@@ -20,7 +20,7 @@ class DomainAuditSnapshot:
     operating_threshold: float | None
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(slots=True)
 class DomainDependencyError(TypeError):
     domain: str
     dependency_type: str

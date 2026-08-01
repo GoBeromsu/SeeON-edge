@@ -168,6 +168,23 @@ def test_cross_bed_movement_never_emits_or_reassigns() -> None:
 
 
 def test_expired_cached_roi_does_not_advance_grace_or_emit() -> None:
+    """An expired ROI must neither emit nor permanently wedge the camera.
+
+    The name says only the first half. The second half is the one that matters
+    more in a ward: an expiry must not leave the camera in a state where real
+    bed exits stop alerting. So this asserts both directions --
+
+    * while the cached ROI is ``EXPIRED``, grace does not advance and nothing
+      is emitted (false positives), and
+    * once a fresh ROI returns, a genuine bed exit still emits after grace
+      (false negatives).
+
+    The original repository split these across
+    ``test_expired_cached_roi_cannot_fabricate_bed_exit`` and
+    ``test_expired_cached_roi_cannot_suppress_fresh_bed_exit``. Both properties
+    live here now; auditing this file by test name alone will miss the recovery
+    half.
+    """
     # Given
     monitor = _monitor(grace_frames=2)
     _ = monitor.update(

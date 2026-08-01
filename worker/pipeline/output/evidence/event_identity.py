@@ -27,7 +27,7 @@ ML_WORKER_STATE_DIR_ENV: Final = "ML_WORKER_STATE_DIR"
 DEFAULT_ML_WORKER_STATE_DIR: Final = "/var/lib/ml-worker"
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(slots=True)
 class EventIdentityStoreError(Exception):
     path: Path
     detail: str

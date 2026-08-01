@@ -247,9 +247,16 @@ def test_real_rtsp_bedexit_script_generates_supported_production_config(tmp_path
         "BED_EXIT_RTSP_URL": "rtsp://camera-1.local/trackID=2",
     }
 
+    # Execute the script directly, the way an operator does, so its own shebang
+    # applies. Handing it to a bare `bash` would bypass the interpreter the
+    # script pins for itself: Homebrew bash 5.3.15 deadlocks on any heredoc
+    # body over PIPE_BUF (512 bytes), and this file has two -- it never execs
+    # the command and hangs with no output. See issue #9.
+    #
+    # `timeout` and `stdin` are belt-and-braces: a future regression must fail
+    # this test rather than hang the whole run, which is what happened before.
     subprocess.run(
         [
-            "bash",
             str(REPO_ROOT / "scripts/ml-worker-real-rtsp-bedexit-e2e.sh"),
             "--render-config",
             str(config_path),
@@ -259,6 +266,8 @@ def test_real_rtsp_bedexit_script_generates_supported_production_config(tmp_path
         env=environment,
         capture_output=True,
         text=True,
+        stdin=subprocess.DEVNULL,
+        timeout=120,
     )
 
     payload = yaml.safe_load(config_path.read_text(encoding="utf-8"))
@@ -299,13 +308,12 @@ def test_repo_does_not_own_rtsp_generation_surface() -> None:
     assert not failures, f"RTSP generation terms remain in active surface: {failures}"
 
 
-def test_worker_imports_no_api_or_serving_packages() -> None:
-    source = (REPO_ROOT / "edge/runtime/edge_worker.py").read_text(encoding="utf-8")
-
-    assert "from api" not in source
-    assert "import api" not in source
-    assert "from serving" not in source
-    assert "import serving" not in source
+# ``test_worker_imports_no_api_or_serving_packages`` was removed with the legacy
+# ``edge/`` tree: it read ``edge/runtime/edge_worker.py`` directly. Its intent --
+# the worker must not reach into the API or serving packages -- is now enforced
+# by the import-linter contract "backend and worker are independent
+# (worker→backend relay boundary only)" in ``pyproject.toml`` and by
+# ``tests/test_serving_boundary_contract.py``.
 
 
 def test_edge_compose_keeps_backend_event_url_on_api_only() -> None:

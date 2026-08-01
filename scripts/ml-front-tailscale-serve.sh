@@ -1,4 +1,11 @@
-#!/usr/bin/env bash
+#!/bin/bash
+# Interpreter is pinned, not `#!/usr/bin/env bash`, on purpose.
+#
+# Homebrew bash 5.3.15 writes a heredoc body into a pipe before exec'ing the
+# reader, so any body over PIPE_BUF (512 bytes on macOS) blocks forever against
+# a pipe nothing is draining -- the command is never exec'd and the script hangs
+# with no output. This file has a heredoc over that limit. bash 3.2.57 stages
+# heredocs in a temp file and is unaffected at any size. See issue #9.
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

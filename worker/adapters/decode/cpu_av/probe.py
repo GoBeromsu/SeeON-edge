@@ -1,41 +1,42 @@
 """Real OpenCV decode-capability probe for the ``opencv`` decode backend.
 
-This is a faithful port of the ``opencv`` branch of ``default_decode_probe``
-in ``edge/runtime/profile/registry.py:151-157`` (pre-migration reference,
-read-only -- ``edge/`` is scheduled for deletion once migration completes).
-That reference deliberately keeps this check minimal: whether ``cv2`` can be
-imported in this process at all. It does *not* additionally probe
-``cv2.videoio_registry.hasBackend(cv2.CAP_FFMPEG)``, and this port preserves
-that same minimal semantics rather than inventing a stricter check -- per the
-"port, don't redesign" directive for this stage. (Known limitation inherited
-unchanged from the reference: a ``cv2`` build present but missing its FFMPEG
-video I/O backend would still probe ``True`` here; flagged upstream rather
-than silently fixed, since fixing it would be a redesign, not a port.)
-
-``CpuAvAdapter`` (``worker/adapters/decode/cpu_av/adapter.py``) always opens
-an RTSP source via ``cv2.VideoCapture(url, cv2.CAP_FFMPEG, params)``
-(``CpuAvAdapter._open_capture``). This probe answers, before any camera is
-allowed to start, whether ``cv2`` itself is even importable in this process
--- it is the composition root's real signal for the ``decode_capability``
+This probe answers, before any camera is allowed to start, whether this
+process can actually decode RTSP through the backend ``CpuAvAdapter`` demands.
+It is the composition root's real signal for the ``decode_capability``
 bootstrap stage (``worker/runtime/bootstrap.py``) on the ``cpu`` and ``mps``
 profiles, both of which resolve to the ``opencv`` decode policy
 (``worker/runtime/profile/registry.py``: ``PROFILE_REGISTRY``).
 
-``probe_opencv_ffmpeg_capability`` returns ``available=True`` only when
-``cv2`` imports without error in this process (never a hypothetical target
-install) -- a missing or broken native OpenCV install makes every
-subsequent ``cv2.VideoCapture`` call fail regardless of build flags, so
-import failure alone is disqualifying and import success is, per the ported
-reference, sufficient. Cross-checked against this repo's real, non-mocked
-RTSP fixture: on this host, ``cv2`` (4.13.0, FFMPEG-backed) imports cleanly,
-and separately-verified real ``cv2.VideoCapture`` calls against a live RTSP
-stream on this same host do open and read real frames -- so ``True`` here is
-not just import-success, it matches this host's actual decode capability.
+``CpuAvAdapter`` (``worker/adapters/decode/cpu_av/adapter.py``) always opens
+an RTSP source via ``cv2.VideoCapture(url, cv2.CAP_FFMPEG, params)``. The
+adapter therefore requires two things, and this probe checks both:
 
-A ``True`` result means "this process can import OpenCV"; it does not, and
-cannot without a live URL, prove any particular camera stream is reachable
--- that remains a per-camera concern handled when the ingest loop opens its
-capture.
+1. ``cv2`` imports in this process at all. A missing or broken native OpenCV
+   install makes every subsequent ``cv2.VideoCapture`` call fail regardless of
+   build flags.
+2. That ``cv2`` build actually carries the FFMPEG video I/O backend, queried
+   through OpenCV's own registry: ``cv2.videoio_registry.hasBackend(
+   cv2.CAP_FFMPEG)``.
+
+The second check is deliberate and required by ADR-0003 (explicit fallback
+only). Earlier this probe checked import alone, mirroring the pre-migration
+``edge`` reference. That was a false positive: an OpenCV build without FFMPEG
+passed the global decode preflight and then failed on every single camera
+open, which is exactly the "degraded path selected silently" failure this
+repository has already shipped twice. Judging on the backend registry keeps
+preflight honest.
+
+Fail-closed contract: ``available=True`` is returned only when the import
+succeeds **and** the registry positively reports the FFMPEG backend. A
+``False`` answer, a missing ``videoio_registry`` or ``CAP_FFMPEG`` attribute,
+and any exception raised while querying are all reported as
+``available=False`` with an explicit, sanitized reason. The probe never falls
+back to another backend and never treats an unanswerable query as available.
+
+A ``True`` result means "this process can decode through OpenCV's FFMPEG
+backend"; it does not, and cannot without a live URL, prove any particular
+camera stream is reachable -- that remains a per-camera concern handled when
+the ingest loop opens its capture.
 """
 
 from __future__ import annotations
@@ -51,10 +52,9 @@ class OpenCvCapability:
     reason: str
 
 
-# The probed ``cv2`` module, typed loosely: only the import itself is
-# exercised, and pinning a narrower Protocol here would not make the real
-# ``cv2`` extension module conform to it any more than duck typing already
-# does.
+# The probed ``cv2`` module, typed loosely: only the import and the registry
+# query are exercised, and pinning a narrower Protocol here would not make the
+# real ``cv2`` extension module conform to it any more than duck typing does.
 Cv2Importer: TypeAlias = Callable[[], Any]
 
 
@@ -65,27 +65,58 @@ def _import_cv2() -> Any:
 
 
 def probe_opencv_ffmpeg_capability(*, importer: Cv2Importer = _import_cv2) -> OpenCvCapability:
-    """Real signal for whether this process can import OpenCV.
+    """Real signal for whether this process can decode via OpenCV + FFMPEG.
 
     ``importer`` defaults to the real ``import cv2`` and is injectable only so
-    tests can exercise the import-failure branch without needing a broken
-    OpenCV install -- mirrors the ``ProbeRunner``/``CaptureFactory``
-    injection pattern already used elsewhere in this package
+    tests can exercise the failure branches without needing a broken OpenCV
+    install -- mirrors the ``ProbeRunner``/``CaptureFactory`` injection pattern
+    already used elsewhere in this package
     (``worker/adapters/decode/cpu_av/adapter.py``,
-    ``worker/adapters/decode/nvdec_cuvid/probe.py``). Production callers
-    never pass ``importer``.
+    ``worker/adapters/decode/nvdec_cuvid/probe.py``). Production callers never
+    pass ``importer``.
 
-    Catches ``Exception`` broadly (not just ``ImportError``), matching the
-    ported reference (``edge/runtime/profile/registry.py:155``) -- native
-    extension imports can fail with platform-specific errors (e.g. ``OSError``
-    from a broken shared library) beyond plain ``ImportError``, and this
-    probe must never itself crash the bootstrap sequence.
+    Catches ``Exception`` broadly (not just ``ImportError``): native extension
+    imports can fail with platform-specific errors (e.g. ``OSError`` from a
+    broken shared library), and this probe must never itself crash the
+    bootstrap sequence. Per ADR-0003 every such failure is reported as an
+    explicit unavailable reason rather than degraded into a weaker check.
     """
     try:
-        _ = importer()
+        cv2 = importer()
     except Exception as exc:  # noqa: BLE001 - decode probe must never break startup
-        return OpenCvCapability(False, str(exc))
-    return OpenCvCapability(True, "OpenCV is available")
+        return OpenCvCapability(False, f"OpenCV import failed: {exc}")
+
+    registry = getattr(cv2, "videoio_registry", None)
+    if registry is None:
+        return OpenCvCapability(
+            False,
+            "OpenCV build exposes no videoio_registry, so the FFMPEG backend cannot be verified",
+        )
+
+    has_backend = getattr(registry, "hasBackend", None)
+    if has_backend is None:
+        return OpenCvCapability(
+            False,
+            "OpenCV videoio_registry exposes no hasBackend, so the FFMPEG backend "
+            "cannot be verified",
+        )
+
+    backend_id = getattr(cv2, "CAP_FFMPEG", None)
+    if backend_id is None:
+        return OpenCvCapability(
+            False,
+            "OpenCV build exposes no CAP_FFMPEG constant, so the FFMPEG backend "
+            "cannot be verified",
+        )
+
+    try:
+        available = bool(has_backend(backend_id))
+    except Exception as exc:  # noqa: BLE001 - an unanswerable query is not availability
+        return OpenCvCapability(False, f"OpenCV FFMPEG backend query failed: {exc}")
+
+    if not available:
+        return OpenCvCapability(False, "OpenCV build has no FFMPEG video I/O backend")
+    return OpenCvCapability(True, "OpenCV FFMPEG backend is available")
 
 
 __all__ = ["Cv2Importer", "OpenCvCapability", "probe_opencv_ffmpeg_capability"]

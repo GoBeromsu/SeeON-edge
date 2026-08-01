@@ -83,6 +83,26 @@ class DevMjpegConfig(BaseModel):
     port: int = Field(default=8090, gt=0, le=65535)
 
 
+class ClipRecordingConfig(BaseModel):
+    """Whether this worker records evidence clips at all.
+
+    Default off. Clip recording is an opt-in capability: when it is disabled
+    the worker still detects, stages, and relays events -- it simply does not
+    build a ``ClipRecorder`` or any per-camera clip feeder, so no video is
+    captured or retained.
+
+    This is independent of, and takes no precedence over, the
+    ``ML_WORKER_EVENT_CLIP_EXPORT_ENABLED`` environment gate. That gate is the
+    export *sender* opt-in (whether staged evidence is shipped to the relay);
+    this flag controls whether a *recorder* exists in the first place. All four
+    combinations are valid, and evidence delivery is composed either way.
+    """
+
+    model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True, extra="forbid")
+
+    enabled: bool = False
+
+
 class WorkerConfig(BaseModel):
     model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True, extra="forbid")
 
@@ -92,6 +112,7 @@ class WorkerConfig(BaseModel):
     models: WorkerModelsConfig = Field(default_factory=WorkerModelsConfig)
     domains: DomainsConfig = Field(default_factory=DomainsConfig)
     dev_mjpeg: DevMjpegConfig = Field(default_factory=DevMjpegConfig)
+    clip: ClipRecordingConfig = Field(default_factory=ClipRecordingConfig)
     cameras: tuple[CameraRuntimeConfig, ...] = Field(min_length=1)
 
     @model_validator(mode="before")

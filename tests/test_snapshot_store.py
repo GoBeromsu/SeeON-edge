@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import os
 import threading
@@ -9,6 +10,37 @@ from pathlib import Path
 import pytest
 
 from worker.pipeline.output.evidence.snapshot_store import SnapshotConflictError, SnapshotStore
+
+# This file's use of the fd table is *instrumentation only* -- it resolves a
+# descriptor back to a path to assert fsync/replace ordering, and counts open
+# descriptors to prove none leak. ``snapshot_store.py`` itself never touches
+# ``/proc``, so there is no reason for these tests to be Linux-only.
+#
+# ``/proc/self/fd/N`` is a symlink on Linux, so ``os.readlink`` resolves it.
+# macOS has no ``/proc``; its ``/dev/fd/N`` is a character device, not a
+# symlink, so ``readlink`` fails with ``EINVAL`` -- which is why these tests
+# used to fail here. ``fcntl(F_GETPATH)`` is the macOS way to ask the same
+# question, and ``/dev/fd`` still enumerates the process's descriptors.
+#
+# Note this is *not* the same situation as `tests/test_clip_recorder.py`, where
+# `/proc/self/fd` is used by production code
+# (`worker/pipeline/output/evidence/evidence_media.py`) to hand ffprobe a
+# TOCTOU-safe reference to an already-open inode. That one is a genuine
+# Linux-only runtime dependency and its tests pin that floor deliberately.
+
+_FD_DIR = Path("/proc/self/fd") if Path("/proc/self/fd").exists() else Path("/dev/fd")
+
+
+def _path_of_fd(descriptor: int) -> str:
+    """Resolve an open descriptor back to its path, on Linux or macOS."""
+    if _FD_DIR == Path("/proc/self/fd"):
+        return os.readlink(f"/proc/self/fd/{descriptor}")
+    raw: bytes = fcntl.fcntl(descriptor, fcntl.F_GETPATH, bytes(1024))
+    return raw.rstrip(b"\x00").decode()
+
+
+def _open_fd_count() -> int:
+    return len(list(_FD_DIR.iterdir()))
 
 
 def _store(store: SnapshotStore, **overrides: object) -> object:
@@ -41,12 +73,12 @@ def test_snapshot_store_fsyncs_each_file_before_replace_and_directory_after(
     fsync = os.fsync
 
     def record_fsync(descriptor: int) -> None:
-        target = os.readlink(f"/proc/self/fd/{descriptor}")
+        target = _path_of_fd(descriptor)
         calls.append(("fsync", target, None))
         fsync(descriptor)
 
     def record_replace(source: str, destination: str, **kwargs: object) -> None:
-        directory = Path(os.readlink(f"/proc/self/fd/{kwargs['src_dir_fd']}"))
+        directory = Path(_path_of_fd(int(kwargs["src_dir_fd"])))  # type: ignore[call-overload]
         calls.append(("replace", str(directory / source), str(directory / destination)))
         replace(source, destination, **kwargs)
 
@@ -149,7 +181,7 @@ def test_snapshot_store_retries_post_replace_directory_fsync(
 
     def fail_once(descriptor: int) -> None:
         nonlocal failed
-        directory = Path(os.readlink(f"/proc/self/fd/{descriptor}"))
+        directory = Path(_path_of_fd(descriptor))
         if directory.name == "2026-07-28" and not failed:
             failed = True
             raise OSError("durability barrier interrupted")
@@ -170,13 +202,13 @@ def test_snapshot_store_does_not_leak_descriptors_when_directory_fsync_fails(
         raise OSError("forced directory fsync failure")
 
     monkeypatch.setattr(SnapshotStore, "_fsync_directory", staticmethod(fail_fsync))
-    before = len(list(Path("/proc/self/fd").iterdir()))
+    before = _open_fd_count()
 
     for index in range(20):
         with pytest.raises(OSError, match="forced directory fsync failure"):
             _store(SnapshotStore(tmp_path / str(index)))
 
-    after = len(list(Path("/proc/self/fd").iterdir()))
+    after = _open_fd_count()
     assert after == before
 
 

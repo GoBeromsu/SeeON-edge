@@ -52,6 +52,8 @@ from e2e_worker_relay_fixtures import (
     wait_until,
 )
 
+from worker.adapters.decode.cpu_av.adapter import CpuAvAdapter
+
 RELAY_TOKEN = "e2e-relay-token"  # noqa: S105 - fixture-scoped test constant, not a real secret
 
 NIGHT_CAMERA_ID = "camera-e2e-night"
@@ -64,7 +66,9 @@ DAY_FACILITY_ID = "facility-e2e-day"
 
 @pytest.fixture(scope="module")
 def mediamtx() -> Iterator[MediaMtxProcess]:
-    process = MediaMtxProcess(rtsp_port=free_tcp_port(), path_names=("night", "fall", "day"))
+    process = MediaMtxProcess(
+        rtsp_port=free_tcp_port(), path_names=("night", "fall", "day", "nominal")
+    )
     try:
         yield process
     finally:
@@ -82,6 +86,7 @@ def _run_scenario(
     facility_id: str,
     domains: dict[str, object],
     serving_client: ScriptedServingClient,
+    clip_enabled: bool = False,
 ) -> Iterator[tuple[LiveBackend, WorkerRunHandle, Path]]:
     state_dir = tmp_path / "state"
     clip_store_dir = tmp_path / "clips"
@@ -109,6 +114,7 @@ def _run_scenario(
             facility_id=facility_id,
             rtsp_url=mediamtx.rtsp_url(path_name),
             domains=domains,
+            clip_enabled=clip_enabled,
         )
         handle = start_worker_runtime(
             config, serving_client, state_dir=state_dir, clip_store_dir=clip_store_dir
@@ -133,6 +139,9 @@ def test_night_bed_exit_reaches_relay_with_heartbeat_status_and_finalized_clip(
         facility_id=NIGHT_FACILITY_ID,
         domains={"bed_exit": {"night_window": night_window_including_now()}},
         serving_client=bed_exit_serving_client(),
+        # This is the one scenario that asserts on a finalized clip, so it opts
+        # into clip recording explicitly. Clip recording is off by default.
+        clip_enabled=True,
     ) as (live_backend, _handle, clip_store_dir):
         wait_until(
             lambda: live_backend.ingest_client.heartbeats >= 1,
@@ -302,3 +311,90 @@ def _moov_precedes_mdat(path: Path) -> bool:
                 break
             offset += box_size
     return moov_offset is not None and mdat_offset is not None and moov_offset < mdat_offset
+
+def test_nominal_30fps_stream_decodes_continuously_without_a_reconnect_loop(
+    mediamtx: MediaMtxProcess, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Liveness contract on the supported nominal stream (30 fps, GOP 1s).
+
+    The failure this guards against was never "no frames ever" -- it was "some
+    frames, then stall, then reopen forever". A single absolute count cannot
+    tell those apart: a worker that decodes a burst and then stalls passes it.
+
+    The oracle is therefore **progress in every consecutive window**, not a
+    frames-per-second number.
+
+    Why not assert ~30 fps: ``pump.processed_count`` counts frames the pipeline
+    *consumed*, not frames the publisher emitted. ``BoundedFrameBus`` is a
+    latest-frame bus -- it deliberately drops stale frames so inference always
+    works on the newest one. Measured on this harness the pump sustains roughly
+    5 frames/s against a 30 fps publisher, and that gap is the design working,
+    not a defect. Deriving a threshold from publisher fps would encode a number
+    the counter never meant.
+
+    So the contract is:
+
+    * every one-second window shows strictly positive progress (no stall), and
+    * the worker thread is still alive at the end (no restart loop).
+
+    ``MIN_PER_WINDOW`` is 1: one frame per second is far below the measured
+    ~5/s, so ordinary jitter cannot flake it, while a stall or a reconnect loop
+    -- both of which produce at least one zero-progress window -- fails it.
+    """
+    window_sec = 1.0
+    windows = 5
+    min_per_window = 1
+
+    # Count real decoder opens. A reconnect loop is precisely repeated
+    # `decoder.open()` calls (`worker/pipeline/ingest/rtsp.py:78` is the only
+    # open site), and per-window frame progress alone cannot rule out a stream
+    # that reopens quickly enough to keep the counter moving.
+    opens: list[float] = []
+    real_open = CpuAvAdapter.open
+
+    def _counting_open(self: CpuAvAdapter, config: object) -> object:
+        opens.append(time.monotonic())
+        return real_open(self, config)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(CpuAvAdapter, "open", _counting_open)
+
+    with _run_scenario(
+        mediamtx=mediamtx,
+        monkeypatch=monkeypatch,
+        tmp_path=tmp_path,
+        path_name="nominal",
+        camera_id=FALL_CAMERA_ID,
+        facility_id=FALL_FACILITY_ID,
+        domains={"fall": {}},
+        serving_client=fall_serving_client(),
+    ) as (live_backend, handle, _clip_store_dir):
+        # READY: the worker has booted through its real probes and is relaying.
+        wait_until(
+            lambda: live_backend.ingest_client.heartbeats >= 1,
+            timeout=20.0,
+            what="heartbeat delivery",
+        )
+
+        pump = handle.camera.pump
+        samples = [pump.processed_count]
+        for _ in range(windows):
+            time.sleep(window_sec)
+            samples.append(pump.processed_count)
+
+        deltas = [
+            samples[index + 1] - samples[index] for index in range(len(samples) - 1)
+        ]
+        stalled = [index for index, delta in enumerate(deltas) if delta < min_per_window]
+
+        assert not stalled, (
+            "decode stalled: no progress in window(s) "
+            f"{stalled} of {windows}; per-window deltas={deltas} "
+            f"samples={samples}"
+        )
+        # Still running at the end of the observation window, not restarting.
+        assert handle.thread.is_alive()
+        # Exactly one decoder open for the whole healthy window: no reconnects.
+        assert len(opens) == 1, (
+            f"decoder reopened {len(opens)} times during a healthy "
+            f"{windows * window_sec}s window; a single open is expected"
+        )

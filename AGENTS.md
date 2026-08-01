@@ -20,11 +20,11 @@ owning its subtree to 2 levels. Boundaries are enforced by import-linter
 | `contracts` | ADR-0004 vendored from `eldercare-dataset-ops` (top-level shared leaf; `test_vendor_drift` firewall) |
 | `tests` | pytest contracts and boundary coverage |
 
-`edge/` is the pre-migration legacy tree that `worker/` replaced; it is being
-retired (todo 34 "atomic edge deletion") and is no longer an import-linter
-root package. See `docs/architecture.md` "Source-to-target ownership" for the
-historical file-by-file mapping — those rows are migration citations, not
-operator instructions.
+`edge/` was the pre-migration legacy tree that `worker/` replaced. It has been
+deleted (todo 34 "atomic edge deletion"). See `docs/architecture.md`
+"Source-to-target ownership" for the historical file-by-file mapping and
+"Feature parity ledger" for the capability-level disposition — those rows are
+migration citations, not operator instructions.
 
 `backend` and `worker` are import-independent (they talk only over relay HTTP);
 both may import `contracts` and `shared`. Training belongs to
@@ -78,7 +78,6 @@ image names, and the vendored `contracts/worker_config.py` (ADR-0004):
 front/            front instance (React/Vite SPA)
 backend/          backend instance (FastAPI)
 worker/           worker instance (RTSP inference worker)
-edge/             legacy pre-migration tree, being retired (todo 34)
 shared/           shared library (shared.events)
 contracts/        L0 interfaces (vendored)
 models/           local, ignored model artifacts

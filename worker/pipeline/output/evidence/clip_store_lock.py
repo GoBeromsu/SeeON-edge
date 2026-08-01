@@ -13,7 +13,7 @@ from typing import BinaryIO, Self, final
 from typing_extensions import override
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(slots=True)
 class ClipStoreLockedError(Exception):
     lock_path: Path
 

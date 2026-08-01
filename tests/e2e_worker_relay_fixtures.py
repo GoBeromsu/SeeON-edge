@@ -170,18 +170,32 @@ class FfmpegPublisher:
     so the fixture and the code under test agree on how the stream is
     carried.
 
-    The GOP is pinned to one keyframe per second (``-g``/``-keyint_min`` at
-    the stream's own fps, ``-sc_threshold 0`` to stop scenecut-triggered
-    keyframes from stretching that interval). Without this, libx264's
+    The nominal stream matches the supported operating contract: 30 fps with
+    one keyframe per second (``-g``/``-keyint_min`` at the stream's own fps,
+    ``-sc_threshold 0`` to stop scenecut-triggered keyframes from stretching
+    that interval). That is what real cameras in this deployment emit, so it
+    is what the reconnect/liveness contract is tuned against.
+
+    ``gop_frames`` exists only so a test can *deliberately* build an
+    unsupported long-GOP stream. Without an explicit override, libx264's
     default ~250-frame GOP means the worker's CPU decode adapter
-    (``cv2.VideoCapture`` with a 5s read timeout, see
-    ``worker/adapters/decode/cpu_av/adapter.py``) can join the stream
-    mid-GOP and have to wait ~25s at 10fps for the next IDR before it can
-    decode a single frame — comfortably past any reasonable readiness
-    timeout even though nothing is actually broken.
+    (``cv2.VideoCapture`` with a read timeout, see
+    ``worker/adapters/decode/cpu_av/adapter.py``) can join mid-GOP and wait
+    many seconds for the next IDR before it can decode a single frame. That
+    condition is exercised as an explicit negative contract, never as the
+    nominal path.
     """
 
-    def __init__(self, *, url: str, width: int = 320, height: int = 240, fps: int = 10) -> None:
+    def __init__(
+        self,
+        *,
+        url: str,
+        width: int = 320,
+        height: int = 240,
+        fps: int = 30,
+        gop_frames: int | None = None,
+    ) -> None:
+        keyframe_interval = fps if gop_frames is None else gop_frames
         binary = _require_tool("ffmpeg")
         self._stderr_tail: deque[str] = deque(maxlen=50)
         self._process = subprocess.Popen(  # noqa: S603 - fixed local test binary, no shell
@@ -195,8 +209,8 @@ class FfmpegPublisher:
                 "-c:v", "libx264",
                 "-preset", "ultrafast",
                 "-tune", "zerolatency",
-                "-g", str(fps),
-                "-keyint_min", str(fps),
+                "-g", str(keyframe_interval),
+                "-keyint_min", str(keyframe_interval),
                 "-sc_threshold", "0",
                 "-pix_fmt", "yuv420p",
                 "-f", "rtsp",
@@ -612,11 +626,19 @@ def build_worker_config(
     facility_id: str,
     rtsp_url: str,
     domains: dict[str, object],
+    clip_enabled: bool = False,
 ) -> WorkerConfig:
+    """Worker config for the real-stack e2e.
+
+    ``clip_enabled`` mirrors the product default (off). Only the test that
+    asserts on a finalized clip opts in, which keeps clip recording an explicit
+    operating decision here exactly as it is in production.
+    """
     return WorkerConfig.model_validate(
         {
             "version": 1,
             "relay": {"url": relay_url, "token": relay_token},
+            "clip": {"enabled": clip_enabled},
             "domains": domains,
             "cameras": [
                 {

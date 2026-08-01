@@ -248,3 +248,61 @@ def test_ml_worker_yaml_rejects_non_lstm_fall_model(tmp_path: Path) -> None:
 
     with pytest.raises(WorkerConfigError, match="models.fall.type"):
         load_worker_config(path)
+
+def test_ml_worker_yaml_without_clip_section_disables_clip_recording(
+    tmp_path: Path,
+) -> None:
+    """The upgrade path must land on off, not on whatever was there before.
+
+    "Clip recording defaults to off" is a claim about configs that do not
+    mention clips at all -- every config written before the flag existed. The
+    composition tests all pass ``clip_enabled`` explicitly, and the shipped
+    example sets ``clip.enabled: false`` by hand, so none of them exercise the
+    default. Flipping ``ClipRecordingConfig.enabled`` to ``True`` would leave
+    all of them green while silently turning on video capture for every
+    operator who upgrades without editing their config.
+
+    The in-test assertion that the fixture has no ``clip`` key is part of the
+    test: if someone adds one to ``_valid_yaml``, this stops testing the
+    default and should say so rather than pass quietly.
+    """
+    path = _valid_yaml(tmp_path / "ml-worker.yaml")
+    payload = yaml.safe_load(path.read_text(encoding="utf-8"))
+    assert "clip" not in payload, "fixture already sets clip; the default is untested"
+
+    config = load_worker_config(path)
+
+    assert config.clip.enabled is False
+
+
+def test_ml_worker_yaml_clip_recording_is_opt_in_not_opt_out(tmp_path: Path) -> None:
+    """Turning it on must require saying so, and must actually take effect.
+
+    The mirror of the default test: if ``clip.enabled: true`` did not survive
+    loading, the default-off test above would still pass while the flag was
+    simply inert.
+    """
+    path = _valid_yaml(tmp_path / "ml-worker.yaml")
+    payload = yaml.safe_load(path.read_text(encoding="utf-8"))
+    payload["clip"] = {"enabled": True}
+    path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+
+    config = load_worker_config(path)
+
+    assert config.clip.enabled is True
+
+
+def test_ml_worker_yaml_rejects_unknown_clip_key(tmp_path: Path) -> None:
+    """A typo in the clip section must fail loudly, not silently record.
+
+    ``ClipRecordingConfig`` forbids extra keys. Without this, ``enabled_: true``
+    or ``enable: true`` would load as the default -- off -- and an operator who
+    believed they had turned recording on would get no clips and no error.
+    """
+    path = _valid_yaml(tmp_path / "ml-worker.yaml")
+    payload = yaml.safe_load(path.read_text(encoding="utf-8"))
+    payload["clip"] = {"enable": True}
+    path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+
+    with pytest.raises(WorkerConfigError, match="clip"):
+        load_worker_config(path)

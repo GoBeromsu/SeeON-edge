@@ -47,9 +47,14 @@ from worker.pipeline.output.evidence.clip_frame_feeder import ClipFrameFeeder
 from worker.pipeline.output.evidence.clip_recorder import ClipRecorder
 from worker.pipeline.output.evidence.clip_recorder_models import ClipRecorderConfig
 from worker.pipeline.output.evidence.clip_recorder_services import default_services
+from worker.pipeline.output.evidence.clip_store_lock import (
+    ClipStoreLock,
+    ClipStoreLockedError,
+)
 from worker.pipeline.output.evidence.evidence_runtime import (
     OUTBOX_PATH_ENV,
     EvidenceExportRuntime,
+    export_enabled,
 )
 from worker.pipeline.output.evidence.evidence_stager import DurableEvidenceStager
 from worker.pipeline.output.evidence.snapshot_store import SnapshotStore
@@ -85,6 +90,18 @@ HEARTBEAT_TIMEOUT_SEC: Final = 0.5
 # Matches edge/runtime/edge_worker.py's DETECTOR_VERSION -- same domain-detector
 # generation, ported wholesale rather than re-derived per worker/AGENTS.md.
 DETECTOR_VERSION: Final = "worker-domain-detectors-v1"
+
+
+class EvidenceDeliveryError(RuntimeError):
+    """Evidence delivery is enabled but cannot be brought up safely.
+
+    ADR-0003: the export env gate is the explicit opt-out. Once export is
+    switched on, a misconfiguration or a clip store owned by another process is
+    a real failure, not something to degrade past with a warning -- a worker
+    that looks healthy while alerts pile up unsent is the exact failure mode
+    that decision removes. Messages are sanitized: relay URLs and tokens stay
+    on ``__cause__``.
+    """
 
 
 class _RunnableIngest(Protocol):
@@ -496,18 +513,30 @@ class WorkerRuntime:
         self._context.release_lease()
 
     def _start_export_sender(self) -> None:
-        """Start delivering staged evidence to the relay, never fatal to cameras.
+        """Start delivering staged evidence to the relay.
 
         Camera activation (and the clip recorder it composes) has already run
         by the time ``bootstrap_or_exit`` returns, so this only needs to flip
         the sender's background thread on.
+
+        ``self._evidence_export_runtime is None`` is the explicit opt-out: the
+        export env gate was off, so there is nothing to deliver and returning
+        is correct.
+
+        A runtime that *does* exist and then fails to start its sender is not
+        an optional boundary. ADR-0003: swallowing it leaves staged alerts
+        accumulating in the local outbox while the worker reports healthy --
+        the same silent-degrade this decision removes. Fail closed instead.
         """
         if self._evidence_export_runtime is None:
             return
         try:
             self._evidence_export_runtime.start_sender()
-        except Exception:  # noqa: BLE001 - export delivery is a non-fatal camera boundary
-            LOGGER.warning("evidence export sender failed to start", exc_info=True)
+        except Exception as exc:  # noqa: BLE001 - re-raised as a typed sanitized error
+            raise EvidenceDeliveryError(
+                "evidence export sender failed to start; staged alerts would "
+                "not reach the relay"
+            ) from exc
 
     def _start_runtime_status_sender(self) -> None:
         """Start periodic runtime-status relay delivery (default 5s cadence).
@@ -663,7 +692,16 @@ class WorkerRuntime:
     ) -> CameraRuntimeContext:
         if self.fall_model is None:
             raise RuntimeError("camera activation requires an initialized fall model")
-        bus, tracker = BoundedFrameBus(), GreedyIouTracker()
+        # The evidence tap is a FIFO that only ``ClipFrameFeeder`` drains. With
+        # clip recording off there is no feeder, so a full-size tap would retain
+        # frames nothing will ever read. Size it from the same flag that decides
+        # whether a recorder exists at all.
+        bus = (
+            BoundedFrameBus()
+            if self.config.clip.enabled
+            else BoundedFrameBus(evidence_capacity=1)
+        )
+        tracker = GreedyIouTracker()
         intervals = {"pose": camera.frame_stride, "person": camera.frame_stride, "bed": 30}
         scene, scheduler = SceneState(camera.camera_id), Scheduler(intervals)
         analytics = CompositeExtractor(
@@ -750,49 +788,176 @@ class WorkerRuntime:
         )
 
     def _compose_evidence_export(self, boot: BootContext) -> None:
-        """Compose the real clip recorder and (optional) relay export sender.
+        """Compose evidence delivery, and clip recording only when enabled.
 
-        ``ClipRecorder`` is one shared actor/encoder for the whole process (the
-        existing design; see ``_CameraClipRecorderView``), so it is built once
-        here, before any per-camera sink needs it. Every profile in
-        ``PROFILE_REGISTRY`` resolves a real encoder (h264_nvenc or libx264) --
-        there is no "no encode support" profile in this codebase -- so this
-        always attempts real clip recording rather than inventing a disabled
-        branch. Composition never fails camera activation: clip-store or relay
-        misconfiguration/unavailability degrades to ``_NullClipRecorder`` (events
-        still stage durably, just without a bound clip), matching the branch
-        ``EvidenceEventSink`` already exercises when recording is unavailable.
+        These are two different capabilities that used to share one method.
+
+        *Evidence delivery* (``EvidenceExportRuntime``: outbox reconciliation
+        and the relay export sender) is always composed. Alerts stage durably
+        and ship regardless of whether this worker records video.
+
+        *Clip recording* (``ClipRecorder`` plus the per-camera views and frame
+        feeders) is opt-in through ``config.clip.enabled``, default off.
+
+        The lifecycle invariant both branches must preserve:
+        ``initialize_under_lock()`` runs **exactly once, while the
+        ``ClipStoreLock`` is held**, before ``start_sender()``.
+
+        * recorder on -- ``ClipRecorder.start()`` acquires the lock, runs the
+          startup hook, then sweeps/rotates/admits in that order. That ordering
+          is a contract (``tests/test_evidence_export_startup.py``), so the
+          hook stays exactly where it is.
+        * recorder off -- nothing else would take the lock, so delivery
+          composition acquires it itself, initializes once, and releases. The
+          sender then starts against an initialized runtime instead of raising
+          ``evidence runtime must initialize before sender start``.
         """
+        evidence_runtime = self._compose_evidence_delivery()
+        self._evidence_export_runtime = evidence_runtime
+        if not self.config.clip.enabled:
+            self._initialize_delivery_without_recorder(evidence_runtime)
+            return
+        self._compose_clip_recording(boot, evidence_runtime)
+
+    def _compose_evidence_delivery(self) -> EvidenceExportRuntime | None:
+        """Build the export runtime. Never gated on clip recording.
+
+        The export gate is checked *before* ``ClipRecorderConfig()`` is built.
+        That config reads clip-only environment variables and raises on
+        malformed values, so building it unconditionally would let a stray clip
+        setting fail a worker that has both clip recording and export switched
+        off -- a failure with no relation to anything that worker uses.
+        """
+        if not export_enabled():
+            return None
         clip_config = ClipRecorderConfig()
-        evidence_runtime: EvidenceExportRuntime | None = None
         try:
-            evidence_runtime = EvidenceExportRuntime.from_environment(
+            return EvidenceExportRuntime.from_environment(
                 store_dir=clip_config.store_dir,
                 relay_url=self.config.relay.url,
                 relay_token=self.config.relay.token.get_secret_value(),
                 probe_camera_id=self.config.cameras[0].camera_id,
                 database_path=_evidence_outbox_path(),
             )
-        except ValueError:
-            LOGGER.warning("evidence export misconfigured; export disabled", exc_info=True)
+        except ValueError as exc:
+            # ADR-0003: the env gate (ML_WORKER_EVENT_CLIP_EXPORT_ENABLED) is the
+            # explicit opt-out and returns None on its own. Reaching this branch
+            # means the operator switched export ON and left it misconfigured, so
+            # degrading to "no delivery" would hide a configuration error behind a
+            # worker that looks healthy. Fail closed. The message is sanitized --
+            # the relay URL and token stay on __cause__, never in this text.
+            raise EvidenceDeliveryError(
+                "evidence export is enabled but misconfigured: relay URL, relay "
+                "token, and probe camera id are all required"
+            ) from exc
+
+    def _initialize_delivery_without_recorder(
+        self,
+        evidence_runtime: EvidenceExportRuntime | None,
+    ) -> None:
+        """Hold the clip-store lock just long enough to initialize the runtime.
+
+        With clip recording disabled there is no ``ClipRecorder`` to own the
+        lock, but reconciliation still has to run under it exactly once before
+        the sender starts.
+        """
+        if evidence_runtime is None:
+            return
+        clip_config = ClipRecorderConfig()
+        try:
+            with ClipStoreLock.acquire(clip_config.store_dir):
+                evidence_runtime.initialize_under_lock()
+        except ClipStoreLockedError as exc:
+            # Another process already owns this clip store. Continuing would run
+            # two workers against one outbox, so this is fatal, not degradable.
+            raise EvidenceDeliveryError(
+                "clip store is locked by another process; refusing to start "
+                "evidence delivery against a store this worker does not own"
+            ) from exc
+        except Exception as exc:  # noqa: BLE001 - any init failure is fatal
+            # Matches the startup-hook path: every failure initializing delivery
+            # is fatal and typed. Narrowing this to OSError let other exception
+            # types escape as raw, unsanitized errors instead.
+            raise EvidenceDeliveryError(
+                "evidence delivery failed to initialize under the clip-store lock"
+            ) from exc
+
+    def _compose_clip_recording(
+        self,
+        boot: BootContext,
+        evidence_runtime: EvidenceExportRuntime | None,
+    ) -> None:
+        """Build the one shared clip recorder for this process.
+
+        ``ClipRecorder`` is one shared actor/encoder for the whole process (the
+        existing design; see ``_CameraClipRecorderView``), so it is built once
+        here, before any per-camera sink needs it. An *encoder* failure, or any
+        other recorder-side start failure, degrades to ``_NullClipRecorder``
+        (events still stage and ship, just without a bound clip), matching the
+        branch ``EvidenceEventSink`` already exercises when recording is
+        unavailable. Clip-store lock acquisition is not in that category --
+        see below.
+
+        Delivery initialization is *not* part of that optional boundary. It
+        happens inside ``recorder.start()`` via the startup hook, so its failure
+        would otherwise be swallowed by the same broad catch and leave the
+        runtime uninitialized -- ``start_sender()`` then refuses and alerts
+        strand in the local outbox while the worker looks healthy. The hook
+        therefore re-raises as ``EvidenceDeliveryError``, which this method lets
+        through.
+        """
+        clip_config = ClipRecorderConfig()
+        hook_ran = False
+
+        def _startup_hook() -> None:
+            # Tracks whether the recorder actually reached the hook, so a later
+            # failure inside start() cannot make us initialize a second time.
+            nonlocal hook_ran
+            hook_ran = True
+            if evidence_runtime is None:
+                return
+            try:
+                evidence_runtime.initialize_under_lock()
+            except ClipStoreLockedError as exc:
+                raise EvidenceDeliveryError(
+                    "clip store is locked by another process; refusing to start "
+                    "evidence delivery against a store this worker does not own"
+                ) from exc
+            except Exception as exc:  # noqa: BLE001 - any init failure is fatal
+                # Every failure inside delivery initialization is fatal, not an
+                # optional clip boundary. Narrowing this would let a new
+                # exception type slip back into the clip-only broad catch below
+                # and strand alerts in the local outbox again.
+                raise EvidenceDeliveryError(
+                    "evidence delivery failed to initialize under the clip-store lock"
+                ) from exc
+
         recorder = ClipRecorder(
             clip_config,
             services=default_services(clip_config, boot.encode),
             is_clip_held=None if evidence_runtime is None else evidence_runtime.is_clip_held,
-            startup_hook=(
-                None if evidence_runtime is None else evidence_runtime.initialize_under_lock
-            ),
+            startup_hook=_startup_hook,
             on_clip_finalized=(
                 None if evidence_runtime is None else evidence_runtime.notify_clip_finalized
             ),
         )
         try:
             recorder.start()
+        except EvidenceDeliveryError:
+            # Delivery initialization is fatal, not an optional clip boundary.
+            raise
         except Exception:  # noqa: BLE001 - clip recording is a non-fatal camera boundary
             LOGGER.warning("clip recorder failed to start; clips disabled", exc_info=True)
+            # `initialize_under_lock()` must run exactly once before the sender
+            # starts. If start() failed *before* the hook, nothing initialized
+            # the runtime and delivery would refuse to start, so initialize here.
+            # If start() failed *after* the hook, the runtime is already
+            # initialized and re-running it would violate the exactly-once
+            # invariant.
+            if not hook_ran:
+                self._initialize_delivery_without_recorder(evidence_runtime)
             return
         self._clip_recorder = recorder
-        self._evidence_export_runtime = evidence_runtime
 
     def _default_clip_recorder(self, camera: CameraRuntimeConfig) -> EventClipRecorder:
         if self._clip_recorder is None:

@@ -120,22 +120,56 @@ class CpuAvAdapter:
             cv2.CAP_PROP_READ_TIMEOUT_MSEC,
             config.read_timeout_ms,
         ]
-        capture = self._open_capture(config.url, params)
+        capture = self._open_capture(config, params)
         if not capture.isOpened():
             capture.release()
             raise CpuAvOpenError("OpenCV could not open the RTSP capture")
-        _ = capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-        _ = capture.set(cv2.CAP_PROP_READ_TIMEOUT_MSEC, config.read_timeout_ms)
         return _CpuAvSession(config, capture, self._clock)
 
-    def _open_capture(self, url: str, params: list[int]) -> Capture:
+    # No post-open property application. Measured on this repo's real
+    # MediaMTX + ffmpeg e2e fixture: OpenCV's FFMPEG backend reports
+    # ``False`` from ``set(CAP_PROP_READ_TIMEOUT_MSEC, ...)`` after the
+    # capture is open, because that timeout is honoured from the constructor
+    # params instead. The previous code issued the call and discarded the
+    # result, which is exactly the "looks configured, proves nothing" pattern
+    # ADR-0003 removes. Treating that discarded result as a required property
+    # instead rejects working captures, so the honest contract is: the open
+    # and read timeouts travel as constructor params, and there is no
+    # best-effort post-open surface at all.
+    #
+    # ``CAP_PROP_BUFFERSIZE`` is likewise not set. It was an unverified
+    # latency knob (its ``set()`` result was also discarded) and the prime
+    # suspect in the reconnect loop.
+
+    def _open_capture(self, config: CpuAvConfig, params: list[int]) -> Capture:
+        """Open the capture with exactly one explicit signature.
+
+        ADR-0003 (explicit fallback only): the previous implementation caught
+        ``TypeError`` and retried as ``(url, backend)`` and then ``(url)``,
+        which silently dropped the required open/read timeouts and the explicit
+        FFmpeg backend. A capture that succeeded that way had neither the
+        timeout contract nor the backend this adapter claims to require, and
+        the operator saw a working camera instead of a configuration error.
+
+        The supported boundary is ``opencv-python-headless>=4.10`` with the
+        lockfile pin. Builds outside it are reported, not accommodated.
+        """
         try:
-            return self._capture_factory(url, cv2.CAP_FFMPEG, params)
-        except TypeError:
-            try:
-                return self._capture_factory(url, cv2.CAP_FFMPEG)
-            except TypeError:
-                return self._capture_factory(url)
+            return self._capture_factory(config.url, cv2.CAP_FFMPEG, params)
+        except TypeError as exc:
+            raise CpuAvOpenError(
+                "OpenCV does not accept the required (url, CAP_FFMPEG, params) "
+                "capture signature; this build is outside the supported "
+                "boundary (opencv-python-headless>=4.10)"
+            ) from exc
+        except cv2.error as exc:
+            # `cv2.error` text routinely echoes the URL it was given, which for
+            # RTSP carries credentials. Report the failure class only; the
+            # original exception stays on __cause__ for local debugging and is
+            # never formatted into this message.
+            raise CpuAvOpenError(
+                f"OpenCV failed to open the RTSP capture for camera {config.camera_id}"
+            ) from exc
 
 
 __all__ = ["CpuAvAdapter"]

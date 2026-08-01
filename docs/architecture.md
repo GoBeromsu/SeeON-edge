@@ -171,7 +171,8 @@ is a loud failure, per ADR-0002.
 | Extractor raises on one frame | per camera | frame dropped, camera continues |
 | Clip encode failure | per camera | alert still relays; evidence marked incomplete |
 | Relay POST failure | per camera | durable outbox retries; no event is lost in memory |
-| Clip store unwritable | global | evidence subsystem degrades; alerts still relay |
+| Clip store locked by another process | global | worker refuses to start: two workers must not share one outbox (ADR-0003) |
+| Evidence delivery enabled but misconfigured or unable to initialise | global | worker refuses to start rather than run with alerts stranded in the local outbox (ADR-0003) |
 
 Rollback of a bad worker image is image-digest based; see
 [`docs/runbooks/worker-migration-rollback.md`](runbooks/worker-migration-rollback.md).
@@ -274,19 +275,166 @@ stay `ml-worker`, and `Dockerfile.edge`, `compose.edge.yaml`, `.env.edge.prod*`,
 and the `ML_WORKER_*` / `WORKER_*` / `ML_API_*` / `API_*` prefixes keep their
 legacy names. Only the Python package and the entrypoint change.
 
+## Feature parity ledger
+
+The ownership table above maps *files*. This ledger maps *user-observable
+behaviour* from the original repository onto its v2 owner, so `edge/` can be
+deleted without silently dropping a capability. It is the parity criterion for
+the v2 cutover.
+
+**Baseline: `eldercare-fall-ml` at committed `aeed6a8`.** Uncommitted work in
+that checkout is out of scope for parity except where a row says otherwise.
+
+Disposition vocabulary:
+
+- `ported` — behaviour lives in the v2 owner and is covered by a behaviour test.
+- `tracked-deferred` — intentionally not ported yet; a GitHub issue tracks it.
+- `out-of-scope (uncommitted)` — present only as uncommitted work in the
+  baseline checkout, so it is not part of the committed parity baseline.
+
+Missing-capability rule: a missing **runtime feature** is reported to the user
+and then restored; a missing **script or tool** is filed as a GitHub issue and
+deferred; a missing **behaviour-coverage test** is restored as part of the
+feature it proves. Developer-convenience harnesses are deferred with the tools.
+
+| Capability | v2 owner | Behaviour test | Disposition |
+| --- | --- | --- | --- |
+| RTSP ingest and reconnect policy | `worker/pipeline/ingest/rtsp.py`, `worker/pipeline/ingest/lifecycle.py` | `tests/test_worker_ingest_rtsp.py`, `tests/test_worker_ingest_lifecycle.py` | ported |
+| CPU decode adapter and capability probe | `worker/adapters/decode/cpu_av/adapter.py`, `worker/adapters/decode/cpu_av/probe.py` | `tests/test_worker_decode_cpu.py`, `tests/test_worker_opencv_decode_probe.py` | ported |
+| NVDEC decode probe | `worker/adapters/decode/nvdec_cuvid/probe.py` | `tests/test_worker_nvdec_probe.py` | ported |
+| CUDA device selection and verification | `worker/adapters/device/cuda/probe.py` | `tests/test_worker_cuda_device_probe.py` | ported |
+| Model registry, warmup, inference | `worker/adapters/model/registry.py`, `worker/interfaces/serving.py` | `tests/test_worker_production_boot_dependencies.py` | ported |
+| Fall interpretation and latching | `worker/domains/fall/` | `tests/test_domains_fall.py`, `tests/test_worker_fall_decider.py` | ported |
+| Bed-exit interpretation and latching | `worker/domains/bed_exit/` | `tests/test_domains_bed_exit.py`, `tests/test_worker_domains_bed_exit.py` | ported |
+| Incident cooldown and duplicate suppression | `worker/pipeline/decision/incident_manager.py` | `tests/test_worker_incident_manager.py` | ported |
+| Relay heartbeat and alert egress | `shared/events/edge_ingest_client.py` | `tests/test_e2e_night_bed_exit_relay.py` | ported |
+| Evidence clip recording and finalisation | `worker/pipeline/output/evidence/clip_recorder.py` | `tests/test_clip_recorder.py` | ported |
+| Snapshot store | `worker/pipeline/output/evidence/snapshot_store.py` | `tests/test_snapshot_store.py` | ported |
+| Evidence outbox and export delivery | `worker/pipeline/output/evidence/evidence_runtime.py` | `tests/test_worker_evidence_export_composition.py` | ported |
+| Worker config load and LKG fallback | `worker/runtime/config/loader.py` | `tests/test_ml_worker_yaml_config.py` | ported |
+| Runtime status and diagnostics | `worker/runtime/telemetry/status_store.py`, `worker/runtime/telemetry/runtime_status_sender.py` | `tests/test_worker_runtime_status_sender_composition.py` | ported |
+| CLI entrypoint and bounded-run cap | `worker/__main__.py` | `tests/test_worker_entrypoint.py`, `tests/test_worker_max_frames_per_camera_composition.py` | ported |
+| Per-frame perception: tracking, scene state, window buffering | `worker/pipeline/perception/`, `worker/pipeline/camera_pipeline.py` | `tests/test_perception_observation_builder.py`, `tests/test_demo_tracking.py`, `tests/test_worker_camera_pipeline_pump.py` | ported |
+| Debug overlay rendering | `worker/pipeline/output/overlay.py`, `worker/pipeline/output/_overlay_primitives.py` | `tests/test_worker_overlay_renderer.py`, `tests/test_worker_overlay_primitives.py` | ported |
+| GPU stability preflight installer | — | — | tracked-deferred (`scripts/edge-preflight/gpu-stability-install.sh`, untracked at baseline; [#6](https://github.com/SeniorAILab/eldercare-fall-ml-v2/issues/6)) |
+| GPU telemetry preflight | — | — | tracked-deferred (`scripts/edge-preflight/gpu-telemetry.sh`, untracked at baseline; [#7](https://github.com/SeniorAILab/eldercare-fall-ml-v2/issues/7)) |
+
+### Baseline uncommitted work
+
+`eldercare-fall-ml@aeed6a8` carries ten uncommitted entries in its checkout.
+Two are tracked above; the remaining eight are `out-of-scope (uncommitted)`:
+
+Listed as a bullet list rather than a table: a two-column table row whose first
+cell is a backticked `edge/` path is reserved for the ownership map above.
+
+- tracked-modified: `compose.edge.yaml`
+- untracked: `docs/research/blackwell-gsp-halt-edge-gpu.md`
+- untracked: `backend/app/features/AGENTS.md`
+- untracked: `edge/evidence/AGENTS.md`
+- untracked: `edge/runtime/AGENTS.md`
+- untracked: `.codex/`
+- untracked: `auto.crt`
+- untracked: `auto.key`
+
 ## Open gaps
 
 These are known divergences between the plan and the tree. They are recorded
 here so nobody documents an intention as a fact.
 
-**No `worker/pipeline/camera_pipeline.py`.** The migration plan names that file
-as the owner of `edge/runtime/camera_worker.py`, and it does not exist. The
-orchestration it was meant to hold is currently spread across
-`worker/pipeline/ingest/lifecycle.py`, `worker/pipeline/analytics/composite.py`,
-and `worker/runtime/worker.py`. The ownership row above describes that split
-because that is what is on disk. Either introduce the file and move the
-orchestration into it, or amend the plan's Scope table — do not describe the
-file as if it were there.
+**One parity row cannot be fully proven on macOS.** The ledger calls a row
+`ported` when a behaviour test covers it. Running the cited tests for every
+`ported` row on this host gives 214 passed, 2 failed, and both failures belong
+to one row:
+
+| Cited test | Row it is evidence for | Why it cannot run |
+| --- | --- | --- |
+| `tests/test_clip_recorder.py::test_clip_recorder_finalizes_atomic_manifest_with_pre_and_post_window` | Evidence clip recording and finalisation | resolving `/proc/self/fd/N` fails, so no manifest is published |
+| `tests/test_clip_recorder.py::test_clip_recorder_fsyncs_media_and_manifest_before_staging_cleanup` | Evidence clip recording and finalisation | reads `/proc/self/fd`, which macOS does not have |
+
+This row is genuinely Linux-only, and not by accident:
+`worker/pipeline/output/evidence/evidence_media.py` hands `ffprobe` a
+`/proc/self/fd/{descriptor}` reference to an already-open inode so the probe
+cannot be TOCTOU-swapped for a different file. That is production code, so the
+capability itself requires `/proc` — the deploy target is a Linux container, so
+this is a deliberate floor rather than a portability bug. `tests/test_clip_recorder.py`
+documents it in its module docstring and keeps these two cases specifically to
+pin that floor.
+
+The row stays `ported`: the evidence exists and CI runs on Ubuntu. What is
+missing is *local* proof, which matters because this branch was developed and
+gated on macOS. Treat it as CI-verified rather than dev-verified, and do not
+read its local failures as a parity gap.
+
+All eight local failures outside the vendor-drift one trace to this single
+design decision, not to a missing tool: five in
+`tests/test_clip_export_reconciliation.py`, two in `tests/test_clip_recorder.py`,
+one in `tests/test_evidence_trust_boundaries.py`. `ffprobe` **is** installed on
+this machine, so "install ffprobe" does not clear any of them. Note that the
+production error text says otherwise — it reports `ffprobe unavailable` for an
+unresolvable `/proc/self/fd/N` too, which is
+[#11](https://github.com/SeniorAILab/eldercare-fall-ml-v2/issues/11) and is a
+misreported reason rather than a second cause.
+
+**Snapshot store used to be listed here too, and no longer is.** Three of its
+cited tests also failed on macOS, but for an entirely different reason: they
+read `/proc/self/fd` purely as *test instrumentation* to resolve a descriptor
+back to a path and to count open descriptors. `snapshot_store.py` itself never
+touches `/proc`, so nothing about the capability was Linux-only. Those tests now
+use `fcntl(F_GETPATH)` and `/dev/fd` on macOS and the same `/proc` reads on
+Linux, so the row is dev-verified on both. The distinction worth keeping: a
+cited test failing on your machine may be pinning a real runtime floor, or may
+just be instrumentation that was never written to be portable, and the two look
+identical from the test report.
+
+**The shipped example config pins a newer fall contract than the shipped artifact.**
+`worker/ml-worker.example.yaml` pins `models.fall.schema_version: 2` and the
+current coco17 `preprocessing_identity`, while `models/fall/lstm/metadata.yaml`
+declares neither — so it loads as `LEGACY_SCHEMA_VERSION` (1) with the legacy
+identity, and the pinned pair is refused. Neither side is malformed: the loader
+supports both generations as first-class cases
+(`worker/adapters/model/lstm_manifest.py`, `SUPPORTED_PREPROCESSING_IDENTITIES`),
+the artifact is a v1 export, and the config documents the v2 contract.
+`eldercare-dataset-ops` currently emits `schema_version: 1` for fall and no
+preprocessing identity, so nothing produces v2 yet. Resolving it means either
+re-exporting the artifact at v2 or relaxing the example's pins — a product call,
+not a defect. Pinned by a passing negative test in
+`tests/test_worker_real_warmup_no_stub.py`. Tracked in
+[#8](https://github.com/SeniorAILab/eldercare-fall-ml-v2/issues/8).
+
+**Operator scripts hang on heredocs larger than `PIPE_BUF`.**
+Bash 5.3.15 writes a heredoc body into a pipe before exec'ing the reader, so a
+body over `PIPE_BUF` blocks forever against a pipe nobody is draining — bash
+never execs the command. The boundary is exact: on macOS (`PIPE_BUF` 512) a
+512-byte body passes and 513 hangs; bash 3.2.57 stages heredocs in a temp file
+and is unaffected at any size. Four bash scripts under `scripts/` pin
+`#!/bin/bash` for this reason, which on macOS resolves to 3.2.57.
+
+**That pin does not help on Linux.** There `PIPE_BUF` is 4096 and `/bin/bash` is
+itself a modern bash, so only the threshold moves. Measured at 4096, one script
+is exposed on a Linux edge host: `ml-worker-single-rtsp-bedexit-e2e.sh:139`
+carries a 7162-byte heredoc. Moving that body into a file is the durable fix.
+
+`tests/test_shell_script_heredoc_contract.py` enforces the rule at the 512-byte
+threshold. CI is unaffected: the only script a test executes is
+`ml-worker-real-rtsp-bedexit-e2e.sh --render-config`, whose two heredocs on that
+path are 527 B and 797 B, both under the Linux threshold. Tracked in
+[#9](https://github.com/SeniorAILab/eldercare-fall-ml-v2/issues/9), which
+carries the reproduction and the measured size census.
+
+**`worker/pipeline/camera_pipeline.py` exists, but does not own what the plan
+said it would.** This entry previously asserted that the file was absent, which
+was false: it is tracked, 163 lines, and was added in `6ce0bbc`. It holds
+`CameraPipelinePump`, which drives one camera's frame → extraction → decision
+path.
+
+What is still true is the ownership claim. The migration plan names this file as
+the owner of `edge/runtime/camera_worker.py`'s orchestration, and that
+orchestration remains split across `worker/pipeline/ingest/lifecycle.py`
+(supervision and reconnect), `worker/pipeline/analytics/composite.py`
+(extraction fan-out), and `worker/runtime/worker.py` (composition and restart
+policy). The ownership row above describes that split because that is what is on
+disk. Either move the orchestration into the pump, or amend the plan's Scope
+table — do not describe the file as owning something it does not.
 
 **No `worker/runtime/supervisor.py` and no `worker/pipeline/bus/latest_frame.py`.**
 The plan named both. Supervision landed in `worker/pipeline/ingest/lifecycle.py`

@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from typing_extensions import override
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(slots=True)
 class ConfigValidationError(ValueError):
     message: str
 
@@ -14,7 +14,7 @@ class ConfigValidationError(ValueError):
         return self.message
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(slots=True)
 class WorkerConfigError(Exception):
     message: str
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
@@ -199,3 +200,36 @@ def test_reconciliation_rolls_back_all_new_relations_when_one_ref_is_missing(
     assert outcome is not None
     assert outcome.local_state is ClipLocalState.CORRUPT
     assert outcome.unavailable_reason is EvidenceReasonCode.CORRUPT
+
+
+@contextlib.contextmanager
+def _passthrough_scope():
+    """A context manager that does not suppress — it only re-raises."""
+    yield
+
+
+def test_evidence_error_survives_contextlib_reraise_with_message_intact() -> None:
+    """Regression guard for frozen+slots on an Exception subclass (CPython 3.13).
+
+    ``dataclass(slots=True)`` cannot add ``__slots__`` to an existing class, so it
+    builds a replacement class object. The ``__setattr__`` that ``frozen=True``
+    generates closes over the *old* class and calls ``super(cls, self)``, while
+    ``self`` is an instance of the *new* class. ``contextlib`` trips this on
+    re-raise because it assigns ``exc.__traceback__``, and the operator then sees
+    ``TypeError: super(type, obj)`` instead of the real failure reason.
+
+    Dropping ``slots=True`` (keeping ``frozen=True``) is the fix. This test fails
+    loudly if ``slots=True`` is reintroduced on the evidence exceptions.
+    """
+    error = ClipEvidenceError(EvidenceReasonCode.FINALIZE_FAILED, "ffprobe unavailable")
+
+    with pytest.raises(ClipEvidenceError) as captured:
+        with _passthrough_scope():
+            raise error
+
+    # The original exception object propagates, not a TypeError from __setattr__.
+    assert captured.value is error
+    assert type(captured.value) is ClipEvidenceError
+    assert captured.value.reason_code is EvidenceReasonCode.FINALIZE_FAILED
+    assert captured.value.detail == "ffprobe unavailable"
+    assert str(captured.value) == "FINALIZE_FAILED: ffprobe unavailable"

@@ -26,7 +26,7 @@ class IncidentAuditSnapshot:
     bed_id: int | None
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(slots=True)
 class IncidentConfigurationError(ValueError):
     cooldown_sec: float
 

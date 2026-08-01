@@ -114,7 +114,7 @@ class ClipOutcome:
     unavailable_reason: EvidenceReasonCode | None = None
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(slots=True)
 class NewerSchemaVersionError(Exception):
     found: int
     supported: int
@@ -123,7 +123,7 @@ class NewerSchemaVersionError(Exception):
         return f"evidence outbox schema {self.found} is newer than supported {self.supported}"
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(slots=True)
 class EventClipConflictError(Exception):
     edge_event_id: EdgeEventId
     existing_clip_id: ClipId
@@ -136,7 +136,7 @@ class EventClipConflictError(Exception):
         )
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(slots=True)
 class StagedEventConflictError(Exception):
     edge_event_id: EdgeEventId
     mismatched_fields: tuple[Literal["detected_at", "payload_json"], ...]
@@ -146,7 +146,7 @@ class StagedEventConflictError(Exception):
         return f"event {self.edge_event_id} replay conflicts in fields: {fields}"
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(slots=True)
 class MissingStagedEventError(Exception):
     edge_event_id: EdgeEventId
 
@@ -154,7 +154,7 @@ class MissingStagedEventError(Exception):
         return f"event {self.edge_event_id} must be staged before clip binding"
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(slots=True)
 class ClipOutcomeConflictError(Exception):
     clip_id: ClipId
     existing_state: ClipLocalState

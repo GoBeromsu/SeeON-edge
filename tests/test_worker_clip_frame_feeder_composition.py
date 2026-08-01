@@ -211,11 +211,18 @@ def _stub_heartbeat_transport(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(worker_module, "bounded_request", request)
 
 
-def _config(*camera_ids: str) -> WorkerConfig:
+def _config(*camera_ids: str, clip_enabled: bool = True) -> WorkerConfig:
+    """Config for these tests.
+
+    Clip recording is opt-in and off by default (``ClipRecordingConfig``).
+    These tests are *about* the clip frame feeders, so they enable it
+    explicitly rather than relying on a default that no longer exists.
+    """
     return WorkerConfig.model_validate(
         {
             "version": 7,
             "relay": {"url": "http://relay.test", "token": "relay-token"},
+            "clip": {"enabled": clip_enabled},
             "cameras": [
                 {
                     "camera_id": camera_id,

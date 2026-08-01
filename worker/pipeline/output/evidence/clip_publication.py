@@ -63,7 +63,7 @@ class PublishedClip:
     video_path: Path | None
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(slots=True)
 class ClipPublicationConflictError(Exception):
     clip_id: ClipId
     detail: str

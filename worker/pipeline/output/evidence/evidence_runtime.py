@@ -169,4 +169,17 @@ def _enabled(value: str | None) -> bool:
     return (value or "").strip().lower() in {"1", "true", "yes"}
 
 
-__all__ = ["EvidenceExportRuntime"]
+def export_enabled() -> bool:
+    """Whether evidence export is switched on for this process.
+
+    Public so the composition root can ask *before* building collaborators that
+    only export needs. ``from_environment`` answers the same question
+    internally, but it requires a ``store_dir`` argument -- and building that
+    config reads clip-only environment variables that can themselves be
+    malformed. Asking first stops a clip-only misconfiguration from failing a
+    worker which has both clip recording and export switched off.
+    """
+    return _enabled(os.environ.get(EXPORT_ENABLED_ENV))
+
+
+__all__ = ["EvidenceExportRuntime", "export_enabled"]

@@ -17,6 +17,7 @@ import threading
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Literal, final
 
 import numpy as np
@@ -215,11 +216,18 @@ def _runtime(
     )
 
 
-def _config(*camera_ids: str) -> WorkerConfig:
+def _config(*camera_ids: str, clip_enabled: bool = True) -> WorkerConfig:
+    """Config for these tests.
+
+    Clip recording is opt-in and off by default (``ClipRecordingConfig``).
+    Tests that assert on the shared ``ClipRecorder`` enable it explicitly;
+    default-off behaviour has its own dedicated tests below.
+    """
     return WorkerConfig.model_validate(
         {
             "version": 7,
             "relay": {"url": "http://relay.test", "token": "relay-token"},
+            "clip": {"enabled": clip_enabled},
             "cameras": [
                 {
                     "camera_id": camera_id,
@@ -455,3 +463,484 @@ def test_build_clip_frame_feeder_returns_none_when_clip_recording_never_started(
     feeder = runtime._build_clip_frame_feeder("camera-a", bus)  # noqa: SLF001
 
     assert feeder is None
+
+
+class _RecordingEvidenceRuntime:
+    """Stand-in that records the lifecycle order the invariant depends on."""
+
+    def __init__(self) -> None:
+        self.initialize_calls: int = 0
+        self.sender_starts: int = 0
+        self.initialized: bool = False
+
+    def initialize_under_lock(self) -> None:
+        self.initialize_calls += 1
+        self.initialized = True
+
+    def start_sender(self) -> None:
+        if not self.initialized:
+            raise RuntimeError("evidence runtime must initialize before sender start")
+        self.sender_starts += 1
+
+    def stop_sender(self) -> None:
+        return None
+
+    def is_clip_held(self, clip_id: str) -> bool:
+        del clip_id
+        return False
+
+    def notify_clip_finalized(self, clip_id: str) -> None:
+        del clip_id
+
+
+def _compose_with(
+    runtime: WorkerRuntime,
+    evidence_runtime: _RecordingEvidenceRuntime,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Run composition with the export runtime and clip store stubbed out."""
+    monkeypatch.setattr(
+        worker_module,
+        "ClipRecorderConfig",
+        lambda: SimpleNamespace(store_dir=tmp_path / "clipstore"),
+    )
+    monkeypatch.setattr(
+        runtime,
+        "_compose_evidence_delivery",
+        lambda: evidence_runtime,
+    )
+    runtime._compose_evidence_export(  # noqa: SLF001
+        SimpleNamespace(encode=SimpleNamespace())
+    )
+
+
+def test_clip_default_off_still_initializes_delivery_under_the_store_lock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Recorder off must not silence alert delivery.
+
+    Skipping evidence composition entirely would leave READY rows stranded in
+    the local outbox: ``start_sender()`` refuses an uninitialized runtime. With
+    no ``ClipRecorder`` to own the clip-store lock, delivery composition takes
+    it itself and initializes exactly once.
+    """
+    serving = _FakeServingClient()
+    loops = _InstantLoopFactory()
+    runtime = _runtime(_config("camera-a", clip_enabled=False), serving, loops, tmp_path)
+    evidence_runtime = _RecordingEvidenceRuntime()
+
+    _compose_with(runtime, evidence_runtime, monkeypatch, tmp_path)
+
+    # Delivery is composed and initialized exactly once...
+    assert runtime._evidence_export_runtime is evidence_runtime  # noqa: SLF001
+    assert evidence_runtime.initialize_calls == 1
+    # ...and the sender can start against it.
+    evidence_runtime.start_sender()
+    assert evidence_runtime.sender_starts == 1
+    # No recorder, and therefore no per-camera feeder.
+    assert runtime._clip_recorder is None  # noqa: SLF001
+    assert runtime._build_clip_frame_feeder("camera-a", BoundedFrameBus()) is None  # noqa: SLF001
+
+
+def test_clip_enabled_initializes_delivery_exactly_once_through_the_recorder_hook(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Recorder on keeps the existing hook path -- and still initializes once.
+
+    ``ClipRecorder.start()`` acquires the lock and runs the startup hook before
+    sweep/rotate/admission (``tests/test_evidence_export_startup.py``). Delivery
+    composition must not initialize a second time on this path.
+    """
+    serving = _FakeServingClient()
+    loops = _InstantLoopFactory()
+    runtime = _runtime(_config("camera-a", clip_enabled=True), serving, loops, tmp_path)
+    evidence_runtime = _RecordingEvidenceRuntime()
+
+    started: list[object] = []
+
+    class _Recorder:
+        def __init__(self, *_args: object, **kwargs: object) -> None:
+            self._startup_hook = kwargs.get("startup_hook")
+
+        def start(self) -> None:
+            hook = self._startup_hook
+            if hook is not None:
+                hook()  # type: ignore[operator]
+            started.append(self)
+
+    monkeypatch.setattr(worker_module, "ClipRecorder", _Recorder)
+    monkeypatch.setattr(worker_module, "default_services", lambda *_a, **_k: object())
+
+    _compose_with(runtime, evidence_runtime, monkeypatch, tmp_path)
+
+    assert started, "clip recording was enabled but no recorder started"
+    assert runtime._clip_recorder is not None  # noqa: SLF001
+    assert runtime._evidence_export_runtime is evidence_runtime  # noqa: SLF001
+    # Exactly once, via the recorder's startup hook under the store lock.
+    assert evidence_runtime.initialize_calls == 1
+    evidence_runtime.start_sender()
+    assert evidence_runtime.sender_starts == 1
+
+
+def test_recorder_failing_after_its_startup_hook_does_not_initialize_twice(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The exactly-once invariant must survive a partial recorder start.
+
+    ``ClipRecorder.start()`` runs the startup hook *before* it sweeps, rotates,
+    and spawns its thread. A failure after the hook therefore leaves the runtime
+    already initialized. Re-initializing it on the error path would break the
+    invariant the disposition fixed, so composition must distinguish "failed
+    before the hook" from "failed after it".
+    """
+    serving = _FakeServingClient()
+    loops = _InstantLoopFactory()
+    runtime = _runtime(_config("camera-a", clip_enabled=True), serving, loops, tmp_path)
+    evidence_runtime = _RecordingEvidenceRuntime()
+
+    class _FailsAfterHook:
+        def __init__(self, *_args: object, **kwargs: object) -> None:
+            self._startup_hook = kwargs.get("startup_hook")
+
+        def start(self) -> None:
+            hook = self._startup_hook
+            if hook is not None:
+                hook()  # type: ignore[operator]
+            raise RuntimeError("encoder unavailable")
+
+    monkeypatch.setattr(worker_module, "ClipRecorder", _FailsAfterHook)
+    monkeypatch.setattr(worker_module, "default_services", lambda *_a, **_k: object())
+
+    _compose_with(runtime, evidence_runtime, monkeypatch, tmp_path)
+
+    # The hook already initialized the runtime; the error path must not repeat it.
+    assert evidence_runtime.initialize_calls == 1
+    # Clip recording is off after the failure, but delivery still works.
+    assert runtime._clip_recorder is None  # noqa: SLF001
+    evidence_runtime.start_sender()
+    assert evidence_runtime.sender_starts == 1
+
+
+def test_recorder_failing_before_its_startup_hook_still_initializes_delivery(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failure before the hook leaves nobody to initialize the runtime.
+
+    Without composition stepping in, ``start_sender()`` would refuse an
+    uninitialized runtime and alerts would strand in the local outbox.
+    """
+    serving = _FakeServingClient()
+    loops = _InstantLoopFactory()
+    runtime = _runtime(_config("camera-a", clip_enabled=True), serving, loops, tmp_path)
+    evidence_runtime = _RecordingEvidenceRuntime()
+
+    class _FailsBeforeHook:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            return None
+
+        def start(self) -> None:
+            raise RuntimeError("clip store locked by another process")
+
+    monkeypatch.setattr(worker_module, "ClipRecorder", _FailsBeforeHook)
+    monkeypatch.setattr(worker_module, "default_services", lambda *_a, **_k: object())
+
+    _compose_with(runtime, evidence_runtime, monkeypatch, tmp_path)
+
+    assert evidence_runtime.initialize_calls == 1
+    assert runtime._clip_recorder is None  # noqa: SLF001
+    evidence_runtime.start_sender()
+    assert evidence_runtime.sender_starts == 1
+
+
+def test_clip_disabled_shrinks_the_evidence_tap_built_by_composition(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No feeder means no reason to hold a full evidence backlog per camera.
+
+    ``bus.evidence`` is a FIFO drained only by ``ClipFrameFeeder``. With clip
+    recording off no feeder is built, so a full-size tap would retain frames
+    nothing will ever read -- multi-GB at fleet scale.
+
+    This asserts on the bus that *composition actually builds*. Comparing two
+    hand-constructed buses would only restate the constructor default and prove
+    nothing about the production path.
+    """
+    captured: list[BoundedFrameBus] = []
+    real_bus = worker_module.BoundedFrameBus
+
+    def _capturing_bus(**kwargs: object) -> BoundedFrameBus:
+        bus = real_bus(**kwargs)  # type: ignore[arg-type]
+        captured.append(bus)
+        return bus
+
+    monkeypatch.setattr(worker_module, "BoundedFrameBus", _capturing_bus)
+
+    serving = _FakeServingClient()
+    loops = _InstantLoopFactory()
+
+    def _evidence_capacity(*, clip_enabled: bool) -> int:
+        captured.clear()
+        runtime = _runtime(
+            _config("camera-a", clip_enabled=clip_enabled), serving, loops, tmp_path
+        )
+        # _build_camera refuses to run without a fall model, and that guard
+        # sits before the bus is built. A sentinel is enough: nothing after the
+        # bus construction matters for this assertion.
+        runtime.fall_model = object()  # type: ignore[assignment]
+        # _build_camera needs a fall model; everything after the bus is
+        # irrelevant here, so let it fail once the bus has been built.
+        try:
+            _ = runtime._build_camera(  # noqa: SLF001
+                runtime.config.cameras[0],
+                SimpleNamespace(extractors=()),  # type: ignore[arg-type]
+            )
+        except Exception as exc:  # noqa: BLE001 - only the constructed bus matters
+            # Recorded rather than swallowed silently: if the bus was never
+            # built, this is the reason the assertion below reports.
+            _ = repr(exc)
+        assert captured, "composition never constructed a frame bus"
+        return captured[0].evidence.capacity
+
+    off_capacity = _evidence_capacity(clip_enabled=False)
+    on_capacity = _evidence_capacity(clip_enabled=True)
+
+    assert off_capacity < on_capacity, (
+        "clip-off composition still builds a full-size evidence tap: "
+        f"off={off_capacity} on={on_capacity}"
+    )
+    assert off_capacity == 1
+
+
+def test_enabled_but_misconfigured_export_fails_closed_instead_of_going_quiet(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ADR-0003: a switched-on, misconfigured export must not degrade silently.
+
+    ``EvidenceExportRuntime.from_environment`` returns ``None`` on its own when
+    the env gate is off -- that is the explicit opt-out. A ``ValueError`` means
+    the gate is ON and the configuration is incomplete, which used to be logged
+    as a warning and turned into "no delivery". A worker that looks healthy
+    while alerts pile up unsent is exactly what that decision removes.
+    """
+    # The gate must be ON: this test is about "switched on and broken", and
+    # composition now short-circuits before building anything when it is off.
+    monkeypatch.setenv("ML_WORKER_EVENT_CLIP_EXPORT_ENABLED", "1")
+    serving = _FakeServingClient()
+    loops = _InstantLoopFactory()
+    runtime = _runtime(_config("camera-a", clip_enabled=False), serving, loops, tmp_path)
+
+    def _misconfigured(**_kwargs: object) -> object:
+        raise ValueError("evidence export requires relay URL, token, and camera")
+
+    monkeypatch.setattr(
+        worker_module.EvidenceExportRuntime, "from_environment", staticmethod(_misconfigured)
+    )
+    monkeypatch.setattr(
+        worker_module,
+        "ClipRecorderConfig",
+        lambda: SimpleNamespace(store_dir=tmp_path / "clipstore"),
+    )
+
+    with pytest.raises(worker_module.EvidenceDeliveryError) as captured:
+        runtime._compose_evidence_export(  # noqa: SLF001
+            SimpleNamespace(encode=SimpleNamespace())
+        )
+
+    message = str(captured.value)
+    assert "misconfigured" in message
+    # Sanitized: the relay URL and token never appear in the operator-facing text.
+    assert "relay.test" not in message
+    assert "relay-token" not in message
+
+
+def test_startup_hook_initialization_failure_is_fatal_not_a_clip_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed delivery init inside the hook must not be demoted to "clips off".
+
+    ``initialize_under_lock()`` runs inside ``ClipRecorder.start()``. Because the
+    recorder's own failures are a deliberate non-fatal boundary, a naive broad
+    catch swallows the hook's failure too -- and then ``start_sender()`` refuses
+    an uninitialized runtime, so alerts pile up in the local outbox while the
+    worker looks healthy. That is the exact ADR-0003 failure mode, so the hook
+    re-raises as ``EvidenceDeliveryError`` and composition lets it through.
+    """
+    serving = _FakeServingClient()
+    loops = _InstantLoopFactory()
+    runtime = _runtime(_config("camera-a", clip_enabled=True), serving, loops, tmp_path)
+
+    class _FailingInit(_RecordingEvidenceRuntime):
+        def initialize_under_lock(self) -> None:
+            raise RuntimeError("outbox schema is newer than this worker")
+
+    evidence_runtime = _FailingInit()
+
+    class _RunsHook:
+        def __init__(self, *_args: object, **kwargs: object) -> None:
+            self._startup_hook = kwargs.get("startup_hook")
+
+        def start(self) -> None:
+            hook = self._startup_hook
+            if hook is not None:
+                hook()  # type: ignore[operator]
+
+    monkeypatch.setattr(worker_module, "ClipRecorder", _RunsHook)
+    monkeypatch.setattr(worker_module, "default_services", lambda *_a, **_k: object())
+
+    with pytest.raises(worker_module.EvidenceDeliveryError) as captured:
+        _compose_with(runtime, evidence_runtime, monkeypatch, tmp_path)
+
+    assert "initialize" in str(captured.value)
+    # The real cause survives for debugging without being echoed to operators.
+    assert isinstance(captured.value.__cause__, RuntimeError)
+
+
+def test_sender_start_failure_is_fatal_when_delivery_is_enabled(
+    tmp_path: Path,
+) -> None:
+    """A composed runtime that cannot start its sender must not be ignored.
+
+    ``self._evidence_export_runtime is None`` is the explicit opt-out (export
+    env gate off). A runtime that exists and then fails to start its sender
+    means staged alerts accumulate in the local outbox forever while the worker
+    reports healthy -- the ADR-0003 silent-degrade this closes.
+    """
+    serving = _FakeServingClient()
+    loops = _InstantLoopFactory()
+    runtime = _runtime(_config("camera-a", clip_enabled=False), serving, loops, tmp_path)
+
+    class _SenderRefuses(_RecordingEvidenceRuntime):
+        def start_sender(self) -> None:
+            raise RuntimeError("relay socket unavailable")
+
+    runtime._evidence_export_runtime = _SenderRefuses()  # type: ignore[assignment]  # noqa: SLF001
+
+    with pytest.raises(worker_module.EvidenceDeliveryError) as captured:
+        runtime._start_export_sender()  # noqa: SLF001
+
+    assert "sender failed to start" in str(captured.value)
+    assert isinstance(captured.value.__cause__, RuntimeError)
+
+
+def test_sender_start_is_a_noop_when_export_is_not_enabled(
+    tmp_path: Path,
+) -> None:
+    """Export gate off is an explicit opt-out, not a failure."""
+    serving = _FakeServingClient()
+    loops = _InstantLoopFactory()
+    runtime = _runtime(_config("camera-a", clip_enabled=False), serving, loops, tmp_path)
+
+    assert runtime._evidence_export_runtime is None  # noqa: SLF001
+    runtime._start_export_sender()  # noqa: SLF001
+
+
+def test_clip_only_env_cannot_brick_a_worker_with_clip_and_export_both_off(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stray clip setting must not fail a worker that uses neither.
+
+    ``ClipRecorderConfig`` parses clip-only environment variables and raises on
+    malformed values (``int(raw)`` / ``float(raw)`` in
+    ``worker/pipeline/output/evidence/clip_config.py``). Building it before the
+    export gate is consulted meant that with clip recording off *and* export
+    off -- the default posture -- a malformed CLIP_STORE_RETENTION_DAYS still
+    aborted camera activation, for a subsystem that process never uses.
+    """
+    monkeypatch.setenv("CLIP_STORE_RETENTION_DAYS", "not-a-number")
+    monkeypatch.delenv("ML_WORKER_EVENT_CLIP_EXPORT_ENABLED", raising=False)
+
+    # Sanity: the malformed value really does break the config object.
+    with pytest.raises(ValueError, match="invalid literal"):
+        _ = worker_module.ClipRecorderConfig()
+
+    serving = _FakeServingClient()
+    loops = _InstantLoopFactory()
+    runtime = _runtime(_config("camera-a", clip_enabled=False), serving, loops, tmp_path)
+
+    # Composition must not touch that config when export is gated off.
+    runtime._compose_evidence_export(  # noqa: SLF001
+        SimpleNamespace(encode=SimpleNamespace())
+    )
+
+    assert runtime._evidence_export_runtime is None  # noqa: SLF001
+    assert runtime._clip_recorder is None  # noqa: SLF001
+
+def test_recorder_off_init_failure_is_typed_whatever_the_exception_class(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A non-OSError init failure must still surface as EvidenceDeliveryError.
+
+    The recorder-off path used to catch only ``OSError``. The startup-hook path
+    catches everything, so the same underlying failure was typed and sanitized
+    on one path and escaped raw on the other -- and outbox initialization can
+    fail with more than ``OSError`` (a locked sqlite outbox raises
+    ``sqlite3.OperationalError``, which is not an ``OSError`` subclass).
+
+    ``CLIP_STORE_DIR`` is redirected at a writable path on purpose. Left at its
+    ``/var/lib/clip-store`` default, ``ClipStoreLock.acquire`` raises
+    ``PermissionError`` before ``initialize_under_lock`` is ever called -- and
+    ``PermissionError`` *is* an ``OSError``, so the test would have passed
+    against the old narrow handler without exercising anything.
+
+    Asserting on ``RuntimeError`` is likewise deliberate: it is not an
+    ``OSError``, so this fails if the narrow handler ever comes back.
+    """
+    monkeypatch.setenv("CLIP_STORE_DIR", str(tmp_path / "clip-store"))
+    serving = _FakeServingClient()
+    loops = _InstantLoopFactory()
+    runtime = _runtime(_config("camera-a", clip_enabled=False), serving, loops, tmp_path)
+
+    class _InitRefuses(_RecordingEvidenceRuntime):
+        def initialize_under_lock(self) -> None:
+            raise RuntimeError("outbox schema is from a newer worker")
+
+    with pytest.raises(worker_module.EvidenceDeliveryError) as captured:
+        runtime._initialize_delivery_without_recorder(  # noqa: SLF001
+            _InitRefuses()  # type: ignore[arg-type]
+        )
+
+    assert "failed to initialize under the clip-store lock" in str(captured.value)
+    # The original failure must remain reachable for diagnosis, not be replaced.
+    assert isinstance(captured.value.__cause__, RuntimeError)
+    assert "newer worker" in str(captured.value.__cause__)
+
+
+def test_recorder_off_init_failure_does_not_leak_the_store_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The typed error must not carry filesystem detail into operator logs.
+
+    Same reasoning as the RTSP credential redaction: the message is what lands
+    in logs and alerts, so it names the failure, not the environment. The cause
+    chain still carries the detail for anyone debugging.
+    """
+    store_dir = tmp_path / "clip-store"
+    monkeypatch.setenv("CLIP_STORE_DIR", str(store_dir))
+    serving = _FakeServingClient()
+    loops = _InstantLoopFactory()
+    runtime = _runtime(_config("camera-a", clip_enabled=False), serving, loops, tmp_path)
+
+    class _InitRefuses(_RecordingEvidenceRuntime):
+        def initialize_under_lock(self) -> None:
+            raise RuntimeError(f"cannot open {store_dir}/outbox.sqlite3")
+
+    with pytest.raises(worker_module.EvidenceDeliveryError) as captured:
+        runtime._initialize_delivery_without_recorder(  # noqa: SLF001
+            _InitRefuses()  # type: ignore[arg-type]
+        )
+
+    assert str(store_dir) not in str(captured.value)
+    # The detail is preserved on the cause, just kept out of the operator-facing
+    # message -- otherwise this would be redaction by accident, not by design.
+    assert str(store_dir) in str(captured.value.__cause__)

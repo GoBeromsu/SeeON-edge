@@ -10,7 +10,7 @@ from typing_extensions import override
 from contracts.runner import Image
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(slots=True)
 class InvalidWarmupFrameError(ValueError):
     width: int
     height: int

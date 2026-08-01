@@ -30,6 +30,14 @@ domains:
       start: "21:00"
       end: "05:00"
       tz: Asia/Seoul
+# Evidence clip recording is off by default, deliberately: this worker detects,
+# stages, and relays events without capturing or retaining any video. Set this
+# to true only where clip capture is an accepted operating decision.
+#
+# Independent of the ML_WORKER_EVENT_CLIP_EXPORT_ENABLED environment gate,
+# which controls the export *sender* rather than whether a recorder exists.
+clip:
+  enabled: false
 cameras:
   - camera_id: camera-1
     facility_id: facility-1

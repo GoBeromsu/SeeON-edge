@@ -32,6 +32,12 @@ domains, or runtime"* and *"worker runtime is the sole composition root"*.
 - Both decode adapters emit the same `FramePacket` contract and the same decode
   metrics: measured non-negative `decode_time_ms`, monotonically increasing `seq`,
   correct width/height, and stream time.
+- The `cpu` profile is available only when OpenCV's own `videoio_registry`
+  reports `CAP_FFMPEG`. Import success alone is not capability: a `cv2` build
+  without the FFMPEG video I/O backend fails `decode_capability` preflight
+  instead of failing every camera open later. A missing registry, a missing
+  `CAP_FFMPEG` constant, or a raising query are all reported as unavailable
+  with an explicit reason. There is no alternate-backend fallback (ADR-0003).
 - The profile selects the decoder and encoder. An adapter never probes its way to
   a different backend, and NVENC failure never starts `libx264`.
 - Model objects are provisioned through the serving client, one per task per

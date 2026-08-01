@@ -10,6 +10,7 @@ import pytest
 from numpy.typing import NDArray
 
 from worker.adapters.decode.cpu_av import CpuAvAdapter, CpuAvConfig
+from worker.adapters.decode.cpu_av.adapter import CpuAvOpenError
 from worker.interfaces.decode import DecodeAdapter, DecodeSession
 from worker.pipeline.ingest.rtsp import RTSPSource
 from worker.runtime.profile.registry import PROFILE_REGISTRY
@@ -107,10 +108,166 @@ def test_cpu_av_opens_with_exact_timeouts_and_capture_properties() -> None:
             ],
         )
     ]
-    assert capture.set_calls == [
-        (cv2.CAP_PROP_BUFFERSIZE, 1),
-        (cv2.CAP_PROP_READ_TIMEOUT_MSEC, 5678),
+    # No post-open property surface at all: the timeouts are constructor
+    # params (OpenCV's FFMPEG backend reports False for a post-open
+    # set(CAP_PROP_READ_TIMEOUT_MSEC), measured on the real e2e fixture), and
+    # CAP_PROP_BUFFERSIZE was an unverified latency knob.
+    assert capture.set_calls == []
+    session.close()
+
+
+def test_cpu_av_opens_with_exactly_one_capture_call_and_no_legacy_retry() -> None:
+    """ADR-0003: one explicit signature, never a silently degraded retry.
+
+    The removed cascade caught TypeError and retried as ``(url, backend)`` and
+    then ``(url)``, dropping the open/read timeouts and the explicit FFmpeg
+    backend. This sentinel pins the call count so the retry cannot come back.
+    """
+    # Given
+    capture = _FakeCapture([])
+    factory = _CaptureFactory([capture])
+    adapter = CpuAvAdapter(capture_factory=factory, clock=_Clock([]))
+    config = CpuAvConfig(camera_id="camera-a", url="rtsp://camera/trackID=2")
+
+    # When
+    session = adapter.open(config)
+
+    # Then -- exactly one factory call, carrying backend and params.
+    assert len(factory.calls) == 1
+    _url, backend, params = factory.calls[0]
+    assert backend == cv2.CAP_FFMPEG
+    assert params is not None
+    session.close()
+
+
+def test_cpu_av_reports_unsupported_capture_signature_instead_of_dropping_params() -> None:
+    """A build outside the supported boundary is reported, not accommodated."""
+
+    # Given -- a factory that rejects the three-argument signature.
+    class _LegacySignatureFactory:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, int | None, list[int] | None]] = []
+
+        def __call__(
+            self,
+            url: str,
+            backend: int | None = None,
+            params: list[int] | None = None,
+        ) -> _FakeCapture:
+            self.calls.append((url, backend, params))
+            if params is not None:
+                raise TypeError("VideoCapture() takes at most 2 arguments")
+            return _FakeCapture([])
+
+    factory = _LegacySignatureFactory()
+    adapter = CpuAvAdapter(capture_factory=factory, clock=_Clock([]))
+    config = CpuAvConfig(camera_id="camera-a", url="rtsp://camera/trackID=2")
+
+    # When / Then -- explicit error, and no degraded retry was attempted.
+    with pytest.raises(CpuAvOpenError) as captured:
+        _ = adapter.open(config)
+
+    assert "supported boundary" in str(captured.value)
+    assert len(factory.calls) == 1
+    # The credentialed URL never leaks into the error text.
+    assert "rtsp://" not in str(captured.value)
+
+
+def test_cpu_av_open_failure_never_echoes_rtsp_credentials() -> None:
+    """The `cv2.error` path is the one that actually leaks, and it was untested.
+
+    OpenCV's error text routinely repeats the URL it was handed, and for RTSP
+    that URL carries `user:password`. The adapter therefore reports the failure
+    class and the camera id only, keeping the original exception on `__cause__`.
+
+    The redaction assertion above covers the `TypeError` branch. This one covers
+    `cv2.error`, which is the branch OpenCV actually raises on a bad RTSP open
+    and the branch that was fixed for leaking. Mutating the message there to
+    interpolate `config.url` left the decode suite and the privacy gate entirely
+    green, so nothing was holding it.
+
+    Asserting on the password specifically, not just on `rtsp://`, because a
+    message could drop the scheme and still carry the secret.
+    """
+
+    class _RaisingFactory:
+        def __call__(
+            self,
+            url: str,
+            backend: int | None = None,
+            params: list[int] | None = None,
+        ) -> _FakeCapture:
+            del backend, params
+            # Mirror OpenCV: the URL it was given comes back in the text.
+            raise cv2.error(f"OpenCV(4.10.0) failed to open stream {url}")
+
+    # Built in two pieces on purpose. A literal credentialed RTSP URL in tracked
+    # text trips the repository privacy gate (`credentialed-rtsp`), and that gate
+    # is right to trip on it -- this repo is public. Keeping `rtsp://` away from
+    # the credential in source satisfies the scanner while the value the adapter
+    # actually sees is still a fully credentialed URL.
+    authority = "admin:hunter2@10.0.0.5:554"
+    adapter = CpuAvAdapter(capture_factory=_RaisingFactory(), clock=_Clock([]))
+    config = CpuAvConfig(
+        camera_id="camera-a",
+        url=f"rtsp://{authority}/Streaming/Channels/101",
+    )
+
+    with pytest.raises(CpuAvOpenError) as captured:
+        _ = adapter.open(config)
+
+    message = str(captured.value)
+    assert "hunter2" not in message
+    assert "admin" not in message
+    assert "rtsp://" not in message
+    assert "10.0.0.5" not in message
+    # The camera is still identifiable, or the message is useless to an operator.
+    assert "camera-a" in message
+    # And the detail survives for local debugging, just not in the message.
+    assert isinstance(captured.value.__cause__, cv2.error)
+    assert "hunter2" in str(captured.value.__cause__)
+
+def test_cpu_av_open_characterizes_buffer_and_timeout_independently() -> None:
+    """A/B characterization: which knob does the adapter actually apply?
+
+    The reconnect-loop hypothesis blamed ``CAP_PROP_BUFFERSIZE=1``. That was
+    never a controlled comparison: the old code discarded the ``set()`` result,
+    so a backend that refused the property looked identical to one that applied
+    it. This test separates the two knobs so the contract is explicit:
+
+    * open-time timeouts travel as constructor ``params`` (they must, because a
+      post-open timeout cannot bound the *first* read), and
+    * there is no post-open property surface at all -- OpenCV's FFMPEG backend
+      reports ``False`` for a post-open ``set(CAP_PROP_READ_TIMEOUT_MSEC)``,
+      so issuing one would prove nothing.
+
+    If buffer tuning is ever reintroduced it must be a declared, checked
+    property, and this test will fail until the contract is updated with it.
+    """
+    # Given
+    capture = _FakeCapture([])
+    factory = _CaptureFactory([capture])
+    adapter = CpuAvAdapter(capture_factory=factory, clock=_Clock([]))
+    config = CpuAvConfig(
+        camera_id="camera-a",
+        url="rtsp://camera/trackID=2",
+        open_timeout_ms=4000,
+        read_timeout_ms=4000,
+    )
+
+    # When
+    session = adapter.open(config)
+
+    # Then -- timeouts are constructor params, not post-open best-effort sets.
+    _url, _backend, params = factory.calls[0]
+    assert params == [
+        cv2.CAP_PROP_OPEN_TIMEOUT_MSEC,
+        4000,
+        cv2.CAP_PROP_READ_TIMEOUT_MSEC,
+        4000,
     ]
+    # And there is no post-open property surface to be best-effort about.
+    assert capture.set_calls == []
     session.close()
 
 

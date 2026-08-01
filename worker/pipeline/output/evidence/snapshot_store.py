@@ -27,7 +27,7 @@ class StoredSnapshot:
     edge_event_id: str | None
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(slots=True)
 class SnapshotConflictError(Exception):
     snapshot_id: str
 

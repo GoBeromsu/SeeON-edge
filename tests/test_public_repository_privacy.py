@@ -390,7 +390,6 @@ def _contains_forbidden_control_bytes(blob: bytes) -> bool:
 
 PUBLIC_SAFE_STRUCTURED_FIXTURES = frozenset(
     {
-        Path("edge/ml-worker.example.yaml"),
         Path("worker/ml-worker.example.yaml"),
     }
 )

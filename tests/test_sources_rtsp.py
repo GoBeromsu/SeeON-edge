@@ -173,6 +173,7 @@ from numpy.typing import NDArray
 
 from contracts.frame import Frame
 from worker.adapters.decode.cpu_av import CpuAvAdapter, CpuAvConfig
+from worker.adapters.decode.cpu_av.adapter import CpuAvOpenError
 from worker.pipeline.ingest.probe import RTSPProbeError, probe_first_frame
 from worker.pipeline.ingest.rtsp import RTSPSource
 from worker.types import FramePacket
@@ -229,8 +230,17 @@ class _FakeCapture:
         return None
 
 
-def test_cpu_av_falls_back_through_parameterized_open_signatures_to_bare_url() -> None:
-    calls: list[tuple[object, ...]] = []
+def test_cpu_av_refuses_to_degrade_when_the_open_signature_is_unsupported() -> None:
+    """ADR-0003: an unsupported OpenCV build is reported, not worked around.
+
+    This test previously asserted the opposite: that the adapter retried as
+    ``(url, backend)`` and then ``(url)`` until one signature stuck. That
+    cascade silently dropped the required open/read timeouts and the explicit
+    FFmpeg backend, so a capture opened through it had neither the timeout
+    contract nor the backend the adapter claims to require -- and the operator
+    saw a working camera instead of a configuration error.
+    """
+    calls: list[tuple[str, int | None, list[int] | None]] = []
     capture = _FakeCapture()
 
     def factory(
@@ -251,8 +261,10 @@ def test_cpu_av_falls_back_through_parameterized_open_signatures_to_bare_url() -
         read_timeout_ms=5678,
     )
 
-    session = adapter.open(config)
+    with pytest.raises(CpuAvOpenError) as captured:
+        _ = adapter.open(config)
 
+    # Exactly one attempt, with the full explicit signature.
     assert calls == [
         (
             "rtsp://camera/live",
@@ -264,10 +276,10 @@ def test_cpu_av_falls_back_through_parameterized_open_signatures_to_bare_url() -
                 5678,
             ],
         ),
-        ("rtsp://camera/live", cv2.CAP_FFMPEG, None),
-        ("rtsp://camera/live", None, None),
     ]
-    session.close()
+    assert "supported boundary" in str(captured.value)
+    # The credentialed URL never leaks into the error text.
+    assert "rtsp://" not in str(captured.value)
 
 
 def test_probe_first_frame_classifies_decode_failure_and_closes_session() -> None:

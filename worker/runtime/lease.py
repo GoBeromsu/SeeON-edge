@@ -39,7 +39,7 @@ from worker.runtime.faults.record import (
 GPU_LEASE_FILENAME: Final = ".gpu.lease"
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(slots=True)
 class GpuLeaseUnavailableError(RuntimeError):
     """Another process in this repository already holds the GPU lease."""
 

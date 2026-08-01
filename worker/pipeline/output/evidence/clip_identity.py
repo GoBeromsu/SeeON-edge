@@ -23,7 +23,7 @@ class ClipReservation:
     final_dir: Path
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(slots=True)
 class ClipIdCollisionError(Exception):
     camera_id: str
     attempts: int

@@ -27,7 +27,7 @@ if TYPE_CHECKING:
 YoloTask: TypeAlias = Literal["pose", "person", "bed"]
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(slots=True)
 class YoloArtifactError(RuntimeError):
     task: YoloTask
     path: Path
@@ -37,7 +37,7 @@ class YoloArtifactError(RuntimeError):
         return f"{self.task} model artifact is missing: {self.path}"
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(slots=True)
 class YoloLoadError(RuntimeError):
     task: YoloTask
     path: Path
@@ -48,7 +48,7 @@ class YoloLoadError(RuntimeError):
         return f"{self.task} model load failed for {self.path}: {self.reason}"
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(slots=True)
 class YoloForwardError(RuntimeError):
     task: YoloTask
     reason: str
@@ -58,7 +58,7 @@ class YoloForwardError(RuntimeError):
         return f"{self.task} model forward failed: {self.reason}"
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(slots=True)
 class YoloOutputError(RuntimeError):
     task: YoloTask
     detail: str

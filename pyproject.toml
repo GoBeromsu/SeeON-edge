@@ -70,7 +70,7 @@ torchvision = [{ index = "pytorch-cu130", marker = "sys_platform == 'linux'" }]
 
 # uv workspace (F1: each instance is an independent build unit with its own
 # pyproject). Members are package=false: they declare each instance's
-# dependency contract and share one lockfile. `contracts`/`edge.features` stay
+# dependency contract and share one lockfile. `contracts` stays
 # path-importable (contracts is vendored ADR-0004 and cannot carry a pyproject,
 # so `uv sync --package` build-isolation is intentionally not used); per-instance
 # slim images are produced by Dockerfile.backend/edge via dependency-groups.

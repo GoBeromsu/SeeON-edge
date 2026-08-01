@@ -13,7 +13,7 @@ from pathlib import Path
 from worker.pipeline.output.evidence.evidence_outbox_types import EvidenceReasonCode
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(slots=True)
 class ClipEvidenceError(Exception):
     reason_code: EvidenceReasonCode
     detail: str

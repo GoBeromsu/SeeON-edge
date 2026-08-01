@@ -117,6 +117,193 @@ def _executable_legacy_hits(text: str) -> list[str]:
     return hits
 
 
+PARITY_BASELINE_SHA = "aeed6a8"
+_PARITY_DISPOSITIONS = ("ported", "tracked-deferred", "out-of-scope (uncommitted)")
+
+
+def _parity_ledger_rows() -> list[tuple[str, str, str, str]]:
+    """Capability rows of the feature parity ledger.
+
+    The ledger is a four-column table under ``## Feature parity ledger``. Rows
+    are collected until the next heading so the baseline-uncommitted table that
+    follows is not mistaken for a capability row.
+    """
+    rows: list[tuple[str, str, str, str]] = []
+    in_section = False
+    for line in _read(ARCHITECTURE).splitlines():
+        if line.startswith("## "):
+            in_section = line.strip() == "## Feature parity ledger"
+            continue
+        if not in_section or not line.startswith("|"):
+            continue
+        cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+        if len(cells) != 4:
+            continue
+        if cells[0] in {"Capability", "---"} or set(cells[0]) <= {"-", " "}:
+            continue
+        rows.append((cells[0], cells[1], cells[2], cells[3]))
+    return rows
+
+
+def test_architecture_documents_a_non_empty_feature_parity_ledger() -> None:
+    text = _read(ARCHITECTURE)
+    assert "## Feature parity ledger" in text
+    assert _parity_ledger_rows() != []
+
+
+def test_parity_ledger_pins_the_committed_baseline_commit() -> None:
+    text = _read(ARCHITECTURE)
+    assert PARITY_BASELINE_SHA in text
+    assert "committed" in text.lower()
+
+
+def test_every_parity_row_names_an_owner_and_a_known_disposition() -> None:
+    for capability, owner, behaviour_test, disposition in _parity_ledger_rows():
+        assert capability, "a parity row must name a capability"
+        matched = [
+            known for known in _PARITY_DISPOSITIONS if disposition.startswith(known)
+        ]
+        assert matched, f"{capability} has an unknown disposition: {disposition}"
+        if disposition.startswith("ported"):
+            assert owner not in {"", "—"}, f"{capability} is ported without an owner"
+            assert behaviour_test not in {
+                "",
+                "—",
+            }, f"{capability} is ported without a behaviour test"
+
+
+def test_ported_parity_rows_cite_behaviour_tests_that_exist() -> None:
+    missing: list[str] = []
+    for capability, _owner, behaviour_test, disposition in _parity_ledger_rows():
+        if not disposition.startswith("ported"):
+            continue
+        for cited in re.findall(r"`([^`]+)`", behaviour_test):
+            if not (ROOT / cited).exists():
+                missing.append(f"{capability} -> {cited}")
+    assert missing == [], f"parity ledger cites tests that do not exist: {missing}"
+
+
+def test_ported_parity_rows_cite_owners_that_exist() -> None:
+    missing: list[str] = []
+    for capability, owner, _behaviour_test, disposition in _parity_ledger_rows():
+        if not disposition.startswith("ported"):
+            continue
+        for cited in re.findall(r"`([^`]+)`", owner):
+            if not (ROOT / cited).exists():
+                missing.append(f"{capability} -> {cited}")
+    assert missing == [], f"parity ledger cites owners that do not exist: {missing}"
+
+
+def test_parity_ledger_states_the_missing_capability_rule() -> None:
+    text = _read(ARCHITECTURE)
+    assert "Missing-capability rule" in text
+    for expected in ("runtime feature", "script or tool", "behaviour-coverage test"):
+        assert expected in text, f"the missing-capability rule omits {expected}"
+
+
+def test_platform_limited_parity_evidence_names_the_exact_cases() -> None:
+    """The row whose evidence cannot run locally must be listed, not implied.
+
+    One ``ported`` row is proven by tests that only run on Linux, because the
+    capability itself reads ``/proc``. A developer on macOS sees those fail and,
+    without this list, has no way to tell a genuine runtime floor from a parity
+    gap -- which is the precise confusion ``Open gaps`` exists to prevent.
+
+    Pinning the individual test IDs rather than a summary sentence is
+    deliberate: if one of these is fixed, renamed, or deleted, this fails and
+    forces the note to be corrected instead of quietly rotting.
+    """
+    text = _read(ARCHITECTURE)
+    platform_limited = (
+        "tests/test_clip_recorder.py::"
+        "test_clip_recorder_finalizes_atomic_manifest_with_pre_and_post_window",
+        "tests/test_clip_recorder.py::"
+        "test_clip_recorder_fsyncs_media_and_manifest_before_staging_cleanup",
+    )
+    for case in platform_limited:
+        assert case in text, f"Open gaps omits the platform-limited case {case}"
+        module, _, name = case.partition("::")
+        assert (ROOT / module).is_file(), f"{module} no longer exists"
+        assert name in _read(ROOT / module), (
+            f"{name} no longer exists in {module}; the Open gaps note is stale"
+        )
+    assert "/proc/self/fd" in text, "the note omits why these cannot run"
+    assert "ffprobe" in text, "the note omits the ffprobe dependency"
+
+
+def test_the_linux_only_parity_row_names_the_production_code_that_makes_it_so() -> None:
+    """The floor must be justified by production code, not asserted.
+
+    A row is only legitimately Linux-only if something in the shipped worker
+    actually requires Linux. If that citation stops being true, the row should
+    become portable rather than stay excused, so this checks the cited file
+    still contains the dependency the note blames.
+    """
+    text = _read(ARCHITECTURE)
+    cited = "worker/pipeline/output/evidence/evidence_media.py"
+    assert cited in text, "the note does not say which production code needs /proc"
+    assert "/proc/self/fd" in _read(ROOT / cited), (
+        f"{cited} no longer reads /proc/self/fd; the Linux-only excuse is stale"
+    )
+
+
+def test_snapshot_store_evidence_is_not_claimed_to_be_platform_limited() -> None:
+    """Snapshot store was on that list and must not silently return to it.
+
+    Its tests read ``/proc`` only as instrumentation; the capability never did.
+    They now work on macOS too, so listing the row as platform-limited would be
+    wrong -- and re-breaking their portability should be caught here rather than
+    by someone rediscovering it on a Mac.
+    """
+    instrumentation = _read(ROOT / "tests" / "test_snapshot_store.py")
+    assert "F_GETPATH" in instrumentation, (
+        "snapshot-store tests no longer have a macOS descriptor-resolution path"
+    )
+    assert "/dev/fd" in instrumentation, (
+        "snapshot-store tests no longer have a macOS descriptor-enumeration path"
+    )
+    production = _read(ROOT / "worker" / "pipeline" / "output" / "evidence" / "snapshot_store.py")
+    assert "/proc" not in production, (
+        "snapshot_store.py now reads /proc, so its row really is Linux-only "
+        "and the Open gaps note needs updating"
+    )
+
+def test_open_gaps_absence_claims_are_still_true() -> None:
+    """A gap that says a file is missing must be checked, not trusted.
+
+    ``Open gaps`` claimed "No ``worker/pipeline/camera_pipeline.py`` ... it does
+    not exist" while that file was tracked, 163 lines, and had been on disk since
+    ``6ce0bbc``. Nobody noticed because a prose claim about absence is exactly
+    the kind of thing that rots silently: the file appears, and the sentence
+    saying it has not stays put.
+
+    This scans the section for ``No `path`` / ``no `path`` claims and fails if
+    any of those paths now exists. Fixing a gap should require deleting the
+    entry, not leaving a stale denial behind.
+    """
+    text = _read(ARCHITECTURE)
+    _, _, gaps = text.partition("## Open gaps")
+    assert gaps, "the Open gaps section is missing"
+
+    claimed_absent = re.findall(r"\b[Nn]o `([^`]+\.(?:py|sh|ya?ml|md))`", gaps)
+    assert claimed_absent, "no absence claims found; this guard would be vacuous"
+
+    still_present = [path for path in claimed_absent if (ROOT / path).exists()]
+    assert still_present == [], (
+        f"Open gaps says these do not exist, but they do: {still_present}. "
+        "Delete the entry rather than leaving a stale denial."
+    )
+
+def test_explicit_fallback_adr_exists_and_is_indexed() -> None:
+    adr = ROOT / "docs" / "decisions" / "0003-explicit-fallback-only.md"
+    assert adr.is_file()
+    body = _read(adr)
+    assert "Status: Accepted" in body
+    assert "Implicit fallback is" in body
+    index = _read(ROOT / "docs" / "decisions" / "README.md")
+    assert "0003-explicit-fallback-only.md" in index
+
+
 def test_architecture_doc_exists_and_is_not_a_placeholder() -> None:
     text = _read(ARCHITECTURE)
     assert len(text.splitlines()) > 50
