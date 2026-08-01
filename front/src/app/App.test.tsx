@@ -180,6 +180,18 @@ describe('Dashboard integration', () => {
     act(() => root.unmount());
   });
 
+  it('navigates from a camera card to its scoped clips view', async () => {
+    window.history.replaceState(null, '', '/?page=cameras');
+    const { host, root } = await renderDashboard();
+
+    const viewClips = Array.from(host.querySelectorAll<HTMLButtonElement>('button')).find((button) => button.textContent === '클립 보기');
+    act(() => viewClips?.click());
+
+    expect(window.location.search).toBe('?page=events&camera=local-a');
+    expect(host.querySelector('main h1')?.textContent).toBe('이벤트 기록');
+    act(() => root.unmount());
+  });
+
   it('restores direct links and popstate without pushing history', async () => {
     window.history.replaceState(null, '', '/?page=events&floor=2%EC%B8%B5&camera=local-a&event=fall&clip=clip-a');
     const push = vi.spyOn(window.history, 'pushState');

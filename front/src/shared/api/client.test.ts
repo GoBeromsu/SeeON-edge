@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { cameraMediaId, clearClipLabelOverlay, createCamera, fetchCameras, fetchClips, fetchStatus, fetchSystem, getApiBase, getCameraSnapshotUrl, getCameraStreamUrl, labelClip, loginDashboard, logoutDashboard, testCamera, updateCamera, updateCameraDecodeBackend } from '@/shared/api/client';
+import { cameraDuplicateDetail, cameraMediaId, cameraProbeFailureDetail, clearClipLabelOverlay, createCamera, fetchCameras, fetchClips, fetchStatus, fetchSystem, getApiBase, getCameraSnapshotUrl, getCameraStreamUrl, labelClip, loginDashboard, logoutDashboard, testCamera, updateCamera, updateCameraDecodeBackend } from '@/shared/api/client';
+import { HttpError } from '@/shared/api/http';
 
 function clipManifest(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
@@ -80,6 +81,57 @@ describe('api client contracts', () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => payload }));
 
     await expect(mutate()).rejects.toThrow('Invalid camera response');
+  });
+
+  it('omits force_register from the create body by default and includes it only when requested', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => cameraResponse() });
+    vi.stubGlobal('fetch', fetchMock);
+
+    await createCamera({ label: '301호', rtsp_url: 'rtsp://camera/stream' });
+    await createCamera({ label: '301호', rtsp_url: 'rtsp://camera/stream' }, { forceRegister: true });
+
+    expect(fetchMock).toHaveBeenNthCalledWith(1, '/api/v1/cameras', expect.objectContaining({
+      body: JSON.stringify({ label: '301호', rtsp_url: 'rtsp://camera/stream' }),
+    }));
+    expect(fetchMock).toHaveBeenNthCalledWith(2, '/api/v1/cameras', expect.objectContaining({
+      body: JSON.stringify({ label: '301호', rtsp_url: 'rtsp://camera/stream', force_register: true }),
+    }));
+  });
+
+  it('surfaces the 409 duplicate_camera body through requestJson so the caller can read it', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: false,
+      status: 409,
+      json: async () => ({ detail: { error: 'duplicate_camera', existing_camera_id: 'cam-2', existing_label: '302호' } }),
+    }));
+
+    const error = await createCamera({ label: '301호', rtsp_url: 'rtsp://camera/stream' }).catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(HttpError);
+    expect((error as HttpError).status).toBe(409);
+    expect(cameraDuplicateDetail(error)).toEqual({ error: 'duplicate_camera', existing_camera_id: 'cam-2', existing_label: '302호' });
+    expect(cameraProbeFailureDetail(error)).toBeUndefined();
+  });
+
+  it('surfaces the 422 probe_failed body through requestJson so the caller can read it', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: false,
+      status: 422,
+      json: async () => ({ detail: { error: 'probe_failed', error_class: 'auth' } }),
+    }));
+
+    const error = await createCamera({ label: '301호', rtsp_url: 'rtsp://camera/stream' }).catch((caught: unknown) => caught);
+
+    expect(cameraProbeFailureDetail(error)).toEqual({ error: 'probe_failed', error_class: 'auth' });
+    expect(cameraDuplicateDetail(error)).toBeUndefined();
+  });
+
+  it('treats a non-matching or body-less HTTP error as neither duplicate nor probe failure', async () => {
+    expect(cameraDuplicateDetail(new HttpError(500))).toBeUndefined();
+    expect(cameraProbeFailureDetail(new HttpError(500))).toBeUndefined();
+    expect(cameraDuplicateDetail(new Error('network down'))).toBeUndefined();
+    expect(cameraDuplicateDetail(new HttpError(409, { detail: { error: 'something_else' } }))).toBeUndefined();
+    expect(cameraProbeFailureDetail(new HttpError(422, { detail: { error: 'something_else' } }))).toBeUndefined();
   });
 
   it('exposes the dashboard API base for operator-facing backend copy', () => {

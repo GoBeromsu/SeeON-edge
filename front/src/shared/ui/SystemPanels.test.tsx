@@ -68,13 +68,15 @@ describe('SystemPanel', () => {
   it('renders an honest complete snapshot and keeps technical identifiers collapsed', () => {
     const { host, root } = renderPanel(resource(system), resource(status));
 
-    expect(host.textContent).toContain('시스템 상태 확인 완료');
+    // 정상 상태는 침묵해야 한다 — "확인 완료" 문구도, 다른 안심시키는 대체 문구도 없다.
+    expect(host.textContent).not.toContain('시스템 상태 확인 완료');
+    expect(host.querySelector('[aria-live="polite"]')).toBeNull();
     expect(host.textContent).toContain('시스템 기준 시각');
     expect(host.textContent).toContain('시스템 정보 · 마지막 확인');
     expect(host.textContent).toContain('런타임 상태 · 마지막 확인');
     expect(host.textContent).toContain(`시스템 기준 시각 ${new Date(system.updated_at!).toLocaleString('ko-KR')}`);
     expect(host.textContent).toContain('설정됨');
-    expect(host.textContent).toContain('연결됨');
+    expect(host.textContent).toMatch(/\d+(초|분|시간|일) 전 동기화/);
     expect(host.textContent).toContain('500 B / 2.0 KB');
     expect(host.textContent).toContain('25.0%');
     expect(host.textContent).toContain('카메라 1대');
@@ -163,6 +165,10 @@ describe('SystemPanel', () => {
 
     expect(nvml?.textContent).toContain('NVML 사용 불가');
     expect(nvml?.className).toContain('text-status-danger');
+    // 장애 진단은 클릭 없이 읽혀야 한다 — 접힌 <details>는 오직 "기술 정보" 식별자용 1개뿐이어야 한다.
+    expect(nvml?.closest('details')).toBeNull();
+    expect(host.querySelectorAll('details')).toHaveLength(1);
+    expect(host.querySelector('details')?.querySelector('summary')?.textContent).toBe('기술 정보');
     act(() => root.unmount());
   });
 
@@ -197,7 +203,7 @@ describe('SystemPanel', () => {
     const failedStatus = resource<StatusSnapshot>(null, { status: 'error', error: new Error('offline'), retry: retryStatus });
     const { host, root } = renderPanel(resource(system), failedStatus);
     expect(host.textContent).toContain('일부 상태만 확인됨');
-    expect(host.textContent).toContain('연결됨');
+    expect(host.textContent).toMatch(/\d+(초|분|시간|일) 전 동기화/);
     expect(host.textContent).toContain('런타임 상태를 불러오지 못했습니다');
     act(() => Array.from(host.querySelectorAll('button')).find((button) => button.textContent === '다시 시도')?.click());
     expect(retryStatus).toHaveBeenCalledOnce();
@@ -251,7 +257,9 @@ describe('SystemPanel', () => {
     expect(host.textContent).toContain('카메라 1대');
 
     act(() => root.render(<SystemPanel systemResource={resource(system)} statusResource={resource(status)} />));
-    expect(host.textContent).toContain('시스템 상태 확인 완료');
+    // 회복 후에도 정상 상태는 침묵한다 — 경고 문구만 사라지고 안심 문구가 새로 나타나지 않는다.
+    expect(host.textContent).not.toContain('시스템 상태 확인 완료');
+    expect(host.querySelector('[aria-live="polite"]')).toBeNull();
     expect(host.textContent).not.toContain('마지막 성공 상태를 표시합니다');
     act(() => root.unmount());
   });
@@ -274,7 +282,6 @@ describe('SystemPanel', () => {
     };
     const { host, root } = renderPanel(resource(unavailableSystem), resource(uncertainStatus));
     expect(host.textContent).toContain('설정되지 않음');
-    expect(host.textContent).toContain('연결 정보 없음');
     expect(host.textContent).toContain('저장 공간 정보 없음');
     expect(host.textContent).toContain('연결 지연');
     expect(host.textContent).toContain('신선도 정보 없음');
@@ -302,6 +309,50 @@ describe('SystemPanel', () => {
     const { host, root } = renderPanel(resource(system), resource(status));
     expect(host.textContent).not.toMatch(/\/api\/v1|\/system|\/status|raw JSON|업데이트 이력|롤백 이력|알림 센터|ops 이벤트|스토리지 게이지|연결되면 이 영역/);
     expect(host.querySelector('pre')).toBeNull();
+    act(() => root.unmount());
+  });
+
+  describe('backend connection: elapsed time, never a bare boolean', () => {
+    it('shows elapsed time since last success when reachable, not a "연결됨" boolean', () => {
+      const recentSystem: SystemSnapshot = { ...system, backend: { ...system.backend, reachable: true, last_ok_at: new Date(Date.now() - 12_000).toISOString() } };
+      const { host, root } = renderPanel(resource(recentSystem), resource(status));
+      expect(host.textContent).toMatch(/\d+초 전 동기화/);
+      expect(host.textContent).not.toContain('연결됨');
+      expect(host.textContent).not.toContain('연결 실패');
+      act(() => root.unmount());
+    });
+
+    it('shows elapsed time since last success when unreachable, phrased as an ongoing failure', () => {
+      const failingSystem: SystemSnapshot = { ...system, backend: { ...system.backend, reachable: false, last_ok_at: new Date(Date.now() - 4 * 60_000).toISOString() } };
+      const { host, root } = renderPanel(resource(failingSystem), resource(status));
+      expect(host.textContent).toMatch(/4분째 실패/);
+      expect(host.textContent).not.toContain('연결 실패');
+      act(() => root.unmount());
+    });
+
+    it('reports missing sync history honestly instead of a boolean when never synced', () => {
+      const neverSyncedSystem: SystemSnapshot = { ...system, backend: { ...system.backend, reachable: null, last_ok_at: null } };
+      const { host, root } = renderPanel(resource(neverSyncedSystem), resource(status));
+      expect(host.textContent).toContain('동기화 이력 없음');
+      act(() => root.unmount());
+    });
+  });
+
+  it('surfaces per-camera staleness (age) without hiding it behind a click', () => {
+    const staleStatus: StatusSnapshot = {
+      ...status,
+      cameras: {
+        ...status.cameras,
+        camera2: { camera_id: 'camera-2', facility_id: 'facility-a', status: 'stale', last_heartbeat_at: 1, age_sec: 42, config_version: 1 },
+        camera3: { camera_id: 'camera-3', facility_id: 'facility-a', status: 'never_seen', last_heartbeat_at: null, age_sec: null, config_version: null },
+      },
+    };
+    const { host, root } = renderPanel(resource(system), resource(staleStatus));
+    expect(host.textContent).toContain('camera-2');
+    expect(host.textContent).toContain('마지막 신호 42초 전');
+    expect(host.textContent).toContain('camera-3');
+    expect(host.textContent).toContain('연결 이력 없음');
+    expect(host.querySelector('details ul')).toBeNull();
     act(() => root.unmount());
   });
 });

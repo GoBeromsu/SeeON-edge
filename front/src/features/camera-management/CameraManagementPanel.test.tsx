@@ -29,8 +29,9 @@ function renderPanel(overrides: Partial<ComponentProps<typeof CameraManagementPa
 describe('CameraManagementPanel freshness', () => {
   it('does not fabricate a last checked time on first-load failure', () => {
     const { host, root } = renderPanel();
-    expect(host.querySelector('summary')?.className).toContain('min-h-11');
-    expect(host.querySelector('summary')?.className).not.toContain('flex');
+    // Registry version is diagnostic info for an engineer audience — it must not hide behind a click.
+    expect(host.querySelector('details')).toBeNull();
+    expect(host.querySelector('summary')).toBeNull();
     expect(host.textContent).toContain('카메라 목록을 불러오지 못했습니다.');
     expect(host.textContent).not.toContain('마지막 확인');
     act(() => root.unmount());
@@ -68,6 +69,23 @@ describe('CameraManagementPanel freshness', () => {
     expect(host.querySelectorAll('[role="status"]')).toHaveLength(1);
     expect(host.textContent).toContain('카메라 목록을 새로 확인하고 있습니다.');
     expect(host.textContent).toContain('301호 A');
+    act(() => root.unmount());
+  });
+});
+
+describe('CameraManagementPanel sort order', () => {
+  it('sorts cards for fault triage: offline, then never-connected/unknown, then online', () => {
+    const online = { ...camera, id: 'cam-online', label: '온라인 카메라', status: 'online' as const };
+    const offline = { ...camera, id: 'cam-offline', label: '오프라인 카메라', status: 'offline' as const };
+    const neverConnected = { ...camera, id: 'cam-never', label: '미연결 카메라', status: 'unknown' as const, never_connected: true };
+    const { host, root } = renderPanel({
+      registry: { registry_version: 1, cameras: [online, offline, neverConnected] },
+      cameraError: null,
+      hasLoadedSuccessfully: true,
+    });
+
+    const labels = Array.from(host.querySelectorAll('h3')).map((heading) => heading.textContent);
+    expect(labels).toEqual(['오프라인 카메라', '미연결 카메라', '온라인 카메라']);
     act(() => root.unmount());
   });
 });

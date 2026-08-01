@@ -1,7 +1,7 @@
 import { getApiBase } from '@/shared/api/session';
 
 export class HttpError extends Error {
-  constructor(readonly status: number) {
+  constructor(readonly status: number, readonly body?: unknown) {
     super(`HTTP ${status}`);
   }
 }
@@ -18,7 +18,13 @@ export async function requestJson(path: string, init?: RequestInit): Promise<unk
   });
 
   if (!response.ok) {
-    throw new HttpError(response.status);
+    let body: unknown;
+    try {
+      body = await response.json();
+    } catch {
+      body = undefined;
+    }
+    throw new HttpError(response.status, body);
   }
 
   if (response.status === 204) {

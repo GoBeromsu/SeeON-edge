@@ -1,6 +1,5 @@
-import { requestJson } from '@/shared/api/http';
+import { HttpError, requestJson } from '@/shared/api/http';
 import { normalizeCameraRegistry, normalizeCameraResponse, normalizeCameraTestResult, normalizeClipsResponse, normalizeStatusSnapshot, normalizeSystemSnapshot } from '@/shared/api/normalizers';
-import { getApiBase, getCameraSnapshotUrl, getCameraStreamUrl } from '@/shared/api/session';
 import type { Camera, CameraInput, CameraPatchInput, CameraRegistry, CameraTestResult, Clip, ClipLabel, DecodeBackend, StatusSnapshot, SystemSnapshot } from '@/shared/api/types';
 
 export type {
@@ -51,7 +50,7 @@ export function cameraMediaId(camera: Pick<Camera, 'id' | 'backend_camera_id'>):
   return camera.backend_camera_id ?? camera.id;
 }
 
-function cameraBody(input: CameraInput | CameraPatchInput): string {
+function cameraBody(input: CameraInput | CameraPatchInput, extra?: Record<string, unknown>): string {
   const body: Record<string, unknown> = {};
   if (input.label !== undefined) {
     body.label = input.label.trim();
@@ -68,15 +67,63 @@ function cameraBody(input: CameraInput | CameraPatchInput): string {
   if ('decode_backend' in input && input.decode_backend !== undefined) {
     body.decode_backend = input.decode_backend;
   }
+  if (extra) {
+    Object.assign(body, extra);
+  }
   return JSON.stringify(body);
+}
+
+/** Structured 422 body the backend sends when probe-before-persist rejects a camera (`error_class`: timeout | auth | decode). */
+export type CameraProbeFailureDetail = {
+  error: 'probe_failed';
+  error_class?: string;
+};
+
+/** Structured 409 body the backend sends when the normalized stream identity already exists. */
+export type CameraDuplicateDetail = {
+  error: 'duplicate_camera';
+  existing_camera_id: string;
+  existing_label: string;
+};
+
+function errorDetail(error: unknown): Record<string, unknown> | undefined {
+  if (!(error instanceof HttpError) || typeof error.body !== 'object' || error.body === null) return undefined;
+  const detail = (error.body as Record<string, unknown>).detail;
+  return typeof detail === 'object' && detail !== null ? (detail as Record<string, unknown>) : undefined;
+}
+
+/** Narrows a caught `createCamera` error to a probe-before-persist rejection (HTTP 422), or returns undefined. */
+export function cameraProbeFailureDetail(error: unknown): CameraProbeFailureDetail | undefined {
+  if (!(error instanceof HttpError) || error.status !== 422) return undefined;
+  const detail = errorDetail(error);
+  if (!detail || detail.error !== 'probe_failed') return undefined;
+  return {
+    error: 'probe_failed',
+    error_class: typeof detail.error_class === 'string' ? detail.error_class : undefined,
+  };
+}
+
+/** Narrows a caught `createCamera` error to a duplicate-stream rejection (HTTP 409), or returns undefined. */
+export function cameraDuplicateDetail(error: unknown): CameraDuplicateDetail | undefined {
+  if (!(error instanceof HttpError) || error.status !== 409) return undefined;
+  const detail = errorDetail(error);
+  if (!detail || detail.error !== 'duplicate_camera' || typeof detail.existing_camera_id !== 'string') return undefined;
+  return {
+    error: 'duplicate_camera',
+    existing_camera_id: detail.existing_camera_id,
+    existing_label: typeof detail.existing_label === 'string' ? detail.existing_label : detail.existing_camera_id,
+  };
 }
 
 export async function fetchCameras(signal?: AbortSignal): Promise<CameraRegistry> {
   return normalizeCameraRegistry(await requestJson('/cameras', { signal }));
 }
 
-export async function createCamera(input: CameraInput): Promise<Camera> {
-  return normalizeCameraResponse(await requestJson('/cameras', { method: 'POST', body: cameraBody(input) }));
+export async function createCamera(input: CameraInput, options: { forceRegister?: boolean } = {}): Promise<Camera> {
+  return normalizeCameraResponse(await requestJson('/cameras', {
+    method: 'POST',
+    body: cameraBody(input, options.forceRegister ? { force_register: true } : undefined),
+  }));
 }
 
 export async function updateCamera(cameraId: string, input: CameraPatchInput): Promise<Camera> {

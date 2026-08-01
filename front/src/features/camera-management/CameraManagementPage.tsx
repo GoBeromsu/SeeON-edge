@@ -27,7 +27,7 @@ function upsertCamera(registry: CameraRegistry, camera: Camera, previousCameraId
   };
 }
 
-export function CameraManagementPage(): JSX.Element {
+export function CameraManagementPage({ onViewClips }: { onViewClips?: (camera: Camera) => void } = {}): JSX.Element {
   const resource = useCamerasResource(true);
   const [registry, setRegistry] = useState<CameraRegistry>(EMPTY_REGISTRY);
   const [addOpen, setAddOpen] = useState(false);
@@ -138,8 +138,9 @@ export function CameraManagementPage(): JSX.Element {
         onUpdateStarted={handleUpdateStarted}
         onUpdated={handleUpdated}
         onDelete={(camera) => { setDeleteMessage(null); setDeleteTarget(camera); }}
+        onViewClips={onViewClips}
       />
-      <AddCameraModal open={addOpen} onClose={() => setAddOpen(false)} onCreated={handleCreated} />
+      <AddCameraModal open={addOpen} onClose={() => setAddOpen(false)} onCreated={handleCreated} cameras={registry.cameras} />
       {deleteTarget ? (
         <DeleteCameraDialog
           camera={deleteTarget}

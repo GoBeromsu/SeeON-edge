@@ -18,6 +18,19 @@ export type Camera = {
   night_start?: string | null;
   night_end?: string | null;
   decode_backend?: DecodeBackend | string | null;
+  /** True once the registry confirms this camera has never completed a successful connection. */
+  never_connected?: boolean;
+  /** ISO timestamp of the last successful connection, or null if none has occurred. */
+  last_ok_at?: string | null;
+  /** ISO timestamp of the last connection probe (success or failure), or null if never probed. */
+  last_probed_at?: string | null;
+  /**
+   * Unix epoch SECONDS of the last edge heartbeat, or null. Only populated by `GET /cameras`;
+   * POST/PATCH/test responses always return null here — that is expected, not an error state.
+   */
+  last_heartbeat_at?: number | null;
+  /** Seconds since the last edge heartbeat, or null. Same GET-only availability as last_heartbeat_at. */
+  heartbeat_age_sec?: number | null;
 };
 
 export type CameraRegistry = {

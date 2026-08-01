@@ -35,6 +35,30 @@ function formatVersion(value: string | null | undefined): string {
   return !value || value.trim().toLowerCase() === 'unknown' ? '정보 없음' : value;
 }
 
+function formatElapsedSince(value: string | null): string | null {
+  if (value === null || value === '') return null;
+  const then = new Date(value).getTime();
+  if (!Number.isFinite(then)) return null;
+  const diffSec = Math.max(0, Math.round((Date.now() - then) / 1_000));
+  if (diffSec < 60) return `${diffSec}초`;
+  const diffMin = Math.round(diffSec / 60);
+  if (diffMin < 60) return `${diffMin}분`;
+  const diffHour = Math.round(diffMin / 60);
+  if (diffHour < 24) return `${diffHour}시간`;
+  return `${Math.round(diffHour / 24)}일`;
+}
+
+// 30초 서버측 갱신 루프(backend/app/lifespan.py)의 산출물이므로 "연결됨" 같은 실시간 불리언이 아니라
+// 마지막으로 확인된 시점을 경과 시간으로 정직하게 표시한다.
+function formatBackendConnection(backend: SystemSnapshot['backend']): string {
+  if (!backend.configured) return '설정되지 않음';
+  const elapsed = formatElapsedSince(backend.last_ok_at);
+  if (elapsed === null) return backend.reachable === false ? '동기화 이력 없음 · 연결 실패' : '동기화 이력 없음';
+  if (backend.reachable === false) return `${elapsed}째 실패`;
+  if (backend.reachable === true) return `${elapsed} 전 동기화`;
+  return `${elapsed} 전 · 상태 불확실`;
+}
+
 function Availability({ label, value }: { label: string; value: string }): JSX.Element {
   return (
     <div className="rounded-xl border border-border bg-surface2 p-4">
@@ -108,15 +132,12 @@ export function StorageGauge({ system }: { system: SystemSnapshot | null }): JSX
 }
 
 function BackendPanel({ system }: { system: SystemSnapshot }): JSX.Element {
-  const reachable = system.backend.reachable === true ? '연결됨' : system.backend.reachable === false ? '연결 실패' : '연결 정보 없음';
-  const lastOkAt = formatDate(system.backend.last_ok_at);
   return (
     <article className="rounded-2xl border border-border bg-surface p-5">
       <h3 className="text-lg font-black text-ink">서비스 연결</h3>
-      <dl className="mt-4 grid gap-3 sm:grid-cols-3">
+      <dl className="mt-4 grid gap-3 sm:grid-cols-2">
         <Availability label="설정" value={system.backend.configured ? '설정됨' : '설정되지 않음'} />
-        <Availability label="도달 가능 여부" value={reachable} />
-        <Availability label="마지막 성공" value={lastOkAt === '정보 없음' ? '마지막 성공 정보 없음' : lastOkAt} />
+        <Availability label="연결" value={formatBackendConnection(system.backend)} />
       </dl>
     </article>
   );
@@ -127,11 +148,27 @@ function HeartbeatPanel({ status }: { status: StatusSnapshot }): JSX.Element {
   const online = heartbeats.filter((item) => item.status === 'online').length;
   const stale = heartbeats.filter((item) => item.status === 'stale').length;
   const neverSeen = heartbeats.filter((item) => item.status === 'never_seen').length;
+  // 신선도 필드는 개별 카메라마다 부재할 수 있으므로 항상 isNonNegative로 방어한다.
+  const atRisk = heartbeats.filter((item) => item.status !== 'online');
   return (
     <article className="rounded-2xl border border-border bg-surface p-5">
       <h3 className="text-lg font-black text-ink">카메라 연결 상태</h3>
       {heartbeats.length === 0 ? <p className="mt-3 text-sm font-bold text-ink-soft">카메라 연결 이력이 없습니다</p> : (
-        <p className="mt-3 text-sm font-bold tabular-nums text-ink-soft">정상 {online}대 · 연결 지연 {stale}대 · 연결 이력 없음 {neverSeen}대</p>
+        <>
+          <p className="mt-3 text-sm font-bold tabular-nums text-ink-soft">정상 {online}대 · 연결 지연 {stale}대 · 연결 이력 없음 {neverSeen}대</p>
+          {atRisk.length > 0 ? (
+            <ul className="mt-2 space-y-1 text-sm text-ink-soft">
+              {atRisk.map((item) => (
+                <li key={item.camera_id}>
+                  <span className="font-bold text-ink">{item.camera_id}</span>
+                  <span className="ml-2 tabular-nums">
+                    {item.status === 'never_seen' ? '연결 이력 없음' : `마지막 신호 ${formatCount(item.age_sec, '초 전')}`}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          ) : null}
+        </>
       )}
     </article>
   );
@@ -280,15 +317,16 @@ export function SystemPanel(props: SystemPanelProps): JSX.Element {
     );
   }
 
+  // 정상 상태(오류 없음, 대기 없음)는 침묵한다 — "확인 완료" 같은 문구는 아무것도 보증하지 않는다.
   const headline = errors.length
     ? (available === 2 ? '마지막 성공 상태를 표시합니다' : '일부 상태만 확인됨')
     : pending ? '일부 상태를 불러오는 중'
-      : '시스템 상태 확인 완료';
+      : null;
   return (
     <section aria-labelledby="system-heading" className="space-y-4">
       <header>
         <h1 id="system-heading" tabIndex={-1} className="text-xl font-black text-ink">시스템</h1>
-        <p aria-live="polite" className="mt-2 text-sm font-bold text-ink-soft">{headline}</p>
+        {headline !== null ? <p aria-live="polite" className="mt-2 text-sm font-bold text-ink-soft">{headline}</p> : null}
         <div className="mt-2 text-sm text-ink-soft">
           <ResourceState label="시스템 정보" resource={systemResource} />
           <ResourceState label="런타임 상태" resource={runtimeResource} />

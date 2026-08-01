@@ -4,14 +4,13 @@ from __future__ import annotations
 
 import json
 import os
-import socket
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from threading import Lock
 from typing import Literal
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import parse_qsl, urlsplit, urlunsplit
 
 API_CAMERA_STORE_ENV = "API_CAMERA_STORE"
 DEFAULT_CAMERA_STORE = "/var/lib/ml-api/cameras.json"
@@ -26,6 +25,15 @@ class ProbeResult:
     error_class: ProbeErrorClass | None = None
     width: int | None = None
     height: int | None = None
+
+
+class DuplicateCameraError(Exception):
+    """Raised when a create/update would register a second camera for the
+    same physical RTSP stream (see ``normalize_stream_identity``)."""
+
+    def __init__(self, existing_record: dict[str, object]) -> None:
+        super().__init__("a camera is already registered for this stream")
+        self.existing_record = existing_record
 
 
 class CameraRegistryStore:
@@ -52,9 +60,18 @@ class CameraRegistryStore:
         backend_camera_id: str | None = None,
         mapping_pending: bool = False,
         decode_backend: str | None = None,
+        last_probed_at: str | None = None,
+        last_ok_at: str | None = None,
+        never_connected: bool = True,
     ) -> dict[str, object]:
         with self._lock:
             data = self._read_unlocked()
+            # Duplicate check runs INSIDE the lock (not as a router pre-check):
+            # a pre-check outside the lock is TOCTOU-racy, since two concurrent
+            # POSTs could both pass it before either writes.
+            duplicate = _find_duplicate(data["cameras"], rtsp_url)
+            if duplicate is not None:
+                raise DuplicateCameraError(dict(duplicate))
             record = {
                 "id": camera_id or str(uuid.uuid4()),
                 "label": label,
@@ -64,7 +81,10 @@ class CameraRegistryStore:
                 "mapping_pending": mapping_pending,
                 "status": status,
                 "decode_backend": decode_backend,
-                "created_at": _utc_now(),
+                "created_at": utc_now_iso(),
+                "last_probed_at": last_probed_at,
+                "last_ok_at": last_ok_at,
+                "never_connected": never_connected,
             }
             data["cameras"].append(record)
             data["registry_version"] += 1
@@ -77,6 +97,13 @@ class CameraRegistryStore:
             for index, record in enumerate(data["cameras"]):
                 if record.get("id") != camera_id:
                     continue
+                new_rtsp_url = updates.get("rtsp_url")
+                if isinstance(new_rtsp_url, str):
+                    duplicate = _find_duplicate(
+                        data["cameras"], new_rtsp_url, exclude_camera_id=camera_id
+                    )
+                    if duplicate is not None:
+                        raise DuplicateCameraError(dict(duplicate))
                 updated = {**record, **updates}
                 data["cameras"][index] = updated
                 data["registry_version"] += 1
@@ -154,7 +181,74 @@ def public_camera(record: dict[str, object]) -> dict[str, object]:
         "status": _status(record.get("status")),
         "decode_backend": _optional_str(record.get("decode_backend")),
         "created_at": str(record.get("created_at", "")),
+        # Probe-history fields (see CameraRegistryStore.create/update): surfaced
+        # so the UI can render "never connected" / "last connected at" text.
+        # Records written before this field existed simply omit the key, which
+        # record.get(...) reports as None -- the same as an explicit null.
+        "never_connected": _optional_bool(record.get("never_connected")),
+        "last_ok_at": _optional_str(record.get("last_ok_at")),
+        "last_probed_at": _optional_str(record.get("last_probed_at")),
     }
+
+
+def normalize_stream_identity(rtsp_url: str) -> str:
+    """Return a comparable identity key for an RTSP stream URL.
+
+    Used to detect duplicate camera registrations (same physical stream
+    registered twice). Deliberately excludes username/password so rotating a
+    default ``admin/admin`` password does not spawn a zombie duplicate, and
+    excludes the fragment (not meaningful for RTSP).
+
+    The query string IS kept (parsed, sorted by key): some vendors (Dahua)
+    encode main-vs-sub stream selection in the query (``?subtype=0`` vs
+    ``?subtype=1``) while others (Hikvision) encode it in the path. Dropping
+    the query would silently merge distinct Dahua streams while leaving
+    Hikvision correctly distinguished -- a vendor-dependent bug.
+
+    The path is case-SENSITIVE (only trailing-slash normalized): vendor paths
+    like ``/Streaming/Channels/101`` are case-sensitive on the wire.
+    """
+    try:
+        parsed = urlsplit(rtsp_url.strip())
+    except ValueError:
+        return rtsp_url.strip().lower()
+    scheme = parsed.scheme.lower()
+    host = (parsed.hostname or "").lower()
+    port = parsed.port
+    if port is None:
+        port_part = ""
+    elif scheme == "rtsp" and port == 554:
+        # Elide only the well-known rtsp:// default; rtsps:// (and any other
+        # scheme) has no default worth guessing, so an explicit port stays.
+        port_part = ""
+    else:
+        port_part = f":{port}"
+    path = parsed.path
+    if len(path) > 1:
+        path = path.rstrip("/")
+    query_pairs = sorted(parse_qsl(parsed.query, keep_blank_values=True))
+    query_part = "&".join(f"{key}={value}" for key, value in query_pairs)
+    identity = f"{scheme}://{host}{port_part}{path}"
+    if query_part:
+        identity = f"{identity}?{query_part}"
+    return identity
+
+
+def _find_duplicate(
+    cameras: list[object], rtsp_url: str, *, exclude_camera_id: str | None = None
+) -> dict[str, object] | None:
+    target = normalize_stream_identity(rtsp_url)
+    for record in cameras:
+        if not isinstance(record, dict):
+            continue
+        if exclude_camera_id is not None and record.get("id") == exclude_camera_id:
+            continue
+        existing_rtsp = record.get("rtsp_url")
+        if not isinstance(existing_rtsp, str):
+            continue
+        if normalize_stream_identity(existing_rtsp) == target:
+            return record
+    return None
 
 
 def mask_rtsp_url(rtsp_url: str) -> str:
@@ -175,29 +269,6 @@ def mask_rtsp_url(rtsp_url: str) -> str:
     return urlunsplit(parsed._replace(netloc=f"{user}{password}@{host}"))
 
 
-def probe_rtsp_url(rtsp_url: str, *, timeout_sec: float = 1.0) -> ProbeResult:
-    """Perform an API-safe RTSP reachability probe.
-
-    ml-api is intentionally ML-free and does not import cv2 or decode frames here.
-    This probe only checks whether the RTSP TCP endpoint accepts a connection;
-    deeper auth/codec validation is left to the worker's camera probe path.
-    """
-    try:
-        parsed = urlsplit(rtsp_url)
-        if parsed.scheme.lower() != "rtsp" or not parsed.hostname:
-            return ProbeResult(ok=False, error_class="decode")
-        port = parsed.port or 554
-    except ValueError:
-        return ProbeResult(ok=False, error_class="decode")
-    try:
-        with socket.create_connection((parsed.hostname, port), timeout=timeout_sec):
-            return ProbeResult(ok=True)
-    except TimeoutError:
-        return ProbeResult(ok=False, error_class="timeout")
-    except OSError:
-        return ProbeResult(ok=False, error_class="decode")
-
-
 def status_from_probe(result: ProbeResult) -> CameraStatus:
     return "online" if result.ok else "offline"
 
@@ -209,11 +280,15 @@ def _optional_str(value: object) -> str | None:
     return stripped or None
 
 
+def _optional_bool(value: object) -> bool | None:
+    return value if isinstance(value, bool) else None
+
+
 def _status(value: object) -> CameraStatus:
     return value if value in {"online", "offline", "starting", "unknown"} else "unknown"
 
 
-def _utc_now() -> str:
+def utc_now_iso() -> str:
     return datetime.now(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
@@ -222,9 +297,11 @@ __all__ = [
     "DEFAULT_CAMERA_STORE",
     "CameraRegistryStore",
     "CameraStatus",
+    "DuplicateCameraError",
     "ProbeResult",
     "mask_rtsp_url",
-    "probe_rtsp_url",
+    "normalize_stream_identity",
     "public_camera",
     "status_from_probe",
+    "utc_now_iso",
 ]

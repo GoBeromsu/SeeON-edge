@@ -1,6 +1,20 @@
 import type { Camera, CameraRegistry } from '@/shared/api/client';
 import { CameraCard } from '@/features/cameras/CameraCard';
 
+// Fault-triage default order: offline first, then unresolved/never-connected states, then online.
+function statusPriority(camera: Camera): number {
+  if (camera.status === 'offline') return 0;
+  if (camera.never_connected || camera.status === 'unknown' || camera.status === 'starting') return 1;
+  return 2;
+}
+
+function sortCamerasByFaultPriority(cameras: Camera[]): Camera[] {
+  return cameras
+    .map((camera, index) => ({ camera, index }))
+    .sort((a, b) => statusPriority(a.camera) - statusPriority(b.camera) || a.index - b.index)
+    .map((entry) => entry.camera);
+}
+
 export function CameraManagementPanel({
   registry,
   cameraError,
@@ -10,6 +24,7 @@ export function CameraManagementPanel({
   onUpdateStarted,
   onUpdated,
   onDelete,
+  onViewClips,
   loading = false,
   hasLoadedSuccessfully = true,
   onRetry,
@@ -22,10 +37,12 @@ export function CameraManagementPanel({
   onUpdateStarted: (camera: Camera) => number;
   onUpdated: (camera: Camera, previousCameraId?: string, startedAtGeneration?: number) => void;
   onDelete: (camera: Camera) => void;
+  onViewClips?: (camera: Camera) => void;
   loading?: boolean;
   hasLoadedSuccessfully?: boolean;
   onRetry?: () => void;
 }): JSX.Element {
+  const sortedCameras = sortCamerasByFaultPriority(registry.cameras);
   return (
     <section className="rounded-2xl border border-border bg-surface p-5 shadow-sm">
       <div className="mb-5 flex items-center justify-between gap-3">
@@ -41,10 +58,7 @@ export function CameraManagementPanel({
           + 카메라 추가
         </button>
       </div>
-      <details className="mb-4 text-xs text-ink-faint">
-        <summary className="min-h-11 cursor-pointer py-3 font-bold">기술 정보</summary>
-        <p className="mt-2">등록 버전 {registry.registry_version}</p>
-      </details>
+      <p className="mb-4 text-xs font-bold text-ink-faint">등록 버전 {registry.registry_version}</p>
       {cameraError ? (
         <div className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-2xl bg-status-dangerBg px-4 py-3 text-sm font-bold text-status-danger" role="alert">
           <div>
@@ -59,10 +73,18 @@ export function CameraManagementPanel({
       ) : null}
       {loading ? (
         <p className="rounded-2xl bg-surface px-5 py-8 text-center font-bold text-ink-soft" role="status">카메라 목록을 불러오는 중...</p>
-      ) : registry.cameras.length > 0 ? (
+      ) : sortedCameras.length > 0 ? (
         <div className="grid gap-4 md:grid-cols-2">
-          {registry.cameras.map((camera) => (
-            <CameraCard key={camera.id} camera={camera} onUpdateStarted={onUpdateStarted} onUpdated={onUpdated} onDelete={onDelete} />
+          {sortedCameras.map((camera) => (
+            <CameraCard
+              key={camera.id}
+              camera={camera}
+              onUpdateStarted={onUpdateStarted}
+              onUpdated={onUpdated}
+              onDelete={onDelete}
+              onViewClips={onViewClips}
+              onRetried={onRetry}
+            />
           ))}
         </div>
       ) : hasLoadedSuccessfully ? (

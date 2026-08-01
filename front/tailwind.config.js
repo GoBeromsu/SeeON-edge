@@ -1,11 +1,10 @@
 /** @type {import('tailwindcss').Config} */
 export default {
-  darkMode: 'class',
   content: ['./index.html', './src/**/*.{ts,tsx}'],
   theme: {
     extend: {
       colors: {
-        // front(front/tailwind.config.js) 정렬 토큰 — CSS 변수 기반, .dark 자동 전환
+        // front(front/tailwind.config.js) 정렬 토큰 — CSS 변수 기반
         bg: 'var(--c-bg)',
         surface: 'var(--c-surface)',
         surface2: 'var(--c-surface-2)',
@@ -30,14 +29,6 @@ export default {
           check: 'var(--c-check)',
           checkBg: 'var(--c-check-bg)',
         },
-        // legacy accents retained during the component token migration
-        cream: '#f8fafc',
-        lilac: '#ede9fe',
-        mint: '#d1fae5',
-      },
-      boxShadow: {
-        soft: '0 18px 45px rgba(15, 23, 42, 0.10)',
-        glow: '0 20px 55px rgba(99, 102, 241, 0.18)',
       },
       borderRadius: {
         '4xl': '2rem',
