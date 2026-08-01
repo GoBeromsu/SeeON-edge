@@ -96,7 +96,7 @@ describe('DashboardShell', () => {
       credentials: 'same-origin',
     }));
     expect(host.textContent).toContain('관리자 로그인');
-    expect(replace).toHaveBeenLastCalledWith(null, '', '/?page=operations&mode=wall&wallPage=1');
+    expect(replace).toHaveBeenLastCalledWith(null, '', '/?page=operations&wallPage=1');
     act(() => root.unmount());
   });
 

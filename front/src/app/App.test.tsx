@@ -91,6 +91,9 @@ function readCssWithLocalImports(path: string): string {
 beforeEach(() => {
   mockResources();
   window.history.replaceState(null, '', '/');
+  // jsdom doesn't implement scrollTo; a wall->focus->wall round trip now restores
+  // scroll position, so stub it globally to keep test output clean.
+  vi.spyOn(window, 'scrollTo').mockImplementation(() => undefined);
 });
 
 afterEach(() => {
@@ -104,7 +107,7 @@ afterEach(() => {
 describe('Dashboard integration', () => {
   it('canonicalizes to the operations wall and exposes exactly four destinations with one mounted page', async () => {
     const { host, root } = await renderDashboard();
-    expect(window.location.search).toBe('?page=operations&mode=wall&wallPage=1');
+    expect(window.location.search).toBe('?page=operations&wallPage=1');
     expect(new Set(Array.from(host.querySelectorAll('nav button')).map((button) => button.textContent))).toHaveLength(4);
     expect(host.querySelectorAll('[aria-current="page"]')).toHaveLength(2);
     expect(host.querySelectorAll('main h1')).toHaveLength(1);
@@ -192,10 +195,10 @@ describe('Dashboard integration', () => {
     act(() => root.unmount());
   });
 
-  it('cleans invalid data-backed selection and returns focus mode to the wall', async () => {
+  it('drops a legacy mode= deep link and clears an invalid camera/floor selection back to the wall', async () => {
     window.history.replaceState(null, '', '/?page=operations&floor=missing&camera=removed&mode=focus&wallPage=99');
     const { root } = await renderDashboard();
-    expect(window.location.search).toBe('?page=operations&mode=wall&wallPage=1');
+    expect(window.location.search).toBe('?page=operations&wallPage=1');
     expect(document.body.querySelector('[data-stream]')).toBeNull();
     act(() => root.unmount());
   });
@@ -205,11 +208,11 @@ describe('Dashboard integration', () => {
     vi.mocked(fetchCameras)
       .mockResolvedValueOnce({ registry_version: 1, cameras: [camera] })
       .mockResolvedValueOnce({ registry_version: 2, cameras: [] });
-    window.history.replaceState(null, '', '/?page=operations&camera=local-a&mode=focus&wallPage=1');
+    window.history.replaceState(null, '', '/?page=operations&camera=local-a&wallPage=1');
     const { root } = await renderDashboard();
     expect(document.body.querySelector('[data-stream]')).not.toBeNull();
     await act(async () => vi.advanceTimersByTimeAsync(5_000));
-    expect(window.location.search).toBe('?page=operations&mode=wall&wallPage=1');
+    expect(window.location.search).toBe('?page=operations&wallPage=1');
     expect(document.body.querySelector('[data-stream]')).toBeNull();
     act(() => root.unmount());
   });
@@ -276,7 +279,7 @@ describe('Dashboard integration', () => {
     const { host, root } = await renderDashboard();
     const focusTarget = cameras.length === 0
       ? Array.from(host.querySelectorAll<HTMLButtonElement>('button')).find((button) => button.textContent === '카메라 등록하기')
-      : host.querySelector<HTMLButtonElement>('[aria-label="동쪽 카메라 선택"]');
+      : host.querySelector<HTMLButtonElement>('[aria-label="동쪽 카메라 열기"]');
     focusTarget?.focus();
 
     await act(async () => vi.advanceTimersByTimeAsync(5_000));
@@ -287,7 +290,7 @@ describe('Dashboard integration', () => {
     expect(refreshStatus?.textContent).toBe('카메라 목록을 새로 확인하고 있습니다.');
     expect(document.activeElement).toBe(focusTarget);
     if (cameras.length === 0) expect(host.textContent).toContain('등록된 카메라가 없습니다.');
-    else expect(host.querySelector('[aria-label="동쪽 카메라 선택"]')).not.toBeNull();
+    else expect(host.querySelector('[aria-label="동쪽 카메라 열기"]')).not.toBeNull();
 
     await act(async () => resolveRefresh?.({ registry_version: 2, cameras }));
     expect(host.querySelector('[data-camera-refresh-status]')).toBeNull();
@@ -302,24 +305,24 @@ describe('Dashboard integration', () => {
       .mockResolvedValueOnce(retainedRegistry)
       .mockRejectedValueOnce(new Error('camera refresh failed'))
       .mockResolvedValueOnce(retainedRegistry);
-    window.history.replaceState(null, '', '/?page=operations&camera=local-a&mode=focus&wallPage=1');
+    window.history.replaceState(null, '', '/?page=operations&camera=local-a&wallPage=1');
     const { root } = await renderDashboard();
     await act(async () => vi.advanceTimersByTimeAsync(5_000));
 
     const historyLength = window.history.length;
     const push = vi.spyOn(window.history, 'pushState');
     const replace = vi.spyOn(window.history, 'replaceState');
-    window.history.replaceState(null, '', '/?page=operations&floor=missing&camera=removed&mode=focus&wallPage=99');
+    window.history.replaceState(null, '', '/?page=operations&floor=missing&camera=removed&wallPage=99');
     replace.mockClear();
     await act(async () => window.dispatchEvent(new PopStateEvent('popstate')));
 
-    expect(window.location.search).toBe('?page=operations&floor=missing&camera=removed&mode=focus&wallPage=99');
+    expect(window.location.search).toBe('?page=operations&floor=missing&camera=removed&wallPage=99');
     expect(replace).not.toHaveBeenCalled();
     expect(push).not.toHaveBeenCalled();
     expect(window.history.length).toBe(historyLength);
 
     await act(async () => vi.advanceTimersByTimeAsync(5_000));
-    expect(window.location.search).toBe('?page=operations&mode=wall&wallPage=1');
+    expect(window.location.search).toBe('?page=operations&wallPage=1');
     expect(replace).toHaveBeenCalledTimes(1);
     expect(push).not.toHaveBeenCalled();
     expect(window.history.length).toBe(historyLength);
@@ -390,47 +393,38 @@ describe('Dashboard integration', () => {
     act(() => root.unmount());
   });
 
-  it('uses the desktop inspector at 1024 and the modal sheet below it without changing URL selection', async () => {
-    const matchMedia = (matches: boolean): typeof window.matchMedia => vi.fn().mockReturnValue({
-      matches, media: '(min-width: 1024px)', onchange: null,
-      addEventListener: vi.fn(), removeEventListener: vi.fn(), addListener: vi.fn(), removeListener: vi.fn(), dispatchEvent: vi.fn(),
-    });
-    window.history.replaceState(null, '', '/?page=operations&camera=local-a&mode=wall&wallPage=1');
-    vi.stubGlobal('matchMedia', matchMedia(true));
-    const desktop = await renderDashboard();
-    expect(desktop.host.querySelector('[role="complementary"]')).not.toBeNull();
-    expect(desktop.host.querySelector('[role="dialog"]')).toBeNull();
-    act(() => desktop.root.unmount());
+  it('renders the focused view directly with no inspector or bottom sheet at any width, without changing URL selection', async () => {
+    window.history.replaceState(null, '', '/?page=operations&camera=local-a&wallPage=1');
+    const { host, root } = await renderDashboard();
 
-    vi.stubGlobal('matchMedia', matchMedia(false));
-    const mobile = await renderDashboard();
-    expect(document.body.querySelector('[role="dialog"][aria-modal="true"]')).not.toBeNull();
+    expect(host.querySelector('[role="complementary"]')).toBeNull();
+    expect(document.body.querySelector('[role="dialog"][aria-modal="true"]')).toBeNull();
+    expect(host.querySelector('#focused-camera-title')?.textContent).toBe('동쪽 카메라 · 2층');
+    expect(host.querySelectorAll('[data-stream]')).toHaveLength(1);
     expect(window.location.search).toContain('camera=local-a');
-    act(() => mobile.root.unmount());
+    act(() => root.unmount());
   });
 
-  it.each([375, 768])('focuses and closes the mobile camera sheet canonically at %ipx', async (width) => {
+  it.each([375, 768])('navigates directly into the focused view and back at %ipx, moving focus exactly per the new screen-transition contract', async (width) => {
     Object.defineProperty(window, 'innerWidth', { configurable: true, value: width });
-    vi.stubGlobal('matchMedia', vi.fn().mockReturnValue({
-      matches: false, media: '(min-width: 1024px)', onchange: null,
-      addEventListener: vi.fn(), removeEventListener: vi.fn(), addListener: vi.fn(), removeListener: vi.fn(), dispatchEvent: vi.fn(),
-    }));
     const { host, root } = await renderDashboard();
-    const card = host.querySelector<HTMLButtonElement>('[aria-label="동쪽 카메라 선택"]');
+    const card = host.querySelector<HTMLButtonElement>('[aria-label="동쪽 카메라 열기"]');
     act(() => {
       card?.focus();
       card?.click();
     });
 
-    const clearSelection = Array.from(document.body.querySelectorAll<HTMLButtonElement>('[role="dialog"] button'))
-      .find((button) => button.textContent === '선택 해제');
-    expect(document.activeElement).toBe(clearSelection);
-    expect(window.location.search).toContain('camera=local-a');
-    act(() => clearSelection?.click());
-
-    expect(window.location.search).toBe('?page=operations&mode=wall&wallPage=1');
+    expect(window.location.search).toBe('?page=operations&camera=local-a&wallPage=1');
+    expect(document.activeElement).toBe(host.querySelector('#focused-camera-title'));
     expect(document.body.querySelector('[role="dialog"]')).toBeNull();
-    expect(document.activeElement).toBe(card);
+    expect(document.body.querySelector('[role="complementary"]')).toBeNull();
+
+    const back = Array.from(host.querySelectorAll<HTMLButtonElement>('button')).find((button) => button.textContent === '← 관제');
+    act(() => back?.click());
+
+    expect(window.location.search).toBe('?page=operations&wallPage=1');
+    expect(document.body.querySelector('[role="dialog"]')).toBeNull();
+    expect(document.activeElement).toBe(host.querySelector('[aria-label="동쪽 카메라 열기"]'));
     act(() => root.unmount());
   });
 
@@ -442,7 +436,7 @@ describe('Dashboard integration', () => {
     expect(host.querySelector('main h1')?.textContent).toBe('시스템');
     await clickLogout(host);
     expect(logoutDashboard).toHaveBeenCalledTimes(1);
-    expect(window.location.search).toBe('?page=operations&mode=wall&wallPage=1');
+    expect(window.location.search).toBe('?page=operations&wallPage=1');
     expect(host.textContent).toContain('관리자 로그인');
     await submitLogin(host);
     expect(host.querySelector('main h1')?.textContent).toBe('관제');

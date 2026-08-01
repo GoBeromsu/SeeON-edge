@@ -1,9 +1,8 @@
-import { useEffect, useMemo, useRef, useState, useSyncExternalStore, type RefObject } from 'react';
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import type { DashboardLocation } from '@/app/dashboardLocation';
 import { cameraMediaId, getCameraSnapshotUrl, getCameraStreamUrl, type Camera, type HeartbeatStatus, type StatusSnapshot } from '@/shared/api/client';
-import { AccessibleDialog } from '@/shared/ui/AccessibleDialog';
 import { SnapshotQueue, type SnapshotEntry } from '@/features/operations/SnapshotQueue';
-import { filterAndGroupCameras, getCameraLiveness, groupCameras, paginateCameras, sortCameras, UNCLASSIFIED } from '@/features/operations/operationsModel';
+import { filterAndGroupCameras, getCameraHeartbeatAgeSec, getCameraLiveness, groupCameras, paginateCameras, sortCameras, UNCLASSIFIED } from '@/features/operations/operationsModel';
 
 type ResourceState = 'idle' | 'loading' | 'success' | 'error';
 type LocationUpdate = Partial<Record<keyof DashboardLocation, string | null>>;
@@ -21,25 +20,7 @@ export type OperationsViewProps = {
   onReplace: (update: LocationUpdate) => void;
   onRetryCameras?: () => void;
   onRetryStatus?: () => void;
-  viewport?: 'desktop' | 'mobile';
 };
-
-function useDesktopViewport(override?: 'desktop' | 'mobile'): boolean {
-  const [desktop, setDesktop] = useState(() => override ? override === 'desktop' : typeof window.matchMedia === 'function' ? window.matchMedia('(min-width: 1024px)').matches : window.innerWidth >= 1024);
-  useEffect(() => {
-    if (override) {
-      setDesktop(override === 'desktop');
-      return;
-    }
-    if (typeof window.matchMedia !== 'function') return;
-    const query = window.matchMedia('(min-width: 1024px)');
-    const update = (): void => setDesktop(query.matches);
-    update();
-    query.addEventListener('change', update);
-    return () => query.removeEventListener('change', update);
-  }, [override]);
-  return desktop;
-}
 
 const livenessLabels: Record<HeartbeatStatus | 'unknown', string> = {
   online: '연결됨',
@@ -65,20 +46,10 @@ function useSnapshotQueue(cameras: Camera[], enabled: boolean): { entries: Map<s
   return { entries: useMemo(() => new Map(snapshot.map((entry) => [entry.id, entry])), [snapshot]), queue };
 }
 
-function CameraInspector({ camera, onClose, onFocus, closeButtonRef }: { camera: Camera; onClose: () => void; onFocus: () => void; closeButtonRef?: RefObject<HTMLButtonElement> }): JSX.Element {
-  return (
-    <div className="space-y-4">
-      <p>{camera.floor_name ?? UNCLASSIFIED} · {camera.space_name ?? camera.space_id ?? UNCLASSIFIED}</p>
-      <button type="button" className="brand-action min-h-11 rounded-lg px-4 font-bold" onClick={onFocus}>집중 보기</button>
-      <button ref={closeButtonRef} type="button" className="min-h-11 rounded-lg border border-border px-4 font-bold" onClick={onClose}>선택 해제</button>
-    </div>
-  );
-}
-
-function CameraCard({ camera, selected, liveness, snapshot, queue, onSelect }: { camera: Camera; selected: boolean; liveness: HeartbeatStatus | 'unknown'; snapshot?: SnapshotEntry; queue: SnapshotQueue; onSelect: () => void }): JSX.Element {
+function CameraCard({ camera, liveness, snapshot, queue, onSelect }: { camera: Camera; liveness: HeartbeatStatus | 'unknown'; snapshot?: SnapshotEntry; queue: SnapshotQueue; onSelect: () => void }): JSX.Element {
   const currentSnapshot = snapshot?.mediaId === cameraMediaId(camera) ? snapshot : undefined;
   return (
-    <button type="button" aria-label={`${camera.label} 선택`} aria-pressed={selected} onClick={onSelect} className="w-full min-w-0 overflow-hidden rounded-xl border border-border bg-surface text-left focus:outline-none focus:ring-2 focus:ring-brand">
+    <button type="button" aria-label={`${camera.label} 열기`} data-camera-id={camera.id} onClick={onSelect} className="min-h-11 w-full min-w-0 overflow-hidden rounded-xl border border-border bg-surface text-left focus:outline-none focus:ring-2 focus:ring-brand">
       <span className="relative block aspect-video bg-[var(--c-media)] text-[var(--c-media-ink)]">
         {[
           currentSnapshot?.lastLoadedUrl ? <img key={currentSnapshot.lastLoadedUrl} src={currentSnapshot.lastLoadedUrl} alt={`${camera.label} 최근 영상`} className="h-full w-full object-contain" /> : null,
@@ -95,13 +66,40 @@ function CameraCard({ camera, selected, liveness, snapshot, queue, onSelect }: {
   );
 }
 
-function FocusedCamera({ camera, onBack }: { camera: Camera; onBack: () => void }): JSX.Element {
+function formatHeartbeatAge(ageSec: number | null): string | null {
+  if (ageSec === null) return null;
+  const seconds = Math.max(0, Math.round(ageSec));
+  if (seconds < 60) return `마지막 확인 ${seconds}초 전`;
+  return `마지막 확인 ${Math.round(seconds / 60)}분 전`;
+}
+
+function focusedSnapshotLabel(snapshot: SnapshotEntry | undefined): string {
+  return snapshot ? snapshotLabels[snapshot.state] : '스냅샷 정보 없음';
+}
+
+function FocusedCamera({ camera, liveness, ageSec, snapshot, onBack, onViewClips, onOpenSettings }: {
+  camera: Camera;
+  liveness: HeartbeatStatus | 'unknown';
+  ageSec: number | null;
+  snapshot?: SnapshotEntry;
+  onBack: () => void;
+  onViewClips: () => void;
+  onOpenSettings: () => void;
+}): JSX.Element {
   const streamUrl = getCameraStreamUrl(cameraMediaId(camera));
+  const statusStripText = [livenessLabels[liveness], formatHeartbeatAge(ageSec), focusedSnapshotLabel(snapshot)]
+    .filter((part): part is string => part !== null)
+    .join(' · ');
   return (
     <section aria-labelledby="focused-camera-title" className="space-y-4">
-      <button type="button" className="min-h-11 rounded-lg border border-border px-4 font-bold" onClick={onBack}>카메라 월로 돌아가기</button>
-      <h1 id="focused-camera-title" data-dialog-focus-fallback tabIndex={-1} className="text-xl font-bold">{camera.label} 집중 보기</h1>
+      <button type="button" className="min-h-11 rounded-lg border border-border px-4 font-bold" onClick={onBack}>← 관제</button>
+      <h1 id="focused-camera-title" data-dialog-focus-fallback tabIndex={-1} className="text-xl font-bold">{camera.label} · {camera.floor_name ?? UNCLASSIFIED}</h1>
       <FocusedMedia key={streamUrl} cameraLabel={camera.label} streamUrl={streamUrl} />
+      <p role="status" aria-live="polite" aria-atomic="true" className="text-sm text-ink-soft">{statusStripText}</p>
+      <div className="flex flex-wrap gap-3">
+        <button type="button" className="brand-action min-h-11 rounded-lg px-4 font-bold" onClick={onViewClips}>이 카메라 클립 보기</button>
+        <button type="button" className="min-h-11 rounded-lg border border-border px-4 font-bold" onClick={onOpenSettings}>카메라 설정</button>
+      </div>
     </section>
   );
 }
@@ -117,45 +115,81 @@ function FocusedMedia({ cameraLabel, streamUrl }: { cameraLabel: string; streamU
   );
 }
 
-export function OperationsView({ active, cameras, camerasState, camerasLastSuccessAt = null, camerasRefreshing = false, status, statusState, location, onNavigate, onReplace, onRetryCameras, onRetryStatus, viewport }: OperationsViewProps): JSX.Element | null {
+export function OperationsView({ active, cameras, camerasState, camerasLastSuccessAt = null, camerasRefreshing = false, status, statusState, location, onNavigate, onReplace, onRetryCameras, onRetryStatus }: OperationsViewProps): JSX.Element | null {
   const [announcement, setAnnouncement] = useState('');
-  const selectionClearRef = useRef<HTMLButtonElement>(null);
-  const desktop = useDesktopViewport(viewport);
+  const previousSelectedIdRef = useRef<string | null>(null);
+  const scrollRestoreRef = useRef<number | null>(null);
   const filtered = useMemo(() => filterAndGroupCameras(cameras, { floor: location.floor, room: location.room }).cameras, [cameras, location.floor, location.room]);
   const requestedPage = Number(location.wallPage ?? '1');
   const pagination = useMemo(() => paginateCameras(filtered, requestedPage), [filtered, requestedPage]);
   const pageCameras = pagination.cameras;
   const selected = cameras.find((camera) => camera.id === location.camera && filtered.some((entry) => entry.id === camera.id));
-  const { entries: snapshots, queue } = useSnapshotQueue(pageCameras, active && location.page === 'operations' && location.mode !== 'focus');
+  const { entries: snapshots, queue } = useSnapshotQueue(pageCameras, active && location.page === 'operations' && !selected);
 
   useEffect(() => {
     if (camerasState !== 'success') return;
     const update: LocationUpdate = {};
     if (location.camera && !selected) {
       update.camera = null;
-      update.mode = 'wall';
       setAnnouncement('선택한 카메라가 현재 목록에 없어 선택을 해제했습니다.');
     }
     if (pagination.page !== requestedPage) update.wallPage = String(pagination.page);
     if (Object.keys(update).length) onReplace(update);
   }, [camerasState, location.camera, onReplace, pagination.page, requestedPage, selected]);
 
+  // Screen-transition focus management (AC-11/AC-12) and wall scroll restore (AC-9),
+  // kept local to this component -- no global state, cleared once consumed.
+  useEffect(() => {
+    const previousSelectedId = previousSelectedIdRef.current;
+    if (selected && selected.id !== previousSelectedId) {
+      document.getElementById('focused-camera-title')?.focus();
+    } else if (!selected && previousSelectedId) {
+      const invokerCard = Array.from(document.querySelectorAll<HTMLElement>('[data-camera-id]'))
+        .find((element) => element.dataset.cameraId === previousSelectedId);
+      (invokerCard ?? document.getElementById('operations-title'))?.focus();
+      if (scrollRestoreRef.current !== null) {
+        window.scrollTo(0, scrollRestoreRef.current);
+        scrollRestoreRef.current = null;
+      }
+    }
+    previousSelectedIdRef.current = selected ? selected.id : null;
+  }, [selected]);
+
   if (!active || location.page !== 'operations') return null;
-  if (location.mode === 'focus' && selected) return <FocusedCamera key={selected.id} camera={selected} onBack={() => onNavigate({ mode: 'wall' })} />;
+
+  const openCameraManagement = (): void => onNavigate({
+    page: 'cameras', floor: null, room: null, camera: null,
+    event: null, clip: null, wallPage: null,
+  });
+
+  if (selected) {
+    const selectedSnapshot = snapshots.get(selected.id);
+    const focusedSnapshot = selectedSnapshot?.mediaId === cameraMediaId(selected) ? selectedSnapshot : undefined;
+    return (
+      <FocusedCamera
+        key={selected.id}
+        camera={selected}
+        liveness={getCameraLiveness(selected, cameras, status)}
+        ageSec={getCameraHeartbeatAgeSec(selected, cameras, status)}
+        snapshot={focusedSnapshot}
+        onBack={() => onNavigate({ camera: null })}
+        onViewClips={() => onNavigate({
+          page: 'events', floor: null, room: null, camera: selected.id,
+          event: null, clip: null, wallPage: null,
+        })}
+        onOpenSettings={openCameraManagement}
+      />
+    );
+  }
 
   const sortedCameras = sortCameras(cameras);
   const floors = [...new Set(sortedCameras.map((camera) => camera.floor_name).filter((value): value is string => value !== null))];
   const rooms = [...new Map(sortedCameras.filter((camera) => !location.floor || camera.floor_name === location.floor).filter((camera) => camera.space_id).map((camera) => [camera.space_id!, camera.space_name ?? camera.space_id!])).entries()];
   const pageGroups = groupCameras(pageCameras);
   const updateFilter = (update: LocationUpdate): void => {
-    onNavigate({ ...update, camera: null, mode: 'wall', wallPage: '1' });
+    onNavigate({ ...update, camera: null, wallPage: '1' });
     if (location.camera) setAnnouncement('필터가 변경되어 카메라 선택을 해제했습니다.');
   };
-  const closeSelection = (): void => onNavigate({ camera: null, mode: 'wall' });
-  const openCameraManagement = (): void => onNavigate({
-    page: 'cameras', floor: null, room: null, camera: null, mode: null,
-    event: null, clip: null, wallPage: null,
-  });
   const addCameraAction = <button type="button" className="brand-action min-h-11 rounded-lg px-4 font-bold" onClick={openCameraManagement}>카메라 등록하기</button>;
   const lastCameraSuccessLabel = camerasLastSuccessAt === null ? null : new Date(camerasLastSuccessAt).toLocaleString('ko-KR');
 
@@ -187,26 +221,22 @@ export function OperationsView({ active, cameras, camerasState, camerasLastSucce
       {camerasState === 'success' && cameras.length === 0 ? <div className="space-y-3"><p>등록된 카메라가 없습니다.</p>{addCameraAction}</div> : null}
       {camerasState === 'success' && cameras.length > 0 && filtered.length === 0 ? <p>선택한 조건에 맞는 카메라가 없습니다.</p> : null}
 
-      <div className={selected && desktop ? 'grid gap-5 lg:grid-cols-[minmax(0,1fr)_20rem]' : ''}>
-        <div className="space-y-6">
-          {pageGroups.map((floor) => <section key={floor.id} aria-labelledby={`floor-${floor.id}`} className="space-y-4">
-            <h2 id={`floor-${floor.id}`} className="text-lg font-bold">{floor.label}</h2>
-            <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
-              {floor.rooms.flatMap((room) => room.cameras.map((camera) => <article key={camera.id} className="space-y-3">
-                <h3 className="font-bold text-ink-soft">{room.label}</h3>
-                <CameraCard camera={camera} selected={selected?.id === camera.id} liveness={getCameraLiveness(camera, cameras, status)} snapshot={snapshots.get(camera.id)} queue={queue} onSelect={() => onNavigate({ camera: camera.id, mode: 'wall' })} />
-              </article>))}
-            </div>
-          </section>)}
-          {pagination.pageCount > 1 ? <nav aria-label="카메라 월 페이지" className="flex items-center justify-center gap-3">
-            <button type="button" disabled={pagination.page === 1} onClick={() => onNavigate({ wallPage: String(pagination.page - 1) })}>이전</button>
-            <span>{pagination.page} / {pagination.pageCount}</span>
-            <button type="button" disabled={pagination.page === pagination.pageCount} onClick={() => onNavigate({ wallPage: String(pagination.page + 1) })}>다음</button>
-          </nav> : null}
-        </div>
-        {selected && desktop ? <aside role="complementary" aria-label={`${selected.label} ${selected.id} 카메라 정보`} className="rounded-xl border border-border bg-surface p-5"><h2 className="mb-4 text-lg font-bold">{selected.label}</h2><CameraInspector camera={selected} onClose={closeSelection} onFocus={() => onNavigate({ camera: selected.id, mode: 'focus' })} /></aside> : null}
+      <div className="space-y-6">
+        {pageGroups.map((floor) => <section key={floor.id} aria-labelledby={`floor-${floor.id}`} className="space-y-4">
+          <h2 id={`floor-${floor.id}`} className="text-lg font-bold">{floor.label}</h2>
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
+            {floor.rooms.flatMap((room) => room.cameras.map((camera) => <article key={camera.id} className="space-y-3">
+              <h3 className="font-bold text-ink-soft">{room.label}</h3>
+              <CameraCard camera={camera} liveness={getCameraLiveness(camera, cameras, status)} snapshot={snapshots.get(camera.id)} queue={queue} onSelect={() => { scrollRestoreRef.current = window.scrollY; onNavigate({ camera: camera.id }); }} />
+            </article>))}
+          </div>
+        </section>)}
+        {pagination.pageCount > 1 ? <nav aria-label="카메라 월 페이지" className="flex items-center justify-center gap-3">
+          <button type="button" className="min-h-11" disabled={pagination.page === 1} onClick={() => onNavigate({ wallPage: String(pagination.page - 1) })}>이전</button>
+          <span>{pagination.page} / {pagination.pageCount}</span>
+          <button type="button" className="min-h-11" disabled={pagination.page === pagination.pageCount} onClick={() => onNavigate({ wallPage: String(pagination.page + 1) })}>다음</button>
+        </nav> : null}
       </div>
-      {selected && !desktop ? <AccessibleDialog open title={`${selected.label} 카메라 정보`} variant="sheet" initialFocusRef={selectionClearRef} onClose={closeSelection}><CameraInspector camera={selected} closeButtonRef={selectionClearRef} onClose={closeSelection} onFocus={() => onNavigate({ camera: selected.id, mode: 'focus' })} /></AccessibleDialog> : null}
     </section>
   );
 }

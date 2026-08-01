@@ -1,18 +1,22 @@
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Camera, StatusSnapshot } from '@/shared/api/client';
 import type { DashboardLocation } from '@/app/dashboardLocation';
 import { OperationsView } from '@/features/operations/OperationsView';
 
 const cleanups: Array<() => void> = [];
 afterEach(() => { while (cleanups.length) cleanups.pop()?.(); });
+// jsdom doesn't implement scrollTo; the component calls it whenever a focus->wall
+// transition restores scroll position, so stub it globally to keep test output clean.
+let scrollToSpy: ReturnType<typeof vi.spyOn>;
+beforeEach(() => { scrollToSpy = vi.spyOn(window, 'scrollTo').mockImplementation(() => undefined); });
 
 function camera(id: string, backend = id): Camera {
   return { id, backend_camera_id: backend, label: `카메라 ${id}`, floor_name: '1층', space_id: 'room-1', space_name: '101호', rtsp_url_masked: '', status: 'unknown', created_at: null };
 }
 
-function renderView(options: { cameras?: Camera[]; location?: DashboardLocation; viewport?: 'desktop' | 'mobile'; status?: StatusSnapshot | null } = {}) {
+function renderView(options: { cameras?: Camera[]; location?: DashboardLocation; status?: StatusSnapshot | null } = {}) {
   const host = document.createElement('div');
   host.id = 'main-content';
   document.body.append(host);
@@ -20,24 +24,24 @@ function renderView(options: { cameras?: Camera[]; location?: DashboardLocation;
   const navigate = vi.fn();
   const replace = vi.fn();
   const cameras = options.cameras ?? [camera('local', 'worker/cam')];
-  const location = options.location ?? { page: 'operations', mode: 'wall', wallPage: '1' };
-  act(() => root.render(<OperationsView active cameras={cameras} camerasState="success" status={options.status ?? null} statusState="success" location={location} onNavigate={navigate} onReplace={replace} viewport={options.viewport ?? 'desktop'} />));
+  const location = options.location ?? { page: 'operations', wallPage: '1' };
+  act(() => root.render(<OperationsView active cameras={cameras} camerasState="success" status={options.status ?? null} statusState="success" location={location} onNavigate={navigate} onReplace={replace} />));
   cleanups.push(() => { act(() => root.unmount()); host.remove(); });
-  return { host, navigate, replace, rerender: (next: DashboardLocation, nextCameras = cameras) => act(() => root.render(<OperationsView active cameras={nextCameras} camerasState="success" status={options.status ?? null} statusState="success" location={next} onNavigate={navigate} onReplace={replace} viewport={options.viewport ?? 'desktop'} />)) };
+  return { host, navigate, replace, rerender: (next: DashboardLocation, nextCameras = cameras) => act(() => root.render(<OperationsView active cameras={nextCameras} camerasState="success" status={options.status ?? null} statusState="success" location={next} onNavigate={navigate} onReplace={replace} />)) };
 }
 
 describe('OperationsView', () => {
   it('renders honest empty/loading/error states and retry actions', () => {
     const host = document.createElement('div'); document.body.append(host); const root = createRoot(host); const retry = vi.fn();
-    act(() => root.render(<OperationsView active cameras={[]} camerasState="loading" status={null} statusState="loading" location={{ page: 'operations', mode: 'wall', wallPage: '1' }} onNavigate={vi.fn()} onReplace={vi.fn()} viewport="desktop" onRetryCameras={retry} />));
+    act(() => root.render(<OperationsView active cameras={[]} camerasState="loading" status={null} statusState="loading" location={{ page: 'operations', wallPage: '1' }} onNavigate={vi.fn()} onReplace={vi.fn()} onRetryCameras={retry} />));
     expect(host.textContent).toContain('카메라 불러오는 중');
     expect(host.querySelector('[data-camera-refresh-status]')).toBeNull();
-    act(() => root.render(<OperationsView active cameras={[]} camerasState="error" status={null} statusState="error" location={{ page: 'operations', mode: 'wall', wallPage: '1' }} onNavigate={vi.fn()} onReplace={vi.fn()} viewport="desktop" onRetryCameras={retry} />));
+    act(() => root.render(<OperationsView active cameras={[]} camerasState="error" status={null} statusState="error" location={{ page: 'operations', wallPage: '1' }} onNavigate={vi.fn()} onReplace={vi.fn()} onRetryCameras={retry} />));
     expect(host.textContent).toContain('카메라 목록을 불러올 수 없음');
     expect(host.querySelector('[data-camera-refresh-status]')).toBeNull();
     act(() => Array.from(host.querySelectorAll('button')).find((button) => button.textContent === '다시 시도')?.click());
     expect(retry).toHaveBeenCalled();
-    act(() => root.render(<OperationsView active cameras={[]} camerasState="success" status={null} statusState="success" location={{ page: 'operations', mode: 'wall', wallPage: '1' }} onNavigate={vi.fn()} onReplace={vi.fn()} viewport="desktop" />));
+    act(() => root.render(<OperationsView active cameras={[]} camerasState="success" status={null} statusState="success" location={{ page: 'operations', wallPage: '1' }} onNavigate={vi.fn()} onReplace={vi.fn()} />));
     expect(host.textContent).toContain('등록된 카메라가 없습니다');
     act(() => root.unmount()); host.remove();
   });
@@ -49,7 +53,7 @@ describe('OperationsView', () => {
     expect(action?.classList.contains('brand-action')).toBe(true);
     act(() => action?.click());
     expect(navigate).toHaveBeenCalledWith({
-      page: 'cameras', floor: null, room: null, camera: null, mode: null,
+      page: 'cameras', floor: null, room: null, camera: null,
       event: null, clip: null, wallPage: null,
     });
   });
@@ -63,10 +67,9 @@ describe('OperationsView', () => {
       active: true,
       status: null,
       statusState: 'success' as const,
-      location: { page: 'operations', mode: 'wall', wallPage: '1' } as DashboardLocation,
+      location: { page: 'operations', wallPage: '1' } as DashboardLocation,
       onNavigate: vi.fn(),
       onReplace: vi.fn(),
-      viewport: 'desktop' as const,
     };
 
     act(() => root.render(<OperationsView {...common} cameras={[camera('local')]} camerasState="error" camerasLastSuccessAt={lastSuccessAt} />));
@@ -84,7 +87,7 @@ describe('OperationsView', () => {
     host.remove();
   });
 
-  it('syncs filters/page and exposes accessible selected-card state without stream URLs in wall', () => {
+  it('syncs filters/page and navigates directly to the clicked camera without stream URLs in wall', () => {
     const cameras = Array.from({ length: 13 }, (_, index) => ({ ...camera(index === 0 ? 'local' : String(index), index === 0 ? 'worker/cam' : String(index)), label: index === 0 ? '카메라 local' : `카메라 ${String(index).padStart(2, '0')}`, floor_name: index === 12 ? '2층' : '1층' }));
     const { host, navigate } = renderView({ cameras });
     act(() => Array.from(host.querySelectorAll('button')).find((button) => button.textContent === '다음')?.click());
@@ -92,10 +95,10 @@ describe('OperationsView', () => {
     const selects = host.querySelectorAll('select');
     act(() => { (selects[0] as HTMLSelectElement).value = '1층'; selects[0].dispatchEvent(new Event('change', { bubbles: true })); });
     expect(navigate).toHaveBeenCalledWith(expect.objectContaining({ floor: '1층', wallPage: '1' }));
-    const card = host.querySelector<HTMLButtonElement>('[aria-label="카메라 local 선택"]');
-    expect(card?.getAttribute('aria-pressed')).toBe('false');
+    const card = host.querySelector<HTMLButtonElement>('[aria-label="카메라 local 열기"]');
+    expect(card?.hasAttribute('aria-pressed')).toBe(false);
     act(() => card?.click());
-    expect(navigate).toHaveBeenCalledWith({ camera: 'local', mode: 'wall' });
+    expect(navigate).toHaveBeenCalledWith({ camera: 'local' });
     expect(host.querySelector('[data-stream]')).toBeNull();
     expect(host.innerHTML).not.toContain('/streams/worker%2Fcam?');
   });
@@ -114,40 +117,38 @@ describe('OperationsView', () => {
     expect(floorGrid?.classList.contains('xl:grid-cols-3')).toBe(true);
     expect(floorGrid?.querySelectorAll(':scope > article')).toHaveLength(3);
     expect(Array.from(floorGrid?.querySelectorAll(':scope > article > h3') ?? []).map((heading) => heading.textContent)).toEqual(['가실', '나실', '다실']);
-    expect(Array.from(floorGrid?.querySelectorAll(':scope > article button[aria-label]') ?? []).map((card) => card.getAttribute('aria-label'))).toEqual(['가 카메라 선택', '나 카메라 선택', '다 카메라 선택']);
+    expect(Array.from(floorGrid?.querySelectorAll(':scope > article button[aria-label]') ?? []).map((card) => card.getAttribute('aria-label'))).toEqual(['가 카메라 열기', '나 카메라 열기', '다 카메라 열기']);
   });
 
-  it('uses local query identity and backend media identity for snapshot and focus', () => {
+  it('navigates directly from a wall card click to the focused live view in a single call (AC-1)', () => {
     const { host, navigate, rerender } = renderView();
     expect(host.querySelector('img')?.getAttribute('src')).toContain('/streams/worker%2Fcam/snapshot');
-    act(() => host.querySelector<HTMLButtonElement>('[aria-label="카메라 local 선택"]')?.click());
-    expect(navigate).toHaveBeenCalledWith({ camera: 'local', mode: 'wall' });
-    rerender({ page: 'operations', camera: 'local', mode: 'wall', wallPage: '1' });
-    act(() => Array.from(host.querySelectorAll('button')).find((button) => button.textContent === '집중 보기')?.click());
-    expect(navigate).toHaveBeenLastCalledWith({ camera: 'local', mode: 'focus' });
-    rerender({ page: 'operations', camera: 'local', mode: 'focus', wallPage: '1' });
+    act(() => host.querySelector<HTMLButtonElement>('[aria-label="카메라 local 열기"]')?.click());
+    expect(navigate).toHaveBeenCalledTimes(1);
+    expect(navigate).toHaveBeenCalledWith({ camera: 'local' });
+    rerender({ page: 'operations', camera: 'local', wallPage: '1' });
     expect(host.querySelectorAll('[data-stream]')).toHaveLength(1);
     expect(host.querySelector('[data-stream]')?.getAttribute('src')).toContain('/streams/worker%2Fcam');
   });
 
   it('unmounts the single focus stream on back, page change, and camera switch and reports focus failure', () => {
     const cameras = [camera('a', 'worker-a'), camera('b', 'worker-b')];
-    const { host, rerender } = renderView({ cameras, location: { page: 'operations', camera: 'a', mode: 'focus', wallPage: '1' } });
+    const { host, rerender } = renderView({ cameras, location: { page: 'operations', camera: 'a', wallPage: '1' } });
     const first = host.querySelector('[data-stream]');
     expect(first).not.toBeNull();
     act(() => first?.dispatchEvent(new Event('error', { bubbles: true })));
     expect(host.textContent).toContain('라이브 영상을 불러올 수 없음');
-    rerender({ page: 'operations', camera: 'b', mode: 'focus', wallPage: '1' });
+    rerender({ page: 'operations', camera: 'b', wallPage: '1' });
     expect(first?.isConnected).toBe(false);
     expect(host.querySelectorAll('[data-stream]')).toHaveLength(1);
-    rerender({ page: 'operations', camera: 'b', mode: 'wall', wallPage: '1' });
+    rerender({ page: 'operations', wallPage: '1' });
     expect(host.querySelector('[data-stream]')).toBeNull();
     rerender({ page: 'events' });
     expect(host.querySelector('[data-stream]')).toBeNull();
   });
 
   it('retries a failed focus stream only when its resolved media identity changes', () => {
-    const location: DashboardLocation = { page: 'operations', camera: 'local', mode: 'focus', wallPage: '1' };
+    const location: DashboardLocation = { page: 'operations', camera: 'local', wallPage: '1' };
     const { host, rerender } = renderView({ cameras: [camera('local', 'worker-old')], location });
     const failedStream = host.querySelector('[data-stream]');
 
@@ -167,12 +168,12 @@ describe('OperationsView', () => {
     expect(host.textContent).not.toContain('라이브 영상을 불러올 수 없음');
   });
 
-  it('reports the focused stream lifecycle and resets it for a new media identity', () => {
-    const location: DashboardLocation = { page: 'operations', camera: 'local', mode: 'focus', wallPage: '1' };
+  it('reports the focused stream lifecycle independently of the heartbeat/snapshot status strip and resets it for a new media identity', () => {
+    const location: DashboardLocation = { page: 'operations', camera: 'local', wallPage: '1' };
     const { host, rerender } = renderView({ cameras: [camera('local', 'worker-old')], location });
     const oldStream = host.querySelector('[data-stream]');
     const liveStatus = host.querySelector('[role="status"]');
-    expect(host.querySelectorAll('[role="status"]')).toHaveLength(1);
+    expect(host.querySelectorAll('[role="status"]')).toHaveLength(2);
     expect(liveStatus?.getAttribute('aria-live')).toBe('polite');
     expect(liveStatus?.getAttribute('aria-atomic')).toBe('true');
     expect(liveStatus?.textContent).toBe('라이브 영상 불러오는 중');
@@ -186,11 +187,11 @@ describe('OperationsView', () => {
     const newLiveStatus = host.querySelector('[role="status"]');
     expect(newStream).not.toBe(oldStream);
     expect(newLiveStatus).not.toBe(liveStatus);
-    expect(host.querySelectorAll('[role="status"]')).toHaveLength(1);
+    expect(host.querySelectorAll('[role="status"]')).toHaveLength(2);
     expect(newLiveStatus?.textContent).toBe('라이브 영상 불러오는 중');
 
     act(() => newStream?.dispatchEvent(new Event('error', { bubbles: true })));
-    expect(host.querySelectorAll('[role="status"]')).toHaveLength(1);
+    expect(host.querySelectorAll('[role="status"]')).toHaveLength(2);
     expect(host.querySelector('[role="status"]')).toBe(newLiveStatus);
     expect(newLiveStatus?.textContent).toBe('라이브 영상을 불러올 수 없음');
     expect(host.textContent?.match(/라이브 영상을 불러올 수 없음/g)).toHaveLength(1);
@@ -205,7 +206,7 @@ describe('OperationsView', () => {
   });
 
   it('does not show an old snapshot when its late load arrives after a media identity change', () => {
-    const location: DashboardLocation = { page: 'operations', mode: 'wall', wallPage: '1' };
+    const location: DashboardLocation = { page: 'operations', wallPage: '1' };
     const { host, rerender } = renderView({ cameras: [camera('local', 'worker-old')], location });
     const oldRequest = host.querySelector<HTMLImageElement>('[data-snapshot-preload]');
 
@@ -233,11 +234,11 @@ describe('OperationsView', () => {
   });
 
   it('uses semantic action and media-overlay classes instead of raw color aliases', () => {
-    const { host, rerender } = renderView({ location: { page: 'operations', camera: 'local', mode: 'wall', wallPage: '1' } });
+    const { host, rerender } = renderView({ location: { page: 'operations', wallPage: '1' } });
 
-    expect(host.querySelector('.brand-action')?.textContent).toBe('집중 보기');
     expect(host.querySelector('.media-status-overlay')?.textContent).toContain('영상 불러오는 중');
-    rerender({ page: 'operations', camera: 'local', mode: 'focus', wallPage: '1' });
+    rerender({ page: 'operations', camera: 'local', wallPage: '1' });
+    expect(host.querySelector('.brand-action')?.textContent).toBe('이 카메라 클립 보기');
     expect(host.querySelector('.media-status-overlay')?.textContent).toContain('라이브 영상 불러오는 중');
   });
 
@@ -290,75 +291,133 @@ describe('OperationsView', () => {
     expect(host.textContent?.match(/영상 불러오는 중/g)).toHaveLength(2);
   });
 
-  it('uses a desktop complementary inspector and mobile accessible bottom sheet', () => {
-    const desktop = renderView({ location: { page: 'operations', camera: 'local', mode: 'wall', wallPage: '1' }, viewport: 'desktop' });
-    expect(desktop.host.querySelector('[role="complementary"]')?.getAttribute('aria-label')).toContain('카메라 local');
-    const mobile = renderView({ location: { page: 'operations', camera: 'local', mode: 'wall', wallPage: '1' }, viewport: 'mobile' });
-    expect(document.body.querySelector('[role="dialog"][aria-modal="true"]')).not.toBeNull();
-  });
-
-  it.each([375, 768])('focuses the mobile selection-clear control at %ipx and restores the invoking card on close', (width) => {
+  it.each([375, 768, 1024, 1440])('never renders an inspector or bottom sheet at %ipx on wall or focus, and has no "집중 보기" button anywhere (AC-2/AC-5)', (width) => {
     const previousWidth = window.innerWidth;
     Object.defineProperty(window, 'innerWidth', { configurable: true, value: width });
     cleanups.push(() => Object.defineProperty(window, 'innerWidth', { configurable: true, value: previousWidth }));
-    const { host, navigate, rerender } = renderView({ viewport: 'mobile' });
-    host.id = 'main-content';
-    const card = host.querySelector<HTMLButtonElement>('[aria-label="카메라 local 선택"]');
-    card?.focus();
-    act(() => card?.click());
-    rerender({ page: 'operations', camera: 'local', mode: 'wall', wallPage: '1' });
 
-    const closeSelection = Array.from(document.body.querySelectorAll<HTMLButtonElement>('[role="dialog"] button'))
-      .find((button) => button.textContent === '선택 해제');
-    expect(document.activeElement).toBe(closeSelection);
-    act(() => closeSelection?.click());
-    expect(navigate).toHaveBeenLastCalledWith({ camera: null, mode: 'wall' });
-    rerender({ page: 'operations', mode: 'wall', wallPage: '1' });
+    const wall = renderView({ location: { page: 'operations', wallPage: '1' } });
+    expect(wall.host.querySelector('[role="complementary"]')).toBeNull();
+    expect(document.body.querySelector('[role="dialog"][aria-modal="true"]')).toBeNull();
+    expect(Array.from(wall.host.querySelectorAll('button')).some((button) => button.textContent === '집중 보기')).toBe(false);
 
-    expect(document.body.querySelector('[role="dialog"]')).toBeNull();
-    expect(document.activeElement).toBe(card);
+    const focus = renderView({ location: { page: 'operations', camera: 'local', wallPage: '1' } });
+    expect(focus.host.querySelector('[role="complementary"]')).toBeNull();
+    expect(document.body.querySelector('[role="dialog"][aria-modal="true"]')).toBeNull();
+    expect(Array.from(focus.host.querySelectorAll('button')).some((button) => button.textContent === '집중 보기')).toBe(false);
   });
 
-  it('restores the operations heading fallback when a direct-linked mobile sheet closes without an invoker', () => {
-    const { host, navigate, rerender } = renderView({
-      viewport: 'mobile',
-      location: { page: 'operations', camera: 'local', mode: 'wall', wallPage: '1' },
-    });
-    const clearSelection = Array.from(document.body.querySelectorAll<HTMLButtonElement>('[role="dialog"] button'))
-      .find((button) => button.textContent === '선택 해제');
-    expect(document.activeElement).toBe(clearSelection);
+  it('renders the focused view as page content with a back control, heading, and clip/settings actions carrying correct navigation payloads', () => {
+    const { host, navigate } = renderView({ location: { page: 'operations', camera: 'local', wallPage: '1' } });
+    expect(host.querySelector('h1')?.textContent).toBe('카메라 local · 1층');
+    expect(Array.from(host.querySelectorAll('button')).some((button) => button.textContent === '← 관제')).toBe(true);
 
-    act(() => clearSelection?.click());
-    expect(navigate).toHaveBeenLastCalledWith({ camera: null, mode: 'wall' });
-    rerender({ page: 'operations', mode: 'wall', wallPage: '1' });
+    const clipsButton = Array.from(host.querySelectorAll<HTMLButtonElement>('button')).find((button) => button.textContent === '이 카메라 클립 보기');
+    act(() => clipsButton?.click());
+    expect(navigate).toHaveBeenLastCalledWith({ page: 'events', floor: null, room: null, camera: 'local', event: null, clip: null, wallPage: null });
 
+    const settingsButton = Array.from(host.querySelectorAll<HTMLButtonElement>('button')).find((button) => button.textContent === '카메라 설정');
+    act(() => settingsButton?.click());
+    expect(navigate).toHaveBeenLastCalledWith({ page: 'cameras', floor: null, room: null, camera: null, event: null, clip: null, wallPage: null });
+
+    const back = Array.from(host.querySelectorAll<HTMLButtonElement>('button')).find((button) => button.textContent === '← 관제');
+    act(() => back?.click());
+    expect(navigate).toHaveBeenLastCalledWith({ camera: null });
+  });
+
+  it('keeps the focus-view tab order visual (back -> clip -> settings), excluding the programmatic-only heading from the tab ring (AC-14)', () => {
+    const { host } = renderView({ location: { page: 'operations', camera: 'local', wallPage: '1' } });
+    const section = host.querySelector('section[aria-labelledby="focused-camera-title"]');
+    const heading = section?.querySelector('h1');
+    expect(heading?.tabIndex).toBe(-1);
+
+    const focusable = Array.from(section?.querySelectorAll<HTMLElement>('button, [href], input, select, textarea, [tabindex]') ?? [])
+      .filter((element) => element.tabIndex !== -1);
+    expect(focusable.map((element) => element.textContent)).toEqual(['← 관제', '이 카메라 클립 보기', '카메라 설정']);
+  });
+
+  it('gives every focus-view action and the wall card a 44px-tall touch target via the min-h-11 convention (AC-15, height only)', () => {
+    const { host, rerender } = renderView({ location: { page: 'operations', wallPage: '1' } });
+    const card = host.querySelector<HTMLButtonElement>('[aria-label="카메라 local 열기"]');
+    expect(card?.classList.contains('min-h-11')).toBe(true);
+
+    rerender({ page: 'operations', camera: 'local', wallPage: '1' });
+    for (const label of ['← 관제', '이 카메라 클립 보기', '카메라 설정']) {
+      const button = Array.from(host.querySelectorAll<HTMLButtonElement>('button')).find((entry) => entry.textContent === label);
+      expect(button?.classList.contains('min-h-11')).toBe(true);
+    }
+
+    const cameras = Array.from({ length: 13 }, (_, index) => camera(String(index)));
+    const paged = renderView({ cameras, location: { page: 'operations', wallPage: '1' } });
+    for (const label of ['이전', '다음']) {
+      const button = Array.from(paged.host.querySelectorAll<HTMLButtonElement>('button')).find((entry) => entry.textContent === label);
+      expect(button?.classList.contains('min-h-11')).toBe(true);
+    }
+  });
+
+  it('mounts no snapshot polling while focused, honoring the exactly-one-stream media budget', () => {
+    const { host, rerender } = renderView({ location: { page: 'operations', camera: 'local', wallPage: '1' } });
+    expect(host.querySelector('[data-snapshot-preload]')).toBeNull();
+    expect(host.querySelectorAll('[data-stream]')).toHaveLength(1);
+    rerender({ page: 'operations', wallPage: '1' });
+    expect(host.querySelector('[data-stream]')).toBeNull();
+  });
+
+  it('moves focus to the focused-view heading on entering focus, and restores focus to the clicked card on returning to the wall (AC-11/AC-12)', () => {
+    const { host, rerender } = renderView({ location: { page: 'operations', wallPage: '1' } });
+    const card = host.querySelector<HTMLButtonElement>('[aria-label="카메라 local 열기"]');
+    card?.focus();
+    act(() => card?.click());
+    rerender({ page: 'operations', camera: 'local', wallPage: '1' });
+
+    expect(document.activeElement).toBe(host.querySelector('#focused-camera-title'));
+
+    const back = Array.from(host.querySelectorAll('button')).find((button) => button.textContent === '← 관제');
+    act(() => back?.click());
+    rerender({ page: 'operations', wallPage: '1' });
+
+    expect(document.activeElement).toBe(host.querySelector('[aria-label="카메라 local 열기"]'));
+  });
+
+  it('focuses the focused-view heading immediately for a direct camera deep link, and falls back to the wall heading if that camera is gone on return (AC-11/AC-12)', () => {
+    const { host, rerender } = renderView({ cameras: [camera('a'), camera('b')], location: { page: 'operations', camera: 'a', wallPage: '1' } });
+    expect(document.activeElement).toBe(host.querySelector('#focused-camera-title'));
+
+    rerender({ page: 'operations', wallPage: '1' }, [camera('b')]);
     expect(document.activeElement).toBe(host.querySelector('#operations-title'));
   });
 
-  it('focuses the destination heading when mobile inspector navigation removes its invoker', () => {
-    const { host, rerender } = renderView({ viewport: 'mobile' });
-    host.id = 'main-content';
-    const card = host.querySelector<HTMLButtonElement>('[aria-label="카메라 local 선택"]');
-    card?.focus();
+  it('remembers and restores wall scroll position across a focus round-trip (AC-9)', () => {
+    const { host, rerender } = renderView({ location: { page: 'operations', wallPage: '1' } });
+    Object.defineProperty(window, 'scrollY', { configurable: true, value: 240 });
+    cleanups.push(() => Object.defineProperty(window, 'scrollY', { configurable: true, value: 0 }));
+
+    const card = host.querySelector<HTMLButtonElement>('[aria-label="카메라 local 열기"]');
     act(() => card?.click());
-    rerender({ page: 'operations', camera: 'local', mode: 'wall', wallPage: '1' });
+    rerender({ page: 'operations', camera: 'local', wallPage: '1' });
 
-    const focusButton = Array.from(document.body.querySelectorAll<HTMLButtonElement>('[role="dialog"] button'))
-      .find((button) => button.textContent === '집중 보기');
-    focusButton?.focus();
-    act(() => focusButton?.click());
-    rerender({ page: 'operations', camera: 'local', mode: 'focus', wallPage: '1' });
+    Object.defineProperty(window, 'scrollY', { configurable: true, value: 0 });
+    const back = Array.from(host.querySelectorAll('button')).find((button) => button.textContent === '← 관제');
+    act(() => back?.click());
+    rerender({ page: 'operations', wallPage: '1' });
 
-    const heading = host.querySelector('#focused-camera-title');
-    expect(document.body.querySelector('[role="dialog"]')).toBeNull();
-    expect(document.activeElement).toBe(heading);
-    expect(document.activeElement).not.toBe(document.body);
+    expect(scrollToSpy).toHaveBeenCalledWith(0, 240);
   });
 
-  it('announces selection invalidation and corrects page without selecting another camera', () => {
-    const { host, replace } = renderView({ cameras: Array.from({ length: 13 }, (_, index) => camera(String(index))), location: { page: 'operations', camera: 'gone', mode: 'focus', wallPage: '9' } });
-    expect(replace).toHaveBeenCalledWith({ camera: null, mode: 'wall', wallPage: '2' });
+  it('never applies transition/transform/animate classes to the wall or focus root across the transition (AC-16)', () => {
+    const { host, rerender } = renderView({ location: { page: 'operations', wallPage: '1' } });
+    const wallRoot = host.querySelector('section[aria-labelledby="operations-title"]');
+    expect(wallRoot?.className ?? '').not.toMatch(/transition|animate|transform/);
+
+    rerender({ page: 'operations', camera: 'local', wallPage: '1' });
+    const focusRoot = host.querySelector('section[aria-labelledby="focused-camera-title"]');
+    expect(focusRoot?.className ?? '').not.toMatch(/transition|animate|transform/);
+  });
+
+  it('announces selection invalidation and corrects page without selecting another camera (AC-10/AC-13)', () => {
+    const { host, replace } = renderView({ cameras: Array.from({ length: 13 }, (_, index) => camera(String(index))), location: { page: 'operations', camera: 'gone', wallPage: '9' } });
+    expect(replace).toHaveBeenCalledWith({ camera: null, wallPage: '2' });
     expect(host.querySelector('[aria-live="polite"]')?.textContent).toContain('선택한 카메라');
-    expect(host.querySelector('[aria-pressed="true"]')).toBeNull();
+    expect(host.querySelector('[aria-pressed]')).toBeNull();
   });
 });

@@ -70,7 +70,7 @@ export function AuthGate({ children }: { children: ReactNode }): JSX.Element {
     setLoginId('');
     setPassword('');
     setSessionState('unauthorized');
-    window.history.replaceState(null, '', `${window.location.pathname}?page=operations&mode=wall&wallPage=1${window.location.hash}`);
+    window.history.replaceState(null, '', `${window.location.pathname}?page=operations&wallPage=1${window.location.hash}`);
   }
 
   if (sessionState === 'authorized') {

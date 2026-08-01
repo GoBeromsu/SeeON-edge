@@ -2,7 +2,7 @@
 
 ## Authority and provenance
 
-This root document is the single design authority for the `front` application. It governs product vocabulary, information architecture, URL state, responsive behavior, visual tokens, component states, accessibility, motion, and visual acceptance. `front/DESIGN.md` and `front/DESIGN-2MODE.md` are retained only as historical pointers and define no active rule.
+This root document is the single design authority for the `front` application. It governs product vocabulary, information architecture, URL state, responsive behavior, visual tokens, component states, accessibility, motion, and visual acceptance.
 
 The visual family reference is the local sibling repository `../eldercare-fall-ai`: its `DESIGN.md`, neutral admin shell, status language, and Senior AI Lab mark were audited on 2026-07-20. Those sources establish family resemblance, not a pixel-clone requirement. This repository must remain independently buildable: do not import sibling source, components, CSS, assets, routes, stores, permissions, or dependencies at runtime.
 
@@ -16,7 +16,7 @@ The default experience is a camera wall, not a metric dashboard. The interface m
 
 ## Product jobs
 
-- An operator scans cameras by floor and room, distinguishes camera liveness from image availability, selects one camera, and deliberately enters a single focused live view.
+- An operator scans cameras by floor and room, distinguishes camera liveness from image availability, and selects one camera to enter its single focused live view in one click.
 - A reviewer filters historical clips, opens evidence with labelled native video controls, sees unavailable media honestly, and applies only the supported review labels.
 - An administrator creates, edits, tests, and deletes camera registrations without exposing secrets or confusing a successful save with a failed follow-up probe.
 - An engineer checks backend reachability, heartbeat freshness, and structured runtime/facility status without reading raw object dumps.
@@ -28,7 +28,7 @@ There are exactly four primary destinations. Floor and room are contextual filte
 
 | Query value | Navigation label | Owns |
 | --- | --- | --- |
-| `operations` | 관제 | Snapshot camera wall, camera selection, contextual inspection, and one focused live camera |
+| `operations` | 관제 | Snapshot camera wall, camera selection, and one focused live camera entered directly per selection |
 | `events` | 이벤트 기록 | Historical clip evidence, filters, detail, playback, and supported label review |
 | `cameras` | 카메라 관리 | Camera registry, create/edit/test/decode actions, and deletion |
 | `system` | 시스템 | Backend reachability, heartbeat/runtime diagnostics, and explicit technical details |
@@ -56,10 +56,10 @@ Camera heartbeat (`online|stale|never_seen`), snapshot lifecycle, focused-feed l
 
 ### 관제
 
-- The default is `mode=wall&wallPage=1` after canonicalization.
+- The default is the snapshot wall at `wallPage=1` after canonicalization; a valid `camera` value enters that camera's focused view directly.
 - Group visible cameras by floor and room and render stable snapshot cards with camera label, location, labelled liveness, image state, and last-seen metadata.
-- Selecting a visible card opens context without starting live video. `라이브 보기` explicitly enters `mode=focus` and mounts exactly one focused stream.
-- Focused mode is page content at every width. Back returns to the wall and the previously selected visible camera context where valid.
+- Selecting a visible card enters the focused view directly and mounts exactly one stream; there is no intermediate selection context.
+- Focused view is page content at every width, never a modal. Back returns to the wall and restores the prior filters, wall page, and scroll position, moving focus to the originating card.
 - If a successful registry refresh or filter change removes the selected camera, return to Wall, clear invalid selection, and announce why.
 
 ### 이벤트 기록
@@ -91,7 +91,7 @@ Camera heartbeat (`online|stale|never_seen`), snapshot lifecycle, focused-feed l
 
 ## Native URL query contract
 
-Use the browser `URLSearchParams` and History APIs; add no router. The only recognized keys are serialized once in canonical order: `page`, `floor`, `room`, `camera`, `mode`, `event`, `clip`, `wallPage`.
+Use the browser `URLSearchParams` and History APIs; add no router. The only recognized keys are serialized once in canonical order: `page`, `floor`, `room`, `camera`, `event`, `clip`, `wallPage`.
 
 For repeated recognized keys, the last occurrence wins. Remove earlier duplicates and all unknown keys. Empty values are invalid. `URLSearchParams` owns UTF-8 percent decoding and encoding. Compare DTO-backed values as exact decoded Unicode without trimming, normalization, or case folding. Enum values are exact lowercase ASCII.
 
@@ -100,30 +100,29 @@ For repeated recognized keys, the last occurrence wins. Remove earlier duplicate
 | `page` | `operations|events|cameras|system` | Global | Missing or invalid becomes `operations`; a destination change removes all keys inapplicable to that destination before later validation. |
 | `floor` | Exact non-null `Camera.floor_name` | `operations`, `events` | After successful cameras data, unknown removes `floor`, then `room`, then incompatible `camera`/`clip`; remove off these pages. |
 | `room` | Exact non-null `Camera.space_id`; when `floor` exists, the same camera must match it | `operations`, `events` | After successful cameras data, unknown/incompatible removes `room`, then incompatible `camera`/`clip`; remove off these pages. |
-| `camera` | Exact local `Camera.id`; never `backend_camera_id` | `operations`, `events` | Operations requires a camera matching location filters or removes it and forces wall. Events requires a matching camera or removes it and then any incompatible clip. |
-| `mode` | `wall|focus` | `operations` | Missing becomes `wall`; focus without a valid filtered camera becomes wall; remove off operations. |
+| `camera` | Exact local `Camera.id`; never `backend_camera_id` | `operations`, `events` | Operations removes an unknown or filter-incompatible camera, which yields the wall. Events requires a matching camera or removes it and then any incompatible clip. |
 | `event` | Exact non-empty `Clip.event_type` in the successfully loaded clip set after active filters | `events` | Unknown removes `event`, then an incompatible `clip`; remove off events. |
 | `clip` | Exact `Clip.id` | `events` | Clip event and resolvable camera must match active filters. An existing unresolved/orphan clip survives only when floor, room, and camera are all absent; otherwise remove only `clip` after upstream invalidation. |
 | `wallPage` | Canonical ASCII decimal matching `[1-9][0-9]*`; parse as `BigInt`, bound to `1..9007199254740991`, then convert if needed | `operations` | Invalid or out of bounds becomes `1`; serialize the parsed decimal; after successful filtering clamp to the last non-empty page, with an empty wall at `1`; remove off operations. |
 
 Run synchronous syntax and page-applicability canonicalization immediately. Retain DTO-backed `floor`, `room`, `camera`, `event`, `clip`, and data-derived `wallPage` while required cameras/clips data is idle, loading, or error. Validate them only after required successful responses: operations waits for cameras; events waits for both cameras and clips.
 
-The full invalidation precedence is `page -> floor -> room -> camera -> mode -> event -> clip -> wallPage`. Rebuild the entire query in canonical order after validation.
+The full invalidation precedence is `page -> floor -> room -> camera -> event -> clip -> wallPage`. Rebuild the entire query in canonical order after validation.
 
-Deliberate destination, filter, page, selection, and focus changes call `pushState`. Default insertion, duplicate/unknown/invalid removal, canonical ordering, data-driven invalidation, logout/login reset, and wall-page clamping call `replaceState`. A `popstate` restoration calls no `pushState`; on the restored entry it may perform at most one immediate syntax/applicability replacement and at most one later DTO-derived replacement. Both keep `history.length` unchanged and are omitted when the canonical query already matches.
+Deliberate destination, filter, page, selection, and focus changes call `pushState`. Default insertion, duplicate/unknown/invalid removal, canonical ordering, data-driven invalidation, logout/login reset, and wall-page clamping call `replaceState`. A legacy `mode` key from a stored deep link is unrecognized; it is removed via `replaceState`, leaving `history.length` unchanged. A `popstate` restoration calls no `pushState`; on the restored entry it may perform at most one immediate syntax/applicability replacement and at most one later DTO-derived replacement. Both keep `history.length` unchanged and are omitted when the canonical query already matches.
 
 ## Responsive viewport contract
 
 The named widths are mandatory acceptance viewports, not approximate device labels.
 
-| Width | Shell and navigation | Content and wall | Selected-camera context |
+| Width | Shell and navigation | Content and wall | Focused view |
 | --- | --- | --- | --- |
-| 375 | Compact 56px top app bar; four fixed bottom tabs; 12-16px gutter; content clears safe areas and tab bar | One-column wall; controls stack; media uses full available width | Modal bottom sheet with labelled dialog semantics |
-| 768 | Compact top app bar and four bottom tabs; 20px gutter | Two-column wall; filters wrap without horizontal scroll | Modal bottom sheet with labelled dialog semantics |
-| 1024 | Desktop left rail and sticky 64px top bar; 20-24px gutter; no bottom tabs | Two-column wall beside contextual space; focused media remains page content | Labelled complementary inspector panel |
-| 1440 | 256px left rail, sticky 64px top bar, 24px gutter, bounded readable content | Three/four-column wall as card minimum permits; stable 16:9 media | 320px labelled complementary inspector panel |
+| 375 | Compact 56px top app bar; four fixed bottom tabs; 12-16px gutter; content clears safe areas and tab bar | One-column wall; controls stack; media uses full available width | Page content at full width |
+| 768 | Compact top app bar and four bottom tabs; 20px gutter | Two-column wall; filters wrap without horizontal scroll | Page content at full width |
+| 1024 | Desktop left rail and sticky 64px top bar; 20-24px gutter; no bottom tabs | Two-column wall; focused media remains page content | Page content at full width |
+| 1440 | 256px left rail, sticky 64px top bar, 24px gutter, bounded readable content | Three/four-column wall as card minimum permits; stable 16:9 media | Page content at full width |
 
-At every width, critical controls wrap rather than clip, Korean text remains legible, the page has no horizontal overflow, and touch targets are at least 44px. The 1024px boundary is desktop: changing across it changes the inspector presentation, not the underlying selection or URL.
+At every width, critical controls wrap rather than clip, Korean text remains legible, the page has no horizontal overflow, and touch targets are at least 44px. The 1024px boundary is desktop: it changes shell chrome (rail versus bottom tabs), not the underlying selection, URL, or focused-view presentation.
 
 ## Camera wall and media budget
 
@@ -135,13 +134,11 @@ At every width, critical controls wrap rather than clip, Korean text remains leg
 - Snapshot, focused-live, and clip viewports use dark media frames (`#0D0D0D`) with stable 16:9 geometry, `object-fit: contain`, a labelled unavailable state, and no stretching. The surrounding shell remains light.
 - Visual evidence may fulfill finite image responses. It proves DOM/request identity and concurrency, not transport-level MJPEG socket closure or real camera integration.
 
-## Inspector, sheet, and dialog semantics
-
-At 1024 and 1440, selected-camera context is a persistent `<aside>` with `role="complementary"` and an accessible name tied to the selected camera. It complements 관제 content; it is not a fifth page and never duplicates primary navigation.
-
-At 375 and 768, the same context is a modal bottom sheet with `role="dialog"`, `aria-modal="true"`, and an accessible name. Opening moves focus to the first meaningful control or explicit heading target, traps focus, locks body scroll, and retains the invoking camera card for restoration. Escape and a safe backdrop click close it; interactions inside the sheet do not. Closing restores focus to the invoker when it still exists, otherwise to the wall heading.
+## Dialog and screen-transition semantics
 
 Camera add and delete flows, plus evidence detail, use the shared accessible dialog surface; camera edits remain inline controls on the camera card. Destructive actions require an explicit labelled confirmation; safe cancel is initially reachable. Every modal handles initial focus, Tab/Shift+Tab containment, Escape, safe-backdrop close, body scroll lock, and invoker focus restoration. Focused live video is page content at all widths, never a modal.
+
+Entering the focused view moves focus to its heading or its back control. Returning to the wall moves focus to the card that opened the focused view, or to the wall heading when that camera no longer exists. Wall cards are navigation, not toggles, and carry no `aria-pressed`.
 
 ## Design tokens
 
@@ -193,7 +190,7 @@ Use concise Korean-first operational language: name the object, state current tr
 
 Do not expose `/api/v1`, Authorization, worker/MJPEG, schema names, raw enums, query tokens, digests, stack traces, camera credentials, RTSP URLs outside the masked registration job, storage paths, resident identity, or raw JSON in primary copy. `시스템` may reveal sanitized identifiers under `기술 정보`, with a human label before the value.
 
-Buttons use verbs (`카메라 추가`, `라이브 보기`, `다시 시도`, `삭제`). Errors do not blame the user and do not claim data was saved unless the supported mutation succeeded. Dates and times use one locale-consistent Korean presentation; unknown values read `정보 없음`, never `0` or a fabricated healthy state.
+Buttons use verbs (`카메라 추가`, `이 카메라 클립 보기`, `다시 시도`, `삭제`). Errors do not blame the user and do not claim data was saved unless the supported mutation succeeded. Dates and times use one locale-consistent Korean presentation; unknown values read `정보 없음`, never `0` or a fabricated healthy state.
 
 ## Accessibility
 
@@ -216,11 +213,11 @@ Under `prefers-reduced-motion: reduce`, remove transforms and nonessential trans
 
 Visual QA runs the real Vite/React/CSS surface on the host and fulfills only external API/media responses with synthetic, privacy-safe fixtures. No screenshot or static mock may replace the DOM. Cross-repo screenshots are qualitative family references; image diffs are directional evidence, not a pixel-clone threshold.
 
-The exact capture packet is **33 state PNGs + 8 interaction PNGs = 41 PNGs**, each captured exactly once from one current configured build:
+The exact capture packet is **31 state PNGs + 8 interaction PNGs = 39 PNGs**, each captured exactly once from one current configured build:
 
 - 10 primary states: `operations` at 375/768/1024/1440, plus `events`, `cameras`, and `system` at 375/1440.
-- 23 edge states: login default; login invalid; loading/empty/error for each of four pages (12); desktop selected-camera inspector; mobile selected-camera sheet; focused stream success; focused stream unavailable; clip detail available; clip detail unavailable; camera dialog validation; camera dialog server failure; failure-to-recovery.
-- 8 interaction states: focus and activated frames for mobile navigation, desktop camera cards, mobile inspector sheet, and desktop dialog.
+- 21 edge states: login default; login invalid; loading/empty/error for each of four pages (12); focused stream success; focused stream unavailable; clip detail available; clip detail unavailable; camera dialog validation; camera dialog server failure; failure-to-recovery.
+- 8 interaction states: focus and activated frames for mobile navigation, desktop camera cards, focused-view back control, and desktop dialog.
 
 Separate automated assertions run at all 375/768/1024/1440 widths and camera scales 0/1/12/13/50. Fixtures cover `mixed`, `loading`, `empty`, `error`, and `recovery`, including online/stale/never-seen cameras, missing location, snapshot failure, fall/bed-exit evidence, playable/unavailable clips, and partial system/runtime data.
 
