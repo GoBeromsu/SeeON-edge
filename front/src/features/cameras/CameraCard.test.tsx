@@ -283,15 +283,16 @@ describe('CameraCard', () => {
     act(() => root.unmount());
   });
 
-  it('distinguishes a camera that has never connected from one that dropped after connecting', () => {
+  it('shows no connection line for a camera that never connected, but shows one for a camera that dropped', () => {
     const host = document.createElement('div');
     const root = createRoot(host);
+    // Asserted on the element, not on textContent: a stale copy string would still satisfy a
+    // "does not contain X" check, so only the absent node proves the line is really gone.
     act(() => root.render(<CameraCard camera={{ ...camera, status: 'offline', never_connected: true }} />));
-    expect(host.textContent).toContain('한 번도 연결된 적 없음');
+    expect(host.querySelector('[data-testid="camera-connection-detail"]')).toBeNull();
 
     act(() => root.render(<CameraCard camera={{ ...camera, status: 'offline', never_connected: false, last_ok_at: '2026-07-20T00:00:00Z' }} />));
-    expect(host.textContent).not.toContain('한 번도 연결된 적 없음');
-    expect(host.textContent).toContain('마지막 연결');
+    expect(host.querySelector('[data-testid="camera-connection-detail"]')?.textContent).toContain('마지막 연결');
     act(() => root.unmount());
   });
 
@@ -323,12 +324,11 @@ describe('CameraCard', () => {
     act(() => root.unmount());
   });
 
-  it('keeps the never_connected treatment instead of a numeric heartbeat age, even if the backend sent one', () => {
+  it('suppresses the heartbeat age on a never_connected card, even if the backend sent one', () => {
     const host = document.createElement('div');
     const root = createRoot(host);
     act(() => root.render(<CameraCard camera={{ ...camera, status: 'offline', never_connected: true, heartbeat_age_sec: 0 }} />));
 
-    expect(host.textContent).toContain('한 번도 연결된 적 없음');
     expect(host.textContent).not.toContain('마지막 신호');
     act(() => root.unmount());
   });

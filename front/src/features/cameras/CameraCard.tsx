@@ -130,20 +130,21 @@ export function CameraCard({ camera, onUpdateStarted, onUpdated, onDelete, onVie
     }
   }
 
-  const connectionDetail = camera.status === 'online'
+  // A never-connected camera gets no connection line at all: the offline badge already says the
+  // camera is not up, and spelling that out again adds a row without adding information.
+  const connectionDetail = camera.status === 'online' || neverConnected
     ? null
-    : neverConnected
-      ? '한 번도 연결된 적 없음'
-      : camera.last_ok_at
-        ? `마지막 연결 ${new Date(camera.last_ok_at).toLocaleString('ko-KR')}`
-        : '연결 이력 없음';
+    : camera.last_ok_at
+      ? `마지막 연결 ${new Date(camera.last_ok_at).toLocaleString('ko-KR')}`
+      : '연결 이력 없음';
 
   // Edge heartbeat freshness is a separate, more real-time signal than last_ok_at (which only
   // moves on a successful probe). Surface it only where it aids triage: an offline/degraded card
   // benefits from "how long has this actually been dead" at a glance. An online card already
   // reads as alive from the badge, so repeating a heartbeat age there is noise, not signal —
   // matches the console's "normal is silent" principle used elsewhere (System page). Never shown
-  // for never_connected, which has its own distinct, non-numeric copy.
+  // for never_connected: a camera that never came up has no meaningful "how long since the last
+  // signal", and a 0-second age from the backend would read as freshly alive.
   const heartbeatDetail = camera.status !== 'online' && !neverConnected
     ? formatHeartbeatAge(camera.heartbeat_age_sec)
     : null;
@@ -157,7 +158,7 @@ export function CameraCard({ camera, onUpdateStarted, onUpdated, onDelete, onVie
         </div>
         <div className="text-right">
           <StatusBadge status={camera.status} />
-          {connectionDetail ? <p className="mt-1.5 text-xs font-semibold text-ink-faint">{connectionDetail}</p> : null}
+          {connectionDetail ? <p data-testid="camera-connection-detail" className="mt-1.5 text-xs font-semibold text-ink-faint">{connectionDetail}</p> : null}
           {heartbeatDetail ? <p className="mt-1 text-xs font-semibold text-ink-faint">{heartbeatDetail}</p> : null}
         </div>
       </div>
