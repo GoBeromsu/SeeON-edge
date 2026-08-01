@@ -1,4 +1,4 @@
-import type { Camera, HeartbeatStatus, StatusSnapshot } from '@/shared/api/client';
+import type { Camera, CameraHeartbeat, HeartbeatStatus, StatusSnapshot } from '@/shared/api/client';
 
 export const WALL_PAGE_SIZE = 12;
 export const UNCLASSIFIED = '미분류';
@@ -60,14 +60,22 @@ export function snapshotJitterMs(cameraId: string): number {
   return hash % 1_000;
 }
 
-export function getCameraLiveness(camera: Camera, cameras: readonly Camera[], status: StatusSnapshot | null): HeartbeatStatus | 'unknown' {
-  if (!status) return 'unknown';
+function resolveCameraHeartbeat(camera: Camera, cameras: readonly Camera[], status: StatusSnapshot | null): CameraHeartbeat | undefined {
+  if (!status) return undefined;
   const heartbeats = Object.values(status.cameras);
   const exact = heartbeats.filter((entry) => entry.camera_id === camera.id);
-  if (exact.length === 1) return exact[0].status;
-  if (exact.length > 1 || !camera.backend_camera_id) return 'unknown';
+  if (exact.length === 1) return exact[0];
+  if (exact.length > 1 || !camera.backend_camera_id) return undefined;
   const alias = camera.backend_camera_id;
-  if (cameras.filter((entry) => entry.id === alias || entry.backend_camera_id === alias).length !== 1) return 'unknown';
+  if (cameras.filter((entry) => entry.id === alias || entry.backend_camera_id === alias).length !== 1) return undefined;
   const matches = heartbeats.filter((entry) => entry.camera_id === alias);
-  return matches.length === 1 ? matches[0].status : 'unknown';
+  return matches.length === 1 ? matches[0] : undefined;
+}
+
+export function getCameraLiveness(camera: Camera, cameras: readonly Camera[], status: StatusSnapshot | null): HeartbeatStatus | 'unknown' {
+  return resolveCameraHeartbeat(camera, cameras, status)?.status ?? 'unknown';
+}
+
+export function getCameraHeartbeatAgeSec(camera: Camera, cameras: readonly Camera[], status: StatusSnapshot | null): number | null {
+  return resolveCameraHeartbeat(camera, cameras, status)?.age_sec ?? null;
 }

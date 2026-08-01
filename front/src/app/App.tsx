@@ -31,7 +31,7 @@ function OperationsRoute({ location, onNavigate, onValidate }: {
     }
   }, [cameras.data, cameras.status, onValidate]);
 
-  useEffect(validateLocation, [location.camera, location.floor, location.mode, location.room, location.wallPage, validateLocation]);
+  useEffect(validateLocation, [location.camera, location.floor, location.room, location.wallPage, validateLocation]);
 
   return (
     <OperationsView

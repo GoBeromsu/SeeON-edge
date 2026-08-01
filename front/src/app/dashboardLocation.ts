@@ -1,14 +1,12 @@
-export const DASHBOARD_QUERY_KEYS = ['page', 'floor', 'room', 'camera', 'mode', 'event', 'clip', 'wallPage'] as const;
+export const DASHBOARD_QUERY_KEYS = ['page', 'floor', 'room', 'camera', 'event', 'clip', 'wallPage'] as const;
 export const DASHBOARD_PAGES = ['operations', 'events', 'cameras', 'system'] as const;
 
 export type DashboardPage = (typeof DASHBOARD_PAGES)[number];
-export type DashboardMode = 'wall' | 'focus';
 export type DashboardLocation = {
   page: DashboardPage;
   floor?: string;
   room?: string;
   camera?: string;
-  mode?: DashboardMode;
   event?: string;
   clip?: string;
   wallPage?: string;
@@ -68,8 +66,6 @@ function parseSyntax(search: string): DashboardLocation {
   }
 
   if (page === 'operations') {
-    const mode = lastValue(params, 'mode');
-    location.mode = mode === 'focus' ? 'focus' : 'wall';
     const wallPage = lastValue(params, 'wallPage');
     location.wallPage = wallPage && /^[1-9][0-9]*$/.test(wallPage) && BigInt(wallPage) <= MAX_WALL_PAGE ? wallPage : '1';
   }
@@ -111,7 +107,6 @@ function resolveClipCamera(clip: LocationClip, cameras: readonly LocationCamera[
 
 function validateOperations(location: DashboardLocation, cameras: readonly LocationCamera[]): void {
   validateCameraFilters(location, cameras);
-  if (location.mode === 'focus' && !location.camera) location.mode = 'wall';
 
   const visibleCount = BigInt(cameras.filter((camera) => cameraMatchesLocation(camera, location)).length);
   const lastPage = visibleCount === 0n ? 1n : (visibleCount + WALL_PAGE_SIZE - 1n) / WALL_PAGE_SIZE;
