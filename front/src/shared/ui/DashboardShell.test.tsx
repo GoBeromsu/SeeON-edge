@@ -52,7 +52,16 @@ describe('DashboardShell', () => {
     expect(host.querySelector('a[href="#main-content"]')?.textContent).toContain('본문으로');
     expect(host.querySelector('#main-content')).not.toBeNull();
     expect(host.querySelectorAll('nav').length).toBe(2);
-    for (const nav of host.querySelectorAll('nav')) expect(nav.querySelectorAll('button')).toHaveLength(4);
+    for (const nav of host.querySelectorAll('nav')) {
+      const buttons = nav.querySelectorAll('button');
+      expect(buttons).toHaveLength(4);
+      for (const button of buttons) {
+        const mark = button.querySelector('.nav-mark');
+        expect(mark?.getAttribute('aria-hidden')).toBe('true');
+        expect(mark?.querySelector('svg')).not.toBeNull();
+        expect(mark?.textContent?.trim()).toBe('');
+      }
+    }
     expect(host.querySelectorAll('[aria-current="page"]')).toHaveLength(2);
     expect(Array.from(host.querySelectorAll('button')).find((button) => button.textContent === '카메라 추가')?.classList.contains('brand-action')).toBe(true);
     expect(host.textContent).toContain('Senior AI Lab');

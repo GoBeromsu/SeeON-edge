@@ -1,14 +1,70 @@
-import { ReactNode } from 'react';
+import { ComponentType, ReactNode, SVGProps } from 'react';
 import type { DashboardPage } from '@/app/dashboardLocation';
 import { SeniorAiLabBrand } from '@/shared/ui/SeniorAiLabBrand';
 import { useAuthSession } from '@/shared/ui/AuthGate';
 
 type BackendStatusView = { label: string; className: string };
-const destinations: Array<{ id: DashboardPage; label: string }> = [
-  { id: 'operations', label: '관제' },
-  { id: 'events', label: '이벤트 기록' },
-  { id: 'cameras', label: '카메라 관리' },
-  { id: 'system', label: '시스템' },
+type NavIcon = ComponentType<SVGProps<SVGSVGElement>>;
+
+function iconProps(props: SVGProps<SVGSVGElement>): SVGProps<SVGSVGElement> {
+  return {
+    viewBox: '0 0 24 24',
+    fill: 'none',
+    stroke: 'currentColor',
+    strokeWidth: 1.75,
+    strokeLinecap: 'round',
+    strokeLinejoin: 'round',
+    ...props,
+  };
+}
+
+/** 2×2 wall — operations / camera wall. */
+function OperationsIcon(props: SVGProps<SVGSVGElement>): JSX.Element {
+  return (
+    <svg {...iconProps(props)}>
+      <rect x="3.5" y="3.5" width="7" height="7" rx="1.25" />
+      <rect x="13.5" y="3.5" width="7" height="7" rx="1.25" />
+      <rect x="3.5" y="13.5" width="7" height="7" rx="1.25" />
+      <rect x="13.5" y="13.5" width="7" height="7" rx="1.25" />
+    </svg>
+  );
+}
+
+/** Clock — historical event evidence. */
+function EventsIcon(props: SVGProps<SVGSVGElement>): JSX.Element {
+  return (
+    <svg {...iconProps(props)}>
+      <circle cx="12" cy="12" r="8.25" />
+      <path d="M12 7.5V12l3 2" />
+    </svg>
+  );
+}
+
+/** Simple camera body — registry management. */
+function CamerasIcon(props: SVGProps<SVGSVGElement>): JSX.Element {
+  return (
+    <svg {...iconProps(props)}>
+      <path d="M3.75 8.25h11.5a1.5 1.5 0 0 1 1.5 1.5v7.5a1.5 1.5 0 0 1-1.5 1.5H3.75a1.5 1.5 0 0 1-1.5-1.5v-7.5a1.5 1.5 0 0 1 1.5-1.5Z" />
+      <path d="M16.75 11.25 20.75 9v9l-4-2.25" />
+      <circle cx="9.5" cy="13.5" r="2.25" />
+    </svg>
+  );
+}
+
+/** Activity pulse — system diagnostics. */
+function SystemIcon(props: SVGProps<SVGSVGElement>): JSX.Element {
+  return (
+    <svg {...iconProps(props)}>
+      <path d="M4 13h3.25l2-5.5 3.5 9 2.25-5H20" />
+    </svg>
+  );
+}
+
+const destinations: Array<{ id: DashboardPage; label: string; Icon: NavIcon }> = [
+  { id: 'operations', label: '관제', Icon: OperationsIcon },
+  { id: 'events', label: '이벤트 기록', Icon: EventsIcon },
+  { id: 'cameras', label: '카메라 관리', Icon: CamerasIcon },
+  { id: 'system', label: '시스템', Icon: SystemIcon },
 ];
 
 export function getScreenLabel(screen: DashboardPage): string {
@@ -20,7 +76,7 @@ function Navigation({ active, onChange, label }: { active: DashboardPage; onChan
     <nav aria-label={label}>
       {destinations.map((entry) => (
         <button key={entry.id} type="button" aria-current={active === entry.id ? 'page' : undefined} onClick={() => onChange(entry.id)}>
-          <span aria-hidden="true" className="nav-mark">{entry.label.slice(0, 1)}</span>
+          <span aria-hidden="true" className="nav-mark"><entry.Icon /></span>
           <span>{entry.label}</span>
         </button>
       ))}

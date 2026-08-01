@@ -128,7 +128,22 @@
 }
 
 .nav-mark {
-  font-size: 16px;
+  display: inline-flex;
+  width: 20px;
+  height: 20px;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+}
+
+.nav-mark svg {
+  display: block;
+  width: 20px;
+  height: 20px;
+}
+
+.mobile-tabs .nav-mark {
+  margin-inline: auto;
 }
 
 .sa-brand {

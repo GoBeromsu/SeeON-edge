@@ -184,7 +184,7 @@ Use the installed CSS stack: `Pretendard`, `-apple-system`, `BlinkMacSystemFont`
 - Controls are at least 44px high; compact desktop controls may visually occupy 36-40px only when their interactive target remains 44px.
 - Radii are 8px for controls/nav, 12px for cards/media, and 16px for elevated panels. Bottom sheets may use 20px only on their top corners.
 - Borders use `1px solid var(--c-border)`. Resting cards use at most `0 1px 3px rgba(15,15,15,.08)`; sheets/dialogs use at most `0 12px 36px rgba(15,15,15,.18)`.
-- Media keeps 16:9 aspect ratio. Status dots are 8px but never stand alone. Icons are simple local SVGs or text; no icon package or emoji controls.
+- Media keeps 16:9 aspect ratio. Status dots are 8px but never stand alone. Icons are simple local SVGs or text; no icon package or emoji controls. Primary navigation uses monoline local SVGs (20px, `currentColor`) beside labels — never first-character letter marks.
 - Layer order is content `0`, sticky shell `20`, backdrop `40`, dialog/sheet `50`, and transient non-modal notice `60`.
 
 ## Content voice
