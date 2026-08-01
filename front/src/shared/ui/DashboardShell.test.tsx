@@ -95,7 +95,7 @@ describe('DashboardShell', () => {
       method: 'DELETE',
       credentials: 'same-origin',
     }));
-    expect(host.textContent).toContain('관리자 로그인');
+    expect(host.querySelector('#login-title')?.textContent).toBe('로그인');
     expect(replace).toHaveBeenLastCalledWith(null, '', '/?page=operations&wallPage=1');
     act(() => root.unmount());
   });
@@ -127,7 +127,7 @@ describe('DashboardShell', () => {
     }));
     expect(host.textContent).toContain('시스템 본문');
     expect(host.textContent).toContain('로그아웃하지 못했습니다. 다시 시도해 주세요.');
-    expect(host.textContent).not.toContain('관리자 로그인');
+    expect(host.querySelector('#login-title')).toBeNull();
     expect(host.querySelector('header button')?.textContent).toBe('로그아웃');
     expect(replace).not.toHaveBeenCalled();
     act(() => root.unmount());

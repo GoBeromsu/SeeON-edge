@@ -60,7 +60,7 @@ describe('AuthGate', () => {
     vi.stubGlobal('fetch', fetchMock);
     const { host, root } = renderGate();
     expect(host.textContent).toContain('로그인 상태를 확인하고 있습니다.');
-    expect(host.textContent).not.toContain('관리자 로그인');
+    expect(host.querySelector('#login-title')).toBeNull();
     expect(host.textContent).not.toContain('대시보드');
     expect(fetchMock).toHaveBeenCalledWith('/api/v1/auth/session', expect.objectContaining({
       credentials: 'same-origin',
@@ -79,7 +79,7 @@ describe('AuthGate', () => {
     const { host, root } = renderGate();
     await settle();
     expect(host.textContent).toContain('대시보드');
-    expect(host.textContent).not.toContain('관리자 로그인');
+    expect(host.querySelector('#login-title')).toBeNull();
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(fetchMock).toHaveBeenCalledWith('/api/v1/auth/session', expect.objectContaining({
       credentials: 'same-origin',
@@ -94,7 +94,7 @@ describe('AuthGate', () => {
     vi.stubGlobal('fetch', fetchMock);
     const { host, root } = renderGate();
     await settle();
-    expect(host.textContent).toContain('관리자 로그인');
+    expect(host.querySelector('#login-title')?.textContent).toBe('로그인');
     expect(host.querySelector('form')).not.toBeNull();
     expect(host.textContent).not.toContain('대시보드');
     expect(fetchMock).toHaveBeenCalledWith('/api/v1/auth/session', expect.objectContaining({
@@ -113,14 +113,14 @@ describe('AuthGate', () => {
     await settle();
 
     expect(host.textContent).toContain('로그인 서비스 연결 실패');
-    expect(host.textContent).not.toContain('관리자 로그인');
+    expect(host.querySelector('#login-title')).toBeNull();
     await act(async () => {
       Array.from(host.querySelectorAll<HTMLButtonElement>('button'))
         .find((button) => button.textContent === '다시 시도')
         ?.click();
     });
     expect(fetchMock).toHaveBeenCalledTimes(2);
-    expect(host.textContent).toContain('관리자 로그인');
+    expect(host.querySelector('#login-title')?.textContent).toBe('로그인');
     act(() => root.unmount());
   });
 
@@ -205,7 +205,7 @@ describe('AuthGate', () => {
     await settle();
     const login = submit(host, 'operator', 'correct-password');
     expect(host.textContent).not.toContain('대시보드');
-    expect(host.textContent).toContain('관리자 로그인');
+    expect(host.querySelector('#login-title')?.textContent).toBe('로그인');
     resolveLogin?.();
     await login;
     expect(host.textContent).toContain('대시보드');
@@ -236,7 +236,7 @@ describe('AuthGate', () => {
     }));
     expect(host.textContent).toContain('대시보드');
     expect(host.textContent).toContain('로그아웃하지 못했습니다. 다시 시도해 주세요.');
-    expect(host.textContent).not.toContain('관리자 로그인');
+    expect(host.querySelector('#login-title')).toBeNull();
     act(() => root.unmount());
   });
 });

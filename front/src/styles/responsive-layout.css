@@ -1,8 +1,6 @@
 @media (min-width: 768px) {
   #main-content { padding: 20px; }
   .dashboard-topbar { padding-inline: 20px; }
-  .auth-card { grid-template-columns: 0.9fr 1.1fr; }
-  .auth-config { display: block; }
 }
 
 @media (min-width: 1024px) {

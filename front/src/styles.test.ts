@@ -80,10 +80,17 @@ describe('design token contrast', () => {
     expect(contrastRatio(faint, cssColor('--c-bg'))).toBeGreaterThanOrEqual(4.5);
   });
 
-  it('uses a readable media-text token for all normal text in the authentication panel', () => {
+  it('keeps media overlay text readable on dark media frames', () => {
     expect(documentedColor('--c-media-text').toLowerCase()).toBe(cssColor('--c-media-text').toLowerCase());
     expect(contrastRatio(cssColor('--c-media-text'), cssColor('--c-media'))).toBeGreaterThanOrEqual(4.5);
-    expect(css).toMatch(/\.auth-brand-panel p,\s*\.auth-brand-panel \.sa-brand small\s*{\s*color:\s*var\(--c-media-text\)/);
+  });
+
+  it('uses a quiet single-column authentication card without a marketing brand panel', () => {
+    expect(css).toMatch(/\.auth-card\s*\{[^}]*width:\s*min\(420px,\s*100%\)/s);
+    expect(css).toMatch(/\.auth-card\s*\{[^}]*min-height:\s*440px/s);
+    expect(css).not.toMatch(/\.auth-card\s*\{[^}]*box-shadow:/s);
+    expect(css).not.toMatch(/\.auth-brand-panel\s*\{/);
+    expect(css).not.toMatch(/\.auth-card\s*\{[^}]*grid-template-columns/s);
   });
 
   it('keeps reachable event media surfaces on semantic media tokens', () => {
