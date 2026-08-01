@@ -116,7 +116,12 @@ export function DashboardShell({
           <div className="shell-actions">
             {backendStatus ? <span className={backendStatus.className}>{backendStatus.label}</span> : null}
             {screen === 'cameras' && onAddCamera ? <button type="button" className="brand-action" onClick={onAddCamera}>카메라 추가</button> : null}
-            {session ? <button type="button" onClick={session.logout}>로그아웃</button> : null}
+            {session ? (
+              <div className="shell-session-group">
+                <span aria-hidden="true" className="shell-divider" />
+                <button type="button" className="logout-action" onClick={session.logout}>로그아웃</button>
+              </div>
+            ) : null}
           </div>
         </header>
         <main id="main-content" tabIndex={-1}>{children}</main>

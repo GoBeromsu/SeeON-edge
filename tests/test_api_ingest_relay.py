@@ -371,6 +371,55 @@ def test_relay_heartbeat_egresses_local_id_when_camera_is_unmapped(tmp_path) -> 
     assert fake.egress_camera_ids == ["local-uuid-1"]
 
 
+def test_relay_heartbeat_clears_never_connected_on_first_heartbeat(tmp_path) -> None:
+    """A registry record's never_connected flips False on its first heartbeat,
+    even before any successful probe -- a live worker beating in is itself
+    evidence the camera has connected at least once."""
+    fake = FakeBackendIngestClient()
+    app = _registry_app(fake, tmp_path, backend_camera_id=None)
+    store: CameraRegistryStore = app.state.camera_registry
+    assert store.get("local-uuid-1")["never_connected"] is True
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/relay/heartbeat",
+            json={"camera_id": "local-uuid-1", "facility_id": "local-facility"},
+            headers={"X-Edge-Relay-Token": "relay-token"},
+        )
+
+    assert response.status_code == 202
+    assert store.get("local-uuid-1")["never_connected"] is False
+
+
+def test_relay_heartbeat_never_connected_flip_is_a_single_write(tmp_path) -> None:
+    """Once never_connected is cleared it must stay cleared without an extra
+    store.update() on every subsequent heartbeat (avoids write amplification
+    on the file-backed, lock-guarded registry for a value that never reverts)."""
+    fake = FakeBackendIngestClient()
+    app = _registry_app(fake, tmp_path, backend_camera_id=None)
+    store: CameraRegistryStore = app.state.camera_registry
+    original_update = store.update
+    call_count = {"count": 0}
+
+    def counting_update(camera_id: str, updates: dict[str, object]):
+        call_count["count"] += 1
+        return original_update(camera_id, updates)
+
+    store.update = counting_update  # type: ignore[method-assign]
+
+    with TestClient(app) as client:
+        for _ in range(3):
+            response = client.post(
+                "/api/v1/relay/heartbeat",
+                json={"camera_id": "local-uuid-1", "facility_id": "local-facility"},
+                headers={"X-Edge-Relay-Token": "relay-token"},
+            )
+            assert response.status_code == 202
+
+    assert call_count["count"] == 1
+    assert store.get("local-uuid-1")["never_connected"] is False
+
+
 def test_relay_alert_rejects_raw_frame_payloads() -> None:
     payload = _alert_payload(frame=[0, 1, 2])
 

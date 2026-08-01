@@ -386,12 +386,9 @@ describe('CameraManagementPage', () => {
     }
   });
 
-  it('ignores a delayed update after delete and accepts the next authoritative registry version', async () => {
+  it('disables delete while an update for the same camera is pending, then allows it once the update settles', async () => {
     let resolveUpdate: ((value: typeof camera) => void) | undefined;
-    let resolveAuthoritativePoll: ((value: { registry_version: number; cameras: typeof camera[] }) => void) | undefined;
-    vi.mocked(fetchCameras)
-      .mockResolvedValueOnce({ registry_version: 4, cameras: [camera] })
-      .mockImplementation(() => new Promise((resolve) => { resolveAuthoritativePoll = resolve; }));
+    vi.mocked(fetchCameras).mockResolvedValue({ registry_version: 4, cameras: [camera] });
     vi.mocked(updateCamera).mockImplementation(() => new Promise((resolve) => { resolveUpdate = resolve; }));
     vi.mocked(deleteCamera).mockResolvedValue();
     const { root } = await renderPage();
@@ -399,19 +396,23 @@ describe('CameraManagementPage', () => {
     act(() => Array.from(document.querySelectorAll('button')).find((button) => button.textContent === '수정')?.click());
     setInput('label', '301호 B');
     act(() => Array.from(document.querySelectorAll('button')).find((button) => button.textContent === '저장')?.click());
-    act(() => Array.from(document.querySelectorAll('button')).find((button) => button.textContent === '삭제')?.click());
-    await act(async () => Array.from(document.querySelectorAll<HTMLButtonElement>('[role="dialog"] button')).find((button) => button.textContent === '삭제')?.click());
 
-    expect(document.body.textContent).not.toContain('301호 A');
-    expect(document.body.textContent).toContain('등록 버전 4');
-
-    await act(async () => resolveAuthoritativePoll?.({ registry_version: 5, cameras: [] }));
-    expect(document.body.textContent).toContain('등록 버전 5');
-    expect(document.body.textContent).toContain('등록된 카메라가 없습니다');
+    const deleteButton = Array.from(document.querySelectorAll<HTMLButtonElement>('button')).find((button) => button.textContent === '삭제');
+    // The card's own delete button is disabled while its rename is still in flight, consistent
+    // with the other per-card mutation buttons — this prevents deleting a camera whose edit
+    // hasn't resolved yet.
+    expect(deleteButton?.disabled).toBe(true);
+    act(() => deleteButton?.click());
+    expect(document.body.textContent).not.toContain('삭제 확인');
 
     await act(async () => resolveUpdate?.({ ...camera, label: '301호 B' }));
+    expect(deleteButton?.disabled).toBe(false);
+
+    act(() => deleteButton?.click());
+    await act(async () => Array.from(document.querySelectorAll<HTMLButtonElement>('[role="dialog"] button')).find((button) => button.textContent === '삭제')?.click());
+
+    expect(deleteCamera).toHaveBeenCalledWith('cam-1');
     expect(document.body.textContent).not.toContain('301호 B');
-    expect(document.body.textContent).toContain('등록 버전 5');
     act(() => root.unmount());
   });
 
@@ -441,6 +442,28 @@ describe('CameraManagementPage', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('warns on a duplicate label (trimmed, case-insensitive) without disabling the add-camera submit button', async () => {
+    // R2.2: a label match against an already-registered camera is a non-blocking warning. This
+    // proves the roster actually reaches AddCameraModal via the `cameras={registry.cameras}`
+    // wiring in CameraManagementPage — not just that the comparison function works in isolation.
+    const existingCamera = { ...camera, label: '301호 침대 A' };
+    vi.mocked(fetchCameras).mockResolvedValue({ registry_version: 1, cameras: [existingCamera] });
+    const { root } = await renderPage();
+
+    act(() => Array.from(document.querySelectorAll('button')).find((button) => button.textContent === '+ 카메라 추가')?.click());
+    // Trims whitespace and differs in case from the registered label, exercising the real
+    // findDuplicateLabelCamera comparison rather than a trivial exact match.
+    setInput('label', '  301호 침대 a  ');
+
+    const warning = Array.from(document.querySelectorAll('[role="status"]')).find((el) => el.textContent?.includes('이름이 같습니다'));
+    expect(warning).toBeDefined();
+    expect(warning?.textContent).toContain('301호 침대 A');
+
+    const submitButton = Array.from(document.querySelectorAll<HTMLButtonElement>('button')).find((button) => button.textContent === '카메라 등록');
+    expect(submitButton?.disabled).toBe(false);
+    act(() => root.unmount());
   });
 
   it('reconciles stale and newer roster identities emitted through a backend camera alias', async () => {

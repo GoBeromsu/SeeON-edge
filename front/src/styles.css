@@ -1,4 +1,5 @@
 @import "./styles/tokens-base.css";
 @import "./styles/application-surfaces.css";
 @import "./styles/shell-auth-dialog.css";
+@import "./styles/dashboard-shell-session.css";
 @import "./styles/responsive-layout.css";

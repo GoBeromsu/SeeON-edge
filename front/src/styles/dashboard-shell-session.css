@@ -1,0 +1,42 @@
+/*
+ * Session-ending action styling, scoped exclusively to DashboardShell.
+ * Kept in its own file (imported after shell-auth-dialog.css) rather than added to
+ * shell-auth-dialog.css because that file also backs AccessibleDialog/AuthGate surfaces
+ * shared with camera registration/deletion dialogs owned by other lanes.
+ */
+
+.shell-session-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.shell-divider {
+  width: 1px;
+  height: 24px;
+  background: var(--c-border);
+}
+
+.shell-actions button.logout-action {
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+  border: 0;
+  border-radius: 8px;
+  padding: 8px 10px;
+  background: transparent;
+  color: var(--c-ink-soft);
+  font-weight: 500;
+}
+
+.shell-actions button.logout-action:hover,
+.shell-actions button.logout-action:focus-visible {
+  background: var(--c-surface-2);
+  color: var(--c-ink);
+}
+
+.shell-actions button.logout-action::after {
+  content: ' [\2192';
+  margin-left: 4px;
+  font-weight: 700;
+}

@@ -57,7 +57,7 @@ function EventsRoute({ location, onNavigate, onValidate }: {
   onValidate: (data: DashboardLocationData) => void;
 }): JSX.Element {
   const cameras = useCamerasResource(true);
-  const clips = useClipsResource(true);
+  const clips = useClipsResource(true, location.camera);
 
   useEffect(() => {
     if (cameras.status === 'success' && cameras.data !== null && clips.status === 'success' && clips.data !== null) {
@@ -113,7 +113,12 @@ export function Dashboard(): JSX.Element {
       page = <EventsRoute location={{ ...location, page: 'events' }} onNavigate={navigate} onValidate={validate} />;
       break;
     case 'cameras':
-      page = <><h1 className="sr-only" data-dialog-focus-fallback tabIndex={-1}>카메라 관리</h1><CameraManagementPage /></>;
+      page = (
+        <>
+          <h1 className="sr-only" data-dialog-focus-fallback tabIndex={-1}>카메라 관리</h1>
+          <CameraManagementPage onViewClips={(camera) => navigate({ page: 'events', camera: camera.id })} />
+        </>
+      );
       break;
     case 'system':
       page = <SystemPage active />;

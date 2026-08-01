@@ -132,4 +132,32 @@ describe('DashboardShell', () => {
     expect(replace).not.toHaveBeenCalled();
     act(() => root.unmount());
   });
+
+  it('gives logout a distinguishing class and visual separation from the primary action, without changing its exact label', async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(okResponse());
+    vi.stubGlobal('fetch', fetchMock);
+    window.history.replaceState(null, '', '/?page=cameras');
+    const host = document.createElement('div');
+    document.body.append(host);
+    const root = createRoot(host);
+    act(() => root.render(
+      <AuthGate>
+        <DashboardShell screen="cameras" onScreenChange={vi.fn()} backendStatus={{ label: '연결됨', className: '' }} onAddCamera={vi.fn()}>
+          <div>카메라 관리 본문</div>
+        </DashboardShell>
+      </AuthGate>,
+    ));
+    await settle();
+
+    const addCameraButton = Array.from(host.querySelectorAll('button')).find((button) => button.textContent === '카메라 추가');
+    const logoutButton = host.querySelector<HTMLButtonElement>('header button.logout-action');
+
+    expect(logoutButton?.textContent).toBe('로그아웃');
+    expect(logoutButton?.classList.contains('brand-action')).toBe(false);
+    expect(addCameraButton?.classList.contains('logout-action')).toBe(false);
+    // Not a bare sibling of equal visual weight — grouped separately with a divider.
+    expect(addCameraButton?.parentElement).not.toBe(logoutButton?.parentElement);
+    expect(host.querySelector('.shell-divider')).not.toBeNull();
+    act(() => root.unmount());
+  });
 });

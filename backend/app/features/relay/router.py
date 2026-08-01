@@ -327,6 +327,7 @@ def relay_heartbeat(
         payload.facility_id,
         config_version=payload.config_version,
     )
+    _clear_never_connected_on_first_heartbeat(request, payload.camera_id)
     # Backend egress uses the canonical identity (explicit backend mapping when
     # present); the backend only knows its own camera ids, not local registry ids.
     canonical_camera_id = str(binding.get("camera_id") or payload.camera_id)
@@ -554,6 +555,39 @@ def _camera_binding_from_registry(
                 "resident_id": None,
             }
     raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="unknown camera")
+
+
+def _clear_never_connected_on_first_heartbeat(request: Request, camera_id: str) -> None:
+    """Flip a registry record's never_connected off on its FIRST heartbeat.
+
+    One-way: never reverts to True once cleared. Looked up by either the
+    registry's local id or its backend_camera_id, matching payload.camera_id
+    against whichever one the worker is currently configured to send (see
+    _camera_binding_from_registry). A no-op once already False, so this stays
+    a single extra write per camera lifetime rather than one per heartbeat.
+    """
+    store = getattr(request.app.state, "camera_registry", None)
+    if not isinstance(store, CameraRegistryStore):
+        return
+    record = _find_registry_record(store, camera_id)
+    if record is None or record.get("never_connected") is not True:
+        return
+    local_id = record.get("id")
+    if isinstance(local_id, str):
+        store.update(local_id, {"never_connected": False})
+
+
+def _find_registry_record(store: CameraRegistryStore, camera_id: str) -> dict[str, object] | None:
+    snapshot = store.snapshot()
+    cameras = snapshot.get("cameras")
+    if not isinstance(cameras, list):
+        return None
+    for record in cameras:
+        if not isinstance(record, dict):
+            continue
+        if camera_id in {record.get("id"), record.get("backend_camera_id")}:
+            return record
+    return None
 
 
 def _backend_ingest_client(request: Request, *, camera_id: str) -> BackendIngestClient:

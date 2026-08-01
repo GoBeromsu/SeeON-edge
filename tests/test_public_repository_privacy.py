@@ -115,6 +115,11 @@ _SYNTHETIC_RTSP_FIXTURES = {
         "trackID=1?profile=main&token=query-secret&token=second-secret",
         "rtsp://***@[invalid-host:554/"
         "trackID=1?profile=***&token=***&token=***",
+        "rtsp://operator:secret@192.0.2.10:8554/Streaming/Channels/101?subtype=0",
+    },
+    Path("front/src/features/cameras/cameraRegistrationForm.test.ts"): {
+        "rtsp://operator:secret@192.0.2.10:8554/Streaming/Channels/101?subtype=0",
+        "rtsp://operator%20name:p%40ss%2Fword@camera.local:554/trackID=1",
     },
     Path("front/src/features/cameras/CameraCard.test.tsx"): {
         "rtsp://user:****@camera.local/stream",
@@ -127,6 +132,8 @@ _SYNTHETIC_RTSP_FIXTURES = {
         "rtsp://***:***@redacted-camera:8554/live",
         "rtsp://user:secret@local/stream",
         "rtsp://***:***@redacted-camera/stream",
+        "rtsp://admin:admin@cam.local/stream",
+        "rtsp://admin:newpass@cam.local/stream",
     },
     Path("tests/test_sources_rtsp.py"): {
         "rtsp://user:password@camera.local/live",

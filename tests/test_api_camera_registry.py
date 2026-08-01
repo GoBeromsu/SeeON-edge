@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import time
 import urllib.error
+import uuid
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Self, TypedDict
@@ -11,6 +13,7 @@ from fastapi.testclient import TestClient
 
 from backend.app.core.config import get_settings
 from backend.app.features.cameras.store import CameraRegistryStore, public_camera
+from backend.app.features.status.heartbeat_store import get_heartbeat_store
 from backend.app.lifespan import refresh_backend_config
 from backend.app.main import create_app, no_lifespan
 from backend.app.shared.backend_mapping import MappingResult
@@ -118,6 +121,10 @@ def test_camera_registry_crud_masks_rtsp_versions_and_worker_config_auth(
                 "label": "Lobby",
                 "rtsp_url": "rtsp://user:secret@camera.local:8554/live",
                 "space_id": "space-1",
+                # The fake worker probe below always reports failure; force
+                # registration so this test can still exercise the full CRUD
+                # flow (masking, versioning, delete) against a real record.
+                "force_register": True,
             },
         )
         assert created.status_code == 201
@@ -181,7 +188,9 @@ def test_camera_registry_crud_masks_rtsp_versions_and_worker_config_auth(
         deleted = client.delete(f"/api/v1/cameras/{camera['id']}", headers=AUTH)
         assert deleted.status_code == 204
         after_delete = client.get("/api/v1/cameras", headers=AUTH).json()
-        assert after_delete == {"registry_version": 3, "cameras": []}
+        # v1 create, v2 patch, v3 POST /test now persists its probe result
+        # (Task 3), v4 delete.
+        assert after_delete == {"registry_version": 4, "cameras": []}
 
     captured_body = captured[0]["body"]
     assert isinstance(captured_body, dict)
@@ -381,6 +390,9 @@ def test_example_camera_registry_seed_is_loadable_and_sanitized() -> None:
         "status": "unknown",
         "decode_backend": None,
         "created_at": "2026-01-01T00:00:00.000Z",
+        "never_connected": None,
+        "last_ok_at": None,
+        "last_probed_at": None,
     }
 
     serialized = json.dumps(snapshot, sort_keys=True).lower()
@@ -468,6 +480,10 @@ def test_patch_pending_camera_preserves_local_id_after_backend_mapping(
                 "label": "Lobby",
                 "rtsp_url": "rtsp://camera/stream",
                 "space_id": "space-1",
+                # No worker probe origin is configured in this test, so the
+                # probe fails closed; force registration to exercise the
+                # pending-mapping/PATCH flow this test is actually about.
+                "force_register": True,
             },
         )
         assert created.status_code == 201
@@ -664,6 +680,11 @@ def test_list_cameras_includes_backend_only_roster_camera(tmp_path) -> None:
             "created_at": "2026-07-10T00:00:00.000Z",
             "space_name": "101호",
             "floor_name": "1층",
+            "last_heartbeat_at": None,
+            "heartbeat_age_sec": None,
+            "never_connected": None,
+            "last_ok_at": None,
+            "last_probed_at": None,
         }
     ]
 def test_list_cameras_includes_backend_only_roster_camera_without_created_at(tmp_path) -> None:
@@ -705,6 +726,11 @@ def test_list_cameras_includes_backend_only_roster_camera_without_created_at(tmp
             "created_at": None,
             "space_name": "101호",
             "floor_name": "1층",
+            "last_heartbeat_at": None,
+            "heartbeat_age_sec": None,
+            "never_connected": None,
+            "last_ok_at": None,
+            "last_probed_at": None,
         }
     ]
 
@@ -764,6 +790,10 @@ def test_list_cameras_joins_local_transport_with_backend_roster_metadata(tmp_pat
             ),
         ),
     )
+    # GET /cameras now derives status from live heartbeat freshness (Task 1),
+    # not the frozen registry snapshot, so this join test must record one for
+    # the record's canonical id (backend_camera_id) to see "online".
+    get_heartbeat_store(app).record("backend-1", "backend-space")
 
     with TestClient(app) as client:
         response = client.get("/api/v1/cameras", headers=AUTH)
@@ -859,7 +889,10 @@ def test_space_fallback_never_steals_explicitly_mapped_roster_row(
         store.create(
             camera_id=camera_id,
             label=camera_id,
-            rtsp_url="rtsp://user:secret@local/stream",
+            # Distinct per-camera paths: this test targets space-based roster
+            # matching ambiguity, not stream dedup, so a shared rtsp_url would
+            # incorrectly trigger DuplicateCameraError during setup.
+            rtsp_url=f"rtsp://local/stream-{camera_id}",
             space_id="space-1",
             status="online",
             backend_camera_id="backend-1" if camera_id == "local-mapped" else None,
@@ -1051,3 +1084,365 @@ def test_roster_refresh_failure_preserves_last_good_and_marks_stale(
         "received_at": received_at,
         "stale": True,
     }
+
+
+def test_list_cameras_status_reflects_heartbeat_freshness(tmp_path) -> None:
+    """GET /cameras derives status from live heartbeat freshness (Task 1), not
+    the frozen registry snapshot -- covers never-seen, stale, and fresh cases
+    without a real sleep by directly stamping received_at in the past."""
+    app = create_app(lifespan=no_lifespan)
+    app.state.edge_relay_token = "relay-token"
+    store = app.state.camera_registry = CameraRegistryStore(tmp_path / "cameras.json")
+    for camera_id in ("never-seen", "stale", "fresh"):
+        store.create(
+            camera_id=camera_id,
+            label=camera_id,
+            rtsp_url=f"rtsp://local/{camera_id}",
+            space_id=None,
+            # The frozen registry status says "online" for all three; the
+            # heartbeat join must override this, never trust it.
+            status="online",
+        )
+    heartbeats = get_heartbeat_store(app)
+    now = time.time()
+    heartbeats.record("stale", "facility-1", received_at=now - 1000.0)
+    heartbeats.record("fresh", "facility-1", received_at=now)
+
+    with TestClient(app) as client:
+        response = client.get("/api/v1/cameras", headers=AUTH)
+
+    assert response.status_code == 200
+    cameras = {c["id"]: c for c in response.json()["cameras"]}
+
+    assert cameras["never-seen"]["status"] == "offline"
+    assert cameras["never-seen"]["last_heartbeat_at"] is None
+    assert cameras["never-seen"]["heartbeat_age_sec"] is None
+
+    assert cameras["stale"]["status"] == "offline"
+    assert cameras["stale"]["last_heartbeat_at"] == pytest.approx(now - 1000.0)
+    assert cameras["stale"]["heartbeat_age_sec"] > 90.0
+
+    assert cameras["fresh"]["status"] == "online"
+    assert cameras["fresh"]["last_heartbeat_at"] == pytest.approx(now)
+    assert cameras["fresh"]["heartbeat_age_sec"] < 90.0
+
+
+def test_list_cameras_status_matches_heartbeat_under_either_local_or_backend_id(
+    tmp_path,
+) -> None:
+    """Regression for the heartbeat key-mismatch bug: relay_heartbeat records
+    under whichever raw id the worker sends (local registry id OR backend
+    id -- see _camera_binding_from_registry, which accepts either), but a
+    camera can be registered locally and later backend-mapped to a distinct
+    backend_camera_id while the worker keeps heartbeating under the old local
+    id. GET /cameras must still resolve "online" by trying both ids, not
+    just the canonical one -- and must NOT fall back to matching an
+    unrelated id."""
+    now = time.time()
+
+    def _make_app() -> tuple[object, CameraRegistryStore]:
+        app = create_app(lifespan=no_lifespan)
+        app.state.edge_relay_token = "relay-token"
+        store = app.state.camera_registry = CameraRegistryStore(
+            tmp_path / f"cameras-{uuid.uuid4()}.json"
+        )
+        store.create(
+            camera_id="loc-12",
+            label="mapped-camera",
+            rtsp_url="rtsp://local/mapped-camera",
+            space_id=None,
+            status="online",
+            backend_camera_id="be-77",
+        )
+        return app, store
+
+    # Case 1: worker still heartbeats under the old local id -- must resolve
+    # online via the local-id fallback, even though backend_camera_id is the
+    # canonical id GET /cameras otherwise prefers.
+    app, _ = _make_app()
+    get_heartbeat_store(app).record("loc-12", "facility-1", received_at=now)
+    with TestClient(app) as client:
+        response = client.get("/api/v1/cameras", headers=AUTH)
+    assert response.status_code == 200
+    camera = response.json()["cameras"][0]
+    assert camera["status"] == "online"
+    assert camera["heartbeat_age_sec"] is not None
+
+    # Case 2 (mirror): worker heartbeats under the canonical backend id --
+    # must also resolve online. Fresh app so no heartbeat from case 1 leaks
+    # in and masks a real failure here.
+    app, _ = _make_app()
+    get_heartbeat_store(app).record("be-77", "facility-1", received_at=now)
+    with TestClient(app) as client:
+        response = client.get("/api/v1/cameras", headers=AUTH)
+    assert response.status_code == 200
+    camera = response.json()["cameras"][0]
+    assert camera["status"] == "online"
+    assert camera["heartbeat_age_sec"] is not None
+
+    # Case 3 (negative): a heartbeat recorded under a third, unrelated id
+    # must NOT match -- proves the dual-key lookup isn't match-anything.
+    # Fresh app so neither of the above heartbeats is present to (correctly
+    # or incorrectly) satisfy the lookup.
+    app, _ = _make_app()
+    get_heartbeat_store(app).record("unrelated-camera", "facility-1", received_at=now)
+    with TestClient(app) as client:
+        response = client.get("/api/v1/cameras", headers=AUTH)
+    assert response.status_code == 200
+    camera = response.json()["cameras"][0]
+    assert camera["status"] == "offline"
+
+
+def test_create_camera_rejects_duplicate_rtsp_url(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Same physical stream registered twice (default port vs explicit :554,
+    which normalize_stream_identity elides for rtsp://) must 409, not silently
+    create a second registry row for the same camera."""
+    monkeypatch.setenv("ML_API_WORKER_PROBE_ORIGIN", "http://worker.local:8090")
+
+    def fake_urlopen(request, timeout: float) -> FakeHTTPResponse:
+        return FakeHTTPResponse({"ok": True, "width": 1920, "height": 1080})
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    app = create_app(lifespan=no_lifespan)
+    app.state.edge_relay_token = "relay-token"
+    app.state.camera_registry = CameraRegistryStore(tmp_path / "cameras.json")
+
+    with TestClient(app) as client:
+        first = client.post(
+            "/api/v1/cameras",
+            headers=AUTH,
+            json={"label": "Lobby", "rtsp_url": "rtsp://cam.local/stream"},
+        )
+        assert first.status_code == 201
+        second = client.post(
+            "/api/v1/cameras",
+            headers=AUTH,
+            json={"label": "Lobby copy", "rtsp_url": "rtsp://cam.local:554/stream"},
+        )
+
+    assert second.status_code == 409
+    detail = second.json()["detail"]
+    assert detail["error"] == "duplicate_camera"
+    assert detail["existing_camera_id"] == first.json()["id"]
+    assert detail["existing_label"] == "Lobby"
+
+
+def test_create_camera_rejects_duplicate_ignoring_credentials(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Rotating a camera's password (e.g. default admin/admin -> a real
+    password) must not spawn a zombie duplicate registration."""
+    monkeypatch.setenv("ML_API_WORKER_PROBE_ORIGIN", "http://worker.local:8090")
+
+    def fake_urlopen(request, timeout: float) -> FakeHTTPResponse:
+        return FakeHTTPResponse({"ok": True})
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    app = create_app(lifespan=no_lifespan)
+    app.state.edge_relay_token = "relay-token"
+    app.state.camera_registry = CameraRegistryStore(tmp_path / "cameras.json")
+
+    with TestClient(app) as client:
+        first = client.post(
+            "/api/v1/cameras",
+            headers=AUTH,
+            json={"label": "Lobby", "rtsp_url": "rtsp://admin:admin@cam.local/stream"},
+        )
+        assert first.status_code == 201
+        second = client.post(
+            "/api/v1/cameras",
+            headers=AUTH,
+            json={
+                "label": "Lobby rotated creds",
+                "rtsp_url": "rtsp://admin:newpass@cam.local/stream",
+            },
+        )
+
+    assert second.status_code == 409
+    assert second.json()["detail"]["error"] == "duplicate_camera"
+
+
+def test_create_camera_allows_dahua_subtype_variants_as_distinct_streams(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Dahua encodes main-vs-sub stream selection in the query string
+    (?subtype=0 vs ?subtype=1 on the same path); these are physically
+    distinct streams and must both be allowed."""
+    monkeypatch.setenv("ML_API_WORKER_PROBE_ORIGIN", "http://worker.local:8090")
+
+    def fake_urlopen(request, timeout: float) -> FakeHTTPResponse:
+        return FakeHTTPResponse({"ok": True})
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    app = create_app(lifespan=no_lifespan)
+    app.state.edge_relay_token = "relay-token"
+    app.state.camera_registry = CameraRegistryStore(tmp_path / "cameras.json")
+
+    with TestClient(app) as client:
+        main = client.post(
+            "/api/v1/cameras",
+            headers=AUTH,
+            json={
+                "label": "Main stream",
+                "rtsp_url": "rtsp://cam.local/cam/realmonitor?channel=1&subtype=0",
+            },
+        )
+        sub = client.post(
+            "/api/v1/cameras",
+            headers=AUTH,
+            json={
+                "label": "Sub stream",
+                "rtsp_url": "rtsp://cam.local/cam/realmonitor?channel=1&subtype=1",
+            },
+        )
+
+    assert main.status_code == 201
+    assert sub.status_code == 201
+    assert main.json()["id"] != sub.json()["id"]
+
+
+def test_create_camera_without_force_register_rejects_on_probe_failure_and_persists_nothing(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ML_API_WORKER_PROBE_ORIGIN", "http://worker.local:8090")
+
+    def fake_urlopen(request, timeout: float) -> FakeHTTPResponse:
+        return FakeHTTPResponse({"ok": False, "error_class": "auth"})
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    app = create_app(lifespan=no_lifespan)
+    app.state.edge_relay_token = "relay-token"
+    store = app.state.camera_registry = CameraRegistryStore(tmp_path / "cameras.json")
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/cameras",
+            headers=AUTH,
+            json={"label": "Dead camera", "rtsp_url": "rtsp://dead.local/stream"},
+        )
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == {"error": "probe_failed", "error_class": "auth"}
+    assert store.snapshot() == {"registry_version": 0, "cameras": []}
+
+
+def test_create_camera_force_register_persists_despite_probe_failure(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ML_API_WORKER_PROBE_ORIGIN", "http://worker.local:8090")
+
+    def fake_urlopen(request, timeout: float) -> FakeHTTPResponse:
+        return FakeHTTPResponse({"ok": False, "error_class": "timeout"})
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    app = create_app(lifespan=no_lifespan)
+    app.state.edge_relay_token = "relay-token"
+    store = app.state.camera_registry = CameraRegistryStore(tmp_path / "cameras.json")
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/cameras",
+            headers=AUTH,
+            json={
+                "label": "Known offline camera",
+                "rtsp_url": "rtsp://offline.local/stream",
+                "force_register": True,
+            },
+        )
+
+    assert response.status_code == 201
+    body = response.json()
+    assert body["status"] == "offline"
+    # The probe-history fields must round-trip through the public API too,
+    # not just the internal store record (frontend Camera type reads these
+    # directly off the GET/POST /cameras response body).
+    assert body["never_connected"] is True
+    assert body["last_ok_at"] is None
+    assert body["last_probed_at"] is not None
+    record = store.get(body["id"])
+    assert record is not None
+    assert record["never_connected"] is True
+    assert record["last_ok_at"] is None
+    assert record["last_probed_at"] is not None
+
+
+def test_patch_camera_rtsp_url_rejects_duplicate(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ML_API_WORKER_PROBE_ORIGIN", "http://worker.local:8090")
+
+    def fake_urlopen(request, timeout: float) -> FakeHTTPResponse:
+        return FakeHTTPResponse({"ok": True})
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    app = create_app(lifespan=no_lifespan)
+    app.state.edge_relay_token = "relay-token"
+    store = app.state.camera_registry = CameraRegistryStore(tmp_path / "cameras.json")
+    store.create(
+        camera_id="cam-a",
+        label="A",
+        rtsp_url="rtsp://a.local/stream",
+        space_id=None,
+        status="online",
+    )
+    store.create(
+        camera_id="cam-b",
+        label="B",
+        rtsp_url="rtsp://b.local/stream",
+        space_id=None,
+        status="online",
+    )
+
+    with TestClient(app) as client:
+        response = client.patch(
+            "/api/v1/cameras/cam-b",
+            headers=AUTH,
+            json={"rtsp_url": "rtsp://a.local/stream"},
+        )
+
+    assert response.status_code == 409
+    detail = response.json()["detail"]
+    assert detail["error"] == "duplicate_camera"
+    assert detail["existing_camera_id"] == "cam-a"
+
+
+def test_test_camera_persists_probe_result(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ML_API_WORKER_PROBE_ORIGIN", "http://worker.local:8090")
+
+    def fake_urlopen(request, timeout: float) -> FakeHTTPResponse:
+        return FakeHTTPResponse({"ok": True, "width": 640, "height": 480})
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    app = create_app(lifespan=no_lifespan)
+    app.state.edge_relay_token = "relay-token"
+    store = app.state.camera_registry = CameraRegistryStore(tmp_path / "cameras.json")
+    store.create(
+        camera_id="cam-a",
+        label="A",
+        rtsp_url="rtsp://a.local/stream",
+        space_id=None,
+        status="offline",
+        never_connected=True,
+    )
+
+    with TestClient(app) as client:
+        response = client.post("/api/v1/cameras/cam-a/test", headers=AUTH)
+
+    assert response.status_code == 200
+    assert response.json() == {"ok": True, "width": 640, "height": 480}
+    record = store.get("cam-a")
+    assert record is not None
+    assert record["last_probed_at"] is not None
+    assert record["last_ok_at"] is not None
+    assert record["never_connected"] is False
+
+    # The persisted result must also surface through GET /cameras, not just
+    # the internal store record.
+    with TestClient(app) as client:
+        listed = client.get("/api/v1/cameras", headers=AUTH).json()
+    camera = listed["cameras"][0]
+    assert camera["never_connected"] is False
+    assert camera["last_ok_at"] is not None
+    assert camera["last_probed_at"] is not None

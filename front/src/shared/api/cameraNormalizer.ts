@@ -1,8 +1,11 @@
 import {
   hasNullableString,
   isNonEmptyString,
+  isNullableBoolean,
+  isNullableFiniteNumber,
   isNullableInteger,
   isRecord,
+  pickBoolean,
   pickNullableString,
   pickNumber,
   pickString,
@@ -77,6 +80,16 @@ export function normalizeCamera(value: unknown): Camera | null {
     night_start: pickNullableString(value, ['night_start', 'nightStart']),
     night_end: pickNullableString(value, ['night_end', 'nightEnd']),
     decode_backend: normalizeDecodeBackend(value),
+    // Backend freshness fields (never_connected, last_ok_at, last_probed_at) are rolling out
+    // separately; consume them defensively so the UI never crashes while they are still absent.
+    never_connected: pickBoolean(value, ['never_connected', 'neverConnected']) ?? false,
+    last_ok_at: pickNullableString(value, ['last_ok_at', 'lastOkAt']),
+    last_probed_at: pickNullableString(value, ['last_probed_at', 'lastProbedAt']),
+    // Heartbeat freshness is populated only by GET /cameras; POST/PATCH/test responses omit it
+    // or send null, which is normal, not an error — pickNumber already returns null for anything
+    // that isn't a finite number, so garbage or missing fields never crash or coerce.
+    last_heartbeat_at: pickNumber(value, ['last_heartbeat_at', 'lastHeartbeatAt']),
+    heartbeat_age_sec: pickNumber(value, ['heartbeat_age_sec', 'heartbeatAgeSec']),
   };
 }
 
@@ -111,12 +124,17 @@ function isCameraResponse(value: unknown): value is Record<string, unknown> {
     && isNonEmptyString(value.rtsp_url_masked)
     && (status === 'online' || status === 'offline' || status === 'starting' || status === 'unknown')
     && (!('mapping_pending' in value) || typeof value.mapping_pending === 'boolean')
+    && (!('never_connected' in value) || isNullableBoolean(value.never_connected))
     && hasNullableString(value, 'space_id')
     && hasNullableString(value, 'backend_camera_id')
     && hasNullableString(value, 'decode_backend')
     && hasNullableString(value, 'created_at')
     && hasNullableString(value, 'space_name')
-    && hasNullableString(value, 'floor_name');
+    && hasNullableString(value, 'floor_name')
+    && hasNullableString(value, 'last_ok_at')
+    && hasNullableString(value, 'last_probed_at')
+    && (!('last_heartbeat_at' in value) || isNullableFiniteNumber(value.last_heartbeat_at))
+    && (!('heartbeat_age_sec' in value) || isNullableFiniteNumber(value.heartbeat_age_sec));
 }
 
 export function normalizeCameraTestResult(value: unknown): CameraTestResult {

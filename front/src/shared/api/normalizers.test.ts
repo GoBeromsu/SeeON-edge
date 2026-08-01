@@ -415,6 +415,92 @@ describe('clip review truth', () => {
   });
 });
 
+describe('connection freshness fields via normalizeCamera', () => {
+  it('defaults never_connected to false and the timestamps to null when the backend has not shipped them yet', () => {
+    const camera = normalizeCamera({ id: 'cam-1', rtsp_url_masked: 'rtsp://***' });
+    expect(camera).toMatchObject({ never_connected: false, last_ok_at: null, last_probed_at: null });
+  });
+
+  it('preserves backend-provided freshness values', () => {
+    const camera = normalizeCamera({
+      id: 'cam-1',
+      rtsp_url_masked: 'rtsp://***',
+      never_connected: true,
+      last_ok_at: '2026-07-20T00:00:00Z',
+      last_probed_at: '2026-07-21T00:05:00Z',
+    });
+    expect(camera).toMatchObject({
+      never_connected: true,
+      last_ok_at: '2026-07-20T00:00:00Z',
+      last_probed_at: '2026-07-21T00:05:00Z',
+    });
+  });
+
+  it('accepts a camera registry entry that omits the freshness fields entirely', () => {
+    expect(() => normalizeCameraRegistry({ registry_version: 1, cameras: [validCameraResponse] })).not.toThrow();
+    const { cameras } = normalizeCameraRegistry({ registry_version: 1, cameras: [validCameraResponse] });
+    expect(cameras[0]).toMatchObject({ never_connected: false, last_ok_at: null, last_probed_at: null });
+  });
+
+  it('accepts a camera registry entry with explicit freshness values', () => {
+    const { cameras } = normalizeCameraRegistry({
+      registry_version: 1,
+      cameras: [{ ...validCameraResponse, never_connected: true, last_ok_at: null, last_probed_at: '2026-07-21T00:05:00Z' }],
+    });
+    expect(cameras[0]).toMatchObject({ never_connected: true, last_ok_at: null, last_probed_at: '2026-07-21T00:05:00Z' });
+  });
+
+  it.each([
+    ['malformed never_connected', { ...validCameraResponse, never_connected: 'true' }],
+    ['malformed last_ok_at', { ...validCameraResponse, last_ok_at: 1_720_000_000 }],
+    ['malformed last_probed_at', { ...validCameraResponse, last_probed_at: false }],
+  ])('rejects a registry entry with a %s instead of dropping or coercing it', (_case, camera) => {
+    expect(() => normalizeCameraRegistry({ registry_version: 1, cameras: [camera] })).toThrow('Invalid camera registry response');
+  });
+});
+
+describe('heartbeat freshness fields via normalizeCamera', () => {
+  it('defaults last_heartbeat_at and heartbeat_age_sec to null when the backend has not shipped them yet', () => {
+    const camera = normalizeCamera({ id: 'cam-1', rtsp_url_masked: 'rtsp://***' });
+    expect(camera).toMatchObject({ last_heartbeat_at: null, heartbeat_age_sec: null });
+  });
+
+  it('preserves backend-provided heartbeat values, including fractional seconds', () => {
+    const camera = normalizeCamera({
+      id: 'cam-1',
+      rtsp_url_masked: 'rtsp://***',
+      last_heartbeat_at: 1_753_000_000.5,
+      heartbeat_age_sec: 245.75,
+    });
+    expect(camera).toMatchObject({ last_heartbeat_at: 1_753_000_000.5, heartbeat_age_sec: 245.75 });
+  });
+
+  it('accepts a camera registry entry that omits the heartbeat fields entirely', () => {
+    const { cameras } = normalizeCameraRegistry({ registry_version: 1, cameras: [validCameraResponse] });
+    expect(cameras[0]).toMatchObject({ last_heartbeat_at: null, heartbeat_age_sec: null });
+  });
+
+  it('accepts a camera registry entry with explicit heartbeat values', () => {
+    const { cameras } = normalizeCameraRegistry({
+      registry_version: 1,
+      cameras: [{ ...validCameraResponse, last_heartbeat_at: 1_753_000_000, heartbeat_age_sec: 12 }],
+    });
+    expect(cameras[0]).toMatchObject({ last_heartbeat_at: 1_753_000_000, heartbeat_age_sec: 12 });
+  });
+
+  it('treats a mutation response (POST/PATCH/test) with null heartbeat fields as normal, not an error', () => {
+    expect(normalizeCameraResponse({ ...validCameraResponse, last_heartbeat_at: null, heartbeat_age_sec: null }))
+      .toMatchObject({ last_heartbeat_at: null, heartbeat_age_sec: null });
+  });
+
+  it.each([
+    ['malformed last_heartbeat_at', { ...validCameraResponse, last_heartbeat_at: '1753000000' }],
+    ['malformed heartbeat_age_sec', { ...validCameraResponse, heartbeat_age_sec: 'stale' }],
+  ])('rejects a registry entry with a %s instead of dropping or coercing it', (_case, camera) => {
+    expect(() => normalizeCameraRegistry({ registry_version: 1, cameras: [camera] })).toThrow('Invalid camera registry response');
+  });
+});
+
 describe('decode backend normalization via normalizeCamera', () => {
   it('maps a valid decode_backend value from the registry response', () => {
     const camera = normalizeCamera({ id: 'cam-1', rtsp_url: 'rtsp://camera.internal.example/stream', decode_backend: 'nvdec' });

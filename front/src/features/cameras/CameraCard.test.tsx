@@ -72,10 +72,11 @@ describe('CameraCard', () => {
     expect(host.textContent).not.toContain('Camera');
     expect(host.textContent).not.toContain('RTSP');
     expect(host.textContent).not.toContain(camera.rtsp_url_masked);
-    expect(host.querySelector('summary')?.className).toContain('min-h-11');
-    expect(host.querySelector('summary')?.className).not.toContain('flex');
-    expect(host.querySelector('details > dl')).not.toBeNull();
-    expect(host.querySelector('dl > details')).toBeNull();
+    // Technical settings must be visible without a click for an engineer audience — no disclosure widget.
+    expect(host.querySelector('details')).toBeNull();
+    expect(host.querySelector('summary')).toBeNull();
+    expect(host.textContent).toContain('기술 설정');
+    expect(host.textContent).toContain('cam-1');
     const classNames = host.innerHTML;
     expect(host.querySelector('article')?.className).toContain('rounded-2xl');
     expect(host.querySelector('article')?.className).toContain('border-border');
@@ -231,25 +232,36 @@ describe('CameraCard', () => {
     host.remove();
   });
 
-  it('tests connectivity and updates the supported decode backend', async () => {
+  it('never shows a manual connection-test button', () => {
     const host = document.createElement('div');
     const root = createRoot(host);
-    const onUpdated = vi.fn();
-    act(() => root.render(<CameraCard camera={camera} onUpdated={onUpdated} />));
+    act(() => root.render(<CameraCard camera={camera} />));
 
-    await act(async () => Array.from(host.querySelectorAll('button')).find((button) => button.textContent === '연결 테스트')?.click());
+    expect(Array.from(host.querySelectorAll('button')).some((button) => button.textContent === '연결 테스트')).toBe(false);
+    act(() => root.unmount());
+  });
+
+  it('shows a retry action only for a camera in a failed state', () => {
+    const host = document.createElement('div');
+    const root = createRoot(host);
+    act(() => root.render(<CameraCard camera={camera} />));
+    expect(Array.from(host.querySelectorAll('button')).some((button) => button.textContent === '재시도')).toBe(false);
+
+    act(() => root.render(<CameraCard camera={{ ...camera, status: 'offline' }} />));
+    expect(Array.from(host.querySelectorAll('button')).some((button) => button.textContent === '재시도')).toBe(true);
+    act(() => root.unmount());
+  });
+
+  it('retries the connection from an offline camera, reports the result, and asks the parent to refresh', async () => {
+    const host = document.createElement('div');
+    const root = createRoot(host);
+    const onRetried = vi.fn();
+    act(() => root.render(<CameraCard camera={{ ...camera, status: 'offline' }} onRetried={onRetried} />));
+
+    await act(async () => Array.from(host.querySelectorAll('button')).find((button) => button.textContent === '재시도')?.click());
     expect(testCamera).toHaveBeenCalledWith('cam-1');
-    expect(host.textContent).toContain('연결 테스트 성공 · 640×480');
-
-    const select = host.querySelector('select') as HTMLSelectElement;
-    expect(select.className).toContain('min-h-11');
-    await act(async () => {
-      const setter = Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype, 'value')?.set;
-      setter?.call(select, 'cpu');
-      select.dispatchEvent(new Event('change', { bubbles: true }));
-    });
-    expect(updateCameraDecodeBackend).toHaveBeenCalledWith('cam-1', 'cpu');
-    expect(onUpdated).toHaveBeenCalledWith(expect.objectContaining({ decode_backend: 'cpu' }), 'cam-1');
+    expect(host.textContent).toContain('재연결 성공 · 640×480');
+    expect(onRetried).toHaveBeenCalledTimes(1);
     act(() => root.unmount());
   });
 
@@ -258,16 +270,79 @@ describe('CameraCard', () => {
     ['auth', '카메라 인증에 실패했습니다. 아이디와 비밀번호를 확인하세요.'],
     ['decode', '영상 형식을 처리할 수 없습니다. 카메라 스트림 설정을 확인하세요.'],
     ['internal_trace_id=secret', '카메라 연결을 확인할 수 없습니다. 네트워크와 설정을 확인하세요.'],
-  ])('given %s connection failure, when testing, then shows a sanitized operator message', async (errorClass, expected) => {
+  ])('given %s connection failure, when retrying an offline camera, then shows a sanitized operator message', async (errorClass, expected) => {
     vi.mocked(testCamera).mockResolvedValue({ ok: false, error_class: errorClass });
     const host = document.createElement('div');
     const root = createRoot(host);
-    act(() => root.render(<CameraCard camera={camera} />));
+    act(() => root.render(<CameraCard camera={{ ...camera, status: 'offline' }} />));
 
-    await act(async () => Array.from(host.querySelectorAll('button')).find((button) => button.textContent === '연결 테스트')?.click());
+    await act(async () => Array.from(host.querySelectorAll('button')).find((button) => button.textContent === '재시도')?.click());
 
     expect(host.textContent).toContain(expected);
     expect(host.textContent).not.toContain(errorClass);
+    act(() => root.unmount());
+  });
+
+  it('distinguishes a camera that has never connected from one that dropped after connecting', () => {
+    const host = document.createElement('div');
+    const root = createRoot(host);
+    act(() => root.render(<CameraCard camera={{ ...camera, status: 'offline', never_connected: true }} />));
+    expect(host.textContent).toContain('한 번도 연결된 적 없음');
+
+    act(() => root.render(<CameraCard camera={{ ...camera, status: 'offline', never_connected: false, last_ok_at: '2026-07-20T00:00:00Z' }} />));
+    expect(host.textContent).not.toContain('한 번도 연결된 적 없음');
+    expect(host.textContent).toContain('마지막 연결');
+    act(() => root.unmount());
+  });
+
+  it('shows humanised heartbeat freshness on an offline card', () => {
+    const host = document.createElement('div');
+    const root = createRoot(host);
+    act(() => root.render(<CameraCard camera={{ ...camera, status: 'offline', heartbeat_age_sec: 245 }} />));
+
+    expect(host.textContent).toContain('마지막 신호 4분 전');
+    act(() => root.unmount());
+  });
+
+  it('shows nothing for heartbeat freshness when both fields are null, with no placeholder text', () => {
+    const host = document.createElement('div');
+    const root = createRoot(host);
+    act(() => root.render(<CameraCard camera={{ ...camera, status: 'offline', last_heartbeat_at: null, heartbeat_age_sec: null }} />));
+
+    expect(host.textContent).not.toContain('마지막 신호');
+    expect(host.textContent).not.toContain('N/A');
+    act(() => root.unmount());
+  });
+
+  it('does not show heartbeat freshness on an online card to avoid noise on the expected-healthy state', () => {
+    const host = document.createElement('div');
+    const root = createRoot(host);
+    act(() => root.render(<CameraCard camera={{ ...camera, status: 'online', heartbeat_age_sec: 3 }} />));
+
+    expect(host.textContent).not.toContain('마지막 신호');
+    act(() => root.unmount());
+  });
+
+  it('keeps the never_connected treatment instead of a numeric heartbeat age, even if the backend sent one', () => {
+    const host = document.createElement('div');
+    const root = createRoot(host);
+    act(() => root.render(<CameraCard camera={{ ...camera, status: 'offline', never_connected: true, heartbeat_age_sec: 0 }} />));
+
+    expect(host.textContent).toContain('한 번도 연결된 적 없음');
+    expect(host.textContent).not.toContain('마지막 신호');
+    act(() => root.unmount());
+  });
+
+  it('links to the camera-scoped clips view only when a handler is supplied', () => {
+    const host = document.createElement('div');
+    const root = createRoot(host);
+    act(() => root.render(<CameraCard camera={camera} />));
+    expect(Array.from(host.querySelectorAll('button')).some((button) => button.textContent === '클립 보기')).toBe(false);
+
+    const onViewClips = vi.fn();
+    act(() => root.render(<CameraCard camera={camera} onViewClips={onViewClips} />));
+    act(() => Array.from(host.querySelectorAll('button')).find((button) => button.textContent === '클립 보기')?.click());
+    expect(onViewClips).toHaveBeenCalledWith(camera);
     act(() => root.unmount());
   });
 });

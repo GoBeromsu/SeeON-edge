@@ -16,11 +16,14 @@ from pydantic import BaseModel, ConfigDict, Field
 from backend.app.core.config import get_settings
 from backend.app.features.cameras.store import (
     CameraRegistryStore,
+    DuplicateCameraError,
     ProbeErrorClass,
     ProbeResult,
     public_camera,
     status_from_probe,
+    utc_now_iso,
 )
+from backend.app.features.status.heartbeat_store import ONLINE, get_heartbeat_store
 from backend.app.lifespan import API_EDGE_RELAY_TOKEN_ENV, API_FACILITY_ID_ENV
 from backend.app.shared.backend_mapping import (
     BackendCameraMapper,
@@ -49,6 +52,16 @@ class CameraResponse(BaseModel):
     created_at: str | None = None
     space_name: str | None = None
     floor_name: str | None = None
+    # Live heartbeat freshness (see _heartbeat_camera_fields); only populated
+    # by GET /cameras, which is the only route that joins heartbeat liveness.
+    last_heartbeat_at: float | None = None
+    heartbeat_age_sec: float | None = None
+    # Probe-history fields persisted on the registry record (see
+    # CameraRegistryStore.create/update); None for backend-only roster
+    # cameras that have no local registry record at all.
+    never_connected: bool | None = None
+    last_ok_at: str | None = None
+    last_probed_at: str | None = None
 
 
 class ListCamerasResponse(BaseModel):
@@ -65,6 +78,10 @@ class CreateCameraRequest(BaseModel):
     rtsp_url: str = Field(min_length=1)
     space_id: str | None = None
     decode_backend: str | None = None
+    # Default False: registration probes the stream first and writes nothing
+    # on failure (see create_camera). True bypasses that gate for cameras
+    # that are known offline but should still be registered.
+    force_register: bool = False
 
 
 class UpdateCameraRequest(BaseModel):
@@ -113,9 +130,11 @@ def list_cameras(
     authorization: Annotated[str | None, Header(alias="Authorization")] = None,
 ) -> dict[str, object]:
     _authorize(request, relay_token, authorization)
+    heartbeats = get_heartbeat_store(request.app).snapshot()
     return _public_snapshot(
         _store(request.app).snapshot(),
         getattr(request.app.state, "pulled_config", None),
+        heartbeats,
     )
 
 
@@ -129,6 +148,16 @@ def create_camera(
     _authorize(request, relay_token, authorization)
     decode_backend = _normalize_decode_backend(payload.decode_backend)
     probe = _probe_rtsp_url(request, payload.rtsp_url)
+    if not probe.ok and not payload.force_register:
+        # Registration gating: a dead camera is not persisted unless the
+        # caller explicitly opts in via force_register. Nothing is written.
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail={
+                "error": "probe_failed",
+                "error_class": probe.error_class or "decode",
+            },
+        )
     provisional_id = str(uuid.uuid4())
     mapping = _map_backend(
         request.app,
@@ -137,16 +166,23 @@ def create_camera(
         space_id=payload.space_id,
     )
     camera_id = mapping.backend_camera_id or provisional_id
-    record = _store(request.app).create(
-        camera_id=camera_id,
-        label=payload.label,
-        rtsp_url=payload.rtsp_url,
-        space_id=payload.space_id,
-        status=status_from_probe(probe),
-        backend_camera_id=mapping.backend_camera_id,
-        mapping_pending=mapping.pending,
-        decode_backend=decode_backend,
-    )
+    now = utc_now_iso()
+    try:
+        record = _store(request.app).create(
+            camera_id=camera_id,
+            label=payload.label,
+            rtsp_url=payload.rtsp_url,
+            space_id=payload.space_id,
+            status=status_from_probe(probe),
+            backend_camera_id=mapping.backend_camera_id,
+            mapping_pending=mapping.pending,
+            decode_backend=decode_backend,
+            last_probed_at=now,
+            last_ok_at=now if probe.ok else None,
+            never_connected=not probe.ok,
+        )
+    except DuplicateCameraError as exc:
+        raise _duplicate_camera_error(exc) from exc
     return public_camera(record)
 
 
@@ -166,6 +202,12 @@ def test_camera(
     if record is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="camera not found")
     probe = _probe_rtsp_url(request, str(record.get("rtsp_url", "")))
+    now = utc_now_iso()
+    updates: dict[str, object] = {"last_probed_at": now}
+    if probe.ok:
+        updates["last_ok_at"] = now
+        updates["never_connected"] = False
+    _store(request.app).update(camera_id, updates)
     return _probe_response(probe)
 
 
@@ -190,8 +232,14 @@ def update_camera(
         updates["label"] = payload.label
         next_label = payload.label
     if "rtsp_url" in payload.model_fields_set and payload.rtsp_url is not None:
+        probe = _probe_rtsp_url(request, payload.rtsp_url)
         updates["rtsp_url"] = payload.rtsp_url
-        updates["status"] = status_from_probe(_probe_rtsp_url(request, payload.rtsp_url))
+        updates["status"] = status_from_probe(probe)
+        now = utc_now_iso()
+        updates["last_probed_at"] = now
+        if probe.ok:
+            updates["last_ok_at"] = now
+            updates["never_connected"] = False
     if "space_id" in payload.model_fields_set:
         updates["space_id"] = payload.space_id
         next_space_id = payload.space_id
@@ -211,10 +259,25 @@ def update_camera(
             updates["backend_camera_id"] = None
         updates["mapping_pending"] = mapping.pending
 
-    updated = _store(request.app).update(camera_id, updates)
+    try:
+        updated = _store(request.app).update(camera_id, updates)
+    except DuplicateCameraError as exc:
+        raise _duplicate_camera_error(exc) from exc
     if updated is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="camera not found")
     return public_camera(updated)
+
+
+def _duplicate_camera_error(exc: DuplicateCameraError) -> HTTPException:
+    existing = exc.existing_record
+    return HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail={
+            "error": "duplicate_camera",
+            "existing_camera_id": existing.get("id"),
+            "existing_label": existing.get("label"),
+        },
+    )
 
 
 @router.delete("/{camera_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -347,7 +410,7 @@ def retry_pending_backend_mappings(app: FastAPI) -> int:
 
 
 def _public_snapshot(
-    snapshot: dict[str, object], pulled: object
+    snapshot: dict[str, object], pulled: object, heartbeats: object = None
 ) -> dict[str, object]:
     records = _snapshot_camera_records(snapshot)
     roster = (
@@ -402,6 +465,29 @@ def _public_snapshot(
     cameras: list[dict[str, object]] = []
     for index, record in enumerate(records):
         camera = public_camera(record)
+        # Derive live status from heartbeat freshness instead of the
+        # persisted registry snapshot, which is written once at
+        # registration/probe time and never reflects a camera going offline
+        # afterward. Same canonical id used everywhere else in this function.
+        canonical_id = record.get("backend_camera_id") or record.get("id")
+        local_id = record.get("id")
+        # The worker may still be configured to heartbeat under the local
+        # registry id even after a backend mapping assigns a distinct
+        # backend_camera_id (relay_heartbeat records under whatever raw id
+        # the worker sends -- see _camera_binding_from_registry, which
+        # accepts either). Try the canonical id first, then the local id, so
+        # a real, freshly-heartbeating camera never reads as offline purely
+        # because of which id happened to be recorded under.
+        candidate_ids: tuple[str, ...] = tuple(
+            dict.fromkeys(
+                candidate
+                for candidate in (canonical_id, local_id)
+                if isinstance(candidate, str)
+            )
+        )
+        camera["status"], camera["last_heartbeat_at"], camera["heartbeat_age_sec"] = (
+            _heartbeat_camera_fields(heartbeats, candidate_ids)
+        )
         backend_id = explicit_backend_by_record_index.get(
             index, fallback_backend_by_record_index.get(index)
         )
@@ -448,6 +534,51 @@ def _public_snapshot(
         "registry_version": snapshot["registry_version"],
         "cameras": cameras,
     }
+
+
+def _heartbeat_camera_fields(
+    heartbeats: object, candidate_ids: tuple[str, ...]
+) -> tuple[Literal["online", "offline"], float | None, float | None]:
+    """Map a HeartbeatStore.snapshot() entry to (status, last_heartbeat_at,
+    heartbeat_age_sec) for the public GET /cameras response.
+
+    Tries each id in ``candidate_ids`` in order (canonical id, then local
+    registry id) and uses the first entry found: relay_heartbeat records
+    under whichever raw id the worker sends, which may be either one (see
+    _camera_binding_from_registry), independent of which id GET /cameras
+    otherwise treats as canonical.
+
+    Fail-closed: no candidate ids, no matching entry for any of them, a
+    missing snapshot, or any heartbeat state other than ONLINE (i.e. STALE or
+    NEVER_SEEN) resolves to "offline" -- never "online" on uncertainty.
+    last_heartbeat_at/age_sec are still surfaced when known (even while
+    offline) so the UI can render a "last seen Ns ago" style text for a stale
+    camera.
+    """
+    if not candidate_ids or not isinstance(heartbeats, dict):
+        return "offline", None, None
+    cameras = heartbeats.get("cameras")
+    if not isinstance(cameras, dict):
+        return "offline", None, None
+    entry: object = None
+    for candidate_id in candidate_ids:
+        entry = cameras.get(candidate_id)
+        if isinstance(entry, dict):
+            break
+    else:
+        entry = None
+    if not isinstance(entry, dict):
+        return "offline", None, None
+    live_status: Literal["online", "offline"] = (
+        "online" if entry.get("status") == ONLINE else "offline"
+    )
+    last_heartbeat_at = entry.get("last_heartbeat_at")
+    age_sec = entry.get("age_sec")
+    return (
+        live_status,
+        last_heartbeat_at if isinstance(last_heartbeat_at, (int, float)) else None,
+        age_sec if isinstance(age_sec, (int, float)) else None,
+    )
 
 
 def _snapshot_camera_records(snapshot: dict[str, object]) -> list[dict[str, object]]:
