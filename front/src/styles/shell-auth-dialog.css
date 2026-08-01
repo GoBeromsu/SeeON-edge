@@ -186,42 +186,54 @@
   min-height: 100vh;
   display: grid;
   place-items: center;
-  padding: 16px;
+  padding: 24px 16px;
   background: var(--c-bg);
 }
 
+/* Quiet single-column gate: border-first, stable footprint across states. */
 .auth-card {
-  width: min(760px, 100%);
-  overflow: hidden;
+  width: min(420px, 100%);
+  min-height: 440px;
   display: grid;
+  grid-template-rows: auto 1fr;
+  gap: 24px;
   border: 1px solid var(--c-border);
   border-radius: 16px;
   background: var(--c-surface);
+  padding: 32px 28px;
 }
 
-.auth-brand-panel,
-.auth-card form,
-.auth-config {
-  padding: 32px 24px;
+.auth-card-header {
+  display: flex;
+  justify-content: flex-start;
 }
 
-.auth-brand-panel {
-  background: var(--c-media);
-  color: var(--c-media-ink);
-}
-
-.auth-brand-panel p,
-.auth-brand-panel .sa-brand small {
-  color: var(--c-media-text);
-}
-
-.auth-config p {
-  color: var(--c-ink-soft);
+.auth-card-body {
+  display: grid;
+  align-content: start;
+  gap: 16px;
+  min-height: 0;
 }
 
 .auth-card form {
   display: grid;
+  align-content: start;
   gap: 16px;
+}
+
+.auth-status {
+  margin: 0;
+  color: var(--c-ink-soft);
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.auth-card h1 {
+  margin: 0;
+  color: var(--c-ink);
+  font-size: 20px;
+  font-weight: 700;
+  line-height: 1.3;
 }
 
 .auth-card label {
@@ -239,16 +251,53 @@
   background: var(--c-surface);
   color: var(--c-ink);
   padding: 0 12px;
+  font-size: 16px;
+}
+
+.auth-card input:focus {
+  outline: 2px solid var(--c-brand);
+  outline-offset: 2px;
+}
+
+.auth-card input:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.auth-card .brand-action {
+  width: 100%;
+  min-height: 44px;
+  cursor: pointer;
+}
+
+.auth-card .brand-action:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
 }
 
 .auth-error {
   margin: 0;
+  min-height: 1.45em;
   color: var(--c-danger);
+  font-size: 14px;
   font-weight: 700;
+  line-height: 1.45;
 }
 
-.auth-config {
-  text-align: center;
+.auth-error-slot {
+  visibility: hidden;
+}
+
+.auth-error-shell {
+  position: fixed;
+  z-index: 60;
+  right: 16px;
+  bottom: 16px;
+  max-width: min(360px, calc(100vw - 32px));
+  padding: 12px 14px;
+  border: 1px solid var(--c-border);
+  border-radius: 8px;
+  background: var(--c-surface);
 }
 
 .dialog-backdrop {

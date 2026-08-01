@@ -437,7 +437,7 @@ describe('Dashboard integration', () => {
     await clickLogout(host);
     expect(logoutDashboard).toHaveBeenCalledTimes(1);
     expect(window.location.search).toBe('?page=operations&wallPage=1');
-    expect(host.textContent).toContain('관리자 로그인');
+    expect(host.querySelector('#login-title')?.textContent).toBe('로그인');
     await submitLogin(host);
     expect(host.querySelector('main h1')?.textContent).toBe('관제');
     act(() => root.unmount());
@@ -452,7 +452,7 @@ describe('Dashboard integration', () => {
     expect(logoutDashboard).toHaveBeenCalledTimes(1);
     expect(host.querySelector('main h1')?.textContent).toBe('시스템');
     expect(host.textContent).toContain('로그아웃하지 못했습니다. 다시 시도해 주세요.');
-    expect(host.textContent).not.toContain('관리자 로그인');
+    expect(host.querySelector('#login-title')).toBeNull();
     expect(window.location.search).toBe('?page=system');
     act(() => root.unmount());
   });

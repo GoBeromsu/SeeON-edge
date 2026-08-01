@@ -85,8 +85,11 @@ Camera heartbeat (`online|stale|never_seen`), snapshot lifecycle, focused-feed l
 
 ### Authentication and shell states
 
-- Configured builds show the existing local username/password gate without displaying or prefilling credentials and without exposing a token field or token value. Invalid credentials make no dashboard request; valid credentials copy the configured relay token into memory only.
+- Configured builds show a quiet single-column login card (≈420px, min-height locked) on the neutral shell background: brand mark, heading `로그인`, username/password fields, and one primary submit. Border-first (no card shadow). No marketing copy, job blurb, or dark brand panel.
+- After the form mounts, focus moves to the username field. Submit disables controls and shows `확인 중…`. Error copy reserves a fixed line so the card does not jump.
+- Do not display or prefill credentials and do not expose a token field or token value. Invalid credentials make no dashboard request; valid credentials establish the server session cookie only.
 - If the relay token is absent, replace the form with a non-interactive `서비스 설정 필요` state and make no dashboard request.
+- Checking and connection-failure states reuse the same card shell and footprint so the layout does not jump.
 - Logout is a shell action. It resets authenticated page state through URL replacement, never by adding a history entry.
 
 ## Native URL query contract
