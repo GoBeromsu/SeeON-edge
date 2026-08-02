@@ -31,7 +31,16 @@ class WorkerRuntimeConfig(BaseModel):
 class FallModelConfig(BaseModel):
     model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True, extra="forbid")
 
-    type: Literal["lstm"]
+    # Issue #65: the fall-model family is config/metadata-driven, not code-pinned.
+    # A brand-new AI model family (a different architecture, not a same-family
+    # weights version-up) is added by implementing FallModelProtocol and
+    # registering a factory in
+    # ``worker.adapters.model.fall_family_registry.DEFAULT_FALL_MODEL_FAMILY_REGISTRY``
+    # under the same string used here -- no edits to this Literal, and no edits
+    # to ``WorkerRuntime._create_fall_model``. An unregistered ``type`` value
+    # refuses to boot (fail-closed, ADR-0002); this field only rejects empty
+    # strings, the registry decides which values are actually valid.
+    type: str = Field(min_length=1)
     framework: Literal["pytorch"]
     mode: Literal["sequence"]
     artifact_dir: Path

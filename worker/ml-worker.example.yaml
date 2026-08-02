@@ -8,11 +8,19 @@ runtime:
   read_timeout_ms: 5000
 models:
   fall:
+    # type selects the fall-model family via a registry keyed on this string
+    # (worker.adapters.model.fall_family_registry), not a code-pinned class in
+    # worker.py: a brand-new family (a different architecture, not a same-
+    # family weights version-up) is added by implementing FallModelProtocol
+    # and registering a factory under a new type value here -- an
+    # unregistered value refuses to boot rather than silently using lstm.
     type: lstm
     framework: pytorch
     mode: sequence
     artifact_dir: ./models/fall/lstm
     weights: model.pt
+    # architecture is the artifact's network-definition file (e.g. arch.json
+    # for the lstm family), unrelated to the type/family selector above.
     architecture: arch.json
     metadata: metadata.yaml
     window: 30

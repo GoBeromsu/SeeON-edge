@@ -15,6 +15,18 @@ even reaches the serving client; (2) the unit-level configured path, proving
 config declares; (3) the full ``WorkerRuntime.run()`` integration path,
 proving the refusal surfaces as ``SystemExit`` with the refuse-to-start code
 and activates zero cameras.
+
+Issue #65 moved the actual family dispatch behind
+``worker.adapters.model.fall_family_registry.DEFAULT_FALL_MODEL_FAMILY_REGISTRY``
+(keyed by ``FallModelConfig.type``), so ``worker.runtime.worker`` no longer
+imports ``LstmFallRunner`` directly -- test (2) below now patches
+``LstmFallRunner.from_artifact_dir`` on the class itself (imported from its
+defining module, ``worker.adapters.model.torch_lstm_fall``), since the call
+now happens inside the registry's "lstm" factory rather than in
+``_create_fall_model``. The registry's own plug-in and
+unknown-type-refusal contracts are covered separately in
+``tests/test_fall_model_family_registry.py``; this file's scope stays #43's
+none-config refusal plus the unchanged configured-LSTM behavior.
 """
 
 from __future__ import annotations
@@ -25,8 +37,8 @@ from typing import Literal, final
 
 import pytest
 
-import worker.runtime.worker as worker_module
 from contracts.runner import Image, RunnerResult
+from worker.adapters.model.torch_lstm_fall import LstmFallRunner
 from worker.runtime import bootstrap
 from worker.runtime.config import WorkerConfig
 from worker.runtime.lease import GpuLease
@@ -164,7 +176,7 @@ def test_create_fall_model_uses_the_configured_lstm_artifact(
         )
         return sentinel
 
-    monkeypatch.setattr(worker_module.LstmFallRunner, "from_artifact_dir", fake_from_artifact_dir)
+    monkeypatch.setattr(LstmFallRunner, "from_artifact_dir", fake_from_artifact_dir)
     runtime = _runtime(config, _ForbiddenServingClient(), tmp_path)
 
     model = runtime._create_fall_model("cuda")  # noqa: SLF001

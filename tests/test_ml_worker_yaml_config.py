@@ -240,14 +240,22 @@ def test_ml_worker_yaml_rejects_invalid_night_window_timezone(tmp_path: Path) ->
         load_worker_config(path)
 
 
-def test_ml_worker_yaml_rejects_non_lstm_fall_model(tmp_path: Path) -> None:
+def test_ml_worker_yaml_accepts_any_non_empty_fall_model_type_string(tmp_path: Path) -> None:
+    """Issue #65: ``FallModelConfig.type`` opened from ``Literal["lstm"]`` to
+    an open, non-empty string, so YAML parsing alone no longer rejects a
+    non-"lstm" family name -- that decision moved to the fall-model family
+    registry at boot (fail-closed for an *unregistered* family; see
+    ``tests/test_fall_model_family_registry.py``), not to config parsing.
+    """
     path = _valid_yaml(tmp_path / "ml-worker.yaml")
     payload = yaml.safe_load(path.read_text(encoding="utf-8"))
     payload["models"]["fall"]["type"] = "random-forest"
     path.write_text(yaml.safe_dump(payload), encoding="utf-8")
 
-    with pytest.raises(WorkerConfigError, match="models.fall.type"):
-        load_worker_config(path)
+    config = load_worker_config(path)
+
+    assert config.models.fall is not None
+    assert config.models.fall.type == "random-forest"
 
 def test_ml_worker_yaml_without_clip_section_disables_clip_recording(
     tmp_path: Path,
