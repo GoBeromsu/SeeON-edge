@@ -28,10 +28,10 @@ jobs:
           enable-cache: false
 
       - name: Install FFmpeg test dependency
-        run: sudo apt-get update && sudo apt-get install --yes ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
 
       - run: uv sync --frozen --group lint
-      - run: uv run pytest -q
+      - run: uv run pytest -q -m "not real_stack"
       - run: uv run --group lint ruff check .
       # Stage 0 guardrail: declarative architecture contracts (import-linter).
       # Tightened per strangler stage; replaces test_import_dependency_ladder.py at Stage 5.

@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import logging
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Protocol, assert_never, final
+from typing import Final, Protocol, assert_never, final
 
 from worker.adapters.encode.adapter_errors import EncoderPolicyError
 from worker.pipeline.output.evidence.clip_identity import ClipReservation
@@ -33,6 +34,8 @@ from worker.pipeline.output.evidence.evidence_outbox_types import (
     EvidenceReasonCode,
 )
 from worker.types import BusinessEvent, FramePacket
+
+LOGGER: Final = logging.getLogger(__name__)
 
 
 class RecordingCoordinator(Protocol):
@@ -216,6 +219,14 @@ class ClipActor:
             OSError,
         ):
             self._stats.failed_writes += 1
+            LOGGER.warning(
+                "clip finalize failed",
+                extra={
+                    "camera_id": camera_id,
+                    "clip_id": str(active.reservation.clip_id),
+                },
+                exc_info=True,
+            )
             if self._dependencies.cancel is not None:
                 self._dependencies.cancel(active.reservation)
         finally:
@@ -231,13 +242,24 @@ class ClipActor:
         active: ActiveClip,
         duration_s: float,
     ) -> ClipPublicationMetadata:
+        # `active.started_at` is a wall-clock anchor taken when the event
+        # arrived, but `duration_s` is derived from source/stream time
+        # (segment or frame timestamps), not wall-clock elapsed time. When
+        # frames are ingested faster than real time (bursty catch-up,
+        # non-realtime test/replay sources), `started_at + duration_s` can
+        # land after `finalized_at`, which the manifest's `clip_start_at <=
+        # clip_end_at <= finalized_at` contract forbids. Anchor the window
+        # to the immutable `finalized_at` instead and derive both ends from
+        # it, so the invariant holds unconditionally.
         finalized_at = datetime.now(UTC)
+        clip_end_at = min(active.started_at + timedelta(seconds=duration_s), finalized_at)
+        clip_start_at = clip_end_at - timedelta(seconds=duration_s)
         return ClipPublicationMetadata(
             camera_id=active.reservation.camera_id,
             event_refs=tuple(EdgeEventId(value) for value in active.event_refs),
             event_type=active.event_type,
-            clip_start_at=active.started_at,
-            clip_end_at=active.started_at + timedelta(seconds=duration_s),
+            clip_start_at=clip_start_at,
+            clip_end_at=clip_end_at,
             finalized_at=finalized_at,
             started_at=active.started_at,
             duration_s=duration_s,

@@ -231,6 +231,45 @@ def test_attach_only_event_after_frame_finalization_cannot_mutate_clip(tmp_path:
     assert stats.finalized_clips == 1
 
 
+def test_ready_clip_metadata_timestamps_stay_ordered_when_finalize_outruns_stream_time(
+    tmp_path: Path,
+) -> None:
+    """Regression for the Linux-CI ``ReadyClipManifest`` "clip timestamps are
+    not ordered" failure.
+
+    ``duration_s`` is derived from source/stream time (segment end minus
+    start, see ``worker/adapters/encode/clip_finalizer.py``'s
+    ``FFmpegConcatFinalizer.finalize``), not from wall-clock elapsed time.
+    ``clip_actor.ClipActor._metadata`` used to compute
+    ``clip_end_at = started_at + duration_s`` from that stream-time
+    duration while ``finalized_at`` is real wall-clock ``datetime.now(UTC)``.
+    When frames are admitted far faster than real time -- as this
+    synchronous test does, and as can happen with non-realtime or
+    backlog-catch-up ingestion -- the wall-clock gap between the event and
+    finalize is much smaller than the nominal stream-time duration, so
+    ``clip_end_at`` landed after ``finalized_at``, violating
+    ``ReadyClipManifest``'s ``clip_start_at <= clip_end_at <= finalized_at``
+    invariant (``worker/pipeline/output/evidence/manifest_models.py``'s
+    ``_ordered_timestamps`` validator) and making
+    ``ClipActor._finalize`` swallow a ``pydantic.ValidationError`` as a
+    failed write. This exercises only ``ClipActor`` and fake collaborators
+    -- no ffprobe, no ``/proc``, no mediamtx -- so it is deterministic on
+    every OS.
+    """
+    reservation = _reservation(tmp_path)
+    stream_time_duration_s = 1_000.0
+    artifact = ClipArtifact(
+        reservation.staging_dir / "clip.mp4", 1, 2, stream_time_duration_s
+    )
+    actor, _, _, publisher, _ = _actor(tmp_path, ClipReady("clip-1", artifact))
+
+    actor.handle_event(_event_message(reservation, "event-1"))
+    actor.flush()
+
+    metadata = publisher.ready[0][2]
+    assert metadata.clip_start_at <= metadata.clip_end_at <= metadata.finalized_at
+
+
 def test_expiry_forces_finalize_when_stream_time_stalls(
     tmp_path: Path,
     monkeypatch,
