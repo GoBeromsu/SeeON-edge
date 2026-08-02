@@ -521,7 +521,16 @@ def test_clip_recorder_fsyncs_media_and_manifest_before_staging_cleanup(
     assert clip_id is not None
     clips_dir_fsync = events.index(("fsync", "clips", ""))
     media_replace = events.index(("replace", "clip.mp4", "clip.mp4"))
-    media_fsync = events.index(("fsync", "clip.mp4", ""))
+    # The staged artifact and the final destination are both named
+    # "clip.mp4" (the real FFmpegConcatFinalizer always writes "clip.mp4"),
+    # so there are two "clip.mp4" fsync events: a durability fsync of the
+    # staged copy *before* the rename (matching
+    # tests/test_worker_clip_publication.py::
+    # test_ready_publication_fsyncs_before_renames_and_staging_cleanup, which
+    # pins that same pre-rename fsync using a distinct staged basename) and
+    # the one this assertion cares about, of the destination *after* the
+    # rename. Scope the lookup past ``media_replace`` to find the latter.
+    media_fsync = events.index(("fsync", "clip.mp4", ""), media_replace)
     first_dir_fsync = events.index(("fsync", clip_id, ""), media_fsync)
     manifest_replace = events.index(("replace", "manifest.json.tmp", "manifest.json"))
     manifest_fsync = events.index(("fsync", "manifest.json", ""))

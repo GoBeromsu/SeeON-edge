@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import StrEnum
 from pathlib import Path
 from typing import Protocol
@@ -55,6 +55,36 @@ class ClipWindow:
             event_time_sec - self.pre_event_seconds,
             event_time_sec + self.post_event_seconds,
         )
+
+
+def _windowed_duration_s(
+    segments: Sequence[Segment],
+    start_time_sec: float,
+    end_time_sec: float,
+) -> float:
+    """Sum each selected segment's overlap with the requested clip window.
+
+    Segments are ffmpeg's own coarse-grained encode units (their boundaries
+    depend on encoder startup timing and keyframe placement, not the
+    pre/post-event window), so `select_segments` routinely pulls in
+    boundary segments that only partially overlap `[start_time_sec,
+    end_time_sec]`. `SegmentClipFinalizer.finalize` reports the raw sum of
+    those segments' full durations as `ClipArtifact.duration_s`, which
+    overstates the clip by however much the boundary segments extend past
+    the requested window (observed as almost a full extra segment on each
+    edge). Clip each segment's contribution to its overlap with the window
+    instead, so the reported duration tracks what was actually requested --
+    matching how the `ClipUnavailable` path already derives its duration
+    from the requested window rather than raw segment bookkeeping.
+    """
+    return sum(
+        max(
+            0.0,
+            min(segment.end_time_sec, end_time_sec)
+            - max(segment.start_time_sec, start_time_sec),
+        )
+        for segment in segments
+    )
 
 
 class SegmentedEncoderSession(Protocol):
@@ -192,6 +222,10 @@ class ClipRecordingCoordinator:
             artifact = finalizer.finalize(segments, event)
         except (ClipRemuxError, CrossGenerationSegmentError):
             return ClipUnavailable(clip_id, ClipReasonCode.REMUX_FAILED)
+        artifact = replace(
+            artifact,
+            duration_s=_windowed_duration_s(segments, start_time_sec, end_time_sec),
+        )
         return ClipReady(clip_id, artifact)
 
     def seal(self, camera_id: str) -> bool:
