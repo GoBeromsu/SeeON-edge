@@ -63,9 +63,18 @@ FALL_FACILITY_ID = "facility-e2e-fall"
 DAY_CAMERA_ID = "camera-e2e-day"
 DAY_FACILITY_ID = "facility-e2e-day"
 
+# Real-stack tests: require `mediamtx` (+ ffmpeg) on PATH. Deselected in CI via
+# `-m "not real_stack"` (no external-binary fetch step is added there -- see
+# tests/test_public_repository_privacy.py); run locally per tests/AGENTS.md.
+pytestmark = pytest.mark.real_stack
+
 
 @pytest.fixture(scope="module")
 def mediamtx() -> Iterator[MediaMtxProcess]:
+    if shutil.which("mediamtx") is None:
+        pytest.skip(
+            "mediamtx not on PATH; real-stack E2E runs locally only -- see tests/AGENTS.md"
+        )
     process = MediaMtxProcess(
         rtsp_port=free_tcp_port(), path_names=("night", "fall", "day", "nominal")
     )
