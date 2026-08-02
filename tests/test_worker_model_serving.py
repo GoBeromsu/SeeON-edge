@@ -29,9 +29,13 @@ class _Runner:
 def test_default_registry_registers_the_production_task_set() -> None:
     registry = default_registry()
 
-    assert registry.tasks() == ("bed", "fall", "person", "pose")
+    # "fall" is deliberately absent: it has no registry-backed fallback (see
+    # WorkerRuntime._create_fall_model, which fails closed instead).
+    assert registry.tasks() == ("bed", "person", "pose")
     for task in registry.tasks():
         assert callable(registry.get_factory(task))
+    with pytest.raises(UnknownModelTaskError):
+        registry.get_factory("fall")
 
 
 def test_model_registry_registers_and_creates_with_factory_options() -> None:

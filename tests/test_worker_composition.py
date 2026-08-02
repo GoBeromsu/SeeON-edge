@@ -165,6 +165,21 @@ def _stub_heartbeat_transport(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(worker_module, "bounded_request", request)
 
 
+@pytest.fixture(autouse=True)
+def _fall_model_via_serving_client(monkeypatch: pytest.MonkeyPatch) -> None:
+    """These composition tests predate explicit fall-model configuration and
+    assert the fall runner comes from the injected ``_FakeServingClient``
+    (e.g. ``serving.created`` below), not a real LSTM artifact on disk.
+    ``_create_fall_model`` no longer falls back to the serving client in
+    production (fail-closed boot, see ``WorkerRuntime._create_fall_model``),
+    so pin the old behavior here, scoped to this test module only."""
+
+    def _fall_via_serving(self: WorkerRuntime, _device: str) -> object:
+        return self._serving.create("fall")  # noqa: SLF001
+
+    monkeypatch.setattr(WorkerRuntime, "_create_fall_model", _fall_via_serving)
+
+
 def test_two_cameras_isolate_mutable_state_and_share_yolo_extractors(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

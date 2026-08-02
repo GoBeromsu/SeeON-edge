@@ -21,12 +21,15 @@ file adds.
 
 Artifact handling: ``worker/runtime/worker.py._create_fall_model`` only
 loads real LSTM weights from disk when ``config.models.fall`` is explicitly
-set (``LstmFallRunner.from_artifact_dir(...)``); when it is left unset (as
-in every existing composition test, e.g. ``test_worker_composition.py``'s
-``_config()``), it instead calls ``self._serving.create("fall")`` -- the
-same DI seam ``compose_yolo_extractors`` uses for pose/person/bed -- and
-uses whatever the injected serving client returns. Real LSTM weight loading
-is therefore avoidable entirely: this file drives a full, valid
+set (``LstmFallRunner.from_artifact_dir(...)``); when it is left unset it now
+refuses to boot (fail-closed: no implicit fallback model). This composition
+test predates that change and still wants to exercise real decider wiring
+without a real LSTM artifact on disk, so the autouse
+``_fall_model_via_serving_client`` fixture below monkeypatches
+``_create_fall_model`` back to ``self._serving.create("fall")`` -- the same
+DI seam ``compose_yolo_extractors`` uses for pose/person/bed -- scoped to
+this test module only. Real LSTM weight loading is therefore avoidable
+entirely: this file drives a full, valid
 ``WorkerConfig`` (``domains.enabled = ["fall", "bed_exit"]``, one camera)
 through the real ``WorkerRuntime.run()`` -> ``_build_decider`` path with a
 ``_FakeServingClient`` (same pattern as ``test_worker_composition.py``),
@@ -192,6 +195,17 @@ def _config() -> WorkerConfig:
             ],
         }
     )
+
+
+@pytest.fixture(autouse=True)
+def _fall_model_via_serving_client(monkeypatch: pytest.MonkeyPatch) -> None:
+    """See module docstring: pins the pre-fail-closed fallback behavior for
+    this test module only."""
+
+    def _fall_via_serving(self: WorkerRuntime, _device: str) -> object:
+        return self._serving.create("fall")  # noqa: SLF001
+
+    monkeypatch.setattr(WorkerRuntime, "_create_fall_model", _fall_via_serving)
 
 
 def _build_runtime(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> WorkerRuntime:

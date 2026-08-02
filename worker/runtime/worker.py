@@ -734,18 +734,26 @@ class WorkerRuntime:
         return self.shared_yolo, self.fall_model
 
     def _create_fall_model(self, device: str) -> FallModelProtocol:
+        """Construct the fall model, fail closed if none is configured.
+
+        Fall model selection has no implicit fallback: an operator who omits
+        ``models.fall`` gets a refused boot, not a silent switch to a
+        different model with different performance characteristics. "Which
+        model ran that night" must never be answered by an unconfigured
+        default (same fail-closed principle as ``ML_WORKER_PROFILE`` and the
+        decode policy's unknown-value ``RuntimeError``).
+        """
         configured = self.config.models.fall
-        if configured is not None:
-            return LstmFallRunner.from_artifact_dir(
-                configured.artifact_dir,
-                device=device,
-                expected_schema_version=configured.schema_version,
-                expected_preprocessing_identity=configured.preprocessing_identity,
+        if configured is None:
+            raise RuntimeError(
+                "fall model must be explicitly configured; refusing to boot"
             )
-        model = self._serving.create("fall")
-        if isinstance(model, FallModelProtocol):
-            return model
-        raise RuntimeError("fall model does not satisfy FallModelProtocol")
+        return LstmFallRunner.from_artifact_dir(
+            configured.artifact_dir,
+            device=device,
+            expected_schema_version=configured.schema_version,
+            expected_preprocessing_identity=configured.preprocessing_identity,
+        )
 
     def _warm_models(self) -> tuple[str, ...]:
         if self.shared_yolo is None or self.fall_model is None or self._boot is None:
@@ -820,11 +828,17 @@ class WorkerRuntime:
             if self.config.clip.enabled
             else BoundedFrameBus(evidence_capacity=1)
         )
+        self.diagnostics.register_bus(camera.camera_id, bus)
         tracker = GreedyIouTracker()
         intervals = {"pose": camera.frame_stride, "person": camera.frame_stride, "bed": 30}
         scene, scheduler = SceneState(camera.camera_id), Scheduler(intervals)
         analytics = CompositeExtractor(
-            extractors=yolo.extractors, scheduler=scheduler, tracker=tracker, scene_state=scene
+            extractors=yolo.extractors,
+            scheduler=scheduler,
+            tracker=tracker,
+            scene_state=scene,
+            watchdog=self.watchdog,
+            stage_timing_recorder=self.diagnostics,
         )
         decision, domain_audit, domain_deciders = self._build_decision_stage(
             camera, self.fall_model

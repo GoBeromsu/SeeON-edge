@@ -15,7 +15,7 @@ from pathlib import Path
 import pytest
 
 from worker.adapters.model.registry import EmptyModelTaskError, ModelRegistry, default_registry
-from worker.adapters.model.sklearn_fall import MODELS_DIR, FallDetector
+from worker.adapters.model.sklearn_fall import MODELS_DIR
 from worker.adapters.model.yolo_bed_seg import YoloBedSegRunner
 from worker.adapters.model.yolo_person import YoloPersonRunner
 from worker.adapters.model.yolo_pose import YoloPoseRunner
@@ -33,14 +33,14 @@ def test_model_registry_rejects_empty_task() -> None:
         registry.register("", FakeRunner)
 
 
-def test_default_registry_has_pose_bed_person_fall_factories_without_loading_models() -> None:
+def test_default_registry_has_pose_bed_person_factories_without_loading_models() -> None:
     registry = default_registry()
 
-    assert registry.tasks() == ("bed", "fall", "person", "pose")
+    # "fall" is deliberately absent: it has no registry-backed fallback.
+    assert registry.tasks() == ("bed", "person", "pose")
     assert registry.get_factory("pose") is YoloPoseRunner
     assert registry.get_factory("bed") is YoloBedSegRunner
     assert registry.get_factory("person") is YoloPersonRunner
-    assert registry.get_factory("fall") is FallDetector
 
 
 def test_sklearn_fall_default_models_dir_points_to_ml_models_root() -> None:

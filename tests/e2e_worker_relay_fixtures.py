@@ -4,11 +4,15 @@ Everything here is test-scoped composition glue: a synthetic RTSP source
 (MediaMTX + an ffmpeg lavfi publisher), a real FastAPI relay backend running
 in-process over uvicorn, deterministic scripted model runners that satisfy
 the worker's serving-client seams, and small helpers to boot/tear down a
-real ``WorkerRuntime`` against them. No production code is touched or
-monkeypatched except ``worker.runtime.worker.ClipRecorderConfig`` (a
-bare-name module lookup the composition root itself resolves at call time),
-swapped only to shrink pre/post-event padding so clip finalize is fast
-enough for a test process instead of production's default 30s/30s window.
+real ``WorkerRuntime`` against them. Production code is monkeypatched in two
+narrow, restored-in-``finally`` spots: ``worker.runtime.worker.ClipRecorderConfig``
+(a bare-name module lookup the composition root itself resolves at call
+time), swapped only to shrink pre/post-event padding so clip finalize is
+fast enough for a test process instead of production's default 30s/30s
+window; and ``WorkerRuntime._create_fall_model``, pinned back to sourcing
+the fall runner from the injected ``ScriptedServingClient`` (this harness
+has no real LSTM artifact on disk, so it cannot use the fail-closed
+explicit-config path -- see ``WorkerRuntime._create_fall_model``).
 
 ``WorkerRuntime.__init__`` also unconditionally builds a ``SnapshotStore()``
 with no DI seam of its own -- it always resolves its root via
@@ -693,6 +697,20 @@ class WorkerRunHandle:
     thread: threading.Thread
 
 
+def _fall_model_via_serving_client(runtime: WorkerRuntime, _device: str) -> object:
+    """Pin the pre-fail-closed fall model source for this harness.
+
+    ``WorkerRuntime._create_fall_model`` now refuses to boot without an
+    explicitly configured LSTM artifact directory (see its docstring). This
+    harness has no real artifact on disk -- it exercises wiring/relay
+    behavior with a scripted fall model, not fall-model accuracy -- so
+    ``start_worker_runtime`` monkeypatches the method back to sourcing the
+    fall runner from the injected ``ScriptedServingClient``, scoped to the
+    lifetime of one worker run.
+    """
+    return runtime._serving.create("fall")  # noqa: SLF001
+
+
 def start_worker_runtime(
     config: WorkerConfig,
     serving: ScriptedServingClient,
@@ -723,12 +741,15 @@ def start_worker_runtime(
 
     original_clip_recorder_config = worker_module.ClipRecorderConfig
     worker_module.ClipRecorderConfig = fast_clip_recorder_config_factory(clip_store_dir)
+    original_create_fall_model = WorkerRuntime._create_fall_model
+    WorkerRuntime._create_fall_model = _fall_model_via_serving_client  # type: ignore[method-assign]
     try:
         thread = threading.Thread(target=runtime.run, daemon=True, name="e2e-worker-runtime")
         thread.start()
         wait_until(lambda: len(runtime.cameras) > 0, timeout=20.0, what="camera activation")
     finally:
         worker_module.ClipRecorderConfig = original_clip_recorder_config
+        WorkerRuntime._create_fall_model = original_create_fall_model  # type: ignore[method-assign]
 
     camera = runtime.cameras[0]
     return WorkerRunHandle(runtime, camera, thread)
