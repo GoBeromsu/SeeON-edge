@@ -1,13 +1,36 @@
 import { getPageLabel } from '@/shared/ui/NavBar';
+import { useCamerasResource } from '@/shared/api/usePollingResource';
+import { useOperationsLocation } from '@/features/operations/useOperationsLocation';
+import { CameraWall } from '@/features/operations/CameraWall';
+import { RoomDetail } from '@/features/operations/RoomDetail';
 
-/** Placeholder — replaced by the camera-wall/floor view in the page-implementation wave. */
 export function OperationsPage(): JSX.Element {
+  const { status, data, retry } = useCamerasResource(true);
+  const cameras = data?.cameras;
+  const location = useOperationsLocation(status, cameras);
+
+  const selectedCamera = location.cameraId
+    ? cameras?.find((camera) => camera.id === location.cameraId)
+    : undefined;
+
   return (
     <section className="page-placeholder">
       <h1 className="shell-page-title" tabIndex={-1} data-dialog-focus-fallback>
         {getPageLabel('operations')}
       </h1>
-      <p>관제 화면은 다음 작업에서 구현됩니다.</p>
+
+      {selectedCamera ? (
+        <RoomDetail camera={selectedCamera} onBack={location.backToWall} />
+      ) : (
+        <CameraWall
+          status={status}
+          cameras={cameras}
+          floor={location.floor}
+          onFloorChange={location.setFloor}
+          onSelectCamera={location.selectCamera}
+          onRetry={retry}
+        />
+      )}
     </section>
   );
 }
