@@ -233,6 +233,101 @@ def test_video_rejects_manifest_path_escape(clip_env) -> None:
     assert invalid_id.status_code == 400
 
 
+def test_list_clips_includes_size_bytes_stat_from_the_resolved_video_file(clip_env) -> None:
+    clip_store = clip_env / "clip-store"
+    _write_manifest(clip_store, "clip-1")
+    video_path = clip_store / "clips" / "clip-1" / "clip.mp4"
+
+    with TestClient(create_app(lifespan=no_lifespan)) as client:
+        _login(client)
+        response = client.get("/api/v1/clips")
+
+    assert response.status_code == 200
+    assert response.json()["clips"][0]["size_bytes"] == video_path.stat().st_size
+
+
+def test_list_clips_size_bytes_is_null_when_video_is_unavailable(clip_env) -> None:
+    clip_store = clip_env / "clip-store"
+    clip_dir = clip_store / "clips" / "clip-no-video"
+    clip_dir.mkdir(parents=True)
+    payload = {
+        "clip_id": "clip-no-video",
+        "camera_id": "camera-1",
+        "event_ref": "event-clip-no-video",
+        "started_at": "2026-07-06T00:00:00Z",
+        "duration_s": 10.0,
+        "codec": "h264",
+        "path": None,
+        "video_available": False,
+        "video_error": "encode failed",
+        "finalized": True,
+    }
+    (clip_dir / "manifest.json").write_text(json.dumps(payload), encoding="utf-8")
+
+    with TestClient(create_app(lifespan=no_lifespan)) as client:
+        _login(client)
+        response = client.get("/api/v1/clips")
+
+    assert response.status_code == 200
+    assert response.json()["clips"][0]["size_bytes"] is None
+
+
+def test_list_clips_defaults_missing_duration_s_to_zero_instead_of_dropping_the_manifest(
+    clip_env,
+) -> None:
+    clip_store = clip_env / "clip-store"
+    clip_dir = clip_store / "clips" / "clip-no-duration"
+    clip_dir.mkdir(parents=True)
+    (clip_dir / "clip.mp4").write_bytes(b"video")
+    payload = {
+        "clip_id": "clip-no-duration",
+        "camera_id": "camera-1",
+        "event_ref": "event-clip-no-duration",
+        "started_at": "2026-07-06T00:00:00Z",
+        "codec": "h264",
+        "path": "clips/clip-no-duration",
+        "finalized": True,
+    }
+    (clip_dir / "manifest.json").write_text(json.dumps(payload), encoding="utf-8")
+
+    with TestClient(create_app(lifespan=no_lifespan)) as client:
+        _login(client)
+        response = client.get("/api/v1/clips")
+
+    assert response.status_code == 200
+    clips = response.json()["clips"]
+    assert [clip["clip_id"] for clip in clips] == ["clip-no-duration"]
+    assert clips[0]["duration_s"] == 0.0
+
+
+def test_list_clips_finds_manifests_under_the_root_and_subdirectory_layouts(clip_env) -> None:
+    clip_store = clip_env / "clip-store"
+    # Root layout: root/clips/<id>/manifest.json.
+    _write_manifest(clip_store, "clip-root", started_at="2026-07-06T00:00:00Z")
+    # First-level subdir layout: root/<sub>/clips/<id>/manifest.json.
+    _write_manifest(
+        clip_store / "backup-drive",
+        "clip-first-level",
+        started_at="2026-07-06T00:01:00Z",
+        path="backup-drive/clips/clip-first-level",
+    )
+    # Second-level subdir layout: root/<sub2>/<sub1>/clips/<id>/manifest.json.
+    _write_manifest(
+        clip_store / "external" / "drive-1",
+        "clip-second-level",
+        started_at="2026-07-06T00:02:00Z",
+        path="external/drive-1/clips/clip-second-level",
+    )
+
+    with TestClient(create_app(lifespan=no_lifespan)) as client:
+        _login(client)
+        response = client.get("/api/v1/clips")
+
+    assert response.status_code == 200
+    clip_ids = {clip["clip_id"] for clip in response.json()["clips"]}
+    assert clip_ids == {"clip-root", "clip-first-level", "clip-second-level"}
+
+
 def test_label_and_audit_backend_backup_is_best_effort(
     clip_env,
     monkeypatch: pytest.MonkeyPatch,

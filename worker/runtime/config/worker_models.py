@@ -110,6 +110,27 @@ class ClipRecordingConfig(BaseModel):
     model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True, extra="forbid")
 
     enabled: bool = False
+    # Backend-selected clip storage location, relative to the fixed
+    # ``CLIP_STORE_DIR`` volume (see ``worker.runtime.worker
+    # ._resolved_clip_store_dir``); ``None`` keeps clips at the store root.
+    # Populated from the pulled ``clip_store_subdir`` (see
+    # ``pull_models.BackendWorkerConfigPayload``), which already validates it
+    # (relative, no ``..`` traversal) before it reaches this field -- this
+    # validator re-checks anyway since this value ultimately drives filesystem
+    # path construction.
+    store_subdir: str | None = Field(default=None, min_length=1)
+
+    @field_validator("store_subdir")
+    @classmethod
+    def _validate_store_subdir(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        candidate = Path(value)
+        if candidate.is_absolute() or ".." in candidate.parts:
+            raise ConfigValidationError(
+                "clip.store_subdir must be a relative path without .. segments"
+            )
+        return value
 
 
 class WorkerConfig(BaseModel):

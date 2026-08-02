@@ -35,6 +35,8 @@ from backend.app.features.cameras.store import (
     status_from_probe,
     utc_now_iso,
 )
+from backend.app.features.clips.storage_location_store import ClipStorageLocationStore
+from backend.app.features.detection_settings.store import DetectionSettingsStore
 from backend.app.features.status.heartbeat_store import ONLINE, get_heartbeat_store
 from backend.app.lifespan import API_EDGE_RELAY_TOKEN_ENV, API_FACILITY_ID_ENV
 from backend.app.shared.backend_mapping import (
@@ -164,6 +166,17 @@ class WorkerConfigResponse(BaseModel):
     # Deprecated alias for detection_windows["bed_exit"]; kept for old workers.
     night_window: dict[str, object] | None = None
     detection_windows: dict[str, dict[str, object]] | None = None
+    # Local per-domain enable/disable overrides (see detection_settings slice,
+    # PUT /api/v1/detection-settings): populated only once an operator has
+    # saved settings at least once, and takes precedence over whatever was
+    # externally pulled above. Consumed by the worker's
+    # BackendWorkerConfigPayload.domains (worker/runtime/config/pull_models.py).
+    domains: dict[str, dict[str, object]] | None = None
+    # Selected clip storage subdirectory (see clips/storage_router.py),
+    # relative to the worker's CLIP_STORE_DIR mount; omitted/None means the
+    # mount root (the pre-existing default, unchanged). Consumed by
+    # BackendWorkerConfigPayload.clip_store_subdir.
+    clip_store_subdir: str | None = None
 
 
 @router.get("", response_model=ListCamerasResponse)
@@ -416,6 +429,7 @@ def worker_config_snapshot(
         "registry_version": snapshot["registry_version"],
         "cameras": cameras,
     }
+    live_pulled: PulledWorkerConfig | None = None
     if isinstance(pulled, PulledWorkerConfig):
         live_pulled = _live_pulled_config(request, pulled)
         response["config_version"] = live_pulled.config_version
@@ -427,7 +441,113 @@ def worker_config_snapshot(
                 domain: window.as_dict()
                 for domain, window in live_pulled.detection_windows.items()
             }
+    # Local overrides run unconditionally (not only when an external pull
+    # exists): an operator can save detection settings or a clip storage
+    # location before the backend has ever successfully pulled anything.
+    _apply_local_detection_overrides(request.app, response, live_pulled)
+    _apply_clip_storage_override(request.app, response)
     return response
+
+
+def _apply_local_detection_overrides(
+    app: FastAPI, response: dict[str, object], live_pulled: PulledWorkerConfig | None
+) -> None:
+    """Merge operator-saved per-domain detection settings (see
+    ``detection_settings/store.py``) into the worker-config response,
+    overriding whatever was externally pulled above.
+
+    A no-op until an operator has saved at least once via
+    ``PUT /api/v1/detection-settings`` -- ``app.state.pulled_config`` is
+    never mutated by this (it is memory-only and gets clobbered every ~30s by
+    ``_apply_backend_config``), so this merge is redone fresh on every
+    worker-config response instead of being applied once to stored state.
+    """
+    stored = _detection_settings_store(app).get_all()
+    if not stored:
+        return
+    domains: dict[str, dict[str, object]] = {}
+    detection_windows = _as_window_dict_map(response.get("detection_windows"))
+    for domain, setting in stored.items():
+        domains[domain] = {"enabled": setting.on}
+        if not setting.on or setting.mode == "always":
+            # Domain off, or on with no window restriction: no detection
+            # window applies (worker ambient default is 24/7 when a domain
+            # has no window entry at all).
+            detection_windows.pop(domain, None)
+            continue
+        detection_windows[domain] = {
+            "start": setting.start,
+            "end": setting.end,
+            "tz": _resolved_tz(live_pulled, domain),
+        }
+    response["domains"] = domains
+    if detection_windows:
+        response["detection_windows"] = detection_windows
+    else:
+        response.pop("detection_windows", None)
+    bed_exit_window = detection_windows.get("bed_exit")
+    if bed_exit_window is not None:
+        response["night_window"] = bed_exit_window
+    elif "bed_exit" in stored:
+        # An explicit local bed_exit setting (off, or on/always) means no
+        # window is in effect -- drop the deprecated alias too rather than
+        # leaving it pointing at a stale externally-pulled window.
+        response.pop("night_window", None)
+
+
+def _as_window_dict_map(value: object) -> dict[str, dict[str, object]]:
+    if not isinstance(value, dict):
+        return {}
+    return {
+        domain: window
+        for domain, window in value.items()
+        if isinstance(domain, str) and isinstance(window, dict)
+    }
+
+
+def _resolved_tz(live_pulled: PulledWorkerConfig | None, domain: str) -> str:
+    """The IANA tz to stamp on a locally-configured window.
+
+    No facility-timezone setting exists anywhere else in this codebase, so
+    this reuses whatever tz the live externally-pulled window for the same
+    domain (or, for bed_exit, the deprecated night_window alias) is already
+    using when one is available, and otherwise falls back to
+    ``ML_API_DETECTION_TZ`` (default ``"UTC"``).
+    """
+    if live_pulled is not None:
+        window = live_pulled.detection_windows.get(domain)
+        if window is None and domain == "bed_exit":
+            window = live_pulled.night_window
+        if window is not None:
+            return window.tz
+    return os.environ.get("ML_API_DETECTION_TZ", "UTC").strip() or "UTC"
+
+
+def _apply_clip_storage_override(app: FastAPI, response: dict[str, object]) -> None:
+    """Thread the operator-selected clip storage subdirectory (see
+    ``clips/storage_router.py``) through to the worker. ``""`` (mount root,
+    the default) is omitted so old and new workers alike keep recording at
+    the mount root unless a real subdirectory was explicitly chosen.
+    """
+    selected = _clip_storage_location_store(app).get()
+    if selected:
+        response["clip_store_subdir"] = selected
+
+
+def _detection_settings_store(app: FastAPI) -> DetectionSettingsStore:
+    store = getattr(app.state, "detection_settings_store", None)
+    if not isinstance(store, DetectionSettingsStore):
+        store = DetectionSettingsStore.from_env()
+        app.state.detection_settings_store = store
+    return store
+
+
+def _clip_storage_location_store(app: FastAPI) -> ClipStorageLocationStore:
+    store = getattr(app.state, "clip_storage_location_store", None)
+    if not isinstance(store, ClipStorageLocationStore):
+        store = ClipStorageLocationStore.from_env()
+        app.state.clip_storage_location_store = store
+    return store
 
 
 def _live_pulled_config(request: Request, pulled: PulledWorkerConfig) -> PulledWorkerConfig:

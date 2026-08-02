@@ -674,7 +674,13 @@ def fast_clip_recorder_config_factory(store_dir: Path) -> Callable[[], ClipRecor
     wiring proof does not intend to exercise.
     """
 
-    def factory() -> ClipRecorderConfig:
+    def factory(**_kwargs: object) -> ClipRecorderConfig:
+        # WorkerRuntime now calls ClipRecorderConfig(store_dir=...) itself
+        # (see _resolved_clip_store_dir); accept and ignore that kwarg here
+        # rather than the closed-over store_dir it already resolves to
+        # (CLIP_STORE_DIR_ENV is pinned to store_dir above, and this
+        # harness's WorkerConfig sets no clip.store_subdir), so this fixture
+        # never has to track that call signature.
         return ClipRecorderConfig(
             store_dir=store_dir,
             segment_seconds=1.0,

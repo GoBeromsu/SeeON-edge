@@ -7,7 +7,7 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from time import monotonic
 from types import MappingProxyType
 from typing import Any, Final, Protocol, TypeAlias, final, runtime_checkable
@@ -50,6 +50,7 @@ from worker.pipeline.decision import EventAggregator, IncidentManager
 from worker.pipeline.decision.event_identity import event_identity_path
 from worker.pipeline.ingest.registry import SourceRegistry
 from worker.pipeline.output.event_sink import EventClipRecorder, EvidenceEventSink
+from worker.pipeline.output.evidence.clip_config import configured_store_dir
 from worker.pipeline.output.evidence.clip_frame_feeder import ClipFrameFeeder
 from worker.pipeline.output.evidence.clip_recorder import ClipRecorder
 from worker.pipeline.output.evidence.clip_recorder_models import ClipRecorderConfig
@@ -1065,6 +1066,30 @@ class WorkerRuntime:
             return
         self._compose_clip_recording(boot, evidence_runtime)
 
+    def _resolved_clip_store_dir(self) -> Path:
+        """The clip store root this worker records into.
+
+        ``configured_store_dir()`` (``CLIP_STORE_DIR`` env, default
+        ``/var/lib/clip-store``) is the fixed physical volume; a
+        backend-selected ``clip.store_subdir`` (see ``ClipRecordingConfig``,
+        pulled from ml-api's persisted clip-storage-location choice) is
+        appended underneath it so an operator's dashboard selection actually
+        changes where clips land. ``pull_models.py`` already validates the
+        subdir (relative, no ``..`` traversal) before it ever reaches
+        ``WorkerConfig``, but a path used for filesystem construction is
+        re-checked here too rather than trusted at a distance -- ``Path(base)
+        / value`` silently discards ``base`` and becomes absolute if ``value``
+        starts with ``/``.
+        """
+        base = configured_store_dir()
+        subdir = self.config.clip.store_subdir
+        if not subdir:
+            return base
+        candidate = PurePosixPath(subdir)
+        if candidate.is_absolute() or ".." in candidate.parts:
+            return base
+        return base / subdir
+
     def _compose_evidence_delivery(self) -> EvidenceExportRuntime | None:
         """Build the export runtime. Never gated on clip recording.
 
@@ -1076,7 +1101,7 @@ class WorkerRuntime:
         """
         if not export_enabled():
             return None
-        clip_config = ClipRecorderConfig()
+        clip_config = ClipRecorderConfig(store_dir=self._resolved_clip_store_dir())
         try:
             return EvidenceExportRuntime.from_environment(
                 store_dir=clip_config.store_dir,
@@ -1109,7 +1134,7 @@ class WorkerRuntime:
         """
         if evidence_runtime is None:
             return
-        clip_config = ClipRecorderConfig()
+        clip_config = ClipRecorderConfig(store_dir=self._resolved_clip_store_dir())
         try:
             with ClipStoreLock.acquire(clip_config.store_dir):
                 evidence_runtime.initialize_under_lock()
@@ -1152,7 +1177,7 @@ class WorkerRuntime:
         therefore re-raises as ``EvidenceDeliveryError``, which this method lets
         through.
         """
-        clip_config = ClipRecorderConfig()
+        clip_config = ClipRecorderConfig(store_dir=self._resolved_clip_store_dir())
         hook_ran = False
 
         def _startup_hook() -> None:

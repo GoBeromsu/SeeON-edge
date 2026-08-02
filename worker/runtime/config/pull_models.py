@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+from pathlib import PurePosixPath
 from typing import ClassVar
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
@@ -12,7 +13,11 @@ from contracts.worker_config import (
     detection_window_validation_error,
 )
 from worker.runtime.config.camera_models import CameraRuntimeConfig, RelayConfig
-from worker.runtime.config.domain_models import DomainsConfig, NightWindowConfig
+from worker.runtime.config.domain_models import (
+    KNOWN_DOMAIN_NAMES,
+    DomainsConfig,
+    NightWindowConfig,
+)
 from worker.runtime.config.errors import ConfigValidationError, WorkerConfigError
 from worker.runtime.config.restart import RestartDirective
 from worker.runtime.config.worker_models import (
@@ -91,6 +96,23 @@ class BackendWorkerConfigPayload(BaseModel):
     # dropped per-camera in ``resolved_cameras`` rather than rejecting the
     # whole payload.
     cameras: tuple[object, ...]
+    # ml-api-local per-domain enable/disable override (see
+    # ``backend/app/features/detection_settings``), keyed by domain name,
+    # e.g. ``{"fall": {"enabled": true}, "bed_exit": {"enabled": false}}``.
+    # Only present once an operator has saved detection settings at least
+    # once; absent otherwise, preserving the pre-existing ambient-default
+    # behavior (all domains enabled, driven by per-camera ``domains``).
+    # Left as ``object`` for the same fail-open reason as
+    # ``detection_windows``: a malformed per-domain entry is dropped in
+    # ``resolved_domain_enabled`` rather than rejecting the whole payload.
+    domains: dict[str, object] | None = None
+    # ml-api-local clip storage subdirectory selection (see
+    # ``backend/app/features/clips/storage_location_store.py``), relative to
+    # the worker's fixed ``CLIP_STORE_DIR`` volume. Left as ``object`` (not
+    # ``str | None``) so a malformed value (wrong type, absolute path, ``..``
+    # traversal) is dropped in ``resolved_clip_store_subdir`` -- falling back
+    # to the store root -- rather than rejecting the whole payload.
+    clip_store_subdir: object = None
 
     @model_validator(mode="after")
     def _require_version(self) -> BackendWorkerConfigPayload:
@@ -147,6 +169,46 @@ class BackendWorkerConfigPayload(BaseModel):
             return {}
         validated = _validated_pulled_window("bed_exit", window)
         return {} if validated is None else {"bed_exit": validated}
+
+    @property
+    def resolved_domain_enabled(self) -> dict[str, bool]:
+        """Per-domain enable/disable overrides, degrading like
+        ``resolved_detection_windows``: a malformed entry (wrong shape, bad
+        ``enabled`` type, or an unrecognized domain name) is dropped and
+        logged rather than failing the whole payload."""
+        if self.domains is None:
+            return {}
+        resolved: dict[str, bool] = {}
+        for domain, value in self.domains.items():
+            if not isinstance(domain, str) or domain not in KNOWN_DOMAIN_NAMES:
+                _log_invalid_domain_config(domain, value, "unknown or non-string domain")
+                continue
+            if not isinstance(value, dict):
+                _log_invalid_domain_config(domain, value, "must be an object")
+                continue
+            enabled = value.get("enabled")
+            if not isinstance(enabled, bool):
+                _log_invalid_domain_config(domain, value, "enabled must be a boolean")
+                continue
+            resolved[domain] = enabled
+        return resolved
+
+    @property
+    def resolved_clip_store_subdir(self) -> str | None:
+        """The pulled clip storage subdirectory, or ``None`` if absent or
+        malformed (falls open to the store root, same fail-open shape as
+        ``resolved_detection_windows``)."""
+        value = self.clip_store_subdir
+        if value is None:
+            return None
+        if not isinstance(value, str) or not value.strip():
+            _log_invalid_clip_store_subdir(value, "must be a non-empty string")
+            return None
+        candidate = PurePosixPath(value)
+        if candidate.is_absolute() or ".." in candidate.parts:
+            _log_invalid_clip_store_subdir(value, "must be a relative path without .. segments")
+            return None
+        return value
 
     @property
     def resolved_cameras(self) -> tuple[_CameraPayload, ...]:
@@ -219,19 +281,42 @@ class BackendWorkerConfigPayload(BaseModel):
         )
         if not cameras:
             raise WorkerConfigError("worker config must include at least one camera")
-        domains = tuple(sorted({name for camera in resolved_cameras for name in camera.domains}))
         detection_windows = {
             domain: NightWindowConfig(start=window.start, end=window.end, tz=window.tz)
             for domain, window in self.resolved_detection_windows.items()
         }
+        domain_enabled = self.resolved_domain_enabled
+        if self.domains is not None:
+            # An explicit local override (even an empty/all-malformed one)
+            # replaces the per-camera-domains-derived set entirely, and is
+            # passed as an explicit tuple (never coerced to ``None``) so an
+            # "everything off" state cannot collapse into
+            # ``DomainsConfig.enabled_domains``'s ambient "nothing configured
+            # -> enable everything" default.
+            domains_config = DomainsConfig(
+                enabled=tuple(
+                    sorted(name for name in KNOWN_DOMAIN_NAMES if domain_enabled.get(name, True))
+                ),
+                detection_windows=detection_windows or None,
+            )
+        else:
+            camera_domains = tuple(
+                sorted({name for camera in resolved_cameras for name in camera.domains})
+            )
+            domains_config = DomainsConfig(
+                enabled=camera_domains or None,
+                detection_windows=detection_windows or None,
+            )
+        base_clip = clip if clip is not None else ClipRecordingConfig()
+        subdir = self.resolved_clip_store_subdir
+        resolved_clip = (
+            base_clip if subdir is None else base_clip.model_copy(update={"store_subdir": subdir})
+        )
         return WorkerConfig(
             relay=RelayConfig.model_validate({"url": relay_url, "token": token}),
             models=models if models is not None else WorkerModelsConfig(),
-            domains=DomainsConfig(
-                enabled=domains or None,
-                detection_windows=detection_windows or None,
-            ),
-            clip=clip if clip is not None else ClipRecordingConfig(),
+            domains=domains_config,
+            clip=resolved_clip,
             cameras=cameras,
         )
 
@@ -255,6 +340,22 @@ def _log_invalid_detection_window(domain: str, value: object, reason: str) -> No
     print(
         f"detection window for domain {domain!r} is invalid ({reason}): {value!r}; "
         "falling open to ALWAYS/24-7 detection for this domain",
+        file=sys.stderr,
+    )
+
+
+def _log_invalid_domain_config(domain: object, value: object, reason: str) -> None:
+    print(
+        f"domain enable/disable override for domain {domain!r} is invalid ({reason}): "
+        f"{value!r}; ignoring this domain's override",
+        file=sys.stderr,
+    )
+
+
+def _log_invalid_clip_store_subdir(value: object, reason: str) -> None:
+    print(
+        f"clip_store_subdir is invalid ({reason}): {value!r}; "
+        "falling back to the clip store root",
         file=sys.stderr,
     )
 

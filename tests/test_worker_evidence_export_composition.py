@@ -520,7 +520,7 @@ def _compose_with(
     monkeypatch.setattr(
         worker_module,
         "ClipRecorderConfig",
-        lambda: SimpleNamespace(store_dir=tmp_path / "clipstore"),
+        lambda **_kwargs: SimpleNamespace(store_dir=tmp_path / "clipstore"),
     )
     monkeypatch.setattr(
         runtime,
@@ -762,7 +762,7 @@ def test_enabled_but_misconfigured_export_fails_closed_instead_of_going_quiet(
     monkeypatch.setattr(
         worker_module,
         "ClipRecorderConfig",
-        lambda: SimpleNamespace(store_dir=tmp_path / "clipstore"),
+        lambda **_kwargs: SimpleNamespace(store_dir=tmp_path / "clipstore"),
     )
 
     with pytest.raises(worker_module.EvidenceDeliveryError) as captured:
