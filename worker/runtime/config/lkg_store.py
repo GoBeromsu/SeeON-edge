@@ -147,6 +147,33 @@ class WorkerConfigLkgStore:
                 if connection is not None:
                     connection.close()
 
+    def clear_current(self) -> bool:
+        """Delete the `config_current` row so a stored LKG that just failed
+        re-validation stops winning every future revision race forever
+        (issue #34, config_pull.py's corrupt-LKG recovery). `config_history`
+        is untouched -- its retained rows must stay locally joinable against
+        un-ACKED evidence audit trails regardless of whether the current
+        pointer gets cleared. Degrades to False (never raises) on the same
+        store-unavailable errors `save()`/`load()` already tolerate, so a
+        failed clear cannot crash the worker either."""
+        with self._lock:
+            connection: sqlite3.Connection | None = None
+            try:
+                connection = open_connection(self.database_path)
+                with ImmediateTransaction(connection):
+                    connection.execute("DELETE FROM config_current WHERE id = 1")
+            except _STORE_UNAVAILABLE_ERRORS as error:
+                print(
+                    f"worker config LKG store unavailable at {self.database_path}: {error}",
+                    file=sys.stderr,
+                )
+                return False
+            else:
+                return True
+            finally:
+                if connection is not None:
+                    connection.close()
+
 
 def _read_current(connection: sqlite3.Connection) -> StoredConfigPayload | None:
     row = connection.execute(
