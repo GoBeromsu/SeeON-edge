@@ -818,7 +818,11 @@ class WorkerRuntime:
         intervals = {"pose": camera.frame_stride, "person": camera.frame_stride, "bed": 30}
         scene, scheduler = SceneState(camera.camera_id), Scheduler(intervals)
         analytics = CompositeExtractor(
-            extractors=yolo.extractors, scheduler=scheduler, tracker=tracker, scene_state=scene
+            extractors=yolo.extractors,
+            scheduler=scheduler,
+            tracker=tracker,
+            scene_state=scene,
+            watchdog=self.watchdog,
         )
         decision, domain_audit, domain_deciders = self._build_decision_stage(
             camera, self.fall_model

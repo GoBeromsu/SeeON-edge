@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from contextlib import AbstractContextManager
 from dataclasses import dataclass
+from typing import Protocol
 
 from contracts.observation import FrameObservation
 from worker.pipeline.analytics.merge import authoritative_boxes, merge_module_results
@@ -23,6 +25,25 @@ class CompositeResult:
     decision_input: DecisionInput
 
 
+class InferenceGuard(Protocol):
+    """Structural view of ``InferenceWatchdog.guard()``.
+
+    Pipeline code depends only on this narrow shape rather than importing
+    ``worker.runtime.watchdog.InferenceWatchdog`` directly, so the pipeline
+    layer never has to import from the runtime layer that composes it.
+    """
+
+    def guard(
+        self,
+        *,
+        camera_id: str,
+        task: str,
+        frame_index: int | None = None,
+        deadline_sec: float | None = None,
+        model_artifact_digest: str | None = None,
+    ) -> AbstractContextManager[int]: ...
+
+
 class CompositeExtractor:
     """Own one camera's analytics state while reusing shared named extractors."""
 
@@ -33,6 +54,7 @@ class CompositeExtractor:
         scheduler: Scheduler,
         tracker: GreedyIouTracker,
         scene_state: SceneState,
+        watchdog: InferenceGuard | None = None,
     ) -> None:
         frozen_extractors = tuple(extractors)
         ensure_unique_module_names(
@@ -45,12 +67,29 @@ class CompositeExtractor:
         self._extractors_by_name: dict[str, NamedExtractor] = {
             extractor.module_name: extractor for extractor in frozen_extractors
         }
+        self._watchdog = watchdog
+
+    def _extract(self, extractor: NamedExtractor, packet: FramePacket) -> ModuleResult:
+        """Run one module's forward pass, guarded against a hung driver.
+
+        Without an injected watchdog this is a direct call -- tests and other
+        non-production compositions that never pass ``watchdog=`` behave
+        exactly as before.
+        """
+        if self._watchdog is None:
+            return extractor.extract(packet)
+        with self._watchdog.guard(
+            camera_id=self.scene_state.camera_id,
+            task=extractor.module_name,
+            frame_index=packet.frame.index,
+        ):
+            return extractor.extract(packet)
 
     def process(self, packet: FramePacket) -> CompositeResult:
         """Run due modules and emit one tracked, image-free decision input."""
         scheduled_names = self.scheduler.tasks_for_frame(packet.frame.index)
         module_results = tuple(
-            extractor.extract(packet)
+            self._extract(extractor, packet)
             for name in scheduled_names
             if (extractor := self._extractors_by_name.get(name)) is not None
         )
@@ -81,4 +120,4 @@ class CompositeExtractor:
             observation=final_observation,
             decision_input=decision_input,
         )
-__all__ = ["CompositeExtractor", "CompositeResult"]
+__all__ = ["CompositeExtractor", "CompositeResult", "InferenceGuard"]
