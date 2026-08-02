@@ -22,6 +22,7 @@ from shared.events.schemas import build_audit_envelope
 from worker.adapters.decode.cpu_av.probe import probe_opencv_ffmpeg_capability
 from worker.adapters.decode.nvdec_cuvid.probe import probe_nvdec_cuvid_capability
 from worker.adapters.device.cuda.probe import probe_cuda_capability
+from worker.adapters.device.mps.probe import probe_mps_capability
 from worker.adapters.model import LstmFallRunner, warmup_to_ready
 from worker.adapters.model.errors import FatalAcceleratorError
 from worker.domains import (
@@ -416,6 +417,10 @@ def _production_cuda_source() -> CudaProbe:
     )
 
 
+def _production_mps_source() -> bool:
+    return probe_mps_capability().available
+
+
 def production_boot_dependencies() -> bootstrap.BootDependencies:
     """The real ``BootDependencies`` :class:`WorkerRuntime` injects by default.
 
@@ -436,17 +441,24 @@ def production_boot_dependencies() -> bootstrap.BootDependencies:
     capability probe is not configured" on every profile that needs a real
     ``cuda`` verify. This is the real default that fixes that.
 
-    ``mps_source`` is intentionally left unconfigured: unlike ``cuda``, this
-    repo's edge implementation being ported (``edge/runners/device.py``) never
-    had a portable MPS probe to port -- edge's MPS check called
-    ``torch.backends.mps.is_available()`` inline from the policy layer, which
-    ``worker/runtime/AGENTS.md`` forbids here (policy, no hardware access).
-    The ``mps`` profile therefore keeps failing closed exactly as it did
-    before this change; only ``cuda`` gains a real verifier. The ``cpu``
-    profile is unaffected either way -- ``_verify_cpu`` never consults a
-    source.
+    ``mps_source`` wraps the adapter-level ``probe_mps_capability``
+    (``worker.adapters.device.mps.probe``, checks ``torch`` imports,
+    ``torch.backends.mps.is_built()``, and ``torch.backends.mps.is_available()``)
+    into the ``MpsProbeSource`` shape ``default_verifiers`` expects for the
+    ``mps`` verifier -- a bare ``Callable[[], bool]``
+    (``worker.runtime.profile.registry.MpsProbeSource``), unlike
+    ``CudaProbeSource`` which carries a richer result dataclass through; only
+    the ``available`` flag crosses that boundary, so ``_verify_mps`` reports a
+    generic "MPS is available"/"MPS is unavailable" reason rather than the
+    probe's detailed diagnostic string. Before this wiring existed, ``mps``
+    kept failing closed with "MPS capability probe is not configured" on
+    every host, including Apple Silicon where ``torch.backends.mps`` reports
+    available. This is the real default that fixes that. The ``cpu`` profile
+    is unaffected either way -- ``_verify_cpu`` never consults a source.
     """
-    return bootstrap.BootDependencies(default_verifiers(cuda_source=_production_cuda_source))
+    return bootstrap.BootDependencies(
+        default_verifiers(cuda_source=_production_cuda_source, mps_source=_production_mps_source)
+    )
 
 
 @final

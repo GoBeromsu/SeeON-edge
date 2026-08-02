@@ -88,9 +88,12 @@ class CameraIngestLoop(Generic[_DecodeConfigT]):
 
         try:
             for packet in source:
-                if not self._ready:
-                    self._ready = True
-                    self._ports.reporter.mark_ready(self.camera_id)
+                # Per-packet call: HeartbeatReporter rate-limits to
+                # camera.heartbeat_interval_sec, so a healthy stream keeps the
+                # relay liveness ping periodic instead of firing once per
+                # READY transition and going stale.
+                self._ready = True
+                self._ports.reporter.mark_ready(self.camera_id)
                 try:
                     self._ports.bus.publish(packet)
                 except FatalAcceleratorError:

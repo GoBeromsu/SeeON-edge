@@ -23,7 +23,6 @@ from types import SimpleNamespace
 import pytest
 import yaml
 
-from worker.adapters.model.errors import ModelLoadError
 from worker.adapters.model.in_process import InProcessServingClient
 from worker.adapters.model.registry import default_registry
 from worker.adapters.model.torch_lstm_fall import LstmFallRunner
@@ -93,9 +92,9 @@ def test_production_warm_models_warms_every_configured_task_for_real() -> None:
     runtime = WorkerRuntime.__new__(WorkerRuntime)
     runtime.shared_yolo = compose_yolo_extractors(serving, device="cpu")
     # This artifact declares neither schema_version nor preprocessing_identity,
-    # so the manifest defaults apply and the example config's pins do not match
-    # it -- pinned by the negative test below. Passing None keeps this test
-    # about warmup rather than about that mismatch.
+    # so the manifest defaults apply. Passing None keeps this test about
+    # warmup rather than about the example config's pins, which are covered
+    # separately below.
     fall = LstmFallRunner.from_artifact_dir(
         str(artifact_dir),
         device="cpu",
@@ -136,32 +135,38 @@ def test_production_warm_models_warms_every_configured_task_for_real() -> None:
     assert sorted(warmed_calls) == sorted([*yolo_names, "fall"])
 
 
-def test_example_config_fall_contract_does_not_match_the_local_artifact() -> None:
-    """Records a real mismatch found while proving no-stub warmup.
+def test_example_config_fall_contract_matches_the_local_artifact() -> None:
+    """The example config's fall contract now matches the shipped artifact.
 
-    ``worker/ml-worker.example.yaml`` pins the fall model to
-    ``schema_version: 2`` and
-    ``preprocessing_identity: coco17-xyc-frame-normalized-zero-fill-v1``, but
-    the artifact under ``models/fall/lstm`` on this host declares neither, so
-    its manifest defaults to schema_version 1. Loading the example contract
-    against it raises ``ModelLoadError``.
+    ``worker/ml-worker.example.yaml`` used to pin the fall model to
+    ``schema_version: 2`` and the current coco17
+    ``preprocessing_identity``, but the artifact under
+    ``models/fall/lstm`` on this host declares neither field, so its
+    manifest defaults to ``schema_version: 1`` with the legacy identity --
+    and ``eldercare-dataset-ops`` does not emit ``schema_version: 2`` for
+    the fall family yet (see ``ml/training/_selftest_g006.py``), so no
+    shipped artifact could ever satisfy that pin. The example was
+    corrected to document the legacy contract training actually produces
+    today; see ``docs/architecture.md`` for the full rationale
+    (issue #8).
 
-    That is the loader behaving correctly -- ADR-0003 fail-closed, no silent
-    downgrade -- so this test pins the behaviour rather than treating it as a
-    defect to patch over. It is also why the production-warm test above passes
-    ``None`` for both expectations.
+    That is a config fix, not a loader change: ADR-0003 fail-closed
+    validation in ``_validate_expected_identity``
+    (``worker/adapters/model/torch_lstm_fall.py``) stays exactly as-is, and
+    this test proves it now succeeds because the *configured* contract
+    agrees with the artifact, not because the check was loosened.
 
-    If the artifact is later re-exported with schema_version 2 and the coco17
-    identity, this test starts failing and should be deleted along with those
-    ``None`` expectations.
+    This reads the pins from the example config itself -- not hard-coded
+    copies -- so editing the YAML exercises the real contract rather than a
+    frozen expectation of it. If the pins are later bumped back to
+    schema_version 2 (once ``eldercare-dataset-ops`` exports that contract
+    and ``models/fall/lstm`` is re-exported to match), this test keeps
+    passing as long as both sides move together.
     """
     artifact_dir = REPO_ROOT / "models" / "fall" / "lstm"
     if not (artifact_dir / "model.pt").is_file():
         pytest.skip(f"fall LSTM artifacts are not present at {artifact_dir}")
 
-    # Read the pins from the example config itself. Hard-coding them here would
-    # make this test agree with a *copy* of the config rather than the config,
-    # so editing the YAML would silently stop exercising the real contract.
     example = yaml.safe_load(
         (REPO_ROOT / "worker" / "ml-worker.example.yaml").read_text(encoding="utf-8")
     )
@@ -169,15 +174,12 @@ def test_example_config_fall_contract_does_not_match_the_local_artifact() -> Non
     configured_schema = fall_cfg["schema_version"]
     configured_identity = fall_cfg["preprocessing_identity"]
 
-    with pytest.raises(ModelLoadError) as captured:
-        _ = LstmFallRunner.from_artifact_dir(
-            str(artifact_dir),
-            device="cpu",
-            expected_schema_version=configured_schema,
-            expected_preprocessing_identity=configured_identity,
-        )
+    runner = LstmFallRunner.from_artifact_dir(
+        str(artifact_dir),
+        device="cpu",
+        expected_schema_version=configured_schema,
+        expected_preprocessing_identity=configured_identity,
+    )
 
-    message = str(captured.value)
-    assert "does not match configured" in message
-    # The mismatch is on the value the example config actually declares.
-    assert str(configured_schema) in message
+    assert runner.schema_version == configured_schema
+    assert runner.preprocessing_identity == configured_identity

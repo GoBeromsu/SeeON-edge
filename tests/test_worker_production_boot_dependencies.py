@@ -5,10 +5,8 @@ straight through to ``bootstrap.profile_device_stage``, which falls back to
 ``BootDependencies(default_verifiers())`` -- fail-closed with "CUDA capability
 probe is not configured" on *every* profile, including ``cuda``.
 ``production_boot_dependencies`` (worker/runtime/worker.py) is the real,
-hardware-checking default that fixes that for the ``cuda`` profile while
-preserving fail-closed behavior for ``mps`` (never had a portable probe to
-port from ``edge/runners/device.py``) and leaving ``cpu`` (always available)
-untouched.
+hardware-checking default that fixes that for both the ``cuda`` and ``mps``
+profiles, leaving ``cpu`` (always available) untouched.
 """
 
 from __future__ import annotations
@@ -19,6 +17,7 @@ import pytest
 
 import worker.runtime.worker as worker_module
 from worker.adapters.device.cuda.probe import CudaCapability
+from worker.adapters.device.mps.probe import MpsCapability
 from worker.runtime.config import WorkerConfig
 from worker.runtime.lease import GpuLease
 from worker.runtime.worker import WorkerRuntime, production_boot_dependencies
@@ -96,16 +95,45 @@ def test_production_boot_dependencies_cpu_always_available() -> None:
     assert result.reason == "CPU is available"
 
 
-def test_production_boot_dependencies_mps_stays_unconfigured_fail_closed() -> None:
-    """mps has no ported source (see production_boot_dependencies docstring):
-    it must keep failing closed exactly as it did before this wiring, not
-    silently start passing.
-    """
+def test_production_boot_dependencies_mps_true_when_capability_true(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Given -- Apple Silicon with a torch build that supports MPS
+    monkeypatch.setattr(
+        worker_module,
+        "probe_mps_capability",
+        lambda: MpsCapability(True, "mps available", is_built=True),
+    )
+
+    # When
     result = production_boot_dependencies().verifiers["mps"]()
 
+    # Then -- MpsProbeSource is a bare Callable[[], bool], so only the
+    # available flag crosses into the verifier; the reason is the registry's
+    # own generic string, not the probe's detailed diagnostic.
+    assert result.ok is True
+    assert result.profile == "mps"
+    assert result.stage == "device"
+    assert result.reason == "MPS is available"
+
+
+def test_production_boot_dependencies_mps_false_fails_closed_without_mps(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Given -- e.g. an NVIDIA machine or a torch wheel without MPS support
+    monkeypatch.setattr(
+        worker_module,
+        "probe_mps_capability",
+        lambda: MpsCapability(False, "MPS not usable: torch.backends.mps.is_built() is False"),
+    )
+
+    # When
+    result = production_boot_dependencies().verifiers["mps"]()
+
+    # Then
     assert result.ok is False
     assert result.profile == "mps"
-    assert result.reason == "MPS capability probe is not configured"
+    assert result.reason == "MPS is unavailable"
 
 
 def test_worker_runtime_defaults_boot_dependencies_to_production_dependencies(
