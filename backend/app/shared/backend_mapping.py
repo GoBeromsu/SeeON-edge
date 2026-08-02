@@ -1,4 +1,16 @@
-"""Best-effort backend edge-camera mapping client."""
+"""Best-effort backend edge-camera mapping client.
+
+G002 note: unlike the Event API ingest clients in ``backend/app/lifespan.py``,
+this module's env readers (``backend_status_from_env``,
+``_mapping_endpoint_from_env``, ``BackendCameraMapper.from_env``) still read
+raw process env, not ``ConnectionSettingsStore``. The mapping endpoint has its
+own override chain (``API_BACKEND_EDGE_CAMERAS_URL``, ``API_BACKEND_URL``,
+falling back to deriving from ``API_BACKEND_EVENTS_URL``) that
+``ConnectionSettingsStore`` does not model (it only tracks a single
+``events_url``), so routing this through the store would either drop those
+overrides or require inventing new store fields -- left for a follow-up if
+runtime-relinking the camera-mapping endpoint is ever needed.
+"""
 
 from __future__ import annotations
 

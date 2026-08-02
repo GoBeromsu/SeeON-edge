@@ -129,23 +129,75 @@ def _configure_backend_ingest(app: FastAPI) -> None:
                 app.state.backend_evidence_client = BackendEvidenceClient(
                     existing.events_url, existing.bearer_token, existing.timeout_sec
                 )
+        # A test/caller already assigned backend_ingest_client before lifespan
+        # ran (fixture-injection pattern, e.g. tests/test_api_ingest_relay.py).
+        # Leave it alone at boot -- runtime rebuilds only ever happen via an
+        # explicit apply_connection_settings(app) call (G003's settings-save
+        # route will be the caller), never from this boot path or the
+        # periodic refresh loop.
         return
 
-    events_url = os.environ.get(API_BACKEND_EVENTS_URL_ENV)
+    apply_connection_settings(app)
+
+
+def apply_connection_settings(app: FastAPI) -> None:
+    """Rebuild the backend ingest/evidence clients from ConnectionSettingsStore.
+
+    Public entrypoint for G003's settings-save route: call this after
+    ``ConnectionSettingsStore.save(...)`` to make a connection-settings change
+    (Event API URL / facility token) take effect immediately, without
+    restarting the process.
+
+    Safe under concurrency: relay/evidence routers look up
+    ``app.state.backend_ingest_client`` / ``backend_evidence_client`` fresh on
+    every request (relay/router.py, evidence/router.py, routes/models.py,
+    routes/health.py all read these off ``request.app.state`` per-call), so a
+    plain reassignment here is sufficient -- an in-flight request keeps
+    whatever client object it already looked up, and the very next request
+    picks up the rebuilt one.
+    """
+    # Lazy import: store.py imports lifespan's env-name constants at module
+    # level, so importing it here at module load would be circular. Same
+    # trick lifespan.py already uses for cameras.router in
+    # refresh_backend_config().
+    from backend.app.features.connection.store import ConnectionSettingsStore
+
+    settings = ConnectionSettingsStore.from_env().load()
+    events_url = settings.events_url
     if not events_url:
+        # Delete rather than set-to-None: routes/models.py and routes/health.py
+        # report "backend_configured" via hasattr(app.state, ...), not
+        # getattr(..., None) -- setting the attribute to None would leave
+        # hasattr() true and those status endpoints permanently wrong after a
+        # runtime clear. Deleting matches the pre-existing boot invariant
+        # (the attribute is simply never set when no events_url is configured)
+        # and is still None-like for the getattr(..., None) consumers in
+        # relay/router.py and evidence/router.py.
+        if hasattr(app.state, "backend_ingest_client"):
+            del app.state.backend_ingest_client
+        if hasattr(app.state, "backend_evidence_client"):
+            del app.state.backend_evidence_client
         return
 
-    first_camera = next(iter(app.state.camera_inventory.values()), {})
+    # camera_id fallback identity for the rebuilt EdgeIngestClient. Every real
+    # caller reaches the client through `.for_camera()` (relay/evidence
+    # routers), which overrides camera_id per request, so this default is
+    # currently inert -- kept only for parity with the pre-G002 boot
+    # construction. It can go stale if camera_inventory changed since boot or
+    # the last relink; harmless today, but worth knowing if a future caller
+    # ever uses the client without `.for_camera()`.
+    first_camera = next(iter((getattr(app.state, "camera_inventory", None) or {}).values()), {})
+    timeout_sec = _backend_ingest_timeout_sec()
     app.state.backend_ingest_client = EdgeIngestClient(
         events_url=events_url,
         camera_id=str(first_camera.get("camera_id", "api-relay")),
-        timeout_sec=_backend_ingest_timeout_sec(),
-        bearer_token=os.environ.get(EDGE_FACILITY_TOKEN_ENV),
+        timeout_sec=timeout_sec,
+        bearer_token=settings.facility_token,
     )
     app.state.backend_evidence_client = BackendEvidenceClient(
         events_url=events_url,
-        bearer_token=os.environ.get(EDGE_FACILITY_TOKEN_ENV),
-        timeout_sec=_backend_ingest_timeout_sec(),
+        bearer_token=settings.facility_token,
+        timeout_sec=timeout_sec,
     )
 
 
@@ -216,8 +268,13 @@ def _backend_config_refresh_is_current(app: FastAPI, stop_token: asyncio.Event |
 
 
 def _fetch_backend_config(restart_epoch: int) -> PulledWorkerConfig | None:
-    facility_id = os.environ.get(API_FACILITY_ID_ENV)
-    base_url = os.environ.get(API_BACKEND_CONFIG_URL_ENV)
+    # Lazy import: see the matching comment in apply_connection_settings() --
+    # store.py imports this module's env-name constants at module level.
+    from backend.app.features.connection.store import ConnectionSettingsStore
+
+    settings = ConnectionSettingsStore.from_env().load()
+    facility_id = settings.facility_id
+    base_url = settings.config_url
     if not facility_id or not base_url:
         return None
     try:
@@ -225,7 +282,7 @@ def _fetch_backend_config(restart_epoch: int) -> PulledWorkerConfig | None:
         # The production backend guards the RTSP-bearing ml-config read with the
         # same shared edge bearer the Event API ingest already sends.
         headers: dict[str, str] = {"Accept": "application/json"}
-        bearer = os.environ.get(EDGE_FACILITY_TOKEN_ENV)
+        bearer = settings.facility_token
         if bearer:
             headers["Authorization"] = f"Bearer {bearer}"
         request = urllib.request.Request(url, headers=headers, method="GET")
