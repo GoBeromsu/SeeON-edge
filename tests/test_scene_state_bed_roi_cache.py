@@ -68,6 +68,50 @@ def test_scene_state_resets_on_frame_index_discontinuity() -> None:
     assert state.bed_region_counters.reset == 1
 
 
+def test_persisted_bed_regions_short_circuit_win_over_live_scheduling() -> None:
+    """An operator-recognized, persisted polygon (camera-build-time, never
+    mutated per-frame) is authoritative: it always reports ``fresh`` and
+    never expires, regardless of what the live segmentation cycle sees on
+    that frame -- including a scheduled cycle that found no beds at all.
+    """
+    persisted = BoundingBox(1, 1, 9, 9, 1.0, polygon=((1, 1), (9, 1), (9, 9), (1, 9)))
+    state = SceneState("cam-1", persisted_bed_regions=(persisted,))
+
+    observation, debug = state.resolve_bed_regions(
+        _observation(), frame_index=0, bed_scheduled=True, bed_interval=30
+    )
+    assert observation.bed_boxes == (persisted,)
+    assert debug.source == "fresh"
+    assert debug.age_frames == 0
+    assert debug.empty_cycles == 0
+    assert debug.reset_reason is None
+
+    # A live detection on the same frame is ignored -- the persisted polygon
+    # still wins.
+    observation, debug = state.resolve_bed_regions(
+        _observation((BED,)), frame_index=1, bed_scheduled=True, bed_interval=30
+    )
+    assert observation.bed_boxes == (persisted,)
+    assert debug.source == "fresh"
+
+    # Two scheduled-empty cycles would normally expire the live cache; the
+    # persisted polygon still never expires.
+    observation, debug = state.resolve_bed_regions(
+        _observation(), frame_index=61, bed_scheduled=True, bed_interval=30
+    )
+    assert observation.bed_boxes == (persisted,)
+    assert debug.source == "fresh"
+
+    # A frame-index discontinuity would normally reset the live cache; the
+    # persisted polygon is unaffected.
+    observation, debug = state.resolve_bed_regions(
+        _observation(), frame_index=0, bed_scheduled=False, bed_interval=30
+    )
+    assert observation.bed_boxes == (persisted,)
+    assert debug.source == "fresh"
+    assert debug.reset_reason is None
+
+
 def test_cached_roi_freshness_counters_are_observable() -> None:
     state = SceneState("cam-1")
     state.resolve_bed_regions(

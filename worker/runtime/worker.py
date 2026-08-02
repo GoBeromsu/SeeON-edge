@@ -4,7 +4,7 @@ import logging
 import os
 import threading
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -15,7 +15,8 @@ from typing import Any, Final, Protocol, TypeAlias, final, runtime_checkable
 import worker.pipeline.ingest.lifecycle as ingest
 import worker.runtime.bootstrap as bootstrap
 import worker.runtime.telemetry.runtime_status_sender as runtime_status_sender_module
-from contracts.runner import RunnerProtocol
+from contracts.observation import BoundingBox
+from contracts.runner import BedRunnerResult, Image, RunnerProtocol
 from shared.events.evidence_export_contract import DeliveryFailure
 from shared.events.evidence_http_transport import bounded_request, encode_json
 from shared.events.schemas import build_audit_envelope
@@ -66,6 +67,8 @@ from worker.pipeline.output.evidence.snapshot_store import SnapshotStore
 from worker.pipeline.output.evidence_attacher import AlertEvidenceAttacher
 from worker.pipeline.output.live_view import LatestFrameStore, LiveViewSubscriber
 from worker.pipeline.output.mjpeg_server import (
+    BedZoneNotFoundError,
+    BedZonePayload,
     MjpegServer,
     MjpegServerConfig,
     dev_mjpeg_config,
@@ -148,6 +151,29 @@ def _processed_count(pump: _RunnableIngest) -> int:
     `processed_count`; a missing attribute reads as 0 (never-complete).
     """
     return getattr(pump, "processed_count", 0)
+
+
+def _persisted_bed_regions(camera: CameraRuntimeConfig) -> tuple[BoundingBox, ...]:
+    """Convert a pulled ``bed_zone_polygon`` into the one persisted bed region.
+
+    Empty when the camera has no persisted polygon -- ``SceneState`` then
+    falls back to its existing live-segmentation cache unchanged.
+    """
+    polygon = camera.bed_zone_polygon
+    if not polygon:
+        return ()
+    xs = tuple(point[0] for point in polygon)
+    ys = tuple(point[1] for point in polygon)
+    return (
+        BoundingBox(
+            x1=min(xs),
+            y1=min(ys),
+            x2=max(xs),
+            y2=max(ys),
+            confidence=1.0,
+            polygon=polygon,
+        ),
+    )
 
 
 @runtime_checkable
@@ -634,7 +660,9 @@ class WorkerRuntime:
         if self._live_view is None:
             return
         self._mjpeg_server = start_optional_mjpeg_server(
-            self._live_frames, self._mjpeg_config
+            self._live_frames,
+            self._mjpeg_config,
+            bed_zone_recognizer=self._bed_zone_recognizer,
         )
         if self._mjpeg_server is None:
             LOGGER.warning(
@@ -644,6 +672,51 @@ class WorkerRuntime:
                     "port": self._mjpeg_config.port,
                 },
             )
+
+    def _bed_zone_recognizer(self, image: Image) -> BedZonePayload:
+        """Run one on-demand bed-segmentation pass for the recognize endpoint.
+
+        Reuses the shared bed-seg runner directly (``self.shared_yolo.bed.runner``)
+        rather than going through ``NamedExtractor.extract``/a ``FramePacket`` --
+        this is a single HTTP-thread call, not a per-camera pump frame. The
+        shared YOLO runner instances are already invoked concurrently by every
+        camera's pump thread with no explicit lock (``NamedExtractor.extract``
+        has none), so this call reuses that same no-additional-locking
+        precedent instead of introducing a new one. Only reachable once
+        ``_start_live_view_server`` runs, which is after ``bootstrap_or_exit``
+        has set ``self.shared_yolo``.
+        """
+        if self.shared_yolo is None:
+            raise RuntimeError("bed-zone recognizer called before models were initialized")
+        runner = self.shared_yolo.bed.runner
+        # Mirrors `worker.pipeline.analytics.models._runner_call`'s exact
+        # is-callable-or-`.run` resolution instead of reaching into
+        # `NamedExtractor`'s private `_call` field.
+        call = runner if callable(runner) else runner.run
+        result = call(image)
+        if not isinstance(result, BedRunnerResult):
+            raise BedZoneNotFoundError("bed runner returned an unexpected result")
+        height, width = int(image.shape[0]), int(image.shape[1])
+        best_box: Sequence[float | Sequence[Sequence[int]]] | None = None
+        best_score = -1.0
+        for box in result.boxes:
+            score = float(box[4])
+            if score > best_score:
+                best_score = score
+                best_box = box
+        if best_box is None:
+            raise BedZoneNotFoundError("no bed detected in the current frame")
+        polygon_field = best_box[5] if len(best_box) > 5 else ()
+        polygon = [[int(point[0]), int(point[1])] for point in polygon_field]  # type: ignore[index]
+        if not polygon:
+            x1, y1, x2, y2 = (
+                int(best_box[0]),
+                int(best_box[1]),
+                int(best_box[2]),
+                int(best_box[3]),
+            )
+            polygon = [[x1, y1], [x2, y1], [x2, y2], [x1, y2]]
+        return {"polygon": polygon, "image_width": width, "image_height": height}
 
     def _start_export_sender(self) -> None:
         """Start delivering staged evidence to the relay.
@@ -855,7 +928,11 @@ class WorkerRuntime:
         self.diagnostics.register_bus(camera.camera_id, bus)
         tracker = GreedyIouTracker()
         intervals = {"pose": camera.frame_stride, "person": camera.frame_stride, "bed": 30}
-        scene, scheduler = SceneState(camera.camera_id), Scheduler(intervals)
+        scene = SceneState(
+            camera.camera_id,
+            persisted_bed_regions=_persisted_bed_regions(camera),
+        )
+        scheduler = Scheduler(intervals)
         analytics = CompositeExtractor(
             extractors=yolo.extractors,
             scheduler=scheduler,

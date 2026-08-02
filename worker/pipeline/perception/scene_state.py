@@ -52,6 +52,12 @@ class SceneState:
     scheduled_empty_bed_cycles: int = 0
     bed_region_freshness: BedRegionCacheState = BedRegionCacheState.EMPTY
     bed_region_counters: BedRegionCacheCounters = field(default_factory=BedRegionCacheCounters)
+    # An operator-recognized, persisted bed polygon (see the bed-zone
+    # recognize endpoint) is authoritative whenever set: it never expires and
+    # always wins over the live scheduled/cached segmentation cycle below.
+    # Set once at camera-build time from `CameraRuntimeConfig.bed_zone_polygon`
+    # -- never mutated per-frame.
+    persisted_bed_regions: tuple[BoundingBox, ...] = field(default_factory=tuple)
 
     def reset_bed_cache(self, _reason: str) -> None:
         self.bed_regions = ()
@@ -88,6 +94,17 @@ class SceneState:
         bed_interval: int,
     ) -> tuple[FrameObservation, BedRegionDebugSnapshot]:
         """Resolve fresh, cached, empty, or expired bed regions for one frame."""
+        if self.persisted_bed_regions:
+            resolved = _replace_bed_boxes(observation, self.persisted_bed_regions)
+            snapshot = BedRegionDebugSnapshot(
+                source=BedRegionCacheState.FRESH,
+                age_frames=0,
+                empty_cycles=0,
+                reset_reason=None,
+            )
+            self._mark_processed(frame_index, resolved)
+            return resolved, snapshot
+
         reset_reason = self._reset_if_discontinuous(frame_index)
         if bed_scheduled and observation.bed_boxes:
             self.bed_regions = observation.bed_boxes

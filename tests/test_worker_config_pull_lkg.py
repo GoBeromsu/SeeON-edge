@@ -48,6 +48,44 @@ def test_to_worker_config_threads_pulled_detection_windows_into_domains_config()
     ) == NightWindowConfig(start="21:00", end="06:00", tz="UTC")
 
 
+def test_to_worker_config_threads_bed_zone_polygon_into_camera_runtime_config() -> None:
+    """The persisted bed-zone polygon (see the bed-zone recognize endpoint)
+    is pulled down as part of the worker config and must survive the
+    ``_CameraPayload`` -> ``CameraRuntimeConfig`` conversion unchanged, so
+    ``WorkerRuntime._build_camera`` can seed ``SceneState.persisted_bed_regions``
+    from it (issue: on-demand bed-zone recognition)."""
+    payload = BackendWorkerConfigPayload.model_validate(
+        {
+            "config_version": 5,
+            "cameras": [
+                {
+                    "camera_id": "camera-1",
+                    "facility_id": "facility-1",
+                    "rtsp_url": "rtsp://camera-1/stream",
+                    "bed_zone_polygon": [[1, 2], [9, 2], [9, 8], [1, 8]],
+                    "bed_zone_image_width": 640,
+                    "bed_zone_image_height": 480,
+                },
+                {
+                    "camera_id": "camera-2",
+                    "facility_id": "facility-1",
+                    "rtsp_url": "rtsp://camera-2/stream",
+                },
+            ],
+        }
+    )
+
+    worker_config = payload.to_worker_config("http://relay.test", "relay-token")
+
+    cameras = {camera.camera_id: camera for camera in worker_config.cameras}
+    assert cameras["camera-1"].bed_zone_polygon == ((1, 2), (9, 2), (9, 8), (1, 8))
+    assert cameras["camera-1"].bed_zone_image_width == 640
+    assert cameras["camera-1"].bed_zone_image_height == 480
+    assert cameras["camera-2"].bed_zone_polygon is None
+    assert cameras["camera-2"].bed_zone_image_width is None
+    assert cameras["camera-2"].bed_zone_image_height is None
+
+
 def test_to_worker_config_still_accepts_legacy_night_window_payload_field() -> None:
     payload = BackendWorkerConfigPayload.model_validate(
         {

@@ -12,6 +12,7 @@ from fastapi.staticfiles import StaticFiles
 
 from backend.app.core.config import get_settings
 from backend.app.features.auth.router import router as auth_router
+from backend.app.features.cameras.bed_zone_router import router as bed_zone_router
 from backend.app.features.cameras.router import router as cameras_router
 from backend.app.features.cameras.streams_router import router as streams_router
 from backend.app.features.clips.router import router as clips_router
@@ -46,6 +47,7 @@ def create_app(*, lifespan: LifespanFactory | None = serving_lifespan) -> FastAP
     api_router.include_router(relay_router)
     api_router.include_router(evidence_router)
     api_router.include_router(cameras_router)
+    api_router.include_router(bed_zone_router)
     api_router.include_router(connection_router)
     api_router.include_router(clips_router)
     api_router.include_router(streams_router)

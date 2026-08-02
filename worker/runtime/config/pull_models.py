@@ -45,6 +45,9 @@ class _CameraPayload(BaseModel):
     fps: float | None = Field(default=None, gt=0)
     decode_backend: str | None = None
     domains: tuple[str, ...] = ()
+    bed_zone_polygon: tuple[tuple[int, int], ...] | None = None
+    bed_zone_image_width: int | None = Field(default=None, gt=0)
+    bed_zone_image_height: int | None = Field(default=None, gt=0)
 
     @model_validator(mode="after")
     def _require_location(self) -> _CameraPayload:
@@ -282,6 +285,9 @@ def _runtime_camera(payload: _CameraPayload) -> CameraRuntimeConfig:
         fps=payload.fps or 5.0,
         decode_backend=payload.decode_backend,
         label=payload.label,
+        bed_zone_polygon=payload.bed_zone_polygon,
+        bed_zone_image_width=payload.bed_zone_image_width,
+        bed_zone_image_height=payload.bed_zone_image_height,
     )
 
 

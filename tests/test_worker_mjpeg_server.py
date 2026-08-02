@@ -8,14 +8,26 @@ import time
 import urllib.error
 import urllib.request
 
+import cv2
+import numpy as np
+
 from worker.pipeline.output.live_view import LatestFrameStore
 from worker.pipeline.output.mjpeg_server import (
+    BedZoneNotFoundError,
+    BedZonePayload,
     MjpegProbeError,
     MjpegServer,
     MjpegServerConfig,
     dev_mjpeg_enabled,
     dev_mjpeg_host,
 )
+
+# A real, cv2-decodable JPEG -- unlike the fake `b"\xff\xd8jpeg\xff\xd9"` bytes
+# used by the /stream and /snapshot tests above (those routes never decode
+# the buffer), the bed-zone recognize handler calls `cv2.imdecode` on
+# whatever is cached before invoking the injected recognizer, so it needs
+# bytes that actually round-trip.
+_REAL_JPEG = cv2.imencode(".jpg", np.zeros((16, 16, 3), dtype=np.uint8))[1].tobytes()
 
 # worker's MjpegServer takes an injected `probe` callable (worker/pipeline/
 # output/mjpeg_server.py:36-52) instead of owning an internal RTSP-probing
@@ -321,6 +333,177 @@ def test_pose_unknown_camera_and_malformed_body_are_rejected() -> None:
         else:  # pragma: no cover
             raise AssertionError("malformed body should 400")
         assert store.get_mode("camera-a") == "none"
+    finally:
+        server.stop()
+
+
+def _post_bed_zone_recognize(base: str, camera_id: str) -> urllib.request.Request:
+    return urllib.request.Request(
+        f"{base}/overlay/{camera_id}/bed-zone/recognize",
+        data=b"",
+        method="POST",
+    )
+
+
+def test_bed_zone_recognize_unknown_camera_returns_404() -> None:
+    store = LatestFrameStore()
+    server = MjpegServer(
+        store,
+        MjpegServerConfig(port=0),
+        bed_zone_recognizer=lambda image: {
+            "polygon": [[0, 0]],
+            "image_width": 1,
+            "image_height": 1,
+        },
+    )
+    server.start()
+    base = f"http://127.0.0.1:{server.port}"
+    try:
+        try:
+            urllib.request.urlopen(_post_bed_zone_recognize(base, "missing"), timeout=1)
+        except urllib.error.HTTPError as exc:
+            assert exc.code == 404
+        else:  # pragma: no cover
+            raise AssertionError("unknown camera should 404")
+    finally:
+        server.stop()
+
+
+def test_bed_zone_recognize_without_recognizer_configured_returns_503() -> None:
+    store = LatestFrameStore()
+    store.register_camera("camera-a")
+    server = MjpegServer(store, MjpegServerConfig(port=0))
+    server.start()
+    base = f"http://127.0.0.1:{server.port}"
+    try:
+        try:
+            urllib.request.urlopen(_post_bed_zone_recognize(base, "camera-a"), timeout=1)
+        except urllib.error.HTTPError as exc:
+            assert exc.code == 503
+        else:  # pragma: no cover
+            raise AssertionError("missing recognizer should 503")
+    finally:
+        server.stop()
+
+
+def test_bed_zone_recognize_no_frame_available_returns_503() -> None:
+    store = LatestFrameStore()
+    store.register_camera("camera-a")
+    recognizer_calls: list[object] = []
+    server = MjpegServer(
+        store,
+        MjpegServerConfig(port=0),
+        bed_zone_recognizer=lambda image: recognizer_calls.append(image) or {  # type: ignore[func-returns-value]
+            "polygon": [[0, 0]],
+            "image_width": 1,
+            "image_height": 1,
+        },
+        bed_zone_frame_timeout_s=0.05,
+    )
+    server.start()
+    base = f"http://127.0.0.1:{server.port}"
+    try:
+        try:
+            urllib.request.urlopen(_post_bed_zone_recognize(base, "camera-a"), timeout=1)
+        except urllib.error.HTTPError as exc:
+            assert exc.code == 503
+        else:  # pragma: no cover
+            raise AssertionError("no cached frame should 503")
+        assert recognizer_calls == []
+    finally:
+        server.stop()
+
+
+def test_bed_zone_recognize_success_returns_polygon_and_dimensions() -> None:
+    store = LatestFrameStore()
+    store.publish_jpeg("camera-a", _REAL_JPEG, frame_index=1)
+    seen_images: list[np.ndarray] = []
+
+    def recognizer(image: np.ndarray) -> BedZonePayload:
+        seen_images.append(image)
+        return {
+            "polygon": [[1, 2], [3, 2], [3, 4], [1, 4]],
+            "image_width": 16,
+            "image_height": 16,
+        }
+
+    server = MjpegServer(
+        store,
+        MjpegServerConfig(port=0),
+        bed_zone_recognizer=recognizer,
+        bed_zone_frame_timeout_s=0.05,
+    )
+    server.start()
+    base = f"http://127.0.0.1:{server.port}"
+    try:
+        with urllib.request.urlopen(
+            _post_bed_zone_recognize(base, "camera-a"), timeout=1
+        ) as response:
+            assert response.status == 200
+            payload = json.loads(response.read())
+        assert payload == {
+            "polygon": [[1, 2], [3, 2], [3, 4], [1, 4]],
+            "image_width": 16,
+            "image_height": 16,
+        }
+        assert len(seen_images) == 1
+        assert seen_images[0].shape[:2] == (16, 16)
+    finally:
+        server.stop()
+
+
+def test_bed_zone_recognize_not_found_maps_to_structured_404() -> None:
+    store = LatestFrameStore()
+    store.publish_jpeg("camera-a", _REAL_JPEG, frame_index=1)
+
+    def recognizer(image: np.ndarray) -> BedZonePayload:
+        del image
+        raise BedZoneNotFoundError("no bed detected")
+
+    server = MjpegServer(
+        store,
+        MjpegServerConfig(port=0),
+        bed_zone_recognizer=recognizer,
+        bed_zone_frame_timeout_s=0.05,
+    )
+    server.start()
+    base = f"http://127.0.0.1:{server.port}"
+    try:
+        try:
+            urllib.request.urlopen(_post_bed_zone_recognize(base, "camera-a"), timeout=1)
+        except urllib.error.HTTPError as exc:
+            assert exc.code == 404
+            payload = json.loads(exc.read())
+            assert payload == {"error_class": "bed_not_found"}
+        else:  # pragma: no cover
+            raise AssertionError("no bed detected should 404 with error_class")
+    finally:
+        server.stop()
+
+
+def test_bed_zone_recognize_runner_failure_returns_503() -> None:
+    store = LatestFrameStore()
+    store.publish_jpeg("camera-a", _REAL_JPEG, frame_index=1)
+
+    def recognizer(image: np.ndarray) -> BedZonePayload:
+        del image
+        raise RuntimeError("model exploded")
+
+    server = MjpegServer(
+        store,
+        MjpegServerConfig(port=0),
+        bed_zone_recognizer=recognizer,
+        bed_zone_frame_timeout_s=0.05,
+    )
+    server.start()
+    base = f"http://127.0.0.1:{server.port}"
+    try:
+        try:
+            urllib.request.urlopen(_post_bed_zone_recognize(base, "camera-a"), timeout=1)
+        except urllib.error.HTTPError as exc:
+            assert exc.code == 503
+        else:  # pragma: no cover
+            raise AssertionError("recognizer runtime error should 503")
     finally:
         server.stop()
 

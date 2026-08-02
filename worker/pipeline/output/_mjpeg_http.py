@@ -10,6 +10,10 @@ from socketserver import ThreadingMixIn
 from typing import Final, Literal, Required, TypedDict
 from urllib.parse import unquote, urlsplit
 
+import cv2
+import numpy as np
+
+from contracts.runner import Image
 from worker.pipeline.output.live_view import LatestFrame, LatestFrameStore
 from worker.pipeline.output.overlay import OverlayMode
 
@@ -25,11 +29,35 @@ _OVERLAY_MODES: Final[frozenset[str]] = frozenset({"none", "bedexit", "fall"})
 # cached the way it always was pre-gating; this must stay comfortably under
 # a client's read timeout while giving the pump a real chance to publish.
 STREAM_FIRST_FRAME_TIMEOUT_SECONDS: Final = 0.5
+# On-demand bed-zone recognition is a deliberate, infrequent user action (not
+# periodic polling), so it is worth waiting a bit longer than a stream's first
+# frame for a genuinely fresh capture before falling back to whatever is
+# already cached.
+BED_ZONE_FRAME_TIMEOUT_SECONDS: Final = 2.0
 
 OVERLAY_PREFIX: Final = "/overlay/"
 POSE_SUFFIX: Final = "/pose"
+BED_ZONE_SUFFIX: Final = "/bed-zone/recognize"
 
 ProbeErrorClass = Literal["auth", "timeout", "decode"]
+
+
+class BedZonePayload(TypedDict):
+    polygon: list[list[int]]
+    image_width: int
+    image_height: int
+
+
+class BedZoneNotFoundError(RuntimeError):
+    """Recognition ran successfully but found no bed in the frame."""
+
+
+# Given the best available (raw-ish) frame, run bed segmentation once and
+# return the highest-confidence bed's polygon, or raise ``BedZoneNotFoundError``
+# when the model finds no bed. Injected from ``worker.runtime`` -- the
+# composition root -- so this output-layer module never imports
+# ``worker.adapters`` directly, mirroring the existing ``MjpegProbe`` seam.
+BedZoneRecognizer = Callable[[Image], BedZonePayload]
 
 
 class MjpegProbePayload(TypedDict, total=False):
@@ -66,6 +94,8 @@ def build_http_server(
     port: int,
     probe_token: str | None,
     probe: MjpegProbe,
+    bed_zone_recognizer: BedZoneRecognizer | None = None,
+    bed_zone_frame_timeout_s: float = BED_ZONE_FRAME_TIMEOUT_SECONDS,
 ) -> HTTPServer:
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:  # noqa: N802 - stdlib hook name
@@ -85,6 +115,10 @@ def build_http_server(
         def do_POST(self) -> None:  # noqa: N802 - stdlib hook name
             path = urlsplit(self.path).path
             if path != "/probe":
+                bed_zone_camera_id = _bed_zone_camera_id(path)
+                if bed_zone_camera_id is not None:
+                    self._handle_bed_zone_recognize(bed_zone_camera_id)
+                    return
                 pose_camera_id = _pose_camera_id(path)
                 if pose_camera_id is not None:
                     self._handle_set_pose(pose_camera_id)
@@ -206,6 +240,57 @@ def build_http_server(
             store.set_mode(camera_id, mode)
             self._write_mode_json(mode)
 
+        def _handle_bed_zone_recognize(self, camera_id: str) -> None:
+            if camera_id == "" or not store.is_known(camera_id):
+                self.send_error(HTTPStatus.NOT_FOUND)
+                return
+            if bed_zone_recognizer is None:
+                self.send_error(HTTPStatus.SERVICE_UNAVAILABLE)
+                return
+            # Force as fresh a capture as the live-view store can provide:
+            # note whatever is already cached, ask for a refresh (viewer
+            # gating -- #48 -- means encoding is otherwise paused with no
+            # stream viewer connected), then wait for a frame that is not the
+            # one we already had. Fall back to the stale cached frame if the
+            # wait times out rather than failing the whole request.
+            previous = store.get_latest(camera_id)
+            store.request_snapshot_refresh(camera_id)
+            frame = store.wait_for_latest(
+                camera_id, previous=previous, timeout=bed_zone_frame_timeout_s
+            )
+            if frame is None:
+                frame = previous
+            if frame is None:
+                self.send_error(HTTPStatus.SERVICE_UNAVAILABLE)
+                return
+            image = cv2.imdecode(
+                np.frombuffer(frame.jpeg, dtype=np.uint8), cv2.IMREAD_COLOR
+            )
+            if image is None:
+                self.send_error(HTTPStatus.SERVICE_UNAVAILABLE)
+                return
+            try:
+                payload = bed_zone_recognizer(image)
+            except BedZoneNotFoundError:
+                self._write_status_json(
+                    HTTPStatus.NOT_FOUND, {"error_class": "bed_not_found"}
+                )
+                return
+            except (OSError, RuntimeError, TypeError, ValueError, cv2.error):
+                self.send_error(HTTPStatus.SERVICE_UNAVAILABLE)
+                return
+            self._write_status_json(HTTPStatus.OK, payload)
+
+        def _write_status_json(self, http_status: HTTPStatus, payload: object) -> None:
+            body = json.dumps(
+                payload, separators=(",", ":"), sort_keys=True
+            ).encode("utf-8")
+            self.send_response(http_status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
         def _read_mode_body(self) -> OverlayMode | None:
             raw_length = self.headers.get("Content-Length")
             if raw_length is None:
@@ -297,6 +382,18 @@ def _pose_camera_id(path: str) -> str | None:
     return camera_id or None
 
 
+def _bed_zone_camera_id(path: str) -> str | None:
+    """Match ``/overlay/{camera_id}/bed-zone/recognize`` and return the camera id.
+
+    Returns ``None`` for any other path (including an empty camera id),
+    letting callers fall through to their existing 404 handling.
+    """
+    if not path.startswith(OVERLAY_PREFIX) or not path.endswith(BED_ZONE_SUFFIX):
+        return None
+    camera_id = unquote(path[len(OVERLAY_PREFIX) : -len(BED_ZONE_SUFFIX)])
+    return camera_id or None
+
+
 def _authorized_probe(supplied: str | None, expected: str | None) -> bool:
     if expected is None or expected.strip() == "" or supplied is None:
         return False
@@ -334,6 +431,10 @@ def _normalize_error_class(error_class: str | None) -> ProbeErrorClass:
 
 
 __all__ = [
+    "BED_ZONE_FRAME_TIMEOUT_SECONDS",
+    "BedZoneNotFoundError",
+    "BedZonePayload",
+    "BedZoneRecognizer",
     "MjpegProbe",
     "MjpegProbeError",
     "MjpegProbePayload",
