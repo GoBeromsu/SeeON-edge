@@ -1,7 +1,9 @@
 import { useMemo } from 'react';
-import { filterCamerasByFloor, listFloors } from '@/features/operations/operationsModel';
+import { countCamerasByLiveness, filterCamerasByFloor, listFloors } from '@/features/operations/operationsModel';
 import { CameraWallTile } from '@/features/operations/CameraWallTile';
 import { useSnapshotQueue } from '@/features/operations/useSnapshotQueue';
+import { getPageLabel } from '@/shared/ui/NavBar';
+import { statusBadgeClassName } from '@/shared/ui/StatusBadge';
 import type { Camera } from '@/shared/api/client';
 import type { PollingResourceStatus } from '@/shared/api/usePollingResource';
 
@@ -14,34 +16,43 @@ type CameraWallProps = {
   onRetry: () => void;
 };
 
+/** Non-breaking space keeps "온라인 3" from wrapping mid-badge (front/design-handoff/README.md §2). */
+const NBSP = ' ';
+
 export function CameraWall({ status, cameras, floor, onFloorChange, onSelectCamera, onRetry }: CameraWallProps): JSX.Element {
   const allCameras = cameras ?? [];
   const floors = useMemo(() => listFloors(allCameras), [allCameras]);
   const visible = useMemo(() => filterCamerasByFloor(allCameras, floor), [allCameras, floor]);
+  const { online, offline } = useMemo(() => countCamerasByLiveness(allCameras), [allCameras]);
   const { entries, queue } = useSnapshotQueue(visible, status === 'success');
 
   return (
     <section aria-label="카메라 월">
-      <div className="mb-4 flex flex-wrap items-center gap-2" role="group" aria-label="층 필터">
-        <button
-          type="button"
-          onClick={() => onFloorChange(undefined)}
-          aria-pressed={!floor}
-          className={`min-h-11 rounded-control border px-3 text-sm font-semibold ${!floor ? 'border-primary bg-primary text-primary-foreground' : 'border-border bg-card text-foreground'}`}
+      <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+        <div className="flex flex-wrap items-center gap-3">
+          <h1 className="shell-page-title" tabIndex={-1} data-dialog-focus-fallback>
+            {getPageLabel('operations')}
+          </h1>
+          <span className={statusBadgeClassName('approved')}>
+            <span aria-hidden="true" className="h-1.5 w-1.5 rounded-full bg-current" />
+            {`온라인${NBSP}${online}`}
+          </span>
+          <span className={statusBadgeClassName('rejected')}>
+            <span aria-hidden="true" className="h-1.5 w-1.5 rounded-full bg-current" />
+            {`오프라인${NBSP}${offline}`}
+          </span>
+        </div>
+        <select
+          aria-label="층 필터"
+          value={floor ?? ''}
+          onChange={(event) => onFloorChange(event.target.value || undefined)}
+          className="h-9 rounded-control border border-input bg-card px-3 text-sm font-medium text-foreground"
         >
-          전체
-        </button>
-        {floors.map((name) => (
-          <button
-            key={name}
-            type="button"
-            onClick={() => onFloorChange(name)}
-            aria-pressed={floor === name}
-            className={`min-h-11 rounded-control border px-3 text-sm font-semibold ${floor === name ? 'border-primary bg-primary text-primary-foreground' : 'border-border bg-card text-foreground'}`}
-          >
-            {name}
-          </button>
-        ))}
+          <option value="">전체</option>
+          {floors.map((name) => (
+            <option key={name} value={name}>{name}</option>
+          ))}
+        </select>
       </div>
 
       {status === 'loading' ? (

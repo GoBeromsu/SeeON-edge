@@ -4,6 +4,8 @@ import { getCameraStreamUrl, type Camera, type RuntimeCameraDiagnostics } from '
 type LiveStreamPanelProps = {
   camera: Camera;
   diagnostics: RuntimeCameraDiagnostics | undefined;
+  onRetryConnection: () => void;
+  onManageConnection: () => void;
 };
 
 /**
@@ -12,13 +14,43 @@ type LiveStreamPanelProps = {
  * FPS) — the design mock implies separate decode/inference FPS and a frame counter, but the API
  * only ever reports one `measured_fps`, so this deliberately omits the fabricated fields.
  */
-export function LiveStreamPanel({ camera, diagnostics }: LiveStreamPanelProps): JSX.Element {
+export function LiveStreamPanel({ camera, diagnostics, onRetryConnection, onManageConnection }: LiveStreamPanelProps): JSX.Element {
   const [streamError, setStreamError] = useState(false);
   const online = camera.status === 'online';
   const showStream = online && !streamError;
 
   const fps = diagnostics?.measured_fps;
   const backend = diagnostics?.decode.selected ?? diagnostics?.decode.requested ?? null;
+
+  if (!online) {
+    return (
+      <div className="flex aspect-video flex-col items-center justify-center gap-4 rounded-card border border-border bg-muted p-6 text-center">
+        <div>
+          <p className="text-base font-semibold text-foreground">카메라에 연결할 수 없습니다</p>
+          <p className="mt-1 text-sm text-muted-foreground">탐지가 중단된 상태입니다</p>
+        </div>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => {
+              setStreamError(false);
+              onRetryConnection();
+            }}
+            className="min-h-11 rounded-control border border-border bg-card px-4 text-sm font-semibold text-foreground"
+          >
+            재연결 시도
+          </button>
+          <button
+            type="button"
+            onClick={onManageConnection}
+            className="min-h-11 rounded-control border border-border bg-card px-4 text-sm font-semibold text-foreground"
+          >
+            연결 관리
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="relative overflow-hidden rounded-card border border-border bg-card event-media-frame">
@@ -31,9 +63,7 @@ export function LiveStreamPanel({ camera, diagnostics }: LiveStreamPanelProps): 
           onError={() => setStreamError(true)}
         />
       ) : (
-        <span className="event-media-unavailable" role="status">
-          {!online ? '카메라가 오프라인입니다' : '실시간 영상을 불러올 수 없습니다'}
-        </span>
+        <span className="event-media-unavailable" role="status">실시간 영상을 불러올 수 없습니다</span>
       )}
 
       {showStream ? (

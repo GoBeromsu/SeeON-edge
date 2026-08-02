@@ -53,8 +53,8 @@ export function CameraWallTile({ camera, snapshot, queue, onSelect }: CameraWall
           </span>
         </span>
       ) : (
-        <span className="block event-media-frame">
-          <span className="event-media-unavailable">오프라인</span>
+        <span className="flex aspect-video items-center justify-center rounded-t-card bg-muted text-sm text-muted-foreground">
+          오프라인
         </span>
       )}
       {!online ? (

@@ -120,25 +120,39 @@ afterEach(() => {
 });
 
 describe('OperationsPage', () => {
-  it('renders the page title and the camera wall grid once cameras load', async () => {
+  it('renders the page title with online/offline counts and the camera wall grid once cameras load', async () => {
     resetLocation();
     installFetchMock();
     const { host } = await renderPage();
 
     expect(host.querySelector('#main-content h1, h1')?.textContent).toBe('관제');
+    expect(host.textContent).toContain('온라인 2');
+    expect(host.textContent).toContain('오프라인 1');
     expect(host.textContent).toContain('101호');
     expect(host.textContent).toContain('102호');
     expect(host.textContent).toContain('201호');
     expect(host.querySelectorAll('[data-camera-id]').length).toBe(3);
   });
 
-  it('filters the wall by floor and updates the URL', async () => {
+  it('renders the offline camera tile as a gray placeholder instead of a live snapshot', async () => {
     resetLocation();
     installFetchMock();
     const { host } = await renderPage();
 
-    const floorButton = Array.from(host.querySelectorAll('button')).find((button) => button.textContent === '2층');
-    act(() => floorButton?.click());
+    const offlineTile = host.querySelector('[data-camera-id="cam-2"]') as HTMLButtonElement;
+    const offlineMedia = offlineTile.querySelector('.bg-muted');
+    expect(offlineMedia?.textContent).toBe('오프라인');
+    expect(offlineTile.querySelector('img')).toBeNull();
+  });
+
+  it('filters the wall by floor via the select and updates the URL', async () => {
+    resetLocation();
+    installFetchMock();
+    const { host } = await renderPage();
+
+    const floorSelect = host.querySelector('select[aria-label="층 필터"]') as HTMLSelectElement;
+    floorSelect.value = '2층';
+    act(() => floorSelect.dispatchEvent(new Event('change', { bubbles: true })));
     await flush();
 
     expect(window.location.search).toContain('floor=2%EC%B8%B5');
@@ -147,7 +161,7 @@ describe('OperationsPage', () => {
     expect(host.textContent).not.toContain('101호');
   });
 
-  it('opens room detail when a tile is clicked, and returns to the wall via the back button', async () => {
+  it('opens room detail when a tile is clicked, and returns to the wall via the breadcrumb', async () => {
     resetLocation();
     installFetchMock();
     const { host } = await renderPage();
@@ -157,17 +171,31 @@ describe('OperationsPage', () => {
     await flush();
 
     expect(window.location.search).toContain('camera=cam-1');
-    expect(host.querySelector('h2')?.textContent).toBe('101호');
+    expect(host.querySelector('h1')?.textContent).toBe('101호');
+    expect(host.textContent).toContain('관제');
     expect(host.textContent).toContain('12.4 FPS');
     expect(host.textContent).toContain('1층');
     expect(host.textContent).toContain('rtsp://redacted-camera/a');
 
-    const backButton = Array.from(host.querySelectorAll('button')).find((button) => button.textContent?.includes('카메라 월로'));
-    act(() => backButton?.click());
+    const breadcrumbLink = Array.from(host.querySelectorAll('button')).find((button) => button.textContent === '관제');
+    act(() => breadcrumbLink?.click());
     await flush();
 
     expect(window.location.search).not.toContain('camera=');
     expect(host.querySelectorAll('[data-camera-id]').length).toBe(3);
+  });
+
+  it('shows an offline camera detail with the disconnected panel and its reconnect/manage buttons', async () => {
+    resetLocation('?page=operations&camera=cam-2');
+    installFetchMock();
+    const { host } = await renderPage();
+
+    expect(host.textContent).toContain('카메라에 연결할 수 없습니다');
+    expect(host.textContent).toContain('탐지가 중단된 상태입니다');
+    const buttons = Array.from(host.querySelectorAll('button')).map((button) => button.textContent);
+    expect(buttons).toContain('재연결 시도');
+    expect(buttons).toContain('연결 관리');
+    expect(host.textContent).toContain('중단됨');
   });
 
   it('shows the global detection settings summary and lets the overlay mode be changed', async () => {
@@ -175,8 +203,8 @@ describe('OperationsPage', () => {
     const fetchMock = installFetchMock();
     const { host } = await renderPage();
 
-    expect(host.textContent).toContain('사용 중 · 상시');
-    expect(host.textContent).toContain('사용 안 함');
+    expect(host.textContent).toContain('탐지 중');
+    expect(host.textContent).toContain('꺼짐');
 
     const fallChip = Array.from(host.querySelectorAll<HTMLButtonElement>('button[aria-pressed]')).find((button) => button.textContent === '낙상');
     expect(fallChip?.getAttribute('aria-pressed')).toBe('false');
