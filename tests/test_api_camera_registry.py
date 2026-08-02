@@ -6,12 +6,15 @@ import urllib.error
 import uuid
 from collections.abc import Iterator
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Self, TypedDict
 
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from backend.app.core.config import get_settings
+from backend.app.features.cameras.router import _authorize_worker
 from backend.app.features.cameras.store import CameraRegistryStore, public_camera
 from backend.app.features.status.heartbeat_store import get_heartbeat_store
 from backend.app.lifespan import refresh_backend_config
@@ -349,29 +352,32 @@ def test_worker_config_emits_detection_windows_alongside_legacy_night_window(tmp
     }
 
 
-def test_worker_config_accepts_non_ascii_relay_token_without_crashing(tmp_path) -> None:
+def test_authorize_worker_accepts_non_ascii_relay_token_without_crashing() -> None:
     """A non-ASCII relay token (e.g. a Korean value in API_EDGE_RELAY_TOKEN)
     must not crash the constant-time compare in `_authorize_worker` with a
     TypeError -- hmac.compare_digest rejects non-ASCII `str` arguments, so
     the comparison must encode to UTF-8 bytes first (see issue #23's
-    compare_digest sweep)."""
-    app = create_app(lifespan=no_lifespan)
-    app.state.edge_relay_token = "중계-토큰"
-    app.state.camera_registry = CameraRegistryStore(tmp_path / "cameras.json")
+    compare_digest sweep).
 
-    with TestClient(app) as client:
-        _login(client)
-        matching = client.get(
-            "/api/v1/cameras/worker-config",
-            headers={"X-Edge-Relay-Token": "중계-토큰"},
-        )
-        mismatched = client.get(
-            "/api/v1/cameras/worker-config",
-            headers={"X-Edge-Relay-Token": "wrong-token"},
-        )
+    Exercised as a direct call against `_authorize_worker` rather than over
+    HTTP: an HTTP header is a byte-oriented channel, and this repo's actual
+    worker HTTP client (stdlib `http.client`/`urllib.request`, see
+    worker/__main__.py, worker/runtime/worker.py,
+    worker/runtime/config/config_pull.py) encodes a `str` header value via
+    Latin-1 *client-side* -- a genuine Korean/CJK token would raise
+    UnicodeEncodeError in the worker itself before a request is ever sent,
+    never reaching this comparison. Calling `_authorize_worker` directly
+    isolates the actual fix (the compare_digest call) from that unrelated,
+    non-reachable HTTP-header-encoding concern.
+    """
+    state = SimpleNamespace(edge_relay_token="중계-토큰")
+    request = SimpleNamespace(app=SimpleNamespace(state=state))
 
-    assert matching.status_code == 200
-    assert mismatched.status_code == 403
+    _authorize_worker(request, "중계-토큰")  # must not raise
+
+    with pytest.raises(HTTPException) as exc_info:
+        _authorize_worker(request, "wrong-token")
+    assert exc_info.value.status_code == 403
 
 
 def test_worker_config_emits_default_camera_fps_when_configured(
