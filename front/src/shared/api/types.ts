@@ -189,6 +189,15 @@ export type Clip = {
   video_error: string | null;
 };
 
+export type HeartbeatRelayErrorClass = 'auth' | 'timeout' | 'unreachable';
+
+export type HeartbeatRelayStatus = {
+  enabled: boolean;
+  last_success_at: string | null;
+  last_error_class: HeartbeatRelayErrorClass | null;
+  detail: string | null;
+};
+
 export type ConnectionView = {
   events_url: string | null;
   config_url: string | null;
@@ -199,6 +208,12 @@ export type ConnectionView = {
   reachable: boolean | null;
   last_ok_at: string | null;
   updated_at: string | null;
+  /**
+   * Optional (not just nullable): an older backend that hasn't shipped this field yet omits it
+   * entirely. connectionNormalizer.normalizeConnectionView always fills it in from a live response,
+   * so treat a missing value here as "talking to an old backend", not as a normalization bug.
+   */
+  heartbeat_relay?: HeartbeatRelayStatus;
 };
 
 /** Partial update body: an omitted field is left untouched; an explicit `null` clears it. */

@@ -10,6 +10,7 @@ import {
   type ConnectionFormState,
 } from '@/features/connection/connectionSettingsForm';
 import type { PollingResource } from '@/shared/api/usePollingResource';
+import type { HeartbeatRelayStatus } from '@/shared/api/types';
 import { getConnectionStatus } from '@/shared/ui/StatusBadge';
 
 type ConnectionSettingsPanelProps = {
@@ -20,6 +21,30 @@ function formatLastOkAt(value: string | null | undefined): string {
   if (!value) return '연결 이력 없음';
   const date = new Date(value);
   return Number.isFinite(date.getTime()) ? `마지막 연결 확인 ${date.toLocaleString('ko-KR')}` : '연결 이력 없음';
+}
+
+const DEFAULT_HEARTBEAT_RELAY: HeartbeatRelayStatus = {
+  enabled: false,
+  last_success_at: null,
+  last_error_class: null,
+  detail: null,
+};
+
+function formatRelayLastSuccessAt(value: string | null): string {
+  if (!value) return '성공 이력 없음';
+  const date = new Date(value);
+  return Number.isFinite(date.getTime()) ? date.toLocaleString('ko-KR') : '성공 이력 없음';
+}
+
+/** Mirrors getConnectionStatus's {enabled, error} -> {label, className} shape, sourced from the relay sub-status instead. */
+function heartbeatRelayStatusLine(relay: HeartbeatRelayStatus): { text: string; className: string } {
+  if (!relay.enabled) {
+    return { text: '하트비트 릴레이 비활성', className: 'text-ink-faint' };
+  }
+  if (relay.last_error_class) {
+    return { text: relay.detail ?? '하트비트 릴레이 오류가 발생했습니다.', className: 'text-status-danger' };
+  }
+  return { text: `하트비트 릴레이 정상 · ${formatRelayLastSuccessAt(relay.last_success_at)}`, className: 'text-status-stable' };
 }
 
 const GENERIC_TEST_FAILURE: ConnectionTestResult = {
@@ -114,6 +139,7 @@ export function ConnectionSettingsPanel({ resource }: ConnectionSettingsPanelPro
 
   const busy = pendingAction !== null;
   const statusMeta = getConnectionStatus(view);
+  const relayStatus = heartbeatRelayStatusLine(view?.heartbeat_relay ?? DEFAULT_HEARTBEAT_RELAY);
   const tokenPlaceholder = form.facility_token_cleared
     ? '저장 시 삭제됩니다'
     : view?.facility_token_masked ?? '토큰 없음';
@@ -126,6 +152,7 @@ export function ConnectionSettingsPanel({ resource }: ConnectionSettingsPanelPro
           <h2 className="mt-2 text-xl font-black text-ink">연결 설정</h2>
         </div>
         <span
+          aria-live="polite"
           className={`inline-flex items-center rounded-full px-3 py-1 text-xs font-bold ring-1 ${statusMeta.className}`}
         >
           <span className="mr-1.5 h-2 w-2 rounded-full bg-current" />
@@ -134,6 +161,7 @@ export function ConnectionSettingsPanel({ resource }: ConnectionSettingsPanelPro
       </div>
 
       <p className="mt-2 text-xs font-semibold text-ink-faint">{formatLastOkAt(view?.last_ok_at)}</p>
+      <p aria-live="polite" className={`mt-1 text-xs font-semibold ${relayStatus.className}`}>{relayStatus.text}</p>
 
       <form className="mt-5 space-y-4" onSubmit={handleSubmit} noValidate>
         <label className="block text-sm font-bold text-ink-soft">

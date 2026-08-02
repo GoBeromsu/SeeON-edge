@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { normalizeCamera, normalizeCameraRegistry, normalizeCameraResponse, normalizeCameraTestResult, normalizeClip, normalizeClipsResponse, normalizeStatusSnapshot, normalizeSystemSnapshot } from '@/shared/api/normalizers';
+import { normalizeCamera, normalizeCameraRegistry, normalizeCameraResponse, normalizeCameraTestResult, normalizeClip, normalizeClipsResponse, normalizeConnectionView, normalizeStatusSnapshot, normalizeSystemSnapshot } from '@/shared/api/normalizers';
 
 const validCameraResponse = {
   id: 'cam-1',
@@ -498,6 +498,68 @@ describe('heartbeat freshness fields via normalizeCamera', () => {
     ['malformed heartbeat_age_sec', { ...validCameraResponse, heartbeat_age_sec: 'stale' }],
   ])('rejects a registry entry with a %s instead of dropping or coercing it', (_case, camera) => {
     expect(() => normalizeCameraRegistry({ registry_version: 1, cameras: [camera] })).toThrow('Invalid camera registry response');
+  });
+});
+
+describe('heartbeat relay status via normalizeConnectionView', () => {
+  const validConnection = {
+    events_url: 'https://backend.example.com/events',
+    config_url: 'https://backend.example.com/config',
+    facility_id: 'facility-42',
+    facility_token_set: true,
+    facility_token_masked: '****ab12',
+    configured: true,
+    reachable: true,
+    last_ok_at: '2026-08-01T00:00:00Z',
+    updated_at: '2026-08-01T00:00:00Z',
+  };
+
+  it('preserves a healthy relay status from the backend', () => {
+    const view = normalizeConnectionView({
+      ...validConnection,
+      heartbeat_relay: { enabled: true, last_success_at: '2026-08-02T00:00:00Z', last_error_class: null, detail: null },
+    });
+    expect(view.heartbeat_relay).toEqual({
+      enabled: true,
+      last_success_at: '2026-08-02T00:00:00Z',
+      last_error_class: null,
+      detail: null,
+    });
+  });
+
+  it('preserves a failing relay status and its error class', () => {
+    const view = normalizeConnectionView({
+      ...validConnection,
+      heartbeat_relay: { enabled: true, last_success_at: null, last_error_class: 'auth', detail: '인증 실패' },
+    });
+    expect(view.heartbeat_relay).toEqual({
+      enabled: true,
+      last_success_at: null,
+      last_error_class: 'auth',
+      detail: '인증 실패',
+    });
+  });
+
+  it.each([
+    ['missing entirely', undefined],
+    ['non-object', 'enabled'],
+    ['missing enabled', { last_success_at: null, last_error_class: null, detail: null }],
+    ['malformed enabled', { enabled: 'true', last_success_at: null, last_error_class: null, detail: null }],
+    ['malformed last_success_at', { enabled: true, last_success_at: 123, last_error_class: null, detail: null }],
+    ['unknown last_error_class', { enabled: true, last_success_at: null, last_error_class: 'network', detail: null }],
+    ['malformed nullable detail', { enabled: true, last_success_at: null, last_error_class: null, detail: 1 }],
+  ])('defaults to the all-disabled relay status on a %s field, without rejecting the connection envelope', (_case, heartbeat_relay) => {
+    const view = normalizeConnectionView({ ...validConnection, heartbeat_relay });
+    expect(view.heartbeat_relay).toEqual({
+      enabled: false,
+      last_success_at: null,
+      last_error_class: null,
+      detail: null,
+    });
+  });
+
+  it('still rejects a connection envelope with an unrelated malformed field, independent of the relay field', () => {
+    expect(() => normalizeConnectionView({ ...validConnection, configured: 'yes' })).toThrow('Invalid connection response');
   });
 });
 

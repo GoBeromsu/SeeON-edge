@@ -160,7 +160,7 @@ export function CameraCard({ camera, onUpdateStarted, onUpdated, onDelete, onVie
         <div className="text-right">
           <StatusBadge status={camera.status} />
           {syncMeta ? (
-            <p className="mt-1.5">
+            <p aria-live="polite" className="mt-1.5">
               <span className={`inline-flex items-center rounded-full px-3 py-1 text-xs font-bold ring-1 ${syncMeta.className}`}>
                 <span className="mr-1.5 h-2 w-2 rounded-full bg-current" />
                 {syncMeta.label}

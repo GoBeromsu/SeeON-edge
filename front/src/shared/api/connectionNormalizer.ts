@@ -3,6 +3,8 @@ import type {
   ConnectionErrorClass,
   ConnectionTestResult,
   ConnectionView,
+  HeartbeatRelayErrorClass,
+  HeartbeatRelayStatus,
   RosterSyncErrorClass,
   RosterSyncResult,
   RosterSyncStatus,
@@ -20,8 +22,41 @@ const ROSTER_SYNC_ERROR_CLASSES: readonly RosterSyncErrorClass[] = ['unreachable
 
 const ROSTER_SYNC_STATUSES: readonly RosterSyncStatus[] = ['synced', 'pending', 'failed', 'disabled'];
 
+const HEARTBEAT_RELAY_ERROR_CLASSES: readonly HeartbeatRelayErrorClass[] = ['auth', 'timeout', 'unreachable'];
+
+const DEFAULT_HEARTBEAT_RELAY: HeartbeatRelayStatus = {
+  enabled: false,
+  last_success_at: null,
+  last_error_class: null,
+  detail: null,
+};
+
 function isNullableEnum<T extends string>(value: unknown, allowed: readonly T[]): value is T | null {
   return value === null || (typeof value === 'string' && (allowed as readonly string[]).includes(value));
+}
+
+/**
+ * Unlike the rest of this file, malformed/missing input here never throws: an older backend simply
+ * hasn't shipped this field yet, so it normalizes to the all-disabled default and the rest of the
+ * connection view still loads.
+ */
+function normalizeHeartbeatRelay(value: unknown): HeartbeatRelayStatus {
+  if (
+    !isRecord(value)
+    || typeof value.enabled !== 'boolean'
+    || !('last_success_at' in value) || !isNullableString(value.last_success_at)
+    || !('last_error_class' in value) || !isNullableEnum(value.last_error_class, HEARTBEAT_RELAY_ERROR_CLASSES)
+    || !('detail' in value) || !isNullableString(value.detail)
+  ) {
+    return DEFAULT_HEARTBEAT_RELAY;
+  }
+
+  return {
+    enabled: value.enabled,
+    last_success_at: value.last_success_at,
+    last_error_class: value.last_error_class,
+    detail: value.detail,
+  };
 }
 
 export function normalizeConnectionView(value: unknown): ConnectionView {
@@ -51,6 +86,7 @@ export function normalizeConnectionView(value: unknown): ConnectionView {
     reachable: record.reachable,
     last_ok_at: record.last_ok_at,
     updated_at: record.updated_at,
+    heartbeat_relay: normalizeHeartbeatRelay(record.heartbeat_relay),
   };
 }
 
