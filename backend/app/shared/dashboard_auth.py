@@ -34,6 +34,20 @@ DEFAULT_DASHBOARD_PASSWORD = "admin"
 _SESSION_STORE_INIT_LOCK = threading.Lock()
 
 
+def _compare_str(candidate: str, expected: str) -> bool:
+    """Constant-time compare of two ``str`` values that may contain non-ASCII
+    text (e.g. a Korean username or password).
+
+    ``hmac.compare_digest`` raises ``TypeError`` for non-ASCII ``str``
+    arguments -- it only accepts ASCII ``str`` or ``bytes``/``bytes``-like
+    objects. Encoding to UTF-8 bytes first keeps the comparison constant-time
+    while supporting any username/password the product's Korean-language UI
+    can produce.
+    """
+
+    return hmac.compare_digest(candidate.encode("utf-8"), expected.encode("utf-8"))
+
+
 class DashboardCredentials(Protocol):
     """Something that knows one dashboard username and can verify a login."""
 
@@ -50,7 +64,7 @@ class PlaintextDashboardCredentials:
     password: str
 
     def verify(self, username: str, password: str) -> bool:
-        return hmac.compare_digest(username, self.username) and hmac.compare_digest(
+        return _compare_str(username, self.username) and _compare_str(
             password, self.password
         )
 
@@ -66,7 +80,7 @@ class HashedDashboardCredentials:
         return self.persisted.username
 
     def verify(self, username: str, password: str) -> bool:
-        return hmac.compare_digest(username, self.persisted.username) and (
+        return _compare_str(username, self.persisted.username) and (
             self.persisted.verify_password(password)
         )
 
@@ -203,25 +217,36 @@ def rotate_dashboard_credentials(
 
     Raises ``WrongCurrentPasswordError`` without touching the credentials file
     when ``current_password`` doesn't match the active session's password.
+
+    The whole verify -> persist -> swap -> mint sequence runs under
+    ``_SESSION_STORE_INIT_LOCK`` so two concurrent rotations can't interleave
+    (e.g. two admin tabs submitting at once): the second call re-verifies
+    ``current_password`` against whatever the first call already swapped in,
+    so at most one of two racing rotations against the same prior password
+    succeeds -- the other gets a clean ``WrongCurrentPasswordError`` instead
+    of a silently-overwritten file or a 204 whose cookie is already dead.
     """
 
     sessions = dashboard_sessions(request)
-    if not sessions.credentials.verify(sessions.username, current_password):
-        raise WrongCurrentPasswordError()
-
-    resolved_username = (new_username or "").strip() or sessions.username
     store = dashboard_credentials_store(request)
-    persisted = store.save(username=resolved_username, password=new_password)
 
     with _SESSION_STORE_INIT_LOCK:
+        if not sessions.credentials.verify(sessions.username, current_password):
+            raise WrongCurrentPasswordError()
+
+        resolved_username = (new_username or "").strip() or sessions.username
+        persisted = store.save(username=resolved_username, password=new_password)
+
         sessions.rotate_credentials(persisted)
 
-    token = sessions.authenticate(resolved_username, new_password)
-    if token is None:
-        # Defensive: rotate_credentials() just persisted this exact pair, so
-        # authenticate() against it must succeed.
-        raise RuntimeError("dashboard credential rotation produced an unauthenticated store")
-    return token
+        token = sessions.authenticate(resolved_username, new_password)
+        if token is None:
+            # Defensive: rotate_credentials() just persisted this exact pair,
+            # so authenticate() against it must succeed.
+            raise RuntimeError(
+                "dashboard credential rotation produced an unauthenticated store"
+            )
+        return token
 
 
 def authorize_dashboard(request: Request, *, legacy_token: str | None = None) -> str:
@@ -260,7 +285,7 @@ def authorize_dashboard(request: Request, *, legacy_token: str | None = None) ->
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="dashboard credential required",
         )
-    if not hmac.compare_digest(legacy_token, str(expected)):
+    if not _compare_str(legacy_token, str(expected)):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="dashboard credential mismatch",

@@ -218,6 +218,66 @@ def test_credential_rotation_changes_login_and_revokes_other_sessions(tmp_path) 
         assert bystander.get("/api/v1/cameras").status_code == 401
 
 
+def test_rotation_to_a_non_ascii_username_logs_in_and_survives_a_restart(tmp_path) -> None:
+    """Regression for a non-ASCII (Korean) username crashing every future
+    login with a 500: hmac.compare_digest raises TypeError for non-ASCII
+    `str` arguments, so both PlaintextDashboardCredentials.verify() and
+    HashedDashboardCredentials.verify() must compare UTF-8-encoded bytes,
+    not `str`, directly. Exercises rotation to "관리자", a login with the new
+    Korean username, a 401 (not 500) for the stale default, and a simulated
+    restart (fresh store re-resolution from the same persisted file)."""
+    store_path = tmp_path / "dashboard_credentials.json"
+    korean_username = "관리자"
+
+    with TestClient(
+        _app(tmp_path, dashboard_credentials_store=DashboardCredentialsStore(store_path))
+    ) as client:
+        login = client.post(
+            "/api/v1/auth/session",
+            json={"username": DEFAULT_DASHBOARD_USERNAME, "password": DEFAULT_DASHBOARD_PASSWORD},
+        )
+        assert login.status_code == 204
+
+        rotate = client.put(
+            "/api/v1/auth/credentials",
+            json={
+                "current_password": DEFAULT_DASHBOARD_PASSWORD,
+                "username": korean_username,
+                "new_password": "new-secret-pw",
+            },
+        )
+        assert rotate.status_code == 204
+
+        new_username_login = client.post(
+            "/api/v1/auth/session",
+            json={"username": korean_username, "password": "new-secret-pw"},
+        )
+        assert new_username_login.status_code == 204
+
+        stale_default = client.post(
+            "/api/v1/auth/session",
+            json={"username": DEFAULT_DASHBOARD_USERNAME, "password": DEFAULT_DASHBOARD_PASSWORD},
+        )
+        assert stale_default.status_code == 401
+
+    # Simulate a restart: a brand-new app/session-store resolves the Korean
+    # username fresh from the same on-disk file, without crashing.
+    with TestClient(
+        _app(tmp_path, dashboard_credentials_store=DashboardCredentialsStore(store_path))
+    ) as client:
+        rejected = client.post(
+            "/api/v1/auth/session",
+            json={"username": DEFAULT_DASHBOARD_USERNAME, "password": DEFAULT_DASHBOARD_PASSWORD},
+        )
+        accepted = client.post(
+            "/api/v1/auth/session",
+            json={"username": korean_username, "password": "new-secret-pw"},
+        )
+
+        assert rejected.status_code == 401
+        assert accepted.status_code == 204
+
+
 def test_wrong_current_password_is_rejected_without_touching_the_store(tmp_path) -> None:
     store_path = tmp_path / "dashboard_credentials.json"
     app = _app(tmp_path, dashboard_credentials_store=DashboardCredentialsStore(store_path))

@@ -349,6 +349,31 @@ def test_worker_config_emits_detection_windows_alongside_legacy_night_window(tmp
     }
 
 
+def test_worker_config_accepts_non_ascii_relay_token_without_crashing(tmp_path) -> None:
+    """A non-ASCII relay token (e.g. a Korean value in API_EDGE_RELAY_TOKEN)
+    must not crash the constant-time compare in `_authorize_worker` with a
+    TypeError -- hmac.compare_digest rejects non-ASCII `str` arguments, so
+    the comparison must encode to UTF-8 bytes first (see issue #23's
+    compare_digest sweep)."""
+    app = create_app(lifespan=no_lifespan)
+    app.state.edge_relay_token = "중계-토큰"
+    app.state.camera_registry = CameraRegistryStore(tmp_path / "cameras.json")
+
+    with TestClient(app) as client:
+        _login(client)
+        matching = client.get(
+            "/api/v1/cameras/worker-config",
+            headers={"X-Edge-Relay-Token": "중계-토큰"},
+        )
+        mismatched = client.get(
+            "/api/v1/cameras/worker-config",
+            headers={"X-Edge-Relay-Token": "wrong-token"},
+        )
+
+    assert matching.status_code == 200
+    assert mismatched.status_code == 403
+
+
 def test_worker_config_emits_default_camera_fps_when_configured(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
