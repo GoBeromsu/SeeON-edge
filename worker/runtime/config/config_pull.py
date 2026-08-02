@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 import urllib.request
+from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Final
@@ -16,9 +17,14 @@ from worker.runtime.config.lkg_store import (
     StoredConfigPayload,
     WorkerConfigLkgStore,
 )
+from worker.runtime.config.local_env import resolve_local_overrides
 from worker.runtime.config.pull_models import BackendWorkerConfigPayload
 from worker.runtime.config.restart import RestartDirective
-from worker.runtime.config.worker_models import WorkerConfig
+from worker.runtime.config.worker_models import (
+    ClipRecordingConfig,
+    WorkerConfig,
+    WorkerModelsConfig,
+)
 
 RELAY_URL_ENV: Final = "RELAY_URL"
 RELAY_TOKEN_ENV: Final = "RELAY_TOKEN"
@@ -71,6 +77,8 @@ def load_worker_config_from_relay(
     timeout_sec: float = 5.0,
     store: WorkerConfigLkgStore | None = None,
     urlopen: UrlOpen | None = None,
+    models: WorkerModelsConfig | None = None,
+    clip: ClipRecordingConfig | None = None,
 ) -> ConfigSnapshot | None:
     lkg_store = store or WorkerConfigLkgStore()
     payload = _pull_payload(
@@ -87,6 +95,8 @@ def load_worker_config_from_relay(
                 relay_token,
                 source=ConfigSource.PULLED,
                 stale=False,
+                models=models,
+                clip=clip,
             )
         except (ValidationError, WorkerConfigError):
             print("worker config pull skipped: malformed payload", file=sys.stderr)
@@ -98,7 +108,9 @@ def load_worker_config_from_relay(
             if stored is None or _stored_key(stored) <= _snapshot_key(fresh):
                 return fresh
             try:
-                return _snapshot_from_stored(stored, relay_url, relay_token)
+                return _snapshot_from_stored(
+                    stored, relay_url, relay_token, models=models, clip=clip
+                )
             except (ValidationError, WorkerConfigError) as exc:
                 print(
                     f"WARNING: worker config LKG at {lkg_store.database_path} "
@@ -112,7 +124,7 @@ def load_worker_config_from_relay(
     if stored is None:
         return None
     try:
-        return _snapshot_from_stored(stored, relay_url, relay_token)
+        return _snapshot_from_stored(stored, relay_url, relay_token, models=models, clip=clip)
     except (ValidationError, WorkerConfigError):
         print("worker config LKG skipped: malformed payload", file=sys.stderr)
         return None
@@ -126,14 +138,18 @@ def resolve_startup_config(
     timeout_sec: float = 5.0,
     store: WorkerConfigLkgStore | None = None,
     urlopen: UrlOpen | None = None,
+    environ: Mapping[str, str] | None = None,
 ) -> ConfigSnapshot:
     effective_token = relay_token or yaml_config.relay.token.get_secret_value()
+    models, clip = resolve_local_overrides(yaml_config, environ)
     pulled = load_worker_config_from_relay(
         relay_url,
         effective_token,
         timeout_sec=timeout_sec,
         store=store,
         urlopen=urlopen,
+        models=models,
+        clip=clip,
     )
     if pulled is not None:
         return pulled
@@ -181,10 +197,12 @@ def _snapshot_from_payload(
     *,
     source: ConfigSource,
     stale: bool,
+    models: WorkerModelsConfig | None = None,
+    clip: ClipRecordingConfig | None = None,
 ) -> ConfigSnapshot:
     parsed = BackendWorkerConfigPayload.model_validate(payload)
     return ConfigSnapshot(
-        config=parsed.to_worker_config(relay_url, relay_token),
+        config=parsed.to_worker_config(relay_url, relay_token, models=models, clip=clip),
         registry_version=parsed.resolved_registry_version,
         directive=parsed.directive,
         source=source,
@@ -196,6 +214,9 @@ def _snapshot_from_stored(
     stored: StoredConfigPayload,
     relay_url: str,
     relay_token: str | None,
+    *,
+    models: WorkerModelsConfig | None = None,
+    clip: ClipRecordingConfig | None = None,
 ) -> ConfigSnapshot:
     snapshot = _snapshot_from_payload(
         stored.payload,
@@ -203,6 +224,8 @@ def _snapshot_from_stored(
         relay_token,
         source=ConfigSource.LKG,
         stale=True,
+        models=models,
+        clip=clip,
     )
     if _snapshot_key(snapshot) != _stored_key(stored):
         raise WorkerConfigError("worker config LKG revision mismatch")

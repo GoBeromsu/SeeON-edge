@@ -133,7 +133,9 @@ def test_no_yaml_successful_pull_becomes_live_runtime_config(
         stale=False,
     )
 
-    def _fake_load_from_relay(relay_url: str, relay_token: str | None) -> ConfigSnapshot:
+    def _fake_load_from_relay(
+        relay_url: str, relay_token: str | None, **_kwargs: object
+    ) -> ConfigSnapshot:
         assert relay_url == "http://ml-api:8000"
         assert relay_token == "relay-token"
         return snapshot

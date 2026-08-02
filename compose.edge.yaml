@@ -95,6 +95,21 @@ services:
       ML_WORKER_DEV_MJPEG: ${ML_WORKER_DEV_MJPEG:-true}
       ML_WORKER_DEV_MJPEG_HOST: 0.0.0.0
       ML_WORKER_DEV_MJPEG_PORT: ${ML_WORKER_DEV_MJPEG_PORT:-8090}
+      # models.fall/clip.enabled are locally-sourced (issues #66/#68): the
+      # pull-first topology above (EDGE_CAMERA_CONFIG unset) has no local YAML
+      # to carry them, and the backend pull only ever carries fleet-level
+      # state (relay/domains/cameras), so these two are edge-local env vars
+      # instead, mounted from the same ML_MODELS_DIR volume as ml-api above.
+      ML_WORKER_FALL_MODEL_ARTIFACT_DIR: ${ML_WORKER_FALL_MODEL_ARTIFACT_DIR:-/app/models/fall/lstm}
+      ML_WORKER_FALL_MODEL_WINDOW: ${ML_WORKER_FALL_MODEL_WINDOW:-30}
+      ML_WORKER_FALL_MODEL_STRIDE: ${ML_WORKER_FALL_MODEL_STRIDE:-5}
+      ML_WORKER_FALL_MODEL_OPERATING_THRESHOLD: ${ML_WORKER_FALL_MODEL_OPERATING_THRESHOLD:-0.5}
+      ML_WORKER_FALL_MODEL_SCHEMA_VERSION: ${ML_WORKER_FALL_MODEL_SCHEMA_VERSION:-1}
+      ML_WORKER_FALL_MODEL_PREPROCESSING_IDENTITY: ${ML_WORKER_FALL_MODEL_PREPROCESSING_IDENTITY:-legacy-coco17-xyc-frame-normalized-zero-fill-v1}
+      # Evidence clip recording stays off by default -- see the clip.enabled
+      # doc in worker/ml-worker.example.yaml. Independent of
+      # ML_WORKER_EVENT_CLIP_EXPORT_ENABLED below (the export sender gate).
+      ML_WORKER_CLIP_RECORDING_ENABLED: ${ML_WORKER_CLIP_RECORDING_ENABLED:-false}
       # Fixed container path of the evidence clip store (host bind below).
       CLIP_STORE_DIR: /var/lib/clip-store
       # Durable sending remains disabled until operators explicitly enable rollout.
