@@ -73,6 +73,31 @@ describe('CameraManagementPanel freshness', () => {
   });
 });
 
+describe('CameraManagementPanel roster sync', () => {
+  it('omits the sync button when onSyncCameras is not provided', () => {
+    const { host, root } = renderPanel();
+    expect(Array.from(host.querySelectorAll('button')).some((button) => button.textContent === '카메라 동기화')).toBe(false);
+    act(() => root.unmount());
+  });
+
+  it('renders a busy sync button and its result message', () => {
+    const onSyncCameras = vi.fn();
+    const { host, root } = renderPanel({
+      cameraError: null,
+      hasLoadedSuccessfully: true,
+      onSyncCameras,
+      syncBusy: true,
+      syncMessage: '카메라 동기화 완료 · 2대',
+    });
+    const syncButton = Array.from(host.querySelectorAll<HTMLButtonElement>('button')).find((button) => button.textContent === '동기화 중...');
+    expect(syncButton?.disabled).toBe(true);
+    act(() => syncButton?.click());
+    expect(onSyncCameras).not.toHaveBeenCalled();
+    expect(host.textContent).toContain('카메라 동기화 완료 · 2대');
+    act(() => root.unmount());
+  });
+});
+
 describe('CameraManagementPanel sort order', () => {
   it('sorts cards for fault triage: offline, then never-connected/unknown, then online', () => {
     const online = { ...camera, id: 'cam-online', label: '온라인 카메라', status: 'online' as const };

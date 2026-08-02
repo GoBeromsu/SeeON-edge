@@ -11,9 +11,11 @@ import { EventHistoryPage } from '@/features/events/EventHistoryPage';
 import type { EventHistoryLocation } from '@/features/events/cameraEventLogic';
 import { OperationsView } from '@/features/operations/OperationsView';
 import { SystemPage } from '@/features/system/SystemPage';
-import { useCamerasResource, useClipsResource, useStatusResource } from '@/shared/api/usePollingResource';
+import type { ConnectionView } from '@/shared/api/client';
+import { useCamerasResource, useClipsResource, useConnectionResource, useStatusResource } from '@/shared/api/usePollingResource';
 import { AuthGate } from '@/shared/ui/AuthGate';
 import { DashboardShell } from '@/shared/ui/DashboardShell';
+import { getConnectionStatus } from '@/shared/ui/StatusBadge';
 
 type LocationUpdate = Partial<Record<keyof DashboardLocation, string | null>>;
 
@@ -90,9 +92,23 @@ function EventsRoute({ location, onNavigate, onValidate }: {
   );
 }
 
+// DashboardShell renders backendStatus.className verbatim on a bare <span> (no shape wrapper of
+// its own), so the pill shape is composed here rather than inside StatusBadge.tsx's pure mapping
+// functions -- keeps getConnectionStatus's contract identical to getBackendStatus's.
+function topbarBackendStatus(connection: ConnectionView | null): { label: string; className: string } {
+  const meta = getConnectionStatus(connection);
+  return {
+    label: meta.label,
+    className: `inline-flex items-center rounded-full px-3 py-1 text-xs font-bold ring-1 ${meta.className}`,
+  };
+}
+
 export function Dashboard(): JSX.Element {
   const [location, setLocation] = useState(() => canonicalizeDashboardLocation(window.location.search).location);
   const [controller] = useState(() => new DashboardLocationController(window, setLocation));
+  // Page-independent and always on (unlike per-screen resources such as useSystemResource): the
+  // topbar badge must reflect the connection state from every screen, not just the system page.
+  const connection = useConnectionResource(true);
 
   useEffect(() => {
     controller.start();
@@ -131,6 +147,7 @@ export function Dashboard(): JSX.Element {
     <DashboardShell
       screen={location.page}
       onScreenChange={(page: DashboardPage) => navigate({ page })}
+      backendStatus={topbarBackendStatus(connection.data)}
     >
       {page}
     </DashboardShell>

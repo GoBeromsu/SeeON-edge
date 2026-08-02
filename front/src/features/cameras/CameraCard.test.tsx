@@ -333,6 +333,33 @@ describe('CameraCard', () => {
     act(() => root.unmount());
   });
 
+  it('shows no sync badge when the camera has no sync state', () => {
+    const host = document.createElement('div');
+    const root = createRoot(host);
+    act(() => root.render(<CameraCard camera={camera} />));
+
+    expect(host.textContent).not.toContain('동기화');
+    act(() => root.unmount());
+  });
+
+  it.each([
+    ['synced', '동기화됨'],
+    ['pending', '동기화 대기'],
+    ['failed', '동기화 실패'],
+    ['disabled', '동기화 비활성'],
+  ] as const)('shows the %s roster sync badge and its detail line', (status, label) => {
+    const host = document.createElement('div');
+    const root = createRoot(host);
+    act(() => root.render(<CameraCard camera={{
+      ...camera,
+      sync: { status, error_class: null, detail: '동기화 상세 메시지', last_ok_at: null },
+    }} />));
+
+    expect(host.textContent).toContain(label);
+    expect(host.textContent).toContain('동기화 상세 메시지');
+    act(() => root.unmount());
+  });
+
   it('links to the camera-scoped clips view only when a handler is supplied', () => {
     const host = document.createElement('div');
     const root = createRoot(host);

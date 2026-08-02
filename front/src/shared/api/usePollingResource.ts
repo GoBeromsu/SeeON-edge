@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { fetchCameras, fetchClips, fetchStatus, fetchSystem } from '@/shared/api/client';
-import type { CameraRegistry, Clip, StatusSnapshot, SystemSnapshot } from '@/shared/api/types';
+import { fetchCameras, fetchClips, fetchConnection, fetchStatus, fetchSystem } from '@/shared/api/client';
+import type { CameraRegistry, Clip, ConnectionView, StatusSnapshot, SystemSnapshot } from '@/shared/api/types';
 
 export type PollingResourceStatus = 'idle' | 'loading' | 'success' | 'error';
 
@@ -100,4 +100,8 @@ export function useClipsResource(enabled: boolean, cameraId?: string): PollingRe
 
 export function useSystemResource(enabled: boolean): PollingResource<SystemSnapshot> {
   return usePollingResource(fetchSystem, { enabled, intervalMs: 10_000 });
+}
+
+export function useConnectionResource(enabled: boolean): PollingResource<ConnectionView> {
+  return usePollingResource(fetchConnection, { enabled, intervalMs: 8_000 });
 }

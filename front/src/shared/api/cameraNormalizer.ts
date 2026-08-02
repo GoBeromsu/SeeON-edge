@@ -10,7 +10,45 @@ import {
   pickNumber,
   pickString,
 } from '@/shared/api/normalizerFields';
-import type { Camera, CameraRegistry, CameraStatus, CameraTestResult, DecodeBackend } from '@/shared/api/types';
+import type {
+  Camera,
+  CameraRegistry,
+  CameraStatus,
+  CameraSync,
+  CameraSyncErrorClass,
+  CameraSyncStatus,
+  CameraTestResult,
+  DecodeBackend,
+} from '@/shared/api/types';
+
+const CAMERA_SYNC_STATUSES: readonly CameraSyncStatus[] = ['synced', 'pending', 'failed', 'disabled'];
+const CAMERA_SYNC_ERROR_CLASSES: readonly CameraSyncErrorClass[] = ['unreachable', 'timeout', 'auth', 'unconfigured'];
+
+// Permissive by design (unlike the strict connection normalizers): `sync` is a GET-only,
+// still-rolling-out field, so a malformed or absent value degrades to null rather than
+// failing the whole camera list.
+function normalizeCameraSyncField(value: unknown): CameraSync | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+  const status = value.status;
+  if (typeof status !== 'string' || !CAMERA_SYNC_STATUSES.includes(status as CameraSyncStatus)) {
+    return null;
+  }
+  const errorClass = value.error_class;
+  if (errorClass !== null && !(typeof errorClass === 'string' && CAMERA_SYNC_ERROR_CLASSES.includes(errorClass as CameraSyncErrorClass))) {
+    return null;
+  }
+  if (!hasNullableString(value, 'detail') || !hasNullableString(value, 'last_ok_at')) {
+    return null;
+  }
+  return {
+    status: status as CameraSyncStatus,
+    error_class: (errorClass ?? null) as CameraSyncErrorClass | null,
+    detail: pickNullableString(value, ['detail']),
+    last_ok_at: pickNullableString(value, ['last_ok_at']),
+  };
+}
 
 function normalizeStatus(record: Record<string, unknown>): CameraStatus {
   const explicit = pickString(record, ['status']);
@@ -90,6 +128,7 @@ export function normalizeCamera(value: unknown): Camera | null {
     // that isn't a finite number, so garbage or missing fields never crash or coerce.
     last_heartbeat_at: pickNumber(value, ['last_heartbeat_at', 'lastHeartbeatAt']),
     heartbeat_age_sec: pickNumber(value, ['heartbeat_age_sec', 'heartbeatAgeSec']),
+    sync: normalizeCameraSyncField(value.sync),
   };
 }
 
@@ -134,7 +173,8 @@ function isCameraResponse(value: unknown): value is Record<string, unknown> {
     && hasNullableString(value, 'last_ok_at')
     && hasNullableString(value, 'last_probed_at')
     && (!('last_heartbeat_at' in value) || isNullableFiniteNumber(value.last_heartbeat_at))
-    && (!('heartbeat_age_sec' in value) || isNullableFiniteNumber(value.heartbeat_age_sec));
+    && (!('heartbeat_age_sec' in value) || isNullableFiniteNumber(value.heartbeat_age_sec))
+    && (!('sync' in value) || value.sync === null || isRecord(value.sync));
 }
 
 export function normalizeCameraTestResult(value: unknown): CameraTestResult {

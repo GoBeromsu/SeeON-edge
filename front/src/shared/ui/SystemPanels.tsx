@@ -1,9 +1,13 @@
-import type { StatusSnapshot, SystemSnapshot } from '@/shared/api/client';
+import type { ConnectionView, StatusSnapshot, SystemSnapshot } from '@/shared/api/client';
 import type { PollingResource } from '@/shared/api/usePollingResource';
+import { ConnectionSettingsPanel } from '@/features/connection/ConnectionSettingsPanel';
 
 type SystemPanelProps = {
   systemResource: PollingResource<SystemSnapshot>;
   statusResource: PollingResource<StatusSnapshot>;
+  // Optional (rather than required) so the many existing tests that construct <SystemPanel />
+  // directly without it keep passing unchanged; production always supplies it (SystemPage.tsx).
+  connectionResource?: PollingResource<ConnectionView>;
 };
 
 function formatDate(value: string | number | null): string {
@@ -290,7 +294,7 @@ function TechnicalInformation({ system, status }: { system: SystemSnapshot | nul
 }
 
 export function SystemPanel(props: SystemPanelProps): JSX.Element {
-  const { systemResource, statusResource: runtimeResource } = props;
+  const { systemResource, statusResource: runtimeResource, connectionResource } = props;
   const system = systemResource.data;
   const status = runtimeResource.data;
   const errors = [systemResource, runtimeResource].filter((resource) => resource.status === 'error');
@@ -304,7 +308,13 @@ export function SystemPanel(props: SystemPanelProps): JSX.Element {
   }
 
   if (available === 0 && errors.length === 0) {
-    return <section aria-labelledby="system-heading"><h1 id="system-heading" tabIndex={-1} className="text-xl font-black text-ink">시스템</h1><p className="mt-3 text-sm font-bold text-ink-soft">시스템 상태를 불러오는 중</p></section>;
+    return (
+      <section aria-labelledby="system-heading">
+        <h1 id="system-heading" tabIndex={-1} className="text-xl font-black text-ink">시스템</h1>
+        <p className="mt-3 text-sm font-bold text-ink-soft">시스템 상태를 불러오는 중</p>
+        {connectionResource ? <div className="mt-4"><ConnectionSettingsPanel resource={connectionResource} /></div> : null}
+      </section>
+    );
   }
 
   if (available === 0 && errors.length === 2) {
@@ -313,6 +323,7 @@ export function SystemPanel(props: SystemPanelProps): JSX.Element {
         <h1 id="system-heading" tabIndex={-1} className="text-xl font-black text-ink">시스템</h1>
         <p role="alert" className="mt-3 text-sm font-bold text-status-danger">시스템 상태를 불러오지 못했습니다</p>
         <button type="button" onClick={retry} className="brand-action mt-4 min-h-11 rounded-lg px-4 font-bold">다시 시도</button>
+        {connectionResource ? <div className="mt-4"><ConnectionSettingsPanel resource={connectionResource} /></div> : null}
       </section>
     );
   }
@@ -334,6 +345,7 @@ export function SystemPanel(props: SystemPanelProps): JSX.Element {
         </div>
         {errors.length ? <button type="button" onClick={retry} className="mt-3 min-h-11 rounded-lg border border-border bg-surface px-4 font-bold text-brand">다시 시도</button> : null}
       </header>
+      {connectionResource ? <ConnectionSettingsPanel resource={connectionResource} /> : null}
       {system ? <BackendPanel system={system} /> : <p className="rounded-xl border border-border bg-surface p-4 text-sm font-bold text-ink-soft">{systemResource.status === 'error' ? '백엔드와 저장 공간 상태를 불러오지 못했습니다' : '시스템 정보를 불러오는 중입니다'}</p>}
       {system ? <StorageGauge system={system} /> : null}
       {status ? <HeartbeatPanel status={status} /> : null}

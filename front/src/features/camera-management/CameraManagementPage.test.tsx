@@ -1,7 +1,7 @@
 import { act } from 'react';
 import { createRoot } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { createCamera, deleteCamera, fetchCameras, testCamera, updateCamera, updateCameraDecodeBackend, type Camera } from '@/shared/api/client';
+import { createCamera, deleteCamera, fetchCameras, syncCameras, testCamera, updateCamera, updateCameraDecodeBackend, type Camera } from '@/shared/api/client';
 import { CameraManagementPage } from '@/features/camera-management/CameraManagementPage';
 
 vi.mock('@/shared/api/client', async () => {
@@ -11,6 +11,7 @@ vi.mock('@/shared/api/client', async () => {
     createCamera: vi.fn(),
     deleteCamera: vi.fn(),
     fetchCameras: vi.fn(),
+    syncCameras: vi.fn(),
     testCamera: vi.fn(),
     updateCamera: vi.fn(),
     updateCameraDecodeBackend: vi.fn(),
@@ -42,6 +43,7 @@ beforeEach(() => {
   vi.mocked(fetchCameras).mockReset();
   vi.mocked(deleteCamera).mockReset();
   vi.mocked(createCamera).mockReset();
+  vi.mocked(syncCameras).mockReset();
   vi.mocked(testCamera).mockReset();
   vi.mocked(updateCamera).mockReset();
   vi.mocked(updateCameraDecodeBackend).mockReset();
@@ -463,6 +465,37 @@ describe('CameraManagementPage', () => {
 
     const submitButton = Array.from(document.querySelectorAll<HTMLButtonElement>('button')).find((button) => button.textContent === '카메라 등록');
     expect(submitButton?.disabled).toBe(false);
+    act(() => root.unmount());
+  });
+
+  it('syncs cameras on demand, showing a busy state then the roster sync result and a refreshed list', async () => {
+    let resolveSync: ((value: { status: 'synced'; error_class: null; detail: null; last_ok_at: null; next_retry_at: null; camera_count: number }) => void) | undefined;
+    vi.mocked(fetchCameras)
+      .mockResolvedValueOnce({ registry_version: 1, cameras: [camera] })
+      .mockResolvedValueOnce({ registry_version: 2, cameras: [camera] });
+    vi.mocked(syncCameras).mockImplementation(() => new Promise((resolve) => { resolveSync = resolve; }));
+    const { root } = await renderPage();
+
+    const syncButton = Array.from(document.querySelectorAll<HTMLButtonElement>('button')).find((button) => button.textContent === '카메라 동기화');
+    expect(syncButton).toBeDefined();
+    act(() => syncButton?.click());
+    expect(document.body.textContent).toContain('동기화 중...');
+
+    await act(async () => resolveSync?.({ status: 'synced', error_class: null, detail: null, last_ok_at: null, next_retry_at: null, camera_count: 1 }));
+    expect(document.body.textContent).toContain('카메라 동기화 완료 · 1대');
+    expect(document.body.textContent).not.toContain('동기화 중...');
+    expect(fetchCameras).toHaveBeenCalledTimes(2);
+    act(() => root.unmount());
+  });
+
+  it('reports a roster sync failure without crashing', async () => {
+    vi.mocked(fetchCameras).mockResolvedValue({ registry_version: 1, cameras: [camera] });
+    vi.mocked(syncCameras).mockRejectedValueOnce(new Error('offline'));
+    const { root } = await renderPage();
+
+    const syncButton = Array.from(document.querySelectorAll<HTMLButtonElement>('button')).find((button) => button.textContent === '카메라 동기화');
+    await act(async () => syncButton?.click());
+    expect(document.body.textContent).toContain('카메라 동기화에 실패했습니다.');
     act(() => root.unmount());
   });
 

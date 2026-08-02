@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState } from 'react';
-import { deleteCamera, type Camera, type CameraRegistry } from '@/shared/api/client';
+import { deleteCamera, syncCameras, type Camera, type CameraRegistry } from '@/shared/api/client';
 import { useCamerasResource } from '@/shared/api/usePollingResource';
 import { AddCameraModal } from '@/features/cameras/AddCameraModal';
 import { DeleteCameraDialog } from '@/features/cameras/DeleteCameraDialog';
 import { CameraManagementPanel } from '@/features/camera-management/CameraManagementPanel';
+import { rosterSyncResultMessage } from '@/features/camera-management/rosterSyncMessage';
 
 const EMPTY_REGISTRY: CameraRegistry = { registry_version: 0, cameras: [] };
 
@@ -34,7 +35,10 @@ export function CameraManagementPage({ onViewClips }: { onViewClips?: (camera: C
   const [deleteTarget, setDeleteTarget] = useState<Camera | null>(null);
   const [deleteMessage, setDeleteMessage] = useState<string | null>(null);
   const [deleteBusy, setDeleteBusy] = useState(false);
+  const [syncBusy, setSyncBusy] = useState(false);
+  const [syncMessage, setSyncMessage] = useState<string | null>(null);
   const deletingRef = useRef(false);
+  const syncBusyRef = useRef(false);
   const registryVersionRef = useRef(EMPTY_REGISTRY.registry_version);
   const deleteBarriersRef = useRef<DeleteBarrier[]>([]);
   const mutationGenerationsRef = useRef(new Map<string, number>());
@@ -116,6 +120,23 @@ export function CameraManagementPage({ onViewClips }: { onViewClips?: (camera: C
     }
   }
 
+  async function handleSyncCameras(): Promise<void> {
+    if (syncBusyRef.current) return;
+    syncBusyRef.current = true;
+    setSyncBusy(true);
+    setSyncMessage(null);
+    try {
+      const result = await syncCameras();
+      setSyncMessage(rosterSyncResultMessage(result));
+      resource.retry();
+    } catch {
+      setSyncMessage('카메라 동기화에 실패했습니다.');
+    } finally {
+      syncBusyRef.current = false;
+      setSyncBusy(false);
+    }
+  }
+
   const firstLoad = resource.data === null && resource.status === 'loading';
   const hasLoadedSuccessfully = resource.data !== null;
   const loadError = resource.status === 'error'
@@ -135,6 +156,9 @@ export function CameraManagementPage({ onViewClips }: { onViewClips?: (camera: C
         hasLoadedSuccessfully={hasLoadedSuccessfully}
         onRetry={resource.retry}
         onAddCamera={() => setAddOpen(true)}
+        onSyncCameras={() => void handleSyncCameras()}
+        syncBusy={syncBusy}
+        syncMessage={syncMessage}
         onUpdateStarted={handleUpdateStarted}
         onUpdated={handleUpdated}
         onDelete={(camera) => { setDeleteMessage(null); setDeleteTarget(camera); }}

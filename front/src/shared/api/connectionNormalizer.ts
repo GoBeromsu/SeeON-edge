@@ -1,0 +1,99 @@
+import { isNullableBoolean, isNullableString, isRecord } from '@/shared/api/normalizerFields';
+import type {
+  ConnectionErrorClass,
+  ConnectionTestResult,
+  ConnectionView,
+  RosterSyncErrorClass,
+  RosterSyncResult,
+  RosterSyncStatus,
+} from '@/shared/api/types';
+
+const CONNECTION_ERROR_CLASSES: readonly ConnectionErrorClass[] = [
+  'unconfigured',
+  'invalid_url',
+  'unreachable',
+  'timeout',
+  'auth',
+];
+
+const ROSTER_SYNC_ERROR_CLASSES: readonly RosterSyncErrorClass[] = ['unreachable', 'timeout', 'auth', 'unconfigured'];
+
+const ROSTER_SYNC_STATUSES: readonly RosterSyncStatus[] = ['synced', 'pending', 'failed', 'disabled'];
+
+function isNullableEnum<T extends string>(value: unknown, allowed: readonly T[]): value is T | null {
+  return value === null || (typeof value === 'string' && (allowed as readonly string[]).includes(value));
+}
+
+export function normalizeConnectionView(value: unknown): ConnectionView {
+  const record = isRecord(value) ? value : null;
+  if (
+    !record
+    || !('events_url' in record) || !isNullableString(record.events_url)
+    || !('config_url' in record) || !isNullableString(record.config_url)
+    || !('facility_id' in record) || !isNullableString(record.facility_id)
+    || typeof record.facility_token_set !== 'boolean'
+    || !('facility_token_masked' in record) || !isNullableString(record.facility_token_masked)
+    || typeof record.configured !== 'boolean'
+    || !('reachable' in record) || !isNullableBoolean(record.reachable)
+    || !('last_ok_at' in record) || !isNullableString(record.last_ok_at)
+    || !('updated_at' in record) || !isNullableString(record.updated_at)
+  ) {
+    throw new Error('Invalid connection response');
+  }
+
+  return {
+    events_url: record.events_url,
+    config_url: record.config_url,
+    facility_id: record.facility_id,
+    facility_token_set: record.facility_token_set,
+    facility_token_masked: record.facility_token_masked,
+    configured: record.configured,
+    reachable: record.reachable,
+    last_ok_at: record.last_ok_at,
+    updated_at: record.updated_at,
+  };
+}
+
+export function normalizeConnectionTestResult(value: unknown): ConnectionTestResult {
+  const record = isRecord(value) ? value : null;
+  if (
+    !record
+    || typeof record.ok !== 'boolean'
+    || !('error_class' in record) || !isNullableEnum(record.error_class, CONNECTION_ERROR_CLASSES)
+    || typeof record.detail !== 'string'
+    || !('probed_url' in record) || !isNullableString(record.probed_url)
+  ) {
+    throw new Error('Invalid connection test response');
+  }
+
+  return {
+    ok: record.ok,
+    error_class: record.error_class,
+    detail: record.detail,
+    probed_url: record.probed_url,
+  };
+}
+
+export function normalizeRosterSyncResult(value: unknown): RosterSyncResult {
+  const record = isRecord(value) ? value : null;
+  if (
+    !record
+    || !isNullableEnum(record.status, ROSTER_SYNC_STATUSES) || record.status === null
+    || !('error_class' in record) || !isNullableEnum(record.error_class, ROSTER_SYNC_ERROR_CLASSES)
+    || !('detail' in record) || !isNullableString(record.detail)
+    || !('last_ok_at' in record) || !isNullableString(record.last_ok_at)
+    || !('next_retry_at' in record) || !isNullableString(record.next_retry_at)
+    || typeof record.camera_count !== 'number' || !Number.isInteger(record.camera_count)
+  ) {
+    throw new Error('Invalid roster sync response');
+  }
+
+  return {
+    status: record.status,
+    error_class: record.error_class,
+    detail: record.detail,
+    last_ok_at: record.last_ok_at,
+    next_retry_at: record.next_retry_at,
+    camera_count: record.camera_count,
+  };
+}

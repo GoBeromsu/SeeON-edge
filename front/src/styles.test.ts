@@ -29,6 +29,7 @@ const appReachableComponentPaths = [
   'src/features/cameras/CameraCard.tsx',
   'src/features/cameras/DeleteCameraDialog.tsx',
   'src/features/clips/ClipLabelButtons.tsx',
+  'src/features/connection/ConnectionSettingsPanel.tsx',
   'src/features/events/EventHistoryPage.tsx',
   'src/features/operations/OperationsView.tsx',
   'src/features/system/SystemPage.tsx',
