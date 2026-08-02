@@ -19,8 +19,8 @@ models:
     stride: 5
     input_shape: [30, 51]
     operating_threshold: 0.5
-    schema_version: 2
-    preprocessing_identity: coco17-xyc-frame-normalized-zero-fill-v1
+    schema_version: 1
+    preprocessing_identity: legacy-coco17-xyc-frame-normalized-zero-fill-v1
 domains:
   fall:
     enabled: true
