@@ -86,3 +86,41 @@ def test_latest_frame_store_wait_for_latest_unblocks_on_publish() -> None:
 def test_latest_frame_store_wait_for_latest_times_out_without_publish() -> None:
     store = LatestFrameStore()
     assert store.wait_for_latest("camera-a", previous=None, timeout=0.05) is None
+
+
+def test_latest_frame_store_viewer_counter_tracks_open_stream_connections() -> None:
+    store = LatestFrameStore()
+    assert store.has_viewers("camera-a") is False
+
+    store.mark_viewer_connected("camera-a")
+    assert store.has_viewers("camera-a") is True
+
+    store.mark_viewer_connected("camera-a")  # a second concurrent viewer
+    store.mark_viewer_disconnected("camera-a")
+    assert store.has_viewers("camera-a") is True  # first viewer is still connected
+
+    store.mark_viewer_disconnected("camera-a")
+    assert store.has_viewers("camera-a") is False
+    assert store.has_viewers("camera-b") is False  # untouched camera is unaffected
+
+
+def test_latest_frame_store_viewer_counter_never_goes_negative() -> None:
+    """An extra disconnect (e.g. a duplicate ``finally`` firing) must not underflow."""
+    store = LatestFrameStore()
+    store.mark_viewer_disconnected("camera-a")
+    assert store.has_viewers("camera-a") is False
+
+    store.mark_viewer_connected("camera-a")
+    store.mark_viewer_disconnected("camera-a")
+    store.mark_viewer_disconnected("camera-a")
+    assert store.has_viewers("camera-a") is False
+
+
+def test_latest_frame_store_snapshot_demand_is_a_one_shot_flag() -> None:
+    store = LatestFrameStore()
+    assert store.consume_snapshot_demand("camera-a") is False
+
+    store.request_snapshot_refresh("camera-a")
+    assert store.consume_snapshot_demand("camera-a") is True
+    assert store.consume_snapshot_demand("camera-a") is False  # consumed exactly once
+    assert store.consume_snapshot_demand("camera-b") is False  # untouched camera

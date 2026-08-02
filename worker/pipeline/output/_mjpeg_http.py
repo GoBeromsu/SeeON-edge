@@ -16,6 +16,12 @@ BOUNDARY: Final = b"frame"
 POLL_INTERVAL_SECONDS: Final = 0.05
 HEARTBEAT_INTERVAL_SECONDS: Final = 1.0
 MAX_PROBE_BODY_BYTES: Final = 8192
+# Bounded wait for the first frame after a stream connects. Viewer gating
+# (#48) means encoding does not start until this connection's counter
+# increment makes `has_viewers` true, so the first frame is not already
+# cached the way it always was pre-gating; this must stay comfortably under
+# a client's read timeout while giving the pump a real chance to publish.
+STREAM_FIRST_FRAME_TIMEOUT_SECONDS: Final = 0.5
 
 ProbeErrorClass = Literal["auth", "timeout", "decode"]
 
@@ -100,37 +106,61 @@ def build_http_server(
             return frame
 
         def _handle_stream(self, camera_id: str) -> None:
-            if self._resolve_frame(camera_id) is None:
+            # Viewer gating (#48): count this connection *before* waiting for
+            # a frame so `has_viewers` opens the encode gate in time for the
+            # pump to actually publish one -- and always uncount it, on every
+            # return path (normal completion or a broken/reset pipe), via
+            # `finally`.
+            if camera_id == "" or not store.is_known(camera_id):
+                self.send_error(HTTPStatus.NOT_FOUND)
                 return
-            self.send_response(HTTPStatus.OK)
-            self.send_header(
-                "Content-Type",
-                f"multipart/x-mixed-replace; boundary={BOUNDARY.decode()}",
-            )
-            self.send_header("Cache-Control", "no-cache")
-            self.end_headers()
-
-            previous: LatestFrame | None = None
-            last_send_at = 0.0
-            while True:
+            store.mark_viewer_connected(camera_id)
+            try:
                 frame = store.wait_for_latest(
                     camera_id,
-                    previous=previous,
-                    timeout=POLL_INTERVAL_SECONDS,
+                    previous=None,
+                    timeout=STREAM_FIRST_FRAME_TIMEOUT_SECONDS,
                 )
-                now = time.monotonic()
-                heartbeat_due = now - last_send_at >= HEARTBEAT_INTERVAL_SECONDS
-                if frame is None or (frame is previous and not heartbeat_due):
-                    continue
-                try:
-                    self._write_part(frame)
-                    self.wfile.flush()
-                except (TimeoutError, BrokenPipeError, ConnectionResetError):
+                if frame is None:
+                    self.send_error(HTTPStatus.SERVICE_UNAVAILABLE)
                     return
-                previous = frame
-                last_send_at = now
+                self.send_response(HTTPStatus.OK)
+                self.send_header(
+                    "Content-Type",
+                    f"multipart/x-mixed-replace; boundary={BOUNDARY.decode()}",
+                )
+                self.send_header("Cache-Control", "no-cache")
+                self.end_headers()
+
+                previous: LatestFrame | None = None
+                last_send_at = 0.0
+                while True:
+                    frame = store.wait_for_latest(
+                        camera_id,
+                        previous=previous,
+                        timeout=POLL_INTERVAL_SECONDS,
+                    )
+                    now = time.monotonic()
+                    heartbeat_due = now - last_send_at >= HEARTBEAT_INTERVAL_SECONDS
+                    if frame is None or (frame is previous and not heartbeat_due):
+                        continue
+                    try:
+                        self._write_part(frame)
+                        self.wfile.flush()
+                    except (TimeoutError, BrokenPipeError, ConnectionResetError):
+                        return
+                    previous = frame
+                    last_send_at = now
+            finally:
+                store.mark_viewer_disconnected(camera_id)
 
         def _handle_snapshot(self, camera_id: str) -> None:
+            # Viewer gating (#48) means the cache can go stale with no stream
+            # viewer connected; treat this request as a momentary viewer so
+            # the next `publish()` encodes one fresh frame, while still
+            # serving whatever is cached right now (bounded cost, no wait).
+            if store.is_known(camera_id):
+                store.request_snapshot_refresh(camera_id)
             frame = self._resolve_frame(camera_id)
             if frame is None:
                 return

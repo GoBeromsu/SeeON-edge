@@ -385,6 +385,9 @@ def _pump(
 def test_pump_publishes_each_frame_into_the_live_view_store() -> None:
     """Real pump, real ``LiveViewSubscriber``, real ``LatestFrameStore``."""
     store = LatestFrameStore()
+    # Viewer gating (#48): publish() is a no-op with zero viewers, so this
+    # regression check for "still works with viewers" needs one connected.
+    store.mark_viewer_connected("camera-a")
     bus = BoundedFrameBus()
     bus.publish(_packet("camera-a", 3))
 
