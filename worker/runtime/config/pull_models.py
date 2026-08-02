@@ -1,12 +1,18 @@
 from __future__ import annotations
 
+import sys
 from typing import ClassVar
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from contracts.worker_config import PulledCameraConfig, PulledNightWindow, PulledWorkerConfig
+from contracts.worker_config import (
+    PulledCameraConfig,
+    PulledNightWindow,
+    PulledWorkerConfig,
+    detection_window_validation_error,
+)
 from worker.runtime.config.camera_models import CameraRuntimeConfig, RelayConfig
-from worker.runtime.config.domain_models import DomainsConfig
+from worker.runtime.config.domain_models import DomainsConfig, NightWindowConfig
 from worker.runtime.config.errors import ConfigValidationError, WorkerConfigError
 from worker.runtime.config.restart import RestartDirective
 from worker.runtime.config.worker_models import WorkerConfig
@@ -57,7 +63,10 @@ class BackendWorkerConfigPayload(BaseModel):
     registry_version: int | None = Field(default=None, ge=0)
     config_version: int | None = Field(default=None, ge=0)
     restart_epoch: int | None = Field(default=None, ge=0)
+    # Deprecated alias for detection_windows["bed_exit"]; kept for old
+    # payload producers/LKG files.
     night_window: _NightWindowPayload | None = None
+    detection_windows: dict[str, _NightWindowPayload] | None = None
     cameras: tuple[_CameraPayload, ...]
 
     @model_validator(mode="after")
@@ -80,16 +89,35 @@ class BackendWorkerConfigPayload(BaseModel):
             version=version,
         )
 
-    def to_pulled_config(self) -> PulledWorkerConfig:
+    @property
+    def resolved_detection_windows(self) -> dict[str, PulledNightWindow]:
+        """Per-domain windows, preferring ``detection_windows`` over the
+        deprecated single ``night_window`` (mapped to "bed_exit").
+
+        Invalid or degenerate windows (bad HH:MM, unknown tz, start == end)
+        fail open to ALWAYS/24-7 detection for that one domain -- dropped
+        from the map with a loud stderr log -- rather than raising and
+        discarding the whole pulled payload.
+        """
+        if self.detection_windows is not None:
+            windows: dict[str, PulledNightWindow] = {}
+            for domain, window in self.detection_windows.items():
+                validated = _validated_pulled_window(domain, window)
+                if validated is not None:
+                    windows[domain] = validated
+            return windows
         window = self.night_window
+        if window is None:
+            return {}
+        validated = _validated_pulled_window("bed_exit", window)
+        return {} if validated is None else {"bed_exit": validated}
+
+    def to_pulled_config(self) -> PulledWorkerConfig:
+        detection_windows = self.resolved_detection_windows
         return PulledWorkerConfig(
             config_version=self.directive.version,
             restart_epoch=self.directive.generation,
-            night_window=(
-                None
-                if window is None
-                else PulledNightWindow(start=window.start, end=window.end, tz=window.tz)
-            ),
+            night_window=detection_windows.get("bed_exit"),
             cameras=tuple(
                 PulledCameraConfig(
                     camera_id=camera.camera_id,
@@ -103,6 +131,7 @@ class BackendWorkerConfigPayload(BaseModel):
                 )
                 for camera in self.cameras
             ),
+            detection_windows=detection_windows,
         )
 
     def to_worker_config(self, relay_url: str, relay_token: str | None) -> WorkerConfig:
@@ -117,11 +146,33 @@ class BackendWorkerConfigPayload(BaseModel):
         if not cameras:
             raise WorkerConfigError("worker config must include at least one camera")
         domains = tuple(sorted({name for camera in self.cameras for name in camera.domains}))
+        detection_windows = {
+            domain: NightWindowConfig(start=window.start, end=window.end, tz=window.tz)
+            for domain, window in self.resolved_detection_windows.items()
+        }
         return WorkerConfig(
             relay=RelayConfig.model_validate({"url": relay_url, "token": token}),
-            domains=DomainsConfig(enabled=domains or None),
+            domains=DomainsConfig(
+                enabled=domains or None,
+                detection_windows=detection_windows or None,
+            ),
             cameras=cameras,
         )
+
+
+def _validated_pulled_window(
+    domain: str, window: _NightWindowPayload
+) -> PulledNightWindow | None:
+    reason = detection_window_validation_error(window.start, window.end, window.tz)
+    if reason is not None:
+        print(
+            f"detection window for domain {domain!r} is invalid ({reason}): "
+            f"start={window.start!r} end={window.end!r} tz={window.tz!r}; "
+            "falling open to ALWAYS/24-7 detection for this domain",
+            file=sys.stderr,
+        )
+        return None
+    return PulledNightWindow(start=window.start, end=window.end, tz=window.tz)
 
 
 def _runtime_camera(payload: _CameraPayload) -> CameraRuntimeConfig:

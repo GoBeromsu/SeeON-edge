@@ -131,6 +131,114 @@ def test_resolve_night_window_returns_none_without_pulled_or_yaml_window() -> No
     assert resolved["bed_exit"] is None
 
 
+def test_resolve_runtime_config_reaches_non_bed_exit_domains_via_pulled_detection_windows() -> None:
+    """Generalizing night_window (issue #24): resolve_runtime_config now
+    resolves every KNOWN_DOMAIN_NAMES entry, not just bed_exit, from the
+    pulled config's per-domain detection_windows map."""
+    yaml_config = _yaml_config(None)
+    pulled = PulledWorkerConfig(
+        config_version=7,
+        restart_epoch=0,
+        night_window=None,
+        cameras=(),
+        detection_windows={
+            "fall": PulledNightWindow(start="22:00", end="05:00", tz="UTC"),
+        },
+    )
+
+    resolved = resolve_runtime_config(yaml_config, pulled)
+
+    assert resolved["fall"] == NightWindowConfig(start="22:00", end="05:00", tz="UTC")
+    assert resolved["bed_exit"] is None
+
+
+def test_resolve_runtime_config_explicit_bed_exit_pull_wins_over_yaml_alias() -> None:
+    """An explicit pulled detection_windows["bed_exit"] entry takes
+    precedence over the yaml domains.bed_exit.night_window alias, matching
+    detection_windows' precedence over the deprecated night_window field."""
+    yaml_config = _yaml_config({"start": "21:00", "end": "05:00", "tz": "Asia/Seoul"})
+    pulled = PulledWorkerConfig(
+        config_version=7,
+        restart_epoch=0,
+        night_window=None,
+        cameras=(),
+        detection_windows={
+            "bed_exit": PulledNightWindow(start="22:00", end="06:00", tz="UTC"),
+        },
+    )
+
+    resolved = resolve_runtime_config(yaml_config, pulled)
+
+    assert resolved["bed_exit"] == NightWindowConfig(start="22:00", end="06:00", tz="UTC")
+
+
+def test_resolve_runtime_config_pulled_supplying_any_window_is_authoritative_for_all() -> None:
+    """Plan-file rule: once pulled supplied window info at all (any
+    detection_windows entry, or the deprecated night_window), it is
+    authoritative for EVERY domain -- a domain it didn't mention resolves to
+    ALWAYS (None), NOT the yaml alias, even when yaml configured a window for
+    that domain. This is what makes a cleared window impossible to
+    resurrect via a stale local alias once the backend has an opinion."""
+    yaml_config = WorkerConfig.model_validate(
+        {
+            "relay": {"url": "http://relay.test", "token": "relay-token"},
+            "domains": {
+                "detection_windows": {
+                    "fall": {"start": "22:00", "end": "05:00", "tz": "UTC"},
+                }
+            },
+            "cameras": [
+                {
+                    "camera_id": "camera-1",
+                    "facility_id": "facility-1",
+                    "rtsp_url": "rtsp://camera-1.local/trackID=2",
+                }
+            ],
+        }
+    )
+    pulled = PulledWorkerConfig(
+        config_version=7,
+        restart_epoch=0,
+        night_window=None,
+        cameras=(),
+        detection_windows={
+            "bed_exit": PulledNightWindow(start="21:00", end="06:00", tz="UTC"),
+        },
+    )
+
+    resolved = resolve_runtime_config(yaml_config, pulled)
+
+    assert resolved["bed_exit"] == NightWindowConfig(start="21:00", end="06:00", tz="UTC")
+    assert resolved["fall"] is None
+
+
+def test_resolve_runtime_config_yaml_alias_applies_when_pulled_supplies_nothing() -> None:
+    """The inverse of the above: when pulled said nothing about windows at
+    all (None, or empty detection_windows and no legacy night_window), the
+    local yaml config's own per-domain windows/aliases fully apply."""
+    yaml_config = WorkerConfig.model_validate(
+        {
+            "relay": {"url": "http://relay.test", "token": "relay-token"},
+            "domains": {
+                "detection_windows": {
+                    "fall": {"start": "22:00", "end": "05:00", "tz": "UTC"},
+                }
+            },
+            "cameras": [
+                {
+                    "camera_id": "camera-1",
+                    "facility_id": "facility-1",
+                    "rtsp_url": "rtsp://camera-1.local/trackID=2",
+                }
+            ],
+        }
+    )
+
+    resolved = resolve_runtime_config(yaml_config, None)
+
+    assert resolved["fall"] == NightWindowConfig(start="22:00", end="05:00", tz="UTC")
+
+
 def test_bed_exit_monitor_live_night_window_flip_without_reconstruction() -> None:
     # Characterizes BedExitMonitor.update_night_window as a still-correct direct
     # mutator; see module docstring for why no production caller reaches it today.

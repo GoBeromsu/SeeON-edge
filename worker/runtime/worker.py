@@ -32,6 +32,7 @@ from worker.domains import (
     enabled_domains,
 )
 from worker.domains.bed_exit import BedExitConfig, NightWindow
+from worker.domains.detection_window import DetectionWindow
 from worker.domains.fall import FallModelProtocol
 from worker.interfaces.decision import Decider
 from worker.interfaces.output import EventSink
@@ -91,6 +92,7 @@ from worker.runtime.telemetry.runtime_status_sender import (
     RuntimeStatusSender,
 )
 from worker.runtime.watchdog import InferenceWatchdog
+from worker.types import BusinessEvent, DecisionInput
 
 LOGGER: Final = logging.getLogger(__name__)
 HEARTBEAT_TIMEOUT_SEC: Final = 0.5
@@ -325,6 +327,29 @@ class _CameraClipRecorderView:
         return self.recorder.on_event(
             camera_id, event_ref, event_type, allow_new_clip=allow_new_clip
         )
+
+
+@final
+@dataclass(frozen=True, slots=True)
+class _WindowGatedDecider:
+    """Common per-domain detection-window gate (issue #24).
+
+    Wraps another domain's :class:`Decider` so ``update()`` is skipped
+    entirely -- returning a no-decision (``()``) -- whenever ``clock()`` falls
+    outside ``window``. The wrapped decider's internal state is never touched
+    while gated, which is safe for domains whose state can simply freeze
+    outside their window (e.g. "fall"). ``bed_exit`` is deliberately never
+    wrapped by this gate: see :meth:`WorkerRuntime._build_decider`.
+    """
+
+    decider: Decider
+    window: DetectionWindow
+    clock: Callable[[], datetime]
+
+    def update(self, input_value: DecisionInput) -> tuple[BusinessEvent, ...]:
+        if not self.window.contains(self.clock()):
+            return ()
+        return self.decider.update(input_value)
 
 
 def _evidence_outbox_path() -> Path:
@@ -1154,14 +1179,34 @@ class WorkerRuntime:
             )
         else:
             raise RuntimeError(f"unsupported domain in registry: {name}")
-        return registration.factory(dependencies)
+        decider = registration.factory(dependencies)
+        # bed_exit gates its own window internally (BedExitMonitor.update()
+        # keeps tracking per-frame containment/latch state regardless of the
+        # window and only gates final event *emission*); wrapping it here as
+        # well would freeze that internal state while the window is closed,
+        # which would delay/alter its emitted events at window-open
+        # boundaries. So bed_exit keeps its existing wiring and is never
+        # wrapped by the common gate below -- every other domain is.
+        if name == "bed_exit":
+            return decider
+        window = self._resolved_window(name)
+        if window is None:
+            return decider
+        return _WindowGatedDecider(decider, window, clock=lambda: datetime.now(UTC))
+
+    def _resolved_window(self, name: str) -> DetectionWindow | None:
+        configured = self.config.domains.resolved_detection_window(name)
+        if configured is None:
+            return None
+        return DetectionWindow(start=configured.start, end=configured.end, tz=configured.tz)
 
     def _bed_exit_config(self, camera: CameraRuntimeConfig) -> BedExitConfig:
-        domain_config = self.config.domains.bed_exit
-        night_window = None
-        if domain_config is not None and domain_config.night_window is not None:
-            configured = domain_config.night_window
-            night_window = NightWindow(start=configured.start, end=configured.end, tz=configured.tz)
+        configured = self.config.domains.resolved_detection_window("bed_exit")
+        night_window = (
+            None
+            if configured is None
+            else NightWindow(start=configured.start, end=configured.end, tz=configured.tz)
+        )
         return BedExitConfig(
             camera_id=camera.camera_id,
             facility_id=camera.facility_id,
