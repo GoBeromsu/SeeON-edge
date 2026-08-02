@@ -3,6 +3,7 @@ import type { DashboardLocation } from '@/app/dashboardLocation';
 import { cameraMediaId, getCameraSnapshotUrl, getCameraStreamUrl, type Camera, type HeartbeatStatus, type StatusSnapshot } from '@/shared/api/client';
 import { SnapshotQueue, type SnapshotEntry } from '@/features/operations/SnapshotQueue';
 import { filterAndGroupCameras, getCameraHeartbeatAgeSec, getCameraLiveness, groupCameras, paginateCameras, sortCameras, UNCLASSIFIED } from '@/features/operations/operationsModel';
+import { AccountSettingsModal } from '@/features/account-settings/AccountSettingsModal';
 
 type ResourceState = 'idle' | 'loading' | 'success' | 'error';
 type LocationUpdate = Partial<Record<keyof DashboardLocation, string | null>>;
@@ -77,7 +78,7 @@ function focusedSnapshotLabel(snapshot: SnapshotEntry | undefined): string {
   return snapshot ? snapshotLabels[snapshot.state] : '스냅샷 정보 없음';
 }
 
-function FocusedCamera({ camera, liveness, ageSec, snapshot, onBack, onViewClips, onOpenSettings }: {
+function FocusedCamera({ camera, liveness, ageSec, snapshot, onBack, onViewClips, onOpenSettings, onOpenAccountSettings }: {
   camera: Camera;
   liveness: HeartbeatStatus | 'unknown';
   ageSec: number | null;
@@ -85,6 +86,7 @@ function FocusedCamera({ camera, liveness, ageSec, snapshot, onBack, onViewClips
   onBack: () => void;
   onViewClips: () => void;
   onOpenSettings: () => void;
+  onOpenAccountSettings: () => void;
 }): JSX.Element {
   const streamUrl = getCameraStreamUrl(cameraMediaId(camera));
   const statusStripText = [livenessLabels[liveness], formatHeartbeatAge(ageSec), focusedSnapshotLabel(snapshot)]
@@ -99,6 +101,7 @@ function FocusedCamera({ camera, liveness, ageSec, snapshot, onBack, onViewClips
       <div className="flex flex-wrap gap-3">
         <button type="button" className="brand-action min-h-11 rounded-lg px-4 font-bold" onClick={onViewClips}>이 카메라 클립 보기</button>
         <button type="button" className="min-h-11 rounded-lg border border-border px-4 font-bold" onClick={onOpenSettings}>카메라 설정</button>
+        <button type="button" className="min-h-11 rounded-lg border border-border px-4 font-bold" onClick={onOpenAccountSettings}>계정 설정</button>
       </div>
     </section>
   );
@@ -117,6 +120,7 @@ function FocusedMedia({ cameraLabel, streamUrl }: { cameraLabel: string; streamU
 
 export function OperationsView({ active, cameras, camerasState, camerasLastSuccessAt = null, camerasRefreshing = false, status, statusState, location, onNavigate, onReplace, onRetryCameras, onRetryStatus }: OperationsViewProps): JSX.Element | null {
   const [announcement, setAnnouncement] = useState('');
+  const [accountSettingsOpen, setAccountSettingsOpen] = useState(false);
   const previousSelectedIdRef = useRef<string | null>(null);
   const scrollRestoreRef = useRef<number | null>(null);
   const filtered = useMemo(() => filterAndGroupCameras(cameras, { floor: location.floor, room: location.room }).cameras, [cameras, location.floor, location.room]);
@@ -166,19 +170,23 @@ export function OperationsView({ active, cameras, camerasState, camerasLastSucce
     const selectedSnapshot = snapshots.get(selected.id);
     const focusedSnapshot = selectedSnapshot?.mediaId === cameraMediaId(selected) ? selectedSnapshot : undefined;
     return (
-      <FocusedCamera
-        key={selected.id}
-        camera={selected}
-        liveness={getCameraLiveness(selected, cameras, status)}
-        ageSec={getCameraHeartbeatAgeSec(selected, cameras, status)}
-        snapshot={focusedSnapshot}
-        onBack={() => onNavigate({ camera: null })}
-        onViewClips={() => onNavigate({
-          page: 'events', floor: null, room: null, camera: selected.id,
-          event: null, clip: null, wallPage: null,
-        })}
-        onOpenSettings={openCameraManagement}
-      />
+      <>
+        <FocusedCamera
+          key={selected.id}
+          camera={selected}
+          liveness={getCameraLiveness(selected, cameras, status)}
+          ageSec={getCameraHeartbeatAgeSec(selected, cameras, status)}
+          snapshot={focusedSnapshot}
+          onBack={() => onNavigate({ camera: null })}
+          onViewClips={() => onNavigate({
+            page: 'events', floor: null, room: null, camera: selected.id,
+            event: null, clip: null, wallPage: null,
+          })}
+          onOpenSettings={openCameraManagement}
+          onOpenAccountSettings={() => setAccountSettingsOpen(true)}
+        />
+        <AccountSettingsModal open={accountSettingsOpen} onClose={() => setAccountSettingsOpen(false)} />
+      </>
     );
   }
 

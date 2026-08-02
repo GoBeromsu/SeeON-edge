@@ -333,7 +333,7 @@ describe('OperationsView', () => {
 
     const focusable = Array.from(section?.querySelectorAll<HTMLElement>('button, [href], input, select, textarea, [tabindex]') ?? [])
       .filter((element) => element.tabIndex !== -1);
-    expect(focusable.map((element) => element.textContent)).toEqual(['← 관제', '이 카메라 클립 보기', '카메라 설정']);
+    expect(focusable.map((element) => element.textContent)).toEqual(['← 관제', '이 카메라 클립 보기', '카메라 설정', '계정 설정']);
   });
 
   it('gives every focus-view action and the wall card a 44px-tall touch target via the min-h-11 convention (AC-15, height only)', () => {
@@ -342,7 +342,7 @@ describe('OperationsView', () => {
     expect(card?.classList.contains('min-h-11')).toBe(true);
 
     rerender({ page: 'operations', camera: 'local', wallPage: '1' });
-    for (const label of ['← 관제', '이 카메라 클립 보기', '카메라 설정']) {
+    for (const label of ['← 관제', '이 카메라 클립 보기', '카메라 설정', '계정 설정']) {
       const button = Array.from(host.querySelectorAll<HTMLButtonElement>('button')).find((entry) => entry.textContent === label);
       expect(button?.classList.contains('min-h-11')).toBe(true);
     }

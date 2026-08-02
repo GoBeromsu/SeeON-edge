@@ -8,7 +8,17 @@ from fastapi.testclient import TestClient
 
 from backend.app.main import create_app, no_lifespan
 
-AUTH = {"Authorization": "Bearer relay-token"}
+# Dashboard auth now always resolves to a session store (persisted file > env
+# > the built-in admin/admin default, see backend/app/shared/dashboard_auth.py),
+# so a bare worker relay/bearer token is never sufficient on its own -- these
+# tests log in as the zero-config default and rely on the TestClient's cookie
+# jar to carry the session across subsequent calls.
+DASHBOARD_LOGIN = {"username": "admin", "password": "admin"}
+
+
+def _login(client: TestClient) -> None:
+    response = client.post("/api/v1/auth/session", json=DASHBOARD_LOGIN)
+    assert response.status_code == 204
 
 
 class FakeHTTPResponse:
@@ -85,8 +95,9 @@ def test_list_clips_returns_only_finalized_latest_first_and_filters_camera(clip_
     )
 
     with TestClient(create_app(lifespan=no_lifespan)) as client:
-        listed = client.get("/api/v1/clips", headers=AUTH)
-        filtered = client.get("/api/v1/clips", params={"camera_id": "camera-1"}, headers=AUTH)
+        _login(client)
+        listed = client.get("/api/v1/clips")
+        filtered = client.get("/api/v1/clips", params={"camera_id": "camera-1"})
 
     assert listed.status_code == 200
     assert [clip["clip_id"] for clip in listed.json()["clips"]] == ["clip-new", "clip-old"]
@@ -105,7 +116,8 @@ def test_list_clips_preserves_event_type_when_event_ref_is_identity(clip_env) ->
     )
 
     with TestClient(create_app(lifespan=no_lifespan)) as client:
-        response = client.get("/api/v1/clips", headers=AUTH)
+        _login(client)
+        response = client.get("/api/v1/clips")
 
     assert response.status_code == 200
     assert response.json()["clips"][0]["event_ref"] == "0:0"
@@ -117,9 +129,10 @@ def test_streams_manifest_video_and_appends_audit(clip_env) -> None:
     _write_manifest(clip_store, "clip-1")
 
     with TestClient(create_app(lifespan=no_lifespan)) as client:
-        video = client.get("/api/v1/clips/clip-1/video", headers=AUTH)
+        _login(client)
+        video = client.get("/api/v1/clips/clip-1/video")
         query_video = client.get("/api/v1/clips/clip-1/video", params={"token": "relay-token"})
-        audit = client.get("/api/v1/audit", headers=AUTH)
+        audit = client.get("/api/v1/audit")
 
     assert video.status_code == 200
     assert video.content == b"video:clip-1"
@@ -127,16 +140,19 @@ def test_streams_manifest_video_and_appends_audit(clip_env) -> None:
     assert query_video.status_code == 200
     assert query_video.content == b"video:clip-1"
     assert audit.status_code == 200
+    # Both requests carry the same dashboard session cookie, so both are
+    # attributed to the real session actor regardless of the (now-vestigial)
+    # query token also present on the second call.
     assert audit.json()["entries"] == [
         {
             "ts": audit.json()["entries"][0]["ts"],
-            "actor": "bearer",
+            "actor": "admin",
             "action": "play",
             "clip_id": "clip-1",
         },
         {
             "ts": audit.json()["entries"][1]["ts"],
-            "actor": "operator",
+            "actor": "admin",
             "action": "play",
             "clip_id": "clip-1",
         },
@@ -149,53 +165,58 @@ def test_label_clip_saves_sidecar_and_audit(clip_env) -> None:
     _write_manifest(clip_store, "clip-1")
 
     with TestClient(create_app(lifespan=no_lifespan)) as client:
+        _login(client)
         response = client.put(
             "/api/v1/clips/clip-1/label",
-            headers=AUTH,
             json={"label": "TRUE_POSITIVE", "reviewer": "reviewer-1"},
         )
         clear_response = client.put(
             "/api/v1/clips/clip-1/label",
-            headers=AUTH,
             json={"label": None, "reviewer": "reviewer-2"},
         )
         default_reviewer = client.put(
             "/api/v1/clips/clip-1/label",
-            headers=AUTH,
             json={"label": "FALSE_POSITIVE"},
         )
-        audit = client.get("/api/v1/audit", headers=AUTH)
+        audit = client.get("/api/v1/audit")
 
     assert response.status_code == 200
     assert response.json()["label"] == "TRUE_POSITIVE"
     assert clear_response.status_code == 200
     assert clear_response.json()["label"] is None
     assert default_reviewer.status_code == 200
-    assert default_reviewer.json()["reviewer"] == "bearer"
+    # No reviewer supplied -> defaults to the authenticated actor (the
+    # dashboard session username, not a legacy bearer/operator placeholder).
+    assert default_reviewer.json()["reviewer"] == "admin"
     saved = json.loads((label_store / "labels" / "clip-1.json").read_text(encoding="utf-8"))
     assert saved["label"] == "FALSE_POSITIVE"
-    assert saved["reviewer"] == "bearer"
+    assert saved["reviewer"] == "admin"
     audit_rows = [
         (entry["actor"], entry["action"], entry["clip_id"]) for entry in audit.json()["entries"]
     ]
     assert audit_rows == [
         ("reviewer-1", "label", "clip-1"),
         ("reviewer-2", "label", "clip-1"),
-        ("bearer", "label", "clip-1"),
+        ("admin", "label", "clip-1"),
     ]
 
 
-def test_clip_routes_require_bearer_token(clip_env) -> None:
+def test_clip_routes_require_a_dashboard_session(clip_env) -> None:
+    """A bare worker relay token or forged bearer token is never a substitute
+    for a real dashboard session -- the legacy bypass is unreachable now that
+    dashboard auth always resolves (persisted file > env > built-in default)."""
     _write_manifest(clip_env / "clip-store", "clip-1")
 
     with TestClient(create_app(lifespan=no_lifespan)) as client:
         unauthenticated = client.get("/api/v1/clips")
-        wrong = client.get("/api/v1/clips", headers={"Authorization": "Bearer wrong"})
-        legacy_header = client.get("/api/v1/clips", headers={"X-Edge-Relay-Token": "relay-token"})
+        wrong_bearer = client.get("/api/v1/clips", headers={"Authorization": "Bearer wrong"})
+        worker_relay_token = client.get(
+            "/api/v1/clips", headers={"Authorization": "Bearer relay-token"}
+        )
 
     assert unauthenticated.status_code == 401
-    assert wrong.status_code == 403
-    assert legacy_header.status_code == 401
+    assert wrong_bearer.status_code == 401
+    assert worker_relay_token.status_code == 401
 
 
 def test_video_rejects_manifest_path_escape(clip_env) -> None:
@@ -204,8 +225,9 @@ def test_video_rejects_manifest_path_escape(clip_env) -> None:
     _write_manifest(clip_store, "clip-escape", path="../secret.mp4")
 
     with TestClient(create_app(lifespan=no_lifespan)) as client:
-        response = client.get("/api/v1/clips/clip-escape/video", headers=AUTH)
-        invalid_id = client.get("/api/v1/clips/%2E%2E/video", headers=AUTH)
+        _login(client)
+        response = client.get("/api/v1/clips/clip-escape/video")
+        invalid_id = client.get("/api/v1/clips/%2E%2E/video")
 
     assert response.status_code == 400
     assert invalid_id.status_code == 400
@@ -235,9 +257,9 @@ def test_label_and_audit_backend_backup_is_best_effort(
     monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
 
     with TestClient(create_app(lifespan=no_lifespan)) as client:
+        _login(client)
         response = client.put(
             "/api/v1/clips/clip-1/label",
-            headers=AUTH,
             json={"label": "FALSE_POSITIVE", "reviewer": "reviewer-1"},
         )
 

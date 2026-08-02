@@ -644,7 +644,10 @@ def _authorize_worker(request: Request, relay_token: str | None) -> None:
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="relay token required",
         )
-    if not hmac.compare_digest(relay_token, expected):
+    # Encode to UTF-8 bytes before comparing: hmac.compare_digest raises
+    # TypeError for non-ASCII str arguments, and a relay token sourced from an
+    # env var or config file is not guaranteed to be ASCII-only.
+    if not hmac.compare_digest(relay_token.encode("utf-8"), expected.encode("utf-8")):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="relay token mismatch",
