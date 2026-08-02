@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import stat
 from collections.abc import Iterator
 from pathlib import Path
@@ -38,12 +39,12 @@ def clear_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
 
 
 def _store(tmp_path: Path) -> ConnectionSettingsStore:
-    return ConnectionSettingsStore(tmp_path / "connection_settings.json")
+    return ConnectionSettingsStore(tmp_path / "connection_settings.sqlite3")
 
 
 class TestFromEnv:
-    def test_default_path_matches_camera_store_directory(self) -> None:
-        assert DEFAULT_CONNECTION_SETTINGS_PATH == "/var/lib/ml-api/connection_settings.json"
+    def test_default_path_matches_expected_sqlite_location(self) -> None:
+        assert DEFAULT_CONNECTION_SETTINGS_PATH == "/var/lib/ml-api/connection-settings.sqlite3"
 
     def test_from_env_uses_default_path_when_unset(self) -> None:
         store = ConnectionSettingsStore.from_env()
@@ -52,14 +53,14 @@ class TestFromEnv:
     def test_from_env_honors_override(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        override = tmp_path / "custom" / "settings.json"
+        override = tmp_path / "custom" / "settings.sqlite3"
         monkeypatch.setenv(API_CONNECTION_SETTINGS_PATH_ENV, str(override))
         store = ConnectionSettingsStore.from_env()
         assert store.path == override
 
 
 class TestLoadPrecedence:
-    def test_empty_file_and_env_yields_all_none(self, tmp_path: Path) -> None:
+    def test_empty_db_and_env_yields_all_none(self, tmp_path: Path) -> None:
         settings = _store(tmp_path).load()
         assert settings == ConnectionSettings(
             events_url=None,
@@ -69,7 +70,7 @@ class TestLoadPrecedence:
             updated_at=None,
         )
 
-    def test_env_seeds_when_no_file(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_env_seeds_when_no_row(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv(API_BACKEND_EVENTS_URL_ENV, "https://backend.example/events")
         monkeypatch.setenv(API_BACKEND_CONFIG_URL_ENV, "https://backend.example/ml-config")
         monkeypatch.setenv(API_FACILITY_ID_ENV, "facility-42")
@@ -83,7 +84,7 @@ class TestLoadPrecedence:
         assert settings.facility_token == "supersecrettoken"
         assert settings.updated_at is None
 
-    def test_saved_file_wins_over_env(
+    def test_saved_row_wins_over_env(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setenv(API_BACKEND_EVENTS_URL_ENV, "https://env.example/events")
@@ -96,8 +97,8 @@ class TestLoadPrecedence:
         assert settings.events_url == "https://saved.example/events"
         assert settings.facility_token == "saved-token"
 
-    def test_saved_file_wins_across_new_store_instances(self, tmp_path: Path) -> None:
-        path = tmp_path / "connection_settings.json"
+    def test_saved_row_wins_across_new_store_instances(self, tmp_path: Path) -> None:
+        path = tmp_path / "connection_settings.sqlite3"
         ConnectionSettingsStore(path).save({"facility_id": "facility-1"})
 
         reloaded = ConnectionSettingsStore(path).load()
@@ -118,7 +119,7 @@ class TestLoadPrecedence:
 
 
 class TestLoadBaseUrlPrecedence:
-    def test_base_url_seeds_both_events_and_config_when_no_file_or_specific_env(
+    def test_base_url_seeds_both_events_and_config_when_no_row_or_specific_env(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setenv(API_BACKEND_BASE_URL_ENV, "https://backend.example")
@@ -150,7 +151,7 @@ class TestLoadBaseUrlPrecedence:
         assert settings.events_url == "https://backend.example/v1/events"
         assert settings.config_url == "https://backend.example/v1/ml-config"
 
-    def test_saved_file_still_wins_over_base_url(
+    def test_saved_row_still_wins_over_base_url(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setenv(API_BACKEND_BASE_URL_ENV, "https://backend.example")
@@ -227,7 +228,7 @@ class TestReprSafety:
 
 
 class TestAtomicWriteAndCorruption:
-    def test_write_leaves_final_file_0600(self, tmp_path: Path) -> None:
+    def test_write_leaves_db_file_0600(self, tmp_path: Path) -> None:
         store = _store(tmp_path)
         store.save({"facility_id": "facility-1"})
 
@@ -241,9 +242,22 @@ class TestAtomicWriteAndCorruption:
         leftovers = list(tmp_path.glob("*.tmp"))
         assert leftovers == []
 
-    def test_corrupt_json_file_treated_as_empty(self, tmp_path: Path) -> None:
-        path = tmp_path / "connection_settings.json"
-        path.write_text("{not valid json", encoding="utf-8")
+    def test_row_persists_via_real_sqlite_connection(self, tmp_path: Path) -> None:
+        store = _store(tmp_path)
+        store.save({"facility_id": "facility-1", "facility_token": "token-abcd"})
+
+        conn = sqlite3.connect(store.path)
+        try:
+            row = conn.execute(
+                "SELECT facility_id, facility_token FROM connection_settings WHERE id = 1"
+            ).fetchone()
+        finally:
+            conn.close()
+        assert row == ("facility-1", "token-abcd")
+
+    def test_corrupt_db_file_treated_as_empty(self, tmp_path: Path) -> None:
+        path = tmp_path / "connection_settings.sqlite3"
+        path.write_bytes(b"not a valid sqlite database, just garbage bytes")
 
         settings = ConnectionSettingsStore(path).load()
 
@@ -255,16 +269,8 @@ class TestAtomicWriteAndCorruption:
             updated_at=None,
         )
 
-    def test_non_object_json_file_treated_as_empty(self, tmp_path: Path) -> None:
-        path = tmp_path / "connection_settings.json"
-        path.write_text(json.dumps(["not", "an", "object"]), encoding="utf-8")
-
-        settings = ConnectionSettingsStore(path).load()
-
-        assert settings.events_url is None
-
     def test_missing_file_does_not_crash_and_save_still_works(self, tmp_path: Path) -> None:
-        path = tmp_path / "nested" / "connection_settings.json"
+        path = tmp_path / "nested" / "connection_settings.sqlite3"
         store = ConnectionSettingsStore(path)
 
         assert store.load().facility_id is None

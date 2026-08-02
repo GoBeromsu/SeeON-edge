@@ -4,10 +4,14 @@ Historically the ml-api -> backend link (Event API URL, ml-config pull URL,
 facility id, facility bearer token) was configured exclusively through env
 vars read in ``backend/app/lifespan.py`` (``API_BACKEND_EVENTS_URL``,
 ``EDGE_FACILITY_TOKEN``, ``API_FACILITY_ID``, ``API_BACKEND_CONFIG_URL``).
-This module adds a persistent JSON-backed store so a technician can configure
-the same link from the dashboard UI without env vars or a restart.
+This module adds a persistent sqlite3-backed store so a technician can
+configure the same link from the dashboard UI without env vars or a restart.
+Per the "no JSON state stores" rule (AGENTS.md), mutable runtime state that
+is read-modify-written belongs in a table, not a hand-rolled atomic-write
+JSON file -- this store keeps its own dedicated sqlite3 database rather than
+sharing ``catalog.py``'s (single-DB consolidation is issue #35's job).
 
-Precedence (``load()``): **the saved file wins over env, field by field**.
+Precedence (``load()``): **the saved row wins over env, field by field**.
 Env values are only used to *seed* a field that has never been saved -- once
 a field is saved via the store (e.g. through the future settings UI), the
 corresponding env var is ignored for that field even if it is still set in
@@ -29,8 +33,9 @@ timeout (``API_BACKEND_INGEST_TIMEOUT_SEC``) stays env-only for now.
 
 from __future__ import annotations
 
-import json
+import logging
 import os
+import sqlite3
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -51,7 +56,16 @@ from backend.app.lifespan import (
 )
 
 API_CONNECTION_SETTINGS_PATH_ENV = "API_CONNECTION_SETTINGS_PATH"
-DEFAULT_CONNECTION_SETTINGS_PATH = "/var/lib/ml-api/connection_settings.json"
+DEFAULT_CONNECTION_SETTINGS_PATH = "/var/lib/ml-api/connection-settings.sqlite3"
+
+logger = logging.getLogger(__name__)
+
+_SCHEMA_SQL = (
+    "CREATE TABLE IF NOT EXISTS connection_settings ("
+    "id INTEGER PRIMARY KEY CHECK (id = 1), "
+    "events_url TEXT, config_url TEXT, facility_id TEXT, "
+    "facility_token TEXT, updated_at TEXT) STRICT"
+)
 
 # Packaging-time base URL: the company already knows the backend host when it
 # bakes the deploy image, so this seeds `events_url`/`config_url` from
@@ -91,9 +105,9 @@ class ConnectionSettingsStore:
         )
 
     def load(self) -> ConnectionSettings:
-        """Return the effective settings: saved file wins, env seeds gaps.
+        """Return the effective settings: saved row wins, env seeds gaps.
 
-        Precedence per field (highest to lowest): saved file > the
+        Precedence per field (highest to lowest): saved row > the
         field-specific env var (API_BACKEND_EVENTS_URL/API_BACKEND_CONFIG_URL)
         > API_BACKEND_BASE_URL-derived value > None. The base var lets a
         packaged image bake a single backend host without also setting the
@@ -122,7 +136,7 @@ class ConnectionSettingsStore:
         )
 
     def save(self, updates: dict[str, str | None]) -> ConnectionSettings:
-        """Partially update the saved file: only keys present in `updates` change.
+        """Partially update the saved row: only keys present in `updates` change.
 
         Passing a key with value ``None`` explicitly clears that saved field
         (falling back to env, if any, on the next `load()`); omitting a key
@@ -152,46 +166,82 @@ class ConnectionSettingsStore:
             "updated_at": settings.updated_at,
         }
 
-    def _read_unlocked(self) -> dict[str, str | None]:
-        try:
-            raw = json.loads(self.path.read_text(encoding="utf-8"))
-        except FileNotFoundError:
-            return {}
-        except (OSError, json.JSONDecodeError, TypeError, ValueError):
-            return {}
-        if not isinstance(raw, dict):
-            return {}
-        data: dict[str, str | None] = {}
-        for field_name in (*_FIELDS, "updated_at"):
-            value = raw.get(field_name)
-            data[field_name] = value if isinstance(value, str) and value else None
-        return data
-
-    def _write_unlocked(self, data: dict[str, str | None]) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = self.path.with_name(f".{self.path.name}.{os.getpid()}.tmp")
-        serialized = json.dumps(data, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-        # facility_token is a bearer credential stored in local edge JSON by
-        # design; API responses and logs must use masked()/mask_facility_token().
-        # The tmp file is created with mode 0600 from the very first byte
-        # (O_EXCL so we never open/reuse an existing, differently-permissioned
-        # file) rather than write-then-chmod, so the plaintext token is never
-        # world-readable even transiently.
-        fd = os.open(str(tmp_path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as tmp_file:
-                tmp_file.write(serialized)
-        except BaseException:
-            try:
-                os.remove(tmp_path)
-            except OSError:
-                pass
-            raise
-        os.replace(tmp_path, self.path)
+    def _connect_unlocked(self, *, create: bool) -> sqlite3.Connection:
+        # facility_token is a bearer credential stored in a local edge sqlite3
+        # database by design; API responses and logs must use
+        # masked()/mask_facility_token(). The db file is chmod'd 0600 right
+        # after connecting (which creates it if missing) so the plaintext
+        # token is never world-readable even transiently.
+        #
+        # `create` gates parent-directory creation: only the write path may
+        # create it (mirrors the old JSON store, where reading a store that
+        # was never saved touched no filesystem state beyond the read
+        # itself). A read against a missing/unwritable directory must fail
+        # into the same graceful "no saved settings" fallback as a corrupt
+        # file -- it must never crash boot just because the configured
+        # default path (e.g. `/var/lib/ml-api`) doesn't exist yet or isn't
+        # writable in this environment (notably: local test runs).
+        if create:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(self.path, timeout=5.0)
         try:
             os.chmod(self.path, 0o600)
         except OSError:
             pass
+        conn.execute("PRAGMA busy_timeout = 5000")
+        return conn
+
+    def _read_unlocked(self) -> dict[str, str | None]:
+        # Always returns all of `(*_FIELDS, "updated_at")` as keys (None for
+        # unset fields), never a partial dict -- `save()` reuses this dict
+        # for named sqlite parameter binding, so every placeholder must
+        # resolve even when a field was never saved.
+        keys = (*_FIELDS, "updated_at")
+        try:
+            conn = self._connect_unlocked(create=False)
+        except (OSError, sqlite3.Error) as exc:
+            logger.warning("connection settings store unreadable at %s: %r", self.path, exc)
+            return dict.fromkeys(keys)
+        try:
+            conn.execute(_SCHEMA_SQL)
+            row = conn.execute(
+                "SELECT events_url, config_url, facility_id, facility_token, updated_at "
+                "FROM connection_settings WHERE id = 1"
+            ).fetchone()
+        except sqlite3.DatabaseError as exc:
+            # Covers a corrupt db and a leftover non-sqlite file (e.g. an old
+            # JSON store) at the configured path -- never crash boot.
+            logger.warning("connection settings store unreadable at %s: %r", self.path, exc)
+            return dict.fromkeys(keys)
+        finally:
+            conn.close()
+        if row is None:
+            return dict.fromkeys(keys)
+        return {
+            key: (value if isinstance(value, str) and value else None)
+            for key, value in zip(keys, row, strict=True)
+        }
+
+    def _write_unlocked(self, data: dict[str, str | None]) -> None:
+        conn = self._connect_unlocked(create=True)
+        try:
+            conn.execute(_SCHEMA_SQL)
+            with conn:
+                conn.execute(
+                    "INSERT INTO connection_settings "
+                    "(id, events_url, config_url, facility_id, facility_token, updated_at) "
+                    "VALUES (1, :events_url, :config_url, :facility_id, :facility_token, "
+                    ":updated_at) "
+                    "ON CONFLICT(id) DO UPDATE SET "
+                    "events_url = excluded.events_url, "
+                    "config_url = excluded.config_url, "
+                    "facility_id = excluded.facility_id, "
+                    "facility_token = excluded.facility_token, "
+                    "updated_at = excluded.updated_at",
+                    data,
+                )
+        finally:
+            conn.close()
 
 
 def mask_facility_token(token: str | None) -> str | None:
