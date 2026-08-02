@@ -2,7 +2,7 @@
 
 from typing import Final
 
-SCHEMA_VERSION: Final = 4
+SCHEMA_VERSION: Final = 5
 
 SCHEMA_V1_STATEMENTS: Final = (
     """
@@ -127,11 +127,46 @@ SCHEMA_V4_STATEMENTS: Final = ()
 """No-op version marker: the outbox DB was renamed from evidence-outbox.sqlite3
 to worker-state.sqlite3 (constant-name change only, no on-disk migration)."""
 
+SCHEMA_V5_STATEMENTS: Final = (
+    """
+    CREATE TABLE config_current (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        generation INTEGER NOT NULL CHECK (generation >= 0),
+        config_version INTEGER NOT NULL CHECK (config_version >= 0),
+        registry_version INTEGER NOT NULL CHECK (registry_version >= 0),
+        payload_json TEXT NOT NULL,
+        saved_at REAL NOT NULL
+    ) STRICT
+    """,
+    """
+    CREATE TABLE config_history (
+        config_version INTEGER PRIMARY KEY CHECK (config_version >= 0),
+        generation INTEGER NOT NULL CHECK (generation >= 0),
+        registry_version INTEGER NOT NULL CHECK (registry_version >= 0),
+        payload_json TEXT NOT NULL,
+        saved_at REAL NOT NULL
+    ) STRICT
+    """,
+    """
+    CREATE INDEX config_history_saved_at_idx
+    ON config_history (saved_at, config_version)
+    """,
+)
+"""config_current holds the single last-known-good worker config (one row,
+id=1, upserted on every accepted save). config_history is an append-only-ish
+log keyed by config_version, retained per the policy in
+worker/runtime/config/lkg_store.py (`_prune_config_history`): rows still
+referenced by an unacked evidence_events row survive pruning, plus the most
+recent N rows overall -- this is what makes
+`evidence_events.payload_json ->> '$.audit.config_version'` locally joinable
+against config_history."""
+
 MIGRATIONS: Final = (
     SCHEMA_V1_STATEMENTS,
     SCHEMA_V2_STATEMENTS,
     SCHEMA_V3_STATEMENTS,
     SCHEMA_V4_STATEMENTS,
+    SCHEMA_V5_STATEMENTS,
 )
 
 __all__ = ["MIGRATIONS", "SCHEMA_VERSION"]

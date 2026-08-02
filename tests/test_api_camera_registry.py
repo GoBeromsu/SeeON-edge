@@ -540,7 +540,7 @@ def test_system_reports_backend_state_and_version(monkeypatch: pytest.MonkeyPatc
 def test_worker_config_pull_maps_fps_and_enabled_domains_from_relay_payload(
     tmp_path: Path,
 ) -> None:
-    store = WorkerConfigLkgStore(tmp_path / "worker-config.json")
+    store = WorkerConfigLkgStore(tmp_path / "worker-config.sqlite3")
     payload: JsonObject = {
         "registry_version": 9,
         "config_version": 9,

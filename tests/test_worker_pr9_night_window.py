@@ -35,7 +35,7 @@ edge/domains/bed_exit/detector.py) and its worker-side disposition:
   (``IngestSupervisor._watch_restart`` polling ``restart_check`` on a timer,
   worker/pipeline/ingest/lifecycle.py) and the pull/apply/last-known-good
   semantics in ``tests/test_worker_config_pull_lkg.py``
-  (``resolve_effective_config`` / ``save_lkg`` / ``load_lkg``). A pull failure
+  (``resolve_effective_config`` / ``WorkerConfigLkgStore``). A pull failure
   under worker's architecture simply defers the next restart rather than
   reaching into a running camera's decider state.
 """
