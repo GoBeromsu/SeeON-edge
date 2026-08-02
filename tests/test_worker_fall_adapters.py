@@ -11,7 +11,7 @@ import pytest
 from numpy.typing import NDArray
 
 import worker.adapters.model.sklearn_fall as sklearn_fall
-from worker.adapters.model.registry import default_registry
+from worker.adapters.model.registry import UnknownModelTaskError, default_registry
 from worker.adapters.model.sklearn_fall import (
     DEFAULT_OPERATING_THRESHOLD,
     EXPECTED_FEATURE_DIM,
@@ -60,12 +60,13 @@ def _write_bundle(
     return path
 
 
-def test_worker_registry_uses_worker_owned_fall_adapter() -> None:
-    # Given / When
-    factory = default_registry().get_factory("fall")
-
-    # Then
-    assert factory is FallDetector
+def test_default_registry_has_no_fall_fallback() -> None:
+    # Given / When / Then
+    # The fall model has no registry-backed fallback: it must be explicitly
+    # configured (worker.runtime.worker.WorkerRuntime._create_fall_model), so
+    # "fall" is not a registered task in the default registry at all.
+    with pytest.raises(UnknownModelTaskError):
+        default_registry().get_factory("fall")
 
 
 def test_sklearn_adapter_loads_artifact_and_preserves_feature_provenance(

@@ -318,7 +318,7 @@ def model_backend_init_stage(
         context.runners = runners
         return runners
 
-    return Stage(MODEL_BACKEND_INIT_STAGE, _run)
+    return Stage(MODEL_BACKEND_INIT_STAGE, _run, REFUSE_TO_START_EXIT_CODE)
 
 
 def warmup_stage(

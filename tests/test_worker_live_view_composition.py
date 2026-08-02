@@ -202,6 +202,21 @@ def _post_probe(port: int, token: str | None) -> int:
         connection.close()
 
 
+@pytest.fixture(autouse=True)
+def _fall_model_via_serving_client(monkeypatch: pytest.MonkeyPatch) -> None:
+    """These composition tests predate explicit fall-model configuration and
+    rely on the fall runner coming from the injected ``_FakeServingClient``,
+    not a real LSTM artifact on disk. ``_create_fall_model`` no longer falls
+    back to the serving client in production (fail-closed boot, see
+    ``WorkerRuntime._create_fall_model``), so pin the old behavior here,
+    scoped to this test module only."""
+
+    def _fall_via_serving(self: WorkerRuntime, _device: str) -> object:
+        return self._serving.create("fall")  # noqa: SLF001
+
+    monkeypatch.setattr(WorkerRuntime, "_create_fall_model", _fall_via_serving)
+
+
 def test_enabled_worker_binds_the_live_view_port_and_serves_its_cameras(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

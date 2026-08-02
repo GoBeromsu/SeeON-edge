@@ -9,7 +9,6 @@ import numpy as np
 from numpy.typing import NDArray
 
 from contracts.runner import RunnerProtocol
-from worker.adapters.model.sklearn_fall import FallDetector
 from worker.adapters.model.yolo_bed_seg import YoloBedSegRunner
 from worker.adapters.model.yolo_person import YoloPersonRunner
 from worker.adapters.model.yolo_pose import YoloPoseRunner
@@ -88,11 +87,16 @@ class ModelRegistry:
 
 
 def default_registry() -> ModelRegistry:
+    """Build the default registry.
+
+    "fall" is deliberately absent: the fall model has no registry-backed
+    fallback (see ``WorkerRuntime._create_fall_model``), so registering one
+    here would just be dead code shadowing the fail-closed boot check.
+    """
     registry = ModelRegistry()
     registry.register("pose", YoloPoseRunner)
     registry.register("person", YoloPersonRunner)
     registry.register("bed", YoloBedSegRunner)
-    registry.register("fall", FallDetector)
     return registry
 
 

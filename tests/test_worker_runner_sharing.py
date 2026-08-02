@@ -164,6 +164,21 @@ def _runtime(
     )
 
 
+@pytest.fixture(autouse=True)
+def _fall_model_via_serving_client(monkeypatch: pytest.MonkeyPatch) -> None:
+    """This composition test predates explicit fall-model configuration and
+    asserts the fall runner comes from the injected serving client (see
+    ``serving.create_calls`` below), not a real LSTM artifact on disk.
+    ``_create_fall_model`` no longer falls back to the serving client in
+    production (fail-closed boot, see ``WorkerRuntime._create_fall_model``),
+    so pin the old behavior here, scoped to this test module only."""
+
+    def _fall_via_serving(self: WorkerRuntime, _device: str) -> object:
+        return self._serving.create("fall")  # noqa: SLF001
+
+    monkeypatch.setattr(WorkerRuntime, "_create_fall_model", _fall_via_serving)
+
+
 def test_pose_person_bed_and_fall_runners_are_created_once_and_shared_across_four_cameras(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

@@ -220,6 +220,21 @@ def _fake_accepted_response() -> HttpResult:
     return 200, {}, json.dumps({"accepted": True, "generation": 1}).encode()
 
 
+@pytest.fixture(autouse=True)
+def _fall_model_via_serving_client(monkeypatch: pytest.MonkeyPatch) -> None:
+    """This composition test predates explicit fall-model configuration and
+    relies on the fall runner coming from the injected ``_FakeServingClient``,
+    not a real LSTM artifact on disk. ``_create_fall_model`` no longer falls
+    back to the serving client in production (fail-closed boot, see
+    ``WorkerRuntime._create_fall_model``), so pin the old behavior here,
+    scoped to this test module only."""
+
+    def _fall_via_serving(self: WorkerRuntime, _device: str) -> object:
+        return self._serving.create("fall")  # noqa: SLF001
+
+    monkeypatch.setattr(WorkerRuntime, "_create_fall_model", _fall_via_serving)
+
+
 def test_runtime_status_sender_delivers_a_complete_facility_mapping_to_the_relay(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

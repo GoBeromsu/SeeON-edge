@@ -62,6 +62,32 @@ def test_named_stage_failure_never_activates_a_camera(tmp_path: Path) -> None:
     assert lease.held is False
 
 
+def test_model_backend_init_stage_failure_refuses_to_start(tmp_path: Path) -> None:
+    """A model backend that refuses to initialize (e.g. the fall model's
+    fail-closed ``RuntimeError`` when unconfigured) must exit with
+    ``REFUSE_TO_START_EXIT_CODE``, not the generic runtime code -- this is an
+    operator misconfiguration, not a transient runtime fault."""
+    activated: list[str] = []
+    lease = GpuLease.acquire(tmp_path)
+    context = bootstrap.BootstrapContext()
+    stages = bootstrap.named_stages(
+        context,
+        {"ML_WORKER_PROFILE": "cpu"},
+        initializers={"fall": _raise_model_backend_init},
+        warmups={},
+        activate=lambda _boot: (activated.append("camera-a"),),
+        decode_probe=_successful_decode,
+        acquire=lambda: lease,
+    )
+
+    with pytest.raises(bootstrap.BootstrapStageError) as exc:
+        bootstrap.bootstrap_or_exit(stages, context=context, exit_fn=lambda _code: None)
+
+    assert exc.value.exit_code == bootstrap.REFUSE_TO_START_EXIT_CODE
+    assert activated == []
+    assert lease.held is False
+
+
 def test_real_warmup_synchronizes_cuda_after_every_configured_forward(tmp_path: Path) -> None:
     calls: list[str] = []
     lease = GpuLease.acquire(tmp_path)
@@ -218,6 +244,10 @@ def test_watchdog_subprocess_hard_exits_with_fatal_accelerator_code(tmp_path: Pa
 
 def _raise_warmup() -> None:
     raise RuntimeError("representative forward failed")
+
+
+def _raise_model_backend_init(_boot: object) -> _Runner:
+    raise RuntimeError("fall model must be explicitly configured; refusing to boot")
 
 
 def _successful_decode(_decode: str) -> VerifyResult:
