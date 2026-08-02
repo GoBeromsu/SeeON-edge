@@ -14,6 +14,14 @@ corresponding env var is ignored for that field even if it is still set in
 the process environment. This lets an operator override a bad/legacy env
 value from the UI without needing to touch the deployment's env file.
 
+Below the two specific env vars sits one more, lower-priority seed:
+``API_BACKEND_BASE_URL``. Packaging already knows the backend host at
+build/deploy time, so a single base URL can be baked into the image and
+this module derives ``events_url``/``config_url`` from it
+(``{base}/v1/events`` and ``{base}/v1/ml-config``) whenever the specific
+vars are unset. The technician-facing UI only ever needs to supply the
+values packaging *cannot* know ahead of time: facility id and token.
+
 This module is store-only (story G001 of the edge-onboarding plan): it does
 not wire into ``lifespan.py`` and exposes no HTTP routes. The connection
 timeout (``API_BACKEND_INGEST_TIMEOUT_SEC``) stays env-only for now.
@@ -44,6 +52,13 @@ from backend.app.lifespan import (
 
 API_CONNECTION_SETTINGS_PATH_ENV = "API_CONNECTION_SETTINGS_PATH"
 DEFAULT_CONNECTION_SETTINGS_PATH = "/var/lib/ml-api/connection_settings.json"
+
+# Packaging-time base URL: the company already knows the backend host when it
+# bakes the deploy image, so this seeds `events_url`/`config_url` from
+# `{base}/v1/events` and `{base}/v1/ml-config` whenever the more specific
+# API_BACKEND_EVENTS_URL/API_BACKEND_CONFIG_URL vars are unset. Lowest
+# priority in load()'s fallback chain -- see load() below.
+API_BACKEND_BASE_URL_ENV = "API_BACKEND_BASE_URL"
 
 # Saved-file field names -- also the accepted keys of the `updates` dict
 # passed to `ConnectionSettingsStore.save()`.
@@ -76,12 +91,31 @@ class ConnectionSettingsStore:
         )
 
     def load(self) -> ConnectionSettings:
-        """Return the effective settings: saved file wins, env seeds gaps."""
+        """Return the effective settings: saved file wins, env seeds gaps.
+
+        Precedence per field (highest to lowest): saved file > the
+        field-specific env var (API_BACKEND_EVENTS_URL/API_BACKEND_CONFIG_URL)
+        > API_BACKEND_BASE_URL-derived value > None. The base var lets a
+        packaged image bake a single backend host without also setting the
+        two specific vars; config_url is derived as exactly `{base}/v1/ml-config`
+        (no trailing facility id) since the config-pull code already appends
+        `/{facility_id}` itself.
+        """
         with self._lock:
             saved = self._read_unlocked()
+        base = os.environ.get(API_BACKEND_BASE_URL_ENV)
+        base = base.rstrip("/") if base else None
         return ConnectionSettings(
-            events_url=saved.get("events_url") or os.environ.get(API_BACKEND_EVENTS_URL_ENV),
-            config_url=saved.get("config_url") or os.environ.get(API_BACKEND_CONFIG_URL_ENV),
+            events_url=(
+                saved.get("events_url")
+                or os.environ.get(API_BACKEND_EVENTS_URL_ENV)
+                or (f"{base}/v1/events" if base else None)
+            ),
+            config_url=(
+                saved.get("config_url")
+                or os.environ.get(API_BACKEND_CONFIG_URL_ENV)
+                or (f"{base}/v1/ml-config" if base else None)
+            ),
             facility_id=saved.get("facility_id") or os.environ.get(API_FACILITY_ID_ENV),
             facility_token=saved.get("facility_token") or os.environ.get(EDGE_FACILITY_TOKEN_ENV),
             updated_at=saved.get("updated_at"),
@@ -178,6 +212,7 @@ def utc_now_iso() -> str:
 
 
 __all__ = [
+    "API_BACKEND_BASE_URL_ENV",
     "API_CONNECTION_SETTINGS_PATH_ENV",
     "DEFAULT_CONNECTION_SETTINGS_PATH",
     "ConnectionSettings",

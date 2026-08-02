@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from backend.app.features.connection.store import (
+    API_BACKEND_BASE_URL_ENV,
     API_CONNECTION_SETTINGS_PATH_ENV,
     DEFAULT_CONNECTION_SETTINGS_PATH,
     ConnectionSettings,
@@ -30,6 +31,7 @@ def clear_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
         API_BACKEND_CONFIG_URL_ENV,
         API_FACILITY_ID_ENV,
         EDGE_FACILITY_TOKEN_ENV,
+        API_BACKEND_BASE_URL_ENV,
     ):
         monkeypatch.delenv(name, raising=False)
     yield
@@ -113,6 +115,53 @@ class TestLoadPrecedence:
 
         assert settings.events_url == "https://saved.example/events"
         assert settings.facility_id == "facility-from-env"
+
+
+class TestLoadBaseUrlPrecedence:
+    def test_base_url_seeds_both_events_and_config_when_no_file_or_specific_env(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv(API_BACKEND_BASE_URL_ENV, "https://backend.example")
+
+        settings = _store(tmp_path).load()
+
+        assert settings.events_url == "https://backend.example/v1/events"
+        assert settings.config_url == "https://backend.example/v1/ml-config"
+
+    def test_specific_env_var_overrides_base_derivation_per_field(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv(API_BACKEND_BASE_URL_ENV, "https://backend.example")
+        monkeypatch.setenv(API_BACKEND_EVENTS_URL_ENV, "https://override.example/events")
+
+        settings = _store(tmp_path).load()
+
+        assert settings.events_url == "https://override.example/events"
+        # config_url has no specific override set, so it still falls back to base.
+        assert settings.config_url == "https://backend.example/v1/ml-config"
+
+    def test_base_url_trailing_slash_is_normalized(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv(API_BACKEND_BASE_URL_ENV, "https://backend.example/")
+
+        settings = _store(tmp_path).load()
+
+        assert settings.events_url == "https://backend.example/v1/events"
+        assert settings.config_url == "https://backend.example/v1/ml-config"
+
+    def test_saved_file_still_wins_over_base_url(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv(API_BACKEND_BASE_URL_ENV, "https://backend.example")
+        store = _store(tmp_path)
+
+        store.save({"events_url": "https://saved.example/events"})
+        settings = store.load()
+
+        assert settings.events_url == "https://saved.example/events"
+        # config_url was never saved, so it still falls back to the base var.
+        assert settings.config_url == "https://backend.example/v1/ml-config"
 
 
 class TestSavePartialUpdate:
