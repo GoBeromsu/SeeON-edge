@@ -260,7 +260,7 @@ def test_stream_connect_and_disconnect_track_the_viewer_counter() -> None:
         server.stop()
 
 
-def test_pose_get_and_set_round_trip_and_defaults_off() -> None:
+def test_pose_get_and_set_round_trip_and_defaults_none() -> None:
     store = LatestFrameStore()
     store.register_camera("camera-a")
     server = MjpegServer(store, MjpegServerConfig(port=0))
@@ -268,20 +268,29 @@ def test_pose_get_and_set_round_trip_and_defaults_off() -> None:
     base = f"http://127.0.0.1:{server.port}"
     try:
         with urllib.request.urlopen(f"{base}/overlay/camera-a/pose", timeout=1) as response:
-            assert json.loads(response.read()) == {"show_pose": False}
+            assert json.loads(response.read()) == {"mode": "none"}
 
         request = urllib.request.Request(
             f"{base}/overlay/camera-a/pose",
-            data=json.dumps({"show_pose": True}).encode(),
+            data=json.dumps({"mode": "fall"}).encode(),
             method="POST",
         )
         with urllib.request.urlopen(request, timeout=1) as response:
-            assert json.loads(response.read()) == {"show_pose": True}
+            assert json.loads(response.read()) == {"mode": "fall"}
 
         with urllib.request.urlopen(f"{base}/overlay/camera-a/pose", timeout=1) as response:
-            assert json.loads(response.read()) == {"show_pose": True}
+            assert json.loads(response.read()) == {"mode": "fall"}
 
-        assert store.get_show_pose("camera-a") is True
+        assert store.get_mode("camera-a") == "fall"
+
+        request = urllib.request.Request(
+            f"{base}/overlay/camera-a/pose",
+            data=json.dumps({"mode": "bedexit"}).encode(),
+            method="POST",
+        )
+        with urllib.request.urlopen(request, timeout=1) as response:
+            assert json.loads(response.read()) == {"mode": "bedexit"}
+        assert store.get_mode("camera-a") == "bedexit"
     finally:
         server.stop()
 
@@ -311,6 +320,54 @@ def test_pose_unknown_camera_and_malformed_body_are_rejected() -> None:
             assert exc.code == 400
         else:  # pragma: no cover
             raise AssertionError("malformed body should 400")
-        assert store.get_show_pose("camera-a") is False
+        assert store.get_mode("camera-a") == "none"
+    finally:
+        server.stop()
+
+
+def test_pose_rejects_unknown_mode_value_and_unknown_keys() -> None:
+    store = LatestFrameStore()
+    store.register_camera("camera-a")
+    server = MjpegServer(store, MjpegServerConfig(port=0))
+    server.start()
+    base = f"http://127.0.0.1:{server.port}"
+    try:
+        unknown_value = urllib.request.Request(
+            f"{base}/overlay/camera-a/pose",
+            data=json.dumps({"mode": "show_pose"}).encode(),
+            method="POST",
+        )
+        try:
+            urllib.request.urlopen(unknown_value, timeout=1)
+        except urllib.error.HTTPError as exc:
+            assert exc.code == 400
+        else:  # pragma: no cover
+            raise AssertionError("unknown mode value should 400")
+
+        legacy_key = urllib.request.Request(
+            f"{base}/overlay/camera-a/pose",
+            data=json.dumps({"show_pose": True}).encode(),
+            method="POST",
+        )
+        try:
+            urllib.request.urlopen(legacy_key, timeout=1)
+        except urllib.error.HTTPError as exc:
+            assert exc.code == 400
+        else:  # pragma: no cover
+            raise AssertionError("legacy show_pose key should 400")
+
+        extra_key = urllib.request.Request(
+            f"{base}/overlay/camera-a/pose",
+            data=json.dumps({"mode": "fall", "extra": 1}).encode(),
+            method="POST",
+        )
+        try:
+            urllib.request.urlopen(extra_key, timeout=1)
+        except urllib.error.HTTPError as exc:
+            assert exc.code == 400
+        else:  # pragma: no cover
+            raise AssertionError("unexpected extra key should 400")
+
+        assert store.get_mode("camera-a") == "none"
     finally:
         server.stop()

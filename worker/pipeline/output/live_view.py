@@ -10,7 +10,11 @@ import cv2
 
 from contracts.observation import FrameObservation
 from worker.domains.bed_exit import BedExitDebugSnapshot
-from worker.pipeline.output.overlay import OverlayEncodingError, OverlayRenderer
+from worker.pipeline.output.overlay import (
+    OverlayEncodingError,
+    OverlayMode,
+    OverlayRenderer,
+)
 from worker.types import FramePacket
 
 
@@ -31,7 +35,7 @@ class LatestFrameStore:
         self._known_camera_ids: set[str] = set()
         self._viewer_counts: dict[str, int] = {}
         self._snapshot_demand: set[str] = set()
-        self._show_pose: dict[str, bool] = {}
+        self._mode: dict[str, OverlayMode] = {}
 
     def register_camera(self, camera_id: str) -> None:
         with self._condition:
@@ -72,13 +76,13 @@ class LatestFrameStore:
                 return True
             return False
 
-    def set_show_pose(self, camera_id: str, show_pose: bool) -> None:
+    def set_mode(self, camera_id: str, mode: OverlayMode) -> None:
         with self._condition:
-            self._show_pose[camera_id] = show_pose
+            self._mode[camera_id] = mode
 
-    def get_show_pose(self, camera_id: str) -> bool:
+    def get_mode(self, camera_id: str) -> OverlayMode:
         with self._condition:
-            return self._show_pose.get(camera_id, False)
+            return self._mode.get(camera_id, "none")
 
     def publish_jpeg(
         self,
@@ -130,18 +134,18 @@ class LiveViewRenderer(Protocol):
     ) -> bytes: ...
 
 
-class _PerCameraPoseRenderer:
-    """Default ``LiveViewSubscriber`` renderer: per-camera runtime pose toggle.
+class _PerCameraOverlayRenderer:
+    """Default ``LiveViewSubscriber`` renderer: per-camera runtime overlay mode.
 
-    ``OverlayRenderer.show_pose`` (overlay.py:40) is a frozen, per-instance
+    ``OverlayRenderer.mode`` (overlay.py) is a frozen, per-instance
     construction switch. Sharing one ``OverlayRenderer`` across every camera
-    (the previous ``worker.py`` wiring) collapses the toggle into a single
-    process-global switch. This reads each camera's toggle from ``store`` --
-    the same camera-keyed collaborator already threaded through the worker --
-    and constructs a fresh, stateless ``OverlayRenderer`` per call, so turning
-    pose off for one camera never affects another, and "off" still skips the
-    keypoint loop entirely (overlay.py:57-58's existing ``if self.show_pose``
-    gate), not just the drawing.
+    (the previous ``worker.py`` wiring) collapses the switch into a single
+    process-global value. This reads each camera's mode from ``store`` -- the
+    same camera-keyed collaborator already threaded through the worker -- and
+    constructs a fresh, stateless ``OverlayRenderer`` per call, so switching
+    modes for one camera never affects another, and ``"none"`` still skips
+    every drawing loop entirely (overlay.py's early return), not just the
+    final composite.
     """
 
     def __init__(self, store: LatestFrameStore) -> None:
@@ -153,8 +157,8 @@ class _PerCameraPoseRenderer:
         observation: FrameObservation,
         debug_snapshots: tuple[BedExitDebugSnapshot, ...] = (),
     ) -> bytes:
-        show_pose = self._store.get_show_pose(packet.camera_id)
-        return OverlayRenderer(show_pose=show_pose).encode_jpeg(
+        mode = self._store.get_mode(packet.camera_id)
+        return OverlayRenderer(mode=mode).encode_jpeg(
             packet, observation, debug_snapshots
         )
 
@@ -169,7 +173,7 @@ class LiveViewSubscriber:
     ) -> None:
         self._store = store
         self._renderer = (
-            renderer if renderer is not None else _PerCameraPoseRenderer(store)
+            renderer if renderer is not None else _PerCameraOverlayRenderer(store)
         )
 
     def publish(

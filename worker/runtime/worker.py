@@ -518,7 +518,13 @@ class WorkerRuntime:
         # pattern as `_clip_recorder`/`_compose_evidence_export` -- plus the
         # per-camera evidence attacher `_default_pump_factory` reads.
         self.diagnostics = WorkerDiagnostics()
-        self._overlay_renderer = OverlayRenderer()
+        # Explicit non-default mode: this renderer also feeds
+        # `AlertEvidenceAttacher` alert snapshots (fall + bed_exit), where
+        # `OverlayRenderer`'s new default `mode="none"` would silently render
+        # blank evidence images. `"bedexit"` still draws person boxes/skeleton
+        # (useful for fall review too) while keeping bed context for bed_exit
+        # alerts.
+        self._overlay_renderer = OverlayRenderer(mode="bedexit")
         self._snapshot_store = SnapshotStore()
         self._camera_evidence_attachers: dict[str, AlertEvidenceAttacher] = {}
         # #15: `mjpeg_server.py` was ported without a call site, so `:8090`

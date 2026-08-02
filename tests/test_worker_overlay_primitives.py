@@ -6,6 +6,7 @@ from contracts.observation import BoundingBox
 from worker.pipeline.output.overlay import (
     draw_box,
     draw_caption,
+    draw_dashed_region,
     draw_label,
     draw_pose,
     draw_region,
@@ -36,6 +37,32 @@ def test_draw_region_without_polygon_falls_back_to_box() -> None:
     draw_region(image, BoundingBox(4, 4, 28, 28, 0.9), (255, 0, 0))
     assert int(image[4, 4:28].sum()) > 0  # rectangle outline painted
     assert int(image[16, 16].sum()) == 0  # no fill for a plain box
+
+
+def test_draw_dashed_region_outlines_polygon_without_filling_interior() -> None:
+    polygon = ((4, 4), (28, 4), (28, 28), (4, 28))
+    image = _blank()
+    draw_dashed_region(image, BoundingBox(4, 4, 28, 28, 0.9, polygon), (128, 128, 0))
+    assert int(image[4, 6].sum()) > 0  # dash drawn at the start of the top edge
+    assert int(image[16, 16].sum()) == 0  # interior never filled, unlike draw_region
+    assert int(image[1, 1].sum()) == 0  # outside the polygon stays untouched
+
+
+def test_draw_dashed_region_has_gaps_along_a_straight_edge() -> None:
+    image = _blank(32, 64)
+    box = BoundingBox(4, 10, 60, 20, 0.9)
+    draw_dashed_region(image, box, (128, 128, 0))
+    top_row = image[10, 4:60]
+    painted = np.any(top_row.reshape(-1, 3) != 0, axis=-1)
+    assert bool(painted.any())  # at least one dash segment painted
+    assert bool((~painted).any())  # at least one gap left unpainted
+
+
+def test_draw_dashed_region_without_polygon_falls_back_to_dashed_box() -> None:
+    image = _blank()
+    draw_dashed_region(image, BoundingBox(4, 4, 28, 28, 0.9), (128, 128, 0))
+    assert int(image[4, 6].sum()) > 0
+    assert int(image[16, 16].sum()) == 0
 
 
 def test_draw_caption_and_label_paint_pixels() -> None:

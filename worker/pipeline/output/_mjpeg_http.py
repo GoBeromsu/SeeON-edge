@@ -11,12 +11,14 @@ from typing import Final, Literal, Required, TypedDict
 from urllib.parse import unquote, urlsplit
 
 from worker.pipeline.output.live_view import LatestFrame, LatestFrameStore
+from worker.pipeline.output.overlay import OverlayMode
 
 BOUNDARY: Final = b"frame"
 POLL_INTERVAL_SECONDS: Final = 0.05
 HEARTBEAT_INTERVAL_SECONDS: Final = 1.0
 MAX_PROBE_BODY_BYTES: Final = 8192
 MAX_POSE_BODY_BYTES: Final = 256
+_OVERLAY_MODES: Final[frozenset[str]] = frozenset({"none", "bedexit", "fall"})
 # Bounded wait for the first frame after a stream connects. Viewer gating
 # (#48) means encoding does not start until this connection's counter
 # increment makes `has_viewers` true, so the first frame is not already
@@ -191,20 +193,20 @@ def build_http_server(
             if camera_id == "" or not store.is_known(camera_id):
                 self.send_error(HTTPStatus.NOT_FOUND)
                 return
-            self._write_pose_json(store.get_show_pose(camera_id))
+            self._write_mode_json(store.get_mode(camera_id))
 
         def _handle_set_pose(self, camera_id: str) -> None:
             if camera_id == "" or not store.is_known(camera_id):
                 self.send_error(HTTPStatus.NOT_FOUND)
                 return
-            show_pose = self._read_show_pose_body()
-            if show_pose is None:
+            mode = self._read_mode_body()
+            if mode is None:
                 self.send_error(HTTPStatus.BAD_REQUEST)
                 return
-            store.set_show_pose(camera_id, show_pose)
-            self._write_pose_json(show_pose)
+            store.set_mode(camera_id, mode)
+            self._write_mode_json(mode)
 
-        def _read_show_pose_body(self) -> bool | None:
+        def _read_mode_body(self) -> OverlayMode | None:
             raw_length = self.headers.get("Content-Length")
             if raw_length is None:
                 return None
@@ -218,14 +220,16 @@ def build_http_server(
                 payload = json.loads(self.rfile.read(length).decode("utf-8"))
             except (UnicodeDecodeError, json.JSONDecodeError):
                 return None
-            if not isinstance(payload, dict):
+            if not isinstance(payload, dict) or set(payload) != {"mode"}:
                 return None
-            show_pose = payload.get("show_pose")
-            return show_pose if isinstance(show_pose, bool) else None
+            mode = payload.get("mode")
+            if isinstance(mode, str) and mode in _OVERLAY_MODES:
+                return mode  # type: ignore[return-value]
+            return None
 
-        def _write_pose_json(self, show_pose: bool) -> None:
+        def _write_mode_json(self, mode: OverlayMode) -> None:
             body = json.dumps(
-                {"show_pose": show_pose}, separators=(",", ":")
+                {"mode": mode}, separators=(",", ":")
             ).encode("utf-8")
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", "application/json")
