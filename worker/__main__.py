@@ -19,15 +19,18 @@ from shared.events.evidence_export_contract import DeliveryFailure
 from shared.events.evidence_http_transport import bounded_request, encode_json
 from worker.adapters.model.in_process import InProcessServingClient
 from worker.runtime.config import (
+    EDGE_CAMERA_CONFIG_ENV,
     RELAY_TOKEN_ENV,
     RELAY_URL_ENV,
-    RestartDirective,
+    ConfigSnapshot,
     WorkerConfig,
     WorkerConfigError,
     load_worker_config,
+    load_worker_config_from_relay,
     make_restart_check,
     pull_worker_config,
     resolve_config_path,
+    resolve_startup_config,
 )
 from worker.runtime.worker import WorkerRuntime
 
@@ -153,15 +156,79 @@ def main(argv: list[str] | None = None) -> int:
     # hardware, which is worse than today's ordering. Config load stays
     # first until that probe wiring is exposed to __main__.py too (same
     # composition-root constraint as loop_factory, below).
-    try:
-        config = load_worker_config(resolve_config_path(args.config))
-    except WorkerConfigError:
-        LOGGER.exception("config resolution failed")
-        return CONFIG_ERROR_EXIT_CODE
 
-    if args.check_config:
-        LOGGER.info("config validation passed (%d camera(s))", len(config.cameras))
-        return CLEAN_SHUTDOWN_EXIT_CODE
+    # Startup config resolution (docs/architecture.md "Entrypoint",
+    # worker/runtime/config/config_pull.py). Two branches:
+    #
+    # 1. Explicit YAML (--config or a non-empty EDGE_CAMERA_CONFIG): load it
+    #    exactly as before, then let `resolve_startup_config` attempt a relay
+    #    pull that takes precedence when the backend is reachable, falling
+    #    back to the YAML on any pull failure. This keeps the offline-dev
+    #    escape hatch alive without ever losing the YAML fallback.
+    # 2. No YAML at all (the production default per compose.edge.yaml): pull
+    #    directly from the relay via `load_worker_config_from_relay`, which
+    #    already saves a successful pull to the last-known-good (LKG) store
+    #    and falls back to that store on a failed pull. Refuse to start only
+    #    when there is neither a fresh pull nor an LKG.
+    yaml_requested = args.config is not None or bool(
+        os.environ.get(EDGE_CAMERA_CONFIG_ENV, "").strip()
+    )
+    snapshot: ConfigSnapshot | None = None
+
+    if yaml_requested:
+        try:
+            yaml_config = load_worker_config(resolve_config_path(args.config))
+        except WorkerConfigError:
+            LOGGER.exception("config resolution failed")
+            return CONFIG_ERROR_EXIT_CODE
+
+        if args.check_config:
+            LOGGER.info("config validation passed (%d camera(s))", len(yaml_config.cameras))
+            return CLEAN_SHUTDOWN_EXIT_CODE
+
+        relay_url = os.environ.get(RELAY_URL_ENV, yaml_config.relay.url)
+        relay_token = (
+            os.environ.get(RELAY_TOKEN_ENV, "").strip()
+            or yaml_config.relay.token.get_secret_value()
+        )
+        snapshot = resolve_startup_config(yaml_config, relay_url, relay_token)
+        config = snapshot.config
+    else:
+        relay_url = os.environ.get(RELAY_URL_ENV, "").strip()
+        relay_token = os.environ.get(RELAY_TOKEN_ENV, "").strip() or None
+        if not relay_url:
+            LOGGER.error(
+                "worker config: no --config/%s provided and %s is unset; "
+                "cannot resolve a live config",
+                EDGE_CAMERA_CONFIG_ENV,
+                RELAY_URL_ENV,
+            )
+            return CONFIG_ERROR_EXIT_CODE
+
+        snapshot = load_worker_config_from_relay(relay_url, relay_token)
+        if snapshot is None:
+            LOGGER.error(
+                "worker could not reach the relay at %s and has no cached "
+                "last-known-good config; set %s/%s or provide --config/%s",
+                relay_url,
+                RELAY_URL_ENV,
+                RELAY_TOKEN_ENV,
+                EDGE_CAMERA_CONFIG_ENV,
+            )
+            return CONFIG_ERROR_EXIT_CODE
+        config = snapshot.config
+
+        if args.check_config:
+            LOGGER.info("config validation passed (%d camera(s))", len(config.cameras))
+            return CLEAN_SHUTDOWN_EXIT_CODE
+
+    LOGGER.info(
+        "worker config resolved: source=%s stale=%s registry_version=%d directive=%s",
+        snapshot.source,
+        snapshot.stale,
+        snapshot.registry_version,
+        snapshot.directive,
+    )
 
     if args.heartbeat_on_start:
         _send_heartbeat_on_start(config)
@@ -173,7 +240,7 @@ def main(argv: list[str] | None = None) -> int:
     restart_check = make_restart_check(
         relay_url,
         relay_token,
-        RestartDirective(generation=0, version=0),
+        snapshot.directive,
         pull_config=pull_worker_config,
     )
 
