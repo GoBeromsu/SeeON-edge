@@ -242,6 +242,214 @@ def test_watchdog_subprocess_hard_exits_with_fatal_accelerator_code(tmp_path: Pa
     assert record["camera_id"] == "camera-a"
 
 
+@pytest.mark.real_stack
+def test_watchdog_detects_a_genuinely_hanging_extractor_inside_the_real_composition(
+    tmp_path: Path,
+) -> None:
+    """The #46 acceptance criterion the unit test above cannot prove: a forward
+    pass that genuinely blocks its calling thread (a real ``time.sleep``, never
+    a self-invoked ``watchdog.check()``) is caught by the watchdog's own
+    background monitor thread while running inside the real
+    ``WorkerRuntime`` -> ``CompositeExtractor`` -> ``CameraPipelinePump``
+    composition, and hard-exits the process through the real
+    ``FaultHandler``/``os._exit`` path -- exactly like
+    ``test_watchdog_subprocess_hard_exits_with_fatal_accelerator_code`` above,
+    except the hang is injected as a blocking "pose" extractor reached through
+    the production composition rather than a direct ``watchdog.register()``
+    call.
+
+    Marked ``real_stack`` because it boots a real worker process and asserts on
+    thread/wall-clock timing, not because it needs the ``mediamtx``/``ffmpeg``
+    tooling that marker otherwise implies (see ``tests/AGENTS.md``): only the
+    ingest *source* is faked, publishing one real ``FramePacket`` onto the real
+    ``BoundedFrameBus`` and then idling. Every other seam is the genuine
+    production composition: real ``WorkerRuntime`` (default, unstubbed
+    ``pump_factory`` and ``hard_exit``), real ``CompositeExtractor`` with
+    ``watchdog=`` wired, real ``CameraPipelinePump``, ``InferenceWatchdog``'s
+    real ``"inference-watchdog"`` monitor thread (deadline shortened by
+    subclassing, since ``WorkerConfig`` has no such knob), real
+    ``FaultHandler``, and a real ``os._exit(4)``.
+    """
+    script = textwrap.dedent(
+        """
+        import sys
+        import time
+        from pathlib import Path
+
+        import numpy as np
+
+        import worker.runtime.worker as worker_module
+        from contracts.frame import Frame
+        from worker.runtime.config import WorkerConfig
+        from worker.runtime.lease import GpuLease
+        from worker.runtime.profile.registry import VerifyResult
+        from worker.runtime.watchdog import InferenceWatchdog
+        from worker.runtime.worker import WorkerRuntime
+        from worker.types.frame_packet import FramePacket
+
+        STATE_DIR = Path(sys.argv[1])
+
+
+        class _FallMetadata:
+            window = 2
+            stride = 1
+            mode = "sequence"
+
+
+        class _FakeRunner:
+            \"\"\"Stands in for pose/person/bed/fall's shared runner. Only
+            ``.warmup()`` is ever exercised by this test: the hanging pose
+            extractor is scheduled first each frame (see
+            ``worker/pipeline/bus/scheduler.py``'s insertion-order iteration),
+            so person/bed/fall are provisioned and warmed but never called.\"\"\"
+
+            def __init__(self, task):
+                self.task = task
+                self.metadata = _FallMetadata()
+                self.operating_threshold = 0.5
+
+            def __call__(self, image):
+                raise AssertionError(f"{self.task} runner must not be invoked")
+
+            def predict(self, features):
+                return 0.0
+
+            def warmup(self):
+                return None
+
+
+        class _HangingPoseRunner:
+            \"\"\"The genuinely blocking forward pass: a real ``time.sleep``,
+            never a call to ``watchdog.check()`` -- only the watchdog's own
+            monitor thread, on its own timer, can ever detect this.\"\"\"
+
+            def __call__(self, image):
+                time.sleep(30)
+                raise AssertionError("hanging pose runner must never return")
+
+            def warmup(self):
+                return None
+
+
+        class _FakeServingClient:
+            def create(self, task, **_options):
+                if task == "pose":
+                    return _HangingPoseRunner()
+                return _FakeRunner(task)
+
+
+        class _OneFramePushLoop:
+            \"\"\"Fake ingest loop: the only faked seam. Publishes exactly one
+            real frame onto the real bus, then idles until stopped -- no RTSP,
+            mediamtx, or ffmpeg required.\"\"\"
+
+            def __init__(self, camera_id, bus, reporter):
+                self.camera_id = camera_id
+                self._bus = bus
+                self._reporter = reporter
+                self._stopped = False
+
+            def run(self):
+                self._reporter.mark_starting(self.camera_id)
+                frame = Frame(
+                    index=0,
+                    time_sec=0.0,
+                    image=np.zeros((360, 640, 3), dtype=np.uint8),
+                )
+                packet = FramePacket(
+                    camera_id=self.camera_id,
+                    frame=frame,
+                    pts=0.0,
+                    seq=0,
+                    width=640,
+                    height=360,
+                    decode_time_ms=0.0,
+                )
+                self._reporter.mark_ready(self.camera_id)
+                self._bus.publish(packet)
+                while not self._stopped:
+                    time.sleep(0.05)
+
+            def stop(self):
+                self._stopped = True
+
+
+        def _loop_factory(camera, bus, reporter):
+            return _OneFramePushLoop(camera.camera_id, bus, reporter)
+
+
+        class _ShortDeadlineWatchdog(InferenceWatchdog):
+            \"\"\"``WorkerConfig`` has no deadline knob, so the only way to keep
+            this test fast is to shorten the deadline the real watchdog uses --
+            the monitor thread, polling, and trip/exit path are all untouched.\"\"\"
+
+            def __init__(self, handler, *, profile, **_ignored):
+                super().__init__(handler, profile=profile, deadline_sec=0.2)
+
+
+        # Bare-name rebind: `worker.py` resolves `InferenceWatchdog` from this
+        # module's globals at call time (`self.watchdog = InferenceWatchdog(...)`
+        # inside `_initialize_models`), so reassigning it here is picked up
+        # without touching `WorkerRuntime.__init__`, which has no deadline seam.
+        worker_module.InferenceWatchdog = _ShortDeadlineWatchdog
+
+
+        def _fall_via_serving(self, _device):
+            return self._serving.create("fall")
+
+
+        # Fall model selection is fail-closed (#43) with no serving-client
+        # fallback in production; pin the pre-#43 test-only behavior here so
+        # this script needs no real LSTM artifact on disk.
+        worker_module.WorkerRuntime._create_fall_model = _fall_via_serving
+
+        config = WorkerConfig.model_validate(
+            {
+                "version": 1,
+                "relay": {"url": "http://relay.test", "token": "relay-token"},
+                "cameras": [
+                    {
+                        "camera_id": "camera-a",
+                        "facility_id": "facility-a",
+                        "rtsp_url": "rtsp://example.test/camera-a",
+                        "heartbeat_interval_sec": 30.0,
+                    }
+                ],
+            }
+        )
+
+        runtime = WorkerRuntime(
+            config,
+            env={"ML_WORKER_PROFILE": "cpu"},
+            serving_client=_FakeServingClient(),
+            loop_factory=_loop_factory,
+            acquire_lease=lambda: GpuLease.acquire(STATE_DIR),
+            decode_probe=lambda _decode: VerifyResult(True, "cpu", "decode", "available"),
+        )
+        # No `hard_exit=` override (stays the real `os._exit`) and no
+        # `pump_factory=` override (stays `_default_pump_factory`, so the real
+        # `CameraPipelinePump` runs on its own thread and calls the real
+        # `CompositeExtractor.process()`).
+        runtime.run()
+        """
+    )
+    completed = subprocess.run(
+        [sys.executable, "-c", script, str(tmp_path)],
+        cwd=Path.cwd(),
+        env=os.environ | {"ML_WORKER_STATE_DIR": str(tmp_path)},
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+
+    assert completed.returncode == 4, f"stdout={completed.stdout!r} stderr={completed.stderr!r}"
+    record = json.loads((tmp_path / "first_fault.json").read_text(encoding="utf-8"))
+    assert record["stage"] == WATCHDOG_STAGE
+    assert record["exit_code"] == 4
+    assert record["camera_id"] == "camera-a"
+    assert record["task"] == "pose"
+
+
 def _raise_warmup() -> None:
     raise RuntimeError("representative forward failed")
 
