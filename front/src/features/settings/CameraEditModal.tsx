@@ -112,7 +112,7 @@ export function CameraEditModal({ camera, onClose, onUpdated, onRequestDelete }:
   const busyFlag = busy !== null;
 
   return (
-    <AccessibleDialog open={camera !== null} title="연결 관리" onClose={requestClose}>
+    <AccessibleDialog open={camera !== null} title="연결 관리" onClose={requestClose} size={mode === 'reseg' ? 'lg' : 'md'}>
       <div className="mb-3 flex items-center gap-2">
         <span className={statusMeta.className}>
           <span aria-hidden="true" className="h-1.5 w-1.5 rounded-full bg-current" />

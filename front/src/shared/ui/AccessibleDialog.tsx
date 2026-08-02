@@ -3,12 +3,28 @@ import { createPortal } from 'react-dom';
 
 const FOCUSABLE = 'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
 
+/**
+ * Width variants matching front/design-handoff/README.md §5 modal specs: xs=380 (계정 설정),
+ * sm=420 (폴더 탐색기), md=440 (연결 관리, 카메라 등록 1단계), default=520 (unchanged — other
+ * callers, e.g. delete confirmation), lg=640 (카메라 등록 2단계, 연결 관리 다시 인식), xl=720 (클립 재생).
+ */
+export type DialogSize = 'xs' | 'sm' | 'md' | 'default' | 'lg' | 'xl';
+
+const DIALOG_SIZE_CLASS: Partial<Record<DialogSize, string>> = {
+  xs: 'accessible-dialog--xs',
+  sm: 'accessible-dialog--sm',
+  md: 'accessible-dialog--md',
+  lg: 'accessible-dialog--lg',
+  xl: 'accessible-dialog--xl',
+};
+
 export function AccessibleDialog({
   open,
   title,
   children,
   onClose,
   variant = 'dialog',
+  size = 'default',
   initialFocus = 'first-control',
   initialFocusRef,
 }: {
@@ -17,6 +33,7 @@ export function AccessibleDialog({
   children: ReactNode;
   onClose: () => void;
   variant?: 'dialog' | 'sheet';
+  size?: DialogSize;
   initialFocus?: 'first-control' | 'heading';
   initialFocusRef?: RefObject<HTMLElement>;
 }): JSX.Element | null {
@@ -84,9 +101,12 @@ export function AccessibleDialog({
   }, [initialFocus, initialFocusRef, open]);
 
   if (!open) return null;
+  const className = ['accessible-dialog', variant === 'sheet' ? 'accessible-sheet' : '', DIALOG_SIZE_CLASS[size] ?? '']
+    .filter(Boolean)
+    .join(' ');
   return createPortal(
     <div className="dialog-backdrop" data-dialog-backdrop onClick={(event) => { if (event.target === event.currentTarget) onClose(); }}>
-      <div ref={dialogRef} className={`accessible-dialog ${variant === 'sheet' ? 'accessible-sheet' : ''}`} data-variant={variant} role="dialog" aria-modal="true" aria-labelledby={titleId}>
+      <div ref={dialogRef} className={className} data-variant={variant} data-size={size} role="dialog" aria-modal="true" aria-labelledby={titleId}>
         <h2 id={titleId} tabIndex={-1}>{title}</h2>
         {children}
       </div>

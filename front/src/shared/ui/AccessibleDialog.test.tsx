@@ -44,6 +44,22 @@ describe('AccessibleDialog', () => {
     act(() => root.unmount());
   });
 
+  it('defaults to the unsized width class and applies a size variant class when requested', () => {
+    const host = document.createElement('div');
+    document.body.append(host);
+    const root = createRoot(host);
+    act(() => root.render(<AccessibleDialog open title="기본 크기" onClose={vi.fn()}><button>닫기</button></AccessibleDialog>));
+    let dialog = document.querySelector('[role="dialog"]');
+    expect(dialog?.getAttribute('data-size')).toBe('default');
+    expect(dialog?.className.trim()).toBe('accessible-dialog');
+
+    act(() => root.render(<AccessibleDialog open title="큰 크기" onClose={vi.fn()} size="xl"><button>닫기</button></AccessibleDialog>));
+    dialog = document.querySelector('[role="dialog"]');
+    expect(dialog?.getAttribute('data-size')).toBe('xl');
+    expect(dialog?.classList.contains('accessible-dialog--xl')).toBe(true);
+    act(() => root.unmount());
+  });
+
   it('supports bottom-sheet presentation and traps tabbing from the focused heading', () => {
     const host = document.createElement('div');
     document.body.append(host);

@@ -189,6 +189,13 @@
   box-shadow: var(--modal-shadow);
 }
 
+/* Width variants — front/design-handoff/README.md §5 modal specs. */
+.accessible-dialog--xs { width: min(380px, 100%); }
+.accessible-dialog--sm { width: min(420px, 100%); }
+.accessible-dialog--md { width: min(440px, 100%); }
+.accessible-dialog--lg { width: min(640px, 100%); }
+.accessible-dialog--xl { width: min(720px, 100%); }
+
 .accessible-dialog h2 {
   margin-bottom: 16px;
 }

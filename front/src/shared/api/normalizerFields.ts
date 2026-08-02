@@ -65,3 +65,12 @@ export function isNonEmptyString(value: unknown): value is string {
 export function hasNullableString(record: Record<string, unknown>, key: string): boolean {
   return !(key in record) || isNullableString(record[key]);
 }
+
+export function isNullableNonNegativeNumber(value: unknown): value is number | null {
+  return value === null || (typeof value === 'number' && Number.isFinite(value) && value >= 0);
+}
+
+/** True when `key` is absent, or present as a non-negative finite number, or explicitly null. */
+export function hasNullableNonNegativeNumber(record: Record<string, unknown>, key: string): boolean {
+  return !(key in record) || isNullableNonNegativeNumber(record[key]);
+}

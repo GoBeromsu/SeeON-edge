@@ -137,6 +137,23 @@ describe('normalizeClip video availability', () => {
   });
 });
 
+describe('normalizeClip duration_s/size_bytes (null-tolerant, no fabrication)', () => {
+  it('picks up duration_s and size_bytes when the manifest reports them', () => {
+    const clip = normalizeClip({ id: 'clip-1', duration_s: 4.2, size_bytes: 8_400_000 });
+    expect(clip?.duration_s).toBe(4.2);
+    expect(clip?.size_bytes).toBe(8_400_000);
+  });
+
+  it('normalizes a missing or malformed duration_s/size_bytes to null instead of fabricating a value', () => {
+    expect(normalizeClip({ id: 'clip-1' })?.duration_s).toBeNull();
+    expect(normalizeClip({ id: 'clip-1' })?.size_bytes).toBeNull();
+    expect(normalizeClip({ id: 'clip-1', duration_s: -1, size_bytes: -1 })?.duration_s).toBeNull();
+    expect(normalizeClip({ id: 'clip-1', duration_s: -1, size_bytes: -1 })?.size_bytes).toBeNull();
+    expect(normalizeClip({ id: 'clip-1', duration_s: 'four', size_bytes: 'big' })?.duration_s).toBeNull();
+    expect(normalizeClip({ id: 'clip-1', duration_s: 'four', size_bytes: 'big' })?.size_bytes).toBeNull();
+  });
+});
+
 describe('rtsp url redaction via normalizeCamera', () => {
   it('masks host and credentials for an rtsp url with credentials', () => {
     const camera = normalizeCamera({
@@ -262,8 +279,19 @@ describe('clip list contract normalization', () => {
     ['missing video availability', { ...validClipManifest, video_available: undefined }],
     ['malformed nullable video error', { ...validClipManifest, video_error: false }],
     ['missing finalized flag', { ...validClipManifest, finalized: undefined }],
+    ['malformed size_bytes', { ...validClipManifest, size_bytes: 'huge' }],
+    ['negative size_bytes', { ...validClipManifest, size_bytes: -1 }],
   ])('rejects an entry with a %s instead of returning a partial list', (_case, clip) => {
     expect(() => normalizeClipsResponse({ clips: [validClipManifest, clip] })).toThrow('Invalid clips response');
+  });
+
+  it('accepts an entry that omits size_bytes entirely (older backend, null-tolerant)', () => {
+    expect(() => normalizeClipsResponse({ clips: [validClipManifest] })).not.toThrow();
+  });
+
+  it('accepts an entry with an explicit null size_bytes and a numeric size_bytes alike', () => {
+    expect(normalizeClipsResponse({ clips: [{ ...validClipManifest, size_bytes: null }] })[0].size_bytes).toBeNull();
+    expect(normalizeClipsResponse({ clips: [{ ...validClipManifest, size_bytes: 1024 }] })[0].size_bytes).toBe(1024);
   });
 });
 

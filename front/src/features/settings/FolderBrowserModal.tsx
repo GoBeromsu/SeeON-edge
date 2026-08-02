@@ -53,7 +53,7 @@ export function FolderBrowserModal({ open, initialPath, onClose, onSelect }: Fol
   }, [open, path]);
 
   return (
-    <AccessibleDialog open={open} title="폴더 탐색기" onClose={onClose}>
+    <AccessibleDialog open={open} title="폴더 탐색기" onClose={onClose} size="sm">
       <div className="flex items-center gap-2 border-b border-border pb-2">
         <button
           type="button"

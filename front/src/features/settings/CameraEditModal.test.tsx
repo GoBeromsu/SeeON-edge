@@ -159,4 +159,15 @@ describe('CameraEditModal', () => {
     act(() => findButton('완료').click());
     expect(document.body.textContent).toContain('인식 완료');
   });
+
+  it('widens the dialog to 640px for the re-recognition sub-view, matching step 2 of registration', () => {
+    render(camera);
+    expect(document.querySelector('[role="dialog"]')?.getAttribute('data-size')).toBe('md');
+
+    act(() => document.querySelector<HTMLButtonElement>('[aria-label="침대 영역 다시 인식"]')?.click());
+    expect(document.querySelector('[role="dialog"]')?.getAttribute('data-size')).toBe('lg');
+
+    act(() => findButton('취소').click());
+    expect(document.querySelector('[role="dialog"]')?.getAttribute('data-size')).toBe('md');
+  });
 });

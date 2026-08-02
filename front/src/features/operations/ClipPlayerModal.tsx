@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { AccessibleDialog } from '@/shared/ui/AccessibleDialog';
 import { eventTypeLabel, formatClipDateTime } from '@/features/operations/operationsModel';
+import { formatBytes } from '@/shared/format/bytes';
 import type { Clip } from '@/shared/api/client';
 
 type ClipPlayerModalProps = {
@@ -18,9 +19,10 @@ function formatDuration(seconds: number): string {
 
 /**
  * The design mock's "파일" row shows a raw server filesystem path (e.g. /mnt/data/clips/...);
- * AGENTS.md forbids exposing the clip-store path directly, so that row is dropped. "길이"/"해상도"
- * are read from the loaded <video> element's real metadata instead of being fabricated, and "크기"
- * is omitted entirely since no API field carries file size.
+ * AGENTS.md forbids exposing the clip-store path directly, so that row is dropped. "해상도" is read
+ * from the loaded <video> element's real metadata. "길이" prefers the manifest's `duration_s` when
+ * the backend reports it, falling back to the loaded metadata otherwise. "크기" is shown only when
+ * the manifest carries `size_bytes` — never fabricated.
  */
 export function ClipPlayerModal({ clip, cameraLabel, onClose }: ClipPlayerModalProps): JSX.Element {
   const [metadata, setMetadata] = useState<{ duration: number; width: number; height: number } | null>(null);
@@ -29,11 +31,16 @@ export function ClipPlayerModal({ clip, cameraLabel, onClose }: ClipPlayerModalP
     setMetadata(null);
   }, [clip?.id]);
 
+  const durationSeconds = clip?.duration_s
+    ?? (metadata && Number.isFinite(metadata.duration) ? metadata.duration : null);
+  const sizeBytes = clip?.size_bytes ?? null;
+
   return (
     <AccessibleDialog
       open={clip !== null}
       title={clip ? `${eventTypeLabel(clip.event_type)} · ${cameraLabel}` : '클립 재생'}
       onClose={onClose}
+      size="xl"
     >
       {clip ? (
         <div className="flex flex-col gap-4">
@@ -61,12 +68,18 @@ export function ClipPlayerModal({ clip, cameraLabel, onClose }: ClipPlayerModalP
           <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-2 text-sm">
             <dt className="text-muted-foreground">길이</dt>
             <dd className="tabular-nums text-foreground">
-              {metadata && Number.isFinite(metadata.duration) ? formatDuration(metadata.duration) : '측정 중'}
+              {durationSeconds !== null ? formatDuration(durationSeconds) : '측정 중'}
             </dd>
             <dt className="text-muted-foreground">해상도</dt>
             <dd className="tabular-nums text-foreground">
               {metadata && metadata.width > 0 ? `${metadata.width}×${metadata.height}` : '측정 중'}
             </dd>
+            {sizeBytes !== null ? (
+              <>
+                <dt className="text-muted-foreground">크기</dt>
+                <dd className="tabular-nums text-foreground">{formatBytes(sizeBytes)}</dd>
+              </>
+            ) : null}
           </dl>
 
           <div className="dialog-actions">

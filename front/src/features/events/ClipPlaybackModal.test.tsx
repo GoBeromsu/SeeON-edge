@@ -1,0 +1,65 @@
+import { act } from 'react';
+import { createRoot } from 'react-dom/client';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { ClipPlaybackModal } from '@/features/events/ClipPlaybackModal';
+import type { Clip } from '@/shared/api/types';
+
+const baseClip: Clip = {
+  id: 'clip-1',
+  camera_id: 'cam-1',
+  camera_label: '301호',
+  event_type: 'fall',
+  created_at: '2026-08-02T03:12:00Z',
+  video_path: '/api/v1/clips/clip-1/video',
+  video_available: true,
+  video_error: null,
+};
+
+function render(clip: Clip | null, open = true, onClose = vi.fn()) {
+  const host = document.createElement('div');
+  document.body.append(host);
+  const root = createRoot(host);
+  act(() => root.render(<ClipPlaybackModal clip={clip} cameraLabel="301호" open={open} onClose={onClose} />));
+  return { host, root, onClose };
+}
+
+function dialog(): HTMLElement {
+  return document.querySelector('[role="dialog"]') as HTMLElement;
+}
+
+afterEach(() => {
+  document.body.innerHTML = '';
+});
+
+describe('ClipPlaybackModal', () => {
+  it('renders at the 720px design-spec width', () => {
+    render(baseClip);
+    expect(dialog().getAttribute('data-size')).toBe('xl');
+  });
+
+  it('omits the 크기 row when size_bytes is not present, never fabricating a value', () => {
+    render(baseClip);
+    expect(dialog().textContent).not.toContain('크기');
+  });
+
+  it('shows the 크기 row formatted in human-readable units when size_bytes is present', () => {
+    render({ ...baseClip, size_bytes: 8_400_000 });
+    expect(dialog().textContent).toContain('크기');
+    expect(dialog().textContent).toContain('8.4 MB');
+  });
+
+  it('prefers the manifest duration_s for 길이 over video-metadata derivation', () => {
+    render({ ...baseClip, duration_s: 12 });
+    const rows = Array.from(dialog().querySelectorAll('dt'));
+    const durationIndex = rows.findIndex((dt) => dt.textContent === '길이');
+    const durationValue = rows[durationIndex]?.nextElementSibling?.textContent;
+    expect(durationValue).toBe('0:12');
+  });
+
+  it('falls back to a dash for 길이 when duration_s is absent and the video is unavailable', () => {
+    render({ ...baseClip, video_available: false, video_error: '저장된 영상을 사용할 수 없습니다.' });
+    const rows = Array.from(dialog().querySelectorAll('dt'));
+    const durationIndex = rows.findIndex((dt) => dt.textContent === '길이');
+    expect(rows[durationIndex]?.nextElementSibling?.textContent).toBe('-');
+  });
+});

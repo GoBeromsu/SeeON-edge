@@ -112,7 +112,7 @@ export function CameraRegisterModal({ open, onClose, onCreated }: CameraRegister
   }
 
   return (
-    <AccessibleDialog open={open} title="카메라 등록" onClose={requestClose}>
+    <AccessibleDialog open={open} title="카메라 등록" onClose={requestClose} size={step === 1 ? 'md' : 'lg'}>
       <p className="mb-3 text-xs font-semibold text-muted-foreground">
         <span className={step === 1 ? 'text-foreground' : ''}>1 연결 정보</span>
         {' → '}

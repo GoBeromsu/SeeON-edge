@@ -161,6 +161,14 @@ export type Clip = {
   video_path: string;
   video_available: boolean;
   video_error: string | null;
+  /**
+   * Clip duration in seconds. Optional (not just nullable): an older backend that hasn't shipped
+   * this field yet omits it entirely from the manifest — treat a missing value as "unknown", not
+   * as a normalization bug. normalizeClip always fills this in (as a value or null) from a live response.
+   */
+  duration_s?: number | null;
+  /** Clip file size in bytes. Same optional/omitted-on-old-backend contract as duration_s — never fabricate a size for display. */
+  size_bytes?: number | null;
 };
 
 export type HeartbeatRelayErrorClass = 'auth' | 'timeout' | 'unreachable';

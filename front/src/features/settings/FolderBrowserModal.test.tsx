@@ -48,6 +48,14 @@ afterEach(() => {
 });
 
 describe('FolderBrowserModal', () => {
+  it('renders at the 420px design-spec width', async () => {
+    vi.mocked(browseClipStorage).mockResolvedValue(rootListing);
+    render();
+    await act(async () => Promise.resolve());
+
+    expect(document.querySelector('[role="dialog"]')?.getAttribute('data-size')).toBe('sm');
+  });
+
   it('loads the initial path listing on open', async () => {
     vi.mocked(browseClipStorage).mockResolvedValue(rootListing);
     render();

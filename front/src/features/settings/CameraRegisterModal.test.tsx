@@ -87,6 +87,18 @@ describe('CameraRegisterModal', () => {
     expect(document.body.textContent).toContain('침대 영역 인식이 필요합니다.');
   });
 
+  it('widens the dialog from step 1 (440px) to step 2 (640px) per the design spec', async () => {
+    vi.mocked(createCamera).mockResolvedValue(createdCamera);
+    render();
+    expect(document.querySelector('[role="dialog"]')?.getAttribute('data-size')).toBe('md');
+
+    setInput('label', '101호');
+    setInput('rtsp_url', 'rtsp://cam/1');
+    await act(async () => findButton('다음').click());
+
+    expect(document.querySelector('[role="dialog"]')?.getAttribute('data-size')).toBe('lg');
+  });
+
   it('shows an inline probe-failure message mapped from the error_class on a 422 rejection', async () => {
     vi.mocked(createCamera).mockRejectedValue(
       new HttpError(422, { detail: { error: 'probe_failed', error_class: 'timeout' } }),

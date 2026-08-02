@@ -79,6 +79,15 @@ describe('AccountSettingsModal', () => {
     act(() => root.unmount());
   });
 
+  it('renders at the 380px design-spec width', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(okResponse());
+    vi.stubGlobal('fetch', fetchMock);
+    const { root } = await renderAuthorized();
+
+    expect(dialog().getAttribute('data-size')).toBe('xs');
+    act(() => root.unmount());
+  });
+
   it('focuses the username field on open', async () => {
     const fetchMock = vi.fn().mockResolvedValue(okResponse());
     vi.stubGlobal('fetch', fetchMock);

@@ -72,7 +72,7 @@ export function AccountSettingsModal({ open, onClose }: AccountSettingsModalProp
   }
 
   return (
-    <AccessibleDialog open={open} title="계정 설정" onClose={requestClose} initialFocusRef={usernameRef}>
+    <AccessibleDialog open={open} title="계정 설정" onClose={requestClose} size="xs" initialFocusRef={usernameRef}>
       <form onSubmit={(event) => void handleSubmit(event)} noValidate>
         <label>
           아이디
