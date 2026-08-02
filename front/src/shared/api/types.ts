@@ -23,6 +23,8 @@ export type Camera = {
   last_heartbeat_at?: number | null;
   /** Seconds since the last edge heartbeat, or null. Same GET-only availability as last_heartbeat_at. */
   heartbeat_age_sec?: number | null;
+  /** Auto-recognized bed area, or null when recognition has never succeeded ("인식 필요" in the UI). */
+  bed_zone?: BedZone | null;
 };
 
 export type CameraRegistry = {
@@ -43,6 +45,17 @@ export type CameraHeartbeat = {
 
 /** Per-camera pose/skeleton overlay mode: no overlay, bed-exit skeleton, or fall-detection skeleton. */
 export type OverlayMode = 'none' | 'bedexit' | 'fall';
+
+/** A single [x, y] vertex of a bed-zone polygon, in the coordinate space of image_width x image_height. */
+export type BedZonePoint = [number, number];
+
+/** Auto-recognized (YOLO segmentation) bed area for a camera. Persisted server-side, not user-drawn. */
+export type BedZone = {
+  polygon: BedZonePoint[];
+  image_width: number;
+  image_height: number;
+  recognized_at: string;
+};
 
 export type RuntimeDecodeDiagnostics = {
   requested: string | null;
@@ -192,4 +205,46 @@ export type ConnectionTestResult = {
   error_class: ConnectionErrorClass | null;
   detail: string;
   probed_url: string | null;
+};
+
+/** GET/PUT /detection-settings domain keys — global, applied to every camera. */
+export type DetectionDomainKey = 'fall' | 'bed_exit';
+
+export type DetectionMode = 'always' | 'window';
+
+export type DetectionDomainSetting = {
+  on: boolean;
+  mode: DetectionMode;
+  /** HH:MM, only meaningful (and required by the form) when mode is "window". */
+  start: string | null;
+  end: string | null;
+};
+
+export type DetectionSettings = {
+  domains: Record<DetectionDomainKey, DetectionDomainSetting>;
+};
+
+/** PUT body is a full replace of the same shape as the GET response. */
+export type DetectionSettingsInput = DetectionSettings;
+
+/** GET /clips/storage — usage + current selection under the CLIP_STORE_DIR mount root. */
+export type ClipStorageInfo = {
+  root: string;
+  /** "" means the mount root itself; otherwise a relative subdirectory path. */
+  selected_path: string;
+  total_bytes: number | null;
+  used_bytes: number | null;
+  used_pct: number | null;
+};
+
+export type ClipStorageBrowseEntry = {
+  name: string;
+  path: string;
+};
+
+/** GET /clips/storage/browse?path= — one directory listing for the folder-explorer modal. */
+export type ClipStorageBrowseResult = {
+  path: string;
+  parent: string | null;
+  directories: ClipStorageBrowseEntry[];
 };

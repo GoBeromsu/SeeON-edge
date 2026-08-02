@@ -9,54 +9,17 @@ import {
   type ConnectionFormState,
 } from '@/features/connection/connectionSettingsForm';
 import type { PollingResource } from '@/shared/api/usePollingResource';
-import type { HeartbeatRelayStatus } from '@/shared/api/types';
+import { toast } from '@/shared/ui/Toast';
 import { getConnectionStatus } from '@/shared/ui/StatusBadge';
 
 type ConnectionSettingsPanelProps = {
   resource: PollingResource<ConnectionView>;
 };
 
-function formatLastOkAt(value: string | null | undefined): string {
-  if (!value) return '연결 이력 없음';
+function formatLastSyncAt(value: string | null | undefined): string {
+  if (!value) return '동기화 이력 없음';
   const date = new Date(value);
-  return Number.isFinite(date.getTime()) ? `마지막 연결 확인 ${date.toLocaleString('ko-KR')}` : '연결 이력 없음';
-}
-
-const DEFAULT_HEARTBEAT_RELAY: HeartbeatRelayStatus = {
-  enabled: false,
-  last_success_at: null,
-  last_error_class: null,
-  detail: null,
-};
-
-function formatRelayLastSuccessAt(value: string | null): string {
-  if (!value) return '성공 이력 없음';
-  const date = new Date(value);
-  return Number.isFinite(date.getTime()) ? date.toLocaleString('ko-KR') : '성공 이력 없음';
-}
-
-/** Mirrors getConnectionStatus's {enabled, error} -> {label, className} shape, sourced from the relay sub-status instead. */
-function heartbeatRelayStatusLine(relay: HeartbeatRelayStatus): { text: string; className: string } {
-  if (!relay.enabled) {
-    return { text: '하트비트 릴레이 비활성', className: 'text-ink-faint' };
-  }
-  if (relay.last_error_class) {
-    return { text: relay.detail ?? '하트비트 릴레이 오류가 발생했습니다.', className: 'text-status-danger' };
-  }
-  return { text: `하트비트 릴레이 정상 · ${formatRelayLastSuccessAt(relay.last_success_at)}`, className: 'text-status-stable' };
-}
-
-// events_url is a packaging-time constant shaped like "<base>/v1/events"; strip that suffix so the
-// technician sees the backend host, not an internal route. An unrecognized shape is shown verbatim
-// rather than mangled -- better an odd-looking address than a silently wrong one.
-const EVENTS_URL_SUFFIX = '/v1/events';
-
-function connectionAddressMeta(eventsUrl: string | null | undefined): { text: string; className: string } {
-  if (!eventsUrl) {
-    return { text: '미설정', className: 'text-ink-faint' };
-  }
-  const derived = eventsUrl.endsWith(EVENTS_URL_SUFFIX) ? eventsUrl.slice(0, -EVENTS_URL_SUFFIX.length) : eventsUrl;
-  return { text: derived, className: 'font-mono text-ink-soft' };
+  return Number.isFinite(date.getTime()) ? date.toLocaleString('ko-KR') : '동기화 이력 없음';
 }
 
 const GENERIC_TEST_FAILURE: ConnectionTestResult = {
@@ -66,33 +29,58 @@ const GENERIC_TEST_FAILURE: ConnectionTestResult = {
   probed_url: null,
 };
 
+function PencilIcon(): JSX.Element {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.75} strokeLinecap="round" strokeLinejoin="round">
+      <path d="M15.5 4.5 19.5 8.5 8 20H4v-4Z" />
+      <path d="M13.5 6.5 17.5 10.5" />
+    </svg>
+  );
+}
+
+/** 설정 페이지의 "서버 연결" 카드: 기본은 읽기 전용 dl, 연필 버튼으로 편집 폼을 연다(front/design-handoff/README.md §5). */
 export function ConnectionSettingsPanel({ resource }: ConnectionSettingsPanelProps): JSX.Element {
   const view = resource.data;
+  const [editing, setEditing] = useState(false);
   const [form, setForm] = useState<ConnectionFormState>(() => connectionFormFromView(view));
-  const [dirty, setDirty] = useState(false);
   const [pendingAction, setPendingAction] = useState<'test' | 'save' | null>(null);
   const busyRef = useRef(false);
   const [validationMessage, setValidationMessage] = useState<string | null>(null);
   const [testResult, setTestResult] = useState<ConnectionTestResult | null>(null);
-  const [saveMessage, setSaveMessage] = useState<string | null>(null);
+  const [saveError, setSaveError] = useState<string | null>(null);
 
-  // Never clobbers an in-progress edit: only resyncs the draft from fresh poll data while the
-  // technician isn't mid-edit or mid-submit, mirroring CameraCard's idle-draft-sync pattern.
+  // Only resyncs the draft from fresh poll data while the technician isn't mid-edit or mid-submit,
+  // mirroring CameraCard's idle-draft-sync pattern.
   useEffect(() => {
-    if (!dirty && pendingAction === null) {
+    if (!editing && pendingAction === null) {
       setForm(connectionFormFromView(view));
     }
-  }, [view, dirty, pendingAction]);
+  }, [view, editing, pendingAction]);
+
+  function openEdit(): void {
+    setForm(connectionFormFromView(view));
+    setValidationMessage(null);
+    setTestResult(null);
+    setSaveError(null);
+    setEditing(true);
+  }
+
+  function closeEdit(): void {
+    if (busyRef.current) return;
+    setEditing(false);
+    setForm(connectionFormFromView(view));
+    setValidationMessage(null);
+    setTestResult(null);
+    setSaveError(null);
+  }
 
   function handleFacilityIdChange(value: string): void {
     setForm((current) => updateFacilityId(current, value));
-    setDirty(true);
     setValidationMessage(null);
   }
 
   function handleTokenChange(value: string): void {
     setForm((current) => updateConnectionToken(current, value));
-    setDirty(true);
     setValidationMessage(null);
   }
 
@@ -104,7 +92,7 @@ export function ConnectionSettingsPanel({ resource }: ConnectionSettingsPanelPro
 
     busyRef.current = true;
     setPendingAction('test');
-    setSaveMessage(null);
+    setSaveError(null);
     try {
       const result = await testConnection(buildConnectionPayload(form));
       setTestResult(result);
@@ -125,13 +113,14 @@ export function ConnectionSettingsPanel({ resource }: ConnectionSettingsPanelPro
     busyRef.current = true;
     setPendingAction('save');
     setTestResult(null);
+    setSaveError(null);
     try {
       await saveConnection(buildConnectionPayload(form));
-      setDirty(false);
-      setSaveMessage('연결 설정을 저장했습니다.');
       resource.retry();
+      setEditing(false);
+      toast.success('연결 설정을 저장했습니다.');
     } catch {
-      setSaveMessage('연결 설정 저장에 실패했습니다. 입력값을 확인하고 다시 시도하세요.');
+      setSaveError('연결 설정 저장에 실패했습니다. 입력값을 확인하고 다시 시도하세요.');
     } finally {
       busyRef.current = false;
       setPendingAction(null);
@@ -145,93 +134,95 @@ export function ConnectionSettingsPanel({ resource }: ConnectionSettingsPanelPro
 
   const busy = pendingAction !== null;
   const statusMeta = getConnectionStatus(view);
-  const relayStatus = heartbeatRelayStatusLine(view?.heartbeat_relay ?? DEFAULT_HEARTBEAT_RELAY);
-  const addressMeta = connectionAddressMeta(view?.events_url);
   const tokenPlaceholder = view?.facility_token_masked ?? '토큰 없음';
 
   return (
-    <article className="rounded-2xl border border-border bg-surface p-5">
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div>
-          <p className="text-xs font-bold tracking-[0.24em] text-brand">외부 백엔드 연결</p>
-          <h2 className="mt-2 text-xl font-black text-ink">연결 설정</h2>
-        </div>
-        <span
-          aria-live="polite"
-          className={`inline-flex items-center rounded-full px-3 py-1 text-xs font-bold ring-1 ${statusMeta.className}`}
-        >
-          <span className="mr-1.5 h-2 w-2 rounded-full bg-current" />
-          {statusMeta.label}
-        </span>
-      </div>
-
-      <p className={`mt-2 text-xs font-semibold ${addressMeta.className}`}>연결 대상: {addressMeta.text}</p>
-      <p className="mt-1 text-xs font-semibold text-ink-faint">{formatLastOkAt(view?.last_ok_at)}</p>
-      <p aria-live="polite" className={`mt-1 text-xs font-semibold ${relayStatus.className}`}>{relayStatus.text}</p>
-
-      <form className="mt-5 space-y-4" onSubmit={handleSubmit} noValidate>
-        <label className="block text-sm font-bold text-ink-soft">
-          시설 ID
-          <input
-            name="facility_id"
-            value={form.facility_id}
-            onChange={(event) => handleFacilityIdChange(event.target.value)}
-            className="mt-2 w-full rounded-2xl border border-border bg-surface2 px-4 py-3 text-ink outline-none ring-brand focus:ring-4"
-            placeholder="예: facility-301"
-          />
-        </label>
-
-        <label className="block text-sm font-bold text-ink-soft">
-          시설 토큰
-          <input
-            name="facility_token"
-            type="password"
-            value={form.facility_token}
-            onChange={(event) => handleTokenChange(event.target.value)}
-            className="mt-2 w-full rounded-2xl border border-border bg-surface2 px-4 py-3 text-ink outline-none ring-brand focus:ring-4"
-            placeholder={tokenPlaceholder}
-            autoComplete="off"
-          />
-        </label>
-
-        {validationMessage ? (
-          <p role="alert" className="text-xs font-bold text-status-danger">{validationMessage}</p>
-        ) : null}
-
-        <div className="flex flex-wrap gap-2">
+    <article className="rounded-card border border-border bg-card p-5">
+      <div className="flex items-center justify-between gap-3">
+        <h2 className="text-base font-semibold text-foreground">서버 연결</h2>
+        <div className="flex items-center gap-2">
+          <span aria-live="polite" className={statusMeta.className}>
+            <span aria-hidden="true" className="h-1.5 w-1.5 rounded-full bg-current" />
+            {statusMeta.label}
+          </span>
           <button
             type="button"
-            disabled={busy}
-            onClick={() => void handleTest()}
-            className="rounded-lg border border-border bg-surface px-5 py-3 text-sm font-black text-brand disabled:cursor-not-allowed disabled:opacity-60"
+            className="icon-button"
+            aria-label={editing ? '서버 연결 편집 닫기' : '서버 연결 편집'}
+            aria-pressed={editing}
+            onClick={() => (editing ? closeEdit() : openEdit())}
           >
-            {pendingAction === 'test' ? '확인 중...' : '연결 테스트'}
-          </button>
-          <button
-            type="submit"
-            disabled={busy}
-            className="brand-action rounded-lg px-5 py-3 text-sm font-black disabled:cursor-not-allowed disabled:opacity-60"
-          >
-            {pendingAction === 'save' ? '저장 중...' : '저장'}
+            <PencilIcon />
           </button>
         </div>
-      </form>
+      </div>
 
-      {testResult ? (
-        <p
-          role={testResult.ok ? 'status' : 'alert'}
-          className={`mt-4 rounded-xl px-4 py-3 text-sm font-bold ${
-            testResult.ok ? 'bg-status-stableBg text-status-stable' : 'bg-status-dangerBg text-status-danger'
-          }`}
-        >
-          {testResult.detail}
-        </p>
-      ) : null}
+      <dl className="mt-4 grid grid-cols-[auto_1fr] gap-x-4 gap-y-2 text-sm">
+        <dt className="text-muted-foreground">시설 ID</dt>
+        <dd className="font-mono text-foreground">{view?.facility_id ?? '정보 없음'}</dd>
+        <dt className="text-muted-foreground">시설 토큰</dt>
+        <dd className="font-mono text-foreground">{view?.facility_token_masked ?? '토큰 없음'}</dd>
+        <dt className="text-muted-foreground">마지막 동기화</dt>
+        <dd className="tabular-nums text-foreground">{formatLastSyncAt(view?.last_ok_at)}</dd>
+      </dl>
 
-      {saveMessage ? (
-        <p role="status" className="mt-4 rounded-xl bg-brand-soft px-4 py-3 text-sm font-bold text-brand">
-          {saveMessage}
-        </p>
+      {editing ? (
+        <form className="mt-4 space-y-3 border-t border-border pt-4" onSubmit={handleSubmit} noValidate>
+          <label>
+            시설 ID
+            <input
+              name="facility_id"
+              value={form.facility_id}
+              disabled={busy}
+              onChange={(event) => handleFacilityIdChange(event.target.value)}
+              placeholder="예: facility-301"
+            />
+          </label>
+
+          <label>
+            시설 토큰
+            <input
+              name="facility_token"
+              type="password"
+              value={form.facility_token}
+              disabled={busy}
+              onChange={(event) => handleTokenChange(event.target.value)}
+              placeholder={tokenPlaceholder}
+              autoComplete="off"
+            />
+          </label>
+
+          {validationMessage ? (
+            <p role="alert" className="auth-error">{validationMessage}</p>
+          ) : null}
+
+          {testResult ? (
+            <p
+              role={testResult.ok ? 'status' : 'alert'}
+              className={testResult.ok ? 'dialog-success' : 'auth-error'}
+            >
+              {testResult.ok ? `연결 성공 · ${testResult.detail}` : testResult.detail}
+            </p>
+          ) : null}
+
+          {saveError ? (
+            <p role="alert" className="auth-error">{saveError}</p>
+          ) : null}
+
+          <div className="dialog-actions">
+            <button
+              type="button"
+              className="dialog-secondary-action"
+              disabled={busy}
+              onClick={() => void handleTest()}
+            >
+              {pendingAction === 'test' ? '확인 중...' : '연결'}
+            </button>
+            <button type="submit" className="brand-action inline-flex h-9 items-center justify-center rounded-control px-4 text-sm font-semibold" disabled={busy}>
+              {pendingAction === 'save' ? '저장 중...' : '저장'}
+            </button>
+          </div>
+        </form>
       ) : null}
     </article>
   );

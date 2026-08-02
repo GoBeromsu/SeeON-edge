@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { cameraDuplicateDetail, cameraProbeFailureDetail, createCamera, fetchCameraOverlay, fetchCameras, fetchClips, fetchStatus, fetchSystem, getApiBase, getCameraSnapshotUrl, getCameraStreamUrl, loginDashboard, logoutDashboard, setCameraOverlay, testCamera, updateCamera, updateCameraDecodeBackend } from '@/shared/api/client';
+import { bedZoneRecognitionFailureDetail, browseClipStorage, cameraDuplicateDetail, cameraProbeFailureDetail, createCamera, fetchCameraOverlay, fetchCameras, fetchClips, fetchClipStorage, fetchDetectionSettings, fetchStatus, fetchSystem, getApiBase, getCameraSnapshotUrl, getCameraStreamUrl, loginDashboard, logoutDashboard, recognizeBedZone, saveClipStorageLocation, saveDetectionSettings, setCameraOverlay, testCamera, updateCamera, updateCameraDecodeBackend } from '@/shared/api/client';
 import { HttpError } from '@/shared/api/http';
+import type { DetectionSettings } from '@/shared/api/client';
 
 function clipManifest(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
@@ -324,5 +325,121 @@ describe('api client contracts', () => {
       body: JSON.stringify({ decode_backend: 'nvdec' }),
     }));
     expect(updated.decode_backend).toBe('nvdec');
+  });
+
+  it('recognizes a bed zone via a POST to the camera-scoped endpoint', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        bed_zone: {
+          polygon: [[0, 0], [10, 0], [10, 10], [0, 10]],
+          image_width: 1920,
+          image_height: 1080,
+          recognized_at: '2026-08-02T00:00:00Z',
+        },
+      }),
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const bedZone = await recognizeBedZone('cam-1');
+
+    expect(fetchMock).toHaveBeenCalledWith('/api/v1/cameras/cam-1/bed-zone/recognize', expect.objectContaining({
+      method: 'POST',
+    }));
+    expect(bedZone).toEqual({
+      polygon: [[0, 0], [10, 0], [10, 10], [0, 10]],
+      image_width: 1920,
+      image_height: 1080,
+      recognized_at: '2026-08-02T00:00:00Z',
+    });
+  });
+
+  it('rejects a malformed bed-zone recognition response', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => ({ bed_zone: null }) }));
+
+    await expect(recognizeBedZone('cam-1')).rejects.toThrow('Invalid bed-zone recognition response');
+  });
+
+  it('surfaces a 422 bed_not_found detail through bedZoneRecognitionFailureDetail, but not other errors', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: false,
+      status: 422,
+      json: async () => ({ detail: { error_class: 'bed_not_found' } }),
+    }));
+
+    const error = await recognizeBedZone('cam-1').catch((caught: unknown) => caught);
+
+    expect(bedZoneRecognitionFailureDetail(error)).toEqual({ error_class: 'bed_not_found' });
+    expect(bedZoneRecognitionFailureDetail(new HttpError(503))).toBeUndefined();
+    expect(bedZoneRecognitionFailureDetail(new Error('network down'))).toBeUndefined();
+  });
+
+  it('fetches and saves detection settings with a full-replace PUT body', async () => {
+    const settings: DetectionSettings = {
+      domains: {
+        fall: { on: true, mode: 'always', start: null, end: null },
+        bed_exit: { on: true, mode: 'window', start: '21:00', end: '06:00' },
+      },
+    };
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => settings });
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(fetchDetectionSettings()).resolves.toEqual(settings);
+    await saveDetectionSettings(settings);
+
+    expect(fetchMock).toHaveBeenNthCalledWith(1, '/api/v1/detection-settings', expect.objectContaining({ credentials: 'same-origin' }));
+    expect(fetchMock.mock.calls[0]?.[1]?.method).toBeUndefined();
+    expect(fetchMock).toHaveBeenNthCalledWith(2, '/api/v1/detection-settings', expect.objectContaining({
+      method: 'PUT',
+      body: JSON.stringify(settings),
+    }));
+  });
+
+  it('rejects a contract-invalid detection settings response', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => ({ domains: null }) }));
+
+    await expect(fetchDetectionSettings()).rejects.toThrow('Invalid detection settings response');
+  });
+
+  it('fetches clip storage info, browses a relative subdirectory, and saves a new location', async () => {
+    const storageInfo = { root: '/var/lib/clip-store', selected_path: '', total_bytes: 100, used_bytes: 10, used_pct: 10 };
+    // The browse endpoint's "" parent means "at the mount root" -- pickNullableString normalizes that to null.
+    const browseResult = { path: 'cam-101a', parent: '', directories: [] };
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce({ ok: true, status: 200, json: async () => storageInfo })
+      .mockResolvedValueOnce({ ok: true, status: 200, json: async () => browseResult })
+      .mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ ...storageInfo, selected_path: 'cam-101a' }) });
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(fetchClipStorage()).resolves.toEqual(storageInfo);
+    await expect(browseClipStorage('cam-101a')).resolves.toEqual({ ...browseResult, parent: null });
+    await expect(saveClipStorageLocation('cam-101a')).resolves.toEqual({ ...storageInfo, selected_path: 'cam-101a' });
+
+    expect(fetchMock).toHaveBeenNthCalledWith(1, '/api/v1/clips/storage', expect.objectContaining({ credentials: 'same-origin' }));
+    expect(fetchMock.mock.calls[0]?.[1]?.method).toBeUndefined();
+    expect(fetchMock).toHaveBeenNthCalledWith(2, '/api/v1/clips/storage/browse?path=cam-101a', expect.objectContaining({ credentials: 'same-origin' }));
+    expect(fetchMock.mock.calls[1]?.[1]?.method).toBeUndefined();
+    expect(fetchMock).toHaveBeenNthCalledWith(3, '/api/v1/clips/storage/location', expect.objectContaining({
+      method: 'PUT',
+      body: JSON.stringify({ path: 'cam-101a' }),
+    }));
+  });
+
+  it('browses the mount root without a query string when path is empty', async () => {
+    const browseResult = { path: '', parent: null, directories: [] };
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => browseResult });
+    vi.stubGlobal('fetch', fetchMock);
+
+    await browseClipStorage('');
+
+    expect(fetchMock).toHaveBeenCalledWith('/api/v1/clips/storage/browse', expect.objectContaining({ credentials: 'same-origin' }));
+    expect(fetchMock.mock.calls[0]?.[1]?.method).toBeUndefined();
+  });
+
+  it('rejects a contract-invalid clip storage response', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => ({ selected_path: '' }) }));
+
+    await expect(fetchClipStorage()).rejects.toThrow('Invalid clip storage response');
   });
 });

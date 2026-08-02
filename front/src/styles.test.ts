@@ -23,19 +23,28 @@ const css = readCssBundle('src/styles.css');
 const designContract = readFileSync('../DESIGN.md', 'utf8');
 
 // App.tsx-reachable components that were restyled onto the current token set (front/src/styles/tokens-base.css)
-// as part of the shell redesign. `features/connection/ConnectionSettingsPanel.tsx` and
-// `shared/ui/StatusBadge.tsx` are intentionally NOT in this list: they still use the retired
-// bg-surface2/text-ink/text-brand/... class names (see DESIGN.md's Design tokens section) and are
-// deferred to the wave that rebuilds the 설정 page against front/design-handoff/README.md.
+// as part of the shell redesign.
 const appReachableComponentPaths = [
   'src/app/App.tsx',
   'src/app/pages/OperationsPage.tsx',
   'src/app/pages/EventsPage.tsx',
   'src/app/pages/SettingsPage.tsx',
   'src/features/account-settings/AccountSettingsModal.tsx',
+  'src/features/connection/ConnectionSettingsPanel.tsx',
+  'src/features/settings/BedZoneRecognitionPanel.tsx',
+  'src/features/settings/CameraEditModal.tsx',
+  'src/features/settings/CameraRegisterModal.tsx',
+  'src/features/settings/CameraSection.tsx',
+  'src/features/settings/CameraTable.tsx',
+  'src/features/settings/ClipStorageCard.tsx',
+  'src/features/settings/DeleteCameraDialog.tsx',
+  'src/features/settings/DetectionSettingsCard.tsx',
+  'src/features/settings/FolderBrowserModal.tsx',
+  'src/features/settings/ProcessingStatusCard.tsx',
   'src/shared/ui/AccessibleDialog.tsx',
   'src/shared/ui/AuthGate.tsx',
   'src/shared/ui/NavBar.tsx',
+  'src/shared/ui/StatusBadge.tsx',
   'src/shared/ui/Toast.tsx',
 ] as const;
 const appReachableComponentSources = Object.fromEntries(

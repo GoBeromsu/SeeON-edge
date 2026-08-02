@@ -1,32 +1,43 @@
 import { HttpError, requestJson } from '@/shared/api/http';
 import {
+  normalizeBedZoneRecognitionResponse,
   normalizeCameraRegistry,
   normalizeCameraResponse,
   normalizeCameraTestResult,
   normalizeClipsResponse,
+  normalizeClipStorageBrowse,
+  normalizeClipStorageInfo,
   normalizeConnectionTestResult,
   normalizeConnectionView,
+  normalizeDetectionSettings,
   normalizeStatusSnapshot,
   normalizeSystemSnapshot,
 } from '@/shared/api/normalizers';
 import { isRecord } from '@/shared/api/normalizerFields';
 import type {
+  BedZone,
   Camera,
   CameraInput,
   CameraPatchInput,
   CameraRegistry,
   CameraTestResult,
   Clip,
+  ClipStorageBrowseResult,
+  ClipStorageInfo,
   ConnectionInput,
   ConnectionTestResult,
   ConnectionView,
   DecodeBackend,
+  DetectionSettings,
+  DetectionSettingsInput,
   OverlayMode,
   StatusSnapshot,
   SystemSnapshot,
 } from '@/shared/api/types';
 
 export type {
+  BedZone,
+  BedZonePoint,
   Camera,
   CameraInput,
   CameraPatchInput,
@@ -35,11 +46,19 @@ export type {
   CameraHeartbeat,
   CameraTestResult,
   Clip,
+  ClipStorageBrowseEntry,
+  ClipStorageBrowseResult,
+  ClipStorageInfo,
   ConnectionErrorClass,
   ConnectionInput,
   ConnectionTestResult,
   ConnectionView,
   DecodeBackend,
+  DetectionDomainKey,
+  DetectionDomainSetting,
+  DetectionMode,
+  DetectionSettings,
+  DetectionSettingsInput,
   HeartbeatStatus,
   OverlayMode,
   RuntimeCameraDiagnostics,
@@ -206,6 +225,56 @@ export async function deleteCamera(cameraId: string): Promise<void> {
 
 export async function testCamera(cameraId: string): Promise<CameraTestResult> {
   return normalizeCameraTestResult(await requestJson(`/cameras/${encodeURIComponent(cameraId)}/test`, { method: 'POST' }));
+}
+
+/** Structured 422 body the backend sends when bed-zone recognition finds no bed in the current frame. */
+export type BedZoneRecognitionFailureDetail = {
+  error_class?: string;
+};
+
+/** Narrows a caught `recognizeBedZone` error to a "no bed detected" rejection (HTTP 422), or returns undefined. */
+export function bedZoneRecognitionFailureDetail(error: unknown): BedZoneRecognitionFailureDetail | undefined {
+  if (!(error instanceof HttpError) || error.status !== 422) return undefined;
+  const detail = errorDetail(error);
+  if (!detail) return undefined;
+  return { error_class: typeof detail.error_class === 'string' ? detail.error_class : undefined };
+}
+
+/**
+ * Runs one-shot YOLO bed segmentation against the camera's latest frame. 422 (bed_not_found) and 503
+ * (worker/frame unavailable) are both surfaced as thrown HttpErrors -- callers keep showing "인식 필요".
+ */
+export async function recognizeBedZone(cameraId: string): Promise<BedZone> {
+  return normalizeBedZoneRecognitionResponse(
+    await requestJson(`/cameras/${encodeURIComponent(cameraId)}/bed-zone/recognize`, { method: 'POST' }),
+  );
+}
+
+export async function fetchDetectionSettings(signal?: AbortSignal): Promise<DetectionSettings> {
+  return normalizeDetectionSettings(await requestJson('/detection-settings', { signal }));
+}
+
+/** Full replace, not a partial update -- send the complete domains map back (see DetectionSettingsInput). */
+export async function saveDetectionSettings(input: DetectionSettingsInput): Promise<DetectionSettings> {
+  return normalizeDetectionSettings(
+    await requestJson('/detection-settings', { method: 'PUT', body: JSON.stringify(input) }),
+  );
+}
+
+export async function fetchClipStorage(signal?: AbortSignal): Promise<ClipStorageInfo> {
+  return normalizeClipStorageInfo(await requestJson('/clips/storage', { signal }));
+}
+
+export async function browseClipStorage(path: string, signal?: AbortSignal): Promise<ClipStorageBrowseResult> {
+  const query = path ? `?path=${encodeURIComponent(path)}` : '';
+  return normalizeClipStorageBrowse(await requestJson(`/clips/storage/browse${query}`, { signal }));
+}
+
+/** path: "" selects the CLIP_STORE_DIR mount root itself; otherwise a relative subdirectory. */
+export async function saveClipStorageLocation(path: string): Promise<ClipStorageInfo> {
+  return normalizeClipStorageInfo(
+    await requestJson('/clips/storage/location', { method: 'PUT', body: JSON.stringify({ path }) }),
+  );
 }
 
 const OVERLAY_MODES: readonly OverlayMode[] = ['none', 'bedexit', 'fall'];

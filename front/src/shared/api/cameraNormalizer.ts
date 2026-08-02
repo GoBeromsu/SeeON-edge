@@ -11,6 +11,8 @@ import {
   pickString,
 } from '@/shared/api/normalizerFields';
 import type {
+  BedZone,
+  BedZonePoint,
   Camera,
   CameraRegistry,
   CameraStatus,
@@ -56,6 +58,41 @@ function maskRtsp(value: string | null): string {
   }
 }
 
+function normalizeBedZonePoint(value: unknown): BedZonePoint | null {
+  if (!Array.isArray(value) || value.length !== 2) return null;
+  const [x, y] = value;
+  return typeof x === 'number' && typeof y === 'number' ? [x, y] : null;
+}
+
+/**
+ * Defensive, never throws: bed-zone recognition (wave 1) may still be rolling out on the backend,
+ * so a missing/malformed field normalizes to null ("인식 필요") rather than invalidating the whole
+ * camera record.
+ */
+function normalizeBedZone(value: unknown): BedZone | null {
+  if (!isRecord(value) || !Array.isArray(value.polygon)) return null;
+  const polygon: BedZonePoint[] = [];
+  for (const point of value.polygon) {
+    const normalized = normalizeBedZonePoint(point);
+    if (!normalized) return null;
+    polygon.push(normalized);
+  }
+  const imageWidth = pickNumber(value, ['image_width', 'imageWidth']);
+  const imageHeight = pickNumber(value, ['image_height', 'imageHeight']);
+  const recognizedAt = pickNullableString(value, ['recognized_at', 'recognizedAt']);
+  if (!polygon.length || imageWidth === null || imageHeight === null || !recognizedAt) return null;
+  return { polygon, image_width: imageWidth, image_height: imageHeight, recognized_at: recognizedAt };
+}
+
+/** Strict counterpart to normalizeBedZone: throws on a malformed 200 response from the recognize endpoint. */
+export function normalizeBedZoneRecognitionResponse(value: unknown): BedZone {
+  const bedZone = isRecord(value) ? normalizeBedZone(value.bed_zone) : null;
+  if (!bedZone) {
+    throw new Error('Invalid bed-zone recognition response');
+  }
+  return bedZone;
+}
+
 export function normalizeCamera(value: unknown): Camera | null {
   if (!isRecord(value)) {
     return null;
@@ -87,6 +124,7 @@ export function normalizeCamera(value: unknown): Camera | null {
     // that isn't a finite number, so garbage or missing fields never crash or coerce.
     last_heartbeat_at: pickNumber(value, ['last_heartbeat_at', 'lastHeartbeatAt']),
     heartbeat_age_sec: pickNumber(value, ['heartbeat_age_sec', 'heartbeatAgeSec']),
+    bed_zone: normalizeBedZone(value.bed_zone),
   };
 }
 

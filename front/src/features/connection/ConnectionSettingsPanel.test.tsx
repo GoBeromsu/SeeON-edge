@@ -1,8 +1,9 @@
 import { act } from 'react';
 import { createRoot } from 'react-dom/client';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { saveConnection, testConnection } from '@/shared/api/client';
 import { ConnectionSettingsPanel } from '@/features/connection/ConnectionSettingsPanel';
+import { toast } from '@/shared/ui/Toast';
 import type { ConnectionView } from '@/shared/api/client';
 import type { PollingResource } from '@/shared/api/usePollingResource';
 
@@ -25,7 +26,6 @@ const baseView: ConnectionView = {
   reachable: true,
   last_ok_at: '2026-08-01T00:00:00Z',
   updated_at: '2026-08-01T00:00:00Z',
-  heartbeat_relay: { enabled: true, last_success_at: '2026-08-02T00:00:00Z', last_error_class: null, detail: null },
 };
 
 function makeResource(overrides: Partial<PollingResource<ConnectionView>> = {}): PollingResource<ConnectionView> {
@@ -72,6 +72,10 @@ function clickButton(host: HTMLElement, label: string): void {
   act(() => findButton(host, label).click());
 }
 
+function openEdit(host: HTMLElement): void {
+  act(() => host.querySelector<HTMLButtonElement>('[aria-label="서버 연결 편집"]')?.click());
+}
+
 beforeEach(() => {
   vi.mocked(saveConnection).mockReset();
   vi.mocked(saveConnection).mockResolvedValue(baseView);
@@ -79,44 +83,61 @@ beforeEach(() => {
   vi.mocked(testConnection).mockResolvedValue({ ok: true, error_class: null, detail: '연결 성공', probed_url: null });
 });
 
-describe('ConnectionSettingsPanel draft sync', () => {
-  it('does not clobber an in-progress edit when a fresh poll delivers different values', () => {
+afterEach(() => {
+  vi.restoreAllMocks();
+});
+
+describe('ConnectionSettingsPanel read mode', () => {
+  it('renders facility id, masked token, and last sync as a read-only dl, with no form yet', () => {
     const { host, root } = renderPanel();
-    setInput(host, 'facility_id', '작성 중인 ID');
 
-    act(() => root.render(<ConnectionSettingsPanel resource={makeResource({ data: { ...baseView, facility_id: 'polled-facility' } })} />));
-
-    expect((host.querySelector('input[name="facility_id"]') as HTMLInputElement).value).toBe('작성 중인 ID');
+    expect(host.textContent).toContain('facility-42');
+    expect(host.textContent).toContain('****ab12');
+    expect(host.querySelector('form')).toBeNull();
     act(() => root.unmount());
   });
 
-  it('syncs the draft from a fresh poll result while the form is pristine', () => {
+  it('opens the edit form pre-filled with facility_id and a blank token when the pencil button is clicked', () => {
     const { host, root } = renderPanel();
 
-    act(() => root.render(<ConnectionSettingsPanel resource={makeResource({ data: { ...baseView, facility_id: 'polled-facility' } })} />));
+    openEdit(host);
 
-    expect((host.querySelector('input[name="facility_id"]') as HTMLInputElement).value).toBe('polled-facility');
+    expect((host.querySelector('input[name="facility_id"]') as HTMLInputElement).value).toBe('facility-42');
+    expect((host.querySelector('input[name="facility_token"]') as HTMLInputElement).value).toBe('');
+    act(() => root.unmount());
+  });
+
+  it('closes the edit form and discards a draft change when the pencil is toggled again', () => {
+    const { host, root } = renderPanel();
+    openEdit(host);
+    setInput(host, 'facility_id', '작성 중인 ID');
+
+    act(() => host.querySelector<HTMLButtonElement>('[aria-label="서버 연결 편집 닫기"]')?.click());
+
+    expect(host.querySelector('form')).toBeNull();
+    openEdit(host);
+    expect((host.querySelector('input[name="facility_id"]') as HTMLInputElement).value).toBe('facility-42');
     act(() => root.unmount());
   });
 });
 
 describe('ConnectionSettingsPanel busy states', () => {
-  it('disables both actions while a save is in flight, then re-enables them', async () => {
+  it('disables both actions while a save is in flight, then closes the form on success', async () => {
     let resolveSave: ((view: ConnectionView) => void) | undefined;
     vi.mocked(saveConnection).mockReturnValue(new Promise((resolve) => {
       resolveSave = resolve;
     }));
     const { host, root } = renderPanel();
+    openEdit(host);
 
     act(() => clickButton(host, '저장'));
 
-    expect(findButton(host, '연결 테스트').disabled).toBe(true);
+    expect(findButton(host, '연결').disabled).toBe(true);
     expect(findButton(host, '저장 중...').disabled).toBe(true);
 
     await act(async () => resolveSave?.(baseView));
 
-    expect(findButton(host, '연결 테스트').disabled).toBe(false);
-    expect(findButton(host, '저장').disabled).toBe(false);
+    expect(host.querySelector('form')).toBeNull();
     act(() => root.unmount());
   });
 
@@ -126,23 +147,41 @@ describe('ConnectionSettingsPanel busy states', () => {
       resolveTest = resolve;
     }));
     const { host, root } = renderPanel();
+    openEdit(host);
 
-    act(() => clickButton(host, '연결 테스트'));
+    act(() => clickButton(host, '연결'));
 
     expect(findButton(host, '확인 중...').disabled).toBe(true);
     expect(findButton(host, '저장').disabled).toBe(true);
 
     await act(async () => resolveTest?.({ ok: true, error_class: null, detail: '연결 성공', probed_url: null }));
 
-    expect(findButton(host, '연결 테스트').disabled).toBe(false);
+    expect(findButton(host, '연결').disabled).toBe(false);
     expect(findButton(host, '저장').disabled).toBe(false);
     act(() => root.unmount());
   });
 });
 
-describe('ConnectionSettingsPanel token payload', () => {
-  it('omits facility_token when the token field is left untouched', async () => {
+describe('ConnectionSettingsPanel save behavior', () => {
+  it('shows a success toast and refreshes the resource on save, without leaking the raw token', async () => {
+    const successSpy = vi.spyOn(toast, 'success');
+    const resource = makeResource();
+    const { host, root } = renderPanel(resource);
+    openEdit(host);
+    setInput(host, 'facility_token', 'super-secret-token');
+
+    await act(async () => clickButton(host, '저장'));
+
+    expect(saveConnection).toHaveBeenCalledWith({ facility_id: 'facility-42', facility_token: 'super-secret-token' });
+    expect(resource.retry).toHaveBeenCalled();
+    expect(successSpy).toHaveBeenCalledWith('연결 설정을 저장했습니다.');
+    expect(host.textContent).not.toContain('super-secret-token');
+    act(() => root.unmount());
+  });
+
+  it('omits facility_token from the payload when the technician never touches it', async () => {
     const { host, root } = renderPanel();
+    openEdit(host);
 
     await act(async () => clickButton(host, '저장'));
 
@@ -152,126 +191,30 @@ describe('ConnectionSettingsPanel token payload', () => {
     act(() => root.unmount());
   });
 
-  it('sends the typed token when the technician replaces it, alongside facility_id only', async () => {
-    const { host, root } = renderPanel();
-    setInput(host, 'facility_token', 'new-secret-value');
-
-    await act(async () => clickButton(host, '저장'));
-
-    expect(saveConnection).toHaveBeenCalledWith({ facility_id: 'facility-42', facility_token: 'new-secret-value' });
-    act(() => root.unmount());
-  });
-
-  it('never sends events_url or config_url in the save payload', async () => {
-    const { host, root } = renderPanel();
-
-    await act(async () => clickButton(host, '저장'));
-
-    const payload = vi.mocked(saveConnection).mock.calls[0]?.[0];
-    expect(payload && 'events_url' in payload).toBe(false);
-    expect(payload && 'config_url' in payload).toBe(false);
-    act(() => root.unmount());
-  });
-
-  it('has no 지우기 (clear) button and no URL input fields in the form', () => {
-    const { host, root } = renderPanel();
-
-    expect(Array.from(host.querySelectorAll('button')).some((button) => button.textContent === '지우기')).toBe(false);
-    expect(host.querySelector('input[name="events_url"]')).toBeNull();
-    expect(host.querySelector('input[name="config_url"]')).toBeNull();
-    expect(host.querySelectorAll('input[type="url"]').length).toBe(0);
-    act(() => root.unmount());
-  });
-});
-
-describe('ConnectionSettingsPanel connection address display', () => {
-  it('renders the derived address with the /v1/events suffix stripped, as read-only text', () => {
-    const { host, root } = renderPanel();
-
-    expect(host.textContent).toContain('연결 대상: https://backend.example.com');
-    act(() => root.unmount());
-  });
-
-  it('falls back to showing the events_url as-is when it does not match the expected suffix', () => {
-    const { host, root } = renderPanel(makeResource({
-      data: { ...baseView, events_url: 'https://backend.example.com/weird-path' },
-    }));
-
-    expect(host.textContent).toContain('연결 대상: https://backend.example.com/weird-path');
-    act(() => root.unmount());
-  });
-
-  it('shows 미설정 when events_url is null', () => {
-    const { host, root } = renderPanel(makeResource({
-      data: { ...baseView, events_url: null },
-    }));
-
-    expect(host.textContent).toContain('연결 대상: 미설정');
-    act(() => root.unmount());
-  });
-});
-
-describe('ConnectionSettingsPanel save and test failures', () => {
-  it('renders the save failure message and never leaks the raw token into the DOM', async () => {
+  it('keeps the form open and shows an inline error when save fails', async () => {
     vi.mocked(saveConnection).mockRejectedValue(new Error('save failed'));
     const { host, root } = renderPanel();
-    setInput(host, 'facility_token', 'super-secret-token');
+    openEdit(host);
 
     await act(async () => clickButton(host, '저장'));
 
-    const status = host.querySelector('[role="status"]');
-    expect(status?.textContent).toContain('연결 설정 저장에 실패했습니다');
-    expect(host.textContent).not.toContain('super-secret-token');
+    expect(host.querySelector('form')).not.toBeNull();
+    const alert = host.querySelector('[role="alert"]');
+    expect(alert?.textContent).toContain('연결 설정 저장에 실패했습니다');
     act(() => root.unmount());
   });
 
-  it('renders the test failure message and never leaks the raw token into the DOM', async () => {
+  it('shows the test failure detail inline without leaking the raw token', async () => {
     vi.mocked(testConnection).mockResolvedValue({ ok: false, error_class: 'auth', detail: '인증에 실패했습니다.', probed_url: null });
     const { host, root } = renderPanel();
+    openEdit(host);
     setInput(host, 'facility_token', 'super-secret-token');
 
-    await act(async () => clickButton(host, '연결 테스트'));
+    await act(async () => clickButton(host, '연결'));
 
     const alert = host.querySelector('[role="alert"]');
     expect(alert?.textContent).toContain('인증에 실패했습니다.');
     expect(host.textContent).not.toContain('super-secret-token');
-    act(() => root.unmount());
-  });
-});
-
-describe('ConnectionSettingsPanel heartbeat relay status', () => {
-  it('shows the normal relay message with the last success time when enabled without an error', () => {
-    const { host, root } = renderPanel(makeResource({
-      data: { ...baseView, heartbeat_relay: { enabled: true, last_success_at: '2026-08-02T00:00:00Z', last_error_class: null, detail: null } },
-    }));
-
-    expect(host.textContent).toContain('하트비트 릴레이 정상');
-    act(() => root.unmount());
-  });
-
-  it('shows the server-provided detail when the relay is enabled but erroring', () => {
-    const { host, root } = renderPanel(makeResource({
-      data: { ...baseView, heartbeat_relay: { enabled: true, last_success_at: null, last_error_class: 'timeout', detail: '릴레이 응답 시간이 초과되었습니다.' } },
-    }));
-
-    expect(host.textContent).toContain('릴레이 응답 시간이 초과되었습니다.');
-    act(() => root.unmount());
-  });
-
-  it('shows the inactive relay message when disabled', () => {
-    const { host, root } = renderPanel(makeResource({
-      data: { ...baseView, heartbeat_relay: { enabled: false, last_success_at: null, last_error_class: null, detail: null } },
-    }));
-
-    expect(host.textContent).toContain('하트비트 릴레이 비활성');
-    act(() => root.unmount());
-  });
-
-  it('defaults to the inactive relay message when the view omits heartbeat_relay entirely (older backend)', () => {
-    const { heartbeat_relay: _omitted, ...legacyView } = baseView;
-    const { host, root } = renderPanel(makeResource({ data: legacyView as ConnectionView }));
-
-    expect(host.textContent).toContain('하트비트 릴레이 비활성');
     act(() => root.unmount());
   });
 });

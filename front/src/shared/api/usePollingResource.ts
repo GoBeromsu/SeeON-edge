@@ -1,6 +1,22 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { fetchCameras, fetchClips, fetchConnection, fetchStatus, fetchSystem } from '@/shared/api/client';
-import type { CameraRegistry, Clip, ConnectionView, StatusSnapshot, SystemSnapshot } from '@/shared/api/types';
+import {
+  fetchCameras,
+  fetchClips,
+  fetchClipStorage,
+  fetchConnection,
+  fetchDetectionSettings,
+  fetchStatus,
+  fetchSystem,
+} from '@/shared/api/client';
+import type {
+  CameraRegistry,
+  Clip,
+  ClipStorageInfo,
+  ConnectionView,
+  DetectionSettings,
+  StatusSnapshot,
+  SystemSnapshot,
+} from '@/shared/api/types';
 
 export type PollingResourceStatus = 'idle' | 'loading' | 'success' | 'error';
 
@@ -104,4 +120,13 @@ export function useSystemResource(enabled: boolean): PollingResource<SystemSnaps
 
 export function useConnectionResource(enabled: boolean): PollingResource<ConnectionView> {
   return usePollingResource(fetchConnection, { enabled, intervalMs: 8_000 });
+}
+
+/** Applies to every camera; the backend polls this into worker config on its own multi-second cycle (no UI immediacy promise). */
+export function useDetectionSettingsResource(enabled: boolean): PollingResource<DetectionSettings> {
+  return usePollingResource(fetchDetectionSettings, { enabled, intervalMs: 15_000 });
+}
+
+export function useClipStorageResource(enabled: boolean): PollingResource<ClipStorageInfo> {
+  return usePollingResource(fetchClipStorage, { enabled, intervalMs: 15_000 });
 }
