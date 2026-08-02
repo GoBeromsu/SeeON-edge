@@ -148,6 +148,7 @@ export function CameraCard({ camera, onUpdateStarted, onUpdated, onDelete, onVie
   const heartbeatDetail = camera.status !== 'online' && !neverConnected
     ? formatHeartbeatAge(camera.heartbeat_age_sec)
     : null;
+  const syncMeta = camera.sync ? getCameraSyncMeta(camera.sync.status) : null;
 
   return (
     <article className="rounded-2xl border border-border bg-surface p-5 shadow-sm">
@@ -158,11 +159,11 @@ export function CameraCard({ camera, onUpdateStarted, onUpdated, onDelete, onVie
         </div>
         <div className="text-right">
           <StatusBadge status={camera.status} />
-          {camera.sync ? (
+          {syncMeta ? (
             <p className="mt-1.5">
-              <span className={`inline-flex items-center rounded-full px-3 py-1 text-xs font-bold ring-1 ${getCameraSyncMeta(camera.sync.status).className}`}>
+              <span className={`inline-flex items-center rounded-full px-3 py-1 text-xs font-bold ring-1 ${syncMeta.className}`}>
                 <span className="mr-1.5 h-2 w-2 rounded-full bg-current" />
-                {getCameraSyncMeta(camera.sync.status).label}
+                {syncMeta.label}
               </span>
             </p>
           ) : null}

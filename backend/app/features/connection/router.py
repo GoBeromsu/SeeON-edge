@@ -20,10 +20,11 @@ from fastapi.exceptions import HTTPException
 from pydantic import BaseModel, ConfigDict
 
 from backend.app.core.config import get_settings
-from backend.app.features.cameras.roster_sync import sync_camera_roster
+from backend.app.features.cameras.roster_sync import SyncStatus, sync_camera_roster
 from backend.app.features.cameras.router import RELAY_TOKEN_HEADER, _authorize
 from backend.app.features.connection.store import ConnectionSettings, ConnectionSettingsStore
 from backend.app.lifespan import apply_connection_settings, refresh_backend_config
+from backend.app.shared.backend_mapping import RosterErrorClass
 
 router = APIRouter(prefix="/connection", tags=["connection"])
 
@@ -71,10 +72,6 @@ class ConnectionTestResponse(BaseModel):
     probed_url: str | None = None
 
 
-RosterErrorClass = Literal["unreachable", "timeout", "auth", "unconfigured"]
-RosterStatus = Literal["synced", "pending", "failed", "disabled"]
-
-
 class CameraRosterSyncResponse(BaseModel):
     """Fresh roster-sync state (story G004), returned by both the explicit
     POST /connection/sync-cameras trigger below and usable to poll the same
@@ -83,7 +80,7 @@ class CameraRosterSyncResponse(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    status: RosterStatus
+    status: SyncStatus
     error_class: RosterErrorClass | None = None
     detail: str | None = None
     last_ok_at: str | None = None
