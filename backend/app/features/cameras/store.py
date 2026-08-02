@@ -15,7 +15,6 @@ responsibility).
 from __future__ import annotations
 
 import json
-import os
 import sqlite3
 import uuid
 from dataclasses import dataclass
@@ -25,6 +24,7 @@ from threading import Lock
 from typing import Literal
 from urllib.parse import parse_qsl, urlsplit, urlunsplit
 
+from backend.app.shared.sqlite_bootstrap import connect_catalog_store
 from backend.app.shared.state_dir import resolve_state_dir
 
 CameraStatus = Literal["online", "offline", "starting", "unknown"]
@@ -151,23 +151,10 @@ class CameraRegistryStore:
 
     def _connect(self) -> sqlite3.Connection:
         if self._connection is None:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            connection = sqlite3.connect(
-                self.path, timeout=5.0, isolation_level=None, check_same_thread=False
-            )
-            connection.execute("PRAGMA journal_mode = WAL")
-            connection.execute("PRAGMA synchronous = FULL")
-            connection.execute("PRAGMA busy_timeout = 5000")
-            connection.execute("PRAGMA foreign_keys = ON")
-            connection.execute(_CREATE_CAMERA_REGISTRY_TABLE)
             # RTSP credentials are stored in the registry by design; API
             # responses and logs must use mask_rtsp_url(), and the database
-            # file is best-effort 0600.
-            try:
-                os.chmod(self.path, 0o600)
-            except OSError:
-                pass
-            self._connection = connection
+            # file is best-effort 0600 (see connect_catalog_store).
+            self._connection = connect_catalog_store(self.path, (_CREATE_CAMERA_REGISTRY_TABLE,))
         return self._connection
 
     def _read_unlocked(self) -> dict[str, object]:

@@ -19,7 +19,6 @@ from __future__ import annotations
 import json
 import logging
 import math
-import os
 import sqlite3
 import threading
 from collections.abc import Mapping
@@ -30,6 +29,7 @@ from pathlib import Path
 from time import time
 from typing import Any
 
+from backend.app.shared.sqlite_bootstrap import connect_catalog_store
 from backend.app.shared.state_dir import resolve_state_dir
 
 DEFAULT_RUNTIME_STATUS_STALE_AFTER_SEC: float = 15.0
@@ -190,23 +190,9 @@ class RuntimeStatusStore:
 
     def _connect(self) -> sqlite3.Connection:
         if self._connection is None:
-            self.latency_state_path.parent.mkdir(parents=True, exist_ok=True)
-            connection = sqlite3.connect(
-                self.latency_state_path,
-                timeout=5.0,
-                isolation_level=None,
-                check_same_thread=False,
+            self._connection = connect_catalog_store(
+                self.latency_state_path, (_CREATE_RUNTIME_LATENCY_TABLE,)
             )
-            connection.execute("PRAGMA journal_mode = WAL")
-            connection.execute("PRAGMA synchronous = FULL")
-            connection.execute("PRAGMA busy_timeout = 5000")
-            connection.execute("PRAGMA foreign_keys = ON")
-            connection.execute(_CREATE_RUNTIME_LATENCY_TABLE)
-            try:
-                os.chmod(self.latency_state_path, 0o600)
-            except OSError:
-                pass
-            self._connection = connection
         return self._connection
 
     def _load_latency(self) -> bool:

@@ -30,6 +30,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from threading import Lock
 
+from backend.app.shared.sqlite_bootstrap import connect_catalog_store
 from backend.app.shared.state_dir import resolve_state_dir
 
 _CREATE_CREDENTIALS_TABLE = (
@@ -110,20 +111,7 @@ class DashboardCredentialsStore:
 
     def _connect(self) -> sqlite3.Connection:
         if self._connection is None:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            connection = sqlite3.connect(
-                self.path, timeout=5.0, isolation_level=None, check_same_thread=False
-            )
-            connection.execute("PRAGMA journal_mode = WAL")
-            connection.execute("PRAGMA synchronous = FULL")
-            connection.execute("PRAGMA busy_timeout = 5000")
-            connection.execute("PRAGMA foreign_keys = ON")
-            connection.execute(_CREATE_CREDENTIALS_TABLE)
-            try:
-                os.chmod(self.path, 0o600)
-            except OSError:
-                pass
-            self._connection = connection
+            self._connection = connect_catalog_store(self.path, (_CREATE_CREDENTIALS_TABLE,))
         return self._connection
 
     def _load_unlocked(self) -> PersistedDashboardCredentials | None:
