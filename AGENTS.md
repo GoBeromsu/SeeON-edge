@@ -72,19 +72,6 @@ image names, and the vendored `contracts/worker_config.py` (ADR-0004):
 | Event egress | `shared/events/edge_ingest_client.py` | Backend Event API facts and heartbeats. |
 | Frontend | `front/src/` | Feature-sliced React SPA. |
 
-## Layout
-
-```text
-front/            front instance (React/Vite SPA)
-backend/          backend instance (FastAPI)
-worker/           worker instance (RTSP inference worker)
-shared/           shared library (shared.events)
-contracts/        L0 interfaces (vendored)
-models/           local, ignored model artifacts
-scripts/          operator and worker tooling
-tests/            pytest suite
-```
-
 ## Commands
 
 Run commands from the repository root:
@@ -117,6 +104,8 @@ also a pre-commit hook and CI step); contract-symbol exports by `tests/test_cont
 - No `backend` import from `worker`, no `worker` import from `backend`; instances communicate only over relay HTTP.
 - No RTSP publishing/runtime server surface; `worker` is an RTSP client only.
 - No committed local model artifacts or training code.
+- No expensive tests in CI: real-stack E2E (external binaries like mediamtx, live RTSP, GPU) must be marked (`real_stack`) and deselected from `ci.yml`; they run locally only. CI stays fast, deterministic, and free of external binary fetches.
+- No pre-provisioned camera rosters: cameras are registered at runtime through the edge camera registry (dashboard CRUD, the SSOT). Do not seed or accept cameras from the backend ml-config `cameras` pull, env vars, or static YAML lists — that inbound path is legacy; do not extend it.
 
 ## NOTES
 
