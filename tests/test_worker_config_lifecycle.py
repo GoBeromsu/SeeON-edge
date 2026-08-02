@@ -188,7 +188,7 @@ def test_race_loss_with_healthy_stored_lkg_returns_lkg_snapshot(tmp_path: Path) 
     """A fresh pull that validates but loses the revision race to a strictly
     newer, still-healthy on-disk LKG must fall back to that LKG unchanged
     (issue #34, race-loss branch with a healthy stored LKG)."""
-    store = WorkerConfigLkgStore(tmp_path / "worker-config.json")
+    store = WorkerConfigLkgStore(tmp_path / "worker-config.sqlite3")
     newer_payload = _payload(registry_version=9, config_version=9, restart_epoch=1)
     assert store.save(newer_payload, RestartDirective(generation=1, version=9))
 
@@ -222,7 +222,7 @@ def test_race_loss_with_corrupt_stored_lkg_deletes_lkg_and_returns_fresh(
     the corrupt LKG, log loudly, and return the fresh (race-losing) snapshot
     since a parseable-but-older config beats an unparseable newer one
     (issue #34, decided design option 3)."""
-    store = WorkerConfigLkgStore(tmp_path / "worker-config.json")
+    store = WorkerConfigLkgStore(tmp_path / "worker-config.sqlite3")
     corrupt_payload = _payload(registry_version=9, config_version=9, restart_epoch=1)
     corrupt_payload["cameras"] = [
         {
@@ -233,7 +233,7 @@ def test_race_loss_with_corrupt_stored_lkg_deletes_lkg_and_returns_fresh(
         }
     ]
     assert store.save(corrupt_payload, RestartDirective(generation=1, version=9))
-    assert store.path.exists()
+    assert store.load() is not None
 
     fresh_payload = _payload(registry_version=5, config_version=5, restart_epoch=1)
     snapshot = load_worker_config_from_relay(
@@ -248,12 +248,13 @@ def test_race_loss_with_corrupt_stored_lkg_deletes_lkg_and_returns_fresh(
     assert snapshot.stale is False
     assert snapshot.registry_version == 5
     assert snapshot.directive == RestartDirective(generation=1, version=5)
-    # The corrupt LKG must be deleted, not left behind to keep winning the
-    # revision race against every future legitimate pull.
-    assert not store.path.exists()
+    # The corrupt LKG (the config_current row) must be deleted, not left
+    # behind to keep winning the revision race against every future
+    # legitimate pull.
+    assert store.load() is None
     error = capsys.readouterr().err
     assert "WARNING" in error
-    assert str(store.path) in error
+    assert str(store.database_path) in error
 
 
 def test_offline_without_lkg_falls_back_to_yaml(tmp_path: Path) -> None:

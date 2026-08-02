@@ -147,6 +147,30 @@ class WorkerConfigLkgStore:
                 if connection is not None:
                     connection.close()
 
+    def clear(self) -> bool:
+        """Delete the current LKG snapshot (the `config_current` row) without
+        touching `config_history`, which stays needed for local joins against
+        already-emitted evidence_events. Used when the stored LKG no longer
+        re-validates and must stop winning the revision race against every
+        future legitimate pull (issue #34)."""
+        with self._lock:
+            connection: sqlite3.Connection | None = None
+            try:
+                connection = open_connection(self.database_path)
+                with ImmediateTransaction(connection):
+                    connection.execute("DELETE FROM config_current WHERE id = 1")
+            except _STORE_UNAVAILABLE_ERRORS as error:
+                print(
+                    f"worker config LKG store unavailable at {self.database_path}: {error}",
+                    file=sys.stderr,
+                )
+                return False
+            else:
+                return True
+            finally:
+                if connection is not None:
+                    connection.close()
+
 
 def _read_current(connection: sqlite3.Connection) -> StoredConfigPayload | None:
     row = connection.execute(
