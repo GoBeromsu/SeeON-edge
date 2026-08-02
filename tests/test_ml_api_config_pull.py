@@ -5,11 +5,13 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from pathlib import Path
 from typing import Self
 
 import pytest
 from fastapi.testclient import TestClient
 
+from backend.app.features.cameras.store import CameraRegistryStore
 from backend.app.lifespan import BACKEND_CONFIG_SHUTDOWN_WAIT_SEC, refresh_backend_config
 from backend.app.main import create_app
 from contracts.worker_config import CONFIG_VERSION_KEY, RESTART_EPOCH_KEY, PulledNightWindow
@@ -83,9 +85,34 @@ def _set_pull_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("API_BACKEND_CONFIG_URL", "http://backend:3000/api/v1/ml-config/")
 
 
-def test_backend_config_pull_seeds_inventory_and_worker_config(
+def _dashboard_camera_registry(tmp_path: Path) -> CameraRegistryStore:
+    """A dashboard camera registry with one registered camera (issue #33: the
+    registry, not a backend ml-config pull, is the sole roster source), so
+    tests whose real subject is config refresh / detection windows / token
+    auth -- not the roster itself -- get an available (non-empty) worker
+    config from `/relay/config` (require_available=True) rather than a 503.
+    """
+    store = CameraRegistryStore(tmp_path / "cameras.json")
+    store.create(
+        camera_id="dashboard-camera",
+        label="Dashboard Camera",
+        rtsp_url="rtsp://dashboard/stream",
+        space_id=None,
+        status="online",
+    )
+    return store
+
+
+def test_backend_config_pull_seeds_inventory_but_not_worker_config_roster(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Backend ml-config pull still seeds app.state.camera_inventory (used by
+    heartbeat/status, unaffected by issue #33). It must NOT seed the worker
+    roster: /cameras/worker-config (require_available=False) must return an
+    empty cameras list rather than the pulled camera, and /relay/config
+    (require_available=True) must treat the now-genuinely-empty dashboard
+    registry as unavailable (503) rather than silently substituting the
+    pulled roster."""
     captured: list[tuple[str, str | None, float]] = []
 
     def fake_urlopen(request: urllib.request.Request, timeout: float) -> FakeHTTPResponse:
@@ -121,21 +148,19 @@ def test_backend_config_pull_seeds_inventory_and_worker_config(
             },
         }
 
-        response = client.get(
+        worker_config = client.get(
+            "/api/v1/cameras/worker-config",
+            headers={"X-Edge-Relay-Token": "relay-token"},
+        )
+        relay_config = client.get(
             "/api/v1/relay/config",
             headers={"X-Edge-Relay-Token": "relay-token"},
         )
 
-    assert response.status_code == 200
-    assert response.json() == {
+    assert worker_config.status_code == 200
+    assert worker_config.json() == {
         "registry_version": 0,
-        "cameras": [
-            {
-                "camera_id": "cam-pulled-1",
-                "facility_id": "facility-pulled",
-                "rtsp_url": "rtsp://camera/101",
-            }
-        ],
+        "cameras": [],
         "config_version": 7,
         "restart_epoch": 0,
         "night_window": {"start": "21:00", "end": "06:00", "tz": "Asia/Seoul"},
@@ -143,16 +168,21 @@ def test_backend_config_pull_seeds_inventory_and_worker_config(
             "bed_exit": {"start": "21:00", "end": "06:00", "tz": "Asia/Seoul"}
         },
     }
+    assert relay_config.status_code == 503
 
 
 def test_backend_detection_windows_present_ignores_legacy_night_window_entirely(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """Plan-file payload-level rule: once ``detectionWindows`` is present at
     all, it is the sole authority for every domain and legacy ``nightWindow``
     is ignored entirely -- even for domains the map doesn't mention. This is
     what makes an operator clearing bed_exit's window in the dashboard stick,
-    instead of a stale ``nightWindow`` resurrecting it."""
+    instead of a stale ``nightWindow`` resurrecting it.
+
+    A dashboard camera is registered so /relay/config (require_available=True)
+    stays available; the pulled camera in the fake backend payload is there
+    only to exercise the pull parser and must not seed the roster (issue #33)."""
 
     def fake_urlopen(request: urllib.request.Request, timeout: float) -> FakeHTTPResponse:
         return FakeHTTPResponse(
@@ -177,8 +207,10 @@ def test_backend_detection_windows_present_ignores_legacy_night_window_entirely(
 
     _set_pull_env(monkeypatch)
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    app = create_app()
+    app.state.camera_registry = _dashboard_camera_registry(tmp_path)
 
-    with TestClient(create_app()) as client:
+    with TestClient(app) as client:
         response = client.get(
             "/api/v1/relay/config",
             headers={"X-Edge-Relay-Token": "relay-token"},
@@ -194,21 +226,35 @@ def test_backend_detection_windows_present_ignores_legacy_night_window_entirely(
     # night_window entirely when it's None (response_model_exclude_none).
     assert "bed_exit" not in body["detection_windows"]
     assert "night_window" not in body
+    # The pulled camera must never seed the roster (issue #33).
+    assert body["cameras"] == [
+        {
+            "camera_id": "dashboard-camera",
+            "facility_id": "facility-pulled",
+            "rtsp_url": "rtsp://dashboard/stream",
+        }
+    ]
 
 
 def test_backend_detection_windows_absent_still_uses_legacy_night_window(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """When ``detectionWindows`` is absent entirely, the legacy single
-    ``nightWindow`` field still applies to bed_exit (compat fallback)."""
+    ``nightWindow`` field still applies to bed_exit (compat fallback).
+
+    A dashboard camera is registered so /relay/config (require_available=True)
+    stays available (see issue #33: the pulled camera in the fake backend
+    payload must not seed the roster)."""
 
     def fake_urlopen(request: urllib.request.Request, timeout: float) -> FakeHTTPResponse:
         return FakeHTTPResponse(_backend_config())
 
     _set_pull_env(monkeypatch)
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    app = create_app()
+    app.state.camera_registry = _dashboard_camera_registry(tmp_path)
 
-    with TestClient(create_app()) as client:
+    with TestClient(app) as client:
         response = client.get(
             "/api/v1/relay/config",
             headers={"X-Edge-Relay-Token": "relay-token"},
@@ -220,12 +266,14 @@ def test_backend_detection_windows_absent_still_uses_legacy_night_window(
     }
 
 
-def test_backend_config_pull_survives_invalid_window_and_still_populates_cameras(
-    monkeypatch: pytest.MonkeyPatch,
+def test_backend_config_pull_survives_invalid_window_and_never_populates_cameras(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """A malformed window value for one domain (start == end here) must not
     crash the whole pull: it fails open to ALWAYS for that domain (logged to
-    stderr) while cameras and other domains' windows still populate."""
+    stderr) while other domains' windows still populate. The pulled camera
+    must never seed the worker-config roster (issue #33) -- a registered
+    dashboard camera is the only thing that appears in ``cameras``."""
 
     def fake_urlopen(request: urllib.request.Request, timeout: float) -> FakeHTTPResponse:
         return FakeHTTPResponse(
@@ -249,8 +297,10 @@ def test_backend_config_pull_survives_invalid_window_and_still_populates_cameras
 
     _set_pull_env(monkeypatch)
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    app = create_app()
+    app.state.camera_registry = _dashboard_camera_registry(tmp_path)
 
-    with TestClient(create_app()) as client:
+    with TestClient(app) as client:
         assert client.app.state.pulled_config is not None
         response = client.get(
             "/api/v1/relay/config",
@@ -262,9 +312,9 @@ def test_backend_config_pull_survives_invalid_window_and_still_populates_cameras
     assert body["config_version"] == 9
     assert body["cameras"] == [
         {
-            "camera_id": "cam-pulled-1",
+            "camera_id": "dashboard-camera",
             "facility_id": "facility-pulled",
-            "rtsp_url": "rtsp://camera/101",
+            "rtsp_url": "rtsp://dashboard/stream",
         }
     ]
     assert "bed_exit" not in body["detection_windows"]
@@ -304,7 +354,7 @@ def test_backend_config_pull_failure_keeps_env_inventory_fallback(
 
 
 def test_config_and_restart_require_token_and_restart_reflects_live_epoch(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     _set_pull_env(monkeypatch)
     monkeypatch.setattr(
@@ -312,8 +362,10 @@ def test_config_and_restart_require_token_and_restart_reflects_live_epoch(
         "urlopen",
         lambda url, timeout: FakeHTTPResponse(_backend_config()),
     )
+    app = create_app()
+    app.state.camera_registry = _dashboard_camera_registry(tmp_path)
 
-    with TestClient(create_app()) as client:
+    with TestClient(app) as client:
         assert client.get("/api/v1/relay/config").status_code == 401
         assert (
             client.get(
@@ -404,7 +456,7 @@ def test_config_returns_503_when_backend_config_unavailable(
 
 
 def test_config_refresh_reflects_backend_change_without_restart(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     configs = [
         _backend_config(),  # boot -> config_version 7
@@ -431,8 +483,10 @@ def test_config_refresh_reflects_backend_change_without_restart(
 
     _set_pull_env(monkeypatch)
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    app = create_app()
+    app.state.camera_registry = _dashboard_camera_registry(tmp_path)
 
-    with TestClient(create_app()) as client:
+    with TestClient(app) as client:
         assert client.app.state.config_version == 7
         initial = client.get(
             "/api/v1/relay/config",
@@ -457,7 +511,7 @@ def test_config_refresh_reflects_backend_change_without_restart(
 
 
 def test_config_refresh_preserves_last_good_on_failure(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     calls = {"n": 0}
 
@@ -469,8 +523,10 @@ def test_config_refresh_preserves_last_good_on_failure(
 
     _set_pull_env(monkeypatch)
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    app = create_app()
+    app.state.camera_registry = _dashboard_camera_registry(tmp_path)
 
-    with TestClient(create_app()) as client:
+    with TestClient(app) as client:
         assert client.app.state.config_version == 7
         response = client.get(
             "/api/v1/relay/config",
@@ -680,12 +736,16 @@ def test_backend_camera_mapper_accepts_canonical_edge_facility_token(
 
 
 def test_backend_detection_windows_populate_per_domain_map_and_bed_exit_alias(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """The backend's ``detectionWindows`` (domain -> window|null) becomes
     ``PulledWorkerConfig.detection_windows``; a null entry for a domain is
     dropped rather than stored, and "bed_exit" also populates the deprecated
-    ``night_window`` alias for old workers."""
+    ``night_window`` alias for old workers.
+
+    A dashboard camera is registered so /relay/config (require_available=True)
+    stays available; the pulled camera in the fake backend payload must not
+    seed the roster (issue #33)."""
 
     def fake_urlopen(url: str, timeout: float) -> FakeHTTPResponse:
         return FakeHTTPResponse(
@@ -710,8 +770,10 @@ def test_backend_detection_windows_populate_per_domain_map_and_bed_exit_alias(
 
     _set_pull_env(monkeypatch)
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    app = create_app()
+    app.state.camera_registry = _dashboard_camera_registry(tmp_path)
 
-    with TestClient(create_app()) as client:
+    with TestClient(app) as client:
         pulled = client.app.state.pulled_config
         assert pulled.detection_windows == {
             "bed_exit": PulledNightWindow(start="21:00", end="06:00", tz="Asia/Seoul"),
@@ -733,6 +795,14 @@ def test_backend_detection_windows_populate_per_domain_map_and_bed_exit_alias(
         "bed_exit": {"start": "21:00", "end": "06:00", "tz": "Asia/Seoul"},
         "fall": {"start": "22:00", "end": "05:00", "tz": "UTC"},
     }
+    # The pulled camera ("cam-1") must never seed the roster (issue #33).
+    assert body["cameras"] == [
+        {
+            "camera_id": "dashboard-camera",
+            "facility_id": "facility-pulled",
+            "rtsp_url": "rtsp://dashboard/stream",
+        }
+    ]
 
 
 def test_backend_detection_windows_absent_falls_back_to_legacy_night_window(
