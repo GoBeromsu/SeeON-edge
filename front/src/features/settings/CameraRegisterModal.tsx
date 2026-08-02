@@ -148,7 +148,7 @@ export function CameraRegisterModal({ open, onClose, onCreated }: CameraRegister
               value={rtspUrl}
               disabled={busy || camera !== null}
               onChange={(event) => setRtspUrl(event.target.value)}
-              placeholder="rtsp://user:pass@host:554/stream"
+              placeholder="rtsp://192.0.2.10:554/stream"
             />
           </label>
 
