@@ -38,12 +38,15 @@ from edge_worker_fixtures import edge_config_payload
 
 import worker.__main__ as worker_main
 from worker.runtime.config import (
+    ML_WORKER_STATE_DIR_ENV,
     CameraRuntimeConfig,
     ConfigSnapshot,
     ConfigSource,
     RelayConfig,
     RestartDirective,
     WorkerConfig,
+    WorkerConfigError,
+    WorkerConfigLkgStore,
 )
 from worker.runtime.worker import WorkerRuntime
 
@@ -266,27 +269,161 @@ def test_yaml_set_failed_pull_no_lkg_falls_back_to_yaml(
 # --- --check-config keeps working in both branches, without a relay pull ---
 
 
-def test_check_config_no_yaml_pulls_but_has_no_further_side_effects(
+def test_check_config_no_yaml_is_strictly_static_no_pull_no_lkg_write(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`--check-config` with no YAML must not touch the network or the disk.
+
+    Regression guard for a review finding on the first cut of this PR: the
+    no-YAML branch called `load_worker_config_from_relay` *before* the
+    `--check-config` early return, and a successful pull inside that function
+    performs an fsync'd write to the last-known-good (LKG) store on disk --
+    i.e. a flag documented as side-effect-free
+    (worker/runtime/AGENTS.md:65, "`--check-config` performs no model,
+    camera, or relay side effect") was mutating persistent device state.
+    `--check-config` must only validate that RELAY_URL/RELAY_TOKEN are set
+    and well-formed; the live pull (and any LKG write) stays deferred to
+    boot.
+    """
+    monkeypatch.setenv("RELAY_URL", "http://ml-api:8000")
+    monkeypatch.setenv("RELAY_TOKEN", "relay-token")
+
+    def _fail(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("--check-config must never attempt a relay pull")
+
+    monkeypatch.setattr(worker_main, "load_worker_config_from_relay", _fail)
+
+    def _fail_save(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("--check-config must never write the LKG store")
+
+    monkeypatch.setattr(WorkerConfigLkgStore, "save", _fail_save)
+
+    def _fail_construct(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("--check-config must not construct WorkerRuntime")
+
+    monkeypatch.setattr(worker_main, "make_restart_check", _fail_construct)
+    monkeypatch.setattr(WorkerRuntime, "__init__", _fail_construct)
+
+    assert worker_main.main(["--check-config"]) == 0
+
+
+def test_check_config_no_yaml_reports_lkg_presence_read_only(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """`--check-config` may read the LKG store to report whether a cache
+    exists (a pure read via `WorkerConfigLkgStore.load`), but must not write
+    it.
+    """
+    monkeypatch.setenv("RELAY_URL", "http://ml-api:8000")
+    monkeypatch.setenv("RELAY_TOKEN", "relay-token")
+    monkeypatch.setenv(ML_WORKER_STATE_DIR_ENV, str(tmp_path))
+
+    with caplog.at_level(logging.INFO):
+        exit_code = worker_main.main(["--check-config"])
+
+    assert exit_code == 0
+    assert any(
+        "no last-known-good cache yet" in record.getMessage() for record in caplog.records
+    )
+
+
+def test_no_yaml_missing_relay_token_exits_before_any_pull(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("RELAY_URL", "http://ml-api:8000")
+    monkeypatch.delenv("RELAY_TOKEN", raising=False)
+
+    def _fail(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("must not attempt a pull without RELAY_TOKEN")
+
+    monkeypatch.setattr(worker_main, "load_worker_config_from_relay", _fail)
+
+    assert worker_main.main([]) == 2
+
+
+def test_no_yaml_malformed_relay_url_exits_before_any_pull(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("RELAY_URL", "not-a-url")
     monkeypatch.setenv("RELAY_TOKEN", "relay-token")
-    snapshot = ConfigSnapshot(
-        config=_worker_config("pulled-camera"),
-        registry_version=1,
-        directive=RestartDirective(generation=0, version=1),
-        source=ConfigSource.PULLED,
-        stale=False,
+
+    def _fail(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("must not attempt a pull with a malformed RELAY_URL")
+
+    monkeypatch.setattr(worker_main, "load_worker_config_from_relay", _fail)
+
+    assert worker_main.main([]) == 2
+
+
+# --- exit codes stay owned by the entrypoint on an unexpected raise --------
+
+
+def test_no_yaml_pull_raising_workerconfigerror_exits_with_config_error_code(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Guards `config_pull.load_worker_config_from_relay`'s one unguarded
+    branch: a fresh pull can validate, lose the LKG race (a strictly newer
+    directive/registry_version already on disk), and then re-derive the
+    snapshot from the stored payload via `_snapshot_from_stored` with no
+    try/except -- so a `WorkerConfigError` there (e.g. an LKG revision
+    mismatch) would otherwise escape `main()` as a raw traceback instead of
+    the documented exit code.
+    """
+    monkeypatch.setenv("RELAY_URL", "http://ml-api:8000")
+    monkeypatch.setenv("RELAY_TOKEN", "relay-token")
+
+    def _raise(*_args: object, **_kwargs: object) -> ConfigSnapshot:
+        raise WorkerConfigError("worker config LKG revision mismatch")
+
+    monkeypatch.setattr(worker_main, "load_worker_config_from_relay", _raise)
+
+    assert worker_main.main([]) == 2
+
+
+def test_yaml_set_pull_raising_workerconfigerror_exits_with_config_error_code(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    config_path = _write_yaml_config(tmp_path)
+
+    def _raise(*_args: object, **_kwargs: object) -> ConfigSnapshot:
+        raise WorkerConfigError("worker config LKG revision mismatch")
+
+    monkeypatch.setattr(worker_main, "resolve_startup_config", _raise)
+
+    assert worker_main.main(["--config", str(config_path)]) == 2
+
+
+# --- the fatal no-config message must not assert an unestablished cause ----
+
+
+def test_no_yaml_no_config_message_names_both_plausible_causes(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Regression: a relay that is up and returns a valid payload where every
+    camera lacks an `rtsp_url` (realistic mid-onboarding, cameras added in
+    the dashboard before stream URLs are entered) makes
+    `BackendWorkerConfigPayload.to_worker_config` raise "must include at
+    least one camera"; `config_pull.py` swallows that and the pull is
+    reported as failed identically to an unreachable relay. The fatal
+    message must not claim the relay was unreachable -- it wasn't
+    established -- so it must name both possible causes rather than assert
+    one.
+    """
+    monkeypatch.setenv("RELAY_URL", "http://ml-api:8000")
+    monkeypatch.setenv("RELAY_TOKEN", "relay-token")
+    monkeypatch.setattr(worker_main, "load_worker_config_from_relay", lambda *_a, **_k: None)
+
+    with caplog.at_level(logging.ERROR):
+        exit_code = worker_main.main([])
+
+    assert exit_code == 2
+    messages = [record.getMessage() for record in caplog.records]
+    assert any(
+        "unreachable" in message and "no usable camera" in message for message in messages
     )
-    monkeypatch.setattr(worker_main, "load_worker_config_from_relay", lambda *_a, **_k: snapshot)
-
-    def _fail(*_args: object, **_kwargs: object) -> object:
-        raise AssertionError("--check-config must not construct WorkerRuntime")
-
-    monkeypatch.setattr(worker_main, "make_restart_check", _fail)
-    monkeypatch.setattr(WorkerRuntime, "__init__", _fail)
-
-    assert worker_main.main(["--check-config"]) == 0
 
 
 def test_check_config_with_yaml_never_calls_resolve_startup_config(

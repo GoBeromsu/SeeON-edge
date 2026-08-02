@@ -15,6 +15,8 @@ import signal
 import sys
 from types import FrameType
 
+from pydantic import ValidationError
+
 from shared.events.evidence_export_contract import DeliveryFailure
 from shared.events.evidence_http_transport import bounded_request, encode_json
 from worker.adapters.model.in_process import InProcessServingClient
@@ -23,8 +25,10 @@ from worker.runtime.config import (
     RELAY_TOKEN_ENV,
     RELAY_URL_ENV,
     ConfigSnapshot,
+    RelayConfig,
     WorkerConfig,
     WorkerConfigError,
+    WorkerConfigLkgStore,
     load_worker_config,
     load_worker_config_from_relay,
     make_restart_check,
@@ -191,11 +195,16 @@ def main(argv: list[str] | None = None) -> int:
             os.environ.get(RELAY_TOKEN_ENV, "").strip()
             or yaml_config.relay.token.get_secret_value()
         )
-        snapshot = resolve_startup_config(yaml_config, relay_url, relay_token)
+        try:
+            snapshot = resolve_startup_config(yaml_config, relay_url, relay_token)
+        except WorkerConfigError:
+            LOGGER.exception("worker config resolution failed")
+            return CONFIG_ERROR_EXIT_CODE
         config = snapshot.config
     else:
         relay_url = os.environ.get(RELAY_URL_ENV, "").strip()
         relay_token = os.environ.get(RELAY_TOKEN_ENV, "").strip() or None
+
         if not relay_url:
             LOGGER.error(
                 "worker config: no --config/%s provided and %s is unset; "
@@ -204,12 +213,66 @@ def main(argv: list[str] | None = None) -> int:
                 RELAY_URL_ENV,
             )
             return CONFIG_ERROR_EXIT_CODE
+        if not relay_token:
+            LOGGER.error(
+                "worker config: no --config/%s provided and %s is unset; "
+                "cannot authenticate with the relay",
+                EDGE_CAMERA_CONFIG_ENV,
+                RELAY_TOKEN_ENV,
+            )
+            return CONFIG_ERROR_EXIT_CODE
+        try:
+            RelayConfig.model_validate({"url": relay_url, "token": relay_token})
+        except ValidationError:
+            LOGGER.exception(
+                "worker config: %s %r is not a valid absolute HTTP(S) URL",
+                RELAY_URL_ENV,
+                relay_url,
+            )
+            return CONFIG_ERROR_EXIT_CODE
 
-        snapshot = load_worker_config_from_relay(relay_url, relay_token)
+        if args.check_config:
+            # Strictly static: RELAY_URL/RELAY_TOKEN presence and shape only.
+            # No network call and no LKG write -- `WorkerConfigLkgStore.load`
+            # is read-only, so reporting whether a cache exists is safe, but
+            # the live pull (and any `lkg_store.save`) is deferred to boot.
+            # `--check-config` must never mutate `ML_WORKER_STATE_DIR`
+            # (worker/runtime/AGENTS.md, "--check-config performs no model,
+            # camera, or relay side effect").
+            stored = WorkerConfigLkgStore().load()
+            if stored is None:
+                LOGGER.info(
+                    "config validation passed (static check): %s/%s set; no "
+                    "last-known-good cache yet -- the live pull happens at boot",
+                    RELAY_URL_ENV,
+                    RELAY_TOKEN_ENV,
+                )
+            else:
+                LOGGER.info(
+                    "config validation passed (static check): %s/%s set; "
+                    "last-known-good cache present (registry_version=%d) -- "
+                    "the live pull still happens at boot",
+                    RELAY_URL_ENV,
+                    RELAY_TOKEN_ENV,
+                    stored.registry_version,
+                )
+            return CLEAN_SHUTDOWN_EXIT_CODE
+
+        try:
+            snapshot = load_worker_config_from_relay(relay_url, relay_token)
+        except WorkerConfigError:
+            LOGGER.exception("worker config pull failed")
+            return CONFIG_ERROR_EXIT_CODE
         if snapshot is None:
             LOGGER.error(
-                "worker could not reach the relay at %s and has no cached "
-                "last-known-good config; set %s/%s or provide --config/%s",
+                "worker has no usable configuration: either the relay at %s "
+                "was unreachable, or it returned a config with no usable "
+                "camera (e.g. a camera registered without an RTSP URL) -- and "
+                "no cached last-known-good config exists either. See the "
+                "preceding stderr line ('request failed' vs 'malformed "
+                "payload') for which. Fix relay reachability or %s/%s, finish "
+                "camera setup in the dashboard, or provide --config/%s as a "
+                "fallback.",
                 relay_url,
                 RELAY_URL_ENV,
                 RELAY_TOKEN_ENV,
@@ -217,10 +280,6 @@ def main(argv: list[str] | None = None) -> int:
             )
             return CONFIG_ERROR_EXIT_CODE
         config = snapshot.config
-
-        if args.check_config:
-            LOGGER.info("config validation passed (%d camera(s))", len(config.cameras))
-            return CLEAN_SHUTDOWN_EXIT_CODE
 
     LOGGER.info(
         "worker config resolved: source=%s stale=%s registry_version=%d directive=%s",
