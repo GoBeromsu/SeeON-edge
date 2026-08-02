@@ -44,6 +44,17 @@ class InferenceGuard(Protocol):
     ) -> AbstractContextManager[int]: ...
 
 
+class StageTimingRecorder(Protocol):
+    """Structural view of ``WorkerDiagnostics.record_stage_timing()``.
+
+    Kept narrow for the same layering reason as ``InferenceGuard``: the
+    pipeline layer depends on this shape instead of importing
+    ``worker.runtime.telemetry.runtime_diagnostics.WorkerDiagnostics``.
+    """
+
+    def record_stage_timing(self, camera_id: str, stage: str, elapsed_sec: float) -> None: ...
+
+
 class CompositeExtractor:
     """Own one camera's analytics state while reusing shared named extractors."""
 
@@ -55,6 +66,7 @@ class CompositeExtractor:
         tracker: GreedyIouTracker,
         scene_state: SceneState,
         watchdog: InferenceGuard | None = None,
+        stage_timing_recorder: StageTimingRecorder | None = None,
     ) -> None:
         frozen_extractors = tuple(extractors)
         ensure_unique_module_names(
@@ -68,22 +80,31 @@ class CompositeExtractor:
             extractor.module_name: extractor for extractor in frozen_extractors
         }
         self._watchdog = watchdog
+        self._stage_timing_recorder = stage_timing_recorder
 
     def _extract(self, extractor: NamedExtractor, packet: FramePacket) -> ModuleResult:
         """Run one module's forward pass, guarded against a hung driver.
 
         Without an injected watchdog this is a direct call -- tests and other
         non-production compositions that never pass ``watchdog=`` behave
-        exactly as before.
+        exactly as before. The already-computed ``elapsed_ms`` is then handed
+        to an injected stage-timing recorder, when one is present, so per-stage
+        latency is visible without recomputing it a second time.
         """
         if self._watchdog is None:
-            return extractor.extract(packet)
-        with self._watchdog.guard(
-            camera_id=self.scene_state.camera_id,
-            task=extractor.module_name,
-            frame_index=packet.frame.index,
-        ):
-            return extractor.extract(packet)
+            result = extractor.extract(packet)
+        else:
+            with self._watchdog.guard(
+                camera_id=self.scene_state.camera_id,
+                task=extractor.module_name,
+                frame_index=packet.frame.index,
+            ):
+                result = extractor.extract(packet)
+        if self._stage_timing_recorder is not None:
+            self._stage_timing_recorder.record_stage_timing(
+                self.scene_state.camera_id, result.module_name, result.elapsed_ms / 1000.0
+            )
+        return result
 
     def process(self, packet: FramePacket) -> CompositeResult:
         """Run due modules and emit one tracked, image-free decision input."""
@@ -120,4 +141,9 @@ class CompositeExtractor:
             observation=final_observation,
             decision_input=decision_input,
         )
-__all__ = ["CompositeExtractor", "CompositeResult", "InferenceGuard"]
+__all__ = [
+    "CompositeExtractor",
+    "CompositeResult",
+    "InferenceGuard",
+    "StageTimingRecorder",
+]

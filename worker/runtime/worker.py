@@ -814,6 +814,7 @@ class WorkerRuntime:
             if self.config.clip.enabled
             else BoundedFrameBus(evidence_capacity=1)
         )
+        self.diagnostics.register_bus(camera.camera_id, bus)
         tracker = GreedyIouTracker()
         intervals = {"pose": camera.frame_stride, "person": camera.frame_stride, "bed": 30}
         scene, scheduler = SceneState(camera.camera_id), Scheduler(intervals)
@@ -823,6 +824,7 @@ class WorkerRuntime:
             tracker=tracker,
             scene_state=scene,
             watchdog=self.watchdog,
+            stage_timing_recorder=self.diagnostics,
         )
         decision, domain_audit, domain_deciders = self._build_decision_stage(
             camera, self.fall_model
