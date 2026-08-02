@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import socket
+import struct
 import threading
 import time
 import urllib.error
@@ -213,3 +215,102 @@ def test_mjpeg_stream_emits_multiple_camera_keyed_non_consuming_parts() -> None:
     latest = store.get_latest("camera-a")
     assert latest is not None
     assert latest.jpeg == b"\xff\xd8camera-a-3\xff\xd9"
+
+
+def test_stream_connect_and_disconnect_track_the_viewer_counter() -> None:
+    """Viewer gating (#48): the counter must clear even on a broken pipe.
+
+    A raw socket (not ``http.client``, which duplicates the fd behind a
+    ``makefile()`` the moment a response is read, making ``SO_LINGER`` a
+    no-op) lets this force an RST instead of a graceful FIN close. That makes
+    the server's next ``wfile.write`` raise ``ConnectionResetError`` -- the
+    exception return path in ``_handle_stream`` -- exercising the
+    ``finally: store.mark_viewer_disconnected(...)`` on that path, not just
+    normal completion. A graceful close can otherwise leave the socket
+    writable for a while on localhost, so this cannot rely on that.
+    """
+    store = LatestFrameStore()
+    store.publish_jpeg("camera-a", b"\xff\xd8jpeg\xff\xd9", frame_index=1)
+    server = MjpegServer(store, MjpegServerConfig(port=0))
+    server.start()
+    try:
+        assert store.has_viewers("camera-a") is False
+        client = socket.create_connection(("127.0.0.1", server.port), timeout=5)
+        try:
+            client.sendall(
+                b"GET /stream/camera-a HTTP/1.1\r\n"
+                b"Host: 127.0.0.1\r\n"
+                b"Connection: keep-alive\r\n\r\n"
+            )
+            response_head = client.recv(4096)
+            assert b"200" in response_head.split(b"\r\n", 1)[0]
+            assert store.has_viewers("camera-a") is True
+
+            client.setsockopt(
+                socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0)
+            )
+        finally:
+            client.close()
+
+        deadline = time.monotonic() + 2.0
+        while store.has_viewers("camera-a") and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert store.has_viewers("camera-a") is False
+    finally:
+        server.stop()
+
+
+def test_pose_get_and_set_round_trip_and_defaults_off() -> None:
+    store = LatestFrameStore()
+    store.register_camera("camera-a")
+    server = MjpegServer(store, MjpegServerConfig(port=0))
+    server.start()
+    base = f"http://127.0.0.1:{server.port}"
+    try:
+        with urllib.request.urlopen(f"{base}/overlay/camera-a/pose", timeout=1) as response:
+            assert json.loads(response.read()) == {"show_pose": False}
+
+        request = urllib.request.Request(
+            f"{base}/overlay/camera-a/pose",
+            data=json.dumps({"show_pose": True}).encode(),
+            method="POST",
+        )
+        with urllib.request.urlopen(request, timeout=1) as response:
+            assert json.loads(response.read()) == {"show_pose": True}
+
+        with urllib.request.urlopen(f"{base}/overlay/camera-a/pose", timeout=1) as response:
+            assert json.loads(response.read()) == {"show_pose": True}
+
+        assert store.get_show_pose("camera-a") is True
+    finally:
+        server.stop()
+
+
+def test_pose_unknown_camera_and_malformed_body_are_rejected() -> None:
+    store = LatestFrameStore()
+    server = MjpegServer(store, MjpegServerConfig(port=0))
+    server.start()
+    base = f"http://127.0.0.1:{server.port}"
+    try:
+        try:
+            urllib.request.urlopen(f"{base}/overlay/missing/pose", timeout=1)
+        except urllib.error.HTTPError as exc:
+            assert exc.code == 404
+        else:  # pragma: no cover
+            raise AssertionError("unknown camera should 404")
+
+        store.register_camera("camera-a")
+        request = urllib.request.Request(
+            f"{base}/overlay/camera-a/pose",
+            data=b"not-json",
+            method="POST",
+        )
+        try:
+            urllib.request.urlopen(request, timeout=1)
+        except urllib.error.HTTPError as exc:
+            assert exc.code == 400
+        else:  # pragma: no cover
+            raise AssertionError("malformed body should 400")
+        assert store.get_show_pose("camera-a") is False
+    finally:
+        server.stop()

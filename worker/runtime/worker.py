@@ -524,8 +524,14 @@ class WorkerRuntime:
         # per-camera pumps built during `_activate` can be handed the tap.
         self._mjpeg_config = self._resolve_mjpeg_config()
         self._live_frames = LatestFrameStore()
+        # #40: the live view gets its own per-camera pose-overlay renderer
+        # (LiveViewSubscriber's default, keyed off `self._live_frames`) rather
+        # than sharing `self._overlay_renderer` -- that instance stays a
+        # fixed, no-toggle renderer for the evidence attacher below, so a
+        # runtime pose toggle for one camera's live view can never leak into
+        # another camera or into audit snapshots.
         self._live_view: LiveViewSubscriber | None = (
-            LiveViewSubscriber(self._live_frames, renderer=self._overlay_renderer)
+            LiveViewSubscriber(self._live_frames)
             if self._mjpeg_config.enabled
             else None
         )

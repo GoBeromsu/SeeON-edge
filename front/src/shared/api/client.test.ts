@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { cameraDuplicateDetail, cameraMediaId, cameraProbeFailureDetail, clearClipLabelOverlay, createCamera, fetchCameras, fetchClips, fetchStatus, fetchSystem, getApiBase, getCameraSnapshotUrl, getCameraStreamUrl, labelClip, loginDashboard, logoutDashboard, testCamera, updateCamera, updateCameraDecodeBackend } from '@/shared/api/client';
+import { cameraDuplicateDetail, cameraMediaId, cameraProbeFailureDetail, clearClipLabelOverlay, createCamera, fetchCameraPose, fetchCameras, fetchClips, fetchStatus, fetchSystem, getApiBase, getCameraSnapshotUrl, getCameraStreamUrl, labelClip, loginDashboard, logoutDashboard, setCameraPose, testCamera, updateCamera, updateCameraDecodeBackend } from '@/shared/api/client';
 import { HttpError } from '@/shared/api/http';
 
 function clipManifest(overrides: Record<string, unknown> = {}): Record<string, unknown> {
@@ -194,6 +194,46 @@ describe('api client contracts', () => {
     await testCamera('cam-1');
 
     expect(fetchMock).toHaveBeenCalledWith('/api/v1/cameras/cam-1/test', expect.objectContaining({ method: 'POST' }));
+  });
+
+  it('fetches the current per-camera pose-overlay state', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ show_pose: true }),
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(fetchCameraPose('cam/1')).resolves.toBe(true);
+
+    expect(fetchMock).toHaveBeenCalledWith('/api/v1/streams/cam%2F1/pose', expect.objectContaining({ credentials: 'same-origin' }));
+    expect(fetchMock.mock.calls[0]?.[1]?.method).toBeUndefined();
+  });
+
+  it('posts the requested pose-overlay state and returns the confirmed value', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ show_pose: false }),
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(setCameraPose('cam-1', false)).resolves.toBe(false);
+
+    expect(fetchMock).toHaveBeenCalledWith('/api/v1/streams/cam-1/pose', expect.objectContaining({
+      method: 'POST',
+      body: JSON.stringify({ show_pose: false }),
+    }));
+  });
+
+  it('rejects a contract-invalid pose-overlay response', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ show_pose: 'yes' }),
+    }));
+
+    await expect(fetchCameraPose('cam-1')).rejects.toThrow('Invalid pose response');
   });
 
   it('normalizes clip video URLs without embedding credentials in the query string', async () => {

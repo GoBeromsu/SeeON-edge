@@ -6,7 +6,10 @@ import type { DashboardLocation } from '@/app/dashboardLocation';
 import { OperationsView } from '@/features/operations/OperationsView';
 
 const cleanups: Array<() => void> = [];
-afterEach(() => { while (cleanups.length) cleanups.pop()?.(); });
+afterEach(() => {
+  while (cleanups.length) cleanups.pop()?.();
+  vi.unstubAllGlobals();
+});
 // jsdom doesn't implement scrollTo; the component calls it whenever a focus->wall
 // transition restores scroll position, so stub it globally to keep test output clean.
 let scrollToSpy: ReturnType<typeof vi.spyOn>;
@@ -333,7 +336,7 @@ describe('OperationsView', () => {
 
     const focusable = Array.from(section?.querySelectorAll<HTMLElement>('button, [href], input, select, textarea, [tabindex]') ?? [])
       .filter((element) => element.tabIndex !== -1);
-    expect(focusable.map((element) => element.textContent)).toEqual(['← 관제', '이 카메라 클립 보기', '카메라 설정', '계정 설정']);
+    expect(focusable.map((element) => element.textContent)).toEqual(['← 관제', '이 카메라 클립 보기', '카메라 설정', '계정 설정', '자세 표시 켜기']);
   });
 
   it('gives every focus-view action and the wall card a 44px-tall touch target via the min-h-11 convention (AC-15, height only)', () => {
@@ -342,7 +345,7 @@ describe('OperationsView', () => {
     expect(card?.classList.contains('min-h-11')).toBe(true);
 
     rerender({ page: 'operations', camera: 'local', wallPage: '1' });
-    for (const label of ['← 관제', '이 카메라 클립 보기', '카메라 설정', '계정 설정']) {
+    for (const label of ['← 관제', '이 카메라 클립 보기', '카메라 설정', '계정 설정', '자세 표시 켜기']) {
       const button = Array.from(host.querySelectorAll<HTMLButtonElement>('button')).find((entry) => entry.textContent === label);
       expect(button?.classList.contains('min-h-11')).toBe(true);
     }
@@ -353,6 +356,36 @@ describe('OperationsView', () => {
       const button = Array.from(paged.host.querySelectorAll<HTMLButtonElement>('button')).find((entry) => entry.textContent === label);
       expect(button?.classList.contains('min-h-11')).toBe(true);
     }
+  });
+
+  it('loads the per-camera pose-overlay state and toggles it through the streams pose endpoint (#40)', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ show_pose: false }) })
+      .mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ show_pose: true }) });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const { host } = renderView({ location: { page: 'operations', camera: 'local', wallPage: '1' } });
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    const findPoseButton = () => Array.from(host.querySelectorAll<HTMLButtonElement>('button')).find((button) => button.textContent?.startsWith('자세 표시'));
+    expect(findPoseButton()?.textContent).toBe('자세 표시 켜기');
+    expect(findPoseButton()?.disabled).toBe(false);
+    expect(fetchMock).toHaveBeenNthCalledWith(1, expect.stringContaining('/streams/worker%2Fcam/pose'), expect.objectContaining({ credentials: 'same-origin' }));
+    expect(fetchMock.mock.calls[0]?.[1]?.method).toBeUndefined();
+
+    await act(async () => {
+      findPoseButton()?.click();
+      await Promise.resolve();
+    });
+
+    expect(fetchMock).toHaveBeenNthCalledWith(2, expect.stringContaining('/streams/worker%2Fcam/pose'), expect.objectContaining({
+      method: 'POST',
+      body: JSON.stringify({ show_pose: true }),
+    }));
+    expect(findPoseButton()?.textContent).toBe('자세 표시 끄기');
+    expect(findPoseButton()?.getAttribute('aria-pressed')).toBe('true');
   });
 
   it('mounts no snapshot polling while focused, honoring the exactly-one-stream media budget', () => {

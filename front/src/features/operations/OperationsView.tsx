@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import type { DashboardLocation } from '@/app/dashboardLocation';
-import { cameraMediaId, getCameraSnapshotUrl, getCameraStreamUrl, type Camera, type HeartbeatStatus, type StatusSnapshot } from '@/shared/api/client';
+import { cameraMediaId, fetchCameraPose, getCameraSnapshotUrl, getCameraStreamUrl, setCameraPose, type Camera, type HeartbeatStatus, type StatusSnapshot } from '@/shared/api/client';
 import { SnapshotQueue, type SnapshotEntry } from '@/features/operations/SnapshotQueue';
 import { filterAndGroupCameras, getCameraHeartbeatAgeSec, getCameraLiveness, groupCameras, paginateCameras, sortCameras, UNCLASSIFIED } from '@/features/operations/operationsModel';
 import { AccountSettingsModal } from '@/features/account-settings/AccountSettingsModal';
@@ -78,6 +78,43 @@ function focusedSnapshotLabel(snapshot: SnapshotEntry | undefined): string {
   return snapshot ? snapshotLabels[snapshot.state] : '스냅샷 정보 없음';
 }
 
+function usePoseToggle(cameraId: string): { showPose: boolean | null; busy: boolean; toggle: () => void } {
+  const [showPose, setShowPose] = useState<boolean | null>(null);
+  const [busy, setBusy] = useState(false);
+  const busyRef = useRef(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    setShowPose(null);
+    fetchCameraPose(cameraId)
+      .then((value) => {
+        if (!cancelled) setShowPose(value);
+      })
+      .catch(() => {
+        if (!cancelled) setShowPose(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [cameraId]);
+
+  function toggle(): void {
+    if (busyRef.current || showPose === null) return;
+    const next = !showPose;
+    busyRef.current = true;
+    setBusy(true);
+    setCameraPose(cameraId, next)
+      .then((value) => setShowPose(value))
+      .catch(() => setShowPose(showPose))
+      .finally(() => {
+        busyRef.current = false;
+        setBusy(false);
+      });
+  }
+
+  return { showPose, busy, toggle };
+}
+
 function FocusedCamera({ camera, liveness, ageSec, snapshot, onBack, onViewClips, onOpenSettings, onOpenAccountSettings }: {
   camera: Camera;
   liveness: HeartbeatStatus | 'unknown';
@@ -92,6 +129,7 @@ function FocusedCamera({ camera, liveness, ageSec, snapshot, onBack, onViewClips
   const statusStripText = [livenessLabels[liveness], formatHeartbeatAge(ageSec), focusedSnapshotLabel(snapshot)]
     .filter((part): part is string => part !== null)
     .join(' · ');
+  const { showPose, busy: poseBusy, toggle: togglePose } = usePoseToggle(cameraMediaId(camera));
   return (
     <section aria-labelledby="focused-camera-title" className="space-y-4">
       <button type="button" className="min-h-11 rounded-lg border border-border px-4 font-bold" onClick={onBack}>← 관제</button>
@@ -102,6 +140,15 @@ function FocusedCamera({ camera, liveness, ageSec, snapshot, onBack, onViewClips
         <button type="button" className="brand-action min-h-11 rounded-lg px-4 font-bold" onClick={onViewClips}>이 카메라 클립 보기</button>
         <button type="button" className="min-h-11 rounded-lg border border-border px-4 font-bold" onClick={onOpenSettings}>카메라 설정</button>
         <button type="button" className="min-h-11 rounded-lg border border-border px-4 font-bold" onClick={onOpenAccountSettings}>계정 설정</button>
+        <button
+          type="button"
+          aria-pressed={showPose === true}
+          disabled={showPose === null || poseBusy}
+          className="min-h-11 rounded-lg border border-border px-4 font-bold disabled:opacity-50"
+          onClick={togglePose}
+        >
+          {showPose === true ? '자세 표시 끄기' : '자세 표시 켜기'}
+        </button>
       </div>
     </section>
   );

@@ -16,6 +16,16 @@ BOUNDARY: Final = b"frame"
 POLL_INTERVAL_SECONDS: Final = 0.05
 HEARTBEAT_INTERVAL_SECONDS: Final = 1.0
 MAX_PROBE_BODY_BYTES: Final = 8192
+MAX_POSE_BODY_BYTES: Final = 256
+# Bounded wait for the first frame after a stream connects. Viewer gating
+# (#48) means encoding does not start until this connection's counter
+# increment makes `has_viewers` true, so the first frame is not already
+# cached the way it always was pre-gating; this must stay comfortably under
+# a client's read timeout while giving the pump a real chance to publish.
+STREAM_FIRST_FRAME_TIMEOUT_SECONDS: Final = 0.5
+
+OVERLAY_PREFIX: Final = "/overlay/"
+POSE_SUFFIX: Final = "/pose"
 
 ProbeErrorClass = Literal["auth", "timeout", "decode"]
 
@@ -64,10 +74,19 @@ def build_http_server(
             if path.startswith("/snapshot/"):
                 self._handle_snapshot(unquote(path[len("/snapshot/") :]))
                 return
+            pose_camera_id = _pose_camera_id(path)
+            if pose_camera_id is not None:
+                self._handle_get_pose(pose_camera_id)
+                return
             self.send_error(HTTPStatus.NOT_FOUND)
 
         def do_POST(self) -> None:  # noqa: N802 - stdlib hook name
-            if urlsplit(self.path).path != "/probe":
+            path = urlsplit(self.path).path
+            if path != "/probe":
+                pose_camera_id = _pose_camera_id(path)
+                if pose_camera_id is not None:
+                    self._handle_set_pose(pose_camera_id)
+                    return
                 self.send_error(HTTPStatus.NOT_FOUND)
                 return
             if not _authorized_probe(
@@ -100,37 +119,61 @@ def build_http_server(
             return frame
 
         def _handle_stream(self, camera_id: str) -> None:
-            if self._resolve_frame(camera_id) is None:
+            # Viewer gating (#48): count this connection *before* waiting for
+            # a frame so `has_viewers` opens the encode gate in time for the
+            # pump to actually publish one -- and always uncount it, on every
+            # return path (normal completion or a broken/reset pipe), via
+            # `finally`.
+            if camera_id == "" or not store.is_known(camera_id):
+                self.send_error(HTTPStatus.NOT_FOUND)
                 return
-            self.send_response(HTTPStatus.OK)
-            self.send_header(
-                "Content-Type",
-                f"multipart/x-mixed-replace; boundary={BOUNDARY.decode()}",
-            )
-            self.send_header("Cache-Control", "no-cache")
-            self.end_headers()
-
-            previous: LatestFrame | None = None
-            last_send_at = 0.0
-            while True:
+            store.mark_viewer_connected(camera_id)
+            try:
                 frame = store.wait_for_latest(
                     camera_id,
-                    previous=previous,
-                    timeout=POLL_INTERVAL_SECONDS,
+                    previous=None,
+                    timeout=STREAM_FIRST_FRAME_TIMEOUT_SECONDS,
                 )
-                now = time.monotonic()
-                heartbeat_due = now - last_send_at >= HEARTBEAT_INTERVAL_SECONDS
-                if frame is None or (frame is previous and not heartbeat_due):
-                    continue
-                try:
-                    self._write_part(frame)
-                    self.wfile.flush()
-                except (TimeoutError, BrokenPipeError, ConnectionResetError):
+                if frame is None:
+                    self.send_error(HTTPStatus.SERVICE_UNAVAILABLE)
                     return
-                previous = frame
-                last_send_at = now
+                self.send_response(HTTPStatus.OK)
+                self.send_header(
+                    "Content-Type",
+                    f"multipart/x-mixed-replace; boundary={BOUNDARY.decode()}",
+                )
+                self.send_header("Cache-Control", "no-cache")
+                self.end_headers()
+
+                previous: LatestFrame | None = None
+                last_send_at = 0.0
+                while True:
+                    frame = store.wait_for_latest(
+                        camera_id,
+                        previous=previous,
+                        timeout=POLL_INTERVAL_SECONDS,
+                    )
+                    now = time.monotonic()
+                    heartbeat_due = now - last_send_at >= HEARTBEAT_INTERVAL_SECONDS
+                    if frame is None or (frame is previous and not heartbeat_due):
+                        continue
+                    try:
+                        self._write_part(frame)
+                        self.wfile.flush()
+                    except (TimeoutError, BrokenPipeError, ConnectionResetError):
+                        return
+                    previous = frame
+                    last_send_at = now
+            finally:
+                store.mark_viewer_disconnected(camera_id)
 
         def _handle_snapshot(self, camera_id: str) -> None:
+            # Viewer gating (#48) means the cache can go stale with no stream
+            # viewer connected; treat this request as a momentary viewer so
+            # the next `publish()` encodes one fresh frame, while still
+            # serving whatever is cached right now (bounded cost, no wait).
+            if store.is_known(camera_id):
+                store.request_snapshot_refresh(camera_id)
             frame = self._resolve_frame(camera_id)
             if frame is None:
                 return
@@ -143,6 +186,52 @@ def build_http_server(
                 self.wfile.write(frame.jpeg)
             except (TimeoutError, BrokenPipeError, ConnectionResetError):
                 return
+
+        def _handle_get_pose(self, camera_id: str) -> None:
+            if camera_id == "" or not store.is_known(camera_id):
+                self.send_error(HTTPStatus.NOT_FOUND)
+                return
+            self._write_pose_json(store.get_show_pose(camera_id))
+
+        def _handle_set_pose(self, camera_id: str) -> None:
+            if camera_id == "" or not store.is_known(camera_id):
+                self.send_error(HTTPStatus.NOT_FOUND)
+                return
+            show_pose = self._read_show_pose_body()
+            if show_pose is None:
+                self.send_error(HTTPStatus.BAD_REQUEST)
+                return
+            store.set_show_pose(camera_id, show_pose)
+            self._write_pose_json(show_pose)
+
+        def _read_show_pose_body(self) -> bool | None:
+            raw_length = self.headers.get("Content-Length")
+            if raw_length is None:
+                return None
+            try:
+                length = int(raw_length)
+            except ValueError:
+                return None
+            if length <= 0 or length > MAX_POSE_BODY_BYTES:
+                return None
+            try:
+                payload = json.loads(self.rfile.read(length).decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                return None
+            if not isinstance(payload, dict):
+                return None
+            show_pose = payload.get("show_pose")
+            return show_pose if isinstance(show_pose, bool) else None
+
+        def _write_pose_json(self, show_pose: bool) -> None:
+            body = json.dumps(
+                {"show_pose": show_pose}, separators=(",", ":")
+            ).encode("utf-8")
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
 
         def _read_probe_url(self) -> str | None:
             raw_length = self.headers.get("Content-Length")
@@ -190,6 +279,18 @@ def build_http_server(
             del format, args
 
     return _ThreadingHTTPServer((host, port), Handler)
+
+
+def _pose_camera_id(path: str) -> str | None:
+    """Match ``/overlay/{camera_id}/pose`` and return the decoded camera id.
+
+    Returns ``None`` for any other path (including an empty camera id),
+    letting callers fall through to their existing 404 handling.
+    """
+    if not path.startswith(OVERLAY_PREFIX) or not path.endswith(POSE_SUFFIX):
+        return None
+    camera_id = unquote(path[len(OVERLAY_PREFIX) : -len(POSE_SUFFIX)])
+    return camera_id or None
 
 
 def _authorized_probe(supplied: str | None, expected: str | None) -> bool:
