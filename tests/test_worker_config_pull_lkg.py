@@ -7,7 +7,6 @@ import pytest
 
 from contracts.worker_config import PulledCameraConfig, PulledNightWindow, PulledWorkerConfig
 from worker.runtime.config import (
-    ML_WORKER_STATE_DIR_ENV,
     BackendWorkerConfigPayload,
     CameraRuntimeConfig,
     CameraStreamsConfig,
@@ -21,19 +20,17 @@ from worker.runtime.config import (
 )
 
 
-def test_lkg_save_load_round_trip(tmp_path, monkeypatch) -> None:
-    monkeypatch.setenv(ML_WORKER_STATE_DIR_ENV, str(tmp_path))
+def test_lkg_save_load_round_trip(tmp_path) -> None:
     cfg = _pulled(config_version=7, restart_epoch=3, rtsp_url="rtsp://pulled/sub")
 
-    save_lkg(cfg)
+    save_lkg(cfg, state_dir=tmp_path)
 
-    assert load_lkg() == cfg
+    assert load_lkg(state_dir=tmp_path) == cfg
 
 
 def test_lkg_save_load_round_trip_preserves_multi_domain_detection_windows(
-    tmp_path, monkeypatch
+    tmp_path,
 ) -> None:
-    monkeypatch.setenv(ML_WORKER_STATE_DIR_ENV, str(tmp_path))
     cfg = PulledWorkerConfig(
         config_version=7,
         restart_epoch=3,
@@ -53,9 +50,9 @@ def test_lkg_save_load_round_trip_preserves_multi_domain_detection_windows(
         },
     )
 
-    save_lkg(cfg)
+    save_lkg(cfg, state_dir=tmp_path)
 
-    assert load_lkg() == cfg
+    assert load_lkg(state_dir=tmp_path) == cfg
 
 
 def test_to_worker_config_threads_pulled_detection_windows_into_domains_config() -> None:
@@ -324,15 +321,13 @@ def _pulled(config_version: int, restart_epoch: int, rtsp_url: str) -> PulledWor
 
 def test_unavailable_pull_returns_none_and_preserves_existing_lkg(
     tmp_path,
-    monkeypatch,
 ) -> None:
     # Regression: when ml-api has no backend config it returns 503, so the pull
     # MUST return None and the worker MUST keep its existing LKG (not overwrite
     # it with an empty placeholder). config_pull.load_worker_config_from_relay /
     # pull_worker_config only persist the LKG on a successful, validated pull.
-    monkeypatch.setenv(ML_WORKER_STATE_DIR_ENV, str(tmp_path))
     good = _pulled(config_version=5, restart_epoch=1, rtsp_url="rtsp://lkg/good")
-    save_lkg(good)
+    save_lkg(good, state_dir=tmp_path)
 
     def _raise_503(request: urllib.request.Request, timeout: float) -> object:
         raise urllib.error.HTTPError(
@@ -344,4 +339,4 @@ def test_unavailable_pull_returns_none_and_preserves_existing_lkg(
         is None
     )
     # Existing LKG is intact: an unavailable pull never clobbers last-known-good.
-    assert load_lkg() == good
+    assert load_lkg(state_dir=tmp_path) == good

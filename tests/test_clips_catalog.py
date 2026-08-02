@@ -10,12 +10,11 @@ import pytest
 from fastapi import FastAPI
 
 from backend.app.features.clips.catalog import (
-    API_CATALOG_STORE_ENV,
     CatalogConflictError,
     CatalogStore,
     get_catalog_store,
 )
-from backend.app.features.clips.store import ClipStore
+from backend.app.features.clips.store import ClipStore, LabelRecord, LabelStore
 
 _EVENT_ID = "11111111-1111-4111-8111-111111111111"
 
@@ -51,9 +50,13 @@ def _write_manifest(root, payload: dict[str, object]) -> None:
     path.write_text(json.dumps(payload), encoding="utf-8")
 
 
-def test_catalog_uses_environment_path_and_is_queryable(tmp_path, monkeypatch) -> None:
-    catalog_path = tmp_path / "catalog" / "catalog.sqlite3"
-    monkeypatch.setenv(API_CATALOG_STORE_ENV, str(catalog_path))
+def test_catalog_from_env_resolves_under_state_dir_and_is_queryable(tmp_path, monkeypatch) -> None:
+    """``from_env()`` has no env override anymore -- it always resolves under
+    ``~/.local/state/ml-api/``, so the test controls the resolved path by
+    redirecting ``Path.home()`` (the resolver's own source of truth) rather
+    than an environment variable."""
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    catalog_path = tmp_path / ".local" / "state" / "ml-api" / "catalog.sqlite3"
 
     store = CatalogStore.from_env()
     try:
@@ -63,6 +66,32 @@ def test_catalog_uses_environment_path_and_is_queryable(tmp_path, monkeypatch) -
         store.close()
 
     assert catalog_path.exists()
+
+
+def test_label_store_save_degrades_gracefully_when_labels_dir_is_unwritable(
+    tmp_path, monkeypatch, caplog
+) -> None:
+    """``LabelStore.save`` must not crash the labeling request when its state
+    dir can't be created -- the same OSError guard as
+    ``RuntimeStatusStore._persist_latency`` (``runtime_status_store.py``)."""
+    store = LabelStore(tmp_path)
+    record = LabelRecord(
+        clip_id="clip-1",
+        label="TRUE_POSITIVE",
+        reviewer="reviewer-1",
+        reviewed_at="2026-01-01T00:00:00Z",
+    )
+
+    def unwritable(self, *, parents: bool = False, exist_ok: bool = False) -> None:
+        raise PermissionError("labels mount unavailable")
+
+    monkeypatch.setattr(Path, "mkdir", unwritable)
+
+    with caplog.at_level("WARNING"):
+        store.save(record)
+
+    assert "label store unavailable" in caplog.text
+    assert store.get("clip-1") is None
 
 
 def test_catalog_open_failure_is_recorded_without_raising(monkeypatch) -> None:

@@ -26,5 +26,10 @@ COPY contracts ./contracts
 COPY shared ./shared
 COPY worker ./worker
 RUN mkdir -p /app/models/fall/lstm-runtime /app/models/pose /app/models/bed
+# State dir is image-owned (matches worker/runtime/state_dir.py's resolver for
+# the root container user); deliberately no VOLUME here to avoid anonymous-
+# volume sprawl and derived-image RUN neutralization — compose.edge.yaml
+# attaches a named volume at this same path instead.
+RUN mkdir -p /root/.local/state/ml-worker
 
 CMD ["python", "-m", "worker"]

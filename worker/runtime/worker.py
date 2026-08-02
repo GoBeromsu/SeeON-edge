@@ -53,7 +53,6 @@ from worker.pipeline.output.evidence.clip_store_lock import (
     ClipStoreLockedError,
 )
 from worker.pipeline.output.evidence.evidence_runtime import (
-    OUTBOX_PATH_ENV,
     EvidenceExportRuntime,
     export_enabled,
 )
@@ -76,7 +75,7 @@ from worker.runtime.ingest_composition import (
     build_camera_source_registry,
     compose_camera_ingest_loop,
 )
-from worker.runtime.lease import GpuLease, resolve_state_dir
+from worker.runtime.lease import GpuLease
 from worker.runtime.model_composition import SharedYoloExtractors, compose_yolo_extractors
 from worker.runtime.profile.boot import BootContext
 from worker.runtime.profile.device import CudaProbe
@@ -86,6 +85,7 @@ from worker.runtime.profile.registry import (
     default_decode_probe,
     default_verifiers,
 )
+from worker.runtime.state_dir import resolve_state_dir
 from worker.runtime.telemetry.runtime_diagnostics import WorkerDiagnostics
 from worker.runtime.telemetry.runtime_status_sender import (
     RelayRuntimeStatusTransport,
@@ -352,11 +352,8 @@ class _WindowGatedDecider:
         return self.decider.update(input_value)
 
 
-def _evidence_outbox_path() -> Path:
-    configured = os.environ.get(OUTBOX_PATH_ENV, "").strip()
-    if configured:
-        return Path(configured)
-    return resolve_state_dir() / "evidence-outbox.sqlite3"
+def _evidence_outbox_path(state_dir: Path) -> Path:
+    return state_dir / "evidence-outbox.sqlite3"
 
 
 def _verify_opencv_decode() -> VerifyResult:
@@ -469,15 +466,18 @@ class WorkerRuntime:
         event_sink_factory: EventSinkFactory | None = None,
         clip_recorder_factory: ClipRecorderFactory | None = None,
         max_frames_per_camera: int | None = None,
+        state_dir: Path | None = None,
     ) -> None:
         self.config = config
         self._env = os.environ if env is None else env
         self._serving = serving_client
+        self._state_dir = state_dir if state_dir is not None else resolve_state_dir()
+        LOGGER.info("worker state directory resolved to %s", self._state_dir)
         self._loop_factory = loop_factory or self._default_loop_factory
         self._pump_factory = pump_factory or self._default_pump_factory
         self._sink_factory = event_sink_factory or self._default_event_sink
         self._clip_recorder_factory = clip_recorder_factory or self._default_clip_recorder
-        self._acquire = acquire_lease or GpuLease.acquire
+        self._acquire = acquire_lease or (lambda: GpuLease.acquire(self._state_dir))
         self._decode_probe = decode_probe or production_decode_probe
         self._boot_dependencies = boot_dependencies or production_boot_dependencies()
         self._hard_exit = hard_exit
@@ -713,7 +713,9 @@ class WorkerRuntime:
         self, boot: BootContext
     ) -> tuple[SharedYoloExtractors, FallModelProtocol]:
         self._boot = boot
-        self.fault_handler = FaultHandler(boot.profile.name, hard_exit=self._hard_exit)
+        self.fault_handler = FaultHandler(
+            boot.profile.name, hard_exit=self._hard_exit, state_dir=self._state_dir
+        )
         self.watchdog = InferenceWatchdog(self.fault_handler, profile=boot.profile.name)
         self.shared_yolo = compose_yolo_extractors(self._serving, device=boot.device)
         self.fall_model = self._create_fall_model(boot.device)
@@ -891,7 +893,7 @@ class WorkerRuntime:
 
     def _default_event_sink(self, camera: CameraRuntimeConfig) -> EventSink:
         stager = DurableEvidenceStager(
-            database_path=_evidence_outbox_path(),
+            database_path=_evidence_outbox_path(self._state_dir),
             camera_id=camera.camera_id,
             facility_id=camera.facility_id,
             resident_id=camera.resident_id,
@@ -954,7 +956,7 @@ class WorkerRuntime:
                 relay_url=self.config.relay.url,
                 relay_token=self.config.relay.token.get_secret_value(),
                 probe_camera_id=self.config.cameras[0].camera_id,
-                database_path=_evidence_outbox_path(),
+                database_path=_evidence_outbox_path(self._state_dir),
             )
         except ValueError as exc:
             # ADR-0003: the env gate (ML_WORKER_EVENT_CLIP_EXPORT_ENABLED) is the
@@ -1117,7 +1119,9 @@ class WorkerRuntime:
         deciders = tuple(self._build_decider(name, camera, fall_model) for name in domain_names)
         domain_deciders = dict(zip(domain_names, deciders, strict=True))
         domain_audit = {name: self._build_domain_audit(name, fall_model) for name in domain_names}
-        incidents = IncidentManager(identity_path=event_identity_path(camera.camera_id))
+        incidents = IncidentManager(
+            identity_path=event_identity_path(camera.camera_id, self._state_dir)
+        )
         aggregator = EventAggregator(deciders=deciders, incidents=incidents)
         return aggregator, domain_audit, domain_deciders
 

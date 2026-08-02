@@ -163,11 +163,11 @@ def _camera_source() -> dict[str, object]:
 def _run_backfill(
     tmp_path: Path, *, camera_source: Path | None
 ) -> subprocess.CompletedProcess[str]:
-    env = {**os.environ, "PYTHONPATH": str(ROOT)}
-    if camera_source is None:
-        env.pop("API_CAMERA_STORE", None)
-    else:
-        env["API_CAMERA_STORE"] = str(camera_source)
+    # An explicit nonexistent path stands in for "absent" so the result does
+    # not depend on whether ~/.local/state/ml-api/cameras.json happens to
+    # exist on the host running the test (no env-var override exists to
+    # force absence anymore).
+    cameras = camera_source if camera_source is not None else tmp_path / "absent"
     return subprocess.run(
         [
             sys.executable,
@@ -176,9 +176,11 @@ def _run_backfill(
             str(tmp_path / "catalog.sqlite3"),
             "--clip-store",
             str(tmp_path / "clip-store"),
+            "--cameras",
+            str(cameras),
         ],
         cwd=ROOT,
-        env=env,
+        env={**os.environ, "PYTHONPATH": str(ROOT)},
         check=False,
         text=True,
         capture_output=True,
@@ -210,9 +212,11 @@ def test_catalog_backfill_and_verify_ignore_unknown_camera_fields(tmp_path) -> N
             str(tmp_path / "catalog.sqlite3"),
             "--clip-store",
             str(tmp_path / "clip-store"),
+            "--cameras",
+            str(camera_source),
         ],
         cwd=ROOT,
-        env={**os.environ, "PYTHONPATH": str(ROOT), "API_CAMERA_STORE": str(camera_source)},
+        env={**os.environ, "PYTHONPATH": str(ROOT)},
         check=False,
         text=True,
         capture_output=True,
@@ -237,9 +241,11 @@ def test_catalog_tools_report_absent_camera_source_without_failing_clip_verifica
             str(tmp_path / "catalog.sqlite3"),
             "--clip-store",
             str(tmp_path / "clip-store"),
+            "--cameras",
+            str(tmp_path / "absent"),
         ],
         cwd=ROOT,
-        env={**os.environ, "PYTHONPATH": str(ROOT), "API_CAMERA_STORE": str(tmp_path / "absent")},
+        env={**os.environ, "PYTHONPATH": str(ROOT)},
         check=False,
         text=True,
         capture_output=True,

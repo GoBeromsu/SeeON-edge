@@ -42,7 +42,7 @@ services:
       ML_DEFAULT_CAMERA_FPS: ${ML_DEFAULT_CAMERA_FPS:-}
     volumes:
       - ${ML_MODELS_DIR:-./models}:/app/models:ro
-      - ml-api-state:/var/lib/ml-api
+      - ml-api-state:/root/.local/state/ml-api
       # Evidence clips persist on the nursing-home host; worker writes, api reads.
       - ${CLIP_STORE_HOST_DIR:?edge requires host clip-store dir}:/var/lib/clip-store:ro
     command:
@@ -87,7 +87,6 @@ services:
       RELAY_URL: http://ml-api:8000
       RELAY_TOKEN: ${API_EDGE_RELAY_TOKEN:?edge worker requires relay token shared with ml-api}
       API_FACILITY_ID: ${API_FACILITY_ID:?edge worker requires the facility id to publish profile boot diagnostics}
-      ML_WORKER_STATE_DIR: /var/lib/ml-worker
       ML_WORKER_PROFILE: ${ML_WORKER_PROFILE:?set cuda|mps|cpu}
       ML_WORKER_DEV_MJPEG: ${ML_WORKER_DEV_MJPEG:-true}
       ML_WORKER_DEV_MJPEG_HOST: 0.0.0.0
@@ -101,7 +100,7 @@ services:
       NVIDIA_DRIVER_CAPABILITIES: compute,utility,video
     volumes:
       - ${ML_MODELS_DIR:-./models}:/app/models:ro
-      - ml-worker-state:/var/lib/ml-worker
+      - ml-worker-state:/root/.local/state/ml-worker
       # Evidence clips persist on the nursing-home host; worker writes, api reads.
       - ${CLIP_STORE_HOST_DIR:?edge requires host clip-store dir}:/var/lib/clip-store:rw
     # Optional offline-dev YAML bootstrap (see EDGE_CAMERA_CONFIG above); the

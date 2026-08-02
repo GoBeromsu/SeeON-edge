@@ -8,7 +8,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import ClassVar, Final, final
+from typing import ClassVar, final
 from uuid import uuid4
 
 from pydantic import (
@@ -22,9 +22,6 @@ from pydantic import (
 from pydantic_core import PydanticCustomError
 
 from contracts.event import EventPayload, MutableEventPayload
-
-ML_WORKER_STATE_DIR_ENV: Final = "ML_WORKER_STATE_DIR"
-DEFAULT_ML_WORKER_STATE_DIR: Final = "/var/lib/ml-worker"
 
 
 @dataclass(slots=True)
@@ -137,8 +134,7 @@ class EventIdentityStore:
             raise EventIdentityStoreError(path, str(exc)) from exc
 
 
-def event_identity_path(camera_id: str) -> Path:
-    state_dir = Path(os.environ.get(ML_WORKER_STATE_DIR_ENV, DEFAULT_ML_WORKER_STATE_DIR))
+def event_identity_path(camera_id: str, state_dir: Path) -> Path:
     camera_digest = hashlib.sha256(camera_id.encode("utf-8")).hexdigest()
     return state_dir / "event-identities" / f"{camera_digest}.jsonl"
 
@@ -169,8 +165,6 @@ def _rfc3339_z(value: datetime) -> str:
 
 
 __all__ = [
-    "DEFAULT_ML_WORKER_STATE_DIR",
-    "ML_WORKER_STATE_DIR_ENV",
     "EventIdentity",
     "EventIdentityStore",
     "EventIdentityStoreError",

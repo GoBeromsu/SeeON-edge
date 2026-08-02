@@ -20,8 +20,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from threading import Lock
 
-API_DASHBOARD_CREDENTIALS_STORE_ENV = "API_DASHBOARD_CREDENTIALS_STORE"
-DEFAULT_DASHBOARD_CREDENTIALS_STORE = "/var/lib/ml-api/dashboard_credentials.json"
+from backend.app.shared.state_dir import resolve_state_dir
 
 _ALGORITHM_SCRYPT = "scrypt"
 _SCRYPT_N = 2**14
@@ -74,11 +73,7 @@ class DashboardCredentialsStore:
 
     @classmethod
     def from_env(cls) -> DashboardCredentialsStore:
-        return cls(
-            os.environ.get(
-                API_DASHBOARD_CREDENTIALS_STORE_ENV, DEFAULT_DASHBOARD_CREDENTIALS_STORE
-            )
-        )
+        return cls(resolve_state_dir("ml-api") / "dashboard_credentials.json")
 
     def load(self) -> PersistedDashboardCredentials | None:
         with self._lock:
@@ -184,8 +179,6 @@ def _parse_persisted(raw: object) -> PersistedDashboardCredentials | None:
 
 
 __all__ = [
-    "API_DASHBOARD_CREDENTIALS_STORE_ENV",
-    "DEFAULT_DASHBOARD_CREDENTIALS_STORE",
     "DashboardCredentialsStore",
     "PersistedDashboardCredentials",
 ]

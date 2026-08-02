@@ -14,9 +14,8 @@ from pydantic import BaseModel, ConfigDict, JsonValue, ValidationError
 from contracts.worker_config import PulledWorkerConfig
 from worker.runtime.config.pull_models import BackendWorkerConfigPayload
 from worker.runtime.config.restart import RestartDirective
+from worker.runtime.state_dir import resolve_state_dir
 
-ML_WORKER_STATE_DIR_ENV: Final = "ML_WORKER_STATE_DIR"
-DEFAULT_STATE_DIR: Final = "/var/lib/ml-worker"
 WORKER_CONFIG_LKG_FILENAME: Final = "worker-config-last-known-good.json"
 PULLED_CONFIG_LKG_FILENAME: Final = "last-known-good.json"
 
@@ -41,8 +40,8 @@ class StoredConfigPayload:
 
 
 class WorkerConfigLkgStore:
-    def __init__(self, path: Path | None = None) -> None:
-        self.path: Path = worker_config_lkg_path() if path is None else path
+    def __init__(self, path: Path | None = None, *, state_dir: Path | None = None) -> None:
+        self.path: Path = worker_config_lkg_path(state_dir) if path is None else path
         self._lock: threading.Lock = threading.Lock()
 
     def save(self, payload: JsonObject, directive: RestartDirective) -> bool:
@@ -94,38 +93,38 @@ class WorkerConfigLkgStore:
 _pulled_lkg_lock = threading.Lock()
 
 
-def worker_config_lkg_path() -> Path:
-    return _state_dir() / WORKER_CONFIG_LKG_FILENAME
+def worker_config_lkg_path(state_dir: Path | None = None) -> Path:
+    return _state_dir(state_dir) / WORKER_CONFIG_LKG_FILENAME
 
 
-def lkg_path() -> Path:
-    return _state_dir() / PULLED_CONFIG_LKG_FILENAME
+def lkg_path(state_dir: Path | None = None) -> Path:
+    return _state_dir(state_dir) / PULLED_CONFIG_LKG_FILENAME
 
 
-def save_lkg(config: PulledWorkerConfig) -> None:
+def save_lkg(config: PulledWorkerConfig, *, state_dir: Path | None = None) -> None:
     with _pulled_lkg_lock:
         try:
             _atomic_write(
-                lkg_path(),
+                lkg_path(state_dir),
                 json.dumps(config.as_dict(), separators=(",", ":"), sort_keys=True),
             )
         except OSError:
             print("worker LKG save failed", file=sys.stderr)
 
 
-def load_lkg() -> PulledWorkerConfig | None:
+def load_lkg(*, state_dir: Path | None = None) -> PulledWorkerConfig | None:
     with _pulled_lkg_lock:
         try:
             return BackendWorkerConfigPayload.model_validate_json(
-                lkg_path().read_text(encoding="utf-8")
+                lkg_path(state_dir).read_text(encoding="utf-8")
             ).to_pulled_config()
         except (OSError, ValidationError):
             print("worker LKG load skipped", file=sys.stderr)
             return None
 
 
-def _state_dir() -> Path:
-    return Path(os.environ.get(ML_WORKER_STATE_DIR_ENV, DEFAULT_STATE_DIR))
+def _state_dir(state_dir: Path | None = None) -> Path:
+    return state_dir if state_dir is not None else resolve_state_dir()
 
 
 def _registry_version(payload: JsonObject) -> int:
@@ -164,8 +163,6 @@ def _fsync_directory(path: Path) -> None:
 
 
 __all__ = [
-    "DEFAULT_STATE_DIR",
-    "ML_WORKER_STATE_DIR_ENV",
     "PULLED_CONFIG_LKG_FILENAME",
     "WORKER_CONFIG_LKG_FILENAME",
     "JsonObject",

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import sys
 import urllib.request
@@ -24,6 +25,7 @@ from backend.app.shared.backend_mapping import (
     backend_status_from_env,
     mark_backend_status,
 )
+from backend.app.shared.state_dir import resolve_state_dir
 from contracts.worker_config import (
     PulledCameraConfig,
     PulledNightWindow,
@@ -51,10 +53,13 @@ API_BACKEND_CONFIG_REFRESH_SEC_ENV = "API_BACKEND_CONFIG_REFRESH_SEC"
 
 BACKEND_CONFIG_SHUTDOWN_WAIT_SEC = 1.0
 
+logger = logging.getLogger(__name__)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Boot ml-api as a thin backend gateway (ADR)."""
+    logger.info("ml-api state directory resolved to %s", resolve_state_dir("ml-api"))
     _load_config(app)
 
     if not isinstance(getattr(app.state, "heartbeat_store", None), HeartbeatStore):

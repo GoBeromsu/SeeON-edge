@@ -36,6 +36,7 @@ from worker.runtime.config import (
     resolve_config_path,
     resolve_startup_config,
 )
+from worker.runtime.state_dir import resolve_state_dir
 from worker.runtime.worker import WorkerRuntime
 
 LOGGER = logging.getLogger(__name__)
@@ -243,10 +244,11 @@ def main(argv: list[str] | None = None) -> int:
             # No network call and no LKG write -- `WorkerConfigLkgStore.load`
             # is read-only, so reporting whether a cache exists is safe, but
             # the live pull (and any `lkg_store.save`) is deferred to boot.
-            # `--check-config` must never mutate `ML_WORKER_STATE_DIR`
-            # (worker/runtime/AGENTS.md, "--check-config performs no model,
-            # camera, or relay side effect").
-            stored = WorkerConfigLkgStore().load()
+            # `--check-config` must never mutate the resolved worker state
+            # directory (`worker/runtime/state_dir.py`, `~/.local/state/ml-worker`,
+            # no env override) (worker/runtime/AGENTS.md, "--check-config
+            # performs no model, camera, or relay side effect").
+            stored = WorkerConfigLkgStore(state_dir=resolve_state_dir()).load()
             if stored is None:
                 LOGGER.info(
                     "config validation passed (static check): %s/%s set; no "
@@ -324,6 +326,7 @@ def main(argv: list[str] | None = None) -> int:
         serving_client=InProcessServingClient(),
         restart_check=restart_check,
         max_frames_per_camera=args.max_frames_per_camera,
+        state_dir=resolve_state_dir(),
     )
 
     def _handle_signal(signum: int, frame: FrameType | None) -> None:

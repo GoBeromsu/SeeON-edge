@@ -38,7 +38,6 @@ from edge_worker_fixtures import edge_config_payload
 
 import worker.__main__ as worker_main
 from worker.runtime.config import (
-    ML_WORKER_STATE_DIR_ENV,
     CameraRuntimeConfig,
     ConfigSnapshot,
     ConfigSource,
@@ -318,7 +317,7 @@ def test_check_config_no_yaml_reports_lkg_presence_read_only(
     """
     monkeypatch.setenv("RELAY_URL", "http://ml-api:8000")
     monkeypatch.setenv("RELAY_TOKEN", "relay-token")
-    monkeypatch.setenv(ML_WORKER_STATE_DIR_ENV, str(tmp_path))
+    monkeypatch.setattr(worker_main, "resolve_state_dir", lambda: tmp_path)
 
     with caplog.at_level(logging.INFO):
         exit_code = worker_main.main(["--check-config"])

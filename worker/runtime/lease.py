@@ -1,8 +1,10 @@
 """Repo-wide advisory GPU lease (todo 26).
 
-One non-blocking ``flock`` under ``ML_WORKER_STATE_DIR`` serializes GPU access
-across every process in this repository: the worker itself plus the smoke/replay
-commands.  Two workers sharing one GPU is the failure mode this removes — the
+One non-blocking ``flock`` under the resolved worker state directory
+(``worker/runtime/state_dir.py``, ``~/.local/state/ml-worker``, no env
+override) serializes GPU access across every process in this repository: the
+worker itself plus the smoke/replay commands.  Two workers sharing one GPU is
+the failure mode this removes — the
 second entrant loses the lease and exits *before* it touches CUDA, NVDEC, or
 constructs a model, rather than discovering the overlap as an out-of-memory or
 context-corruption fault later.
@@ -31,10 +33,7 @@ from typing import BinaryIO, Final, Self, final
 
 from typing_extensions import override
 
-from worker.runtime.faults.record import (
-    DEFAULT_ML_WORKER_STATE_DIR,
-    ML_WORKER_STATE_DIR_ENV,
-)
+from worker.runtime.state_dir import resolve_state_dir as _default_state_dir
 
 GPU_LEASE_FILENAME: Final = ".gpu.lease"
 
@@ -54,10 +53,10 @@ class GpuLeaseUnavailableError(RuntimeError):
 
 
 def resolve_state_dir(state_dir: Path | None = None) -> Path:
-    """Resolve the lease directory, honouring ``ML_WORKER_STATE_DIR``."""
+    """Resolve the lease directory, honouring an explicit override."""
     if state_dir is not None:
         return state_dir
-    return Path(os.environ.get(ML_WORKER_STATE_DIR_ENV, DEFAULT_ML_WORKER_STATE_DIR))
+    return _default_state_dir()
 
 
 @final

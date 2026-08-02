@@ -12,8 +12,7 @@ from threading import Lock
 from typing import Literal
 from urllib.parse import parse_qsl, urlsplit, urlunsplit
 
-API_CAMERA_STORE_ENV = "API_CAMERA_STORE"
-DEFAULT_CAMERA_STORE = "/var/lib/ml-api/cameras.json"
+from backend.app.shared.state_dir import resolve_state_dir
 
 CameraStatus = Literal["online", "offline", "starting", "unknown"]
 ProbeErrorClass = Literal["timeout", "decode", "auth"]
@@ -43,7 +42,7 @@ class CameraRegistryStore:
 
     @classmethod
     def from_env(cls) -> CameraRegistryStore:
-        return cls(os.environ.get(API_CAMERA_STORE_ENV, DEFAULT_CAMERA_STORE))
+        return cls(resolve_state_dir("ml-api") / "cameras.json")
 
     def snapshot(self) -> dict[str, object]:
         with self._lock:
@@ -293,8 +292,6 @@ def utc_now_iso() -> str:
 
 
 __all__ = [
-    "API_CAMERA_STORE_ENV",
-    "DEFAULT_CAMERA_STORE",
     "CameraRegistryStore",
     "CameraStatus",
     "DuplicateCameraError",

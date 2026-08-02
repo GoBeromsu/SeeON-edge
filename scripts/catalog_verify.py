@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import os
 import re
 import stat
 from collections import Counter
@@ -14,13 +13,7 @@ from pathlib import Path
 from typing import Any
 from uuid import UUID
 
-from backend.app.features.cameras.store import (
-    API_CAMERA_STORE_ENV,
-    DEFAULT_CAMERA_STORE,
-)
 from backend.app.features.clips.catalog import (
-    API_CATALOG_STORE_ENV,
-    DEFAULT_CATALOG_STORE,
     CatalogRecord,
     CatalogStore,
     sanitized_camera_payload,
@@ -28,18 +21,19 @@ from backend.app.features.clips.catalog import (
     strict_manifest_records,
 )
 from backend.app.features.clips.store import ClipStore
+from backend.app.shared.state_dir import resolve_state_dir
 
 parser = argparse.ArgumentParser()
 parser.add_argument(
     "--catalog",
     type=Path,
-    default=Path(os.environ.get(API_CATALOG_STORE_ENV, DEFAULT_CATALOG_STORE)),
+    default=resolve_state_dir("ml-api") / "catalog.sqlite3",
 )
 parser.add_argument("--clip-store", type=Path, required=True)
 parser.add_argument(
     "--cameras",
     type=Path,
-    default=Path(os.environ.get(API_CAMERA_STORE_ENV, DEFAULT_CAMERA_STORE)),
+    default=resolve_state_dir("ml-api") / "cameras.json",
 )
 args = parser.parse_args()
 

@@ -173,7 +173,7 @@ def test_edge_api_persists_runtime_camera_registry_state() -> None:
         Loader=ComposeLoader,
     )
 
-    assert "ml-api-state:/var/lib/ml-api" in api_volumes
+    assert "ml-api-state:/root/.local/state/ml-api" in api_volumes
     assert "ml-api-state" in compose.get("volumes", {})
 
 
