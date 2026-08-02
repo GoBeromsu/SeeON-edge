@@ -160,6 +160,9 @@ _SYNTHETIC_RTSP_FIXTURES = {
         "rtsp://user:camera-pass@camera/live",
         "rtsp://user:leaked-camera-password@camera/live",
     },
+    Path("tests/test_worker_config_local_overrides.py"): {
+        "rtsp://user:camera-pass@camera/live",
+    },
     Path("tests/test_worker_ingest_lifecycle.py"): {
         "rtsp://operator:s3cr3t@example.test/live?token=plain",
     },
