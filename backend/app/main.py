@@ -15,6 +15,7 @@ from backend.app.features.auth.router import router as auth_router
 from backend.app.features.cameras.router import router as cameras_router
 from backend.app.features.cameras.streams_router import router as streams_router
 from backend.app.features.clips.router import router as clips_router
+from backend.app.features.connection.router import router as connection_router
 from backend.app.features.evidence.router import router as evidence_router
 from backend.app.features.relay.router import router as relay_router
 from backend.app.features.status.router import router as status_router
@@ -45,6 +46,7 @@ def create_app(*, lifespan: LifespanFactory | None = serving_lifespan) -> FastAP
     api_router.include_router(relay_router)
     api_router.include_router(evidence_router)
     api_router.include_router(cameras_router)
+    api_router.include_router(connection_router)
     api_router.include_router(clips_router)
     api_router.include_router(streams_router)
     api_router.include_router(system_router)

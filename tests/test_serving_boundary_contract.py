@@ -29,6 +29,8 @@ ALLOWED_PATHS: Final = {
     "/api/v1/cameras/{camera_id}",
     "/api/v1/cameras/{camera_id}/test",
     "/api/v1/clips",
+    "/api/v1/connection",
+    "/api/v1/connection/test",
     "/api/v1/clips/{clip_id}/label",
     "/api/v1/clips/{clip_id}/video",
     "/api/v1/status",
