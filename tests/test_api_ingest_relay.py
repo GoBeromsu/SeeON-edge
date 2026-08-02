@@ -313,7 +313,7 @@ def test_relay_accepts_canonical_camera_id_from_registry_when_inventory_missing(
     fake = FakeBackendIngestClient()
     app = create_app(lifespan=no_lifespan)
     app.state.edge_relay_token = "relay-token"
-    store = CameraRegistryStore(tmp_path / "cameras.json")
+    store = CameraRegistryStore(tmp_path / "catalog.sqlite3")
     store.create(
         camera_id="provisional-camera",
         label="Lobby",
@@ -340,7 +340,7 @@ def test_relay_accepts_canonical_camera_id_from_registry_when_inventory_missing(
 def _registry_app(fake: FakeBackendIngestClient, tmp_path, *, backend_camera_id: str | None):
     app = create_app(lifespan=no_lifespan)
     app.state.edge_relay_token = "relay-token"
-    store = CameraRegistryStore(tmp_path / "cameras.json")
+    store = CameraRegistryStore(tmp_path / "catalog.sqlite3")
     store.create(
         camera_id="local-uuid-1",
         label="Lobby",
@@ -606,7 +606,7 @@ class ReceiptBackendIngestClient(FakeBackendIngestClient):
 def _receipt_client(fake: ReceiptBackendIngestClient, tmp_path) -> TestClient:
     client = _client(fake)
     client.app.state.runtime_status_store = RuntimeStatusStore(
-        latency_state_path=tmp_path / "runtime-latency.json"
+        latency_state_path=tmp_path / "catalog.sqlite3"
     )
     return client
 

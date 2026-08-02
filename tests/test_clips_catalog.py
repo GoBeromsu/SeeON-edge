@@ -9,12 +9,25 @@ from pathlib import Path
 import pytest
 from fastapi import FastAPI
 
+from backend.app.features.cameras.store import (
+    _CREATE_CAMERA_REGISTRY_TABLE,
+    CameraRegistryStore,
+)
 from backend.app.features.clips.catalog import (
+    _V3_TABLE_STATEMENTS,
     CatalogConflictError,
     CatalogStore,
     get_catalog_store,
 )
 from backend.app.features.clips.store import ClipStore, LabelRecord, LabelStore
+from backend.app.features.status.runtime_status_store import (
+    _CREATE_RUNTIME_LATENCY_TABLE,
+    RuntimeStatusStore,
+)
+from backend.app.shared.dashboard_credentials import (
+    _CREATE_CREDENTIALS_TABLE,
+    DashboardCredentialsStore,
+)
 
 _EVENT_ID = "11111111-1111-4111-8111-111111111111"
 
@@ -390,14 +403,22 @@ def test_camera_backfill_projects_only_allowed_scalar_fields_and_excludes_secret
         for database_path in (path, path.with_name(f"{path.name}-wal")):
             assert database_path.exists()
             encoded = database_path.read_bytes()
+            # Checked as VALUES, not generic key-name substrings: since issue
+            # #35's SQLite consolidation, the shared catalog.sqlite3 file
+            # legitimately has schema-level `username`/`password_hash`
+            # columns (the unrelated `credentials` table), so bare "user" or
+            # "password" now appear in every fresh database's own DDL text
+            # regardless of any camera secret leak. `rtsp_url` and `secret`
+            # aren't used as column/table names anywhere, so those two key
+            # names are still meaningful literal checks.
             for secret in (
                 b"rtsp_url",
-                b"username",
-                b"password",
-                b"user",
                 b"secret",
                 b"NESTED-SECRET-42",
                 b"DEEP-PASSWORD",
+                b"operator",
+                b"fixture-password",
+                b"synthetic-token",
             ):
                 assert secret not in encoded
     finally:
@@ -508,3 +529,238 @@ def test_catalog_backfill_rejects_symlinked_clips_root(tmp_path: Path) -> None:
             store.backfill(ClipStore(root))
     finally:
         store.close()
+
+
+def test_catalog_migration_from_v1_adds_v3_tables_and_promotes_columns(tmp_path) -> None:
+    """Schema-version-3 migration (PR E, issue #35): a database still at
+    version 1 (pre-column-promotion -- only ``key``/``payload_json`` columns,
+    matching ``test_catalog_migrates_legacy_payload_schema_losslessly_and_idempotently``'s
+    shape) must land at ``user_version == 3`` with BOTH the column-promotion
+    ALTERs applied AND the three new v3 tables present. The single-dispatch
+    ``_migrate`` only ever runs the branch matching the *found* version once,
+    so a v1-origin database would silently skip the v3 tables unless the
+    ``elif version == 1:`` branch also executes ``_V3_TABLE_STATEMENTS``."""
+    path = tmp_path / "legacy-v1.sqlite3"
+    camera_payload = {
+        "camera_id": "cam-1",
+        "label": "Lobby",
+        "decode_backend": "software",
+    }
+    connection = sqlite3.connect(path)
+    connection.execute(
+        "CREATE TABLE clips (clip_id TEXT PRIMARY KEY, payload_json TEXT NOT NULL) STRICT"
+    )
+    for table, key in (
+        ("snapshots", "snapshot_id"),
+        ("events", "edge_event_id"),
+        ("labels", "clip_id"),
+        ("audit", "audit_id"),
+        ("cameras", "camera_id"),
+    ):
+        connection.execute(
+            f"CREATE TABLE {table} ({key} TEXT PRIMARY KEY, payload_json TEXT NOT NULL) STRICT"
+        )
+    connection.execute(
+        "INSERT INTO cameras VALUES (?, ?)",
+        ("cam-1", json.dumps(camera_payload, sort_keys=True, separators=(",", ":"))),
+    )
+    connection.execute("PRAGMA user_version = 1")
+    connection.commit()
+    connection.close()
+
+    store = CatalogStore.open(path)
+    try:
+        version = store._connection.execute("PRAGMA user_version").fetchone()[0]
+        assert version == 3
+
+        # (b) the version==1 column-promotion ALTERs ran: the real columns
+        # (not just payload_json) are populated.
+        row = store._connection.execute(
+            "SELECT camera_id, label, decode_backend, payload_json FROM cameras"
+        ).fetchone()
+        assert row[:-1] == ("cam-1", "Lobby", "software")
+        assert json.loads(row[-1]) == camera_payload
+
+        # (c) all three new v3 tables exist and are empty.
+        tables = {
+            row[0]
+            for row in store._connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ).fetchall()
+        }
+        assert {"credentials", "camera_registry", "runtime_latency"} <= tables
+        for table in ("credentials", "camera_registry", "runtime_latency"):
+            count = store._connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+            assert count == 0, f"expected {table} to start empty, found {count} row(s)"
+
+        # (d) legacy data untouched (beyond the expected column promotion).
+        assert store.records("cameras") == [camera_payload]
+    finally:
+        store.close()
+
+    # Idempotent: reopening an already-migrated database is a no-op.
+    reopened = CatalogStore.open(path)
+    reopened.close()
+
+
+def test_catalog_migration_from_v2_adds_v3_tables_without_touching_legacy_cameras_table(
+    tmp_path,
+) -> None:
+    """Schema-version-3 migration (PR E, issue #35): a database already at
+    version 2 (the pre-existing 6-table schema) must gain the three new
+    ``credentials``/``camera_registry``/``runtime_latency`` tables on open,
+    while its existing data -- including the pre-existing ``cameras`` cache
+    table, a completely distinct table from the new ``camera_registry`` --
+    is left untouched."""
+    path = tmp_path / "legacy-v2.sqlite3"
+    camera_payload = {
+        "camera_id": "cam-1",
+        "label": "Lobby",
+        "decode_backend": "software",
+    }
+    connection = sqlite3.connect(path)
+    connection.execute(
+        "CREATE TABLE clips (clip_id TEXT PRIMARY KEY, camera_id TEXT, event_type TEXT, "
+        "state TEXT, started_at TEXT, path TEXT, sha256 TEXT, size_bytes INTEGER, "
+        "mime_type TEXT, encoder TEXT, payload_json TEXT NOT NULL) STRICT"
+    )
+    connection.execute(
+        "CREATE TABLE snapshots (snapshot_id TEXT PRIMARY KEY, camera_id TEXT, "
+        "edge_event_id TEXT, captured_at TEXT, path TEXT, sha256 TEXT, "
+        "size_bytes INTEGER, mime_type TEXT, payload_json TEXT NOT NULL) STRICT"
+    )
+    connection.execute(
+        "CREATE TABLE events (edge_event_id TEXT PRIMARY KEY, camera_id TEXT, "
+        "event_type TEXT, detected_at TEXT, clip_id TEXT, payload_json TEXT NOT NULL) STRICT"
+    )
+    connection.execute(
+        "CREATE TABLE labels (clip_id TEXT PRIMARY KEY, label TEXT, reviewer TEXT, "
+        "reviewed_at TEXT, payload_json TEXT NOT NULL) STRICT"
+    )
+    connection.execute(
+        "CREATE TABLE cameras (camera_id TEXT PRIMARY KEY, label TEXT, "
+        "decode_backend TEXT, payload_json TEXT NOT NULL) STRICT"
+    )
+    connection.execute(
+        "CREATE TABLE audit (audit_id TEXT PRIMARY KEY, occurred_at TEXT, action TEXT, "
+        "payload_json TEXT NOT NULL) STRICT"
+    )
+    connection.execute(
+        "INSERT INTO cameras (camera_id, label, decode_backend, payload_json) VALUES (?, ?, ?, ?)",
+        (
+            "cam-1",
+            "Lobby",
+            "software",
+            json.dumps(camera_payload, sort_keys=True, separators=(",", ":")),
+        ),
+    )
+    connection.execute("PRAGMA user_version = 2")
+    connection.commit()
+    connection.close()
+
+    store = CatalogStore.open(path)
+    try:
+        version = store._connection.execute("PRAGMA user_version").fetchone()[0]
+        assert version == 3
+
+        tables = {
+            row[0]
+            for row in store._connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ).fetchall()
+        }
+        assert {"credentials", "camera_registry", "runtime_latency"} <= tables
+
+        for table in ("credentials", "camera_registry", "runtime_latency"):
+            count = store._connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+            assert count == 0, f"expected {table} to start empty, found {count} row(s)"
+
+        # The pre-existing `cameras` cache table (distinct from the new
+        # `camera_registry` table) survives the migration untouched.
+        assert store.records("cameras") == [camera_payload]
+    finally:
+        store.close()
+
+    # Idempotent: reopening an already-migrated database is a no-op.
+    reopened = CatalogStore.open(path)
+    reopened.close()
+
+
+def test_camera_registry_credentials_and_latency_stores_coexist_in_one_catalog_db(
+    tmp_path,
+) -> None:
+    """The three PR E stores (``CameraRegistryStore``, ``DashboardCredentialsStore``,
+    ``RuntimeStatusStore``) each independently bootstrap their own table in
+    the shared ``catalog.sqlite3`` file, without conflicting with each other
+    or with ``CatalogStore``'s own tables -- including the pre-existing
+    ``cameras`` cache table, which is a distinct table from the new
+    ``camera_registry`` table despite the similar name."""
+    path = tmp_path / "catalog.sqlite3"
+
+    camera_store = CameraRegistryStore(path)
+    camera_store.create(
+        camera_id="cam-1",
+        label="Lobby",
+        rtsp_url="rtsp://camera/live",
+        space_id=None,
+        status="online",
+    )
+
+    credentials_store = DashboardCredentialsStore(path)
+    credentials_store.save(username="admin", password="admin")
+
+    latency_store = RuntimeStatusStore(latency_state_path=path)
+    latency_store.record_latency("facility-1", "1970-01-01T00:00:00Z", received_at=10.0)
+
+    catalog_store = CatalogStore.open(path)
+    try:
+        # CatalogStore.backfill() reads from CameraRegistryStore.snapshot()
+        # and writes into the *separate* `cameras` cache table -- proving the
+        # two identically-domained but distinct tables don't collide.
+        catalog_store.backfill(ClipStore(tmp_path / "empty"), camera_registry=camera_store)
+        cached_cameras = catalog_store.records("cameras")
+        assert [record["id"] for record in cached_cameras] == ["cam-1"]
+
+        tables = {
+            row[0]
+            for row in catalog_store._connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ).fetchall()
+        }
+        assert {"cameras", "camera_registry", "credentials", "runtime_latency"} <= tables
+    finally:
+        catalog_store.close()
+
+    # Each store's own data survives round-tripping through the shared file
+    # alongside the others, confirmed via fresh store instances.
+    reloaded_camera_store = CameraRegistryStore(path)
+    reloaded_snapshot = reloaded_camera_store.snapshot()
+    assert reloaded_snapshot["registry_version"] == 1
+    assert [record["id"] for record in reloaded_snapshot["cameras"]] == ["cam-1"]
+
+    reloaded_credentials_store = DashboardCredentialsStore(path)
+    reloaded_credentials = reloaded_credentials_store.load()
+    assert reloaded_credentials is not None
+    assert reloaded_credentials.username == "admin"
+    assert reloaded_credentials.verify_password("admin")
+
+    reloaded_latency_store = RuntimeStatusStore(latency_state_path=path)
+    latency = reloaded_latency_store._latency_for_facility("facility-1")
+    assert latency is not None
+    assert latency["first_attempt_samples"] == 1
+
+
+def test_v3_table_ddl_is_identical_across_catalog_and_the_three_owning_stores() -> None:
+    """``DashboardCredentialsStore``, ``CameraRegistryStore``, and
+    ``RuntimeStatusStore`` each independently bootstrap their own table with
+    DDL text that must stay byte-identical to catalog.py's
+    ``_V3_TABLE_STATEMENTS`` (see the coexistence test above and each
+    module's docstring) -- nothing else pins that today. If any of the four
+    constants drifts, this pins it with a clear diff instead of a silent
+    runtime mismatch between what CatalogStore's migration creates and what
+    an owning store's own idempotent bootstrap creates."""
+    assert _V3_TABLE_STATEMENTS == (
+        _CREATE_CREDENTIALS_TABLE,
+        _CREATE_CAMERA_REGISTRY_TABLE,
+        _CREATE_RUNTIME_LATENCY_TABLE,
+    )
