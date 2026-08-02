@@ -4,10 +4,9 @@ One non-blocking ``flock`` under the resolved worker state directory
 (``worker/runtime/state_dir.py``, ``~/.local/state/ml-worker``, no env
 override) serializes GPU access across every process in this repository: the
 worker itself plus the smoke/replay commands.  Two workers sharing one GPU is
-the failure mode this removes — the
-second entrant loses the lease and exits *before* it touches CUDA, NVDEC, or
-constructs a model, rather than discovering the overlap as an out-of-memory or
-context-corruption fault later.
+the failure mode this removes — the second entrant loses the lease and exits
+*before* it touches CUDA, NVDEC, or constructs a model, rather than discovering
+the overlap as an out-of-memory or context-corruption fault later.
 
 The lease is *advisory*, in the POSIX ``flock`` sense: it binds cooperating
 processes in this repository and is released automatically when a holder dies.
