@@ -1,5 +1,6 @@
 from worker.adapters.model.fall_family_registry import (
     DEFAULT_FALL_MODEL_FAMILY_REGISTRY,
+    FallModelConfigLike,
     FallModelFactory,
     FallModelFamilyRegistry,
     UnknownFallModelTypeError,
@@ -52,6 +53,7 @@ __all__ = [
     "CURRENT_PREPROCESSING_IDENTITY",
     "CURRENT_SCHEMA_VERSION",
     "FallDetector",
+    "FallModelConfigLike",
     "FallModelFactory",
     "FallModelFamilyRegistry",
     "InProcessServingClient",

@@ -10,29 +10,90 @@ both.
 
 This registry is the one-time dispatch mechanism: every family after "lstm"
 is additive -- implement ``FallModelProtocol``
-(``worker/domains/fall/classifier.py``), write a factory function taking the
-validated ``FallModelConfig`` and a device string, and ``register()`` it under
-the family's ``type`` name. ``_create_fall_model`` never grows a new branch.
+(``worker/domains/fall/classifier.py``), write a factory function taking a
+``FallModelConfigLike`` and a device string, and ``register()`` it under the
+family's ``type`` name. ``_create_fall_model`` never grows a new branch.
 
 Fail-closed per ADR-0002 (same principle as #43's None-config refusal, which
 this registry does not touch): an unregistered ``type`` value raises
 ``UnknownFallModelTypeError`` with the offending value and every known family
 name, rather than silently falling back to "lstm" or any other default.
+
+``worker/adapters`` may not import ``worker/runtime`` (runtime is the sole
+composition root; see the import-linter contracts in ``pyproject.toml``), so
+this module cannot import the real, validated
+``worker.runtime.config.worker_models.FallModelConfig``. It instead declares
+``FallModelConfigLike``, a structural mirror of that pydantic model's public
+fields -- the same "adapters define their own Protocol instead of importing
+the higher layer's type" convention already used by
+``worker/adapters/model/registry.py``'s ``FallModel``/``FallModelMetadata``.
+``FallModelConfig`` satisfies it structurally with no inheritance or import
+needed; ``worker.runtime.worker`` (the composition root) passes a real
+instance straight through.
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Final, TypeAlias
+from pathlib import Path
+from typing import Final, Protocol, TypeAlias
 
 from typing_extensions import override
 
 from worker.adapters.model.registry import FallModel
 from worker.adapters.model.torch_lstm_fall import LstmFallRunner
-from worker.runtime.config.worker_models import FallModelConfig
 
-FallModelFactory: TypeAlias = Callable[[FallModelConfig, str], FallModel]
+
+class FallModelConfigLike(Protocol):
+    """Structural mirror of ``worker.runtime.config.worker_models.FallModelConfig``.
+
+    Every field a fall-model factory may need to read, named identically to
+    the real pydantic model. See the module docstring for why this Protocol
+    exists instead of an import.
+    """
+
+    @property
+    def type(self) -> str: ...
+
+    @property
+    def framework(self) -> str: ...
+
+    @property
+    def mode(self) -> str: ...
+
+    @property
+    def artifact_dir(self) -> Path: ...
+
+    @property
+    def weights(self) -> str: ...
+
+    @property
+    def architecture(self) -> str: ...
+
+    @property
+    def metadata(self) -> str: ...
+
+    @property
+    def window(self) -> int: ...
+
+    @property
+    def stride(self) -> int: ...
+
+    @property
+    def input_shape(self) -> tuple[int, int]: ...
+
+    @property
+    def operating_threshold(self) -> float: ...
+
+    @property
+    def schema_version(self) -> int | None: ...
+
+    @property
+    def preprocessing_identity(self) -> str | None: ...
+
+
+FallModelFactory: TypeAlias = Callable[[FallModelConfigLike, str], FallModel]
 
 
 @dataclass(slots=True)
@@ -62,7 +123,7 @@ class FallModelFamilyRegistry:
             raise ValueError("model_type must be non-empty")
         self._factories[model_type] = factory
 
-    def create(self, model_type: str, config: FallModelConfig, device: str) -> FallModel:
+    def create(self, model_type: str, config: FallModelConfigLike, device: str) -> FallModel:
         return self.get_factory(model_type)(config, device)
 
     def get_factory(self, model_type: str) -> FallModelFactory:
@@ -75,7 +136,7 @@ class FallModelFamilyRegistry:
         return tuple(sorted(self._factories))
 
 
-def _create_lstm_fall_model(config: FallModelConfig, device: str) -> FallModel:
+def _create_lstm_fall_model(config: FallModelConfigLike, device: str) -> FallModel:
     return LstmFallRunner.from_artifact_dir(
         config.artifact_dir,
         device=device,
@@ -95,6 +156,7 @@ DEFAULT_FALL_MODEL_FAMILY_REGISTRY: Final = default_fall_model_family_registry()
 
 __all__ = [
     "DEFAULT_FALL_MODEL_FAMILY_REGISTRY",
+    "FallModelConfigLike",
     "FallModelFactory",
     "FallModelFamilyRegistry",
     "UnknownFallModelTypeError",
