@@ -106,6 +106,7 @@ also a pre-commit hook and CI step); contract-symbol exports by `tests/test_cont
 - No committed local model artifacts or training code.
 - No expensive tests in CI: real-stack E2E (external binaries like mediamtx, live RTSP, GPU) must be marked (`real_stack`) and deselected from `ci.yml`; they run locally only. CI stays fast, deterministic, and free of external binary fetches.
 - No pre-provisioned camera rosters: cameras are registered at runtime through the edge camera registry (dashboard CRUD, the SSOT). Do not seed or accept cameras from the backend ml-config `cameras` pull, env vars, or static YAML lists — that inbound path is legacy; do not extend it.
+- 기사님한테 회사 숙제 시키기: 패키징(배포) 때 회사가 이미 아는 값(예: 백엔드 주소)을 현장 입력폼에 올려 기사님이 타이핑하게 만드는 것. 판별법: "이 값은 누가·언제 아는 값인가?" 처방: 회사가 배포 때 아는 값은 env/이미지에 굽고, 요양원 현장에서만 정해지는 값(시설 ID·토큰)만 UI 폼에 남긴다. 사례: 연결 설정 폼이 env 변수 4개(이벤트 URL/설정 URL/시설 ID/토큰)를 텍스트박스로 옮겨 놓았던 것 → 주소는 API_BACKEND_BASE_URL로 굽고 폼은 2칸으로 축소.
 
 ## NOTES
 

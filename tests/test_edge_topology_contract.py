@@ -316,12 +316,20 @@ def test_repo_does_not_own_rtsp_generation_surface() -> None:
 # ``tests/test_serving_boundary_contract.py``.
 
 
-def test_edge_compose_keeps_backend_event_url_on_api_only() -> None:
+def test_edge_compose_keeps_backend_url_on_api_only() -> None:
+    """The external-backend URL env belongs to ml-api only; the worker never gets one.
+
+    ml-api derives its Event API / ml-config URLs from a single packaging-time
+    base var (API_BACKEND_BASE_URL). The old field-specific names
+    (API_BACKEND_EVENTS_URL / API_BACKEND_CONFIG_URL) remain valid overrides
+    on ml-api but must stay excluded from the worker too, so a future revert
+    to the old scheme can't accidentally leak a backend URL onto the worker.
+    """
     services = _compose_services(EDGE_COMPOSE_FILE)
     api_env = _mapping_field(services["ml-api"], "environment")
     worker_env = _mapping_field(services["ml-worker"], "environment")
 
-    assert "API_BACKEND_EVENTS_URL" in api_env
+    assert "API_BACKEND_BASE_URL" in api_env
     assert "API_BACKEND_" + "ALERT_URL" not in api_env
     assert "API_BACKEND_" + "HEARTBEAT_URL" not in api_env
     assert "API_" + "INGEST_" + "KEY_ID" not in api_env
@@ -335,6 +343,8 @@ def test_edge_compose_keeps_backend_event_url_on_api_only() -> None:
     assert worker_env["RELAY_URL"] == "http://ml-api:8000"
     assert "RELAY_TOKEN" in worker_env
     assert "API_BACKEND_EVENTS_URL" not in worker_env
+    assert "API_BACKEND_BASE_URL" not in worker_env
+    assert "API_BACKEND_CONFIG_URL" not in worker_env
     assert "API_" + "INGEST_" + "KEY_ID" not in worker_env
     assert "API_" + "INGEST_" + "SECRET" not in worker_env
 

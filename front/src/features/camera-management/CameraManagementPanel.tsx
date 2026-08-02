@@ -21,6 +21,9 @@ export function CameraManagementPanel({
   lastSuccessAt,
   refreshing,
   onAddCamera,
+  onSyncCameras,
+  syncBusy = false,
+  syncMessage = null,
   onUpdateStarted,
   onUpdated,
   onDelete,
@@ -34,6 +37,9 @@ export function CameraManagementPanel({
   lastSuccessAt: number | null;
   refreshing: boolean;
   onAddCamera: () => void;
+  onSyncCameras?: () => void;
+  syncBusy?: boolean;
+  syncMessage?: string | null;
   onUpdateStarted: (camera: Camera) => number;
   onUpdated: (camera: Camera, previousCameraId?: string, startedAtGeneration?: number) => void;
   onDelete: (camera: Camera) => void;
@@ -50,14 +56,27 @@ export function CameraManagementPanel({
           <p className="text-sm font-black text-brand">카메라 연결 설정</p>
           <h2 className="text-2xl font-black text-ink">카메라 관리</h2>
         </div>
-        <button
-          type="button"
-          onClick={onAddCamera}
-          className="brand-action rounded-lg px-5 py-3 text-sm font-black"
-        >
-          + 카메라 추가
-        </button>
+        <div className="flex flex-wrap gap-2">
+          {onSyncCameras ? (
+            <button
+              type="button"
+              onClick={onSyncCameras}
+              disabled={syncBusy}
+              className="rounded-lg border border-border bg-surface px-5 py-3 text-sm font-black text-ink-soft disabled:opacity-60"
+            >
+              {syncBusy ? '동기화 중...' : '카메라 동기화'}
+            </button>
+          ) : null}
+          <button
+            type="button"
+            onClick={onAddCamera}
+            className="brand-action rounded-lg px-5 py-3 text-sm font-black"
+          >
+            + 카메라 추가
+          </button>
+        </div>
       </div>
+      {syncMessage ? <p className="mb-4 text-sm font-bold text-brand" role="status">{syncMessage}</p> : null}
       <p className="mb-4 text-xs font-bold text-ink-faint">등록 버전 {registry.registry_version}</p>
       {cameraError ? (
         <div className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-2xl bg-status-dangerBg px-4 py-3 text-sm font-bold text-status-danger" role="alert">

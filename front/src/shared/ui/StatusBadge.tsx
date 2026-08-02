@@ -1,4 +1,4 @@
-import type { CameraStatus, SystemSnapshot } from '@/shared/api/client';
+import type { CameraStatus, CameraSyncStatus, ConnectionView, SystemSnapshot } from '@/shared/api/client';
 
 const cameraStatusMeta: Record<CameraStatus, { label: string; className: string }> = {
   online: {
@@ -38,29 +38,22 @@ export function StatusBadge({ status }: StatusBadgeProps): JSX.Element {
   );
 }
 
-export function getBackendStatus(system: SystemSnapshot | null): { label: string; className: string } {
-  if (!system) {
-    return {
-      label: '백엔드 확인 중',
-      className: 'bg-surface2 text-ink-soft ring-border',
-    };
-  }
-
-  if (!system.backend.configured) {
+function backendStatusMeta(configured: boolean, reachable: boolean | null): { label: string; className: string } {
+  if (!configured) {
     return {
       label: '백엔드 미설정',
       className: 'bg-status-cautionBg text-status-caution ring-status-caution',
     };
   }
 
-  if (system.backend.reachable === true) {
+  if (reachable === true) {
     return {
       label: '백엔드 연결됨',
       className: 'bg-status-stableBg text-status-stable ring-status-stable',
     };
   }
 
-  if (system.backend.reachable === false) {
+  if (reachable === false) {
     return {
       label: '백엔드 연결 실패',
       className: 'bg-status-dangerBg text-status-danger ring-status-danger',
@@ -71,4 +64,50 @@ export function getBackendStatus(system: SystemSnapshot | null): { label: string
     label: '백엔드 대기 중',
     className: 'bg-surface2 text-ink-soft ring-border',
   };
+}
+
+export function getBackendStatus(system: SystemSnapshot | null): { label: string; className: string } {
+  if (!system) {
+    return {
+      label: '백엔드 확인 중',
+      className: 'bg-surface2 text-ink-soft ring-border',
+    };
+  }
+
+  return backendStatusMeta(system.backend.configured, system.backend.reachable);
+}
+
+/** Same {configured, reachable} contract as getBackendStatus, sourced from the connection resource instead of /system. */
+export function getConnectionStatus(connection: ConnectionView | null): { label: string; className: string } {
+  if (!connection) {
+    return {
+      label: '백엔드 확인 중',
+      className: 'bg-surface2 text-ink-soft ring-border',
+    };
+  }
+
+  return backendStatusMeta(connection.configured, connection.reachable);
+}
+
+const cameraSyncMeta: Record<CameraSyncStatus, { label: string; className: string }> = {
+  synced: {
+    label: '동기화됨',
+    className: 'bg-status-stableBg text-status-stable ring-status-stable',
+  },
+  pending: {
+    label: '동기화 대기',
+    className: 'bg-status-cautionBg text-status-caution ring-status-caution',
+  },
+  failed: {
+    label: '동기화 실패',
+    className: 'bg-status-dangerBg text-status-danger ring-status-danger',
+  },
+  disabled: {
+    label: '동기화 비활성',
+    className: 'bg-surface2 text-ink-soft ring-border',
+  },
+};
+
+export function getCameraSyncMeta(status: CameraSyncStatus): { label: string; className: string } {
+  return cameraSyncMeta[status];
 }

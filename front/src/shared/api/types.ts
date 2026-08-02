@@ -31,6 +31,18 @@ export type Camera = {
   last_heartbeat_at?: number | null;
   /** Seconds since the last edge heartbeat, or null. Same GET-only availability as last_heartbeat_at. */
   heartbeat_age_sec?: number | null;
+  /** Per-camera external-backend roster sync state. Only populated by `GET /cameras`. */
+  sync?: CameraSync | null;
+};
+
+export type CameraSyncStatus = 'synced' | 'pending' | 'failed' | 'disabled';
+export type CameraSyncErrorClass = 'unreachable' | 'timeout' | 'auth' | 'unconfigured';
+
+export type CameraSync = {
+  status: CameraSyncStatus;
+  error_class: CameraSyncErrorClass | null;
+  detail: string | null;
+  last_ok_at: string | null;
 };
 
 export type CameraRegistry = {
@@ -175,4 +187,60 @@ export type Clip = {
   video_path: string;
   video_available: boolean;
   video_error: string | null;
+};
+
+export type HeartbeatRelayErrorClass = 'auth' | 'timeout' | 'unreachable';
+
+export type HeartbeatRelayStatus = {
+  enabled: boolean;
+  last_success_at: string | null;
+  last_error_class: HeartbeatRelayErrorClass | null;
+  detail: string | null;
+};
+
+export type ConnectionView = {
+  events_url: string | null;
+  config_url: string | null;
+  facility_id: string | null;
+  facility_token_set: boolean;
+  facility_token_masked: string | null;
+  configured: boolean;
+  reachable: boolean | null;
+  last_ok_at: string | null;
+  updated_at: string | null;
+  /**
+   * Optional (not just nullable): an older backend that hasn't shipped this field yet omits it
+   * entirely. connectionNormalizer.normalizeConnectionView always fills it in from a live response,
+   * so treat a missing value here as "talking to an old backend", not as a normalization bug.
+   */
+  heartbeat_relay?: HeartbeatRelayStatus;
+};
+
+/** Partial update body: an omitted field is left untouched; an explicit `null` clears it. */
+export type ConnectionInput = {
+  events_url?: string | null;
+  config_url?: string | null;
+  facility_id?: string | null;
+  facility_token?: string | null;
+};
+
+export type ConnectionErrorClass = 'unconfigured' | 'invalid_url' | 'unreachable' | 'timeout' | 'auth';
+
+export type ConnectionTestResult = {
+  ok: boolean;
+  error_class: ConnectionErrorClass | null;
+  detail: string;
+  probed_url: string | null;
+};
+
+export type RosterSyncStatus = 'synced' | 'pending' | 'failed' | 'disabled';
+export type RosterSyncErrorClass = 'unreachable' | 'timeout' | 'auth' | 'unconfigured';
+
+export type RosterSyncResult = {
+  status: RosterSyncStatus;
+  error_class: RosterSyncErrorClass | null;
+  detail: string | null;
+  last_ok_at: string | null;
+  next_retry_at: string | null;
+  camera_count: number;
 };

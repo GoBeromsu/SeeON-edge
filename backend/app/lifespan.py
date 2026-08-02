@@ -17,6 +17,11 @@ from fastapi import FastAPI
 
 from backend.app.features.cameras.store import CameraRegistryStore
 from backend.app.features.clips.catalog import CatalogStore
+from backend.app.features.status.backend_heartbeat_relay import (
+    effective_relay_interval_sec,
+    get_heartbeat_relay_state,
+    relay_heartbeats_once,
+)
 from backend.app.features.status.heartbeat_store import DEFAULT_STALE_AFTER_SEC, HeartbeatStore
 from backend.app.features.status.runtime_status_store import RuntimeStatusStore
 from backend.app.shared.backend_mapping import (
@@ -48,8 +53,10 @@ API_BACKEND_CONFIG_URL_ENV = "API_BACKEND_CONFIG_URL"
 API_BACKEND_INGEST_TIMEOUT_SEC_ENV = "API_BACKEND_INGEST_TIMEOUT_SEC"
 API_HEARTBEAT_STALE_AFTER_SEC_ENV = "API_HEARTBEAT_STALE_AFTER_SEC"
 API_BACKEND_CONFIG_REFRESH_SEC_ENV = "API_BACKEND_CONFIG_REFRESH_SEC"
+API_BACKEND_HEARTBEAT_RELAY_SEC_ENV = "API_BACKEND_HEARTBEAT_RELAY_SEC"
 
 BACKEND_CONFIG_SHUTDOWN_WAIT_SEC = 1.0
+BACKEND_HEARTBEAT_RELAY_SHUTDOWN_WAIT_SEC = 1.0
 
 
 @asynccontextmanager
@@ -98,6 +105,30 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         _backend_config_refresh_loop(app, refresh_stop, refresh_executor),
         name="backend-config-refresh",
     )
+
+    relay_interval_sec = _backend_heartbeat_relay_sec()
+    relay_stop = getattr(app.state, "backend_heartbeat_relay_stop", None)
+    if not isinstance(relay_stop, asyncio.Event) or relay_stop.is_set():
+        relay_stop = asyncio.Event()
+        app.state.backend_heartbeat_relay_stop = relay_stop
+    if relay_interval_sec > 0:
+        # Dedicated 1-worker executor, mirroring refresh_executor above,
+        # rather than sharing it: the relay tick and a backend-config pull
+        # are independent concerns and neither should be able to make the
+        # other wait behind it in the same executor's single worker thread.
+        relay_executor = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="backend-heartbeat-relay"
+        )
+        app.state.backend_heartbeat_relay_executor = relay_executor
+        app.state.backend_heartbeat_relay_task = asyncio.create_task(
+            _backend_heartbeat_relay_loop(app, relay_stop, relay_executor, relay_interval_sec),
+            name="backend-heartbeat-relay",
+        )
+    else:
+        # env=0 or unset-invalid -- relay disabled (kill-switch).
+        app.state.backend_heartbeat_relay_executor = None
+        app.state.backend_heartbeat_relay_task = None
+
     app.state.readiness = {"ready": True, "status": "ready"}
     try:
         yield
@@ -113,6 +144,22 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         refresh_executor.shutdown(wait=False, cancel_futures=True)
         app.state.backend_config_refresh_executor = None
         app.state.backend_config_refresh_task = None
+
+        relay_stop.set()
+        relay_task = app.state.backend_heartbeat_relay_task
+        if relay_task is not None:
+            try:
+                await asyncio.wait_for(
+                    asyncio.shield(relay_task), timeout=BACKEND_HEARTBEAT_RELAY_SHUTDOWN_WAIT_SEC
+                )
+            except TimeoutError:
+                relay_task.cancel()
+            relay_executor = app.state.backend_heartbeat_relay_executor
+            if relay_executor is not None:
+                relay_executor.shutdown(wait=False, cancel_futures=True)
+            app.state.backend_heartbeat_relay_executor = None
+            app.state.backend_heartbeat_relay_task = None
+
         catalog_store = getattr(app.state, "catalog_store", None)
         if isinstance(catalog_store, CatalogStore):
             catalog_store.close()
@@ -130,23 +177,82 @@ def _configure_backend_ingest(app: FastAPI) -> None:
                 app.state.backend_evidence_client = BackendEvidenceClient(
                     existing.events_url, existing.bearer_token, existing.timeout_sec
                 )
+        # A test/caller already assigned backend_ingest_client before lifespan
+        # ran (fixture-injection pattern, e.g. tests/test_api_ingest_relay.py).
+        # Leave it alone at boot -- runtime rebuilds only ever happen via an
+        # explicit apply_connection_settings(app) call (G003's settings-save
+        # route will be the caller), never from this boot path or the
+        # periodic refresh loop.
         return
 
-    events_url = os.environ.get(API_BACKEND_EVENTS_URL_ENV)
+    apply_connection_settings(app)
+
+
+def apply_connection_settings(app: FastAPI) -> None:
+    """Rebuild the backend ingest/evidence clients from ConnectionSettingsStore.
+
+    Public entrypoint for G003's settings-save route: call this after
+    ``ConnectionSettingsStore.save(...)`` to make a connection-settings change
+    (Event API URL / facility token) take effect immediately, without
+    restarting the process.
+
+    Safe under concurrency: relay/evidence routers look up
+    ``app.state.backend_ingest_client`` / ``backend_evidence_client`` fresh on
+    every request (relay/router.py, evidence/router.py, routes/models.py,
+    routes/health.py all read these off ``request.app.state`` per-call), so a
+    plain reassignment here is sufficient -- an in-flight request keeps
+    whatever client object it already looked up, and the very next request
+    picks up the rebuilt one.
+
+    Caveat: ``backend_ingest_client`` and ``backend_evidence_client`` are
+    reassigned as two separate statements below, not swapped atomically as a
+    pair. A caller reading both attributes within a single request must not
+    assume they were built from the same settings generation -- a relink
+    racing in between the two assignments could hand back one client from
+    the old generation and one from the new.
+    """
+    # Lazy import: store.py imports lifespan's env-name constants at module
+    # level, so importing it here at module load would be circular. Same
+    # trick lifespan.py already uses for cameras.router in
+    # refresh_backend_config().
+    from backend.app.features.connection.store import ConnectionSettingsStore
+
+    settings = ConnectionSettingsStore.from_env().load()
+    events_url = settings.events_url
     if not events_url:
+        # Delete rather than set-to-None: routes/models.py and routes/health.py
+        # report "backend_configured" via hasattr(app.state, ...), not
+        # getattr(..., None) -- setting the attribute to None would leave
+        # hasattr() true and those status endpoints permanently wrong after a
+        # runtime clear. Deleting matches the pre-existing boot invariant
+        # (the attribute is simply never set when no events_url is configured)
+        # and is still None-like for the getattr(..., None) consumers in
+        # relay/router.py and evidence/router.py.
+        if hasattr(app.state, "backend_ingest_client"):
+            del app.state.backend_ingest_client
+        if hasattr(app.state, "backend_evidence_client"):
+            del app.state.backend_evidence_client
         return
 
-    first_camera = next(iter(app.state.camera_inventory.values()), {})
+    # camera_id fallback identity for the rebuilt EdgeIngestClient. Every real
+    # caller reaches the client through `.for_camera()` (relay/evidence
+    # routers), which overrides camera_id per request, so this default is
+    # currently inert -- kept only for parity with the pre-G002 boot
+    # construction. It can go stale if camera_inventory changed since boot or
+    # the last relink; harmless today, but worth knowing if a future caller
+    # ever uses the client without `.for_camera()`.
+    first_camera = next(iter((getattr(app.state, "camera_inventory", None) or {}).values()), {})
+    timeout_sec = _backend_ingest_timeout_sec()
     app.state.backend_ingest_client = EdgeIngestClient(
         events_url=events_url,
         camera_id=str(first_camera.get("camera_id", "api-relay")),
-        timeout_sec=_backend_ingest_timeout_sec(),
-        bearer_token=os.environ.get(EDGE_FACILITY_TOKEN_ENV),
+        timeout_sec=timeout_sec,
+        bearer_token=settings.facility_token,
     )
     app.state.backend_evidence_client = BackendEvidenceClient(
         events_url=events_url,
-        bearer_token=os.environ.get(EDGE_FACILITY_TOKEN_ENV),
-        timeout_sec=_backend_ingest_timeout_sec(),
+        bearer_token=settings.facility_token,
+        timeout_sec=timeout_sec,
     )
 
 
@@ -207,6 +313,33 @@ async def _backend_config_refresh_loop(
         )
 
 
+async def _backend_heartbeat_relay_loop(
+    app: FastAPI,
+    stop_event: asyncio.Event,
+    executor: ThreadPoolExecutor,
+    base_interval_sec: float,
+) -> None:
+    """Own the periodic per-camera heartbeat relay to the external backend.
+
+    Mirrors ``_backend_config_refresh_loop``'s wait/tick/repeat shape. The
+    wait between ticks widens via ``relay_heartbeats_once``'s backoff state
+    after consecutive all-fail ticks (external backend down/unreachable) and
+    snaps back to ``base_interval_sec`` the moment any send succeeds.
+    """
+    while not stop_event.is_set():
+        relay_state = get_heartbeat_relay_state(app)
+        wait_sec = effective_relay_interval_sec(base_interval_sec, relay_state)
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=wait_sec)
+        except TimeoutError:
+            pass
+        if stop_event.is_set():
+            break
+        await asyncio.get_running_loop().run_in_executor(
+            executor, relay_heartbeats_once, app
+        )
+
+
 def _backend_config_refresh_is_current(app: FastAPI, stop_token: asyncio.Event | None) -> bool:
     if stop_token is None:
         return True
@@ -217,8 +350,13 @@ def _backend_config_refresh_is_current(app: FastAPI, stop_token: asyncio.Event |
 
 
 def _fetch_backend_config(restart_epoch: int) -> PulledWorkerConfig | None:
-    facility_id = os.environ.get(API_FACILITY_ID_ENV)
-    base_url = os.environ.get(API_BACKEND_CONFIG_URL_ENV)
+    # Lazy import: see the matching comment in apply_connection_settings() --
+    # store.py imports this module's env-name constants at module level.
+    from backend.app.features.connection.store import ConnectionSettingsStore
+
+    settings = ConnectionSettingsStore.from_env().load()
+    facility_id = settings.facility_id
+    base_url = settings.config_url
     if not facility_id or not base_url:
         return None
     try:
@@ -226,7 +364,7 @@ def _fetch_backend_config(restart_epoch: int) -> PulledWorkerConfig | None:
         # The production backend guards the RTSP-bearing ml-config read with the
         # same shared edge bearer the Event API ingest already sends.
         headers: dict[str, str] = {"Accept": "application/json"}
-        bearer = os.environ.get(EDGE_FACILITY_TOKEN_ENV)
+        bearer = settings.facility_token
         if bearer:
             headers["Authorization"] = f"Bearer {bearer}"
         request = urllib.request.Request(url, headers=headers, method="GET")
@@ -450,6 +588,23 @@ def _backend_config_refresh_sec() -> float:
         return min(max(float(raw), 1.0), 3600.0)
     except ValueError:
         return 30.0
+
+
+def _backend_heartbeat_relay_sec() -> float:
+    """Relay interval in seconds; ``<= 0`` or unparseable disables the relay.
+
+    Unlike ``_backend_config_refresh_sec``, a malformed value here does NOT
+    fall back to the 30s default -- it fails safe to disabled, since a typo'd
+    env var should never silently start egress to an external backend.
+    """
+    raw = os.environ.get(API_BACKEND_HEARTBEAT_RELAY_SEC_ENV)
+    if raw is None:
+        return 30.0
+    try:
+        value = float(raw)
+    except ValueError:
+        return 0.0
+    return value if value > 0 else 0.0
 
 
 def _utc_now() -> str:

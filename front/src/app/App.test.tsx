@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import App, { Dashboard } from '@/app/App';
-import { deleteCamera, fetchCameras, fetchClips, fetchDashboardSession, fetchStatus, fetchSystem, loginDashboard, logoutDashboard, type StatusSnapshot, type SystemSnapshot } from '@/shared/api/client';
+import { deleteCamera, fetchCameras, fetchClips, fetchConnection, fetchDashboardSession, fetchStatus, fetchSystem, loginDashboard, logoutDashboard, type ConnectionView, type StatusSnapshot, type SystemSnapshot } from '@/shared/api/client';
 import { HttpError } from '@/shared/api/http';
 
 const defaultInnerWidth = window.innerWidth;
@@ -16,6 +16,7 @@ vi.mock('@/shared/api/client', async () => {
     deleteCamera: vi.fn(),
     fetchCameras: vi.fn(),
     fetchClips: vi.fn(),
+    fetchConnection: vi.fn(),
     fetchDashboardSession: vi.fn(),
     fetchStatus: vi.fn(),
     fetchSystem: vi.fn(),
@@ -34,11 +35,16 @@ const clip = {
 };
 const status: StatusSnapshot = { cameras: {}, stale_after_sec: 30, runtime: { facilities: {}, stale_after_sec: 30 } };
 const system: SystemSnapshot = { version: '1', image_digests: { ml_api: null, ml_worker: null }, backend: { configured: true, reachable: true, last_ok_at: null }, storage: {} };
+const connection: ConnectionView = {
+  events_url: null, config_url: null, facility_id: null, facility_token_set: false, facility_token_masked: null,
+  configured: false, reachable: null, last_ok_at: null, updated_at: null,
+};
 
 function mockResources(): void {
   vi.mocked(deleteCamera).mockResolvedValue();
   vi.mocked(fetchCameras).mockResolvedValue({ registry_version: 1, cameras: [camera] });
   vi.mocked(fetchClips).mockResolvedValue([clip]);
+  vi.mocked(fetchConnection).mockResolvedValue(connection);
   vi.mocked(fetchDashboardSession).mockRejectedValue(new HttpError(401));
   vi.mocked(fetchStatus).mockResolvedValue(status);
   vi.mocked(fetchSystem).mockResolvedValue(system);

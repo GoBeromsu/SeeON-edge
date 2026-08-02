@@ -1,6 +1,31 @@
 import { HttpError, requestJson } from '@/shared/api/http';
-import { normalizeCameraRegistry, normalizeCameraResponse, normalizeCameraTestResult, normalizeClipsResponse, normalizeStatusSnapshot, normalizeSystemSnapshot } from '@/shared/api/normalizers';
-import type { Camera, CameraInput, CameraPatchInput, CameraRegistry, CameraTestResult, Clip, ClipLabel, DecodeBackend, StatusSnapshot, SystemSnapshot } from '@/shared/api/types';
+import {
+  normalizeCameraRegistry,
+  normalizeCameraResponse,
+  normalizeCameraTestResult,
+  normalizeClipsResponse,
+  normalizeConnectionTestResult,
+  normalizeConnectionView,
+  normalizeRosterSyncResult,
+  normalizeStatusSnapshot,
+  normalizeSystemSnapshot,
+} from '@/shared/api/normalizers';
+import type {
+  Camera,
+  CameraInput,
+  CameraPatchInput,
+  CameraRegistry,
+  CameraTestResult,
+  Clip,
+  ClipLabel,
+  ConnectionInput,
+  ConnectionTestResult,
+  ConnectionView,
+  DecodeBackend,
+  RosterSyncResult,
+  StatusSnapshot,
+  SystemSnapshot,
+} from '@/shared/api/types';
 
 export type {
   Camera,
@@ -9,11 +34,21 @@ export type {
   CameraRegistry,
   CameraStatus,
   CameraHeartbeat,
+  CameraSync,
+  CameraSyncErrorClass,
+  CameraSyncStatus,
   CameraTestResult,
   Clip,
   ClipLabel,
+  ConnectionErrorClass,
+  ConnectionInput,
+  ConnectionTestResult,
+  ConnectionView,
   DecodeBackend,
   HeartbeatStatus,
+  RosterSyncErrorClass,
+  RosterSyncResult,
+  RosterSyncStatus,
   RuntimeCamera,
   RuntimeClipRecorder,
   RuntimeDecodeDiagnostics,
@@ -89,6 +124,40 @@ function cameraBody(input: CameraInput | CameraPatchInput, extra?: Record<string
     Object.assign(body, extra);
   }
   return JSON.stringify(body);
+}
+
+/**
+ * Mirrors cameraBody()'s partial-update convention: a key is included in the request body only
+ * when the caller's input explicitly sets it (`!== undefined`). An included key whose value is
+ * `null` clears that field back to its env-seed default; an omitted key is left untouched by the
+ * backend (see ConnectionSettingsUpdateRequest.model_fields_set in the backend router).
+ */
+function connectionBody(input: ConnectionInput): string {
+  const body: Record<string, unknown> = {};
+  if (input.events_url !== undefined) body.events_url = input.events_url;
+  if (input.config_url !== undefined) body.config_url = input.config_url;
+  if (input.facility_id !== undefined) body.facility_id = input.facility_id;
+  if (input.facility_token !== undefined) body.facility_token = input.facility_token;
+  return JSON.stringify(body);
+}
+
+export async function fetchConnection(signal?: AbortSignal): Promise<ConnectionView> {
+  return normalizeConnectionView(await requestJson('/connection', { signal }));
+}
+
+export async function saveConnection(input: ConnectionInput): Promise<ConnectionView> {
+  return normalizeConnectionView(await requestJson('/connection', { method: 'PUT', body: connectionBody(input) }));
+}
+
+/** Tests the current (possibly unsaved) form values via a probe-only body override, or the saved settings when omitted. */
+export async function testConnection(input?: ConnectionInput): Promise<ConnectionTestResult> {
+  return normalizeConnectionTestResult(
+    await requestJson('/connection/test', { method: 'POST', body: input ? connectionBody(input) : undefined }),
+  );
+}
+
+export async function syncCameras(): Promise<RosterSyncResult> {
+  return normalizeRosterSyncResult(await requestJson('/connection/sync-cameras', { method: 'POST' }));
 }
 
 /** Structured 422 body the backend sends when probe-before-persist rejects a camera (`error_class`: timeout | auth | decode). */

@@ -2,7 +2,7 @@ import { FormEvent, useEffect, useState } from 'react';
 import { testCamera, updateCameraDecodeBackend, updateCamera, type Camera, type DecodeBackend } from '@/shared/api/client';
 import { connectionFailureMessage } from '@/features/cameras/connectionTestMessage';
 import { formatHeartbeatAge } from '@/features/cameras/heartbeatFreshness';
-import { StatusBadge } from '@/shared/ui/StatusBadge';
+import { getCameraSyncMeta, StatusBadge } from '@/shared/ui/StatusBadge';
 
 const DECODE_BACKEND_OPTIONS: Array<{ value: DecodeBackend; label: string }> = [
   { value: 'auto', label: '자동 (GPU→CPU)' },
@@ -148,6 +148,7 @@ export function CameraCard({ camera, onUpdateStarted, onUpdated, onDelete, onVie
   const heartbeatDetail = camera.status !== 'online' && !neverConnected
     ? formatHeartbeatAge(camera.heartbeat_age_sec)
     : null;
+  const syncMeta = camera.sync ? getCameraSyncMeta(camera.sync.status) : null;
 
   return (
     <article className="rounded-2xl border border-border bg-surface p-5 shadow-sm">
@@ -158,6 +159,15 @@ export function CameraCard({ camera, onUpdateStarted, onUpdated, onDelete, onVie
         </div>
         <div className="text-right">
           <StatusBadge status={camera.status} />
+          {syncMeta ? (
+            <p aria-live="polite" className="mt-1.5">
+              <span className={`inline-flex items-center rounded-full px-3 py-1 text-xs font-bold ring-1 ${syncMeta.className}`}>
+                <span className="mr-1.5 h-2 w-2 rounded-full bg-current" />
+                {syncMeta.label}
+              </span>
+            </p>
+          ) : null}
+          {camera.sync?.detail ? <p className="mt-1 text-xs font-semibold text-ink-faint">{camera.sync.detail}</p> : null}
           {connectionDetail ? <p data-testid="camera-connection-detail" className="mt-1.5 text-xs font-semibold text-ink-faint">{connectionDetail}</p> : null}
           {heartbeatDetail ? <p className="mt-1 text-xs font-semibold text-ink-faint">{heartbeatDetail}</p> : null}
         </div>
