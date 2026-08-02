@@ -20,13 +20,22 @@ Design notes:
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
+from datetime import UTC, datetime
 
 from backend.app.features.status.heartbeat_store import ONLINE, get_heartbeat_store
+
+logger = logging.getLogger(__name__)
 
 # Consecutive all-fail ticks widen the effective relay interval up to this
 # multiplier of the configured base interval (e.g. 30s base -> 240s ceiling).
 MAX_BACKOFF_MULTIPLIER = 8
+
+# Relative severity of a tick's classified failures -- when a tick mixes
+# error classes across cameras, the most severe one wins as the tick's
+# (and then the relay state's) reported error_class.
+_ERROR_CLASS_SEVERITY: dict[str, int] = {"auth": 3, "timeout": 2, "unreachable": 1}
 
 
 @dataclass(slots=True)
@@ -39,14 +48,21 @@ class RelayTickResult:
     # Set (and attempted/sent/failed left at 0) when the tick did no work at
     # all: no configured client, or no ONLINE cameras to relay this tick.
     skipped_reason: str | None = None
+    # Most severe classified failure this tick (auth > timeout > unreachable),
+    # or None when nothing failed with a known class -- including plain-bool
+    # fakes/clients that predate send_heartbeat_result().
+    error_class: str | None = None
 
 
 @dataclass(slots=True)
 class HeartbeatRelayState:
-    """Backoff bookkeeping for the relay loop, tracked on ``app.state``."""
+    """Backoff + last-known-status bookkeeping for the relay loop, tracked on
+    ``app.state``."""
 
     consecutive_all_fail_ticks: int = 0
     backoff_multiplier: int = 1
+    last_error_class: str | None = None
+    last_success_at: str | None = None
 
 
 def get_heartbeat_relay_state(app: object) -> HeartbeatRelayState:
@@ -96,27 +112,52 @@ def relay_heartbeats_once(app: object, now: float | None = None) -> RelayTickRes
     # (single-digit cameras per facility) but would need fan-out if that
     # roster ever grows large.
     for camera_id in online_camera_ids:
-        if _send_one(client, camera_id):
+        ok, error_class = _send_one(client, camera_id)
+        if ok:
             result.sent += 1
         else:
             result.failed += 1
+            result.error_class = _more_severe(result.error_class, error_class)
 
-    _update_backoff(get_heartbeat_relay_state(app), result)
+    relay_state = get_heartbeat_relay_state(app)
+    _update_backoff(relay_state, result)
+    _update_error_state(relay_state, result)
     return result
 
 
-def _send_one(client: object, camera_id: str) -> bool:
+def _send_one(client: object, camera_id: str) -> tuple[bool, str | None]:
     try:
         camera_client = client.for_camera(camera_id)  # type: ignore[attr-defined]
     except Exception:  # noqa: BLE001 - backend egress must never crash the loop
-        return False
+        return False, None
+    # Prefer the classified result path (send_heartbeat_result) when the
+    # client offers one; fall back to the plain bool send_heartbeat() for
+    # older/fake clients that predate it -- their failures are reported with
+    # error_class=None, same as before this classification existed.
+    result_sender = getattr(camera_client, "send_heartbeat_result", None)
+    if callable(result_sender):
+        try:
+            sent = result_sender()
+        except Exception:  # noqa: BLE001 - ditto
+            return False, None
+        return bool(getattr(sent, "ok", False)), getattr(sent, "error_class", None)
     sender = getattr(camera_client, "send_heartbeat", None)
     if not callable(sender):
-        return False
+        return False, None
     try:
-        return bool(sender())
+        return bool(sender()), None
     except Exception:  # noqa: BLE001 - ditto
-        return False
+        return False, None
+
+
+def _more_severe(current: str | None, candidate: str | None) -> str | None:
+    if candidate is None:
+        return current
+    if current is None:
+        return candidate
+    if _ERROR_CLASS_SEVERITY.get(candidate, 0) > _ERROR_CLASS_SEVERITY.get(current, 0):
+        return candidate
+    return current
 
 
 def _update_backoff(relay_state: HeartbeatRelayState, result: RelayTickResult) -> None:
@@ -132,6 +173,27 @@ def _update_backoff(relay_state: HeartbeatRelayState, result: RelayTickResult) -
     else:
         relay_state.consecutive_all_fail_ticks = 0
         relay_state.backoff_multiplier = 1
+
+
+def _update_error_state(relay_state: HeartbeatRelayState, result: RelayTickResult) -> None:
+    if result.sent > 0:
+        relay_state.last_success_at = _utc_now_iso()
+    if result.attempted == 0:
+        # Skipped tick did no delivery attempt -- leave the last-known error
+        # class alone rather than falsely clearing it.
+        return
+    previous = relay_state.last_error_class
+    relay_state.last_error_class = result.error_class
+    if result.error_class != previous:
+        logger.warning(
+            "backend heartbeat relay error_class transition: %s -> %s",
+            previous,
+            result.error_class,
+        )
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
 __all__ = [

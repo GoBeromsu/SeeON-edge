@@ -169,6 +169,14 @@ class TestSavePartialUpdate:
         assert second.updated_at >= first.updated_at
 
 
+class TestReprSafety:
+    def test_repr_does_not_contain_the_raw_facility_token(self, tmp_path: Path) -> None:
+        settings = _store(tmp_path).save({"facility_token": "super-secret-facility-token"})
+
+        assert "super-secret-facility-token" not in repr(settings)
+        assert "facility_token" not in repr(settings)
+
+
 class TestAtomicWriteAndCorruption:
     def test_write_leaves_final_file_0600(self, tmp_path: Path) -> None:
         store = _store(tmp_path)

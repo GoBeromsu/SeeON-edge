@@ -23,6 +23,7 @@ from backend.app.core.config import get_settings
 from backend.app.features.cameras.roster_sync import SyncStatus, sync_camera_roster
 from backend.app.features.cameras.router import RELAY_TOKEN_HEADER, _authorize
 from backend.app.features.connection.store import ConnectionSettings, ConnectionSettingsStore
+from backend.app.features.status.backend_heartbeat_relay import HeartbeatRelayState
 from backend.app.lifespan import apply_connection_settings, refresh_backend_config
 from backend.app.shared.backend_mapping import RosterErrorClass
 
@@ -30,6 +31,22 @@ router = APIRouter(prefix="/connection", tags=["connection"])
 
 _FIELDS = ("events_url", "config_url", "facility_id", "facility_token")
 ErrorClass = Literal["unconfigured", "invalid_url", "unreachable", "timeout", "auth"]
+HeartbeatErrorClass = Literal["auth", "timeout", "unreachable"]
+
+_HEARTBEAT_RELAY_DETAIL_BY_ERROR_CLASS: dict[str, str] = {
+    "auth": "외부 백엔드 인증에 실패했습니다. 시설 토큰을 확인해 주세요.",
+    "timeout": "외부 백엔드 응답이 지연되고 있습니다.",
+    "unreachable": "외부 백엔드에 연결할 수 없습니다. 주소와 네트워크를 확인해 주세요.",
+}
+
+
+class HeartbeatRelayStatus(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool
+    last_success_at: str | None = None
+    last_error_class: HeartbeatErrorClass | None = None
+    detail: str | None = None
 
 
 class ConnectionStatusResponse(BaseModel):
@@ -44,6 +61,7 @@ class ConnectionStatusResponse(BaseModel):
     reachable: bool | None = None
     last_ok_at: str | None = None
     updated_at: str | None = None
+    heartbeat_relay: HeartbeatRelayStatus
 
 
 class ConnectionSettingsUpdateRequest(BaseModel):
@@ -152,6 +170,16 @@ def test_connection(
     overrides = _explicit_fields(payload) if payload is not None else {}
     _reject_invalid_urls(overrides)
     settings = ConnectionSettingsStore.from_env().load()  # not persisted: overrides are probe-only
+    if _stored_token_fallback_blocked(overrides, settings):
+        return {
+            "ok": False,
+            "error_class": "auth",
+            "detail": (
+                "테스트하려는 주소가 저장된 주소와 달라 저장된 토큰을 사용할 수 없습니다. "
+                "토큰을 함께 입력해 주세요."
+            ),
+            "probed_url": None,
+        }
     return _probe(
         config_url=_effective(overrides, settings, "config_url"),
         facility_id=_effective(overrides, settings, "facility_id"),
@@ -174,6 +202,30 @@ def _status_response(app: FastAPI) -> dict[str, object]:
         "reachable": getattr(app.state, "backend_reachable", None),
         "last_ok_at": getattr(app.state, "backend_last_ok_at", None),
         "updated_at": masked["updated_at"],
+        "heartbeat_relay": _heartbeat_relay_view(app),
+    }
+
+
+def _heartbeat_relay_view(app: FastAPI) -> dict[str, object]:
+    relay_state = getattr(app.state, "backend_heartbeat_relay_state", None)
+    if not isinstance(relay_state, HeartbeatRelayState):
+        return {
+            "enabled": False,
+            "last_success_at": None,
+            "last_error_class": None,
+            "detail": None,
+        }
+    # The relay loop task is None both when it was never started under this
+    # app (e.g. no_lifespan test apps) and when lifespan explicitly disabled
+    # it via the env kill-switch (API_BACKEND_HEARTBEAT_RELAY_SEC=0) -- either
+    # way "enabled" must read false.
+    enabled = getattr(app.state, "backend_heartbeat_relay_task", None) is not None
+    error_class = relay_state.last_error_class
+    return {
+        "enabled": enabled,
+        "last_success_at": relay_state.last_success_at,
+        "last_error_class": error_class,
+        "detail": _HEARTBEAT_RELAY_DETAIL_BY_ERROR_CLASS.get(error_class) if error_class else None,
     }
 
 
@@ -203,6 +255,25 @@ def _effective(
     if field in overrides:
         return overrides[field]
     return getattr(settings, field)
+
+
+def _stored_token_fallback_blocked(
+    overrides: dict[str, str | None], settings: ConnectionSettings
+) -> bool:
+    """Guard against leaking the stored facility_token to a caller-chosen URL.
+
+    The stored token is only safe to fall back to when the effective
+    config_url is still the one it was issued for. A request that overrides
+    config_url to something else while omitting facility_token would
+    otherwise silently probe an arbitrary URL with the stored Bearer token.
+    """
+    if "config_url" not in overrides or "facility_token" in overrides:
+        return False
+    if not settings.facility_token:
+        return False
+    stored_url = (settings.config_url or "").rstrip("/")
+    new_url = (overrides.get("config_url") or "").rstrip("/")
+    return new_url != stored_url
 
 
 def _trigger_roster_sync(app: FastAPI) -> None:

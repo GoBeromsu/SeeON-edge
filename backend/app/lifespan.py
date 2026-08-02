@@ -202,6 +202,13 @@ def apply_connection_settings(app: FastAPI) -> None:
     plain reassignment here is sufficient -- an in-flight request keeps
     whatever client object it already looked up, and the very next request
     picks up the rebuilt one.
+
+    Caveat: ``backend_ingest_client`` and ``backend_evidence_client`` are
+    reassigned as two separate statements below, not swapped atomically as a
+    pair. A caller reading both attributes within a single request must not
+    assume they were built from the same settings generation -- a relink
+    racing in between the two assignments could hand back one client from
+    the old generation and one from the new.
     """
     # Lazy import: store.py imports lifespan's env-name constants at module
     # level, so importing it here at module load would be circular. Same

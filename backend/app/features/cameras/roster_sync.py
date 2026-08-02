@@ -89,6 +89,14 @@ class RosterSyncState:
     next_retry_at: str | None = None
     _next_retry_monotonic: float | None = field(default=None, repr=False)
     _lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
+    # Single-flight guard around the actual push + state write (mirrors
+    # lifespan.py's refresh_backend_config/backend_config_refresh_lock
+    # pattern): concurrent triggers (camera CRUD background tasks, PUT
+    # /connection, POST /connection/sync-cameras) must never race a push,
+    # or a slower earlier call can overwrite a newer result and
+    # double-count consecutive_failures. Separate from `_lock` above, which
+    # only guards individual state reads/writes, not the network call.
+    _push_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
 
 
 def get_roster_sync_state(app: object) -> RosterSyncState:
@@ -138,77 +146,84 @@ def sync_camera_roster(app: object, *, _now: float | None = None) -> RosterSyncR
         _apply_disabled(sync_state, camera_ids)
         return _result_from_state(sync_state, attempted=False)
 
-    payload, eligible_ids, unassigned_ids = _split_roster_payload(records)
-    push_result = mapper.put_roster(payload)
-    stamp = _utc_now_iso()
-    with sync_state._lock:
-        sync_state.last_attempt_at = stamp
-        for camera_id in camera_ids:
-            sync_state.cameras.setdefault(camera_id, CameraSyncState())
+    if not sync_state._push_lock.acquire(blocking=False):
+        # Another sync is already pushing -- record nothing and return the
+        # last known result unchanged, rather than racing it.
+        return _result_from_state(sync_state, attempted=False)
+    try:
+        payload, eligible_ids, unassigned_ids = _split_roster_payload(records)
+        push_result = mapper.put_roster(payload)
+        stamp = _utc_now_iso()
+        with sync_state._lock:
+            sync_state.last_attempt_at = stamp
+            for camera_id in camera_ids:
+                sync_state.cameras.setdefault(camera_id, CameraSyncState())
 
-        # Cameras with no space_id yet are never pushed (the external DTO
-        # requires spaceId) -- they read as "pending" with an explanatory
-        # detail, independent of whether the eligible cameras below succeed.
-        for camera_id in unassigned_ids:
-            cam = sync_state.cameras[camera_id]
-            cam.status = "pending"
-            cam.error_class = None
-            cam.detail = _SPACE_PENDING_DETAIL
-            cam.last_attempt_at = stamp
-
-        any_failed = False
-        first_failed_error_class: RosterErrorClass | None = None
-        for camera_id in eligible_ids:
-            camera_result = push_result.cameras.get(camera_id)
-            cam = sync_state.cameras[camera_id]
-            cam.last_attempt_at = stamp
-            if camera_result is not None and camera_result.ok:
-                cam.status = "synced"
+            # Cameras with no space_id yet are never pushed (the external DTO
+            # requires spaceId) -- they read as "pending" with an explanatory
+            # detail, independent of whether the eligible cameras below succeed.
+            for camera_id in unassigned_ids:
+                cam = sync_state.cameras[camera_id]
+                cam.status = "pending"
                 cam.error_class = None
-                cam.detail = None
-                cam.last_ok_at = stamp
-            else:
-                any_failed = True
-                error_class = (
-                    camera_result.error_class if camera_result is not None else None
-                ) or "unreachable"
-                first_failed_error_class = first_failed_error_class or error_class
-                cam.status = "failed"
-                cam.error_class = error_class
-                cam.detail = _DETAIL_BY_ERROR_CLASS[error_class]
+                cam.detail = _SPACE_PENDING_DETAIL
+                cam.last_attempt_at = stamp
 
-        if any_failed:
-            sync_state.consecutive_failures += 1
-            backoff = min(
-                BASE_BACKOFF_SEC * (2 ** (sync_state.consecutive_failures - 1)),
-                MAX_BACKOFF_SEC,
-            )
-            sync_state._next_retry_monotonic = now_monotonic + backoff
-            sync_state.next_retry_at = _utc_iso_offset(backoff)
-            sync_state.overall_status = "failed"
-            sync_state.overall_error_class = first_failed_error_class
-            sync_state.overall_detail = (
-                _DETAIL_BY_ERROR_CLASS[first_failed_error_class]
-                if first_failed_error_class is not None
-                else None
-            )
-        else:
-            sync_state.consecutive_failures = 0
-            sync_state.next_retry_at = None
-            sync_state._next_retry_monotonic = None
-            sync_state.overall_error_class = None
-            sync_state.overall_detail = None
-            if eligible_ids:
-                # At least one camera actually pushed and none failed.
-                sync_state.overall_status = "synced"
-                sync_state.last_ok_at = stamp
+            any_failed = False
+            first_failed_error_class: RosterErrorClass | None = None
+            for camera_id in eligible_ids:
+                camera_result = push_result.cameras.get(camera_id)
+                cam = sync_state.cameras[camera_id]
+                cam.last_attempt_at = stamp
+                if camera_result is not None and camera_result.ok:
+                    cam.status = "synced"
+                    cam.error_class = None
+                    cam.detail = None
+                    cam.last_ok_at = stamp
+                else:
+                    any_failed = True
+                    error_class = (
+                        camera_result.error_class if camera_result is not None else None
+                    ) or "unreachable"
+                    first_failed_error_class = first_failed_error_class or error_class
+                    cam.status = "failed"
+                    cam.error_class = error_class
+                    cam.detail = _DETAIL_BY_ERROR_CLASS[error_class]
+
+            if any_failed:
+                sync_state.consecutive_failures += 1
+                backoff = min(
+                    BASE_BACKOFF_SEC * (2 ** (sync_state.consecutive_failures - 1)),
+                    MAX_BACKOFF_SEC,
+                )
+                sync_state._next_retry_monotonic = now_monotonic + backoff
+                sync_state.next_retry_at = _utc_iso_offset(backoff)
+                sync_state.overall_status = "failed"
+                sync_state.overall_error_class = first_failed_error_class
+                sync_state.overall_detail = (
+                    _DETAIL_BY_ERROR_CLASS[first_failed_error_class]
+                    if first_failed_error_class is not None
+                    else None
+                )
             else:
-                # Nothing was eligible to push this attempt (every camera is
-                # still awaiting a space assignment) -- nothing failed, but
-                # nothing was confirmed synced either, so overall stays
-                # "pending" rather than falsely claiming success.
-                sync_state.overall_status = "pending"
-        return _result_from_state(sync_state, attempted=True)
+                sync_state.consecutive_failures = 0
+                sync_state.next_retry_at = None
+                sync_state._next_retry_monotonic = None
+                sync_state.overall_error_class = None
+                sync_state.overall_detail = None
+                if eligible_ids:
+                    # At least one camera actually pushed and none failed.
+                    sync_state.overall_status = "synced"
+                    sync_state.last_ok_at = stamp
+                else:
+                    # Nothing was eligible to push this attempt (every camera is
+                    # still awaiting a space assignment) -- nothing failed, but
+                    # nothing was confirmed synced either, so overall stays
+                    # "pending" rather than falsely claiming success.
+                    sync_state.overall_status = "pending"
+            return _result_from_state(sync_state, attempted=True)
+    finally:
+        sync_state._push_lock.release()
 
 
 def camera_sync_view(app: object, camera_id: str) -> dict[str, object]:

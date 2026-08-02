@@ -11,7 +11,7 @@ import urllib.request
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Final, Protocol
+from typing import Final, Literal, Protocol
 
 from contracts.event import EventPayload
 from contracts.relay import AlertEventType, EventApiPayload
@@ -20,11 +20,23 @@ from shared.events.evidence_export_contract import DeliveryFailure, EventReceipt
 
 DEFAULT_TIMEOUT_SEC: Final = 0.5
 EdgeEventId = str
+IngestErrorClass = Literal["auth", "timeout", "unreachable"]
 
 
 class _PublishedEvent(Protocol):
     event_type: str
     evidence: EventPayload
+
+
+@dataclass(frozen=True, slots=True)
+class IngestSendResult:
+    """Classified outcome of a single ingest POST, for callers (story G005's
+    heartbeat relay) that need more than a bare bool to report *why* a send
+    failed, not just that it did.
+    """
+
+    ok: bool
+    error_class: IngestErrorClass | None
 
 
 @dataclass(slots=True)
@@ -47,7 +59,12 @@ class EdgeIngestClient:
             return self._failure_count
 
     def send_heartbeat(self) -> bool:
-        return self._post(_join_url(self.events_url, "heartbeat"), {"camera_id": self.camera_id})
+        return self.send_heartbeat_result().ok
+
+    def send_heartbeat_result(self) -> IngestSendResult:
+        return self._post_classified(
+            _join_url(self.events_url, "heartbeat"), {"camera_id": self.camera_id}
+        )
 
     def send_alert(
         self,
@@ -157,6 +174,9 @@ class EdgeIngestClient:
         )
 
     def _post(self, url: str, payload: dict[str, str | float]) -> bool:
+        return self._post_classified(url, payload).ok
+
+    def _post_classified(self, url: str, payload: dict[str, str | float]) -> IngestSendResult:
         request = urllib.request.Request(
             url,
             data=json.dumps(payload, separators=(",", ":")).encode("utf-8"),
@@ -166,10 +186,22 @@ class EdgeIngestClient:
         try:
             with urllib.request.urlopen(request, timeout=self.timeout_sec) as response:
                 response.read()
-        except (TimeoutError, OSError, urllib.error.URLError, urllib.error.HTTPError):
+        except urllib.error.HTTPError as exc:
             self._increment_failure()
-            return False
-        return True
+            error_class = "auth" if exc.code in (401, 403) else "unreachable"
+            return IngestSendResult(ok=False, error_class=error_class)
+        except urllib.error.URLError as exc:
+            self._increment_failure()
+            if isinstance(exc.reason, TimeoutError):
+                return IngestSendResult(ok=False, error_class="timeout")
+            return IngestSendResult(ok=False, error_class="unreachable")
+        except TimeoutError:
+            self._increment_failure()
+            return IngestSendResult(ok=False, error_class="timeout")
+        except OSError:
+            self._increment_failure()
+            return IngestSendResult(ok=False, error_class="unreachable")
+        return IngestSendResult(ok=True, error_class=None)
 
     def _post_json(self, url: str, payload: dict[str, object]) -> dict[str, object] | None:
         request = urllib.request.Request(
@@ -273,4 +305,4 @@ def _audit_payload_fields(audit: dict[str, object] | None) -> dict[str, object]:
     }
 
 
-__all__ = ["DEFAULT_TIMEOUT_SEC", "EdgeIngestClient", "_utc_iso_timestamp"]
+__all__ = ["DEFAULT_TIMEOUT_SEC", "EdgeIngestClient", "IngestSendResult", "_utc_iso_timestamp"]

@@ -49,6 +49,29 @@ class FakeIngestClient:
         return self.camera_id not in self.failing_camera_ids
 
 
+class FakeClassifiedIngestClient:
+    """Like ``FakeIngestClient`` but exposes ``send_heartbeat_result`` with a
+    per-camera classified outcome, exercising the classified-path preference.
+    """
+
+    def __init__(self, *, error_class_by_camera_id: dict[str, str | None]) -> None:
+        self.calls: list[str] = []
+        self.error_class_by_camera_id = error_class_by_camera_id
+        self.camera_id: str | None = None
+
+    def for_camera(self, camera_id: str) -> FakeClassifiedIngestClient:
+        clone = FakeClassifiedIngestClient(error_class_by_camera_id=self.error_class_by_camera_id)
+        clone.calls = self.calls
+        clone.camera_id = camera_id
+        return clone
+
+    def send_heartbeat_result(self) -> SimpleNamespace:
+        assert self.camera_id is not None
+        self.calls.append(self.camera_id)
+        error_class = self.error_class_by_camera_id.get(self.camera_id)
+        return SimpleNamespace(ok=error_class is None, error_class=error_class)
+
+
 def _make_app(*, client: object | None, inventory: dict[str, dict[str, str | None]]) -> object:
     state = SimpleNamespace(
         heartbeat_store=HeartbeatStore(stale_after_sec=90.0),
@@ -172,17 +195,97 @@ def test_backoff_doubles_on_consecutive_all_fail_ticks_and_resets_on_success() -
     assert state.consecutive_all_fail_ticks == 0
 
 
+# --------------------------------------------------------------------------
+# Error classification (story: heartbeat relay error classification fix)
+# --------------------------------------------------------------------------
+
+
+def test_relay_tick_prefers_classified_result_and_reports_most_severe_error_class() -> None:
+    inventory = {
+        "cam-auth": {"camera_id": "cam-auth", "facility_id": "fac-1"},
+        "cam-timeout": {"camera_id": "cam-timeout", "facility_id": "fac-1"},
+        "cam-ok": {"camera_id": "cam-ok", "facility_id": "fac-1"},
+    }
+    client = FakeClassifiedIngestClient(
+        error_class_by_camera_id={"cam-auth": "auth", "cam-timeout": "timeout", "cam-ok": None}
+    )
+    app = _make_app(client=client, inventory=inventory)
+    for camera_id in inventory:
+        app.state.heartbeat_store.record(camera_id, "fac-1", received_at=1000.0)
+
+    result = relay_heartbeats_once(app, now=1010.0)
+
+    assert result.attempted == 3
+    assert result.sent == 1
+    assert result.failed == 2
+    # auth outranks timeout -- the more severe class wins the tick.
+    assert result.error_class == "auth"
+
+    state = get_heartbeat_relay_state(app)
+    assert state.last_error_class == "auth"
+    assert state.last_success_at is not None  # cam-ok succeeded this tick
+
+
+def test_relay_tick_falls_back_to_plain_bool_with_no_error_class() -> None:
+    inventory = {"cam-bad": {"camera_id": "cam-bad", "facility_id": "fac-1"}}
+    client = FakeIngestClient(failing_camera_ids=frozenset({"cam-bad"}))
+    app = _make_app(client=client, inventory=inventory)
+    app.state.heartbeat_store.record("cam-bad", "fac-1", received_at=1000.0)
+
+    result = relay_heartbeats_once(app, now=1010.0)
+
+    assert result.failed == 1
+    assert result.error_class is None  # bool-only fake -> no classification available
+
+    state = get_heartbeat_relay_state(app)
+    assert state.last_error_class is None
+
+
+def test_relay_state_error_class_transitions_are_logged_as_warnings(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    inventory = {"cam-a": {"camera_id": "cam-a", "facility_id": "fac-1"}}
+    app = _make_app(client=None, inventory=inventory)  # placeholder; replaced per tick below
+
+    def _tick(error_class: str | None, now: float) -> None:
+        error_map = {} if error_class is None else {"cam-a": error_class}
+        app.state.backend_ingest_client = FakeClassifiedIngestClient(
+            error_class_by_camera_id=error_map
+        )
+        app.state.heartbeat_store.record("cam-a", "fac-1", received_at=now)
+        relay_heartbeats_once(app, now=now)
+
+    caplog.set_level("WARNING", logger="backend.app.features.status.backend_heartbeat_relay")
+
+    _tick("auth", 1000.0)  # None -> auth: logged
+    _tick("auth", 1001.0)  # auth -> auth: no new log
+    _tick("unreachable", 1002.0)  # auth -> unreachable: logged
+    _tick(None, 1003.0)  # unreachable -> None: logged
+
+    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert len(warnings) == 3
+    assert "None -> auth" in warnings[0].message
+    assert "auth -> unreachable" in warnings[1].message
+    assert "unreachable -> None" in warnings[2].message
+
+    state = get_heartbeat_relay_state(app)
+    assert state.last_error_class is None
+    assert state.last_success_at is not None
+
+
 def test_skipped_tick_does_not_touch_backoff_state() -> None:
     app = _make_app(client=None, inventory={})
     initial_state = get_heartbeat_relay_state(app)
     initial_state.backoff_multiplier = 4
     initial_state.consecutive_all_fail_ticks = 2
+    initial_state.last_error_class = "timeout"
 
     relay_heartbeats_once(app, now=0.0)
 
     state = get_heartbeat_relay_state(app)
     assert state.backoff_multiplier == 4
     assert state.consecutive_all_fail_ticks == 2
+    assert state.last_error_class == "timeout"  # untouched: skipped tick did no attempt
 
 
 def test_get_heartbeat_relay_state_self_heals_and_is_cached() -> None:

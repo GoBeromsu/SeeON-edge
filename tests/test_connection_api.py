@@ -123,6 +123,61 @@ def test_get_connection_unconfigured_when_nothing_saved(
     assert body["facility_token_masked"] is None
 
 
+def test_get_connection_heartbeat_relay_absent_state_reads_disabled_with_nulls(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # no_lifespan test apps never populate backend_heartbeat_relay_state.
+    client = _client(tmp_path, monkeypatch)
+    response = client.get("/api/v1/connection", headers=AUTH)
+    assert response.status_code == 200
+    assert response.json()["heartbeat_relay"] == {
+        "enabled": False,
+        "last_success_at": None,
+        "last_error_class": None,
+        "detail": None,
+    }
+
+
+def test_get_connection_heartbeat_relay_reflects_state_and_maps_korean_detail(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from backend.app.features.status.backend_heartbeat_relay import HeartbeatRelayState
+
+    client = _client(tmp_path, monkeypatch)
+    client.app.state.backend_heartbeat_relay_task = object()  # loop "configured"
+    client.app.state.backend_heartbeat_relay_state = HeartbeatRelayState(
+        last_error_class="auth", last_success_at="2026-01-01T00:00:00.000Z"
+    )
+
+    response = client.get("/api/v1/connection", headers=AUTH)
+
+    assert response.status_code == 200
+    assert response.json()["heartbeat_relay"] == {
+        "enabled": True,
+        "last_success_at": "2026-01-01T00:00:00.000Z",
+        "last_error_class": "auth",
+        "detail": "외부 백엔드 인증에 실패했습니다. 시설 토큰을 확인해 주세요.",
+    }
+
+
+def test_get_connection_heartbeat_relay_task_none_reads_disabled_even_with_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from backend.app.features.status.backend_heartbeat_relay import HeartbeatRelayState
+
+    client = _client(tmp_path, monkeypatch)
+    client.app.state.backend_heartbeat_relay_task = None  # disabled via env kill-switch
+    client.app.state.backend_heartbeat_relay_state = HeartbeatRelayState()
+
+    response = client.get("/api/v1/connection", headers=AUTH)
+
+    assert response.status_code == 200
+    body = response.json()["heartbeat_relay"]
+    assert body["enabled"] is False
+    assert body["last_error_class"] is None
+    assert body["detail"] is None
+
+
 # --------------------------------------------------------------------------
 # PUT /connection
 # --------------------------------------------------------------------------
@@ -412,6 +467,124 @@ def test_connection_test_body_override_is_not_persisted(
         unchanged = store.load()
         assert unchanged.config_url == "http://saved.example/config"
         assert unchanged.facility_id == "saved-facility"
+    finally:
+        server.shutdown()
+        thread.join(timeout=1.0)
+
+
+def test_connection_test_overridden_config_url_without_token_blocks_stored_token_fallback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Stored facility_token must never be sent to a config_url the caller
+    switched to without also supplying a token -- no outbound request at all.
+    """
+    hits: list[str | None] = []
+
+    class _RecordingHandler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:  # noqa: N802
+            hits.append(self.headers.get("Authorization"))
+            self.send_response(200)
+            self.end_headers()
+
+        def log_message(self, _format: str, *args: str) -> None:
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _RecordingHandler)
+    thread = _run_server(server)
+    try:
+        store = _store(tmp_path, monkeypatch)
+        store.save(
+            {
+                "config_url": "http://saved.example/config",
+                "facility_id": "facility-1",
+                "facility_token": "super-secret-stored-token",
+            }
+        )
+        client = _client(tmp_path, monkeypatch)
+
+        response = client.post(
+            "/api/v1/connection/test",
+            headers=AUTH,
+            json={"config_url": f"http://127.0.0.1:{server.server_port}"},
+        )
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["ok"] is False
+        assert body["error_class"] == "auth"
+        assert "저장된 토큰을 사용할 수 없습니다" in body["detail"]
+        assert body["probed_url"] is None
+        assert "super-secret-stored-token" not in response.text
+        assert hits == []  # no outbound request was made at all
+    finally:
+        server.shutdown()
+        thread.join(timeout=1.0)
+
+
+def test_connection_test_overridden_config_url_with_explicit_token_probes_with_body_token(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _OKHandler.received_auth = []
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _OKHandler)
+    thread = _run_server(server)
+    try:
+        store = _store(tmp_path, monkeypatch)
+        store.save(
+            {
+                "config_url": "http://saved.example/config",
+                "facility_id": "facility-1",
+                "facility_token": "stored-token",
+            }
+        )
+        client = _client(tmp_path, monkeypatch)
+
+        response = client.post(
+            "/api/v1/connection/test",
+            headers=AUTH,
+            json={
+                "config_url": f"http://127.0.0.1:{server.server_port}",
+                "facility_token": "body-token",
+            },
+        )
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["ok"] is True
+        assert _OKHandler.received_auth == ["Bearer body-token"]
+    finally:
+        server.shutdown()
+        thread.join(timeout=1.0)
+
+
+def test_connection_test_same_config_url_override_keeps_stored_token_fallback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _OKHandler.received_auth = []
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _OKHandler)
+    thread = _run_server(server)
+    try:
+        saved_config_url = f"http://127.0.0.1:{server.server_port}"
+        store = _store(tmp_path, monkeypatch)
+        store.save(
+            {
+                "config_url": saved_config_url,
+                "facility_id": "facility-1",
+                "facility_token": "stored-token",
+            }
+        )
+        client = _client(tmp_path, monkeypatch)
+
+        # Same URL, just with a trailing slash -- still "unchanged" after rstrip.
+        response = client.post(
+            "/api/v1/connection/test",
+            headers=AUTH,
+            json={"config_url": f"{saved_config_url}/"},
+        )
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["ok"] is True
+        assert _OKHandler.received_auth == ["Bearer stored-token"]
     finally:
         server.shutdown()
         thread.join(timeout=1.0)

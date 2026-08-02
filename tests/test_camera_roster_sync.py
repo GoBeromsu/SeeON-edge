@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import json
 import socket
+import threading
+import time
 from collections.abc import Iterator
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -16,9 +18,11 @@ import pytest
 from fastapi.testclient import TestClient
 
 from backend.app.core.config import get_settings
+from backend.app.features.cameras import roster_sync as roster_sync_module
 from backend.app.features.cameras.roster_sync import (
     BASE_BACKOFF_SEC,
     camera_sync_view,
+    get_roster_sync_state,
     sync_camera_roster,
 )
 from backend.app.features.cameras.store import CameraRegistryStore
@@ -27,7 +31,11 @@ from backend.app.features.connection.store import (
     ConnectionSettingsStore,
 )
 from backend.app.main import create_app, no_lifespan
-from backend.app.shared.backend_mapping import API_BACKEND_CAMERA_MAPPING_TIMEOUT_SEC_ENV
+from backend.app.shared.backend_mapping import (
+    API_BACKEND_CAMERA_MAPPING_TIMEOUT_SEC_ENV,
+    CameraPushResult,
+    RosterPushResult,
+)
 
 AUTH = {"Authorization": "Bearer relay-token"}
 
@@ -443,6 +451,62 @@ def test_sync_camera_roster_backoff_is_a_no_op_within_window_then_retries(
 
     after_window = sync_camera_roster(app, _now=1_000.0 + BASE_BACKOFF_SEC + 0.1)
     assert after_window.attempted is True  # backoff elapsed -> a real retry happened
+
+
+# --------------------------------------------------------------------------
+# Single-flight: concurrent triggers must never race a push
+# --------------------------------------------------------------------------
+
+
+def test_sync_camera_roster_single_flight_prevents_concurrent_pushes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    app, store = _app_with_registry(tmp_path)
+    store.create(
+        camera_id="cam-1", label="Lobby", rtsp_url="rtsp://a", space_id="space-1", status="online"
+    )
+
+    block = threading.Event()
+    call_count: list[int] = []
+
+    class _BlockingMapper:
+        configured = True
+
+        def put_roster(self, payload: list[dict[str, object]]) -> RosterPushResult:
+            call_count.append(1)
+            block.wait(timeout=5.0)
+            return RosterPushResult(
+                ok=True,
+                error_class=None,
+                status_code=200,
+                cameras={"cam-1": CameraPushResult(ok=True, error_class=None, status_code=200)},
+            )
+
+    monkeypatch.setattr(roster_sync_module, "_build_mapper", lambda app: _BlockingMapper())
+
+    first_result: list[object] = []
+    thread = Thread(target=lambda: first_result.append(sync_camera_roster(app)))
+    thread.start()
+    try:
+        for _ in range(500):  # wait until the first call has actually entered put_roster
+            if call_count:
+                break
+            time.sleep(0.01)
+        assert call_count == [1]
+
+        second = sync_camera_roster(app)
+        assert second.attempted is False  # single-flight: no second push started
+        assert call_count == [1]
+    finally:
+        block.set()
+        thread.join(timeout=5.0)
+
+    assert first_result[0].attempted is True
+    assert first_result[0].status == "synced"
+
+    state = get_roster_sync_state(app)
+    assert state.last_ok_at is not None
+    assert state.consecutive_failures == 0
 
 
 # --------------------------------------------------------------------------

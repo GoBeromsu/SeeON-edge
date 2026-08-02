@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from threading import Lock
@@ -57,7 +57,10 @@ class ConnectionSettings:
     events_url: str | None
     config_url: str | None
     facility_id: str | None
-    facility_token: str | None
+    # repr=False -- a stray log/exception of the dataclass itself must never
+    # print the raw bearer token; masked()/mask_facility_token() are the only
+    # sanctioned way to surface it externally.
+    facility_token: str | None = field(repr=False)
     updated_at: str | None
 
 
@@ -96,9 +99,9 @@ class ConnectionSettingsStore:
             raise ValueError(f"unknown connection setting field(s): {sorted(unknown)}")
         with self._lock:
             data = self._read_unlocked()
-            for field in _FIELDS:
-                if field in updates:
-                    data[field] = updates[field]
+            for field_name in _FIELDS:
+                if field_name in updates:
+                    data[field_name] = updates[field_name]
             data["updated_at"] = utc_now_iso()
             self._write_unlocked(data)
         return self.load()
@@ -125,25 +128,31 @@ class ConnectionSettingsStore:
         if not isinstance(raw, dict):
             return {}
         data: dict[str, str | None] = {}
-        for field in (*_FIELDS, "updated_at"):
-            value = raw.get(field)
-            data[field] = value if isinstance(value, str) and value else None
+        for field_name in (*_FIELDS, "updated_at"):
+            value = raw.get(field_name)
+            data[field_name] = value if isinstance(value, str) and value else None
         return data
 
     def _write_unlocked(self, data: dict[str, str | None]) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         tmp_path = self.path.with_name(f".{self.path.name}.{os.getpid()}.tmp")
-        tmp_path.write_text(
-            json.dumps(data, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
-            encoding="utf-8",
-        )
+        serialized = json.dumps(data, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         # facility_token is a bearer credential stored in local edge JSON by
-        # design; API responses and logs must use masked()/mask_facility_token(),
-        # and the store is best-effort 0600 -- same posture as CameraRegistryStore.
+        # design; API responses and logs must use masked()/mask_facility_token().
+        # The tmp file is created with mode 0600 from the very first byte
+        # (O_EXCL so we never open/reuse an existing, differently-permissioned
+        # file) rather than write-then-chmod, so the plaintext token is never
+        # world-readable even transiently.
+        fd = os.open(str(tmp_path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         try:
-            os.chmod(tmp_path, 0o600)
-        except OSError:
-            pass
+            with os.fdopen(fd, "w", encoding="utf-8") as tmp_file:
+                tmp_file.write(serialized)
+        except BaseException:
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+            raise
         os.replace(tmp_path, self.path)
         try:
             os.chmod(self.path, 0o600)
