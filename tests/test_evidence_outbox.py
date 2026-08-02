@@ -386,5 +386,5 @@ def test_newer_schema_is_refused_without_mutation(tmp_path: Path) -> None:
 
     # Then: startup refuses compatibility and leaves the DB untouched.
     assert raised.value.found == 999
-    assert raised.value.supported == 4
+    assert raised.value.supported == 5
     assert os.stat(database_path).st_size == before
