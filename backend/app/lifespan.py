@@ -17,6 +17,11 @@ from fastapi import FastAPI
 
 from backend.app.features.cameras.store import CameraRegistryStore
 from backend.app.features.clips.catalog import CatalogStore
+from backend.app.features.status.backend_heartbeat_relay import (
+    effective_relay_interval_sec,
+    get_heartbeat_relay_state,
+    relay_heartbeats_once,
+)
 from backend.app.features.status.heartbeat_store import DEFAULT_STALE_AFTER_SEC, HeartbeatStore
 from backend.app.features.status.runtime_status_store import RuntimeStatusStore
 from backend.app.shared.backend_mapping import (
@@ -47,8 +52,10 @@ API_BACKEND_CONFIG_URL_ENV = "API_BACKEND_CONFIG_URL"
 API_BACKEND_INGEST_TIMEOUT_SEC_ENV = "API_BACKEND_INGEST_TIMEOUT_SEC"
 API_HEARTBEAT_STALE_AFTER_SEC_ENV = "API_HEARTBEAT_STALE_AFTER_SEC"
 API_BACKEND_CONFIG_REFRESH_SEC_ENV = "API_BACKEND_CONFIG_REFRESH_SEC"
+API_BACKEND_HEARTBEAT_RELAY_SEC_ENV = "API_BACKEND_HEARTBEAT_RELAY_SEC"
 
 BACKEND_CONFIG_SHUTDOWN_WAIT_SEC = 1.0
+BACKEND_HEARTBEAT_RELAY_SHUTDOWN_WAIT_SEC = 1.0
 
 
 @asynccontextmanager
@@ -97,6 +104,30 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         _backend_config_refresh_loop(app, refresh_stop, refresh_executor),
         name="backend-config-refresh",
     )
+
+    relay_interval_sec = _backend_heartbeat_relay_sec()
+    relay_stop = getattr(app.state, "backend_heartbeat_relay_stop", None)
+    if not isinstance(relay_stop, asyncio.Event) or relay_stop.is_set():
+        relay_stop = asyncio.Event()
+        app.state.backend_heartbeat_relay_stop = relay_stop
+    if relay_interval_sec > 0:
+        # Dedicated 1-worker executor, mirroring refresh_executor above,
+        # rather than sharing it: the relay tick and a backend-config pull
+        # are independent concerns and neither should be able to make the
+        # other wait behind it in the same executor's single worker thread.
+        relay_executor = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="backend-heartbeat-relay"
+        )
+        app.state.backend_heartbeat_relay_executor = relay_executor
+        app.state.backend_heartbeat_relay_task = asyncio.create_task(
+            _backend_heartbeat_relay_loop(app, relay_stop, relay_executor, relay_interval_sec),
+            name="backend-heartbeat-relay",
+        )
+    else:
+        # env=0 or unset-invalid -- relay disabled (kill-switch).
+        app.state.backend_heartbeat_relay_executor = None
+        app.state.backend_heartbeat_relay_task = None
+
     app.state.readiness = {"ready": True, "status": "ready"}
     try:
         yield
@@ -112,6 +143,22 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         refresh_executor.shutdown(wait=False, cancel_futures=True)
         app.state.backend_config_refresh_executor = None
         app.state.backend_config_refresh_task = None
+
+        relay_stop.set()
+        relay_task = app.state.backend_heartbeat_relay_task
+        if relay_task is not None:
+            try:
+                await asyncio.wait_for(
+                    asyncio.shield(relay_task), timeout=BACKEND_HEARTBEAT_RELAY_SHUTDOWN_WAIT_SEC
+                )
+            except TimeoutError:
+                relay_task.cancel()
+            relay_executor = app.state.backend_heartbeat_relay_executor
+            if relay_executor is not None:
+                relay_executor.shutdown(wait=False, cancel_futures=True)
+            app.state.backend_heartbeat_relay_executor = None
+            app.state.backend_heartbeat_relay_task = None
+
         catalog_store = getattr(app.state, "catalog_store", None)
         if isinstance(catalog_store, CatalogStore):
             catalog_store.close()
@@ -255,6 +302,33 @@ async def _backend_config_refresh_loop(
             break
         await asyncio.get_running_loop().run_in_executor(
             executor, refresh_backend_config, app, stop_event
+        )
+
+
+async def _backend_heartbeat_relay_loop(
+    app: FastAPI,
+    stop_event: asyncio.Event,
+    executor: ThreadPoolExecutor,
+    base_interval_sec: float,
+) -> None:
+    """Own the periodic per-camera heartbeat relay to the external backend.
+
+    Mirrors ``_backend_config_refresh_loop``'s wait/tick/repeat shape. The
+    wait between ticks widens via ``relay_heartbeats_once``'s backoff state
+    after consecutive all-fail ticks (external backend down/unreachable) and
+    snaps back to ``base_interval_sec`` the moment any send succeeds.
+    """
+    while not stop_event.is_set():
+        relay_state = get_heartbeat_relay_state(app)
+        wait_sec = effective_relay_interval_sec(base_interval_sec, relay_state)
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=wait_sec)
+        except TimeoutError:
+            pass
+        if stop_event.is_set():
+            break
+        await asyncio.get_running_loop().run_in_executor(
+            executor, relay_heartbeats_once, app
         )
 
 
@@ -449,6 +523,23 @@ def _backend_config_refresh_sec() -> float:
         return min(max(float(raw), 1.0), 3600.0)
     except ValueError:
         return 30.0
+
+
+def _backend_heartbeat_relay_sec() -> float:
+    """Relay interval in seconds; ``<= 0`` or unparseable disables the relay.
+
+    Unlike ``_backend_config_refresh_sec``, a malformed value here does NOT
+    fall back to the 30s default -- it fails safe to disabled, since a typo'd
+    env var should never silently start egress to an external backend.
+    """
+    raw = os.environ.get(API_BACKEND_HEARTBEAT_RELAY_SEC_ENV)
+    if raw is None:
+        return 30.0
+    try:
+        value = float(raw)
+    except ValueError:
+        return 0.0
+    return value if value > 0 else 0.0
 
 
 def _utc_now() -> str:
