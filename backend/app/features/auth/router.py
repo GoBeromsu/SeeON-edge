@@ -8,7 +8,6 @@ from pydantic import BaseModel, ConfigDict, Field
 from backend.app.shared.dashboard_auth import (
     DASHBOARD_SESSION_COOKIE,
     DashboardSessionStore,
-    WrongCurrentPasswordError,
     authorize_dashboard,
     dashboard_sessions,
     rotate_dashboard_credentials,
@@ -27,7 +26,6 @@ class DashboardLoginRequest(BaseModel):
 class DashboardCredentialsUpdateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    current_password: str = Field(min_length=1, max_length=512)
     username: str | None = Field(default=None, min_length=1, max_length=128)
     new_password: str = Field(min_length=4, max_length=512)
 
@@ -74,18 +72,11 @@ def update_credentials(
     payload: DashboardCredentialsUpdateRequest, request: Request, response: Response
 ) -> None:
     authorize_dashboard(request)
-    try:
-        token = rotate_dashboard_credentials(
-            request,
-            current_password=payload.current_password,
-            new_username=payload.username,
-            new_password=payload.new_password,
-        )
-    except WrongCurrentPasswordError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="current password is incorrect",
-        ) from exc
+    token = rotate_dashboard_credentials(
+        request,
+        new_username=payload.username,
+        new_password=payload.new_password,
+    )
     _set_session_cookie(response, request, dashboard_sessions(request), token)
 
 
