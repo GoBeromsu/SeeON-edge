@@ -387,20 +387,32 @@ cited test failing on your machine may be pinning a real runtime floor, or may
 just be instrumentation that was never written to be portable, and the two look
 identical from the test report.
 
-**The shipped example config pins a newer fall contract than the shipped artifact.**
-`worker/ml-worker.example.yaml` pins `models.fall.schema_version: 2` and the
-current coco17 `preprocessing_identity`, while `models/fall/lstm/metadata.yaml`
-declares neither — so it loads as `LEGACY_SCHEMA_VERSION` (1) with the legacy
-identity, and the pinned pair is refused. Neither side is malformed: the loader
-supports both generations as first-class cases
-(`worker/adapters/model/lstm_manifest.py`, `SUPPORTED_PREPROCESSING_IDENTITIES`),
-the artifact is a v1 export, and the config documents the v2 contract.
-`eldercare-dataset-ops` currently emits `schema_version: 1` for fall and no
-preprocessing identity, so nothing produces v2 yet. Resolving it means either
-re-exporting the artifact at v2 or relaxing the example's pins — a product call,
-not a defect. Pinned by a passing negative test in
-`tests/test_worker_real_warmup_no_stub.py`. Tracked in
-[#8](https://github.com/SeniorAILab/eldercare-fall-ml-v2/issues/8).
+**Resolved: the shipped example config pinned a fall contract nothing produces yet.**
+`worker/ml-worker.example.yaml` used to pin `models.fall.schema_version: 2`
+and the current coco17 `preprocessing_identity`, while
+`models/fall/lstm/metadata.yaml` declares neither — so it loads as
+`LEGACY_SCHEMA_VERSION` (1) with the legacy identity, and the pinned pair was
+refused. Neither side was malformed: the loader supports both generations as
+first-class cases (`worker/adapters/model/lstm_manifest.py`,
+`SUPPORTED_PREPROCESSING_IDENTITIES`), but `eldercare-dataset-ops` currently
+emits `schema_version: 1` for fall and no preprocessing identity
+(`ml/training/_selftest_g006.py`), so schema_version 2 is not a contract any
+export path produces today — the example was documenting an aspirational
+target, not the artifact it ships with.
+
+The example was corrected to pin the legacy contract
+(`schema_version: 1`, `legacy-coco17-xyc-frame-normalized-zero-fill-v1`) that
+the shipped artifact and current training pipeline actually satisfy, so
+copying the example boots the fall model it ships with. When
+`eldercare-dataset-ops` starts exporting fall artifacts with
+`schema_version: 2` and the current coco17 identity, re-export
+`models/fall/lstm` from that pipeline and bump the example's pins back to the
+v2 values at the same time — the fail-closed validation in
+`_validate_expected_identity` (`worker/adapters/model/torch_lstm_fall.py`)
+stays unchanged either way; only the pinned values move. The regression is
+covered by
+`tests/test_worker_real_warmup_no_stub.py::test_example_config_fall_contract_matches_the_local_artifact`.
+Tracked in [#8](https://github.com/SeniorAILab/eldercare-fall-ml-v2/issues/8).
 
 **Operator scripts hang on heredocs larger than `PIPE_BUF`.**
 Bash 5.3.15 writes a heredoc body into a pipe before exec'ing the reader, so a
