@@ -30,8 +30,18 @@ from backend.app.lifespan import (
 from backend.app.main import create_app, no_lifespan
 from shared.events.edge_ingest_client import EdgeIngestClient
 
-AUTH = {"Authorization": "Bearer relay-token"}
+# Dashboard auth now always resolves to a session store (persisted file > env
+# > the built-in admin/admin default, see backend/app/shared/dashboard_auth.py),
+# so a bare worker relay/bearer token is never sufficient on its own -- these
+# tests log in as the zero-config default and rely on the TestClient's cookie
+# jar to carry the session across subsequent calls.
+DASHBOARD_LOGIN = {"username": "admin", "password": "admin"}
 _TEST_TIMEOUT_ENV = "ML_API_CONNECTION_TEST_TIMEOUT_S"
+
+
+def _login(client: TestClient) -> None:
+    response = client.post("/api/v1/auth/session", json=DASHBOARD_LOGIN)
+    assert response.status_code == 204
 
 
 @pytest.fixture(autouse=True)
@@ -95,8 +105,9 @@ def test_get_connection_masks_token_and_reports_configured(
         }
     )
     client = _client(tmp_path, monkeypatch)
+    _login(client)
 
-    response = client.get("/api/v1/connection", headers=AUTH)
+    response = client.get("/api/v1/connection")
 
     assert response.status_code == 200
     body = response.json()
@@ -115,7 +126,8 @@ def test_get_connection_unconfigured_when_nothing_saved(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     client = _client(tmp_path, monkeypatch)
-    response = client.get("/api/v1/connection", headers=AUTH)
+    _login(client)
+    response = client.get("/api/v1/connection")
     assert response.status_code == 200
     body = response.json()
     assert body["configured"] is False
@@ -128,7 +140,8 @@ def test_get_connection_heartbeat_relay_absent_state_reads_disabled_with_nulls(
 ) -> None:
     # no_lifespan test apps never populate backend_heartbeat_relay_state.
     client = _client(tmp_path, monkeypatch)
-    response = client.get("/api/v1/connection", headers=AUTH)
+    _login(client)
+    response = client.get("/api/v1/connection")
     assert response.status_code == 200
     assert response.json()["heartbeat_relay"] == {
         "enabled": False,
@@ -144,12 +157,13 @@ def test_get_connection_heartbeat_relay_reflects_state_and_maps_korean_detail(
     from backend.app.features.status.backend_heartbeat_relay import HeartbeatRelayState
 
     client = _client(tmp_path, monkeypatch)
+    _login(client)
     client.app.state.backend_heartbeat_relay_task = object()  # loop "configured"
     client.app.state.backend_heartbeat_relay_state = HeartbeatRelayState(
         last_error_class="auth", last_success_at="2026-01-01T00:00:00.000Z"
     )
 
-    response = client.get("/api/v1/connection", headers=AUTH)
+    response = client.get("/api/v1/connection")
 
     assert response.status_code == 200
     assert response.json()["heartbeat_relay"] == {
@@ -166,10 +180,11 @@ def test_get_connection_heartbeat_relay_task_none_reads_disabled_even_with_state
     from backend.app.features.status.backend_heartbeat_relay import HeartbeatRelayState
 
     client = _client(tmp_path, monkeypatch)
+    _login(client)
     client.app.state.backend_heartbeat_relay_task = None  # disabled via env kill-switch
     client.app.state.backend_heartbeat_relay_state = HeartbeatRelayState()
 
-    response = client.get("/api/v1/connection", headers=AUTH)
+    response = client.get("/api/v1/connection")
 
     assert response.status_code == 200
     body = response.json()["heartbeat_relay"]
@@ -193,10 +208,10 @@ def test_put_connection_saves_and_relinks_the_running_app_immediately(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     client = _client(tmp_path, monkeypatch)
+    _login(client)
 
     response = client.put(
         "/api/v1/connection",
-        headers=AUTH,
         json={
             "events_url": "http://backend.example/api/v1/edge/events",
             "facility_token": "tok-1",
@@ -222,17 +237,16 @@ def test_put_connection_explicit_null_clears_saved_value_back_to_env_seed(
 ) -> None:
     monkeypatch.setenv(EDGE_FACILITY_TOKEN_ENV, "env-seeded-token")
     client = _client(tmp_path, monkeypatch)
+    _login(client)
 
     saved = client.put(
         "/api/v1/connection",
-        headers=AUTH,
         json={"events_url": "http://backend.example/events", "facility_token": "explicit-token"},
     )
     assert saved.json()["facility_token_masked"] == "****oken"
 
     cleared = client.put(
         "/api/v1/connection",
-        headers=AUTH,
         json={"facility_token": None},
     )
     assert cleared.status_code == 200
@@ -245,15 +259,14 @@ def test_put_connection_omitted_field_is_left_untouched(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     client = _client(tmp_path, monkeypatch)
+    _login(client)
     client.put(
         "/api/v1/connection",
-        headers=AUTH,
         json={"events_url": "http://backend.example/events", "facility_id": "facility-1"},
     )
 
     response = client.put(
         "/api/v1/connection",
-        headers=AUTH,
         json={"events_url": "http://backend-2.example/events"},
     )
 
@@ -266,9 +279,9 @@ def test_put_connection_rejects_invalid_url_with_422(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     client = _client(tmp_path, monkeypatch)
+    _login(client)
     response = client.put(
         "/api/v1/connection",
-        headers=AUTH,
         json={"events_url": "not-a-url"},
     )
     assert response.status_code == 422
@@ -279,9 +292,9 @@ def test_put_connection_rejects_non_http_scheme(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     client = _client(tmp_path, monkeypatch)
+    _login(client)
     response = client.put(
         "/api/v1/connection",
-        headers=AUTH,
         json={"config_url": "ftp://backend.example/config"},
     )
     assert response.status_code == 422
@@ -345,9 +358,9 @@ def test_connection_test_ok(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> 
     thread = _run_server(server)
     try:
         client = _client(tmp_path, monkeypatch)
+        _login(client)
         response = client.post(
             "/api/v1/connection/test",
-            headers=AUTH,
             json={
                 "config_url": f"http://127.0.0.1:{server.server_port}",
                 "facility_id": "facility-1",
@@ -370,9 +383,9 @@ def test_connection_test_auth_failure(tmp_path: Path, monkeypatch: pytest.Monkey
     thread = _run_server(server)
     try:
         client = _client(tmp_path, monkeypatch)
+        _login(client)
         response = client.post(
             "/api/v1/connection/test",
-            headers=AUTH,
             json={
                 "config_url": f"http://127.0.0.1:{server.server_port}",
                 "facility_id": "facility-1",
@@ -392,9 +405,9 @@ def test_connection_test_auth_failure(tmp_path: Path, monkeypatch: pytest.Monkey
 def test_connection_test_unreachable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     port = _closed_port()
     client = _client(tmp_path, monkeypatch)
+    _login(client)
     response = client.post(
         "/api/v1/connection/test",
-        headers=AUTH,
         json={"config_url": f"http://127.0.0.1:{port}", "facility_id": "facility-1"},
     )
     assert response.status_code == 200
@@ -408,9 +421,9 @@ def test_connection_test_timeout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     thread = _run_server(server)
     try:
         client = _client(tmp_path, monkeypatch, test_timeout_s=0.2)
+        _login(client)
         response = client.post(
             "/api/v1/connection/test",
-            headers=AUTH,
             json={
                 "config_url": f"http://127.0.0.1:{server.server_port}",
                 "facility_id": "facility-1",
@@ -429,7 +442,8 @@ def test_connection_test_unconfigured_with_empty_settings(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     client = _client(tmp_path, monkeypatch)
-    response = client.post("/api/v1/connection/test", headers=AUTH, json={})
+    _login(client)
+    response = client.post("/api/v1/connection/test", json={})
     assert response.status_code == 200
     body = response.json()
     assert body["ok"] is False
@@ -452,10 +466,10 @@ def test_connection_test_body_override_is_not_persisted(
         store = _store(tmp_path, monkeypatch)
         store.save({"config_url": "http://saved.example/config", "facility_id": "saved-facility"})
         client = _client(tmp_path, monkeypatch)
+        _login(client)
 
         response = client.post(
             "/api/v1/connection/test",
-            headers=AUTH,
             json={
                 "config_url": f"http://127.0.0.1:{server.server_port}",
                 "facility_id": "facility-1",
@@ -501,10 +515,10 @@ def test_connection_test_overridden_config_url_without_token_blocks_stored_token
             }
         )
         client = _client(tmp_path, monkeypatch)
+        _login(client)
 
         response = client.post(
             "/api/v1/connection/test",
-            headers=AUTH,
             json={"config_url": f"http://127.0.0.1:{server.server_port}"},
         )
 
@@ -537,10 +551,10 @@ def test_connection_test_overridden_config_url_with_explicit_token_probes_with_b
             }
         )
         client = _client(tmp_path, monkeypatch)
+        _login(client)
 
         response = client.post(
             "/api/v1/connection/test",
-            headers=AUTH,
             json={
                 "config_url": f"http://127.0.0.1:{server.server_port}",
                 "facility_token": "body-token",
@@ -573,11 +587,11 @@ def test_connection_test_same_config_url_override_keeps_stored_token_fallback(
             }
         )
         client = _client(tmp_path, monkeypatch)
+        _login(client)
 
         # Same URL, just with a trailing slash -- still "unchanged" after rstrip.
         response = client.post(
             "/api/v1/connection/test",
-            headers=AUTH,
             json={"config_url": f"{saved_config_url}/"},
         )
 
@@ -594,9 +608,9 @@ def test_connection_test_malformed_body_url_is_422(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     client = _client(tmp_path, monkeypatch)
+    _login(client)
     response = client.post(
         "/api/v1/connection/test",
-        headers=AUTH,
         json={"config_url": "not-a-url", "facility_id": "facility-1"},
     )
     assert response.status_code == 422

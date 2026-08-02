@@ -37,7 +37,17 @@ from backend.app.shared.backend_mapping import (
     RosterPushResult,
 )
 
-AUTH = {"Authorization": "Bearer relay-token"}
+# Dashboard auth now always resolves to a session store (persisted file > env
+# > the built-in admin/admin default, see backend/app/shared/dashboard_auth.py),
+# so a bare worker relay/bearer token is never sufficient on its own -- these
+# tests log in as the zero-config default and rely on the TestClient's cookie
+# jar to carry the session across subsequent calls.
+DASHBOARD_LOGIN = {"username": "admin", "password": "admin"}
+
+
+def _login(client: TestClient) -> None:
+    response = client.post("/api/v1/auth/session", json=DASHBOARD_LOGIN)
+    assert response.status_code == 204
 
 
 @pytest.fixture(autouse=True)
@@ -528,9 +538,9 @@ def test_camera_create_triggers_background_sync_without_breaking_the_response(
         )
         app, _store = _app_with_registry(tmp_path)
         with TestClient(app) as client:
+            _login(client)
             created = client.post(
                 "/api/v1/cameras",
-                headers=AUTH,
                 json={
                     "label": "Lobby",
                     "rtsp_url": "rtsp://camera/stream",
@@ -543,7 +553,7 @@ def test_camera_create_triggers_background_sync_without_breaking_the_response(
             # fire-and-forget BackgroundTask against a pinned response shape.
             assert created.json()["sync"] is None
 
-            listed = client.get("/api/v1/cameras", headers=AUTH).json()
+            listed = client.get("/api/v1/cameras").json()
         sync = listed["cameras"][0]["sync"]
         assert sync["status"] == "synced"
         assert sync["last_ok_at"] is not None
@@ -560,9 +570,9 @@ def test_camera_create_trigger_is_best_effort_when_backend_unconfigured(
     )
     app, _store = _app_with_registry(tmp_path)
     with TestClient(app) as client:
+        _login(client)
         created = client.post(
             "/api/v1/cameras",
-            headers=AUTH,
             json={
                 "label": "Lobby",
                 "rtsp_url": "rtsp://camera/stream",
@@ -574,7 +584,7 @@ def test_camera_create_trigger_is_best_effort_when_backend_unconfigured(
         assert created.status_code == 201
         assert created.json()["sync"] is None
 
-        listed = client.get("/api/v1/cameras", headers=AUTH).json()
+        listed = client.get("/api/v1/cameras").json()
     sync = listed["cameras"][0]["sync"]
     assert sync["status"] == "disabled"
     assert sync["error_class"] == "unconfigured"
@@ -597,9 +607,9 @@ def test_put_connection_triggers_roster_sync(
             status="online",
         )
         with TestClient(app) as client:
+            _login(client)
             put_response = client.put(
                 "/api/v1/connection",
-                headers=AUTH,
                 json={
                     "events_url": f"http://127.0.0.1:{server.server_port}/api/v1/edge/events",
                     "facility_token": "tok-1",
@@ -608,7 +618,7 @@ def test_put_connection_triggers_roster_sync(
             )
             assert put_response.status_code == 200
 
-            listed = client.get("/api/v1/cameras", headers=AUTH).json()
+            listed = client.get("/api/v1/cameras").json()
         sync = listed["cameras"][0]["sync"]
         assert sync["status"] == "synced"
     finally:
@@ -650,7 +660,8 @@ def test_sync_cameras_endpoint_returns_fresh_result(
             status="online",
         )
         with TestClient(app) as client:
-            response = client.post("/api/v1/connection/sync-cameras", headers=AUTH)
+            _login(client)
+            response = client.post("/api/v1/connection/sync-cameras")
         assert response.status_code == 200
         body = response.json()
         assert body["status"] == "synced"
@@ -670,7 +681,8 @@ def test_sync_cameras_endpoint_unconfigured_result(
     )
     app, _store = _app_with_registry(tmp_path)
     with TestClient(app) as client:
-        response = client.post("/api/v1/connection/sync-cameras", headers=AUTH)
+        _login(client)
+        response = client.post("/api/v1/connection/sync-cameras")
     assert response.status_code == 200
     body = response.json()
     assert body["status"] == "disabled"
@@ -698,7 +710,8 @@ def test_sync_cameras_endpoint_never_exposes_the_facility_token(
             status="online",
         )
         with TestClient(app) as client:
-            response = client.post("/api/v1/connection/sync-cameras", headers=AUTH)
+            _login(client)
+            response = client.post("/api/v1/connection/sync-cameras")
         assert response.status_code == 200
         assert "super-secret-token" not in response.text
         assert all(
