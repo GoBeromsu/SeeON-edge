@@ -13,10 +13,12 @@ from __future__ import annotations
 import os
 import threading
 from collections.abc import Callable
+from pathlib import Path
 from typing import Final, Protocol, final
 
 from worker.adapters.model.errors import FatalAcceleratorError
 from worker.runtime.faults.record import FirstFaultRecord, persist_first_fault
+from worker.runtime.state_dir import resolve_state_dir
 
 FATAL_ACCELERATOR_EXIT_CODE: Final = 4
 
@@ -36,6 +38,9 @@ class FaultHandler:
     hard_exit:
         Injected exit function.  Production code passes ``os._exit``; tests
         pass a recording callable so the process does not actually terminate.
+    state_dir:
+        Directory the first-fault record is written under.  Defaults to the
+        resolved worker state directory.
     """
 
     def __init__(
@@ -43,9 +48,11 @@ class FaultHandler:
         profile: str,
         *,
         hard_exit: Callable[[int], None] = os._exit,  # noqa: SLF001
+        state_dir: Path | None = None,
     ) -> None:
         self._profile = profile
         self._hard_exit = hard_exit
+        self._state_dir = state_dir if state_dir is not None else resolve_state_dir()
         self._loops: list[_Stoppable] = []
         self._handled = threading.Event()
 
@@ -69,7 +76,7 @@ class FaultHandler:
         self._handled.set()
 
         # 1. Persist first-fault record (best-effort; never raises).
-        persist_first_fault(record)
+        persist_first_fault(record, state_dir=self._state_dir)
 
         # 2. Stop every camera loop so no further inference is scheduled.
         for loop in self._loops:

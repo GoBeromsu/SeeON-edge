@@ -30,6 +30,11 @@ COPY shared ./shared
 COPY backend ./backend
 COPY --from=front-build /src/front/dist /app/front
 RUN mkdir -p /app/models/fall /app/models/pose /app/models/bed
+# State dir is image-owned (matches backend/app/shared/state_dir.py's resolver
+# for the root container user); deliberately no VOLUME here to avoid
+# anonymous-volume sprawl and derived-image RUN neutralization —
+# compose.edge.yaml attaches a named volume at this same path instead.
+RUN mkdir -p /root/.local/state/ml-api
 
 ENV HOST=127.0.0.1 \
     PORT=8000

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-import stat
+import sqlite3
 import threading
 import urllib.error
 import urllib.request
@@ -12,6 +12,7 @@ from typing import Self, final
 
 import pytest
 
+from worker.pipeline.output.evidence.evidence_outbox_schema import SCHEMA_VERSION
 from worker.runtime.config import (
     ConfigSource,
     JsonObject,
@@ -45,7 +46,7 @@ class FakeResponse:
 
 
 def test_fresh_pull_uses_auth_and_replaces_lkg_atomically(tmp_path: Path) -> None:
-    store = WorkerConfigLkgStore(tmp_path / "worker-config.json")
+    store = WorkerConfigLkgStore(tmp_path / "worker-config.sqlite3")
     captured: list[tuple[str, str | None, float]] = []
 
     def fake_urlopen(request: urllib.request.Request, timeout: float) -> FakeResponse:
@@ -79,12 +80,14 @@ def test_fresh_pull_uses_auth_and_replaces_lkg_atomically(tmp_path: Path) -> Non
             0.25,
         )
     ]
-    assert stat.S_IMODE(store.path.stat().st_mode) == 0o600
-    assert not tuple(tmp_path.glob(".*.tmp"))
+    assert store.database_path.exists()
+    stored = store.load()
+    assert stored is not None
+    assert stored.registry_version == 9
 
 
 def test_unreachable_backend_uses_stale_lkg_without_zeroing_cameras(tmp_path: Path) -> None:
-    store = WorkerConfigLkgStore(tmp_path / "worker-config.json")
+    store = WorkerConfigLkgStore(tmp_path / "worker-config.sqlite3")
     fresh = load_worker_config_from_relay(
         "http://ml-api:8000",
         "relay-secret",
@@ -116,7 +119,7 @@ def test_malformed_pull_keeps_prior_lkg_and_redacts_secrets(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    store = WorkerConfigLkgStore(tmp_path / "worker-config.json")
+    store = WorkerConfigLkgStore(tmp_path / "worker-config.sqlite3")
     fresh = load_worker_config_from_relay(
         "http://ml-api:8000",
         "relay-secret",
@@ -153,7 +156,7 @@ def test_malformed_pull_keeps_prior_lkg_and_redacts_secrets(
 
 
 def test_concurrent_lkg_writes_preserve_newest_directive(tmp_path: Path) -> None:
-    store = WorkerConfigLkgStore(tmp_path / "worker-config.json")
+    store = WorkerConfigLkgStore(tmp_path / "worker-config.sqlite3")
     barrier = threading.Barrier(3)
 
     def save(version: int) -> bool:
@@ -174,16 +177,18 @@ def test_concurrent_lkg_writes_preserve_newest_directive(tmp_path: Path) -> None
     assert stored is not None
     assert stored.directive == RestartDirective(generation=1, version=9)
     assert stored.payload["registry_version"] == 9
-    assert json.loads(store.path.read_text(encoding="utf-8"))["payload"][
-        "registry_version"
-    ] == 9
+    # Re-open via a second store instance pointed at the same database file to
+    # confirm the write is durably persisted, not just cached on `store`.
+    reopened = WorkerConfigLkgStore(store.database_path).load()
+    assert reopened is not None
+    assert reopened.payload["registry_version"] == 9
 
 
 def test_race_loss_with_healthy_stored_lkg_returns_lkg_snapshot(tmp_path: Path) -> None:
     """A fresh pull that validates but loses the revision race to a strictly
     newer, still-healthy on-disk LKG must fall back to that LKG unchanged
     (issue #34, race-loss branch with a healthy stored LKG)."""
-    store = WorkerConfigLkgStore(tmp_path / "worker-config.json")
+    store = WorkerConfigLkgStore(tmp_path / "worker-config.sqlite3")
     newer_payload = _payload(registry_version=9, config_version=9, restart_epoch=1)
     assert store.save(newer_payload, RestartDirective(generation=1, version=9))
 
@@ -207,17 +212,24 @@ def test_race_loss_with_healthy_stored_lkg_returns_lkg_snapshot(tmp_path: Path) 
     assert stored.registry_version == 9
 
 
-def test_race_loss_with_corrupt_stored_lkg_deletes_lkg_and_returns_fresh(
+def test_race_loss_with_corrupt_stored_lkg_clears_current_and_returns_fresh(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """A fresh pull that validates but loses the revision race to a strictly
-    newer on-disk LKG that no longer re-validates must not leave the corrupt
-    LKG in place -- it would keep winning the race forever. Instead, delete
-    the corrupt LKG, log loudly, and return the fresh (race-losing) snapshot
-    since a parseable-but-older config beats an unparseable newer one
-    (issue #34, decided design option 3)."""
-    store = WorkerConfigLkgStore(tmp_path / "worker-config.json")
+    newer stored LKG that no longer re-validates must not leave the corrupt
+    LKG in place -- it would keep winning the race forever. Instead, clear
+    the stored `config_current` row via `WorkerConfigLkgStore.clear()`,
+    log loudly, and return the fresh (race-losing) snapshot since a
+    parseable-but-older config beats an unparseable newer one (issue #34,
+    decided design option 3).
+
+    Since PR #61's move off the JSON-file store onto `worker-state.sqlite3`
+    (`config_current`/`config_history` tables), there is no single file to
+    unlink -- `clear()` deletes only the `config_current` pointer row so
+    `load()` stops returning the corrupt payload, while leaving
+    `config_history` intact for audit-trail joinability."""
+    store = WorkerConfigLkgStore(tmp_path / "worker-config.sqlite3")
     corrupt_payload = _payload(registry_version=9, config_version=9, restart_epoch=1)
     corrupt_payload["cameras"] = [
         {
@@ -228,7 +240,7 @@ def test_race_loss_with_corrupt_stored_lkg_deletes_lkg_and_returns_fresh(
         }
     ]
     assert store.save(corrupt_payload, RestartDirective(generation=1, version=9))
-    assert store.path.exists()
+    assert store.load() is not None
 
     fresh_payload = _payload(registry_version=5, config_version=5, restart_epoch=1)
     snapshot = load_worker_config_from_relay(
@@ -243,16 +255,16 @@ def test_race_loss_with_corrupt_stored_lkg_deletes_lkg_and_returns_fresh(
     assert snapshot.stale is False
     assert snapshot.registry_version == 5
     assert snapshot.directive == RestartDirective(generation=1, version=5)
-    # The corrupt LKG must be deleted, not left behind to keep winning the
-    # revision race against every future legitimate pull.
-    assert not store.path.exists()
+    # The corrupt LKG's current pointer must be cleared, not left behind to
+    # keep winning the revision race against every future legitimate pull.
+    assert store.load() is None
     error = capsys.readouterr().err
     assert "WARNING" in error
-    assert str(store.path) in error
+    assert str(store.database_path) in error
 
 
 def test_offline_without_lkg_falls_back_to_yaml(tmp_path: Path) -> None:
-    store = WorkerConfigLkgStore(tmp_path / "worker-config.json")
+    store = WorkerConfigLkgStore(tmp_path / "worker-config.sqlite3")
 
     def offline(_request: urllib.request.Request, _timeout: float) -> FakeResponse:
         raise TimeoutError
@@ -303,3 +315,111 @@ def _yaml_config() -> WorkerConfig:
             ],
         }
     )
+
+
+def test_save_degrades_to_false_when_database_parent_is_uncreatable(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """open_connection's `path.parent.mkdir(parents=True, exist_ok=True)` raises
+    OSError (specifically NotADirectoryError) when a path component that should
+    be a directory is actually a file. save() must degrade to False rather than
+    let that OSError escape -- an unwritable state dir must not crash the
+    worker, matching the old JSON store's failure contract."""
+    blocker = tmp_path / "blocker-file"
+    blocker.write_text("not a directory")
+    database_path = blocker / "state" / "worker-state.sqlite3"
+    store = WorkerConfigLkgStore(database_path)
+
+    saved = store.save(
+        {"registry_version": 1, "config_version": 1, "restart_epoch": 0, "cameras": []},
+        RestartDirective(generation=1, version=1),
+    )
+
+    assert saved is False
+    error = capsys.readouterr().err
+    assert "worker config LKG store unavailable" in error
+    assert str(database_path) in error
+
+
+def test_load_degrades_to_none_when_database_parent_is_uncreatable(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    blocker = tmp_path / "blocker-file"
+    blocker.write_text("not a directory")
+    database_path = blocker / "state" / "worker-state.sqlite3"
+    store = WorkerConfigLkgStore(database_path)
+
+    loaded = store.load()
+
+    assert loaded is None
+    error = capsys.readouterr().err
+    assert "worker config LKG store unavailable" in error
+
+
+def test_load_degrades_to_none_against_a_newer_schema_version(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A database stamped with a `user_version` newer than this binary's
+    SCHEMA_VERSION (e.g. after a downgrade) must make load() return None
+    rather than let NewerSchemaVersionError propagate -- same degrade-to-
+    unavailable contract as an OSError."""
+    database_path = tmp_path / "worker-state.sqlite3"
+    connection = sqlite3.connect(database_path)
+    try:
+        connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION + 1}")
+        connection.commit()
+    finally:
+        connection.close()
+
+    store = WorkerConfigLkgStore(database_path)
+    loaded = store.load()
+
+    assert loaded is None
+    error = capsys.readouterr().err
+    assert "worker config LKG store unavailable" in error
+
+
+def test_clear_removes_the_current_row_but_keeps_history(tmp_path: Path) -> None:
+    """`clear()` only clears the `config_current` pointer -- `config_history`
+    stays intact so it remains locally joinable against un-ACKED evidence
+    audit trails regardless of whether a corrupt current LKG gets cleared."""
+    store = WorkerConfigLkgStore(tmp_path / "worker-state.sqlite3")
+    payload = _payload(registry_version=9, config_version=9, restart_epoch=1)
+    assert store.save(payload, RestartDirective(generation=1, version=9))
+    assert store.load() is not None
+
+    cleared = store.clear()
+
+    assert cleared is True
+    assert store.load() is None
+    connection = sqlite3.connect(store.database_path)
+    try:
+        row = connection.execute(
+            "SELECT COUNT(*) FROM config_history WHERE config_version = 9"
+        ).fetchone()
+    finally:
+        connection.close()
+    assert row is not None
+    assert row[0] == 1
+
+
+def test_clear_degrades_to_false_when_database_parent_is_uncreatable(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Mirrors `test_save_degrades_to_false_when_database_parent_is_uncreatable`:
+    an unwritable state dir must degrade `clear()` to False rather than
+    crash the worker."""
+    blocker = tmp_path / "blocker-file"
+    blocker.write_text("not a directory")
+    database_path = blocker / "state" / "worker-state.sqlite3"
+    store = WorkerConfigLkgStore(database_path)
+
+    cleared = store.clear()
+
+    assert cleared is False
+    error = capsys.readouterr().err
+    assert "worker config LKG store unavailable" in error

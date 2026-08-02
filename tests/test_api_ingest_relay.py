@@ -3,12 +3,14 @@ from __future__ import annotations
 import base64
 import hashlib
 import sqlite3
+from collections.abc import Iterator
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 
 from backend.app.features.cameras.store import CameraRegistryStore
-from backend.app.features.clips.catalog import API_CATALOG_STORE_ENV
+from backend.app.features.clips.catalog import CatalogStore
 from backend.app.features.relay.router import (
     MAX_CATALOG_PAYLOAD_BYTES,
     MAX_CATALOG_PAYLOAD_DEPTH,
@@ -22,6 +24,32 @@ from shared.events.evidence_export_contract import (
     DeliveryFailure,
     EventReceipt,
 )
+
+
+@pytest.fixture(autouse=True)
+def default_catalog_path_to_tmp_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> Iterator[None]:
+    """Redirect the catalog resolver so no test in this file can reach the
+    real ``~/.local/state/ml-api/catalog.sqlite3``, even if a call site
+    forgets to pass ``catalog_path`` into ``_client()``.
+
+    Mirrors ``tests/conftest.py``'s
+    ``default_dashboard_credentials_store_to_tmp_path`` fixture: relay POSTs
+    that never explicitly inject a catalog path fall through to
+    ``get_catalog_store()`` -> ``_catalog_path()``, which otherwise resolves
+    the real home-directory state dir (no env override exists for this path
+    anymore). That ambient-filesystem write shouldn't happen from the suite
+    at all, so ``_catalog_path()`` itself is patched to build the path from
+    a per-test tmp path instead -- a belt-and-suspenders guard on top of the
+    explicit ``catalog_path=`` call sites below.
+    """
+
+    monkeypatch.setattr(
+        "backend.app.features.clips.catalog._catalog_path",
+        lambda: tmp_path / "catalog.sqlite3",
+    )
+    yield
 
 
 class FakeBackendIngestClient:
@@ -49,7 +77,9 @@ class FakeBackendIngestClient:
         return EventReceipt("accepted", kwargs["edge_event_id"], "event-1")
 
 
-def _client(fake: FakeBackendIngestClient | None = None) -> TestClient:
+def _client(
+    fake: FakeBackendIngestClient | None = None, *, catalog_path: Path | None = None
+) -> TestClient:
     app = create_app(lifespan=no_lifespan)
     app.state.edge_relay_token = "relay-token"
     app.state.camera_inventory = {
@@ -60,6 +90,12 @@ def _client(fake: FakeBackendIngestClient | None = None) -> TestClient:
         }
     }
     app.state.backend_ingest_client = fake or FakeBackendIngestClient()
+    if catalog_path is not None:
+        # Pre-set app.state.catalog_store so get_catalog_store() (called
+        # lazily on first relay use) short-circuits on the isinstance check
+        # and never resolves a path itself -- constructor injection instead
+        # of env-var injection now that no state-path env override exists.
+        app.state.catalog_store = CatalogStore.open(catalog_path)
     return TestClient(app)
 
 
@@ -149,15 +185,14 @@ def test_relay_alert_forwards_valid_event_to_backend_ingest_client() -> None:
     ]
 
 
-def test_relay_alert_catalog_preserves_normal_evidence_losslessly(tmp_path, monkeypatch) -> None:
-    monkeypatch.setenv(API_CATALOG_STORE_ENV, str(tmp_path / "catalog.sqlite3"))
+def test_relay_alert_catalog_preserves_normal_evidence_losslessly(tmp_path) -> None:
     fake = FakeBackendIngestClient()
     evidence = {"domain": "night-bed-exit", "window": {"start": 1, "end": 2}}
     payload = _alert_payload(
         edge_event_id="00000000-0000-4000-8000-000000000010", evidence=evidence
     )
 
-    with _client(fake) as client:
+    with _client(fake, catalog_path=tmp_path / "catalog.sqlite3") as client:
         response = client.post(
             "/api/v1/relay/alerts",
             json=payload,
@@ -169,10 +204,11 @@ def test_relay_alert_catalog_preserves_normal_evidence_losslessly(tmp_path, monk
     assert client.app.state.catalog_store.records("events") == [{**payload}]
 
 
-def test_relay_alert_skips_oversized_catalog_record_but_delivers_alert(
-    tmp_path, monkeypatch
-) -> None:
-    monkeypatch.setenv(API_CATALOG_STORE_ENV, str(tmp_path / "catalog.sqlite3"))
+def test_relay_alert_skips_oversized_catalog_record_but_delivers_alert() -> None:
+    # No catalog is ever opened on this path: the size guard rejects the
+    # payload before the router reaches ``get_catalog_store`` (see
+    # ``backend/app/features/relay/router.py``), so ``catalog_store`` must
+    # stay unset -- matching the assertion below.
     fake = FakeBackendIngestClient()
     client = _client(fake)
     response = client.post(
@@ -191,11 +227,10 @@ def test_relay_alert_skips_oversized_catalog_record_but_delivers_alert(
     assert not hasattr(client.app.state, "catalog_store")
 
 
-def test_relay_alert_skips_overdeep_catalog_record_but_delivers_alert(
-    tmp_path, monkeypatch
-) -> None:
+def test_relay_alert_skips_overdeep_catalog_record_but_delivers_alert() -> None:
     """Catalog limits never block safety-alert egress because it is only an index."""
-    monkeypatch.setenv(API_CATALOG_STORE_ENV, str(tmp_path / "catalog.sqlite3"))
+    # No catalog is ever opened on this path either -- see the sibling
+    # oversized-record test above.
     fake = FakeBackendIngestClient()
     evidence: dict[str, object] = {}
     current = evidence
@@ -278,7 +313,7 @@ def test_relay_accepts_canonical_camera_id_from_registry_when_inventory_missing(
     fake = FakeBackendIngestClient()
     app = create_app(lifespan=no_lifespan)
     app.state.edge_relay_token = "relay-token"
-    store = CameraRegistryStore(tmp_path / "cameras.json")
+    store = CameraRegistryStore(tmp_path / "catalog.sqlite3")
     store.create(
         camera_id="provisional-camera",
         label="Lobby",
@@ -305,7 +340,7 @@ def test_relay_accepts_canonical_camera_id_from_registry_when_inventory_missing(
 def _registry_app(fake: FakeBackendIngestClient, tmp_path, *, backend_camera_id: str | None):
     app = create_app(lifespan=no_lifespan)
     app.state.edge_relay_token = "relay-token"
-    store = CameraRegistryStore(tmp_path / "cameras.json")
+    store = CameraRegistryStore(tmp_path / "catalog.sqlite3")
     store.create(
         camera_id="local-uuid-1",
         label="Lobby",
@@ -457,11 +492,10 @@ def test_relay_alert_forwards_audit_and_snapshot_when_present() -> None:
         "clock_source": "edge_wall_clock",
     }
     assert forwarded["snapshot_bytes"] == b"jpeg-bytes"
-def test_relay_alert_accepts_inline_snapshot_at_decoded_size_limit(tmp_path, monkeypatch) -> None:
+def test_relay_alert_accepts_inline_snapshot_at_decoded_size_limit(tmp_path) -> None:
     content = b"x" * MAX_INLINE_SNAPSHOT_BYTES
     fake = FakeBackendIngestClient()
-    monkeypatch.setenv(API_CATALOG_STORE_ENV, str(tmp_path / "catalog.sqlite3"))
-    response = _client(fake).post(
+    response = _client(fake, catalog_path=tmp_path / "catalog.sqlite3").post(
         "/api/v1/relay/alerts",
         json=_alert_payload(
             edge_event_id="00000000-0000-4000-8000-000000000020",
@@ -528,10 +562,9 @@ def test_relay_alert_rejects_inline_snapshot_metadata_mismatch(
     assert fake.alerts == []
 
 
-def test_relay_alert_keeps_metadata_only_snapshot_compatible(tmp_path, monkeypatch) -> None:
+def test_relay_alert_keeps_metadata_only_snapshot_compatible(tmp_path) -> None:
     fake = FakeBackendIngestClient()
-    monkeypatch.setenv(API_CATALOG_STORE_ENV, str(tmp_path / "catalog.sqlite3"))
-    response = _client(fake).post(
+    response = _client(fake, catalog_path=tmp_path / "catalog.sqlite3").post(
         "/api/v1/relay/alerts",
         json=_alert_payload(
             edge_event_id="00000000-0000-4000-8000-000000000020",
@@ -573,7 +606,7 @@ class ReceiptBackendIngestClient(FakeBackendIngestClient):
 def _receipt_client(fake: ReceiptBackendIngestClient, tmp_path) -> TestClient:
     client = _client(fake)
     client.app.state.runtime_status_store = RuntimeStatusStore(
-        latency_state_path=tmp_path / "runtime-latency.json"
+        latency_state_path=tmp_path / "catalog.sqlite3"
     )
     return client
 

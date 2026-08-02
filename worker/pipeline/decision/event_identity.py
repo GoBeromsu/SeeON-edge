@@ -5,13 +5,10 @@ import os
 import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import ClassVar, Final, final, override
+from typing import ClassVar, final, override
 from uuid import uuid4
 
 from pydantic import UUID4, BaseModel, ConfigDict, ValidationError
-
-ML_WORKER_STATE_DIR_ENV: Final = "ML_WORKER_STATE_DIR"
-DEFAULT_ML_WORKER_STATE_DIR: Final = "/var/lib/ml-worker"
 
 
 @dataclass(slots=True)
@@ -93,15 +90,12 @@ class EventIdentityStore:
             raise EventIdentityStoreError(path, str(error)) from error
 
 
-def event_identity_path(camera_id: str) -> Path:
-    state_dir = Path(os.environ.get(ML_WORKER_STATE_DIR_ENV, DEFAULT_ML_WORKER_STATE_DIR))
+def event_identity_path(camera_id: str, state_dir: Path) -> Path:
     camera_digest = hashlib.sha256(camera_id.encode()).hexdigest()
     return state_dir / "event-identities" / f"{camera_digest}.jsonl"
 
 
 __all__ = [
-    "DEFAULT_ML_WORKER_STATE_DIR",
-    "ML_WORKER_STATE_DIR_ENV",
     "EventIdentityStore",
     "EventIdentityStoreError",
     "event_identity_path",

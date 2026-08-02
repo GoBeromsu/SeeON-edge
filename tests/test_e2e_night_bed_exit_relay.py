@@ -99,10 +99,6 @@ def _run_scenario(
 ) -> Iterator[tuple[LiveBackend, WorkerRunHandle, Path]]:
     state_dir = tmp_path / "state"
     clip_store_dir = tmp_path / "clips"
-    monkeypatch.setenv("ML_WORKER_STATE_DIR", str(state_dir))
-    monkeypatch.setenv(
-        "ML_WORKER_EVIDENCE_OUTBOX_PATH", str(state_dir / "evidence-outbox.sqlite3")
-    )
     monkeypatch.setenv("ML_WORKER_EVENT_CLIP_EXPORT_ENABLED", "1")
 
     publisher = FfmpegPublisher(url=mediamtx.rtsp_url(path_name))

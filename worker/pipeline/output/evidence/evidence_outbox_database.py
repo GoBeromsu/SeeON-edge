@@ -10,16 +10,26 @@ from worker.pipeline.output.evidence.evidence_outbox_types import (
 )
 
 
-def open_connection(path: Path) -> sqlite3.Connection:
+def open_connection(path: Path, *, busy_timeout_ms: int = 5000) -> sqlite3.Connection:
+    """Open (creating and migrating if needed) the worker-state database.
+
+    ``busy_timeout_ms`` controls how long a conflicting writer is waited out
+    (both the Python-level connect ``timeout`` and ``PRAGMA busy_timeout`` are
+    set to the same value). The default (5s) matches normal outbox/config
+    write behavior. Callers on a path that must never delay -- e.g. the fault
+    handler's hard-exit boundary in ``worker/runtime/faults/record.py`` --
+    pass ``busy_timeout_ms=0`` so a lock held by a concurrent writer surfaces
+    immediately as ``sqlite3.OperationalError`` instead of being waited out.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
-    connection = sqlite3.connect(path, timeout=5.0, isolation_level=None)
+    connection = sqlite3.connect(path, timeout=busy_timeout_ms / 1000, isolation_level=None)
     version_row = connection.execute("PRAGMA user_version").fetchone()
     version = 0 if version_row is None else int(version_row[0])
     if version > SCHEMA_VERSION:
         connection.close()
         raise NewerSchemaVersionError(found=version, supported=SCHEMA_VERSION)
     try:
-        connection.execute("PRAGMA busy_timeout = 5000")
+        connection.execute(f"PRAGMA busy_timeout = {busy_timeout_ms}")
         connection.execute("PRAGMA foreign_keys = ON")
         connection.execute("PRAGMA synchronous = FULL")
         connection.execute("PRAGMA journal_mode = WAL")

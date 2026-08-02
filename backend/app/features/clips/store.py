@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
+
+logger = logging.getLogger(__name__)
 
 CLIP_STORE_DIR_ENV = "CLIP_STORE_DIR"
 API_LABEL_STORE_ENV = "API_LABEL_STORE"
@@ -134,17 +137,28 @@ class LabelStore:
         return cls(os.environ.get(API_LABEL_STORE_ENV, DEFAULT_LABEL_STORE_DIR))
 
     def save(self, record: LabelRecord) -> None:
+        """Best-effort persist; an unwritable state dir must not crash the caller.
+
+        Mirrors ``RuntimeStatusStore._persist_latency``'s graceful-degradation
+        pattern (``backend/app/features/status/runtime_status_store.py``): a
+        label write that cannot land durably is dropped (with a warning)
+        rather than crashing the labeling request.
+        """
         if not is_valid_clip_id(record.clip_id):
             raise ValueError("invalid clip_id")
         labels_dir = self.root / "labels"
-        labels_dir.mkdir(parents=True, exist_ok=True)
-        target = labels_dir / f"{record.clip_id}.json"
-        tmp = target.with_suffix(".json.tmp")
-        tmp.write_text(
-            json.dumps(record.as_response(), ensure_ascii=False, separators=(",", ":")) + "\n",
-            encoding="utf-8",
-        )
-        os.replace(tmp, target)
+        try:
+            labels_dir.mkdir(parents=True, exist_ok=True)
+            target = labels_dir / f"{record.clip_id}.json"
+            tmp = target.with_suffix(".json.tmp")
+            tmp.write_text(
+                json.dumps(record.as_response(), ensure_ascii=False, separators=(",", ":"))
+                + "\n",
+                encoding="utf-8",
+            )
+            os.replace(tmp, target)
+        except OSError as exc:
+            logger.warning("label store unavailable at %s: %s", labels_dir, exc)
 
     def get(self, clip_id: str) -> LabelRecord | None:
         if not is_valid_clip_id(clip_id):

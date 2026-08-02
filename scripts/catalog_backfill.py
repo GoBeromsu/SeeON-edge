@@ -4,28 +4,22 @@
 from __future__ import annotations
 
 import argparse
-import os
 from pathlib import Path
 
-from backend.app.features.cameras.store import (
-    API_CAMERA_STORE_ENV,
-    DEFAULT_CAMERA_STORE,
-)
 from backend.app.features.clips.audit_log import AuditLogStore
 from backend.app.features.clips.catalog import (
-    API_CATALOG_STORE_ENV,
-    DEFAULT_CATALOG_STORE,
     CatalogStore,
     sanitized_camera_payload,
     strict_camera_snapshot,
 )
 from backend.app.features.clips.store import ClipStore, LabelStore
+from backend.app.shared.state_dir import resolve_state_dir
 
 parser = argparse.ArgumentParser()
 parser.add_argument(
     "--catalog",
     type=Path,
-    default=Path(os.environ.get(API_CATALOG_STORE_ENV, DEFAULT_CATALOG_STORE)),
+    default=resolve_state_dir("ml-api") / "catalog.sqlite3",
 )
 parser.add_argument("--clip-store", type=Path, required=True)
 parser.add_argument("--audit", type=Path)
@@ -33,7 +27,7 @@ parser.add_argument("--labels", type=Path)
 parser.add_argument(
     "--cameras",
     type=Path,
-    default=Path(os.environ.get(API_CAMERA_STORE_ENV, DEFAULT_CAMERA_STORE)),
+    default=resolve_state_dir("ml-api") / "cameras.json",
 )
 args = parser.parse_args()
 store = CatalogStore.open(args.catalog)

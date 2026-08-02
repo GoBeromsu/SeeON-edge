@@ -75,7 +75,6 @@ from worker.domains.bed_exit import BedExitMonitor
 from worker.domains.fall import FallEventLatch
 from worker.pipeline.bus import BoundedFrameBus
 from worker.pipeline.ingest.lifecycle import IngestReporter
-from worker.pipeline.output.evidence.evidence_runtime import OUTBOX_PATH_ENV
 from worker.runtime.config import CameraRuntimeConfig, WorkerConfig
 from worker.runtime.lease import GpuLease
 from worker.runtime.profile.registry import VerifyResult
@@ -210,8 +209,6 @@ def _fall_model_via_serving_client(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _build_runtime(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> WorkerRuntime:
-    monkeypatch.setenv("ML_WORKER_STATE_DIR", str(tmp_path))
-    monkeypatch.setenv(OUTBOX_PATH_ENV, str(tmp_path / "outbox.sqlite3"))
     _stub_heartbeat_transport(monkeypatch)
     return WorkerRuntime(
         _config(),
@@ -221,6 +218,7 @@ def _build_runtime(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> WorkerRun
         pump_factory=_pump_factory,
         acquire_lease=lambda: GpuLease.acquire(tmp_path),
         decode_probe=lambda _decode: VerifyResult(True, "cpu", "decode", "available"),
+        state_dir=tmp_path,
     )
 
 

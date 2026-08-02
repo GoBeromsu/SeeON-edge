@@ -34,17 +34,22 @@ api_log="$tmpdir/ml-api.log"
 worker_log="$tmpdir/ml-worker.log"
 api_pid=""
 
-# Sandbox worker runtime state (GPU lease file, durable evidence outbox) under
-# this run's disposable tmpdir instead of the real /var/lib/ml-worker, and
-# turn on relay export -- EvidenceExportRuntime.from_environment() (worker/
-# pipeline/output/evidence/evidence_runtime.py) is disabled unless
-# ML_WORKER_EVENT_CLIP_EXPORT_ENABLED=1, in which case admitted events stage
-# to the durable outbox but are never sent to the relay, and this harness's
-# whole point is proving relay delivery.
-export ML_WORKER_STATE_DIR="$tmpdir/worker-state"
-export ML_WORKER_EVIDENCE_OUTBOX_PATH="$tmpdir/worker-state/evidence-outbox.sqlite3"
+# Sandbox ml-api/ml-worker runtime state (GPU lease file, durable evidence
+# outbox, camera/credentials catalog) under this run's disposable tmpdir
+# instead of the developer's real ~/.local/state/{ml-api,ml-worker} -- both
+# resolvers (worker/runtime/state_dir.py, backend/app/shared/state_dir.py)
+# derive their path from Path.home() with no environment override, so HOME
+# is the only sandboxing seam left. It is set only on the api/worker process
+# invocations below (start_api, run_worker_with_clock), not for this whole
+# script, so `uv run` here keeps resolving its own cache under the real
+# HOME instead of an empty one. Also turn on relay export --
+# EvidenceExportRuntime.from_environment() (worker/pipeline/output/evidence/
+# evidence_runtime.py) is disabled unless ML_WORKER_EVENT_CLIP_EXPORT_ENABLED=1,
+# in which case admitted events stage to the durable outbox but are never
+# sent to the relay, and this harness's whole point is proving relay delivery.
+sandbox_home="$tmpdir/home"
 export ML_WORKER_EVENT_CLIP_EXPORT_ENABLED=1
-mkdir -p "$ML_WORKER_STATE_DIR"
+mkdir -p "$sandbox_home"
 
 cleanup() {
   if [[ -n "$api_pid" ]]; then
@@ -92,6 +97,7 @@ YAML
 }
 
 start_api() {
+  HOME="$sandbox_home" \
   API_BACKEND_EVENTS_URL="${backend_base_url}/api/v1/events" \
   API_EDGE_RELAY_TOKEN="$relay_token" \
   API_CAMERA_INVENTORY="[{\"camera_id\":\"${camera_id}\",\"facility_id\":\"${facility_id}\",\"resident_id\":\"${resident_id}\"}]" \
@@ -147,7 +153,7 @@ run_worker_with_clock() {
   # working directory on sys.path, while running a file puts the *script's*
   # directory there instead -- so `import worker` resolved as a heredoc and
   # would not as a file. Setting it restores what the heredoc got implicitly.
-  if ! PYTHONPATH="$repo_root" OPENCV_FFMPEG_CAPTURE_OPTIONS="rtsp_transport;tcp" BED_EXIT_NOW="$now" EDGE_CAMERA_CONFIG="$config" uv run python "$repo_root/scripts/single_rtsp_bedexit_worker_run.py" "$frames" >>"$worker_log" 2>&1
+  if ! HOME="$sandbox_home" PYTHONPATH="$repo_root" OPENCV_FFMPEG_CAPTURE_OPTIONS="rtsp_transport;tcp" BED_EXIT_NOW="$now" EDGE_CAMERA_CONFIG="$config" uv run python "$repo_root/scripts/single_rtsp_bedexit_worker_run.py" "$frames" >>"$worker_log" 2>&1
   then
     printf 'worker run failed; log follows:\n' >&2
     sed -n '1,200p' "$worker_log" >&2

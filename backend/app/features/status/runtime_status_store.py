@@ -3,13 +3,23 @@
 The worker publishes telemetry through the relay HTTP boundary. This store owns
 only the API-local, latest snapshot for each facility; it never reads worker
 runtime state directly.
+
+Latency history persists in the ``runtime_latency`` table (one row per
+facility) of the shared ``catalog.sqlite3`` database (see
+``backend/app/features/clips/catalog.py``). This module bootstraps its own
+table independently via an idempotent ``CREATE TABLE IF NOT EXISTS``
+(identical statement text to ``catalog.py``'s ``_V3_TABLE_STATEMENTS``)
+rather than depending on ``CatalogStore``, and never touches
+``PRAGMA user_version`` (that stays exclusively ``CatalogStore``'s
+responsibility).
 """
 
 from __future__ import annotations
 
 import json
+import logging
 import math
-import os
+import sqlite3
 import threading
 from collections.abc import Mapping
 from copy import deepcopy
@@ -19,10 +29,16 @@ from pathlib import Path
 from time import time
 from typing import Any
 
-DEFAULT_RUNTIME_STATUS_STALE_AFTER_SEC: float = 15.0
-ML_API_RUNTIME_LATENCY_STORE_ENV = "ML_API_RUNTIME_LATENCY_STORE"
-DEFAULT_RUNTIME_LATENCY_STORE = "/var/lib/ml-api/runtime-latency.json"
+from backend.app.shared.sqlite_bootstrap import connect_catalog_store
+from backend.app.shared.state_dir import resolve_state_dir
 
+DEFAULT_RUNTIME_STATUS_STALE_AFTER_SEC: float = 15.0
+logger = logging.getLogger(__name__)
+
+_CREATE_RUNTIME_LATENCY_TABLE = (
+    "CREATE TABLE IF NOT EXISTS runtime_latency (facility_id TEXT PRIMARY KEY, "
+    "payload_json TEXT NOT NULL) STRICT"
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,13 +69,12 @@ class RuntimeStatusStore:
     _latest_generation: dict[str, int] = field(default_factory=dict)
     _latency_by_facility: dict[str, dict[str, Any]] = field(default_factory=dict)
     latency_state_path: Path = field(
-        default_factory=lambda: Path(
-            os.environ.get(ML_API_RUNTIME_LATENCY_STORE_ENV, DEFAULT_RUNTIME_LATENCY_STORE)
-        )
+        default_factory=lambda: resolve_state_dir("ml-api") / "catalog.sqlite3"
     )
     _lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
     _latency_loaded: bool = field(default=False, init=False, repr=False)
     _latency_load_error: str | None = field(default=None, init=False, repr=False)
+    _connection: sqlite3.Connection | None = field(default=None, init=False, repr=False)
 
     def record(
         self,
@@ -173,41 +188,65 @@ class RuntimeStatusStore:
         latency = self._latency_by_facility.get(facility_id)
         return None if latency is None else deepcopy(latency)
 
+    def _connect(self) -> sqlite3.Connection:
+        if self._connection is None:
+            self._connection = connect_catalog_store(
+                self.latency_state_path, (_CREATE_RUNTIME_LATENCY_TABLE,)
+            )
+        return self._connection
+
     def _load_latency(self) -> bool:
         if self._latency_loaded:
             return True
         try:
-            value = json.loads(self.latency_state_path.read_text(encoding="utf-8"))
-        except FileNotFoundError:
-            self._latency_loaded = True
-            return True
-        except (OSError, ValueError) as exc:
+            connection = self._connect()
+            rows = connection.execute(
+                "SELECT facility_id, payload_json FROM runtime_latency"
+            ).fetchall()
+        except (OSError, sqlite3.Error) as exc:
             self._latency_load_error = exc.__class__.__name__
             return False
-        if not isinstance(value, dict):
-            self._latency_load_error = "invalid_state"
-            return False
-        self._latency_by_facility = {
-            key: item
-            for key, item in value.items()
-            if isinstance(key, str) and isinstance(item, dict)
-        }
+        latency_by_facility: dict[str, dict[str, Any]] = {}
+        for facility_id, encoded in rows:
+            try:
+                item = json.loads(encoded)
+            except (json.JSONDecodeError, TypeError, ValueError):
+                continue
+            if isinstance(facility_id, str) and isinstance(item, dict):
+                latency_by_facility[facility_id] = item
+        self._latency_by_facility = latency_by_facility
         self._latency_loaded = True
         return True
 
     def _persist_latency(self) -> None:
-        self.latency_state_path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = self.latency_state_path.with_suffix(".tmp")
-        with temporary.open("w", encoding="utf-8") as handle:
-            json.dump(self._latency_by_facility, handle)
-            handle.flush()
-            os.fsync(handle.fileno())
-        temporary.replace(self.latency_state_path)
-        directory_fd = os.open(self.latency_state_path.parent, os.O_DIRECTORY)
+        """Best-effort persist; an unwritable state dir must not crash the caller.
+
+        Mirrors ``CatalogStore.get_catalog_store``'s graceful-degradation
+        pattern (``backend/app/features/clips/catalog.py``): a store that
+        cannot durably persist still functions in-memory for the process
+        lifetime, it just loses latency history across restarts.
+        """
         try:
-            os.fsync(directory_fd)
-        finally:
-            os.close(directory_fd)
+            connection = self._connect()
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                connection.execute("DELETE FROM runtime_latency")
+                for facility_id, item in self._latency_by_facility.items():
+                    encoded = json.dumps(
+                        item, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+                    )
+                    connection.execute(
+                        "INSERT INTO runtime_latency (facility_id, payload_json) VALUES (?, ?)",
+                        (facility_id, encoded),
+                    )
+                connection.execute("COMMIT")
+            except Exception:
+                connection.execute("ROLLBACK")
+                raise
+        except (OSError, sqlite3.Error) as exc:
+            message = f"runtime latency store unavailable at {self.latency_state_path}: {exc}"
+            logger.warning(message)
+
 
 def get_runtime_status_store(app: object) -> RuntimeStatusStore:
     """Return the app-owned runtime store, creating it for no-lifespan tests."""
@@ -220,8 +259,6 @@ def get_runtime_status_store(app: object) -> RuntimeStatusStore:
 
 
 __all__ = [
-    "ML_API_RUNTIME_LATENCY_STORE_ENV",
-    "DEFAULT_RUNTIME_LATENCY_STORE",
     "DEFAULT_RUNTIME_STATUS_STALE_AFTER_SEC",
     "RuntimeStatusRecordResult",
     "RuntimeStatusSnapshot",

@@ -106,7 +106,7 @@ def test_runtime_status_exposes_additive_diagnostics() -> None:
 
 
 def test_latency_max_persists_and_excludes_nonfirst_attempts(tmp_path: Path) -> None:
-    state_path = tmp_path / "runtime-latency.json"
+    state_path = tmp_path / "catalog.sqlite3"
     store = RuntimeStatusStore(latency_state_path=state_path)
 
     store.record_latency("facility-1", "1970-01-01T00:00:00Z", received_at=10.0)
@@ -117,6 +117,35 @@ def test_latency_max_persists_and_excludes_nonfirst_attempts(tmp_path: Path) -> 
 
     latency = restarted.snapshot()["facilities"]["facility-1"]["latency"]
     assert latency == {"first_attempt_samples": 3, "max_sec": 20.0, "since_sec": 10.0}
+
+
+def test_persist_latency_degrades_gracefully_when_the_connection_is_unusable(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A broken SQLite connection at persist time must not crash the caller
+    -- the store keeps functioning in-memory for the rest of the process
+    lifetime, it just loses latency history across restarts. Mirrors the
+    pre-SQLite-conversion OSError-only degradation contract, now broadened to
+    also catch sqlite3.Error since the failure surface changed from file I/O
+    to SQL."""
+    state_path = tmp_path / "catalog.sqlite3"
+    store = RuntimeStatusStore(latency_state_path=state_path)
+    store.record_latency("facility-1", "1970-01-01T00:00:00Z", received_at=10.0)
+
+    # Simulate the connection breaking underneath the store between a
+    # successful load and a subsequent persist (e.g. the underlying file
+    # became unwritable, or SQLite closed the connection on error).
+    store._connection.close()
+
+    with caplog.at_level("WARNING"):
+        store.record_latency("facility-1", "1970-01-01T00:00:00Z", received_at=20.0)
+
+    assert f"runtime latency store unavailable at {state_path}" in caplog.text
+    # The store still functions in-memory: the new sample is reflected even
+    # though it could not be durably persisted.
+    latency = store._latency_for_facility("facility-1")
+    assert latency == {"first_attempt_samples": 2, "max_sec": 20.0, "since_sec": 10.0}
+    assert store.snapshot()["facilities"] == {}
 
 
 def test_runtime_status_none_generation_is_issued_and_retransmission_keeps_it() -> None:

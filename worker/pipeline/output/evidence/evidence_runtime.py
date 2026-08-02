@@ -23,7 +23,6 @@ from worker.pipeline.output.evidence.evidence_sender import (
 from worker.pipeline.output.evidence.evidence_stager import DurableEvidenceStager
 
 EXPORT_ENABLED_ENV = "ML_WORKER_EVENT_CLIP_EXPORT_ENABLED"
-OUTBOX_PATH_ENV = "ML_WORKER_EVIDENCE_OUTBOX_PATH"
 
 
 class SenderProtocol(Protocol):
@@ -62,10 +61,7 @@ class EvidenceExportRuntime:
         if not relay_url.strip() or not token or not probe_camera_id.strip():
             raise ValueError("evidence export requires relay URL, token, and camera")
         if database_path is None:
-            configured_path = os.environ.get(OUTBOX_PATH_ENV, "").strip()
-            database_path = (
-                Path(configured_path) if configured_path else store_dir / "evidence-outbox.sqlite3"
-            )
+            database_path = store_dir / "worker-state.sqlite3"
         config = SenderConfig(
             relay_url=relay_url,
             relay_token=token,

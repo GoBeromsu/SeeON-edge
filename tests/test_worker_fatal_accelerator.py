@@ -4,8 +4,9 @@ All tests are hardware-free — CUDA errors are injected via fakes.
 """
 from __future__ import annotations
 
-import json
+import sqlite3
 import threading
+import time as time_module
 from dataclasses import dataclass
 from pathlib import Path
 from typing import final
@@ -19,9 +20,10 @@ from worker.adapters.model.yolo_api import (
     _classify_or_reraise,
     predict_one,
 )
+from worker.pipeline.output.evidence.evidence_outbox_database import open_connection
 from worker.runtime.faults.handler import FATAL_ACCELERATOR_EXIT_CODE, FaultHandler
 from worker.runtime.faults.record import (
-    FIRST_FAULT_FILENAME,
+    WORKER_STATE_DB_FILENAME,
     FirstFaultRecord,
     make_fault_record,
     persist_first_fault,
@@ -132,25 +134,90 @@ def test_predict_one_raises_forward_error_on_non_cuda() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_persist_first_fault_writes_exactly_one_fsynced_record(tmp_path: Path) -> None:
+def test_persist_first_fault_writes_exactly_one_record_to_faults_table(tmp_path: Path) -> None:
     # Module-level _written flag is per-import, so we reset it between tests.
     import worker.runtime.faults.record as mod
 
     mod._written = False  # noqa: SLF001
 
     rec = _record()
-    path1 = persist_first_fault(rec, state_dir=tmp_path)
-    path2 = persist_first_fault(rec, state_dir=tmp_path)
+    wrote_first = persist_first_fault(rec, state_dir=tmp_path)
+    wrote_second = persist_first_fault(rec, state_dir=tmp_path)
 
-    assert path1 is not None
-    assert path1 == tmp_path / FIRST_FAULT_FILENAME
-    assert path2 is None  # second call is a no-op
-    assert path1.is_file()
+    assert wrote_first is True
+    assert wrote_second is False  # second call is a no-op
 
-    data = json.loads(path1.read_text(encoding="utf-8"))
-    assert data["exit_code"] == 4
-    assert data["camera_id"] == "cam-1"
-    assert data["exception_message"] == "CUDA error: device-side assert triggered"
+    connection = sqlite3.connect(tmp_path / WORKER_STATE_DB_FILENAME)
+    try:
+        cursor = connection.execute("SELECT * FROM faults")
+        columns = [description[0] for description in cursor.description]
+        rows = cursor.fetchall()
+    finally:
+        connection.close()
+
+    assert len(rows) == 1  # exactly one record, per the "first fault wins" contract
+    row = dict(zip(columns, rows[0], strict=True))
+    assert row["id"] == 1
+    assert row["exit_code"] == 4
+    assert row["camera_id"] == "cam-1"
+    assert row["exception_message"] == "CUDA error: device-side assert triggered"
+
+
+def test_persist_first_fault_degrades_to_false_when_database_parent_is_uncreatable(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A storage failure (e.g. an unwritable/uncreatable state dir) must
+    degrade to False rather than raise. persist_first_fault runs on
+    FaultHandler's hard-exit boundary and must never prevent the process
+    from exiting -- see test_fault_handler_exits_even_when_fault_storage_is_unavailable
+    for the handler-level version of this contract."""
+    import worker.runtime.faults.record as mod
+
+    mod._written = False  # noqa: SLF001
+
+    blocker = tmp_path / "blocker-file"
+    blocker.write_text("not a directory")
+    state_dir = blocker / "state"
+
+    rec = _record()
+    with caplog.at_level("WARNING"):
+        written = persist_first_fault(rec, state_dir=state_dir)
+
+    assert written is False
+    assert "first-fault record unavailable" in caplog.text
+
+
+def test_persist_first_fault_does_not_wait_out_a_concurrent_writer_lock(tmp_path: Path) -> None:
+    """The evidence outbox or config LKG store may hold worker-state.sqlite3's
+    write lock when a fault fires. persist_first_fault must fail fast --
+    SQLITE_BUSY surfacing immediately via busy_timeout_ms=0 -- rather than
+    wait out open_connection's normal 5-second busy timeout, which would
+    delay the hard-exit boundary a watchdog trip may itself be racing a
+    deadline against."""
+    import worker.runtime.faults.record as mod
+
+    mod._written = False  # noqa: SLF001
+
+    database_path = tmp_path / WORKER_STATE_DB_FILENAME
+    # Pre-create the schema (including `faults`) at the normal busy timeout.
+    open_connection(database_path).close()
+
+    # Hold the write lock on a second connection, the same lock shape the
+    # outbox writer or config LKG store would hold mid-write.
+    holder = sqlite3.connect(database_path, isolation_level=None)
+    holder.execute("BEGIN IMMEDIATE")
+    try:
+        rec = _record()
+        started = time_module.monotonic()
+        written = persist_first_fault(rec, state_dir=tmp_path)
+        elapsed = time_module.monotonic() - started
+    finally:
+        holder.rollback()
+        holder.close()
+
+    assert written is False
+    assert elapsed < 1.0  # fails fast; must not wait out a multi-second timeout
 
 
 def test_persist_first_fault_includes_frame_hash(tmp_path: Path) -> None:
@@ -178,7 +245,7 @@ def test_persist_first_fault_includes_frame_hash(tmp_path: Path) -> None:
 
 def test_fault_handler_stops_all_loops_and_exits(tmp_path: Path) -> None:
     exits: list[int] = []
-    handler = FaultHandler("cuda", hard_exit=exits.append)
+    handler = FaultHandler("cuda", hard_exit=exits.append, state_dir=tmp_path)
     loop_a = _FakeLoop()
     loop_b = _FakeLoop()
     handler.register_loop(loop_a)
@@ -199,7 +266,7 @@ def test_fault_handler_stops_all_loops_and_exits(tmp_path: Path) -> None:
 def test_fault_handler_is_idempotent(tmp_path: Path) -> None:
     """Concurrent calls from two camera threads must trigger exactly one exit."""
     exits: list[int] = []
-    handler = FaultHandler("cuda", hard_exit=exits.append)
+    handler = FaultHandler("cuda", hard_exit=exits.append, state_dir=tmp_path)
     loop = _FakeLoop()
     handler.register_loop(loop)
 
@@ -219,6 +286,31 @@ def test_fault_handler_is_idempotent(tmp_path: Path) -> None:
     t1.join()
     t2.join()
 
+    assert exits == [FATAL_ACCELERATOR_EXIT_CODE]
+
+
+def test_fault_handler_exits_even_when_fault_storage_is_unavailable(tmp_path: Path) -> None:
+    """The never-blocks-exit contract at the handler level: a storage failure
+    inside persist_first_fault (unwritable/uncreatable state dir) must not
+    prevent FaultHandler.handle() from stopping every camera loop and hard-
+    exiting with FATAL_ACCELERATOR_EXIT_CODE."""
+    import worker.runtime.faults.record as mod
+
+    mod._written = False  # noqa: SLF001
+
+    blocker = tmp_path / "blocker-file"
+    blocker.write_text("not a directory")
+    state_dir = blocker / "state"
+
+    exits: list[int] = []
+    handler = FaultHandler("cuda", hard_exit=exits.append, state_dir=state_dir)
+    loop = _FakeLoop()
+    handler.register_loop(loop)
+
+    rec = _record()
+    handler.handle(FatalAcceleratorError("CUDA error"), rec)
+
+    assert loop.stopped
     assert exits == [FATAL_ACCELERATOR_EXIT_CODE]
 
 

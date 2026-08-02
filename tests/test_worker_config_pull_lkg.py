@@ -1,61 +1,26 @@
 from __future__ import annotations
 
+import json
 import urllib.error
 import urllib.request
 
 import pytest
 
-from contracts.worker_config import PulledCameraConfig, PulledNightWindow, PulledWorkerConfig
+from contracts.worker_config import PulledCameraConfig, PulledWorkerConfig
 from worker.runtime.config import (
-    ML_WORKER_STATE_DIR_ENV,
     BackendWorkerConfigPayload,
     CameraRuntimeConfig,
     CameraStreamsConfig,
+    ConfigSource,
     NightWindowConfig,
     RelayConfig,
+    RestartDirective,
     WorkerConfig,
-    load_lkg,
+    WorkerConfigLkgStore,
+    load_worker_config_from_relay,
     pull_worker_config,
     resolve_effective_config,
-    save_lkg,
 )
-
-
-def test_lkg_save_load_round_trip(tmp_path, monkeypatch) -> None:
-    monkeypatch.setenv(ML_WORKER_STATE_DIR_ENV, str(tmp_path))
-    cfg = _pulled(config_version=7, restart_epoch=3, rtsp_url="rtsp://pulled/sub")
-
-    save_lkg(cfg)
-
-    assert load_lkg() == cfg
-
-
-def test_lkg_save_load_round_trip_preserves_multi_domain_detection_windows(
-    tmp_path, monkeypatch
-) -> None:
-    monkeypatch.setenv(ML_WORKER_STATE_DIR_ENV, str(tmp_path))
-    cfg = PulledWorkerConfig(
-        config_version=7,
-        restart_epoch=3,
-        night_window=PulledNightWindow(start="21:00", end="06:00", tz="UTC"),
-        cameras=(
-            PulledCameraConfig(
-                camera_id="camera-1",
-                space_id="space-1",
-                label="Room 1",
-                rtsp_url="rtsp://pulled/sub",
-                online=True,
-            ),
-        ),
-        detection_windows={
-            "bed_exit": PulledNightWindow(start="21:00", end="06:00", tz="UTC"),
-            "fall": PulledNightWindow(start="22:00", end="05:00", tz="Asia/Seoul"),
-        },
-    )
-
-    save_lkg(cfg)
-
-    assert load_lkg() == cfg
 
 
 def test_to_worker_config_threads_pulled_detection_windows_into_domains_config() -> None:
@@ -322,26 +287,74 @@ def _pulled(config_version: int, restart_epoch: int, rtsp_url: str) -> PulledWor
     )
 
 
-def test_unavailable_pull_returns_none_and_preserves_existing_lkg(
-    tmp_path,
-    monkeypatch,
-) -> None:
+def test_unavailable_pull_returns_none_and_preserves_existing_lkg(tmp_path) -> None:
     # Regression: when ml-api has no backend config it returns 503, so the pull
     # MUST return None and the worker MUST keep its existing LKG (not overwrite
-    # it with an empty placeholder). config_pull.load_worker_config_from_relay /
-    # pull_worker_config only persist the LKG on a successful, validated pull.
-    monkeypatch.setenv(ML_WORKER_STATE_DIR_ENV, str(tmp_path))
-    good = _pulled(config_version=5, restart_epoch=1, rtsp_url="rtsp://lkg/good")
-    save_lkg(good)
-
-    def _raise_503(request: urllib.request.Request, timeout: float) -> object:
-        raise urllib.error.HTTPError(
-            "http://ml-api:8000/api/v1/cameras/worker-config", 503, "unavailable", {}, None
-        )
-
+    # it with an empty placeholder). config_pull.load_worker_config_from_relay
+    # only persists the LKG (WorkerConfigLkgStore's config_current/
+    # config_history tables in worker-state.sqlite3) on a successful,
+    # validated pull.
     assert (
         pull_worker_config("http://ml-api:8000", "token", timeout_sec=0.01, urlopen=_raise_503)
         is None
     )
+
+    store = WorkerConfigLkgStore(tmp_path / "worker-config.sqlite3")
+    good_payload = {
+        "registry_version": 5,
+        "config_version": 5,
+        "restart_epoch": 1,
+        "cameras": [
+            {
+                "camera_id": "camera-1",
+                "facility_id": "facility-1",
+                "rtsp_url": "rtsp://lkg/good",
+            }
+        ],
+    }
+
+    def _respond_good(request: urllib.request.Request, timeout: float) -> object:
+        return _FakeResponse(good_payload)
+
+    fresh = load_worker_config_from_relay(
+        "http://ml-api:8000",
+        "token",
+        store=store,
+        urlopen=_respond_good,
+    )
+    assert fresh is not None
+    assert fresh.source is ConfigSource.PULLED
+
+    stale = load_worker_config_from_relay(
+        "http://ml-api:8000",
+        "token",
+        store=store,
+        urlopen=_raise_503,
+    )
+
     # Existing LKG is intact: an unavailable pull never clobbers last-known-good.
-    assert load_lkg() == good
+    assert stale is not None
+    assert stale.source is ConfigSource.LKG
+    assert stale.registry_version == 5
+    assert stale.directive == RestartDirective(generation=1, version=5)
+
+
+def _raise_503(request: urllib.request.Request, timeout: float) -> object:
+    raise urllib.error.HTTPError(
+        "http://ml-api:8000/api/v1/cameras/worker-config", 503, "unavailable", {}, None
+    )
+
+
+class _FakeResponse:
+    def __init__(self, payload: dict) -> None:
+        self._payload = payload
+        self.status = 200
+
+    def __enter__(self) -> _FakeResponse:
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        return None
+
+    def read(self) -> bytes:
+        return json.dumps(self._payload).encode("utf-8")

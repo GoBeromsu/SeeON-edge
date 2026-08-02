@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import final
 
 import numpy as np
+import pytest
 
 from contracts.frame import Frame
 from worker.interfaces.bus import FrameBus, FrameSubscription
@@ -490,3 +491,83 @@ def test_restart_check_always_false_is_consulted_but_never_stops_early() -> None
     assert bus.packets == packets
     assert reporter.states == {"camera-a": "ready"}
     assert len(calls) >= 1
+
+
+def test_stop_never_races_a_partially_started_thread_set(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``stop()`` must never observe a Thread ``start()`` has constructed but
+    not yet actually started.
+
+    Regression test for the CI flake that hit main right after PR #60
+    merged: ``IngestSupervisor.start()`` used to publish ``self._threads``
+    before every ``Thread`` in it had its ``.start()`` called, so a ``stop()``
+    racing with an in-flight ``start()`` could ``Thread.join()`` an
+    unstarted thread and raise
+    ``RuntimeError: cannot join thread before it is started``.
+
+    Deterministic by construction -- no sleeps as synchronization. A pair of
+    ``threading.Event`` barriers pins the exact interleaving: camera-a's
+    thread is allowed to actually start and begin running, camera-b's real
+    ``Thread.start()`` is held until this test explicitly releases it, and
+    ``stop()`` is driven from a third thread in that exact window. Pre-fix,
+    ``self._threads`` already holds camera-b's constructed-but-not-started
+    ``Thread`` at that instant, so ``stop()``'s ``join()`` raises. Post-fix,
+    ``self._threads`` is still empty at that instant (not published until
+    every thread's real ``.start()`` has returned), so ``join()`` is a no-op
+    and ``stop()`` returns cleanly.
+    """
+    camera_a_running = threading.Event()
+    release_camera_b_start = threading.Event()
+    real_start = threading.Thread.start
+
+    def patched_start(self: threading.Thread) -> None:
+        if self.name == "worker-ingest-camera-b":
+            assert release_camera_b_start.wait(
+                timeout=5.0
+            ), "test never released camera-b's Thread.start()"
+        real_start(self)
+
+    monkeypatch.setattr(threading.Thread, "start", patched_start)
+
+    loop_a = _BlockingLoop("camera-a")
+    loop_b = _BlockingLoop("camera-b")
+    original_run_a = loop_a.run
+
+    def running_run_a() -> None:
+        camera_a_running.set()
+        original_run_a()
+
+    loop_a.run = running_run_a  # type: ignore[method-assign]
+
+    supervisor = IngestSupervisor((loop_a, loop_b))
+    starter = threading.Thread(target=supervisor.start)
+
+    errors: list[BaseException] = []
+
+    def guarded_stop() -> None:
+        try:
+            supervisor.stop(join_timeout_sec=2.0)
+        except BaseException as exc:  # noqa: BLE001  # noqa: BROAD_EXCEPT_OK - capture for assertion
+            errors.append(exc)
+
+    # When: start() is mid-flight (camera-a's thread is up, camera-b's real
+    # start() is held), stop() races in from a separate thread.
+    starter.start()
+    try:
+        assert camera_a_running.wait(timeout=5.0), "camera-a thread never started running"
+        stopper = threading.Thread(target=guarded_stop)
+        stopper.start()
+        stopper.join(timeout=5.0)
+        assert not stopper.is_alive(), "stop() never returned"
+    finally:
+        release_camera_b_start.set()
+        starter.join(timeout=5.0)
+
+    # Then: start() finished, stop() raised nothing, and both loops still
+    # end up cleanly stopped once camera-b's thread is released to run.
+    assert not starter.is_alive(), "start() never returned"
+    assert not errors, f"stop() raised: {errors!r}"
+    supervisor.join(timeout_sec=2.0)
+    assert loop_a.stop_count >= 1
+    assert loop_b.stop_count >= 1

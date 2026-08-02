@@ -1,9 +1,21 @@
-"""Local camera registry storage and lightweight probes for ml-api."""
+"""Local camera registry storage and lightweight probes for ml-api.
+
+Storage lives in the single-row ``camera_registry`` table of the shared
+``catalog.sqlite3`` database (see ``backend/app/features/clips/catalog.py``),
+distinct from the pre-existing ``cameras`` table there (a derived clip/audit
+denormalization read cache, not this registry's source of truth). This
+module bootstraps its own table independently via an idempotent
+``CREATE TABLE IF NOT EXISTS`` (identical statement text to ``catalog.py``'s
+``_V3_TABLE_STATEMENTS``) rather than depending on ``CatalogStore``, so
+construction order relative to the catalog store never matters, and never
+touches ``PRAGMA user_version`` (that stays exclusively ``CatalogStore``'s
+responsibility).
+"""
 
 from __future__ import annotations
 
 import json
-import os
+import sqlite3
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -12,11 +24,16 @@ from threading import Lock
 from typing import Literal
 from urllib.parse import parse_qsl, urlsplit, urlunsplit
 
-API_CAMERA_STORE_ENV = "API_CAMERA_STORE"
-DEFAULT_CAMERA_STORE = "/var/lib/ml-api/cameras.json"
+from backend.app.shared.sqlite_bootstrap import connect_catalog_store
+from backend.app.shared.state_dir import resolve_state_dir
 
 CameraStatus = Literal["online", "offline", "starting", "unknown"]
 ProbeErrorClass = Literal["timeout", "decode", "auth"]
+
+_CREATE_CAMERA_REGISTRY_TABLE = (
+    "CREATE TABLE IF NOT EXISTS camera_registry (id INTEGER PRIMARY KEY CHECK (id = 1), "
+    "registry_version INTEGER NOT NULL, cameras_json TEXT NOT NULL) STRICT"
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,10 +57,11 @@ class CameraRegistryStore:
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
         self._lock = Lock()
+        self._connection: sqlite3.Connection | None = None
 
     @classmethod
     def from_env(cls) -> CameraRegistryStore:
-        return cls(os.environ.get(API_CAMERA_STORE_ENV, DEFAULT_CAMERA_STORE))
+        return cls(resolve_state_dir("ml-api") / "catalog.sqlite3")
 
     def snapshot(self) -> dict[str, object]:
         with self._lock:
@@ -131,19 +149,31 @@ class CameraRegistryStore:
                     return dict(record)
             return None
 
+    def _connect(self) -> sqlite3.Connection:
+        if self._connection is None:
+            # RTSP credentials are stored in the registry by design; API
+            # responses and logs must use mask_rtsp_url(), and the database
+            # file is best-effort 0600 (see connect_catalog_store).
+            self._connection = connect_catalog_store(self.path, (_CREATE_CAMERA_REGISTRY_TABLE,))
+        return self._connection
+
     def _read_unlocked(self) -> dict[str, object]:
         try:
-            raw = json.loads(self.path.read_text(encoding="utf-8"))
-        except FileNotFoundError:
+            connection = self._connect()
+            row = connection.execute(
+                "SELECT registry_version, cameras_json FROM camera_registry WHERE id = 1"
+            ).fetchone()
+        except (OSError, sqlite3.Error):
             return {"registry_version": 0, "cameras": []}
-        except (OSError, json.JSONDecodeError, TypeError, ValueError):
+        if row is None:
             return {"registry_version": 0, "cameras": []}
-        if not isinstance(raw, dict):
+        registry_version, cameras_json = row
+        try:
+            cameras = json.loads(cameras_json)
+        except (json.JSONDecodeError, TypeError, ValueError):
             return {"registry_version": 0, "cameras": []}
-        registry_version = raw.get("registry_version", 0)
         if isinstance(registry_version, bool) or not isinstance(registry_version, int):
             registry_version = 0
-        cameras = raw.get("cameras", [])
         if not isinstance(cameras, list):
             cameras = []
         return {
@@ -152,23 +182,17 @@ class CameraRegistryStore:
         }
 
     def _write_unlocked(self, data: dict[str, object]) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = self.path.with_name(f".{self.path.name}.{os.getpid()}.tmp")
-        tmp_path.write_text(
-            json.dumps(data, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
-            encoding="utf-8",
+        connection = self._connect()
+        cameras_json = json.dumps(
+            data["cameras"], ensure_ascii=False, sort_keys=True, separators=(",", ":")
         )
-        # RTSP credentials are stored in local edge JSON by design; API responses
-        # and logs must use mask_rtsp_url(), and the store is best-effort 0600.
-        try:
-            os.chmod(tmp_path, 0o600)
-        except OSError:
-            pass
-        os.replace(tmp_path, self.path)
-        try:
-            os.chmod(self.path, 0o600)
-        except OSError:
-            pass
+        connection.execute(
+            "INSERT INTO camera_registry (id, registry_version, cameras_json) "
+            "VALUES (1, ?, ?) "
+            "ON CONFLICT(id) DO UPDATE SET "
+            "registry_version = excluded.registry_version, cameras_json = excluded.cameras_json",
+            (data["registry_version"], cameras_json),
+        )
 
 
 def public_camera(record: dict[str, object]) -> dict[str, object]:
@@ -293,8 +317,6 @@ def utc_now_iso() -> str:
 
 
 __all__ = [
-    "API_CAMERA_STORE_ENV",
-    "DEFAULT_CAMERA_STORE",
     "CameraRegistryStore",
     "CameraStatus",
     "DuplicateCameraError",

@@ -1,27 +1,43 @@
-"""Persisted dashboard login credentials (scrypt-hashed, atomic-write JSON).
+"""Persisted dashboard login credentials (scrypt-hashed, SQLite-backed).
 
 Separate from the in-memory ``DashboardSessionStore`` in ``dashboard_auth.py``:
 this module only knows how to durably store and verify one username/password
-pair on disk. ``dashboard_auth.py`` decides *when* to consult it (persisted
-file wins over env vars, which win over the built-in ``admin``/``admin``
-default).
+pair. ``dashboard_auth.py`` decides *when* to consult it (persisted row wins
+over env vars, which win over the built-in ``admin``/``admin`` default).
+
+Storage lives in the single-row ``credentials`` table of the shared
+``catalog.sqlite3`` database (see ``backend/app/features/clips/catalog.py``),
+alongside the ``camera_registry`` and ``runtime_latency`` tables. This module
+cannot import ``CatalogStore`` to bootstrap that table -- the import-linter
+contract "backend base (core/shared) does not import upper layers"
+(``pyproject.toml``) forbids ``backend.app.shared`` from importing
+``backend.app.features`` -- so it opens and migrates its own single table via
+an idempotent ``CREATE TABLE IF NOT EXISTS`` (identical statement text to
+``catalog.py``'s ``_V3_TABLE_STATEMENTS``), independent of whichever store
+opens the database file first, and never touches ``PRAGMA user_version``
+(that stays exclusively ``CatalogStore``'s responsibility).
 """
 
 from __future__ import annotations
 
-import base64
 import hashlib
 import hmac
-import json
 import os
+import sqlite3
 import sys
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from threading import Lock
 
-API_DASHBOARD_CREDENTIALS_STORE_ENV = "API_DASHBOARD_CREDENTIALS_STORE"
-DEFAULT_DASHBOARD_CREDENTIALS_STORE = "/var/lib/ml-api/dashboard_credentials.json"
+from backend.app.shared.sqlite_bootstrap import connect_catalog_store
+from backend.app.shared.state_dir import resolve_state_dir
+
+_CREATE_CREDENTIALS_TABLE = (
+    "CREATE TABLE IF NOT EXISTS credentials (id INTEGER PRIMARY KEY CHECK (id = 1), "
+    "username TEXT NOT NULL, algorithm TEXT NOT NULL, salt BLOB NOT NULL, "
+    "password_hash BLOB NOT NULL, updated_at TEXT NOT NULL) STRICT"
+)
 
 _ALGORITHM_SCRYPT = "scrypt"
 _SCRYPT_N = 2**14
@@ -58,27 +74,23 @@ class PersistedDashboardCredentials:
 
 
 class DashboardCredentialsStore:
-    """Atomic JSON-backed persistence for dashboard login credentials.
+    """SQLite-backed persistence for dashboard login credentials.
 
-    Reuses the tmp-file + ``os.replace`` + fsync + chmod 0600 atomic-write
-    pattern used by ``CameraRegistryStore`` (see
-    ``backend/app/features/cameras/store.py``). A corrupt or unreadable file
-    is logged to stderr and treated as "no persisted credentials" -- it must
-    never crash boot or brick login (the operator can always fall back to
-    env vars or the built-in default by deleting the file).
+    Reads and writes the single-row ``credentials`` table (``id = 1``) in the
+    catalog database. A missing table row, an unreadable/corrupt database, or
+    any other read-time failure is logged to stderr and treated as "no
+    persisted credentials" -- it must never crash boot or brick login (the
+    operator can always fall back to env vars or the built-in default).
     """
 
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
         self._lock = Lock()
+        self._connection: sqlite3.Connection | None = None
 
     @classmethod
     def from_env(cls) -> DashboardCredentialsStore:
-        return cls(
-            os.environ.get(
-                API_DASHBOARD_CREDENTIALS_STORE_ENV, DEFAULT_DASHBOARD_CREDENTIALS_STORE
-            )
-        )
+        return cls(resolve_state_dir("ml-api") / "catalog.sqlite3")
 
     def load(self) -> PersistedDashboardCredentials | None:
         with self._lock:
@@ -97,95 +109,56 @@ class DashboardCredentialsStore:
             self._write_unlocked(record)
         return record
 
+    def _connect(self) -> sqlite3.Connection:
+        if self._connection is None:
+            self._connection = connect_catalog_store(self.path, (_CREATE_CREDENTIALS_TABLE,))
+        return self._connection
+
     def _load_unlocked(self) -> PersistedDashboardCredentials | None:
         try:
-            raw = json.loads(self.path.read_text(encoding="utf-8"))
-        except FileNotFoundError:
-            return None
-        except Exception as exc:  # noqa: BLE001 - never brick login on a corrupt file
+            connection = self._connect()
+            row = connection.execute(
+                "SELECT username, algorithm, salt, password_hash, updated_at "
+                "FROM credentials WHERE id = 1"
+            ).fetchone()
+        except (OSError, sqlite3.Error) as exc:  # noqa: BLE001 - never brick login on a bad db
             print(
                 f"dashboard credentials store unreadable at {self.path}, "
                 f"falling back to env/default: {exc!r}",
                 file=sys.stderr,
             )
             return None
-        try:
-            return _parse_persisted(raw)
-        except Exception as exc:  # noqa: BLE001 - same fallback guarantee as above
-            print(
-                f"dashboard credentials store malformed at {self.path}, "
-                f"falling back to env/default: {exc!r}",
-                file=sys.stderr,
-            )
+        if row is None:
             return None
+        username, algorithm, salt, password_hash, updated_at = row
+        return PersistedDashboardCredentials(
+            username=username,
+            algorithm=algorithm,
+            salt=bytes(salt),
+            password_hash=bytes(password_hash),
+            updated_at=updated_at,
+        )
 
     def _write_unlocked(self, record: PersistedDashboardCredentials) -> None:
-        payload = {
-            "version": 1,
-            "username": record.username,
-            "algorithm": record.algorithm,
-            "salt": base64.b64encode(record.salt).decode("ascii"),
-            "password_hash": base64.b64encode(record.password_hash).decode("ascii"),
-            "updated_at": record.updated_at,
-        }
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = self.path.with_name(f".{self.path.name}.{os.getpid()}.tmp")
-        with tmp_path.open("w", encoding="utf-8") as handle:
-            handle.write(
-                json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-            )
-            handle.flush()
-            os.fsync(handle.fileno())
-        try:
-            os.chmod(tmp_path, 0o600)
-        except OSError:
-            pass
-        os.replace(tmp_path, self.path)
-        try:
-            os.chmod(self.path, 0o600)
-        except OSError:
-            pass
-        try:
-            directory_fd = os.open(self.path.parent, os.O_DIRECTORY)
-        except OSError:
-            return
-        try:
-            os.fsync(directory_fd)
-        except OSError:
-            pass
-        finally:
-            os.close(directory_fd)
-
-
-def _parse_persisted(raw: object) -> PersistedDashboardCredentials | None:
-    if not isinstance(raw, dict):
-        return None
-    username = raw.get("username")
-    algorithm = raw.get("algorithm")
-    salt_b64 = raw.get("salt")
-    hash_b64 = raw.get("password_hash")
-    updated_at = raw.get("updated_at")
-    if not (
-        isinstance(username, str)
-        and username
-        and isinstance(algorithm, str)
-        and isinstance(salt_b64, str)
-        and isinstance(hash_b64, str)
-        and isinstance(updated_at, str)
-    ):
-        return None
-    return PersistedDashboardCredentials(
-        username=username,
-        algorithm=algorithm,
-        salt=base64.b64decode(salt_b64, validate=True),
-        password_hash=base64.b64decode(hash_b64, validate=True),
-        updated_at=updated_at,
-    )
+        connection = self._connect()
+        connection.execute(
+            "INSERT INTO credentials (id, username, algorithm, salt, password_hash, updated_at) "
+            "VALUES (1, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(id) DO UPDATE SET "
+            "username = excluded.username, algorithm = excluded.algorithm, "
+            "salt = excluded.salt, password_hash = excluded.password_hash, "
+            "updated_at = excluded.updated_at",
+            (
+                record.username,
+                record.algorithm,
+                record.salt,
+                record.password_hash,
+                record.updated_at,
+            ),
+        )
 
 
 __all__ = [
-    "API_DASHBOARD_CREDENTIALS_STORE_ENV",
-    "DEFAULT_DASHBOARD_CREDENTIALS_STORE",
     "DashboardCredentialsStore",
     "PersistedDashboardCredentials",
 ]

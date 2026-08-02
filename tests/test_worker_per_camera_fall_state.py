@@ -50,7 +50,6 @@ from worker.pipeline.bus import BoundedFrameBus
 from worker.pipeline.decision import EventAggregator, IncidentManager
 from worker.pipeline.ingest.lifecycle import IngestReporter
 from worker.pipeline.output.event_sink import EvidenceEventSink
-from worker.pipeline.output.evidence.evidence_runtime import OUTBOX_PATH_ENV
 from worker.runtime.config import CameraRuntimeConfig, WorkerConfig
 from worker.runtime.lease import GpuLease
 from worker.runtime.profile.registry import VerifyResult
@@ -158,10 +157,7 @@ def _fall_model_via_serving_client(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(WorkerRuntime, "_create_fall_model", _fall_via_serving)
 
 
-def test_worker_wires_a_distinct_durable_stager_per_camera(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    monkeypatch.setenv(OUTBOX_PATH_ENV, str(tmp_path / "outbox.sqlite3"))
+def test_worker_wires_a_distinct_durable_stager_per_camera(tmp_path: Path) -> None:
     serving = _FakeServingClient()
     captured: dict[str, object] = {}
 
@@ -183,6 +179,7 @@ def test_worker_wires_a_distinct_durable_stager_per_camera(
         pump_factory=_pump_factory,
         acquire_lease=lambda: GpuLease.acquire(tmp_path),
         decode_probe=lambda _decode: VerifyResult(True, "cpu", "decode", "available"),
+        state_dir=tmp_path,
     )
 
     runtime.run()

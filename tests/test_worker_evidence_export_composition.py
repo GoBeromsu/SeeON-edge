@@ -213,6 +213,7 @@ def _runtime(
         decode_probe=lambda _decode: VerifyResult(True, "cpu", "decode", "available"),
         hard_exit=hard_exit,
         clip_recorder_factory=clip_recorder_factory,
+        state_dir=state_dir,
     )
 
 
@@ -277,9 +278,10 @@ def _stage_one_admitted_event(outbox_path: Path) -> str:
 def _enable_export(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     monkeypatch.setenv("ML_WORKER_EVENT_CLIP_EXPORT_ENABLED", "1")
     monkeypatch.setenv("CLIP_STORE_DIR", str(tmp_path / "clip-store"))
-    outbox_path = tmp_path / "evidence-outbox.sqlite3"
-    monkeypatch.setenv("ML_WORKER_EVIDENCE_OUTBOX_PATH", str(outbox_path))
-    return outbox_path
+    # Matches the default `_evidence_outbox_path(state_dir)` filename -- the
+    # composition root always threads `state_dir=tmp_path` into `WorkerRuntime`
+    # (via `_runtime`), so this is where the real outbox lands.
+    return tmp_path / "worker-state.sqlite3"
 
 
 def _fake_capabilities_response() -> HttpResult:

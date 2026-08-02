@@ -1,3 +1,4 @@
+import sqlite3
 import stat
 from concurrent.futures import ThreadPoolExecutor
 
@@ -14,7 +15,7 @@ from backend.app.shared.dashboard_credentials import DashboardCredentialsStore
 
 def _app(tmp_path, **state):
     app = create_app(lifespan=no_lifespan)
-    app.state.camera_registry = CameraRegistryStore(tmp_path / "cameras.json")
+    app.state.camera_registry = CameraRegistryStore(tmp_path / "catalog.sqlite3")
     app.state.edge_relay_token = "worker-secret"
     for key, value in state.items():
         setattr(app.state, key, value)
@@ -128,6 +129,23 @@ def test_dashboard_logout_revokes_session(tmp_path) -> None:
 # -- Default credentials + persisted rotation (issue #23) --------------------
 
 
+def test_credentials_store_returns_none_on_zero_rows(tmp_path) -> None:
+    """A brand-new (or freshly-migrated) ``credentials`` table has zero rows
+    -- ``DashboardCredentialsStore.load()`` must return ``None`` (never
+    raise), preserving the exact contract that feeds the admin/admin
+    default-and-rotate login flow (issue #23 / PR #32)."""
+    store = DashboardCredentialsStore(tmp_path / "catalog.sqlite3")
+
+    assert store.load() is None
+
+    # Persisting a credential flips the contract: subsequent loads return it.
+    store.save(username="admin", password="admin")
+    persisted = store.load()
+    assert persisted is not None
+    assert persisted.username == "admin"
+    assert persisted.verify_password("admin")
+
+
 def test_zero_config_edge_box_accepts_built_in_admin_default(tmp_path) -> None:
     app = _app(tmp_path)
     with TestClient(app) as client:
@@ -162,7 +180,7 @@ def test_env_pair_wins_over_built_in_default_when_no_file_is_persisted(tmp_path)
 
 
 def test_credential_rotation_changes_login_and_revokes_other_sessions(tmp_path) -> None:
-    store_path = tmp_path / "dashboard_credentials.json"
+    store_path = tmp_path / "catalog.sqlite3"
     app = _app(tmp_path, dashboard_credentials_store=DashboardCredentialsStore(store_path))
 
     with TestClient(app) as bystander:
@@ -226,7 +244,7 @@ def test_rotation_to_a_non_ascii_username_logs_in_and_survives_a_restart(tmp_pat
     not `str`, directly. Exercises rotation to "관리자", a login with the new
     Korean username, a 401 (not 500) for the stale default, and a simulated
     restart (fresh store re-resolution from the same persisted file)."""
-    store_path = tmp_path / "dashboard_credentials.json"
+    store_path = tmp_path / "catalog.sqlite3"
     korean_username = "관리자"
 
     with TestClient(
@@ -279,7 +297,7 @@ def test_rotation_to_a_non_ascii_username_logs_in_and_survives_a_restart(tmp_pat
 
 
 def test_wrong_current_password_is_rejected_without_touching_the_store(tmp_path) -> None:
-    store_path = tmp_path / "dashboard_credentials.json"
+    store_path = tmp_path / "catalog.sqlite3"
     app = _app(tmp_path, dashboard_credentials_store=DashboardCredentialsStore(store_path))
 
     with TestClient(app) as client:
@@ -294,7 +312,15 @@ def test_wrong_current_password_is_rejected_without_touching_the_store(tmp_path)
             json={"current_password": "not-admin", "new_password": "new-secret-pw"},
         )
         assert rejected.status_code == 403
-        assert not store_path.exists()
+        # The credentials table exists (created on first connect for the
+        # login read above) but must have zero rows: a rejected rotation must
+        # never write a persisted credential row.
+        connection = sqlite3.connect(store_path)
+        try:
+            count = connection.execute("SELECT COUNT(*) FROM credentials").fetchone()[0]
+        finally:
+            connection.close()
+        assert count == 0
 
         still_default = client.post(
             "/api/v1/auth/session",
@@ -304,7 +330,7 @@ def test_wrong_current_password_is_rejected_without_touching_the_store(tmp_path)
 
 
 def test_persisted_file_wins_over_env_and_default_after_store_reresolution(tmp_path) -> None:
-    store_path = tmp_path / "dashboard_credentials.json"
+    store_path = tmp_path / "catalog.sqlite3"
 
     with TestClient(
         _app(
@@ -349,7 +375,7 @@ def test_persisted_file_wins_over_env_and_default_after_store_reresolution(tmp_p
 
 
 def test_persisted_credentials_file_is_written_with_mode_0600(tmp_path) -> None:
-    store_path = tmp_path / "dashboard_credentials.json"
+    store_path = tmp_path / "catalog.sqlite3"
     app = _app(tmp_path, dashboard_credentials_store=DashboardCredentialsStore(store_path))
 
     with TestClient(app) as client:
@@ -371,8 +397,8 @@ def test_persisted_credentials_file_is_written_with_mode_0600(tmp_path) -> None:
 
 
 def test_corrupt_credentials_file_falls_back_without_a_500(tmp_path) -> None:
-    store_path = tmp_path / "dashboard_credentials.json"
-    store_path.write_text("{not valid json", encoding="utf-8")
+    store_path = tmp_path / "catalog.sqlite3"
+    store_path.write_bytes(b"not a sqlite database")
     app = _app(tmp_path, dashboard_credentials_store=DashboardCredentialsStore(store_path))
 
     with TestClient(app) as client:
