@@ -81,9 +81,12 @@ services:
               count: all
               capabilities: [gpu]
     environment:
-      # Optional offline-dev escape hatch:
-      # set EDGE_CAMERA_CONFIG=/run/secrets/ml-worker.yaml and mount the secret below
-      # to bypass ml-api config pull.
+      # Optional offline-dev override: set
+      # EDGE_CAMERA_CONFIG=/run/secrets/ml-worker.yaml and mount the secret
+      # below to boot from a static YAML roster instead of pulling from
+      # ml-api. Left unset (the production default), worker/__main__.py pulls
+      # the live config from ml-api over RELAY_URL/RELAY_TOKEN below, with
+      # the worker's own last-known-good cache as fallback on a pull failure.
       EDGE_CAMERA_CONFIG: ${EDGE_CAMERA_CONFIG:-}
       RELAY_URL: http://ml-api:8000
       RELAY_TOKEN: ${API_EDGE_RELAY_TOKEN:?edge worker requires relay token shared with ml-api}
@@ -105,7 +108,8 @@ services:
       - ml-worker-state:/var/lib/ml-worker
       # Evidence clips persist on the nursing-home host; worker writes, api reads.
       - ${CLIP_STORE_HOST_DIR:?edge requires host clip-store dir}:/var/lib/clip-store:rw
-    # Optional offline-dev YAML bootstrap; production should pull config from ml-api.
+    # Optional offline-dev YAML bootstrap (see EDGE_CAMERA_CONFIG above); the
+    # production default (unset) pulls config from ml-api instead.
     # secrets:
     #   - source: ml-worker-config
     #     target: ml-worker.yaml

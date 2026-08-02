@@ -149,7 +149,9 @@ class WorkerConfigResponse(BaseModel):
     cameras: list[WorkerCameraConfig]
     config_version: int | None = Field(default=None, ge=0)
     restart_epoch: int | None = Field(default=None, ge=0)
+    # Deprecated alias for detection_windows["bed_exit"]; kept for old workers.
     night_window: dict[str, object] | None = None
+    detection_windows: dict[str, dict[str, object]] | None = None
 
 
 @router.get("", response_model=ListCamerasResponse)
@@ -395,6 +397,11 @@ def worker_config_snapshot(
         response["restart_epoch"] = live_pulled.restart_epoch
         if live_pulled.night_window is not None:
             response["night_window"] = live_pulled.night_window.as_dict()
+        if live_pulled.detection_windows:
+            response["detection_windows"] = {
+                domain: window.as_dict()
+                for domain, window in live_pulled.detection_windows.items()
+            }
     return response
 
 
@@ -425,6 +432,7 @@ def _live_pulled_config(request: Request, pulled: PulledWorkerConfig) -> PulledW
         restart_epoch=int(getattr(request.app.state, "restart_epoch", 0)),
         night_window=pulled.night_window,
         cameras=pulled.cameras,
+        detection_windows=pulled.detection_windows,
     )
 
 def retry_pending_backend_mappings(app: FastAPI) -> int:
@@ -689,7 +697,10 @@ def _authorize_worker(request: Request, relay_token: str | None) -> None:
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="relay token required",
         )
-    if not hmac.compare_digest(relay_token, expected):
+    # Encode to UTF-8 bytes before comparing: hmac.compare_digest raises
+    # TypeError for non-ASCII str arguments, and a relay token sourced from an
+    # env var or config file is not guaranteed to be ASCII-only.
+    if not hmac.compare_digest(relay_token.encode("utf-8"), expected.encode("utf-8")):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="relay token mismatch",

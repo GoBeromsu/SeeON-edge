@@ -33,6 +33,7 @@ from contracts.worker_config import (
     PulledCameraConfig,
     PulledNightWindow,
     PulledWorkerConfig,
+    detection_window_validation_error,
 )
 from shared.events.edge_ingest_client import (
     DEFAULT_TIMEOUT_SEC,
@@ -371,11 +372,13 @@ def _fetch_backend_config(restart_epoch: int) -> PulledWorkerConfig | None:
         # Keep it within the lifespan shutdown wait bound.
         with urllib.request.urlopen(request, timeout=_backend_config_timeout_sec()) as response:
             parsed = _as_mapping(json.loads(response.read().decode("utf-8")))
+        detection_windows = _pulled_detection_windows(parsed)
         return PulledWorkerConfig(
             config_version=_backend_config_version(parsed),
             restart_epoch=restart_epoch,
-            night_window=_pulled_night_window(parsed.get("nightWindow")),
+            night_window=detection_windows.get("bed_exit"),
             cameras=_pulled_cameras(parsed.get("cameras")),
+            detection_windows=detection_windows,
         )
     except Exception as exc:  # noqa: BLE001 - best-effort pull must never crash boot/serve
         print(f"failed to pull backend ml config: {exc}", file=sys.stderr)
@@ -424,16 +427,71 @@ def _backend_config_version(data: dict[str, object]) -> int:
     return value
 
 
-def _pulled_night_window(value: object) -> PulledNightWindow | None:
+def _pulled_night_window(domain: str, value: object) -> PulledNightWindow | None:
+    """Parse and validate one raw ``{start,end,tz}`` window, failing open
+    (returning ``None``, i.e. ALWAYS/24-7 for that domain) on any structural
+    or semantic problem rather than raising -- a malformed value from a
+    single domain must never crash the whole backend-config pull."""
     if value is None:
         return None
     if not isinstance(value, dict):
-        raise TypeError("nightWindow must be an object or null")
-    return PulledNightWindow(
-        start=_require_text(value, "start"),
-        end=_require_text(value, "end"),
-        tz=_require_text(value, "tz"),
+        _log_invalid_window(domain, value, "must be an object or null")
+        return None
+    try:
+        window = PulledNightWindow(
+            start=_require_text(value, "start"),
+            end=_require_text(value, "end"),
+            tz=_require_text(value, "tz"),
+        )
+    except (ValueError, TypeError) as exc:
+        _log_invalid_window(domain, value, str(exc))
+        return None
+    reason = detection_window_validation_error(window.start, window.end, window.tz)
+    if reason is not None:
+        _log_invalid_window(domain, value, reason)
+        return None
+    return window
+
+
+def _log_invalid_window(domain: str, value: object, reason: str) -> None:
+    print(
+        f"detection window for domain {domain!r} is invalid ({reason}): {value!r}; "
+        "falling open to ALWAYS/24-7 detection for this domain",
+        file=sys.stderr,
     )
+
+
+def _pulled_detection_windows(parsed: dict[str, object]) -> dict[str, PulledNightWindow]:
+    """Parse backend ``detectionWindows`` (domain -> {start,end,tz} | null).
+
+    If ``detectionWindows`` is present at all, that map is the sole
+    authority for every domain and the legacy ``nightWindow`` field is
+    ignored entirely -- this is what makes a window an operator clears in
+    the dashboard stay cleared instead of being resurrected by a stale
+    ``nightWindow``. Only when ``detectionWindows`` is absent does the
+    legacy single ``nightWindow`` field fall back to the "bed_exit" domain.
+    Unknown domain names are kept in the map (forward-compatible) rather
+    than rejected.
+    """
+    raw_map = parsed.get("detectionWindows")
+    if raw_map is not None:
+        if not isinstance(raw_map, dict):
+            print(
+                "detectionWindows must be an object or null; ignoring and "
+                "falling back to legacy nightWindow",
+                file=sys.stderr,
+            )
+        else:
+            windows: dict[str, PulledNightWindow] = {}
+            for domain, value in raw_map.items():
+                if not isinstance(domain, str):
+                    continue
+                window = _pulled_night_window(domain, value)
+                if window is not None:
+                    windows[domain] = window
+            return windows
+    legacy_window = _pulled_night_window("bed_exit", parsed.get("nightWindow"))
+    return {} if legacy_window is None else {"bed_exit": legacy_window}
 
 
 def _pulled_cameras(value: object) -> tuple[PulledCameraConfig, ...]:

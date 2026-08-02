@@ -3,11 +3,15 @@ from __future__ import annotations
 import urllib.error
 import urllib.request
 
-from contracts.worker_config import PulledCameraConfig, PulledWorkerConfig
+import pytest
+
+from contracts.worker_config import PulledCameraConfig, PulledNightWindow, PulledWorkerConfig
 from worker.runtime.config import (
     ML_WORKER_STATE_DIR_ENV,
+    BackendWorkerConfigPayload,
     CameraRuntimeConfig,
     CameraStreamsConfig,
+    NightWindowConfig,
     RelayConfig,
     WorkerConfig,
     load_lkg,
@@ -24,6 +28,203 @@ def test_lkg_save_load_round_trip(tmp_path, monkeypatch) -> None:
     save_lkg(cfg)
 
     assert load_lkg() == cfg
+
+
+def test_lkg_save_load_round_trip_preserves_multi_domain_detection_windows(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setenv(ML_WORKER_STATE_DIR_ENV, str(tmp_path))
+    cfg = PulledWorkerConfig(
+        config_version=7,
+        restart_epoch=3,
+        night_window=PulledNightWindow(start="21:00", end="06:00", tz="UTC"),
+        cameras=(
+            PulledCameraConfig(
+                camera_id="camera-1",
+                space_id="space-1",
+                label="Room 1",
+                rtsp_url="rtsp://pulled/sub",
+                online=True,
+            ),
+        ),
+        detection_windows={
+            "bed_exit": PulledNightWindow(start="21:00", end="06:00", tz="UTC"),
+            "fall": PulledNightWindow(start="22:00", end="05:00", tz="Asia/Seoul"),
+        },
+    )
+
+    save_lkg(cfg)
+
+    assert load_lkg() == cfg
+
+
+def test_to_worker_config_threads_pulled_detection_windows_into_domains_config() -> None:
+    """pull_models + config_resolver thread pulled detection_windows into the
+    resolved WorkerConfig for every domain, not just bed_exit (issue #24)."""
+    payload = BackendWorkerConfigPayload.model_validate(
+        {
+            "config_version": 5,
+            "cameras": [
+                {
+                    "camera_id": "camera-1",
+                    "facility_id": "facility-1",
+                    "rtsp_url": "rtsp://camera-1/stream",
+                }
+            ],
+            "detection_windows": {
+                "bed_exit": {"start": "21:00", "end": "06:00", "tz": "UTC"},
+                "fall": {"start": "22:00", "end": "05:00", "tz": "Asia/Seoul"},
+            },
+        }
+    )
+
+    worker_config = payload.to_worker_config("http://relay.test", "relay-token")
+
+    assert worker_config.domains.detection_windows == {
+        "bed_exit": NightWindowConfig(start="21:00", end="06:00", tz="UTC"),
+        "fall": NightWindowConfig(start="22:00", end="05:00", tz="Asia/Seoul"),
+    }
+    assert worker_config.domains.resolved_detection_window(
+        "bed_exit"
+    ) == NightWindowConfig(start="21:00", end="06:00", tz="UTC")
+
+
+def test_to_worker_config_still_accepts_legacy_night_window_payload_field() -> None:
+    payload = BackendWorkerConfigPayload.model_validate(
+        {
+            "config_version": 5,
+            "night_window": {"start": "21:00", "end": "06:00", "tz": "UTC"},
+            "cameras": [
+                {
+                    "camera_id": "camera-1",
+                    "facility_id": "facility-1",
+                    "rtsp_url": "rtsp://camera-1/stream",
+                }
+            ],
+        }
+    )
+
+    worker_config = payload.to_worker_config("http://relay.test", "relay-token")
+
+    assert worker_config.domains.detection_windows == {
+        "bed_exit": NightWindowConfig(start="21:00", end="06:00", tz="UTC"),
+    }
+
+
+def test_to_worker_config_drops_start_equal_end_window_and_falls_open(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A degenerate start == end window fails open to ALWAYS (dropped from
+    detection_windows, logged loudly) rather than being threaded through as
+    a window that DetectionWindow.contains would treat as matching nothing."""
+    payload = BackendWorkerConfigPayload.model_validate(
+        {
+            "config_version": 5,
+            "cameras": [
+                {
+                    "camera_id": "camera-1",
+                    "facility_id": "facility-1",
+                    "rtsp_url": "rtsp://camera-1/stream",
+                }
+            ],
+            "detection_windows": {
+                "bed_exit": {"start": "09:00", "end": "09:00", "tz": "UTC"},
+            },
+        }
+    )
+
+    worker_config = payload.to_worker_config("http://relay.test", "relay-token")
+
+    # An empty detection_windows map is normalized to None by to_worker_config
+    # (falsy dict -> None), matching DomainsConfig's own default.
+    assert worker_config.domains.detection_windows is None
+    assert worker_config.domains.resolved_detection_window("bed_exit") is None
+    err = capsys.readouterr().err
+    assert "bed_exit" in err
+
+
+def test_to_worker_config_drops_invalid_timezone_and_falls_open(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    payload = BackendWorkerConfigPayload.model_validate(
+        {
+            "config_version": 5,
+            "cameras": [
+                {
+                    "camera_id": "camera-1",
+                    "facility_id": "facility-1",
+                    "rtsp_url": "rtsp://camera-1/stream",
+                }
+            ],
+            "detection_windows": {
+                "fall": {"start": "22:00", "end": "05:00", "tz": "Not/A_Zone"},
+            },
+        }
+    )
+
+    worker_config = payload.to_worker_config("http://relay.test", "relay-token")
+
+    assert worker_config.domains.detection_windows is None
+    err = capsys.readouterr().err
+    assert "fall" in err
+
+
+def test_to_pulled_config_drops_malformed_hhmm_and_falls_open(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    payload = BackendWorkerConfigPayload.model_validate(
+        {
+            "config_version": 5,
+            "cameras": [
+                {
+                    "camera_id": "camera-1",
+                    "facility_id": "facility-1",
+                    "rtsp_url": "rtsp://camera-1/stream",
+                }
+            ],
+            "detection_windows": {
+                "bed_exit": {"start": "25:00", "end": "17:00", "tz": "UTC"},
+            },
+        }
+    )
+
+    pulled = payload.to_pulled_config()
+
+    assert pulled.detection_windows == {}
+    assert pulled.night_window is None
+    err = capsys.readouterr().err
+    assert "bed_exit" in err
+
+
+def test_to_worker_config_drops_explicit_null_domain_entry_without_crashing_payload() -> None:
+    """A stray ``null`` for one domain (e.g. a hand-edited LKG file, or a
+    version-skewed ml-api) must not fail pydantic validation for the whole
+    payload -- it's dropped at parse time (ALWAYS for that domain) exactly
+    like the contracts and lifespan.py boundaries, and the rest of the
+    payload (other domains, cameras) still parses normally."""
+    payload = BackendWorkerConfigPayload.model_validate(
+        {
+            "config_version": 5,
+            "cameras": [
+                {
+                    "camera_id": "camera-1",
+                    "facility_id": "facility-1",
+                    "rtsp_url": "rtsp://camera-1/stream",
+                }
+            ],
+            "detection_windows": {
+                "bed_exit": None,
+                "fall": {"start": "22:00", "end": "05:00", "tz": "UTC"},
+            },
+        }
+    )
+
+    worker_config = payload.to_worker_config("http://relay.test", "relay-token")
+
+    assert worker_config.domains.detection_windows == {
+        "fall": NightWindowConfig(start="22:00", end="05:00", tz="UTC"),
+    }
+    assert worker_config.domains.resolved_detection_window("bed_exit") is None
 
 
 def test_pull_worker_config_returns_none_on_urllib_error() -> None:

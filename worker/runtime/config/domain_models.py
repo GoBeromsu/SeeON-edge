@@ -45,6 +45,20 @@ class NightWindowConfig(BaseModel):
             ) from error
         return value
 
+    @model_validator(mode="after")
+    def _reject_degenerate_window(self) -> NightWindowConfig:
+        # start == end would make DetectionWindow.contains's
+        # `start <= t < end` range match nothing, permanently disabling the
+        # domain -- reject it here rather than silently accepting an empty
+        # window. Operators who want 24/7 detection omit the window entirely.
+        if self.start == self.end:
+            raise ConfigValidationError(
+                "night window start and end must not be equal (an equal "
+                "start/end window matches nothing); omit the window for "
+                "24/7 detection instead"
+            )
+        return self
+
 
 class FallDomainConfig(BaseModel):
     model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True, extra="forbid")
@@ -56,6 +70,8 @@ class BedExitDomainConfig(BaseModel):
     model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True, extra="forbid")
 
     enabled: bool = True
+    # Deprecated alias for detection_windows["bed_exit"]; an explicit
+    # DomainsConfig.detection_windows entry for "bed_exit" wins over this.
     night_window: NightWindowConfig | None = None
 
 
@@ -68,6 +84,11 @@ class DomainsConfig(BaseModel):
     enabled: tuple[str, ...] | None = None
     fall: FallDomainConfig | None = None
     bed_exit: BedExitDomainConfig | None = None
+    # Per-domain detection windows, keyed by domain name. Deliberately
+    # lenient (unlike ``enabled``): unknown domain names are accepted so this
+    # stays forward-compatible with domains this worker build doesn't know
+    # about yet.
+    detection_windows: dict[str, NightWindowConfig | None] | None = None
 
     @field_validator("enabled")
     @classmethod
@@ -104,6 +125,21 @@ class DomainsConfig(BaseModel):
             return configs[name]
         except KeyError as error:
             raise ConfigValidationError(f"unknown domain: {name}") from error
+
+    def resolved_detection_window(self, name: str) -> NightWindowConfig | None:
+        """Resolve domain ``name``'s detection window.
+
+        An explicit ``detection_windows[name]`` entry (including an explicit
+        ``None``, i.e. no window) always wins. Otherwise falls back to
+        ``BedExitDomainConfig.night_window`` for "bed_exit" (the only
+        pre-existing per-domain window alias); other domains have no legacy
+        alias and default to no window (24/7).
+        """
+        if self.detection_windows is not None and name in self.detection_windows:
+            return self.detection_windows[name]
+        if name == "bed_exit" and self.bed_exit is not None:
+            return self.bed_exit.night_window
+        return None
 
     @property
     def enabled_domains(self) -> tuple[str, ...] | None:

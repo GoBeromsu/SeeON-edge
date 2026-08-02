@@ -78,6 +78,24 @@ export async function logoutDashboard(): Promise<void> {
   await requestJson('/auth/session', { method: 'DELETE' });
 }
 
+export async function updateDashboardCredentials(input: {
+  currentPassword: string;
+  newUsername?: string;
+  newPassword: string;
+}): Promise<void> {
+  const body: Record<string, unknown> = {
+    current_password: input.currentPassword,
+    new_password: input.newPassword,
+  };
+  if (input.newUsername) {
+    body.username = input.newUsername;
+  }
+  await requestJson('/auth/credentials', {
+    method: 'PUT',
+    body: JSON.stringify(body),
+  });
+}
+
 type ClipLabelOverlay = Pick<Clip, 'label' | 'reviewer' | 'reviewed_at'>;
 const clipLabelOverlay = new Map<string, ClipLabelOverlay>();
 

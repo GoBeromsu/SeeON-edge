@@ -16,6 +16,20 @@ from backend.app.main import LifespanFactory, create_app, no_lifespan
 AUTH = {"Authorization": "Bearer relay-token"}
 NO_LIFESPAN: LifespanFactory = no_lifespan
 
+# Dashboard auth now always resolves to a session store (persisted file > env
+# > the built-in admin/admin default, see backend/app/shared/dashboard_auth.py),
+# so a bare worker relay/bearer token or query token is never sufficient on
+# its own -- these tests log in as the zero-config default and rely on the
+# TestClient's cookie jar to carry the session across subsequent calls.
+
+
+def _login(client: TestClient) -> None:
+    response = client.post(
+        "/api/v1/auth/session",
+        json={"username": "admin", "password": "admin"},
+    )
+    assert response.status_code == 204
+
 
 class UrlopenCall(TypedDict):
     url: str
@@ -65,7 +79,9 @@ def stream_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     get_settings.cache_clear()
 
 
-def test_stream_proxy_forwards_mjpeg_with_query_token(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_stream_proxy_forwards_mjpeg_with_a_dashboard_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     body = (
         b"--frame\r\n"
         b"Content-Type: image/jpeg\r\n\r\n"
@@ -86,7 +102,8 @@ def test_stream_proxy_forwards_mjpeg_with_query_token(monkeypatch: pytest.Monkey
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
 
     with TestClient(create_app(lifespan=NO_LIFESPAN)) as client:
-        response = client.get("/api/v1/streams/cam_sp_201", params={"token": "relay-token"})
+        _login(client)
+        response = client.get("/api/v1/streams/cam_sp_201")
 
     assert response.status_code == 200
     assert response.content == body
@@ -100,9 +117,12 @@ def test_stream_proxy_forwards_mjpeg_with_query_token(monkeypatch: pytest.Monkey
     ]
 
 
-def test_stream_proxy_accepts_bearer_and_rejects_bad_auth(
+def test_stream_proxy_requires_a_dashboard_session(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """A worker relay bearer token or a query token is never a substitute for
+    a real dashboard session -- the legacy bypass is unreachable now that
+    dashboard auth always resolves (persisted file > env > built-in default)."""
     calls: list[str] = []
 
     def fake_urlopen(request: urllib.request.Request, timeout: float) -> FiniteStreamResponse:
@@ -114,12 +134,15 @@ def test_stream_proxy_accepts_bearer_and_rejects_bad_auth(
 
     with TestClient(create_app(lifespan=NO_LIFESPAN)) as client:
         missing = client.get("/api/v1/streams/cam_sp_201")
-        wrong = client.get("/api/v1/streams/cam_sp_201", params={"token": "wrong"})
-        header = client.get("/api/v1/streams/cam_sp_201", headers=AUTH)
+        wrong_query_token = client.get("/api/v1/streams/cam_sp_201", params={"token": "wrong"})
+        bearer_without_session = client.get("/api/v1/streams/cam_sp_201", headers=AUTH)
+        _login(client)
+        authorized = client.get("/api/v1/streams/cam_sp_201")
 
     assert missing.status_code == 401
-    assert wrong.status_code == 403
-    assert header.status_code == 200
+    assert wrong_query_token.status_code == 401
+    assert bearer_without_session.status_code == 401
+    assert authorized.status_code == 200
     assert calls == ["http://worker.local:8090/stream/cam_sp_201"]
 
 
@@ -141,7 +164,8 @@ def test_stream_proxy_preserves_upstream_404_and_503(
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
 
     with TestClient(create_app(lifespan=NO_LIFESPAN)) as client:
-        response = client.get("/api/v1/streams/missing", headers=AUTH)
+        _login(client)
+        response = client.get("/api/v1/streams/missing")
 
     assert response.status_code == code
     assert response.json()["detail"] == "worker stream unavailable"
@@ -157,13 +181,16 @@ def test_stream_proxy_reports_connection_failure_as_unavailable(
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
 
     with TestClient(create_app(lifespan=NO_LIFESPAN)) as client:
-        response = client.get("/api/v1/streams/cam_sp_201", headers=AUTH)
+        _login(client)
+        response = client.get("/api/v1/streams/cam_sp_201")
 
     assert response.status_code == 503
     assert response.json()["detail"] == "worker stream unavailable"
 
 
-def test_snapshot_proxy_forwards_jpeg_with_query_token(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_snapshot_proxy_forwards_jpeg_with_a_dashboard_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     body = b"\xff\xd8camera-jpeg\xff\xd9"
     calls: list[UrlopenCall] = []
 
@@ -183,9 +210,8 @@ def test_snapshot_proxy_forwards_jpeg_with_query_token(monkeypatch: pytest.Monke
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
 
     with TestClient(create_app(lifespan=NO_LIFESPAN)) as client:
-        response = client.get(
-            "/api/v1/streams/cam_sp_201/snapshot", params={"token": "relay-token"}
-        )
+        _login(client)
+        response = client.get("/api/v1/streams/cam_sp_201/snapshot")
 
     assert response.status_code == 200
     assert response.content == body
@@ -200,7 +226,7 @@ def test_snapshot_proxy_forwards_jpeg_with_query_token(monkeypatch: pytest.Monke
     ]
 
 
-def test_snapshot_proxy_accepts_bearer_and_rejects_bad_auth(
+def test_snapshot_proxy_requires_a_dashboard_session(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls: list[str] = []
@@ -214,14 +240,19 @@ def test_snapshot_proxy_accepts_bearer_and_rejects_bad_auth(
 
     with TestClient(create_app(lifespan=NO_LIFESPAN)) as client:
         missing = client.get("/api/v1/streams/cam_sp_201/snapshot")
-        wrong = client.get(
+        wrong_query_token = client.get(
             "/api/v1/streams/cam_sp_201/snapshot", params={"token": "wrong"}
         )
-        header = client.get("/api/v1/streams/cam_sp_201/snapshot", headers=AUTH)
+        bearer_without_session = client.get(
+            "/api/v1/streams/cam_sp_201/snapshot", headers=AUTH
+        )
+        _login(client)
+        authorized = client.get("/api/v1/streams/cam_sp_201/snapshot")
 
     assert missing.status_code == 401
-    assert wrong.status_code == 403
-    assert header.status_code == 200
+    assert wrong_query_token.status_code == 401
+    assert bearer_without_session.status_code == 401
+    assert authorized.status_code == 200
     assert calls == ["http://worker.local:8090/snapshot/cam_sp_201"]
 
 
@@ -243,7 +274,8 @@ def test_snapshot_proxy_preserves_upstream_404_and_503(
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
 
     with TestClient(create_app(lifespan=NO_LIFESPAN)) as client:
-        response = client.get("/api/v1/streams/missing/snapshot", headers=AUTH)
+        _login(client)
+        response = client.get("/api/v1/streams/missing/snapshot")
 
     assert response.status_code == code
     assert response.json()["detail"] == "worker stream unavailable"
@@ -259,7 +291,8 @@ def test_snapshot_proxy_reports_connection_failure_as_unavailable(
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
 
     with TestClient(create_app(lifespan=NO_LIFESPAN)) as client:
-        response = client.get("/api/v1/streams/cam_sp_201/snapshot", headers=AUTH)
+        _login(client)
+        response = client.get("/api/v1/streams/cam_sp_201/snapshot")
 
     assert response.status_code == 503
     assert response.json()["detail"] == "worker stream unavailable"
