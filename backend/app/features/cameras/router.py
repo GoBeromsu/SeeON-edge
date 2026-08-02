@@ -10,10 +10,20 @@ import urllib.request
 import uuid
 from typing import Annotated, Literal
 
-from fastapi import APIRouter, FastAPI, Header, HTTPException, Request, Response, status
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    FastAPI,
+    Header,
+    HTTPException,
+    Request,
+    Response,
+    status,
+)
 from pydantic import BaseModel, ConfigDict, Field
 
 from backend.app.core.config import get_settings
+from backend.app.features.cameras.roster_sync import camera_sync_view, sync_camera_roster
 from backend.app.features.cameras.store import (
     CameraRegistryStore,
     DuplicateCameraError,
@@ -38,6 +48,21 @@ RELAY_TOKEN_HEADER = "X-Edge-Relay-Token"
 router = APIRouter(prefix="/cameras", tags=["cameras"])
 
 
+class CameraSyncStatus(BaseModel):
+    """Per-camera roster-sync state (story G004): whether this camera's last
+    push to the external backend (``PUT /v1/edge/cameras``) succeeded, is
+    still pending, or failed, and why. See
+    ``backend/app/features/cameras/roster_sync.py``.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["synced", "pending", "failed", "disabled"]
+    error_class: Literal["unreachable", "timeout", "auth", "unconfigured"] | None = None
+    detail: str | None = None
+    last_ok_at: str | None = None
+
+
 class CameraResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -52,6 +77,10 @@ class CameraResponse(BaseModel):
     created_at: str | None = None
     space_name: str | None = None
     floor_name: str | None = None
+    # Roster-sync state (story G004): populated only by GET /cameras (see
+    # _public_snapshot); create/update/delete/test responses leave this None
+    # rather than racing the fire-and-forget background sync they trigger.
+    sync: CameraSyncStatus | None = None
     # Live heartbeat freshness (see _heartbeat_camera_fields); only populated
     # by GET /cameras, which is the only route that joins heartbeat liveness.
     last_heartbeat_at: float | None = None
@@ -132,6 +161,7 @@ def list_cameras(
     _authorize(request, relay_token, authorization)
     heartbeats = get_heartbeat_store(request.app).snapshot()
     return _public_snapshot(
+        request.app,
         _store(request.app).snapshot(),
         getattr(request.app.state, "pulled_config", None),
         heartbeats,
@@ -142,6 +172,7 @@ def list_cameras(
 def create_camera(
     payload: CreateCameraRequest,
     request: Request,
+    background_tasks: BackgroundTasks,
     relay_token: Annotated[str | None, Header(alias=RELAY_TOKEN_HEADER)] = None,
     authorization: Annotated[str | None, Header(alias="Authorization")] = None,
 ) -> dict[str, object]:
@@ -183,6 +214,7 @@ def create_camera(
         )
     except DuplicateCameraError as exc:
         raise _duplicate_camera_error(exc) from exc
+    background_tasks.add_task(_trigger_roster_sync, request.app)
     return public_camera(record)
 
 
@@ -216,6 +248,7 @@ def update_camera(
     camera_id: str,
     payload: UpdateCameraRequest,
     request: Request,
+    background_tasks: BackgroundTasks,
     relay_token: Annotated[str | None, Header(alias=RELAY_TOKEN_HEADER)] = None,
     authorization: Annotated[str | None, Header(alias="Authorization")] = None,
 ) -> dict[str, object]:
@@ -265,7 +298,23 @@ def update_camera(
         raise _duplicate_camera_error(exc) from exc
     if updated is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="camera not found")
+    background_tasks.add_task(_trigger_roster_sync, request.app)
     return public_camera(updated)
+
+
+def _trigger_roster_sync(app: FastAPI) -> None:
+    """Best-effort roster push, run as a BackgroundTask after create/update/
+    delete so it never adds latency to -- or can fail -- the CRUD response.
+
+    BackgroundTasks run after the response body has already been sent (see
+    Starlette's Response.__call__), so by the time a caller's next request
+    lands the sync has already been attempted; sync_camera_roster() itself
+    never raises, but this still guards against a future change there.
+    """
+    try:
+        sync_camera_roster(app)
+    except Exception:  # noqa: BLE001, S110 - a roster-sync bug must never surface here
+        pass
 
 
 def _duplicate_camera_error(exc: DuplicateCameraError) -> HTTPException:
@@ -284,12 +333,14 @@ def _duplicate_camera_error(exc: DuplicateCameraError) -> HTTPException:
 def delete_camera(
     camera_id: str,
     request: Request,
+    background_tasks: BackgroundTasks,
     relay_token: Annotated[str | None, Header(alias=RELAY_TOKEN_HEADER)] = None,
     authorization: Annotated[str | None, Header(alias="Authorization")] = None,
 ) -> Response:
     _authorize(request, relay_token, authorization)
     if not _store(request.app).delete(camera_id):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="camera not found")
+    background_tasks.add_task(_trigger_roster_sync, request.app)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
@@ -410,7 +461,7 @@ def retry_pending_backend_mappings(app: FastAPI) -> int:
 
 
 def _public_snapshot(
-    snapshot: dict[str, object], pulled: object, heartbeats: object = None
+    app: FastAPI, snapshot: dict[str, object], pulled: object, heartbeats: object = None
 ) -> dict[str, object]:
     records = _snapshot_camera_records(snapshot)
     roster = (
@@ -488,6 +539,8 @@ def _public_snapshot(
         camera["status"], camera["last_heartbeat_at"], camera["heartbeat_age_sec"] = (
             _heartbeat_camera_fields(heartbeats, candidate_ids)
         )
+        if isinstance(local_id, str) and local_id:
+            camera["sync"] = camera_sync_view(app, local_id)
         backend_id = explicit_backend_by_record_index.get(
             index, fallback_backend_by_record_index.get(index)
         )

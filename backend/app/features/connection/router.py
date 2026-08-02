@@ -15,11 +15,12 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from typing import Annotated, Literal
 
-from fastapi import APIRouter, FastAPI, Header, Request, status
+from fastapi import APIRouter, BackgroundTasks, FastAPI, Header, Request, status
 from fastapi.exceptions import HTTPException
 from pydantic import BaseModel, ConfigDict
 
 from backend.app.core.config import get_settings
+from backend.app.features.cameras.roster_sync import sync_camera_roster
 from backend.app.features.cameras.router import RELAY_TOKEN_HEADER, _authorize
 from backend.app.features.connection.store import ConnectionSettings, ConnectionSettingsStore
 from backend.app.lifespan import apply_connection_settings, refresh_backend_config
@@ -70,6 +71,26 @@ class ConnectionTestResponse(BaseModel):
     probed_url: str | None = None
 
 
+RosterErrorClass = Literal["unreachable", "timeout", "auth", "unconfigured"]
+RosterStatus = Literal["synced", "pending", "failed", "disabled"]
+
+
+class CameraRosterSyncResponse(BaseModel):
+    """Fresh roster-sync state (story G004), returned by both the explicit
+    POST /connection/sync-cameras trigger below and usable to poll the same
+    state GET /cameras surfaces per-camera.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    status: RosterStatus
+    error_class: RosterErrorClass | None = None
+    detail: str | None = None
+    last_ok_at: str | None = None
+    next_retry_at: str | None = None
+    camera_count: int
+
+
 @router.get("", response_model=ConnectionStatusResponse)
 def get_connection(
     request: Request,
@@ -84,6 +105,7 @@ def get_connection(
 def put_connection(
     payload: ConnectionSettingsUpdateRequest,
     request: Request,
+    background_tasks: BackgroundTasks,
     relay_token: Annotated[str | None, Header(alias=RELAY_TOKEN_HEADER)] = None,
     authorization: Annotated[str | None, Header(alias="Authorization")] = None,
 ) -> dict[str, object]:
@@ -93,7 +115,33 @@ def put_connection(
     ConnectionSettingsStore.from_env().save(updates)
     apply_connection_settings(request.app)  # immediate relink, no restart
     _kick_backend_config_refresh(request.app)
+    # Best-effort, non-blocking: new/changed connection settings may make the
+    # roster reachable (or newly unreachable) -- re-push it so per-camera
+    # sync state converges without waiting for the next camera CRUD.
+    background_tasks.add_task(_trigger_roster_sync, request.app)
     return _status_response(request.app)
+
+
+@router.post("/sync-cameras", response_model=CameraRosterSyncResponse)
+def sync_cameras(
+    request: Request,
+    relay_token: Annotated[str | None, Header(alias=RELAY_TOKEN_HEADER)] = None,
+    authorization: Annotated[str | None, Header(alias="Authorization")] = None,
+) -> dict[str, object]:
+    """Explicit, synchronous roster push -- unlike the CRUD/PUT triggers
+    (fire-and-forget background tasks), this endpoint's whole point is to
+    return the fresh result, so it calls sync_camera_roster() directly.
+    """
+    _authorize(request, relay_token, authorization)
+    result = sync_camera_roster(request.app)
+    return {
+        "status": result.status,
+        "error_class": result.error_class,
+        "detail": result.detail,
+        "last_ok_at": result.last_ok_at,
+        "next_retry_at": result.next_retry_at,
+        "camera_count": result.camera_count,
+    }
 
 
 @router.post("/test", response_model=ConnectionTestResponse)
@@ -158,6 +206,19 @@ def _effective(
     if field in overrides:
         return overrides[field]
     return getattr(settings, field)
+
+
+def _trigger_roster_sync(app: FastAPI) -> None:
+    """Same fire-and-forget BackgroundTask pattern as the cameras router's
+    own trigger (backend/app/features/cameras/router.py::_trigger_roster_sync)
+    -- duplicated rather than imported across routers to keep each router's
+    background-task helper trivially local; sync_camera_roster() itself
+    never raises, but this still guards against a future change there.
+    """
+    try:
+        sync_camera_roster(app)
+    except Exception:  # noqa: BLE001, S110 - a roster-sync bug must never surface here
+        pass
 
 
 def _kick_backend_config_refresh(app: FastAPI) -> None:

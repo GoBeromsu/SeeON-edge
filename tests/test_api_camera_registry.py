@@ -140,7 +140,20 @@ def test_camera_registry_crud_masks_rtsp_versions_and_worker_config_auth(
 
         listed = client.get("/api/v1/cameras", headers=AUTH).json()
         assert listed["registry_version"] == 1
-        assert listed["cameras"] == [camera]
+        assert len(listed["cameras"]) == 1
+        listed_camera = listed["cameras"][0]
+        # The POST response never populates `sync` (avoids a BackgroundTask
+        # race against this pinned-shape assertion); GET does. This test's
+        # env sets API_BACKEND_EDGE_CAMERAS_URL/API_FACILITY_TOKEN directly,
+        # neither of which ConnectionSettingsStore (roster_sync's source of
+        # truth) recognizes -- so the roster mapper is unconfigured and the
+        # listed camera reads as disabled.
+        sync = listed_camera["sync"]
+        assert sync["status"] == "disabled"
+        assert sync["error_class"] == "unconfigured"
+        assert sync["last_ok_at"] is None
+        assert isinstance(sync["detail"], str) and sync["detail"]
+        assert {**listed_camera, "sync": None} == camera
 
         assert client.get("/api/v1/cameras/worker-config").status_code == 401
         assert (
@@ -685,6 +698,7 @@ def test_list_cameras_includes_backend_only_roster_camera(tmp_path) -> None:
             "never_connected": None,
             "last_ok_at": None,
             "last_probed_at": None,
+            "sync": None,
         }
     ]
 def test_list_cameras_includes_backend_only_roster_camera_without_created_at(tmp_path) -> None:
@@ -731,6 +745,7 @@ def test_list_cameras_includes_backend_only_roster_camera_without_created_at(tmp
             "never_connected": None,
             "last_ok_at": None,
             "last_probed_at": None,
+            "sync": None,
         }
     ]
 
