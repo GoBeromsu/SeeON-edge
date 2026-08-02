@@ -395,6 +395,45 @@ def test_yaml_set_pull_raising_workerconfigerror_exits_with_config_error_code(
     assert worker_main.main(["--config", str(config_path)]) == 2
 
 
+def test_no_yaml_pull_raising_validationerror_exits_with_config_error_code(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Mirrors the `WorkerConfigError` guard above for its sibling exception:
+    `load_worker_config_from_relay`'s unguarded "lost the LKG race" branch
+    calls `_snapshot_from_stored` -> `_snapshot_from_payload` ->
+    `BackendWorkerConfigPayload.model_validate(stored.payload)`, which raises
+    `pydantic.ValidationError` (not `WorkerConfigError`) when the stored LKG
+    payload itself fails schema validation. Both exception types must be
+    caught, not just one.
+    """
+    monkeypatch.setenv("RELAY_URL", "http://ml-api:8000")
+    monkeypatch.setenv("RELAY_TOKEN", "relay-token")
+
+    def _raise(*_args: object, **_kwargs: object) -> ConfigSnapshot:
+        # Real pydantic ValidationError, produced the same way the guarded
+        # branch would encounter one -- not a hand-constructed stand-in.
+        RelayConfig.model_validate({"url": "not-a-url", "token": "relay-token"})
+        raise AssertionError("RelayConfig.model_validate should have raised")
+
+    monkeypatch.setattr(worker_main, "load_worker_config_from_relay", _raise)
+
+    assert worker_main.main([]) == 2
+
+
+def test_yaml_set_pull_raising_validationerror_exits_with_config_error_code(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    config_path = _write_yaml_config(tmp_path)
+
+    def _raise(*_args: object, **_kwargs: object) -> ConfigSnapshot:
+        RelayConfig.model_validate({"url": "not-a-url", "token": "relay-token"})
+        raise AssertionError("RelayConfig.model_validate should have raised")
+
+    monkeypatch.setattr(worker_main, "resolve_startup_config", _raise)
+
+    assert worker_main.main(["--config", str(config_path)]) == 2
+
+
 # --- the fatal no-config message must not assert an unestablished cause ----
 
 

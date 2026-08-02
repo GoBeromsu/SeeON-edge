@@ -197,7 +197,14 @@ def main(argv: list[str] | None = None) -> int:
         )
         try:
             snapshot = resolve_startup_config(yaml_config, relay_url, relay_token)
-        except WorkerConfigError:
+        except (WorkerConfigError, ValidationError):
+            # config_pull.py's own "fresh pull validated but lost the LKG
+            # race" branch re-derives the snapshot from the stored payload
+            # via `_snapshot_from_stored` with no try/except, and that path
+            # can raise either exception (`ValidationError` from
+            # `BackendWorkerConfigPayload.model_validate`, `WorkerConfigError`
+            # from `to_worker_config`) -- every other call to that pair
+            # inside config_pull.py guards both, so this must too.
             LOGGER.exception("worker config resolution failed")
             return CONFIG_ERROR_EXIT_CODE
         config = snapshot.config
@@ -260,7 +267,11 @@ def main(argv: list[str] | None = None) -> int:
 
         try:
             snapshot = load_worker_config_from_relay(relay_url, relay_token)
-        except WorkerConfigError:
+        except (WorkerConfigError, ValidationError):
+            # See the matching comment on the YAML branch's
+            # `resolve_startup_config` call: the same unguarded
+            # `_snapshot_from_stored` re-derivation can raise either
+            # exception.
             LOGGER.exception("worker config pull failed")
             return CONFIG_ERROR_EXIT_CODE
         if snapshot is None:
