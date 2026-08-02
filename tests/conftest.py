@@ -27,17 +27,17 @@ def default_dashboard_credentials_store_to_tmp_path(
     Any test that logs in via the dashboard session route without explicitly
     setting ``app.state.dashboard_credentials_store`` falls through to
     ``from_env()``, which otherwise resolves to the real
-    ``~/.local/state/ml-api/dashboard_credentials.json`` (no env override
-    exists anymore for this path). That path is an ambient-filesystem read
-    that shouldn't happen from the suite at all, so ``from_env()`` itself is
-    patched (constructor injection, same isolated-path guarantee as before,
-    just no longer routed through an environment variable) to build the
-    store from a per-test tmp path instead.
+    ``~/.local/state/ml-api/catalog.sqlite3`` (no env override exists anymore
+    for this path). That path is an ambient-filesystem read that shouldn't
+    happen from the suite at all, so ``from_env()`` itself is patched
+    (constructor injection, same isolated-path guarantee as before, just no
+    longer routed through an environment variable) to build the store from a
+    per-test tmp path instead.
     """
 
     monkeypatch.setattr(
         DashboardCredentialsStore,
         "from_env",
-        classmethod(lambda cls: cls(tmp_path / "dashboard_credentials.json")),
+        classmethod(lambda cls: cls(tmp_path / "catalog.sqlite3")),
     )
     yield

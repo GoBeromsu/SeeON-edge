@@ -390,7 +390,7 @@ class LiveBackend:
         self.app.state.backend_ingest_client = self.ingest_client
         state_dir.mkdir(parents=True, exist_ok=True)
         self.app.state.runtime_status_store = RuntimeStatusStore(
-            latency_state_path=state_dir / "runtime-latency.json"
+            latency_state_path=state_dir / "catalog.sqlite3"
         )
         self.app.state.catalog_store = CatalogStore.open(state_dir / "catalog.sqlite3")
         self.port = free_tcp_port()

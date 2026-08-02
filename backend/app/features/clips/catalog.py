@@ -26,7 +26,7 @@ from backend.app.shared.state_dir import resolve_state_dir
 if TYPE_CHECKING:
     from fastapi import FastAPI
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 logger = logging.getLogger(__name__)
 _CAMERA_PAYLOAD_FIELDS = (
     "id",
@@ -137,6 +137,41 @@ _CREATE_STATEMENTS = (
         "payload_json TEXT NOT NULL) STRICT"
     ),
 )
+# Schema-version-3 tables: ml-api-owned state that used to live in standalone
+# JSON files (dashboard_credentials.json, cameras.json, runtime-latency.json).
+# Deliberately NOT added to _TABLE_KEYS/_TABLE_COLUMNS -- those two dicts back
+# the payload_json compare-or-insert convention used by record()/records(),
+# which does not apply here. `camera_registry` is a distinct table from the
+# pre-existing `cameras` clip/audit denormalization cache above: `cameras` is
+# a derived read cache of catalog-relevant camera fields, while
+# `camera_registry` is the ml-api camera registry's own source of truth.
+#
+# IF NOT EXISTS (unlike every other statement in _CREATE_STATEMENTS): the
+# owning stores (DashboardCredentialsStore, CameraRegistryStore,
+# RuntimeStatusStore) each independently bootstrap their own single table on
+# first use via the same statement text, since two of the three live in
+# backend/app/shared and backend/app/features/cameras -- CatalogStore itself
+# cannot be a dependency there (see "backend base (core/shared) does not
+# import upper layers" in pyproject.toml's import-linter contracts) or a
+# forward reference (cameras is a sibling feature, not a base layer). Whoever
+# opens the database file first (a catalog request, or one of the three
+# stores) must not fail when the others have already created their table.
+_V3_TABLE_STATEMENTS = (
+    (
+        "CREATE TABLE IF NOT EXISTS credentials (id INTEGER PRIMARY KEY CHECK (id = 1), "
+        "username TEXT NOT NULL, algorithm TEXT NOT NULL, salt BLOB NOT NULL, "
+        "password_hash BLOB NOT NULL, updated_at TEXT NOT NULL) STRICT"
+    ),
+    (
+        "CREATE TABLE IF NOT EXISTS camera_registry (id INTEGER PRIMARY KEY CHECK (id = 1), "
+        "registry_version INTEGER NOT NULL, cameras_json TEXT NOT NULL) STRICT"
+    ),
+    (
+        "CREATE TABLE IF NOT EXISTS runtime_latency (facility_id TEXT PRIMARY KEY, "
+        "payload_json TEXT NOT NULL) STRICT"
+    ),
+)
+_CREATE_STATEMENTS = (*_CREATE_STATEMENTS, *_V3_TABLE_STATEMENTS)
 _INDEX_STATEMENTS = (
     "CREATE INDEX IF NOT EXISTS clips_camera_started_at_idx ON clips(camera_id, started_at)",
     "CREATE INDEX IF NOT EXISTS clips_event_type_idx ON clips(event_type)",
@@ -516,6 +551,11 @@ class CatalogStore:
                     for column in columns:
                         kind = "INTEGER" if column == "size_bytes" else "TEXT"
                         connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {kind}")
+                for statement in _V3_TABLE_STATEMENTS:
+                    connection.execute(statement)
+            elif version == 2:
+                for statement in _V3_TABLE_STATEMENTS:
+                    connection.execute(statement)
             else:
                 raise RuntimeError(f"unsupported catalog schema {version}")  # noqa: TRY301
             for table, key in _TABLE_KEYS.items():

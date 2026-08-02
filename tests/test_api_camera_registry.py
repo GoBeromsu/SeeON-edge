@@ -131,7 +131,7 @@ def test_camera_registry_crud_masks_rtsp_versions_and_worker_config_auth(
     monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
 
     app = create_app(lifespan=no_lifespan)
-    app.state.camera_registry = CameraRegistryStore(tmp_path / "cameras.json")
+    app.state.camera_registry = CameraRegistryStore(tmp_path / "catalog.sqlite3")
 
     with TestClient(app) as client:
         _login(client)
@@ -264,7 +264,7 @@ def test_worker_config_uses_registry_first_and_metadata_from_backend_pull(tmp_pa
             ),
         ),
     )
-    store = app.state.camera_registry = CameraRegistryStore(tmp_path / "cameras.json")
+    store = app.state.camera_registry = CameraRegistryStore(tmp_path / "catalog.sqlite3")
     store.create(
         camera_id="camera-1",
         label="Lobby",
@@ -329,7 +329,7 @@ def test_worker_config_emits_detection_windows_alongside_legacy_night_window(tmp
             "fall": PulledNightWindow(start="22:00", end="05:00", tz="Asia/Seoul"),
         },
     )
-    store = app.state.camera_registry = CameraRegistryStore(tmp_path / "cameras.json")
+    store = app.state.camera_registry = CameraRegistryStore(tmp_path / "catalog.sqlite3")
     store.create(
         camera_id="camera-1",
         label="Lobby",
@@ -387,7 +387,7 @@ def test_worker_config_emits_default_camera_fps_when_configured(
     monkeypatch.setenv("ML_DEFAULT_CAMERA_FPS", "15")
     app = create_app(lifespan=no_lifespan)
     app.state.edge_relay_token = "relay-token"
-    store = app.state.camera_registry = CameraRegistryStore(tmp_path / "cameras.json")
+    store = app.state.camera_registry = CameraRegistryStore(tmp_path / "catalog.sqlite3")
     store.create(
         camera_id="camera-1",
         label="Lobby",
@@ -435,7 +435,7 @@ def test_worker_config_normalizes_pulled_cameras_when_registry_empty(tmp_path) -
             ),
         ),
     )
-    app.state.camera_registry = CameraRegistryStore(tmp_path / "cameras.json")
+    app.state.camera_registry = CameraRegistryStore(tmp_path / "catalog.sqlite3")
 
     with TestClient(app) as client:
         _login(client)
@@ -469,8 +469,14 @@ def test_worker_config_normalizes_pulled_cameras_when_registry_empty(tmp_path) -
 
 
 def test_example_camera_registry_seed_is_loadable_and_sanitized() -> None:
+    """``cameras.example.json`` is a docs-only reference of the pre-SQLite
+    JSON registry file shape (see ``backend/app/cameras.example.json``); it
+    is not read by ``CameraRegistryStore`` itself anymore (issue #35 moved
+    that store's storage to the shared ``catalog.sqlite3`` database), so this
+    test parses it directly with ``json.loads`` and exercises the same
+    ``public_camera`` sanitization the store's readers use."""
     seed_path = REPO_ROOT / "backend" / "app" / "cameras.example.json"
-    snapshot = CameraRegistryStore(seed_path).snapshot()
+    snapshot = json.loads(seed_path.read_text(encoding="utf-8"))
 
     assert snapshot["registry_version"] == 1
     cameras = snapshot["cameras"]
@@ -574,7 +580,7 @@ def test_patch_pending_camera_preserves_local_id_after_backend_mapping(
 ) -> None:
     app = create_app(lifespan=no_lifespan)
     app.state.edge_relay_token = "relay-token"
-    store = app.state.camera_registry = CameraRegistryStore(tmp_path / "cameras.json")
+    store = app.state.camera_registry = CameraRegistryStore(tmp_path / "catalog.sqlite3")
     with TestClient(app) as client:
         _login(client)
         created = client.post(
@@ -617,7 +623,7 @@ def test_patch_pending_camera_preserves_local_id_after_backend_mapping(
 def test_patch_camera_sets_decode_backend_and_worker_config_emits_it(tmp_path) -> None:
     app = create_app(lifespan=no_lifespan)
     app.state.edge_relay_token = "relay-token"
-    store = app.state.camera_registry = CameraRegistryStore(tmp_path / "cameras.json")
+    store = app.state.camera_registry = CameraRegistryStore(tmp_path / "catalog.sqlite3")
     store.create(
         camera_id="camera-1",
         label="Lobby",
@@ -650,7 +656,7 @@ def test_patch_camera_sets_decode_backend_and_worker_config_emits_it(tmp_path) -
 def test_patch_camera_rejects_invalid_decode_backend(tmp_path) -> None:
     app = create_app(lifespan=no_lifespan)
     app.state.edge_relay_token = "relay-token"
-    store = app.state.camera_registry = CameraRegistryStore(tmp_path / "cameras.json")
+    store = app.state.camera_registry = CameraRegistryStore(tmp_path / "catalog.sqlite3")
     store.create(
         camera_id="camera-1",
         label="Lobby",
@@ -679,7 +685,7 @@ def test_create_camera_rejects_invalid_decode_backend(
     monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
     app = create_app(lifespan=no_lifespan)
     app.state.edge_relay_token = "relay-token"
-    app.state.camera_registry = CameraRegistryStore(tmp_path / "cameras.json")
+    app.state.camera_registry = CameraRegistryStore(tmp_path / "catalog.sqlite3")
 
     with TestClient(app) as client:
         _login(client)
@@ -702,7 +708,7 @@ def test_worker_config_emits_default_decode_backend_when_configured(
     monkeypatch.setenv("ML_DEFAULT_DECODE_BACKEND", "cpu")
     app = create_app(lifespan=no_lifespan)
     app.state.edge_relay_token = "relay-token"
-    store = app.state.camera_registry = CameraRegistryStore(tmp_path / "cameras.json")
+    store = app.state.camera_registry = CameraRegistryStore(tmp_path / "catalog.sqlite3")
     store.create(
         camera_id="camera-1",
         label="Lobby",
@@ -730,7 +736,7 @@ def test_worker_config_prefers_record_decode_backend_over_env_default(
     monkeypatch.setenv("ML_DEFAULT_DECODE_BACKEND", "cpu")
     app = create_app(lifespan=no_lifespan)
     app.state.edge_relay_token = "relay-token"
-    store = app.state.camera_registry = CameraRegistryStore(tmp_path / "cameras.json")
+    store = app.state.camera_registry = CameraRegistryStore(tmp_path / "catalog.sqlite3")
     store.create(
         camera_id="camera-1",
         label="Lobby",
@@ -753,7 +759,7 @@ def test_worker_config_prefers_record_decode_backend_over_env_default(
 def test_list_cameras_includes_backend_only_roster_camera(tmp_path) -> None:
     app = create_app(lifespan=no_lifespan)
     app.state.edge_relay_token = "relay-token"
-    app.state.camera_registry = CameraRegistryStore(tmp_path / "cameras.json")
+    app.state.camera_registry = CameraRegistryStore(tmp_path / "catalog.sqlite3")
     app.state.pulled_config = PulledWorkerConfig(
         config_version=9,
         restart_epoch=0,
@@ -800,7 +806,7 @@ def test_list_cameras_includes_backend_only_roster_camera(tmp_path) -> None:
 def test_list_cameras_includes_backend_only_roster_camera_without_created_at(tmp_path) -> None:
     app = create_app(lifespan=no_lifespan)
     app.state.edge_relay_token = "relay-token"
-    app.state.camera_registry = CameraRegistryStore(tmp_path / "cameras.json")
+    app.state.camera_registry = CameraRegistryStore(tmp_path / "catalog.sqlite3")
     app.state.pulled_config = PulledWorkerConfig(
         config_version=9,
         restart_epoch=0,
@@ -851,7 +857,7 @@ def test_list_cameras_includes_backend_only_roster_camera_without_created_at(tmp
 def test_list_cameras_includes_local_only_camera_with_null_roster_names(tmp_path) -> None:
     app = create_app(lifespan=no_lifespan)
     app.state.edge_relay_token = "relay-token"
-    store = app.state.camera_registry = CameraRegistryStore(tmp_path / "cameras.json")
+    store = app.state.camera_registry = CameraRegistryStore(tmp_path / "catalog.sqlite3")
     store.create(
         camera_id="local-1",
         label="Local camera",
@@ -875,7 +881,7 @@ def test_list_cameras_includes_local_only_camera_with_null_roster_names(tmp_path
 def test_list_cameras_joins_local_transport_with_backend_roster_metadata(tmp_path) -> None:
     app = create_app(lifespan=no_lifespan)
     app.state.edge_relay_token = "relay-token"
-    store = app.state.camera_registry = CameraRegistryStore(tmp_path / "cameras.json")
+    store = app.state.camera_registry = CameraRegistryStore(tmp_path / "catalog.sqlite3")
     store.create(
         camera_id="local-1",
         label="Local label",
@@ -933,7 +939,7 @@ def test_list_cameras_joins_unmapped_local_camera_by_unambiguous_space(tmp_path)
     """
     app = create_app(lifespan=no_lifespan)
     app.state.edge_relay_token = "relay-token"
-    store = app.state.camera_registry = CameraRegistryStore(tmp_path / "cameras.json")
+    store = app.state.camera_registry = CameraRegistryStore(tmp_path / "catalog.sqlite3")
     store.create(
         camera_id="local-1",
         label="Local label",
@@ -995,7 +1001,7 @@ def test_space_fallback_never_steals_explicitly_mapped_roster_row(
     explicitly mapped local camera, regardless of registry iteration order."""
     app = create_app(lifespan=no_lifespan)
     app.state.edge_relay_token = "relay-token"
-    store = app.state.camera_registry = CameraRegistryStore(tmp_path / "cameras.json")
+    store = app.state.camera_registry = CameraRegistryStore(tmp_path / "catalog.sqlite3")
     order = (
         ("local-unmapped", "local-mapped") if unmapped_first else ("local-mapped", "local-unmapped")
     )
@@ -1059,7 +1065,7 @@ def test_list_cameras_does_not_join_ambiguous_space(
 ) -> None:
     app = create_app(lifespan=no_lifespan)
     app.state.edge_relay_token = "relay-token"
-    store = app.state.camera_registry = CameraRegistryStore(tmp_path / "cameras.json")
+    store = app.state.camera_registry = CameraRegistryStore(tmp_path / "catalog.sqlite3")
     for camera_id in local_ids:
         store.create(
             camera_id=camera_id,
@@ -1147,7 +1153,7 @@ def test_list_cameras_reflects_room_name_after_roster_refresh(
     monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
     app = create_app(lifespan=no_lifespan)
     app.state.edge_relay_token = "relay-token"
-    app.state.camera_registry = CameraRegistryStore(tmp_path / "cameras.json")
+    app.state.camera_registry = CameraRegistryStore(tmp_path / "catalog.sqlite3")
 
     assert refresh_backend_config(app) is True
     with TestClient(app) as client:
@@ -1209,7 +1215,7 @@ def test_list_cameras_status_reflects_heartbeat_freshness(tmp_path) -> None:
     without a real sleep by directly stamping received_at in the past."""
     app = create_app(lifespan=no_lifespan)
     app.state.edge_relay_token = "relay-token"
-    store = app.state.camera_registry = CameraRegistryStore(tmp_path / "cameras.json")
+    store = app.state.camera_registry = CameraRegistryStore(tmp_path / "catalog.sqlite3")
     for camera_id in ("never-seen", "stale", "fresh"):
         store.create(
             camera_id=camera_id,
@@ -1328,7 +1334,7 @@ def test_create_camera_rejects_duplicate_rtsp_url(
     monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
     app = create_app(lifespan=no_lifespan)
     app.state.edge_relay_token = "relay-token"
-    app.state.camera_registry = CameraRegistryStore(tmp_path / "cameras.json")
+    app.state.camera_registry = CameraRegistryStore(tmp_path / "catalog.sqlite3")
 
     with TestClient(app) as client:
         _login(client)
@@ -1364,7 +1370,7 @@ def test_create_camera_rejects_duplicate_ignoring_credentials(
     monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
     app = create_app(lifespan=no_lifespan)
     app.state.edge_relay_token = "relay-token"
-    app.state.camera_registry = CameraRegistryStore(tmp_path / "cameras.json")
+    app.state.camera_registry = CameraRegistryStore(tmp_path / "catalog.sqlite3")
 
     with TestClient(app) as client:
         _login(client)
@@ -1401,7 +1407,7 @@ def test_create_camera_allows_dahua_subtype_variants_as_distinct_streams(
     monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
     app = create_app(lifespan=no_lifespan)
     app.state.edge_relay_token = "relay-token"
-    app.state.camera_registry = CameraRegistryStore(tmp_path / "cameras.json")
+    app.state.camera_registry = CameraRegistryStore(tmp_path / "catalog.sqlite3")
 
     with TestClient(app) as client:
         _login(client)
@@ -1438,7 +1444,7 @@ def test_create_camera_without_force_register_rejects_on_probe_failure_and_persi
     monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
     app = create_app(lifespan=no_lifespan)
     app.state.edge_relay_token = "relay-token"
-    store = app.state.camera_registry = CameraRegistryStore(tmp_path / "cameras.json")
+    store = app.state.camera_registry = CameraRegistryStore(tmp_path / "catalog.sqlite3")
 
     with TestClient(app) as client:
         _login(client)
@@ -1464,7 +1470,7 @@ def test_create_camera_force_register_persists_despite_probe_failure(
     monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
     app = create_app(lifespan=no_lifespan)
     app.state.edge_relay_token = "relay-token"
-    store = app.state.camera_registry = CameraRegistryStore(tmp_path / "cameras.json")
+    store = app.state.camera_registry = CameraRegistryStore(tmp_path / "catalog.sqlite3")
 
     with TestClient(app) as client:
         _login(client)
@@ -1505,7 +1511,7 @@ def test_patch_camera_rtsp_url_rejects_duplicate(
     monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
     app = create_app(lifespan=no_lifespan)
     app.state.edge_relay_token = "relay-token"
-    store = app.state.camera_registry = CameraRegistryStore(tmp_path / "cameras.json")
+    store = app.state.camera_registry = CameraRegistryStore(tmp_path / "catalog.sqlite3")
     store.create(
         camera_id="cam-a",
         label="A",
@@ -1544,7 +1550,7 @@ def test_test_camera_persists_probe_result(tmp_path, monkeypatch: pytest.MonkeyP
     monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
     app = create_app(lifespan=no_lifespan)
     app.state.edge_relay_token = "relay-token"
-    store = app.state.camera_registry = CameraRegistryStore(tmp_path / "cameras.json")
+    store = app.state.camera_registry = CameraRegistryStore(tmp_path / "catalog.sqlite3")
     store.create(
         camera_id="cam-a",
         label="A",

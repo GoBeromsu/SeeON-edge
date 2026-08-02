@@ -630,7 +630,7 @@ def test_successful_refresh_retries_pending_backend_mappings(
             )
 
     with TestClient(create_app()) as client:
-        store = CameraRegistryStore(tmp_path / "cameras.json")
+        store = CameraRegistryStore(tmp_path / "catalog.sqlite3")
         store.create(
             camera_id="local-uuid-9",
             label="Room 9",
