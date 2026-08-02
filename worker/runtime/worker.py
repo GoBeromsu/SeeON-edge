@@ -23,8 +23,12 @@ from worker.adapters.decode.cpu_av.probe import probe_opencv_ffmpeg_capability
 from worker.adapters.decode.nvdec_cuvid.probe import probe_nvdec_cuvid_capability
 from worker.adapters.device.cuda.probe import probe_cuda_capability
 from worker.adapters.device.mps.probe import probe_mps_capability
-from worker.adapters.model import LstmFallRunner, warmup_to_ready
+from worker.adapters.model import warmup_to_ready
 from worker.adapters.model.errors import FatalAcceleratorError
+from worker.adapters.model.fall_family_registry import (
+    DEFAULT_FALL_MODEL_FAMILY_REGISTRY,
+    UnknownFallModelTypeError,
+)
 from worker.domains import (
     DOMAIN_REGISTRY,
     AuditContext,
@@ -740,7 +744,7 @@ class WorkerRuntime:
         return self.shared_yolo, self.fall_model
 
     def _create_fall_model(self, device: str) -> FallModelProtocol:
-        """Construct the fall model, fail closed if none is configured.
+        """Construct the fall model, fail closed if none or unknown is configured.
 
         Fall model selection has no implicit fallback: an operator who omits
         ``models.fall`` gets a refused boot, not a silent switch to a
@@ -748,18 +752,26 @@ class WorkerRuntime:
         model ran that night" must never be answered by an unconfigured
         default (same fail-closed principle as ``ML_WORKER_PROFILE`` and the
         decode policy's unknown-value ``RuntimeError``).
+
+        Issue #65: which model *family* runs is config/metadata-driven via
+        ``DEFAULT_FALL_MODEL_FAMILY_REGISTRY``, keyed by ``configured.type``.
+        This method never grows a new branch for a new family -- onboarding
+        one means registering a factory, not editing this call site. An
+        unregistered ``type`` value is just as fail-closed as an absent
+        config: it refuses to boot with a diagnostic error naming every
+        registered family, never a silent fallback to "lstm".
         """
         configured = self.config.models.fall
         if configured is None:
             raise RuntimeError(
                 "fall model must be explicitly configured; refusing to boot"
             )
-        return LstmFallRunner.from_artifact_dir(
-            configured.artifact_dir,
-            device=device,
-            expected_schema_version=configured.schema_version,
-            expected_preprocessing_identity=configured.preprocessing_identity,
-        )
+        try:
+            return DEFAULT_FALL_MODEL_FAMILY_REGISTRY.create(
+                configured.type, configured, device
+            )
+        except UnknownFallModelTypeError as exc:
+            raise RuntimeError(str(exc)) from exc
 
     def _warm_models(self) -> tuple[str, ...]:
         if self.shared_yolo is None or self.fall_model is None or self._boot is None:

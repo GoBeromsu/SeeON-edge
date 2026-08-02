@@ -40,6 +40,7 @@ from worker.runtime.config.worker_models import (
 )
 
 ML_WORKER_FALL_MODEL_ARTIFACT_DIR_ENV: Final = "ML_WORKER_FALL_MODEL_ARTIFACT_DIR"
+ML_WORKER_FALL_MODEL_TYPE_ENV: Final = "ML_WORKER_FALL_MODEL_TYPE"
 ML_WORKER_FALL_MODEL_WEIGHTS_ENV: Final = "ML_WORKER_FALL_MODEL_WEIGHTS"
 ML_WORKER_FALL_MODEL_ARCHITECTURE_ENV: Final = "ML_WORKER_FALL_MODEL_ARCHITECTURE"
 ML_WORKER_FALL_MODEL_WINDOW_ENV: Final = "ML_WORKER_FALL_MODEL_WINDOW"
@@ -53,6 +54,7 @@ ML_WORKER_CLIP_RECORDING_ENABLED_ENV: Final = "ML_WORKER_CLIP_RECORDING_ENABLED"
 
 _TRUTHY: Final = frozenset({"1", "true", "yes", "on"})
 _FALSY: Final = frozenset({"0", "false", "no", "off"})
+_DEFAULT_TYPE: Final = "lstm"
 _DEFAULT_WEIGHTS: Final = "model.pt"
 _DEFAULT_ARCHITECTURE: Final = "arch.json"
 
@@ -122,12 +124,17 @@ def fall_model_config_from_environment(
     Once it is set, the rest of the artifact contract
     (window/stride/operating_threshold) becomes required so a partially
     configured fall model fails loudly at boot rather than silently
-    defaulting (ADR-0002). ``type``/``framework``/``mode`` are not
-    independent env vars: today's ``FallModelConfig`` only has one valid
-    literal for each (lstm/pytorch/sequence), so there is nothing for an env
-    var to select yet (#65 will need to revisit this once model_type
-    dispatch lands). ``input_shape`` is derived from ``window`` rather than
-    given its own var, since ``FallModelConfig`` already requires
+    defaulting (ADR-0002). ``framework``/``mode`` are not independent env
+    vars: today's ``FallModelConfig`` only has one valid literal for each
+    (pytorch/sequence), so there is nothing for an env var to select yet.
+    ``type`` (the model family/architecture -- #65) does have an env var,
+    ``ML_WORKER_FALL_MODEL_TYPE``, defaulting to "lstm" so existing
+    deployments are unaffected; the registry
+    (``worker.adapters.model.fall_family_registry``) fails closed at boot on
+    an unrecognized value, not here, so a typo'd family name is still
+    validated against every registered family rather than silently accepted
+    as an opaque string. ``input_shape`` is derived from ``window`` rather
+    than given its own var, since ``FallModelConfig`` already requires
     ``input_shape == (window, 51)``.
     """
     env = os.environ if environ is None else environ
@@ -141,6 +148,7 @@ def fall_model_config_from_environment(
         ML_WORKER_FALL_MODEL_OPERATING_THRESHOLD_ENV, env, because=because
     )
     schema_version = _optional_int(ML_WORKER_FALL_MODEL_SCHEMA_VERSION_ENV, env)
+    model_type = env.get(ML_WORKER_FALL_MODEL_TYPE_ENV, "").strip() or _DEFAULT_TYPE
     weights = env.get(ML_WORKER_FALL_MODEL_WEIGHTS_ENV, "").strip() or _DEFAULT_WEIGHTS
     architecture = (
         env.get(ML_WORKER_FALL_MODEL_ARCHITECTURE_ENV, "").strip() or _DEFAULT_ARCHITECTURE
@@ -150,7 +158,7 @@ def fall_model_config_from_environment(
     )
     try:
         return FallModelConfig(
-            type="lstm",
+            type=model_type,
             framework="pytorch",
             mode="sequence",
             artifact_dir=Path(artifact_dir),
@@ -211,6 +219,7 @@ __all__ = [
     "ML_WORKER_FALL_MODEL_PREPROCESSING_IDENTITY_ENV",
     "ML_WORKER_FALL_MODEL_SCHEMA_VERSION_ENV",
     "ML_WORKER_FALL_MODEL_STRIDE_ENV",
+    "ML_WORKER_FALL_MODEL_TYPE_ENV",
     "ML_WORKER_FALL_MODEL_WEIGHTS_ENV",
     "ML_WORKER_FALL_MODEL_WINDOW_ENV",
     "clip_recording_config_from_environment",

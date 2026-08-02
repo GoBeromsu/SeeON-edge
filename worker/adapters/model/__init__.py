@@ -1,3 +1,10 @@
+from worker.adapters.model.fall_family_registry import (
+    DEFAULT_FALL_MODEL_FAMILY_REGISTRY,
+    FallModelFactory,
+    FallModelFamilyRegistry,
+    UnknownFallModelTypeError,
+    default_fall_model_family_registry,
+)
 from worker.adapters.model.in_process import InProcessServingClient
 from worker.adapters.model.registry import (
     DEFAULT_REGISTRY,
@@ -39,11 +46,14 @@ from worker.adapters.model.yolo_person import YoloPersonRunner
 from worker.adapters.model.yolo_pose import YoloPoseRunner
 
 __all__ = [
+    "DEFAULT_FALL_MODEL_FAMILY_REGISTRY",
     "DEFAULT_REGISTRY",
     "DEFAULT_WARMUP_FRAME",
     "CURRENT_PREPROCESSING_IDENTITY",
     "CURRENT_SCHEMA_VERSION",
     "FallDetector",
+    "FallModelFactory",
+    "FallModelFamilyRegistry",
     "InProcessServingClient",
     "LEGACY_PREPROCESSING_IDENTITY",
     "LEGACY_SCHEMA_VERSION",
@@ -57,6 +67,7 @@ __all__ = [
     "ModelOption",
     "ModelRegistry",
     "RunnerFactory",
+    "UnknownFallModelTypeError",
     "WarmupFrameSpec",
     "WarmupResult",
     "YoloArtifactError",
@@ -66,6 +77,7 @@ __all__ = [
     "YoloOutputError",
     "YoloPersonRunner",
     "YoloPoseRunner",
+    "default_fall_model_family_registry",
     "default_registry",
     "warmup_to_ready",
 ]
