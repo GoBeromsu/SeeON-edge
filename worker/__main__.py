@@ -34,6 +34,7 @@ from worker.runtime.config import (
     make_restart_check,
     pull_worker_config,
     resolve_config_path,
+    resolve_local_overrides,
     resolve_startup_config,
 )
 from worker.runtime.state_dir import resolve_state_dir
@@ -268,8 +269,11 @@ def main(argv: list[str] | None = None) -> int:
                 )
             return CLEAN_SHUTDOWN_EXIT_CODE
 
+        models, clip = resolve_local_overrides(None, os.environ)
         try:
-            snapshot = load_worker_config_from_relay(relay_url, relay_token)
+            snapshot = load_worker_config_from_relay(
+                relay_url, relay_token, models=models, clip=clip
+            )
         except (WorkerConfigError, ValidationError):
             # Defensive only: see the matching comment on the YAML branch's
             # `resolve_startup_config` call -- `load_worker_config_from_relay`

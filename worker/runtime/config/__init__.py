@@ -21,10 +21,7 @@ from worker.runtime.config.config_pull import (
     pull_worker_config,
     resolve_startup_config,
 )
-from worker.runtime.config.config_resolver import (
-    resolve_effective_config,
-    resolve_runtime_config,
-)
+from worker.runtime.config.config_resolver import resolve_runtime_config
 from worker.runtime.config.domain_models import (
     KNOWN_DOMAIN_NAMES,
     BedExitDomainConfig,
@@ -50,6 +47,21 @@ from worker.runtime.config.loader import (
     load_worker_config,
     resolve_config_path,
 )
+from worker.runtime.config.local_env import (
+    ML_WORKER_CLIP_RECORDING_ENABLED_ENV,
+    ML_WORKER_FALL_MODEL_ARCHITECTURE_ENV,
+    ML_WORKER_FALL_MODEL_ARTIFACT_DIR_ENV,
+    ML_WORKER_FALL_MODEL_OPERATING_THRESHOLD_ENV,
+    ML_WORKER_FALL_MODEL_PREPROCESSING_IDENTITY_ENV,
+    ML_WORKER_FALL_MODEL_SCHEMA_VERSION_ENV,
+    ML_WORKER_FALL_MODEL_STRIDE_ENV,
+    ML_WORKER_FALL_MODEL_WEIGHTS_ENV,
+    ML_WORKER_FALL_MODEL_WINDOW_ENV,
+    clip_recording_config_from_environment,
+    fall_model_config_from_environment,
+    resolve_local_overrides,
+    worker_models_config_from_environment,
+)
 from worker.runtime.config.pull_models import BackendWorkerConfigPayload
 from worker.runtime.config.restart import (
     PullWorkerConfig,
@@ -60,6 +72,7 @@ from worker.runtime.config.restart import (
 from worker.runtime.config.worker_models import (
     RELAY_ALERTS_PATH,
     RELAY_HEARTBEAT_PATH,
+    ClipRecordingConfig,
     ConfigValue,
     DevMjpegConfig,
     FallModelConfig,
@@ -74,9 +87,18 @@ __all__ = [
     "CONFIG_VERSION_KEY",
     "EDGE_CAMERA_CONFIG_ENV",
     "KNOWN_DOMAIN_NAMES",
+    "ML_WORKER_CLIP_RECORDING_ENABLED_ENV",
     "ML_WORKER_DEV_MJPEG_ENV",
     "ML_WORKER_DEV_MJPEG_HOST_ENV",
     "ML_WORKER_DEV_MJPEG_PORT_ENV",
+    "ML_WORKER_FALL_MODEL_ARCHITECTURE_ENV",
+    "ML_WORKER_FALL_MODEL_ARTIFACT_DIR_ENV",
+    "ML_WORKER_FALL_MODEL_OPERATING_THRESHOLD_ENV",
+    "ML_WORKER_FALL_MODEL_PREPROCESSING_IDENTITY_ENV",
+    "ML_WORKER_FALL_MODEL_SCHEMA_VERSION_ENV",
+    "ML_WORKER_FALL_MODEL_STRIDE_ENV",
+    "ML_WORKER_FALL_MODEL_WEIGHTS_ENV",
+    "ML_WORKER_FALL_MODEL_WINDOW_ENV",
     "RELAY_ALERTS_PATH",
     "RELAY_HEARTBEAT_PATH",
     "RELAY_TOKEN_ENV",
@@ -90,6 +112,7 @@ __all__ = [
     "BedExitDomainConfig",
     "CameraRuntimeConfig",
     "CameraStreamsConfig",
+    "ClipRecordingConfig",
     "ConfigSnapshot",
     "ConfigSource",
     "ConfigValidationError",
@@ -113,12 +136,15 @@ __all__ = [
     "WorkerConfigLkgStore",
     "WorkerModelsConfig",
     "WorkerRuntimeConfig",
+    "clip_recording_config_from_environment",
+    "fall_model_config_from_environment",
     "load_worker_config",
     "load_worker_config_from_relay",
     "make_restart_check",
     "pull_worker_config",
     "resolve_config_path",
-    "resolve_effective_config",
+    "resolve_local_overrides",
     "resolve_runtime_config",
     "resolve_startup_config",
+    "worker_models_config_from_environment",
 ]

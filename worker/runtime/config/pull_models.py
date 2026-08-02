@@ -15,7 +15,11 @@ from worker.runtime.config.camera_models import CameraRuntimeConfig, RelayConfig
 from worker.runtime.config.domain_models import DomainsConfig, NightWindowConfig
 from worker.runtime.config.errors import ConfigValidationError, WorkerConfigError
 from worker.runtime.config.restart import RestartDirective
-from worker.runtime.config.worker_models import WorkerConfig
+from worker.runtime.config.worker_models import (
+    ClipRecordingConfig,
+    WorkerConfig,
+    WorkerModelsConfig,
+)
 
 
 class _NightWindowPayload(BaseModel):
@@ -184,7 +188,23 @@ class BackendWorkerConfigPayload(BaseModel):
             detection_windows=detection_windows,
         )
 
-    def to_worker_config(self, relay_url: str, relay_token: str | None) -> WorkerConfig:
+    def to_worker_config(
+        self,
+        relay_url: str,
+        relay_token: str | None,
+        *,
+        models: WorkerModelsConfig | None = None,
+        clip: ClipRecordingConfig | None = None,
+    ) -> WorkerConfig:
+        """Build the effective ``WorkerConfig`` from a relay pull.
+
+        The backend-pulled payload only ever carries fleet-level state
+        (relay/domains/cameras); ``models``/``clip`` are locally-sourced
+        (env, or local YAML when ``EDGE_CAMERA_CONFIG`` is set) and must be
+        passed in explicitly by the caller (``config_pull.py``'s
+        ``resolve_local_overrides``) rather than silently dropped -- see
+        issues #66/#68.
+        """
         token = "" if relay_token is None else relay_token.strip()
         if not token:
             raise WorkerConfigError("RELAY_TOKEN is required for pulled worker config")
@@ -203,10 +223,12 @@ class BackendWorkerConfigPayload(BaseModel):
         }
         return WorkerConfig(
             relay=RelayConfig.model_validate({"url": relay_url, "token": token}),
+            models=models if models is not None else WorkerModelsConfig(),
             domains=DomainsConfig(
                 enabled=domains or None,
                 detection_windows=detection_windows or None,
             ),
+            clip=clip if clip is not None else ClipRecordingConfig(),
             cameras=cameras,
         )
 

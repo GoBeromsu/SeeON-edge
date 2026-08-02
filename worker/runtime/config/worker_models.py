@@ -166,6 +166,7 @@ class WorkerConfig(BaseModel):
 __all__ = [
     "RELAY_ALERTS_PATH",
     "RELAY_HEARTBEAT_PATH",
+    "ClipRecordingConfig",
     "ConfigValue",
     "DevMjpegConfig",
     "FallModelConfig",
