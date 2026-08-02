@@ -2,7 +2,7 @@
 
 from typing import Final
 
-SCHEMA_VERSION: Final = 3
+SCHEMA_VERSION: Final = 4
 
 SCHEMA_V1_STATEMENTS: Final = (
     """
@@ -123,10 +123,15 @@ SCHEMA_V3_STATEMENTS: Final = (
     """,
 )
 
+SCHEMA_V4_STATEMENTS: Final = ()
+"""No-op version marker: the outbox DB was renamed from evidence-outbox.sqlite3
+to worker-state.sqlite3 (constant-name change only, no on-disk migration)."""
+
 MIGRATIONS: Final = (
     SCHEMA_V1_STATEMENTS,
     SCHEMA_V2_STATEMENTS,
     SCHEMA_V3_STATEMENTS,
+    SCHEMA_V4_STATEMENTS,
 )
 
 __all__ = ["MIGRATIONS", "SCHEMA_VERSION"]
