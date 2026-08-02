@@ -101,12 +101,12 @@ def load_worker_config_from_relay(
                 return _snapshot_from_stored(stored, relay_url, relay_token)
             except (ValidationError, WorkerConfigError) as exc:
                 print(
-                    f"WARNING: worker config LKG in {lkg_store.database_path} "
-                    f"failed re-validation ({exc}); clearing corrupt LKG and "
+                    f"WARNING: worker config LKG at {lkg_store.database_path} "
+                    f"failed re-validation ({exc}); deleting corrupt LKG and "
                     "using fresh (race-losing) snapshot instead",
                     file=sys.stderr,
                 )
-                lkg_store.clear_current()
+                lkg_store.clear()
                 return fresh
     stored = lkg_store.load()
     if stored is None:

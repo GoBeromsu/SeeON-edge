@@ -147,15 +147,12 @@ class WorkerConfigLkgStore:
                 if connection is not None:
                     connection.close()
 
-    def clear_current(self) -> bool:
-        """Delete the `config_current` row so a stored LKG that just failed
-        re-validation stops winning every future revision race forever
-        (issue #34, config_pull.py's corrupt-LKG recovery). `config_history`
-        is untouched -- its retained rows must stay locally joinable against
-        un-ACKED evidence audit trails regardless of whether the current
-        pointer gets cleared. Degrades to False (never raises) on the same
-        store-unavailable errors `save()`/`load()` already tolerate, so a
-        failed clear cannot crash the worker either."""
+    def clear(self) -> bool:
+        """Delete the current LKG snapshot (the `config_current` row) without
+        touching `config_history`, which stays needed for local joins against
+        already-emitted evidence_events. Used when the stored LKG no longer
+        re-validates and must stop winning the revision race against every
+        future legitimate pull (issue #34)."""
         with self._lock:
             connection: sqlite3.Connection | None = None
             try:

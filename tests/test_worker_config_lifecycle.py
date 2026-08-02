@@ -188,7 +188,7 @@ def test_race_loss_with_healthy_stored_lkg_returns_lkg_snapshot(tmp_path: Path) 
     """A fresh pull that validates but loses the revision race to a strictly
     newer, still-healthy on-disk LKG must fall back to that LKG unchanged
     (issue #34, race-loss branch with a healthy stored LKG)."""
-    store = WorkerConfigLkgStore(tmp_path / "worker-config.json")
+    store = WorkerConfigLkgStore(tmp_path / "worker-config.sqlite3")
     newer_payload = _payload(registry_version=9, config_version=9, restart_epoch=1)
     assert store.save(newer_payload, RestartDirective(generation=1, version=9))
 
@@ -219,15 +219,15 @@ def test_race_loss_with_corrupt_stored_lkg_clears_current_and_returns_fresh(
     """A fresh pull that validates but loses the revision race to a strictly
     newer stored LKG that no longer re-validates must not leave the corrupt
     LKG in place -- it would keep winning the race forever. Instead, clear
-    the stored `config_current` row via `WorkerConfigLkgStore.clear_current()`,
+    the stored `config_current` row via `WorkerConfigLkgStore.clear()`,
     log loudly, and return the fresh (race-losing) snapshot since a
     parseable-but-older config beats an unparseable newer one (issue #34,
     decided design option 3).
 
     Since PR #61's move off the JSON-file store onto `worker-state.sqlite3`
     (`config_current`/`config_history` tables), there is no single file to
-    unlink -- `clear_current()` deletes only the `config_current` pointer
-    row so `load()` stops returning the corrupt payload, while leaving
+    unlink -- `clear()` deletes only the `config_current` pointer row so
+    `load()` stops returning the corrupt payload, while leaving
     `config_history` intact for audit-trail joinability."""
     store = WorkerConfigLkgStore(tmp_path / "worker-config.sqlite3")
     corrupt_payload = _payload(registry_version=9, config_version=9, restart_epoch=1)
@@ -382,17 +382,16 @@ def test_load_degrades_to_none_against_a_newer_schema_version(
     assert "worker config LKG store unavailable" in error
 
 
-def test_clear_current_removes_the_current_row_but_keeps_history(tmp_path: Path) -> None:
-    """`clear_current()` only clears the `config_current` pointer --
-    `config_history` stays intact so it remains locally joinable against
-    un-ACKED evidence audit trails regardless of whether a corrupt current
-    LKG gets cleared."""
+def test_clear_removes_the_current_row_but_keeps_history(tmp_path: Path) -> None:
+    """`clear()` only clears the `config_current` pointer -- `config_history`
+    stays intact so it remains locally joinable against un-ACKED evidence
+    audit trails regardless of whether a corrupt current LKG gets cleared."""
     store = WorkerConfigLkgStore(tmp_path / "worker-state.sqlite3")
     payload = _payload(registry_version=9, config_version=9, restart_epoch=1)
     assert store.save(payload, RestartDirective(generation=1, version=9))
     assert store.load() is not None
 
-    cleared = store.clear_current()
+    cleared = store.clear()
 
     assert cleared is True
     assert store.load() is None
@@ -407,19 +406,19 @@ def test_clear_current_removes_the_current_row_but_keeps_history(tmp_path: Path)
     assert row[0] == 1
 
 
-def test_clear_current_degrades_to_false_when_database_parent_is_uncreatable(
+def test_clear_degrades_to_false_when_database_parent_is_uncreatable(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """Mirrors `test_save_degrades_to_false_when_database_parent_is_uncreatable`:
-    an unwritable state dir must degrade `clear_current()` to False rather
-    than crash the worker."""
+    an unwritable state dir must degrade `clear()` to False rather than
+    crash the worker."""
     blocker = tmp_path / "blocker-file"
     blocker.write_text("not a directory")
     database_path = blocker / "state" / "worker-state.sqlite3"
     store = WorkerConfigLkgStore(database_path)
 
-    cleared = store.clear_current()
+    cleared = store.clear()
 
     assert cleared is False
     error = capsys.readouterr().err
