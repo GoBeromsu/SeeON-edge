@@ -198,6 +198,54 @@ def test_finalize_remuxes_the_configured_pre_and_post_window() -> None:
     assert len(finalizer.calls) == 1
 
 
+def test_finalize_reports_duration_clamped_to_the_requested_window() -> None:
+    """Regression for the Linux-CI ``duration_s`` overshoot.
+
+    Segments are ffmpeg's own coarse encode units -- their boundaries depend
+    on encoder startup timing and keyframe placement, not the pre/post-event
+    window -- so ``select_segments`` (``worker/adapters/encode/
+    csv_segment_index.py``'s ``CsvSegmentIndex.select``) routinely returns
+    boundary segments that only partially overlap ``[start_time_sec,
+    end_time_sec]``. ``FFmpegConcatFinalizer.finalize`` used to be the sole
+    source of ``ClipArtifact.duration_s``, reporting the raw sum of the
+    *full* selected segments' durations, which overstated the clip by
+    however much the boundary segments extended past the requested window
+    (observed on Linux CI as 33.0s for a nominal 30.0s pre+post window).
+    ``ClipRecordingCoordinator.finalize`` now clamps each segment's
+    contribution to its overlap with the window before reporting
+    ``duration_s``, regardless of what the finalizer itself returns -- this
+    exercises only fakes, no ffmpeg/ffprobe/mediamtx, so it is deterministic
+    on every OS.
+    """
+    # Segment 0 starts two seconds before the window and ends inside it;
+    # segment 1 starts inside the window and ends eight seconds past it.
+    boundary_segments = (
+        Segment(path=Path("/tmp/seg-a.mp4"), generation=1, start_time_sec=0.0, end_time_sec=5.0),
+        Segment(path=Path("/tmp/seg-b.mp4"), generation=1, start_time_sec=5.0, end_time_sec=40.0),
+    )
+    encoder = _FakeEncoder(segments=boundary_segments)
+    # The fake finalizer's returned duration_s is intentionally unrelated to
+    # the segments, so a passing assertion proves the coordinator itself
+    # recomputed the clamped value rather than trusting the finalizer's.
+    finalizer = _FakeFinalizer()
+    coordinator = _coordinator(
+        encoder,
+        finalizer,
+        window=ClipWindow(pre_event_seconds=10.0, post_event_seconds=20.0),
+    )
+    coordinator.write(_packet(1))
+
+    outcome = coordinator.finalize(
+        camera_id="cam-1",
+        clip_id="clip-1",
+        event_time_sec=12.0,
+        event=_event(),
+    )
+
+    assert isinstance(outcome, ClipReady)
+    assert outcome.artifact.duration_s == 30.0
+
+
 def test_remux_failure_yields_typed_unavailable_without_losing_the_event() -> None:
     encoder = _FakeEncoder(segments=(_segment(0),))
     finalizer = _FakeFinalizer(error=ClipRemuxError("boom"))
