@@ -281,6 +281,56 @@ def test_worker_config_uses_registry_first_and_metadata_from_backend_pull(tmp_pa
     assert relay_config.json() == expected
 
 
+def test_worker_config_emits_detection_windows_alongside_legacy_night_window(tmp_path) -> None:
+    """Per-domain ``detection_windows`` (issue #24) is emitted alongside the
+    deprecated single ``night_window`` field so old workers keep working
+    while new ones can read the full per-domain map."""
+    app = create_app(lifespan=no_lifespan)
+    app.state.edge_relay_token = "relay-token"
+    app.state.config_version = 42
+    app.state.restart_epoch = 5
+    app.state.pulled_config = PulledWorkerConfig(
+        config_version=42,
+        restart_epoch=5,
+        night_window=PulledNightWindow(start="21:00", end="06:00", tz="UTC"),
+        cameras=(
+            PulledCameraConfig(
+                camera_id="pulled-camera",
+                space_id="space-pulled",
+                label="Pulled",
+                rtsp_url="rtsp://pulled/stream",
+                online=True,
+            ),
+        ),
+        detection_windows={
+            "bed_exit": PulledNightWindow(start="21:00", end="06:00", tz="UTC"),
+            "fall": PulledNightWindow(start="22:00", end="05:00", tz="Asia/Seoul"),
+        },
+    )
+    store = app.state.camera_registry = CameraRegistryStore(tmp_path / "cameras.json")
+    store.create(
+        camera_id="camera-1",
+        label="Lobby",
+        rtsp_url="rtsp://camera/stream",
+        space_id="space-1",
+        status="online",
+    )
+
+    with TestClient(app) as client:
+        worker_config = client.get(
+            "/api/v1/cameras/worker-config",
+            headers={"X-Edge-Relay-Token": "relay-token"},
+        )
+
+    assert worker_config.status_code == 200
+    body = worker_config.json()
+    assert body["night_window"] == {"start": "21:00", "end": "06:00", "tz": "UTC"}
+    assert body["detection_windows"] == {
+        "bed_exit": {"start": "21:00", "end": "06:00", "tz": "UTC"},
+        "fall": {"start": "22:00", "end": "05:00", "tz": "Asia/Seoul"},
+    }
+
+
 def test_worker_config_emits_default_camera_fps_when_configured(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

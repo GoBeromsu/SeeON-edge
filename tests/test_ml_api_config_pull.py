@@ -12,7 +12,7 @@ from fastapi.testclient import TestClient
 
 from backend.app.lifespan import BACKEND_CONFIG_SHUTDOWN_WAIT_SEC, refresh_backend_config
 from backend.app.main import create_app
-from contracts.worker_config import CONFIG_VERSION_KEY, RESTART_EPOCH_KEY
+from contracts.worker_config import CONFIG_VERSION_KEY, RESTART_EPOCH_KEY, PulledNightWindow
 
 
 class FakeBackendIngestClient:
@@ -139,7 +139,136 @@ def test_backend_config_pull_seeds_inventory_and_worker_config(
         "config_version": 7,
         "restart_epoch": 0,
         "night_window": {"start": "21:00", "end": "06:00", "tz": "Asia/Seoul"},
+        "detection_windows": {
+            "bed_exit": {"start": "21:00", "end": "06:00", "tz": "Asia/Seoul"}
+        },
     }
+
+
+def test_backend_detection_windows_present_ignores_legacy_night_window_entirely(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Plan-file payload-level rule: once ``detectionWindows`` is present at
+    all, it is the sole authority for every domain and legacy ``nightWindow``
+    is ignored entirely -- even for domains the map doesn't mention. This is
+    what makes an operator clearing bed_exit's window in the dashboard stick,
+    instead of a stale ``nightWindow`` resurrecting it."""
+
+    def fake_urlopen(request: urllib.request.Request, timeout: float) -> FakeHTTPResponse:
+        return FakeHTTPResponse(
+            {
+                "configVersion": 7,
+                # Legacy alias present alongside the map: must be ignored.
+                "nightWindow": {"start": "21:00", "end": "06:00", "tz": "Asia/Seoul"},
+                "detectionWindows": {
+                    "fall": {"start": "22:00", "end": "05:00", "tz": "UTC"},
+                },
+                "cameras": [
+                    {
+                        "id": "cam-pulled-1",
+                        "spaceId": "room-101",
+                        "label": "Room 101",
+                        "rtspUrl": "rtsp://camera/101",
+                        "online": True,
+                    }
+                ],
+            }
+        )
+
+    _set_pull_env(monkeypatch)
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+    with TestClient(create_app()) as client:
+        response = client.get(
+            "/api/v1/relay/config",
+            headers={"X-Edge-Relay-Token": "relay-token"},
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["detection_windows"] == {
+        "fall": {"start": "22:00", "end": "05:00", "tz": "UTC"},
+    }
+    # bed_exit is not in the map, so the map's authority means ALWAYS (24/7)
+    # for bed_exit -- NOT the legacy nightWindow value. The response omits
+    # night_window entirely when it's None (response_model_exclude_none).
+    assert "bed_exit" not in body["detection_windows"]
+    assert "night_window" not in body
+
+
+def test_backend_detection_windows_absent_still_uses_legacy_night_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When ``detectionWindows`` is absent entirely, the legacy single
+    ``nightWindow`` field still applies to bed_exit (compat fallback)."""
+
+    def fake_urlopen(request: urllib.request.Request, timeout: float) -> FakeHTTPResponse:
+        return FakeHTTPResponse(_backend_config())
+
+    _set_pull_env(monkeypatch)
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+    with TestClient(create_app()) as client:
+        response = client.get(
+            "/api/v1/relay/config",
+            headers={"X-Edge-Relay-Token": "relay-token"},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["detection_windows"] == {
+        "bed_exit": {"start": "21:00", "end": "06:00", "tz": "Asia/Seoul"}
+    }
+
+
+def test_backend_config_pull_survives_invalid_window_and_still_populates_cameras(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A malformed window value for one domain (start == end here) must not
+    crash the whole pull: it fails open to ALWAYS for that domain (logged to
+    stderr) while cameras and other domains' windows still populate."""
+
+    def fake_urlopen(request: urllib.request.Request, timeout: float) -> FakeHTTPResponse:
+        return FakeHTTPResponse(
+            {
+                "configVersion": 9,
+                "detectionWindows": {
+                    "bed_exit": {"start": "09:00", "end": "09:00", "tz": "UTC"},
+                    "fall": {"start": "22:00", "end": "05:00", "tz": "UTC"},
+                },
+                "cameras": [
+                    {
+                        "id": "cam-pulled-1",
+                        "spaceId": "room-101",
+                        "label": "Room 101",
+                        "rtspUrl": "rtsp://camera/101",
+                        "online": True,
+                    }
+                ],
+            }
+        )
+
+    _set_pull_env(monkeypatch)
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+    with TestClient(create_app()) as client:
+        assert client.app.state.pulled_config is not None
+        response = client.get(
+            "/api/v1/relay/config",
+            headers={"X-Edge-Relay-Token": "relay-token"},
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["config_version"] == 9
+    assert body["cameras"] == [
+        {
+            "camera_id": "cam-pulled-1",
+            "facility_id": "facility-pulled",
+            "rtsp_url": "rtsp://camera/101",
+        }
+    ]
+    assert "bed_exit" not in body["detection_windows"]
+    assert body["detection_windows"]["fall"] == {"start": "22:00", "end": "05:00", "tz": "UTC"}
 
 
 def test_backend_config_pull_failure_keeps_env_inventory_fallback(
@@ -548,3 +677,78 @@ def test_backend_camera_mapper_accepts_canonical_edge_facility_token(
     assert mapper.configured is True
     assert mapper.token == "facility-token"
     assert mapper.endpoint == "http://backend:8080/api/v1/edge/cameras"
+
+
+def test_backend_detection_windows_populate_per_domain_map_and_bed_exit_alias(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The backend's ``detectionWindows`` (domain -> window|null) becomes
+    ``PulledWorkerConfig.detection_windows``; a null entry for a domain is
+    dropped rather than stored, and "bed_exit" also populates the deprecated
+    ``night_window`` alias for old workers."""
+
+    def fake_urlopen(url: str, timeout: float) -> FakeHTTPResponse:
+        return FakeHTTPResponse(
+            {
+                "configVersion": 9,
+                "detectionWindows": {
+                    "bed_exit": {"start": "21:00", "end": "06:00", "tz": "Asia/Seoul"},
+                    "fall": {"start": "22:00", "end": "05:00", "tz": "UTC"},
+                    "wander": None,
+                },
+                "cameras": [
+                    {
+                        "id": "cam-1",
+                        "spaceId": "room-1",
+                        "label": "Room 1",
+                        "rtspUrl": "rtsp://camera/1",
+                        "online": True,
+                    }
+                ],
+            }
+        )
+
+    _set_pull_env(monkeypatch)
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+    with TestClient(create_app()) as client:
+        pulled = client.app.state.pulled_config
+        assert pulled.detection_windows == {
+            "bed_exit": PulledNightWindow(start="21:00", end="06:00", tz="Asia/Seoul"),
+            "fall": PulledNightWindow(start="22:00", end="05:00", tz="UTC"),
+        }
+        assert pulled.night_window == PulledNightWindow(
+            start="21:00", end="06:00", tz="Asia/Seoul"
+        )
+
+        response = client.get(
+            "/api/v1/relay/config",
+            headers={"X-Edge-Relay-Token": "relay-token"},
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["night_window"] == {"start": "21:00", "end": "06:00", "tz": "Asia/Seoul"}
+    assert body["detection_windows"] == {
+        "bed_exit": {"start": "21:00", "end": "06:00", "tz": "Asia/Seoul"},
+        "fall": {"start": "22:00", "end": "05:00", "tz": "UTC"},
+    }
+
+
+def test_backend_detection_windows_absent_falls_back_to_legacy_night_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the backend has not rolled out ``detectionWindows`` yet, the
+    legacy single ``nightWindow`` field still maps to "bed_exit"."""
+
+    def fake_urlopen(url: str, timeout: float) -> FakeHTTPResponse:
+        return FakeHTTPResponse(_backend_config())
+
+    _set_pull_env(monkeypatch)
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+    with TestClient(create_app()) as client:
+        pulled = client.app.state.pulled_config
+        assert pulled.detection_windows == {
+            "bed_exit": PulledNightWindow(start="21:00", end="06:00", tz="Asia/Seoul"),
+        }
