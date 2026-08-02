@@ -281,7 +281,7 @@ def _enable_export(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     # Matches the default `_evidence_outbox_path(state_dir)` filename -- the
     # composition root always threads `state_dir=tmp_path` into `WorkerRuntime`
     # (via `_runtime`), so this is where the real outbox lands.
-    return tmp_path / "evidence-outbox.sqlite3"
+    return tmp_path / "worker-state.sqlite3"
 
 
 def _fake_capabilities_response() -> HttpResult:

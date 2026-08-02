@@ -61,7 +61,7 @@ class EvidenceExportRuntime:
         if not relay_url.strip() or not token or not probe_camera_id.strip():
             raise ValueError("evidence export requires relay URL, token, and camera")
         if database_path is None:
-            database_path = store_dir / "evidence-outbox.sqlite3"
+            database_path = store_dir / "worker-state.sqlite3"
         config = SenderConfig(
             relay_url=relay_url,
             relay_token=token,

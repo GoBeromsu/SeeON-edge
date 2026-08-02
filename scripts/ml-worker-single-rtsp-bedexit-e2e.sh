@@ -42,7 +42,7 @@ api_pid=""
 # to the durable outbox but are never sent to the relay, and this harness's
 # whole point is proving relay delivery.
 export ML_WORKER_STATE_DIR="$tmpdir/worker-state"
-export ML_WORKER_EVIDENCE_OUTBOX_PATH="$tmpdir/worker-state/evidence-outbox.sqlite3"
+export ML_WORKER_EVIDENCE_OUTBOX_PATH="$tmpdir/worker-state/worker-state.sqlite3"
 export ML_WORKER_EVENT_CLIP_EXPORT_ENABLED=1
 mkdir -p "$ML_WORKER_STATE_DIR"
 

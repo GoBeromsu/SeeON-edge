@@ -353,7 +353,7 @@ class _WindowGatedDecider:
 
 
 def _evidence_outbox_path(state_dir: Path) -> Path:
-    return state_dir / "evidence-outbox.sqlite3"
+    return state_dir / "worker-state.sqlite3"
 
 
 def _verify_opencv_decode() -> VerifyResult:
