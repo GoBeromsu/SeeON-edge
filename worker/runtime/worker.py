@@ -59,6 +59,13 @@ from worker.pipeline.output.evidence.evidence_runtime import (
 from worker.pipeline.output.evidence.evidence_stager import DurableEvidenceStager
 from worker.pipeline.output.evidence.snapshot_store import SnapshotStore
 from worker.pipeline.output.evidence_attacher import AlertEvidenceAttacher
+from worker.pipeline.output.live_view import LatestFrameStore, LiveViewSubscriber
+from worker.pipeline.output.mjpeg_server import (
+    MjpegServer,
+    MjpegServerConfig,
+    dev_mjpeg_config,
+    start_optional_mjpeg_server,
+)
 from worker.pipeline.output.overlay import OverlayRenderer
 from worker.pipeline.perception import GreedyIouTracker, SceneState
 from worker.runtime.config import CameraRuntimeConfig, WorkerConfig
@@ -473,6 +480,49 @@ class WorkerRuntime:
         self._overlay_renderer = OverlayRenderer()
         self._snapshot_store = SnapshotStore()
         self._camera_evidence_attachers: dict[str, AlertEvidenceAttacher] = {}
+        # #15: `mjpeg_server.py` was ported without a call site, so `:8090`
+        # never opened and the dashboard's camera view stayed dead even though
+        # `compose.edge.yaml` enables the switch and the backend proxies
+        # `/api/v1/streams/{id}` there. Resolve the switch once, here, so the
+        # per-camera pumps built during `_activate` can be handed the tap.
+        self._mjpeg_config = self._resolve_mjpeg_config()
+        self._live_frames = LatestFrameStore()
+        self._live_view: LiveViewSubscriber | None = (
+            LiveViewSubscriber(self._live_frames, renderer=self._overlay_renderer)
+            if self._mjpeg_config.enabled
+            else None
+        )
+        self._mjpeg_server: MjpegServer | None = None
+        self._camera_debug_snapshots: dict[str, Callable[[int], tuple[Any, ...]]] = {}
+
+    def _resolve_mjpeg_config(self) -> MjpegServerConfig:
+        """Settle the live view's two switches into one answer.
+
+        Both exist on purpose and neither may be silently ignored: the YAML
+        ``dev_mjpeg`` block is how an operator pins host/port in a config file,
+        and ``ML_WORKER_DEV_MJPEG*`` is how the shipped ``compose.edge.yaml``
+        turns it on for the deployed worker. An explicit ``dev_mjpeg.enabled``
+        in the config wins outright (it is the more specific statement); with
+        the config silent, the environment decides.
+
+        The relay token doubles as the probe token, matching edge, so the
+        backend's probe origin authenticates against the same secret it
+        already holds.
+        """
+        configured = self.config.dev_mjpeg
+        source = (
+            MjpegServerConfig(enabled=True, host=configured.host, port=configured.port)
+            if configured.enabled
+            else dev_mjpeg_config(self._env)
+        )
+        return MjpegServerConfig(
+            enabled=source.enabled,
+            host=source.host,
+            port=source.port,
+            # `_authorized_probe` does a plain string comparison, so the
+            # SecretStr has to be unwrapped here or every probe would 403.
+            probe_token=self.config.relay.token.get_secret_value(),
+        )
 
     def run(self) -> None:
         stages = bootstrap.named_stages(
@@ -490,6 +540,7 @@ class WorkerRuntime:
             self._start_export_sender()
             self._start_runtime_status_sender()
             self._start_clip_frame_feeders()
+            self._start_live_view_server()
             if self._supervisor is not None:
                 self._supervisor.join()
         finally:
@@ -510,7 +561,36 @@ class WorkerRuntime:
             thread.join(timeout=5.0)
         if self._clip_recorder is not None:
             self._clip_recorder.stop()
+        if self._mjpeg_server is not None:
+            self._mjpeg_server.stop()
+            self._mjpeg_server = None
         self._context.release_lease()
+
+    def _start_live_view_server(self) -> None:
+        """Open the operator MJPEG port once the cameras behind it exist.
+
+        Runs after ``bootstrap_or_exit`` so every camera is already registered
+        in ``_live_frames`` -- a request for an unknown camera is a 404, and
+        binding earlier would serve those for the whole boot window.
+
+        ``start_optional_mjpeg_server`` returns ``None`` both when the feature
+        is off and when the bind fails. That is the intended asymmetry: a
+        cosmetic view losing its port must not take fall detection down with
+        it, so the failure is logged and the worker keeps running.
+        """
+        if self._live_view is None:
+            return
+        self._mjpeg_server = start_optional_mjpeg_server(
+            self._live_frames, self._mjpeg_config
+        )
+        if self._mjpeg_server is None:
+            LOGGER.warning(
+                "live view enabled but its server could not bind",
+                extra={
+                    "host": self._mjpeg_config.host,
+                    "port": self._mjpeg_config.port,
+                },
+            )
 
     def _start_export_sender(self) -> None:
         """Start delivering staged evidence to the relay.
@@ -710,11 +790,21 @@ class WorkerRuntime:
         decision, domain_audit, domain_deciders = self._build_decision_stage(
             camera, self.fall_model
         )
+        # One collector per camera, shared by the two consumers that need the
+        # same per-frame snapshots: the alert overlay burned into evidence, and
+        # the operator live view. Building it twice would read the same live
+        # deciders through two closures for no reason.
+        debug_snapshots = _debug_snapshots_provider(domain_deciders)
+        self._camera_debug_snapshots[camera.camera_id] = debug_snapshots
         self._camera_evidence_attachers[camera.camera_id] = AlertEvidenceAttacher(
             domain_audit=domain_audit,
             overlay_renderer=self._overlay_renderer,
-            debug_snapshots_provider=_debug_snapshots_provider(domain_deciders),
+            debug_snapshots_provider=debug_snapshots,
         )
+        if self._live_view is not None:
+            # Register before the server binds so a camera is never a 404 on a
+            # live view that is meant to carry it.
+            self._live_frames.register_camera(camera.camera_id)
         heartbeat = HeartbeatReporter(self.config, camera)
         loop = self._loop_factory(camera, bus, heartbeat)
         sink = self._sink_factory(camera)
@@ -756,6 +846,8 @@ class WorkerRuntime:
             evidence_attacher=self._camera_evidence_attachers.get(camera.camera_id),
             diagnostics=self.diagnostics,
             max_frames=self._max_frames_per_camera,
+            live_view=self._live_view,
+            debug_snapshots_provider=self._camera_debug_snapshots.get(camera.camera_id),
         )
 
     def _max_frames_completion_check(self) -> bool:

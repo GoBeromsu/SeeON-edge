@@ -316,6 +316,7 @@ feature it proves. Developer-convenience harnesses are deferred with the tools.
 | CLI entrypoint and bounded-run cap | `worker/__main__.py` | `tests/test_worker_entrypoint.py`, `tests/test_worker_max_frames_per_camera_composition.py` | ported |
 | Per-frame perception: tracking, scene state, window buffering | `worker/pipeline/perception/`, `worker/pipeline/camera_pipeline.py` | `tests/test_perception_observation_builder.py`, `tests/test_demo_tracking.py`, `tests/test_worker_camera_pipeline_pump.py` | ported |
 | Debug overlay rendering | `worker/pipeline/output/overlay.py`, `worker/pipeline/output/_overlay_primitives.py` | `tests/test_worker_overlay_renderer.py`, `tests/test_worker_overlay_primitives.py` | ported |
+| Operator MJPEG live view | `worker/pipeline/output/mjpeg_server.py`, `worker/pipeline/output/live_view.py`, composed in `worker/runtime/worker.py` | `tests/test_worker_live_view_composition.py` | ported |
 | GPU stability preflight installer | — | — | tracked-deferred (`scripts/edge-preflight/gpu-stability-install.sh`, untracked at baseline; [#6](https://github.com/SeniorAILab/eldercare-fall-ml-v2/issues/6)) |
 | GPU telemetry preflight | — | — | tracked-deferred (`scripts/edge-preflight/gpu-telemetry.sh`, untracked at baseline; [#7](https://github.com/SeniorAILab/eldercare-fall-ml-v2/issues/7)) |
 

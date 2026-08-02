@@ -16,7 +16,8 @@ import logging
 import threading
 import time
 from collections import deque
-from typing import Final, Protocol, final
+from collections.abc import Callable
+from typing import Any, Final, Protocol, final
 
 from contracts.observation import FrameObservation
 from worker.adapters.model.errors import FatalAcceleratorError
@@ -52,6 +53,22 @@ class EvidenceAttacher(Protocol):
     ) -> BusinessEvent: ...
 
 
+class LiveViewPublisher(Protocol):
+    """Structural seam matched by `LiveViewSubscriber` (worker.pipeline.output).
+
+    Deliberately a Protocol, like `EvidenceAttacher` above: this module stays
+    import-free of `worker.pipeline.output` so the live view is a tap that can
+    be absent, not a stage this loop depends on.
+    """
+
+    def publish(
+        self,
+        packet: FramePacket,
+        observation: FrameObservation,
+        debug_snapshots: tuple[Any, ...] = (),
+    ) -> bool: ...
+
+
 @final
 class CameraPipelinePump:
     """Drive one camera's inference subscription through decision to output.
@@ -75,6 +92,8 @@ class CameraPipelinePump:
         evidence_attacher: EvidenceAttacher | None = None,
         diagnostics: MeasuredFpsSink | None = None,
         max_frames: int | None = None,
+        live_view: LiveViewPublisher | None = None,
+        debug_snapshots_provider: Callable[[int], tuple[Any, ...]] | None = None,
     ) -> None:
         self._camera_id = camera_id
         self._subscription = subscription
@@ -85,6 +104,8 @@ class CameraPipelinePump:
         self._evidence_attacher = evidence_attacher
         self._diagnostics = diagnostics
         self._max_frames = max_frames
+        self._live_view = live_view
+        self._debug_snapshots_provider = debug_snapshots_provider
         self._fps_timestamps: deque[float] = deque()
         self._stop_event = threading.Event()
         self.failure_count = 0
@@ -124,8 +145,35 @@ class CameraPipelinePump:
     def _pump_one(self, packet: FramePacket) -> None:
         self._record_measured_fps()
         result = self._analytics.process(packet)
+        self._publish_live_view(packet, result.observation)
         for event in self._decision.update(result.decision_input):
             self._sink.emit(self._attach_evidence(event, packet, result.observation))
+
+    def _publish_live_view(
+        self, packet: FramePacket, observation: FrameObservation
+    ) -> None:
+        """Mirror edge's per-frame overlay publication (edge/runtime/edge_worker.py).
+
+        A cosmetic operator view must never decide whether detection runs, so
+        this is a tap and not a stage: it is skipped entirely when no live view
+        is composed, and any failure inside it is logged and swallowed rather
+        than surfaced to ``run``'s per-frame failure counter. It publishes
+        before ``decision.update`` so a decision-stage error still leaves the
+        operator with a current frame.
+        """
+        live_view = self._live_view
+        if live_view is None:
+            return
+        provider = self._debug_snapshots_provider
+        try:
+            snapshots = () if provider is None else provider(packet.frame.index)
+            _ = live_view.publish(packet, observation, snapshots)
+        except Exception:  # noqa: BLE001 - a debug view must not stop detection
+            LOGGER.warning(
+                "live view publish failed",
+                extra={"camera_id": self._camera_id},
+                exc_info=True,
+            )
 
     def _attach_evidence(
         self,
