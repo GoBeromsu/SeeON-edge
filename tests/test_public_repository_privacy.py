@@ -685,10 +685,17 @@ def _assert_untrusted_ci_security(workflow: dict[str, object]) -> None:
         },
         {
             "name": "Install FFmpeg test dependency",
-            "run": "sudo apt-get update && sudo apt-get install --yes ffmpeg",
+            "run": (
+                "sudo apt-get update && "
+                "sudo apt-get install -y --no-install-recommends ffmpeg"
+            ),
         },
         {"run": "uv sync --frozen --group lint"},
-        {"run": "uv run pytest -q"},
+        # Real-stack E2E (mediamtx-backed) is deselected here by marker, not by
+        # adding a step -- the security contract below (step count/order, no
+        # external-binary fetch) is unchanged; only this step's own argument
+        # changed. See tests/AGENTS.md for running the real-stack E2E locally.
+        {"run": 'uv run pytest -q -m "not real_stack"'},
         {"run": "uv run --group lint ruff check ."},
         {"run": "uv run --group lint lint-imports"},
     ]

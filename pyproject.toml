@@ -99,6 +99,9 @@ ignore = ["TRY003"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
+markers = [
+    "real_stack: real-stack E2E tests that require external RTSP tooling (mediamtx, ffmpeg) on PATH; deselected in CI via `-m \"not real_stack\"`, see tests/AGENTS.md for running locally.",
+]
 
 [tool.ruff.lint.flake8-tidy-imports]
 ban-relative-imports = "all"
