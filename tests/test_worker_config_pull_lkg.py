@@ -196,6 +196,37 @@ def test_to_pulled_config_drops_malformed_hhmm_and_falls_open(
     assert "bed_exit" in err
 
 
+def test_to_worker_config_drops_explicit_null_domain_entry_without_crashing_payload() -> None:
+    """A stray ``null`` for one domain (e.g. a hand-edited LKG file, or a
+    version-skewed ml-api) must not fail pydantic validation for the whole
+    payload -- it's dropped at parse time (ALWAYS for that domain) exactly
+    like the contracts and lifespan.py boundaries, and the rest of the
+    payload (other domains, cameras) still parses normally."""
+    payload = BackendWorkerConfigPayload.model_validate(
+        {
+            "config_version": 5,
+            "cameras": [
+                {
+                    "camera_id": "camera-1",
+                    "facility_id": "facility-1",
+                    "rtsp_url": "rtsp://camera-1/stream",
+                }
+            ],
+            "detection_windows": {
+                "bed_exit": None,
+                "fall": {"start": "22:00", "end": "05:00", "tz": "UTC"},
+            },
+        }
+    )
+
+    worker_config = payload.to_worker_config("http://relay.test", "relay-token")
+
+    assert worker_config.domains.detection_windows == {
+        "fall": NightWindowConfig(start="22:00", end="05:00", tz="UTC"),
+    }
+    assert worker_config.domains.resolved_detection_window("bed_exit") is None
+
+
 def test_pull_worker_config_returns_none_on_urllib_error() -> None:
     # The worker transport (http_transport.stdlib_urlopen) is http.client-based,
     # not urllib.request.urlopen, so the fake transport is injected via the

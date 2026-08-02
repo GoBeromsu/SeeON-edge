@@ -66,7 +66,11 @@ class BackendWorkerConfigPayload(BaseModel):
     # Deprecated alias for detection_windows["bed_exit"]; kept for old
     # payload producers/LKG files.
     night_window: _NightWindowPayload | None = None
-    detection_windows: dict[str, _NightWindowPayload] | None = None
+    # A ``None`` value for one domain (e.g. a hand-edited LKG file, or a
+    # version-skewed ml-api) means ALWAYS for that domain and is dropped at
+    # parse time in ``resolved_detection_windows`` -- it must not fail
+    # pydantic validation for the whole payload over one domain's opinion.
+    detection_windows: dict[str, _NightWindowPayload | None] | None = None
     cameras: tuple[_CameraPayload, ...]
 
     @model_validator(mode="after")
@@ -102,6 +106,9 @@ class BackendWorkerConfigPayload(BaseModel):
         if self.detection_windows is not None:
             windows: dict[str, PulledNightWindow] = {}
             for domain, window in self.detection_windows.items():
+                if window is None:
+                    # Explicit null for this domain: ALWAYS, not an error.
+                    continue
                 validated = _validated_pulled_window(domain, window)
                 if validated is not None:
                     windows[domain] = validated
