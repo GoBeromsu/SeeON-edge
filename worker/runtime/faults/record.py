@@ -1,26 +1,70 @@
 """First-fault record persistence (todo 25).
 
-Writes exactly one bounded, fsynced JSON record under the resolved worker
-state directory (``worker/runtime/state_dir.py``, ``~/.local/state/ml-worker``,
-no env override) on the first FatalAcceleratorError.  Subsequent calls are
-no-ops (the record is written at most once per process lifetime).
+Writes exactly one record to the ``faults`` table in ``worker-state.sqlite3``
+under the resolved worker state directory (``worker/runtime/state_dir.py``,
+``~/.local/state/ml-worker``, no env override) on the first
+FatalAcceleratorError. Subsequent calls within the same process are no-ops
+(the module-level ``_written`` flag). Because the write is a fixed-id upsert
+(``faults.id = 1``, see ``evidence_outbox_schema.py``'s SCHEMA_V6_STATEMENTS),
+a later process's crash overwrites whatever the table already holds -- the
+same "most recent first fault wins" behavior the prior first_fault.json's
+unconditional tmp-then-rename already had, not a permanent cross-restart log.
+
+**Never blocks or delays process exit.** This is the hard constraint the
+JSON-file predecessor already honored (best-effort write, swallow all
+exceptions) and the SQLite replacement must honor just as strictly, including
+under lock contention: the evidence outbox writer (``evidence_runtime.py``)
+and the config LKG store (``worker/runtime/config/lkg_store.py``) share the
+same ``worker-state.sqlite3`` file and may hold its write lock when a fault
+fires. Reusing ``open_connection``'s normal 5-second busy timeout would make
+the fault path *wait up to 5 seconds* before degrading -- a real delay to a
+hard-exit boundary that a watchdog-driven trip (``worker/runtime/watchdog.py``)
+may itself be racing against a deadline for. Instead this module opens its own
+connection with ``busy_timeout_ms=0``: a conflicting writer surfaces
+immediately as ``sqlite3.OperationalError`` (SQLITE_BUSY) with no wait at all.
+Any storage failure -- OSError (unwritable/uncreatable state dir),
+sqlite3.Error (including that immediate SQLITE_BUSY), or
+NewerSchemaVersionError (a downgraded binary opening a database a newer
+binary already migrated past) -- is caught and logged as a warning; the
+caller always proceeds to exit regardless of whether the record was written.
 """
 from __future__ import annotations
 
-import hashlib
 import json
+import logging
 import os
+import sqlite3
 import threading
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Final
 
+from worker.pipeline.output.evidence.evidence_outbox_database import open_connection
+from worker.pipeline.output.evidence.evidence_outbox_types import NewerSchemaVersionError
+from worker.pipeline.output.evidence.outbox_transaction import ImmediateTransaction
 from worker.runtime.state_dir import resolve_state_dir
 
-FIRST_FAULT_FILENAME: Final = "first_fault.json"
-# Max record size: 64 KiB.  Enough for any realistic fault record.
-MAX_RECORD_BYTES: Final = 65_536
+LOGGER: Final = logging.getLogger(__name__)
+
+WORKER_STATE_DB_FILENAME: Final = "worker-state.sqlite3"
+
+# Fault writes must never wait out a lock held by a concurrent writer (the
+# evidence outbox or the config LKG store): a zero busy-timeout makes a
+# conflicting writer surface as an immediate sqlite3.OperationalError instead
+# of blocking the hard-exit path for up to open_connection's normal 5s.
+_FAULT_WRITE_BUSY_TIMEOUT_MS: Final = 0
+
+# Same failure modes WorkerConfigLkgStore (lkg_store.py's
+# _STORE_UNAVAILABLE_ERRORS) treats as "storage unavailable, degrade
+# silently rather than raise": OSError, sqlite3.Error (this is where the
+# zero-timeout SQLITE_BUSY above surfaces), and NewerSchemaVersionError.
+_STORE_UNAVAILABLE_ERRORS: Final = (OSError, sqlite3.Error, NewerSchemaVersionError)
+
+# Bound on the stored exception message so one pathological fault message
+# cannot bloat the row; mirrors the JSON predecessor's MAX_RECORD_BYTES
+# truncation intent at a per-field granularity that fits typed columns.
+MAX_EXCEPTION_MESSAGE_CHARS: Final = 4_096
 
 _write_lock = threading.Lock()
 _written = False
@@ -69,6 +113,8 @@ def _iso_now() -> str:
 def _frame_hash(image: object) -> str | None:
     """SHA-256 of the raw image bytes, or None if the image is not a numpy array."""
     try:
+        import hashlib
+
         import numpy as np
 
         if isinstance(image, np.ndarray):
@@ -78,61 +124,99 @@ def _frame_hash(image: object) -> str | None:
     return None
 
 
+def _truncate_message(message: str) -> str:
+    if len(message) <= MAX_EXCEPTION_MESSAGE_CHARS:
+        return message
+    return message[:MAX_EXCEPTION_MESSAGE_CHARS] + "...[truncated]"
+
+
+def _worker_state_db_path(state_dir: Path) -> Path:
+    return state_dir / WORKER_STATE_DB_FILENAME
+
+
 def persist_first_fault(
     record: FirstFaultRecord,
     *,
     state_dir: Path | None = None,
-) -> Path | None:
-    """Write *record* to disk atomically.  Returns the path written, or None if
-    a record was already written (subsequent calls are silently ignored).
+) -> bool:
+    """Upsert *record* into the ``faults`` table. Returns True if this call
+    wrote the record, False if a record was already written this process
+    lifetime (no-op) or if the write failed for any reason.
 
-    The write is atomic: we write to a temp file in the same directory, fsync
-    it, then rename it into place (rename is atomic on POSIX).  We also fsync
-    the directory after the rename so the entry survives a crash.
+    Best-effort and non-blocking: storage failures -- including a concurrent
+    writer holding the database -- degrade silently to False rather than
+    raising or waiting. The caller (``FaultHandler.handle``) must always
+    proceed to stop camera loops and exit regardless of this return value.
     """
     global _written  # noqa: PLW0603
     with _write_lock:
         if _written:
-            return None
+            return False
         _written = True
 
     if state_dir is None:
         state_dir = resolve_state_dir()
+    database_path = _worker_state_db_path(state_dir)
 
+    connection: sqlite3.Connection | None = None
     try:
-        state_dir.mkdir(parents=True, exist_ok=True)
-        dest = state_dir / FIRST_FAULT_FILENAME
-        tmp = state_dir / f"{FIRST_FAULT_FILENAME}.tmp"
-
-        payload = json.dumps(asdict(record), default=str, separators=(",", ":"))
-        if len(payload.encode()) > MAX_RECORD_BYTES:
-            # Truncate the message to fit — we must not silently drop the record.
-            truncated = record.__class__(
-                **{
-                    **asdict(record),
-                    "exception_message": record.exception_message[:256] + "...[truncated]",
-                },
+        connection = open_connection(database_path, busy_timeout_ms=_FAULT_WRITE_BUSY_TIMEOUT_MS)
+        with ImmediateTransaction(connection):
+            connection.execute(
+                """
+                INSERT INTO faults (
+                    id, pid, boot_time_iso, profile, task, stage, camera_id,
+                    frame_index, pts, frame_shape_json, frame_hash_sha256,
+                    model_artifact_digest, invocation_seq, exception_type,
+                    exception_message, exit_code, action, fault_time_iso
+                ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT (id) DO UPDATE SET
+                    pid = excluded.pid,
+                    boot_time_iso = excluded.boot_time_iso,
+                    profile = excluded.profile,
+                    task = excluded.task,
+                    stage = excluded.stage,
+                    camera_id = excluded.camera_id,
+                    frame_index = excluded.frame_index,
+                    pts = excluded.pts,
+                    frame_shape_json = excluded.frame_shape_json,
+                    frame_hash_sha256 = excluded.frame_hash_sha256,
+                    model_artifact_digest = excluded.model_artifact_digest,
+                    invocation_seq = excluded.invocation_seq,
+                    exception_type = excluded.exception_type,
+                    exception_message = excluded.exception_message,
+                    exit_code = excluded.exit_code,
+                    action = excluded.action,
+                    fault_time_iso = excluded.fault_time_iso
+                """,
+                (
+                    record.pid,
+                    record.boot_time_iso,
+                    record.profile,
+                    record.task,
+                    record.stage,
+                    record.camera_id,
+                    record.frame_index,
+                    record.pts,
+                    None if record.frame_shape is None else json.dumps(list(record.frame_shape)),
+                    record.frame_hash_sha256,
+                    record.model_artifact_digest,
+                    record.invocation_seq,
+                    record.exception_type,
+                    _truncate_message(record.exception_message),
+                    record.exit_code,
+                    record.action,
+                    record.fault_time_iso,
+                ),
             )
-            payload = json.dumps(asdict(truncated), default=str, separators=(",", ":"))
-
-        with tmp.open("w", encoding="utf-8") as fh:
-            fh.write(payload)
-            fh.flush()
-            os.fsync(fh.fileno())
-
-        tmp.rename(dest)
-
-        # fsync the directory so the rename is durable.
-        dir_fd = os.open(str(state_dir), os.O_RDONLY)
-        try:
-            os.fsync(dir_fd)
-        finally:
-            os.close(dir_fd)
-    except Exception:  # noqa: BLE001
-        # Persistence failure must never prevent the process from exiting.
-        return None
+    except _STORE_UNAVAILABLE_ERRORS as error:
+        LOGGER.warning("first-fault record unavailable at %s: %s", database_path, error)
+        return False
     else:
-        return dest
+        return True
+    finally:
+        if connection is not None:
+            connection.close()
 
 
 def make_fault_record(
@@ -181,7 +265,7 @@ def make_fault_record(
 
 
 __all__ = [
-    "FIRST_FAULT_FILENAME",
+    "WORKER_STATE_DB_FILENAME",
     "FirstFaultRecord",
     "make_fault_record",
     "persist_first_fault",

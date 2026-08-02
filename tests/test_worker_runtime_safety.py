@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import json
+import sqlite3
 import subprocess
 import sys
 import textwrap
@@ -15,7 +15,7 @@ from worker.adapters.model.errors import FatalAcceleratorError
 from worker.adapters.model.warmup import warmup_to_ready
 from worker.runtime import bootstrap
 from worker.runtime.faults import FaultHandler
-from worker.runtime.faults.record import FirstFaultRecord
+from worker.runtime.faults.record import WORKER_STATE_DB_FILENAME, FirstFaultRecord
 from worker.runtime.lease import GpuLease, GpuLeaseUnavailableError
 from worker.runtime.profile.registry import VerifyResult
 from worker.runtime.watchdog import WATCHDOG_STAGE, InferenceWatchdog
@@ -212,10 +212,17 @@ def test_watchdog_subprocess_hard_exits_with_fatal_accelerator_code(tmp_path: Pa
     )
 
     assert completed.returncode == 4
-    record = json.loads((tmp_path / "first_fault.json").read_text(encoding="utf-8"))
-    assert record["stage"] == WATCHDOG_STAGE
-    assert record["exit_code"] == 4
-    assert record["camera_id"] == "camera-a"
+    connection = sqlite3.connect(tmp_path / WORKER_STATE_DB_FILENAME)
+    try:
+        cursor = connection.execute(
+            "SELECT stage, exit_code, camera_id FROM faults WHERE id = 1"
+        )
+        stage, exit_code, camera_id = cursor.fetchone()
+    finally:
+        connection.close()
+    assert stage == WATCHDOG_STAGE
+    assert exit_code == 4
+    assert camera_id == "camera-a"
 
 
 def _raise_warmup() -> None:

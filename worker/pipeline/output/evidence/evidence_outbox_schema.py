@@ -2,7 +2,7 @@
 
 from typing import Final
 
-SCHEMA_VERSION: Final = 5
+SCHEMA_VERSION: Final = 6
 
 SCHEMA_V1_STATEMENTS: Final = (
     """
@@ -161,12 +161,45 @@ recent N rows overall -- this is what makes
 `evidence_events.payload_json ->> '$.audit.config_version'` locally joinable
 against config_history."""
 
+SCHEMA_V6_STATEMENTS: Final = (
+    """
+    CREATE TABLE faults (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        pid INTEGER NOT NULL,
+        boot_time_iso TEXT NOT NULL,
+        profile TEXT NOT NULL,
+        task TEXT NOT NULL,
+        stage TEXT NOT NULL,
+        camera_id TEXT NOT NULL,
+        frame_index INTEGER,
+        pts REAL,
+        frame_shape_json TEXT,
+        frame_hash_sha256 TEXT,
+        model_artifact_digest TEXT,
+        invocation_seq INTEGER NOT NULL,
+        exception_type TEXT NOT NULL,
+        exception_message TEXT NOT NULL,
+        exit_code INTEGER NOT NULL,
+        action TEXT NOT NULL,
+        fault_time_iso TEXT NOT NULL
+    ) STRICT
+    """,
+)
+"""faults holds the single most recent first-fault record (one row, id=1,
+upserted on every FatalAcceleratorError), replacing first_fault.json. Like
+config_current, a fixed-id upsert means a later process's crash overwrites
+whatever the table already holds -- the same "latest first-fault wins"
+semantics the JSON file's unconditional tmp-then-rename already had, not a
+permanent cross-restart audit log. See worker/runtime/faults/record.py for
+the write path and its zero-busy-timeout, never-blocks-exit contract."""
+
 MIGRATIONS: Final = (
     SCHEMA_V1_STATEMENTS,
     SCHEMA_V2_STATEMENTS,
     SCHEMA_V3_STATEMENTS,
     SCHEMA_V4_STATEMENTS,
     SCHEMA_V5_STATEMENTS,
+    SCHEMA_V6_STATEMENTS,
 )
 
 __all__ = ["MIGRATIONS", "SCHEMA_VERSION"]
