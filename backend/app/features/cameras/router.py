@@ -380,8 +380,6 @@ def worker_config_snapshot(
             camera["decode_backend"] = decode_backend
         cameras.append(camera)
     pulled = getattr(request.app.state, "pulled_config", None)
-    if not cameras and isinstance(pulled, PulledWorkerConfig):
-        cameras = _worker_cameras_from_pulled_config(pulled, facility_id)
     if require_available and not cameras:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -404,27 +402,6 @@ def worker_config_snapshot(
             }
     return response
 
-
-def _worker_cameras_from_pulled_config(
-    pulled: PulledWorkerConfig, facility_id: str
-) -> list[dict[str, object]]:
-    cameras: list[dict[str, object]] = []
-    for camera in pulled.cameras:
-        if camera.rtsp_url is None or not camera.rtsp_url.strip():
-            continue
-        worker_camera: dict[str, object] = {
-            "camera_id": camera.camera_id,
-            "facility_id": facility_id,
-            "rtsp_url": camera.rtsp_url,
-        }
-        fps = _default_camera_fps()
-        if fps is not None:
-            worker_camera["fps"] = fps
-        decode_backend = _default_decode_backend()
-        if decode_backend is not None:
-            worker_camera["decode_backend"] = decode_backend
-        cameras.append(worker_camera)
-    return cameras
 
 def _live_pulled_config(request: Request, pulled: PulledWorkerConfig) -> PulledWorkerConfig:
     return PulledWorkerConfig(

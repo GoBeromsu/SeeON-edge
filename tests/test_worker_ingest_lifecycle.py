@@ -111,6 +111,7 @@ class _Reporter:
         self.states: dict[str, str] = {}
         self.categories: dict[str, str] = {}
         self.events: list[IngestEvent] = []
+        self.ready_calls: list[str] = []
         self._lock = threading.Lock()
 
     def mark_starting(self, camera_id: str) -> None:
@@ -120,6 +121,7 @@ class _Reporter:
     def mark_ready(self, camera_id: str) -> None:
         with self._lock:
             self.states[camera_id] = "ready"
+            self.ready_calls.append(camera_id)
 
     def mark_degraded(self, camera_id: str, *, category: str) -> None:
         with self._lock:
@@ -199,6 +201,26 @@ def test_registered_loop_publishes_the_exact_packet_and_closes_its_session() -> 
     assert [(packet.seq, packet.pts) for packet in bus.packets] == [(7, 1.4), (8, 1.6)]
     assert reporter.states == {"camera-a": "ready"}
     assert session.close_count == 1
+
+
+def test_healthy_stream_calls_mark_ready_for_every_packet_not_only_once() -> None:
+    # Given: a healthy stream that yields three packets without ever reconnecting.
+    packets = [_packet("camera-a", 1), _packet("camera-a", 2), _packet("camera-a", 3)]
+    session = _Session([*packets])
+    adapter = _Adapter([session])
+    bus = _FakeBus()
+    reporter = _Reporter()
+    loop = _loop("camera-a", adapter, bus, reporter, _registry("camera-a"))
+    bus.on_publish = lambda _packet: loop.stop() if len(bus.packets) == 3 else None
+
+    # When
+    loop.run()
+
+    # Then: mark_ready fires per packet, not once on the READY transition, so the
+    # reporter's own heartbeat_interval_sec throttle -- not this loop -- controls
+    # how often the relay actually sees a ping.
+    assert reporter.ready_calls == ["camera-a", "camera-a", "camera-a"]
+    assert len(reporter.ready_calls) == len(packets)
 
 
 def test_registered_loop_reports_reconnect_and_recovery_without_replacing_packets() -> None:

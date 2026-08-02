@@ -421,7 +421,21 @@ def test_worker_config_emits_default_camera_fps_when_configured(
     assert camera["camera_id"] == "camera-1"
 
 
-def test_worker_config_normalizes_pulled_cameras_when_registry_empty(tmp_path) -> None:
+def test_worker_config_surfaces_empty_roster_when_registry_empty(tmp_path) -> None:
+    """An empty dashboard camera registry must surface as an empty worker-config
+    roster -- never silently substitute app.state.pulled_config's legacy
+    backend-pulled camera list (see issue #33: that inbound path is deprecated
+    per AGENTS.md ANTI-PATTERNS, and an empty registry must be a visible,
+    diagnosable state rather than one indistinguishable from a legacy-sourced
+    roster). Non-camera fields (config_version, restart_epoch, night_window)
+    still legitimately flow from pulled_config -- only the camera fallback is
+    removed.
+
+    /cameras/worker-config (require_available=False) returns 200 with an
+    empty cameras list; /relay/config (require_available=True, see
+    backend/app/features/relay/router.py) treats the now-genuinely-empty
+    roster as a still-unavailable config and returns 503 -- both are visible,
+    diagnosable states, unlike the old legacy-sourced 200."""
     app = create_app(lifespan=no_lifespan)
     app.state.edge_relay_token = "relay-token"
     app.state.config_version = 42
@@ -462,22 +476,19 @@ def test_worker_config_normalizes_pulled_cameras_when_registry_empty(tmp_path) -
 
     expected = {
         "registry_version": 0,
-        "cameras": [
-            {
-                "camera_id": "pulled-camera",
-                "facility_id": "local-facility",
-                "rtsp_url": "rtsp://pulled/stream",
-            }
-        ],
+        "cameras": [],
         "config_version": 42,
         "restart_epoch": 5,
         "night_window": {"start": "21:00", "end": "06:00", "tz": "UTC"},
     }
     assert worker_config.status_code == 200
-    assert relay_config.status_code == 200
     assert worker_config.json() == expected
-    assert relay_config.json() == expected
-    assert set(worker_config.json()["cameras"][0]) == {"camera_id", "facility_id", "rtsp_url"}
+    # relay/config requires an available roster (require_available=True); an
+    # empty registry is now a genuinely empty roster rather than a
+    # legacy-sourced one, so it correctly surfaces as 503 (see
+    # test_config_returns_503_when_backend_config_unavailable in
+    # tests/test_ml_api_config_pull.py for the analogous no-pull case).
+    assert relay_config.status_code == 503
 
 
 def test_example_camera_registry_seed_is_loadable_and_sanitized() -> None:
