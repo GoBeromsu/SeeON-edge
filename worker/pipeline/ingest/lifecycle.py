@@ -219,7 +219,15 @@ class IngestSupervisor:
     def start(self) -> None:
         if self._threads:
             return
-        self._threads = tuple(
+        # Build every Thread first, but only publish it to the attribute
+        # `stop()`/`join()` read (`self._threads`, `self._restart_watcher`,
+        # `self._completion_watcher`) *after* `.start()` has returned. A
+        # concurrent `stop()` -- e.g. a test driving `run()` on a background
+        # thread and calling `stop()` once some readiness condition flips --
+        # must never observe a `Thread` object that has been constructed but
+        # not yet started, or `Thread.join()` raises "cannot join thread
+        # before it is started".
+        threads = tuple(
             threading.Thread(
                 target=loop.run,
                 name=f"worker-ingest-{loop.camera_id}",
@@ -227,22 +235,25 @@ class IngestSupervisor:
             )
             for loop in self._loops
         )
-        for thread in self._threads:
+        for thread in threads:
             thread.start()
+        self._threads = threads
         if self._restart_check is not None:
-            self._restart_watcher = threading.Thread(
+            restart_watcher = threading.Thread(
                 target=self._watch_restart,
                 name="worker-ingest-restart-watch",
                 daemon=True,
             )
-            self._restart_watcher.start()
+            restart_watcher.start()
+            self._restart_watcher = restart_watcher
         if self._completion_check is not None:
-            self._completion_watcher = threading.Thread(
+            completion_watcher = threading.Thread(
                 target=self._watch_completion,
                 name="worker-ingest-completion-watch",
                 daemon=True,
             )
-            self._completion_watcher.start()
+            completion_watcher.start()
+            self._completion_watcher = completion_watcher
 
     def join(self, *, timeout_sec: float | None = None) -> None:
         for thread in self._threads:
