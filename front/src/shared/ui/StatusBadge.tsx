@@ -1,4 +1,4 @@
-import type { CameraStatus, CameraSyncStatus, ConnectionView, SystemSnapshot } from '@/shared/api/client';
+import type { CameraStatus, ConnectionView, SystemSnapshot } from '@/shared/api/client';
 
 const cameraStatusMeta: Record<CameraStatus, { label: string; className: string }> = {
   online: {
@@ -87,27 +87,4 @@ export function getConnectionStatus(connection: ConnectionView | null): { label:
   }
 
   return backendStatusMeta(connection.configured, connection.reachable);
-}
-
-const cameraSyncMeta: Record<CameraSyncStatus, { label: string; className: string }> = {
-  synced: {
-    label: '동기화됨',
-    className: 'bg-status-stableBg text-status-stable ring-status-stable',
-  },
-  pending: {
-    label: '동기화 대기',
-    className: 'bg-status-cautionBg text-status-caution ring-status-caution',
-  },
-  failed: {
-    label: '동기화 실패',
-    className: 'bg-status-dangerBg text-status-danger ring-status-danger',
-  },
-  disabled: {
-    label: '동기화 비활성',
-    className: 'bg-surface2 text-ink-soft ring-border',
-  },
-};
-
-export function getCameraSyncMeta(status: CameraSyncStatus): { label: string; className: string } {
-  return cameraSyncMeta[status];
 }

@@ -25,10 +25,6 @@ export function normalizeClip(value: unknown): Clip | null {
     camera_label: pickString(value, ['camera_label', 'cameraLabel', 'camera'], '카메라 미상'),
     event_type: pickString(value, ['event_type', 'eventType', 'type', 'event_ref', 'eventRef'], '이벤트'),
     created_at: pickNullableString(value, ['created_at', 'createdAt', 'timestamp', 'started_at', 'startedAt']),
-    label: null,
-    reviewer: null,
-    reviewed_at: null,
-    reviewState: 'unknown',
     video_path: getClipVideoUrl(id),
     video_available: normalizedVideoAvailable,
     video_error: normalizedVideoAvailable

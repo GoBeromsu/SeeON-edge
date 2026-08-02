@@ -1,22 +1,6 @@
 @media (min-width: 768px) {
-  #main-content { padding: 20px; }
-  .dashboard-topbar { padding-inline: 20px; }
-}
-
-@media (min-width: 1024px) {
-  .dashboard-shell { display: grid; grid-template-columns: 224px minmax(0, 1fr); }
-  .desktop-rail { position: sticky; top: 0; height: 100vh; display: flex; flex-direction: column; gap: 32px; border-right: 1px solid var(--c-border); background: var(--c-surface); padding: 20px 16px; }
-  .desktop-rail nav { display: grid; gap: 4px; }
-  .desktop-rail nav button { display: flex; align-items: center; gap: 12px; min-height: 44px; border-radius: 8px; padding: 0 12px; text-align: left; font-size: 14px; }
-  .mobile-brand, .mobile-tabs { display: none; }
-  .dashboard-workspace { padding-bottom: 0; }
-  .dashboard-topbar { min-height: 64px; padding-inline: 24px; }
-  #main-content { padding: 24px; }
-}
-
-@media (min-width: 1440px) {
-  .dashboard-shell { grid-template-columns: 256px minmax(0, 1fr); }
-  #main-content { max-width: 1440px; }
+  .app-main { padding: 24px 20px; }
+  .app-navbar { padding-inline: 24px; }
 }
 
 @media (prefers-reduced-motion: reduce) {

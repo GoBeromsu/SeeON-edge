@@ -5,9 +5,6 @@ import type {
   ConnectionView,
   HeartbeatRelayErrorClass,
   HeartbeatRelayStatus,
-  RosterSyncErrorClass,
-  RosterSyncResult,
-  RosterSyncStatus,
 } from '@/shared/api/types';
 
 const CONNECTION_ERROR_CLASSES: readonly ConnectionErrorClass[] = [
@@ -17,10 +14,6 @@ const CONNECTION_ERROR_CLASSES: readonly ConnectionErrorClass[] = [
   'timeout',
   'auth',
 ];
-
-const ROSTER_SYNC_ERROR_CLASSES: readonly RosterSyncErrorClass[] = ['unreachable', 'timeout', 'auth', 'unconfigured'];
-
-const ROSTER_SYNC_STATUSES: readonly RosterSyncStatus[] = ['synced', 'pending', 'failed', 'disabled'];
 
 const HEARTBEAT_RELAY_ERROR_CLASSES: readonly HeartbeatRelayErrorClass[] = ['auth', 'timeout', 'unreachable'];
 
@@ -107,29 +100,5 @@ export function normalizeConnectionTestResult(value: unknown): ConnectionTestRes
     error_class: record.error_class,
     detail: record.detail,
     probed_url: record.probed_url,
-  };
-}
-
-export function normalizeRosterSyncResult(value: unknown): RosterSyncResult {
-  const record = isRecord(value) ? value : null;
-  if (
-    !record
-    || !isNullableEnum(record.status, ROSTER_SYNC_STATUSES) || record.status === null
-    || !('error_class' in record) || !isNullableEnum(record.error_class, ROSTER_SYNC_ERROR_CLASSES)
-    || !('detail' in record) || !isNullableString(record.detail)
-    || !('last_ok_at' in record) || !isNullableString(record.last_ok_at)
-    || !('next_retry_at' in record) || !isNullableString(record.next_retry_at)
-    || typeof record.camera_count !== 'number' || !Number.isInteger(record.camera_count)
-  ) {
-    throw new Error('Invalid roster sync response');
-  }
-
-  return {
-    status: record.status,
-    error_class: record.error_class,
-    detail: record.detail,
-    last_ok_at: record.last_ok_at,
-    next_retry_at: record.next_retry_at,
-    camera_count: record.camera_count,
   };
 }

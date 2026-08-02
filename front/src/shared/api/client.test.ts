@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { cameraDuplicateDetail, cameraMediaId, cameraProbeFailureDetail, clearClipLabelOverlay, createCamera, fetchCameraPose, fetchCameras, fetchClips, fetchStatus, fetchSystem, getApiBase, getCameraSnapshotUrl, getCameraStreamUrl, labelClip, loginDashboard, logoutDashboard, setCameraPose, testCamera, updateCamera, updateCameraDecodeBackend } from '@/shared/api/client';
+import { cameraDuplicateDetail, cameraProbeFailureDetail, createCamera, fetchCameraOverlay, fetchCameras, fetchClips, fetchStatus, fetchSystem, getApiBase, getCameraSnapshotUrl, getCameraStreamUrl, loginDashboard, logoutDashboard, setCameraOverlay, testCamera, updateCamera, updateCameraDecodeBackend } from '@/shared/api/client';
 import { HttpError } from '@/shared/api/http';
 
 function clipManifest(overrides: Record<string, unknown> = {}): Record<string, unknown> {
@@ -13,13 +13,12 @@ function clipManifest(overrides: Record<string, unknown> = {}): Record<string, u
 function cameraResponse(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     id: 'cam-1', label: '301호', rtsp_url_masked: 'rtsp://***@redacted-camera/stream',
-    space_id: null, backend_camera_id: null, mapping_pending: false, status: 'online',
-    decode_backend: null, created_at: null, space_name: null, floor_name: null, ...overrides,
+    mapping_pending: false, status: 'online',
+    decode_backend: null, created_at: null, floor_name: null, ...overrides,
   };
 }
 
 afterEach(() => {
-  clearClipLabelOverlay();
   vi.unstubAllEnvs();
   vi.restoreAllMocks();
 });
@@ -44,16 +43,20 @@ describe('api client contracts', () => {
   it('keeps valid empty list envelopes as successful empty data', async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ registry_version: 0, cameras: [] }) })
-      .mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ cameras: {}, runtime: { facilities: {} } }) })
+      .mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ cameras: {}, runtime: { cameras: {} } }) })
       .mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ clips: [] }) });
     vi.stubGlobal('fetch', fetchMock);
 
     await expect(fetchCameras()).resolves.toEqual({ registry_version: 0, cameras: [] });
-    await expect(fetchStatus()).resolves.toEqual({ cameras: {}, stale_after_sec: null, runtime: { facilities: {}, stale_after_sec: null } });
+    await expect(fetchStatus()).resolves.toEqual({
+      cameras: {},
+      stale_after_sec: null,
+      runtime: { cameras: {}, worker: null, device: null, clip_recorder: null, stale_after_sec: null },
+    });
     await expect(fetchClips()).resolves.toEqual([]);
   });
 
-  it('serializes camera create without a user-entered id or space_id', async () => {
+  it('serializes camera create and patch without a user-entered id', async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
       status: 200,
@@ -62,7 +65,7 @@ describe('api client contracts', () => {
     vi.stubGlobal('fetch', fetchMock);
 
     await createCamera({ label: ' 301호 ', rtsp_url: ' rtsp://camera/stream ' });
-    await updateCamera('cam-1', { label: ' 301호 A ', rtsp_url: ' rtsp://camera/a ', space_id: ' space-302 ' });
+    await updateCamera('cam-1', { label: ' 301호 A ', rtsp_url: ' rtsp://camera/a ' });
 
     expect(fetchMock).toHaveBeenNthCalledWith(1, '/api/v1/cameras', expect.objectContaining({
       method: 'POST',
@@ -70,7 +73,7 @@ describe('api client contracts', () => {
     }));
     expect(fetchMock).toHaveBeenNthCalledWith(2, '/api/v1/cameras/cam-1', expect.objectContaining({
       method: 'PATCH',
-      body: JSON.stringify({ label: '301호 A', rtsp_url: 'rtsp://camera/a', space_id: 'space-302' }),
+      body: JSON.stringify({ label: '301호 A', rtsp_url: 'rtsp://camera/a' }),
     }));
   });
 
@@ -196,44 +199,44 @@ describe('api client contracts', () => {
     expect(fetchMock).toHaveBeenCalledWith('/api/v1/cameras/cam-1/test', expect.objectContaining({ method: 'POST' }));
   });
 
-  it('fetches the current per-camera pose-overlay state', async () => {
+  it('fetches the current per-camera overlay mode', async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
       status: 200,
-      json: async () => ({ show_pose: true }),
+      json: async () => ({ mode: 'fall' }),
     });
     vi.stubGlobal('fetch', fetchMock);
 
-    await expect(fetchCameraPose('cam/1')).resolves.toBe(true);
+    await expect(fetchCameraOverlay('cam/1')).resolves.toBe('fall');
 
     expect(fetchMock).toHaveBeenCalledWith('/api/v1/streams/cam%2F1/pose', expect.objectContaining({ credentials: 'same-origin' }));
     expect(fetchMock.mock.calls[0]?.[1]?.method).toBeUndefined();
   });
 
-  it('posts the requested pose-overlay state and returns the confirmed value', async () => {
+  it('posts the requested overlay mode and returns the confirmed value', async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
       status: 200,
-      json: async () => ({ show_pose: false }),
+      json: async () => ({ mode: 'none' }),
     });
     vi.stubGlobal('fetch', fetchMock);
 
-    await expect(setCameraPose('cam-1', false)).resolves.toBe(false);
+    await expect(setCameraOverlay('cam-1', 'none')).resolves.toBe('none');
 
     expect(fetchMock).toHaveBeenCalledWith('/api/v1/streams/cam-1/pose', expect.objectContaining({
       method: 'POST',
-      body: JSON.stringify({ show_pose: false }),
+      body: JSON.stringify({ mode: 'none' }),
     }));
   });
 
-  it('rejects a contract-invalid pose-overlay response', async () => {
+  it('rejects a contract-invalid overlay response', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
       ok: true,
       status: 200,
-      json: async () => ({ show_pose: 'yes' }),
+      json: async () => ({ mode: 'yes' }),
     }));
 
-    await expect(fetchCameraPose('cam-1')).rejects.toThrow('Invalid pose response');
+    await expect(fetchCameraOverlay('cam-1')).rejects.toThrow('Invalid overlay response');
   });
 
   it('normalizes clip video URLs without embedding credentials in the query string', async () => {
@@ -265,17 +268,11 @@ describe('api client contracts', () => {
   });
 
   it('builds the real ml-api camera stream URL without a credential query', () => {
-
     expect(getCameraStreamUrl('cam/1')).toBe('/api/v1/streams/cam%2F1');
   });
 
-  it('keeps local camera identity separate from encoded backend media URLs', () => {
-    const camera = { id: 'local/cam', backend_camera_id: 'worker/cam' };
-
-    expect(cameraMediaId(camera)).toBe('worker/cam');
-    expect(getCameraSnapshotUrl(cameraMediaId(camera), 'refresh &=1')).toBe('/api/v1/streams/worker%2Fcam/snapshot?refresh=refresh%20%26%3D1');
-    expect(getCameraStreamUrl(cameraMediaId(camera))).toBe('/api/v1/streams/worker%2Fcam');
-    expect(camera.id).toBe('local/cam');
+  it('builds a camera snapshot URL without a credential query', () => {
+    expect(getCameraSnapshotUrl('cam/1', 'refresh &=1')).toBe('/api/v1/streams/cam%2F1/snapshot?refresh=refresh%20%26%3D1');
   });
 
   it('normalizes the real ml-api clip manifest shape for bed-exit playback', async () => {
@@ -327,42 +324,5 @@ describe('api client contracts', () => {
       body: JSON.stringify({ decode_backend: 'nvdec' }),
     }));
     expect(updated.decode_backend).toBe('nvdec');
-  });
-
-  it('preserves clip metadata and reapplies a confirmed label overlay across polling', async () => {
-    const manifest = clipManifest({ camera_id: 'worker-1', video_error: 'encoder failed' });
-    const fetchMock = vi.fn()
-      .mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ clips: [manifest] }) })
-      .mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ clip_id: 'clip-1', label: 'TRUE_POSITIVE', reviewer: 'operator', reviewed_at: '2026-07-07T00:00:00Z' }) })
-      .mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ clips: [manifest] }) });
-    vi.stubGlobal('fetch', fetchMock);
-
-    const original = (await fetchClips())[0]!;
-    const labelled = await labelClip(original, 'TRUE_POSITIVE');
-    const polled = (await fetchClips())[0]!;
-
-    expect(labelled).toEqual(expect.objectContaining({
-      id: 'clip-1', camera_id: 'worker-1', event_type: 'fall', created_at: '2026-07-06T00:00:00Z',
-      video_available: false, video_error: '저장된 영상을 사용할 수 없습니다.', label: 'TRUE_POSITIVE', reviewer: 'operator',
-      reviewed_at: '2026-07-07T00:00:00Z', reviewState: 'confirmed',
-    }));
-    expect(polled).toEqual(labelled);
-  });
-
-  it('preserves metadata for a partial explicit null-label response and a reload returns to unknown', async () => {
-    const manifest = clipManifest({ clip_id: 'clip-null', camera_id: 'cam-a', event_type: 'bed-exit' });
-    const fetchMock = vi.fn()
-      .mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ clips: [manifest] }) })
-      .mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ clip_id: 'clip-null', label: null, reviewer: 'operator', reviewed_at: '2026-07-07T00:00:00Z' }) })
-      .mockResolvedValue({ ok: true, status: 200, json: async () => ({ clips: [manifest] }) });
-    vi.stubGlobal('fetch', fetchMock);
-
-    const original = (await fetchClips())[0]!;
-    const cleared = await labelClip(original, 'UNREVIEWED');
-    expect(cleared).toMatchObject({ camera_id: 'cam-a', event_type: 'bed-exit', label: null, reviewer: 'operator', reviewState: 'confirmed' });
-    expect((await fetchClips())[0]).toMatchObject({ label: null, reviewer: 'operator', reviewState: 'confirmed' });
-
-    clearClipLabelOverlay();
-    expect((await fetchClips())[0]).toMatchObject({ label: null, reviewer: null, reviewed_at: null, reviewState: 'unknown' });
   });
 });

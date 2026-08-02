@@ -1,15 +1,13 @@
-export const DASHBOARD_QUERY_KEYS = ['page', 'floor', 'room', 'camera', 'event', 'clip', 'wallPage'] as const;
-export const DASHBOARD_PAGES = ['operations', 'events', 'cameras', 'system'] as const;
+export const DASHBOARD_QUERY_KEYS = ['page', 'floor', 'camera', 'event', 'clip'] as const;
+export const DASHBOARD_PAGES = ['operations', 'events', 'settings'] as const;
 
 export type DashboardPage = (typeof DASHBOARD_PAGES)[number];
 export type DashboardLocation = {
   page: DashboardPage;
   floor?: string;
-  room?: string;
   camera?: string;
   event?: string;
   clip?: string;
-  wallPage?: string;
 };
 
 type Resource<T> = {
@@ -19,14 +17,11 @@ type Resource<T> = {
 
 type LocationCamera = {
   id: string;
-  backend_camera_id?: string | null;
   floor_name?: string | null;
-  space_id?: string | null;
 };
 
 type LocationClip = {
   id: string;
-  camera_id: string | null;
   event_type: string;
 };
 
@@ -43,9 +38,6 @@ export type CanonicalDashboardLocation = {
 
 type RestorationPhase = 'syntax' | 'data' | null;
 
-const MAX_WALL_PAGE = 9_007_199_254_740_991n;
-const WALL_PAGE_SIZE = 12n;
-
 function lastValue(params: URLSearchParams, key: string): string | undefined {
   const values = params.getAll(key);
   const value = values.at(-1);
@@ -58,75 +50,44 @@ function parseSyntax(search: string): DashboardLocation {
   const page = DASHBOARD_PAGES.includes(rawPage as DashboardPage) ? rawPage as DashboardPage : 'operations';
   const location: DashboardLocation = { page };
 
-  if (page === 'operations' || page === 'events') {
-    for (const key of ['floor', 'room', 'camera'] as const) {
+  if (page === 'operations') {
+    for (const key of ['floor', 'camera'] as const) {
       const value = lastValue(params, key);
       if (value !== undefined) location[key] = value;
     }
   }
 
-  if (page === 'operations') {
-    const wallPage = lastValue(params, 'wallPage');
-    location.wallPage = wallPage && /^[1-9][0-9]*$/.test(wallPage) && BigInt(wallPage) <= MAX_WALL_PAGE ? wallPage : '1';
-  }
-
   if (page === 'events') {
-    const event = lastValue(params, 'event');
-    const clip = lastValue(params, 'clip');
-    if (event !== undefined) location.event = event;
-    if (clip !== undefined) location.clip = clip;
+    for (const key of ['event', 'clip'] as const) {
+      const value = lastValue(params, key);
+      if (value !== undefined) location[key] = value;
+    }
   }
 
   return location;
 }
 
-function cameraMatchesLocation(camera: LocationCamera, location: DashboardLocation): boolean {
-  return (!location.floor || camera.floor_name === location.floor)
-    && (!location.room || camera.space_id === location.room);
-}
-
-function validateCameraFilters(location: DashboardLocation, cameras: readonly LocationCamera[]): void {
+function validateOperations(location: DashboardLocation, cameras: readonly LocationCamera[]): void {
   if (location.floor && !cameras.some((camera) => camera.floor_name === location.floor)) {
     delete location.floor;
-    delete location.room;
   }
-  if (location.room && !cameras.some((camera) => camera.space_id === location.room && (!location.floor || camera.floor_name === location.floor))) {
-    delete location.room;
-  }
-  if (location.camera && !cameras.some((camera) => camera.id === location.camera && cameraMatchesLocation(camera, location))) {
-    delete location.camera;
+  if (location.camera) {
+    const match = cameras.find((camera) => camera.id === location.camera);
+    if (!match || (location.floor && match.floor_name !== location.floor)) {
+      delete location.camera;
+    }
   }
 }
 
-function resolveClipCamera(clip: LocationClip, cameras: readonly LocationCamera[]): LocationCamera | undefined {
-  const local = cameras.find((camera) => camera.id === clip.camera_id);
-  if (local) return local;
-  const aliases = cameras.filter((camera) => camera.backend_camera_id !== null && camera.backend_camera_id === clip.camera_id);
-  return aliases.length === 1 ? aliases[0] : undefined;
-}
-
-function validateOperations(location: DashboardLocation, cameras: readonly LocationCamera[]): void {
-  validateCameraFilters(location, cameras);
-
-  const visibleCount = BigInt(cameras.filter((camera) => cameraMatchesLocation(camera, location)).length);
-  const lastPage = visibleCount === 0n ? 1n : (visibleCount + WALL_PAGE_SIZE - 1n) / WALL_PAGE_SIZE;
-  if (BigInt(location.wallPage ?? '1') > lastPage) location.wallPage = lastPage.toString();
-}
-
-function validateEvents(location: DashboardLocation, cameras: readonly LocationCamera[], clips: readonly LocationClip[]): void {
-  validateCameraFilters(location, cameras);
-
-  const matchesFilters = (clip: LocationClip): boolean => {
-    const camera = resolveClipCamera(clip, cameras);
-    if (!camera) return !location.floor && !location.room && !location.camera;
-    return cameraMatchesLocation(camera, location) && (!location.camera || camera.id === location.camera);
-  };
-  if (location.event && !clips.some((clip) => matchesFilters(clip) && clip.event_type === location.event)) {
+function validateEvents(location: DashboardLocation, clips: readonly LocationClip[]): void {
+  if (location.event && !clips.some((clip) => clip.event_type === location.event)) {
     delete location.event;
   }
   if (location.clip) {
-    const selected = clips.find((clip) => clip.id === location.clip);
-    if (!selected || !matchesFilters(selected) || (location.event && selected.event_type !== location.event)) delete location.clip;
+    const match = clips.find((clip) => clip.id === location.clip);
+    if (!match || (location.event && match.event_type !== location.event)) {
+      delete location.clip;
+    }
   }
 }
 
@@ -144,8 +105,8 @@ export function canonicalizeDashboardLocation(search: string, data: DashboardLoc
   if (location.page === 'operations' && data.cameras?.status === 'success') {
     validateOperations(location, data.cameras.data ?? []);
   }
-  if (location.page === 'events' && data.cameras?.status === 'success' && data.clips?.status === 'success') {
-    validateEvents(location, data.cameras.data ?? [], data.clips.data ?? []);
+  if (location.page === 'events' && data.clips?.status === 'success') {
+    validateEvents(location, data.clips.data ?? []);
   }
   const canonicalSearch = serializeDashboardLocation(location);
   return { location, search: canonicalSearch, changed: canonicalSearch !== search };
@@ -157,7 +118,7 @@ function needsDataValidation(location: DashboardLocation): boolean {
 
 function hasRelevantData(location: DashboardLocation, data: DashboardLocationData | undefined): boolean {
   if (location.page === 'operations') return data?.cameras?.status === 'success';
-  if (location.page === 'events') return data?.cameras?.status === 'success' && data.clips?.status === 'success';
+  if (location.page === 'events') return data?.clips?.status === 'success';
   return false;
 }
 

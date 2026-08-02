@@ -5,13 +5,10 @@ const validCameraResponse = {
   id: 'cam-1',
   label: '301호',
   rtsp_url_masked: 'rtsp://***@redacted-camera/stream',
-  space_id: null,
-  backend_camera_id: null,
   mapping_pending: false,
   status: 'online',
   decode_backend: null,
   created_at: null,
-  space_name: null,
   floor_name: null,
 };
 
@@ -212,22 +209,19 @@ describe('camera roster normalization', () => {
     ['malformed masked URL', { ...validCameraResponse, rtsp_url_masked: null }],
     ['unknown status', { ...validCameraResponse, status: 'stale' }],
     ['malformed mapping flag', { ...validCameraResponse, mapping_pending: 'false' }],
-    ['malformed nullable space', { ...validCameraResponse, space_id: 301 }],
+    ['malformed nullable floor', { ...validCameraResponse, floor_name: 301 }],
   ])('rejects an entry with a %s instead of dropping or defaulting it', (_case, camera) => {
     expect(() => normalizeCameraRegistry({ registry_version: 1, cameras: [validCameraResponse, camera] }))
       .toThrow('Invalid camera registry response');
   });
 
-  it('preserves nullable room metadata and does not synthesize created_at', () => {
+  it('preserves nullable floor metadata and does not synthesize created_at', () => {
     const camera = normalizeCamera({
       id: 'cam-1',
       rtsp_url_masked: 'rtsp://***',
-      space_id: 'space-301',
-      spaceName: '301호',
       floorName: '3층',
     });
 
-    expect(camera?.space_name).toBe('301호');
     expect(camera?.floor_name).toBe('3층');
     expect(camera?.created_at).toBeNull();
   });
@@ -237,7 +231,7 @@ describe('camera mutation response normalization', () => {
   it('normalizes a valid backend CameraResponse and preserves nullable leaves', () => {
     expect(normalizeCameraResponse(validCameraResponse)).toMatchObject({
       id: 'cam-1', label: '301호', rtsp_url_masked: 'rtsp://***@redacted-camera/stream',
-      space_id: null, backend_camera_id: null, status: 'online', decode_backend: null, created_at: null,
+      status: 'online', decode_backend: null, created_at: null,
     });
   });
 
@@ -275,26 +269,26 @@ describe('clip list contract normalization', () => {
 
 describe('status normalization', () => {
   it('accepts the backend status envelope when both collections are explicitly empty', () => {
-    expect(normalizeStatusSnapshot({ cameras: {}, runtime: { facilities: {} } })).toEqual({
+    expect(normalizeStatusSnapshot({ cameras: {}, runtime: { cameras: {} } })).toEqual({
       cameras: {},
       stale_after_sec: null,
-      runtime: { facilities: {}, stale_after_sec: null },
+      runtime: { cameras: {}, worker: null, device: null, clip_recorder: null, stale_after_sec: null },
     });
   });
 
   it.each([
     ['null', null],
-    ['missing cameras', { runtime: { facilities: {} } }],
-    ['wrong cameras type', { cameras: [], runtime: { facilities: {} } }],
+    ['missing cameras', { runtime: { cameras: {} } }],
+    ['wrong cameras type', { cameras: [], runtime: { cameras: {} } }],
     ['missing runtime', { cameras: {} }],
     ['wrong runtime type', { cameras: {}, runtime: null }],
-    ['missing runtime facilities', { cameras: {}, runtime: {} }],
-    ['wrong runtime facilities type', { cameras: {}, runtime: { facilities: [] } }],
+    ['missing runtime cameras', { cameras: {}, runtime: {} }],
+    ['wrong runtime cameras type', { cameras: {}, runtime: { cameras: [] } }],
   ])('rejects a %s status envelope', (_case, payload) => {
     expect(() => normalizeStatusSnapshot(payload)).toThrow('Invalid status response');
   });
 
-  it('preserves valid heartbeat and runtime facility fields without converting epoch seconds', () => {
+  it('preserves valid heartbeat and per-camera runtime diagnostics without converting epoch seconds', () => {
     expect(normalizeStatusSnapshot({
       cameras: {
         'worker/cam': {
@@ -308,20 +302,17 @@ describe('status normalization', () => {
       },
       stale_after_sec: 90,
       runtime: {
-        facilities: {
-          'facility-a': {
-            facility_id: 'facility-a',
-            generation: 2,
-            seq: 8,
-            received_at: 1_720_000_001,
-            stale: false,
-            cameras: [{ camera_id: 'worker/cam', measured_fps: 27.5, decode: { requested: 'auto', selected: 'nvdec', fallback_count: 1, last_reason: 'open_failed', updated_at_sec: 1_720_000_000 } }],
-            clip_recorder: { available: true, finalized_clips: 4 },
-            gpu: { nvml_available: true, cuda_context_ok: true, driver_version: '555.42', device_name: 'NVIDIA Test GPU', captured_at_sec: 1_720_000_000 },
-            worker: { alive: true, pid: 1234, started_at_sec: 1_719_999_000 },
+        cameras: {
+          'worker/cam': {
+            camera_id: 'worker/cam',
+            measured_fps: 27.5,
+            decode: { requested: 'auto', selected: 'nvdec', fallback_count: 1, last_reason: 'open_failed', updated_at_sec: 1_720_000_000 },
             latency: { first_attempt_samples: 3, max_sec: 0.75, since_sec: 1_720_000_000 },
           },
         },
+        worker: { alive: true, pid: 1234, started_at_sec: 1_719_999_000 },
+        device: { backend: 'nvdec', available: true, device_name: 'NVIDIA Test GPU', captured_at_sec: 1_720_000_000 },
+        clip_recorder: { available: true, finalized_clips: 4 },
         stale_after_sec: 15,
       },
     })).toEqual({
@@ -337,46 +328,38 @@ describe('status normalization', () => {
       },
       stale_after_sec: 90,
       runtime: {
-        facilities: {
-          'facility-a': {
-            facility_id: 'facility-a',
-            generation: 2,
-            seq: 8,
-            received_at: 1_720_000_001,
-            stale: false,
-            cameras: [{ camera_id: 'worker/cam', measured_fps: 27.5, decode: { requested: 'auto', selected: 'nvdec', fallback_count: 1, last_reason: 'open_failed', updated_at_sec: 1_720_000_000 } }],
-            clip_recorder: {
-              available: true, dropped_frames: null, dropped_events: null, failed_writes: null,
-              finalized_clips: 4, video_unavailable_clips: null, active_clips: null, encoder: null,
-            },
-            gpu: { nvml_available: true, cuda_context_ok: true, driver_version: '555.42', device_name: 'NVIDIA Test GPU', captured_at_sec: 1_720_000_000 },
-            worker: { alive: true, pid: 1234, started_at_sec: 1_719_999_000 },
+        cameras: {
+          'worker/cam': {
+            camera_id: 'worker/cam',
+            measured_fps: 27.5,
+            decode: { requested: 'auto', selected: 'nvdec', fallback_count: 1, last_reason: 'open_failed', updated_at_sec: 1_720_000_000 },
             latency: { first_attempt_samples: 3, max_sec: 0.75, since_sec: 1_720_000_000 },
           },
+        },
+        worker: { alive: true, pid: 1234, started_at_sec: 1_719_999_000 },
+        device: { backend: 'nvdec', available: true, device_name: 'NVIDIA Test GPU', captured_at_sec: 1_720_000_000 },
+        clip_recorder: {
+          available: true, dropped_frames: null, dropped_events: null, failed_writes: null,
+          finalized_clips: 4, video_unavailable_clips: null, active_clips: null, encoder: null,
         },
         stale_after_sec: 15,
       },
     });
   });
+
   it('keeps null and partial runtime diagnostics available without inventing values', () => {
     expect(normalizeStatusSnapshot({
       cameras: {},
       runtime: {
-        facilities: {
-          legacy: {
-            facility_id: 'legacy',
-            cameras: [{ camera_id: 'cam-1', measured_fps: 'fast' }],
-            gpu: null,
-            worker: { alive: 'yes', pid: 1.5 },
-            latency: { max_sec: 'slow' },
-          },
-        },
+        cameras: { 'cam-1': { camera_id: 'cam-1', measured_fps: 'fast' } },
+        device: null,
+        worker: { alive: 'yes', pid: 1.5 },
+        clip_recorder: { available: 'yes' },
       },
-    }).runtime.facilities.legacy).toMatchObject({
-      gpu: null,
+    }).runtime).toMatchObject({
+      device: null,
       worker: { alive: null, pid: null, started_at_sec: null },
-      latency: { first_attempt_samples: null, max_sec: null, since_sec: null },
-      cameras: [{ camera_id: 'cam-1', measured_fps: null }],
+      cameras: { 'cam-1': { camera_id: 'cam-1', measured_fps: null, latency: null } },
     });
   });
 
@@ -387,7 +370,7 @@ describe('status normalization', () => {
         malformed: { status: 'online' },
         never: { camera_id: 'never', status: 'never_seen' },
       },
-      runtime: { facilities: { broken: { facility_id: 'broken', stale: 'yes', cameras: 'nope' } } },
+      runtime: { cameras: { broken: { measured_fps: 'nope' } }, worker: null, device: null, clip_recorder: null },
     })).toEqual({
       cameras: {
         partial: { camera_id: 'partial', facility_id: null, status: 'stale', last_heartbeat_at: null, age_sec: null, config_version: null },
@@ -395,22 +378,12 @@ describe('status normalization', () => {
       },
       stale_after_sec: null,
       runtime: {
-        facilities: {
-          broken: { facility_id: 'broken', generation: null, seq: null, received_at: null, stale: null, cameras: [], clip_recorder: null },
-        },
+        cameras: {},
+        worker: null,
+        device: null,
+        clip_recorder: null,
         stale_after_sec: null,
       },
-    });
-  });
-});
-
-describe('clip review truth', () => {
-  it('normalizes every fresh server clip to unknown even if unsupported label fields appear', () => {
-    expect(normalizeClip({ id: 'clip-1', label: 'TRUE_POSITIVE' })).toMatchObject({
-      label: null,
-      reviewer: null,
-      reviewed_at: null,
-      reviewState: 'unknown',
     });
   });
 });

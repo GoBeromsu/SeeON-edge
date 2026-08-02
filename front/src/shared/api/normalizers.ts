@@ -8,7 +8,6 @@ export { normalizeClip, normalizeClipsResponse } from '@/shared/api/clipNormaliz
 export {
   normalizeConnectionTestResult,
   normalizeConnectionView,
-  normalizeRosterSyncResult,
 } from '@/shared/api/connectionNormalizer';
 export { isRecord } from '@/shared/api/normalizerFields';
 export { normalizeStatusSnapshot } from '@/shared/api/statusNormalizer';

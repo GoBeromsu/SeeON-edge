@@ -1,42 +1,101 @@
 /*
- * Session-ending action styling, scoped exclusively to DashboardShell.
- * Kept in its own file (imported after shell-auth-dialog.css) rather than added to
- * shell-auth-dialog.css because that file also backs AccessibleDialog/AuthGate surfaces
- * shared with camera registration/deletion dialogs owned by other lanes.
+ * NavBar-scoped styling (nav chips, account icon, logout), kept in its own file
+ * (imported after shell-auth-dialog.css) rather than merged there because that file
+ * also backs AccessibleDialog/AuthGate surfaces shared with dialogs owned by other lanes.
  */
 
-.shell-session-group {
+.app-nav {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 4px;
 }
 
-.shell-divider {
-  width: 1px;
-  height: 24px;
-  background: var(--c-border);
-}
-
-.shell-actions button.logout-action {
+.app-nav button {
   display: inline-flex;
   align-items: center;
-  min-height: 44px;
+  gap: 6px;
+  height: 36px;
+  min-height: 36px;
   border: 0;
-  border-radius: 8px;
-  padding: 8px 10px;
+  border-radius: var(--radius-control);
+  padding-inline: 12px;
   background: transparent;
-  color: var(--c-ink-soft);
+  color: var(--muted-foreground);
+  font-size: 14px;
   font-weight: 500;
 }
 
-.shell-actions button.logout-action:hover,
-.shell-actions button.logout-action:focus-visible {
-  background: var(--c-surface-2);
-  color: var(--c-ink);
+.app-nav button:hover,
+.app-nav button:focus-visible {
+  color: var(--foreground);
 }
 
-.shell-actions button.logout-action::after {
-  content: ' [\2192';
-  margin-left: 4px;
-  font-weight: 700;
+.app-nav button[aria-current="page"] {
+  background: var(--muted);
+  color: var(--foreground);
+  font-weight: 600;
+}
+
+.nav-mark {
+  display: inline-flex;
+  width: 18px;
+  height: 18px;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+}
+
+.nav-mark svg {
+  display: block;
+  width: 18px;
+  height: 18px;
+}
+
+.app-navbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+}
+
+.icon-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  min-height: 36px;
+  border: 0;
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: var(--foreground);
+}
+
+.icon-button svg {
+  width: 20px;
+  height: 20px;
+}
+
+.icon-button:hover,
+.icon-button:focus-visible {
+  background: var(--muted);
+}
+
+.logout-button {
+  display: inline-flex;
+  align-items: center;
+  height: 36px;
+  min-height: 36px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  padding-inline: 14px;
+  background: var(--card);
+  color: var(--foreground);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.logout-button:hover,
+.logout-button:focus-visible {
+  background: var(--muted);
 }

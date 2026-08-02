@@ -1,13 +1,9 @@
-.event-filter-control {
-  min-height: 44px;
-}
-
 .event-media-frame {
   aspect-ratio: 16 / 9;
   overflow: hidden;
-  border-radius: 12px;
-  background: var(--c-media);
-  color: var(--c-media-ink);
+  border-radius: var(--radius-card);
+  background: var(--media-bg);
+  color: var(--media-label-fg);
 }
 
 .event-media-unavailable {
@@ -15,17 +11,17 @@
   height: 100%;
   align-items: center;
   justify-content: center;
-  color: var(--c-media-text);
+  color: var(--muted-foreground);
 }
 
 .brand-action {
-  background: var(--c-brand);
-  color: var(--c-action-foreground);
+  background: var(--primary);
+  color: var(--primary-foreground);
 }
 
 .media-status-overlay {
-  background: var(--c-media-overlay);
-  color: var(--c-media-overlay-foreground);
+  background: var(--media-label-bg);
+  color: var(--media-label-fg);
 }
 
 .tabular-nums,
@@ -35,6 +31,44 @@ time,
 }
 
 :focus-visible {
-  outline: 2px solid var(--c-brand);
+  outline: 2px solid var(--primary);
   outline-offset: 2px;
+}
+
+.toast-stack {
+  position: fixed;
+  z-index: 70;
+  right: 16px;
+  bottom: 16px;
+  display: flex;
+  flex-direction: column-reverse;
+  gap: 8px;
+  pointer-events: none;
+}
+
+.toast {
+  pointer-events: auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 200px;
+  max-width: min(360px, calc(100vw - 32px));
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  background: var(--card);
+  color: var(--foreground);
+  padding: 12px 16px;
+  font-size: 14px;
+  font-weight: 500;
+  box-shadow: var(--modal-shadow);
+}
+
+.toast-success {
+  border-color: var(--status-approved-fg);
+  color: var(--status-approved-fg);
+}
+
+.toast-error {
+  border-color: var(--status-rejected-fg);
+  color: var(--status-rejected-fg);
 }

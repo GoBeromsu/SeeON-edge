@@ -1,7 +1,8 @@
 import { createContext, FormEvent, ReactNode, useContext, useEffect, useRef, useState } from 'react';
 import { fetchDashboardSession, loginDashboard, logoutDashboard } from '@/shared/api/client';
 import { HttpError } from '@/shared/api/http';
-import { SeniorAiLabBrand } from '@/shared/ui/SeniorAiLabBrand';
+
+const BRAND_TEXT = 'Senior AI Lab Edge';
 
 type AuthSession = {
   logout: () => Promise<void>;
@@ -27,7 +28,7 @@ function AuthShell({ busy = false, children }: { busy?: boolean; children: React
     <main className="auth-page" aria-busy={busy || undefined}>
       <section className="auth-card">
         <div className="auth-card-header">
-          <SeniorAiLabBrand compact />
+          <h1 id="auth-title">{BRAND_TEXT}</h1>
         </div>
         <div className="auth-card-body">{children}</div>
       </section>
@@ -105,7 +106,7 @@ export function AuthGate({ children }: { children: ReactNode }): JSX.Element {
     setPassword('');
     setUsername(null);
     setSessionState('unauthorized');
-    window.history.replaceState(null, '', `${window.location.pathname}?page=operations&wallPage=1${window.location.hash}`);
+    window.history.replaceState(null, '', `${window.location.pathname}?page=operations${window.location.hash}`);
   }
 
   if (sessionState === 'authorized') {
@@ -128,7 +129,7 @@ export function AuthGate({ children }: { children: ReactNode }): JSX.Element {
   if (sessionState === 'unavailable') {
     return (
       <AuthShell>
-        <h1>로그인 서비스 연결 실패</h1>
+        <p className="text-sm font-semibold text-destructive" role="alert">로그인 서비스 연결 실패</p>
         <p className="auth-status">서버 상태를 확인한 뒤 다시 시도해 주세요.</p>
         <button
           type="button"
@@ -146,8 +147,7 @@ export function AuthGate({ children }: { children: ReactNode }): JSX.Element {
 
   return (
     <AuthShell>
-      <form onSubmit={(event) => void handleSubmit(event)} noValidate aria-labelledby="login-title">
-        <h1 id="login-title">로그인</h1>
+      <form onSubmit={(event) => void handleSubmit(event)} noValidate aria-labelledby="auth-title">
         <label htmlFor="login-id">
           아이디
           <input

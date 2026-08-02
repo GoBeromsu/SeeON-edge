@@ -7,10 +7,10 @@ import {
 } from '@/shared/api/normalizerFields';
 import type {
   CameraHeartbeat,
-  RuntimeCamera,
+  RuntimeCameraDiagnostics,
   RuntimeClipRecorder,
-  RuntimeFacility,
-  RuntimeGpuDiagnostics,
+  RuntimeDecodeDiagnostics,
+  RuntimeDeviceDiagnostics,
   RuntimeLatencyDiagnostics,
   RuntimeWorkerDiagnostics,
   StatusSnapshot,
@@ -31,32 +31,44 @@ function normalizeHeartbeat(value: unknown): CameraHeartbeat | null {
   };
 }
 
-function normalizeRuntimeCamera(value: unknown): RuntimeCamera | null {
-  if (!isRecord(value)) return null;
-  const cameraId = pickString(value, ['camera_id', 'cameraId']);
-  if (!cameraId) return null;
-  const decode = isRecord(value.decode) ? value.decode : {};
+function normalizeRuntimeDecode(value: unknown): RuntimeDecodeDiagnostics {
+  const decode = isRecord(value) ? value : {};
   return {
-    camera_id: cameraId,
-    decode: {
-      requested: pickNullableString(decode, ['requested']),
-      selected: pickNullableString(decode, ['selected']),
-      fallback_count: pickNonNegativeNumber(decode, ['fallback_count', 'fallbackCount']),
-      last_reason: pickNullableString(decode, ['last_reason', 'lastReason']),
-      updated_at_sec: pickNonNegativeNumber(decode, ['updated_at_sec', 'updatedAtSec']),
-    },
-    ...(('measured_fps' in value || 'measuredFps' in value)
-      ? { measured_fps: pickNonNegativeNumber(value, ['measured_fps', 'measuredFps']) }
-      : {}),
+    requested: pickNullableString(decode, ['requested']),
+    selected: pickNullableString(decode, ['selected']),
+    fallback_count: pickNonNegativeNumber(decode, ['fallback_count', 'fallbackCount']),
+    last_reason: pickNullableString(decode, ['last_reason', 'lastReason']),
+    updated_at_sec: pickNonNegativeNumber(decode, ['updated_at_sec', 'updatedAtSec']),
   };
 }
 
-function normalizeRuntimeGpu(value: unknown): RuntimeGpuDiagnostics | null {
+function normalizeRuntimeLatency(value: unknown): RuntimeLatencyDiagnostics | null {
   if (!isRecord(value)) return null;
   return {
-    nvml_available: pickBoolean(value, ['nvml_available', 'nvmlAvailable']),
-    cuda_context_ok: pickBoolean(value, ['cuda_context_ok', 'cudaContextOk']),
-    driver_version: pickNullableString(value, ['driver_version', 'driverVersion']),
+    first_attempt_samples: pickNonNegativeNumber(value, ['first_attempt_samples', 'firstAttemptSamples']),
+    max_sec: pickNonNegativeNumber(value, ['max_sec', 'maxSec']),
+    since_sec: pickNonNegativeNumber(value, ['since_sec', 'sinceSec']),
+  };
+}
+
+function normalizeRuntimeCameraDiagnostics(value: unknown): RuntimeCameraDiagnostics | null {
+  if (!isRecord(value)) return null;
+  const cameraId = pickString(value, ['camera_id', 'cameraId']);
+  if (!cameraId) return null;
+  return {
+    camera_id: cameraId,
+    decode: normalizeRuntimeDecode(value.decode),
+    measured_fps: pickNonNegativeNumber(value, ['measured_fps', 'measuredFps']),
+    latency: normalizeRuntimeLatency(value.latency),
+  };
+}
+
+/** Device-adaptive: `backend` names whatever acceleration path is active (nvdec, opencv, cpu, ...), not CUDA-only. */
+function normalizeRuntimeDevice(value: unknown): RuntimeDeviceDiagnostics | null {
+  if (!isRecord(value)) return null;
+  return {
+    backend: pickNullableString(value, ['backend']),
+    available: pickBoolean(value, ['available']),
     device_name: pickNullableString(value, ['device_name', 'deviceName']),
     captured_at_sec: pickNonNegativeNumber(value, ['captured_at_sec', 'capturedAtSec']),
   };
@@ -69,15 +81,6 @@ function normalizeRuntimeWorker(value: unknown): RuntimeWorkerDiagnostics | null
     alive: pickBoolean(value, ['alive']),
     pid: pid !== null && Number.isInteger(pid) ? pid : null,
     started_at_sec: pickNonNegativeNumber(value, ['started_at_sec', 'startedAtSec']),
-  };
-}
-
-function normalizeRuntimeLatency(value: unknown): RuntimeLatencyDiagnostics | null {
-  if (!isRecord(value)) return null;
-  return {
-    first_attempt_samples: pickNonNegativeNumber(value, ['first_attempt_samples', 'firstAttemptSamples']),
-    max_sec: pickNonNegativeNumber(value, ['max_sec', 'maxSec']),
-    since_sec: pickNonNegativeNumber(value, ['since_sec', 'sinceSec']),
   };
 }
 
@@ -95,30 +98,12 @@ function normalizeRuntimeClipRecorder(value: unknown): RuntimeClipRecorder | nul
   };
 }
 
-function normalizeRuntimeFacility(value: unknown): RuntimeFacility | null {
-  if (!isRecord(value)) return null;
-  const facilityId = pickString(value, ['facility_id', 'facilityId']);
-  if (!facilityId) return null;
-  return {
-    facility_id: facilityId,
-    generation: pickNonNegativeNumber(value, ['generation']),
-    seq: pickNonNegativeNumber(value, ['seq']),
-    received_at: pickNonNegativeNumber(value, ['received_at', 'receivedAt']),
-    stale: pickBoolean(value, ['stale']),
-    cameras: Array.isArray(value.cameras) ? value.cameras.map(normalizeRuntimeCamera).filter((camera): camera is RuntimeCamera => camera !== null) : [],
-    clip_recorder: normalizeRuntimeClipRecorder(value.clip_recorder),
-    ...(('gpu' in value) ? { gpu: normalizeRuntimeGpu(value.gpu) } : {}),
-    ...(('worker' in value) ? { worker: normalizeRuntimeWorker(value.worker) } : {}),
-    ...(('latency' in value) ? { latency: normalizeRuntimeLatency(value.latency) } : {}),
-  };
-}
-
 export function normalizeStatusSnapshot(value: unknown): StatusSnapshot {
   const record = isRecord(value) ? value : null;
   const rawCameras = record?.cameras;
   const rawRuntime = record?.runtime;
-  const rawFacilities = isRecord(rawRuntime) ? rawRuntime.facilities : null;
-  if (!record || !isRecord(rawCameras) || !isRecord(rawRuntime) || !isRecord(rawFacilities)) {
+  const rawRuntimeCameras = isRecord(rawRuntime) ? rawRuntime.cameras : null;
+  if (!record || !isRecord(rawCameras) || !isRecord(rawRuntime) || !isRecord(rawRuntimeCameras)) {
     throw new Error('Invalid status response');
   }
   const cameras: Record<string, CameraHeartbeat> = {};
@@ -127,16 +112,20 @@ export function normalizeStatusSnapshot(value: unknown): StatusSnapshot {
     if (heartbeat) cameras[key] = heartbeat;
   });
 
-  const facilities: Record<string, RuntimeFacility> = {};
-  Object.entries(rawFacilities).forEach(([key, entry]) => {
-    const facility = normalizeRuntimeFacility(entry);
-    if (facility) facilities[key] = facility;
+  const runtimeCameras: Record<string, RuntimeCameraDiagnostics> = {};
+  Object.entries(rawRuntimeCameras).forEach(([key, entry]) => {
+    const diagnostics = normalizeRuntimeCameraDiagnostics(entry);
+    if (diagnostics) runtimeCameras[key] = diagnostics;
   });
+
   return {
     cameras,
     stale_after_sec: pickNonNegativeNumber(record, ['stale_after_sec', 'staleAfterSec']),
     runtime: {
-      facilities,
+      cameras: runtimeCameras,
+      worker: normalizeRuntimeWorker(rawRuntime.worker),
+      device: normalizeRuntimeDevice(rawRuntime.device),
+      clip_recorder: normalizeRuntimeClipRecorder(rawRuntime.clip_recorder),
       stale_after_sec: pickNonNegativeNumber(rawRuntime, ['stale_after_sec', 'staleAfterSec']),
     },
   };

@@ -4,34 +4,46 @@ export default {
   theme: {
     extend: {
       colors: {
-        // front(front/tailwind.config.js) 정렬 토큰 — CSS 변수 기반
-        bg: 'var(--c-bg)',
-        surface: 'var(--c-surface)',
-        surface2: 'var(--c-surface-2)',
-        border: 'var(--c-border)',
-        ink: {
-          DEFAULT: 'var(--c-ink)',
-          soft: 'var(--c-ink-soft)',
-          faint: 'var(--c-ink-faint)',
+        // front(front/tailwind.config.js) 정렬 토큰 — CSS 변수 기반. 이름 체계는
+        // front/design-handoff/README.md의 디자인 토큰 스펙을 따른다.
+        background: 'var(--background)',
+        foreground: 'var(--foreground)',
+        card: {
+          DEFAULT: 'var(--card)',
+          foreground: 'var(--card-foreground)',
         },
-        brand: {
-          DEFAULT: 'var(--c-brand)',
-          soft: 'var(--c-brand-soft)',
+        border: 'var(--border)',
+        input: 'var(--input)',
+        muted: {
+          DEFAULT: 'var(--muted)',
+          foreground: 'var(--muted-foreground)',
         },
-        teal: 'var(--c-teal)',
+        primary: {
+          DEFAULT: 'var(--primary)',
+          foreground: 'var(--primary-foreground)',
+        },
+        destructive: {
+          DEFAULT: 'var(--destructive)',
+          foreground: 'var(--destructive-foreground)',
+        },
+        teal: 'var(--overlay-teal)',
         status: {
-          stable: 'var(--c-stable)',
-          stableBg: 'var(--c-stable-bg)',
-          caution: 'var(--c-caution)',
-          cautionBg: 'var(--c-caution-bg)',
-          danger: 'var(--c-danger)',
-          dangerBg: 'var(--c-danger-bg)',
-          check: 'var(--c-check)',
-          checkBg: 'var(--c-check-bg)',
+          approvedBg: 'var(--status-approved-bg)',
+          approvedFg: 'var(--status-approved-fg)',
+          rejectedBg: 'var(--status-rejected-bg)',
+          rejectedFg: 'var(--status-rejected-fg)',
+          pendingBg: 'var(--status-pending-bg)',
+          pendingFg: 'var(--status-pending-fg)',
+          closedBg: 'var(--status-closed-bg)',
+          closedFg: 'var(--status-closed-fg)',
         },
       },
       borderRadius: {
-        '4xl': '2rem',
+        card: 'var(--radius-card)',
+        control: 'var(--radius-control)',
+      },
+      boxShadow: {
+        modal: 'var(--modal-shadow)',
       },
     },
   },
