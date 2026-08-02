@@ -23,6 +23,22 @@ from worker.runtime.config import JsonObject, WorkerConfigLkgStore, load_worker_
 AUTH = {"Authorization": "Bearer relay-token"}
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
+# Dashboard auth now always resolves to a session store (persisted file > env
+# > the built-in admin/admin default, see backend/app/shared/dashboard_auth.py).
+# A worker relay bearer token is still valid for the dedicated worker-config
+# and relay/config routes (a separate auth mechanism, see _authorize_worker in
+# backend/app/features/cameras/router.py), but every other /cameras route now
+# requires a real dashboard session cookie -- these tests log in as the
+# zero-config default before touching any dashboard-only route.
+
+
+def _login(client: TestClient) -> None:
+    response = client.post(
+        "/api/v1/auth/session",
+        json={"username": "admin", "password": "admin"},
+    )
+    assert response.status_code == 204
+
 
 class CapturedBackendCall(TypedDict):
     url: str
@@ -114,6 +130,7 @@ def test_camera_registry_crud_masks_rtsp_versions_and_worker_config_auth(
     monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
 
     with TestClient(create_app(lifespan=no_lifespan)) as client:
+        _login(client)
         created = client.post(
             "/api/v1/cameras",
             headers=AUTH,
@@ -253,6 +270,7 @@ def test_worker_config_uses_registry_first_and_metadata_from_backend_pull(tmp_pa
     )
 
     with TestClient(app) as client:
+        _login(client)
         worker_config = client.get(
             "/api/v1/cameras/worker-config",
             headers={"X-Edge-Relay-Token": "relay-token"},
@@ -347,6 +365,7 @@ def test_worker_config_emits_default_camera_fps_when_configured(
     )
 
     with TestClient(app) as client:
+        _login(client)
         worker_config = client.get(
             "/api/v1/cameras/worker-config",
             headers={"X-Edge-Relay-Token": "relay-token"},
@@ -387,6 +406,7 @@ def test_worker_config_normalizes_pulled_cameras_when_registry_empty(tmp_path) -
     app.state.camera_registry = CameraRegistryStore(tmp_path / "cameras.json")
 
     with TestClient(app) as client:
+        _login(client)
         worker_config = client.get(
             "/api/v1/cameras/worker-config",
             headers={"X-Edge-Relay-Token": "relay-token"},
@@ -459,6 +479,7 @@ def test_system_reports_backend_state_and_version(monkeypatch: pytest.MonkeyPatc
     app.state.backend_last_ok_at = "2026-07-06T00:00:00.000Z"
 
     with TestClient(app) as client:
+        _login(client)
         response = client.get("/api/v1/system")
 
     assert response.status_code == 200
@@ -523,6 +544,7 @@ def test_patch_pending_camera_preserves_local_id_after_backend_mapping(
     app.state.edge_relay_token = "relay-token"
     store = app.state.camera_registry = CameraRegistryStore(tmp_path / "cameras.json")
     with TestClient(app) as client:
+        _login(client)
         created = client.post(
             "/api/v1/cameras",
             headers=AUTH,
@@ -573,6 +595,7 @@ def test_patch_camera_sets_decode_backend_and_worker_config_emits_it(tmp_path) -
     )
 
     with TestClient(app) as client:
+        _login(client)
         patched = client.patch(
             "/api/v1/cameras/camera-1",
             headers=AUTH,
@@ -605,6 +628,7 @@ def test_patch_camera_rejects_invalid_decode_backend(tmp_path) -> None:
     )
 
     with TestClient(app) as client:
+        _login(client)
         patched = client.patch(
             "/api/v1/cameras/camera-1",
             headers=AUTH,
@@ -626,6 +650,7 @@ def test_create_camera_rejects_invalid_decode_backend(
     app.state.camera_registry = CameraRegistryStore(tmp_path / "cameras.json")
 
     with TestClient(app) as client:
+        _login(client)
         created = client.post(
             "/api/v1/cameras",
             headers=AUTH,
@@ -655,6 +680,7 @@ def test_worker_config_emits_default_decode_backend_when_configured(
     )
 
     with TestClient(app) as client:
+        _login(client)
         worker_config = client.get(
             "/api/v1/cameras/worker-config",
             headers={"X-Edge-Relay-Token": "relay-token"},
@@ -683,6 +709,7 @@ def test_worker_config_prefers_record_decode_backend_over_env_default(
     )
 
     with TestClient(app) as client:
+        _login(client)
         worker_config = client.get(
             "/api/v1/cameras/worker-config",
             headers={"X-Edge-Relay-Token": "relay-token"},
@@ -714,6 +741,7 @@ def test_list_cameras_includes_backend_only_roster_camera(tmp_path) -> None:
     )
 
     with TestClient(app) as client:
+        _login(client)
         response = client.get("/api/v1/cameras", headers=AUTH)
 
     assert response.status_code == 200
@@ -760,6 +788,7 @@ def test_list_cameras_includes_backend_only_roster_camera_without_created_at(tmp
     )
 
     with TestClient(app) as client:
+        _login(client)
         response = client.get("/api/v1/cameras", headers=AUTH)
 
     assert response.status_code == 200
@@ -800,6 +829,7 @@ def test_list_cameras_includes_local_only_camera_with_null_roster_names(tmp_path
     )
 
     with TestClient(app) as client:
+        _login(client)
         response = client.get("/api/v1/cameras", headers=AUTH)
 
     assert response.status_code == 200
@@ -846,6 +876,7 @@ def test_list_cameras_joins_local_transport_with_backend_roster_metadata(tmp_pat
     get_heartbeat_store(app).record("backend-1", "backend-space")
 
     with TestClient(app) as client:
+        _login(client)
         response = client.get("/api/v1/cameras", headers=AUTH)
 
     assert response.status_code == 200
@@ -909,6 +940,7 @@ def test_list_cameras_joins_unmapped_local_camera_by_unambiguous_space(tmp_path)
     )
 
     with TestClient(app) as client:
+        _login(client)
         response = client.get("/api/v1/cameras", headers=AUTH)
 
     assert response.status_code == 200
@@ -967,6 +999,7 @@ def test_space_fallback_never_steals_explicitly_mapped_roster_row(
     )
 
     with TestClient(app) as client:
+        _login(client)
         response = client.get("/api/v1/cameras", headers=AUTH)
 
     assert response.status_code == 200
@@ -1023,6 +1056,7 @@ def test_list_cameras_does_not_join_ambiguous_space(
     )
 
     with TestClient(app) as client:
+        _login(client)
         response = client.get("/api/v1/cameras", headers=AUTH)
 
     assert response.status_code == 200
@@ -1085,6 +1119,7 @@ def test_list_cameras_reflects_room_name_after_roster_refresh(
 
     assert refresh_backend_config(app) is True
     with TestClient(app) as client:
+        _login(client)
         assert client.get("/api/v1/cameras", headers=AUTH).json()["cameras"][0][
             "space_name"
         ] == "101호"
@@ -1159,6 +1194,7 @@ def test_list_cameras_status_reflects_heartbeat_freshness(tmp_path) -> None:
     heartbeats.record("fresh", "facility-1", received_at=now)
 
     with TestClient(app) as client:
+        _login(client)
         response = client.get("/api/v1/cameras", headers=AUTH)
 
     assert response.status_code == 200
@@ -1212,6 +1248,7 @@ def test_list_cameras_status_matches_heartbeat_under_either_local_or_backend_id(
     app, _ = _make_app()
     get_heartbeat_store(app).record("loc-12", "facility-1", received_at=now)
     with TestClient(app) as client:
+        _login(client)
         response = client.get("/api/v1/cameras", headers=AUTH)
     assert response.status_code == 200
     camera = response.json()["cameras"][0]
@@ -1224,6 +1261,7 @@ def test_list_cameras_status_matches_heartbeat_under_either_local_or_backend_id(
     app, _ = _make_app()
     get_heartbeat_store(app).record("be-77", "facility-1", received_at=now)
     with TestClient(app) as client:
+        _login(client)
         response = client.get("/api/v1/cameras", headers=AUTH)
     assert response.status_code == 200
     camera = response.json()["cameras"][0]
@@ -1237,6 +1275,7 @@ def test_list_cameras_status_matches_heartbeat_under_either_local_or_backend_id(
     app, _ = _make_app()
     get_heartbeat_store(app).record("unrelated-camera", "facility-1", received_at=now)
     with TestClient(app) as client:
+        _login(client)
         response = client.get("/api/v1/cameras", headers=AUTH)
     assert response.status_code == 200
     camera = response.json()["cameras"][0]
@@ -1260,6 +1299,7 @@ def test_create_camera_rejects_duplicate_rtsp_url(
     app.state.camera_registry = CameraRegistryStore(tmp_path / "cameras.json")
 
     with TestClient(app) as client:
+        _login(client)
         first = client.post(
             "/api/v1/cameras",
             headers=AUTH,
@@ -1295,6 +1335,7 @@ def test_create_camera_rejects_duplicate_ignoring_credentials(
     app.state.camera_registry = CameraRegistryStore(tmp_path / "cameras.json")
 
     with TestClient(app) as client:
+        _login(client)
         first = client.post(
             "/api/v1/cameras",
             headers=AUTH,
@@ -1331,6 +1372,7 @@ def test_create_camera_allows_dahua_subtype_variants_as_distinct_streams(
     app.state.camera_registry = CameraRegistryStore(tmp_path / "cameras.json")
 
     with TestClient(app) as client:
+        _login(client)
         main = client.post(
             "/api/v1/cameras",
             headers=AUTH,
@@ -1367,6 +1409,7 @@ def test_create_camera_without_force_register_rejects_on_probe_failure_and_persi
     store = app.state.camera_registry = CameraRegistryStore(tmp_path / "cameras.json")
 
     with TestClient(app) as client:
+        _login(client)
         response = client.post(
             "/api/v1/cameras",
             headers=AUTH,
@@ -1392,6 +1435,7 @@ def test_create_camera_force_register_persists_despite_probe_failure(
     store = app.state.camera_registry = CameraRegistryStore(tmp_path / "cameras.json")
 
     with TestClient(app) as client:
+        _login(client)
         response = client.post(
             "/api/v1/cameras",
             headers=AUTH,
@@ -1446,6 +1490,7 @@ def test_patch_camera_rtsp_url_rejects_duplicate(
     )
 
     with TestClient(app) as client:
+        _login(client)
         response = client.patch(
             "/api/v1/cameras/cam-b",
             headers=AUTH,
@@ -1478,6 +1523,7 @@ def test_test_camera_persists_probe_result(tmp_path, monkeypatch: pytest.MonkeyP
     )
 
     with TestClient(app) as client:
+        _login(client)
         response = client.post("/api/v1/cameras/cam-a/test", headers=AUTH)
 
     assert response.status_code == 200
@@ -1491,6 +1537,7 @@ def test_test_camera_persists_probe_result(tmp_path, monkeypatch: pytest.MonkeyP
     # The persisted result must also surface through GET /cameras, not just
     # the internal store record.
     with TestClient(app) as client:
+        _login(client)
         listed = client.get("/api/v1/cameras", headers=AUTH).json()
     camera = listed["cameras"][0]
     assert camera["never_connected"] is False

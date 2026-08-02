@@ -5,6 +5,15 @@ import { SeniorAiLabBrand } from '@/shared/ui/SeniorAiLabBrand';
 
 type AuthSession = {
   logout: () => Promise<void>;
+  /**
+   * The username entered for the current login, if the user actually logged
+   * in during this browser tab's session. Not carried across a page reload
+   * (the session-check endpoint returns no body), so account-settings prefill
+   * only works within the same tab lifetime that performed the login.
+   */
+  username: string | null;
+  /** Updates the displayed username after a successful credential rotation. */
+  setUsername: (username: string) => void;
 };
 
 const AuthSessionContext = createContext<AuthSession | null>(null);
@@ -29,6 +38,7 @@ function AuthShell({ busy = false, children }: { busy?: boolean; children: React
 export function AuthGate({ children }: { children: ReactNode }): JSX.Element {
   const [loginId, setLoginId] = useState('');
   const [password, setPassword] = useState('');
+  const [username, setUsername] = useState<string | null>(null);
   const [sessionState, setSessionState] = useState<'checking' | 'unavailable' | 'unauthorized' | 'authorized'>('checking');
   const [message, setMessage] = useState('');
   const [submitting, setSubmitting] = useState(false);
@@ -69,6 +79,7 @@ export function AuthGate({ children }: { children: ReactNode }): JSX.Element {
     setSubmitting(true);
     try {
       await loginDashboard(loginId, password);
+      setUsername(loginId.trim());
       setPassword('');
       setSessionState('authorized');
     } catch (error) {
@@ -92,13 +103,14 @@ export function AuthGate({ children }: { children: ReactNode }): JSX.Element {
     }
     setLoginId('');
     setPassword('');
+    setUsername(null);
     setSessionState('unauthorized');
     window.history.replaceState(null, '', `${window.location.pathname}?page=operations&wallPage=1${window.location.hash}`);
   }
 
   if (sessionState === 'authorized') {
     return (
-      <AuthSessionContext.Provider value={{ logout }}>
+      <AuthSessionContext.Provider value={{ logout, username, setUsername }}>
         {children}
         {message ? <p className="auth-error auth-error-shell" role="alert">{message}</p> : null}
       </AuthSessionContext.Provider>

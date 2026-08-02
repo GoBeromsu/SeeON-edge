@@ -13,6 +13,7 @@ from backend.app.main import create_app, no_lifespan
 ML_ROOT: Final = Path(__file__).resolve().parents[1]
 SERVING_ROOT: Final = ML_ROOT / "backend" / "app"
 ALLOWED_PATHS: Final = {
+    "/api/v1/auth/credentials",
     "/api/v1/auth/session",
     "/api/v1/health",
     "/api/v1/models",

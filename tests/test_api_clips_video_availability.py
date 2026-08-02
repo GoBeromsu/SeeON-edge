@@ -10,7 +10,19 @@ from fastapi.testclient import TestClient
 from backend.app.features.clips.router import _media_type
 from backend.app.main import create_app, no_lifespan
 
-AUTH = {"Authorization": "Bearer relay-token"}
+# Dashboard auth now always resolves to a session store (persisted file > env
+# > the built-in admin/admin default, see backend/app/shared/dashboard_auth.py),
+# so a bare worker relay/bearer token is never sufficient on its own -- these
+# tests log in as the zero-config default and rely on the TestClient's cookie
+# jar to carry the session across subsequent calls.
+
+
+def _login(client: TestClient) -> None:
+    response = client.post(
+        "/api/v1/auth/session",
+        json={"username": "admin", "password": "admin"},
+    )
+    assert response.status_code == 204
 
 
 def _write_playable_manifest(clip_store, clip_id: str) -> None:
@@ -69,7 +81,8 @@ def test_path_less_manifest_is_listed_with_video_unavailable(clip_env) -> None:
     _write_diagnostic_manifest(clip_store, "clip-broken", video_error="no working codec")
 
     with TestClient(create_app(lifespan=no_lifespan)) as client:
-        listed = client.get("/api/v1/clips", headers=AUTH)
+        _login(client)
+        listed = client.get("/api/v1/clips")
 
     assert listed.status_code == 200
     clips = listed.json()["clips"]
@@ -99,7 +112,8 @@ def test_legacy_manifest_without_field_defaults_video_available_true(clip_env) -
     (clip_dir / "manifest.json").write_text(json.dumps(payload), encoding="utf-8")
 
     with TestClient(create_app(lifespan=no_lifespan)) as client:
-        listed = client.get("/api/v1/clips", headers=AUTH)
+        _login(client)
+        listed = client.get("/api/v1/clips")
 
     row = listed.json()["clips"][0]
     assert row["video_available"] is True
@@ -112,9 +126,10 @@ def test_video_endpoint_404_but_manifest_stays_listed(clip_env) -> None:
     _write_playable_manifest(clip_store, "clip-ok")
 
     with TestClient(create_app(lifespan=no_lifespan)) as client:
-        broken_video = client.get("/api/v1/clips/clip-broken/video", headers=AUTH)
-        ok_video = client.get("/api/v1/clips/clip-ok/video", headers=AUTH)
-        listed = client.get("/api/v1/clips", headers=AUTH)
+        _login(client)
+        broken_video = client.get("/api/v1/clips/clip-broken/video")
+        ok_video = client.get("/api/v1/clips/clip-ok/video")
+        listed = client.get("/api/v1/clips")
 
     assert broken_video.status_code == 404
     assert ok_video.status_code == 200
