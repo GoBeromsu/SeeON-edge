@@ -3,7 +3,7 @@ from __future__ import annotations
 import sys
 from typing import ClassVar
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from contracts.worker_config import (
     PulledCameraConfig,
@@ -70,8 +70,20 @@ class BackendWorkerConfigPayload(BaseModel):
     # version-skewed ml-api) means ALWAYS for that domain and is dropped at
     # parse time in ``resolved_detection_windows`` -- it must not fail
     # pydantic validation for the whole payload over one domain's opinion.
-    detection_windows: dict[str, _NightWindowPayload | None] | None = None
-    cameras: tuple[_CameraPayload, ...]
+    #
+    # The value type is left as ``object`` (not ``_NightWindowPayload | None``)
+    # so a member with the *wrong shape* (a string, or an object missing
+    # start/end/tz) does not fail pydantic's dict validation for the whole
+    # payload either -- shape and semantic validation both happen per-domain
+    # in ``resolved_detection_windows``, mirroring
+    # ``contracts/worker_config.py``'s ``_pulled_detection_windows`` and
+    # ``backend/app/lifespan.py``'s ``_pulled_night_window``.
+    detection_windows: dict[str, object] | None = None
+    # Same reasoning as ``detection_windows`` above: left as ``object`` so one
+    # malformed camera entry (bad field type, missing required field) is
+    # dropped per-camera in ``resolved_cameras`` rather than rejecting the
+    # whole payload.
+    cameras: tuple[object, ...]
 
     @model_validator(mode="after")
     def _require_version(self) -> BackendWorkerConfigPayload:
@@ -98,10 +110,12 @@ class BackendWorkerConfigPayload(BaseModel):
         """Per-domain windows, preferring ``detection_windows`` over the
         deprecated single ``night_window`` (mapped to "bed_exit").
 
-        Invalid or degenerate windows (bad HH:MM, unknown tz, start == end)
-        fail open to ALWAYS/24-7 detection for that one domain -- dropped
-        from the map with a loud stderr log -- rather than raising and
-        discarding the whole pulled payload.
+        A member with the wrong shape (not an object, or missing
+        start/end/tz) and a well-shaped but invalid/degenerate window (bad
+        HH:MM, unknown tz, start == end) both fail open to ALWAYS/24-7
+        detection for that one domain -- dropped from the map with a loud
+        stderr log -- rather than raising and discarding the whole pulled
+        payload.
         """
         if self.detection_windows is not None:
             windows: dict[str, PulledNightWindow] = {}
@@ -109,7 +123,15 @@ class BackendWorkerConfigPayload(BaseModel):
                 if window is None:
                     # Explicit null for this domain: ALWAYS, not an error.
                     continue
-                validated = _validated_pulled_window(domain, window)
+                if not isinstance(window, dict):
+                    _log_invalid_detection_window(domain, window, "must be an object or null")
+                    continue
+                try:
+                    payload = _NightWindowPayload.model_validate(window)
+                except ValidationError as exc:
+                    _log_invalid_detection_window(domain, window, _validation_error_reason(exc))
+                    continue
+                validated = _validated_pulled_window(domain, payload)
                 if validated is not None:
                     windows[domain] = validated
             return windows
@@ -118,6 +140,27 @@ class BackendWorkerConfigPayload(BaseModel):
             return {}
         validated = _validated_pulled_window("bed_exit", window)
         return {} if validated is None else {"bed_exit": validated}
+
+    @property
+    def resolved_cameras(self) -> tuple[_CameraPayload, ...]:
+        """Camera roster entries, degrading like ``resolved_detection_windows``:
+        an entry with the wrong shape (not an object, a bad field type such
+        as ``fps``, or missing the required facility_id/space_id location)
+        is dropped and logged by camera identity rather than failing the
+        whole payload.
+        """
+        cameras: list[_CameraPayload] = []
+        for entry in self.cameras:
+            if not isinstance(entry, dict):
+                _log_invalid_camera(entry, "must be an object")
+                continue
+            try:
+                camera = _CameraPayload.model_validate(entry)
+            except ValidationError as exc:
+                _log_invalid_camera(entry, _validation_error_reason(exc))
+                continue
+            cameras.append(camera)
+        return tuple(cameras)
 
     def to_pulled_config(self) -> PulledWorkerConfig:
         detection_windows = self.resolved_detection_windows
@@ -136,7 +179,7 @@ class BackendWorkerConfigPayload(BaseModel):
                     floor_name=camera.floor_name,
                     created_at=camera.created_at,
                 )
-                for camera in self.cameras
+                for camera in self.resolved_cameras
             ),
             detection_windows=detection_windows,
         )
@@ -145,14 +188,15 @@ class BackendWorkerConfigPayload(BaseModel):
         token = "" if relay_token is None else relay_token.strip()
         if not token:
             raise WorkerConfigError("RELAY_TOKEN is required for pulled worker config")
+        resolved_cameras = self.resolved_cameras
         cameras = tuple(
             _runtime_camera(camera)
-            for camera in self.cameras
+            for camera in resolved_cameras
             if camera.rtsp_url is not None
         )
         if not cameras:
             raise WorkerConfigError("worker config must include at least one camera")
-        domains = tuple(sorted({name for camera in self.cameras for name in camera.domains}))
+        domains = tuple(sorted({name for camera in resolved_cameras for name in camera.domains}))
         detection_windows = {
             domain: NightWindowConfig(start=window.start, end=window.end, tz=window.tz)
             for domain, window in self.resolved_detection_windows.items()
@@ -180,6 +224,30 @@ def _validated_pulled_window(
         )
         return None
     return PulledNightWindow(start=window.start, end=window.end, tz=window.tz)
+
+
+def _log_invalid_detection_window(domain: str, value: object, reason: str) -> None:
+    print(
+        f"detection window for domain {domain!r} is invalid ({reason}): {value!r}; "
+        "falling open to ALWAYS/24-7 detection for this domain",
+        file=sys.stderr,
+    )
+
+
+def _log_invalid_camera(value: object, reason: str) -> None:
+    identifier = value.get("camera_id") if isinstance(value, dict) else None
+    label = f"camera_id={identifier!r}" if identifier else f"entry={value!r}"
+    print(
+        f"camera config entry is invalid ({reason}): {label}; dropping this camera",
+        file=sys.stderr,
+    )
+
+
+def _validation_error_reason(exc: ValidationError) -> str:
+    return "; ".join(
+        f"{'.'.join(str(part) for part in error['loc'])}: {error['msg']}"
+        for error in exc.errors()
+    )
 
 
 def _runtime_camera(payload: _CameraPayload) -> CameraRuntimeConfig:
