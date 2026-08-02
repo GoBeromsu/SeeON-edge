@@ -16,8 +16,8 @@ vi.mock('@/shared/api/client', async () => {
 });
 
 const baseView: ConnectionView = {
-  events_url: 'https://backend.example.com/events',
-  config_url: 'https://backend.example.com/config',
+  events_url: 'https://backend.example.com/v1/events',
+  config_url: 'https://backend.example.com/v1/config',
   facility_id: 'facility-42',
   facility_token_set: true,
   facility_token_masked: '****ab12',
@@ -140,7 +140,7 @@ describe('ConnectionSettingsPanel busy states', () => {
   });
 });
 
-describe('ConnectionSettingsPanel token tri-state payload', () => {
+describe('ConnectionSettingsPanel token payload', () => {
   it('omits facility_token when the token field is left untouched', async () => {
     const { host, root } = renderPanel();
 
@@ -148,26 +148,65 @@ describe('ConnectionSettingsPanel token tri-state payload', () => {
 
     const payload = vi.mocked(saveConnection).mock.calls[0]?.[0];
     expect(payload && 'facility_token' in payload).toBe(false);
+    expect(payload).toEqual({ facility_id: 'facility-42' });
     act(() => root.unmount());
   });
 
-  it('sends the typed token when the technician replaces it', async () => {
+  it('sends the typed token when the technician replaces it, alongside facility_id only', async () => {
     const { host, root } = renderPanel();
     setInput(host, 'facility_token', 'new-secret-value');
 
     await act(async () => clickButton(host, '저장'));
 
-    expect(saveConnection).toHaveBeenCalledWith(expect.objectContaining({ facility_token: 'new-secret-value' }));
+    expect(saveConnection).toHaveBeenCalledWith({ facility_id: 'facility-42', facility_token: 'new-secret-value' });
     act(() => root.unmount());
   });
 
-  it('sends an explicit null when the technician clears a previously-set token', async () => {
+  it('never sends events_url or config_url in the save payload', async () => {
     const { host, root } = renderPanel();
-    clickButton(host, '지우기');
 
     await act(async () => clickButton(host, '저장'));
 
-    expect(saveConnection).toHaveBeenCalledWith(expect.objectContaining({ facility_token: null }));
+    const payload = vi.mocked(saveConnection).mock.calls[0]?.[0];
+    expect(payload && 'events_url' in payload).toBe(false);
+    expect(payload && 'config_url' in payload).toBe(false);
+    act(() => root.unmount());
+  });
+
+  it('has no 지우기 (clear) button and no URL input fields in the form', () => {
+    const { host, root } = renderPanel();
+
+    expect(Array.from(host.querySelectorAll('button')).some((button) => button.textContent === '지우기')).toBe(false);
+    expect(host.querySelector('input[name="events_url"]')).toBeNull();
+    expect(host.querySelector('input[name="config_url"]')).toBeNull();
+    expect(host.querySelectorAll('input[type="url"]').length).toBe(0);
+    act(() => root.unmount());
+  });
+});
+
+describe('ConnectionSettingsPanel connection address display', () => {
+  it('renders the derived address with the /v1/events suffix stripped, as read-only text', () => {
+    const { host, root } = renderPanel();
+
+    expect(host.textContent).toContain('연결 대상: https://backend.example.com');
+    act(() => root.unmount());
+  });
+
+  it('falls back to showing the events_url as-is when it does not match the expected suffix', () => {
+    const { host, root } = renderPanel(makeResource({
+      data: { ...baseView, events_url: 'https://backend.example.com/weird-path' },
+    }));
+
+    expect(host.textContent).toContain('연결 대상: https://backend.example.com/weird-path');
+    act(() => root.unmount());
+  });
+
+  it('shows 미설정 when events_url is null', () => {
+    const { host, root } = renderPanel(makeResource({
+      data: { ...baseView, events_url: null },
+    }));
+
+    expect(host.textContent).toContain('연결 대상: 미설정');
     act(() => root.unmount());
   });
 });

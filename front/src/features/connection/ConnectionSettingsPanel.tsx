@@ -2,10 +2,9 @@ import { FormEvent, useEffect, useRef, useState } from 'react';
 import { saveConnection, testConnection, type ConnectionTestResult, type ConnectionView } from '@/shared/api/client';
 import {
   buildConnectionPayload,
-  clearConnectionToken,
   connectionFormFromView,
-  updateConnectionField,
   updateConnectionToken,
+  updateFacilityId,
   validateConnectionForm,
   type ConnectionFormState,
 } from '@/features/connection/connectionSettingsForm';
@@ -47,6 +46,19 @@ function heartbeatRelayStatusLine(relay: HeartbeatRelayStatus): { text: string; 
   return { text: `하트비트 릴레이 정상 · ${formatRelayLastSuccessAt(relay.last_success_at)}`, className: 'text-status-stable' };
 }
 
+// events_url is a packaging-time constant shaped like "<base>/v1/events"; strip that suffix so the
+// technician sees the backend host, not an internal route. An unrecognized shape is shown verbatim
+// rather than mangled -- better an odd-looking address than a silently wrong one.
+const EVENTS_URL_SUFFIX = '/v1/events';
+
+function connectionAddressMeta(eventsUrl: string | null | undefined): { text: string; className: string } {
+  if (!eventsUrl) {
+    return { text: '미설정', className: 'text-ink-faint' };
+  }
+  const derived = eventsUrl.endsWith(EVENTS_URL_SUFFIX) ? eventsUrl.slice(0, -EVENTS_URL_SUFFIX.length) : eventsUrl;
+  return { text: derived, className: 'font-mono text-ink-soft' };
+}
+
 const GENERIC_TEST_FAILURE: ConnectionTestResult = {
   ok: false,
   error_class: null,
@@ -72,20 +84,14 @@ export function ConnectionSettingsPanel({ resource }: ConnectionSettingsPanelPro
     }
   }, [view, dirty, pendingAction]);
 
-  function updateField(field: 'events_url' | 'config_url' | 'facility_id', value: string): void {
-    setForm((current) => updateConnectionField(current, field, value));
+  function handleFacilityIdChange(value: string): void {
+    setForm((current) => updateFacilityId(current, value));
     setDirty(true);
     setValidationMessage(null);
   }
 
-  function updateToken(value: string): void {
+  function handleTokenChange(value: string): void {
     setForm((current) => updateConnectionToken(current, value));
-    setDirty(true);
-    setValidationMessage(null);
-  }
-
-  function handleClearToken(): void {
-    setForm((current) => clearConnectionToken(current));
     setDirty(true);
     setValidationMessage(null);
   }
@@ -140,9 +146,8 @@ export function ConnectionSettingsPanel({ resource }: ConnectionSettingsPanelPro
   const busy = pendingAction !== null;
   const statusMeta = getConnectionStatus(view);
   const relayStatus = heartbeatRelayStatusLine(view?.heartbeat_relay ?? DEFAULT_HEARTBEAT_RELAY);
-  const tokenPlaceholder = form.facility_token_cleared
-    ? '저장 시 삭제됩니다'
-    : view?.facility_token_masked ?? '토큰 없음';
+  const addressMeta = connectionAddressMeta(view?.events_url);
+  const tokenPlaceholder = view?.facility_token_masked ?? '토큰 없음';
 
   return (
     <article className="rounded-2xl border border-border bg-surface p-5">
@@ -160,7 +165,8 @@ export function ConnectionSettingsPanel({ resource }: ConnectionSettingsPanelPro
         </span>
       </div>
 
-      <p className="mt-2 text-xs font-semibold text-ink-faint">{formatLastOkAt(view?.last_ok_at)}</p>
+      <p className={`mt-2 text-xs font-semibold ${addressMeta.className}`}>연결 대상: {addressMeta.text}</p>
+      <p className="mt-1 text-xs font-semibold text-ink-faint">{formatLastOkAt(view?.last_ok_at)}</p>
       <p aria-live="polite" className={`mt-1 text-xs font-semibold ${relayStatus.className}`}>{relayStatus.text}</p>
 
       <form className="mt-5 space-y-4" onSubmit={handleSubmit} noValidate>
@@ -169,61 +175,24 @@ export function ConnectionSettingsPanel({ resource }: ConnectionSettingsPanelPro
           <input
             name="facility_id"
             value={form.facility_id}
-            onChange={(event) => updateField('facility_id', event.target.value)}
+            onChange={(event) => handleFacilityIdChange(event.target.value)}
             className="mt-2 w-full rounded-2xl border border-border bg-surface2 px-4 py-3 text-ink outline-none ring-brand focus:ring-4"
             placeholder="예: facility-301"
           />
         </label>
 
         <label className="block text-sm font-bold text-ink-soft">
-          이벤트 URL
+          시설 토큰
           <input
-            name="events_url"
-            value={form.events_url}
-            onChange={(event) => updateField('events_url', event.target.value)}
-            className="mt-2 w-full rounded-2xl border border-border bg-surface2 px-4 py-3 font-mono text-xs text-ink outline-none ring-brand focus:ring-4"
-            placeholder="https://backend.example.com/events"
+            name="facility_token"
+            type="password"
+            value={form.facility_token}
+            onChange={(event) => handleTokenChange(event.target.value)}
+            className="mt-2 w-full rounded-2xl border border-border bg-surface2 px-4 py-3 text-ink outline-none ring-brand focus:ring-4"
+            placeholder={tokenPlaceholder}
+            autoComplete="off"
           />
         </label>
-
-        <label className="block text-sm font-bold text-ink-soft">
-          설정 조회 URL
-          <input
-            name="config_url"
-            value={form.config_url}
-            onChange={(event) => updateField('config_url', event.target.value)}
-            className="mt-2 w-full rounded-2xl border border-border bg-surface2 px-4 py-3 font-mono text-xs text-ink outline-none ring-brand focus:ring-4"
-            placeholder="https://backend.example.com/config"
-          />
-        </label>
-
-        <div>
-          <label className="block text-sm font-bold text-ink-soft">
-            시설 토큰
-            <input
-              name="facility_token"
-              type="password"
-              value={form.facility_token}
-              onChange={(event) => updateToken(event.target.value)}
-              className="mt-2 w-full rounded-2xl border border-border bg-surface2 px-4 py-3 text-ink outline-none ring-brand focus:ring-4"
-              placeholder={tokenPlaceholder}
-              autoComplete="off"
-            />
-          </label>
-          <div className="mt-2 flex flex-wrap items-center gap-3">
-            <button
-              type="button"
-              disabled={busy}
-              onClick={handleClearToken}
-              className="text-xs font-bold text-status-danger underline disabled:cursor-not-allowed disabled:opacity-60"
-            >
-              지우기
-            </button>
-            {form.facility_token_cleared ? (
-              <span className="text-xs font-bold text-status-caution">저장하면 토큰이 삭제됩니다.</span>
-            ) : null}
-          </div>
-        </div>
 
         {validationMessage ? (
           <p role="alert" className="text-xs font-bold text-status-danger">{validationMessage}</p>
