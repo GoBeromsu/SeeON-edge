@@ -124,3 +124,12 @@ def test_latest_frame_store_snapshot_demand_is_a_one_shot_flag() -> None:
     assert store.consume_snapshot_demand("camera-a") is True
     assert store.consume_snapshot_demand("camera-a") is False  # consumed exactly once
     assert store.consume_snapshot_demand("camera-b") is False  # untouched camera
+
+
+def test_latest_frame_store_show_pose_defaults_off_and_is_per_camera() -> None:
+    store = LatestFrameStore()
+    assert store.get_show_pose("camera-a") is False
+
+    store.set_show_pose("camera-a", True)
+    assert store.get_show_pose("camera-a") is True
+    assert store.get_show_pose("camera-b") is False  # untouched camera stays off

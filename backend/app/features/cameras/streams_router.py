@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -8,6 +9,7 @@ from typing import Annotated, Protocol
 
 from fastapi import APIRouter, Header, HTTPException, Query, Request, status
 from fastapi.responses import Response, StreamingResponse
+from pydantic import BaseModel, ConfigDict
 
 from backend.app.core.config import get_settings
 from backend.app.shared.dashboard_auth import authorize_dashboard
@@ -29,6 +31,18 @@ class _ReadableResponse(Protocol):
     def read(self, size: int = -1) -> bytes: ...
 
     def close(self) -> None: ...
+
+
+class PoseOverlayRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    show_pose: bool
+
+
+class PoseOverlayResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    show_pose: bool
 
 
 @router.get("/streams/{camera_id}")
@@ -100,7 +114,35 @@ def camera_snapshot(
     return Response(content=body, media_type=content_type, headers={"Cache-Control": "no-store"})
 
 
-def _worker_url(origin: str, segment: str, camera_id: str) -> str:
+@router.get("/streams/{camera_id}/pose")
+def camera_pose_get(
+    camera_id: str,
+    request: Request,
+    authorization: Annotated[str | None, Header(alias="Authorization")] = None,
+    token: Annotated[str | None, Query()] = None,
+) -> PoseOverlayResponse:
+    _authorize(request, authorization, query_token=token)
+    settings = get_settings()
+    upstream_url = _pose_url(settings.worker_stream_origin, camera_id)
+    return _pose_request(upstream_url, settings.worker_stream_timeout_s)
+
+
+@router.post("/streams/{camera_id}/pose")
+def camera_pose_set(
+    camera_id: str,
+    payload: PoseOverlayRequest,
+    request: Request,
+    authorization: Annotated[str | None, Header(alias="Authorization")] = None,
+    token: Annotated[str | None, Query()] = None,
+) -> PoseOverlayResponse:
+    _authorize(request, authorization, query_token=token)
+    settings = get_settings()
+    upstream_url = _pose_url(settings.worker_stream_origin, camera_id)
+    body = json.dumps({"show_pose": payload.show_pose}).encode("utf-8")
+    return _pose_request(upstream_url, settings.worker_stream_timeout_s, body=body)
+
+
+def _worker_url(origin: str, segment: str, camera_id: str, *, suffix: str = "") -> str:
     base = origin.strip().rstrip("/")
     if not base:
         raise HTTPException(
@@ -108,7 +150,7 @@ def _worker_url(origin: str, segment: str, camera_id: str) -> str:
             detail="worker stream origin is not configured",
         )
     encoded_camera_id = urllib.parse.quote(camera_id, safe="")
-    return f"{base}/{segment}/{encoded_camera_id}"
+    return f"{base}/{segment}/{encoded_camera_id}{suffix}"
 
 
 def _stream_url(origin: str, camera_id: str) -> str:
@@ -117,6 +159,50 @@ def _stream_url(origin: str, camera_id: str) -> str:
 
 def _snapshot_url(origin: str, camera_id: str) -> str:
     return _worker_url(origin, "snapshot", camera_id)
+
+
+def _pose_url(origin: str, camera_id: str) -> str:
+    return _worker_url(origin, "overlay", camera_id, suffix="/pose")
+
+
+def _pose_request(
+    upstream_url: str,
+    timeout_s: float,
+    *,
+    body: bytes | None = None,
+) -> PoseOverlayResponse:
+    method = "GET" if body is None else "POST"
+    headers = {} if body is None else {"Content-Type": "application/json"}
+    upstream_request = urllib.request.Request(
+        upstream_url, data=body, method=method, headers=headers
+    )
+
+    try:
+        upstream: _ReadableResponse = urllib.request.urlopen(
+            upstream_request,
+            timeout=timeout_s,
+        )
+    except urllib.error.HTTPError as exc:
+        raise _upstream_unavailable(exc.code) from exc
+    except urllib.error.URLError as exc:
+        raise _upstream_unavailable(status.HTTP_503_SERVICE_UNAVAILABLE) from exc
+
+    try:
+        upstream_status = int(getattr(upstream, "status", status.HTTP_200_OK))
+        raw = upstream.read()
+    finally:
+        upstream.close()
+    if upstream_status != status.HTTP_200_OK:
+        raise _upstream_unavailable(upstream_status)
+
+    try:
+        parsed = json.loads(raw)
+        show_pose = parsed["show_pose"]
+    except (json.JSONDecodeError, KeyError) as exc:
+        raise _upstream_unavailable(status.HTTP_503_SERVICE_UNAVAILABLE) from exc
+    if not isinstance(show_pose, bool):
+        raise _upstream_unavailable(status.HTTP_503_SERVICE_UNAVAILABLE)
+    return PoseOverlayResponse(show_pose=show_pose)
 
 
 def _iter_upstream(upstream: _ReadableResponse) -> Iterator[bytes]:

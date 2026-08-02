@@ -10,6 +10,7 @@ import {
   normalizeStatusSnapshot,
   normalizeSystemSnapshot,
 } from '@/shared/api/normalizers';
+import { isRecord, pickBoolean } from '@/shared/api/normalizerFields';
 import type {
   Camera,
   CameraInput,
@@ -229,6 +230,25 @@ export async function deleteCamera(cameraId: string): Promise<void> {
 
 export async function testCamera(cameraId: string): Promise<CameraTestResult> {
   return normalizeCameraTestResult(await requestJson(`/cameras/${encodeURIComponent(cameraId)}/test`, { method: 'POST' }));
+}
+
+function normalizePoseResponse(value: unknown): boolean {
+  const showPose = isRecord(value) ? pickBoolean(value, ['show_pose']) : null;
+  if (showPose === null) throw new Error('Invalid pose response');
+  return showPose;
+}
+
+export async function fetchCameraPose(cameraId: string): Promise<boolean> {
+  return normalizePoseResponse(await requestJson(`/streams/${encodeURIComponent(cameraId)}/pose`));
+}
+
+export async function setCameraPose(cameraId: string, showPose: boolean): Promise<boolean> {
+  return normalizePoseResponse(
+    await requestJson(`/streams/${encodeURIComponent(cameraId)}/pose`, {
+      method: 'POST',
+      body: JSON.stringify({ show_pose: showPose }),
+    }),
+  );
 }
 
 export async function fetchStatus(signal?: AbortSignal): Promise<StatusSnapshot> {

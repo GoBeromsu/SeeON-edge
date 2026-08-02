@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import urllib.error
 import urllib.request
 from collections.abc import Iterator
@@ -295,4 +296,134 @@ def test_snapshot_proxy_reports_connection_failure_as_unavailable(
         response = client.get("/api/v1/streams/cam_sp_201/snapshot")
 
     assert response.status_code == 503
+    assert response.json()["detail"] == "worker stream unavailable"
+
+
+class PoseJsonResponse(FiniteStreamResponse):
+    headers: dict[str, str] = {"Content-Type": "application/json"}
+
+
+def test_pose_get_forwards_and_returns_current_state_with_a_dashboard_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[UrlopenCall] = []
+
+    def fake_urlopen(request: urllib.request.Request, timeout: float) -> PoseJsonResponse:
+        calls.append(
+            {
+                "url": request.full_url,
+                "timeout": timeout,
+                "method": request.get_method(),
+            }
+        )
+        return PoseJsonResponse(json.dumps({"show_pose": True}).encode())
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+    with TestClient(create_app(lifespan=NO_LIFESPAN)) as client:
+        _login(client)
+        response = client.get("/api/v1/streams/cam_sp_201/pose")
+
+    assert response.status_code == 200
+    assert response.json() == {"show_pose": True}
+    assert calls == [
+        {
+            "url": "http://worker.local:8090/overlay/cam_sp_201/pose",
+            "timeout": 3.0,
+            "method": "GET",
+        }
+    ]
+
+
+def test_pose_set_forwards_the_requested_value_with_a_dashboard_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[dict[str, object]] = []
+
+    def fake_urlopen(request: urllib.request.Request, timeout: float) -> PoseJsonResponse:
+        calls.append(
+            {
+                "url": request.full_url,
+                "timeout": timeout,
+                "method": request.get_method(),
+                "body": request.data,
+            }
+        )
+        return PoseJsonResponse(json.dumps({"show_pose": True}).encode())
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+    with TestClient(create_app(lifespan=NO_LIFESPAN)) as client:
+        _login(client)
+        response = client.post("/api/v1/streams/cam_sp_201/pose", json={"show_pose": True})
+
+    assert response.status_code == 200
+    assert response.json() == {"show_pose": True}
+    assert calls == [
+        {
+            "url": "http://worker.local:8090/overlay/cam_sp_201/pose",
+            "timeout": 3.0,
+            "method": "POST",
+            "body": json.dumps({"show_pose": True}).encode("utf-8"),
+        }
+    ]
+
+
+def test_pose_get_and_set_require_a_dashboard_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_urlopen(request: urllib.request.Request, timeout: float) -> PoseJsonResponse:
+        del timeout
+        return PoseJsonResponse(json.dumps({"show_pose": False}).encode())
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+    with TestClient(create_app(lifespan=NO_LIFESPAN)) as client:
+        missing = client.get("/api/v1/streams/cam_sp_201/pose")
+        missing_post = client.post("/api/v1/streams/cam_sp_201/pose", json={"show_pose": True})
+        _login(client)
+        authorized = client.get("/api/v1/streams/cam_sp_201/pose")
+
+    assert missing.status_code == 401
+    assert missing_post.status_code == 401
+    assert authorized.status_code == 200
+
+
+def test_pose_set_rejects_unknown_fields(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_urlopen(request: urllib.request.Request, timeout: float) -> NoReturn:
+        del request, timeout
+        raise AssertionError("upstream must not be called for a rejected payload")
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+    with TestClient(create_app(lifespan=NO_LIFESPAN)) as client:
+        _login(client)
+        response = client.post(
+            "/api/v1/streams/cam_sp_201/pose",
+            json={"show_pose": True, "unexpected": "field"},
+        )
+
+    assert response.status_code == 422
+
+
+@pytest.mark.parametrize("code", [404, 503])
+def test_pose_get_preserves_upstream_404_and_503(
+    code: int,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_urlopen(request: urllib.request.Request, timeout: float) -> NoReturn:
+        del timeout
+        raise urllib.error.HTTPError(
+            request.full_url, code, "upstream status", hdrs=Message(), fp=None
+        )
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+    with TestClient(create_app(lifespan=NO_LIFESPAN)) as client:
+        _login(client)
+        response = client.get("/api/v1/streams/missing/pose")
+
+    assert response.status_code == code
     assert response.json()["detail"] == "worker stream unavailable"

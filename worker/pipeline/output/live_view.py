@@ -31,6 +31,7 @@ class LatestFrameStore:
         self._known_camera_ids: set[str] = set()
         self._viewer_counts: dict[str, int] = {}
         self._snapshot_demand: set[str] = set()
+        self._show_pose: dict[str, bool] = {}
 
     def register_camera(self, camera_id: str) -> None:
         with self._condition:
@@ -70,6 +71,14 @@ class LatestFrameStore:
                 self._snapshot_demand.discard(camera_id)
                 return True
             return False
+
+    def set_show_pose(self, camera_id: str, show_pose: bool) -> None:
+        with self._condition:
+            self._show_pose[camera_id] = show_pose
+
+    def get_show_pose(self, camera_id: str) -> bool:
+        with self._condition:
+            return self._show_pose.get(camera_id, False)
 
     def publish_jpeg(
         self,
@@ -121,6 +130,35 @@ class LiveViewRenderer(Protocol):
     ) -> bytes: ...
 
 
+class _PerCameraPoseRenderer:
+    """Default ``LiveViewSubscriber`` renderer: per-camera runtime pose toggle.
+
+    ``OverlayRenderer.show_pose`` (overlay.py:40) is a frozen, per-instance
+    construction switch. Sharing one ``OverlayRenderer`` across every camera
+    (the previous ``worker.py`` wiring) collapses the toggle into a single
+    process-global switch. This reads each camera's toggle from ``store`` --
+    the same camera-keyed collaborator already threaded through the worker --
+    and constructs a fresh, stateless ``OverlayRenderer`` per call, so turning
+    pose off for one camera never affects another, and "off" still skips the
+    keypoint loop entirely (overlay.py:57-58's existing ``if self.show_pose``
+    gate), not just the drawing.
+    """
+
+    def __init__(self, store: LatestFrameStore) -> None:
+        self._store = store
+
+    def encode_jpeg(
+        self,
+        packet: FramePacket,
+        observation: FrameObservation,
+        debug_snapshots: tuple[BedExitDebugSnapshot, ...] = (),
+    ) -> bytes:
+        show_pose = self._store.get_show_pose(packet.camera_id)
+        return OverlayRenderer(show_pose=show_pose).encode_jpeg(
+            packet, observation, debug_snapshots
+        )
+
+
 class LiveViewSubscriber:
     """Render optional live output without changing inference state or flow."""
 
@@ -130,7 +168,9 @@ class LiveViewSubscriber:
         renderer: LiveViewRenderer | None = None,
     ) -> None:
         self._store = store
-        self._renderer = renderer if renderer is not None else OverlayRenderer()
+        self._renderer = (
+            renderer if renderer is not None else _PerCameraPoseRenderer(store)
+        )
 
     def publish(
         self,

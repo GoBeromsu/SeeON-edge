@@ -258,3 +258,59 @@ def test_stream_connect_and_disconnect_track_the_viewer_counter() -> None:
         assert store.has_viewers("camera-a") is False
     finally:
         server.stop()
+
+
+def test_pose_get_and_set_round_trip_and_defaults_off() -> None:
+    store = LatestFrameStore()
+    store.register_camera("camera-a")
+    server = MjpegServer(store, MjpegServerConfig(port=0))
+    server.start()
+    base = f"http://127.0.0.1:{server.port}"
+    try:
+        with urllib.request.urlopen(f"{base}/overlay/camera-a/pose", timeout=1) as response:
+            assert json.loads(response.read()) == {"show_pose": False}
+
+        request = urllib.request.Request(
+            f"{base}/overlay/camera-a/pose",
+            data=json.dumps({"show_pose": True}).encode(),
+            method="POST",
+        )
+        with urllib.request.urlopen(request, timeout=1) as response:
+            assert json.loads(response.read()) == {"show_pose": True}
+
+        with urllib.request.urlopen(f"{base}/overlay/camera-a/pose", timeout=1) as response:
+            assert json.loads(response.read()) == {"show_pose": True}
+
+        assert store.get_show_pose("camera-a") is True
+    finally:
+        server.stop()
+
+
+def test_pose_unknown_camera_and_malformed_body_are_rejected() -> None:
+    store = LatestFrameStore()
+    server = MjpegServer(store, MjpegServerConfig(port=0))
+    server.start()
+    base = f"http://127.0.0.1:{server.port}"
+    try:
+        try:
+            urllib.request.urlopen(f"{base}/overlay/missing/pose", timeout=1)
+        except urllib.error.HTTPError as exc:
+            assert exc.code == 404
+        else:  # pragma: no cover
+            raise AssertionError("unknown camera should 404")
+
+        store.register_camera("camera-a")
+        request = urllib.request.Request(
+            f"{base}/overlay/camera-a/pose",
+            data=b"not-json",
+            method="POST",
+        )
+        try:
+            urllib.request.urlopen(request, timeout=1)
+        except urllib.error.HTTPError as exc:
+            assert exc.code == 400
+        else:  # pragma: no cover
+            raise AssertionError("malformed body should 400")
+        assert store.get_show_pose("camera-a") is False
+    finally:
+        server.stop()
