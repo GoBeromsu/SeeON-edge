@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import os
 import subprocess
 import sys
 import textwrap
@@ -187,13 +186,17 @@ def test_watchdog_passes_deadline_as_fatal_accelerator_fault() -> None:
 
 def test_watchdog_subprocess_hard_exits_with_fatal_accelerator_code(tmp_path: Path) -> None:
     script = textwrap.dedent(
-        """
+        f"""
         import time
+        from pathlib import Path
+
         from worker.runtime.faults import FaultHandler
         from worker.runtime.watchdog import InferenceWatchdog
 
         watchdog = InferenceWatchdog(
-            FaultHandler("cuda"), profile="cuda", deadline_sec=0.05
+            FaultHandler("cuda", state_dir=Path({str(tmp_path)!r})),
+            profile="cuda",
+            deadline_sec=0.05,
         )
         watchdog.start()
         watchdog.register(camera_id="camera-a", task="pose", frame_index=9)
@@ -203,7 +206,6 @@ def test_watchdog_subprocess_hard_exits_with_fatal_accelerator_code(tmp_path: Pa
     completed = subprocess.run(
         [sys.executable, "-c", script],
         cwd=Path.cwd(),
-        env=os.environ | {"ML_WORKER_STATE_DIR": str(tmp_path)},
         capture_output=True,
         text=True,
         timeout=3,

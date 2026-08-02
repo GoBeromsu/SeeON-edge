@@ -713,6 +713,7 @@ def start_worker_runtime(
             serving_client=serving,
             acquire_lease=lambda: GpuLease.acquire(state_dir),
             hard_exit=lambda _code: None,
+            state_dir=state_dir,
         )
     finally:
         if original_clip_store_dir_env is None:

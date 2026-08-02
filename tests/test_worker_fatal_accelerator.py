@@ -178,7 +178,7 @@ def test_persist_first_fault_includes_frame_hash(tmp_path: Path) -> None:
 
 def test_fault_handler_stops_all_loops_and_exits(tmp_path: Path) -> None:
     exits: list[int] = []
-    handler = FaultHandler("cuda", hard_exit=exits.append)
+    handler = FaultHandler("cuda", hard_exit=exits.append, state_dir=tmp_path)
     loop_a = _FakeLoop()
     loop_b = _FakeLoop()
     handler.register_loop(loop_a)
@@ -199,7 +199,7 @@ def test_fault_handler_stops_all_loops_and_exits(tmp_path: Path) -> None:
 def test_fault_handler_is_idempotent(tmp_path: Path) -> None:
     """Concurrent calls from two camera threads must trigger exactly one exit."""
     exits: list[int] = []
-    handler = FaultHandler("cuda", hard_exit=exits.append)
+    handler = FaultHandler("cuda", hard_exit=exits.append, state_dir=tmp_path)
     loop = _FakeLoop()
     handler.register_loop(loop)
 

@@ -21,12 +21,11 @@ from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 from backend.app.features.clips.store import ClipManifest, is_valid_clip_id
+from backend.app.shared.state_dir import resolve_state_dir
 
 if TYPE_CHECKING:
     from fastapi import FastAPI
 
-API_CATALOG_STORE_ENV = "API_CATALOG_STORE"
-DEFAULT_CATALOG_STORE = "/var/lib/ml-api/catalog.sqlite3"
 SCHEMA_VERSION = 2
 logger = logging.getLogger(__name__)
 _CAMERA_PAYLOAD_FIELDS = (
@@ -150,7 +149,7 @@ _INDEX_STATEMENTS = (
 
 
 def _catalog_path() -> Path:
-    return Path(os.environ.get(API_CATALOG_STORE_ENV, DEFAULT_CATALOG_STORE))
+    return resolve_state_dir("ml-api") / "catalog.sqlite3"
 
 
 def get_catalog_store(app: FastAPI) -> CatalogStore | None:
@@ -664,7 +663,6 @@ class CatalogStore:
 
 
 __all__ = [
-    "API_CATALOG_STORE_ENV",
     "CatalogConflictError",
     "StrictManifest",
     "CatalogRecord",
@@ -672,6 +670,5 @@ __all__ = [
     "strict_manifest_records",
     "strict_camera_snapshot",
     "CatalogStore",
-    "DEFAULT_CATALOG_STORE",
     "get_catalog_store",
 ]

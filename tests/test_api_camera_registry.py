@@ -70,7 +70,6 @@ class FakeHTTPResponse:
 @pytest.fixture(autouse=True)
 def clear_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     for name in (
-        "API_CAMERA_STORE",
         "API_EDGE_RELAY_TOKEN",
         "API_FACILITY_ID",
         "API_BACKEND_EDGE_CAMERAS_URL",
@@ -95,7 +94,6 @@ def test_camera_registry_crud_masks_rtsp_versions_and_worker_config_auth(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("API_CAMERA_STORE", str(tmp_path / "cameras.json"))
     monkeypatch.setenv("API_EDGE_RELAY_TOKEN", "relay-token")
     monkeypatch.setenv("API_FACILITY_ID", "facility-1")
     monkeypatch.setenv("API_BACKEND_EDGE_CAMERAS_URL", "http://backend/api/v1/edge/cameras")
@@ -132,7 +130,10 @@ def test_camera_registry_crud_masks_rtsp_versions_and_worker_config_auth(
 
     monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
 
-    with TestClient(create_app(lifespan=no_lifespan)) as client:
+    app = create_app(lifespan=no_lifespan)
+    app.state.camera_registry = CameraRegistryStore(tmp_path / "cameras.json")
+
+    with TestClient(app) as client:
         _login(client)
         created = client.post(
             "/api/v1/cameras",

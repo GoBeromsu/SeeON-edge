@@ -1,8 +1,9 @@
 """First-fault record persistence (todo 25).
 
-Writes exactly one bounded, fsynced JSON record under ML_WORKER_STATE_DIR on
-the first FatalAcceleratorError.  Subsequent calls are no-ops (the record is
-written at most once per process lifetime).
+Writes exactly one bounded, fsynced JSON record under the resolved worker
+state directory (``worker/runtime/state_dir.py``, ``~/.local/state/ml-worker``,
+no env override) on the first FatalAcceleratorError.  Subsequent calls are
+no-ops (the record is written at most once per process lifetime).
 """
 from __future__ import annotations
 
@@ -15,8 +16,8 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Final
 
-ML_WORKER_STATE_DIR_ENV: Final = "ML_WORKER_STATE_DIR"
-DEFAULT_ML_WORKER_STATE_DIR: Final = "/var/lib/ml-worker"
+from worker.runtime.state_dir import resolve_state_dir
+
 FIRST_FAULT_FILENAME: Final = "first_fault.json"
 # Max record size: 64 KiB.  Enough for any realistic fault record.
 MAX_RECORD_BYTES: Final = 65_536
@@ -96,9 +97,7 @@ def persist_first_fault(
         _written = True
 
     if state_dir is None:
-        state_dir = Path(
-            os.environ.get(ML_WORKER_STATE_DIR_ENV, DEFAULT_ML_WORKER_STATE_DIR)
-        )
+        state_dir = resolve_state_dir()
 
     try:
         state_dir.mkdir(parents=True, exist_ok=True)
@@ -182,10 +181,8 @@ def make_fault_record(
 
 
 __all__ = [
-    "DEFAULT_ML_WORKER_STATE_DIR",
     "FIRST_FAULT_FILENAME",
     "FirstFaultRecord",
-    "ML_WORKER_STATE_DIR_ENV",
     "make_fault_record",
     "persist_first_fault",
 ]

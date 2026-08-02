@@ -1,7 +1,9 @@
 """Fatal accelerator fault containment (todo 25).
 
 Responsible for:
-- Persisting exactly one first-fault record atomically under ML_WORKER_STATE_DIR.
+- Persisting exactly one first-fault record atomically under the resolved
+  worker state directory (``worker/runtime/state_dir.py``,
+  ``~/.local/state/ml-worker``, no env override).
 - Providing a FaultHandler that stops all camera ingest loops and exits with code 4.
 
 The exception TYPE (FatalAcceleratorError) lives in worker.adapters.model.errors so

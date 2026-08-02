@@ -35,8 +35,6 @@ from worker.runtime.config.domain_models import (
 )
 from worker.runtime.config.errors import ConfigValidationError, WorkerConfigError
 from worker.runtime.config.lkg_store import (
-    DEFAULT_STATE_DIR,
-    ML_WORKER_STATE_DIR_ENV,
     PULLED_CONFIG_LKG_FILENAME,
     WORKER_CONFIG_LKG_FILENAME,
     JsonObject,
@@ -77,13 +75,11 @@ from worker.runtime.config.worker_models import (
 __all__ = [
     "API_FACILITY_ID_ENV",
     "CONFIG_VERSION_KEY",
-    "DEFAULT_STATE_DIR",
     "EDGE_CAMERA_CONFIG_ENV",
     "KNOWN_DOMAIN_NAMES",
     "ML_WORKER_DEV_MJPEG_ENV",
     "ML_WORKER_DEV_MJPEG_HOST_ENV",
     "ML_WORKER_DEV_MJPEG_PORT_ENV",
-    "ML_WORKER_STATE_DIR_ENV",
     "PULLED_CONFIG_LKG_FILENAME",
     "RELAY_ALERTS_PATH",
     "RELAY_HEARTBEAT_PATH",

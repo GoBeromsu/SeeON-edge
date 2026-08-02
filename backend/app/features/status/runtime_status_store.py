@@ -8,6 +8,7 @@ runtime state directly.
 from __future__ import annotations
 
 import json
+import logging
 import math
 import os
 import threading
@@ -19,9 +20,10 @@ from pathlib import Path
 from time import time
 from typing import Any
 
+from backend.app.shared.state_dir import resolve_state_dir
+
 DEFAULT_RUNTIME_STATUS_STALE_AFTER_SEC: float = 15.0
-ML_API_RUNTIME_LATENCY_STORE_ENV = "ML_API_RUNTIME_LATENCY_STORE"
-DEFAULT_RUNTIME_LATENCY_STORE = "/var/lib/ml-api/runtime-latency.json"
+logger = logging.getLogger(__name__)
 
 
 
@@ -53,9 +55,7 @@ class RuntimeStatusStore:
     _latest_generation: dict[str, int] = field(default_factory=dict)
     _latency_by_facility: dict[str, dict[str, Any]] = field(default_factory=dict)
     latency_state_path: Path = field(
-        default_factory=lambda: Path(
-            os.environ.get(ML_API_RUNTIME_LATENCY_STORE_ENV, DEFAULT_RUNTIME_LATENCY_STORE)
-        )
+        default_factory=lambda: resolve_state_dir("ml-api") / "runtime-latency.json"
     )
     _lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
     _latency_loaded: bool = field(default=False, init=False, repr=False)
@@ -196,18 +196,29 @@ class RuntimeStatusStore:
         return True
 
     def _persist_latency(self) -> None:
-        self.latency_state_path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = self.latency_state_path.with_suffix(".tmp")
-        with temporary.open("w", encoding="utf-8") as handle:
-            json.dump(self._latency_by_facility, handle)
-            handle.flush()
-            os.fsync(handle.fileno())
-        temporary.replace(self.latency_state_path)
-        directory_fd = os.open(self.latency_state_path.parent, os.O_DIRECTORY)
+        """Best-effort persist; an unwritable state dir must not crash the caller.
+
+        Mirrors ``CatalogStore.get_catalog_store``'s graceful-degradation
+        pattern (``backend/app/features/clips/catalog.py``): a store that
+        cannot durably persist still functions in-memory for the process
+        lifetime, it just loses latency history across restarts.
+        """
         try:
-            os.fsync(directory_fd)
-        finally:
-            os.close(directory_fd)
+            self.latency_state_path.parent.mkdir(parents=True, exist_ok=True)
+            temporary = self.latency_state_path.with_suffix(".tmp")
+            with temporary.open("w", encoding="utf-8") as handle:
+                json.dump(self._latency_by_facility, handle)
+                handle.flush()
+                os.fsync(handle.fileno())
+            temporary.replace(self.latency_state_path)
+            directory_fd = os.open(self.latency_state_path.parent, os.O_DIRECTORY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+        except OSError as exc:
+            message = f"runtime latency store unavailable at {self.latency_state_path}: {exc}"
+            logger.warning(message)
 
 def get_runtime_status_store(app: object) -> RuntimeStatusStore:
     """Return the app-owned runtime store, creating it for no-lifespan tests."""
@@ -220,8 +231,6 @@ def get_runtime_status_store(app: object) -> RuntimeStatusStore:
 
 
 __all__ = [
-    "ML_API_RUNTIME_LATENCY_STORE_ENV",
-    "DEFAULT_RUNTIME_LATENCY_STORE",
     "DEFAULT_RUNTIME_STATUS_STALE_AFTER_SEC",
     "RuntimeStatusRecordResult",
     "RuntimeStatusSnapshot",

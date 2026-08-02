@@ -292,7 +292,6 @@ def test_fatal_accelerator_fault_stops_every_camera_and_exits_four(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    monkeypatch.setenv("ML_WORKER_STATE_DIR", str(tmp_path))
     _stub_heartbeat_transport(monkeypatch)
     received: list[FatalAcceleratorError] = []
     real_handle = FaultHandler.handle
@@ -322,6 +321,26 @@ def test_fatal_accelerator_fault_stops_every_camera_and_exits_four(
     assert exit_codes == [4]
 
 
+def test_worker_runtime_init_logs_resolved_state_directory(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """``WorkerRuntime`` must log its resolved state directory at
+    construction (issue #35's fixed resolver has no env override to inspect
+    externally, so the log line is the operator-visible record of where it
+    landed)."""
+    serving = _FakeServingClient()
+    loops = _LoopFactory(serving)
+
+    with caplog.at_level("INFO"):
+        _runtime(_config("camera-a"), serving, loops, tmp_path)
+
+    assert any(
+        record.getMessage() == f"worker state directory resolved to {tmp_path}"
+        for record in caplog.records
+    )
+
+
 def _runtime(
     config: WorkerConfig,
     serving: _FakeServingClient,
@@ -339,6 +358,7 @@ def _runtime(
         acquire_lease=lambda: GpuLease.acquire(state_dir),
         decode_probe=lambda _decode: VerifyResult(True, "cpu", "decode", "available"),
         hard_exit=hard_exit,
+        state_dir=state_dir,
     )
 
 
