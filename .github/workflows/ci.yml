@@ -31,6 +31,16 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
 
       - run: uv sync --frozen --group lint
+
+      - name: Cache packaged default LSTM model
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: models/fall/lstm/model.pt
+          key: lstm-model-${{ hashFiles('scripts/fetch-models.sh') }}
+
+      - name: Fetch packaged default LSTM model
+        run: bash scripts/fetch-models.sh
+
       - run: uv run pytest -q -m "not real_stack"
       - run: uv run --group lint ruff check .
       # Stage 0 guardrail: declarative architecture contracts (import-linter).
