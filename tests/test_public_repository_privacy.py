@@ -707,6 +707,10 @@ def _assert_untrusted_ci_security(workflow: dict[str, object]) -> None:
             ),
         },
         {"run": "uv sync --frozen --group lint"},
+        {
+            "name": "Fetch packaged default LSTM model",
+            "run": "bash scripts/fetch-models.sh",
+        },
         # Real-stack E2E (mediamtx-backed) is deselected here by marker, not by
         # adding a step -- the security contract below (step count/order, no
         # external-binary fetch) is unchanged; only this step's own argument
