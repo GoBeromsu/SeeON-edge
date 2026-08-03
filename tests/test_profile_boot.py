@@ -4,6 +4,7 @@ import pytest
 
 from worker.runtime.profile.boot import (
     resolve_boot_context,
+    resolve_encode_or_fallback,
     resolve_profile,
 )
 from worker.runtime.profile.device import CudaProbe
@@ -15,6 +16,7 @@ from worker.runtime.profile.registry import (
     ProfileVerifyError,
     VerifyResult,
     default_decode_probe,
+    default_encode_probe,
     default_verifiers,
 )
 
@@ -166,3 +168,110 @@ def test_cuda_profile_fails_closed_when_no_decode_probe_configured() -> None:
 
     with pytest.raises(ProfileVerifyError, match="nvdec capability probe is not configured"):
         resolve_boot_context({ML_WORKER_PROFILE_ENV: "cuda"}, deps)
+
+
+def _nvenc_ok() -> VerifyResult:
+    return VerifyResult(True, "cuda", "encode", "h264_nvenc encoder is available")
+
+
+def _nvenc_unavailable() -> VerifyResult:
+    return VerifyResult(False, "cuda", "encode", "ffmpeg has no h264_nvenc encoder")
+
+
+def test_resolve_encode_or_fallback_keeps_nvenc_when_probe_succeeds() -> None:
+    selection = resolve_encode_or_fallback(PROFILE_REGISTRY["cuda"], _nvenc_ok)
+
+    assert selection.requested == "h264_nvenc"
+    assert selection.selected == "h264_nvenc"
+    assert selection.fallback_count == 0
+    assert selection.last_reason is None
+
+
+def test_resolve_encode_or_fallback_never_raises_and_falls_back_to_libx264(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """#53: unlike decode's fail-fast preflight, a failed nvenc probe must
+    never abort boot -- it degrades to libx264 with a loud WARNING instead."""
+    with caplog.at_level("WARNING"):
+        selection = resolve_encode_or_fallback(PROFILE_REGISTRY["cuda"], _nvenc_unavailable)
+
+    assert selection.requested == "h264_nvenc"
+    assert selection.selected == "libx264"
+    assert selection.fallback_count == 1
+    assert selection.last_reason == "nvenc_probe_failed"
+    assert any("libx264" in record.message for record in caplog.records)
+
+
+def test_resolve_encode_or_fallback_swallows_probe_exceptions() -> None:
+    def raising_probe() -> VerifyResult:
+        raise RuntimeError("ffmpeg exploded")
+
+    selection = resolve_encode_or_fallback(PROFILE_REGISTRY["cuda"], raising_probe)
+
+    assert selection.selected == "libx264"
+    assert selection.fallback_count == 1
+
+
+def test_resolve_encode_or_fallback_never_probes_non_nvenc_profiles() -> None:
+    def unexpected_probe() -> VerifyResult:
+        raise AssertionError("libx264 profiles must never be probed")
+
+    for profile_name in ("mps", "cpu"):
+        selection = resolve_encode_or_fallback(PROFILE_REGISTRY[profile_name], unexpected_probe)
+        assert selection.requested == "libx264"
+        assert selection.selected == "libx264"
+        assert selection.fallback_count == 0
+
+
+def test_default_encode_probe_fails_closed_without_injected_probe() -> None:
+    result = default_encode_probe()
+
+    assert not result.ok
+    assert result.profile == "cuda"
+    assert result.stage == "encode"
+    assert result.reason == "h264_nvenc capability probe is not configured"
+
+
+def test_resolve_boot_context_carries_encode_selection_and_falls_back(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    with caplog.at_level("WARNING"):
+        context = resolve_boot_context(
+            {ML_WORKER_PROFILE_ENV: "cuda"},
+            _deps("cuda"),
+            _decode_ok,
+            _nvenc_unavailable,
+        )
+
+    assert context.encode == "libx264"
+    assert context.encode_selection is not None
+    assert context.encode_selection.requested == "h264_nvenc"
+    assert context.encode_selection.selected == "libx264"
+    assert context.encode_selection.fallback_count == 1
+
+
+def test_resolve_boot_context_keeps_nvenc_when_probe_succeeds() -> None:
+    context = resolve_boot_context(
+        {ML_WORKER_PROFILE_ENV: "cuda"},
+        _deps("cuda"),
+        _decode_ok,
+        _nvenc_ok,
+    )
+
+    assert context.encode == "h264_nvenc"
+    assert context.encode_selection is not None
+    assert context.encode_selection.fallback_count == 0
+
+
+def test_resolve_boot_context_never_probes_encode_for_mps_or_cpu_profiles() -> None:
+    def unexpected_probe() -> VerifyResult:
+        raise AssertionError("mps/cpu profiles must never probe encode")
+
+    context = resolve_boot_context(
+        {ML_WORKER_PROFILE_ENV: "cpu"},
+        _deps("cpu"),
+        _decode_ok,
+        unexpected_probe,
+    )
+
+    assert context.encode == "libx264"

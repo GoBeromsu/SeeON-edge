@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import logging
 import threading
+import time
 from typing import final
 
+from contracts.encode_diagnostics import EncodeSelection
 from worker.adapters.encode.adapter_errors import (
     EncoderPolicyError,
     EncoderStartError,
@@ -29,6 +32,8 @@ from worker.adapters.encode.segment_process import (
 from worker.adapters.encode.session import FFmpegEncoderSession, SessionGeneration
 from worker.types import FramePacket
 
+LOGGER = logging.getLogger(__name__)
+
 
 @final
 class FFmpegSegmentEncoder:
@@ -45,11 +50,23 @@ class FFmpegSegmentEncoder:
         self._sessions: dict[str, FFmpegEncoderSession] = {}
         self._generation_by_camera: dict[str, int] = {}
         self._unavailable_cameras: set[str] = set()
+        # Cameras demoted from h264_nvenc to libx264 after a failed session
+        # open (#53). Once a camera lands here it stays here: unlike decode's
+        # fail-fast preflight, this is a cost-only, content-safe downgrade, so
+        # it never re-attempts nvenc for that camera.
+        self._encode_override: dict[str, EncodePolicy] = {}
+        self._encode_selection: dict[str, EncodeSelection] = {}
 
     @property
     def unavailable_cameras(self) -> frozenset[str]:
         with self._lock:
             return frozenset(self._unavailable_cameras)
+
+    @property
+    def encode_selections(self) -> dict[str, EncodeSelection]:
+        """Per-camera requested-vs-selected encoder, for local diagnostics only."""
+        with self._lock:
+            return dict(self._encode_selection)
 
     def open(
         self,
@@ -59,30 +76,26 @@ class FFmpegSegmentEncoder:
     ) -> FFmpegEncoderSession:
         if not camera.strip():
             raise EncoderPolicyError("camera id must not be blank")
-        encoder = parse_encode_policy(profile)
+        requested_encoder = parse_encode_policy(profile)
         with self._lock:
+            effective_encoder = self._encode_override.get(camera, requested_encoder)
             existing = self._sessions.get(camera)
-            if existing is not None and existing.matches(encoder, geometry):
+            if existing is not None and existing.matches(effective_encoder, geometry):
                 return existing
             if existing is not None:
                 self.metrics.recreates += 1
                 self.close_session(existing)
-            return self._create_session(camera, encoder, geometry)
+            return self._create_session(camera, requested_encoder, geometry)
 
     def _create_session(
         self,
         camera: str,
-        encoder: EncodePolicy,
+        requested_encoder: EncodePolicy,
         geometry: EncoderGeometry,
     ) -> FFmpegEncoderSession:
         generation = self._generation_by_camera.get(camera, 0) + 1
-        state = self._spawn(
-            SessionRequest(
-                camera=camera,
-                encoder=encoder,
-                geometry=geometry,
-                generation=generation,
-            )
+        state = self._spawn_with_encode_fallback(
+            camera, requested_encoder, geometry, generation
         )
         session = FFmpegEncoderSession(self, state)
         self._generation_by_camera[camera] = generation
@@ -90,7 +103,92 @@ class FFmpegSegmentEncoder:
         self.metrics.active_sessions += 1
         return session
 
-    def _spawn(self, request: SessionRequest) -> SessionGeneration:
+    def _spawn_with_encode_fallback(
+        self,
+        camera: str,
+        requested_encoder: EncodePolicy,
+        geometry: EncoderGeometry,
+        generation: int,
+    ) -> SessionGeneration:
+        """Spawn a camera's encoder session, demoting nvenc to libx264 on failure.
+
+        #53's sanctioned exception to #43's "no implicit fallback" rule: NVENC
+        and libx264 both produce the same H.264 content, so trading GPU for
+        CPU encode cost after a failed session open never changes what a clip
+        records. The fallback is still loud (WARNING log + `EncodeSelection`
+        exposed via local diagnostics) and happens at most once per camera --
+        `self._encode_override` makes the demotion persistent.
+        """
+        effective_encoder = self._encode_override.get(camera, requested_encoder)
+        if effective_encoder != "h264_nvenc":
+            state = self._spawn(
+                SessionRequest(
+                    camera=camera,
+                    encoder=effective_encoder,
+                    geometry=geometry,
+                    generation=generation,
+                )
+            )
+            if camera not in self._encode_selection:
+                self._encode_selection[camera] = EncodeSelection(
+                    requested=requested_encoder,
+                    selected=effective_encoder,
+                    fallback_count=0,
+                    last_reason=None,
+                    updated_at_sec=time.time(),
+                )
+            return state
+
+        try:
+            state = self._spawn(
+                SessionRequest(
+                    camera=camera,
+                    encoder="h264_nvenc",
+                    geometry=geometry,
+                    generation=generation,
+                ),
+                record_failure_on_error=False,
+            )
+        except EncoderStartError as error:
+            self._downgrade_to_libx264(camera, error.reason)
+            return self._spawn(
+                SessionRequest(
+                    camera=camera,
+                    encoder="libx264",
+                    geometry=geometry,
+                    generation=generation,
+                )
+            )
+
+        self._encode_selection[camera] = EncodeSelection(
+            requested=requested_encoder,
+            selected="h264_nvenc",
+            fallback_count=0,
+            last_reason=None,
+            updated_at_sec=time.time(),
+        )
+        return state
+
+    def _downgrade_to_libx264(self, camera: str, reason: str) -> None:
+        self._encode_override[camera] = "libx264"
+        self.metrics.encode_fallbacks += 1
+        LOGGER.warning(
+            "camera %r nvenc session open failed (%s); falling back to libx264 "
+            "for this camera",
+            camera,
+            reason,
+        )
+        self._encode_selection[camera] = EncodeSelection(
+            requested="h264_nvenc",
+            selected="libx264",
+            fallback_count=1,
+            last_reason="session_open_failed",
+            updated_at_sec=time.time(),
+        )
+
+    def _spawn(
+        self, request: SessionRequest, *, record_failure_on_error: bool = True
+    ) -> SessionGeneration:
         output_dir = (
             self.config.store_dir
             / camera_directory_name(request.camera)
@@ -106,10 +204,12 @@ class FFmpegSegmentEncoder:
             output_dir.mkdir(parents=True, exist_ok=True)
             process = self._spawner(segment_process_args(spec))
         except EncoderStartError:
-            self._record_start_failure(request.camera)
+            if record_failure_on_error:
+                self._record_start_failure(request.camera)
             raise
         except OSError as exc:
-            self._record_start_failure(request.camera)
+            if record_failure_on_error:
+                self._record_start_failure(request.camera)
             raise EncoderStartError(
                 f"failed to prepare camera encoder ({type(exc).__name__})"
             ) from exc
@@ -158,13 +258,8 @@ class FFmpegSegmentEncoder:
             self.metrics.failures += 1
         generation = session.generation + 1
         try:
-            state = self._spawn(
-                SessionRequest(
-                    camera=session.camera,
-                    encoder=session.encoder,
-                    geometry=geometry,
-                    generation=generation,
-                )
+            state = self._spawn_with_encode_fallback(
+                session.camera, session.encoder, geometry, generation
             )
         except EncoderStartError:
             self._deactivate_session(session)

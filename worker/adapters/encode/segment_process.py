@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import math
 import subprocess
 from contextlib import suppress
@@ -9,6 +10,8 @@ from typing import Final, Protocol, final
 
 from worker.adapters.encode.adapter_errors import EncoderStartError, EncoderWriteError
 from worker.adapters.encode.models import EncodePolicy, EncoderGeometry, SegmentEncoderConfig
+
+LOGGER = logging.getLogger(__name__)
 
 _WAIT_TIMEOUT_SECONDS: Final = 15.0
 _TERMINATE_TIMEOUT_SECONDS: Final = 5.0
@@ -73,6 +76,20 @@ class _PopenEncoderProcess:
                 process.kill()
                 _ = process.wait()
         self._returncode = process.returncode
+        if self._returncode not in (0, None) and process.stderr is not None:
+            # Only read here, once the process has already exited: this call
+            # is on the same already-blocking reap() path as the wait() calls
+            # above, so it adds no new synchronous wait to encoder session
+            # open (see worker/adapters/encode/ffmpeg_segment_encoder.py's
+            # #53 fallback, which never waits on this).
+            with suppress(OSError, ValueError):
+                stderr_bytes = process.stderr.read()
+                if stderr_bytes:
+                    LOGGER.warning(
+                        "ffmpeg encoder process exited with code %s: %s",
+                        self._returncode,
+                        stderr_bytes.decode("utf-8", errors="replace").strip(),
+                    )
         return self._returncode
 
 
@@ -129,7 +146,7 @@ def spawn_encoder_process(args: tuple[str, ...]) -> EncoderProcess:
             args,
             stdin=subprocess.PIPE,
             stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
             bufsize=0,
         )
     except OSError as exc:

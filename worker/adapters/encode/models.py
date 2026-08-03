@@ -40,6 +40,7 @@ class SegmentEncoderConfig:
 class EncoderMetrics:
     __slots__: tuple[str, ...] = (
         "active_sessions",
+        "encode_fallbacks",
         "failures",
         "finalized_segments",
         "process_starts",
@@ -51,6 +52,10 @@ class EncoderMetrics:
     failures: int
     active_sessions: int
     finalized_segments: int
+    # Count of cameras that were demoted from h264_nvenc to libx264 after a
+    # failed session open (#53). Distinct from `failures`, which counts
+    # sessions that never started at all.
+    encode_fallbacks: int
 
     def __init__(self) -> None:
         self.process_starts = 0
@@ -58,6 +63,7 @@ class EncoderMetrics:
         self.failures = 0
         self.active_sessions = 0
         self.finalized_segments = 0
+        self.encode_fallbacks = 0
 
 
 @dataclass(frozen=True, slots=True)

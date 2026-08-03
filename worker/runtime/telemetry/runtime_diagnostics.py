@@ -8,6 +8,7 @@ from time import monotonic, time
 from typing import final
 
 from contracts.decode_diagnostics import DECODE_FALLBACK_REASONS, DecodeSelection
+from contracts.encode_diagnostics import ENCODE_FALLBACK_REASONS, EncodeSelection
 from worker.runtime.telemetry.local_metrics import (
     StageTimingAccumulator,
     bus_snapshot,
@@ -54,6 +55,7 @@ class WorkerDiagnostics:
         self._clock = clock
         self._wall_clock = wall_clock
         self._decode_by_camera: dict[str, DecodeSelection] = {}
+        self._encode_by_camera: dict[str, EncodeSelection] = {}
         self._measured_fps_by_camera: dict[str, tuple[float, float | None]] = {}
         self._stage_timings: dict[str, dict[str, StageTimingAccumulator]] = {}
         self._buses: dict[str, tuple[BusMetricsSource, tuple[str, ...]]] = {}
@@ -112,6 +114,51 @@ class WorkerDiagnostics:
         with self._lock:
             return dict(self._decode_by_camera)
 
+    def register_encode(self, camera_id: str, requested: str) -> None:
+        self.update_encode(
+            camera_id,
+            EncodeSelection(
+                requested=requested,
+                selected=requested,
+                fallback_count=0,
+                last_reason=None,
+                updated_at_sec=self._wall_clock(),
+            ),
+        )
+
+    def update_encode(self, camera_id: str, selection: EncodeSelection) -> None:
+        with self._lock:
+            self._encode_by_camera[camera_id] = selection
+
+    def record_encode_open_failure(self, camera_id: str, reason: str) -> None:
+        """Record a camera's nvenc session-open failure and its libx264 demotion.
+
+        Unlike `record_decode_open_failure` (which sets `selected=None` --
+        decode has nothing safe to fall back to), #53 sanctions libx264 as
+        encode's always-available fallback, so this records the demotion
+        itself rather than a "no selection" state.
+        """
+        normalized = reason if reason in ENCODE_FALLBACK_REASONS else "session_open_failed"
+        with self._lock:
+            previous = self._encode_by_camera.get(camera_id)
+            requested = previous.requested if previous is not None else "h264_nvenc"
+            fallback_count = 1 + (previous.fallback_count if previous is not None else 0)
+            self._encode_by_camera[camera_id] = EncodeSelection(
+                requested=requested,
+                selected="libx264",
+                fallback_count=fallback_count,
+                last_reason=normalized,
+                updated_at_sec=self._wall_clock(),
+            )
+
+    def encode_selection(self, camera_id: str) -> EncodeSelection | None:
+        with self._lock:
+            return self._encode_by_camera.get(camera_id)
+
+    def encode_snapshot(self) -> Mapping[str, EncodeSelection]:
+        with self._lock:
+            return dict(self._encode_by_camera)
+
     def update_measured_fps(self, camera_id: str, measured_fps: float | None) -> None:
         with self._lock:
             self._measured_fps_by_camera[camera_id] = (self._clock(), measured_fps)
@@ -156,11 +203,13 @@ class WorkerDiagnostics:
             }
             buses = dict(self._buses)
             encoder = self._encoder
+            encode_by_camera = dict(self._encode_by_camera)
             camera_ids = (
                 set(self._decode_by_camera)
                 | set(stage_timings)
                 | set(buses)
                 | set(statuses)
+                | set(encode_by_camera)
             )
         cameras = tuple(
             CameraDiagnosticsSnapshot(
@@ -170,6 +219,7 @@ class WorkerDiagnostics:
                 ),
                 stage_timings=stage_timings.get(camera_id, ()),
                 bus=bus_snapshot(buses.get(camera_id)),
+                encode=encode_by_camera.get(camera_id),
             )
             for camera_id in sorted(camera_ids)
         )
@@ -253,6 +303,7 @@ __all__ = [
     "BusSubscriptionSnapshot",
     "CameraDiagnosticsSnapshot",
     "ClipRecorderStatus",
+    "EncodeSelection",
     "EncoderLifecycleSnapshot",
     "RelayCameraPayload",
     "RelayClipRecorderPayload",
