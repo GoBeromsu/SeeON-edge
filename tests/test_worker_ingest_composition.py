@@ -341,6 +341,12 @@ def test_compose_camera_ingest_loop_capture_policy_fps_is_independent_of_frame_s
 def test_compose_camera_ingest_loop_logs_the_effective_pacing_fps(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
+    # The values must land in the *rendered* message text (record.message,
+    # i.e. what `%(message)s` actually substitutes), not merely in `extra=`
+    # -- worker/__main__.py's console formatter only renders `%(message)s`,
+    # so an extra=-only log is invisible there and defeats the point of this
+    # log line (seeing the effective fps without reading source). `extra=`
+    # stays too, for structured consumers, but is not what this asserts.
     camera = _camera("camera-a").model_copy(update={"fps": 15.0, "frame_stride": 3})
     registry = build_camera_source_registry((camera,))
 
@@ -350,10 +356,12 @@ def test_compose_camera_ingest_loop_logs_the_effective_pacing_fps(
         )
 
     records = [r for r in caplog.records if r.name == "worker.runtime.ingest_composition"]
-    assert any("target_fps" in r.getMessage() for r in records)
-    assert any(getattr(r, "target_fps", None) == 15.0 for r in records)
-    assert any(getattr(r, "frame_stride", None) == 3 for r in records)
-    assert any(getattr(r, "camera_id", None) == "camera-a" for r in records)
+    assert records, "expected an INFO log from compose_camera_ingest_loop"
+    for record in records:
+        record.message = record.getMessage()
+    assert any("camera_id=camera-a" in r.message for r in records)
+    assert any("target_fps=15.0" in r.message for r in records)
+    assert any("frame_stride=3" in r.message for r in records)
 
 
 def test_build_camera_source_registry_allowlists_only_the_configured_cameras() -> None:

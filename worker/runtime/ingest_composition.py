@@ -157,7 +157,11 @@ def compose_camera_ingest_loop(
     # the false lead this line exists to close off. `frame_stride` never
     # reaches this policy -- it only gates the extractor Scheduler.
     LOGGER.info(
-        "camera ingest paced to target_fps (frame_stride does not affect this rate)",
+        "camera ingest paced: camera_id=%s target_fps=%s frame_stride=%s "
+        "(frame_stride does not affect this rate)",
+        camera.camera_id,
+        camera.fps,
+        camera.frame_stride,
         extra={
             "camera_id": camera.camera_id,
             "target_fps": camera.fps,
