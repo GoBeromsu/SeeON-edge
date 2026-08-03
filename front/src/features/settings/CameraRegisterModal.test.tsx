@@ -207,3 +207,91 @@ describe('CameraRegisterModal', () => {
     expect(document.body.textContent).not.toContain('침대 영역 인식이 필요합니다.');
   });
 });
+
+describe('I7 — 클라우드 방(space) 선택', () => {
+  /** 엣지가 pull한 roster의 미매칭 항목 = 아직 카메라가 없는 방. */
+  const rosterSpace: Camera = {
+    id: 'backend-cam-205',
+    label: '205호',
+    rtsp_url_masked: 'rtsp://***',
+    space_id: 'sp_205',
+    space_name: '205호',
+    floor_name: '2층',
+    backend_camera_id: 'backend-cam-205',
+    mapping_pending: true,
+    status: 'unknown',
+    created_at: null,
+  };
+
+  function setSelect(name: string, value: string): void {
+    const select = document.querySelector(`select[name="${name}"]`);
+    if (!(select instanceof HTMLSelectElement)) throw new Error(`missing select ${name}`);
+    act(() => {
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype, 'value')?.set;
+      setter?.call(select, value);
+      select.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+  }
+
+  it('빈 방이 있으면 선택 UI를 보여준다', () => {
+    render(true, vi.fn(), vi.fn(), [rosterSpace]);
+
+    const select = document.querySelector('select[name="space_id"]');
+    expect(select).not.toBeNull();
+    expect(document.body.textContent).toContain('2층 · 205호');
+  });
+
+  it('방을 고르지 않으면 등록을 막는다', async () => {
+    const errorSpy = vi.spyOn(toast, 'error');
+    render(true, vi.fn(), vi.fn(), [rosterSpace]);
+    setInput('label', '205호');
+    setInput('rtsp_url', 'rtsp://cam/1');
+
+    await act(async () => findButton('다음').click());
+
+    expect(createCamera).not.toHaveBeenCalled();
+    expect(errorSpy).toHaveBeenCalledWith('이 카메라가 설치된 방을 선택하세요.');
+  });
+
+  it('선택한 space_id를 등록 요청에 함께 보낸다', async () => {
+    vi.mocked(createCamera).mockResolvedValue(createdCamera);
+    render(true, vi.fn(), vi.fn(), [rosterSpace]);
+    setInput('label', '205호');
+    setInput('rtsp_url', 'rtsp://cam/1');
+    setSelect('space_id', 'sp_205');
+
+    await act(async () => findButton('다음').click());
+
+    expect(createCamera).toHaveBeenCalledWith(
+      { label: '205호', rtsp_url: 'rtsp://cam/1', space_id: 'sp_205' },
+      { forceRegister: false },
+    );
+  });
+
+  it('이미 카메라가 붙은 방은 후보에서 빠진다 (카메라 1대 = 방 1개)', () => {
+    const occupied: Camera = {
+      ...rosterSpace,
+      id: 'local-cam',
+      mapping_pending: false,
+      backend_camera_id: 'backend-cam-205',
+    };
+    render(true, vi.fn(), vi.fn(), [occupied]);
+
+    const select = document.querySelector('select[name="space_id"]');
+    expect(select).toBeNull();
+  });
+
+  it('roster가 비어 있으면 선택을 요구하지 않는다', async () => {
+    vi.mocked(createCamera).mockResolvedValue(createdCamera);
+    render(true, vi.fn(), vi.fn(), []);
+    setInput('label', '101호');
+    setInput('rtsp_url', 'rtsp://cam/1');
+
+    await act(async () => findButton('다음').click());
+
+    expect(createCamera).toHaveBeenCalledWith(
+      { label: '101호', rtsp_url: 'rtsp://cam/1' },
+      { forceRegister: false },
+    );
+  });
+});

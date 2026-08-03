@@ -123,6 +123,11 @@ function cameraBody(input: CameraInput | CameraPatchInput, extra?: Record<string
   if ('floor' in input && input.floor !== undefined) {
     body.floor = input.floor;
   }
+  // 클라우드 방(space) 매핑. 이게 없으면 카메라가 클라우드 push 대상에서
+  // 통째로 제외돼(roster_sync), 등록은 됐는데 클라우드에는 영영 안 나타난다.
+  if ('space_id' in input && input.space_id !== undefined) {
+    body.space_id = input.space_id;
+  }
   if (extra) {
     Object.assign(body, extra);
   }
