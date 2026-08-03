@@ -1,59 +1,72 @@
 import { HttpError, requestJson } from '@/shared/api/http';
 import {
+  normalizeBedZoneRecognitionResponse,
   normalizeCameraRegistry,
   normalizeCameraResponse,
   normalizeCameraTestResult,
   normalizeClipsResponse,
+  normalizeClipStorageBrowse,
+  normalizeClipStorageInfo,
   normalizeConnectionTestResult,
   normalizeConnectionView,
-  normalizeRosterSyncResult,
+  normalizeDetectionSettings,
   normalizeStatusSnapshot,
   normalizeSystemSnapshot,
 } from '@/shared/api/normalizers';
-import { isRecord, pickBoolean } from '@/shared/api/normalizerFields';
+import { isRecord } from '@/shared/api/normalizerFields';
 import type {
+  BedZone,
   Camera,
   CameraInput,
   CameraPatchInput,
   CameraRegistry,
   CameraTestResult,
   Clip,
-  ClipLabel,
+  ClipStorageBrowseResult,
+  ClipStorageInfo,
   ConnectionInput,
   ConnectionTestResult,
   ConnectionView,
   DecodeBackend,
-  RosterSyncResult,
+  DetectionSettings,
+  DetectionSettingsInput,
+  OverlayMode,
   StatusSnapshot,
   SystemSnapshot,
 } from '@/shared/api/types';
 
 export type {
+  BedZone,
+  BedZonePoint,
   Camera,
   CameraInput,
   CameraPatchInput,
   CameraRegistry,
   CameraStatus,
   CameraHeartbeat,
-  CameraSync,
-  CameraSyncErrorClass,
-  CameraSyncStatus,
   CameraTestResult,
   Clip,
-  ClipLabel,
+  ClipStorageBrowseEntry,
+  ClipStorageBrowseResult,
+  ClipStorageInfo,
   ConnectionErrorClass,
   ConnectionInput,
   ConnectionTestResult,
   ConnectionView,
   DecodeBackend,
+  DetectionDomainKey,
+  DetectionDomainSetting,
+  DetectionMode,
+  DetectionSettings,
+  DetectionSettingsInput,
   HeartbeatStatus,
-  RosterSyncErrorClass,
-  RosterSyncResult,
-  RosterSyncStatus,
-  RuntimeCamera,
+  OverlayMode,
+  RuntimeCameraDiagnostics,
   RuntimeClipRecorder,
   RuntimeDecodeDiagnostics,
-  RuntimeFacility,
+  RuntimeDeviceDiagnostics,
+  RuntimeLatencyDiagnostics,
+  RuntimeWorkerDiagnostics,
   StatusSnapshot,
   SystemSnapshot,
 } from '@/shared/api/types';
@@ -79,29 +92,21 @@ export async function logoutDashboard(): Promise<void> {
   await requestJson('/auth/session', { method: 'DELETE' });
 }
 
+/** Single admin account: no current-password confirmation — the caller is already an authenticated session. */
 export async function updateDashboardCredentials(input: {
-  currentPassword: string;
-  newUsername?: string;
+  username?: string;
   newPassword: string;
 }): Promise<void> {
   const body: Record<string, unknown> = {
-    current_password: input.currentPassword,
     new_password: input.newPassword,
   };
-  if (input.newUsername) {
-    body.username = input.newUsername;
+  if (input.username) {
+    body.username = input.username;
   }
   await requestJson('/auth/credentials', {
     method: 'PUT',
     body: JSON.stringify(body),
   });
-}
-
-type ClipLabelOverlay = Pick<Clip, 'label' | 'reviewer' | 'reviewed_at'>;
-const clipLabelOverlay = new Map<string, ClipLabelOverlay>();
-
-export function cameraMediaId(camera: Pick<Camera, 'id' | 'backend_camera_id'>): string {
-  return camera.backend_camera_id ?? camera.id;
 }
 
 function cameraBody(input: CameraInput | CameraPatchInput, extra?: Record<string, unknown>): string {
@@ -111,12 +116,6 @@ function cameraBody(input: CameraInput | CameraPatchInput, extra?: Record<string
   }
   if (input.rtsp_url !== undefined) {
     body.rtsp_url = input.rtsp_url.trim();
-  }
-  if (input.space_id !== undefined) {
-    body.space_id = input.space_id.trim();
-  }
-  if ('detectionSettings' in input && input.detectionSettings) {
-    body.detectionSettings = input.detectionSettings;
   }
   if ('decode_backend' in input && input.decode_backend !== undefined) {
     body.decode_backend = input.decode_backend;
@@ -155,10 +154,6 @@ export async function testConnection(input?: ConnectionInput): Promise<Connectio
   return normalizeConnectionTestResult(
     await requestJson('/connection/test', { method: 'POST', body: input ? connectionBody(input) : undefined }),
   );
-}
-
-export async function syncCameras(): Promise<RosterSyncResult> {
-  return normalizeRosterSyncResult(await requestJson('/connection/sync-cameras', { method: 'POST' }));
 }
 
 /** Structured 422 body the backend sends when probe-before-persist rejects a camera (`error_class`: timeout | auth | decode). */
@@ -232,21 +227,75 @@ export async function testCamera(cameraId: string): Promise<CameraTestResult> {
   return normalizeCameraTestResult(await requestJson(`/cameras/${encodeURIComponent(cameraId)}/test`, { method: 'POST' }));
 }
 
-function normalizePoseResponse(value: unknown): boolean {
-  const showPose = isRecord(value) ? pickBoolean(value, ['show_pose']) : null;
-  if (showPose === null) throw new Error('Invalid pose response');
-  return showPose;
+/** Structured 422 body the backend sends when bed-zone recognition finds no bed in the current frame. */
+export type BedZoneRecognitionFailureDetail = {
+  error_class?: string;
+};
+
+/** Narrows a caught `recognizeBedZone` error to a "no bed detected" rejection (HTTP 422), or returns undefined. */
+export function bedZoneRecognitionFailureDetail(error: unknown): BedZoneRecognitionFailureDetail | undefined {
+  if (!(error instanceof HttpError) || error.status !== 422) return undefined;
+  const detail = errorDetail(error);
+  if (!detail) return undefined;
+  return { error_class: typeof detail.error_class === 'string' ? detail.error_class : undefined };
 }
 
-export async function fetchCameraPose(cameraId: string): Promise<boolean> {
-  return normalizePoseResponse(await requestJson(`/streams/${encodeURIComponent(cameraId)}/pose`));
+/**
+ * Runs one-shot YOLO bed segmentation against the camera's latest frame. 422 (bed_not_found) and 503
+ * (worker/frame unavailable) are both surfaced as thrown HttpErrors -- callers keep showing "인식 필요".
+ */
+export async function recognizeBedZone(cameraId: string): Promise<BedZone> {
+  return normalizeBedZoneRecognitionResponse(
+    await requestJson(`/cameras/${encodeURIComponent(cameraId)}/bed-zone/recognize`, { method: 'POST' }),
+  );
 }
 
-export async function setCameraPose(cameraId: string, showPose: boolean): Promise<boolean> {
-  return normalizePoseResponse(
+export async function fetchDetectionSettings(signal?: AbortSignal): Promise<DetectionSettings> {
+  return normalizeDetectionSettings(await requestJson('/detection-settings', { signal }));
+}
+
+/** Full replace, not a partial update -- send the complete domains map back (see DetectionSettingsInput). */
+export async function saveDetectionSettings(input: DetectionSettingsInput): Promise<DetectionSettings> {
+  return normalizeDetectionSettings(
+    await requestJson('/detection-settings', { method: 'PUT', body: JSON.stringify(input) }),
+  );
+}
+
+export async function fetchClipStorage(signal?: AbortSignal): Promise<ClipStorageInfo> {
+  return normalizeClipStorageInfo(await requestJson('/clips/storage', { signal }));
+}
+
+export async function browseClipStorage(path: string, signal?: AbortSignal): Promise<ClipStorageBrowseResult> {
+  const query = path ? `?path=${encodeURIComponent(path)}` : '';
+  return normalizeClipStorageBrowse(await requestJson(`/clips/storage/browse${query}`, { signal }));
+}
+
+/** path: "" selects the CLIP_STORE_DIR mount root itself; otherwise a relative subdirectory. */
+export async function saveClipStorageLocation(path: string): Promise<ClipStorageInfo> {
+  return normalizeClipStorageInfo(
+    await requestJson('/clips/storage/location', { method: 'PUT', body: JSON.stringify({ path }) }),
+  );
+}
+
+const OVERLAY_MODES: readonly OverlayMode[] = ['none', 'bedexit', 'fall'];
+
+function normalizeOverlayResponse(value: unknown): OverlayMode {
+  const mode = isRecord(value) ? value.mode : null;
+  if (typeof mode !== 'string' || !OVERLAY_MODES.includes(mode as OverlayMode)) {
+    throw new Error('Invalid overlay response');
+  }
+  return mode as OverlayMode;
+}
+
+export async function fetchCameraOverlay(cameraId: string): Promise<OverlayMode> {
+  return normalizeOverlayResponse(await requestJson(`/streams/${encodeURIComponent(cameraId)}/pose`));
+}
+
+export async function setCameraOverlay(cameraId: string, mode: OverlayMode): Promise<OverlayMode> {
+  return normalizeOverlayResponse(
     await requestJson(`/streams/${encodeURIComponent(cameraId)}/pose`, {
       method: 'POST',
-      body: JSON.stringify({ show_pose: showPose }),
+      body: JSON.stringify({ mode }),
     }),
   );
 }
@@ -262,38 +311,5 @@ export async function fetchSystem(signal?: AbortSignal): Promise<SystemSnapshot>
 export async function fetchClips(cameraId?: string, signal?: AbortSignal): Promise<Clip[]> {
   const query = cameraId?.trim() ? `?camera_id=${encodeURIComponent(cameraId.trim())}` : '';
   const value = await requestJson(`/clips${query}`, { signal });
-  return normalizeClipsResponse(value).map(applyClipLabelOverlay);
-}
-
-export async function labelClip(existing: Clip, label: ClipLabel): Promise<Clip> {
-  const value = await requestJson(`/clips/${encodeURIComponent(existing.id)}/label`, {
-      method: 'PUT',
-      body: JSON.stringify({ label: label === 'UNREVIEWED' ? null : label }),
-    });
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
-    throw new Error('Invalid clip response');
-  }
-  const response = value as Record<string, unknown>;
-  if ((response.clip_id !== existing.id && response.id !== existing.id)
-    || (response.label !== null && response.label !== 'TRUE_POSITIVE' && response.label !== 'FALSE_POSITIVE')
-    || typeof response.reviewer !== 'string' || !response.reviewer
-    || typeof response.reviewed_at !== 'string' || !response.reviewed_at) {
-    throw new Error('Invalid clip response');
-  }
-  const overlay: ClipLabelOverlay = {
-    label: response.label,
-    reviewer: response.reviewer,
-    reviewed_at: response.reviewed_at,
-  };
-  clipLabelOverlay.set(existing.id, overlay);
-  return { ...existing, ...overlay, reviewState: 'confirmed' };
-}
-
-function applyClipLabelOverlay(clip: Clip): Clip {
-  const overlay = clipLabelOverlay.get(clip.id);
-  return overlay ? { ...clip, ...overlay, reviewState: 'confirmed' } : clip;
-}
-
-export function clearClipLabelOverlay(): void {
-  clipLabelOverlay.clear();
+  return normalizeClipsResponse(value);
 }

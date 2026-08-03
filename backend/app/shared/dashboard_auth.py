@@ -85,10 +85,6 @@ class HashedDashboardCredentials:
         )
 
 
-class WrongCurrentPasswordError(Exception):
-    """The current_password supplied to a credential rotation didn't match."""
-
-
 @dataclass(slots=True)
 class DashboardSessionStore:
     credentials: DashboardCredentials
@@ -207,33 +203,26 @@ def dashboard_sessions(request: Request) -> DashboardSessionStore:
 def rotate_dashboard_credentials(
     request: Request,
     *,
-    current_password: str,
     new_username: str | None,
     new_password: str,
 ) -> str:
-    """Verify ``current_password`` against the live session, persist the new
-    credentials, revoke every existing session, and return a fresh session
-    token for the caller (so the PUT response can carry a live cookie).
+    """Persist the new credentials, revoke every existing session, and return
+    a fresh session token for the caller (so the PUT response can carry a
+    live cookie).
 
-    Raises ``WrongCurrentPasswordError`` without touching the credentials file
-    when ``current_password`` doesn't match the active session's password.
+    The caller must already hold a valid dashboard session -- callers reach
+    this function only after ``authorize_dashboard`` -- so no current-password
+    check is performed here; the session cookie is the sole auth gate.
 
-    The whole verify -> persist -> swap -> mint sequence runs under
+    The whole persist -> swap -> mint sequence runs under
     ``_SESSION_STORE_INIT_LOCK`` so two concurrent rotations can't interleave
-    (e.g. two admin tabs submitting at once): the second call re-verifies
-    ``current_password`` against whatever the first call already swapped in,
-    so at most one of two racing rotations against the same prior password
-    succeeds -- the other gets a clean ``WrongCurrentPasswordError`` instead
-    of a silently-overwritten file or a 204 whose cookie is already dead.
+    (e.g. two admin tabs submitting at once).
     """
 
     sessions = dashboard_sessions(request)
     store = dashboard_credentials_store(request)
 
     with _SESSION_STORE_INIT_LOCK:
-        if not sessions.credentials.verify(sessions.username, current_password):
-            raise WrongCurrentPasswordError()
-
         resolved_username = (new_username or "").strip() or sessions.username
         persisted = store.save(username=resolved_username, password=new_password)
 
@@ -305,7 +294,6 @@ __all__ = [
     "DashboardSessionStore",
     "HashedDashboardCredentials",
     "PlaintextDashboardCredentials",
-    "WrongCurrentPasswordError",
     "authorize_dashboard",
     "dashboard_credentials_store",
     "dashboard_sessions",

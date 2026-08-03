@@ -1,0 +1,791 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="_ds/design-system-227d994e-82c0-4077-be29-8433717f6692/styles.css">
+<script src="_ds/design-system-227d994e-82c0-4077-be29-8433717f6692/_ds_bundle.js"></script>
+<style>
+body{margin:0;background:#fff;font-family:Pretendard,-apple-system,BlinkMacSystemFont,system-ui,"Apple SD Gothic Neo","Noto Sans KR",sans-serif}
+a{color:var(--primary,#2f6fb0)}a:hover{opacity:.85}
+@keyframes pulseZone{0%,100%{opacity:.9}50%{opacity:.35}}
+</style>
+</helmet>
+<div class="bg-background text-foreground" style="min-height:100vh;display:grid;grid-template-rows:auto 1fr;align-content:start">
+<sc-if value="{{ notLogin }}" hint-placeholder-val="{{ true }}">
+<x-import component-from-global-scope="OssHub.NavBar" items="{{ navItems }}" brand="{{ brandText }}" actions="{{ shellActions }}" hint-size="100%,56px"></x-import>
+</sc-if>
+
+<sc-if value="{{ isLogin }}" hint-placeholder-val="{{ false }}">
+<main data-screen-label="로그인" style="display:grid;place-items:center;padding:48px 16px">
+<div class="rounded-xl border border-border bg-card p-6" style="width:380px;display:grid;gap:14px">
+<h1 class="font-heading text-lg font-semibold" style="margin:0">Senior AI Lab Edge</h1>
+<label class="text-sm font-medium" style="display:grid;gap:6px">아이디<input class="h-9 w-full rounded-lg border border-input bg-background px-3 text-sm" value="admin"></label>
+<label class="text-sm font-medium" style="display:grid;gap:6px">비밀번호<input class="h-9 w-full rounded-lg border border-input bg-background px-3 text-sm" type="password" value="••••••"></label>
+<x-import component-from-global-scope="OssHub.Button" size="sm" onClick="{{ doLogin }}" hint-size="100%,36px">로그인</x-import>
+</div>
+</main>
+</sc-if>
+
+<sc-if value="{{ isWall }}" hint-placeholder-val="{{ true }}">
+<main data-screen-label="관제" style="padding:20px 24px 24px;max-width:1280px;margin:0 auto;width:100%;box-sizing:border-box;display:grid;gap:16px;align-content:start">
+<div class="flex items-center justify-between" style="gap:16px">
+<div class="flex items-center" style="gap:12px">
+<h1 class="font-heading text-xl font-semibold" style="margin:0">관제</h1>
+<x-import component-from-global-scope="OssHub.StatusBadge" variant="approved" hint-size="auto,22px">온라인&#160;{{ onlineCount }}</x-import>
+<x-import component-from-global-scope="OssHub.StatusBadge" variant="rejected" hint-size="auto,22px">오프라인&#160;{{ offlineCount }}</x-import>
+</div>
+<select class="h-9 rounded-lg border border-input bg-background px-3 text-sm" value="{{ floorFilter }}" onChange="{{ setFloorFilter }}">
+<option value="전체">전체 층</option><option value="1층">1층</option><option value="2층">2층</option>
+</select>
+</div>
+<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px">
+<sc-for list="{{ wallCams }}" as="cam" hint-placeholder-count="8">
+<div class="relative overflow-hidden rounded-lg border border-border" style="cursor:pointer" onClick="{{ cam.open }}">
+<sc-if value="{{ cam.online }}" hint-placeholder-val="{{ true }}"><div style="{{ cam.bgStyle }}"></div></sc-if>
+<sc-if value="{{ cam.offline }}" hint-placeholder-val="{{ false }}"><div class="bg-muted flex items-center justify-center text-sm text-muted-foreground" style="aspect-ratio:16/9;box-sizing:border-box;padding-bottom:40px">오프라인</div></sc-if>
+<div class="flex items-center justify-between px-3 py-2" style="{{ cam.barStyle }}"><span class="text-sm font-medium">{{ cam.name }}</span><span class="size-2 rounded-full" style="{{ cam.dotStyle }}"></span></div>
+</div>
+</sc-for>
+</div>
+</main>
+</sc-if>
+
+<sc-if value="{{ isDetail }}" hint-placeholder-val="{{ false }}">
+<main data-screen-label="호실 상세" style="padding:20px 24px 24px;max-width:1280px;margin:0 auto;width:100%;box-sizing:border-box;display:grid;gap:14px;align-content:start">
+<div class="flex items-center" style="gap:10px">
+<a class="text-sm text-muted-foreground" style="text-decoration:none;cursor:pointer" onClick="{{ goWall }}">관제</a><span class="text-sm text-muted-foreground">/</span>
+<h1 class="font-heading text-xl font-semibold" style="margin:0">{{ selName }}</h1>
+<x-import component-from-global-scope="OssHub.StatusBadge" variant="{{ selBadgeVariant }}" hint-size="auto,22px">{{ selStatusText }}</x-import>
+</div>
+<div style="display:grid;grid-template-columns:minmax(0,2fr) minmax(0,1fr);gap:16px;align-items:start">
+<div class="relative overflow-hidden rounded-lg border border-border">
+<sc-if value="{{ selOnline }}" hint-placeholder-val="{{ true }}"><div style="{{ selBgStyle }}"></div></sc-if>
+<sc-if value="{{ selOffline }}" hint-placeholder-val="{{ false }}">
+<div class="bg-muted" style="aspect-ratio:16/9;display:grid;place-items:center">
+<div style="display:grid;gap:10px;justify-items:center">
+<p class="text-sm text-muted-foreground" style="margin:0">카메라에 연결할 수 없습니다 — 탐지가 중단된 상태입니다</p>
+<div class="flex gap-2">
+<x-import component-from-global-scope="OssHub.Button" variant="outline" size="sm" onClick="{{ retryCam }}" hint-size="auto,32px">재연결 시도</x-import>
+<x-import component-from-global-scope="OssHub.Button" variant="ghost" size="sm" onClick="{{ openEditSel }}" hint-size="auto,32px">연결 관리</x-import>
+</div>
+</div>
+</div>
+</sc-if>
+<sc-if value="{{ showBedOverlay }}" hint-placeholder-val="{{ true }}">
+<svg viewBox="0 0 320 180" style="position:absolute;inset:0;width:100%;height:100%">
+<rect x="34" y="84" width="150" height="82" fill="#2bb6a3" fill-opacity="0.08" stroke="#2bb6a3" stroke-width="1.5" stroke-dasharray="6 4"></rect>
+<text x="40" y="98" fill="#2bb6a3" font-size="10" font-weight="700">침대 영역</text>
+<rect x="148" y="50" width="66" height="108" fill="none" stroke="#fff" stroke-opacity="0.9" stroke-width="1.5"></rect>
+<text x="150" y="44" fill="#fff" font-size="10" font-weight="700">인물 1 · 침대 안 · 누움</text>
+<g stroke="#fff" stroke-opacity="0.85" stroke-width="2" stroke-linecap="round"><circle cx="181" cy="72" r="7" fill="none"></circle><path d="M181 79 V112"></path><path d="M181 88 L164 102"></path><path d="M181 88 L198 102"></path><path d="M181 112 L167 142"></path><path d="M181 112 L195 142"></path></g>
+</svg>
+</sc-if>
+<sc-if value="{{ showFallOverlay }}" hint-placeholder-val="{{ false }}">
+<svg viewBox="0 0 320 180" style="position:absolute;inset:0;width:100%;height:100%">
+<rect x="120" y="60" width="90" height="100" fill="none" stroke="#fff" stroke-opacity="0.9" stroke-width="1.5"></rect>
+<text x="122" y="54" fill="#fff" font-size="10" font-weight="700">인물 1 · 서있음 · 낙상 없음</text>
+<g stroke="#fff" stroke-opacity="0.85" stroke-width="2" stroke-linecap="round"><circle cx="163" cy="78" r="7" fill="none"></circle><path d="M163 85 V118"></path><path d="M163 94 L146 108"></path><path d="M163 94 L180 108"></path><path d="M163 118 L150 150"></path><path d="M163 118 L176 150"></path></g>
+</svg>
+</sc-if>
+<sc-if value="{{ selOnline }}" hint-placeholder-val="{{ true }}"><div class="rounded-md px-2.5 py-1 text-xs" style="position:absolute;left:8px;bottom:8px;background:rgba(0,0,0,.72);color:#fff">{{ liveLabel }}</div>
+<div class="rounded-md px-2.5 py-1 text-xs tabular-nums font-mono" style="position:absolute;right:8px;top:8px;background:rgba(0,0,0,.72);color:rgba(255,255,255,.85)">디코드 14.8 FPS · 추론 7.2 FPS · 프레임 42,318</div></sc-if>
+</div>
+<div style="display:grid;gap:12px">
+<div class="rounded-xl border border-border bg-card p-4">
+<div class="flex items-center justify-between" style="margin-bottom:10px">
+<h3 class="font-heading text-lg font-semibold" style="margin:0">{{ selName }}</h3>
+<x-import component-from-global-scope="OssHub.Button" variant="outline" size="xs" onClick="{{ openEditSel }}" hint-size="auto,26px">연결 관리</x-import>
+</div>
+<dl class="text-sm" style="display:grid;grid-template-columns:auto 1fr;gap:6px 16px;margin:0">
+<dt class="text-muted-foreground">층</dt><dd class="text-right" style="margin:0">{{ selFloor }}</dd>
+<dt class="text-muted-foreground">RTSP</dt><dd class="text-right font-mono text-xs" style="margin:0">{{ selRtsp }}</dd>
+</dl>
+</div>
+<div class="rounded-xl border border-border bg-card p-4">
+<div class="flex items-center justify-between" style="margin-bottom:8px"><h3 class="font-heading text-sm font-semibold" style="margin:0">탐지 이벤트</h3>
+<a aria-label="탐지 설정" title="탐지 설정" class="text-muted-foreground" style="display:inline-flex;padding:4px;cursor:pointer" onClick="{{ goSettings }}"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"></circle><path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3M5.3 5.3l2.1 2.1M16.6 16.6l2.1 2.1M18.7 5.3l-2.1 2.1M7.4 16.6l-2.1 2.1"></path></svg></a></div>
+<div style="display:grid;gap:8px">
+<div class="flex items-center justify-between text-sm"><span>침대 이탈 <span class="ml-2 text-xs text-muted-foreground tabular-nums whitespace-nowrap">{{ bedSchedText }}</span></span><x-import component-from-global-scope="OssHub.StatusBadge" variant="{{ bedBadgeVariant }}" hint-size="auto,22px">{{ bedBadgeText }}</x-import></div>
+<div class="flex items-center justify-between text-sm"><span>낙상 <span class="ml-2 text-xs text-muted-foreground tabular-nums whitespace-nowrap">{{ fallSchedText }}</span></span><x-import component-from-global-scope="OssHub.StatusBadge" variant="{{ fallBadgeVariant }}" hint-size="auto,22px">{{ fallBadgeText }}</x-import></div>
+</div>
+<div class="flex items-center border-t border-border" style="gap:8px;margin-top:12px;padding-top:12px">
+<span class="text-xs text-muted-foreground" style="white-space:nowrap">오버레이</span>
+<sc-for list="{{ overlayChips }}" as="ch" hint-placeholder-count="3">
+<button class="{{ ch.cls }}" style="cursor:pointer" onClick="{{ ch.set }}">{{ ch.label }}</button>
+</sc-for>
+</div>
+</div>
+</div>
+</div>
+<section style="display:grid;gap:10px">
+<div class="flex items-center justify-between"><h2 class="font-heading text-base font-semibold" style="margin:0">이벤트 히스토리</h2>
+<select class="h-9 rounded-lg border border-input bg-background px-3 text-sm" value="{{ sortMode }}" onChange="{{ setSortMode }}"><option>최신순</option><option>종류별</option></select></div>
+<sc-for list="{{ detailGroups }}" as="grp" hint-placeholder-count="1">
+<div style="display:grid;gap:8px">
+<sc-if value="{{ grp.showTitle }}" hint-placeholder-val="{{ false }}"><h3 class="text-sm font-medium text-muted-foreground" style="margin:0">{{ grp.title }}</h3></sc-if>
+<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px">
+<sc-for list="{{ grp.items }}" as="ev" hint-placeholder-count="3">
+<div class="overflow-hidden rounded-lg border border-border bg-card" style="cursor:pointer" onClick="{{ ev.open }}"><div style="{{ ev.bgStyle }}"></div><div class="px-3 py-2 flex items-center justify-between"><span class="text-sm font-medium">{{ ev.typeLabel }}</span><span class="text-xs text-muted-foreground tabular-nums">{{ ev.time }}</span></div></div>
+</sc-for>
+</div>
+</div>
+</sc-for>
+<sc-if value="{{ detailEventsEmpty }}" hint-placeholder-val="{{ false }}"><p class="text-sm text-muted-foreground" style="margin:0">이 카메라의 이벤트가 없습니다.</p></sc-if>
+</section>
+</main>
+</sc-if>
+
+<sc-if value="{{ isEvents }}" hint-placeholder-val="{{ false }}">
+<main data-screen-label="이벤트" style="padding:20px 24px 24px;max-width:1280px;margin:0 auto;width:100%;box-sizing:border-box;display:grid;gap:14px;align-content:start">
+<h1 class="font-heading text-xl font-semibold" style="margin:0">이벤트</h1>
+<div class="flex items-center" style="gap:8px">
+<sc-for list="{{ evChips }}" as="ch" hint-placeholder-count="3">
+<button class="{{ ch.cls }}" style="cursor:pointer" onClick="{{ ch.set }}">{{ ch.label }}</button>
+</sc-for>
+<span style="margin-left:auto"></span>
+<select class="h-8 rounded-lg border border-input bg-background px-3 text-sm" value="{{ evCam }}" onChange="{{ setEvCam }}">
+<option value="전체">전체 카메라</option><option>101호</option><option>102호</option><option>103호</option><option>104호</option><option>201호</option><option>202호</option><option>1층 복도</option><option>2층 복도</option>
+</select>
+</div>
+<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px">
+<sc-for list="{{ filteredEvents }}" as="ev" hint-placeholder-count="4">
+<div class="overflow-hidden rounded-lg border border-border bg-card" style="cursor:pointer" onClick="{{ ev.open }}">
+<div class="relative"><div style="{{ ev.bgStyle }}"></div><span class="rounded-md px-2 py-0.5 text-xs" style="position:absolute;left:6px;top:6px;background:rgba(0,0,0,.72);color:#fff">{{ ev.camName }}</span></div>
+<div class="px-3 py-2 flex items-center justify-between"><span class="text-sm font-medium">{{ ev.typeLabel }}</span><span class="text-xs text-muted-foreground tabular-nums">{{ ev.time }}</span></div>
+</div>
+</sc-for>
+</div>
+<sc-if value="{{ eventsEmpty }}" hint-placeholder-val="{{ false }}"><p class="text-sm text-muted-foreground" style="margin:0">조건에 맞는 이벤트가 없습니다.</p></sc-if>
+</main>
+</sc-if>
+
+<sc-if value="{{ isSettings }}" hint-placeholder-val="{{ false }}">
+<main data-screen-label="설정" style="padding:20px 24px 24px;max-width:1280px;margin:0 auto;width:100%;box-sizing:border-box;display:grid;gap:16px;align-content:start">
+<h1 class="font-heading text-xl font-semibold" style="margin:0">설정</h1>
+<div style="display:grid;grid-template-columns:minmax(0,7fr) minmax(0,5fr);gap:16px;align-items:start">
+<div style="display:grid;gap:16px">
+<div class="rounded-xl border border-border bg-card p-5">
+<div class="flex items-center justify-between" style="margin-bottom:12px">
+<h2 class="font-heading text-base font-semibold" style="margin:0">카메라</h2>
+<x-import component-from-global-scope="OssHub.Button" size="sm" onClick="{{ openAdd }}" hint-size="auto,32px"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" style="margin-right:6px"><path d="M3.75 8.25h11.5a1.5 1.5 0 0 1 1.5 1.5v7.5a1.5 1.5 0 0 1-1.5 1.5H3.75a1.5 1.5 0 0 1-1.5-1.5v-7.5a1.5 1.5 0 0 1 1.5-1.5Z"></path><path d="M16.75 11.25 20.75 9v9l-4-2.25"></path><path d="M9.5 11v5M7 13.5h5"></path></svg>카메라 등록</x-import>
+</div>
+<div class="overflow-hidden rounded-lg border border-border">
+<table class="w-full text-sm" style="border-collapse:collapse">
+<thead><tr class="border-b border-border bg-muted">
+<th class="px-3 py-2 text-left font-medium text-muted-foreground">카메라</th>
+<th class="px-3 py-2 text-left font-medium text-muted-foreground">층</th>
+<th class="px-3 py-2 text-left font-medium text-muted-foreground">상태</th>
+<th class="px-3 py-2 text-right font-medium text-muted-foreground">작업</th>
+</tr></thead>
+<tbody>
+<sc-for list="{{ cams }}" as="cam" hint-placeholder-count="8">
+<tr class="{{ cam.rowCls }}"><td class="px-3 py-2 font-medium">{{ cam.name }}</td><td class="px-3 py-2">{{ cam.floor }}</td><td class="px-3 py-2"><x-import component-from-global-scope="OssHub.StatusBadge" variant="{{ cam.badgeVariant }}" hint-size="auto,22px">{{ cam.statusText }}</x-import></td><td class="px-3 py-2 text-right"><span class="text-primary" style="cursor:pointer" onClick="{{ cam.edit }}">수정</span><span class="ml-2 text-destructive" style="cursor:pointer" onClick="{{ cam.del }}">삭제</span></td></tr>
+</sc-for>
+</tbody>
+</table>
+</div>
+</div>
+<p class="text-xs text-muted-foreground font-mono" style="margin:0">v2026.07.28 · ml-api@8c4e21 · ml-worker@1fa905</p>
+</div>
+<div style="display:grid;gap:16px">
+<div class="rounded-xl border border-border bg-card p-5">
+<div class="flex items-center justify-between" style="margin-bottom:12px">
+<h2 class="font-heading text-base font-semibold" style="margin:0">탐지 설정 <span class="ml-2 text-xs font-normal text-muted-foreground">모든 카메라에 적용</span></h2>
+<button aria-label="탐지 설정 편집" title="편집" class="text-muted-foreground" style="display:inline-flex;padding:4px;border:0;background:transparent;cursor:pointer" onClick="{{ toggleEditDetect }}"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3.5l3.5 3.5L8 19.5 3.5 20.5 4.5 16z"></path></svg></button>
+</div>
+<sc-if value="{{ notEditingDetect }}" hint-placeholder-val="{{ true }}">
+<div style="display:grid;grid-template-columns:1fr auto auto;gap:8px 16px;align-items:center">
+<span class="text-sm">침대 이탈</span><span class="text-xs text-muted-foreground tabular-nums whitespace-nowrap" style="text-align:right">{{ bedSchedText }}</span><x-import component-from-global-scope="OssHub.StatusBadge" variant="{{ dBedReadVariant }}" hint-size="auto,22px">{{ dBedReadText }}</x-import>
+<span class="text-sm">낙상</span><span class="text-xs text-muted-foreground tabular-nums whitespace-nowrap" style="text-align:right">{{ fallSchedText }}</span><x-import component-from-global-scope="OssHub.StatusBadge" variant="{{ dFallReadVariant }}" hint-size="auto,22px">{{ dFallReadText }}</x-import>
+</div>
+</sc-if>
+<sc-if value="{{ editingDetect }}" hint-placeholder-val="{{ false }}">
+<div style="display:grid;gap:12px">
+<div class="flex items-center justify-between rounded-lg border border-border px-3 py-2">
+<label class="flex items-center gap-2 text-sm"><input type="checkbox" checked="{{ dBedOn }}" onChange="{{ toggleBed }}" class="accent-primary">침대 이탈</label>
+<span class="flex items-center gap-1 text-xs whitespace-nowrap">
+<select class="h-7 rounded-md border border-input bg-background px-1 text-xs" value="{{ dBedMode }}" onChange="{{ setBedMode }}"><option>항상</option><option>시간 지정</option></select>
+<sc-if value="{{ bedTimed }}" hint-placeholder-val="{{ true }}"><input class="h-7 rounded-md border border-input bg-background px-1 text-xs tabular-nums" value="{{ bedStart }}" onChange="{{ setBedStart }}" style="width:52px"> – <input class="h-7 rounded-md border border-input bg-background px-1 text-xs tabular-nums" value="{{ bedEnd }}" onChange="{{ setBedEnd }}" style="width:52px"></sc-if>
+</span>
+</div>
+<div class="flex items-center justify-between rounded-lg border border-border px-3 py-2">
+<label class="flex items-center gap-2 text-sm"><input type="checkbox" checked="{{ dFallOn }}" onChange="{{ toggleFall }}" class="accent-primary">낙상</label>
+<span class="flex items-center gap-1 text-xs whitespace-nowrap">
+<select class="h-7 rounded-md border border-input bg-background px-1 text-xs" value="{{ dFallMode }}" onChange="{{ setFallMode }}"><option>항상</option><option>시간 지정</option></select>
+<sc-if value="{{ fallTimed }}" hint-placeholder-val="{{ false }}"><input class="h-7 rounded-md border border-input bg-background px-1 text-xs tabular-nums" value="{{ fallStart }}" onChange="{{ setFallStart }}" style="width:52px"> – <input class="h-7 rounded-md border border-input bg-background px-1 text-xs tabular-nums" value="{{ fallEnd }}" onChange="{{ setFallEnd }}" style="width:52px"></sc-if>
+</span>
+</div>
+<div class="flex items-center justify-between"><p class="text-xs text-muted-foreground" style="margin:0">변경 즉시 모든 카메라에 적용됩니다.</p>
+<x-import component-from-global-scope="OssHub.Button" variant="ghost" size="sm" onClick="{{ toggleEditDetect }}" hint-size="auto,32px">완료</x-import></div>
+</div>
+</sc-if>
+</div>
+<div class="rounded-xl border border-border bg-card p-5">
+<div class="flex items-center justify-between" style="margin-bottom:12px">
+<h2 class="font-heading text-base font-semibold" style="margin:0">서버 연결</h2>
+<div class="flex items-center gap-1">
+<x-import component-from-global-scope="OssHub.StatusBadge" variant="approved" hint-size="auto,22px">정상</x-import>
+<button aria-label="서버 연결 편집" title="편집" class="text-muted-foreground" style="display:inline-flex;padding:4px;border:0;background:transparent;cursor:pointer" onClick="{{ toggleEditConn }}"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3.5l3.5 3.5L8 19.5 3.5 20.5 4.5 16z"></path></svg></button>
+</div>
+</div>
+<dl class="text-sm" style="display:grid;grid-template-columns:auto 1fr;gap:6px 16px;margin:0">
+<dt class="text-muted-foreground">시설 ID</dt><dd class="text-right font-mono" style="margin:0">{{ facilityId }}</dd>
+<dt class="text-muted-foreground">시설 토큰</dt><dd class="text-right font-mono" style="margin:0">••••2f9a</dd>
+<dt class="text-muted-foreground">마지막 동기화</dt><dd class="text-right" style="margin:0">오후 9:40</dd>
+</dl>
+<sc-if value="{{ editingConn }}" hint-placeholder-val="{{ false }}">
+<div class="border-t border-border" style="margin-top:14px;padding-top:14px;display:grid;gap:10px">
+<label class="text-sm font-medium" style="display:grid;gap:6px">시설 ID<input class="h-9 w-full rounded-lg border border-input bg-background px-3 text-sm" value="{{ facilityId }}" onChange="{{ setFacilityId }}"></label>
+<label class="text-sm font-medium" style="display:grid;gap:6px">시설 토큰<input class="h-9 w-full rounded-lg border border-input bg-background px-3 text-sm" type="password" placeholder="••••2f9a"></label>
+<div class="flex items-center gap-2">
+<x-import component-from-global-scope="OssHub.Button" variant="outline" size="sm" onClick="{{ testConn }}" hint-size="auto,32px">연결</x-import>
+<x-import component-from-global-scope="OssHub.Button" size="sm" onClick="{{ saveConn }}" hint-size="auto,32px">저장</x-import>
+<sc-if value="{{ hasTestMsg }}" hint-placeholder-val="{{ false }}"><span class="text-xs" style="{{ testMsgStyle }}">{{ testMsg }}</span></sc-if>
+</div>
+</div>
+</sc-if>
+</div>
+<div class="rounded-xl border border-border bg-card p-5">
+<div class="flex items-center justify-between" style="margin-bottom:12px">
+<h2 class="font-heading text-base font-semibold" style="margin:0">처리 상태</h2>
+<x-import component-from-global-scope="OssHub.StatusBadge" variant="approved" hint-size="auto,22px">정상</x-import>
+</div>
+<dl class="text-sm" style="display:grid;grid-template-columns:auto 1fr;gap:6px 16px;margin:0">
+<dt class="text-muted-foreground">실행 디바이스</dt><dd class="text-right" style="margin:0">Apple M2 · MPS</dd>
+<dt class="text-muted-foreground">디코드</dt><dd class="text-right" style="margin:0">opencv (CPU)</dd>
+<dt class="text-muted-foreground">인코드</dt><dd class="text-right" style="margin:0">libx264</dd>
+<dt class="text-muted-foreground">전송 지연</dt><dd class="text-right tabular-nums" style="margin:0">최대 1.84초</dd>
+</dl>
+</div>
+<div class="rounded-xl border border-border bg-card p-5">
+<div class="flex items-center justify-between" style="margin-bottom:8px">
+<h2 class="font-heading text-base font-semibold" style="margin:0">클립 저장 공간</h2>
+<span class="text-sm tabular-nums text-muted-foreground">2.0 / 10.0 GB</span>
+</div>
+<div class="h-2 overflow-hidden rounded-full bg-muted"><div class="h-full rounded-full bg-primary" style="width:20%"></div></div>
+<div class="flex items-center justify-between" style="margin-top:12px">
+<span class="text-sm text-muted-foreground">저장 위치 <span class="ml-2 font-mono text-xs text-foreground">{{ clipPath }}</span></span>
+<x-import component-from-global-scope="OssHub.Button" variant="ghost" size="xs" onClick="{{ openFolder }}" hint-size="auto,26px">변경</x-import>
+</div>
+</div>
+</div>
+</div>
+</main>
+</sc-if>
+
+<sc-if value="{{ modalEdit }}" hint-placeholder-val="{{ false }}">
+<div style="position:fixed;inset:0;z-index:50;display:grid;place-items:center;background:rgba(0,0,0,.42);padding:16px" onClick="{{ closeModal }}">
+<div class="rounded-xl border border-border bg-card p-5" style="width:440px;box-shadow:0 12px 36px rgba(0,0,0,.2)" onClick="{{ stopProp }}">
+<div class="flex items-center justify-between" style="margin-bottom:14px">
+<h3 class="font-heading text-base font-semibold" style="margin:0">카메라 연결 관리</h3>
+<x-import component-from-global-scope="OssHub.StatusBadge" variant="{{ editBadgeVariant }}" hint-size="auto,22px">{{ editStatusText }}</x-import>
+</div>
+<div style="display:grid;gap:14px">
+<label class="text-sm font-medium" style="display:grid;gap:6px">이름<input class="h-9 w-full rounded-lg border border-input bg-background px-3 text-sm" value="{{ editName }}" onChange="{{ setEditName }}"></label>
+<div style="display:grid;gap:6px"><span class="text-sm font-medium">층</span>
+<div class="flex items-center flex-wrap" style="gap:6px">
+<sc-for list="{{ editFloorChips }}" as="fc" hint-placeholder-count="3">
+<button class="{{ fc.cls }}" style="cursor:pointer" onClick="{{ fc.set }}">{{ fc.label }}</button>
+</sc-for>
+<button class="rounded-full px-3 py-1 text-sm text-muted-foreground" style="cursor:pointer;border:1px dashed var(--border);background:transparent" onClick="{{ addFloor }}">+ 층 추가</button>
+</div></div>
+<label class="text-sm font-medium" style="display:grid;gap:6px">RTSP 주소<input class="h-9 w-full rounded-lg border border-input bg-background px-3 font-mono text-sm" value="{{ editRtsp }}" onChange="{{ setEditRtsp }}"></label>
+<div class="flex items-center justify-between rounded-lg border border-border px-3 py-2">
+<span class="flex items-center gap-2 text-sm font-medium">침대 영역
+<x-import component-from-global-scope="OssHub.StatusBadge" variant="{{ segBadgeVariant }}" hint-size="auto,22px">{{ segBadgeText }}</x-import>
+</span>
+<button title="다시 인식" aria-label="다시 인식" class="text-muted-foreground" style="display:inline-flex;padding:4px;border:0;background:transparent;cursor:pointer" onClick="{{ resegment }}"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M20 12a8 8 0 1 1-2.34-5.66"></path><path d="M20 3v4h-4"></path></svg></button>
+</div>
+<div class="flex items-center justify-between border-t border-border" style="padding-top:14px">
+<x-import component-from-global-scope="OssHub.Button" variant="destructive" size="sm" onClick="{{ deleteFromModal }}" hint-size="auto,32px">삭제</x-import>
+<div class="flex gap-2">
+<x-import component-from-global-scope="OssHub.Button" variant="outline" size="sm" onClick="{{ testCam }}" hint-size="auto,32px">연결</x-import>
+<x-import component-from-global-scope="OssHub.Button" size="sm" onClick="{{ saveEdit }}" hint-size="auto,32px">저장</x-import>
+</div>
+</div>
+</div>
+</div>
+</div>
+</sc-if>
+
+<sc-if value="{{ modalAdd1 }}" hint-placeholder-val="{{ false }}">
+<div style="position:fixed;inset:0;z-index:50;display:grid;place-items:center;background:rgba(0,0,0,.42);padding:16px" onClick="{{ closeModal }}">
+<div class="rounded-xl border border-border bg-card p-5" style="width:440px;box-shadow:0 12px 36px rgba(0,0,0,.2)" onClick="{{ stopProp }}">
+<div class="flex items-center justify-between" style="margin-bottom:4px">
+<h3 class="font-heading text-base font-semibold" style="margin:0">카메라 등록</h3>
+<span class="text-xs text-muted-foreground"><span class="font-medium text-foreground">1 연결 정보</span><span style="margin:0 6px">→</span>2 침대 영역</span>
+</div>
+<p class="text-sm text-muted-foreground" style="margin:0 0 14px">카메라의 연결 정보를 입력하세요.</p>
+<div style="display:grid;gap:14px">
+<label class="text-sm font-medium" style="display:grid;gap:6px">이름<input class="h-9 w-full rounded-lg border border-input bg-background px-3 text-sm" value="{{ addName }}" onChange="{{ setAddName }}" placeholder="예: 105호"></label>
+<div style="display:grid;gap:6px"><span class="text-sm font-medium">층</span>
+<div class="flex items-center flex-wrap" style="gap:6px">
+<sc-for list="{{ addFloorChips }}" as="fc" hint-placeholder-count="3">
+<button class="{{ fc.cls }}" style="cursor:pointer" onClick="{{ fc.set }}">{{ fc.label }}</button>
+</sc-for>
+<button class="rounded-full px-3 py-1 text-sm text-muted-foreground" style="cursor:pointer;border:1px dashed var(--border);background:transparent" onClick="{{ addFloor }}">+ 층 추가</button>
+</div></div>
+<label class="text-sm font-medium" style="display:grid;gap:6px">RTSP 주소<input class="h-9 w-full rounded-lg border border-input bg-background px-3 font-mono text-sm" value="{{ addRtsp }}" onChange="{{ setAddRtsp }}" placeholder="rtsp://"></label>
+<div class="flex items-center justify-end border-t border-border" style="padding-top:14px;gap:8px">
+<x-import component-from-global-scope="OssHub.Button" variant="outline" size="sm" onClick="{{ closeModal }}" hint-size="auto,32px">취소</x-import>
+<x-import component-from-global-scope="OssHub.Button" size="sm" onClick="{{ goAdd2 }}" hint-size="auto,32px">다음</x-import>
+</div>
+</div>
+</div>
+</div>
+</sc-if>
+
+<sc-if value="{{ modalAdd2 }}" hint-placeholder-val="{{ false }}">
+<div style="position:fixed;inset:0;z-index:50;display:grid;place-items:center;background:rgba(0,0,0,.42);padding:16px" onClick="{{ closeModal }}">
+<div class="rounded-xl border border-border bg-card p-5" style="width:640px;box-shadow:0 12px 36px rgba(0,0,0,.2)" onClick="{{ stopProp }}">
+<div class="flex items-center justify-between" style="margin-bottom:4px">
+<h3 class="font-heading text-base font-semibold" style="margin:0">침대 영역 인식</h3>
+<span class="text-xs text-muted-foreground"><a style="cursor:pointer" class="text-primary" onClick="{{ goAdd1 }}">1 연결 정보 ✓</a><span style="margin:0 6px">→</span><span class="font-medium text-foreground">2 침대 영역</span></span>
+</div>
+<p class="text-sm text-muted-foreground" style="margin:0 0 14px">{{ addNameShown }} 화면에서 모델이 침대 영역을 자동으로 찾습니다. ▶를 눌러 시작하세요.</p>
+<div class="relative overflow-hidden rounded-lg border border-border"><div style="aspect-ratio:16/9;background:linear-gradient(150deg,#39434c,#20272d 60%,#171c21)"></div>
+<sc-if value="{{ detectRunning }}" hint-placeholder-val="{{ false }}">
+<svg viewBox="0 0 320 180" style="position:absolute;inset:0;width:100%;height:100%;animation:pulseZone 1.2s ease-in-out infinite">
+<polygon points="40,88 178,84 186,158 36,164" fill="#2bb6a3" fill-opacity="0.12" stroke="#2bb6a3" stroke-width="1.5" stroke-dasharray="4 4"></polygon>
+</svg>
+<div class="rounded-md px-2.5 py-1 text-xs" style="position:absolute;right:8px;top:8px;background:rgba(0,0,0,.72);color:#fff">인식 중…</div>
+</sc-if>
+<sc-if value="{{ detectDone }}" hint-placeholder-val="{{ false }}">
+<svg viewBox="0 0 320 180" style="position:absolute;inset:0;width:100%;height:100%">
+<polygon points="40,88 178,84 186,158 36,164" fill="#2bb6a3" fill-opacity="0.22" stroke="#2bb6a3" stroke-width="1.5"></polygon>
+<text x="46" y="102" fill="#2bb6a3" font-size="10" font-weight="700">침대 · 자동 인식됨</text>
+</svg>
+<div class="rounded-md px-2.5 py-1 text-xs" style="position:absolute;right:8px;top:8px;background:rgba(0,0,0,.72);color:#fff">침대 1개 인식됨</div>
+</sc-if>
+<div class="rounded-md px-2.5 py-1 text-xs" style="position:absolute;left:8px;bottom:8px;background:rgba(0,0,0,.72);color:#fff">라이브 미리보기</div>
+</div>
+<div class="flex items-center justify-between" style="margin-top:14px">
+<div class="flex gap-2">
+<x-import component-from-global-scope="OssHub.Button" variant="outline" size="icon-sm" aria-label="인식 시작" title="인식 시작" onClick="{{ startDetect }}" hint-size="32px,32px"><svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor"><path d="M7 4.5v15l13-7.5z"></path></svg></x-import>
+<x-import component-from-global-scope="OssHub.Button" variant="outline" size="icon-sm" aria-label="정지" title="정지" onClick="{{ stopDetect }}" hint-size="32px,32px"><svg viewBox="0 0 24 24" width="12" height="12" fill="currentColor"><rect x="5.5" y="5.5" width="13" height="13" rx="1.5"></rect></svg></x-import>
+</div>
+<div class="flex gap-2">
+<x-import component-from-global-scope="OssHub.Button" variant="ghost" size="sm" onClick="{{ goAdd1 }}" hint-size="auto,32px">이전</x-import>
+<x-import component-from-global-scope="OssHub.Button" size="sm" onClick="{{ finishAdd }}" hint-size="auto,32px">완료</x-import>
+</div>
+</div>
+</div>
+</div>
+</sc-if>
+
+<sc-if value="{{ modalFolder }}" hint-placeholder-val="{{ false }}">
+<div style="position:fixed;inset:0;z-index:50;display:grid;place-items:center;background:rgba(0,0,0,.42);padding:16px" onClick="{{ closeModal }}">
+<div class="rounded-xl border border-border bg-card p-5" style="width:420px;box-shadow:0 12px 36px rgba(0,0,0,.2)" onClick="{{ stopProp }}">
+<h3 class="font-heading text-base font-semibold" style="margin:0 0 12px">클립 저장 위치 선택</h3>
+<div class="flex items-center gap-2 rounded-lg border border-border px-3 py-2" style="margin-bottom:8px">
+<button aria-label="상위 폴더" title="상위 폴더" class="text-muted-foreground" style="display:inline-flex;padding:2px;border:0;background:transparent;cursor:pointer" onClick="{{ pickerUp }}"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"></path></svg></button>
+<span class="font-mono text-xs">{{ pickerPath }}</span>
+</div>
+<div class="rounded-lg border border-border" style="min-height:160px;display:grid;align-content:start">
+<sc-for list="{{ pickerDirs }}" as="dir" hint-placeholder-count="3">
+<div class="flex items-center gap-2 border-b border-border px-3 py-2 text-sm" style="cursor:pointer" onClick="{{ dir.open }}">
+<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="var(--muted-foreground)" stroke-width="1.8" stroke-linejoin="round"><path d="M3.5 6.5a2 2 0 0 1 2-2h4l2 2.5h7a2 2 0 0 1 2 2v8.5a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z"></path></svg>
+{{ dir.name }}
+</div>
+</sc-for>
+<sc-if value="{{ pickerEmpty }}" hint-placeholder-val="{{ false }}"><p class="text-sm text-muted-foreground" style="margin:0;padding:12px">하위 폴더 없음</p></sc-if>
+</div>
+<div class="flex items-center justify-end gap-2" style="margin-top:14px">
+<x-import component-from-global-scope="OssHub.Button" variant="ghost" size="sm" onClick="{{ closeModal }}" hint-size="auto,32px">취소</x-import>
+<x-import component-from-global-scope="OssHub.Button" size="sm" onClick="{{ selectFolder }}" hint-size="auto,32px">이 위치 사용</x-import>
+</div>
+</div>
+</div>
+</sc-if>
+
+<sc-if value="{{ modalClip }}" hint-placeholder-val="{{ false }}">
+<div style="position:fixed;inset:0;z-index:50;display:grid;place-items:center;background:rgba(0,0,0,.6);padding:16px" onClick="{{ closeModal }}">
+<div class="rounded-xl border border-border bg-card p-5" style="width:720px;box-shadow:0 12px 36px rgba(0,0,0,.3)" onClick="{{ stopProp }}">
+<div class="flex items-center justify-between" style="margin-bottom:12px">
+<h3 class="font-heading text-base font-semibold" style="margin:0">{{ clipTitle }}</h3>
+<div class="flex items-center gap-2">
+<span class="text-sm text-muted-foreground tabular-nums">{{ clipTime }}</span>
+<button aria-label="닫기" title="닫기" class="text-muted-foreground" style="display:inline-flex;padding:4px;border:0;background:transparent;cursor:pointer" onClick="{{ closeModal }}"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"></path></svg></button>
+</div>
+</div>
+<div class="relative overflow-hidden rounded-lg border border-border">
+<div style="{{ clipBgStyle }}"></div>
+<div style="position:absolute;inset:0;display:grid;place-items:center"><div style="width:56px;height:56px;border-radius:9999px;background:rgba(0,0,0,.6);display:grid;place-items:center;cursor:pointer"><svg viewBox="0 0 24 24" width="22" height="22" fill="#fff"><path d="M8 5.5v13l11-6.5z"></path></svg></div></div>
+<div style="position:absolute;left:0;right:0;bottom:0;padding:10px 12px;background:linear-gradient(transparent,rgba(0,0,0,.7))">
+<div style="height:4px;border-radius:9999px;background:rgba(255,255,255,.3)"><div style="height:100%;width:35%;border-radius:9999px;background:#fff"></div></div>
+<div class="flex items-center justify-between" style="margin-top:6px;color:rgba(255,255,255,.85);font-size:11px"><span>0:04</span><span>0:12</span></div>
+</div>
+</div>
+<dl class="text-sm" style="display:grid;grid-template-columns:auto 1fr;gap:6px 16px;margin:12px 0 0">
+<dt class="text-muted-foreground">파일</dt><dd class="text-right font-mono text-xs" style="margin:0">{{ clipFile }}</dd>
+<dt class="text-muted-foreground">길이</dt><dd class="text-right text-xs tabular-nums" style="margin:0">0:12</dd>
+<dt class="text-muted-foreground">해상도</dt><dd class="text-right text-xs tabular-nums" style="margin:0">1920×1080</dd>
+<dt class="text-muted-foreground">크기</dt><dd class="text-right text-xs tabular-nums" style="margin:0">8.4 MB</dd>
+</dl>
+<div class="flex items-center justify-end" style="margin-top:14px">
+<x-import component-from-global-scope="OssHub.Button" size="sm" onClick="{{ downloadClip }}" hint-size="auto,32px">다운로드</x-import>
+</div>
+</div>
+</div>
+</sc-if>
+
+<sc-if value="{{ modalReseg }}" hint-placeholder-val="{{ false }}">
+<div style="position:fixed;inset:0;z-index:50;display:grid;place-items:center;background:rgba(0,0,0,.42);padding:16px" onClick="{{ backToEdit }}">
+<div class="rounded-xl border border-border bg-card p-5" style="width:640px;box-shadow:0 12px 36px rgba(0,0,0,.2)" onClick="{{ stopProp }}">
+<h3 class="font-heading text-base font-semibold" style="margin:0 0 4px">침대 영역 다시 인식</h3>
+<p class="text-sm text-muted-foreground" style="margin:0 0 14px">{{ editNameShown }} 화면에서 모델이 침대 영역을 다시 찾습니다. ▶를 눌러 시작하세요.</p>
+<div class="relative overflow-hidden rounded-lg border border-border"><div style="aspect-ratio:16/9;background:linear-gradient(150deg,#39434c,#20272d 60%,#171c21)"></div>
+<sc-if value="{{ detectRunning }}" hint-placeholder-val="{{ false }}">
+<svg viewBox="0 0 320 180" style="position:absolute;inset:0;width:100%;height:100%;animation:pulseZone 1.2s ease-in-out infinite">
+<polygon points="40,88 178,84 186,158 36,164" fill="#2bb6a3" fill-opacity="0.12" stroke="#2bb6a3" stroke-width="1.5" stroke-dasharray="4 4"></polygon>
+</svg>
+<div class="rounded-md px-2.5 py-1 text-xs" style="position:absolute;right:8px;top:8px;background:rgba(0,0,0,.72);color:#fff">인식 중…</div>
+</sc-if>
+<sc-if value="{{ detectDone }}" hint-placeholder-val="{{ false }}">
+<svg viewBox="0 0 320 180" style="position:absolute;inset:0;width:100%;height:100%">
+<polygon points="40,88 178,84 186,158 36,164" fill="#2bb6a3" fill-opacity="0.22" stroke="#2bb6a3" stroke-width="1.5"></polygon>
+<text x="46" y="102" fill="#2bb6a3" font-size="10" font-weight="700">침대 · 자동 인식됨</text>
+</svg>
+<div class="rounded-md px-2.5 py-1 text-xs" style="position:absolute;right:8px;top:8px;background:rgba(0,0,0,.72);color:#fff">침대 1개 인식됨</div>
+</sc-if>
+<div class="rounded-md px-2.5 py-1 text-xs" style="position:absolute;left:8px;bottom:8px;background:rgba(0,0,0,.72);color:#fff">라이브 미리보기</div>
+</div>
+<div class="flex items-center justify-between" style="margin-top:14px">
+<div class="flex gap-2">
+<x-import component-from-global-scope="OssHub.Button" variant="outline" size="icon-sm" aria-label="인식 시작" title="인식 시작" onClick="{{ startDetect }}" hint-size="32px,32px"><svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor"><path d="M7 4.5v15l13-7.5z"></path></svg></x-import>
+<x-import component-from-global-scope="OssHub.Button" variant="outline" size="icon-sm" aria-label="정지" title="정지" onClick="{{ stopDetect }}" hint-size="32px,32px"><svg viewBox="0 0 24 24" width="12" height="12" fill="currentColor"><rect x="5.5" y="5.5" width="13" height="13" rx="1.5"></rect></svg></x-import>
+</div>
+<div class="flex gap-2">
+<x-import component-from-global-scope="OssHub.Button" variant="ghost" size="sm" onClick="{{ backToEdit }}" hint-size="auto,32px">취소</x-import>
+<x-import component-from-global-scope="OssHub.Button" size="sm" onClick="{{ finishReseg }}" hint-size="auto,32px">완료</x-import>
+</div>
+</div>
+</div>
+</div>
+</sc-if>
+
+<sc-if value="{{ modalAccount }}" hint-placeholder-val="{{ false }}">
+<div style="position:fixed;inset:0;z-index:50;display:grid;place-items:center;background:rgba(0,0,0,.42);padding:16px" onClick="{{ closeModal }}">
+<div class="rounded-xl border border-border bg-card p-5" style="width:380px;box-shadow:0 12px 36px rgba(0,0,0,.2)" onClick="{{ stopProp }}">
+<h3 class="font-heading text-base font-semibold" style="margin:0 0 14px">계정 설정</h3>
+<div style="display:grid;gap:12px">
+<label class="text-sm font-medium" style="display:grid;gap:6px">아이디<input class="h-9 w-full rounded-lg border border-input bg-background px-3 text-sm" value="admin"></label>
+<label class="text-sm font-medium" style="display:grid;gap:6px">새 비밀번호<input class="h-9 w-full rounded-lg border border-input bg-background px-3 text-sm" type="password"></label>
+<label class="text-sm font-medium" style="display:grid;gap:6px">새 비밀번호 확인<input class="h-9 w-full rounded-lg border border-input bg-background px-3 text-sm" type="password"></label>
+<div class="flex justify-end" style="padding-top:2px">
+<x-import component-from-global-scope="OssHub.Button" size="sm" onClick="{{ saveAccount }}" hint-size="auto,32px">저장</x-import>
+</div>
+</div>
+</div>
+</div>
+</sc-if>
+
+<sc-if value="{{ hasToast }}" hint-placeholder-val="{{ false }}">
+<div class="rounded-lg border border-border bg-card px-4 py-2 text-sm shadow-lg" style="position:fixed;right:16px;bottom:16px;z-index:60">{{ toast }}</div>
+</sc-if>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script>
+const GRADS = [
+  'linear-gradient(150deg,#39434c,#20272d 60%,#171c21)',
+  'linear-gradient(150deg,#434c39,#272d20 60%,#1c2117)',
+  'linear-gradient(150deg,#4c3939,#2d2020 60%,#211717)',
+  'linear-gradient(150deg,#3c3944,#25222b 60%,#1a1820)',
+  'linear-gradient(150deg,#44403a,#2b2723 60%,#201c18)',
+  'linear-gradient(150deg,#39444c,#20282d 60%,#171d21)',
+];
+class Component extends DCLogic {
+  state = {
+    page: 'wall', sel: 'c1', overlay: 'bedexit', modal: null, editId: null,
+    floors: ['1층', '2층'], floorFilter: '전체', sortMode: '최신순',
+    evFilter: '전체', evCam: '전체',
+    cams: [
+      { id: 'c1', name: '101호', floor: '1층', online: true, g: 0, rtsp: 'rtsp://192.168.0.61:554/ch1', seg: true },
+      { id: 'c2', name: '102호', floor: '1층', online: true, g: 1, rtsp: 'rtsp://192.168.0.62:554/ch1', seg: true },
+      { id: 'c3', name: '103호', floor: '1층', online: true, g: 2, rtsp: 'rtsp://192.168.0.63:554/ch1', seg: false },
+      { id: 'c4', name: '104호', floor: '1층', online: false, g: 3, rtsp: 'rtsp://192.168.0.64:554/ch1', seg: true },
+      { id: 'c5', name: '201호', floor: '2층', online: true, g: 3, rtsp: 'rtsp://192.168.0.71:554/ch1', seg: true },
+      { id: 'c6', name: '202호', floor: '2층', online: true, g: 4, rtsp: 'rtsp://192.168.0.72:554/ch1', seg: true },
+      { id: 'c7', name: '2층 복도', floor: '2층', online: true, g: 5, rtsp: 'rtsp://192.168.0.73:554/ch1', seg: true },
+      { id: 'c8', name: '1층 복도', floor: '1층', online: false, g: 0, rtsp: 'rtsp://192.168.0.65:554/ch1', seg: true },
+    ],
+    events: [
+      { id: 'e1', cam: 'c1', type: 'bedexit', time: '8월 2일 오전 3:12', g: 0 },
+      { id: 'e2', cam: 'c1', type: 'bedexit', time: '8월 1일 오후 11:02', g: 1 },
+      { id: 'e3', cam: 'c3', type: 'fall', time: '8월 1일 오전 2:05', g: 2 },
+      { id: 'e4', cam: 'c5', type: 'bedexit', time: '7월 31일 오전 4:38', g: 3 },
+      { id: 'e5', cam: 'c6', type: 'fall', time: '7월 30일 오후 9:12', g: 4 },
+      { id: 'e6', cam: 'c2', type: 'bedexit', time: '7월 30일 오전 1:44', g: 5 },
+    ],
+    dBedOn: true, dFallOn: true, dBedMode: '시간 지정', dFallMode: '항상',
+    bedStart: '21:00', bedEnd: '06:00', fallStart: '00:00', fallEnd: '24:00',
+    editDraft: null, addDraft: { name: '', floor: '1층', rtsp: '' },
+    detect: 'idle', testMsg: null, toast: null, facilityId: 'facility-301',
+  };
+  flash(msg) {
+    clearTimeout(this._toastT);
+    this.setState({ toast: msg });
+    this._toastT = setTimeout(() => this.setState({ toast: null }), 2200);
+  }
+  componentWillUnmount() { clearTimeout(this._toastT); clearTimeout(this._detT); clearTimeout(this._connT); }
+  renderVals() {
+    const s = this.state, R = React, O = window.OssHub || {}, el = R.createElement;
+    const set = (p) => this.setState(p);
+    const typeLabel = (t) => t === 'fall' ? '낙상' : '침대 이탈';
+    const chipOn = 'rounded-full border border-primary/30 bg-primary/10 px-3 py-1 text-sm font-medium text-primary';
+    const chipOff = 'rounded-full border border-border bg-background px-3 py-1 text-sm text-muted-foreground';
+    const chipOnXs = 'rounded-full border border-primary/30 bg-primary/10 px-3 py-1 text-xs font-medium text-primary';
+    const chipOffXs = 'rounded-full border border-border bg-background px-3 py-1 text-xs text-muted-foreground';
+    // nav
+    const svg = (kids) => el('svg', { viewBox: '0 0 24 24', width: 15, height: 15, fill: 'none', stroke: 'currentColor', strokeWidth: 1.9, strokeLinecap: 'round', strokeLinejoin: 'round', style: { marginRight: 6, flex: 'none' } }, ...kids);
+    const icons = {
+      wall: svg([el('rect', { x: 3.5, y: 3.5, width: 7, height: 7, rx: 1.5 }), el('rect', { x: 13.5, y: 3.5, width: 7, height: 7, rx: 1.5 }), el('rect', { x: 3.5, y: 13.5, width: 7, height: 7, rx: 1.5 }), el('rect', { x: 13.5, y: 13.5, width: 7, height: 7, rx: 1.5 })]),
+      clock: svg([el('circle', { cx: 12, cy: 12, r: 8.25 }), el('path', { d: 'M12 7.5V12l3 2' })]),
+      gear: svg([el('circle', { cx: 12, cy: 12, r: 3 }), el('path', { d: 'M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3M5.3 5.3l2.1 2.1M16.6 16.6l2.1 2.1M18.7 5.3l-2.1 2.1M7.4 16.6l-2.1 2.1' })]),
+    };
+    const navDef = [['관제', icons.wall, 'wall'], ['이벤트', icons.clock, 'events'], ['설정', icons.gear, 'settings']];
+    const activeKey = s.page === 'detail' ? 'wall' : s.page;
+    const navItems = navDef.map(([label, icon, key]) => ({
+      href: '#' + key,
+      label: el('span', {
+        className: key === activeKey ? 'rounded-md bg-muted px-2.5 py-1.5 font-semibold text-foreground' : 'px-1 py-1.5',
+        style: { display: 'inline-flex', alignItems: 'center' },
+        onClick: (e) => { e.preventDefault(); set({ page: key, modal: null }); },
+      }, icon, label),
+    }));
+    const shellActions = el(R.Fragment, null,
+      O.Button ? el(O.Button, { variant: 'ghost', size: 'icon-sm', 'aria-label': '계정 설정', title: '계정 설정', onClick: () => set({ modal: 'account' }) },
+        el('svg', { viewBox: '0 0 24 24', width: 18, height: 18, fill: 'none', stroke: 'currentColor', strokeWidth: 1.75, strokeLinecap: 'round', strokeLinejoin: 'round' },
+          el('circle', { cx: 12, cy: 8, r: 3.75 }), el('path', { d: 'M4.75 20a7.25 7.25 0 0 1 14.5 0' }))) : null,
+      O.Button ? el(O.Button, { variant: 'outline', size: 'sm', onClick: () => set({ page: 'login', modal: null }) }, '로그아웃') : null,
+    );
+    // cams decorated
+    const decorate = (c) => ({
+      ...c,
+      offline: !c.online,
+      bgStyle: { aspectRatio: '16/9', background: GRADS[c.g] },
+      barStyle: c.online
+        ? { position: 'absolute', left: 0, right: 0, bottom: 0, background: 'linear-gradient(transparent,rgba(0,0,0,.72))', color: '#fff' }
+        : { position: 'absolute', left: 0, right: 0, bottom: 0, background: 'var(--background)', borderTop: '1px solid var(--border)' },
+      dotStyle: { background: c.online ? 'var(--status-approved-fg)' : 'var(--status-rejected-fg)' },
+      badgeVariant: c.online ? 'approved' : 'rejected',
+      statusText: c.online ? '온라인' : '오프라인',
+      rowCls: c.online ? 'border-b border-border' : 'border-b border-border bg-status-rejected-bg',
+      open: () => set({ page: 'detail', sel: c.id }),
+      edit: () => set({ modal: 'edit', editId: c.id, editDraft: { name: c.name, floor: c.floor, rtsp: c.rtsp, seg: c.seg } }),
+      del: () => { set({ cams: s.cams.filter((x) => x.id !== c.id) }); this.flash(c.name + ' 삭제됨'); },
+    });
+    const cams = s.cams.map(decorate);
+    const wallCams = cams.filter((c) => s.floorFilter === '전체' || c.floor === s.floorFilter);
+    const sel = cams.find((c) => c.id === s.sel) || cams[0] || null;
+    // detail events
+    const decorateEvent = (e) => ({
+      ...e, typeLabel: typeLabel(e.type),
+      bgStyle: { aspectRatio: '16/9', background: GRADS[e.g] },
+      open: () => set({ modal: 'clip', clipId: e.id }),
+    });
+    const detailEvents = s.events.filter((e) => sel && e.cam === sel.id).map(decorateEvent);
+    let detailGroups;
+    if (s.sortMode === '종류별') {
+      detailGroups = ['bedexit', 'fall']
+        .map((t) => ({ items: detailEvents.filter((e) => e.type === t), title: typeLabel(t) }))
+        .filter((g) => g.items.length)
+        .map((g) => ({ ...g, showTitle: true, title: g.title + ' · ' + g.items.length + '건' }));
+    } else {
+      detailGroups = detailEvents.length ? [{ showTitle: false, title: '', items: detailEvents }] : [];
+    }
+    // events page
+    const counts = { all: s.events.length, bedexit: s.events.filter((e) => e.type === 'bedexit').length, fall: s.events.filter((e) => e.type === 'fall').length };
+    const evChips = [['전체', '전체 ' + counts.all], ['bedexit', '침대 이탈 ' + counts.bedexit], ['fall', '낙상 ' + counts.fall]].map(([key, label]) => ({
+      label, cls: s.evFilter === key ? chipOn : chipOff, set: () => set({ evFilter: key }),
+    }));
+    const camName = (id) => (s.cams.find((c) => c.id === id) || {}).name || '?';
+    const filteredEvents = s.events
+      .filter((e) => s.evFilter === '전체' || e.type === s.evFilter)
+      .filter((e) => s.evCam === '전체' || camName(e.cam) === s.evCam)
+      .map((e) => ({ ...decorateEvent(e), camName: camName(e.cam) }));
+    const clip = s.events.find((e) => e.id === s.clipId) || null;
+    // overlay chips
+    const overlayChips = [['none', '없음'], ['bedexit', '침대 이탈'], ['fall', '낙상']].map(([key, label]) => ({
+      label: s.overlay === key ? label + ' ✓' : label,
+      cls: s.overlay === key ? chipOnXs : chipOffXs,
+      set: () => set({ overlay: key }),
+    }));
+    // floor chips factory
+    const floorChips = (cur, apply) => s.floors.map((f) => ({
+      label: cur === f ? f + ' ✓' : f,
+      cls: cur === f ? chipOn : chipOff,
+      set: () => apply(f),
+    }));
+    const ed = s.editDraft || { name: '', floor: '1층', rtsp: '', seg: true };
+    const editCam = cams.find((c) => c.id === s.editId);
+    const ad = s.addDraft;
+    const schedText = (on, mode, a, b) => !on ? '꺼짐' : mode === '항상' ? '항상' : a + '–' + b;
+    return {
+      // pages
+      isLogin: s.page === 'login', notLogin: s.page !== 'login',
+      isWall: s.page === 'wall', isDetail: s.page === 'detail', isEvents: s.page === 'events', isSettings: s.page === 'settings',
+      doLogin: () => set({ page: 'wall' }),
+      navItems, shellActions,
+      // wall
+      onlineCount: s.cams.filter((c) => c.online).length,
+      offlineCount: s.cams.filter((c) => !c.online).length,
+      wallCams, cams,
+      floorFilter: s.floorFilter, setFloorFilter: (e) => set({ floorFilter: e.target.value }),
+      goWall: () => set({ page: 'wall' }), goSettings: () => set({ page: 'settings' }),
+      // detail
+      selName: sel ? sel.name : '', selFloor: sel ? sel.floor : '', selRtsp: sel ? sel.rtsp.replace(/\/[^/]*$/, '/•••') : '',
+      selBgStyle: sel ? sel.bgStyle : {}, selBadgeVariant: sel ? sel.badgeVariant : 'approved', selStatusText: sel ? sel.statusText : '',
+      liveLabel: sel && sel.online ? (s.overlay === 'fall' ? '라이브 · 낙상 없음' : '라이브 · 온라인') : '오프라인',
+      selOnline: !!(sel && sel.online), selOffline: !!(sel && !sel.online),
+      retryCam: () => this.flash('재연결 실패 · 연결 관리에서 RTSP 주소를 확인하세요'),
+      showBedOverlay: !!(sel && sel.online && s.overlay === 'bedexit'),
+      showFallOverlay: !!(sel && sel.online && s.overlay === 'fall'),
+      overlayChips,
+      openEditSel: () => sel && decorate(s.cams.find((c) => c.id === sel.id)).edit(),
+      sortMode: s.sortMode, setSortMode: (e) => set({ sortMode: e.target.value }),
+      detailGroups, detailEventsEmpty: detailEvents.length === 0,
+      brandText: 'Senior AI Lab Edge',
+      facilityId: s.facilityId, setFacilityId: (e) => set({ facilityId: e.target.value }),
+      bedSchedText: schedText(s.dBedOn, s.dBedMode, s.bedStart, s.bedEnd),
+      fallSchedText: schedText(s.dFallOn, s.dFallMode, s.fallStart, s.fallEnd),
+      bedBadgeVariant: !(sel && sel.online) ? 'pending' : s.dBedOn ? 'approved' : 'closed',
+      bedBadgeText: !(sel && sel.online) ? '중단됨' : s.dBedOn ? '탐지 중' : '꺼짐',
+      fallBadgeVariant: !(sel && sel.online) ? 'pending' : s.dFallOn ? 'approved' : 'closed',
+      fallBadgeText: !(sel && sel.online) ? '중단됨' : s.dFallOn ? '탐지 중' : '꺼짐',
+      // events page
+      evChips, filteredEvents, eventsEmpty: filteredEvents.length === 0,
+      evCam: s.evCam, setEvCam: (e) => set({ evCam: e.target.value }),
+      // settings
+      dBedOn: s.dBedOn, dFallOn: s.dFallOn,
+      toggleBed: (e) => { set({ dBedOn: e.target.checked }); this.flash('저장됨'); },
+      toggleFall: (e) => { set({ dFallOn: e.target.checked }); this.flash('저장됨'); },
+      dBedMode: s.dBedMode, dFallMode: s.dFallMode,
+      setBedMode: (e) => { set({ dBedMode: e.target.value }); this.flash('저장됨'); },
+      setFallMode: (e) => { set({ dFallMode: e.target.value }); this.flash('저장됨'); },
+      bedTimed: s.dBedMode === '시간 지정', fallTimed: s.dFallMode === '시간 지정',
+      bedStart: s.bedStart, bedEnd: s.bedEnd, fallStart: s.fallStart, fallEnd: s.fallEnd,
+      setBedStart: (e) => set({ bedStart: e.target.value }), setBedEnd: (e) => set({ bedEnd: e.target.value }),
+      setFallStart: (e) => set({ fallStart: e.target.value }), setFallEnd: (e) => set({ fallEnd: e.target.value }),
+      editingDetect: !!s.editingDetect, notEditingDetect: !s.editingDetect,
+      toggleEditDetect: () => set({ editingDetect: !s.editingDetect }),
+      clipPath: s.clipPath || '/mnt/data/clips',
+      openFolder: async () => {
+        if (window.showDirectoryPicker) {
+          try {
+            const dir = await window.showDirectoryPicker();
+            this.setState({ clipPath: '/mnt/data/' + dir.name });
+            this.flash('저장 위치를 변경했습니다');
+          } catch (e) { /* 사용자가 취소 */ }
+          return;
+        }
+        set({ modal: 'folder', pickerPath: s.clipPath || '/mnt/data/clips' });
+      },
+      modalFolder: s.modal === 'folder',
+      pickerPath: s.pickerPath || '/',
+      pickerDirs: (({
+        '/': ['mnt', 'media'],
+        '/mnt': ['data', 'backup'],
+        '/mnt/data': ['clips', 'models'],
+        '/mnt/backup': [],
+        '/media': ['usb0'],
+        '/media/usb0': ['clips'],
+      })[s.pickerPath || '/'] || []).map((name) => ({
+        name,
+        open: () => set({ pickerPath: (s.pickerPath === '/' ? '' : s.pickerPath) + '/' + name }),
+      })),
+      pickerEmpty: (({ '/': 1, '/mnt': 1, '/mnt/data': 1, '/media': 1, '/media/usb0': 1 })[s.pickerPath || '/'] ? false : true),
+      pickerUp: () => {
+        const p = s.pickerPath || '/';
+        const up = p.replace(/\/[^/]+$/, '') || '/';
+        set({ pickerPath: up });
+      },
+      selectFolder: () => { set({ clipPath: s.pickerPath, modal: null }); this.flash('저장 위치를 변경했습니다'); },
+      editingConn: !!s.editingConn,
+      toggleEditConn: () => set({ editingConn: !s.editingConn }),
+      dBedReadVariant: s.dBedOn ? 'approved' : 'closed', dBedReadText: s.dBedOn ? '탐지 중' : '꺼짐',
+      dFallReadVariant: s.dFallOn ? 'approved' : 'closed', dFallReadText: s.dFallOn ? '탐지 중' : '꺼짐',
+      testConn: () => {
+        set({ testMsg: '확인 중…' });
+        clearTimeout(this._connT);
+        this._connT = setTimeout(() => this.setState({ testMsg: '연결 성공' }), 900);
+      },
+      saveConn: () => { set({ editingConn: false }); this.flash('연결 설정을 저장했습니다'); },
+      hasTestMsg: !!s.testMsg, testMsg: s.testMsg || '',
+      testMsgStyle: { color: s.testMsg === '확인 중…' ? 'var(--muted-foreground)' : 'var(--status-approved-fg)' },
+      // modals
+      modalEdit: s.modal === 'edit', modalAdd1: s.modal === 'add1', modalAdd2: s.modal === 'add2', modalAccount: s.modal === 'account',
+      closeModal: () => set({ modal: null, detect: 'idle' }),
+      stopProp: (e) => e.stopPropagation(),
+      // edit modal
+      editName: ed.name, setEditName: (e) => set({ editDraft: { ...ed, name: e.target.value } }),
+      editRtsp: ed.rtsp, setEditRtsp: (e) => set({ editDraft: { ...ed, rtsp: e.target.value } }),
+      editFloorChips: floorChips(ed.floor, (f) => set({ editDraft: { ...ed, floor: f } })),
+      editBadgeVariant: editCam ? editCam.badgeVariant : 'approved', editStatusText: editCam ? editCam.statusText : '',
+      segBadgeVariant: ed.seg ? 'approved' : 'rejected', segBadgeText: ed.seg ? '인식 완료' : '인식 필요',
+      resegment: () => set({ modal: 'reseg', detect: 'idle' }),
+      modalReseg: s.modal === 'reseg',
+      backToEdit: () => { clearTimeout(this._detT); set({ modal: 'edit', detect: 'idle' }); },
+      finishReseg: () => {
+        if (s.detect !== 'done') { this.flash('먼저 인식을 실행하세요'); return; }
+        set({ editDraft: { ...ed, seg: true }, modal: 'edit', detect: 'idle' });
+        this.flash('침대 영역을 다시 인식했습니다');
+      },
+      editNameShown: ed.name || '카메라',
+      addFloor: () => set({ floors: [...s.floors, (s.floors.length + 1) + '층'] }),
+      testCam: () => {
+        set({ cams: s.cams.map((c) => c.id === s.editId ? { ...c, online: true } : c) });
+        this.flash('연결 성공');
+      },
+      deleteFromModal: () => { set({ cams: s.cams.filter((c) => c.id !== s.editId), modal: null }); this.flash('카메라를 삭제했습니다'); },
+      saveEdit: () => {
+        set({ cams: s.cams.map((c) => c.id === s.editId ? { ...c, name: ed.name, floor: ed.floor, rtsp: ed.rtsp, seg: ed.seg } : c), modal: null });
+        this.flash('저장했습니다');
+      },
+      // add flow
+      openAdd: () => set({ modal: 'add1', addDraft: { name: '', floor: '1층', rtsp: '' }, detect: 'idle' }),
+      addName: ad.name, setAddName: (e) => set({ addDraft: { ...ad, name: e.target.value } }),
+      addRtsp: ad.rtsp, setAddRtsp: (e) => set({ addDraft: { ...ad, rtsp: e.target.value } }),
+      addFloorChips: floorChips(ad.floor, (f) => set({ addDraft: { ...ad, floor: f } })),
+      addNameShown: ad.name || '새 카메라',
+      goAdd1: () => set({ modal: 'add1' }),
+      goAdd2: () => {
+        if (!ad.name.trim()) { this.flash('이름을 입력하세요'); return; }
+        set({ modal: 'add2' });
+      },
+      detectRunning: s.detect === 'running', detectDone: s.detect === 'done',
+      startDetect: () => {
+        set({ detect: 'running' });
+        clearTimeout(this._detT);
+        this._detT = setTimeout(() => this.setState({ detect: 'done' }), 1500);
+      },
+      stopDetect: () => { clearTimeout(this._detT); set({ detect: 'idle' }); },
+      finishAdd: () => {
+        if (s.detect !== 'done') { this.flash('먼저 침대 영역을 인식하세요'); return; }
+        const id = 'c' + (Date.now() % 100000);
+        set({ cams: [...s.cams, { id, name: ad.name, floor: ad.floor, online: true, g: (s.cams.length) % 6, rtsp: ad.rtsp || 'rtsp://', seg: true }], modal: null, detect: 'idle' });
+        this.flash(ad.name + ' 등록 완료');
+      },
+      // clip viewer
+      modalClip: s.modal === 'clip' && !!clip,
+      clipTitle: clip ? typeLabel(clip.type) + ' · ' + camName(clip.cam) : '',
+      clipTime: clip ? clip.time : '',
+      clipBgStyle: clip ? { aspectRatio: '16/9', background: GRADS[clip.g] } : {},
+      clipFile: clip ? (s.clipPath || '/mnt/data/clips') + '/' + clip.id + '_' + clip.type + '.mp4' : '',
+      downloadClip: () => this.flash('클립 다운로드를 시작했습니다'),
+      // account
+      saveAccount: () => { set({ modal: null }); this.flash('계정 정보가 변경되었습니다'); },
+      // toast
+      hasToast: !!s.toast, toast: s.toast || '',
+    };
+  }
+}
+</script>
+</body>
+</html>

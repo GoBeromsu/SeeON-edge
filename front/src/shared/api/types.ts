@@ -6,17 +6,9 @@ export type Camera = {
   id: string;
   label: string;
   rtsp_url_masked: string;
-  space_id: string | null;
-  space_name: string | null;
   floor_name: string | null;
-  backend_camera_id: string | null;
   status: CameraStatus;
   created_at: string | null;
-  threshold?: number | null;
-  domains?: Record<string, boolean> | null;
-  bed_count?: number | null;
-  night_start?: string | null;
-  night_end?: string | null;
   decode_backend?: DecodeBackend | string | null;
   /** True once the registry confirms this camera has never completed a successful connection. */
   never_connected?: boolean;
@@ -31,18 +23,8 @@ export type Camera = {
   last_heartbeat_at?: number | null;
   /** Seconds since the last edge heartbeat, or null. Same GET-only availability as last_heartbeat_at. */
   heartbeat_age_sec?: number | null;
-  /** Per-camera external-backend roster sync state. Only populated by `GET /cameras`. */
-  sync?: CameraSync | null;
-};
-
-export type CameraSyncStatus = 'synced' | 'pending' | 'failed' | 'disabled';
-export type CameraSyncErrorClass = 'unreachable' | 'timeout' | 'auth' | 'unconfigured';
-
-export type CameraSync = {
-  status: CameraSyncStatus;
-  error_class: CameraSyncErrorClass | null;
-  detail: string | null;
-  last_ok_at: string | null;
+  /** Auto-recognized bed area, or null when recognition has never succeeded ("인식 필요" in the UI). */
+  bed_zone?: BedZone | null;
 };
 
 export type CameraRegistry = {
@@ -61,6 +43,20 @@ export type CameraHeartbeat = {
   config_version: number | null;
 };
 
+/** Per-camera pose/skeleton overlay mode: no overlay, bed-exit skeleton, or fall-detection skeleton. */
+export type OverlayMode = 'none' | 'bedexit' | 'fall';
+
+/** A single [x, y] vertex of a bed-zone polygon, in the coordinate space of image_width x image_height. */
+export type BedZonePoint = [number, number];
+
+/** Auto-recognized (YOLO segmentation) bed area for a camera. Persisted server-side, not user-drawn. */
+export type BedZone = {
+  polygon: BedZonePoint[];
+  image_width: number;
+  image_height: number;
+  recognized_at: string;
+};
+
 export type RuntimeDecodeDiagnostics = {
   requested: string | null;
   selected: string | null;
@@ -69,16 +65,23 @@ export type RuntimeDecodeDiagnostics = {
   updated_at_sec: number | null;
 };
 
-export type RuntimeCamera = {
-  camera_id: string;
-  decode: RuntimeDecodeDiagnostics;
-  measured_fps?: number | null;
+export type RuntimeLatencyDiagnostics = {
+  first_attempt_samples: number | null;
+  max_sec: number | null;
+  since_sec: number | null;
 };
 
-export type RuntimeGpuDiagnostics = {
-  nvml_available: boolean | null;
-  cuda_context_ok: boolean | null;
-  driver_version: string | null;
+export type RuntimeCameraDiagnostics = {
+  camera_id: string;
+  decode: RuntimeDecodeDiagnostics;
+  measured_fps: number | null;
+  latency: RuntimeLatencyDiagnostics | null;
+};
+
+/** Device-adaptive acceleration diagnostics (not CUDA-specific — backend may be any decode/inference device). */
+export type RuntimeDeviceDiagnostics = {
+  backend: string | null;
+  available: boolean | null;
   device_name: string | null;
   captured_at_sec: number | null;
 };
@@ -87,12 +90,6 @@ export type RuntimeWorkerDiagnostics = {
   alive: boolean | null;
   pid: number | null;
   started_at_sec: number | null;
-};
-
-export type RuntimeLatencyDiagnostics = {
-  first_attempt_samples: number | null;
-  max_sec: number | null;
-  since_sec: number | null;
 };
 
 export type RuntimeClipRecorder = {
@@ -106,24 +103,14 @@ export type RuntimeClipRecorder = {
   encoder: string | null;
 };
 
-export type RuntimeFacility = {
-  facility_id: string;
-  generation: number | null;
-  seq: number | null;
-  received_at: number | null;
-  stale: boolean | null;
-  cameras: RuntimeCamera[];
-  clip_recorder: RuntimeClipRecorder | null;
-  gpu?: RuntimeGpuDiagnostics | null;
-  worker?: RuntimeWorkerDiagnostics | null;
-  latency?: RuntimeLatencyDiagnostics | null;
-};
-
 export type StatusSnapshot = {
   cameras: Record<string, CameraHeartbeat>;
   stale_after_sec: number | null;
   runtime: {
-    facilities: Record<string, RuntimeFacility>;
+    cameras: Record<string, RuntimeCameraDiagnostics>;
+    worker: RuntimeWorkerDiagnostics | null;
+    device: RuntimeDeviceDiagnostics | null;
+    clip_recorder: RuntimeClipRecorder | null;
     stale_after_sec: number | null;
   };
 };
@@ -131,16 +118,9 @@ export type StatusSnapshot = {
 export type CameraInput = {
   label: string;
   rtsp_url: string;
-  space_id?: string;
 };
 
 export type CameraPatchInput = Partial<CameraInput> & {
-  detectionSettings?: {
-    threshold: number;
-    domains: Record<string, boolean>;
-    bedCount: number;
-    nightWindow: { start: string; end: string };
-  };
   decode_backend?: DecodeBackend;
 };
 
@@ -172,21 +152,23 @@ export type SystemSnapshot = {
   };
 };
 
-export type ClipLabel = 'TRUE_POSITIVE' | 'FALSE_POSITIVE' | 'UNREVIEWED';
-
 export type Clip = {
   id: string;
   camera_id: string | null;
   camera_label: string;
   event_type: string;
   created_at: string | null;
-  label: ClipLabel | null;
-  reviewer?: string | null;
-  reviewed_at?: string | null;
-  reviewState?: 'unknown' | 'confirmed';
   video_path: string;
   video_available: boolean;
   video_error: string | null;
+  /**
+   * Clip duration in seconds. Optional (not just nullable): an older backend that hasn't shipped
+   * this field yet omits it entirely from the manifest — treat a missing value as "unknown", not
+   * as a normalization bug. normalizeClip always fills this in (as a value or null) from a live response.
+   */
+  duration_s?: number | null;
+  /** Clip file size in bytes. Same optional/omitted-on-old-backend contract as duration_s — never fabricate a size for display. */
+  size_bytes?: number | null;
 };
 
 export type HeartbeatRelayErrorClass = 'auth' | 'timeout' | 'unreachable';
@@ -233,14 +215,44 @@ export type ConnectionTestResult = {
   probed_url: string | null;
 };
 
-export type RosterSyncStatus = 'synced' | 'pending' | 'failed' | 'disabled';
-export type RosterSyncErrorClass = 'unreachable' | 'timeout' | 'auth' | 'unconfigured';
+/** GET/PUT /detection-settings domain keys — global, applied to every camera. */
+export type DetectionDomainKey = 'fall' | 'bed_exit';
 
-export type RosterSyncResult = {
-  status: RosterSyncStatus;
-  error_class: RosterSyncErrorClass | null;
-  detail: string | null;
-  last_ok_at: string | null;
-  next_retry_at: string | null;
-  camera_count: number;
+export type DetectionMode = 'always' | 'window';
+
+export type DetectionDomainSetting = {
+  on: boolean;
+  mode: DetectionMode;
+  /** HH:MM, only meaningful (and required by the form) when mode is "window". */
+  start: string | null;
+  end: string | null;
+};
+
+export type DetectionSettings = {
+  domains: Record<DetectionDomainKey, DetectionDomainSetting>;
+};
+
+/** PUT body is a full replace of the same shape as the GET response. */
+export type DetectionSettingsInput = DetectionSettings;
+
+/** GET /clips/storage — usage + current selection under the CLIP_STORE_DIR mount root. */
+export type ClipStorageInfo = {
+  root: string;
+  /** "" means the mount root itself; otherwise a relative subdirectory path. */
+  selected_path: string;
+  total_bytes: number | null;
+  used_bytes: number | null;
+  used_pct: number | null;
+};
+
+export type ClipStorageBrowseEntry = {
+  name: string;
+  path: string;
+};
+
+/** GET /clips/storage/browse?path= — one directory listing for the folder-explorer modal. */
+export type ClipStorageBrowseResult = {
+  path: string;
+  parent: string | null;
+  directories: ClipStorageBrowseEntry[];
 };

@@ -4,10 +4,10 @@ import logging
 import os
 import threading
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from time import monotonic
 from types import MappingProxyType
 from typing import Any, Final, Protocol, TypeAlias, final, runtime_checkable
@@ -15,10 +15,13 @@ from typing import Any, Final, Protocol, TypeAlias, final, runtime_checkable
 import worker.pipeline.ingest.lifecycle as ingest
 import worker.runtime.bootstrap as bootstrap
 import worker.runtime.telemetry.runtime_status_sender as runtime_status_sender_module
-from contracts.runner import RunnerProtocol
+from contracts.observation import BoundingBox
+from contracts.runner import BedRunnerResult, Image, RunnerProtocol
 from shared.events.evidence_export_contract import DeliveryFailure
 from shared.events.evidence_http_transport import bounded_request, encode_json
 from shared.events.schemas import build_audit_envelope
+from worker.adapters.decode.cpu_av.adapter import CpuAvAdapter
+from worker.adapters.decode.cpu_av.models import CpuAvConfig
 from worker.adapters.decode.cpu_av.probe import probe_opencv_ffmpeg_capability
 from worker.adapters.decode.nvdec_cuvid.probe import probe_nvdec_cuvid_capability
 from worker.adapters.device.cuda.probe import probe_cuda_capability
@@ -47,8 +50,10 @@ from worker.pipeline.bus import BoundedFrameBus, Scheduler
 from worker.pipeline.camera_pipeline import CameraPipelinePump
 from worker.pipeline.decision import EventAggregator, IncidentManager
 from worker.pipeline.decision.event_identity import event_identity_path
+from worker.pipeline.ingest.probe import RTSPProbeError, probe_first_frame
 from worker.pipeline.ingest.registry import SourceRegistry
 from worker.pipeline.output.event_sink import EventClipRecorder, EvidenceEventSink
+from worker.pipeline.output.evidence.clip_config import configured_store_dir
 from worker.pipeline.output.evidence.clip_frame_feeder import ClipFrameFeeder
 from worker.pipeline.output.evidence.clip_recorder import ClipRecorder
 from worker.pipeline.output.evidence.clip_recorder_models import ClipRecorderConfig
@@ -66,6 +71,10 @@ from worker.pipeline.output.evidence.snapshot_store import SnapshotStore
 from worker.pipeline.output.evidence_attacher import AlertEvidenceAttacher
 from worker.pipeline.output.live_view import LatestFrameStore, LiveViewSubscriber
 from worker.pipeline.output.mjpeg_server import (
+    BedZoneNotFoundError,
+    BedZonePayload,
+    MjpegProbeError,
+    MjpegProbePayload,
     MjpegServer,
     MjpegServerConfig,
     dev_mjpeg_config,
@@ -148,6 +157,29 @@ def _processed_count(pump: _RunnableIngest) -> int:
     `processed_count`; a missing attribute reads as 0 (never-complete).
     """
     return getattr(pump, "processed_count", 0)
+
+
+def _persisted_bed_regions(camera: CameraRuntimeConfig) -> tuple[BoundingBox, ...]:
+    """Convert a pulled ``bed_zone_polygon`` into the one persisted bed region.
+
+    Empty when the camera has no persisted polygon -- ``SceneState`` then
+    falls back to its existing live-segmentation cache unchanged.
+    """
+    polygon = camera.bed_zone_polygon
+    if not polygon:
+        return ()
+    xs = tuple(point[0] for point in polygon)
+    ys = tuple(point[1] for point in polygon)
+    return (
+        BoundingBox(
+            x1=min(xs),
+            y1=min(ys),
+            x2=max(xs),
+            y2=max(ys),
+            confidence=1.0,
+            polygon=polygon,
+        ),
+    )
 
 
 @runtime_checkable
@@ -518,7 +550,13 @@ class WorkerRuntime:
         # pattern as `_clip_recorder`/`_compose_evidence_export` -- plus the
         # per-camera evidence attacher `_default_pump_factory` reads.
         self.diagnostics = WorkerDiagnostics()
-        self._overlay_renderer = OverlayRenderer()
+        # Explicit non-default mode: this renderer also feeds
+        # `AlertEvidenceAttacher` alert snapshots (fall + bed_exit), where
+        # `OverlayRenderer`'s new default `mode="none"` would silently render
+        # blank evidence images. `"bedexit"` still draws person boxes/skeleton
+        # (useful for fall review too) while keeping bed context for bed_exit
+        # alerts.
+        self._overlay_renderer = OverlayRenderer(mode="bedexit")
         self._snapshot_store = SnapshotStore()
         self._camera_evidence_attachers: dict[str, AlertEvidenceAttacher] = {}
         # #15: `mjpeg_server.py` was ported without a call site, so `:8090`
@@ -628,7 +666,10 @@ class WorkerRuntime:
         if self._live_view is None:
             return
         self._mjpeg_server = start_optional_mjpeg_server(
-            self._live_frames, self._mjpeg_config
+            self._live_frames,
+            self._mjpeg_config,
+            probe=self._rtsp_probe,
+            bed_zone_recognizer=self._bed_zone_recognizer,
         )
         if self._mjpeg_server is None:
             LOGGER.warning(
@@ -638,6 +679,82 @@ class WorkerRuntime:
                     "port": self._mjpeg_config.port,
                 },
             )
+
+    def _rtsp_probe(self, rtsp_url: str) -> MjpegProbePayload:
+        """Give the dev MJPEG server's ``POST /probe`` a real decode attempt.
+
+        ``start_optional_mjpeg_server`` falls back to its ``_unavailable_probe``
+        default (always ``MjpegProbeError("decode")``) when no ``probe=`` is
+        passed in -- this method is that callable, wired in below in
+        ``_start_live_view_server``. It reuses camera ingest's own decode path
+        (``CpuAvAdapter`` + ``probe_first_frame``) rather than a bespoke probe
+        implementation, and the same open/read timeouts real ingest uses
+        (``self.config.runtime``) rather than inventing separate probe-only
+        ones, so a registration probe fails for the same reasons the camera
+        itself would have.
+        """
+        config = CpuAvConfig(
+            camera_id="probe",
+            url=rtsp_url,
+            open_timeout_ms=self.config.runtime.open_timeout_ms,
+            read_timeout_ms=self.config.runtime.read_timeout_ms,
+        )
+        try:
+            result = probe_first_frame(
+                rtsp_url,
+                decoder=CpuAvAdapter(),
+                config=config,
+                requested_backend="cpu_av",
+                selected_backend="cpu_av",
+            )
+        except RTSPProbeError as exc:
+            raise MjpegProbeError(exc.error_class) from exc
+        return result.as_dict()
+
+    def _bed_zone_recognizer(self, image: Image) -> BedZonePayload:
+        """Run one on-demand bed-segmentation pass for the recognize endpoint.
+
+        Reuses the shared bed-seg runner directly (``self.shared_yolo.bed.runner``)
+        rather than going through ``NamedExtractor.extract``/a ``FramePacket`` --
+        this is a single HTTP-thread call, not a per-camera pump frame. The
+        shared YOLO runner instances are already invoked concurrently by every
+        camera's pump thread with no explicit lock (``NamedExtractor.extract``
+        has none), so this call reuses that same no-additional-locking
+        precedent instead of introducing a new one. Only reachable once
+        ``_start_live_view_server`` runs, which is after ``bootstrap_or_exit``
+        has set ``self.shared_yolo``.
+        """
+        if self.shared_yolo is None:
+            raise RuntimeError("bed-zone recognizer called before models were initialized")
+        runner = self.shared_yolo.bed.runner
+        # Mirrors `worker.pipeline.analytics.models._runner_call`'s exact
+        # is-callable-or-`.run` resolution instead of reaching into
+        # `NamedExtractor`'s private `_call` field.
+        call = runner if callable(runner) else runner.run
+        result = call(image)
+        if not isinstance(result, BedRunnerResult):
+            raise BedZoneNotFoundError("bed runner returned an unexpected result")
+        height, width = int(image.shape[0]), int(image.shape[1])
+        best_box: Sequence[float | Sequence[Sequence[int]]] | None = None
+        best_score = -1.0
+        for box in result.boxes:
+            score = float(box[4])
+            if score > best_score:
+                best_score = score
+                best_box = box
+        if best_box is None:
+            raise BedZoneNotFoundError("no bed detected in the current frame")
+        polygon_field = best_box[5] if len(best_box) > 5 else ()
+        polygon = [[int(point[0]), int(point[1])] for point in polygon_field]  # type: ignore[index]
+        if not polygon:
+            x1, y1, x2, y2 = (
+                int(best_box[0]),
+                int(best_box[1]),
+                int(best_box[2]),
+                int(best_box[3]),
+            )
+            polygon = [[x1, y1], [x2, y1], [x2, y2], [x1, y2]]
+        return {"polygon": polygon, "image_width": width, "image_height": height}
 
     def _start_export_sender(self) -> None:
         """Start delivering staged evidence to the relay.
@@ -849,7 +966,11 @@ class WorkerRuntime:
         self.diagnostics.register_bus(camera.camera_id, bus)
         tracker = GreedyIouTracker()
         intervals = {"pose": camera.frame_stride, "person": camera.frame_stride, "bed": 30}
-        scene, scheduler = SceneState(camera.camera_id), Scheduler(intervals)
+        scene = SceneState(
+            camera.camera_id,
+            persisted_bed_regions=_persisted_bed_regions(camera),
+        )
+        scheduler = Scheduler(intervals)
         analytics = CompositeExtractor(
             extractors=yolo.extractors,
             scheduler=scheduler,
@@ -982,6 +1103,30 @@ class WorkerRuntime:
             return
         self._compose_clip_recording(boot, evidence_runtime)
 
+    def _resolved_clip_store_dir(self) -> Path:
+        """The clip store root this worker records into.
+
+        ``configured_store_dir()`` (``CLIP_STORE_DIR`` env, default
+        ``/var/lib/clip-store``) is the fixed physical volume; a
+        backend-selected ``clip.store_subdir`` (see ``ClipRecordingConfig``,
+        pulled from ml-api's persisted clip-storage-location choice) is
+        appended underneath it so an operator's dashboard selection actually
+        changes where clips land. ``pull_models.py`` already validates the
+        subdir (relative, no ``..`` traversal) before it ever reaches
+        ``WorkerConfig``, but a path used for filesystem construction is
+        re-checked here too rather than trusted at a distance -- ``Path(base)
+        / value`` silently discards ``base`` and becomes absolute if ``value``
+        starts with ``/``.
+        """
+        base = configured_store_dir()
+        subdir = self.config.clip.store_subdir
+        if not subdir:
+            return base
+        candidate = PurePosixPath(subdir)
+        if candidate.is_absolute() or ".." in candidate.parts:
+            return base
+        return base / subdir
+
     def _compose_evidence_delivery(self) -> EvidenceExportRuntime | None:
         """Build the export runtime. Never gated on clip recording.
 
@@ -993,7 +1138,7 @@ class WorkerRuntime:
         """
         if not export_enabled():
             return None
-        clip_config = ClipRecorderConfig()
+        clip_config = ClipRecorderConfig(store_dir=self._resolved_clip_store_dir())
         try:
             return EvidenceExportRuntime.from_environment(
                 store_dir=clip_config.store_dir,
@@ -1026,7 +1171,7 @@ class WorkerRuntime:
         """
         if evidence_runtime is None:
             return
-        clip_config = ClipRecorderConfig()
+        clip_config = ClipRecorderConfig(store_dir=self._resolved_clip_store_dir())
         try:
             with ClipStoreLock.acquire(clip_config.store_dir):
                 evidence_runtime.initialize_under_lock()
@@ -1069,7 +1214,7 @@ class WorkerRuntime:
         therefore re-raises as ``EvidenceDeliveryError``, which this method lets
         through.
         """
-        clip_config = ClipRecorderConfig()
+        clip_config = ClipRecorderConfig(store_dir=self._resolved_clip_store_dir())
         hook_ran = False
 
         def _startup_hook() -> None:

@@ -9,7 +9,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from backend.app.features.clips.audit_log import AuditLogStore, post_backend_backup, utc_now_iso
-from backend.app.features.clips.store import ClipStore, LabelRecord, LabelStore
+from backend.app.features.clips.store import ClipManifest, ClipStore, LabelRecord, LabelStore
 from backend.app.shared.dashboard_auth import authorize_dashboard
 
 router = APIRouter(tags=["clips"])
@@ -38,6 +38,7 @@ class ClipManifestResponse(BaseModel):
     video_available: bool
     video_error: str | None = Field(default=None)
     finalized: bool
+    size_bytes: int | None = Field(default=None, ge=0)
 
 
 class ListClipsResponse(BaseModel):
@@ -75,8 +76,29 @@ def list_clips(
     authorization: Annotated[str | None, Header(alias="Authorization")] = None,
 ) -> dict[str, object]:
     _authorize(request, authorization)
-    manifests = _clip_store(request).list_manifests(camera_id=camera_id)
-    return {"clips": [manifest.as_response() for manifest in manifests]}
+    store = _clip_store(request)
+    manifests = store.list_manifests(camera_id=camera_id)
+    return {"clips": [_clip_response(store, manifest) for manifest in manifests]}
+
+
+def _clip_response(store: ClipStore, manifest: ClipManifest) -> dict[str, object]:
+    response = manifest.as_response()
+    response["size_bytes"] = _clip_size_bytes(store, manifest)
+    return response
+
+
+def _clip_size_bytes(store: ClipStore, manifest: ClipManifest) -> int | None:
+    if not manifest.video_available:
+        return None
+    try:
+        video_path = store.resolve_video_path(manifest)
+    except (ValueError, FileNotFoundError):
+        return None
+    try:
+        return video_path.stat().st_size
+    except OSError:
+        return None
+
 
 @router.get("/clips/{clip_id}/video")
 def clip_video(

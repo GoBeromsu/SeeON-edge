@@ -3,23 +3,23 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Final
+from typing import Final, Literal
 
 import cv2
 import numpy as np
 from numpy.typing import NDArray
 
-from contracts.observation import FrameObservation
+from contracts.observation import BoundingBox, DetectionLabel, FrameObservation
 from worker.domains.bed_exit import BedExitDebugSnapshot
 from worker.pipeline.output._overlay_primitives import (
-    BED_COLOR,
-    BED_EXIT_STATUS_COLOR,
-    BED_PRESENT_STATUS_COLOR,
-    BED_ROI_TEXT_COLOR,
+    BED_DASHED_COLOR,
+    FALL_LABEL_COLOR,
+    NORMAL_LABEL_COLOR,
     PERSON_COLOR,
     POSE_DOT_COLOR,
     draw_box,
     draw_caption,
+    draw_dashed_region,
     draw_label,
     draw_pose,
     draw_region,
@@ -27,6 +27,13 @@ from worker.pipeline.output._overlay_primitives import (
 from worker.types import FramePacket
 
 MAX_SNAPSHOT_BYTES: Final = 200 * 1024
+
+# ``none``: draw nothing (clean frames). ``bedexit``: teal dashed bed
+# polygon(s) + person boxes/skeleton + per-bed occupancy label. ``fall``:
+# person boxes/skeleton + per-track FALL/NORMAL label. No backward
+# compatibility with the previous boolean ``show_pose`` toggle -- the
+# frontend sends ``{"mode": ...}`` exclusively.
+OverlayMode = Literal["none", "bedexit", "fall"]
 
 
 class OverlayEncodingError(RuntimeError):
@@ -37,7 +44,7 @@ class OverlayEncodingError(RuntimeError):
 class OverlayRenderer:
     """Render frozen inference outputs without mutating the shared frame."""
 
-    show_pose: bool = False
+    mode: OverlayMode = "none"
 
     def render(
         self,
@@ -46,23 +53,17 @@ class OverlayRenderer:
         debug_snapshots: tuple[BedExitDebugSnapshot, ...] = (),
     ) -> NDArray[np.uint8]:
         image = packet.frame.image.copy()
+        if self.mode == "none":
+            return image
         for box in observation.boxes:
             draw_box(image, box, PERSON_COLOR)
             draw_label(image, "person", box.x1, max(12, box.y1 - 4), PERSON_COLOR)
-        for box in observation.bed_boxes:
-            draw_region(image, box, BED_COLOR, fill=True)
-            draw_label(image, "bed", box.x1, max(12, box.y1 - 4), BED_COLOR)
-        for snapshot in debug_snapshots:
-            _draw_bed_exit_debug(image, snapshot)
-        if self.show_pose:
-            for keypoints in observation.keypoints:
-                draw_pose(
-                    image,
-                    keypoints,
-                    color=POSE_DOT_COLOR,
-                    dot_radius=2,
-                    skeleton=False,
-                )
+        for keypoints in observation.keypoints:
+            draw_pose(image, keypoints, color=POSE_DOT_COLOR, dot_radius=2, skeleton=True)
+        if self.mode == "bedexit":
+            _draw_bedexit_beds(image, observation.bed_boxes, debug_snapshots)
+        elif self.mode == "fall":
+            _draw_fall_labels(image, observation)
         return image
 
     def encode_jpeg(
@@ -123,38 +124,77 @@ def _encode_bounded_image(
     return None
 
 
-def _draw_bed_exit_debug(
+def _draw_bedexit_beds(
     image: NDArray[np.uint8],
-    snapshot: BedExitDebugSnapshot,
+    bed_boxes: tuple[BoundingBox, ...],
+    debug_snapshots: tuple[BedExitDebugSnapshot, ...],
 ) -> None:
-    bed_debug = snapshot.bed_region
-    label = "bed_roi"
-    if bed_debug is not None:
-        label = f"bed_roi:{bed_debug.source}"
-        if bed_debug.age_frames is not None:
-            label = f"{label} age={bed_debug.age_frames}"
-    draw_label(image, label, 8, 18, BED_ROI_TEXT_COLOR, scale=0.5)
-    for status in snapshot.statuses:
-        color = (
-            BED_EXIT_STATUS_COLOR
-            if status.occupancy == "exit"
-            else BED_PRESENT_STATUS_COLOR
-        )
-        draw_box(image, status.box, color)
-        draw_label(
-            image,
-            f"bed:{status.occupancy}",
-            status.box.x1,
-            max(12, status.box.y1 - 4),
-            color,
-        )
+    """Teal dashed bed outline plus its occupancy label (empty/occupied/exit).
+
+    Occupancy comes from the bed-exit domain's debug side-channel
+    (``BedExitDebugSnapshot.statuses``), keyed by ``bed_id``.
+    ``BedExitMonitor._update_frame`` builds that tuple by ``enumerate()``-ing
+    this same ``observation.bed_boxes`` sequence
+    (worker/domains/bed_exit/detector.py:145-159), so ``bed_id`` lines up
+    with this loop's index without any extra join key.
+    """
+    occupancy_by_bed_id = {
+        status.bed_id: status.occupancy
+        for snapshot in debug_snapshots
+        for status in snapshot.statuses
+    }
+    for bed_id, box in enumerate(bed_boxes):
+        draw_dashed_region(image, box, BED_DASHED_COLOR)
+        occupancy = occupancy_by_bed_id.get(bed_id)
+        label = f"bed:{occupancy}" if occupancy is not None else "bed"
+        draw_label(image, label, box.x1, max(12, box.y1 - 4), BED_DASHED_COLOR)
+
+
+def _draw_fall_labels(image: NDArray[np.uint8], observation: FrameObservation) -> None:
+    """Per-track FALL/NORMAL label: danger-red for FALL, neutral for NORMAL."""
+    for index, label in _fall_labels_by_box_index(observation).items():
+        box = observation.boxes[index]
+        color = FALL_LABEL_COLOR if label.is_fall else NORMAL_LABEL_COLOR
+        draw_label(image, label.text, box.x1, box.y2 + 14, color)
+
+
+def _fall_labels_by_box_index(
+    observation: FrameObservation,
+) -> dict[int, DetectionLabel]:
+    """Map each per-track FALL/NORMAL ``DetectionLabel`` back to its box index.
+
+    ``FallWindowClassifier.classify()`` (worker/domains/fall/classifier.py:
+    87-91) builds ``labels`` by walking ``track_ids`` in order and skipping
+    any entry that is ``None`` or not currently live, so ``labels[k]`` is the
+    label for the k-th non-``None`` track id -- not necessarily for
+    ``boxes[k]``. Track ids stay positionally parallel to boxes from tracker
+    assignment onward (worker/pipeline/analytics/composite.py:118-124), so
+    replay that same walk here instead of assuming labels and boxes already
+    line up index-for-index.
+    """
+    track_ids = observation.track_ids
+    if len(track_ids) != len(observation.boxes):
+        return {}
+    mapping: dict[int, DetectionLabel] = {}
+    label_iter = iter(observation.labels)
+    for index, track_id in enumerate(track_ids):
+        if track_id is None:
+            continue
+        label = next(label_iter, None)
+        if label is None:
+            break
+        mapping[index] = label
+    return mapping
 
 
 __all__ = [
     "MAX_SNAPSHOT_BYTES",
+    "OverlayEncodingError",
+    "OverlayMode",
     "OverlayRenderer",
     "draw_box",
     "draw_caption",
+    "draw_dashed_region",
     "draw_label",
     "draw_pose",
     "draw_region",

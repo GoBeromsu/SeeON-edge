@@ -2,42 +2,98 @@
 
 ## Authority and provenance
 
-This root document is the single design authority for the `front` application. It governs product vocabulary, information architecture, URL state, responsive behavior, visual tokens, component states, accessibility, motion, and visual acceptance.
+This document is the design contract for the completed `front` redesign — global shell, tokens, accessibility, interaction primitives, and the three implemented pages. Its design source is the Claude Design prototype bundled at `front/design-handoff/`: `front/design-handoff/README.md` is the authoritative spec for page-level visual and interaction detail (관제/이벤트/설정 screens and their modals), and `Eldercare Prototype.dc.html` in the same directory is the interactive visual reference the spec describes. The bundle is reference-only — never imported, copied, or edited at runtime — and where this document and the handoff spec disagree on page content, the handoff spec wins and this document must be updated in the same change. Section-by-section, this document also records where the shipped implementation deliberately deviates from the handoff spec (a field the API doesn't provide, a UI simplification); those deviations are the current design contract, not bugs.
 
-The visual family reference is the local sibling repository `../eldercare-fall-ai`: its `DESIGN.md`, neutral admin shell, status language, and Senior AI Lab mark were audited on 2026-07-20. Those sources establish family resemblance, not a pixel-clone requirement. This repository must remain independently buildable: do not import sibling source, components, CSS, assets, routes, stores, permissions, or dependencies at runtime.
+The product is a single-facility edge console: one eldercare facility's on-site edge device, operated by installers and facility staff, not a multi-tenant SaaS product. There is no facility switcher, no backend-status ribbon, and no multi-facility concept anywhere in the shell.
 
-The local implementation sources are `front/src/styles.css`, `front/tailwind.config.js`, and feature-sliced React components under `front/src`. A new component or token must reuse a semantic contract here or update this document in the same change.
+The local implementation sources are `front/src/styles.css` (and its `front/src/styles/*.css` imports), `front/tailwind.config.js`, and feature-sliced React components under `front/src`. A new component or token must reuse a semantic contract here or update this document in the same change.
 
 ## Product identity and goals
 
-The product is `Senior AI Lab · ML Control`, a calm operational safety console for checking camera availability, reviewing fall and bed-exit evidence, managing camera registration, and diagnosing runtime health. It should feel quiet, exact, and trustworthy during repeated daily use.
+The product is `Senior AI Lab Edge`, a calm operational safety console for checking camera availability, reviewing fall and bed-exit evidence, and managing the single admin account and device connection. It should feel quiet, exact, and trustworthy during repeated daily use.
 
-The default experience is a camera wall, not a metric dashboard. The interface must reveal what is known, when it was last known, and what the operator can do next. It must never imply a live event feed, persistent label state, camera health, or system history that the current APIs do not provide.
-
-## Product jobs
-
-- An operator scans cameras by floor and room, distinguishes camera liveness from image availability, and selects one camera to enter its single focused live view in one click.
-- A reviewer filters historical clips, opens evidence with labelled native video controls, sees unavailable media honestly, and applies only the supported review labels.
-- An administrator creates, edits, tests, and deletes camera registrations without exposing secrets or confusing a successful save with a failed follow-up probe.
-- An engineer checks backend reachability, heartbeat freshness, and structured runtime/facility status without reading raw object dumps.
-- Any signed-in user can deep-link to a supported page and state, use browser back/forward, recover from failures, and complete core tasks with keyboard or touch.
+The interface must reveal what is known, when it was last known, and what the operator can do next. It must never imply live data, camera health, or history that the current APIs do not provide.
 
 ## Information architecture
 
-There are exactly four primary destinations. Floor and room are contextual filters, not destinations.
+There are exactly three primary destinations, all reachable from a single 56px top `NavBar` present at every viewport width. There is no left rail and no bottom tab bar.
 
 | Query value | Navigation label | Owns |
 | --- | --- | --- |
-| `operations` | 관제 | Snapshot camera wall, camera selection, and one focused live camera entered directly per selection |
-| `events` | 이벤트 기록 | Historical clip evidence, filters, detail, playback, and supported label review |
-| `cameras` | 카메라 관리 | Camera registry, create/edit/test/decode actions, and deletion |
-| `system` | 시스템 | Backend reachability, heartbeat/runtime diagnostics, and explicit technical details |
+| `operations` | 관제 | Camera view/selection (default destination) |
+| `events` | 이벤트 | Historical event/clip evidence |
+| `settings` | 설정 | Camera, connection, and system settings |
 
-Desktop uses a persistent left navigation rail and sticky top bar. Mobile and tablet use a compact top app bar and four persistent bottom tabs. Navigation is never duplicated inside page content.
+The `NavBar` also carries the brand mark (text, left), the three nav destinations (grid/clock/gear inline SVG icons, `front/src/shared/ui/NavBar.tsx`), an account-settings icon button (opens `AccountSettingsModal`), and — only while a session exists — a logout button. It never renders a backend-status pill or facility name; connection status is surfaced only inside the 설정 page. The active destination uses a `bg-muted` rounded chip and `aria-current="page"`; the room-detail view under 관제 keeps the 관제 destination active.
 
-## Page and state contracts
+All three destinations plus the login gate are implemented against `front/design-handoff/README.md`; there is no placeholder-page state left. Page-level content (filters, camera wall, room detail, clip review, settings cards) is owned by the handoff spec; the sections below (`관제`, `이벤트`, `설정`, `모달`) record the implemented reality and its deliberate deviations from that spec.
 
-### Shared resource states
+## 관제 (Operations)
+
+`front/src/app/pages/OperationsPage.tsx` composes the camera wall and, once a `camera` query value resolves against the loaded camera list, swaps to room detail — both under the single `관제` destination (`useOperationsLocation`, `front/src/features/operations/useOperationsLocation.ts`). There is no page-level `h1` in `OperationsPage` itself: the wall and room-detail views each own their own primary heading (matching the handoff spec's per-view header rather than a duplicated "관제" title above a second, view-specific one), and each still exposes exactly one `[data-dialog-focus-fallback]` heading so `AccessibleDialog`'s close-focus fallback keeps working.
+
+**Camera wall** (`CameraWall.tsx`, `CameraWallTile.tsx`): the header row is `h1` "관제" plus two count badges — `온라인 {n}` (approved/green) and `오프라인 {n}` (rejected/red), counts computed client-side (`countCamerasByLiveness`) with a non-breaking space so a badge never wraps mid-count — with a right-aligned floor `<select>` (전체 + one `<option>` per distinct `floor_name`, same control styling as the 이벤트 page's `CameraFilterSelect`) replacing the floor-chip row. Below that, a responsive grid (1 col → 2 at `sm` → 4 at `lg`) of 16:9 tiles: an online tile polls a snapshot queue (`useSnapshotQueue.ts`/`SnapshotQueue.ts`) and overlays `linear-gradient(transparent, rgba(0,0,0,.72))` with the camera label and a green status dot; an offline tile is an `aspect-video bg-muted` panel with centered "오프라인" text (no dark media frame), plus a separate white bottom bar with the label and a red dot. The whole tile is the click target to open room detail.
+
+**Room detail** (`RoomDetail.tsx`): a breadcrumb ("관제" link `/` camera name, the camera name is the `[data-dialog-focus-fallback]` `h1`) plus an online/offline status badge, then a 2/3-1/3 grid — `LiveStreamPanel` (live view) on the left, `CameraInfoCard` + `DetectionSettingsCard` stacked on the right — followed by `EventHistoryList` below. `RoomDetail` also owns the shared `CameraEditModal`/`DeleteCameraDialog` instances (imported from `front/src/features/settings/`, not duplicated) so 연결 관리 opens in place; a delete from here removes the camera being viewed, so it also navigates back to the wall (`onBack`) after refreshing (`onRetryConnection`, which is `OperationsPage`'s `camerasResource.retry`). Stacking two `AccessibleDialog`s is avoided the same way `CameraSection` avoids it: `CameraEditModal` never opens its own delete-confirm dialog, it bubbles the request up via `onRequestDelete` to a sibling `DeleteCameraDialog`.
+
+- `LiveStreamPanel.tsx` renders the MJPEG-over-`<img>` live view (`getCameraStreamUrl`, no WebRTC/HLS) with a top-right diagnostics chip. Deviation from the handoff spec: the spec describes separate decode/inference FPS and a running frame counter; `RuntimeCameraDiagnostics` only ever reports one `measured_fps` plus a decode backend name, so the chip shows only `"{fps} FPS · {backend}"` (or `FPS 측정 중` while unmeasured) rather than fabricating the extra fields. An offline camera renders the spec's gray `bg-muted` panel — "카메라에 연결할 수 없습니다" / "탐지가 중단된 상태입니다" — with [재연결 시도] (clears the local stream-error flag and calls `onRetryConnection`, re-polling the cameras resource) and [연결 관리] (opens the shared `CameraEditModal` via `onManageConnection`) buttons; a live `<img>` load failure (camera reported online but the stream errors) instead shows the plain-text fallback "실시간 영상을 불러올 수 없습니다" without those buttons, since that's a stream-level failure rather than a reported-offline camera.
+- `CameraInfoCard.tsx` is now header-title-as-camera-name with an xs outline "연결 관리" button in the header (opens the shared `CameraEditModal` in place via `onManageConnection`) and a `dl` of 층/RTSP 주소(masked, `rtsp_url_masked`) only — the 상태 row and the old full-width bottom button are removed, since status now shows as the breadcrumb-row badge and 연결 관리 no longer navigates away.
+- `DetectionSettingsCard.tsx` (operations variant, distinct from the settings-page card of the same name, now takes the `camera` object rather than just its id) shows the global `GET /detection-settings` domains read-only in a 3-col grid (이벤트명 / schedule, tabular right-aligned / status pill), reusing the settings feature's `DOMAIN_LABELS`/`DOMAIN_ORDER`/`formatDomainSchedule`, and a gear-icon header button that navigates to 설정 (`navigateToPage('settings')`) rather than editing in place. The status pill has three states, not two: 탐지 중 (approved — domain `on` and the camera is online), 꺼짐 (closed — domain `off`), 중단됨 (pending — the camera is offline, which overrides the domain's own on/off flag regardless of its saved state, since an offline camera can't be detecting anything). `OverlayModeControl` still renders below a border inside this same card.
+- `OverlayModeControl.tsx` is a three-chip `role="group"` (오버레이 없음/침대 이탈/낙상) backed by `GET`/`POST /streams/{camera_id}/pose`; the selected chip is `aria-pressed` + primary-filled, selection is optimistic-disabled (`pending`) during the POST, and a failed POST reverts with a toast (`오버레이 모드를 변경하지 못했습니다.`).
+- `EventHistoryList.tsx` polls `GET /clips` scoped to the camera and offers a 최신순/종류별 sort select; 최신순 is a flat 4-col clip grid, 종류별 groups clips under `"{종류} · n건"` headings. Each tile is a muted video preview (`clip.video_available` gates a native `<video muted>` vs. an unavailable-copy fallback) plus type label and timestamp; selecting one opens `ClipPlayerModal` (`front/src/features/operations/ClipPlayerModal.tsx`, `size="xl"`, same shape as the 이벤트 page's `ClipPlaybackModal`).
+
+## 이벤트 (Events)
+
+`front/src/app/pages/EventsPage.tsx`: a filter row of `EventTypeFilterChips.tsx` (전체 n / 침대 이탈 n / 낙상 n, counts derived client-side from the loaded `GET /clips` page) on the left and `CameraFilterSelect.tsx` on the right (`ml-auto`), driving a 4-col `ClipGrid.tsx` (each card labels its camera in the top-left of the thumbnail via `resolveCameraLabel.ts`). The empty state reads `조건에 맞는 이벤트가 없습니다.`. Selecting a clip opens `ClipPlaybackModal.tsx`. TP/FP labeling (the old `PUT /clips/{id}/label` review workflow) is intentionally removed from this redesign — the modal shows the event-type chip in its place, and the label-mutation call is deleted from the frontend entirely (backend route removal is out of scope).
+
+The `camera`-scoped `GET /clips` request is filter-driven, not URL-driven (`selectedCameraId` local state) and doesn't restart `usePollingResource`'s own poll loop on a camera-filter change, so `EventsPage` explicitly calls `clipsResource.retry()` on every `selectedCameraId` change to avoid up to an 8s stale window.
+
+## 설정 (Settings)
+
+`front/src/app/pages/SettingsPage.tsx`: a 7:5 two-column grid (`lg:grid-cols-12`, 7/5 span) — `CameraSection` on the left; `DetectionSettingsCard`, `ConnectionSettingsPanel`, `ProcessingStatusCard`, `ClipStorageCard` stacked on the right.
+
+- **카메라** (`CameraSection.tsx` + `CameraTable.tsx`): header with a primary "카메라 등록" button (camera+plus SVG) opening `CameraRegisterModal`; a table of 카메라(label + masked RTSP)/층/**침대 영역**/상태/작업. The 침대 영역 column (인식 완료 approved-badge / 인식 필요 rejected-badge, from `camera.bed_zone`) is an addition beyond the handoff spec's 카메라/층/상태/작업 columns, reflecting the bed-zone feature. An offline row is tinted `bg-status-rejectedBg`. 수정 opens `CameraEditModal`; 삭제 opens `DeleteCameraDialog` (a plain confirm dialog, "되돌릴 수 없습니다", destructive-filled confirm), not an immediate delete. Below the table, a `font-mono` version line reads `v{version} · ml-api@{digest} · ml-worker@{digest}` (parts omitted if `GET /system` doesn't report them, never fabricated) — no separate technical-info card.
+- **탐지 설정** (`DetectionSettingsCard.tsx`, settings variant): read mode is a 3-col grid per domain (이벤트명 / schedule, right-aligned tabular / status badge — 탐지 중 approved when `on`, 미탐지 closed when off). The pencil button enters edit mode: per-domain checkbox + 항상/시간 지정 select + (`mode=window`) two `type="time"` inputs. Every field change calls `PUT /detection-settings` immediately (no save button; "변경 즉시 모든 카메라에 적용됩니다." caption), and a failed PUT toasts and reverts the local draft. A ghost "완료" button exits edit mode.
+- **서버 연결** (`ConnectionSettingsPanel.tsx`, `front/src/features/connection/`): read mode is a `dl` of 시설 ID(`font-mono`)/시설 토큰(masked)/마지막 동기화, with a connection-status badge and pencil in the header. The pencil opens an inline form below a border: 시설 ID + 시설 토큰 inputs, a "연결" test button (`testConnection`, shows `연결 성공 · {detail}` inline in green on success, the raw detail string on failure) and a primary "저장" submit (`saveConnection`, closes on success + toast). This is the only settings-card flow with an explicit save button — 탐지 설정 and 계정 are immediate/no-current-password respectively, but connection changes are deliberately not auto-applied.
+- **처리 상태** (`ProcessingStatusCard.tsx`): a status badge (정상/중단됨/확인 중, from `runtime.worker.alive`) plus a `dl` of 실행 디바이스 (`device_name · backend`, e.g. `Apple M2 · MPS`), 디코드 (first camera's `decode.selected`/`decode.requested` as a representative sample — there is no single global decode field), 인코드 (`clip_recorder.encoder`), 전송 지연 (`최대 {max_sec}초` across cameras' `latency.max_sec`). No CUDA-only diagnostics (FPS averages, NVML) are rendered regardless of device — the card renders whatever the backend reports, without a CUDA-specific code path.
+- **클립 저장 공간** (`ClipStorageCard.tsx`): usage line `"{used} / {total} GB"` (tabular, one decimal, `—` when unknown) over an 8px pill progress bar (`role="progressbar"`), then a `font-mono` "저장 위치 {root}/{selected_path}" line and a "변경" button opening `FolderBrowserModal`. A successful `PUT /clips/storage/location` toasts and refreshes; a failure toasts `저장 위치를 변경하지 못했습니다.` without closing the modal state.
+
+`CameraRegisterModal`'s 1단계 in the shipped implementation deviates from the handoff spec: there is no floor-chip picker. `floor_name` is a read-only field populated by an external space-sync process, so step 1 collects only 이름 and RTSP 주소, and `POST /cameras` performs the RTSP probe and the save in a single call (no separate probe endpoint) — a probe failure (`timeout`/`auth`/`decode`) or a duplicate-stream conflict (offering a "그래도 등록" force-register retry) surfaces inline rather than blocking on a separate step. 2단계 is `BedZoneRecognitionPanel` (shared with `CameraEditModal`'s 다시 인식 flow): a live camera snapshot (`getCameraSnapshotUrl`, refetched by key after each recognize) with the persisted bed polygon drawn as an SVG overlay once known, an "인식 중..." status overlay while `POST /cameras/{camera_id}/bed-zone/recognize` is in flight, and an "인식 시작"/"다시 인식" button. This is a simpler implementation than the handoff spec's animated dashed-polygon-pulse preview — recognition is a discrete server round trip (one YOLO segmentation pass per click), not a live client-side animation, and "저장하고 완료" is blocked with a toast until a `bed_zone` exists.
+
+## 모달과 AccessibleDialog 크기 (Modals)
+
+All five modals use `AccessibleDialog` (`front/src/shared/ui/AccessibleDialog.tsx`) with a `DialogSize` variant matching the handoff spec's pixel widths:
+
+| Size | Width | Modal | Component |
+| --- | --- | --- | --- |
+| `xs` | 380px | 계정 설정 | `front/src/features/account-settings/AccountSettingsModal.tsx` |
+| `sm` | 420px | 폴더 탐색기 | `front/src/features/settings/FolderBrowserModal.tsx` |
+| `md` | 440px | 카메라 등록 1단계 · 연결 관리(view mode) | `CameraRegisterModal.tsx` (step 1) · `CameraEditModal.tsx` (mode `view`) |
+| `lg` | 640px | 카메라 등록 2단계 · 연결 관리 다시 인식 | `CameraRegisterModal.tsx` (step 2) · `CameraEditModal.tsx` (mode `reseg`) |
+| `xl` | 720px | 클립 재생 | `front/src/features/events/ClipPlaybackModal.tsx` · `front/src/features/operations/ClipPlayerModal.tsx` |
+
+`default` (520px, unchanged) remains for other callers (e.g. `DeleteCameraDialog`, which uses no explicit `size`).
+
+Deviation from the handoff spec: 연결 관리 and 침대 영역 다시 인식 are one modal (`CameraEditModal`) that switches view via internal `mode` state (`view` ↔ `reseg`), not two separately-opened modals. `AccessibleDialog` makes everything outside the open dialog `inert`; stacking a second dialog on top of a first would make the first dialog's own container `inert` too (it isn't a descendant of the second), producing a focus trap. Widening the same dialog to `lg` for the 다시 인식 sub-view avoids that bug. The same reasoning routes camera deletion through `CameraSection`'s single shared `DeleteCameraDialog` via an `onRequestDelete` callback rather than a delete-confirm dialog nested inside `CameraEditModal`.
+
+**클립 재생** (`ClipPlaybackModal.tsx`/`ClipPlayerModal.tsx`, xl): header is `"{종류} · {카메라명}"` + timestamp; body is a native `<video controls>` (or an unavailable-copy fallback) inside `.event-media-frame`, then a `dl` of 카메라/시간/길이/해상도/크기(only when `size_bytes` is non-null — the row is omitted, never shown as `0` or fabricated). 길이 prefers the clip manifest's `duration_s`, falling back to the loaded `<video>` element's metadata; 해상도 is read only from loaded `<video>` metadata (the API's `Clip` type carries no dimensions field). Deviation from the handoff spec: there is no "파일" row showing the full clip-store path — `AGENTS.md` prohibits exposing the clip-store filesystem path or camera credentials in the UI, so only `video_path` (an API URL, never a raw filesystem path) is used, and the path row is dropped entirely rather than shown redacted. Footer has one action, 다운로드 (`<a download>` on `video_path`), shown only when `video_available`.
+
+**폴더 탐색기** (`FolderBrowserModal.tsx`, sm): a current-path row (↑ parent-navigate icon button, disabled at root, plus a `font-mono` path) over a directory list (`GET /clips/storage/browse?path=`) with drill-down on click; an empty directory reads "하위 폴더 없음". Footer: 취소 / "이 위치 사용" (disabled until a browse response has loaded), which calls `PUT /clips/storage/location`.
+
+**계정 설정** (`AccountSettingsModal.tsx`, xs): 아이디 / 새 비밀번호 / 새 비밀번호 확인 — no current-password field, matching the single-admin-account, already-authenticated model. Client-side validates length (≥4) and confirm-match before calling `PUT /auth/credentials`; success shows an inline `dialog-success` message and resets the password fields (username stays populated).
+
+**카메라 등록** and **연결 관리**: see the 설정 page section above for their content; both are described there rather than duplicated here since their behavior is inseparable from the 카메라 카드 flow they belong to.
+
+## Behavioral contracts the UI depends on
+
+- **Overlay mode** — `GET`/`POST /api/v1/streams/{camera_id}/pose`, body/response `{"mode": "none"|"bedexit"|"fall"}` (`backend/app/features/cameras/streams_router.py`, proxying the worker's `/overlay/{id}/pose`). Rendering is entirely server-side burn-in on the worker (`worker/pipeline/output/overlay.py`'s `OverlayRenderer`) — the frontend never draws boxes/skeletons itself, it only selects a mode and displays whatever JPEG the stream returns. `none` draws nothing. `bedexit` draws every person box + pose skeleton, then a teal dashed outline per bed polygon labeled `bed:{occupancy}` (occupancy from the bed-exit domain's per-frame debug snapshot, keyed positionally to `observation.bed_boxes`). `fall` draws every person box + skeleton, then a per-track FALL (danger-red) or NORMAL (neutral) label positioned under that track's box.
+- **Bed-zone recognition** — `POST /api/v1/cameras/{camera_id}/bed-zone/recognize` (dashboard session auth) triggers one server-side YOLO segmentation pass against the camera's latest frame; success (200) persists `{polygon, image_width, image_height, recognized_at}` server-side (`BedZoneStore`) and is echoed back under `bed_zone`. No usable bed found → 422 `{"detail": {"error_class": "bed_not_found"}}`, surfaced as "침대를 찾지 못했습니다…"; any other upstream failure (worker down, no frame, decode failure) → 503, surfaced as a generic retry message. `GET /cameras` includes each camera's persisted `bed_zone: {...}|null`, which drives the 인식 완료/인식 필요 badge everywhere it appears (카메라 테이블, 연결 관리, 카메라 등록 2단계).
+- **Detection settings** — `GET`/`PUT /api/v1/detection-settings`, shape `{"domains": {"fall": {"on": bool, "mode": "always"|"window", "start": "HH:MM"|null, "end": "HH:MM"|null}, "bed_exit": {...}}}`; `PUT` replaces both domains atomically and returns the saved shape. This is one global, all-cameras setting — there is no per-camera override anywhere in the UI. Precedence: once an operator has saved a domain through this UI, that local value (`DetectionSettingsStore`) takes over from whatever the backend externally pulls, merged in at `worker_config_snapshot()` build time; a domain never explicitly saved falls back to reflecting the live externally-pulled window, and only falls back further to `on=true, mode=always` if there's no external window either — so a first-time visitor sees the schedule actually in effect, not a fabricated default. A save is not instantaneous on the worker: the worker only picks it up on its next poll cycle (tens of seconds), so the UI promises only "저장됨," never live effect.
+- **Clip storage location** — `GET /api/v1/clips/storage` (`{root, selected_path, total_bytes, used_bytes, used_pct}`), `GET /api/v1/clips/storage/browse?path=` (`{path, parent, directories:[{name, path}]}`), `PUT /api/v1/clips/storage/location` (body `{path}`, returns the same shape as `GET /clips/storage`). Scope: every path is a subdirectory selection *inside* the `CLIP_STORE_DIR` mount (default `/var/lib/clip-store`) only — there is no way to change the host mount itself from this UI, and every client-supplied path is walked with `O_NOFOLLOW` dir_fd chaining so a crafted `../../etc` or a symlink planted inside the store can never resolve outside the configured root (`backend/app/features/clips/storage_router.py`).
+- **Credentials** — `PUT /api/v1/auth/credentials`, body `{username?: string, new_password: string}`. There is no `current_password` field in the request or the form; the single-admin-account model treats an already-authenticated dashboard session as sufficient authorization to rotate credentials.
+- **Clip metadata** — a clip's `duration_s` and `size_bytes` are optional manifest fields; the UI never fabricates them. 길이 falls back to the loaded `<video>` element's metadata when `duration_s` is absent; 크기 has no client-side fallback — the entire 크기 `dl` row is omitted from `ClipPlaybackModal` when `size_bytes` is `null`, never rendered as `0` or hidden behind a fake value.
+
+## Shared resource states
 
 Every polled resource exposes `idle`, `loading`, `success`, and `error` without collapsing prior truth:
 
@@ -52,227 +108,134 @@ Every polled resource exposes `idle`, `loading`, `success`, and `error` without 
 | Request error | Use a concise Korean explanation, a retry action, and a polite live region; never expose raw backend text. |
 | Recovery | Replace the error with current truth, preserve relevant selection when still valid, and avoid celebratory motion. |
 
-Camera heartbeat (`online|stale|never_seen`), snapshot lifecycle, focused-feed lifecycle, backend reachability, and runtime freshness are independent states. A successful snapshot does not prove a fresh heartbeat; a stale heartbeat does not rewrite registry transport status; malformed or missing values become `unknown`/`정보 없음`.
+`usePollingResource` (`front/src/shared/api/usePollingResource.ts`) is the shared implementation: abort-on-cleanup, no overlapping polls, stale/out-of-order completions ignored, last-good data retained through a later error.
 
-### 관제
+## Authentication and shell states
 
-- The default is the snapshot wall at `wallPage=1` after canonicalization; a valid `camera` value enters that camera's focused view directly.
-- Group visible cameras by floor and room and render stable snapshot cards with camera label, location, labelled liveness, image state, and last-seen metadata.
-- Selecting a visible card enters the focused view directly and mounts exactly one stream; there is no intermediate selection context.
-- Focused view is page content at every width, never a modal. Back returns to the wall and restores the prior filters, wall page, and scroll position, moving focus to the originating card.
-- If a successful registry refresh or filter change removes the selected camera, return to Wall, clear invalid selection, and announce why.
-
-### 이벤트 기록
-
-- Show historical clips only; there is no retained real-time alert rail or live resident alert feed in the current contract.
-- Filters are floor, room, camera, and exact event type. Clip detail preserves event time, camera/location context when resolvable, media availability, reviewer metadata when confirmed, and labelled native video controls.
-- A server clip without label fields is `라벨 정보 없음`, not `미검토`. In-memory confirmed label overlays may survive list polling but disappear on reload unless the server returns label truth.
-- An unresolved/orphan clip is allowed only without active floor/room/camera filters and is described as camera information unavailable.
-
-### 카메라 관리
-
-- Present registry identity, display label, location, enabled/connection information, and only supported create/edit/test/decode/delete actions.
-- Camera `id` is the local query, selection, and CRUD identity. `backend_camera_id`, when present, is only the snapshot/focused-stream/heartbeat alias and is never serialized as `camera`.
-- RTSP terminology is permitted only inside the authenticated registration form and masked preview. Never show credentials, tokens, complete secrets, or storage paths.
-- A successful create remains successful if the optional follow-up probe fails; communicate the saved registration and the separate probe outcome.
-- Destructive delete always uses the shared confirmation dialog and names the camera being removed.
-
-### 시스템
-
-- Show actual backend reachability plus structured heartbeat/runtime facility fields only. Keep per-camera heartbeat, runtime freshness, and API availability visibly distinct.
-- Place digests, config identifiers, and similarly technical values behind an explicitly labelled `기술 정보` disclosure.
-- Do not render raw JSON, fake gauges, unsupported detection-setting saves, or fabricated update/rollback history.
-
-### Authentication and shell states
-
-- Configured builds show a quiet single-column login card (≈420px, min-height locked) on the neutral shell background: brand mark, heading `로그인`, username/password fields, and one primary submit. Border-first (no card shadow). No marketing copy, job blurb, or dark brand panel.
-- After the form mounts, focus moves to the username field. Submit disables controls and shows `확인 중…`. Error copy reserves a fixed line so the card does not jump.
-- Do not display or prefill credentials and do not expose a token field or token value. Invalid credentials make no dashboard request; valid credentials establish the server session cookie only.
-- If the relay token is absent, replace the form with a non-interactive `서비스 설정 필요` state and make no dashboard request.
-- Checking and connection-failure states reuse the same card shell and footprint so the layout does not jump.
-- Logout is a shell action. It resets authenticated page state through URL replacement, never by adding a history entry.
+- The login card (`AuthGate`, `.auth-card`) is a quiet single-column card (`min(380px, 100%)`, `min-height: 360px`) on the neutral shell background: brand heading, username/password fields, one primary submit. Border-first, no shadow.
+- After the form mounts, focus moves to the username field. Submit disables controls and shows `확인 중…`. Error copy has a reserved line so the card does not jump.
+- Do not display or prefill credentials. Invalid credentials make no dashboard request beyond the login attempt; valid credentials establish the server session cookie only.
+- Checking and connection-failure states reuse the same card shell so the layout does not jump.
+- Logout is a `NavBar` action. It resets to `?page=operations` via `history.replaceState`, never a new history entry.
+- `AccountSettingsModal` (single admin account, already authenticated) collects username and new password only — there is no current-password field. It calls `PUT /auth/credentials` with `{username?, new_password}`.
 
 ## Native URL query contract
 
-Use the browser `URLSearchParams` and History APIs; add no router. The only recognized keys are serialized once in canonical order: `page`, `floor`, `room`, `camera`, `event`, `clip`, `wallPage`.
+Use the browser `URLSearchParams` and History APIs; add no router. The only recognized keys, serialized once in canonical order, are `page`, `floor`, `camera`, `event`, `clip`. There is no `room` or `wallPage` key.
 
-For repeated recognized keys, the last occurrence wins. Remove earlier duplicates and all unknown keys. Empty values are invalid. `URLSearchParams` owns UTF-8 percent decoding and encoding. Compare DTO-backed values as exact decoded Unicode without trimming, normalization, or case folding. Enum values are exact lowercase ASCII.
+For repeated recognized keys, the last occurrence wins. Remove earlier duplicates and all unknown keys. Empty values are invalid.
 
-| Key | Exact value/source | Applies to | Canonicalization and dependent invalidation |
+| Key | Exact value/source | Applies to | Canonicalization |
 | --- | --- | --- | --- |
-| `page` | `operations|events|cameras|system` | Global | Missing or invalid becomes `operations`; a destination change removes all keys inapplicable to that destination before later validation. |
-| `floor` | Exact non-null `Camera.floor_name` | `operations`, `events` | After successful cameras data, unknown removes `floor`, then `room`, then incompatible `camera`/`clip`; remove off these pages. |
-| `room` | Exact non-null `Camera.space_id`; when `floor` exists, the same camera must match it | `operations`, `events` | After successful cameras data, unknown/incompatible removes `room`, then incompatible `camera`/`clip`; remove off these pages. |
-| `camera` | Exact local `Camera.id`; never `backend_camera_id` | `operations`, `events` | Operations removes an unknown or filter-incompatible camera, which yields the wall. Events requires a matching camera or removes it and then any incompatible clip. |
-| `event` | Exact non-empty `Clip.event_type` in the successfully loaded clip set after active filters | `events` | Unknown removes `event`, then an incompatible `clip`; remove off events. |
-| `clip` | Exact `Clip.id` | `events` | Clip event and resolvable camera must match active filters. An existing unresolved/orphan clip survives only when floor, room, and camera are all absent; otherwise remove only `clip` after upstream invalidation. |
-| `wallPage` | Canonical ASCII decimal matching `[1-9][0-9]*`; parse as `BigInt`, bound to `1..9007199254740991`, then convert if needed | `operations` | Invalid or out of bounds becomes `1`; serialize the parsed decimal; after successful filtering clamp to the last non-empty page, with an empty wall at `1`; remove off operations. |
+| `page` | `operations\|events\|settings` | Global | Missing or invalid becomes `operations`; a destination change removes all keys inapplicable to that destination. |
+| `floor` | Exact non-null camera floor name | `operations` | After successful cameras data, unknown removes `floor`, then incompatible `camera`. |
+| `camera` | Exact local camera `id` | `operations` | Operations removes an unknown or filter-incompatible camera. |
+| `event` | Exact non-empty clip `event_type` in the successfully loaded clip set | `events` | Unknown removes `event`, then an incompatible `clip`. |
+| `clip` | Exact clip `id` | `events` | Clip event must match active filters, or `clip` is removed after upstream invalidation. |
 
-Run synchronous syntax and page-applicability canonicalization immediately. Retain DTO-backed `floor`, `room`, `camera`, `event`, `clip`, and data-derived `wallPage` while required cameras/clips data is idle, loading, or error. Validate them only after required successful responses: operations waits for cameras; events waits for both cameras and clips.
-
-The full invalidation precedence is `page -> floor -> room -> camera -> event -> clip -> wallPage`. Rebuild the entire query in canonical order after validation.
-
-Deliberate destination, filter, page, selection, and focus changes call `pushState`. Default insertion, duplicate/unknown/invalid removal, canonical ordering, data-driven invalidation, logout/login reset, and wall-page clamping call `replaceState`. A legacy `mode` key from a stored deep link is unrecognized; it is removed via `replaceState`, leaving `history.length` unchanged. A `popstate` restoration calls no `pushState`; on the restored entry it may perform at most one immediate syntax/applicability replacement and at most one later DTO-derived replacement. Both keep `history.length` unchanged and are omitted when the canonical query already matches.
+Deliberate destination, filter, and selection changes call `pushState`. Default insertion, duplicate/unknown/invalid removal, canonical ordering, data-driven invalidation, and logout/login reset call `replaceState`. A `popstate` restoration calls no `pushState`.
 
 ## Responsive viewport contract
 
-The named widths are mandatory acceptance viewports, not approximate device labels.
+The shell is a single 56px sticky top `NavBar` at every width; only the horizontal gutter changes with viewport (`.app-main`/`.app-navbar` padding steps up at `768px`). There is no separate mobile chrome, no left rail, and no bottom tab bar at any width. Content below the `NavBar` is centered with `max-width: 1280px`.
 
-| Width | Shell and navigation | Content and wall | Focused view |
-| --- | --- | --- | --- |
-| 375 | Compact 56px top app bar; four fixed bottom tabs; 12-16px gutter; content clears safe areas and tab bar | One-column wall; controls stack; media uses full available width | Page content at full width |
-| 768 | Compact top app bar and four bottom tabs; 20px gutter | Two-column wall; filters wrap without horizontal scroll | Page content at full width |
-| 1024 | Desktop left rail and sticky 64px top bar; 20-24px gutter; no bottom tabs | Two-column wall; focused media remains page content | Page content at full width |
-| 1440 | 256px left rail, sticky 64px top bar, 24px gutter, bounded readable content | Three/four-column wall as card minimum permits; stable 16:9 media | Page content at full width |
+At every width, critical controls wrap rather than clip, Korean text remains legible, the page has no horizontal overflow, and touch targets are at least 44px effective (compact 36px controls keep a 44px hit area where practical).
 
-At every width, critical controls wrap rather than clip, Korean text remains legible, the page has no horizontal overflow, and touch targets are at least 44px. The 1024px boundary is desktop: it changes shell chrome (rail versus bottom tabs), not the underlying selection, URL, or focused-view presentation.
+## Dialog semantics
 
-## Camera wall and media budget
+`AccessibleDialog` is the sole modal primitive: portal to `document.body`, initial focus, Tab/Shift+Tab containment, Escape, safe-backdrop close, `inert` background, body scroll lock, and invoker focus restoration on close. When the invoking control is gone, focus falls back to `#main-content [data-dialog-focus-fallback]` or `#main-content h1[tabindex="-1"]` — every page must expose a focusable heading under `#main-content` for this reason.
 
-- Sort by floor, then room, then camera label with Korean collation and stable `Camera.id` tie-breaking. Missing floor or room is grouped under `미분류`.
-- Render 12 tiles per page. Only the active page loads images; changing filters resets or clamps paging deterministically.
-- Permit at most six (6) concurrent snapshot loads across the wall. Queue the rest; do not let tile-level timers bypass the shared limit.
-- Refresh snapshots about five seconds after completion plus deterministic jitter, so cameras do not synchronize into request spikes. Retain the last-good image and timestamp while refreshing; visibly distinguish initial loading, stale, and failed images.
-- Wall cards use snapshots only and produce zero focused-stream/MJPEG requests. Focused mode mounts exactly one stream element app-wide; switching camera or page removes the prior element before mounting another.
-- Snapshot, focused-live, and clip viewports use dark media frames (`#0D0D0D`) with stable 16:9 geometry, `object-fit: contain`, a labelled unavailable state, and no stretching. The surrounding shell remains light.
-- Visual evidence may fulfill finite image responses. It proves DOM/request identity and concurrency, not transport-level MJPEG socket closure or real camera integration.
+Forms inside a dialog use the shared `.accessible-dialog form/label/input` styling and `.dialog-actions`/`.dialog-secondary-action` for the cancel/confirm button pair, mirroring the login card's `.auth-card label/input` styling so every dialog looks consistent without new one-off classes.
 
-## Dialog and screen-transition semantics
+## Toast notifications
 
-Camera add and delete flows, plus evidence detail, use the shared accessible dialog surface; camera edits remain inline controls on the camera card. Destructive actions require an explicit labelled confirmation; safe cancel is initially reachable. Every modal handles initial focus, Tab/Shift+Tab containment, Escape, safe-backdrop close, body scroll lock, and invoker focus restoration. Focused live video is page content at all widths, never a modal.
-
-Entering the focused view moves focus to its heading or its back control. Returning to the wall moves focus to the card that opened the focused view, or to the wall heading when that camera no longer exists. Wall cards are navigation, not toggles, and carry no `aria-pressed`.
+`ToastViewport` (`front/src/shared/ui/Toast.tsx`), mounted once at the app root, renders a bottom-right stack (`.toast-stack`). `toast.success(message)` / `toast.error(message)` show a `.toast`/`.toast-success`/`.toast-error` entry that auto-dismisses after 2.2s. This is the only notification surface; do not build a second one.
 
 ## Design tokens
 
 ### Color
 
-Ship one light application shell with dark media frames. Existing unused dark variables may remain in code for compatibility, but they are not an exposed theme or a release claim.
+One light application shell with dark media frames. Tokens are CSS custom properties on `:root` (`front/src/styles/tokens-base.css`), mapped into Tailwind's `theme.extend.colors` (`front/tailwind.config.js`) under shadcn-style names. There is no `surface2`, `ink`, `ink-soft`, `brand`, or `status-danger`/`status-stable`/`status-caution` token — those names do not exist in the palette and must never appear as Tailwind utility classes (`bg-surface2`, `text-ink`, `ring-brand`, …); using them produces unstyled output.
 
-| Role | Token | Value | Use |
+| Role | Token | Value | Tailwind class |
 | --- | --- | --- | --- |
-| Page | `--c-bg` | `#FAFAFA` | Application canvas |
-| Primary surface | `--c-surface` | `#FFFFFF` | Rail, top bar, cards, sheets, dialogs |
-| Secondary surface | `--c-surface-2` | `#F0F0F0` | Hover, selected-neutral, grouped detail |
-| Border | `--c-border` | `#E0E0E0` | Dividers, cards, controls |
-| Primary ink | `--c-ink` | `#0F0F0F` | Headings, body, values |
-| Secondary ink | `--c-ink-soft` | `#595959` | Labels and supporting copy |
-| Tertiary ink | `--c-ink-faint` | `#6B6B6B` | Timestamps and metadata on light application surfaces |
-| Interactive | `--c-brand` | `#2F6FB0` | Primary action, active nav, link, focus |
-| Interactive soft | `--c-brand-soft` | `#EAF2FB` | Active navigation/control background |
-| Primary action foreground | `--c-action-foreground` | `#FFFFFF` | Text and icons on brand-filled primary actions |
-| Brand teal | `--c-teal` | `#2BB6A3` | SA mark only; never generic decoration |
-| Stable | `--c-stable` / `--c-stable-bg` | `#166E3D` / `#E7F7EE` | Online, success |
-| Caution | `--c-caution` / `--c-caution-bg` | `#884E07` / `#FDF2DF` | Stale, delayed, partial |
-| Danger | `--c-danger` / `--c-danger-bg` | `#B8261B` / `#FDECEB` | Failure, destructive, fall risk |
-| Check | `--c-check` / `--c-check-bg` | `#1554E0` / `#E8F0FE` | Review/check-needed state |
-| Media | `--c-media` / `--c-media-ink` | `#0D0D0D` / `#F5F5F5` | Snapshot, live, and clip frames only |
-| Media supporting text | `--c-media-text` | `#B8B8B8` | Normal supporting text on dark media frames and the dark authentication brand panel |
-| Media overlay | `--c-media-overlay` | `rgba(13,13,13,.72)` | Snapshot and focused-live status labels over imagery |
-| Media overlay foreground | `--c-media-overlay-foreground` | `#F5F5F5` | Text and icons on media status overlays |
-| Backdrop | `--c-backdrop` | `rgba(15,15,15,.42)` | Dialog and sheet backdrop |
+| Page/app canvas | `--background` | `#ffffff` | `bg-background` |
+| Primary text | `--foreground` | `#1a1a1a` | `text-foreground` |
+| Card surface | `--card` | `#ffffff` | `bg-card` |
+| Card text | `--card-foreground` | `#1a1a1a` | `text-card-foreground` |
+| Border | `--border` | `#e4e4e7` | `border-border` |
+| Input border | `--input` | `#e4e4e7` | `border-input` |
+| Muted surface | `--muted` | `#f4f4f5` | `bg-muted` |
+| Muted text | `--muted-foreground` | `#71717a` | `text-muted-foreground` |
+| Primary action fill | `--primary` | `#2f6fb0` | `bg-primary` (or the `.brand-action` class) |
+| Primary action text | `--primary-foreground` | `#ffffff` | `text-primary-foreground` |
+| Destructive fill | `--destructive` | `#dc2626` | `bg-destructive` |
+| Destructive text | `--destructive-foreground` | `#ffffff` | `text-destructive-foreground` |
+| Overlay teal | `--overlay-teal` | `#2bb6a3` | `text-teal` |
+| Status approved bg | `--status-approved-bg` | `#e7f7ee` | `bg-status-approvedBg` |
+| Status approved text | `--status-approved-fg` | `#166e3d` | `text-status-approvedFg` |
+| Status rejected bg | `--status-rejected-bg` | `#fdeceb` | `bg-status-rejectedBg` |
+| Status rejected text | `--status-rejected-fg` | `#b8261b` | `text-status-rejectedFg` |
+| Status pending bg | `--status-pending-bg` | `#fdf2df` | `bg-status-pendingBg` |
+| Status pending text | `--status-pending-fg` | `#884e07` | `text-status-pendingFg` |
+| Status closed bg | `--status-closed-bg` | `#f4f4f5` | `bg-status-closedBg` |
+| Status closed text | `--status-closed-fg` | `#71717a` | `text-status-closedFg` |
+| Media frame | `--media-bg` | `#0d0d0d` | n/a (CSS only, `.event-media-frame`) |
+| Media overlay fill | `--media-label-bg` | `rgba(0,0,0,.72)` | n/a (`.media-status-overlay`) |
+| Media overlay text | `--media-label-fg` | `#ffffff` | n/a (`.media-status-overlay`) |
+| Backdrop | `--backdrop` | `rgba(0,0,0,.42)` | n/a (`.dialog-backdrop`) |
 
-Surfaces and text are achromatic. Brand blue is interactive only; semantic colors convey status/risk and always include a text label or icon. Every App-reachable brand-filled primary action uses `.brand-action`; component code must not rebuild that pairing from `bg-brand`, dark fill, or raw foreground utilities. Status copy over imagery uses `.media-status-overlay`. Reachable components must not use raw black/white utility aliases or literal foreground/overlay values. Prefer borders over shadows. Do not add tinted page canvases, glow shadows, decorative gradients, or one-off raw colors.
+Radii: `--radius-card: 12px` (`rounded-card`), `--radius-control: 8px` (`rounded-control`). Modal shadow: `--modal-shadow: 0 12px 36px rgba(0,0,0,.2)` (`shadow-modal`).
+
+Every brand-filled primary action uses the `.brand-action` class (`background: var(--primary); color: var(--primary-foreground)`); do not rebuild that pairing from raw Tailwind color utilities. `StatusBadge.tsx`'s camera/backend status mapping predates this token set and still emits the retired `bg-surface2`/`text-ink-soft`/`bg-status-dangerBg`/`bg-status-stableBg` names — it is not yet reconciled with this table; do not copy its className strings into new code, and treat fixing it as follow-up work for whichever wave next touches it.
 
 ### Typography
 
-Use the installed CSS stack: `Pretendard`, `-apple-system`, `BlinkMacSystemFont`, `system-ui`, `Apple SD Gothic Neo`, `Noto Sans KR`, `sans-serif`. Do not add a font dependency. Page titles are 20px/700; section titles 18px/700; body 16px/400-700; compact controls and labels 14px/500-700; metadata 12px/500-700. Use normal tracking, 1.45-1.6 line height for prose, and tabular numerals for dates, durations, counts, pages, and health ages.
+`Pretendard`, `-apple-system`, `BlinkMacSystemFont`, `system-ui`, `Apple SD Gothic Neo`, `Noto Sans KR`, `sans-serif`. Page titles (`.shell-page-title`, `.auth-card h1`, `.accessible-dialog h2`) are 20px/600. Body copy is 14px; field labels 13px/600; the `NavBar` brand text is 14px/600. Use tabular numerals (`.tabular-nums`, `time`, `[role="meter"]`) for dates, durations, and counts.
 
-### Spacing, geometry, and depth
+### Spacing and geometry
 
-- Spacing follows a 4px base: 4, 8, 12, 16, 20, 24, 32, and 40px. Default page/card gutters are 16-24px.
-- Controls are at least 44px high; compact desktop controls may visually occupy 36-40px only when their interactive target remains 44px.
-- Radii are 8px for controls/nav, 12px for cards/media, and 16px for elevated panels. Bottom sheets may use 20px only on their top corners.
-- Borders use `1px solid var(--c-border)`. Resting cards use at most `0 1px 3px rgba(15,15,15,.08)`; sheets/dialogs use at most `0 12px 36px rgba(15,15,15,.18)`.
-- Media keeps 16:9 aspect ratio. Status dots are 8px but never stand alone. Icons are simple local SVGs or text; no icon package or emoji controls. Primary navigation uses monoline local SVGs (20px, `currentColor`) beside labels — never first-character letter marks.
-- Layer order is content `0`, sticky shell `20`, backdrop `40`, dialog/sheet `50`, and transient non-modal notice `60`.
+- `NavBar` is a fixed 56px sticky top bar. `.app-main` centers content at `max-width: 1280px` with 16-24px horizontal padding depending on viewport.
+- Controls default to a 36px height (nav chips, icon buttons, inputs, secondary/primary dialog actions) — smaller than the historical 44px minimum, matching the design-handoff spec's compact control scale; keep effective touch targets reasonable on touch devices.
+- Radii: 8px for controls/nav, 12px for cards/dialogs.
+- Borders use `1px solid var(--border)`; only dialogs/sheets use a shadow (`--modal-shadow`).
+- Layer order: content `0`, sticky `NavBar` `20`, dialog backdrop `40`, dialog/sheet `50`, skip link/transient notice `60`, toast stack `70`.
 
 ## Content voice
 
-Use concise Korean-first operational language: name the object, state current truth, and offer one supported next action. Prefer `다시 시도`, `마지막 확인`, `연결 지연`, `연결 이력 없음`, `영상 불러오는 중`, `영상을 불러올 수 없음`, `라벨 정보 없음`, and `서비스 설정 필요`.
+Concise Korean-first operational language: name the object, state current truth, offer one supported next action. Prefer `다시 시도`, `마지막 확인`, `영상을 불러올 수 없음`, and similar honest, non-fabricated copy.
 
-Do not expose `/api/v1`, Authorization, worker/MJPEG, schema names, raw enums, query tokens, digests, stack traces, camera credentials, RTSP URLs outside the masked registration job, storage paths, resident identity, or raw JSON in primary copy. `시스템` may reveal sanitized identifiers under `기술 정보`, with a human label before the value.
+Do not expose `/api/v1`, Authorization headers, worker/relay internals, schema names, raw enums, digests, stack traces, camera credentials, RTSP URLs outside an authenticated registration form, or raw JSON in primary copy.
 
-Buttons use verbs (`카메라 추가`, `이 카메라 클립 보기`, `다시 시도`, `삭제`). Errors do not blame the user and do not claim data was saved unless the supported mutation succeeded. Dates and times use one locale-consistent Korean presentation; unknown values read `정보 없음`, never `0` or a fabricated healthy state.
+Buttons use verbs (`변경하기`, `취소`, `로그아웃`, `다시 시도`). Errors do not blame the user and do not claim data was saved unless the mutation actually succeeded. Unknown values read `정보 없음`, never `0` or a fabricated healthy state.
 
 ## Accessibility
 
-- Provide a first-focusable skip link to the main content target, then semantic header, navigation, main, section, and complementary landmarks with one clear page heading.
-- Active destinations use `aria-current="page"`; toggles use native state or `aria-pressed`; icon-only buttons have accessible names.
-- All functions are operable by keyboard. Focus order follows visual order; focus is never hidden behind sticky bars or bottom tabs; visible focus uses a 2px brand outline plus offset.
-- Touch targets are at least 44x44px. Do not rely on color alone; every status includes readable Korean text and maintains 4.5:1 text contrast (3:1 for large text and non-text UI boundaries).
-- Loading and background refresh avoid noisy announcements. New errors and selection-invalidated explanations use a polite live region; urgent destructive confirmation is conveyed by dialog name and copy, not animation.
-- Images have contextual alternative text; decorative marks are hidden when adjacent wordmark text already names the brand. Media controls are native and keyboard accessible.
-- Dialog and bottom-sheet focus lifecycle follows the semantics section. Background content is inert/unreachable while modal, and body scroll is restored on every close/unmount path.
-- Validate CJK wrapping, 200% zoom, reduced motion, and no horizontal overflow at 375, 768, 1024, and 1440.
+- A first-focusable skip link (`.skip-link`) targets `#main-content`. Semantic `header`/`nav`/`main` landmarks; one clear page heading per screen (`h1.shell-page-title`, `tabIndex={-1}` so it is a valid dialog-focus fallback target).
+- The active `NavBar` destination uses `aria-current="page"`. Icon-only buttons (`.icon-button`) have `aria-label`.
+- All functions are keyboard operable; focus order follows visual order; visible focus uses a 2px `--primary` outline plus offset (global `:focus-visible` rule).
+- Do not rely on color alone; every status includes readable Korean text.
+- New errors and success confirmations use a polite live region (`role="alert"`/`role="status"`); loading and background refresh avoid noisy announcements.
+- `AccessibleDialog`/`AccessibleSheet` own the full modal focus lifecycle described above; background content is `inert` while a dialog is open, and body scroll is restored on every close/unmount path.
 
 ## Motion and reduced motion
 
-Motion explains state change; it never decorates routine monitoring. Use CSS only. Hover/focus color changes take 120ms; panels/sheets use opacity and transform for 180ms; background refresh cross-fades may use 160ms. Use `cubic-bezier(.2,.8,.2,1)` for entry and standard ease for color. Never animate layout dimensions, camera card size, continuously pulse routine status, or autoplay attention effects.
-
-Under `prefers-reduced-motion: reduce`, remove transforms and nonessential transitions, set durations to effectively zero, disable smooth scrolling, and replace any loading motion with a static labelled state. Focus movement, announcements, and state changes remain immediate and complete.
+CSS-only motion that explains state change, never decorates routine monitoring. Hover/focus color changes ~120ms; the `.skip-link` reveal and dialog/sheet transitions ~180ms. `prefers-reduced-motion: reduce` collapses transition/animation durations to near-zero and disables smooth scrolling (`front/src/styles/responsive-layout.css`); focus movement and state changes remain immediate.
 
 ## Visual QA capture contract
 
-Visual QA runs the real Vite/React/CSS surface on the host and fulfills only external API/media responses with synthetic, privacy-safe fixtures. No screenshot or static mock may replace the DOM. Cross-repo screenshots are qualitative family references; image diffs are directional evidence, not a pixel-clone threshold.
-
-The exact capture packet is **31 state PNGs + 8 interaction PNGs = 39 PNGs**, each captured exactly once from one current configured build:
-
-- 10 primary states: `operations` at 375/768/1024/1440, plus `events`, `cameras`, and `system` at 375/1440.
-- 21 edge states: login default; login invalid; loading/empty/error for each of four pages (12); focused stream success; focused stream unavailable; clip detail available; clip detail unavailable; camera dialog validation; camera dialog server failure; failure-to-recovery.
-- 8 interaction states: focus and activated frames for mobile navigation, desktop camera cards, focused-view back control, and desktop dialog.
-
-Separate automated assertions run at all 375/768/1024/1440 widths and camera scales 0/1/12/13/50. Fixtures cover `mixed`, `loading`, `empty`, `error`, and `recovery`, including online/stale/never-seen cameras, missing location, snapshot failure, fall/bed-exit evidence, playable/unavailable clips, and partial system/runtime data.
-
-The manifest records capture ID, canonical URL, fixture/failing endpoint, viewport, action trace, exact capture moment, assertion, PNG signature/dimensions/mtime, source/build identity, sanitized network trace, console result, privacy scan, and cleanup. Required network evidence is zero focused-stream requests on Wall, no off-page snapshot polling, no more than six unresolved snapshots, exactly one focused stream identity, and prior focused element removal on switch. Artifacts contain no real resident, credential, token, RTSP URL, storage path, or footage.
-
-Acceptance requires keyboard/dialog flows, reduced-motion behavior, CJK/overflow checks, no uncaught console errors, fresh artifact validation, and two independent visual reviews of the same complete capture set.
+The prior 39-PNG capture packet described a four-destination camera-wall product that no longer exists and has been retired. A new capture contract, when one is needed, should be scoped to the three real destinations and their states as documented in this file: 관제 (camera wall — empty/loading/error/populated, floor-filtered; room detail — online/offline live panel, each overlay mode, populated/empty event history), 이벤트 (filtered/unfiltered clip grid, empty state, playback modal), and 설정 (all four right-column cards in read and edit mode, camera table with a mixed online/offline/bed-zone-pending set, all five modals). There is no active capture contract today — do not treat its absence as a regression.
 
 ## Deviations from the sibling product
 
-- This product uses a camera wall and evidence workflows, not the sibling room-status treemap or staff monitor board.
-- This release exposes only the neutral light operational shell; dark treatment is confined to media. The sibling's broader theme variants do not define ML release scope.
-- Navigation uses the native query/history contract above. Do not copy React Router, RBAC, facility selection, Zustand, Lucide, Recharts, or sibling components.
-- The left rail, top bar, neutral tokens, Korean type hierarchy, border-first depth, labelled semantic statuses, and SA geometry provide family resemblance; ML page composition remains purpose-built.
-- Snapshot support already exists in this product. The retired notes' endpoint-gap assumptions and proposed simultaneous live wall are obsolete.
-- No readable real-time alert source exists. Event history uses clips; status uses heartbeat/runtime truth without inventing retained alerts.
-
-## Local Senior AI Lab mark geometry
-
-Provenance: the following geometry was copied from the local sibling `../eldercare-fall-ai/front/src/components/Logo.tsx` during the 2026-07-20 audit. Only SVG geometry and brand colors are reproduced here. The ML implementation must copy it into a local component/asset with its own accessible labelling; it must not import or resolve the sibling path at runtime. Do not copy the sibling React utilities, dark-theme classes, or component architecture.
-
-```svg
-<svg viewBox="0 0 100 100" fill="none" aria-hidden="true">
-  <defs>
-    <linearGradient id="sa-grad" x1="20" y1="14" x2="78" y2="84" gradientUnits="userSpaceOnUse">
-      <stop stop-color="#2BB6A3" />
-      <stop offset="0.5" stop-color="#2F6FB0" />
-      <stop offset="1" stop-color="#16325A" />
-    </linearGradient>
-  </defs>
-  <path d="M67 25 C59 18 43 18 36 25 C27 34 32 45 46 49 C60 53 65 61 59 69 C52 78 37 78 29 71" stroke="url(#sa-grad)" stroke-width="11" stroke-linecap="round" />
-  <path d="M64 84 L79 33 L94 84 M69 70 H89" stroke="#16325A" stroke-width="9.5" stroke-linecap="round" stroke-linejoin="round" />
-  <g stroke="#2F6FB0" stroke-width="2.4" stroke-linecap="round">
-    <path d="M55 47 L62 40 L62 28" />
-    <path d="M62 40 L72 34 L72 24" />
-    <path d="M62 40 L74 44 L82 40" />
-    <path d="M55 47 L52 38" />
-  </g>
-  <g fill="#2BB6A3">
-    <circle cx="62" cy="26" r="3.4" />
-    <circle cx="72" cy="22" r="3.4" />
-  </g>
-  <g fill="#2F6FB0">
-    <circle cx="52" cy="36" r="3.4" />
-    <circle cx="83" cy="40" r="3.4" />
-  </g>
-</svg>
-```
+- This is a single-facility edge console: no facility switcher, no multi-tenant concepts, no backend-status ribbon anywhere in the shell.
+- Navigation uses the native query/history contract above (3 destinations). Do not add React Router, RBAC, facility selection, Zustand, Lucide, Recharts, or sibling components.
+- The top `NavBar`, neutral tokens, Korean type hierarchy, border-first depth, and labelled semantic statuses provide family resemblance with the sibling product; page composition is purpose-built per `front/design-handoff/README.md`.
 
 ## Implementation constraints
 
-- Preserve React, Vite, TypeScript, Tailwind, the feature-sliced directory boundaries, centralized API utilities, native media controls, and current backend/edge separation.
-- Add no router, global state manager, component library, icon package, animation library, font package, or sibling dependency solely for this redesign.
-- Keep polling page-local and active-page-only, retain last-good values, avoid overlapping requests, abort on cleanup, and reject stale/out-of-order completion.
-- Do not add backend/edge routes, retained alerts, WebSocket/SSE, RTSP publishing/emulation, inference changes, or committed media/model artifacts.
-- Do not treat synthetic browser media as production camera proof. Runtime integration and transport-level stream closure remain outside this visual contract.
+- Preserve React, Vite, TypeScript, Tailwind, the feature-sliced directory boundaries, centralized API utilities (`front/src/shared/api`), native media controls, and current backend/edge separation.
+- Add no router, global state manager, component library, icon package, animation library, or font package for this redesign.
+- Keep polling page-local and active-page-only, retain last-good values, avoid overlapping requests, abort on cleanup, and reject stale/out-of-order completion (`usePollingResource`).
+- Do not add backend/edge routes, retained alerts, WebSocket/SSE, RTSP publishing/emulation, or inference changes as part of shell/design work.
+- All API calls go through `/api/v1`; never bundle worker/relay credentials into the frontend; clip media is fetched via the API only, never a direct worker/relay URL; no `playbackRate` compensation hacks on native video.

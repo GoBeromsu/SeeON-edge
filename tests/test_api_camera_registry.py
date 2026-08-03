@@ -826,6 +826,7 @@ def test_list_cameras_includes_backend_only_roster_camera(tmp_path) -> None:
             "last_ok_at": None,
             "last_probed_at": None,
             "sync": None,
+            "bed_zone": None,
         }
     ]
 def test_list_cameras_includes_backend_only_roster_camera_without_created_at(tmp_path) -> None:
@@ -874,6 +875,7 @@ def test_list_cameras_includes_backend_only_roster_camera_without_created_at(tmp
             "last_ok_at": None,
             "last_probed_at": None,
             "sync": None,
+            "bed_zone": None,
         }
     ]
 

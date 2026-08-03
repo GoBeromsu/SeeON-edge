@@ -36,6 +36,10 @@ class ClipManifest:
     video_available: bool
     video_error: str | None
     finalized: bool
+    # Not read from manifest.json (the recorder never writes it there); the
+    # router stats the resolved video file at response time and overrides
+    # this, so it stays None whenever that stat is unavailable/skipped.
+    size_bytes: int | None = None
 
     def as_response(self) -> dict[str, object]:
         return {
@@ -50,6 +54,7 @@ class ClipManifest:
             "video_available": self.video_available,
             "video_error": self.video_error,
             "finalized": self.finalized,
+            "size_bytes": self.size_bytes,
         }
 
 
@@ -79,10 +84,7 @@ class ClipStore:
 
     def list_manifests(self, *, camera_id: str | None = None) -> list[ClipManifest]:
         manifests: list[ClipManifest] = []
-        clips_dir = self.root / "clips"
-        if not clips_dir.is_dir():
-            return manifests
-        for manifest_path in clips_dir.glob("*/manifest.json"):
+        for manifest_path in self._manifest_paths():
             manifest = self._read_manifest_file(manifest_path)
             if (
                 manifest is None
@@ -94,6 +96,27 @@ class ClipStore:
                 continue
             manifests.append(manifest)
         return sorted(manifests, key=lambda manifest: manifest.started_at, reverse=True)
+
+    def _manifest_paths(self) -> list[Path]:
+        """Manifests can live directly under the store root
+        (``root/clips/*/manifest.json`` -- the layout before any storage
+        location was ever selected) or nested one or two levels down under a
+        chosen ``clip_store_subdir`` (``root/<sub>/clips/*/manifest.json``,
+        ``root/<sub2>/<sub1>/clips/*/manifest.json`` -- ``store_subdir`` may
+        itself be a multi-segment relative path, see
+        ``ClipRecordingConfig.store_subdir``). Listing must keep finding
+        clips recorded under any past selection, not just the current one, so
+        all three layouts are always checked -- bounded to two subdir levels
+        rather than an unbounded recursive walk, since a clip store can
+        accumulate many unrelated directories over time.
+        """
+        if not self.root.is_dir():
+            return []
+        paths: list[Path] = []
+        paths.extend(self.root.glob("clips/*/manifest.json"))
+        paths.extend(self.root.glob("*/clips/*/manifest.json"))
+        paths.extend(self.root.glob("*/*/clips/*/manifest.json"))
+        return paths
 
     def get_manifest(self, clip_id: str) -> ClipManifest | None:
         if not is_valid_clip_id(clip_id):
@@ -193,7 +216,7 @@ def _manifest_from_mapping(data: dict[str, object]) -> ClipManifest | None:
     video_error = _text(data.get("video_error")) or None
     video_available_raw = data.get("video_available")
     finalized = data.get("finalized")
-    duration_s = data.get("duration_s")
+    duration_s_raw = data.get("duration_s")
     # Path-less manifests are kept as diagnostic rows so the event->clip
     # correlation survives even when the encoder produced no playable video.
     if not all((clip_id, camera_id, event_ref, started_at)):
@@ -202,8 +225,15 @@ def _manifest_from_mapping(data: dict[str, object]) -> ClipManifest | None:
         return None
     if not isinstance(finalized, bool):
         return None
-    if isinstance(duration_s, bool) or not isinstance(duration_s, int | float):
-        return None
+    # Missing/invalid duration_s defaults to 0.0 rather than dropping the
+    # manifest: the wire contract (ClipManifestResponse.duration_s) requires
+    # a real, non-negative number, so a manifest can never be represented
+    # with duration_s absent -- but it must still be listed (diagnostic value)
+    # rather than silently disappearing from GET /clips.
+    if isinstance(duration_s_raw, bool) or not isinstance(duration_s_raw, int | float):
+        duration_s = 0.0
+    else:
+        duration_s = float(duration_s_raw)
     if isinstance(video_available_raw, bool):
         video_available = video_available_raw
     else:
@@ -215,7 +245,7 @@ def _manifest_from_mapping(data: dict[str, object]) -> ClipManifest | None:
         event_ref=event_ref,
         event_type=event_type,
         started_at=started_at,
-        duration_s=float(duration_s),
+        duration_s=duration_s,
         codec=codec,
         path=path,
         video_available=video_available,

@@ -23,6 +23,8 @@ from fastapi import (
 from pydantic import BaseModel, ConfigDict, Field
 
 from backend.app.core.config import get_settings
+from backend.app.features.cameras.bed_zone_router import BedZonePayload
+from backend.app.features.cameras.bed_zone_store import BedZone, BedZoneStore
 from backend.app.features.cameras.roster_sync import camera_sync_view, sync_camera_roster
 from backend.app.features.cameras.store import (
     CameraRegistryStore,
@@ -33,6 +35,8 @@ from backend.app.features.cameras.store import (
     status_from_probe,
     utc_now_iso,
 )
+from backend.app.features.clips.storage_location_store import ClipStorageLocationStore
+from backend.app.features.detection_settings.store import DetectionSettingsStore
 from backend.app.features.status.heartbeat_store import ONLINE, get_heartbeat_store
 from backend.app.lifespan import API_EDGE_RELAY_TOKEN_ENV, API_FACILITY_ID_ENV
 from backend.app.shared.backend_mapping import (
@@ -91,6 +95,9 @@ class CameraResponse(BaseModel):
     never_connected: bool | None = None
     last_ok_at: str | None = None
     last_probed_at: str | None = None
+    # Persisted on-demand bed-zone recognition result (see bed_zone_router.py
+    # and BedZoneStore); None when never recognized for this camera.
+    bed_zone: BedZonePayload | None = None
 
 
 class ListCamerasResponse(BaseModel):
@@ -140,6 +147,13 @@ class WorkerCameraConfig(BaseModel):
     fps: float | None = Field(default=None, gt=0)
     decode_backend: str | None = Field(default=None)
     domains: list[str] | None = None
+    # Persisted bed-zone recognition (see BedZoneStore): threaded through so
+    # the worker's _CameraPayload (worker/runtime/config/pull_models.py) can
+    # seed SceneState.persisted_bed_regions, making it the authoritative bed
+    # region for bed-exit instead of live per-frame segmentation.
+    bed_zone_polygon: list[list[int]] | None = None
+    bed_zone_image_width: int | None = Field(default=None, gt=0)
+    bed_zone_image_height: int | None = Field(default=None, gt=0)
 
 
 class WorkerConfigResponse(BaseModel):
@@ -152,6 +166,17 @@ class WorkerConfigResponse(BaseModel):
     # Deprecated alias for detection_windows["bed_exit"]; kept for old workers.
     night_window: dict[str, object] | None = None
     detection_windows: dict[str, dict[str, object]] | None = None
+    # Local per-domain enable/disable overrides (see detection_settings slice,
+    # PUT /api/v1/detection-settings): populated only once an operator has
+    # saved settings at least once, and takes precedence over whatever was
+    # externally pulled above. Consumed by the worker's
+    # BackendWorkerConfigPayload.domains (worker/runtime/config/pull_models.py).
+    domains: dict[str, dict[str, object]] | None = None
+    # Selected clip storage subdirectory (see clips/storage_router.py),
+    # relative to the worker's CLIP_STORE_DIR mount; omitted/None means the
+    # mount root (the pre-existing default, unchanged). Consumed by
+    # BackendWorkerConfigPayload.clip_store_subdir.
+    clip_store_subdir: str | None = None
 
 
 @router.get("", response_model=ListCamerasResponse)
@@ -340,8 +365,17 @@ def delete_camera(
     authorization: Annotated[str | None, Header(alias="Authorization")] = None,
 ) -> Response:
     _authorize(request, relay_token, authorization)
-    if not _store(request.app).delete(camera_id):
+    existing = _store(request.app).get(camera_id)
+    if existing is None or not _store(request.app).delete(camera_id):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="camera not found")
+    # A bed zone may be keyed by either the local registry id or the
+    # canonical backend_camera_id (see _lookup_bed_zone) depending on which
+    # id was canonical when it was recognized -- delete both so a re-created
+    # camera with the same id never inherits a stale polygon.
+    canonical_id = existing.get("backend_camera_id")
+    _bed_zone_store(request.app).delete(camera_id)
+    if isinstance(canonical_id, str) and canonical_id and canonical_id != camera_id:
+        _bed_zone_store(request.app).delete(canonical_id)
     background_tasks.add_task(_trigger_roster_sync, request.app)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
@@ -361,14 +395,15 @@ def worker_config_snapshot(
 ) -> dict[str, object]:
     snapshot = _store(request.app).snapshot()
     facility_id = _facility_id()
+    bed_zones = _bed_zone_store(request.app).get_all()
     cameras = []
     for record in _snapshot_camera_records(snapshot):
         rtsp_url = record.get("rtsp_url")
         if not isinstance(rtsp_url, str) or not rtsp_url.strip():
             continue
-        canonical_id = record.get("backend_camera_id") or record.get("id", "")
+        canonical_id = str(record.get("backend_camera_id") or record.get("id", ""))
         camera: dict[str, object] = {
-            "camera_id": str(canonical_id),
+            "camera_id": canonical_id,
             "facility_id": facility_id,
             "rtsp_url": rtsp_url,
         }
@@ -378,6 +413,11 @@ def worker_config_snapshot(
         decode_backend = record.get("decode_backend") or _default_decode_backend()
         if decode_backend is not None:
             camera["decode_backend"] = decode_backend
+        bed_zone = _lookup_bed_zone(bed_zones, canonical_id, record.get("id"))
+        if bed_zone is not None:
+            camera["bed_zone_polygon"] = [[x, y] for x, y in bed_zone.polygon]
+            camera["bed_zone_image_width"] = bed_zone.image_width
+            camera["bed_zone_image_height"] = bed_zone.image_height
         cameras.append(camera)
     pulled = getattr(request.app.state, "pulled_config", None)
     if require_available and not cameras:
@@ -389,6 +429,7 @@ def worker_config_snapshot(
         "registry_version": snapshot["registry_version"],
         "cameras": cameras,
     }
+    live_pulled: PulledWorkerConfig | None = None
     if isinstance(pulled, PulledWorkerConfig):
         live_pulled = _live_pulled_config(request, pulled)
         response["config_version"] = live_pulled.config_version
@@ -400,7 +441,113 @@ def worker_config_snapshot(
                 domain: window.as_dict()
                 for domain, window in live_pulled.detection_windows.items()
             }
+    # Local overrides run unconditionally (not only when an external pull
+    # exists): an operator can save detection settings or a clip storage
+    # location before the backend has ever successfully pulled anything.
+    _apply_local_detection_overrides(request.app, response, live_pulled)
+    _apply_clip_storage_override(request.app, response)
     return response
+
+
+def _apply_local_detection_overrides(
+    app: FastAPI, response: dict[str, object], live_pulled: PulledWorkerConfig | None
+) -> None:
+    """Merge operator-saved per-domain detection settings (see
+    ``detection_settings/store.py``) into the worker-config response,
+    overriding whatever was externally pulled above.
+
+    A no-op until an operator has saved at least once via
+    ``PUT /api/v1/detection-settings`` -- ``app.state.pulled_config`` is
+    never mutated by this (it is memory-only and gets clobbered every ~30s by
+    ``_apply_backend_config``), so this merge is redone fresh on every
+    worker-config response instead of being applied once to stored state.
+    """
+    stored = _detection_settings_store(app).get_all()
+    if not stored:
+        return
+    domains: dict[str, dict[str, object]] = {}
+    detection_windows = _as_window_dict_map(response.get("detection_windows"))
+    for domain, setting in stored.items():
+        domains[domain] = {"enabled": setting.on}
+        if not setting.on or setting.mode == "always":
+            # Domain off, or on with no window restriction: no detection
+            # window applies (worker ambient default is 24/7 when a domain
+            # has no window entry at all).
+            detection_windows.pop(domain, None)
+            continue
+        detection_windows[domain] = {
+            "start": setting.start,
+            "end": setting.end,
+            "tz": _resolved_tz(live_pulled, domain),
+        }
+    response["domains"] = domains
+    if detection_windows:
+        response["detection_windows"] = detection_windows
+    else:
+        response.pop("detection_windows", None)
+    bed_exit_window = detection_windows.get("bed_exit")
+    if bed_exit_window is not None:
+        response["night_window"] = bed_exit_window
+    elif "bed_exit" in stored:
+        # An explicit local bed_exit setting (off, or on/always) means no
+        # window is in effect -- drop the deprecated alias too rather than
+        # leaving it pointing at a stale externally-pulled window.
+        response.pop("night_window", None)
+
+
+def _as_window_dict_map(value: object) -> dict[str, dict[str, object]]:
+    if not isinstance(value, dict):
+        return {}
+    return {
+        domain: window
+        for domain, window in value.items()
+        if isinstance(domain, str) and isinstance(window, dict)
+    }
+
+
+def _resolved_tz(live_pulled: PulledWorkerConfig | None, domain: str) -> str:
+    """The IANA tz to stamp on a locally-configured window.
+
+    No facility-timezone setting exists anywhere else in this codebase, so
+    this reuses whatever tz the live externally-pulled window for the same
+    domain (or, for bed_exit, the deprecated night_window alias) is already
+    using when one is available, and otherwise falls back to
+    ``ML_API_DETECTION_TZ`` (default ``"UTC"``).
+    """
+    if live_pulled is not None:
+        window = live_pulled.detection_windows.get(domain)
+        if window is None and domain == "bed_exit":
+            window = live_pulled.night_window
+        if window is not None:
+            return window.tz
+    return os.environ.get("ML_API_DETECTION_TZ", "UTC").strip() or "UTC"
+
+
+def _apply_clip_storage_override(app: FastAPI, response: dict[str, object]) -> None:
+    """Thread the operator-selected clip storage subdirectory (see
+    ``clips/storage_router.py``) through to the worker. ``""`` (mount root,
+    the default) is omitted so old and new workers alike keep recording at
+    the mount root unless a real subdirectory was explicitly chosen.
+    """
+    selected = _clip_storage_location_store(app).get()
+    if selected:
+        response["clip_store_subdir"] = selected
+
+
+def _detection_settings_store(app: FastAPI) -> DetectionSettingsStore:
+    store = getattr(app.state, "detection_settings_store", None)
+    if not isinstance(store, DetectionSettingsStore):
+        store = DetectionSettingsStore.from_env()
+        app.state.detection_settings_store = store
+    return store
+
+
+def _clip_storage_location_store(app: FastAPI) -> ClipStorageLocationStore:
+    store = getattr(app.state, "clip_storage_location_store", None)
+    if not isinstance(store, ClipStorageLocationStore):
+        store = ClipStorageLocationStore.from_env()
+        app.state.clip_storage_location_store = store
+    return store
 
 
 def _live_pulled_config(request: Request, pulled: PulledWorkerConfig) -> PulledWorkerConfig:
@@ -449,6 +596,7 @@ def _public_snapshot(
     app: FastAPI, snapshot: dict[str, object], pulled: object, heartbeats: object = None
 ) -> dict[str, object]:
     records = _snapshot_camera_records(snapshot)
+    bed_zones = _bed_zone_store(app).get_all()
     roster = (
         {camera.camera_id: camera for camera in pulled.cameras}
         if isinstance(pulled, PulledWorkerConfig)
@@ -526,6 +674,8 @@ def _public_snapshot(
         )
         if isinstance(local_id, str) and local_id:
             camera["sync"] = camera_sync_view(app, local_id)
+        bed_zone = _lookup_bed_zone(bed_zones, canonical_id, local_id)
+        camera["bed_zone"] = bed_zone.as_dict() if bed_zone is not None else None
         backend_id = explicit_backend_by_record_index.get(
             index, fallback_backend_by_record_index.get(index)
         )
@@ -553,6 +703,7 @@ def _public_snapshot(
         cameras.append(camera)
 
     for backend_camera in roster.values():
+        roster_bed_zone = bed_zones.get(backend_camera.camera_id)
         cameras.append(
             {
                 "id": backend_camera.camera_id,
@@ -566,6 +717,7 @@ def _public_snapshot(
                 "created_at": backend_camera.created_at,
                 "space_name": backend_camera.space_name,
                 "floor_name": backend_camera.floor_name,
+                "bed_zone": roster_bed_zone.as_dict() if roster_bed_zone is not None else None,
             }
         )
     return {
@@ -632,6 +784,27 @@ def _store(app: FastAPI) -> CameraRegistryStore:
         store = CameraRegistryStore.from_env()
         app.state.camera_registry = store
     return store
+
+
+def _bed_zone_store(app: FastAPI) -> BedZoneStore:
+    store = getattr(app.state, "bed_zone_store", None)
+    if not isinstance(store, BedZoneStore):
+        store = BedZoneStore.from_env()
+        app.state.bed_zone_store = store
+    return store
+
+
+def _lookup_bed_zone(
+    bed_zones: dict[str, BedZone], canonical_id: object, local_id: object
+) -> BedZone | None:
+    """Match a persisted bed zone by canonical id first, then local registry
+    id, mirroring _heartbeat_camera_fields' candidate-id fallback: the
+    recognize endpoint may have been called with either id historically, and
+    a backend mapping can change which id is canonical after the fact."""
+    for candidate in (canonical_id, local_id):
+        if isinstance(candidate, str) and candidate in bed_zones:
+            return bed_zones[candidate]
+    return None
 
 
 def _mapper(app: FastAPI) -> BackendCameraMapper:

@@ -33,7 +33,7 @@ afterEach(() => {
 describe('usePollingResource', () => {
   const validCamera = {
     id: 'cam-1', label: '301호', rtsp_url_masked: 'rtsp://***', mapping_pending: false, status: 'online',
-    space_id: null, backend_camera_id: null, decode_backend: null, created_at: null, space_name: null, floor_name: null,
+    decode_backend: null, created_at: null, floor_name: null,
   };
   const validClip = {
     clip_id: 'clip-1', camera_id: 'cam-1', event_ref: 'event-1', event_type: 'fall',

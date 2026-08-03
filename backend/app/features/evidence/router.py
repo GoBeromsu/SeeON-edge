@@ -14,6 +14,7 @@ from uuid import UUID
 from fastapi import APIRouter, Header, HTTPException, Request, status
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from backend.app.features.clips.store import CLIP_STORE_DIR_ENV, DEFAULT_CLIP_STORE_DIR
 from backend.app.features.relay.router import RELAY_TOKEN_HEADER, _authorize, _camera_binding
 from shared.events.evidence_export_contract import (
     BackendCapabilities,
@@ -198,7 +199,7 @@ def export_clip(
 
 def _verified_media(request: Request, clip_id: str, payload: ReadyClipPayload) -> BinaryIO:
     root_value = getattr(request.app.state, "clip_store_root", None)
-    root = Path(root_value or os.environ.get("CLIP_STORE_DIR", "/var/lib/ml-clips"))
+    root = Path(root_value or os.environ.get(CLIP_STORE_DIR_ENV, DEFAULT_CLIP_STORE_DIR))
     directory_fds: list[int] = []
     media_fd: int | None = None
     try:

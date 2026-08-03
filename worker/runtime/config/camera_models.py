@@ -37,6 +37,24 @@ class CameraRuntimeConfig(BaseModel):
     frame_stride: int = Field(default=1, gt=0)
     label: str | None = None
     decode_backend: str | None = None
+    # Operator-recognized bed polygon (see the bed-zone recognize endpoint),
+    # persisted backend-side and pulled down as part of the worker config.
+    # When set, it is the authoritative bed region for bed-exit -- live
+    # segmentation is only used as a fallback when this is absent.
+    bed_zone_polygon: tuple[tuple[int, int], ...] | None = None
+    bed_zone_image_width: int | None = Field(default=None, gt=0)
+    bed_zone_image_height: int | None = Field(default=None, gt=0)
+
+    @field_validator("bed_zone_polygon")
+    @classmethod
+    def _validate_bed_zone_polygon(
+        cls, value: tuple[tuple[int, int], ...] | None
+    ) -> tuple[tuple[int, int], ...] | None:
+        if value is None:
+            return None
+        if len(value) < 3:
+            raise ConfigValidationError("bed_zone_polygon must have at least 3 points")
+        return value
 
     @field_validator("camera_id", "facility_id")
     @classmethod

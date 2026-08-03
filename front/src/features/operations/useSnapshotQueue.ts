@@ -1,0 +1,22 @@
+import { useEffect, useMemo, useState, useSyncExternalStore } from 'react';
+import { getCameraSnapshotUrl, type Camera } from '@/shared/api/client';
+import { SnapshotQueue, type SnapshotEntry } from '@/features/operations/SnapshotQueue';
+
+export function useSnapshotQueue(cameras: readonly Camera[], enabled: boolean): { entries: Map<string, SnapshotEntry>; queue: SnapshotQueue } {
+  const [queue] = useState(() => new SnapshotQueue(getCameraSnapshotUrl));
+  const snapshot = useSyncExternalStore(queue.subscribe, queue.snapshot, queue.snapshot);
+
+  // Depend on a stable, content-derived key rather than the `cameras` array reference: callers
+  // that don't memoize their filtered/sorted camera list (a new array every render) would
+  // otherwise re-trigger this effect every render, and `queue.update()` notifying subscribers
+  // forces a re-render, which recreates the array again — an infinite update loop.
+  const cameraIdsKey = cameras.map((camera) => camera.id).join(',');
+
+  useEffect(() => {
+    queue.update(cameras.map((camera) => ({ id: camera.id, mediaId: camera.id })), enabled);
+  }, [cameraIdsKey, enabled, queue]);
+
+  useEffect(() => () => queue.dispose(), [queue]);
+
+  return { entries: useMemo(() => new Map(snapshot.map((entry) => [entry.id, entry])), [snapshot]), queue };
+}

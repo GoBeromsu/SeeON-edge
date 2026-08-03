@@ -204,7 +204,6 @@ def test_credential_rotation_changes_login_and_revokes_other_sessions(tmp_path) 
             rotate = client.put(
                 "/api/v1/auth/credentials",
                 json={
-                    "current_password": DEFAULT_DASHBOARD_PASSWORD,
                     "username": "operator",
                     "new_password": "new-secret-pw",
                 },
@@ -259,7 +258,6 @@ def test_rotation_to_a_non_ascii_username_logs_in_and_survives_a_restart(tmp_pat
         rotate = client.put(
             "/api/v1/auth/credentials",
             json={
-                "current_password": DEFAULT_DASHBOARD_PASSWORD,
                 "username": korean_username,
                 "new_password": "new-secret-pw",
             },
@@ -296,25 +294,26 @@ def test_rotation_to_a_non_ascii_username_logs_in_and_survives_a_restart(tmp_pat
         assert accepted.status_code == 204
 
 
-def test_wrong_current_password_is_rejected_without_touching_the_store(tmp_path) -> None:
+def test_unauthenticated_credential_rotation_is_rejected_without_touching_the_store(
+    tmp_path,
+) -> None:
+    """``PUT /auth/credentials`` no longer takes a ``current_password`` -- the
+    session cookie is the sole auth gate. A request with no (or an invalid)
+    session must still be rejected, and must never write a persisted
+    credential row."""
     store_path = tmp_path / "catalog.sqlite3"
     app = _app(tmp_path, dashboard_credentials_store=DashboardCredentialsStore(store_path))
 
     with TestClient(app) as client:
-        login = client.post(
-            "/api/v1/auth/session",
-            json={"username": DEFAULT_DASHBOARD_USERNAME, "password": DEFAULT_DASHBOARD_PASSWORD},
-        )
-        assert login.status_code == 204
-
         rejected = client.put(
             "/api/v1/auth/credentials",
-            json={"current_password": "not-admin", "new_password": "new-secret-pw"},
+            json={"new_password": "new-secret-pw"},
         )
-        assert rejected.status_code == 403
-        # The credentials table exists (created on first connect for the
-        # login read above) but must have zero rows: a rejected rotation must
-        # never write a persisted credential row.
+        assert rejected.status_code == 401
+        # The credentials table exists (created on first connect while
+        # resolving credentials for the session check above) but must have
+        # zero rows: a rejected rotation must never write a persisted
+        # credential row.
         connection = sqlite3.connect(store_path)
         try:
             count = connection.execute("SELECT COUNT(*) FROM credentials").fetchone()[0]
@@ -347,7 +346,7 @@ def test_persisted_file_wins_over_env_and_default_after_store_reresolution(tmp_p
         assert login.status_code == 204
         rotate = client.put(
             "/api/v1/auth/credentials",
-            json={"current_password": "correct horse", "new_password": "rotated-pw"},
+            json={"new_password": "rotated-pw"},
         )
         assert rotate.status_code == 204
 
@@ -386,10 +385,7 @@ def test_persisted_credentials_file_is_written_with_mode_0600(tmp_path) -> None:
         assert login.status_code == 204
         rotate = client.put(
             "/api/v1/auth/credentials",
-            json={
-                "current_password": DEFAULT_DASHBOARD_PASSWORD,
-                "new_password": "new-secret-pw",
-            },
+            json={"new_password": "new-secret-pw"},
         )
         assert rotate.status_code == 204
 

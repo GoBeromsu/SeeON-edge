@@ -11,44 +11,14 @@ import {
   pickString,
 } from '@/shared/api/normalizerFields';
 import type {
+  BedZone,
+  BedZonePoint,
   Camera,
   CameraRegistry,
   CameraStatus,
-  CameraSync,
-  CameraSyncErrorClass,
-  CameraSyncStatus,
   CameraTestResult,
   DecodeBackend,
 } from '@/shared/api/types';
-
-const CAMERA_SYNC_STATUSES: readonly CameraSyncStatus[] = ['synced', 'pending', 'failed', 'disabled'];
-const CAMERA_SYNC_ERROR_CLASSES: readonly CameraSyncErrorClass[] = ['unreachable', 'timeout', 'auth', 'unconfigured'];
-
-// Permissive by design (unlike the strict connection normalizers): `sync` is a GET-only,
-// still-rolling-out field, so a malformed or absent value degrades to null rather than
-// failing the whole camera list.
-function normalizeCameraSyncField(value: unknown): CameraSync | null {
-  if (!isRecord(value)) {
-    return null;
-  }
-  const status = value.status;
-  if (typeof status !== 'string' || !CAMERA_SYNC_STATUSES.includes(status as CameraSyncStatus)) {
-    return null;
-  }
-  const errorClass = value.error_class;
-  if (errorClass !== null && !(typeof errorClass === 'string' && CAMERA_SYNC_ERROR_CLASSES.includes(errorClass as CameraSyncErrorClass))) {
-    return null;
-  }
-  if (!hasNullableString(value, 'detail') || !hasNullableString(value, 'last_ok_at')) {
-    return null;
-  }
-  return {
-    status: status as CameraSyncStatus,
-    error_class: (errorClass ?? null) as CameraSyncErrorClass | null,
-    detail: pickNullableString(value, ['detail']),
-    last_ok_at: pickNullableString(value, ['last_ok_at']),
-  };
-}
 
 function normalizeStatus(record: Record<string, unknown>): CameraStatus {
   const explicit = pickString(record, ['status']);
@@ -88,6 +58,41 @@ function maskRtsp(value: string | null): string {
   }
 }
 
+function normalizeBedZonePoint(value: unknown): BedZonePoint | null {
+  if (!Array.isArray(value) || value.length !== 2) return null;
+  const [x, y] = value;
+  return typeof x === 'number' && typeof y === 'number' ? [x, y] : null;
+}
+
+/**
+ * Defensive, never throws: bed-zone recognition (wave 1) may still be rolling out on the backend,
+ * so a missing/malformed field normalizes to null ("인식 필요") rather than invalidating the whole
+ * camera record.
+ */
+function normalizeBedZone(value: unknown): BedZone | null {
+  if (!isRecord(value) || !Array.isArray(value.polygon)) return null;
+  const polygon: BedZonePoint[] = [];
+  for (const point of value.polygon) {
+    const normalized = normalizeBedZonePoint(point);
+    if (!normalized) return null;
+    polygon.push(normalized);
+  }
+  const imageWidth = pickNumber(value, ['image_width', 'imageWidth']);
+  const imageHeight = pickNumber(value, ['image_height', 'imageHeight']);
+  const recognizedAt = pickNullableString(value, ['recognized_at', 'recognizedAt']);
+  if (!polygon.length || imageWidth === null || imageHeight === null || !recognizedAt) return null;
+  return { polygon, image_width: imageWidth, image_height: imageHeight, recognized_at: recognizedAt };
+}
+
+/** Strict counterpart to normalizeBedZone: throws on a malformed 200 response from the recognize endpoint. */
+export function normalizeBedZoneRecognitionResponse(value: unknown): BedZone {
+  const bedZone = isRecord(value) ? normalizeBedZone(value.bed_zone) : null;
+  if (!bedZone) {
+    throw new Error('Invalid bed-zone recognition response');
+  }
+  return bedZone;
+}
+
 export function normalizeCamera(value: unknown): Camera | null {
   if (!isRecord(value)) {
     return null;
@@ -100,23 +105,14 @@ export function normalizeCamera(value: unknown): Camera | null {
 
   const rtspMasked = pickString(value, ['rtsp_url_masked', 'rtspUrlMasked']);
   const rtspPlain = pickNullableString(value, ['rtsp_url', 'rtspUrl']);
-  const domains = isRecord(value.domains) ? Object.fromEntries(Object.entries(value.domains).map(([key, entry]) => [key, Boolean(entry)])) : null;
 
   return {
     id,
     label: pickString(value, ['label', 'name'], '이름 없는 카메라'),
     rtsp_url_masked: rtspMasked || maskRtsp(rtspPlain),
-    space_id: pickNullableString(value, ['space_id', 'spaceId']),
-    space_name: pickNullableString(value, ['space_name', 'spaceName']),
     floor_name: pickNullableString(value, ['floor_name', 'floorName']),
-    backend_camera_id: pickNullableString(value, ['backend_camera_id', 'backendCameraId', 'facilityId']),
     status: normalizeStatus(value),
     created_at: pickNullableString(value, ['created_at', 'createdAt']),
-    threshold: pickNumber(value, ['threshold']),
-    domains,
-    bed_count: pickNumber(value, ['bed_count', 'bedCount']),
-    night_start: pickNullableString(value, ['night_start', 'nightStart']),
-    night_end: pickNullableString(value, ['night_end', 'nightEnd']),
     decode_backend: normalizeDecodeBackend(value),
     // Backend freshness fields (never_connected, last_ok_at, last_probed_at) are rolling out
     // separately; consume them defensively so the UI never crashes while they are still absent.
@@ -128,7 +124,7 @@ export function normalizeCamera(value: unknown): Camera | null {
     // that isn't a finite number, so garbage or missing fields never crash or coerce.
     last_heartbeat_at: pickNumber(value, ['last_heartbeat_at', 'lastHeartbeatAt']),
     heartbeat_age_sec: pickNumber(value, ['heartbeat_age_sec', 'heartbeatAgeSec']),
-    sync: normalizeCameraSyncField(value.sync),
+    bed_zone: normalizeBedZone(value.bed_zone),
   };
 }
 
@@ -164,17 +160,13 @@ function isCameraResponse(value: unknown): value is Record<string, unknown> {
     && (status === 'online' || status === 'offline' || status === 'starting' || status === 'unknown')
     && (!('mapping_pending' in value) || typeof value.mapping_pending === 'boolean')
     && (!('never_connected' in value) || isNullableBoolean(value.never_connected))
-    && hasNullableString(value, 'space_id')
-    && hasNullableString(value, 'backend_camera_id')
     && hasNullableString(value, 'decode_backend')
     && hasNullableString(value, 'created_at')
-    && hasNullableString(value, 'space_name')
     && hasNullableString(value, 'floor_name')
     && hasNullableString(value, 'last_ok_at')
     && hasNullableString(value, 'last_probed_at')
     && (!('last_heartbeat_at' in value) || isNullableFiniteNumber(value.last_heartbeat_at))
-    && (!('heartbeat_age_sec' in value) || isNullableFiniteNumber(value.heartbeat_age_sec))
-    && (!('sync' in value) || value.sync === null || isRecord(value.sync));
+    && (!('heartbeat_age_sec' in value) || isNullableFiniteNumber(value.heartbeat_age_sec));
 }
 
 export function normalizeCameraTestResult(value: unknown): CameraTestResult {

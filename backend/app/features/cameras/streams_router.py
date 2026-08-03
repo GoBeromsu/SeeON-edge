@@ -5,7 +5,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Iterator
-from typing import Annotated, Protocol
+from typing import Annotated, Literal, Protocol, get_args
 
 from fastapi import APIRouter, Header, HTTPException, Query, Request, status
 from fastapi.responses import Response, StreamingResponse
@@ -33,16 +33,21 @@ class _ReadableResponse(Protocol):
     def close(self) -> None: ...
 
 
+OverlayMode = Literal["none", "bedexit", "fall"]
+
+_OVERLAY_MODES: frozenset[str] = frozenset(get_args(OverlayMode))
+
+
 class PoseOverlayRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    show_pose: bool
+    mode: OverlayMode
 
 
 class PoseOverlayResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    show_pose: bool
+    mode: OverlayMode
 
 
 @router.get("/streams/{camera_id}")
@@ -138,7 +143,7 @@ def camera_pose_set(
     _authorize(request, authorization, query_token=token)
     settings = get_settings()
     upstream_url = _pose_url(settings.worker_stream_origin, camera_id)
-    body = json.dumps({"show_pose": payload.show_pose}).encode("utf-8")
+    body = json.dumps({"mode": payload.mode}).encode("utf-8")
     return _pose_request(upstream_url, settings.worker_stream_timeout_s, body=body)
 
 
@@ -197,12 +202,12 @@ def _pose_request(
 
     try:
         parsed = json.loads(raw)
-        show_pose = parsed["show_pose"]
+        mode = parsed["mode"]
     except (json.JSONDecodeError, KeyError) as exc:
         raise _upstream_unavailable(status.HTTP_503_SERVICE_UNAVAILABLE) from exc
-    if not isinstance(show_pose, bool):
+    if not isinstance(mode, str) or mode not in _OVERLAY_MODES:
         raise _upstream_unavailable(status.HTTP_503_SERVICE_UNAVAILABLE)
-    return PoseOverlayResponse(show_pose=show_pose)
+    return PoseOverlayResponse(mode=mode)  # type: ignore[arg-type]
 
 
 def _iter_upstream(upstream: _ReadableResponse) -> Iterator[bytes]:

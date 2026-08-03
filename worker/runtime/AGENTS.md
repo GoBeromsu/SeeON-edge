@@ -54,6 +54,11 @@ Feature math belongs in `worker.pipeline.perception`, interpretation in
   receives only its existing fields.
 - The worker never queries or claims GPU Xid state. That is a host runbook
   concern.
+- No stub wiring at this composition root: when a collaborator seam defaults to
+  an always-failing/no-op stub (e.g. `mjpeg_server`'s `_unavailable_probe`),
+  runtime must pass the real implementation or refuse to boot — never omit the
+  argument and let the feature ship dead while boot succeeds. See the root
+  `AGENTS.md` anti-pattern "조립 루트(runtime)의 스텁 배선" (#81).
 
 ## CLI
 

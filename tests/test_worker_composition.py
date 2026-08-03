@@ -10,6 +10,7 @@ import pytest
 from numpy.typing import NDArray
 
 import worker.runtime.worker as worker_module
+from contracts.observation import BoundingBox
 from contracts.runner import Image, RunnerResult
 from shared.events.evidence_http_transport import HttpResult
 from worker.adapters.model.errors import FatalAcceleratorError
@@ -354,6 +355,59 @@ def test_worker_runtime_init_logs_resolved_state_directory(
         record.getMessage() == f"worker state directory resolved to {tmp_path}"
         for record in caplog.records
     )
+
+
+def test_camera_with_persisted_bed_zone_polygon_seeds_scene_state(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A camera pulled with a persisted ``bed_zone_polygon`` (see the
+    bed-zone recognize endpoint) must have its ``SceneState`` seeded with the
+    equivalent ``BoundingBox`` at camera-build time, so bed-exit treats it as
+    the authoritative bed region from frame one -- and a camera without one
+    is unaffected."""
+    _stub_heartbeat_transport(monkeypatch)
+    serving = _FakeServingClient()
+    loops = _LoopFactory(serving)
+    config = WorkerConfig.model_validate(
+        {
+            "version": 7,
+            "relay": {"url": "http://relay.test", "token": "relay-token"},
+            "cameras": [
+                {
+                    "camera_id": "camera-a",
+                    "facility_id": "facility-a",
+                    "rtsp_url": "rtsp://example.test/camera-a",
+                    "heartbeat_interval_sec": 30.0,
+                    "bed_zone_polygon": [[1, 2], [9, 2], [9, 8], [1, 8]],
+                    "bed_zone_image_width": 640,
+                    "bed_zone_image_height": 480,
+                },
+                {
+                    "camera_id": "camera-b",
+                    "facility_id": "facility-b",
+                    "rtsp_url": "rtsp://example.test/camera-b",
+                    "heartbeat_interval_sec": 30.0,
+                },
+            ],
+        }
+    )
+    runtime = _runtime(config, serving, loops, tmp_path)
+
+    runtime.run()
+
+    with_polygon, without_polygon = runtime.cameras
+    assert with_polygon.scene_state.persisted_bed_regions == (
+        BoundingBox(
+            x1=1,
+            y1=2,
+            x2=9,
+            y2=8,
+            confidence=1.0,
+            polygon=((1, 2), (9, 2), (9, 8), (1, 8)),
+        ),
+    )
+    assert without_polygon.scene_state.persisted_bed_regions == ()
 
 
 def _runtime(

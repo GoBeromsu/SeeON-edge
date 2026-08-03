@@ -10,6 +10,10 @@ from http.server import HTTPServer
 from typing import Final
 
 from worker.pipeline.output._mjpeg_http import (
+    BED_ZONE_FRAME_TIMEOUT_SECONDS,
+    BedZoneNotFoundError,
+    BedZonePayload,
+    BedZoneRecognizer,
     MjpegProbe,
     MjpegProbeError,
     MjpegProbePayload,
@@ -38,17 +42,23 @@ class MjpegServer:
         store: LatestFrameStore,
         config: MjpegServerConfig,
         probe: MjpegProbe | None = None,
+        bed_zone_recognizer: BedZoneRecognizer | None = None,
+        *,
+        bed_zone_frame_timeout_s: float = BED_ZONE_FRAME_TIMEOUT_SECONDS,
     ) -> None:
         self.store = store
         self.host = config.host
         self.probe_token = config.probe_token
         self.probe = probe if probe is not None else _unavailable_probe
+        self.bed_zone_recognizer = bed_zone_recognizer
         self._server: HTTPServer = build_http_server(
             store,
             host=self.host,
             port=config.port,
             probe_token=self.probe_token,
             probe=self.probe,
+            bed_zone_recognizer=self.bed_zone_recognizer,
+            bed_zone_frame_timeout_s=bed_zone_frame_timeout_s,
         )
         self.port = int(self._server.server_port)
         self._thread: threading.Thread | None = None
@@ -75,7 +85,7 @@ class MjpegServer:
 
 
 MjpegServerFactory = Callable[
-    [LatestFrameStore, MjpegServerConfig, MjpegProbe | None],
+    [LatestFrameStore, MjpegServerConfig, MjpegProbe | None, BedZoneRecognizer | None],
     MjpegServer,
 ]
 
@@ -116,13 +126,14 @@ def start_optional_mjpeg_server(
     config: MjpegServerConfig | None = None,
     *,
     probe: MjpegProbe | None = None,
+    bed_zone_recognizer: BedZoneRecognizer | None = None,
     factory: MjpegServerFactory = MjpegServer,
 ) -> MjpegServer | None:
     resolved = dev_mjpeg_config() if config is None else config
     if not resolved.enabled:
         return None
     try:
-        server = factory(store, resolved, probe)
+        server = factory(store, resolved, probe, bed_zone_recognizer)
     except OSError:
         return None
     try:
@@ -138,6 +149,9 @@ def _unavailable_probe(_rtsp_url: str) -> MjpegProbePayload:
 
 
 __all__ = [
+    "BedZoneNotFoundError",
+    "BedZonePayload",
+    "BedZoneRecognizer",
     "MjpegProbe",
     "MjpegProbeError",
     "MjpegProbePayload",

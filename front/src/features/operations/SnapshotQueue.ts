@@ -14,6 +14,12 @@ export type SnapshotIdentity = { id: string; mediaId: string };
 
 type InternalEntry = SnapshotEntry & { active: boolean; refreshKey: number; refreshTimer: number | null; requestTimer: number | null };
 
+/**
+ * Concurrency-capped, jittered poller for the camera-wall thumbnails: only `limit` snapshot
+ * requests are ever in flight, each in-flight request times out into an `error` state after 10s,
+ * and a settled entry (loaded or errored) re-queues after 5s + a per-camera jitter so the whole
+ * wall doesn't refresh in lockstep. `useSyncExternalStore`-friendly via subscribe/snapshot.
+ */
 export class SnapshotQueue {
   private entries = new Map<string, InternalEntry>();
   private order: string[] = [];

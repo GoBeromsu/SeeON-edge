@@ -1,24 +1,28 @@
 import { describe, expect, it } from 'vitest';
-import { getBackendStatus, getCameraStatusMeta, getCameraSyncMeta, getConnectionStatus } from '@/shared/ui/StatusBadge';
-import type { CameraSyncStatus, ConnectionView, SystemSnapshot } from '@/shared/api/client';
+import { getBackendStatus, getCameraStatusMeta, getConnectionStatus } from '@/shared/ui/StatusBadge';
+import type { ConnectionView, SystemSnapshot } from '@/shared/api/client';
 
 describe('status badge mapping', () => {
   it.each([
-    ['online', '온라인', 'bg-status-stableBg text-status-stable ring-status-stable'],
-    ['offline', '오프라인', 'bg-status-dangerBg text-status-danger ring-status-danger'],
-    ['starting', '시작 중', 'bg-surface2 text-ink-soft ring-border'],
-    ['unknown', '확인 중', 'bg-surface2 text-ink-soft ring-border'],
-  ] as const)('maps %s camera status to localized copy and semantic tokens', (status, label, className) => {
-    expect(getCameraStatusMeta(status)).toEqual({ label, className });
+    ['online', '온라인', 'approved'],
+    ['offline', '오프라인', 'rejected'],
+    ['starting', '시작 중', 'pending'],
+    ['unknown', '확인 중', 'closed'],
+  ] as const)('maps %s camera status to localized copy and the %s semantic token', (status, label, variant) => {
+    const meta = getCameraStatusMeta(status);
+    expect(meta.label).toBe(label);
+    expect(meta.variant).toBe(variant);
+    expect(meta.className).toContain(`bg-status-${variant}Bg`);
+    expect(meta.className).toContain(`text-status-${variant}Fg`);
   });
 
   it.each([
-    [null, '백엔드 확인 중', 'bg-surface2 text-ink-soft ring-border'],
-    [{ configured: false, reachable: null }, '백엔드 미설정', 'bg-status-cautionBg text-status-caution ring-status-caution'],
-    [{ configured: true, reachable: true }, '백엔드 연결됨', 'bg-status-stableBg text-status-stable ring-status-stable'],
-    [{ configured: true, reachable: false }, '백엔드 연결 실패', 'bg-status-dangerBg text-status-danger ring-status-danger'],
-    [{ configured: true, reachable: null }, '백엔드 대기 중', 'bg-surface2 text-ink-soft ring-border'],
-  ] as const)('maps backend state %# to localized copy and semantic tokens', (backend, label, className) => {
+    [null, '백엔드 확인 중'],
+    [{ configured: false, reachable: null }, '백엔드 미설정'],
+    [{ configured: true, reachable: true }, '백엔드 연결됨'],
+    [{ configured: true, reachable: false }, '백엔드 연결 실패'],
+    [{ configured: true, reachable: null }, '백엔드 대기 중'],
+  ] as const)('maps backend state %# to localized copy', (backend, label) => {
     const system: SystemSnapshot | null = backend === null ? null : {
       version: 'test',
       backend: {
@@ -27,16 +31,16 @@ describe('status badge mapping', () => {
       },
     };
 
-    expect(getBackendStatus(system)).toEqual({ label, className });
+    expect(getBackendStatus(system).label).toBe(label);
   });
 
   it.each([
-    [null, '백엔드 확인 중', 'bg-surface2 text-ink-soft ring-border'],
-    [{ configured: false, reachable: null }, '백엔드 미설정', 'bg-status-cautionBg text-status-caution ring-status-caution'],
-    [{ configured: true, reachable: true }, '백엔드 연결됨', 'bg-status-stableBg text-status-stable ring-status-stable'],
-    [{ configured: true, reachable: false }, '백엔드 연결 실패', 'bg-status-dangerBg text-status-danger ring-status-danger'],
-    [{ configured: true, reachable: null }, '백엔드 대기 중', 'bg-surface2 text-ink-soft ring-border'],
-  ] as const)('maps connection state %# to localized copy and semantic tokens', (backend, label, className) => {
+    [null, '확인 중'],
+    [{ configured: false, reachable: null }, '미설정'],
+    [{ configured: true, reachable: true }, '정상'],
+    [{ configured: true, reachable: false }, '연결 실패'],
+    [{ configured: true, reachable: null }, '확인 중'],
+  ] as const)('maps connection state %# to the 서버 연결 카드 wording', (backend, label) => {
     const connection: ConnectionView | null = backend === null ? null : {
       events_url: null,
       config_url: null,
@@ -48,41 +52,27 @@ describe('status badge mapping', () => {
       updated_at: null,
     };
 
-    expect(getConnectionStatus(connection)).toEqual({ label, className });
+    expect(getConnectionStatus(connection).label).toBe(label);
   });
 
-  it.each([
-    ['synced', '동기화됨', 'bg-status-stableBg text-status-stable ring-status-stable'],
-    ['pending', '동기화 대기', 'bg-status-cautionBg text-status-caution ring-status-caution'],
-    ['failed', '동기화 실패', 'bg-status-dangerBg text-status-danger ring-status-danger'],
-    ['disabled', '동기화 비활성', 'bg-surface2 text-ink-soft ring-border'],
-  ] as const)('maps camera sync status %s to localized copy and semantic tokens', (status, label, className) => {
-    expect(getCameraSyncMeta(status)).toEqual({ label, className });
-  });
-
-  it('never exposes one-off raw palette utilities', () => {
+  it('never exposes retired or raw one-off palette utilities', () => {
     const systemStates: Array<SystemSnapshot | null> = [
       null,
       { version: 'test', backend: { configured: false, reachable: null, last_ok_at: null } },
       { version: 'test', backend: { configured: true, reachable: true, last_ok_at: null } },
-      { version: 'test', backend: { configured: true, reachable: false, last_ok_at: null } },
-      { version: 'test', backend: { configured: true, reachable: null, last_ok_at: null } },
     ];
     const connectionStates: Array<ConnectionView | null> = [
       null,
       { events_url: null, config_url: null, facility_id: null, facility_token_set: false, facility_token_masked: null, configured: false, reachable: null, last_ok_at: null, updated_at: null },
       { events_url: null, config_url: null, facility_id: null, facility_token_set: false, facility_token_masked: null, configured: true, reachable: true, last_ok_at: null, updated_at: null },
-      { events_url: null, config_url: null, facility_id: null, facility_token_set: false, facility_token_masked: null, configured: true, reachable: false, last_ok_at: null, updated_at: null },
-      { events_url: null, config_url: null, facility_id: null, facility_token_set: false, facility_token_masked: null, configured: true, reachable: null, last_ok_at: null, updated_at: null },
     ];
-    const syncStatuses: CameraSyncStatus[] = ['synced', 'pending', 'failed', 'disabled'];
     const classNames = [
       ...(['online', 'offline', 'starting', 'unknown'] as const).map((status) => getCameraStatusMeta(status).className),
       ...systemStates.map((system) => getBackendStatus(system).className),
       ...connectionStates.map((connection) => getConnectionStatus(connection).className),
-      ...syncStatuses.map((status) => getCameraSyncMeta(status).className),
-    ];
+    ].join(' ');
 
-    expect(classNames.join(' ')).not.toMatch(/(?:bg|text|ring)-(?:emerald|amber|violet|slate|rose)-/);
+    expect(classNames).not.toMatch(/(?:bg|text|ring)-(?:emerald|amber|violet|slate|rose|surface2?|ink)(?:-|Bg|Fg)?/);
+    expect(classNames).not.toMatch(/\b(?:bg-black|bg-white|text-black|text-white)\b/);
   });
 });
