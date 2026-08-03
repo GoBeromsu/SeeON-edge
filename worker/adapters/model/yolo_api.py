@@ -1,10 +1,14 @@
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+import os
+from collections.abc import Callable, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FuturesTimeoutError
 from dataclasses import dataclass
 from pathlib import Path
 from typing import (
     TYPE_CHECKING,
+    Final,
     Literal,
     Protocol,
     TypeAlias,
@@ -163,16 +167,76 @@ class _UltralyticsModel:
         )
 
 
-def load_yolo_model(path: Path, task: YoloTask) -> YoloModel:
+_YOLO_LOAD_TIMEOUT_SECONDS: Final = 30.0
+
+
+def load_yolo_model(
+    path: Path,
+    task: YoloTask,
+    *,
+    timeout_seconds: float = _YOLO_LOAD_TIMEOUT_SECONDS,
+    construct: Callable[[Path], YoloModel] | None = None,
+) -> YoloModel:
     if not path.is_file():
         raise YoloArtifactError(task=task, path=path)
     try:
-        from ultralytics import YOLO
-
-        model = _UltralyticsModel(YOLO(str(path)))
+        model = _construct_with_timeout(
+            construct or _construct_ultralytics_model, path, timeout_seconds
+        )
     except (ImportError, OSError, RuntimeError, TypeError, ValueError) as exc:
         raise YoloLoadError(task=task, path=path, reason=str(exc)) from exc
     return model
+
+
+def _construct_ultralytics_model(path: Path) -> YoloModel:
+    """Load a local weights file into an ultralytics ``YOLO`` instance.
+
+    Issue #111: importing ``ultralytics`` runs a module-level connectivity
+    self-check (``ultralytics.utils.is_online()``) that calls bare,
+    timeout-less ``socket.getaddrinfo`` against two fixed probe hosts. On a
+    machine where DNS to those hosts is blackholed rather than refused, that
+    call blocks forever, and the worker never logs another line past model
+    construction. Every model here is loaded from a local ``artifact_dir``
+    and never uses ultralytics' online/HUB features, so the self-check is
+    disabled outright rather than merely raced against a timeout.
+    """
+    os.environ.setdefault("YOLO_OFFLINE", "true")
+    from ultralytics import YOLO
+
+    return _UltralyticsModel(YOLO(str(path)))
+
+
+def _construct_with_timeout(
+    construct: Callable[[Path], YoloModel], path: Path, timeout_seconds: float
+) -> YoloModel:
+    """Bound model construction so an unforeseen stall fails loud instead of hanging.
+
+    ADR-0002: even where the ``YOLO_OFFLINE`` fix above turns out to be
+    incomplete -- a future ultralytics release adding another network-touching
+    path, or some other environment-specific stall -- a silent infinite wait
+    at boot is itself a defect. This converts any such stall into a bounded,
+    actionable ``TimeoutError`` (a ``OSError`` subclass, so it is wrapped into
+    ``YoloLoadError`` like any other load failure) rather than leaving the
+    worker hung with no further logs.
+
+    Deliberately not a context manager: ``ThreadPoolExecutor.__exit__`` calls
+    ``shutdown(wait=True)``, which would block this thread until the stuck
+    worker thread finishes -- i.e. forever, in exactly the scenario this
+    function exists to fail fast out of. ``shutdown(wait=False)`` lets a
+    still-running construction thread leak instead; acceptable because a
+    timeout here is fatal to the calling boot stage, which exits the process.
+    """
+    pool = ThreadPoolExecutor(max_workers=1)
+    future = pool.submit(construct, path)
+    try:
+        return future.result(timeout=timeout_seconds)
+    except FuturesTimeoutError:
+        raise TimeoutError(
+            f"model construction did not finish within {timeout_seconds}s "
+            f"(path={path}); check network/DNS reachability"
+        ) from None
+    finally:
+        pool.shutdown(wait=False)
 
 
 def to_float_array(tensor: YoloArray) -> NDArray[np.float64]:

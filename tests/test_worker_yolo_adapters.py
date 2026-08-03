@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Literal, assert_never, final
@@ -12,7 +13,10 @@ from worker.adapters.model.warmup import WarmupFrameSpec, warmup_to_ready
 from worker.adapters.model.yolo_api import (
     YoloArtifactError,
     YoloForwardError,
+    YoloLoadError,
+    YoloModel,
     YoloOutputError,
+    load_yolo_model,
 )
 from worker.adapters.model.yolo_bed_seg import COCO_BED_CLASS_ID, YoloBedSegRunner
 from worker.adapters.model.yolo_person import COCO_PERSON_CLASS_ID, YoloPersonRunner
@@ -209,6 +213,41 @@ def test_missing_yolo_artifact_blocks_readiness(tmp_path: Path) -> None:
 
     with pytest.raises(YoloArtifactError, match="person.*missing"):
         _ = warmup_to_ready(runner, device="cpu")
+
+
+def test_load_yolo_model_times_out_instead_of_hanging_forever(tmp_path: Path) -> None:
+    """Issue #111: a stalled model construction (e.g. ultralytics' import-time
+    connectivity self-check blocking on unreachable DNS) must fail loud with a
+    bounded, diagnosable error rather than hang the boot thread forever."""
+    artifact = tmp_path / "model.pt"
+    artifact.write_bytes(b"not a real checkpoint")
+    started = threading.Event()
+    release = threading.Event()
+
+    def _hang_forever(_path: Path) -> YoloModel:
+        started.set()
+        release.wait()  # never released within the test -- simulates a stuck import
+        raise AssertionError("should have timed out before reaching this point")
+
+    with pytest.raises(YoloLoadError, match="pose.*model.pt"):
+        _ = load_yolo_model(
+            artifact, "pose", timeout_seconds=0.05, construct=_hang_forever
+        )
+    assert started.is_set()
+    release.set()  # let the leaked thread exit cleanly instead of leaking past the test
+
+
+def test_load_yolo_model_returns_promptly_when_construction_is_fast(tmp_path: Path) -> None:
+    artifact = tmp_path / "model.pt"
+    artifact.write_bytes(b"not a real checkpoint")
+    sentinel = _Model(_pose_result())
+
+    def _fast_construct(_path: Path) -> YoloModel:
+        return sentinel
+
+    model = load_yolo_model(artifact, "pose", timeout_seconds=5.0, construct=_fast_construct)
+
+    assert model is sentinel
 
 
 def test_forward_failure_blocks_readiness_before_cuda_sync() -> None:
