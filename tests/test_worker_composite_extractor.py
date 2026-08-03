@@ -142,6 +142,54 @@ def test_composite_merges_named_results_once_and_preserves_pose_keypoints() -> N
     assert result.decision_input.bed_region.source == "fresh"
 
 
+def test_box_source_person_merge_winner_is_person_not_pose() -> None:
+    """Issue #108 regression (gap found reviewing PR #106 / issue #44).
+
+    With box_source="person", ``WorkerRuntime._build_camera`` builds the
+    schedule's ``intervals`` dict from the domain-required extractors first
+    (pose, then bed) and appends "person" last. ``Scheduler.tasks_for_frame``
+    preserves that insertion order, and ``merge_module_results`` is
+    unconditional last-writer-wins on ``raw_boxes`` -- so "person always
+    beats pose" is a structural consequence of construction + iteration
+    order, never asserted at the merged-result level. Pin the outcome here:
+    if ``Scheduler`` ever reorders tasks (e.g. sorts names -- "person" sorts
+    before "pose" alphabetically), this must fail, because issue #44's fix
+    would silently regress for every box_source="person" camera.
+    """
+    pose_box = (1, 2, 11, 22, 0.55)
+    person_box = (100, 110, 200, 220, 0.95)
+    runners = {
+        "pose": _Runner(_pose_output(pose_box)),
+        "bed": _Runner(bed_result(())),
+        "person": _Runner(person_result((person_box,))),
+    }
+    client = _ServingClient(runners)
+    extractors = provision_extractors(
+        client,
+        (
+            ExtractorSpec("pose", "pose"),
+            ExtractorSpec("bed", "bed"),
+            ExtractorSpec("person", "person"),
+        ),
+    )
+    # Mirrors WorkerRuntime._build_camera's real construction shape for
+    # box_source="person": domain-required extractors built first (pose,
+    # then bed), "person" inserted last -- not hand-picked for the test.
+    intervals: dict[str, int] = {"pose": 1, "bed": 30}
+    intervals["person"] = 1
+    composite = _composite(extractors, Scheduler(intervals))
+
+    result = composite.process(_packet(0))
+
+    assert tuple(item.module_name for item in result.module_results) == (
+        "pose",
+        "bed",
+        "person",
+    )
+    assert result.observation.boxes == (BoundingBox(*person_box),)
+    assert result.observation.boxes != (BoundingBox(*pose_box),)
+
+
 def test_merge_module_results_pose_only_keeps_pose_raw_boxes() -> None:
     """Issue #44 regression: when person is never scheduled (box_source is
     "pose", the default), pose's raw_boxes survive intact -- structurally,
