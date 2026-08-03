@@ -75,3 +75,15 @@ The images are published as
 `ghcr.io/seniorailab/eldercare-fall-ml/{ml-api,ml-worker}` (deployment identity;
 these map to `Dockerfile.backend` / `Dockerfile.edge`). `compose.edge.yaml`
 uses `models/` as the default host model-artifact path.
+
+## Operations
+
+- [`docs/operations/config-pitfalls.md`](docs/operations/config-pitfalls.md) —
+  settings that are silently ineffective when set on the wrong process or in
+  the wrong place (backend vs. worker env, YAML-vs-env precedence).
+- [`docs/operations/soak-test-plan.md`](docs/operations/soak-test-plan.md) —
+  24h+ continuous-run soak test scenario, metrics, and pass/fail thresholds.
+- [`docs/operations/clip-retention-policy.md`](docs/operations/clip-retention-policy.md) —
+  clip storage and retention policy.
+- [`docs/runbooks/`](docs/runbooks/) — incident runbooks (worker rollback,
+  driver/CUDA alignment, local e2e RTSP source).
