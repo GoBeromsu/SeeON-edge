@@ -7,6 +7,7 @@ from typing import Self
 import pytest
 from fastapi.testclient import TestClient
 
+from backend.app.features.clips.audit_log import AUDIT_NO_CLIP_ID
 from backend.app.main import create_app, no_lifespan
 
 # Dashboard auth now always resolves to a session store (persisted file > env
@@ -160,6 +161,40 @@ def test_streams_manifest_video_and_appends_audit(clip_env) -> None:
     ]
 
 
+def test_list_clips_and_audit_view_are_recorded_in_the_audit_log(clip_env) -> None:
+    """Issue #131: ``list_clips`` and ``GET /audit`` previously had zero audit
+    coverage (only "play" and "label" were recorded). Both must now append an
+    entry attributed to the authenticated dashboard actor, using the
+    ``AUDIT_NO_CLIP_ID`` sentinel since neither action is scoped to a single
+    clip."""
+    _write_manifest(clip_env / "clip-store", "clip-1")
+
+    with TestClient(create_app(lifespan=no_lifespan)) as client:
+        _login(client)
+        listed = client.get("/api/v1/clips")
+        first_audit = client.get("/api/v1/audit")
+        second_audit = client.get("/api/v1/audit")
+
+    assert listed.status_code == 200
+    assert first_audit.status_code == 200
+    # first_audit's response reflects the log state *before* its own view is
+    # recorded (the same ordering "play"/"label" already rely on), so it only
+    # shows the "list" entry from the preceding /clips call.
+    assert [
+        (entry["actor"], entry["action"], entry["clip_id"])
+        for entry in first_audit.json()["entries"]
+    ] == [("admin", "list", AUDIT_NO_CLIP_ID)]
+    # second_audit's response then shows both the "list" entry and the
+    # "audit-view" entry recorded as a side effect of the first GET /audit.
+    assert [
+        (entry["actor"], entry["action"], entry["clip_id"])
+        for entry in second_audit.json()["entries"]
+    ] == [
+        ("admin", "list", AUDIT_NO_CLIP_ID),
+        ("admin", "audit-view", AUDIT_NO_CLIP_ID),
+    ]
+
+
 def test_label_clip_saves_sidecar_and_audit(clip_env) -> None:
     clip_store = clip_env / "clip-store"
     label_store = clip_env / "label-store"
@@ -211,7 +246,10 @@ def test_label_clip_signals_degradation_when_label_store_is_unwritable(
     It also must not report the label as saved *elsewhere*: a failed local
     save must short-circuit before the best-effort backend backup POST and
     before the audit log records a "label" action, or callers/auditors would
-    see evidence of a save that never actually persisted anywhere."""
+    see evidence of a save that never actually persisted anywhere. The
+    trailing ``GET /audit`` call below still records its own "audit-view"
+    entry (see #131 audit coverage) and backs *that* up -- it is unrelated
+    to the failed label save and is asserted separately."""
     clip_store = clip_env / "clip-store"
     label_store_root = clip_env / "label-store"
     _write_manifest(clip_store, "clip-1")
@@ -229,7 +267,12 @@ def test_label_clip_signals_degradation_when_label_store_is_unwritable(
     backup_calls: list[dict[str, object]] = []
 
     def fake_urlopen(request, timeout: float) -> FakeHTTPResponse:
-        backup_calls.append({"url": request.full_url})
+        backup_calls.append(
+            {
+                "url": request.full_url,
+                "body": json.loads(request.data.decode("utf-8")),
+            }
+        )
         return FakeHTTPResponse()
 
     monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
@@ -245,8 +288,9 @@ def test_label_clip_signals_degradation_when_label_store_is_unwritable(
 
     assert response.status_code == 503
     assert not (labels_dir / "clip-1.json").exists()
-    assert backup_calls == []
     assert audit.json()["entries"] == []
+    assert [call["body"]["type"] for call in backup_calls] == ["clip_audit"]
+    assert backup_calls[0]["body"]["payload"]["action"] == "audit-view"
 
 
 def test_clip_routes_require_a_dashboard_session(clip_env) -> None:
