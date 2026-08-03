@@ -597,6 +597,7 @@ def test_example_camera_registry_seed_is_loadable_and_sanitized() -> None:
         "status": "unknown",
         "decode_backend": None,
         "fps": None,
+        "floor": None,
         "created_at": "2026-01-01T00:00:00.000Z",
         "never_connected": None,
         "last_ok_at": None,
@@ -1067,6 +1068,157 @@ def test_worker_config_prefers_record_fps_over_env_default(
     assert camera["fps"] == 20.0
 
 
+def test_create_camera_sets_floor(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_urlopen(request, timeout: float) -> FakeHTTPResponse:
+        return FakeHTTPResponse({"ok": False, "error_class": "timeout"})
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    app = create_app(lifespan=no_lifespan)
+    app.state.edge_relay_token = "relay-token"
+    app.state.camera_registry = CameraRegistryStore(tmp_path / "catalog.sqlite3")
+
+    with TestClient(app) as client:
+        _login(client)
+        created = client.post(
+            "/api/v1/cameras",
+            headers=AUTH,
+            json={
+                "label": "Lobby",
+                "rtsp_url": "rtsp://camera.local/live",
+                "floor": "2층",
+                "force_register": True,
+            },
+        )
+
+    assert created.status_code == 201
+    assert created.json()["floor"] == "2층"
+
+
+def test_patch_camera_sets_floor(tmp_path) -> None:
+    app = create_app(lifespan=no_lifespan)
+    app.state.edge_relay_token = "relay-token"
+    store = app.state.camera_registry = CameraRegistryStore(tmp_path / "catalog.sqlite3")
+    store.create(
+        camera_id="camera-1",
+        label="Lobby",
+        rtsp_url="rtsp://camera/stream",
+        space_id="space-1",
+        status="online",
+    )
+
+    with TestClient(app) as client:
+        _login(client)
+        patched = client.patch(
+            "/api/v1/cameras/camera-1",
+            headers=AUTH,
+            json={"floor": "3층"},
+        )
+
+    assert patched.status_code == 200
+    assert patched.json()["floor"] == "3층"
+    assert store.get("camera-1")["floor"] == "3층"
+
+
+def test_patch_camera_clears_floor_with_explicit_null(tmp_path) -> None:
+    app = create_app(lifespan=no_lifespan)
+    app.state.edge_relay_token = "relay-token"
+    store = app.state.camera_registry = CameraRegistryStore(tmp_path / "catalog.sqlite3")
+    store.create(
+        camera_id="camera-1",
+        label="Lobby",
+        rtsp_url="rtsp://camera/stream",
+        space_id="space-1",
+        status="online",
+        floor="3층",
+    )
+
+    with TestClient(app) as client:
+        _login(client)
+        patched = client.patch(
+            "/api/v1/cameras/camera-1",
+            headers=AUTH,
+            json={"floor": None},
+        )
+
+    assert patched.status_code == 200
+    assert patched.json()["floor"] is None
+    assert store.get("camera-1")["floor"] is None
+
+
+def test_patch_camera_normalizes_whitespace_only_floor_to_null(tmp_path) -> None:
+    app = create_app(lifespan=no_lifespan)
+    app.state.edge_relay_token = "relay-token"
+    store = app.state.camera_registry = CameraRegistryStore(tmp_path / "catalog.sqlite3")
+    store.create(
+        camera_id="camera-1",
+        label="Lobby",
+        rtsp_url="rtsp://camera/stream",
+        space_id="space-1",
+        status="online",
+        floor="3층",
+    )
+
+    with TestClient(app) as client:
+        _login(client)
+        patched = client.patch(
+            "/api/v1/cameras/camera-1",
+            headers=AUTH,
+            json={"floor": "   "},
+        )
+
+    assert patched.status_code == 200
+    assert patched.json()["floor"] is None
+    assert store.get("camera-1")["floor"] is None
+
+
+def test_list_cameras_user_set_floor_survives_roster_sync(tmp_path) -> None:
+    """Precedence decision (issue #85): a user-set ``floor`` override must
+    survive a space-sync roster re-pull untouched, even when that roster
+    carries its own (different) ``floor_name`` for the same camera -- see
+    the ``floor`` field doc-comment on CameraResponse and public_camera().
+    """
+    app = create_app(lifespan=no_lifespan)
+    app.state.edge_relay_token = "relay-token"
+    store = app.state.camera_registry = CameraRegistryStore(tmp_path / "catalog.sqlite3")
+    store.create(
+        camera_id="camera-1",
+        label="Lobby",
+        rtsp_url="rtsp://camera/stream",
+        space_id="space-101",
+        status="online",
+        backend_camera_id="backend-1",
+        floor="사용자 지정 3층",
+    )
+    app.state.pulled_config = PulledWorkerConfig(
+        config_version=9,
+        restart_epoch=0,
+        night_window=None,
+        cameras=(
+            PulledCameraConfig(
+                camera_id="backend-1",
+                space_id="space-101",
+                label="Lobby",
+                rtsp_url=None,
+                online=True,
+                space_name="101호",
+                floor_name="1층",
+                created_at="2026-07-10T00:00:00.000Z",
+            ),
+        ),
+    )
+
+    with TestClient(app) as client:
+        _login(client)
+        response = client.get("/api/v1/cameras", headers=AUTH)
+
+    assert response.status_code == 200
+    camera = response.json()["cameras"][0]
+    # The roster sync's floor_name lands as usual...
+    assert camera["floor_name"] == "1층"
+    # ...but the locally user-set floor is untouched by it.
+    assert camera["floor"] == "사용자 지정 3층"
+
+
 def test_list_cameras_includes_backend_only_roster_camera(tmp_path) -> None:
     app = create_app(lifespan=no_lifespan)
     app.state.edge_relay_token = "relay-token"
@@ -1105,6 +1257,7 @@ def test_list_cameras_includes_backend_only_roster_camera(tmp_path) -> None:
             "status": "unknown",
             "decode_backend": None,
             "fps": None,
+            "floor": None,
             "created_at": "2026-07-10T00:00:00.000Z",
             "space_name": "101호",
             "floor_name": "1층",
@@ -1155,6 +1308,7 @@ def test_list_cameras_includes_backend_only_roster_camera_without_created_at(tmp
             "status": "unknown",
             "decode_backend": None,
             "fps": None,
+            "floor": None,
             "created_at": None,
             "space_name": "101호",
             "floor_name": "1층",

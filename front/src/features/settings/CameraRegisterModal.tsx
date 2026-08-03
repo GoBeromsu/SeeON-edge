@@ -8,10 +8,13 @@ import {
 } from '@/shared/api/client';
 import { AccessibleDialog } from '@/shared/ui/AccessibleDialog';
 import { BedZoneRecognitionPanel } from '@/features/settings/BedZoneRecognitionPanel';
+import { FloorChips } from '@/features/settings/FloorChips';
+import { deriveFloorOptions } from '@/features/settings/floorOptions';
 import { toast } from '@/shared/ui/Toast';
 
 type CameraRegisterModalProps = {
   open: boolean;
+  cameras: Camera[];
   onClose: () => void;
   onCreated: () => void;
 };
@@ -23,15 +26,18 @@ const PROBE_FAILURE_MESSAGE: Record<string, string> = {
 };
 
 /**
- * 카메라 등록 모달 (front/design-handoff/README.md §5 모달 1): 1단계에서 연결 정보를 입력하면 그 자리에서
- * POST /cameras가 프로브 후 저장까지 수행하므로(별도 프로브 엔드포인트 없음), 2단계는 이미 생성된
- * 카메라에 대해 침대 영역을 인식하는 단계다. 층은 외부 space-sync 필드라 이 모달에서 입력받지 않는다
- * (스펙 이탈: floor chip 선택 UI 없음, floor_name은 서버가 읽기 전용으로 채운다).
+ * 카메라 등록 모달 (front/design-handoff/Eldercare Prototype.dc.html:305-336 모달 1): 1단계에서 연결
+ * 정보를 입력하면 그 자리에서 POST /cameras가 프로브 후 저장까지 수행하므로(별도 프로브 엔드포인트
+ * 없음), 2단계는 이미 생성된 카메라에 대해 침대 영역을 인식하는 단계다. 층은 사용자가 이 모달에서
+ * 선택하는 로컬 override(`floor`)이며, 외부 space-sync가 채우는 읽기 전용 `floor_name`과는 별개다
+ * (issue #85; 정밀 계약은 CameraResponse.floor 문서 주석 참고).
  */
-export function CameraRegisterModal({ open, onClose, onCreated }: CameraRegisterModalProps): JSX.Element {
+export function CameraRegisterModal({ open, cameras, onClose, onCreated }: CameraRegisterModalProps): JSX.Element {
   const [step, setStep] = useState<1 | 2>(1);
   const [label, setLabel] = useState('');
   const [rtspUrl, setRtspUrl] = useState('');
+  const [floor, setFloor] = useState<string | null>(null);
+  const [extraFloors, setExtraFloors] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [duplicateLabel, setDuplicateLabel] = useState<string | null>(null);
@@ -40,11 +46,15 @@ export function CameraRegisterModal({ open, onClose, onCreated }: CameraRegister
   const busyRef = useRef(false);
   const wasOpen = useRef(open);
 
+  const floorOptions = deriveFloorOptions(cameras, extraFloors);
+
   useEffect(() => {
     if (open && !wasOpen.current) {
       setStep(1);
       setLabel('');
       setRtspUrl('');
+      setFloor(null);
+      setExtraFloors([]);
       setErrorMessage(null);
       setDuplicateLabel(null);
       setCamera(null);
@@ -76,7 +86,10 @@ export function CameraRegisterModal({ open, onClose, onCreated }: CameraRegister
     setErrorMessage(null);
     setDuplicateLabel(null);
     try {
-      const created = await createCamera({ label, rtsp_url: rtspUrl }, { forceRegister: force });
+      const created = await createCamera(
+        { label, rtsp_url: rtspUrl, floor: floor ?? undefined },
+        { forceRegister: force },
+      );
       setCamera(created);
       setBedZone(created.bed_zone ?? null);
       setStep(2);
@@ -141,6 +154,18 @@ export function CameraRegisterModal({ open, onClose, onCreated }: CameraRegister
               placeholder="예: 101호"
             />
           </label>
+          <div>
+            <span className="text-sm font-medium">층</span>
+            <FloorChips
+              options={floorOptions}
+              selected={floor}
+              onSelect={setFloor}
+              onAddFloor={(newFloor) => {
+                setExtraFloors((prev) => (prev.includes(newFloor) ? prev : [...prev, newFloor]));
+                setFloor(newFloor);
+              }}
+            />
+          </div>
           <label>
             RTSP 주소
             <input

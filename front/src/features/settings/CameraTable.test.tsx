@@ -44,19 +44,31 @@ describe('CameraTable', () => {
     act(() => root.unmount());
   });
 
-  it('renders each camera with its label, masked RTSP url, floor, bed-zone and status badges', () => {
+  it('renders each camera with its label, masked RTSP url, floor and status badges in the 4-column layout', () => {
     const { host, root } = render([onlineCamera, offlineCamera]);
+
+    const headers = Array.from(host.querySelectorAll('th')).map((th) => th.textContent);
+    expect(headers).toEqual(['카메라', '층', '상태', '작업']);
+    expect(host.textContent).not.toContain('침대 영역');
 
     expect(host.textContent).toContain('101호');
     expect(host.textContent).toContain('rtsp://***@10.0.0.5/stream');
     expect(host.textContent).toContain('1층');
-    expect(host.textContent).toContain('인식 완료');
     expect(host.textContent).toContain('온라인');
 
     expect(host.textContent).toContain('102호');
     expect(host.textContent).toContain('미지정');
-    expect(host.textContent).toContain('인식 필요');
     expect(host.textContent).toContain('오프라인');
+
+    act(() => root.unmount());
+  });
+
+  it('prefers the user-set floor override over the read-only floor_name (issue #85 precedence)', () => {
+    const overriddenCamera: Camera = { ...onlineCamera, id: 'cam-3', floor_name: '1층', floor: '사용자 지정 3층' };
+    const { host, root } = render([overriddenCamera]);
+
+    const floorCell = host.querySelector('tbody tr td:nth-child(2)');
+    expect(floorCell?.textContent).toBe('사용자 지정 3층');
 
     act(() => root.unmount());
   });

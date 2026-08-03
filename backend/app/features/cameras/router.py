@@ -81,7 +81,16 @@ class CameraResponse(BaseModel):
     fps: float | None = None
     created_at: str | None = None
     space_name: str | None = None
+    # Space-sync-owned floor name (external roster pull, read-only from here --
+    # see _public_snapshot). None for a camera with no backend space mapping.
     floor_name: str | None = None
+    # User-set floor override (issue #85 design handoff: floor chip editing).
+    # Persisted on the local registry record, so it survives every space-sync
+    # roster re-sync untouched (that merge only ever assigns space_name/
+    # floor_name -- see CameraRegistryStore.public_camera). Display precedence
+    # is user-set floor first, falling back to the space-sync floor_name:
+    # `camera.floor ?? camera.floor_name`.
+    floor: str | None = None
     # Roster-sync state (story G004): populated only by GET /cameras (see
     # _public_snapshot); create/update/delete/test responses leave this None
     # rather than racing the fire-and-forget background sync they trigger.
@@ -116,6 +125,7 @@ class CreateCameraRequest(BaseModel):
     space_id: str | None = None
     decode_backend: str | None = None
     fps: float | None = None
+    floor: str | None = None
     # Default False: registration probes the stream first and writes nothing
     # on failure (see create_camera). True bypasses that gate for cameras
     # that are known offline but should still be registered.
@@ -130,6 +140,7 @@ class UpdateCameraRequest(BaseModel):
     space_id: str | None = None
     decode_backend: str | None = None
     fps: float | None = None
+    floor: str | None = None
 
 
 class TestCameraResponse(BaseModel):
@@ -210,6 +221,7 @@ def create_camera(
     _authorize(request, relay_token, authorization)
     decode_backend = _normalize_decode_backend(payload.decode_backend)
     fps = _normalize_fps(payload.fps)
+    floor = _normalize_floor(payload.floor)
     probe = _probe_rtsp_url(request, payload.rtsp_url)
     if not probe.ok and not payload.force_register:
         # Registration gating: a dead camera is not persisted unless the
@@ -241,6 +253,7 @@ def create_camera(
             mapping_pending=mapping.pending,
             decode_backend=decode_backend,
             fps=fps,
+            floor=floor,
             last_probed_at=now,
             last_ok_at=now if probe.ok else None,
             never_connected=not probe.ok,
@@ -313,6 +326,8 @@ def update_camera(
         updates["decode_backend"] = _normalize_decode_backend(payload.decode_backend)
     if "fps" in payload.model_fields_set:
         updates["fps"] = _normalize_fps(payload.fps)
+    if "floor" in payload.model_fields_set:
+        updates["floor"] = _normalize_floor(payload.floor)
 
     if "space_id" in payload.model_fields_set or "label" in payload.model_fields_set:
         mapping = _map_backend(
@@ -917,6 +932,21 @@ def _default_frame_stride() -> int | None:
     except ValueError:
         return None
     return value if value > 0 else None
+
+
+def _normalize_floor(value: str | None) -> str | None:
+    """Validate a user-set floor override (issue #85).
+
+    Free-text (not an enum like decode_backend) since floor labels are
+    facility-defined ("1층", "지하 1층", ...), not a fixed backend vocabulary.
+    None passes through untouched (not set). An explicit blank/whitespace-only
+    string normalizes to None (clear the override, fall back to floor_name)
+    rather than persisting a visually-empty chip.
+    """
+    if value is None:
+        return None
+    stripped = value.strip()
+    return stripped or None
 
 
 DECODE_BACKENDS = {"auto", "nvdec", "opencv", "cpu"}

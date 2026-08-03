@@ -2,11 +2,14 @@ import { useEffect, useRef, useState } from 'react';
 import { testCamera, updateCamera, type BedZone, type Camera, type CameraTestResult } from '@/shared/api/client';
 import { AccessibleDialog } from '@/shared/ui/AccessibleDialog';
 import { BedZoneRecognitionPanel } from '@/features/settings/BedZoneRecognitionPanel';
+import { FloorChips } from '@/features/settings/FloorChips';
+import { deriveFloorOptions } from '@/features/settings/floorOptions';
 import { getCameraStatusMeta, statusBadgeClassName } from '@/shared/ui/StatusBadge';
 import { toast } from '@/shared/ui/Toast';
 
 type CameraEditModalProps = {
   camera: Camera | null;
+  cameras: Camera[];
   onClose: () => void;
   onUpdated: () => void;
   onRequestDelete: (camera: Camera) => void;
@@ -30,10 +33,16 @@ function RefreshIcon(): JSX.Element {
  * 포함되지 않는 두 번째 다이얼로그 때문에 자기 자신이 inert 처리되는 포커스 트랩 버그가 생긴다.
  * 삭제도 같은 이유로 이 모달 안에서 직접 확인창을 띄우지 않고, 부모(CameraSection)의 공용
  * DeleteCameraDialog로 위임한다(onRequestDelete) — 그래야 한 번에 다이얼로그가 하나만 열린다.
+ * 층은 이 모달에서 편집 가능한 로컬 override다(issue #85 design handoff). 칩을 건드리지 않고
+ * 저장하면 floor 패치 자체를 보내지 않아, 조용히 space-sync floor_name을 고정 override로
+ * 바꿔버리는 부작용을 피한다 — 자세한 내용은 handleSave의 floor 비교 로직 참고.
  */
-export function CameraEditModal({ camera, onClose, onUpdated, onRequestDelete }: CameraEditModalProps): JSX.Element | null {
+export function CameraEditModal({ camera, cameras, onClose, onUpdated, onRequestDelete }: CameraEditModalProps): JSX.Element | null {
   const [label, setLabel] = useState('');
   const [rtspUrl, setRtspUrl] = useState('');
+  const [floor, setFloor] = useState<string | null>(null);
+  const [initialFloor, setInitialFloor] = useState<string | null>(null);
+  const [extraFloors, setExtraFloors] = useState<string[]>([]);
   const [bedZone, setBedZone] = useState<BedZone | null>(null);
   const [mode, setMode] = useState<'view' | 'reseg'>('view');
   const [busy, setBusy] = useState<'save' | 'test' | null>(null);
@@ -41,6 +50,8 @@ export function CameraEditModal({ camera, onClose, onUpdated, onRequestDelete }:
   const [testResult, setTestResult] = useState<CameraTestResult | null>(null);
   const busyRef = useRef(false);
   const openCameraIdRef = useRef<string | null>(null);
+
+  const floorOptions = deriveFloorOptions(cameras, extraFloors);
 
   // Reset the form only when the targeted camera's identity changes (opening the modal for a
   // camera, or switching to a different one) — not on every re-render caused by the operations
@@ -55,6 +66,10 @@ export function CameraEditModal({ camera, onClose, onUpdated, onRequestDelete }:
     openCameraIdRef.current = camera.id;
     setLabel(camera.label);
     setRtspUrl('');
+    const effectiveFloor = camera.floor ?? camera.floor_name ?? null;
+    setFloor(effectiveFloor);
+    setInitialFloor(effectiveFloor);
+    setExtraFloors([]);
     setBedZone(camera.bed_zone ?? null);
     setMode('view');
     setSaveError(null);
@@ -98,9 +113,13 @@ export function CameraEditModal({ camera, onClose, onUpdated, onRequestDelete }:
     setBusy('save');
     setSaveError(null);
     try {
-      const patch: { label?: string; rtsp_url?: string } = {};
+      const patch: { label?: string; rtsp_url?: string; floor?: string | null } = {};
       if (label.trim() !== camera.label) patch.label = label.trim();
       if (rtspUrl.trim()) patch.rtsp_url = rtspUrl.trim();
+      // Only send floor when the user actually changed the selection (issue #85): saving without
+      // touching the chips must not silently freeze the current space-sync floor_name as a local
+      // override -- see FloorChips' doc comment and the floor precedence contract on Camera.floor.
+      if (floor !== initialFloor) patch.floor = floor;
       await updateCamera(camera.id, patch);
       onUpdated();
       toast.success('카메라 정보를 저장했습니다.');
@@ -163,10 +182,18 @@ export function CameraEditModal({ camera, onClose, onUpdated, onRequestDelete }:
               onChange={(event) => setLabel(event.target.value)}
             />
           </label>
-          <label>
-            층
-            <input name="floor" value={camera.floor_name ?? '미지정'} disabled readOnly />
-          </label>
+          <div>
+            <span className="text-sm font-medium">층</span>
+            <FloorChips
+              options={floorOptions}
+              selected={floor}
+              onSelect={setFloor}
+              onAddFloor={(newFloor) => {
+                setExtraFloors((prev) => (prev.includes(newFloor) ? prev : [...prev, newFloor]));
+                setFloor(newFloor);
+              }}
+            />
+          </div>
           <label>
             RTSP 주소
             <input

@@ -111,6 +111,7 @@ export function normalizeCamera(value: unknown): Camera | null {
     label: pickString(value, ['label', 'name'], '이름 없는 카메라'),
     rtsp_url_masked: rtspMasked || maskRtsp(rtspPlain),
     floor_name: pickNullableString(value, ['floor_name', 'floorName']),
+    floor: pickNullableString(value, ['floor']),
     status: normalizeStatus(value),
     created_at: pickNullableString(value, ['created_at', 'createdAt']),
     decode_backend: normalizeDecodeBackend(value),
@@ -163,6 +164,7 @@ function isCameraResponse(value: unknown): value is Record<string, unknown> {
     && hasNullableString(value, 'decode_backend')
     && hasNullableString(value, 'created_at')
     && hasNullableString(value, 'floor_name')
+    && hasNullableString(value, 'floor')
     && hasNullableString(value, 'last_ok_at')
     && hasNullableString(value, 'last_probed_at')
     && (!('last_heartbeat_at' in value) || isNullableFiniteNumber(value.last_heartbeat_at))

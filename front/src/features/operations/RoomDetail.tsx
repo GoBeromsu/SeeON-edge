@@ -81,6 +81,7 @@ export function RoomDetail({ camera, onBack, onRetryConnection }: RoomDetailProp
 
       <CameraEditModal
         camera={connectionModalOpen ? camera : null}
+        cameras={[camera]}
         onClose={() => setConnectionModalOpen(false)}
         onUpdated={onRetryConnection}
         onRequestDelete={(target) => {

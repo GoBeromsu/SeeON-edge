@@ -120,6 +120,9 @@ function cameraBody(input: CameraInput | CameraPatchInput, extra?: Record<string
   if ('decode_backend' in input && input.decode_backend !== undefined) {
     body.decode_backend = input.decode_backend;
   }
+  if ('floor' in input && input.floor !== undefined) {
+    body.floor = input.floor;
+  }
   if (extra) {
     Object.assign(body, extra);
   }
