@@ -396,9 +396,10 @@ refused. Neither side was malformed: the loader supports both generations as
 first-class cases (`worker/adapters/model/lstm_manifest.py`,
 `SUPPORTED_PREPROCESSING_IDENTITIES`), but `eldercare-dataset-ops` currently
 emits `schema_version: 1` for fall and no preprocessing identity
-(`ml/training/_selftest_g006.py`), so schema_version 2 is not a contract any
-export path produces today — the example was documenting an aspirational
-target, not the artifact it ships with.
+(`ml/training/model_artifacts.py::build_fall_lstm_metadata`, which never
+writes either field), so schema_version 2 is not a contract any export path
+produces today — the example was documenting an aspirational target, not the
+artifact it ships with.
 
 The example was corrected to pin the legacy contract
 (`schema_version: 1`, `legacy-coco17-xyc-frame-normalized-zero-fill-v1`) that
