@@ -44,6 +44,13 @@ class DomainRegistration:
     input_view: str
     event_types: frozenset[str]
     factory: Callable[[Any], DomainDetector]
+    # The observations (extractor module names, e.g. "pose"/"bed") this
+    # domain requires from the analytics stage. `WorkerRuntime._build_camera`
+    # unions `requires` across every active domain to build the extraction
+    # schedule -- an extractor whose name is required by no active domain is
+    # never scheduled or loaded (issue #47). No default: every registration
+    # must declare what it needs.
+    requires: frozenset[str]
     enabled: bool = True
     audit_metadata_provider: Callable[[AuditContext], DomainAuditSnapshot] | None = None
     debug_snapshot_adapter: Callable[[Any, int], Any] | None = None
@@ -85,6 +92,7 @@ DOMAIN_REGISTRY: Mapping[str, DomainRegistration] = MappingProxyType(
             input_view="fall_window",
             event_types=frozenset({"fall"}),
             factory=_build_fall,
+            requires=frozenset({"pose"}),
             audit_metadata_provider=_audit_snapshot,
         ),
         "bed_exit": DomainRegistration(
@@ -92,6 +100,7 @@ DOMAIN_REGISTRY: Mapping[str, DomainRegistration] = MappingProxyType(
             input_view="bed_regions",
             event_types=frozenset({"bed-exit"}),
             factory=_build_bed_exit,
+            requires=frozenset({"pose", "bed"}),
             audit_metadata_provider=_audit_snapshot,
             debug_snapshot_adapter=_bed_exit_debug_snapshot,
         ),

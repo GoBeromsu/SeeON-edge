@@ -137,6 +137,7 @@ def test_domain_registry_extension_composes_through_event_aggregator_generically
         input_view="dummy-view",
         event_types=frozenset({"dummy-alert"}),
         factory=lambda _dependencies: _DummyDetector(),
+        requires=frozenset(),
     )
     extended = dict(registry_module.DOMAIN_REGISTRY)
     extended["dummy"] = dummy_registration

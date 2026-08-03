@@ -82,13 +82,21 @@ def _runtime(config: WorkerConfig, state_dir: Path) -> WorkerRuntime:
 
 
 def _build_camera_best_effort(
-    runtime: WorkerRuntime, extractors: tuple[object, ...] = ()
+    runtime: WorkerRuntime,
+    extractors: tuple[object, ...] = (
+        SimpleNamespace(module_name="pose"),
+        SimpleNamespace(module_name="bed"),
+    ),
 ) -> None:
     """Drive ``_build_camera`` far enough to build the bus and analytics.
 
     ``_build_camera`` needs a fall model and decision-stage wiring this test
     does not care about; a sentinel fall model is enough to clear the guard,
     and any failure past the bus/analytics construction is irrelevant here.
+    The default fixture supplies "pose"/"bed" sentinel extractors -- the
+    observations the default-enabled domains (fall, bed_exit) require -- so
+    ``_build_camera``'s fail-closed missing-extractor check (issue #47)
+    doesn't short-circuit before the seams under test even run.
     """
     runtime.fall_model = object()  # type: ignore[assignment]
     try:

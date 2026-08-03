@@ -159,6 +159,25 @@ def _processed_count(pump: _RunnableIngest) -> int:
     return getattr(pump, "processed_count", 0)
 
 
+def _required_extractor_names(domain_names: Sequence[str]) -> tuple[str, ...]:
+    """Union of extractor module names every active domain requires.
+
+    Domain registry iteration order (fixed by ``DOMAIN_REGISTRY``) drives the
+    result order for determinism; within one domain, ``requires`` names are
+    sorted for the same reason. Fails closed -- ``RuntimeError``, mirroring
+    ``_build_decider``'s unsupported-domain check -- for any active domain
+    name absent from the registry (issue #47).
+    """
+    required: dict[str, None] = {}
+    for name in domain_names:
+        registration = DOMAIN_REGISTRY.get(name)
+        if registration is None:
+            raise RuntimeError(f"unsupported domain in registry: {name}")
+        for extractor_name in sorted(registration.requires):
+            required.setdefault(extractor_name, None)
+    return tuple(required)
+
+
 def _persisted_bed_regions(camera: CameraRuntimeConfig) -> tuple[BoundingBox, ...]:
     """Convert a pulled ``bed_zone_polygon`` into the one persisted bed region.
 
@@ -856,7 +875,9 @@ class WorkerRuntime:
             boot.profile.name, hard_exit=self._hard_exit, state_dir=self._state_dir
         )
         self.watchdog = InferenceWatchdog(self.fault_handler, profile=boot.profile.name)
-        self.shared_yolo = compose_yolo_extractors(self._serving, device=boot.device)
+        self.shared_yolo = compose_yolo_extractors(
+            self._serving, device=boot.device, box_source=self.config.models.box_source
+        )
         self.fall_model = self._create_fall_model(boot.device)
         return self.shared_yolo, self.fall_model
 
@@ -896,7 +917,9 @@ class WorkerRuntime:
         for extractor in self.shared_yolo.extractors:
             self._warm_one(extractor.runner, self._boot.device)
         self._warm_one(self.fall_model, self._boot.device)
-        return ("pose", "person", "bed", "fall")
+        return tuple(extractor.module_name for extractor in self.shared_yolo.extractors) + (
+            "fall",
+        )
 
     def _warm_one(self, model: RunnerProtocol | FallModelProtocol, device: str) -> None:
         if not isinstance(model, _Warmable):
@@ -965,10 +988,29 @@ class WorkerRuntime:
         )
         self.diagnostics.register_bus(camera.camera_id, bus)
         tracker = GreedyIouTracker()
-        intervals = {"pose": camera.frame_stride, "person": camera.frame_stride, "bed": 30}
+        domain_names = self._active_domain_names()
+        required = _required_extractor_names(domain_names)
+        available = {extractor.module_name for extractor in yolo.extractors}
+        missing = sorted(name for name in required if name not in available)
+        if missing:
+            raise RuntimeError(
+                "domain requires unregistered extractor(s): " + ", ".join(missing)
+            )
+        persisted_bed_regions = _persisted_bed_regions(camera)
+        if persisted_bed_regions:
+            # A persisted bed polygon is authoritative and never expires
+            # (`SceneState.resolve_bed_regions` short-circuits on it) --
+            # scheduling the live bed-seg extractor on top of it would only
+            # pay its cost for a result nothing ever reads (issue #41).
+            required = tuple(name for name in required if name != "bed")
+        intervals: dict[str, int] = {
+            name: (30 if name == "bed" else camera.frame_stride) for name in required
+        }
+        if self.config.models.box_source == "person":
+            intervals["person"] = camera.frame_stride
         scene = SceneState(
             camera.camera_id,
-            persisted_bed_regions=_persisted_bed_regions(camera),
+            persisted_bed_regions=persisted_bed_regions,
         )
         scheduler = Scheduler(intervals)
         analytics = CompositeExtractor(
@@ -1299,12 +1341,16 @@ class WorkerRuntime:
             self._camera_source_registry = build_camera_source_registry(self.config.cameras)
         return self._camera_source_registry
 
-    def _build_decision_stage(
-        self, camera: CameraRuntimeConfig, fall_model: FallModelProtocol
-    ) -> tuple[EventAggregator, Mapping[str, Mapping[str, object]], Mapping[str, Decider]]:
+    def _active_domain_names(self) -> tuple[str, ...]:
         domain_names = self.config.enabled_domains
         if domain_names is None:
             domain_names = enabled_domains()
+        return domain_names
+
+    def _build_decision_stage(
+        self, camera: CameraRuntimeConfig, fall_model: FallModelProtocol
+    ) -> tuple[EventAggregator, Mapping[str, Mapping[str, object]], Mapping[str, Decider]]:
+        domain_names = self._active_domain_names()
         deciders = tuple(self._build_decider(name, camera, fall_model) for name in domain_names)
         domain_deciders = dict(zip(domain_names, deciders, strict=True))
         domain_audit = {name: self._build_domain_audit(name, fall_model) for name in domain_names}

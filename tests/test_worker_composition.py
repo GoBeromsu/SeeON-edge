@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Literal, final
 
@@ -206,7 +206,8 @@ def test_two_cameras_isolate_mutable_state_and_share_yolo_extractors(
             strict=True,
         )
     )
-    assert [task for task, _runner in serving.created] == ["pose", "person", "bed", "fall"]
+    # box_source defaults to "pose" (issue #44): person is never provisioned.
+    assert [task for task, _runner in serving.created] == ["pose", "bed", "fall"]
     assert all(loop.started_after_warmup for loop in loops.loops)
 
 
@@ -408,6 +409,134 @@ def test_camera_with_persisted_bed_zone_polygon_seeds_scene_state(
         ),
     )
     assert without_polygon.scene_state.persisted_bed_regions == ()
+    # Issue #41: a persisted polygon is authoritative and never expires, so
+    # scheduling the live bed-seg extractor on top of it would only pay its
+    # cost for a result nothing ever reads.
+    assert "bed" not in with_polygon.scheduler.task_intervals
+    assert "bed" in without_polygon.scheduler.task_intervals
+
+
+def test_bed_exit_disabled_excludes_bed_from_intervals(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Issue #47: the extraction schedule is derived from the union of active
+    domains' declared ``requires``, not a fixed dict. With bed_exit disabled,
+    only "fall" is active and its sole requirement is "pose" -- "bed" must
+    never appear in the built schedule."""
+    _stub_heartbeat_transport(monkeypatch)
+    serving = _FakeServingClient()
+    loops = _LoopFactory(serving)
+    config = WorkerConfig.model_validate(
+        {
+            "version": 7,
+            "relay": {"url": "http://relay.test", "token": "relay-token"},
+            "domains": {"enabled": ["fall"]},
+            "cameras": [
+                {
+                    "camera_id": "camera-a",
+                    "facility_id": "facility-a",
+                    "rtsp_url": "rtsp://example.test/camera-a",
+                    "heartbeat_interval_sec": 30.0,
+                }
+            ],
+        }
+    )
+    runtime = _runtime(config, serving, loops, tmp_path)
+
+    runtime.run()
+
+    intervals = runtime.cameras[0].scheduler.task_intervals
+    assert set(intervals) == {"pose"}
+    assert "bed" not in intervals
+
+
+def test_domain_requiring_an_unregistered_extractor_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Issue #47: a domain that declares a ``requires`` name with no matching
+    provisioned extractor refuses to boot that camera -- fail-closed,
+    mirroring ``_build_decider``'s existing unsupported-domain RuntimeError.
+    A per-camera failure degrades only that camera (``run_camera_stage``), so
+    this asserts the camera never activates rather than that ``run()``
+    raises.
+    """
+    _stub_heartbeat_transport(monkeypatch)
+    serving = _FakeServingClient()
+    loops = _LoopFactory(serving)
+    ghost_bed_exit = replace(
+        worker_module.DOMAIN_REGISTRY["bed_exit"],
+        requires=frozenset({"pose", "bed", "ghost"}),
+    )
+    monkeypatch.setattr(
+        worker_module,
+        "DOMAIN_REGISTRY",
+        {**worker_module.DOMAIN_REGISTRY, "bed_exit": ghost_bed_exit},
+    )
+    runtime = _runtime(_config("camera-a"), serving, loops, tmp_path)
+
+    with caplog.at_level("WARNING"):
+        runtime.run()
+
+    assert runtime.cameras == ()
+    assert any(
+        "domain requires unregistered extractor(s): ghost" in record.getMessage()
+        for record in caplog.records
+    )
+
+
+def test_default_box_source_schedules_pose_and_bed_without_person(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Issue #44: box_source defaults to "pose", so with both domains active
+    (fall + bed_exit, the default) the schedule is exactly their requires
+    union -- person is never added."""
+    _stub_heartbeat_transport(monkeypatch)
+    serving = _FakeServingClient()
+    loops = _LoopFactory(serving)
+    runtime = _runtime(_config("camera-a"), serving, loops, tmp_path)
+
+    runtime.run()
+
+    intervals = runtime.cameras[0].scheduler.task_intervals
+    assert set(intervals) == {"pose", "bed"}
+    assert "person" not in [task for task, _runner in serving.created]
+
+
+def test_box_source_person_schedules_and_provisions_person(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Issue #44: box_source="person" additionally schedules and provisions
+    the person extractor, on top of the domain-declared pose/bed set."""
+    _stub_heartbeat_transport(monkeypatch)
+    serving = _FakeServingClient()
+    loops = _LoopFactory(serving)
+    config = WorkerConfig.model_validate(
+        {
+            "version": 7,
+            "relay": {"url": "http://relay.test", "token": "relay-token"},
+            "models": {"box_source": "person"},
+            "cameras": [
+                {
+                    "camera_id": "camera-a",
+                    "facility_id": "facility-a",
+                    "rtsp_url": "rtsp://example.test/camera-a",
+                    "heartbeat_interval_sec": 30.0,
+                }
+            ],
+        }
+    )
+    runtime = _runtime(config, serving, loops, tmp_path)
+
+    runtime.run()
+
+    intervals = runtime.cameras[0].scheduler.task_intervals
+    assert set(intervals) == {"pose", "bed", "person"}
+    assert "person" in [task for task, _runner in serving.created]
 
 
 def _runtime(
