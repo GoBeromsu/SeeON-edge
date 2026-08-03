@@ -15,7 +15,9 @@ from backend.app.features.cameras.store import (
 )
 from backend.app.features.clips.catalog import (
     _V3_TABLE_STATEMENTS,
+    SCHEMA_VERSION,
     CatalogConflictError,
+    CatalogSchemaNewerThanSupportedError,
     CatalogStore,
     get_catalog_store,
 )
@@ -117,6 +119,42 @@ def test_catalog_open_failure_is_recorded_without_raising(monkeypatch) -> None:
 
     assert get_catalog_store(app) is None
     assert "catalog mount unavailable" in app.state.catalog_error
+
+
+def test_catalog_open_refuses_newer_schema_without_mutation(tmp_path) -> None:
+    """Mirrors the worker-side ``test_newer_schema_is_refused_without_mutation``
+    (``tests/test_evidence_outbox.py``): opening a catalog written by a newer
+    ml-api must refuse rather than silently rewriting/corrupting it."""
+    catalog_path = tmp_path / "catalog.sqlite3"
+    with sqlite3.connect(catalog_path) as connection:
+        connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION + 1}")
+    before = os.stat(catalog_path).st_size
+
+    with pytest.raises(CatalogSchemaNewerThanSupportedError) as raised:
+        CatalogStore.open(catalog_path)
+
+    assert raised.value.found == SCHEMA_VERSION + 1
+    assert raised.value.supported == SCHEMA_VERSION
+    assert os.stat(catalog_path).st_size == before
+
+
+def test_catalog_downgrade_degrades_instead_of_crashing_startup(tmp_path, monkeypatch) -> None:
+    """The parallel case to the worker's ``NewerSchemaVersionError`` handling
+    in ``_STORE_UNAVAILABLE_ERRORS`` (``worker/runtime/faults/record.py``,
+    ``worker/runtime/config/lkg_store.py``): a downgraded ml-api binary
+    pointed at a newer ``catalog.sqlite3`` must degrade at startup instead of
+    crashing, matching ``get_catalog_store``'s existing OSError/sqlite3.Error
+    degradation behavior."""
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    catalog_path = tmp_path / ".local" / "state" / "ml-api" / "catalog.sqlite3"
+    catalog_path.parent.mkdir(parents=True)
+    with sqlite3.connect(catalog_path) as connection:
+        connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION + 1}")
+
+    app = FastAPI()
+
+    assert get_catalog_store(app) is None
+    assert "catalog unavailable" in app.state.catalog_error
 
 
 def test_catalog_queries_promoted_clip_columns_in_sql(tmp_path) -> None:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Self
 
 import pytest
@@ -199,6 +200,35 @@ def test_label_clip_saves_sidecar_and_audit(clip_env) -> None:
         ("reviewer-2", "label", "clip-1"),
         ("admin", "label", "clip-1"),
     ]
+
+
+def test_label_clip_signals_degradation_when_label_store_is_unwritable(
+    clip_env, monkeypatch
+) -> None:
+    """A degraded ``LabelStore.save`` (e.g. an unwritable labels dir) must not
+    be reported to the caller as a successful 200 label write -- see #50."""
+    clip_store = clip_env / "clip-store"
+    label_store_root = clip_env / "label-store"
+    _write_manifest(clip_store, "clip-1")
+    label_store_root.mkdir(parents=True)
+    labels_dir = label_store_root / "labels"
+    original_mkdir = Path.mkdir
+
+    def guarded_mkdir(self: Path, *, parents: bool = False, exist_ok: bool = False) -> None:
+        if self == labels_dir:
+            raise PermissionError("labels mount unavailable")
+        original_mkdir(self, parents=parents, exist_ok=exist_ok)
+
+    with TestClient(create_app(lifespan=no_lifespan)) as client:
+        _login(client)
+        monkeypatch.setattr(Path, "mkdir", guarded_mkdir)
+        response = client.put(
+            "/api/v1/clips/clip-1/label",
+            json={"label": "TRUE_POSITIVE", "reviewer": "reviewer-1"},
+        )
+
+    assert response.status_code == 503
+    assert not (labels_dir / "clip-1.json").exists()
 
 
 def test_clip_routes_require_a_dashboard_session(clip_env) -> None:

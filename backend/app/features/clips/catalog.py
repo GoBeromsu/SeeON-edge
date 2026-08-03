@@ -194,7 +194,7 @@ def get_catalog_store(app: FastAPI) -> CatalogStore | None:
         return store
     try:
         store = CatalogStore.open(_catalog_path())
-    except (OSError, sqlite3.Error) as exc:
+    except (OSError, sqlite3.Error, CatalogSchemaNewerThanSupportedError) as exc:
         message = f"catalog unavailable at {_catalog_path()}: {exc}"
         app.state.catalog_error = message
         logger.warning(message)
@@ -472,6 +472,24 @@ class CatalogConflictError(ValueError):
     """A stable id was submitted with content different from its first write."""
 
 
+@dataclass(slots=True)
+class CatalogSchemaNewerThanSupportedError(Exception):
+    """A downgraded ml-api binary opened a catalog written by a newer schema.
+
+    Mirrors the worker-side ``NewerSchemaVersionError``
+    (``worker/pipeline/output/evidence/evidence_outbox_types.py``), which
+    ``get_catalog_store`` treats as "storage unavailable, degrade" the same
+    way it treats ``OSError``/``sqlite3.Error`` -- a schema downgrade must not
+    crash ml-api startup.
+    """
+
+    found: int
+    supported: int
+
+    def __str__(self) -> str:
+        return f"catalog schema {self.found} is newer than supported {self.supported}"
+
+
 def _raise_conflict(table: str, key: str) -> None:
     raise CatalogConflictError(f"conflicting {table} record: {key}")
 
@@ -538,7 +556,7 @@ class CatalogStore:
     def _migrate(connection: sqlite3.Connection) -> None:
         version = int(connection.execute("PRAGMA user_version").fetchone()[0])
         if version > SCHEMA_VERSION:
-            raise RuntimeError(f"catalog schema {version} is newer than supported")
+            raise CatalogSchemaNewerThanSupportedError(found=version, supported=SCHEMA_VERSION)
         if version == SCHEMA_VERSION:
             return
         connection.execute("BEGIN IMMEDIATE")
@@ -557,7 +575,9 @@ class CatalogStore:
                 for statement in _V3_TABLE_STATEMENTS:
                     connection.execute(statement)
             else:
-                raise RuntimeError(f"unsupported catalog schema {version}")  # noqa: TRY301
+                raise CatalogSchemaNewerThanSupportedError(  # noqa: TRY301
+                    found=version, supported=SCHEMA_VERSION
+                )
             for table, key in _TABLE_KEYS.items():
                 rows = connection.execute(f"SELECT {key}, payload_json FROM {table}").fetchall()
                 columns = _TABLE_COLUMNS[table]
@@ -704,6 +724,7 @@ class CatalogStore:
 
 __all__ = [
     "CatalogConflictError",
+    "CatalogSchemaNewerThanSupportedError",
     "StrictManifest",
     "CatalogRecord",
     "sanitized_camera_payload",
