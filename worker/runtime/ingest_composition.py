@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from pathlib import Path
-from typing import TypeAlias
+from typing import Final, TypeAlias
 
 from worker.adapters.decode.cpu_av.adapter import CpuAvAdapter
 from worker.adapters.decode.cpu_av.models import CpuAvConfig
@@ -20,6 +21,8 @@ from worker.pipeline.ingest.lifecycle import (
 from worker.pipeline.ingest.registry import ResolvedSource, SourceRecord, SourceRegistry
 from worker.runtime.config import CameraRuntimeConfig, WorkerRuntimeConfig
 from worker.runtime.profile.registry import DecodePolicy
+
+LOGGER: Final = logging.getLogger(__name__)
 
 DecodeConfig: TypeAlias = CpuAvConfig | NvdecCuvidConfig
 
@@ -143,6 +146,23 @@ def compose_camera_ingest_loop(
         source_id=camera.camera_id,
         make_decode_config=_decode_config_factory(decode, camera, effective_runtime),
         policy=CapturePolicy(target_fps=camera.fps, max_failures=effective_runtime.max_failures),
+    )
+    # `camera.fps` paces both decode and the live-view tap (RTSPSource yields
+    # at this rate; CameraPipelinePump publishes every yielded packet to the
+    # live view unconditionally). It silently falls back to a hardcoded 5.0
+    # whenever nothing sets it (no per-camera value from the backend registry,
+    # no ML_DEFAULT_CAMERA_FPS), which previously had zero log trace -- a
+    # camera pacing at 5fps against a 15fps source looked externally
+    # indistinguishable from a frame_stride bug (5 == 15/3), which is exactly
+    # the false lead this line exists to close off. `frame_stride` never
+    # reaches this policy -- it only gates the extractor Scheduler.
+    LOGGER.info(
+        "camera ingest paced to target_fps (frame_stride does not affect this rate)",
+        extra={
+            "camera_id": camera.camera_id,
+            "target_fps": camera.fps,
+            "frame_stride": camera.frame_stride,
+        },
     )
     return CameraIngestLoop(spec, ports)
 

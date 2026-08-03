@@ -312,6 +312,50 @@ def test_compose_camera_ingest_loop_without_runtime_falls_back_to_dataclass_defa
     assert config == CpuAvConfig(camera_id="camera-a", url=camera.inference_rtsp_url)
 
 
+# -- compose_camera_ingest_loop: fps/frame_stride decoupling (QA fps bug) ----
+
+
+@pytest.mark.parametrize("frame_stride", [1, 3, 30])
+def test_compose_camera_ingest_loop_capture_policy_fps_is_independent_of_frame_stride(
+    frame_stride: int,
+) -> None:
+    # QA measured live-view fps at ~1/3 of the source's 15fps and flagged
+    # frame_stride as a possible (unconfirmed) cause. Root cause turned out to
+    # be unrelated: camera.fps itself silently defaults to 5.0 when nothing
+    # sets it. This test pins down the other half of that finding -- whatever
+    # frame_stride is set to must never change the CapturePolicy target_fps
+    # that paces ingest (and therefore the live view, which is published for
+    # every packet CameraPipelinePump takes off the bus, unconditionally).
+    camera = _camera("camera-a").model_copy(
+        update={"fps": 15.0, "frame_stride": frame_stride}
+    )
+    registry = build_camera_source_registry((camera,))
+
+    loop = compose_camera_ingest_loop(
+        camera, BoundedFrameBus(), _Reporter(), decode="opencv", registry=registry
+    )
+
+    assert loop._spec.policy.target_fps == 15.0  # noqa: SLF001
+
+
+def test_compose_camera_ingest_loop_logs_the_effective_pacing_fps(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    camera = _camera("camera-a").model_copy(update={"fps": 15.0, "frame_stride": 3})
+    registry = build_camera_source_registry((camera,))
+
+    with caplog.at_level("INFO", logger="worker.runtime.ingest_composition"):
+        compose_camera_ingest_loop(
+            camera, BoundedFrameBus(), _Reporter(), decode="opencv", registry=registry
+        )
+
+    records = [r for r in caplog.records if r.name == "worker.runtime.ingest_composition"]
+    assert any("target_fps" in r.getMessage() for r in records)
+    assert any(getattr(r, "target_fps", None) == 15.0 for r in records)
+    assert any(getattr(r, "frame_stride", None) == 3 for r in records)
+    assert any(getattr(r, "camera_id", None) == "camera-a" for r in records)
+
+
 def test_build_camera_source_registry_allowlists_only_the_configured_cameras() -> None:
     registry = build_camera_source_registry((_camera("camera-a"),))
 
