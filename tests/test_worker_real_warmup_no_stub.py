@@ -17,15 +17,17 @@ machine without artifacts reports "skipped", never a false pass.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import torch
 import yaml
 
 from worker.adapters.model.in_process import InProcessServingClient
 from worker.adapters.model.registry import default_registry
-from worker.adapters.model.torch_lstm_fall import LstmFallRunner
+from worker.adapters.model.torch_lstm_fall import LstmFallRunner, build_lstm_module
 from worker.runtime.model_composition import compose_yolo_extractors
 from worker.runtime.worker import WorkerRuntime
 
@@ -173,6 +175,82 @@ def test_example_config_fall_contract_matches_the_local_artifact() -> None:
     fall_cfg = example["models"]["fall"]
     configured_schema = fall_cfg["schema_version"]
     configured_identity = fall_cfg["preprocessing_identity"]
+
+    runner = LstmFallRunner.from_artifact_dir(
+        str(artifact_dir),
+        device="cpu",
+        expected_schema_version=configured_schema,
+        expected_preprocessing_identity=configured_identity,
+    )
+
+    assert runner.schema_version == configured_schema
+    assert runner.preprocessing_identity == configured_identity
+
+
+def test_example_config_fall_contract_boots_against_a_synthesized_artifact(
+    tmp_path: Path,
+) -> None:
+    """CI-runnable companion to the local-artifact test above.
+
+    ``models/`` is gitignored, so the test above only skips-or-runs
+    depending on whether a real ``models/fall/lstm`` artifact happens to be
+    checked out locally -- it never runs in CI. This test closes that gap by
+    synthesizing a legacy-shaped artifact entirely in-process (a real
+    ``_LstmNet``-shaped ``torch.nn.Module`` with its ``state_dict()`` saved
+    to ``model.pt``, a matching ``arch.json``, and a ``metadata.yaml`` with
+    all loader-required fields but -- critically -- no ``schema_version`` or
+    ``preprocessing_identity`` keys, the same shape as the real shipped
+    artifact and as ``eldercare-dataset-ops``'s
+    ``ml/training/model_artifacts.py::build_fall_lstm_metadata``, which
+    never writes those two fields) and then boots
+    ``LstmFallRunner.from_artifact_dir`` against the pins read live from
+    ``worker/ml-worker.example.yaml``.
+
+    This has no ``real_stack`` marker and no dependency on ``models/`` being
+    present, so it runs in default CI. It proves the shipped example config
+    actually boots the contract it documents, and it demonstrably catches
+    drift: mismatching either pin (verified manually while authoring this
+    test, then reverted) makes ``from_artifact_dir`` raise the real
+    ``ModelLoadError`` from ``_validate_expected_identity``
+    (``worker/adapters/model/torch_lstm_fall.py``), not a mocked one.
+    """
+    example = yaml.safe_load(
+        (REPO_ROOT / "worker" / "ml-worker.example.yaml").read_text(encoding="utf-8")
+    )
+    fall_cfg = example["models"]["fall"]
+    configured_schema = fall_cfg["schema_version"]
+    configured_identity = fall_cfg["preprocessing_identity"]
+    window = fall_cfg["window"]
+
+    artifact_dir = tmp_path / "fall-lstm"
+    artifact_dir.mkdir()
+
+    hidden, layers, dropout = 4, 1, 0.0
+    module = build_lstm_module(hidden=hidden, layers=layers, dropout=dropout)
+    torch.save(module.state_dict(), artifact_dir / "model.pt")
+    (artifact_dir / "arch.json").write_text(
+        json.dumps({"hidden": hidden, "layers": layers, "dropout": dropout}),
+        encoding="utf-8",
+    )
+    metadata = {
+        "type": "lstm",
+        "framework": "pytorch",
+        "mode": "sequence",
+        "artifact_dir": str(artifact_dir),
+        "weights": "model.pt",
+        "architecture": "arch.json",
+        "metadata": "metadata.yaml",
+        "window": window,
+        "stride": fall_cfg["stride"],
+        "input_shape": [window, 51],
+        "operating_threshold": fall_cfg["operating_threshold"],
+        # Deliberately no schema_version / preprocessing_identity keys: the
+        # manifest's legacy defaults must apply, matching the real shipped
+        # artifact and build_fall_lstm_metadata's actual output.
+    }
+    (artifact_dir / "metadata.yaml").write_text(
+        yaml.safe_dump(metadata), encoding="utf-8"
+    )
 
     runner = LstmFallRunner.from_artifact_dir(
         str(artifact_dir),
