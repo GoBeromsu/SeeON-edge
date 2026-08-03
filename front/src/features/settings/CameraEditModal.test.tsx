@@ -40,7 +40,12 @@ function render(
   act(() => root.render(
     <CameraEditModal camera={cam} onClose={onClose} onUpdated={onUpdated} onRequestDelete={onRequestDelete} />,
   ));
-  return { host, root, onClose, onUpdated, onRequestDelete };
+  const rerender = (nextCam: Camera | null) => {
+    act(() => root.render(
+      <CameraEditModal camera={nextCam} onClose={onClose} onUpdated={onUpdated} onRequestDelete={onRequestDelete} />,
+    ));
+  };
+  return { host, root, onClose, onUpdated, onRequestDelete, rerender };
 }
 
 function findButton(label: string): HTMLButtonElement {
@@ -169,5 +174,40 @@ describe('CameraEditModal', () => {
 
     act(() => findButton('취소').click());
     expect(document.querySelector('[role="dialog"]')?.getAttribute('data-size')).toBe('md');
+  });
+
+  it('does not reset the re-recognition flow when the operations page polls in a fresh camera object for the same id', () => {
+    const { rerender } = render(camera);
+
+    act(() => document.querySelector<HTMLButtonElement>('[aria-label="침대 영역 다시 인식"]')?.click());
+    expect(document.querySelector('[role="dialog"]')?.getAttribute('data-size')).toBe('lg');
+    expect(document.body.textContent).toContain('침대 영역 인식이 필요합니다.');
+
+    // Simulate a 5s poll tick handing down a brand-new object for the same camera id.
+    rerender({ ...camera });
+
+    expect(document.querySelector('[role="dialog"]')?.getAttribute('data-size')).toBe('lg');
+    expect(document.body.textContent).toContain('침대 영역 인식이 필요합니다.');
+  });
+
+  it('resets to the view mode when the modal is retargeted at a different camera id', () => {
+    const otherCamera: Camera = { ...camera, id: 'cam-2', label: '102호', bed_zone: null };
+    const { rerender } = render(camera);
+
+    act(() => document.querySelector<HTMLButtonElement>('[aria-label="침대 영역 다시 인식"]')?.click());
+    expect(document.querySelector('[role="dialog"]')?.getAttribute('data-size')).toBe('lg');
+
+    rerender(otherCamera);
+
+    expect(document.querySelector('[role="dialog"]')?.getAttribute('data-size')).toBe('md');
+    expect((document.querySelector('input[name="label"]') as HTMLInputElement).value).toBe('102호');
+  });
+
+  it('shows the masked address as helper text instead of leaving the operator guessing whether one is registered', () => {
+    render(camera);
+    const rtspInput = document.querySelector('input[name="rtsp_url"]') as HTMLInputElement;
+    expect(rtspInput.value).toBe('');
+    expect(document.body.textContent).toContain('현재 등록됨:');
+    expect(document.body.textContent).toContain(camera.rtsp_url_masked);
   });
 });

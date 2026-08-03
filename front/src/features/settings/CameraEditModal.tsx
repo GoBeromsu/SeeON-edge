@@ -40,18 +40,27 @@ export function CameraEditModal({ camera, onClose, onUpdated, onRequestDelete }:
   const [saveError, setSaveError] = useState<string | null>(null);
   const [testResult, setTestResult] = useState<CameraTestResult | null>(null);
   const busyRef = useRef(false);
+  const openCameraIdRef = useRef<string | null>(null);
 
+  // Reset the form only when the targeted camera's identity changes (opening the modal for a
+  // camera, or switching to a different one) — not on every re-render caused by the operations
+  // page's polling passing a fresh `camera` object for the same id. Otherwise an in-progress
+  // re-recognition flow (mode === 'reseg') gets silently snapped back to 'view' mid-flow.
   useEffect(() => {
-    if (camera) {
-      setLabel(camera.label);
-      setRtspUrl('');
-      setBedZone(camera.bed_zone ?? null);
-      setMode('view');
-      setSaveError(null);
-      setTestResult(null);
-      setBusy(null);
-      busyRef.current = false;
+    if (!camera) {
+      openCameraIdRef.current = null;
+      return;
     }
+    if (openCameraIdRef.current === camera.id) return;
+    openCameraIdRef.current = camera.id;
+    setLabel(camera.label);
+    setRtspUrl('');
+    setBedZone(camera.bed_zone ?? null);
+    setMode('view');
+    setSaveError(null);
+    setTestResult(null);
+    setBusy(null);
+    busyRef.current = false;
   }, [camera]);
 
   function requestClose(): void {
@@ -165,10 +174,13 @@ export function CameraEditModal({ camera, onClose, onUpdated, onRequestDelete }:
               value={rtspUrl}
               disabled={busyFlag}
               onChange={(event) => setRtspUrl(event.target.value)}
-              placeholder={camera.rtsp_url_masked}
+              placeholder="새 주소 입력 시에만 작성"
               autoComplete="off"
             />
           </label>
+          <p className="mt-1 text-xs text-muted-foreground">
+            현재 등록됨: <span className="font-mono">{camera.rtsp_url_masked}</span> — 변경할 때만 새 주소를 입력하세요.
+          </p>
 
           <div className="flex items-center justify-between gap-2 text-sm">
             <span className="font-semibold text-muted-foreground">침대 영역</span>
