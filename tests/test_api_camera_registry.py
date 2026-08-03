@@ -21,7 +21,15 @@ from backend.app.lifespan import refresh_backend_config
 from backend.app.main import create_app, no_lifespan
 from backend.app.shared.backend_mapping import MappingResult
 from contracts.worker_config import PulledCameraConfig, PulledNightWindow, PulledWorkerConfig
-from worker.runtime.config import JsonObject, WorkerConfigLkgStore, load_worker_config_from_relay
+from worker.adapters.decode.cpu_av.adapter import CpuAvAdapter
+from worker.adapters.decode.nvdec_cuvid.adapter import NvdecCuvidAdapter
+from worker.runtime.config import (
+    CameraRuntimeConfig,
+    JsonObject,
+    WorkerConfigLkgStore,
+    load_worker_config_from_relay,
+)
+from worker.runtime.ingest_composition import decoder_for
 
 AUTH = {"Authorization": "Bearer relay-token"}
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -800,6 +808,23 @@ def test_patch_camera_sets_decode_backend_and_worker_config_emits_it(tmp_path) -
     camera = worker_config.json()["cameras"][0]
     assert camera["decode_backend"] == "nvdec"
     assert camera["camera_id"] == "camera-1"
+
+    # Issue #42: the value must not just round-trip through the backend --
+    # it has to actually reach the composed per-camera ingest loop's decoder
+    # selection, not be dropped once it lands on CameraRuntimeConfig.
+    snapshot = load_worker_config_from_relay(
+        "http://ml-api:8000",
+        "relay-token",
+        store=WorkerConfigLkgStore(tmp_path / "worker-config-pull.sqlite3"),
+        urlopen=lambda _request, _timeout: FakeHTTPResponse(worker_config.json()),
+    )
+    assert snapshot is not None
+    runtime_camera = snapshot.config.cameras[0]
+    assert isinstance(runtime_camera, CameraRuntimeConfig)
+    assert runtime_camera.decode_backend == "nvdec"
+    decoder = decoder_for("nvdec", runtime_camera.decode_backend)
+    assert isinstance(decoder, NvdecCuvidAdapter)
+    assert not isinstance(decoder, CpuAvAdapter)
 
 
 def test_patch_camera_rejects_invalid_decode_backend(tmp_path) -> None:
