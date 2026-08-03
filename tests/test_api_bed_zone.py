@@ -192,8 +192,10 @@ def test_recognize_bed_not_found_does_not_persist_anything(
         lambda: _http_error(404),  # unstructured 404 (e.g. unknown camera at the worker)
         lambda: _http_error(503),
         lambda: urllib.error.URLError("connection refused"),
+        lambda: TimeoutError("timed out"),
+        lambda: OSError("connection reset"),
     ],
-    ids=["plain_404", "worker_503", "connection_refused"],
+    ids=["plain_404", "worker_503", "connection_refused", "bare_timeout_error", "bare_os_error"],
 )
 def test_recognize_reports_worker_unavailability_as_503(
     raise_error, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -209,6 +211,52 @@ def test_recognize_reports_worker_unavailability_as_503(
         response = client.post(RECOGNIZE_PATH)
 
     assert response.status_code == 503
+
+
+class _ReadFailsUpstreamResponse:
+    status: int = 200
+    headers: dict[str, str] = {"Content-Type": "application/json"}
+
+    def __init__(self, error: BaseException) -> None:
+        self._error = error
+        self.closed = False
+
+    def read(self, size: int = -1) -> bytes:
+        del size
+        raise self._error
+
+    def close(self) -> None:
+        self.closed = True
+
+
+@pytest.mark.parametrize(
+    "make_error",
+    [lambda: TimeoutError("timed out"), lambda: OSError("connection reset")],
+    ids=["timeout_error", "os_error"],
+)
+def test_recognize_reports_a_read_timeout_as_503_not_500(
+    make_error, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A TimeoutError (or other OSError) raised while reading the response
+    body -- e.g. the connection was accepted but the worker stalled mid
+    response -- must map to the same clean 503 as an upfront connect/read
+    timeout, not surface as an unhandled 500."""
+    upstream = _ReadFailsUpstreamResponse(make_error())
+
+    def fake_urlopen(
+        request: urllib.request.Request, timeout: float
+    ) -> _ReadFailsUpstreamResponse:
+        del request, timeout
+        return upstream
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+    with TestClient(_app(tmp_path)) as client:
+        _login(client)
+        response = client.post(RECOGNIZE_PATH)
+
+    assert response.status_code == 503
+    assert upstream.closed is True
 
 
 def test_recognize_rejects_a_malformed_upstream_payload_as_503(

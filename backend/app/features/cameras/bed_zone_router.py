@@ -96,10 +96,19 @@ def recognize_bed_zone(
         raise _upstream_unavailable() from exc
     except urllib.error.URLError as exc:
         raise _upstream_unavailable() from exc
+    except (TimeoutError, OSError) as exc:
+        # A read timeout waiting on getresponse() can surface as a bare
+        # TimeoutError instead of being wrapped in URLError (CPython's
+        # urllib.request.AbstractHTTPHandler.do_open does not guarantee the
+        # wrap), so it must be handled alongside HTTPError/URLError to avoid
+        # an unhandled 500.
+        raise _upstream_unavailable() from exc
 
     try:
         upstream_status = int(getattr(upstream, "status", status.HTTP_200_OK))
         raw = upstream.read()
+    except (TimeoutError, OSError) as exc:
+        raise _upstream_unavailable() from exc
     finally:
         upstream.close()
     if upstream_status != status.HTTP_200_OK:
