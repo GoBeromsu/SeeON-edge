@@ -145,6 +145,7 @@ class WorkerCameraConfig(BaseModel):
     facility_id: str = Field(min_length=1)
     rtsp_url: str = Field(min_length=1)
     fps: float | None = Field(default=None, gt=0)
+    frame_stride: int | None = Field(default=None, gt=0)
     decode_backend: str | None = Field(default=None)
     domains: list[str] | None = None
     # Persisted bed-zone recognition (see BedZoneStore): threaded through so
@@ -410,6 +411,9 @@ def worker_config_snapshot(
         fps = _default_camera_fps()
         if fps is not None:
             camera["fps"] = fps
+        stride = _default_frame_stride()
+        if stride is not None:
+            camera["frame_stride"] = stride
         decode_backend = record.get("decode_backend") or _default_decode_backend()
         if decode_backend is not None:
             camera["decode_backend"] = decode_backend
@@ -882,6 +886,26 @@ def _default_camera_fps() -> float | None:
         return None
     try:
         value = float(raw)
+    except ValueError:
+        return None
+    return value if value > 0 else None
+
+
+def _default_frame_stride() -> int | None:
+    """Facility-wide detection cadence divisor (worker default 1 -- every frame).
+
+    Set ML_DEFAULT_FRAME_STRIDE to decouple detection cadence from live view:
+    the worker still decodes/serves the live MJPEG view at fps (see
+    ML_DEFAULT_CAMERA_FPS), but only runs pose+person inference every Nth
+    decoded frame. Unset -> worker keeps its stride-1 default (detect every
+    frame). Lets deployments raise fps for a smoother live wall without
+    overloading inference-bound hardware.
+    """
+    raw = os.environ.get("ML_DEFAULT_FRAME_STRIDE", "").strip()
+    if not raw:
+        return None
+    try:
+        value = int(raw)
     except ValueError:
         return None
     return value if value > 0 else None

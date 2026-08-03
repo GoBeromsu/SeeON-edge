@@ -422,6 +422,73 @@ def test_worker_config_emits_default_camera_fps_when_configured(
     assert camera["camera_id"] == "camera-1"
 
 
+def test_worker_config_emits_default_frame_stride_when_configured(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ML_DEFAULT_FRAME_STRIDE", "3")
+    app = create_app(lifespan=no_lifespan)
+    app.state.edge_relay_token = "relay-token"
+    store = app.state.camera_registry = CameraRegistryStore(tmp_path / "catalog.sqlite3")
+    store.create(
+        camera_id="camera-1",
+        label="Lobby",
+        rtsp_url="rtsp://camera/stream",
+        space_id="space-1",
+        status="online",
+    )
+
+    with TestClient(app) as client:
+        _login(client)
+        worker_config = client.get(
+            "/api/v1/cameras/worker-config",
+            headers={"X-Edge-Relay-Token": "relay-token"},
+        )
+
+    assert worker_config.status_code == 200
+    camera = worker_config.json()["cameras"][0]
+    assert camera["frame_stride"] == 3
+    assert camera["camera_id"] == "camera-1"
+
+
+def test_worker_config_omits_frame_stride_when_unset_or_invalid(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("ML_DEFAULT_FRAME_STRIDE", raising=False)
+    app = create_app(lifespan=no_lifespan)
+    app.state.edge_relay_token = "relay-token"
+    store = app.state.camera_registry = CameraRegistryStore(tmp_path / "catalog.sqlite3")
+    store.create(
+        camera_id="camera-1",
+        label="Lobby",
+        rtsp_url="rtsp://camera/stream",
+        space_id="space-1",
+        status="online",
+    )
+
+    with TestClient(app) as client:
+        _login(client)
+        worker_config = client.get(
+            "/api/v1/cameras/worker-config",
+            headers={"X-Edge-Relay-Token": "relay-token"},
+        )
+
+    assert worker_config.status_code == 200
+    camera = worker_config.json()["cameras"][0]
+    assert "frame_stride" not in camera
+
+    monkeypatch.setenv("ML_DEFAULT_FRAME_STRIDE", "not-a-number")
+    with TestClient(app) as client:
+        _login(client)
+        worker_config = client.get(
+            "/api/v1/cameras/worker-config",
+            headers={"X-Edge-Relay-Token": "relay-token"},
+        )
+
+    assert worker_config.status_code == 200
+    camera = worker_config.json()["cameras"][0]
+    assert "frame_stride" not in camera
+
+
 def test_worker_config_surfaces_empty_roster_when_registry_empty(tmp_path) -> None:
     """An empty dashboard camera registry must surface as an empty worker-config
     roster -- never silently substitute app.state.pulled_config's legacy
@@ -597,6 +664,64 @@ def test_worker_config_pull_maps_fps_and_enabled_domains_from_relay_payload(
     assert snapshot.config.cameras[0].fps == 4
     assert snapshot.config.domains.enabled_domains == ("fall",)
 
+
+def test_worker_config_pull_maps_frame_stride_from_relay_payload(
+    tmp_path: Path,
+) -> None:
+    store = WorkerConfigLkgStore(tmp_path / "worker-config.sqlite3")
+    payload: JsonObject = {
+        "registry_version": 9,
+        "config_version": 9,
+        "restart_epoch": 1,
+        "cameras": [
+            {
+                "camera_id": "camera-1",
+                "facility_id": "facility-1",
+                "rtsp_url": "rtsp://camera/stream",
+                "fps": 15,
+                "frame_stride": 3,
+            }
+        ],
+    }
+
+    snapshot = load_worker_config_from_relay(
+        "http://ml-api:8000",
+        "relay-token",
+        store=store,
+        urlopen=lambda _request, _timeout: FakeHTTPResponse(payload),
+    )
+
+    assert snapshot is not None
+    assert snapshot.config.cameras[0].frame_stride == 3
+
+
+def test_worker_config_pull_defaults_frame_stride_to_one_when_absent(
+    tmp_path: Path,
+) -> None:
+    store = WorkerConfigLkgStore(tmp_path / "worker-config.sqlite3")
+    payload: JsonObject = {
+        "registry_version": 9,
+        "config_version": 9,
+        "restart_epoch": 1,
+        "cameras": [
+            {
+                "camera_id": "camera-1",
+                "facility_id": "facility-1",
+                "rtsp_url": "rtsp://camera/stream",
+                "fps": 15,
+            }
+        ],
+    }
+
+    snapshot = load_worker_config_from_relay(
+        "http://ml-api:8000",
+        "relay-token",
+        store=store,
+        urlopen=lambda _request, _timeout: FakeHTTPResponse(payload),
+    )
+
+    assert snapshot is not None
+    assert snapshot.config.cameras[0].frame_stride == 1
 
 
 def test_patch_pending_camera_preserves_local_id_after_backend_mapping(

@@ -44,6 +44,11 @@ services:
       # Facility-wide processed FPS for live camera streams (unset -> worker 5.0
       # default). Raise (e.g. 15) to smooth the live wall where GPU headroom allows.
       ML_DEFAULT_CAMERA_FPS: ${ML_DEFAULT_CAMERA_FPS:-}
+      # Facility-wide detection cadence divisor (unset -> worker stride-1
+      # default: detect every frame). Raise alongside ML_DEFAULT_CAMERA_FPS to
+      # keep detection cadence bounded while live view runs faster on
+      # inference-bound hardware.
+      ML_DEFAULT_FRAME_STRIDE: ${ML_DEFAULT_FRAME_STRIDE:-}
     volumes:
       - ${ML_MODELS_DIR:-./models}:/app/models:ro
       - ml-api-state:/root/.local/state/ml-api

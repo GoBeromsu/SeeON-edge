@@ -48,6 +48,7 @@ class _CameraPayload(BaseModel):
     floor_name: str | None = None
     created_at: str | None = None
     fps: float | None = Field(default=None, gt=0)
+    frame_stride: int | None = Field(default=None, gt=0)
     decode_backend: str | None = None
     domains: tuple[str, ...] = ()
     bed_zone_polygon: tuple[tuple[int, int], ...] | None = None
@@ -384,6 +385,7 @@ def _runtime_camera(payload: _CameraPayload) -> CameraRuntimeConfig:
         facility_id=payload.resolved_facility_id,
         rtsp_url=payload.rtsp_url,
         fps=payload.fps or 5.0,
+        frame_stride=payload.frame_stride or 1,
         decode_backend=payload.decode_backend,
         label=payload.label,
         bed_zone_polygon=payload.bed_zone_polygon,
