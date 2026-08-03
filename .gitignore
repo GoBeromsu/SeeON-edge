@@ -29,7 +29,21 @@ worker/ml-worker.*.local.yaml
 .runtime/
 
 # Large model artifacts and private data
-models/
+#
+# Issue #133: the packaged default LSTM fall-detector sidecars (arch.json,
+# metadata.yaml -- not the weights themselves) are tracked so the worker's
+# env-less default fall model config has a manifest to validate against as
+# soon as scripts/fetch-models.sh drops model.pt on disk. Git cannot
+# re-include a file whose parent directory is ignored, so a blanket
+# `models/` ignore has to become the `models/*` + explicit re-ignore chain
+# below to carve out just those two files.
+models/*
+!models/fall/
+models/fall/*
+!models/fall/lstm/
+models/fall/lstm/*
+!models/fall/lstm/arch.json
+!models/fall/lstm/metadata.yaml
 weights/
 checkpoints/
 *.pt

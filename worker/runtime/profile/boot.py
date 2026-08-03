@@ -8,6 +8,7 @@ from typing import Final
 
 from contracts.encode_diagnostics import EncodeSelection
 from worker.runtime.profile.registry import (
+    DEFAULT_PROFILE_NAME,
     ML_WORKER_PROFILE_ENV,
     PROFILE_REGISTRY,
     BootDependencies,
@@ -43,10 +44,18 @@ def resolve_profile(
     env: Mapping[str, str],
     registry: Mapping[str, ProfileSpec] = PROFILE_REGISTRY,
 ) -> ProfileSpec:
-    profile_name = env.get(ML_WORKER_PROFILE_ENV)
-    if profile_name is None or not profile_name.strip():
-        message = "ML_WORKER_PROFILE is required (no default); set cuda|mps|cpu"
-        raise ProfileError(message)
+    """Resolve ``ML_WORKER_PROFILE``, defaulting to :data:`DEFAULT_PROFILE_NAME`.
+
+    Issue #133: the worker must boot with zero env vars, so an unset/blank
+    ``ML_WORKER_PROFILE`` no longer refuses to boot -- it falls back to
+    ``DEFAULT_PROFILE_NAME`` ("cpu"), the only profile whose device
+    verification always succeeds with no injected capability probe. An
+    *explicit* but unrecognized value is still fail-closed: a typo like
+    ``ML_WORKER_PROFILE=gpu`` must not be silently reinterpreted as the
+    default.
+    """
+    raw = env.get(ML_WORKER_PROFILE_ENV)
+    profile_name = DEFAULT_PROFILE_NAME if raw is None or not raw.strip() else raw
 
     try:
         return registry[profile_name]
@@ -162,10 +171,42 @@ def resolve_boot_context(
     decode_probe: DecodeProbe | None = None,
     encode_probe: EncodeProbe | None = None,
 ) -> BootContext:
+    """Resolve the full boot gate: profile, device, decode, legacy-conflict.
+
+    Issue #79 (track 2): the device check, the decode preflight, and the
+    legacy-env conflict check are three independent gates over the same
+    resolved ``spec`` -- none depends on another's outcome. Previously each
+    raised immediately on its own failure, so an operator with e.g. both a
+    bad device *and* an incompatible legacy decode override only ever saw
+    the device failure, fixed it, reran, and only then discovered the
+    decode conflict. All three now always run and every failure is
+    collected into one raised ``ProfileVerifyError`` naming every failed
+    gate instead of just the first.
+    """
     spec = resolve_profile(env)
-    _ = verify_device_or_raise(spec, deps or BootDependencies(default_verifiers()))
-    _ = preflight_decode_or_raise(spec, decode_probe or default_decode_probe)
-    reject_legacy_conflicts(spec, env)
+    failures: list[str] = []
+
+    try:
+        _ = verify_device_or_raise(spec, deps or BootDependencies(default_verifiers()))
+    except ProfileVerifyError as error:
+        failures.append(str(error))
+
+    try:
+        _ = preflight_decode_or_raise(spec, decode_probe or default_decode_probe)
+    except ProfileVerifyError as error:
+        failures.append(str(error))
+
+    try:
+        reject_legacy_conflicts(spec, env)
+    except ProfileVerifyError as error:
+        failures.append(str(error))
+
+    if failures:
+        summary = "; ".join(failures)
+        raise ProfileVerifyError(
+            f"{len(failures)} boot gate(s) failed for profile {spec.name!r}: {summary}"
+        )
+
     encode_selection = resolve_encode_or_fallback(spec, encode_probe)
     return BootContext(
         profile=spec,

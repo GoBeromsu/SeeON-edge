@@ -58,12 +58,38 @@ _FALSY: Final = frozenset({"0", "false", "no", "off"})
 _DEFAULT_TYPE: Final = "lstm"
 _DEFAULT_WEIGHTS: Final = "model.pt"
 _DEFAULT_ARCHITECTURE: Final = "arch.json"
+# Issue #133: packaged default fall model, used when
+# ML_WORKER_FALL_MODEL_ARTIFACT_DIR is unset. Sidecars (arch.json,
+# metadata.yaml) are tracked in git at this path; model.pt is fetched
+# separately via scripts/fetch-models.sh since weights stay gitignored.
+# Values mirror worker/ml-worker.example.yaml's models.fall block and the
+# upstream Berom0227/eldercare-fall-models lstm/metadata.json this artifact
+# was derived from (operating_threshold in particular is not a placeholder).
+_DEFAULT_ARTIFACT_DIR: Final = "models/fall/lstm"
+_DEFAULT_WINDOW: Final = 30
+_DEFAULT_STRIDE: Final = 5
+_DEFAULT_OPERATING_THRESHOLD: Final = 0.0007872396381571889
+_DEFAULT_SCHEMA_VERSION: Final = 1
+_DEFAULT_PREPROCESSING_IDENTITY: Final = "legacy-coco17-xyc-frame-normalized-zero-fill-v1"
+_FETCH_MODELS_HINT: Final = (
+    "run scripts/fetch-models.sh to download the packaged default LSTM model "
+    "weights (or set ML_WORKER_FALL_MODEL_ARTIFACT_DIR to point at an "
+    "already-provisioned artifact directory)"
+)
 
 
-def _bool_env(name: str, env: Mapping[str, str]) -> bool:
+def _bool_env(name: str, env: Mapping[str, str]) -> bool | None:
+    """Parse an optional boolean env var.
+
+    Returns ``None`` when unset/blank so callers can distinguish "not set"
+    from an explicit ``false`` -- "explicit wins outright, silence defers"
+    (mirrored from ``WorkerRuntime._resolve_mjpeg_config``'s ``dev_mjpeg``
+    precedent) only works if silence is representable here, not collapsed to
+    a hardcoded ``False``.
+    """
     raw = env.get(name, "").strip().lower()
     if raw == "":
-        return False
+        return None
     if raw in _TRUTHY:
         return True
     if raw in _FALSY:
@@ -96,6 +122,32 @@ def _required_float(name: str, env: Mapping[str, str], *, because: str) -> float
         raise WorkerConfigError(f"{name} must be a number, got {raw!r}") from error
 
 
+def _collect_required_int(
+    name: str, env: Mapping[str, str], *, because: str, errors: list[str]
+) -> int | None:
+    """Like ``_required_int``, but appends to ``errors`` instead of raising.
+
+    Issue #79 (track 2): callers collect every malformed fall-model env var
+    into one error report instead of the first ``_required_int`` call
+    aborting before the next field is even checked.
+    """
+    try:
+        return _required_int(name, env, because=because)
+    except WorkerConfigError as error:
+        errors.append(str(error))
+        return None
+
+
+def _collect_required_float(
+    name: str, env: Mapping[str, str], *, because: str, errors: list[str]
+) -> float | None:
+    try:
+        return _required_float(name, env, because=because)
+    except WorkerConfigError as error:
+        errors.append(str(error))
+        return None
+
+
 def _optional_int(name: str, env: Mapping[str, str]) -> int | None:
     raw = env.get(name, "").strip()
     if raw == "":
@@ -109,24 +161,40 @@ def _optional_int(name: str, env: Mapping[str, str]) -> int | None:
 def clip_recording_config_from_environment(
     environ: Mapping[str, str] | None = None,
 ) -> ClipRecordingConfig:
+    """Build ``clip`` from env, deferring to ``ClipRecordingConfig``'s own
+    default when ``ML_WORKER_CLIP_RECORDING_ENABLED`` is unset.
+
+    An explicit env value (true or false) always wins outright. Env silence
+    must *not* be read as an explicit "false" -- it defers to whatever
+    ``ClipRecordingConfig.enabled`` itself defaults to, so a future change to
+    that default (e.g. always-on clip recording) takes effect on an
+    unconfigured boot instead of being silently overridden here.
+    """
     env = os.environ if environ is None else environ
-    return ClipRecordingConfig(enabled=_bool_env(ML_WORKER_CLIP_RECORDING_ENABLED_ENV, env))
+    explicit = _bool_env(ML_WORKER_CLIP_RECORDING_ENABLED_ENV, env)
+    return ClipRecordingConfig() if explicit is None else ClipRecordingConfig(enabled=explicit)
 
 
 def fall_model_config_from_environment(
     environ: Mapping[str, str] | None = None,
-) -> FallModelConfig | None:
-    """Build ``models.fall`` from env, or ``None`` if unconfigured.
+) -> FallModelConfig:
+    """Build ``models.fall`` from env, defaulting to the packaged LSTM model.
 
-    ``ML_WORKER_FALL_MODEL_ARTIFACT_DIR`` is the on/off switch: unset (the
-    out-of-the-box default) means no fall model is configured via env, same
-    as an omitted ``models.fall`` in YAML -- the #43 boot gate
-    (``WorkerRuntime._create_fall_model``) then refuses to boot, by design.
-    Once it is set, the rest of the artifact contract
-    (window/stride/operating_threshold) becomes required so a partially
-    configured fall model fails loudly at boot rather than silently
-    defaulting (ADR-0002). ``framework``/``mode`` are not independent env
-    vars: today's ``FallModelConfig`` only has one valid literal for each
+    Issue #133: the worker must boot with zero env vars.
+    ``ML_WORKER_FALL_MODEL_ARTIFACT_DIR`` is the on/off switch for *explicit*
+    configuration: unset (the out-of-the-box default) no longer means "no
+    fall model" -- it now resolves to the packaged default LSTM model at
+    ``models/fall/lstm`` (arch.json/metadata.yaml are tracked in git;
+    model.pt is fetched separately via ``scripts/fetch-models.sh`` since
+    weights stay gitignored). An explicit env value always overrides the
+    default outright, never blends with it. Once
+    ``ML_WORKER_FALL_MODEL_ARTIFACT_DIR`` is explicitly set, the rest of the
+    artifact contract (window/stride/operating_threshold) becomes required
+    so a partially configured fall model still fails loudly at boot rather
+    than silently defaulting (ADR-0002) -- issue #79 (track 2): every
+    malformed field is collected and reported together, not just the first.
+    ``framework``/``mode`` are not independent env vars: today's
+    ``FallModelConfig`` only has one valid literal for each
     (pytorch/sequence), so there is nothing for an env var to select yet.
     ``type`` (the model family/architecture -- #65) does have an env var,
     ``ML_WORKER_FALL_MODEL_TYPE``, defaulting to "lstm" so existing
@@ -139,23 +207,48 @@ def fall_model_config_from_environment(
     ``input_shape == (window, 51)``.
     """
     env = os.environ if environ is None else environ
-    artifact_dir = env.get(ML_WORKER_FALL_MODEL_ARTIFACT_DIR_ENV, "").strip()
-    if not artifact_dir:
-        return None
-    because = f"when {ML_WORKER_FALL_MODEL_ARTIFACT_DIR_ENV} is set"
-    window = _required_int(ML_WORKER_FALL_MODEL_WINDOW_ENV, env, because=because)
-    stride = _required_int(ML_WORKER_FALL_MODEL_STRIDE_ENV, env, because=because)
-    operating_threshold = _required_float(
-        ML_WORKER_FALL_MODEL_OPERATING_THRESHOLD_ENV, env, because=because
-    )
-    schema_version = _optional_int(ML_WORKER_FALL_MODEL_SCHEMA_VERSION_ENV, env)
+    artifact_dir_raw = env.get(ML_WORKER_FALL_MODEL_ARTIFACT_DIR_ENV, "").strip()
+    is_default = not artifact_dir_raw
+
+    if is_default:
+        artifact_dir = _DEFAULT_ARTIFACT_DIR
+        window = _DEFAULT_WINDOW
+        stride = _DEFAULT_STRIDE
+        operating_threshold = _DEFAULT_OPERATING_THRESHOLD
+        schema_version: int | None = _DEFAULT_SCHEMA_VERSION
+        preprocessing_identity: str | None = _DEFAULT_PREPROCESSING_IDENTITY
+    else:
+        artifact_dir = artifact_dir_raw
+        because = f"when {ML_WORKER_FALL_MODEL_ARTIFACT_DIR_ENV} is set"
+        errors: list[str] = []
+        window = _collect_required_int(
+            ML_WORKER_FALL_MODEL_WINDOW_ENV, env, because=because, errors=errors
+        )
+        stride = _collect_required_int(
+            ML_WORKER_FALL_MODEL_STRIDE_ENV, env, because=because, errors=errors
+        )
+        operating_threshold = _collect_required_float(
+            ML_WORKER_FALL_MODEL_OPERATING_THRESHOLD_ENV, env, because=because, errors=errors
+        )
+        if errors:
+            raise WorkerConfigError(
+                f"{len(errors)} fall model environment variable(s) invalid: "
+                + "; ".join(errors)
+            )
+        # Guaranteed non-None: the empty-errors check above already returned
+        # (raised) if any of the three collectors above appended a failure.
+        assert window is not None
+        assert stride is not None
+        assert operating_threshold is not None
+        schema_version = _optional_int(ML_WORKER_FALL_MODEL_SCHEMA_VERSION_ENV, env)
+        preprocessing_identity = (
+            env.get(ML_WORKER_FALL_MODEL_PREPROCESSING_IDENTITY_ENV, "").strip() or None
+        )
+
     model_type = env.get(ML_WORKER_FALL_MODEL_TYPE_ENV, "").strip() or _DEFAULT_TYPE
     weights = env.get(ML_WORKER_FALL_MODEL_WEIGHTS_ENV, "").strip() or _DEFAULT_WEIGHTS
     architecture = (
         env.get(ML_WORKER_FALL_MODEL_ARCHITECTURE_ENV, "").strip() or _DEFAULT_ARCHITECTURE
-    )
-    preprocessing_identity = (
-        env.get(ML_WORKER_FALL_MODEL_PREPROCESSING_IDENTITY_ENV, "").strip() or None
     )
     try:
         return FallModelConfig(
@@ -173,6 +266,11 @@ def fall_model_config_from_environment(
             preprocessing_identity=preprocessing_identity,
         )
     except ValidationError as error:
+        if is_default:
+            raise WorkerConfigError(
+                "packaged default LSTM fall model is not fully provisioned at "
+                f"{artifact_dir!r} ({error}); {_FETCH_MODELS_HINT}"
+            ) from error
         raise WorkerConfigError(
             f"invalid fall model environment configuration: {error}"
         ) from error
