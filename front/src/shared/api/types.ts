@@ -6,7 +6,14 @@ export type Camera = {
   id: string;
   label: string;
   rtsp_url_masked: string;
+  /** Space-sync-owned floor name (external roster pull); read-only from the UI. See `floor`. */
   floor_name: string | null;
+  /**
+   * User-set floor override (issue #85): editable via the settings UI's floor chips, persisted on
+   * the local registry record so it survives every space-sync re-pull untouched. Display precedence
+   * is this field first, falling back to `floor_name`: `camera.floor ?? camera.floor_name`.
+   */
+  floor?: string | null;
   status: CameraStatus;
   created_at: string | null;
   decode_backend?: DecodeBackend | string | null;
@@ -118,10 +125,20 @@ export type StatusSnapshot = {
 export type CameraInput = {
   label: string;
   rtsp_url: string;
+  /** Initial user-set floor override (issue #85); omit to leave unset (falls back to floor_name). */
+  floor?: string;
 };
 
-export type CameraPatchInput = Partial<CameraInput> & {
+/**
+ * Partial-update body: an omitted field is left untouched; for `floor`, an explicit `null` clears
+ * the override back to the space-sync `floor_name` fallback (see cameraBody() in client.ts).
+ * `floor` is redeclared here (rather than inherited via `Partial<CameraInput>`) so it can carry
+ * `null` -- intersecting `Partial<CameraInput>`'s `floor?: string` with a `null`-inclusive override
+ * would otherwise collapse to `string` only, silently losing the "clear" case.
+ */
+export type CameraPatchInput = Partial<Omit<CameraInput, 'floor'>> & {
   decode_backend?: DecodeBackend;
+  floor?: string | null;
 };
 
 export type CameraTestResult = {

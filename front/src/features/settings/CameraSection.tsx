@@ -79,6 +79,7 @@ export function CameraSection({ camerasResource, systemResource }: CameraSection
 
       <CameraRegisterModal
         open={registerOpen}
+        cameras={cameras}
         onClose={() => setRegisterOpen(false)}
         onCreated={() => {
           setRegisterOpen(false);
@@ -88,6 +89,7 @@ export function CameraSection({ camerasResource, systemResource }: CameraSection
 
       <CameraEditModal
         camera={editingCamera}
+        cameras={cameras}
         onClose={() => setEditingCamera(null)}
         onUpdated={refresh}
         onRequestDelete={(camera) => {

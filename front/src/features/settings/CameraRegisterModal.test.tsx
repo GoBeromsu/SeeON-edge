@@ -29,11 +29,11 @@ const bedZone: BedZone = {
   recognized_at: '2026-08-01T00:00:00Z',
 };
 
-function render(open = true, onClose = vi.fn(), onCreated = vi.fn()) {
+function render(open = true, onClose = vi.fn(), onCreated = vi.fn(), cameras: Camera[] = []) {
   const host = document.createElement('div');
   document.body.append(host);
   const root = createRoot(host);
-  act(() => root.render(<CameraRegisterModal open={open} onClose={onClose} onCreated={onCreated} />));
+  act(() => root.render(<CameraRegisterModal open={open} cameras={cameras} onClose={onClose} onCreated={onCreated} />));
   return { host, root, onClose, onCreated };
 }
 
@@ -154,6 +154,44 @@ describe('CameraRegisterModal', () => {
     expect(onCreated).toHaveBeenCalled();
   });
 
+  it('includes a selected floor chip in the create-camera call', async () => {
+    vi.mocked(createCamera).mockResolvedValue(createdCamera);
+    render(true, undefined, undefined, [{ ...createdCamera, id: 'cam-existing', floor_name: '2층' }]);
+    setInput('label', '101호');
+    setInput('rtsp_url', 'rtsp://cam/1');
+
+    await act(async () => findButton('2층').click());
+    await act(async () => findButton('다음').click());
+
+    expect(createCamera).toHaveBeenCalledWith(
+      { label: '101호', rtsp_url: 'rtsp://cam/1', floor: '2층' },
+      { forceRegister: false },
+    );
+  });
+
+  it('adds a new floor via "+ 층 추가" and includes it in the create-camera call', async () => {
+    vi.mocked(createCamera).mockResolvedValue(createdCamera);
+    render();
+    setInput('label', '101호');
+    setInput('rtsp_url', 'rtsp://cam/1');
+
+    act(() => findButton('+ 층 추가').click());
+    const floorInput = document.querySelector('input[aria-label="새 층 이름"]') as HTMLInputElement;
+    act(() => {
+      const valueSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
+      valueSetter?.call(floorInput, '3층');
+      floorInput.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    act(() => floorInput.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })));
+
+    await act(async () => findButton('다음').click());
+
+    expect(createCamera).toHaveBeenCalledWith(
+      { label: '101호', rtsp_url: 'rtsp://cam/1', floor: '3층' },
+      { forceRegister: false },
+    );
+  });
+
   it('resets its draft the next time it is reopened', async () => {
     vi.mocked(createCamera).mockResolvedValue(createdCamera);
     const { root, onClose } = render(true);
@@ -162,8 +200,8 @@ describe('CameraRegisterModal', () => {
     await act(async () => findButton('다음').click());
     expect(document.body.textContent).toContain('침대 영역 인식이 필요합니다.');
 
-    act(() => root.render(<CameraRegisterModal open={false} onClose={onClose} onCreated={vi.fn()} />));
-    act(() => root.render(<CameraRegisterModal open onClose={onClose} onCreated={vi.fn()} />));
+    act(() => root.render(<CameraRegisterModal open={false} cameras={[]} onClose={onClose} onCreated={vi.fn()} />));
+    act(() => root.render(<CameraRegisterModal open cameras={[]} onClose={onClose} onCreated={vi.fn()} />));
 
     expect((document.querySelector('input[name="label"]') as HTMLInputElement).value).toBe('');
     expect(document.body.textContent).not.toContain('침대 영역 인식이 필요합니다.');

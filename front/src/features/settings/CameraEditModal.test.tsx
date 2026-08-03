@@ -33,16 +33,17 @@ function render(
   onClose = vi.fn(),
   onUpdated = vi.fn(),
   onRequestDelete = vi.fn(),
+  cams: Camera[] = cam ? [cam] : [],
 ) {
   const host = document.createElement('div');
   document.body.append(host);
   const root = createRoot(host);
   act(() => root.render(
-    <CameraEditModal camera={cam} onClose={onClose} onUpdated={onUpdated} onRequestDelete={onRequestDelete} />,
+    <CameraEditModal camera={cam} cameras={cams} onClose={onClose} onUpdated={onUpdated} onRequestDelete={onRequestDelete} />,
   ));
   const rerender = (nextCam: Camera | null) => {
     act(() => root.render(
-      <CameraEditModal camera={nextCam} onClose={onClose} onUpdated={onUpdated} onRequestDelete={onRequestDelete} />,
+      <CameraEditModal camera={nextCam} cameras={cams} onClose={onClose} onUpdated={onUpdated} onRequestDelete={onRequestDelete} />,
     ));
   };
   return { host, root, onClose, onUpdated, onRequestDelete, rerender };
@@ -81,11 +82,59 @@ describe('CameraEditModal', () => {
     expect(document.querySelector('[role="dialog"]')).toBeNull();
   });
 
-  it('pre-fills the name and shows the read-only floor and 인식 필요 bed-zone badge', () => {
+  it('pre-fills the name, shows the current floor as a selected chip, and the 인식 필요 bed-zone badge', () => {
     render(camera);
     expect((document.querySelector('input[name="label"]') as HTMLInputElement).value).toBe('101호');
-    expect((document.querySelector('input[name="floor"]') as HTMLInputElement).value).toBe('1층');
+    expect(findButton('1층').getAttribute('aria-pressed')).toBe('true');
     expect(document.body.textContent).toContain('인식 필요');
+  });
+
+  it('selects a different floor chip and includes the new floor in the patch', async () => {
+    vi.mocked(updateCamera).mockResolvedValue(camera);
+    render(camera, undefined, undefined, undefined, [camera, { ...camera, id: 'cam-2', floor_name: '2층' }]);
+
+    await act(async () => findButton('2층').click());
+    await act(async () => findButton('저장').click());
+
+    expect(updateCamera).toHaveBeenCalledWith('cam-1', { floor: '2층' });
+  });
+
+  it('deselects the active floor chip and sends floor: null to clear the override', async () => {
+    vi.mocked(updateCamera).mockResolvedValue(camera);
+    render(camera);
+
+    await act(async () => findButton('1층').click());
+    await act(async () => findButton('저장').click());
+
+    expect(updateCamera).toHaveBeenCalledWith('cam-1', { floor: null });
+  });
+
+  it('adds a new floor via "+ 층 추가" and includes it in the patch', async () => {
+    vi.mocked(updateCamera).mockResolvedValue(camera);
+    render(camera);
+
+    act(() => findButton('+ 층 추가').click());
+    const floorInput = document.querySelector('input[aria-label="새 층 이름"]') as HTMLInputElement;
+    act(() => {
+      const valueSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
+      valueSetter?.call(floorInput, '3층');
+      floorInput.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    act(() => floorInput.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })));
+
+    await act(async () => findButton('저장').click());
+
+    expect(updateCamera).toHaveBeenCalledWith('cam-1', { floor: '3층' });
+  });
+
+  it('omits floor from the patch when the chips are left untouched, avoiding an accidental override', async () => {
+    vi.mocked(updateCamera).mockResolvedValue({ ...camera, label: '새 이름' });
+    render(camera);
+    setInput('label', '새 이름');
+
+    await act(async () => findButton('저장').click());
+
+    expect(updateCamera).toHaveBeenCalledWith('cam-1', { label: '새 이름' });
   });
 
   it('saves only the changed fields and omits rtsp_url when left untouched', async () => {

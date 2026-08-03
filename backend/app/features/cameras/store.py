@@ -79,6 +79,7 @@ class CameraRegistryStore:
         mapping_pending: bool = False,
         decode_backend: str | None = None,
         fps: float | None = None,
+        floor: str | None = None,
         last_probed_at: str | None = None,
         last_ok_at: str | None = None,
         never_connected: bool = True,
@@ -101,6 +102,7 @@ class CameraRegistryStore:
                 "status": status,
                 "decode_backend": decode_backend,
                 "fps": fps,
+                "floor": floor,
                 "created_at": utc_now_iso(),
                 "last_probed_at": last_probed_at,
                 "last_ok_at": last_ok_at,
@@ -207,6 +209,14 @@ def public_camera(record: dict[str, object]) -> dict[str, object]:
         "status": _status(record.get("status")),
         "decode_backend": _optional_str(record.get("decode_backend")),
         "fps": _optional_float(record.get("fps")),
+        # User-set floor override (issue #85): distinct from the space-sync-owned
+        # "floor_name" merged in later by _public_snapshot from the external
+        # roster pull. Kept in a separate key on purpose -- that merge only ever
+        # assigns "space_name"/"floor_name" and never touches this field, so a
+        # locally-set floor survives every roster re-sync instead of being
+        # clobbered by it. See CameraResponse.floor in router.py for the
+        # display-precedence contract (floor ?? floor_name).
+        "floor": _optional_str(record.get("floor")),
         "created_at": str(record.get("created_at", "")),
         # Probe-history fields (see CameraRegistryStore.create/update): surfaced
         # so the UI can render "never connected" / "last connected at" text.

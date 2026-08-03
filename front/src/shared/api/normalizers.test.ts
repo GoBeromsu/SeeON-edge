@@ -227,6 +227,7 @@ describe('camera roster normalization', () => {
     ['unknown status', { ...validCameraResponse, status: 'stale' }],
     ['malformed mapping flag', { ...validCameraResponse, mapping_pending: 'false' }],
     ['malformed nullable floor', { ...validCameraResponse, floor_name: 301 }],
+    ['malformed nullable floor override', { ...validCameraResponse, floor: 301 }],
   ])('rejects an entry with a %s instead of dropping or defaulting it', (_case, camera) => {
     expect(() => normalizeCameraRegistry({ registry_version: 1, cameras: [validCameraResponse, camera] }))
       .toThrow('Invalid camera registry response');
@@ -241,6 +242,24 @@ describe('camera roster normalization', () => {
 
     expect(camera?.floor_name).toBe('3층');
     expect(camera?.created_at).toBeNull();
+  });
+
+  it('accepts a registry entry omitting the floor override key, defaulting it to null (backward compat)', () => {
+    expect(() => normalizeCameraRegistry({ registry_version: 1, cameras: [validCameraResponse] })).not.toThrow();
+    const { cameras } = normalizeCameraRegistry({ registry_version: 1, cameras: [validCameraResponse] });
+    expect(cameras[0]?.floor).toBeNull();
+  });
+
+  it('keeps the user-set floor override independent of the read-only floor_name (issue #85 precedence)', () => {
+    const camera = normalizeCamera({
+      id: 'cam-1',
+      rtsp_url_masked: 'rtsp://***',
+      floor_name: '1층',
+      floor: '사용자 지정 3층',
+    });
+
+    expect(camera?.floor_name).toBe('1층');
+    expect(camera?.floor).toBe('사용자 지정 3층');
   });
 });
 
