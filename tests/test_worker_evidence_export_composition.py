@@ -220,15 +220,41 @@ def _runtime(
 def _config(*camera_ids: str, clip_enabled: bool = True) -> WorkerConfig:
     """Config for these tests.
 
-    Clip recording is opt-in and off by default (``ClipRecordingConfig``).
-    Tests that assert on the shared ``ClipRecorder`` enable it explicitly;
-    default-off behaviour has its own dedicated tests below.
+    Clip recording is configurable via ``ClipRecordingConfig`` and always-on
+    by default (#127/#10). This helper still takes ``clip_enabled`` explicitly
+    so each test's intent (on vs. off) stays pinned regardless of the default;
+    tests exercising the real default use ``_config_without_clip_section``
+    instead.
     """
     return WorkerConfig.model_validate(
         {
             "version": 7,
             "relay": {"url": "http://relay.test", "token": "relay-token"},
             "clip": {"enabled": clip_enabled},
+            "cameras": [
+                {
+                    "camera_id": camera_id,
+                    "facility_id": f"facility-{camera_id.removeprefix('camera-')}",
+                    "rtsp_url": f"rtsp://example.test/{camera_id}",
+                    "heartbeat_interval_sec": 30.0,
+                }
+                for camera_id in camera_ids
+            ],
+        }
+    )
+
+
+def _config_without_clip_section(*camera_ids: str) -> WorkerConfig:
+    """Config that omits the ``clip`` key entirely.
+
+    Exercises the real ``ClipRecordingConfig.enabled`` default (#127/#10:
+    always-on) rather than a test-pinned ``clip_enabled`` value, the way an
+    operator's config written before clip recording was configurable would.
+    """
+    return WorkerConfig.model_validate(
+        {
+            "version": 7,
+            "relay": {"url": "http://relay.test", "token": "relay-token"},
             "cameras": [
                 {
                     "camera_id": camera_id,
@@ -672,6 +698,107 @@ def test_recorder_failing_before_its_startup_hook_still_initializes_delivery(
     assert runtime._clip_recorder is None  # noqa: SLF001
     evidence_runtime.start_sender()
     assert evidence_runtime.sender_starts == 1
+
+
+def test_recorder_start_failure_reports_degraded_clip_recorder_status(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#127/#10: clips are always-on by default now, so a recorder start
+    failure must not silently disable clips -- it must degrade *visibly*
+    through runtime diagnostics (``set_clip_recorder_status``), the same wire
+    object ``/status`` already relays (``RelayClipRecorderPayload``).
+
+    Mirrors ``test_recorder_failing_after_its_startup_hook_does_not_initialize_twice``
+    (the pinned swallow-and-continue behavior) with an added assertion on the
+    diagnostics side effect.
+    """
+    serving = _FakeServingClient()
+    loops = _InstantLoopFactory()
+    runtime = _runtime(_config("camera-a", clip_enabled=True), serving, loops, tmp_path)
+    evidence_runtime = _RecordingEvidenceRuntime()
+
+    class _FailsAfterHook:
+        def __init__(self, *_args: object, **kwargs: object) -> None:
+            self._startup_hook = kwargs.get("startup_hook")
+
+        def start(self) -> None:
+            hook = self._startup_hook
+            if hook is not None:
+                hook()  # type: ignore[operator]
+            raise RuntimeError("encoder unavailable")
+
+    monkeypatch.setattr(worker_module, "ClipRecorder", _FailsAfterHook)
+    monkeypatch.setattr(worker_module, "default_services", lambda *_a, **_k: object())
+
+    _compose_with(runtime, evidence_runtime, monkeypatch, tmp_path)
+
+    # Worker continues without clips...
+    assert runtime._clip_recorder is None  # noqa: SLF001
+    evidence_runtime.start_sender()
+    assert evidence_runtime.sender_starts == 1
+    # ...but the degraded state is now observable, not silent.
+    payload = runtime.diagnostics.to_payload("facility-a", None, 0)
+    assert payload["clip_recorder"]["available"] is False
+
+
+def test_recorder_start_success_reports_available_clip_recorder_status(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The success path must also produce an explicit, positive diagnostics
+    signal -- not rely on the default ``ClipRecorderStatus()`` happening to
+    look the same as "recording was never composed"."""
+    serving = _FakeServingClient()
+    loops = _InstantLoopFactory()
+    runtime = _runtime(_config("camera-a", clip_enabled=True), serving, loops, tmp_path)
+    evidence_runtime = _RecordingEvidenceRuntime()
+
+    class _Recorder:
+        def __init__(self, *_args: object, **kwargs: object) -> None:
+            self._startup_hook = kwargs.get("startup_hook")
+
+        def start(self) -> None:
+            hook = self._startup_hook
+            if hook is not None:
+                hook()  # type: ignore[operator]
+
+    monkeypatch.setattr(worker_module, "ClipRecorder", _Recorder)
+    monkeypatch.setattr(worker_module, "default_services", lambda *_a, **_k: object())
+
+    _compose_with(runtime, evidence_runtime, monkeypatch, tmp_path)
+
+    assert runtime._clip_recorder is not None  # noqa: SLF001
+    payload = runtime.diagnostics.to_payload("facility-a", None, 0)
+    assert payload["clip_recorder"]["available"] is True
+
+
+def test_clip_recording_default_on_boots_without_crashing_on_this_platform(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """#127/#10: clips are always-on by default now. Every profile in
+    PROFILE_REGISTRY resolves a real encoder (h264_nvenc or libx264 -- see
+    ``test_per_camera_clip_recorder_views_are_distinct_objects_over_one_shared_recorder``
+    above), so the real ``ClipRecorder`` must start cleanly on whatever
+    platform this worker boots on -- including macOS dev boxes without a
+    Linux ``/proc/self/fd`` -- even though nobody set ``clip.enabled``
+    explicitly.
+    """
+    _stub_heartbeat_transport(monkeypatch)
+    monkeypatch.setenv("CLIP_STORE_DIR", str(tmp_path / "clip-store"))
+
+    serving = _FakeServingClient()
+    loops = _InstantLoopFactory()
+    config = _config_without_clip_section("camera-a")
+    assert config.clip.enabled is True, "this test exercises the real default, not a pinned value"
+    runtime = _runtime(config, serving, loops, tmp_path)
+
+    runtime.run()
+
+    assert runtime._clip_recorder is not None  # noqa: SLF001
+    payload = runtime.diagnostics.to_payload("facility-a", None, 0)
+    assert payload["clip_recorder"]["available"] is True
 
 
 def test_clip_disabled_shrinks_the_evidence_tap_built_by_composition(
