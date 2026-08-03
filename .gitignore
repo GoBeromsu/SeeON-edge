@@ -71,3 +71,9 @@ experiments/loop_status.json
 # Editor and OS files
 .DS_Store
 .dataset-ops/
+
+# mediamtx self-signed TLS artifacts (auto-generated in its cwd on startup;
+# see tests/e2e_worker_relay_fixtures.py's MediaMtxProcess for the fixture
+# that now isolates its cwd so these no longer land here)
+auto.crt
+auto.key
