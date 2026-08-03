@@ -17,8 +17,10 @@ const OVERLAY_CHIPS: { mode: OverlayMode; label: string }[] = [
 export function useCameraOverlayMode(cameraId: string): {
   state: OverlayModeState;
   select: (mode: OverlayMode) => void;
+  retry: () => void;
 } {
   const [state, setState] = useState<OverlayModeState>({ status: 'loading', mode: null, pending: false });
+  const [fetchAttempt, setFetchAttempt] = useState(0);
   const cameraIdRef = useRef(cameraId);
   cameraIdRef.current = cameraId;
 
@@ -35,7 +37,9 @@ export function useCameraOverlayMode(cameraId: string): {
     return () => {
       cancelled = true;
     };
-  }, [cameraId]);
+  }, [cameraId, fetchAttempt]);
+
+  const retry = (): void => setFetchAttempt((attempt) => attempt + 1);
 
   const select = (mode: OverlayMode) => {
     const requestedFor = cameraIdRef.current;
@@ -52,7 +56,7 @@ export function useCameraOverlayMode(cameraId: string): {
       });
   };
 
-  return { state, select };
+  return { state, select, retry };
 }
 
 type OverlayModeControlProps = {
@@ -60,7 +64,7 @@ type OverlayModeControlProps = {
 };
 
 export function OverlayModeControl({ cameraId }: OverlayModeControlProps): JSX.Element {
-  const { state, select } = useCameraOverlayMode(cameraId);
+  const { state, select, retry } = useCameraOverlayMode(cameraId);
 
   return (
     <div className="border-t border-border pt-3">
@@ -69,7 +73,16 @@ export function OverlayModeControl({ cameraId }: OverlayModeControlProps): JSX.E
         <p role="status" className="text-sm text-muted-foreground">오버레이 모드를 불러오는 중입니다…</p>
       ) : null}
       {state.status === 'error' ? (
-        <p role="alert" className="text-sm text-destructive">오버레이 모드를 불러오지 못했습니다.</p>
+        <div className="flex items-center gap-2">
+          <p role="alert" className="text-sm text-destructive">오버레이 모드를 불러오지 못했습니다.</p>
+          <button
+            type="button"
+            onClick={retry}
+            className="min-h-11 rounded-control border border-border bg-card px-3 text-sm font-semibold text-foreground"
+          >
+            다시 시도
+          </button>
+        </div>
       ) : null}
       {state.status === 'success' ? (
         <div role="group" aria-label="오버레이 모드 선택" className="flex flex-wrap gap-2">

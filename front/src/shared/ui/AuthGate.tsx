@@ -1,6 +1,6 @@
 import { createContext, FormEvent, ReactNode, useContext, useEffect, useRef, useState } from 'react';
 import { fetchDashboardSession, loginDashboard, logoutDashboard } from '@/shared/api/client';
-import { HttpError } from '@/shared/api/http';
+import { HttpError, subscribeUnauthorized } from '@/shared/api/http';
 
 const BRAND_TEXT = 'Senior AI Lab Edge';
 
@@ -69,6 +69,15 @@ export function AuthGate({ children }: { children: ReactNode }): JSX.Element {
     if (sessionState !== 'unauthorized') return;
     loginIdRef.current?.focus();
   }, [sessionState]);
+
+  /**
+   * A 401/403 on any request (not just the mount-time probe) means the session died mid-flight —
+   * e.g. a backend restart invalidating cookies while the operator is watching the wall. Flip
+   * straight back to the login form instead of leaving a silently-frozen authorized view up.
+   */
+  useEffect(() => subscribeUnauthorized(() => {
+    setSessionState((current) => (current === 'authorized' ? 'unauthorized' : current));
+  }), []);
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
