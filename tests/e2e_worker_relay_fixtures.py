@@ -30,6 +30,7 @@ import os
 import shutil
 import socket
 import subprocess
+import tempfile
 import threading
 import time
 from collections import deque
@@ -125,9 +126,17 @@ class MediaMtxProcess:
         for name in path_names:
             env[f"MTX_PATHS_{name.upper()}_SOURCE"] = "publisher"
         self._rtsp_port = rtsp_port
+        # mediamtx auto-generates a self-signed auto.crt/auto.key in its cwd
+        # when it starts (even with TLS listeners disabled here). Without an
+        # explicit cwd, that cwd is whatever the test process happened to be
+        # run from -- the repo root for a local `pytest`/demo invocation --
+        # littering the working tree with untracked cert files. Give it a
+        # disposable directory of its own instead.
+        self._cwd = tempfile.mkdtemp(prefix="mediamtx-e2e-")
         self._process = subprocess.Popen(  # noqa: S603 - fixed local test binary, no shell
             [binary],
             env={**_inherited_env(), **env},
+            cwd=self._cwd,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
@@ -155,14 +164,16 @@ class MediaMtxProcess:
         raise TimeoutError("mediamtx did not open its RTSP listener in time")
 
     def stop(self) -> None:
-        if self._process.poll() is not None:
-            return
-        self._process.terminate()
         try:
-            self._process.wait(timeout=5.0)
-        except subprocess.TimeoutExpired:
-            self._process.kill()
-            self._process.wait(timeout=5.0)
+            if self._process.poll() is None:
+                self._process.terminate()
+                try:
+                    self._process.wait(timeout=5.0)
+                except subprocess.TimeoutExpired:
+                    self._process.kill()
+                    self._process.wait(timeout=5.0)
+        finally:
+            shutil.rmtree(self._cwd, ignore_errors=True)
 
 
 @final
