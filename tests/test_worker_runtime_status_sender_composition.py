@@ -317,3 +317,48 @@ def test_worker_stop_joins_the_runtime_status_sender_thread(
     # run() returns, its background thread must already be joined and dead --
     # no zombie thread survives.
     assert not sender_thread.is_alive()
+
+
+def test_runtime_status_payload_reports_registered_cameras_and_worker_status(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Regression test: ``register_decode``/``set_worker_status`` used to be
+    defined on ``WorkerDiagnostics`` but never called anywhere in
+    ``WorkerRuntime`` -- every runtime-status POST kept succeeding with 200,
+    but carried an empty ``cameras`` list and no ``worker`` field forever, so
+    ``/status``'s ``runtime.cameras``/``runtime.worker`` stayed ``{}``/``null``
+    no matter how long the worker ran."""
+    _stub_heartbeat_transport(monkeypatch)
+
+    delivered = threading.Event()
+    posts: list[bytes | None] = []
+
+    def fake_bounded_request(
+        _url: str,
+        method: str,
+        _headers: dict[str, str],
+        data: bytes | None,
+        _timeout: float,
+        _on_response: Callable[[int], None] | None = None,
+    ) -> HttpResult:
+        assert method == "POST"
+        posts.append(data)
+        delivered.set()
+        return _fake_accepted_response()
+
+    monkeypatch.setattr(runtime_status_sender_module, "bounded_request", fake_bounded_request)
+
+    loops = _DeliveryWaitingLoopFactory(delivered)
+    runtime = _runtime(_config(("camera-a", "facility-a")), loops, tmp_path)
+
+    runtime.run()
+
+    assert posts, "runtime status sender never delivered a payload"
+    payload = json.loads(posts[0] or b"{}")
+    assert [camera["camera_id"] for camera in payload["cameras"]] == ["camera-a"]
+    assert payload["cameras"][0]["decode"]["requested"] == "auto"
+    assert payload["cameras"][0]["decode"]["selected"] is None
+    assert payload["worker"]["alive"] is True
+    assert isinstance(payload["worker"]["pid"], int)
+    assert isinstance(payload["worker"]["started_at_sec"], float)
+    assert payload["worker"]["profile_boot_error"] is None
