@@ -24,6 +24,7 @@ def _run_diagnose(
     status: object | str | None = None,
     command_stubs: dict[str, str] | None = None,
     arguments: tuple[str, ...] = (),
+    timeout_sec: str = "20",
 ) -> subprocess.CompletedProcess[str]:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir(parents=True)
@@ -87,7 +88,7 @@ def _run_diagnose(
         "PATH": f"{bin_dir}:{os.environ['PATH']}",
         "EDGE_STATUS_FIXTURE": str(fixture),
         "EDGE_KERNEL_FIXTURE": str(kernel_fixture),
-        "EDGE_PREFLIGHT_TIMEOUT_SEC": "1",
+        "EDGE_PREFLIGHT_TIMEOUT_SEC": timeout_sec,
     }
     return subprocess.run(
         ["bash", str(SCRIPT), *arguments], env=env, text=True, capture_output=True, check=False
@@ -400,16 +401,17 @@ def test_diagnose_fails_for_unhealthy_joined_telemetry(tmp_path: Path) -> None:
 
 def test_diagnose_reports_docker_probe_failure_evidence(tmp_path: Path) -> None:
     cases = (
-        ("sleep 2", "Docker 데몬 조회가 1초를 초과했습니다"),
-        ('echo "permission denied" >&2; exit 1', "실패(rc=1): permission denied"),
-        ('echo "daemon unavailable" >&2; exit 42', "실패(rc=42): daemon unavailable"),
+        ("exec sleep 999", "Docker 데몬 조회가 1초를 초과했습니다", "1"),
+        ('echo "permission denied" >&2; exit 1', "실패(rc=1): permission denied", "20"),
+        ('echo "daemon unavailable" >&2; exit 42', "실패(rc=42): daemon unavailable", "20"),
     )
 
-    for index, (docker_stub, expected) in enumerate(cases):
+    for index, (docker_stub, expected, timeout_sec) in enumerate(cases):
         result = _run_diagnose(
             tmp_path / str(index),
             kernel_log="NVRM: no fatal signature",
             command_stubs={"docker": docker_stub},
+            timeout_sec=timeout_sec,
         )
 
         assert "3. SKIP" in result.stdout
