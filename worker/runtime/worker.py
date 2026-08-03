@@ -20,6 +20,8 @@ from contracts.runner import BedRunnerResult, Image, RunnerProtocol
 from shared.events.evidence_export_contract import DeliveryFailure
 from shared.events.evidence_http_transport import bounded_request, encode_json
 from shared.events.schemas import build_audit_envelope
+from worker.adapters.decode.cpu_av.adapter import CpuAvAdapter
+from worker.adapters.decode.cpu_av.models import CpuAvConfig
 from worker.adapters.decode.cpu_av.probe import probe_opencv_ffmpeg_capability
 from worker.adapters.decode.nvdec_cuvid.probe import probe_nvdec_cuvid_capability
 from worker.adapters.device.cuda.probe import probe_cuda_capability
@@ -48,6 +50,7 @@ from worker.pipeline.bus import BoundedFrameBus, Scheduler
 from worker.pipeline.camera_pipeline import CameraPipelinePump
 from worker.pipeline.decision import EventAggregator, IncidentManager
 from worker.pipeline.decision.event_identity import event_identity_path
+from worker.pipeline.ingest.probe import RTSPProbeError, probe_first_frame
 from worker.pipeline.ingest.registry import SourceRegistry
 from worker.pipeline.output.event_sink import EventClipRecorder, EvidenceEventSink
 from worker.pipeline.output.evidence.clip_config import configured_store_dir
@@ -70,6 +73,8 @@ from worker.pipeline.output.live_view import LatestFrameStore, LiveViewSubscribe
 from worker.pipeline.output.mjpeg_server import (
     BedZoneNotFoundError,
     BedZonePayload,
+    MjpegProbeError,
+    MjpegProbePayload,
     MjpegServer,
     MjpegServerConfig,
     dev_mjpeg_config,
@@ -663,6 +668,7 @@ class WorkerRuntime:
         self._mjpeg_server = start_optional_mjpeg_server(
             self._live_frames,
             self._mjpeg_config,
+            probe=self._rtsp_probe,
             bed_zone_recognizer=self._bed_zone_recognizer,
         )
         if self._mjpeg_server is None:
@@ -673,6 +679,37 @@ class WorkerRuntime:
                     "port": self._mjpeg_config.port,
                 },
             )
+
+    def _rtsp_probe(self, rtsp_url: str) -> MjpegProbePayload:
+        """Give the dev MJPEG server's ``POST /probe`` a real decode attempt.
+
+        ``start_optional_mjpeg_server`` falls back to its ``_unavailable_probe``
+        default (always ``MjpegProbeError("decode")``) when no ``probe=`` is
+        passed in -- this method is that callable, wired in below in
+        ``_start_live_view_server``. It reuses camera ingest's own decode path
+        (``CpuAvAdapter`` + ``probe_first_frame``) rather than a bespoke probe
+        implementation, and the same open/read timeouts real ingest uses
+        (``self.config.runtime``) rather than inventing separate probe-only
+        ones, so a registration probe fails for the same reasons the camera
+        itself would have.
+        """
+        config = CpuAvConfig(
+            camera_id="probe",
+            url=rtsp_url,
+            open_timeout_ms=self.config.runtime.open_timeout_ms,
+            read_timeout_ms=self.config.runtime.read_timeout_ms,
+        )
+        try:
+            result = probe_first_frame(
+                rtsp_url,
+                decoder=CpuAvAdapter(),
+                config=config,
+                requested_backend="cpu_av",
+                selected_backend="cpu_av",
+            )
+        except RTSPProbeError as exc:
+            raise MjpegProbeError(exc.error_class) from exc
+        return result.as_dict()
 
     def _bed_zone_recognizer(self, image: Image) -> BedZonePayload:
         """Run one on-demand bed-segmentation pass for the recognize endpoint.

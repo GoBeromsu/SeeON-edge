@@ -42,7 +42,9 @@ from worker.pipeline.bus import BoundedFrameBus, Scheduler
 from worker.pipeline.camera_pipeline import CameraPipelinePump
 from worker.pipeline.decision import EventAggregator, IncidentManager
 from worker.pipeline.ingest.lifecycle import IngestReporter
+from worker.pipeline.ingest.probe import RTSPProbeError, RTSPProbeResult
 from worker.pipeline.output.live_view import LatestFrameStore, LiveViewSubscriber
+from worker.pipeline.output.mjpeg_server import MjpegProbeError
 from worker.pipeline.perception import GreedyIouTracker, SceneState
 from worker.runtime.config import CameraRuntimeConfig, WorkerConfig
 from worker.runtime.lease import GpuLease
@@ -319,6 +321,70 @@ def test_either_switch_alone_enables_the_live_view(tmp_path: Path) -> None:
     # The relay token doubles as the probe token so the backend's probe origin
     # authenticates with the secret it already holds.
     assert config_only._mjpeg_config.probe_token == "relay-token"  # noqa: SLF001
+
+
+def test_enabled_worker_wires_a_real_probe_not_the_unavailable_default(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Regression for the bug this file's sibling method exists to fix:
+    ``_start_live_view_server`` used to call ``start_optional_mjpeg_server``
+    without ``probe=``, so every registration probe fell back to
+    ``_unavailable_probe`` and always failed with ``error_class=decode``. The
+    started server's ``probe`` must be the runtime's own ``_rtsp_probe``.
+    """
+    _stub_heartbeat_transport(monkeypatch)
+    runtime = _runtime(
+        _config("camera-a"),
+        tmp_path,
+        {"ML_WORKER_DEV_MJPEG": "true", "ML_WORKER_DEV_MJPEG_PORT": "0"},
+    )
+    with _running(runtime, lambda: runtime._mjpeg_server is not None):  # noqa: SLF001
+        server = runtime._mjpeg_server  # noqa: SLF001
+        assert server is not None
+        assert server.probe == runtime._rtsp_probe  # noqa: SLF001
+
+
+def test_rtsp_probe_translates_probe_error_into_mjpeg_probe_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """``_rtsp_probe`` must carry the decoder's error class through as the
+    HTTP handler's ``MjpegProbeError``, not swallow or relabel it. Faking
+    ``probe_first_frame`` keeps this a plain-CI unit test -- no real RTSP."""
+    runtime = _runtime(_config("camera-a"), tmp_path, {})
+
+    def _raise_timeout(*_args: object, **_kwargs: object) -> RTSPProbeResult:
+        raise RTSPProbeError("timeout", "timed out waiting for a frame", "rtsp://masked")
+
+    monkeypatch.setattr(worker_module, "probe_first_frame", _raise_timeout)
+
+    with pytest.raises(MjpegProbeError) as excinfo:
+        runtime._rtsp_probe("rtsp://example.test/camera-a")  # noqa: SLF001
+    assert excinfo.value.error_class == "timeout"
+
+
+def test_rtsp_probe_returns_the_probe_result_payload_on_success(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """On success ``_rtsp_probe`` returns ``RTSPProbeResult.as_dict()``
+    untouched -- the HTTP handler's ``_sanitize_probe_payload`` is what trims
+    it down for the wire, not this method."""
+    runtime = _runtime(_config("camera-a"), tmp_path, {})
+    result = RTSPProbeResult(
+        masked_url="rtsp://masked",
+        requested_backend="cpu_av",
+        backend="cpu_av",
+        width=640,
+        height=480,
+        channels=3,
+    )
+
+    def _succeed(*_args: object, **_kwargs: object) -> RTSPProbeResult:
+        return result
+
+    monkeypatch.setattr(worker_module, "probe_first_frame", _succeed)
+
+    payload = runtime._rtsp_probe("rtsp://example.test/camera-a")  # noqa: SLF001
+    assert payload == result.as_dict()
 
 
 def test_enabled_worker_hands_every_pump_the_live_view_tap(
