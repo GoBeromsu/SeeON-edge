@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import logging
 import threading
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
-from typing import Generic, Protocol, TypeVar, final
+from typing import Final, Generic, Protocol, TypeVar, final
 
 from worker.adapters.model.errors import FatalAcceleratorError
 from worker.interfaces.bus import FrameBus
@@ -11,6 +12,8 @@ from worker.interfaces.decode import DecodeAdapter
 from worker.pipeline.ingest.registry import ResolvedSource, SourceRegistry
 from worker.pipeline.ingest.rtsp import RTSPSource
 from worker.pipeline.ingest.rtsp_url import mask_rtsp_url
+
+LOGGER: Final = logging.getLogger(__name__)
 
 _DecodeConfigT = TypeVar("_DecodeConfigT")
 _DecodeConfigFactory = Callable[[str, ResolvedSource], _DecodeConfigT]
@@ -133,6 +136,14 @@ class CameraIngestLoop(Generic[_DecodeConfigT]):
     def _record_reconnecting(self, reason: str) -> None:
         self._ready = False
         category = "rtsp_reconnecting"
+        # Issue #113: this is the only console-visible trace of a camera's
+        # reconnect loop -- mark_degraded/emit below only reach the in-memory
+        # status store, so without a camera_id here, an offline camera's
+        # retry cadence is invisible in the worker log.
+        LOGGER.warning(
+            "camera ingest reconnecting",
+            extra={"camera_id": self.camera_id, "reason": reason},
+        )
         self._ports.reporter.mark_degraded(self.camera_id, category=category)
         self._emit_offline_once(category, reason)
 

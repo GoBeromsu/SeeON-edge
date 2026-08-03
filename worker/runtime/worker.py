@@ -683,6 +683,13 @@ class WorkerRuntime:
         it, so the failure is logged and the worker keeps running.
         """
         if self._live_view is None:
+            # Issue #113: this used to return with zero logging, so a
+            # dev_mjpeg config silently discarded upstream (e.g. a relay pull
+            # resetting it to disabled) looked externally identical to an
+            # indefinite boot hang -- nothing on disk distinguished "off on
+            # purpose" from "never got this far". Every exit out of this
+            # method must now say which of the three it took.
+            LOGGER.info("dev_mjpeg disabled; live view server not started")
             return
         self._mjpeg_server = start_optional_mjpeg_server(
             self._live_frames,
@@ -693,6 +700,14 @@ class WorkerRuntime:
         if self._mjpeg_server is None:
             LOGGER.warning(
                 "live view enabled but its server could not bind",
+                extra={
+                    "host": self._mjpeg_config.host,
+                    "port": self._mjpeg_config.port,
+                },
+            )
+        else:
+            LOGGER.info(
+                "live view server bound",
                 extra={
                     "host": self._mjpeg_config.host,
                     "port": self._mjpeg_config.port,

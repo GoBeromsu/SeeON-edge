@@ -258,6 +258,47 @@ def test_registered_loop_reports_reconnect_and_recovery_without_replacing_packet
     assert first.close_count == second.close_count == 1
 
 
+def test_reconnecting_warning_log_identifies_the_camera(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Issue #113: the retry/reconnect warning must name the camera.
+
+    Before this fix, ``_record_reconnecting`` only updated the in-memory
+    status store (``mark_degraded``/``emit``) -- there was no console-visible
+    log line at all for a camera's reconnect loop, so an operator tailing the
+    worker log had no trace of which camera was retrying or why."""
+    # Given
+    first = _Session([None])
+    recovered_packet = _packet("camera-a", 9)
+    second = _Session([recovered_packet])
+    adapter = _Adapter([first, second])
+    bus = _FakeBus()
+    reporter = _Reporter()
+    spec = _spec("camera-a")
+    spec = CameraIngestSpec(
+        spec.camera_id,
+        spec.source_id,
+        spec.make_decode_config,
+        CapturePolicy(max_failures=1, max_total_reconnects=1, target_fps=1000.0),
+    )
+    loop = CameraIngestLoop(
+        spec,
+        CameraIngestPorts(_registry("camera-a"), adapter, bus, reporter),
+    )
+    bus.on_publish = lambda _packet: loop.stop()
+
+    # When
+    with caplog.at_level("WARNING", logger="worker.pipeline.ingest.lifecycle"):
+        loop.run()
+
+    # Then
+    reconnect_records = [
+        record for record in caplog.records if "reconnecting" in record.message
+    ]
+    assert reconnect_records, "expected a reconnecting warning to be logged"
+    assert all(record.camera_id == "camera-a" for record in reconnect_records)  # type: ignore[attr-defined]
+
+
 def test_source_construction_failure_marks_only_that_camera_offline() -> None:
     # Given
     adapter = _Adapter([])

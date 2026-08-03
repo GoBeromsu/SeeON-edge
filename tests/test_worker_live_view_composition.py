@@ -220,7 +220,9 @@ def _fall_model_via_serving_client(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_enabled_worker_binds_the_live_view_port_and_serves_its_cameras(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     """The regression this file exists for: a real listening socket.
 
@@ -234,6 +236,7 @@ def test_enabled_worker_binds_the_live_view_port_and_serves_its_cameras(
         {"ML_WORKER_DEV_MJPEG": "true", "ML_WORKER_DEV_MJPEG_PORT": "0"},
     )
     port = 0
+    caplog.set_level("INFO", logger="worker.runtime.worker")
     with _running(runtime, lambda: runtime._mjpeg_server is not None):  # noqa: SLF001
         server = runtime._mjpeg_server  # noqa: SLF001
         assert server is not None
@@ -269,22 +272,40 @@ def test_enabled_worker_binds_the_live_view_port_and_serves_its_cameras(
         probe.settimeout(2)
         assert probe.connect_ex(("127.0.0.1", port)) != 0
 
+    # Issue #113: a successful bind must also be logged -- the disabled path
+    # gained a matching "not started" line, so the enabled+bound path must
+    # not be the one left silent.
+    assert any("live view server bound" in record.message for record in caplog.records)
+
 
 def test_disabled_worker_composes_no_live_view_and_opens_no_port(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """Off by default: neither switch set means no tap and no socket."""
+    """Off by default: neither switch set means no tap and no socket.
+
+    Issue #113: ``_start_live_view_server`` used to return here with zero
+    logging, so an operator/monitor had no way to tell "off on purpose" apart
+    from "silently never got this far" -- which is exactly what made a
+    relay-pull-discarded ``dev_mjpeg`` config look identical to a boot hang.
+    """
     _stub_heartbeat_transport(monkeypatch)
     runtime = _runtime(_config("camera-a"), tmp_path, {})
 
     assert runtime._live_view is None  # noqa: SLF001
     assert runtime._mjpeg_config.enabled is False  # noqa: SLF001
 
-    with _running(runtime, lambda: len(runtime.cameras) == 1):
-        assert runtime._mjpeg_server is None  # noqa: SLF001
-        # Nothing was registered either: the store stays empty rather than
-        # accumulating cameras for a view that does not exist.
-        assert runtime._live_frames.is_known("camera-a") is False  # noqa: SLF001
+    with caplog.at_level("INFO", logger="worker.runtime.worker"):
+        with _running(runtime, lambda: len(runtime.cameras) == 1):
+            assert runtime._mjpeg_server is None  # noqa: SLF001
+            # Nothing was registered either: the store stays empty rather than
+            # accumulating cameras for a view that does not exist.
+            assert runtime._live_frames.is_known("camera-a") is False  # noqa: SLF001
+
+    assert any(
+        "live view server not started" in record.message for record in caplog.records
+    )
 
 
 def test_either_switch_alone_enables_the_live_view(tmp_path: Path) -> None:

@@ -269,10 +269,10 @@ def main(argv: list[str] | None = None) -> int:
                 )
             return CLEAN_SHUTDOWN_EXIT_CODE
 
-        models, clip = resolve_local_overrides(None, os.environ)
+        models, clip, dev_mjpeg = resolve_local_overrides(None, os.environ)
         try:
             snapshot = load_worker_config_from_relay(
-                relay_url, relay_token, models=models, clip=clip
+                relay_url, relay_token, models=models, clip=clip, dev_mjpeg=dev_mjpeg
             )
         except (WorkerConfigError, ValidationError):
             # Defensive only: see the matching comment on the YAML branch's

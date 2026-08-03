@@ -22,6 +22,7 @@ from worker.runtime.config.pull_models import BackendWorkerConfigPayload
 from worker.runtime.config.restart import RestartDirective
 from worker.runtime.config.worker_models import (
     ClipRecordingConfig,
+    DevMjpegConfig,
     WorkerConfig,
     WorkerModelsConfig,
 )
@@ -79,6 +80,7 @@ def load_worker_config_from_relay(
     urlopen: UrlOpen | None = None,
     models: WorkerModelsConfig | None = None,
     clip: ClipRecordingConfig | None = None,
+    dev_mjpeg: DevMjpegConfig | None = None,
 ) -> ConfigSnapshot | None:
     lkg_store = store or WorkerConfigLkgStore()
     payload = _pull_payload(
@@ -97,6 +99,7 @@ def load_worker_config_from_relay(
                 stale=False,
                 models=models,
                 clip=clip,
+                dev_mjpeg=dev_mjpeg,
             )
         except (ValidationError, WorkerConfigError):
             print("worker config pull skipped: malformed payload", file=sys.stderr)
@@ -109,7 +112,7 @@ def load_worker_config_from_relay(
                 return fresh
             try:
                 return _snapshot_from_stored(
-                    stored, relay_url, relay_token, models=models, clip=clip
+                    stored, relay_url, relay_token, models=models, clip=clip, dev_mjpeg=dev_mjpeg
                 )
             except (ValidationError, WorkerConfigError) as exc:
                 print(
@@ -124,7 +127,9 @@ def load_worker_config_from_relay(
     if stored is None:
         return None
     try:
-        return _snapshot_from_stored(stored, relay_url, relay_token, models=models, clip=clip)
+        return _snapshot_from_stored(
+            stored, relay_url, relay_token, models=models, clip=clip, dev_mjpeg=dev_mjpeg
+        )
     except (ValidationError, WorkerConfigError):
         print("worker config LKG skipped: malformed payload", file=sys.stderr)
         return None
@@ -141,7 +146,7 @@ def resolve_startup_config(
     environ: Mapping[str, str] | None = None,
 ) -> ConfigSnapshot:
     effective_token = relay_token or yaml_config.relay.token.get_secret_value()
-    models, clip = resolve_local_overrides(yaml_config, environ)
+    models, clip, dev_mjpeg = resolve_local_overrides(yaml_config, environ)
     pulled = load_worker_config_from_relay(
         relay_url,
         effective_token,
@@ -150,6 +155,7 @@ def resolve_startup_config(
         urlopen=urlopen,
         models=models,
         clip=clip,
+        dev_mjpeg=dev_mjpeg,
     )
     if pulled is not None:
         return pulled
@@ -199,10 +205,13 @@ def _snapshot_from_payload(
     stale: bool,
     models: WorkerModelsConfig | None = None,
     clip: ClipRecordingConfig | None = None,
+    dev_mjpeg: DevMjpegConfig | None = None,
 ) -> ConfigSnapshot:
     parsed = BackendWorkerConfigPayload.model_validate(payload)
     return ConfigSnapshot(
-        config=parsed.to_worker_config(relay_url, relay_token, models=models, clip=clip),
+        config=parsed.to_worker_config(
+            relay_url, relay_token, models=models, clip=clip, dev_mjpeg=dev_mjpeg
+        ),
         registry_version=parsed.resolved_registry_version,
         directive=parsed.directive,
         source=source,
@@ -217,6 +226,7 @@ def _snapshot_from_stored(
     *,
     models: WorkerModelsConfig | None = None,
     clip: ClipRecordingConfig | None = None,
+    dev_mjpeg: DevMjpegConfig | None = None,
 ) -> ConfigSnapshot:
     snapshot = _snapshot_from_payload(
         stored.payload,
@@ -226,6 +236,7 @@ def _snapshot_from_stored(
         stale=True,
         models=models,
         clip=clip,
+        dev_mjpeg=dev_mjpeg,
     )
     if _snapshot_key(snapshot) != _stored_key(stored):
         raise WorkerConfigError("worker config LKG revision mismatch")
