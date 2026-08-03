@@ -47,7 +47,7 @@ def build_camera_source_registry(cameras: tuple[CameraRuntimeConfig, ...]) -> So
     return SourceRegistry(records=records)
 
 
-def _resolve_decode_backend(decode: DecodePolicy, override: str | None) -> str:
+def resolve_decode_backend(decode: DecodePolicy, override: str | None) -> str:
     """Resolve the effective decode backend for one camera.
 
     ``override`` is a camera's ``CameraRuntimeConfig.decode_backend``.
@@ -79,7 +79,7 @@ def decoder_for(
     Fail-fast per ADR-0002: an unrecognized token raises immediately rather
     than silently falling back to a default backend.
     """
-    resolved = _resolve_decode_backend(decode, override)
+    resolved = resolve_decode_backend(decode, override)
     if resolved in ("opencv", "cpu"):
         return CpuAvAdapter()
     if resolved == "nvdec":
@@ -90,7 +90,7 @@ def decoder_for(
 def _decode_config_factory(
     decode: DecodePolicy, camera: CameraRuntimeConfig, runtime: WorkerRuntimeConfig
 ) -> Callable[[str, ResolvedSource], DecodeConfig]:
-    resolved = _resolve_decode_backend(decode, camera.decode_backend)
+    resolved = resolve_decode_backend(decode, camera.decode_backend)
 
     def make(camera_id: str, resolved_source: ResolvedSource) -> DecodeConfig:
         del resolved_source  # the registry only gates which cameras may ingest
@@ -126,7 +126,7 @@ def compose_camera_ingest_loop(
 
     ``camera.decode_backend`` (when not ``None``/``"auto"``) overrides the
     profile-global ``decode`` token for this camera only; see
-    ``_resolve_decode_backend``. ``runtime`` supplies the effective
+    ``resolve_decode_backend``. ``runtime`` supplies the effective
     ``max_failures``/``open_timeout_ms``/``read_timeout_ms`` -- callers that
     don't have a ``WorkerConfig.runtime`` in scope (e.g. tests) get the
     adapter/policy dataclass defaults via a fresh ``WorkerRuntimeConfig``.
@@ -152,4 +152,5 @@ __all__ = [
     "build_camera_source_registry",
     "compose_camera_ingest_loop",
     "decoder_for",
+    "resolve_decode_backend",
 ]

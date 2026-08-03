@@ -364,6 +364,63 @@ def test_default_loop_factory_selects_the_nvdec_cuvid_adapter_for_the_nvdec_prof
     assert loop._ports.decoder is sentinel  # noqa: SLF001
 
 
+def test_default_loop_factory_records_the_resolved_decode_selection_in_diagnostics(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The resolved decode backend (what `decoder_for`/`_decode_config_factory`
+    # actually built the camera's real adapter from) never reached
+    # `WorkerDiagnostics`, so `runtime.cameras[*].decode.selected` stayed
+    # permanently null in the runtime-status payload no matter what backend
+    # was really running.
+    monkeypatch.setattr(ingest_composition_module, "CpuAvAdapter", lambda: object())
+    monkeypatch.setattr(
+        ingest_composition_module, "NvdecCuvidAdapter", _forbid("NvdecCuvidAdapter")
+    )
+    config = _config("camera-a")
+    runtime = WorkerRuntime(config, serving_client=_FakeServingClient())
+    runtime._boot = _boot_context_for("cpu")  # noqa: SLF001 - simulate post-model-init state
+
+    _ = runtime._default_loop_factory(  # noqa: SLF001
+        config.cameras[0], BoundedFrameBus(), _Reporter()
+    )
+
+    selection = runtime.diagnostics.decode_selection("camera-a")
+    assert selection is not None
+    assert selection.selected == "opencv"
+
+
+def test_default_loop_factory_preserves_the_prior_requested_and_fallback_count(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # `_build_camera` calls `register_decode` (requested=..., fallback_count=0)
+    # before the loop factory ever runs in production. The loop factory's
+    # `update_decode` must layer `selected` on top of that record, not
+    # overwrite `requested`/`fallback_count` with fresh defaults.
+    monkeypatch.setattr(ingest_composition_module, "CpuAvAdapter", lambda: object())
+    monkeypatch.setattr(
+        ingest_composition_module, "NvdecCuvidAdapter", _forbid("NvdecCuvidAdapter")
+    )
+    config = _config("camera-a")
+    runtime = WorkerRuntime(config, serving_client=_FakeServingClient())
+    runtime._boot = _boot_context_for("cpu")  # noqa: SLF001
+    runtime.diagnostics.register_decode("camera-a", "auto")
+    runtime.diagnostics.record_decode_open_failure("camera-a", "spawn_failed")
+
+    _ = runtime._default_loop_factory(  # noqa: SLF001
+        config.cameras[0], BoundedFrameBus(), _Reporter()
+    )
+
+    selection = runtime.diagnostics.decode_selection("camera-a")
+    assert selection is not None
+    assert selection.requested == "auto"
+    # `record_decode_open_failure` doesn't bump `fallback_count` (unlike its
+    # encode counterpart) -- out of scope here; this only pins that the loop
+    # factory's `update_decode` doesn't reset the field back to 0 itself.
+    assert selection.fallback_count == 0
+    assert selection.last_reason == "spawn_failed"
+    assert selection.selected == "opencv"
+
+
 def test_default_loop_factory_without_a_resolved_boot_profile_raises() -> None:
     config = _config("camera-a")
     runtime = WorkerRuntime(config, serving_client=_FakeServingClient())
