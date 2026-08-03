@@ -59,3 +59,37 @@ describe('CameraInfoCard', () => {
     expect(onManageConnection).toHaveBeenCalledTimes(1);
   });
 });
+
+describe('I10 — 클라우드 연동 상태 표시', () => {
+  it('매핑이 끝났으면 연동 완료로 보여준다', () => {
+    const { host } = render({
+      ...camera,
+      mapping_pending: false,
+      backend_camera_id: 'cam_sp_205',
+    });
+
+    expect(host.querySelector('[data-testid="cloud-mapping"]')?.textContent).toContain('연동 완료');
+  });
+
+  it('매핑이 진행 중이면 무엇을 해야 하는지 알려준다', () => {
+    const { host } = render({ ...camera, mapping_pending: true, backend_camera_id: null });
+
+    const text = host.querySelector('[data-testid="cloud-mapping"]')?.textContent ?? '';
+    expect(text).toContain('연동 대기');
+    expect(text).toContain('방을 지정');
+  });
+
+  it('backend_camera_id가 없으면 pending이 false여도 완료로 표시하지 않는다', () => {
+    // 서버가 pending=false만 보내고 id를 못 준 상태를 "완료"로 읽으면
+    // 기사님이 안 붙은 카메라를 두고 현장을 떠난다.
+    const { host } = render({ ...camera, mapping_pending: false, backend_camera_id: null });
+
+    expect(host.querySelector('[data-testid="cloud-mapping"]')?.textContent).toContain('연동 대기');
+  });
+
+  it('필드가 아예 없으면 보수적으로 연동 대기로 본다', () => {
+    const { host } = render(camera);
+
+    expect(host.querySelector('[data-testid="cloud-mapping"]')?.textContent).toContain('연동 대기');
+  });
+});

@@ -23,6 +23,16 @@ export function CameraInfoCard({ camera, onManageConnection }: CameraInfoCardPro
         <dd className="text-foreground">{camera.floor_name ?? '미지정'}</dd>
         <dt className="text-muted-foreground">RTSP 주소</dt>
         <dd className="truncate font-mono text-foreground">{camera.rtsp_url_masked}</dd>
+        <dt className="text-muted-foreground">클라우드 연동</dt>
+        <dd data-testid="cloud-mapping" className="text-foreground">
+          {camera.mapping_pending === false && camera.backend_camera_id ? (
+            <span className="font-semibold text-emerald-600">연동 완료</span>
+          ) : (
+            <span className="font-semibold text-amber-600">
+              연동 대기 — 방을 지정해야 클라우드로 전송됩니다
+            </span>
+          )}
+        </dd>
       </dl>
     </article>
   );
