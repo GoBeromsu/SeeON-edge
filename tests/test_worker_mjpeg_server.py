@@ -307,6 +307,98 @@ def test_pose_get_and_set_round_trip_and_defaults_none() -> None:
         server.stop()
 
 
+def test_pose_get_and_set_open_when_no_relay_token_configured() -> None:
+    """Issue #71: a standalone dev MJPEG server (no relay token wired at
+    all, i.e. ``MjpegServerConfig(probe_token=None)`` as used above) must
+    keep working unauthenticated -- preserving pre-existing dev ergonomics
+    -- even though pose GET/POST now gate on the relay token once one *is*
+    configured (see the paired ``..._require_token_when_configured`` test).
+    """
+    store = LatestFrameStore()
+    store.register_camera("camera-a")
+    server = MjpegServer(store, MjpegServerConfig(port=0))
+    server.start()
+    base = f"http://127.0.0.1:{server.port}"
+    try:
+        with urllib.request.urlopen(f"{base}/overlay/camera-a/pose", timeout=1) as response:
+            assert response.status == 200
+
+        request = urllib.request.Request(
+            f"{base}/overlay/camera-a/pose",
+            data=json.dumps({"mode": "fall"}).encode(),
+            method="POST",
+        )
+        with urllib.request.urlopen(request, timeout=1) as response:
+            assert response.status == 200
+        assert store.get_mode("camera-a") == "fall"
+    finally:
+        server.stop()
+
+
+def test_pose_get_and_set_require_token_when_configured() -> None:
+    """Issue #71: once a relay token is configured, pose GET/POST require the
+    same ``X-Edge-Relay-Token`` header as ``/probe`` (``_authorized_probe``).
+    """
+    store = LatestFrameStore()
+    store.register_camera("camera-a")
+    server = MjpegServer(store, MjpegServerConfig(port=0, probe_token="relay-token"))
+    server.start()
+    base = f"http://127.0.0.1:{server.port}"
+    try:
+        try:
+            urllib.request.urlopen(f"{base}/overlay/camera-a/pose", timeout=1)
+        except urllib.error.HTTPError as exc:
+            assert exc.code == 403
+        else:  # pragma: no cover
+            raise AssertionError("pose GET without a token should 403")
+
+        unauthorized_post = urllib.request.Request(
+            f"{base}/overlay/camera-a/pose",
+            data=json.dumps({"mode": "fall"}).encode(),
+            method="POST",
+        )
+        try:
+            urllib.request.urlopen(unauthorized_post, timeout=1)
+        except urllib.error.HTTPError as exc:
+            assert exc.code == 403
+        else:  # pragma: no cover
+            raise AssertionError("pose POST without a token should 403")
+
+        wrong_token_post = urllib.request.Request(
+            f"{base}/overlay/camera-a/pose",
+            data=json.dumps({"mode": "fall"}).encode(),
+            headers={"X-Edge-Relay-Token": "wrong-token"},
+            method="POST",
+        )
+        try:
+            urllib.request.urlopen(wrong_token_post, timeout=1)
+        except urllib.error.HTTPError as exc:
+            assert exc.code == 403
+        else:  # pragma: no cover
+            raise AssertionError("pose POST with a mismatched token should 403")
+
+        assert store.get_mode("camera-a") == "none"
+
+        authorized_get = urllib.request.Request(
+            f"{base}/overlay/camera-a/pose",
+            headers={"X-Edge-Relay-Token": "relay-token"},
+        )
+        with urllib.request.urlopen(authorized_get, timeout=1) as response:
+            assert json.loads(response.read()) == {"mode": "none"}
+
+        authorized_post = urllib.request.Request(
+            f"{base}/overlay/camera-a/pose",
+            data=json.dumps({"mode": "bedexit"}).encode(),
+            headers={"X-Edge-Relay-Token": "relay-token"},
+            method="POST",
+        )
+        with urllib.request.urlopen(authorized_post, timeout=1) as response:
+            assert json.loads(response.read()) == {"mode": "bedexit"}
+        assert store.get_mode("camera-a") == "bedexit"
+    finally:
+        server.stop()
+
+
 def test_pose_unknown_camera_and_malformed_body_are_rejected() -> None:
     store = LatestFrameStore()
     server = MjpegServer(store, MjpegServerConfig(port=0))

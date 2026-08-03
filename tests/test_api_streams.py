@@ -38,6 +38,12 @@ class UrlopenCall(TypedDict):
     method: str
 
 
+class UrlopenCallWithHeaders(TypedDict):
+    url: str
+    method: str
+    headers: dict[str, str]
+
+
 class FiniteStreamResponse:
     status: int = 200
     headers: dict[str, str] = {"Content-Type": "multipart/x-mixed-replace; boundary=frame"}
@@ -365,6 +371,79 @@ def test_pose_set_forwards_the_requested_value_with_a_dashboard_session(
             "timeout": 3.0,
             "method": "POST",
             "body": json.dumps({"mode": "bedexit"}).encode("utf-8"),
+        }
+    ]
+
+
+def test_pose_get_forwards_the_relay_token_to_the_worker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Issue #71: the worker now gates GET /overlay/{camera_id}/pose on the
+    same relay token as /probe, so the proxy must forward it (mirroring
+    cameras/router.py's `/probe` connection-test call) or every dashboard
+    pose read would start 403ing against a worker with a token configured.
+    """
+    calls: list[UrlopenCallWithHeaders] = []
+
+    def fake_urlopen(request: urllib.request.Request, timeout: float) -> PoseJsonResponse:
+        del timeout
+        calls.append(
+            {
+                "url": request.full_url,
+                "method": request.get_method(),
+                "headers": dict(request.headers),
+            }
+        )
+        return PoseJsonResponse(json.dumps({"mode": "none"}).encode())
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+    with TestClient(create_app(lifespan=NO_LIFESPAN)) as client:
+        _login(client)
+        response = client.get("/api/v1/streams/cam_sp_201/pose")
+
+    assert response.status_code == 200
+    assert calls == [
+        {
+            "url": "http://worker.local:8090/overlay/cam_sp_201/pose",
+            "method": "GET",
+            "headers": {"X-edge-relay-token": "relay-token"},
+        }
+    ]
+
+
+def test_pose_set_forwards_the_relay_token_to_the_worker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Issue #71: same as the GET case above, but for POST /overlay/{camera_id}/pose."""
+    calls: list[UrlopenCallWithHeaders] = []
+
+    def fake_urlopen(request: urllib.request.Request, timeout: float) -> PoseJsonResponse:
+        del timeout
+        calls.append(
+            {
+                "url": request.full_url,
+                "method": request.get_method(),
+                "headers": dict(request.headers),
+            }
+        )
+        return PoseJsonResponse(json.dumps({"mode": "fall"}).encode())
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+    with TestClient(create_app(lifespan=NO_LIFESPAN)) as client:
+        _login(client)
+        response = client.post("/api/v1/streams/cam_sp_201/pose", json={"mode": "fall"})
+
+    assert response.status_code == 200
+    assert calls == [
+        {
+            "url": "http://worker.local:8090/overlay/cam_sp_201/pose",
+            "method": "POST",
+            "headers": {
+                "Content-type": "application/json",
+                "X-edge-relay-token": "relay-token",
+            },
         }
     ]
 
