@@ -110,7 +110,7 @@ def test_pull_with_fall_env_vars_set_configures_models_fall_and_clip_enabled(
     ``WorkerConfig``, not silently drop them."""
     artifact_dir = _write_fall_artifact(tmp_path / "models" / "fall" / "lstm")
     environ = {**_fall_env(artifact_dir), ML_WORKER_CLIP_RECORDING_ENABLED_ENV: "true"}
-    models, clip = resolve_local_overrides(None, environ)
+    models, clip, dev_mjpeg = resolve_local_overrides(None, environ)
 
     snapshot = load_worker_config_from_relay(
         "http://ml-api:8000",
@@ -121,6 +121,7 @@ def test_pull_with_fall_env_vars_set_configures_models_fall_and_clip_enabled(
         ),
         models=models,
         clip=clip,
+        dev_mjpeg=dev_mjpeg,
     )
 
     assert snapshot is not None
@@ -136,9 +137,10 @@ def test_pull_with_no_fall_config_leaves_models_fall_none_for_the_boot_gate(
     no YAML), the pulled config's ``models.fall`` must remain ``None`` so the
     #43 boot gate (``WorkerRuntime._create_fall_model``) still fires -- this
     fix must not weaken that gate by inventing a default fall model."""
-    models, clip = resolve_local_overrides(None, {})
+    models, clip, dev_mjpeg = resolve_local_overrides(None, {})
     assert models.fall is None
     assert clip.enabled is False
+    assert dev_mjpeg is None
 
     snapshot = load_worker_config_from_relay(
         "http://ml-api:8000",
@@ -149,11 +151,13 @@ def test_pull_with_no_fall_config_leaves_models_fall_none_for_the_boot_gate(
         ),
         models=models,
         clip=clip,
+        dev_mjpeg=dev_mjpeg,
     )
 
     assert snapshot is not None
     assert snapshot.config.models.fall is None
     assert snapshot.config.clip.enabled is False
+    assert snapshot.config.dev_mjpeg.enabled is False
 
 
 def test_local_yaml_fall_config_wins_over_env_when_both_are_set(tmp_path: Path) -> None:
@@ -190,11 +194,12 @@ def test_local_yaml_fall_config_wins_over_env_when_both_are_set(tmp_path: Path) 
     )
     environ = {**_fall_env(env_artifact_dir), ML_WORKER_CLIP_RECORDING_ENABLED_ENV: "false"}
 
-    models, clip = resolve_local_overrides(yaml_config, environ)
+    models, clip, dev_mjpeg = resolve_local_overrides(yaml_config, environ)
 
     assert models.fall is not None
     assert models.fall.artifact_dir == yaml_artifact_dir.resolve()
     assert clip.enabled is True
+    assert dev_mjpeg is None
 
 
 def test_malformed_fall_env_value_raises_loudly_instead_of_silently_defaulting() -> None:
@@ -220,7 +225,7 @@ def test_lkg_restore_path_preserves_locally_sourced_models_and_clip(tmp_path: Pa
     re-attached there too, not only on the live-pull path."""
     artifact_dir = _write_fall_artifact(tmp_path / "models" / "fall" / "lstm")
     environ = {**_fall_env(artifact_dir), ML_WORKER_CLIP_RECORDING_ENABLED_ENV: "true"}
-    models, clip = resolve_local_overrides(None, environ)
+    models, clip, dev_mjpeg = resolve_local_overrides(None, environ)
     store = WorkerConfigLkgStore(tmp_path / "worker-state.sqlite3")
 
     fresh = load_worker_config_from_relay(
@@ -232,6 +237,7 @@ def test_lkg_restore_path_preserves_locally_sourced_models_and_clip(tmp_path: Pa
         ),
         models=models,
         clip=clip,
+        dev_mjpeg=dev_mjpeg,
     )
     assert fresh is not None
     assert fresh.source is ConfigSource.PULLED
@@ -246,6 +252,7 @@ def test_lkg_restore_path_preserves_locally_sourced_models_and_clip(tmp_path: Pa
         urlopen=offline,
         models=models,
         clip=clip,
+        dev_mjpeg=dev_mjpeg,
     )
 
     assert stale is not None
@@ -254,3 +261,54 @@ def test_lkg_restore_path_preserves_locally_sourced_models_and_clip(tmp_path: Pa
     assert stale.config.models.fall is not None
     assert stale.config.models.fall.artifact_dir == artifact_dir.resolve()
     assert stale.config.clip.enabled is True
+
+
+def test_pull_with_yaml_dev_mjpeg_enabled_survives_the_pull(tmp_path: Path) -> None:
+    """Issue #113: ``BackendWorkerConfigPayload.to_worker_config()`` never
+    threaded ``dev_mjpeg`` through a relay pull, so an explicit local
+    ``dev_mjpeg.enabled: true`` was silently reset to the pydantic default
+    (disabled) on every successful pull -- with no failure and no log line,
+    the live-view MJPEG port would simply never bind. This must not regress:
+    a YAML with ``dev_mjpeg.enabled: true`` must still be enabled in the
+    post-pull ``WorkerConfig``."""
+    yaml_config = WorkerConfig.model_validate(
+        {
+            "relay": {"url": "http://ml-api:8000", "token": "relay-secret"},
+            "cameras": [
+                {
+                    "camera_id": "yaml-camera",
+                    "facility_id": "facility-1",
+                    "rtsp_url": "rtsp://yaml/camera",
+                }
+            ],
+            "dev_mjpeg": {"enabled": True, "host": "127.0.0.1", "port": 8090},
+        }
+    )
+    _models, _clip, dev_mjpeg = resolve_local_overrides(yaml_config, {})
+    assert dev_mjpeg is not None
+    assert dev_mjpeg.enabled is True
+
+    snapshot = load_worker_config_from_relay(
+        "http://ml-api:8000",
+        "relay-secret",
+        store=WorkerConfigLkgStore(tmp_path / "worker-state.sqlite3"),
+        urlopen=lambda _request, _timeout: FakeResponse(
+            _payload(registry_version=1, config_version=1, restart_epoch=0)
+        ),
+        models=_models,
+        clip=_clip,
+        dev_mjpeg=dev_mjpeg,
+    )
+
+    assert snapshot is not None
+    assert snapshot.config.dev_mjpeg.enabled is True
+    assert snapshot.config.dev_mjpeg.port == 8090
+
+
+def test_pull_with_no_yaml_dev_mjpeg_leaves_it_disabled_for_env_fallback() -> None:
+    """The default (no local YAML, or YAML silent on ``dev_mjpeg``) must keep
+    resolving to ``None`` here so ``WorkerRuntime._resolve_mjpeg_config``'s
+    existing ``ML_WORKER_DEV_MJPEG*`` env fallback is left untouched -- this
+    fix only needed to add the missing YAML-survives-a-pull half."""
+    _models, _clip, dev_mjpeg = resolve_local_overrides(None, {})
+    assert dev_mjpeg is None

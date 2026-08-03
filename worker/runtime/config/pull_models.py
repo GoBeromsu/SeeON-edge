@@ -22,6 +22,7 @@ from worker.runtime.config.errors import ConfigValidationError, WorkerConfigErro
 from worker.runtime.config.restart import RestartDirective
 from worker.runtime.config.worker_models import (
     ClipRecordingConfig,
+    DevMjpegConfig,
     WorkerConfig,
     WorkerModelsConfig,
 )
@@ -261,15 +262,19 @@ class BackendWorkerConfigPayload(BaseModel):
         *,
         models: WorkerModelsConfig | None = None,
         clip: ClipRecordingConfig | None = None,
+        dev_mjpeg: DevMjpegConfig | None = None,
     ) -> WorkerConfig:
         """Build the effective ``WorkerConfig`` from a relay pull.
 
         The backend-pulled payload only ever carries fleet-level state
-        (relay/domains/cameras); ``models``/``clip`` are locally-sourced
-        (env, or local YAML when ``EDGE_CAMERA_CONFIG`` is set) and must be
-        passed in explicitly by the caller (``config_pull.py``'s
+        (relay/domains/cameras); ``models``/``clip``/``dev_mjpeg`` are
+        locally-sourced (env, or local YAML when ``EDGE_CAMERA_CONFIG`` is
+        set) and must be passed in explicitly by the caller (``config_pull.py``'s
         ``resolve_local_overrides``) rather than silently dropped -- see
-        issues #66/#68.
+        issues #66/#68 (models/clip) and #113 (dev_mjpeg: an explicit local
+        ``dev_mjpeg.enabled: true`` used to be silently reset to the pydantic
+        default -- disabled -- on every successful pull, so the operator
+        diagnostic MJPEG port never bound and never logged why).
         """
         token = "" if relay_token is None else relay_token.strip()
         if not token:
@@ -318,6 +323,7 @@ class BackendWorkerConfigPayload(BaseModel):
             models=models if models is not None else WorkerModelsConfig(),
             domains=domains_config,
             clip=resolved_clip,
+            dev_mjpeg=dev_mjpeg if dev_mjpeg is not None else DevMjpegConfig(),
             cameras=cameras,
         )
 

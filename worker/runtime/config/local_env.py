@@ -34,6 +34,7 @@ from pydantic import ValidationError
 from worker.runtime.config.errors import WorkerConfigError
 from worker.runtime.config.worker_models import (
     ClipRecordingConfig,
+    DevMjpegConfig,
     FallModelConfig,
     WorkerConfig,
     WorkerModelsConfig,
@@ -186,16 +187,32 @@ def worker_models_config_from_environment(
 def resolve_local_overrides(
     yaml_config: WorkerConfig | None,
     environ: Mapping[str, str] | None = None,
-) -> tuple[WorkerModelsConfig, ClipRecordingConfig]:
-    """Settle ``models``/``clip`` to merge into a pulled or LKG-restored
-    ``WorkerConfig``.
+) -> tuple[WorkerModelsConfig, ClipRecordingConfig, DevMjpegConfig | None]:
+    """Settle ``models``/``clip``/``dev_mjpeg`` to merge into a pulled or
+    LKG-restored ``WorkerConfig``.
 
-    Mirrors the "explicit wins outright, silence defers" precedence
-    ``WorkerRuntime._resolve_mjpeg_config`` already uses for
+    ``models``/``clip`` mirror the "explicit wins outright, silence defers"
+    precedence ``WorkerRuntime._resolve_mjpeg_config`` already uses for
     ``dev_mjpeg``/``ML_WORKER_DEV_MJPEG*`` (worker/runtime/worker.py
     ~535-554): an explicit local YAML value wins outright over env; with the
     YAML silent (no local YAML at all -- the production pull-first default
     -- or the YAML field left at its own default), the environment decides.
+
+    ``dev_mjpeg`` only needs the YAML half of that precedence here: unlike
+    ``models``/``clip``, ``WorkerRuntime._resolve_mjpeg_config`` already
+    falls back to ``ML_WORKER_DEV_MJPEG*`` env vars itself whenever the
+    resolved ``WorkerConfig.dev_mjpeg`` comes back disabled, reading
+    ``self._env`` directly -- so that half of the precedence already worked
+    even before this fix. What was missing (issue #113) was the YAML half:
+    ``BackendWorkerConfigPayload.to_worker_config`` never received
+    ``dev_mjpeg`` at all, so an explicit local ``dev_mjpeg.enabled: true``
+    was silently reset to the pydantic default (disabled) on every
+    successful pull -- with no failure and no log line, the operator-facing
+    MJPEG diagnostic port would simply never bind. Returning ``None`` here
+    when the YAML did not explicitly enable it (rather than synthesizing a
+    disabled ``DevMjpegConfig()``) preserves that existing env fallback:
+    ``to_worker_config`` only overrides the pulled config's default when the
+    caller actually has an explicit answer to give it.
     """
     env = os.environ if environ is None else environ
     models = (
@@ -208,7 +225,12 @@ def resolve_local_overrides(
         if yaml_config is not None and yaml_config.clip.enabled
         else clip_recording_config_from_environment(env)
     )
-    return models, clip
+    dev_mjpeg = (
+        yaml_config.dev_mjpeg
+        if yaml_config is not None and yaml_config.dev_mjpeg.enabled
+        else None
+    )
+    return models, clip, dev_mjpeg
 
 
 __all__ = [
