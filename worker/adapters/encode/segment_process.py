@@ -3,10 +3,12 @@ from __future__ import annotations
 import logging
 import math
 import subprocess
+import threading
+from collections import deque
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Final, Protocol, final
+from typing import IO, Final, Protocol, final
 
 from worker.adapters.encode.adapter_errors import EncoderStartError, EncoderWriteError
 from worker.adapters.encode.models import EncodePolicy, EncoderGeometry, SegmentEncoderConfig
@@ -15,6 +17,9 @@ LOGGER = logging.getLogger(__name__)
 
 _WAIT_TIMEOUT_SECONDS: Final = 15.0
 _TERMINATE_TIMEOUT_SECONDS: Final = 5.0
+_STDERR_DRAIN_JOIN_TIMEOUT_SECONDS: Final = 2.0
+_STDERR_DRAIN_CHUNK_BYTES: Final = 4096
+_STDERR_TAIL_MAX_BYTES: Final = 8192
 
 # FramePacket images are RGB (every decode adapter publishes rgb24). Declaring
 # bgr24 here silently swaps red and blue in every stored clip.
@@ -44,10 +49,66 @@ class SegmentProcessSpec:
 
 
 @final
+class _StderrDrain:
+    """Continuously drains a subprocess's stderr pipe on a background daemon
+    thread into a small bounded tail buffer.
+
+    ffmpeg here is a long-lived process spanning many segments and frames.
+    The kernel pipe buffer backing ``stderr=PIPE`` is small (historically
+    64KB). If nothing reads it between process exits and ffmpeg emits a
+    sustained trickle of stderr (e.g. per-frame encoder warnings under GPU
+    contention), that buffer fills, ffmpeg blocks on its own stderr write,
+    stops reading stdin, and the caller's frame writes to stdin silently
+    hang -- see #105. Draining continuously, rather than once synchronously
+    in ``reap()``, keeps the pipe empty so ffmpeg can never block on it,
+    while still surfacing the same WARNING-level tail on a nonzero exit.
+    """
+
+    def __init__(self, stream: IO[bytes]) -> None:
+        self._stream = stream
+        self._chunks: deque[bytes] = deque()
+        self._tail_len = 0
+        self._lock = threading.Lock()
+        self._thread = threading.Thread(
+            target=self._run, name="ffmpeg-stderr-drain", daemon=True
+        )
+        self._thread.start()
+
+    def _run(self) -> None:
+        # Terminates on its own once the pipe reaches EOF, which happens as
+        # soon as the child process exits and its stderr write end closes --
+        # no explicit stop signal is needed.
+        with suppress(OSError, ValueError):
+            while True:
+                chunk = self._stream.read(_STDERR_DRAIN_CHUNK_BYTES)
+                if not chunk:
+                    return
+                with self._lock:
+                    self._chunks.append(chunk)
+                    self._tail_len += len(chunk)
+                    while self._tail_len > _STDERR_TAIL_MAX_BYTES and len(self._chunks) > 1:
+                        self._tail_len -= len(self._chunks.popleft())
+
+    def tail(self) -> bytes:
+        with self._lock:
+            data = b"".join(self._chunks)
+        return data[-_STDERR_TAIL_MAX_BYTES:]
+
+    def join(self, *, timeout: float) -> None:
+        self._thread.join(timeout=timeout)
+
+    def is_alive(self) -> bool:
+        return self._thread.is_alive()
+
+
+@final
 class _PopenEncoderProcess:
     def __init__(self, process: subprocess.Popen[bytes]) -> None:
         self._process: subprocess.Popen[bytes] | None = process
         self._returncode: int | None = None
+        self._stderr_drain: _StderrDrain | None = (
+            _StderrDrain(process.stderr) if process.stderr is not None else None
+        )
 
     def write(self, payload: bytes) -> None:
         process = self._process
@@ -76,20 +137,23 @@ class _PopenEncoderProcess:
                 process.kill()
                 _ = process.wait()
         self._returncode = process.returncode
-        if self._returncode not in (0, None) and process.stderr is not None:
-            # Only read here, once the process has already exited: this call
-            # is on the same already-blocking reap() path as the wait() calls
-            # above, so it adds no new synchronous wait to encoder session
-            # open (see worker/adapters/encode/ffmpeg_segment_encoder.py's
-            # #53 fallback, which never waits on this).
-            with suppress(OSError, ValueError):
-                stderr_bytes = process.stderr.read()
+        if self._stderr_drain is not None:
+            # The process has already exited, so its stderr write end is
+            # closed and the drain thread's next read() sees EOF almost
+            # immediately; this join is just a bound so reap() can never
+            # hang on it.
+            self._stderr_drain.join(timeout=_STDERR_DRAIN_JOIN_TIMEOUT_SECONDS)
+            if self._returncode not in (0, None):
+                stderr_bytes = self._stderr_drain.tail()
                 if stderr_bytes:
                     LOGGER.warning(
                         "ffmpeg encoder process exited with code %s: %s",
                         self._returncode,
                         stderr_bytes.decode("utf-8", errors="replace").strip(),
                     )
+            if process.stderr is not None:
+                with suppress(OSError, ValueError):
+                    process.stderr.close()
         return self._returncode
 
 
