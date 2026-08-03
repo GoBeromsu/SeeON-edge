@@ -206,7 +206,12 @@ def test_label_clip_signals_degradation_when_label_store_is_unwritable(
     clip_env, monkeypatch
 ) -> None:
     """A degraded ``LabelStore.save`` (e.g. an unwritable labels dir) must not
-    be reported to the caller as a successful 200 label write -- see #50."""
+    be reported to the caller as a successful 200 label write -- see #50.
+
+    It also must not report the label as saved *elsewhere*: a failed local
+    save must short-circuit before the best-effort backend backup POST and
+    before the audit log records a "label" action, or callers/auditors would
+    see evidence of a save that never actually persisted anywhere."""
     clip_store = clip_env / "clip-store"
     label_store_root = clip_env / "label-store"
     _write_manifest(clip_store, "clip-1")
@@ -219,6 +224,16 @@ def test_label_clip_signals_degradation_when_label_store_is_unwritable(
             raise PermissionError("labels mount unavailable")
         original_mkdir(self, parents=parents, exist_ok=exist_ok)
 
+    monkeypatch.setenv("API_BACKEND_CLIP_EVENTS_URL", "http://backend/api/v1/clip-events")
+    monkeypatch.setenv("API_BACKEND_FACILITY_TOKEN", "facility-token")
+    backup_calls: list[dict[str, object]] = []
+
+    def fake_urlopen(request, timeout: float) -> FakeHTTPResponse:
+        backup_calls.append({"url": request.full_url})
+        return FakeHTTPResponse()
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+
     with TestClient(create_app(lifespan=no_lifespan)) as client:
         _login(client)
         monkeypatch.setattr(Path, "mkdir", guarded_mkdir)
@@ -226,9 +241,12 @@ def test_label_clip_signals_degradation_when_label_store_is_unwritable(
             "/api/v1/clips/clip-1/label",
             json={"label": "TRUE_POSITIVE", "reviewer": "reviewer-1"},
         )
+        audit = client.get("/api/v1/audit")
 
     assert response.status_code == 503
     assert not (labels_dir / "clip-1.json").exists()
+    assert backup_calls == []
+    assert audit.json()["entries"] == []
 
 
 def test_clip_routes_require_a_dashboard_session(clip_env) -> None:
