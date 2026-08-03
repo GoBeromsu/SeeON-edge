@@ -226,8 +226,19 @@ export async function deleteCamera(cameraId: string): Promise<void> {
   await requestJson(`/cameras/${encodeURIComponent(cameraId)}`, { method: 'DELETE' });
 }
 
-export async function testCamera(cameraId: string): Promise<CameraTestResult> {
-  return normalizeCameraTestResult(await requestJson(`/cameras/${encodeURIComponent(cameraId)}/test`, { method: 'POST' }));
+/**
+ * 카메라 연결 테스트.
+ *
+ * `rtspUrl`을 주면 저장된 값이 아니라 그 값을 검사한다. 수정 화면에서
+ * 방금 입력한 URL을 검사해야 오타를 저장 전에 잡을 수 있다.
+ */
+export async function testCamera(cameraId: string, rtspUrl?: string): Promise<CameraTestResult> {
+  return normalizeCameraTestResult(
+    await requestJson(`/cameras/${encodeURIComponent(cameraId)}/test`, {
+      method: 'POST',
+      ...(rtspUrl ? { body: JSON.stringify({ rtsp_url: rtspUrl }) } : {}),
+    }),
+  );
 }
 
 /** Structured 422 body the backend sends when bed-zone recognition finds no bed in the current frame. */

@@ -89,7 +89,10 @@ export function CameraEditModal({ camera, cameras, onClose, onUpdated, onRequest
     setBusy('test');
     setTestResult(null);
     try {
-      const result = await testCamera(camera.id);
+      // 저장된 값이 아니라 지금 입력창에 있는 값을 검사한다. 예전에는
+      // 저장본만 검사해 오타를 넣어도 "연결 성공"이 뜬 뒤 그대로 저장됐다.
+      const draft = rtspUrl.trim();
+      const result = await testCamera(camera.id, draft || undefined);
       setTestResult(result);
       if (result.ok) {
         toast.success('연결 성공');
@@ -115,7 +118,16 @@ export function CameraEditModal({ camera, cameras, onClose, onUpdated, onRequest
     try {
       const patch: { label?: string; rtsp_url?: string; floor?: string | null } = {};
       if (label.trim() !== camera.label) patch.label = label.trim();
-      if (rtspUrl.trim()) patch.rtsp_url = rtspUrl.trim();
+      const draft = rtspUrl.trim();
+      if (draft) {
+        // RTSP를 바꿨다면 그 값이 실제로 붙는지 확인된 뒤에만 저장한다.
+        // 확인 없이 저장하면 오타가 그대로 들어가 카메라가 조용히 죽는다.
+        if (!testResult?.ok) {
+          setSaveError('먼저 연결을 확인해 주세요. 연결에 성공해야 저장할 수 있습니다.');
+          return;
+        }
+        patch.rtsp_url = draft;
+      }
       // Only send floor when the user actually changed the selection (issue #85): saving without
       // touching the chips must not silently freeze the current space-sync floor_name as a local
       // override -- see FloorChips' doc comment and the floor precedence contract on Camera.floor.
