@@ -79,4 +79,32 @@ describe('LiveStreamPanel', () => {
     expect(host.textContent).toContain('12.4 FPS');
     expect(host.textContent).not.toContain('카메라에 연결할 수 없습니다');
   });
+
+  it('shows a bottom-left "라이브 · 온라인" badge for an online camera, matching the design handoff', () => {
+    const { host } = render(onlineCamera, undefined);
+
+    expect(host.textContent).toContain('라이브 · 온라인');
+  });
+
+  it('shows a "연결 끊김" overlay while the stream is reconnecting after an onError, without dropping the mounted img', () => {
+    const { host } = render(onlineCamera, undefined);
+
+    const img = host.querySelector('img') as HTMLImageElement;
+    expect(img).not.toBeNull();
+    act(() => img.dispatchEvent(new Event('error')));
+
+    expect(host.querySelector('[role="status"]')?.textContent).toContain('연결 끊김');
+    expect(host.querySelector('img')).not.toBeNull();
+  });
+
+  it('clears the "연결 끊김" overlay once the stream loads successfully again', () => {
+    const { host } = render(onlineCamera, undefined);
+
+    const img = host.querySelector('img') as HTMLImageElement;
+    act(() => img.dispatchEvent(new Event('error')));
+    expect(host.textContent).toContain('연결 끊김');
+
+    act(() => img.dispatchEvent(new Event('load')));
+    expect(host.textContent).not.toContain('연결 끊김');
+  });
 });

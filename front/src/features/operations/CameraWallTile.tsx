@@ -1,5 +1,7 @@
-import type { Camera } from '@/shared/api/client';
+import { useEffect, useState } from 'react';
+import { getCameraStreamUrl, type Camera } from '@/shared/api/client';
 import type { SnapshotEntry, SnapshotQueue } from '@/features/operations/SnapshotQueue';
+import { useMjpegStream } from '@/features/operations/useMjpegStream';
 
 type CameraWallTileProps = {
   camera: Camera;
@@ -8,13 +10,45 @@ type CameraWallTileProps = {
   onSelect: () => void;
 };
 
-/** 16:9 object-cover tile: online = live snapshot + gradient name/status bar over the video; offline = gray placeholder + separate bottom bar. */
+/** Tracks whether `node` is at least partially in the viewport; `false` until IntersectionObserver
+ * confirms visibility (jsdom/older browsers without IntersectionObserver stream unconditionally). */
+function useIsTileVisible(node: HTMLElement | null): boolean {
+  const [visible, setVisible] = useState(typeof IntersectionObserver === 'undefined');
+
+  useEffect(() => {
+    if (!node || typeof IntersectionObserver === 'undefined') return undefined;
+    const observer = new IntersectionObserver(
+      ([entry]) => setVisible(entry?.isIntersecting ?? false),
+      { threshold: 0.1 },
+    );
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [node]);
+
+  return visible;
+}
+
+/**
+ * 16:9 object-cover tile. Online + visible tiles stream live MJPEG (issue #82 — the wall must look
+ * like playing video, not a 5s snapshot poll); offscreen tiles fall back to the SnapshotQueue
+ * snapshot to save bandwidth, and any tile also falls back to the snapshot while the stream is
+ * reconnecting after an error (issue #83). Offline tiles are unchanged (gray placeholder).
+ */
 export function CameraWallTile({ camera, snapshot, queue, onSelect }: CameraWallTileProps): JSX.Element {
   const online = camera.status === 'online';
+  const [tileNode, setTileNode] = useState<HTMLButtonElement | null>(null);
+  const isVisible = useIsTileVisible(tileNode);
+  const streamActive = online && isVisible;
+  const stream = useMjpegStream(streamActive ? getCameraStreamUrl(camera.id) : null);
+  const showingStream = streamActive && stream.status === 'connected';
+
+  const snapshotStale = !showingStream && (snapshot?.state === 'error' || snapshot?.state === 'stale') && !!snapshot?.lastLoadedUrl;
+  const showDisconnectedBadge = (streamActive && stream.status === 'reconnecting') || snapshotStale;
 
   return (
     <button
       type="button"
+      ref={setTileNode}
       onClick={onSelect}
       aria-label={`${camera.label} 열기`}
       data-camera-id={camera.id}
@@ -34,6 +68,16 @@ export function CameraWallTile({ camera, snapshot, queue, onSelect }: CameraWall
               {snapshot?.state === 'error' ? '영상을 불러올 수 없습니다' : '불러오는 중…'}
             </span>
           )}
+          {streamActive && stream.src ? (
+            <img
+              key={stream.src}
+              src={stream.src}
+              alt={`${camera.label} 실시간 영상`}
+              className={`absolute inset-0 h-full w-full object-cover ${showingStream ? '' : 'opacity-0'}`}
+              onLoad={stream.onLoad}
+              onError={stream.onError}
+            />
+          ) : null}
           {snapshot?.requestUrl ? (
             <img
               src={snapshot.requestUrl}
@@ -43,6 +87,14 @@ export function CameraWallTile({ camera, snapshot, queue, onSelect }: CameraWall
               onLoad={(event) => queue.resolve(camera.id, camera.id, 'loaded', event.currentTarget.getAttribute('src') ?? undefined)}
               onError={(event) => queue.resolve(camera.id, camera.id, 'error', event.currentTarget.getAttribute('src') ?? undefined)}
             />
+          ) : null}
+          {showDisconnectedBadge ? (
+            <span
+              role="status"
+              className="media-status-overlay absolute left-2 top-2 rounded-control px-2 py-1 text-xs font-semibold"
+            >
+              연결 끊김
+            </span>
           ) : null}
           <span
             className="media-status-overlay absolute inset-x-0 bottom-0 flex items-center justify-between px-3 py-2 text-sm font-semibold"

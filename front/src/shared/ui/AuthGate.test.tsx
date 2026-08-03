@@ -219,6 +219,39 @@ describe('AuthGate', () => {
     act(() => root.unmount());
   });
 
+  it('flips back to the login form when a later, unrelated request returns 401 (session died mid-session)', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(okResponse())
+      .mockResolvedValueOnce(errorResponse(401));
+    vi.stubGlobal('fetch', fetchMock);
+    const { host, root } = renderGate();
+    await settle();
+    expect(host.textContent).toContain('대시보드');
+    expect(host.querySelector('form')).toBeNull();
+
+    await act(async () => {
+      await fetchCameras().catch(() => undefined);
+    });
+
+    expect(host.querySelector('form')).not.toBeNull();
+    expect(host.textContent).not.toContain('대시보드');
+    act(() => root.unmount());
+  });
+
+  it('does not flip an already-unauthorized login screen back and forth on a 401 from the login attempt itself', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(errorResponse(401))
+      .mockResolvedValueOnce(errorResponse(401));
+    vi.stubGlobal('fetch', fetchMock);
+    const { host, root } = renderGate();
+    await settle();
+
+    await submit(host, 'operator', 'wrong-password');
+    expect(host.textContent).toContain('아이디 또는 비밀번호가 올바르지 않습니다.');
+    expect(host.querySelector('form')).not.toBeNull();
+    act(() => root.unmount());
+  });
+
   it('keeps the dashboard authorized and shows operational copy when logout fails', async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(okResponse())
