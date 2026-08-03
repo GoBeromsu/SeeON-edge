@@ -29,6 +29,7 @@ from typing import Self, final
 import pytest
 
 from worker.runtime.config import (
+    ClipRecordingConfig,
     ConfigSource,
     JsonObject,
     WorkerConfig,
@@ -160,7 +161,12 @@ def test_pull_with_no_fall_config_resolves_packaged_default_lstm(
     assert models.fall is not None
     assert models.fall.type == "lstm"
     assert models.fall.artifact_dir == _PACKAGED_DEFAULT_ARTIFACT_DIR.resolve()
-    assert clip.enabled is False
+    # Deliberately not a literal: this test's concern is fall-model
+    # resolution, not clip. Deferring to ClipRecordingConfig's own default
+    # documents "env/YAML silence defers to the model default" (this
+    # branch's intent) and stays correct regardless of merge order with
+    # #137 (which flips that default to always-on).
+    assert clip.enabled is ClipRecordingConfig().enabled
     assert dev_mjpeg is None
 
     snapshot = load_worker_config_from_relay(
@@ -178,7 +184,9 @@ def test_pull_with_no_fall_config_resolves_packaged_default_lstm(
     assert snapshot is not None
     assert snapshot.config.models.fall is not None
     assert snapshot.config.models.fall.type == "lstm"
-    assert snapshot.config.clip.enabled is False
+    # Same rationale as the `clip.enabled` assertion above: defers to the
+    # model default rather than asserting a stale literal.
+    assert snapshot.config.clip.enabled is ClipRecordingConfig().enabled
     assert snapshot.config.dev_mjpeg.enabled is False
 
 
