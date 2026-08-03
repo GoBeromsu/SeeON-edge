@@ -107,7 +107,7 @@ from worker.runtime.telemetry.runtime_status_sender import (
     RelayRuntimeStatusTransport,
     RuntimeStatusSender,
 )
-from worker.runtime.telemetry.wire import RelayWorkerPayload
+from worker.runtime.telemetry.wire import ClipRecorderStatus, RelayWorkerPayload
 from worker.runtime.watchdog import InferenceWatchdog
 from worker.types import BusinessEvent, DecisionInput
 
@@ -1336,6 +1336,11 @@ class WorkerRuntime:
             raise
         except Exception:  # noqa: BLE001 - clip recording is a non-fatal camera boundary
             LOGGER.warning("clip recorder failed to start; clips disabled", exc_info=True)
+            # Fail-visible: clips are always-on by default, so a start failure
+            # must surface through runtime diagnostics (`/status`) rather than
+            # silently degrading -- the worker keeps running without clips,
+            # but that degraded state is now observable.
+            self.diagnostics.set_clip_recorder_status(ClipRecorderStatus(available=False))
             # `initialize_under_lock()` must run exactly once before the sender
             # starts. If start() failed *before* the hook, nothing initialized
             # the runtime and delivery would refuse to start, so initialize here.
@@ -1346,6 +1351,7 @@ class WorkerRuntime:
                 self._initialize_delivery_without_recorder(evidence_runtime)
             return
         self._clip_recorder = recorder
+        self.diagnostics.set_clip_recorder_status(ClipRecorderStatus(available=True))
 
     def _default_clip_recorder(self, camera: CameraRuntimeConfig) -> EventClipRecorder:
         if self._clip_recorder is None:
