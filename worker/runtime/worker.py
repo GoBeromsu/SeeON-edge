@@ -27,6 +27,7 @@ from worker.adapters.decode.cpu_av.probe import probe_opencv_ffmpeg_capability
 from worker.adapters.decode.nvdec_cuvid.probe import probe_nvdec_cuvid_capability
 from worker.adapters.device.cuda.probe import probe_cuda_capability
 from worker.adapters.device.mps.probe import probe_mps_capability
+from worker.adapters.device.nvml.probe import probe_nvml_gpu_status
 from worker.adapters.model import warmup_to_ready
 from worker.adapters.model.errors import FatalAcceleratorError
 from worker.adapters.model.fall_family_registry import (
@@ -107,7 +108,7 @@ from worker.runtime.telemetry.runtime_status_sender import (
     RelayRuntimeStatusTransport,
     RuntimeStatusSender,
 )
-from worker.runtime.telemetry.wire import RelayWorkerPayload
+from worker.runtime.telemetry.wire import RelayGpuPayload, RelayWorkerPayload
 from worker.runtime.watchdog import InferenceWatchdog
 from worker.types import BusinessEvent, DecisionInput
 
@@ -516,6 +517,47 @@ def production_boot_dependencies() -> bootstrap.BootDependencies:
     )
 
 
+def _production_gpu_status() -> RelayGpuPayload:
+    """The real GPU-telemetry producer `WorkerRuntime.__init__` calls once at boot.
+
+    Issue #132: `RelayGpuPayload` (`worker/runtime/telemetry/wire.py:56-64`) and
+    `WorkerDiagnostics.set_gpu_status` (`worker/runtime/telemetry/runtime_diagnostics.py`)
+    have existed since the relay wire schema was defined, but nothing in
+    production ever called `set_gpu_status` -- the same failure class as #124
+    (`update_decode` never called in production, fixed in 583d02e). This
+    function is the fix's composition point: it combines two adapter-level,
+    hardware-touching probes into the wire payload's shape.
+
+    `nvml_available`/`driver_version`/`device_name` come from
+    `probe_nvml_gpu_status` (`worker.adapters.device.nvml.probe`, checks
+    `pynvml` imports and `nvmlInit`/`nvmlDeviceGetCount`). `cuda_context_ok`
+    reuses `probe_cuda_capability` (`worker.adapters.device.cuda.probe`,
+    already probed above for the `profile_device` bootstrap stage) rather than
+    re-deriving CUDA-context health from NVML data -- NVML enumerating a
+    device is a necessary but not sufficient signal that this process's torch
+    build can actually construct a `device="cuda"` model (see
+    `probe_cuda_capability`'s own docstring on the broken-wheel failure mode),
+    so this deliberately answers "is NVML available" and "is CUDA usable" as
+    two independent questions, exactly as the wire schema's two separate
+    boolean fields imply.
+
+    Both probes fail closed and never raise, so an environment with neither
+    NVML nor CUDA (this repo's macOS dev/CI machines) reports
+    `nvml_available=False`/`cuda_context_ok=False` with a clear `nvml_error`
+    rather than breaking boot.
+    """
+    nvml_status = probe_nvml_gpu_status()
+    cuda_capability = probe_cuda_capability()
+    return RelayGpuPayload(
+        nvml_available=nvml_status.nvml_available,
+        cuda_context_ok=cuda_capability.available,
+        driver_version=nvml_status.driver_version,
+        device_name=nvml_status.device_name,
+        captured_at_sec=time.time(),
+        nvml_error=None if nvml_status.nvml_available else nvml_status.reason,
+    )
+
+
 @final
 class WorkerRuntime:
     """Own process-wide models and camera-local mutable pipeline state."""
@@ -572,6 +614,12 @@ class WorkerRuntime:
         # pattern as `_clip_recorder`/`_compose_evidence_export` -- plus the
         # per-camera evidence attacher `_default_pump_factory` reads.
         self.diagnostics = WorkerDiagnostics()
+        # #132: `set_gpu_status` existed with zero production callers --
+        # `runtime.device` in `/status` stayed permanently empty. Probing and
+        # recording once here (not per-camera, not periodically refreshed --
+        # see `_production_gpu_status`'s docstring for the follow-up note)
+        # mirrors `_boot_dependencies`' own eager probe call two lines above.
+        self.diagnostics.set_gpu_status(_production_gpu_status())
         # Explicit non-default mode: this renderer also feeds
         # `AlertEvidenceAttacher` alert snapshots (fall + bed_exit), where
         # `OverlayRenderer`'s new default `mode="none"` would silently render
