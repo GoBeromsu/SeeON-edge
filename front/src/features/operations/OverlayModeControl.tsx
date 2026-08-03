@@ -61,10 +61,22 @@ export function useCameraOverlayMode(cameraId: string): {
 
 type OverlayModeControlProps = {
   cameraId: string;
+  /**
+   * Notified with the confirmed overlay mode whenever it changes (initial load, retry, or a
+   * successful selection) — `null` while loading/erroring. LiveStreamPanel's live badge label
+   * (issue #102) needs the *current* mode from this same fetch/selection state, not an
+   * independent copy that could fall out of sync with what the operator picked here, so the
+   * shared RoomDetail ancestor lifts this via the callback rather than re-fetching.
+   */
+  onModeChange?: (mode: OverlayMode | null) => void;
 };
 
-export function OverlayModeControl({ cameraId }: OverlayModeControlProps): JSX.Element {
+export function OverlayModeControl({ cameraId, onModeChange }: OverlayModeControlProps): JSX.Element {
   const { state, select, retry } = useCameraOverlayMode(cameraId);
+
+  useEffect(() => {
+    onModeChange?.(state.mode);
+  }, [state.mode, onModeChange]);
 
   return (
     <div className="border-t border-border pt-3">

@@ -39,11 +39,14 @@ async function flush(): Promise<void> {
   });
 }
 
-function render(cameraId = 'cam-1'): { host: HTMLDivElement; root: Root } {
+function render(
+  cameraId = 'cam-1',
+  onModeChange?: (mode: string | null) => void,
+): { host: HTMLDivElement; root: Root } {
   const host = document.createElement('div');
   document.body.append(host);
   const root = createRoot(host);
-  act(() => root.render(<OverlayModeControl cameraId={cameraId} />));
+  act(() => root.render(<OverlayModeControl cameraId={cameraId} onModeChange={onModeChange} />));
   return { host, root };
 }
 
@@ -107,5 +110,26 @@ describe('OverlayModeControl', () => {
     // Reverted: still shows the previously-confirmed mode ('none'), not the rejected selection, and re-enabled.
     expect(fallButton.getAttribute('aria-pressed')).toBe('false');
     expect(fallButton.disabled).toBe(false);
+  });
+
+  it('notifies onModeChange with the confirmed mode on load and after a successful selection (issue #102)', async () => {
+    const { setPostResult } = installFetchMock([{ ok: true, status: 200, mode: 'none' }]);
+    const onModeChange = vi.fn();
+    const { host } = render('cam-1', onModeChange);
+    await flush();
+
+    // null while loading, then the resolved initial mode.
+    expect(onModeChange.mock.calls[0]).toEqual([null]);
+    expect(onModeChange).toHaveBeenLastCalledWith('none');
+
+    setPostResult({ ok: true, status: 200, mode: 'fall' });
+    const fallButton = Array.from(host.querySelectorAll('button')).find((button) => button.textContent === '낙상') as HTMLButtonElement;
+    await act(async () => {
+      fallButton.click();
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(onModeChange).toHaveBeenLastCalledWith('fall');
   });
 });
