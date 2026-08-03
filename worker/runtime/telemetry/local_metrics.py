@@ -85,6 +85,16 @@ def log_snapshot(snapshot: RuntimeDiagnosticsSnapshot) -> None:
                     for metrics in camera.bus
                 },
                 "encoder": snapshot.encoder,
+                "encode": (
+                    None
+                    if camera.encode is None
+                    else {
+                        "requested": camera.encode.requested,
+                        "selected": camera.encode.selected,
+                        "fallback_count": camera.encode.fallback_count,
+                        "last_reason": camera.encode.last_reason,
+                    }
+                ),
             },
         )
 

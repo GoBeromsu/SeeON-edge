@@ -33,6 +33,10 @@ class VerifyResult:
 
 DeviceVerifier: TypeAlias = Callable[[], VerifyResult]
 DecodeProbe: TypeAlias = Callable[[str], VerifyResult]
+# Encode has only one non-trivial backend to preflight (h264_nvenc; libx264
+# ships with virtually every ffmpeg build), so unlike DecodeProbe this takes
+# no backend-name argument -- it always answers "is NVENC usable".
+EncodeProbe: TypeAlias = Callable[[], VerifyResult]
 
 
 @dataclass(frozen=True, slots=True)
@@ -104,6 +108,23 @@ def default_decode_probe(
     return probes[decode]()
 
 
+def default_encode_probe() -> VerifyResult:
+    """Fail-closed default NVENC probe, used when boot wiring injects none.
+
+    This package holds policy, not hardware access (worker/runtime/AGENTS.md):
+    the real ffmpeg-build probe (`worker.adapters.device.cuda.probe.probe_nvenc_capability`)
+    is only ever wired in by the composition root (`worker/runtime/worker.py`),
+    mirroring `default_decode_probe`'s injection pattern above. Failing closed
+    here is safe by construction because the caller
+    (`worker.runtime.profile.boot.resolve_encode_or_fallback`) never raises on
+    a failed probe -- it demotes to `libx264` with a WARNING instead of
+    aborting boot, unlike `preflight_decode_or_raise`.
+    """
+    return VerifyResult(
+        False, "cuda", "encode", "h264_nvenc capability probe is not configured"
+    )
+
+
 __all__ = [
     "ML_WORKER_PROFILE_ENV",
     "PROFILE_REGISTRY",
@@ -113,10 +134,12 @@ __all__ = [
     "DevicePolicy",
     "DeviceVerifier",
     "EncodePolicy",
+    "EncodeProbe",
     "ProfileError",
     "ProfileSpec",
     "ProfileVerifyError",
     "VerifyResult",
     "default_decode_probe",
+    "default_encode_probe",
     "default_verifiers",
 ]

@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Protocol, final
 
+from contracts.encode_diagnostics import EncodeSelection
+
 
 @dataclass(frozen=True, slots=True)
 class StageTimingSnapshot:
@@ -48,6 +50,12 @@ class CameraDiagnosticsSnapshot:
     failure_category: str | None
     stage_timings: tuple[StageTimingSnapshot, ...]
     bus: tuple[BusSubscriptionSnapshot, ...]
+    # Local-only (#53): unlike decode's selection, which is also projected
+    # onto the strict backend relay payload (RelayDecodePayload in
+    # worker/runtime/telemetry/wire.py), this never crosses the relay
+    # boundary -- see worker/runtime/AGENTS.md's byte-for-byte compatibility
+    # rule for RelayRuntimeStatusRequest.
+    encode: EncodeSelection | None = None
 
 
 @dataclass(frozen=True, slots=True)

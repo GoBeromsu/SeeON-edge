@@ -40,9 +40,11 @@ correct on that device -- that remains the warmup stage's concern
 
 from __future__ import annotations
 
+import re
+import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, TypeAlias
+from typing import Any, Final, Protocol, TypeAlias
 
 
 @dataclass(frozen=True, slots=True)
@@ -136,4 +138,96 @@ def probe_cuda_capability(*, importer: TorchImporter = _import_torch) -> CudaCap
     )
 
 
-__all__ = ["CudaCapability", "TorchImporter", "probe_cuda_capability"]
+# Matches the `h264_nvenc` encoder token in `ffmpeg -encoders` output without
+# false-matching unrelated substrings (mirrors `_CUVID_DECODER_PATTERN` in
+# worker/adapters/decode/nvdec_cuvid/probe.py).
+_NVENC_ENCODER_PATTERN: Final = re.compile(r"\bh264_nvenc\b", re.IGNORECASE)
+
+
+@dataclass(frozen=True, slots=True)
+class NvencCapability:
+    available: bool
+    reason: str
+
+
+class FfmpegQueryRunner(Protocol):
+    def __call__(self, args: tuple[str, ...], timeout_sec: float, /) -> str: ...
+
+
+def run_ffmpeg_encoders_query(args: tuple[str, ...], timeout_sec: float) -> str:
+    """Run a bounded `ffmpeg -encoders` query, returning combined stdout+stderr.
+
+    Same rationale as `run_ffmpeg_query` in
+    worker/adapters/decode/nvdec_cuvid/probe.py: some ffmpeg builds report
+    capability listings on stderr rather than stdout, so both streams are
+    combined rather than relying on just one.
+    """
+    completed = subprocess.run(
+        args,
+        capture_output=True,
+        text=True,
+        timeout=timeout_sec,
+        check=True,
+    )
+    return f"{completed.stdout}\n{completed.stderr}"
+
+
+def probe_nvenc_capability(
+    ffmpeg_bin: str = "ffmpeg",
+    *,
+    timeout_sec: float = 3.0,
+    runner: FfmpegQueryRunner = run_ffmpeg_encoders_query,
+) -> NvencCapability:
+    """Never-raise ffmpeg-build capability probe for the `h264_nvenc` encoder.
+
+    This is the encode-side counterpart to `probe_nvdec_cuvid_capability`
+    (worker/adapters/decode/nvdec_cuvid/probe.py), and answers a question that
+    `probe_cuda_capability` above deliberately does not: `torch.cuda.is_available()`
+    only proves a CUDA *device* is usable for model inference, it says nothing
+    about whether the `ffmpeg` binary on `ffmpeg_bin` was built with NVENC
+    support -- driver/build mismatches are a documented, independent failure
+    mode (#53), so a host can have working CUDA and still have no `h264_nvenc`
+    encoder available.
+
+    Checks `ffmpeg -hide_banner -encoders` for an `h264_nvenc` token (matched
+    with a word-boundary regex, not a bare substring). Never touches a camera,
+    a GPU device, or spawns a real encode -- this is purely "does this ffmpeg
+    build claim to support h264_nvenc at all"; whether a session can actually
+    be opened (e.g. consumer-GPU concurrent-session limits) is a separate,
+    per-camera runtime concern handled by `FFmpegSegmentEncoder`
+    (worker/adapters/encode/ffmpeg_segment_encoder.py).
+
+    Returns `available=False` -- never a guess, never raises -- when the
+    binary is missing, the query times out, exits non-zero, or the encoder
+    token is absent (e.g. this repo's macOS dev machines, whose ffmpeg builds
+    have no NVENC support), so the boot-time preflight
+    (`worker/runtime/profile/boot.py:resolve_encode_or_fallback`) can fail
+    open to `libx264` instead of aborting boot.
+    """
+    try:
+        encoders = runner((ffmpeg_bin, "-hide_banner", "-encoders"), timeout_sec)
+    except FileNotFoundError:
+        return NvencCapability(False, "ffmpeg missing")
+    except subprocess.TimeoutExpired:
+        return NvencCapability(False, "ffmpeg encoder probe timed out")
+    except subprocess.CalledProcessError as error:
+        return NvencCapability(
+            False, f"ffmpeg encoder probe failed with exit code {error.returncode}"
+        )
+    except Exception as error:  # noqa: BLE001 - encode probe must never break startup
+        return NvencCapability(False, f"ffmpeg encoder probe failed: {type(error).__name__}")
+
+    if _NVENC_ENCODER_PATTERN.search(encoders):
+        return NvencCapability(True, "ffmpeg h264_nvenc encoder is available")
+    return NvencCapability(False, "ffmpeg has no h264_nvenc encoder")
+
+
+__all__ = [
+    "CudaCapability",
+    "FfmpegQueryRunner",
+    "NvencCapability",
+    "TorchImporter",
+    "probe_cuda_capability",
+    "probe_nvenc_capability",
+    "run_ffmpeg_encoders_query",
+]

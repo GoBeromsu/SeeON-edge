@@ -180,17 +180,79 @@ def test_closed_segments_never_concatenate_across_generations(tmp_path: Path) ->
     assert session.select_segments(start_time_sec=0.0, end_time_sec=4.0) == current
 
 
-def test_cuda_open_failure_never_starts_the_software_encoder(tmp_path: Path) -> None:
+def test_nvenc_session_open_failure_falls_back_to_libx264_once(tmp_path: Path) -> None:
+    """#53's sanctioned exception to #43's "no implicit fallback" rule.
+
+    #43 forbids a silent LSTM -> random-forest fallback because that changes
+    a decision's *semantic content*. NVENC -> libx264 only changes encode
+    *cost* (GPU vs CPU): both produce the same H.264 clip content, so a
+    session-open failure on nvenc is allowed -- and required -- to demote
+    that camera to libx264 rather than losing the recording entirely. This
+    replaces the pre-#53 test (same name minus "_falls_back_to_libx264_once")
+    which asserted the opposite: that an nvenc failure must never start the
+    software encoder. That was correct under #43's original blanket rule;
+    #53 is the explicit, narrower exception for encode-only cost fallback.
+    """
     spawner = _SpawnSpy(fail_encoders=("h264_nvenc",))
+    encoder = _encoder(tmp_path, spawner)
+
+    session = encoder.open("cam-1", "h264_nvenc", EncoderGeometry(4, 2, 5.0))
+
+    assert spawner.encoders == ["h264_nvenc", "libx264"]
+    assert session.encoder == "libx264"
+    assert encoder.metrics.failures == 0
+    assert encoder.metrics.active_sessions == 1
+    assert encoder.metrics.encode_fallbacks == 1
+    selection = encoder.encode_selections["cam-1"]
+    assert selection.requested == "h264_nvenc"
+    assert selection.selected == "libx264"
+    assert selection.fallback_count == 1
+    assert selection.last_reason == "session_open_failed"
+
+
+def test_nvenc_fallback_is_persistent_across_reopens(tmp_path: Path) -> None:
+    spawner = _SpawnSpy(fail_encoders=("h264_nvenc",))
+    encoder = _encoder(tmp_path, spawner)
+    geometry = EncoderGeometry(4, 2, 5.0)
+
+    first = encoder.open("cam-1", "h264_nvenc", geometry)
+    # Re-requesting nvenc for the same camera must not retry nvenc: the
+    # demotion is persistent once recorded.
+    second = encoder.open("cam-1", "h264_nvenc", geometry)
+
+    assert first is second
+    assert spawner.encoders == ["h264_nvenc", "libx264"]
+    assert encoder.metrics.encode_fallbacks == 1
+
+
+def test_nvenc_and_libx264_both_failing_raises_and_records_one_failure(
+    tmp_path: Path,
+) -> None:
+    spawner = _SpawnSpy(fail_encoders=("h264_nvenc", "libx264"))
     encoder = _encoder(tmp_path, spawner)
 
     with pytest.raises(EncoderStartError):
         _ = encoder.open("cam-1", "h264_nvenc", EncoderGeometry(4, 2, 5.0))
 
-    assert spawner.encoders == ["h264_nvenc"]
-    assert "libx264" not in spawner.encoders
+    assert spawner.encoders == ["h264_nvenc", "libx264"]
     assert encoder.metrics.failures == 1
     assert encoder.metrics.active_sessions == 0
+
+
+def test_nvenc_fallback_stays_demoted_through_a_geometry_triggered_recreate(
+    tmp_path: Path,
+) -> None:
+    spawner = _SpawnSpy(fail_encoders=("h264_nvenc",))
+    encoder = _encoder(tmp_path, spawner)
+
+    session = encoder.open("cam-1", "h264_nvenc", EncoderGeometry(4, 2, 5.0))
+    # A mid-stream geometry change forces a recreate; the camera must stay on
+    # libx264 rather than re-attempting nvenc.
+    session.write(_packet(1, width=8, height=4))
+
+    assert spawner.encoders == ["h264_nvenc", "libx264", "libx264"]
+    assert session.encoder == "libx264"
+    assert encoder.metrics.encode_fallbacks == 1
 
 
 def test_profile_selects_the_codec_without_probing(tmp_path: Path) -> None:

@@ -30,6 +30,23 @@ class ClipRecorderServices:
 
 
 def resolve_encoder() -> str:
+    """Intentionally conservative encoder default for the services-less construction path.
+
+    Only reached by ``ClipRecorder.start()`` (clip_recorder.py) when a
+    ``ClipRecorder`` is built without an explicit ``services`` argument (e.g.
+    ``ClipRecorder.from_env()``) -- production always constructs
+    ``ClipRecorder`` with ``services`` built from ``boot.encode``
+    (``worker/runtime/profile/boot.py``'s already-probed-and-fallback-resolved
+    selection, wired in by the composition root), so this function never runs
+    in production. It hardcodes ``libx264`` rather than probing for
+    ``h264_nvenc`` on purpose: this path has no access to the boot-time
+    profile/probe machinery, and per #53, guessing nvenc here without a real
+    preflight would risk exactly the kind of un-probed, unverified encoder
+    selection the boot-time preflight exists to prevent. If a caller needs
+    nvenc outside the composition root, it must resolve
+    ``worker.runtime.profile.boot.resolve_boot_context(...).encode`` itself
+    and pass ``services`` explicitly instead of relying on this default.
+    """
     return "libx264"
 
 
