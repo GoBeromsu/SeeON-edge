@@ -105,6 +105,7 @@ from worker.runtime.telemetry.runtime_status_sender import (
     RelayRuntimeStatusTransport,
     RuntimeStatusSender,
 )
+from worker.runtime.telemetry.wire import RelayWorkerPayload
 from worker.runtime.watchdog import InferenceWatchdog
 from worker.types import BusinessEvent, DecisionInput
 
@@ -641,6 +642,17 @@ class WorkerRuntime:
         )
         try:
             _ = bootstrap.bootstrap_or_exit(stages, context=self._context)
+            # `bootstrap_or_exit` exits the process on any boot failure, so
+            # reaching this line already means boot succeeded -- there is no
+            # deferred/partial failure state left to report here.
+            self.diagnostics.set_worker_status(
+                RelayWorkerPayload(
+                    alive=True,
+                    pid=os.getpid(),
+                    started_at_sec=time.time(),
+                    profile_boot_error=None,
+                )
+            )
             self._start_export_sender()
             self._start_runtime_status_sender()
             self._start_clip_frame_feeders()
@@ -1002,6 +1014,15 @@ class WorkerRuntime:
             else BoundedFrameBus(evidence_capacity=1)
         )
         self.diagnostics.register_bus(camera.camera_id, bus)
+        # #(runtime.cameras): `register_decode` is the only thing that seeds
+        # a camera into the runtime-status payload's `cameras` list (see
+        # `WorkerDiagnostics.to_payload`/`to_payloads`, which build it solely
+        # from `_decode_by_camera`); without this call every camera is
+        # invisible to `/status`'s `runtime.cameras` forever, even though the
+        # sender keeps posting 200s. `selected` starts unset here and is
+        # refined by `update_decode`/`record_decode_open_failure` once actual
+        # decode selection runs.
+        self.diagnostics.register_decode(camera.camera_id, camera.decode_backend or "auto")
         tracker = GreedyIouTracker()
         domain_names = self._active_domain_names()
         required = _required_extractor_names(domain_names)
