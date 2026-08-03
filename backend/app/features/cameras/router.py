@@ -78,6 +78,7 @@ class CameraResponse(BaseModel):
     mapping_pending: bool = False
     status: Literal["online", "offline", "starting", "unknown"]
     decode_backend: str | None = None
+    fps: float | None = None
     created_at: str | None = None
     space_name: str | None = None
     floor_name: str | None = None
@@ -114,6 +115,7 @@ class CreateCameraRequest(BaseModel):
     rtsp_url: str = Field(min_length=1)
     space_id: str | None = None
     decode_backend: str | None = None
+    fps: float | None = None
     # Default False: registration probes the stream first and writes nothing
     # on failure (see create_camera). True bypasses that gate for cameras
     # that are known offline but should still be registered.
@@ -127,6 +129,7 @@ class UpdateCameraRequest(BaseModel):
     rtsp_url: str | None = Field(default=None, min_length=1)
     space_id: str | None = None
     decode_backend: str | None = None
+    fps: float | None = None
 
 
 class TestCameraResponse(BaseModel):
@@ -206,6 +209,7 @@ def create_camera(
 ) -> dict[str, object]:
     _authorize(request, relay_token, authorization)
     decode_backend = _normalize_decode_backend(payload.decode_backend)
+    fps = _normalize_fps(payload.fps)
     probe = _probe_rtsp_url(request, payload.rtsp_url)
     if not probe.ok and not payload.force_register:
         # Registration gating: a dead camera is not persisted unless the
@@ -236,6 +240,7 @@ def create_camera(
             backend_camera_id=mapping.backend_camera_id,
             mapping_pending=mapping.pending,
             decode_backend=decode_backend,
+            fps=fps,
             last_probed_at=now,
             last_ok_at=now if probe.ok else None,
             never_connected=not probe.ok,
@@ -306,6 +311,8 @@ def update_camera(
         next_space_id = payload.space_id
     if "decode_backend" in payload.model_fields_set:
         updates["decode_backend"] = _normalize_decode_backend(payload.decode_backend)
+    if "fps" in payload.model_fields_set:
+        updates["fps"] = _normalize_fps(payload.fps)
 
     if "space_id" in payload.model_fields_set or "label" in payload.model_fields_set:
         mapping = _map_backend(
@@ -408,7 +415,7 @@ def worker_config_snapshot(
             "facility_id": facility_id,
             "rtsp_url": rtsp_url,
         }
-        fps = _default_camera_fps()
+        fps = record.get("fps") or _default_camera_fps()
         if fps is not None:
             camera["fps"] = fps
         stride = _default_frame_stride()
@@ -718,6 +725,7 @@ def _public_snapshot(
                 "mapping_pending": True,
                 "status": "unknown",
                 "decode_backend": None,
+                "fps": None,
                 "created_at": backend_camera.created_at,
                 "space_name": backend_camera.space_name,
                 "floor_name": backend_camera.floor_name,
@@ -933,6 +941,23 @@ def _normalize_decode_backend(value: object) -> str | None:
             status_code=status.HTTP_400_BAD_REQUEST, detail="invalid decode_backend"
         )
     return normalized
+
+
+def _normalize_fps(value: object) -> float | None:
+    """Validate a per-camera processed-fps override.
+
+    None passes through untouched (not set / clear). A number must be > 0,
+    mirroring the worker's CameraRuntimeConfig.fps validator (Field(gt=0));
+    anything else is a 400, matching _normalize_decode_backend's shape.
+    """
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="invalid fps")
+    fps = float(value)
+    if fps <= 0:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="invalid fps")
+    return fps
 
 
 def _default_decode_backend() -> str | None:
