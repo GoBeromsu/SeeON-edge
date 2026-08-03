@@ -83,7 +83,9 @@ def test_production_composition_provisions_yolo_tasks_once_through_serving_seam(
     }
     client = _ServingClient(runners)
 
-    shared = compose_yolo_extractors(client, device="cuda:0")
+    # box_source="person" (issue #44): exercises all three production tasks
+    # provisioned once and shared across cameras, including person.
+    shared = compose_yolo_extractors(client, device="cuda:0", box_source="person")
     camera_a = _composite(shared.extractors, "camera-a")
     camera_b = _composite(shared.extractors, "camera-b")
 

@@ -82,6 +82,12 @@ class WorkerModelsConfig(BaseModel):
     model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True, extra="forbid")
 
     fall: FallModelConfig | None = None
+    # Issue #44: which extraction module's boxes are authoritative for the
+    # person bounding box consumed downstream. Explicit and defaulted (never
+    # an implicit dict-insertion-order winner) -- "pose" only schedules and
+    # provisions the pose model; "person" additionally schedules/provisions
+    # the person model and its boxes take over in the merge stage.
+    box_source: Literal["pose", "person"] = "pose"
 
 
 class DevMjpegConfig(BaseModel):

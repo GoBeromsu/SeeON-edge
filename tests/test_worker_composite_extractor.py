@@ -22,9 +22,10 @@ from worker.pipeline.analytics import (
     NamedExtractor,
     provision_extractors,
 )
+from worker.pipeline.analytics.merge import merge_module_results
 from worker.pipeline.bus import Scheduler
 from worker.pipeline.perception import GreedyIouTracker, SceneState
-from worker.types import FramePacket
+from worker.types import FramePacket, ModuleResult
 
 ServingOption = str | int | float | bool | None
 
@@ -139,6 +140,24 @@ def test_composite_merges_named_results_once_and_preserves_pose_keypoints() -> N
     assert result.observation is composite.scene_state.latest_observation
     assert composite.scene_state.track_ids == (0,)
     assert result.decision_input.bed_region.source == "fresh"
+
+
+def test_merge_module_results_pose_only_keeps_pose_raw_boxes() -> None:
+    """Issue #44 regression: when person is never scheduled (box_source is
+    "pose", the default), pose's raw_boxes survive intact -- structurally,
+    because there is no person merge step to run, not merely because of
+    scheduling order.
+    """
+    pose_box = (1, 2, 11, 22, 0.55)
+    result = ModuleResult(
+        module_name="pose",
+        result=_pose_output(pose_box),
+        elapsed_ms=1.0,
+    )
+
+    merged = merge_module_results((result,))
+
+    assert merged.raw_boxes == (pose_box,)
 
 
 def test_composite_runs_only_scheduled_extractors_and_one_pose_call_per_frame() -> None:

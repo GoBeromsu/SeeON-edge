@@ -92,7 +92,10 @@ def test_production_warm_models_warms_every_configured_task_for_real() -> None:
     serving = InProcessServingClient(registry=default_registry())
 
     runtime = WorkerRuntime.__new__(WorkerRuntime)
-    runtime.shared_yolo = compose_yolo_extractors(serving, device="cpu")
+    # box_source="person": this smoke test wants every YOLO extractor
+    # (pose, person, bed) actually provisioned and warmed, not just the
+    # box_source="pose" default's subset.
+    runtime.shared_yolo = compose_yolo_extractors(serving, device="cpu", box_source="person")
     # This artifact declares neither schema_version nor preprocessing_identity,
     # so the manifest defaults apply. Passing None keeps this test about
     # warmup rather than about the example config's pins, which are covered

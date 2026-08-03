@@ -192,9 +192,9 @@ def test_pose_person_bed_and_fall_runners_are_created_once_and_shared_across_fou
 
     # Each task is created exactly once regardless of camera count; "device"
     # is forwarded to the YOLO extractors, the fall model takes no kwargs.
+    # box_source defaults to "pose" (issue #44): person is never provisioned.
     assert serving.create_calls == [
         ("pose", {"device": "cpu"}),
-        ("person", {"device": "cpu"}),
         ("bed", {"device": "cpu"}),
         ("fall", {}),
     ]
