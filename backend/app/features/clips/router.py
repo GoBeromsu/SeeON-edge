@@ -8,7 +8,12 @@ from fastapi import APIRouter, Header, HTTPException, Query, Request, status
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict, Field
 
-from backend.app.features.clips.audit_log import AuditLogStore, post_backend_backup, utc_now_iso
+from backend.app.features.clips.audit_log import (
+    AUDIT_NO_CLIP_ID,
+    AuditLogStore,
+    post_backend_backup,
+    utc_now_iso,
+)
 from backend.app.features.clips.store import ClipManifest, ClipStore, LabelRecord, LabelStore
 from backend.app.shared.dashboard_auth import authorize_dashboard
 
@@ -75,10 +80,12 @@ def list_clips(
     camera_id: str | None = None,
     authorization: Annotated[str | None, Header(alias="Authorization")] = None,
 ) -> dict[str, object]:
-    _authorize(request, authorization)
+    actor = _authorize(request, authorization)
     store = _clip_store(request)
     manifests = store.list_manifests(camera_id=camera_id)
-    return {"clips": [_clip_response(store, manifest) for manifest in manifests]}
+    response = {"clips": [_clip_response(store, manifest) for manifest in manifests]}
+    _audit_store(request).append(actor=actor, action="list", clip_id=AUDIT_NO_CLIP_ID)
+    return response
 
 
 def _clip_response(store: ClipStore, manifest: ClipManifest) -> dict[str, object]:
@@ -159,8 +166,14 @@ def list_audit(
     request: Request,
     authorization: Annotated[str | None, Header(alias="Authorization")] = None,
 ) -> dict[str, object]:
-    _authorize(request, authorization)
-    return {"entries": _audit_store(request).list_entries()}
+    actor = _authorize(request, authorization)
+    store = _audit_store(request)
+    # Snapshot entries before recording this view so the response reflects
+    # the log state prior to this request, matching how "play"/"label" audit
+    # entries never appear until after their triggering action completes.
+    entries = store.list_entries()
+    store.append(actor=actor, action="audit-view", clip_id=AUDIT_NO_CLIP_ID)
+    return {"entries": entries}
 
 
 def _get_manifest_or_404(request: Request, clip_id: str):

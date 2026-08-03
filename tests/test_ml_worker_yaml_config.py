@@ -257,18 +257,18 @@ def test_ml_worker_yaml_accepts_any_non_empty_fall_model_type_string(tmp_path: P
     assert config.models.fall is not None
     assert config.models.fall.type == "random-forest"
 
-def test_ml_worker_yaml_without_clip_section_disables_clip_recording(
+def test_ml_worker_yaml_without_clip_section_enables_clip_recording_by_default(
     tmp_path: Path,
 ) -> None:
-    """The upgrade path must land on off, not on whatever was there before.
+    """The upgrade path must land on always-on, per the #127/#10 decision.
 
-    "Clip recording defaults to off" is a claim about configs that do not
+    "Clip recording defaults to on" is a claim about configs that do not
     mention clips at all -- every config written before the flag existed. The
     composition tests all pass ``clip_enabled`` explicitly, and the shipped
-    example sets ``clip.enabled: false`` by hand, so none of them exercise the
-    default. Flipping ``ClipRecordingConfig.enabled`` to ``True`` would leave
-    all of them green while silently turning on video capture for every
-    operator who upgrades without editing their config.
+    example sets ``clip.enabled: true`` by hand, so none of them exercise the
+    default. This asserts the default itself: clips are always-on unless an
+    operator opts out explicitly, and a clip-recorder start failure degrades
+    visibly (runtime diagnostics) rather than silently disabling clips.
 
     The in-test assertion that the fixture has no ``clip`` key is part of the
     test: if someone adds one to ``_valid_yaml``, this stops testing the
@@ -280,7 +280,7 @@ def test_ml_worker_yaml_without_clip_section_disables_clip_recording(
 
     config = load_worker_config(path)
 
-    assert config.clip.enabled is False
+    assert config.clip.enabled is True
 
 
 def test_ml_worker_yaml_clip_recording_is_opt_in_not_opt_out(tmp_path: Path) -> None:

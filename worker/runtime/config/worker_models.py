@@ -101,10 +101,13 @@ class DevMjpegConfig(BaseModel):
 class ClipRecordingConfig(BaseModel):
     """Whether this worker records evidence clips at all.
 
-    Default off. Clip recording is an opt-in capability: when it is disabled
-    the worker still detects, stages, and relays events -- it simply does not
+    Default on. Clip recording is always-on by default: when disabled the
+    worker still detects, stages, and relays events -- it simply does not
     build a ``ClipRecorder`` or any per-camera clip feeder, so no video is
-    captured or retained.
+    captured or retained. If the recorder fails to start, the worker keeps
+    running (delivery still works); that failure degrades visibly through
+    runtime diagnostics (``set_clip_recorder_status``) instead of silently
+    disabling clips.
 
     This is independent of, and takes no precedence over, the
     ``ML_WORKER_EVENT_CLIP_EXPORT_ENABLED`` environment gate. That gate is the
@@ -115,7 +118,7 @@ class ClipRecordingConfig(BaseModel):
 
     model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True, extra="forbid")
 
-    enabled: bool = False
+    enabled: bool = True
     # Backend-selected clip storage location, relative to the fixed
     # ``CLIP_STORE_DIR`` volume (see ``worker.runtime.worker
     # ._resolved_clip_store_dir``); ``None`` keeps clips at the store root.
