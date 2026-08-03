@@ -99,10 +99,20 @@ def test_runtime_status_exposes_additive_diagnostics() -> None:
     )
 
     assert _post(client, payload).status_code == 200
-    runtime = client.get("/api/v1/status").json()["runtime"]["facilities"]["facility-1"]
-    assert runtime["gpu"] == payload["gpu"]
+    runtime = client.get("/api/v1/status").json()["runtime"]
+    facility = runtime["facilities"]["facility-1"]
+    assert facility["gpu"] == payload["gpu"]
+    assert facility["worker"] == payload["worker"]
+    assert facility["cameras"][0]["measured_fps"] == 12.5
+    assert runtime["cameras"]["camera-1"]["measured_fps"] == 12.5
     assert runtime["worker"] == payload["worker"]
-    assert runtime["cameras"][0]["measured_fps"] == 12.5
+    assert runtime["device"] == {
+        "backend": None,
+        "available": False,
+        "device_name": None,
+        "captured_at_sec": 1.0,
+    }
+    assert runtime["clip_recorder"]["finalized_clips"] == 2
 
 
 def test_latency_max_persists_and_excludes_nonfirst_attempts(tmp_path: Path) -> None:
@@ -236,6 +246,10 @@ def test_status_merges_runtime_snapshot() -> None:
     assert facility["cameras"][0]["decode"]["selected"] == "opencv"
     assert facility["clip_recorder"]["finalized_clips"] == 2
     assert facility["clip_recorder"]["available"] is True
+    assert runtime["cameras"]["camera-1"]["decode"]["selected"] == "opencv"
+    assert runtime["clip_recorder"]["finalized_clips"] == 2
+    assert runtime["worker"] is None
+    assert runtime["device"] is None
 
 
 def test_runtime_status_rejects_non_backend_decode_values() -> None:
