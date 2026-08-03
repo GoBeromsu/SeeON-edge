@@ -394,6 +394,13 @@ def _contains_forbidden_control_bytes(blob: bytes) -> bool:
 PUBLIC_SAFE_STRUCTURED_FIXTURES = frozenset(
     {
         Path("worker/ml-worker.example.yaml"),
+        # Issue #133: small text sidecars (architecture shape + manifest)
+        # derived from the packaged default LSTM fall-detector's actual
+        # weights -- not data, not credentials, not PII. The weights
+        # themselves (model.pt) stay gitignored; only these two sidecars are
+        # tracked, carved out of the blanket `models/` ignore.
+        Path("models/fall/lstm/arch.json"),
+        Path("models/fall/lstm/metadata.yaml"),
     }
 )
 
@@ -440,6 +447,12 @@ def _is_public_safe_structured_fixture(relative: Path, blob: bytes) -> bool:
 
 
 def _is_prohibited_path(relative: Path) -> bool:
+    # Exact-path exemption only -- explicitly named-safe fixtures (see
+    # PUBLIC_SAFE_STRUCTURED_FIXTURES's docstring above) bypass the path-part
+    # guardrail below without weakening it for anything else under a
+    # prohibited directory like `models/`.
+    if relative in PUBLIC_SAFE_STRUCTURED_FIXTURES:
+        return False
     lowered_parts = {part.lower() for part in relative.parts}
     lowered_suffixes = {suffix.lower() for suffix in relative.suffixes}
     return bool(
