@@ -15,6 +15,7 @@ from typing import Any, Final, Protocol, TypeAlias, final, runtime_checkable
 import worker.pipeline.ingest.lifecycle as ingest
 import worker.runtime.bootstrap as bootstrap
 import worker.runtime.telemetry.runtime_status_sender as runtime_status_sender_module
+from contracts.decode_diagnostics import DecodeSelection
 from contracts.observation import BoundingBox
 from contracts.runner import BedRunnerResult, Image, RunnerProtocol
 from shared.events.evidence_export_contract import DeliveryFailure
@@ -88,6 +89,7 @@ from worker.runtime.faults.record import make_fault_record
 from worker.runtime.ingest_composition import (
     build_camera_source_registry,
     compose_camera_ingest_loop,
+    resolve_decode_backend,
 )
 from worker.runtime.lease import GpuLease
 from worker.runtime.model_composition import SharedYoloExtractors, compose_yolo_extractors
@@ -1364,13 +1366,46 @@ class WorkerRuntime:
         """
         if self._boot is None:
             raise RuntimeError("camera ingest composition requires a resolved boot profile")
-        return compose_camera_ingest_loop(
+        # `resolve_decode_backend` raises on an incompatible override before
+        # any adapter is built (fail-fast, ADR-0002); computing it here first
+        # means a rejected override never reaches `_record_decode_selection`,
+        # so diagnostics never claims a resolution that didn't actually happen.
+        resolved_backend = resolve_decode_backend(self._boot.decode, camera.decode_backend)
+        loop = compose_camera_ingest_loop(
             camera,
             bus,
             reporter,
             decode=self._boot.decode,
             registry=self._ingest_source_registry(),
             runtime=self.config.runtime,
+        )
+        self._record_decode_selection(camera, resolved_backend)
+        return loop
+
+    def _record_decode_selection(self, camera: CameraRuntimeConfig, resolved_backend: str) -> None:
+        """Surface the effective decode backend to runtime-status diagnostics.
+
+        `register_decode` (called from `_build_camera`) only ever records the
+        *requested* backend with `selected=None`; nothing previously carried
+        the value `resolve_decode_backend` actually computed for this camera
+        into `WorkerDiagnostics`, so `runtime.cameras[*].decode.selected`
+        stayed permanently null even though the real decode adapter was built
+        from exactly this token. Layer `selected` onto whatever `requested`/
+        `fallback_count`/`last_reason` are already on record rather than
+        resetting them, since `register_decode`/`record_decode_open_failure`
+        may have already run for this camera.
+        """
+        previous = self.diagnostics.decode_selection(camera.camera_id)
+        fallback_requested = camera.decode_backend or "auto"
+        self.diagnostics.update_decode(
+            camera.camera_id,
+            DecodeSelection(
+                requested=previous.requested if previous is not None else fallback_requested,
+                selected=resolved_backend,
+                fallback_count=previous.fallback_count if previous is not None else 0,
+                last_reason=previous.last_reason if previous is not None else None,
+                updated_at_sec=time.time(),
+            ),
         )
 
     def _ingest_source_registry(self) -> SourceRegistry:
