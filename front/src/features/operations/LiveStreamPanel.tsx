@@ -1,9 +1,10 @@
-import { getCameraStreamUrl, type Camera, type RuntimeCameraDiagnostics } from '@/shared/api/client';
+import { getCameraStreamUrl, type Camera, type OverlayMode, type RuntimeCameraDiagnostics } from '@/shared/api/client';
 import { useMjpegStream } from '@/features/operations/useMjpegStream';
 
 type LiveStreamPanelProps = {
   camera: Camera;
   diagnostics: RuntimeCameraDiagnostics | undefined;
+  overlayMode: OverlayMode | null;
   onRetryConnection: () => void;
   onManageConnection: () => void;
 };
@@ -16,8 +17,14 @@ type LiveStreamPanelProps = {
  *
  * Stall recovery (issue #83) is delegated to useMjpegStream: periodic forced re-mount + backoff
  * re-mount after consecutive onError, surfaced here as a "연결 끊김" overlay while reconnecting.
+ *
+ * The bottom-left badge label mirrors design-handoff/Eldercare Prototype.dc.html:645's `liveLabel`
+ * data model: '라이브 · 낙상 없음' when the camera's overlay mode is 'fall', else '라이브 · 온라인'.
+ * `overlayMode` is the OverlayModeControl selection lifted to the shared RoomDetail ancestor
+ * (issue #102) rather than fetched again here, so the badge always agrees with what the operator
+ * actually selected.
  */
-export function LiveStreamPanel({ camera, diagnostics, onRetryConnection, onManageConnection }: LiveStreamPanelProps): JSX.Element {
+export function LiveStreamPanel({ camera, diagnostics, overlayMode, onRetryConnection, onManageConnection }: LiveStreamPanelProps): JSX.Element {
   const online = camera.status === 'online';
   const stream = useMjpegStream(online ? getCameraStreamUrl(camera.id) : null);
   const showStream = online && stream.src !== null;
@@ -79,7 +86,7 @@ export function LiveStreamPanel({ camera, diagnostics, onRetryConnection, onMana
 
       {showStream ? (
         <span className="media-status-overlay absolute bottom-2 left-2 rounded-control px-2.5 py-1 text-xs font-semibold">
-          라이브 · 온라인
+          {overlayMode === 'fall' ? '라이브 · 낙상 없음' : '라이브 · 온라인'}
         </span>
       ) : null}
 

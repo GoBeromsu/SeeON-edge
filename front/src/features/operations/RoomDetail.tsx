@@ -8,7 +8,7 @@ import { CameraEditModal } from '@/features/settings/CameraEditModal';
 import { DeleteCameraDialog } from '@/features/settings/DeleteCameraDialog';
 import { useStatusResource } from '@/shared/api/usePollingResource';
 import { getCameraStatusMeta } from '@/shared/ui/StatusBadge';
-import type { Camera, Clip } from '@/shared/api/client';
+import type { Camera, Clip, OverlayMode } from '@/shared/api/client';
 
 type RoomDetailProps = {
   camera: Camera;
@@ -29,6 +29,10 @@ export function RoomDetail({ camera, onBack, onRetryConnection }: RoomDetailProp
   const [selectedClip, setSelectedClip] = useState<Clip | null>(null);
   const [connectionModalOpen, setConnectionModalOpen] = useState(false);
   const [deletingCamera, setDeletingCamera] = useState<Camera | null>(null);
+  // Sourced from OverlayModeControl's own fetch/selection state (via its onModeChange callback)
+  // rather than re-fetched here, so the live badge below never disagrees with what the operator
+  // picked in the detection settings card (issue #102).
+  const [overlayMode, setOverlayMode] = useState<OverlayMode | null>(null);
   const statusMeta = getCameraStatusMeta(camera.status);
 
   return (
@@ -58,13 +62,14 @@ export function RoomDetail({ camera, onBack, onRetryConnection }: RoomDetailProp
           <LiveStreamPanel
             camera={camera}
             diagnostics={diagnostics}
+            overlayMode={overlayMode}
             onRetryConnection={onRetryConnection}
             onManageConnection={() => setConnectionModalOpen(true)}
           />
         </div>
         <div className="flex flex-col gap-4 lg:col-span-1">
           <CameraInfoCard camera={camera} onManageConnection={() => setConnectionModalOpen(true)} />
-          <DetectionSettingsCard camera={camera} />
+          <DetectionSettingsCard camera={camera} onOverlayModeChange={setOverlayMode} />
         </div>
       </div>
 

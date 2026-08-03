@@ -2,7 +2,7 @@ import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { LiveStreamPanel } from '@/features/operations/LiveStreamPanel';
-import type { Camera, RuntimeCameraDiagnostics } from '@/shared/api/client';
+import type { Camera, OverlayMode, RuntimeCameraDiagnostics } from '@/shared/api/client';
 
 const onlineCamera: Camera = {
   id: 'cam-1',
@@ -20,12 +20,19 @@ function render(
   diagnostics: RuntimeCameraDiagnostics | undefined,
   onRetryConnection = vi.fn(),
   onManageConnection = vi.fn(),
+  overlayMode: OverlayMode | null = null,
 ): { host: HTMLDivElement; root: Root; onRetryConnection: typeof onRetryConnection; onManageConnection: typeof onManageConnection } {
   const host = document.createElement('div');
   document.body.append(host);
   const root = createRoot(host);
   act(() => root.render(
-    <LiveStreamPanel camera={camera} diagnostics={diagnostics} onRetryConnection={onRetryConnection} onManageConnection={onManageConnection} />,
+    <LiveStreamPanel
+      camera={camera}
+      diagnostics={diagnostics}
+      overlayMode={overlayMode}
+      onRetryConnection={onRetryConnection}
+      onManageConnection={onManageConnection}
+    />,
   ));
   return { host, root, onRetryConnection, onManageConnection };
 }
@@ -80,10 +87,25 @@ describe('LiveStreamPanel', () => {
     expect(host.textContent).not.toContain('카메라에 연결할 수 없습니다');
   });
 
-  it('shows a bottom-left "라이브 · 온라인" badge for an online camera, matching the design handoff', () => {
+  it('shows a bottom-left "라이브 · 온라인" badge when the overlay mode is not fall, matching the design handoff', () => {
     const { host } = render(onlineCamera, undefined);
 
     expect(host.textContent).toContain('라이브 · 온라인');
+    expect(host.textContent).not.toContain('라이브 · 낙상 없음');
+  });
+
+  it('shows "라이브 · 온라인" for the bedexit overlay mode too (only fall gets its own label)', () => {
+    const { host } = render(onlineCamera, undefined, vi.fn(), vi.fn(), 'bedexit');
+
+    expect(host.textContent).toContain('라이브 · 온라인');
+    expect(host.textContent).not.toContain('라이브 · 낙상 없음');
+  });
+
+  it('shows a bottom-left "라이브 · 낙상 없음" badge when the overlay mode is fall, matching design-handoff/Eldercare Prototype.dc.html:645', () => {
+    const { host } = render(onlineCamera, undefined, vi.fn(), vi.fn(), 'fall');
+
+    expect(host.textContent).toContain('라이브 · 낙상 없음');
+    expect(host.textContent).not.toContain('라이브 · 온라인');
   });
 
   it('shows a "연결 끊김" overlay while the stream is reconnecting after an onError, without dropping the mounted img', () => {

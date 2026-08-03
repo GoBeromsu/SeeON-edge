@@ -3,10 +3,11 @@ import { DOMAIN_LABELS, DOMAIN_ORDER, formatDomainSchedule } from '@/features/se
 import { navigateToPage } from '@/features/operations/crossPageNavigation';
 import { statusBadgeClassName } from '@/shared/ui/StatusBadge';
 import { OverlayModeControl } from '@/features/operations/OverlayModeControl';
-import type { Camera, DetectionDomainKey, DetectionDomainSetting } from '@/shared/api/client';
+import type { Camera, DetectionDomainKey, DetectionDomainSetting, OverlayMode } from '@/shared/api/client';
 
 type DetectionSettingsCardProps = {
   camera: Camera;
+  onOverlayModeChange?: (mode: OverlayMode | null) => void;
 };
 
 function GearIcon(): JSX.Element {
@@ -35,7 +36,7 @@ function statusPill(setting: DetectionDomainSetting, online: boolean): { label: 
  * editing the schedule itself stays Settings-page territory — the gear icon here navigates there
  * rather than duplicating that editor.
  */
-export function DetectionSettingsCard({ camera }: DetectionSettingsCardProps): JSX.Element {
+export function DetectionSettingsCard({ camera, onOverlayModeChange }: DetectionSettingsCardProps): JSX.Element {
   const { status, data, retry } = useDetectionSettingsResource(true);
   const online = camera.status === 'online';
 
@@ -81,7 +82,7 @@ export function DetectionSettingsCard({ camera }: DetectionSettingsCardProps): J
       ) : null}
 
       <div className="mt-3">
-        <OverlayModeControl cameraId={camera.id} />
+        <OverlayModeControl cameraId={camera.id} onModeChange={onOverlayModeChange} />
       </div>
     </article>
   );
