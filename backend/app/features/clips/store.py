@@ -159,13 +159,16 @@ class LabelStore:
     def from_env(cls) -> LabelStore:
         return cls(os.environ.get(API_LABEL_STORE_ENV, DEFAULT_LABEL_STORE_DIR))
 
-    def save(self, record: LabelRecord) -> None:
+    def save(self, record: LabelRecord) -> bool:
         """Best-effort persist; an unwritable state dir must not crash the caller.
 
         Mirrors ``RuntimeStatusStore._persist_latency``'s graceful-degradation
         pattern (``backend/app/features/status/runtime_status_store.py``): a
         label write that cannot land durably is dropped (with a warning)
-        rather than crashing the labeling request.
+        rather than crashing the labeling request. Returns ``True`` only when
+        the record actually landed durably, so the caller (``label_clip`` in
+        ``router.py``) can surface a degraded save to the client instead of
+        silently reporting success.
         """
         if not is_valid_clip_id(record.clip_id):
             raise ValueError("invalid clip_id")
@@ -182,6 +185,8 @@ class LabelStore:
             os.replace(tmp, target)
         except OSError as exc:
             logger.warning("label store unavailable at %s: %s", labels_dir, exc)
+            return False
+        return True
 
     def get(self, clip_id: str) -> LabelRecord | None:
         if not is_valid_clip_id(clip_id):

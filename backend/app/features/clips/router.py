@@ -143,7 +143,12 @@ def label_clip(
         reviewer=reviewer,
         reviewed_at=utc_now_iso(),
     )
-    _label_store(request).save(record)
+    persisted = _label_store(request).save(record)
+    if not persisted:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="label store unavailable",
+        )
     post_backend_backup("clip_label", record.as_response())
     _audit_store(request).append(actor=reviewer, action="label", clip_id=manifest.clip_id)
     return record.as_response()
