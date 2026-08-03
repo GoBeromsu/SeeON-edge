@@ -1,0 +1,35 @@
+# Packaged default LSTM fall-detector artifact manifest (issue #133).
+#
+# Weights (model.pt) are NOT checked into git (gitignored per .gitignore) --
+# fetch them with `scripts/fetch-models.sh` before first boot. This sidecar
+# (metadata.yaml) and arch.json ARE tracked so the worker's env-less default
+# fall model config has a manifest to validate against as soon as the weights
+# land on disk.
+#
+# Provenance: downloaded from the public Hugging Face repo
+# Berom0227/eldercare-fall-models at revision
+# d67887844bfd2e4b1ca3f3275f770b0b05e23aba (lstm/model.pt, lstm/metadata.json).
+# `hidden`/`layers` in arch.json were derived by inspecting the actual
+# state_dict tensor shapes (lstm.weight_ih_l0: [512, 51] => 4*hidden=512,
+# input_size=51; lstm.weight_ih_l1: [512, 128] confirms a second LSTM layer
+# with hidden=128), not fabricated -- see the PR description for the
+# verification transcript.
+type: lstm
+framework: pytorch
+mode: sequence
+artifact_dir: .
+weights: model.pt
+architecture: arch.json
+metadata: metadata.yaml
+window: 30
+stride: 5
+input_shape: [30, 51]
+# From upstream lstm/metadata.json's operating_threshold (dataset le2i,
+# version poc) -- not a placeholder.
+operating_threshold: 0.0007872396381571889
+schema_version: 1
+preprocessing_identity: legacy-coco17-xyc-frame-normalized-zero-fill-v1
+# SHA-256 of the fetched model.pt, so a corrupted or unexpectedly swapped
+# weights file fails closed at load time (worker.adapters.model.artifact
+# .verify_artifact_digest) instead of silently loading.
+artifact_digest: "889075695884742475b9713e3b86ba67085bb96979b64c51756ea3fd715ab57a"

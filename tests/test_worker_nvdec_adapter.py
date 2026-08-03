@@ -226,7 +226,12 @@ def test_first_frame_failure_is_masked_camera_local_and_has_no_cpu_fallback(
     assert opencv_calls == []
 
 
-def test_cuda_profile_preflight_fails_before_decode_when_cuda_is_unavailable() -> None:
+def test_cuda_profile_still_runs_decode_preflight_when_device_check_fails() -> None:
+    """Issue #79 (track 2): device verification, decode preflight, and the
+    legacy-conflict check are independent gates over the same resolved
+    profile -- none depends on another's outcome, so a failed device check no
+    longer skips the decode preflight. All gate failures are collected into
+    one raised ``ProfileVerifyError`` instead of surfacing only the first."""
     # Given
     decode_calls: list[str] = []
     dependencies = BootDependencies(
@@ -252,4 +257,4 @@ def test_cuda_profile_preflight_fails_before_decode_when_cuda_is_unavailable() -
             decode_probe,
         )
 
-    assert decode_calls == []
+    assert decode_calls == ["nvdec"]

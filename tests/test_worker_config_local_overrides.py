@@ -29,6 +29,7 @@ from typing import Self, final
 import pytest
 
 from worker.runtime.config import (
+    ClipRecordingConfig,
     ConfigSource,
     JsonObject,
     WorkerConfig,
@@ -130,16 +131,42 @@ def test_pull_with_fall_env_vars_set_configures_models_fall_and_clip_enabled(
     assert snapshot.config.clip.enabled is True
 
 
-def test_pull_with_no_fall_config_leaves_models_fall_none_for_the_boot_gate(
+_PACKAGED_DEFAULT_ARTIFACT_DIR = Path(__file__).resolve().parents[1] / "models" / "fall" / "lstm"
+
+
+@pytest.mark.skipif(
+    not (_PACKAGED_DEFAULT_ARTIFACT_DIR / "model.pt").exists(),
+    reason=(
+        "packaged default LSTM weights not provisioned locally (run "
+        "scripts/fetch-models.sh); model.pt is gitignored so a fresh clone "
+        "or CI checkout has no weights to validate the packaged default "
+        "against -- the fail-closed missing-artifact path is covered "
+        "without real weights in tests/test_local_env_defaults.py"
+    ),
+)
+def test_pull_with_no_fall_config_resolves_packaged_default_lstm(
     tmp_path: Path,
 ) -> None:
-    """Requirement (b): with no local fall configuration at all (env unset,
-    no YAML), the pulled config's ``models.fall`` must remain ``None`` so the
-    #43 boot gate (``WorkerRuntime._create_fall_model``) still fires -- this
-    fix must not weaken that gate by inventing a default fall model."""
+    """Issue #133: with no local fall configuration at all (env unset, no
+    YAML), ``models.fall`` must resolve to the packaged default LSTM model
+    instead of staying ``None`` -- the worker boots with zero env vars using
+    a default fall model rather than refusing to start. This supersedes the
+    previous #43-boot-gate contract asserted here (fall must stay
+    unconfigured absent explicit env/YAML); the #43 gate itself
+    (``WorkerRuntime._create_fall_model``) is unchanged and still refuses to
+    boot when ``models.fall`` truly cannot be resolved (e.g. the packaged
+    default's weights are missing -- see the skip reason above and
+    tests/test_local_env_defaults.py)."""
     models, clip, dev_mjpeg = resolve_local_overrides(None, {})
-    assert models.fall is None
-    assert clip.enabled is False
+    assert models.fall is not None
+    assert models.fall.type == "lstm"
+    assert models.fall.artifact_dir == _PACKAGED_DEFAULT_ARTIFACT_DIR.resolve()
+    # Deliberately not a literal: this test's concern is fall-model
+    # resolution, not clip. Deferring to ClipRecordingConfig's own default
+    # documents "env/YAML silence defers to the model default" (this
+    # branch's intent) and stays correct regardless of merge order with
+    # #137 (which flips that default to always-on).
+    assert clip.enabled is ClipRecordingConfig().enabled
     assert dev_mjpeg is None
 
     snapshot = load_worker_config_from_relay(
@@ -155,8 +182,11 @@ def test_pull_with_no_fall_config_leaves_models_fall_none_for_the_boot_gate(
     )
 
     assert snapshot is not None
-    assert snapshot.config.models.fall is None
-    assert snapshot.config.clip.enabled is False
+    assert snapshot.config.models.fall is not None
+    assert snapshot.config.models.fall.type == "lstm"
+    # Same rationale as the `clip.enabled` assertion above: defers to the
+    # model default rather than asserting a stale literal.
+    assert snapshot.config.clip.enabled is ClipRecordingConfig().enabled
     assert snapshot.config.dev_mjpeg.enabled is False
 
 

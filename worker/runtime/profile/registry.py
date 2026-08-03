@@ -13,6 +13,16 @@ EncodePolicy: TypeAlias = Literal["h264_nvenc", "libx264"]
 MpsProbeSource: TypeAlias = Callable[[], bool]
 
 ML_WORKER_PROFILE_ENV: Final = "ML_WORKER_PROFILE"
+# Issue #133: the worker must boot with zero env vars. "cpu" is the only
+# profile in PROFILE_REGISTRY whose device verifier (`_verify_cpu`) always
+# succeeds with no injected capability probe -- "cuda"/"mps" fail closed
+# without one (`default_verifiers()` wires no probe source by default), so
+# defaulting to either would make an unconfigured boot device-dependent
+# (it would pass on a real GPU/Apple-Silicon host and fail everywhere else,
+# including CI). Real deployments still set ML_WORKER_PROFILE explicitly
+# per target (compose.edge.yaml); this default only governs the zero-config
+# local/dev/CI boot path.
+DEFAULT_PROFILE_NAME: Final = "cpu"
 
 
 class ProfileError(RuntimeError):
@@ -126,6 +136,7 @@ def default_encode_probe() -> VerifyResult:
 
 
 __all__ = [
+    "DEFAULT_PROFILE_NAME",
     "ML_WORKER_PROFILE_ENV",
     "PROFILE_REGISTRY",
     "BootDependencies",

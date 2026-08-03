@@ -9,6 +9,7 @@ from worker.runtime.profile.boot import (
 )
 from worker.runtime.profile.device import CudaProbe
 from worker.runtime.profile.registry import (
+    DEFAULT_PROFILE_NAME,
     ML_WORKER_PROFILE_ENV,
     PROFILE_REGISTRY,
     BootDependencies,
@@ -34,9 +35,13 @@ def _decode_ok(decode: str) -> VerifyResult:
 
 
 @pytest.mark.parametrize("env", [{}, {ML_WORKER_PROFILE_ENV: "  "}])
-def test_resolve_profile_missing_env_raises(env: dict[str, str]) -> None:
-    with pytest.raises(ProfileError):
-        resolve_profile(env)
+def test_resolve_profile_missing_env_defaults_to_cpu(env: dict[str, str]) -> None:
+    """Issue #133: the worker must boot with zero env vars, so an unset/blank
+    ML_WORKER_PROFILE no longer refuses to boot -- it defaults to
+    DEFAULT_PROFILE_NAME ("cpu")."""
+    spec = resolve_profile(env)
+    assert spec.name == DEFAULT_PROFILE_NAME
+    assert spec == PROFILE_REGISTRY[DEFAULT_PROFILE_NAME]
 
 
 def test_resolve_profile_unknown_raises() -> None:
@@ -94,6 +99,25 @@ def test_decode_preflight_incompat_raises() -> None:
 
     with pytest.raises(ProfileVerifyError):
         resolve_boot_context({ML_WORKER_PROFILE_ENV: "cuda"}, _deps("cuda"), decode_probe)
+
+
+def test_resolve_boot_context_aggregates_multiple_gate_failures() -> None:
+    """Issue #79 (track 2): a bad device *and* an incompatible legacy decode
+    override are independent gates over the same profile -- both failures
+    must be named in the single raised error instead of only the device
+    failure (the first gate checked) being visible."""
+
+    with pytest.raises(ProfileVerifyError) as excinfo:
+        resolve_boot_context(
+            {ML_WORKER_PROFILE_ENV: "cuda", "ML_RTSP_BACKEND": "opencv"},
+            _deps("cuda", ok=False),
+            _decode_ok,
+        )
+
+    message = str(excinfo.value)
+    assert "2 boot gate(s) failed for profile 'cuda'" in message
+    assert "device verification failed" in message
+    assert "conflicts with profile 'cuda' decode" in message
 
 
 def test_legacy_decode_conflict_rejected() -> None:
