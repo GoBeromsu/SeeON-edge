@@ -5,6 +5,9 @@ from typing import final
 import pytest
 
 import worker.runtime.ingest_composition as ingest_composition_module
+import worker.runtime.worker as worker_module
+from worker.adapters.device.cuda.probe import CudaCapability
+from worker.adapters.device.nvml.probe import NvmlGpuStatus
 from worker.pipeline.bus import BoundedFrameBus
 from worker.pipeline.ingest.lifecycle import CapturePolicy, IngestEvent
 from worker.pipeline.ingest.registry import SourceRegistryError
@@ -471,6 +474,78 @@ def test_default_loop_factory_preserves_the_prior_requested_and_fallback_count(
     assert selection.fallback_count == 0
     assert selection.last_reason == "spawn_failed"
     assert selection.selected == "opencv"
+
+
+def test_worker_runtime_init_records_gpu_status_at_boot_via_the_production_probe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # #132: `WorkerDiagnostics.set_gpu_status` existed with zero production
+    # callers -- `runtime.device` in `/status` stayed permanently empty no
+    # matter what GPU was really attached. Same failure class as #124
+    # (`update_decode` never called in production, fixed in 583d02e): the
+    # regression to guard against is the producer silently going missing
+    # again, not any particular probe value.
+    monkeypatch.setattr(
+        worker_module,
+        "probe_nvml_gpu_status",
+        lambda: NvmlGpuStatus(
+            nvml_available=True,
+            reason="NVML reports a usable GPU device",
+            driver_version="550.90.07",
+            device_name="Tesla T4",
+        ),
+    )
+    monkeypatch.setattr(
+        worker_module,
+        "probe_cuda_capability",
+        lambda: CudaCapability(
+            available=True, reason="cuda available", device_count=1, arch_list=("sm_90",)
+        ),
+    )
+    config = _config("camera-a")
+
+    runtime = WorkerRuntime(config, serving_client=_FakeServingClient())
+
+    gpu = runtime.diagnostics.to_payload("facility-1", None, 0)["gpu"]
+    assert gpu["nvml_available"] is True
+    assert gpu["cuda_context_ok"] is True
+    assert gpu["driver_version"] == "550.90.07"
+    assert gpu["device_name"] == "Tesla T4"
+    assert gpu["nvml_error"] is None
+    assert isinstance(gpu["captured_at_sec"], float)
+
+
+def test_worker_runtime_init_records_gpu_status_false_when_nvml_is_absent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The macOS/no-NVML path: `probe_nvml_gpu_status` fails closed (never
+    # raises) rather than leaving `runtime.device` unset, so an operator can
+    # still see *why* the GPU section is empty via `nvml_error`.
+    monkeypatch.setattr(
+        worker_module,
+        "probe_nvml_gpu_status",
+        lambda: NvmlGpuStatus(
+            nvml_available=False,
+            reason="nvmlInit failed: NVMLError_LibraryNotFound: NVML Shared Library Not Found",
+        ),
+    )
+    monkeypatch.setattr(
+        worker_module,
+        "probe_cuda_capability",
+        lambda: CudaCapability(available=False, reason="torch import failed: ModuleNotFoundError"),
+    )
+    config = _config("camera-a")
+
+    runtime = WorkerRuntime(config, serving_client=_FakeServingClient())
+
+    gpu = runtime.diagnostics.to_payload("facility-1", None, 0)["gpu"]
+    assert gpu["nvml_available"] is False
+    assert gpu["cuda_context_ok"] is False
+    assert gpu["driver_version"] is None
+    assert gpu["device_name"] is None
+    assert gpu["nvml_error"] == (
+        "nvmlInit failed: NVMLError_LibraryNotFound: NVML Shared Library Not Found"
+    )
 
 
 def test_default_loop_factory_without_a_resolved_boot_profile_raises() -> None:
