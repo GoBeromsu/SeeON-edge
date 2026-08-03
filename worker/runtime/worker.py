@@ -1334,6 +1334,7 @@ class WorkerRuntime:
             reporter,
             decode=self._boot.decode,
             registry=self._ingest_source_registry(),
+            runtime=self.config.runtime,
         )
 
     def _ingest_source_registry(self) -> SourceRegistry:

@@ -6,9 +6,9 @@ import pytest
 
 import worker.runtime.ingest_composition as ingest_composition_module
 from worker.pipeline.bus import BoundedFrameBus
-from worker.pipeline.ingest.lifecycle import IngestEvent
+from worker.pipeline.ingest.lifecycle import CapturePolicy, IngestEvent
 from worker.pipeline.ingest.registry import SourceRegistryError
-from worker.runtime.config import CameraRuntimeConfig, WorkerConfig
+from worker.runtime.config import CameraRuntimeConfig, WorkerConfig, WorkerRuntimeConfig
 from worker.runtime.ingest_composition import (
     CpuAvConfig,
     NvdecCuvidConfig,
@@ -131,6 +131,66 @@ def test_decoder_for_unknown_token_raises_without_constructing_any_adapter(
         decoder_for("mystery")  # type: ignore[arg-type]
 
 
+# -- decoder_for: per-camera decode_backend override (issue #42) --------------
+
+
+@pytest.mark.parametrize("override", [None, "auto"])
+def test_decoder_for_none_or_auto_override_defers_to_the_profile_token(
+    monkeypatch: pytest.MonkeyPatch, override: str | None
+) -> None:
+    sentinel = object()
+    monkeypatch.setattr(ingest_composition_module, "NvdecCuvidAdapter", lambda: sentinel)
+    monkeypatch.setattr(ingest_composition_module, "CpuAvAdapter", _forbid("CpuAvAdapter"))
+
+    result = decoder_for("nvdec", override)
+
+    assert result is sentinel
+
+
+@pytest.mark.parametrize("override", ["opencv", "cpu"])
+def test_decoder_for_cpu_override_wins_over_an_nvdec_profile(
+    monkeypatch: pytest.MonkeyPatch, override: str
+) -> None:
+    # A CPU-decode override is always compatible -- it never needs the GPU
+    # the profile probed for, so it may downgrade an "nvdec" profile freely.
+    sentinel = object()
+    monkeypatch.setattr(ingest_composition_module, "CpuAvAdapter", lambda: sentinel)
+    monkeypatch.setattr(
+        ingest_composition_module, "NvdecCuvidAdapter", _forbid("NvdecCuvidAdapter")
+    )
+
+    result = decoder_for("nvdec", override)
+
+    assert result is sentinel
+
+
+def test_decoder_for_nvdec_override_matching_an_nvdec_profile_is_not_a_conflict(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sentinel = object()
+    monkeypatch.setattr(ingest_composition_module, "NvdecCuvidAdapter", lambda: sentinel)
+    monkeypatch.setattr(ingest_composition_module, "CpuAvAdapter", _forbid("CpuAvAdapter"))
+
+    result = decoder_for("nvdec", "nvdec")
+
+    assert result is sentinel
+
+
+def test_decoder_for_nvdec_override_on_a_non_nvdec_profile_raises_without_constructing_any_adapter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Fail-fast per ADR-0002: the boot profile never verified an NVDEC
+    # device, so silently falling back to CPU decode would hide a
+    # misconfiguration instead of surfacing it at composition time.
+    monkeypatch.setattr(ingest_composition_module, "CpuAvAdapter", _forbid("CpuAvAdapter"))
+    monkeypatch.setattr(
+        ingest_composition_module, "NvdecCuvidAdapter", _forbid("NvdecCuvidAdapter")
+    )
+
+    with pytest.raises(RuntimeError, match="nvdec"):
+        decoder_for("opencv", "nvdec")
+
+
 # -- compose_camera_ingest_loop: end-to-end composition wiring ----------------
 
 
@@ -170,6 +230,86 @@ def test_compose_camera_ingest_loop_wires_the_nvdec_cuvid_adapter_and_its_config
     resolved = registry.resolve(source_id="camera-b")
     config = loop._spec.make_decode_config("camera-b", resolved)  # noqa: SLF001
     assert config == NvdecCuvidConfig(camera_id="camera-b", url=camera.inference_rtsp_url)
+
+
+def test_compose_camera_ingest_loop_honors_a_per_camera_decode_backend_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Issue #42: camera.decode_backend must win over the profile-global
+    # "nvdec" token (downgrading to CPU decode is always compatible), not be
+    # silently dropped at composition time.
+    sentinel = object()
+    monkeypatch.setattr(ingest_composition_module, "CpuAvAdapter", lambda: sentinel)
+    monkeypatch.setattr(
+        ingest_composition_module, "NvdecCuvidAdapter", _forbid("NvdecCuvidAdapter")
+    )
+    camera = _camera("camera-a").model_copy(update={"decode_backend": "opencv"})
+    registry = build_camera_source_registry((camera,))
+
+    loop = compose_camera_ingest_loop(
+        camera, BoundedFrameBus(), _Reporter(), decode="nvdec", registry=registry
+    )
+
+    assert loop._ports.decoder is sentinel  # noqa: SLF001
+    resolved = registry.resolve(source_id="camera-a")
+    config = loop._spec.make_decode_config("camera-a", resolved)  # noqa: SLF001
+    assert isinstance(config, CpuAvConfig)
+
+
+def test_compose_camera_ingest_loop_rejects_an_incompatible_decode_backend_override() -> None:
+    # Issue #42: fail-fast, not a silent fallback to the profile's decoder.
+    camera = _camera("camera-a").model_copy(update={"decode_backend": "nvdec"})
+    registry = build_camera_source_registry((camera,))
+
+    with pytest.raises(RuntimeError, match="nvdec"):
+        compose_camera_ingest_loop(
+            camera, BoundedFrameBus(), _Reporter(), decode="opencv", registry=registry
+        )
+
+
+@pytest.mark.parametrize("decode", ["opencv", "nvdec"])
+def test_compose_camera_ingest_loop_threads_runtime_config_into_capture_policy_and_decode_config(
+    decode: str,
+) -> None:
+    # Issue #69: a non-default WorkerRuntimeConfig must actually reach the
+    # constructed CapturePolicy and decode config -- before the fix, ingest
+    # composition ignored it entirely and always took the adapter/lifecycle
+    # dataclass defaults (max_failures=30, open/read_timeout_ms=5000)
+    # regardless of what the yaml configured.
+    camera = _camera("camera-a")
+    registry = build_camera_source_registry((camera,))
+    runtime = WorkerRuntimeConfig(max_failures=7, open_timeout_ms=1234, read_timeout_ms=2345)
+
+    loop = compose_camera_ingest_loop(
+        camera,
+        BoundedFrameBus(),
+        _Reporter(),
+        decode=decode,  # type: ignore[arg-type]
+        registry=registry,
+        runtime=runtime,
+    )
+
+    assert loop._spec.policy.max_failures == 7  # noqa: SLF001
+    assert loop._spec.policy.max_failures != CapturePolicy().max_failures  # noqa: SLF001
+    resolved = registry.resolve(source_id="camera-a")
+    config = loop._spec.make_decode_config("camera-a", resolved)  # noqa: SLF001
+    assert config.open_timeout_ms == 1234
+    assert config.read_timeout_ms == 2345
+    assert config.open_timeout_ms != CpuAvConfig(camera_id="x", url="rtsp://x").open_timeout_ms
+
+
+def test_compose_camera_ingest_loop_without_runtime_falls_back_to_dataclass_defaults() -> None:
+    camera = _camera("camera-a")
+    registry = build_camera_source_registry((camera,))
+
+    loop = compose_camera_ingest_loop(
+        camera, BoundedFrameBus(), _Reporter(), decode="opencv", registry=registry
+    )
+
+    assert loop._spec.policy.max_failures == CapturePolicy().max_failures  # noqa: SLF001
+    resolved = registry.resolve(source_id="camera-a")
+    config = loop._spec.make_decode_config("camera-a", resolved)  # noqa: SLF001
+    assert config == CpuAvConfig(camera_id="camera-a", url=camera.inference_rtsp_url)
 
 
 def test_build_camera_source_registry_allowlists_only_the_configured_cameras() -> None:
