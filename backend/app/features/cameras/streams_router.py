@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -12,12 +13,19 @@ from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, ConfigDict
 
 from backend.app.core.config import get_settings
+from backend.app.lifespan import API_EDGE_RELAY_TOKEN_ENV
 from backend.app.shared.dashboard_auth import authorize_dashboard
 
 router = APIRouter(tags=["streams"])
 
 _DEFAULT_MEDIA_TYPE = "multipart/x-mixed-replace; boundary=frame"
 _STREAM_CHUNK_SIZE = 64 * 1024
+# Mirrors cameras/router.py's RELAY_TOKEN_HEADER -- the worker's dev MJPEG
+# server now gates POST/GET /overlay/{camera_id}/pose with the same relay
+# token as /probe (issue #71). Duplicated here rather than importing from
+# cameras/router.py to avoid coupling this module to that router's private
+# helpers/ownership.
+_RELAY_TOKEN_HEADER = "X-Edge-Relay-Token"
 
 
 class _ResponseHeaders(Protocol):
@@ -129,7 +137,9 @@ def camera_pose_get(
     _authorize(request, authorization, query_token=token)
     settings = get_settings()
     upstream_url = _pose_url(settings.worker_stream_origin, camera_id)
-    return _pose_request(upstream_url, settings.worker_stream_timeout_s)
+    return _pose_request(
+        upstream_url, settings.worker_stream_timeout_s, relay_token=_relay_token(request)
+    )
 
 
 @router.post("/streams/{camera_id}/pose")
@@ -144,7 +154,12 @@ def camera_pose_set(
     settings = get_settings()
     upstream_url = _pose_url(settings.worker_stream_origin, camera_id)
     body = json.dumps({"mode": payload.mode}).encode("utf-8")
-    return _pose_request(upstream_url, settings.worker_stream_timeout_s, body=body)
+    return _pose_request(
+        upstream_url,
+        settings.worker_stream_timeout_s,
+        body=body,
+        relay_token=_relay_token(request),
+    )
 
 
 def _worker_url(origin: str, segment: str, camera_id: str, *, suffix: str = "") -> str:
@@ -175,9 +190,12 @@ def _pose_request(
     timeout_s: float,
     *,
     body: bytes | None = None,
+    relay_token: str | None = None,
 ) -> PoseOverlayResponse:
     method = "GET" if body is None else "POST"
-    headers = {} if body is None else {"Content-Type": "application/json"}
+    headers: dict[str, str] = {} if body is None else {"Content-Type": "application/json"}
+    if relay_token:
+        headers[_RELAY_TOKEN_HEADER] = relay_token
     upstream_request = urllib.request.Request(
         upstream_url, data=body, method=method, headers=headers
     )
@@ -242,6 +260,22 @@ def _bearer_token(value: str | None) -> str | None:
     if value is None or not value.startswith("Bearer "):
         return None
     return value.removeprefix("Bearer ").strip() or None
+
+
+def _relay_token(request: Request) -> str | None:
+    """The same worker-relay token cameras/router.py's ``_expected_relay_token``
+    resolves for the ``/probe`` connection-test call (app.state.edge_relay_token,
+    set at boot from ``API_EDGE_RELAY_TOKEN`` -- see lifespan._configure_backend_ingest
+    -- falling back to reading the env var directly). Duplicated here (rather
+    than importing the private helper from cameras/router.py) per issue #71's
+    worker-side auth fix: the worker's pose GET/POST overlay routes now gate on
+    this same token, so it must be forwarded on those upstream calls too.
+    """
+    expected = getattr(request.app.state, "edge_relay_token", None) or os.environ.get(
+        API_EDGE_RELAY_TOKEN_ENV
+    )
+    return expected if isinstance(expected, str) and expected else None
+
 
 def _upstream_unavailable(status_code: int) -> HTTPException:
     if status_code not in {

@@ -224,12 +224,18 @@ def build_http_server(
                 return
 
         def _handle_get_pose(self, camera_id: str) -> None:
+            if not _authorized_pose(self.headers.get("X-Edge-Relay-Token"), probe_token):
+                self.send_error(HTTPStatus.FORBIDDEN)
+                return
             if camera_id == "" or not store.is_known(camera_id):
                 self.send_error(HTTPStatus.NOT_FOUND)
                 return
             self._write_mode_json(store.get_mode(camera_id))
 
         def _handle_set_pose(self, camera_id: str) -> None:
+            if not _authorized_pose(self.headers.get("X-Edge-Relay-Token"), probe_token):
+                self.send_error(HTTPStatus.FORBIDDEN)
+                return
             if camera_id == "" or not store.is_known(camera_id):
                 self.send_error(HTTPStatus.NOT_FOUND)
                 return
@@ -401,6 +407,19 @@ def _authorized_probe(supplied: str | None, expected: str | None) -> bool:
         supplied.encode("utf-8"),
         expected.strip().encode("utf-8"),
     )
+
+
+def _authorized_pose(supplied: str | None, expected: str | None) -> bool:
+    """Gate the pose-overlay GET/POST routes with the same relay token as
+    ``/probe`` (issue #71), but -- unlike ``_authorized_probe`` -- fail open
+    when no token is configured. A standalone ``ML_WORKER_DEV_MJPEG`` server
+    (no relay token wired at all) must keep working unauthenticated exactly
+    as it did before this endpoint had any auth, preserving dev ergonomics;
+    once a relay token *is* configured, it is enforced just like ``/probe``.
+    """
+    if expected is None or expected.strip() == "":
+        return True
+    return _authorized_probe(supplied, expected)
 
 
 def _sanitize_probe_payload(payload: MjpegProbePayload) -> MjpegProbePayload:
