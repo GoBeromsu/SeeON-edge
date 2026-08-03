@@ -1,9 +1,8 @@
 from __future__ import annotations
 
 import os
+import threading
 from collections.abc import Callable, Mapping, Sequence
-from concurrent.futures import ThreadPoolExecutor
-from concurrent.futures import TimeoutError as FuturesTimeoutError
 from dataclasses import dataclass
 from pathlib import Path
 from typing import (
@@ -235,24 +234,40 @@ def _construct_with_timeout(
     ``YoloLoadError`` like any other load failure) rather than leaving the
     worker hung with no further logs.
 
-    Deliberately not a context manager: ``ThreadPoolExecutor.__exit__`` calls
-    ``shutdown(wait=True)``, which would block this thread until the stuck
-    worker thread finishes -- i.e. forever, in exactly the scenario this
-    function exists to fail fast out of. ``shutdown(wait=False)`` lets a
-    still-running construction thread leak instead; acceptable because a
-    timeout here is fatal to the calling boot stage, which exits the process.
+    Deliberately a raw ``threading.Thread(daemon=True)`` rather than
+    ``ThreadPoolExecutor``: this process exits via ``sys.exit()`` (not
+    ``os._exit()``), and CPython's ``concurrent.futures.thread`` module
+    registers an ``atexit`` hook (``_python_exit()``) that joins every
+    *non-daemon* worker thread it ever created, with no timeout of its own.
+    A genuinely stuck ``construct`` call would therefore still hang the
+    process at interpreter shutdown -- silently, with this function's own
+    ``TimeoutError`` already raised and handled -- reintroducing exactly the
+    defect this fix exists to close. A daemon thread is never joined by the
+    interpreter at exit, so a permanently stuck thread can only be abandoned,
+    never block shutdown; that abandonment is acceptable because a timeout
+    here is fatal to the calling boot stage, which exits the process anyway.
     """
-    pool = ThreadPoolExecutor(max_workers=1)
-    future = pool.submit(construct, path)
-    try:
-        return future.result(timeout=timeout_seconds)
-    except FuturesTimeoutError:
+    done = threading.Event()
+    outcome: list[YoloModel | Exception] = []
+
+    def _run() -> None:
+        try:
+            outcome.append(construct(path))
+        except Exception as exc:  # noqa: BLE001 -- re-raised verbatim below, in the caller thread
+            outcome.append(exc)
+        finally:
+            done.set()
+
+    threading.Thread(target=_run, daemon=True).start()
+    if not done.wait(timeout=timeout_seconds):
         raise TimeoutError(
             f"model construction did not finish within {timeout_seconds}s "
             f"(path={path}); check network/DNS reachability"
         ) from None
-    finally:
-        pool.shutdown(wait=False)
+    result = outcome[0]
+    if isinstance(result, Exception):
+        raise result
+    return result
 
 
 def to_float_array(tensor: YoloArray) -> NDArray[np.float64]:

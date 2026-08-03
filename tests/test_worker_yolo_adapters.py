@@ -253,6 +253,39 @@ def test_load_yolo_model_returns_promptly_when_construction_is_fast(tmp_path: Pa
     assert model is sentinel
 
 
+def test_load_yolo_model_timeout_does_not_block_process_exit(tmp_path: Path) -> None:
+    """PR #112 review (rv95): the earlier ``ThreadPoolExecutor``-based
+    timeout wrapper used a non-daemon worker thread. CPython's
+    ``concurrent.futures.thread`` module registers an ``atexit`` hook that
+    joins every such thread, with no timeout of its own, at interpreter
+    shutdown -- so even though ``load_yolo_model``'s own timeout correctly
+    raised ``YoloLoadError`` for a stuck ``construct`` call, the *process*
+    would still silently re-hang trying to join that permanently stuck
+    thread on exit, reintroducing #111's defect one layer up.
+
+    Runs in a subprocess (not in-process) because the failure mode is about
+    interpreter shutdown itself, which can only be observed by actually
+    letting a process exit. Mirrors the real fatal-stage exit path
+    (``bootstrap_or_exit`` -> ``sys.exit()``, not ``os._exit()``): with the
+    daemon-thread fix, the process must exit promptly instead of hanging.
+    """
+    artifact = tmp_path / "model.pt"
+    artifact.write_bytes(b"not a real checkpoint")
+    script = Path(__file__).with_name("_yolo_load_timeout_exit_repro.py")
+    repo_root = Path(__file__).resolve().parent.parent
+
+    result = subprocess.run(
+        [sys.executable, str(script), str(artifact)],
+        cwd=repo_root,
+        env={**os.environ, "PYTHONPATH": str(repo_root)},
+        capture_output=True,
+        text=True,
+        timeout=10.0,
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
 _YOLO_OFFLINE_GUARD_REPRO = Path(__file__).with_name("_yolo_offline_guard_repro.py")
 _REPRO_SUBPROCESS_TIMEOUT_SECONDS = 10.0
 
