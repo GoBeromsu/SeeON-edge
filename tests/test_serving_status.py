@@ -41,5 +41,12 @@ def test_status_does_not_read_worker_runtime_state() -> None:
     body = TestClient(app).get("/api/v1/status").json()
     assert body["cameras"] == {}
     assert body["stale_after_sec"] == HeartbeatStore().stale_after_sec
-    assert body["runtime"] == {"facilities": {}, "stale_after_sec": 15.0}
+    assert body["runtime"] == {
+        "facilities": {},
+        "stale_after_sec": 15.0,
+        "cameras": {},
+        "worker": None,
+        "device": None,
+        "clip_recorder": None,
+    }
     assert not hasattr(app.state, "runtime")
