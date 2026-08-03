@@ -140,8 +140,13 @@ class CameraIngestLoop(Generic[_DecodeConfigT]):
         # reconnect loop -- mark_degraded/emit below only reach the in-memory
         # status store, so without a camera_id here, an offline camera's
         # retry cadence is invisible in the worker log.
+        # Issue #115: camera_id/reason must also be in the message text, not
+        # just extra= -- worker/__main__.py's console formatter doesn't
+        # render extra fields, so extra-only values are silently dropped.
         LOGGER.warning(
-            "camera ingest reconnecting",
+            "camera ingest reconnecting: camera_id=%s reason=%s",
+            self.camera_id,
+            reason,
             extra={"camera_id": self.camera_id, "reason": reason},
         )
         self._ports.reporter.mark_degraded(self.camera_id, category=category)

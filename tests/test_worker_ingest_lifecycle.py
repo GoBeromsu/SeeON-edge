@@ -261,12 +261,19 @@ def test_registered_loop_reports_reconnect_and_recovery_without_replacing_packet
 def test_reconnecting_warning_log_identifies_the_camera(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """Issue #113: the retry/reconnect warning must name the camera.
+    """Issue #113/#115: the retry/reconnect warning must name the camera.
 
-    Before this fix, ``_record_reconnecting`` only updated the in-memory
-    status store (``mark_degraded``/``emit``) -- there was no console-visible
-    log line at all for a camera's reconnect loop, so an operator tailing the
-    worker log had no trace of which camera was retrying or why."""
+    Before #113, ``_record_reconnecting`` only updated the in-memory status
+    store (``mark_degraded``/``emit``) -- there was no console-visible log
+    line at all for a camera's reconnect loop, so an operator tailing the
+    worker log had no trace of which camera was retrying or why.
+
+    #113's fix passed camera_id/reason via ``extra=`` only, which QA found
+    never actually reaches the console: worker/__main__.py's format string
+    (``%(asctime)s - %(name)s - %(levelname)s - %(message)s``) doesn't
+    render extra fields, so ``record.getMessage()`` -- what a real console
+    handler substitutes for ``%(message)s`` -- must itself contain the
+    camera_id, not just the LogRecord's extra attribute."""
     # Given
     first = _Session([None])
     recovered_packet = _packet("camera-a", 9)
@@ -297,6 +304,9 @@ def test_reconnecting_warning_log_identifies_the_camera(
     ]
     assert reconnect_records, "expected a reconnecting warning to be logged"
     assert all(record.camera_id == "camera-a" for record in reconnect_records)  # type: ignore[attr-defined]
+    # The console formatter only renders %(message)s, not extra fields, so
+    # the camera_id must be baked into the message text itself.
+    assert all("camera_id=camera-a" in record.message for record in reconnect_records)
 
 
 def test_source_construction_failure_marks_only_that_camera_offline() -> None:
