@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
 import threading
 from collections.abc import Mapping, Sequence
 from pathlib import Path
@@ -248,6 +251,58 @@ def test_load_yolo_model_returns_promptly_when_construction_is_fast(tmp_path: Pa
     model = load_yolo_model(artifact, "pose", timeout_seconds=5.0, construct=_fast_construct)
 
     assert model is sentinel
+
+
+_YOLO_OFFLINE_GUARD_REPRO = Path(__file__).with_name("_yolo_offline_guard_repro.py")
+_REPRO_SUBPROCESS_TIMEOUT_SECONDS = 10.0
+
+
+def _run_offline_guard_repro(*extra_args: str) -> subprocess.CompletedProcess[str]:
+    # cwd + PYTHONPATH mirror pyproject.toml's `pythonpath = ["."]` pytest
+    # setting, since a plain subprocess doesn't pick that up on its own.
+    repo_root = Path(__file__).resolve().parent.parent
+    return subprocess.run(
+        [sys.executable, str(_YOLO_OFFLINE_GUARD_REPRO), *extra_args],
+        cwd=repo_root,
+        env={**os.environ, "PYTHONPATH": str(repo_root)},
+        capture_output=True,
+        text=True,
+        timeout=_REPRO_SUBPROCESS_TIMEOUT_SECONDS,
+    )
+
+
+def test_yolo_offline_guard_survives_blackholed_dns() -> None:
+    """Issue #111 regression test: reproduces the reported machine condition
+    (DNS to ultralytics' connectivity-probe hosts silently blackholed, not
+    refused) in a fresh subprocess -- required because ultralytics' import-time
+    ``is_online()`` self-check runs at most once per process, so this can't be
+    exercised reliably inside the shared pytest process.
+
+    With the ``YOLO_OFFLINE`` guard in ``yolo_api.py`` (set at module import
+    time, before any ``import ultralytics`` can occur) the blackhole is never
+    even reached, so this must complete quickly rather than hang.
+    """
+    result = _run_offline_guard_repro()
+
+    assert result.returncode == 0, result.stderr
+    assert "SUBPROCESS_COMPLETED" in result.stdout
+
+
+def test_yolo_offline_guard_repro_is_a_real_hang_without_the_guard() -> None:
+    """Negative control for the test above: proves the blackhole condition it
+    simulates is a genuine hang trigger -- not a tautological test that would
+    "pass" regardless of whether the guard does anything -- by bypassing the
+    guard (``--skip-guard``: pop ``YOLO_OFFLINE`` and import ultralytics
+    directly) and confirming that *does* hang.
+
+    Bounded by ``subprocess.run(timeout=...)`` rather than a real infinite
+    wait: a future regression that reintroduces this hang must fail this test
+    fast and diagnosably (``TimeoutExpired``), not hang CI indefinitely --
+    this project has no ``pytest-timeout`` plugin installed, so the bound is
+    implemented directly via the subprocess timeout instead of a marker.
+    """
+    with pytest.raises(subprocess.TimeoutExpired):
+        _run_offline_guard_repro("--skip-guard")
 
 
 def test_forward_failure_blocks_readiness_before_cuda_sync() -> None:

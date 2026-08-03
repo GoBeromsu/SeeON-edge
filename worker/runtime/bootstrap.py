@@ -314,7 +314,14 @@ def model_backend_init_stage(
                 REFUSE_TO_START_EXIT_CODE,
                 f"requires a completed {DECODE_CAPABILITY_STAGE!r} stage",
             )
+        LOGGER.info(
+            "%s: constructing %d model backend(s): %s",
+            MODEL_BACKEND_INIT_STAGE,
+            len(initializers),
+            ", ".join(initializers) or "(none)",
+        )
         runners = {task: initializer(boot) for task, initializer in initializers.items()}
+        LOGGER.info("%s: all model backends constructed", MODEL_BACKEND_INIT_STAGE)
         context.runners = runners
         return runners
 

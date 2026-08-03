@@ -28,6 +28,28 @@ from worker.adapters.model.errors import FatalAcceleratorError
 if TYPE_CHECKING:
     from ultralytics import YOLO
 
+# Issue #111: importing ultralytics runs a module-level connectivity
+# self-check (ultralytics.utils.is_online(), gated on this exact env var --
+# verified against the ultralytics version this repo's lockfile pins) that
+# calls bare, timeout-less socket.getaddrinfo() against two fixed probe
+# hosts. On a machine where DNS to those hosts is blackholed rather than
+# refused, that call blocks forever, and the worker never logs another line
+# past model construction -- the silent boot hang reported in #111. Every
+# model in this module loads from a local artifact_dir and never uses
+# ultralytics' online/HUB features (grep the repo for "ultralytics": this
+# file is the only importer), so the self-check is disabled outright.
+#
+# This must be set here, at module import time, rather than immediately
+# before the lazy `from ultralytics import YOLO` below: ultralytics'
+# ONLINE = is_online() runs exactly once, at the first import of the
+# ultralytics package anywhere in the process, so the guard has to be in
+# place before that import can possibly happen. This module is the sole
+# importer of ultralytics in the codebase, and this line runs the moment
+# any of worker/adapters/model/{yolo_pose,yolo_person,yolo_bed_seg}.py --
+# reachable from worker/__main__.py's very first imports -- pull this
+# module in, long before model_backend_init_stage ever runs.
+os.environ.setdefault("YOLO_OFFLINE", "true")
+
 YoloTask: TypeAlias = Literal["pose", "person", "bed"]
 
 
@@ -191,16 +213,10 @@ def load_yolo_model(
 def _construct_ultralytics_model(path: Path) -> YoloModel:
     """Load a local weights file into an ultralytics ``YOLO`` instance.
 
-    Issue #111: importing ``ultralytics`` runs a module-level connectivity
-    self-check (``ultralytics.utils.is_online()``) that calls bare,
-    timeout-less ``socket.getaddrinfo`` against two fixed probe hosts. On a
-    machine where DNS to those hosts is blackholed rather than refused, that
-    call blocks forever, and the worker never logs another line past model
-    construction. Every model here is loaded from a local ``artifact_dir``
-    and never uses ultralytics' online/HUB features, so the self-check is
-    disabled outright rather than merely raced against a timeout.
+    See the ``YOLO_OFFLINE`` guard at the top of this module (issue #111)
+    for why this import is safe from ultralytics' import-time connectivity
+    self-check by the time this function ever runs.
     """
-    os.environ.setdefault("YOLO_OFFLINE", "true")
     from ultralytics import YOLO
 
     return _UltralyticsModel(YOLO(str(path)))
