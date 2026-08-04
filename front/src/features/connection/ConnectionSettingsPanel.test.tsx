@@ -218,3 +218,73 @@ describe('ConnectionSettingsPanel save behavior', () => {
     act(() => root.unmount());
   });
 });
+
+describe('클라우드 전송 상태 표시', () => {
+  function withRelay(relay: ConnectionView['heartbeat_relay']) {
+    return makeResource({ data: { ...baseView, heartbeat_relay: relay } });
+  }
+
+  function relayText(host: HTMLElement): string {
+    return host.querySelector('[data-testid="heartbeat-relay"]')?.textContent ?? '';
+  }
+
+  it('정상 전송 중이면 마지막 전송 시각을 보여준다', () => {
+    const { host } = renderPanel(
+      withRelay({
+        enabled: true,
+        last_success_at: '2026-08-04T00:00:00Z',
+        last_error_class: null,
+        detail: null,
+      }),
+    );
+
+    expect(relayText(host)).toContain('정상');
+  });
+
+  it('인증 실패면 무엇을 확인할지 알려준다', () => {
+    const { host } = renderPanel(
+      withRelay({
+        enabled: true,
+        last_success_at: null,
+        last_error_class: 'auth',
+        detail: null,
+      }),
+    );
+
+    expect(relayText(host)).toContain('인증');
+    expect(relayText(host)).toContain('시설 ID와 토큰');
+  });
+
+  it('연결 불가면 서버 주소와 네트워크를 가리킨다', () => {
+    const { host } = renderPanel(
+      withRelay({
+        enabled: true,
+        last_success_at: null,
+        last_error_class: 'unreachable',
+        detail: null,
+      }),
+    );
+
+    expect(relayText(host)).toContain('서버 주소와 네트워크');
+  });
+
+  it('전송이 꺼져 있으면 그 사실을 명시한다', () => {
+    const { host } = renderPanel(
+      withRelay({
+        enabled: false,
+        last_success_at: null,
+        last_error_class: null,
+        detail: null,
+      }),
+    );
+
+    expect(relayText(host)).toContain('꺼짐');
+    expect(relayText(host)).toContain('전달되지 않습니다');
+  });
+
+  it('구버전 백엔드처럼 필드가 없으면 지어내지 않는다', () => {
+    const { host } = renderPanel(makeResource());
+
+    expect(relayText(host)).toBe('정보 없음');
+  });
+});
