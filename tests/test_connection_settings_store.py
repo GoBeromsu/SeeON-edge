@@ -382,3 +382,33 @@ class TestApiPrefixNormalization:
         settings = _store(tmp_path).load()
 
         assert settings.events_url is None
+
+
+def test_compose_edge_puts_settings_db_inside_the_persisted_volume() -> None:
+    """연결 설정이 컨테이너 재생성에도 살아남는지 배포 파일에서 고정한다.
+
+    ``DEFAULT_CONNECTION_SETTINGS_PATH``는 ``/var/lib/ml-api/``인데
+    ``compose.edge.yaml``의 ml-api 볼륨은 ``/root/.local/state/ml-api``에
+    마운트된다. 기본값을 그대로 쓰면 sqlite가 볼륨 밖에 생겨,
+    기사님이 대시보드에서 저장한 이벤트 URL/시설 토큰이 컨테이너를
+    다시 만들 때 사라진다. 읽기 실패는 조용히 빈 값으로 떨어지므로
+    (``store.py``의 ``connection settings store unreadable`` 경고)
+    현장에서는 "설정이 왜 초기화됐지"로만 보인다.
+    """
+    compose_path = Path(__file__).resolve().parents[1] / "compose.edge.yaml"
+    compose = compose_path.read_text()
+
+    mount_line = next(
+        line for line in compose.splitlines() if "ml-api-state:" in line and ":/" in line
+    )
+    container_dir = mount_line.split(":", 1)[1].strip()
+
+    setting_line = next(
+        line for line in compose.splitlines() if "API_CONNECTION_SETTINGS_PATH:" in line
+    )
+    settings_path = setting_line.split(":", 1)[1].strip()
+
+    assert settings_path.startswith(f"{container_dir}/"), (
+        f"connection settings db {settings_path!r} must live inside the persisted "
+        f"volume mount {container_dir!r}"
+    )
