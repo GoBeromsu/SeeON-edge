@@ -92,6 +92,7 @@ also a pre-commit hook and CI step); contract-symbol exports by `tests/test_cont
 - Architecture map: [`docs/architecture.md`](docs/architecture.md)
 - Decision records (explicit-only): [`docs/decisions/`](docs/decisions/) — index in [`docs/decisions/README.md`](docs/decisions/README.md)
 - Active plans: [`docs/exec-plan/active/`](docs/exec-plan/active/) · Research: [`docs/research/`](docs/research/) · Rules: [`docs/rules/`](docs/rules/)
+- Operator runbooks: [`docs/runbooks/`](docs/runbooks/) — 엣지 호스트에서 손으로 실행하는 절차. 현재 3건: `local-e2e-rtsp-source.md`(핀된 클립으로 로컬 RTSP 소스 구성), `worker-migration-rollback.md`(`ML_WORKER_IMAGE` digest 롤백), `driver-cuda-alignment.md`.
 
 ## CONVENTIONS
 
