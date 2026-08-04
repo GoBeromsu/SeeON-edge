@@ -56,9 +56,10 @@ gh run watch "$RUN" --repo SeniorAILab/eldercare-fall-ml-v2
 RUN=${RUN:-$(gh run list --repo SeniorAILab/eldercare-fall-ml-v2 \
       --workflow edge-images.yml --limit 1 --json databaseId -q '.[0].databaseId')}
 
-cd "eldercare-fall-ml-v2"   # 받은 파일을 여기 두면 .env.edge.prod 옆이다
-gh run download "$RUN" --repo SeniorAILab/eldercare-fall-ml-v2 --dir ./edge-refs
-find ./edge-refs -name edge-ml-image-refs.env -exec cat {} +
+# 받는 위치는 어디든 된다. 아래 두 줄만 복사해 .env.edge.prod에 붙일 것이라
+# 임시 디렉터리로 받는다.
+gh run download "$RUN" --repo SeniorAILab/eldercare-fall-ml-v2 --dir /tmp/edge-refs
+find /tmp/edge-refs -name edge-ml-image-refs.env -exec cat {} +
 ```
 
 받은 두 줄은 **태그가 아니라 `@sha256:` digest**다.
