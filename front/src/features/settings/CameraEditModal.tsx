@@ -48,6 +48,13 @@ export function CameraEditModal({ camera, cameras, onClose, onUpdated, onRequest
   const [busy, setBusy] = useState<'save' | 'test' | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [testResult, setTestResult] = useState<CameraTestResult | null>(null);
+  /**
+   * 연결 테스트를 통과한 URL. 지금 입력창의 값과 같을 때만 유효하다.
+   *
+   * 이게 없으면 테스트 성공 뒤 주소를 한 글자만 바꿔도 testResult.ok가 그대로라
+   * 검사받지 않은 URL이 저장된다 — 테스트를 강제한 의미가 사라진다.
+   */
+  const [testedUrl, setTestedUrl] = useState<string | null>(null);
   const busyRef = useRef(false);
   const openCameraIdRef = useRef<string | null>(null);
 
@@ -74,6 +81,7 @@ export function CameraEditModal({ camera, cameras, onClose, onUpdated, onRequest
     setMode('view');
     setSaveError(null);
     setTestResult(null);
+    setTestedUrl(null);
     setBusy(null);
     busyRef.current = false;
   }, [camera]);
@@ -95,6 +103,8 @@ export function CameraEditModal({ camera, cameras, onClose, onUpdated, onRequest
       const result = await testCamera(camera.id, draft || undefined);
       setTestResult(result);
       if (result.ok) {
+        // 어떤 URL이 통과했는지 기록한다. 저장 시 지금 값과 대조한다.
+        setTestedUrl(draft);
         toast.success('연결 성공');
         onUpdated();
       }
@@ -122,7 +132,9 @@ export function CameraEditModal({ camera, cameras, onClose, onUpdated, onRequest
       if (draft) {
         // RTSP를 바꿨다면 그 값이 실제로 붙는지 확인된 뒤에만 저장한다.
         // 확인 없이 저장하면 오타가 그대로 들어가 카메라가 조용히 죽는다.
-        if (!testResult?.ok) {
+        // 테스트를 통과한 URL과 지금 값이 같아야 한다. 통과 뒤 주소를
+        // 바꿨다면 그 값은 검사받지 않은 것이다.
+        if (!testResult?.ok || testedUrl !== draft) {
           setSaveError('먼저 연결을 확인해 주세요. 연결에 성공해야 저장할 수 있습니다.');
           return;
         }
