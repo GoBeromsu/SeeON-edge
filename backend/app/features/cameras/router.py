@@ -153,7 +153,9 @@ class TestCameraRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    rtsp_url: str | None = None
+    # UpdateCameraRequest.rtsp_url과 같은 제약을 쓴다 — 빈 문자열을 보내
+    # 저장된 URL 검사로 조용히 되돌아가는 경로를 막는다.
+    rtsp_url: str | None = Field(default=None, min_length=1)
 
 
 class TestCameraResponse(BaseModel):
