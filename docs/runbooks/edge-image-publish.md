@@ -28,8 +28,19 @@
 
 ```bash
 gh workflow run edge-images.yml --repo SeniorAILab/eldercare-fall-ml-v2 -f ref=main
-gh run watch --repo SeniorAILab/eldercare-fall-ml-v2   # 완료까지 대기
+
+# 실행 id를 얻어서 지켜본다. `gh run watch`는 인자 없이 쓰면 대화형으로
+# 목록을 띄우므로 id를 넘긴다.
+sleep 5   # 목록에 뜨기까지 잠깐 걸린다
+RUN=$(gh run list --repo SeniorAILab/eldercare-fall-ml-v2 \
+      --workflow edge-images.yml --limit 1 --json databaseId -q '.[0].databaseId')
+echo "run=$RUN"
+gh run watch "$RUN" --repo SeniorAILab/eldercare-fall-ml-v2
 ```
+
+> 이 워크플로는 아직 한 번도 돈 적이 없어 `gh run list`가 **빈 목록**을
+> 낸다(확인함). 위 `RUN`이 비어 있으면 워크플로가 아직 시작되지 않은
+> 것이므로 몇 초 뒤 다시 조회한다.
 
 **값을 손으로 만들지 않는다.** 워크플로 마지막 단계
 (`Write edge image env artifact`)가 `ML_API_IMAGE` / `ML_WORKER_IMAGE`
@@ -37,10 +48,12 @@ gh run watch --repo SeniorAILab/eldercare-fall-ml-v2   # 완료까지 대기
 블록으로 보이므로 복사해서 `.env.edge.prod`에 붙인다.
 
 ```bash
-# 실행 요약(웹)에서 바로 복사하거나, 아티팩트로 받는다
-gh run download --repo SeniorAILab/eldercare-fall-ml-v2 \
-  --name edge-ml-image-refs-<빌드한 SHA> --dir .
-cat edge-ml-image-refs.env
+# 실행 요약(웹)에서 바로 복사하거나, 아티팩트로 받는다.
+# 아티팩트 이름에 SHA가 붙으므로 이름을 지정하지 말고 run id로 받는다 —
+# 이 워크플로는 아티팩트를 하나만 올린다.
+gh run download "$RUN" --repo SeniorAILab/eldercare-fall-ml-v2 --dir ./edge-refs
+cat ./edge-refs/*/edge-ml-image-refs.env 2>/dev/null || \
+  cat ./edge-refs/edge-ml-image-refs.env
 ```
 
 받은 두 줄은 **태그가 아니라 `@sha256:` digest**다.
