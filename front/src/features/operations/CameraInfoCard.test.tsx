@@ -93,3 +93,39 @@ describe('I10 — 클라우드 연동 상태 표시', () => {
     expect(host.querySelector('[data-testid="cloud-mapping"]')?.textContent).toContain('연동 대기');
   });
 });
+
+describe('연결 이력 — 미연결과 단절을 구분한다', () => {
+  function historyText(host: HTMLElement): string {
+    return host.querySelector('[data-testid="connection-history"]')?.textContent ?? '';
+  }
+
+  it('한 번도 연결된 적 없으면 무엇을 확인할지 알려준다', () => {
+    const { host } = render({ ...camera, never_connected: true, last_ok_at: null });
+
+    expect(historyText(host)).toContain('한 번도 연결된 적 없음');
+    expect(historyText(host)).toContain('주소와 계정');
+  });
+
+  it('연결된 적이 있으면 마지막 연결 시각을 보여준다', () => {
+    const { host } = render({
+      ...camera,
+      never_connected: false,
+      last_ok_at: '2026-08-03T01:00:00Z',
+    });
+
+    expect(historyText(host)).toContain('마지막 연결');
+    expect(historyText(host)).not.toContain('한 번도');
+  });
+
+  it('시각이 깨져 있으면 지어내지 않는다', () => {
+    const { host } = render({ ...camera, never_connected: false, last_ok_at: 'not-a-date' });
+
+    expect(historyText(host)).toContain('시각 불명');
+  });
+
+  it('정보가 없으면 연결 기록 없음으로 남긴다', () => {
+    const { host } = render({ ...camera, never_connected: false, last_ok_at: null });
+
+    expect(historyText(host)).toContain('연결 기록 없음');
+  });
+});
