@@ -51,9 +51,14 @@ gh run watch "$RUN" --repo SeniorAILab/eldercare-fall-ml-v2
 # 실행 요약(웹)에서 바로 복사하거나, 아티팩트로 받는다.
 # 아티팩트 이름에 SHA가 붙으므로 이름을 지정하지 말고 run id로 받는다 —
 # 이 워크플로는 아티팩트를 하나만 올린다.
+#
+# 위 블록과 다른 셸이면 $RUN이 없다. 그때는 다시 얻는다:
+RUN=${RUN:-$(gh run list --repo SeniorAILab/eldercare-fall-ml-v2 \
+      --workflow edge-images.yml --limit 1 --json databaseId -q '.[0].databaseId')}
+
+cd "eldercare-fall-ml-v2"   # 받은 파일을 여기 두면 .env.edge.prod 옆이다
 gh run download "$RUN" --repo SeniorAILab/eldercare-fall-ml-v2 --dir ./edge-refs
-cat ./edge-refs/*/edge-ml-image-refs.env 2>/dev/null || \
-  cat ./edge-refs/edge-ml-image-refs.env
+find ./edge-refs -name edge-ml-image-refs.env -exec cat {} +
 ```
 
 받은 두 줄은 **태그가 아니라 `@sha256:` digest**다.
