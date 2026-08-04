@@ -1,6 +1,7 @@
 import sqlite3
 import stat
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
 from fastapi.testclient import TestClient
 
@@ -404,3 +405,23 @@ def test_corrupt_credentials_file_falls_back_without_a_500(tmp_path) -> None:
         )
 
     assert response.status_code == 204
+
+
+def test_compose_edge_requires_dashboard_credentials_so_default_never_ships() -> None:
+    """admin/admin 기본값이 프로덕션 엣지로 나가지 않음을 배포 파일에서 고정한다.
+
+    ``dashboard_auth.py``는 env가 비었을 때만 ``admin/admin``으로 떨어진다
+    (:160-177). 그 기본값 자체는 zero-config 설치를 위해 남겨두되, 실제
+    배포 경로에서는 절대 도달하지 않아야 한다.
+
+    ``compose.edge.yaml``이 두 변수를 ``:?``로 강제하므로 값이 없으면
+    컨테이너가 아예 뜨지 않는다. 누가 그 ``:?``를 지우거나 기본값을 넣으면
+    조용히 admin/admin으로 뜨는 엣지가 요양원에 설치될 수 있다.
+    """
+    compose = (Path(__file__).resolve().parents[1] / "compose.edge.yaml").read_text()
+
+    for var in ("API_DASHBOARD_USERNAME", "API_DASHBOARD_PASSWORD"):
+        assert f"${{{var}:?" in compose, (
+            f"{var} must stay required (`:?`) in compose.edge.yaml — "
+            "otherwise the admin/admin fallback can reach a real edge box"
+        )
