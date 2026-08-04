@@ -239,7 +239,16 @@ export function CameraRegisterModal({ open, cameras, onClose, onCreated }: Camer
                 방을 지정해야 클라우드 현황판에 이 카메라가 나타납니다.
               </span>
             </label>
-          ) : null}
+          ) : (
+            /* 클라우드 roster가 아직 안 왔을 때. 등록 자체를 막으면 오프라인
+               설치가 불가능해지므로 통과시키되, 침묵하지는 않는다 — 기사가
+               정상 등록으로 알고 현장을 떠나면 클라우드에는 영영 안 나타난다. */
+            <p data-testid="no-spaces-notice" className="text-sm text-amber-600">
+              클라우드에서 방 목록을 아직 받지 못했습니다. 지금 등록하면 방 지정
+              없이 저장되며, 클라우드 현황판에는 나타나지 않습니다. 연결 설정을
+              먼저 확인하거나, 등록 후 수정 화면에서 방을 지정하세요.
+            </p>
+          )}
 
           {errorMessage ? (
             <div>

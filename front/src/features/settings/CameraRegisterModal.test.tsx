@@ -294,4 +294,21 @@ describe('I7 — 클라우드 방(space) 선택', () => {
       { forceRegister: false },
     );
   });
+
+  it('roster가 비어 있으면 그 사실과 결과를 알린다', () => {
+    // 등록은 통과시키되 침묵하지 않는다. 기사가 정상 등록으로 알고 떠나면
+    // 클라우드 현황판에는 영영 나타나지 않는다.
+    render(true, vi.fn(), vi.fn(), []);
+
+    const notice = document.querySelector('[data-testid="no-spaces-notice"]');
+    expect(notice).not.toBeNull();
+    expect(notice?.textContent).toContain('클라우드 현황판에는 나타나지 않습니다');
+  });
+
+  it('빈 방이 있으면 안내 대신 선택 UI를 보여준다', () => {
+    render(true, vi.fn(), vi.fn(), [rosterSpace]);
+
+    expect(document.querySelector('[data-testid="no-spaces-notice"]')).toBeNull();
+    expect(document.querySelector('select[name="space_id"]')).not.toBeNull();
+  });
 });
