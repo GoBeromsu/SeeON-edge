@@ -189,6 +189,7 @@ def test_gpu_lease_rejects_a_second_process_until_clean_release(tmp_path: Path) 
     replacement.close()
 
 
+@pytest.mark.heavy
 def test_watchdog_passes_deadline_as_fatal_accelerator_fault() -> None:
     handler = _RecordingFaultHandler()
     watchdog = InferenceWatchdog(
@@ -210,6 +211,7 @@ def test_watchdog_passes_deadline_as_fatal_accelerator_fault() -> None:
     assert record.frame_index == 11
 
 
+@pytest.mark.heavy
 def test_watchdog_subprocess_hard_exits_with_fatal_accelerator_code(tmp_path: Path) -> None:
     script = textwrap.dedent(
         f"""
@@ -234,11 +236,6 @@ def test_watchdog_subprocess_hard_exits_with_fatal_accelerator_code(tmp_path: Pa
         cwd=Path.cwd(),
         capture_output=True,
         text=True,
-        # 워치독 deadline이 0.05초라 정상 호스트에서는 1초 안에 끝난다.
-        # 3초는 부하가 걸린 CI 러너에서 파이썬 기동 + import만으로 넘길 수
-        # 있다(실제로 전체 스위트가 112초에서 318초로 늘어난 실행에서 이
-        # 테스트만 TimeoutExpired로 두 번 연속 깨졌다). 판정하려는 것은
-        # "워치독이 hard exit 하는가"이지 기동 속도가 아니므로 여유를 준다.
         timeout=30,
     )
 
