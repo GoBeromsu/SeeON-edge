@@ -141,12 +141,45 @@ describe('LiveStreamPanel', () => {
       decode: { requested: 'auto', selected: 'cpu', fallback_count: 0, last_reason: null, updated_at_sec: 1 },
       measured_fps: 12.4,
       latency: null,
+      stale: false,
     };
     const { host } = render(onlineCamera, diagnostics);
 
     expect(host.querySelector('canvas')).not.toBeNull();
     expect(host.textContent).toContain('12.4 FPS');
     expect(host.textContent).not.toContain('카메라에 연결할 수 없습니다');
+  });
+
+  it('shows "FPS 측정 중" when no measurement has arrived yet (never measured, not stale)', () => {
+    stubStreamingFetch();
+    const diagnostics: RuntimeCameraDiagnostics = {
+      camera_id: 'cam-1',
+      decode: { requested: 'auto', selected: null, fallback_count: 0, last_reason: null, updated_at_sec: null },
+      measured_fps: null,
+      latency: null,
+      stale: false,
+    };
+    const { host } = render(onlineCamera, diagnostics);
+
+    expect(host.textContent).toContain('FPS 측정 중');
+    expect(host.textContent).not.toContain('측정 중단');
+  });
+
+  it('shows a distinct "측정 중단" warning with the last known FPS once the worker goes stale (issue #160)', () => {
+    stubStreamingFetch();
+    const diagnostics: RuntimeCameraDiagnostics = {
+      camera_id: 'cam-1',
+      decode: { requested: 'auto', selected: 'opencv', fallback_count: 0, last_reason: null, updated_at_sec: 1 },
+      measured_fps: 5.0,
+      latency: null,
+      stale: true,
+    };
+    const { host } = render(onlineCamera, diagnostics);
+
+    // 마지막 값을 지우지 않고, 지금도 그 값이 유효한 것처럼 보여주지도 않는다.
+    expect(host.textContent).toContain('측정 중단');
+    expect(host.textContent).toContain('5.0');
+    expect(host.textContent).not.toContain('5.0 FPS');
   });
 
   it('shows a bottom-left "라이브 · 온라인" badge when the overlay mode is not fall, matching the design handoff', () => {

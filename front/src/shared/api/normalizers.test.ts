@@ -359,6 +359,7 @@ describe('status normalization', () => {
             measured_fps: 27.5,
             decode: { requested: 'auto', selected: 'nvdec', fallback_count: 1, last_reason: 'open_failed', updated_at_sec: 1_720_000_000 },
             latency: { first_attempt_samples: 3, max_sec: 0.75, since_sec: 1_720_000_000 },
+            stale: true,
           },
         },
         worker: { alive: true, pid: 1234, started_at_sec: 1_719_999_000 },
@@ -385,6 +386,7 @@ describe('status normalization', () => {
             measured_fps: 27.5,
             decode: { requested: 'auto', selected: 'nvdec', fallback_count: 1, last_reason: 'open_failed', updated_at_sec: 1_720_000_000 },
             latency: { first_attempt_samples: 3, max_sec: 0.75, since_sec: 1_720_000_000 },
+            stale: true,
           },
         },
         worker: { alive: true, pid: 1234, started_at_sec: 1_719_999_000 },
@@ -410,7 +412,7 @@ describe('status normalization', () => {
     }).runtime).toMatchObject({
       device: null,
       worker: { alive: null, pid: null, started_at_sec: null },
-      cameras: { 'cam-1': { camera_id: 'cam-1', measured_fps: null, latency: null } },
+      cameras: { 'cam-1': { camera_id: 'cam-1', measured_fps: null, latency: null, stale: null } },
     });
   });
 

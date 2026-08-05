@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
 from backend.app.features.relay.router import RelayRuntimeStatusRequest
+from backend.app.features.status.router import _flatten_runtime_cameras
 from backend.app.features.status.runtime_status_store import RuntimeStatusStore
 from backend.app.main import create_app, no_lifespan
 from contracts.decode_diagnostics import DecodeSelection
@@ -113,6 +114,35 @@ def test_runtime_status_exposes_additive_diagnostics() -> None:
         "captured_at_sec": 1.0,
     }
     assert runtime["clip_recorder"]["finalized_clips"] == 2
+
+
+def test_flatten_runtime_cameras_marks_stale_camera_without_erasing_last_fps() -> None:
+    """워커가 죽어 facility가 stale이 되면, 마지막 measured_fps는 지우지 않되
+    카메라별로 stale을 같이 내려야 프론트가 '멈춘 값'과 '현재 값'을 구분할 수 있다."""
+    store = RuntimeStatusStore(stale_after_sec=1.0)
+    store.record(
+        _payload(cameras=[{**_payload()["cameras"][0], "measured_fps": 5.0}]),
+        received_at=0.0,
+    )
+
+    facilities = store.snapshot(now=1000.0)["facilities"]
+    assert facilities["facility-1"]["stale"] is True
+
+    cameras = _flatten_runtime_cameras(facilities)
+    assert cameras["camera-1"]["measured_fps"] == 5.0
+    assert cameras["camera-1"]["stale"] is True
+
+
+def test_flatten_runtime_cameras_marks_fresh_camera_as_not_stale() -> None:
+    store = RuntimeStatusStore(stale_after_sec=100.0)
+    store.record(
+        _payload(cameras=[{**_payload()["cameras"][0], "measured_fps": 5.0}]),
+        received_at=0.0,
+    )
+
+    facilities = store.snapshot(now=1.0)["facilities"]
+    cameras = _flatten_runtime_cameras(facilities)
+    assert cameras["camera-1"]["stale"] is False
 
 
 def test_latency_max_persists_and_excludes_nonfirst_attempts(tmp_path: Path) -> None:

@@ -40,13 +40,22 @@ def _flatten_runtime_cameras(facilities: dict[str, Any]) -> dict[str, Any]:
     expects ``runtime.cameras`` as a flat dict, independent of facility
     grouping. Single-tenant deployments have exactly one facility today, so a
     later facility's entry for the same camera_id simply wins on collision.
+
+    Staleness lives on the facility (``facility["stale"]``, derived from
+    ``received_at`` vs ``stale_after_sec``) but the front-end only reads this
+    flat dict (issue #160) — a dead worker's last-known ``measured_fps`` would
+    otherwise keep rendering as if it were live. So each camera's staleness is
+    propagated here rather than dropped, without erasing the last measured
+    value (the front-end needs both to tell "never measured" apart from
+    "measurement stopped").
     """
     cameras: dict[str, Any] = {}
     for facility in facilities.values():
+        stale = bool(facility.get("stale"))
         for camera in facility.get("cameras", []):
             camera_id = camera.get("camera_id")
             if camera_id:
-                cameras[camera_id] = camera
+                cameras[camera_id] = {**camera, "stale": stale}
     return cameras
 
 

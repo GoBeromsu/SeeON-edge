@@ -60,6 +60,7 @@ function normalizeRuntimeCameraDiagnostics(value: unknown): RuntimeCameraDiagnos
     decode: normalizeRuntimeDecode(value.decode),
     measured_fps: pickNonNegativeNumber(value, ['measured_fps', 'measuredFps']),
     latency: normalizeRuntimeLatency(value.latency),
+    stale: pickBoolean(value, ['stale']),
   };
 }
 

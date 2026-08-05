@@ -16,6 +16,12 @@ type LiveStreamPanelProps = {
  * counter, but the API only ever reports one `measured_fps`, so this deliberately omits the
  * fabricated fields.
  *
+ * The chip has three distinct states (issue #160): no value yet ("FPS 측정 중"), a live value
+ * ("N.N FPS · backend"), and a stale value — the reporting worker hasn't published within
+ * `stale_after_sec` but `measured_fps` still holds its last-known reading. That last case is
+ * shown as "⚠ 측정 중단 · 마지막 N.N" in a warning color instead of silently keeping the old
+ * value on screen as if it were current.
+ *
  * Stall recovery (issue #83) is delegated to useMjpegStream: it draws each frame onto the canvas
  * directly and only reconnects once frames have actually stopped arriving for a few seconds, so
  * the last frame stays on screen the whole time. This panel surfaces that as a small corner badge
@@ -34,6 +40,10 @@ export function LiveStreamPanel({ camera, diagnostics, overlayMode, onRetryConne
 
   const fps = diagnostics?.measured_fps;
   const backend = diagnostics?.decode.selected ?? diagnostics?.decode.requested ?? null;
+  // stale는 워커가 죽어도 마지막 measured_fps를 지우지 않으므로(#160), 값이 없어
+  // 아직 측정 전인 경우와 값이 있지만 멈춰버린 경우를 구분해서 보여준다.
+  const isStale = diagnostics?.stale === true;
+  const fpsKnown = fps !== null && fps !== undefined;
 
   if (!online) {
     return (
@@ -72,11 +82,14 @@ export function LiveStreamPanel({ camera, diagnostics, overlayMode, onRetryConne
       />
 
       <span
-        className="media-status-overlay tabular-nums absolute right-3 top-3 rounded-control px-2 py-1 text-xs font-semibold"
+        className={`media-status-overlay tabular-nums absolute right-3 top-3 rounded-control px-2 py-1 text-xs font-semibold ${isStale && fpsKnown ? 'text-amber-400' : ''}`}
         aria-label="스트림 진단 정보"
       >
-        {fps !== null && fps !== undefined ? `${fps.toFixed(1)} FPS` : 'FPS 측정 중'}
-        {backend ? ` · ${backend}` : ''}
+        {isStale && fpsKnown
+          ? `⚠ 측정 중단 · 마지막 ${(fps as number).toFixed(1)}`
+          : fpsKnown
+            ? `${(fps as number).toFixed(1)} FPS${backend ? ` · ${backend}` : ''}`
+            : 'FPS 측정 중'}
       </span>
 
       <span className="media-status-overlay absolute bottom-2 left-2 rounded-control px-2.5 py-1 text-xs font-semibold">

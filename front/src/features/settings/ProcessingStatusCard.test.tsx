@@ -15,6 +15,7 @@ const status: StatusSnapshot = {
         decode: { requested: 'auto', selected: 'opencv (CPU)', fallback_count: 0, last_reason: null, updated_at_sec: null },
         measured_fps: 24.5,
         latency: { first_attempt_samples: 10, max_sec: 1.84, since_sec: 60 },
+        stale: false,
       },
     },
     worker: { alive: true, pid: 123, started_at_sec: 100 },

@@ -94,6 +94,8 @@ export type RuntimeCameraDiagnostics = {
   decode: RuntimeDecodeDiagnostics;
   measured_fps: number | null;
   latency: RuntimeLatencyDiagnostics | null;
+  /** True once the reporting facility hasn't published within `stale_after_sec` — the worker may be dead while `measured_fps` still holds its last-known value (issue #160). */
+  stale: boolean | null;
 };
 
 /** Device-adaptive acceleration diagnostics (not CUDA-specific — backend may be any decode/inference device). */
