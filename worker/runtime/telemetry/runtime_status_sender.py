@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import queue
 import threading
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Protocol, final
 
@@ -99,11 +99,21 @@ class RuntimeStatusSender:
         facility_id: str | Mapping[str, str],
         transport: RuntimeStatusTransport,
         config: RuntimeStatusSenderConfig | None = None,
+        *,
+        before_publish: Callable[[], None] | None = None,
     ) -> None:
         resolved_config = RuntimeStatusSenderConfig() if config is None else config
         self._diagnostics = diagnostics
         self._facility_id = facility_id
         self._transport = transport
+        # Invoked on every publish (the initial synchronous one in `start()`
+        # and every subsequent tick in `_run()`) just before building the
+        # payload, so a live-stats provider (e.g. the clip recorder's
+        # `ClipRecorderStats`, #165) can push its latest snapshot into
+        # `diagnostics` right before it is read -- `WorkerDiagnostics` itself
+        # must not depend on `ClipRecorder` (layering), so the composition
+        # root (`WorkerRuntime`) supplies this instead.
+        self._before_publish = before_publish
         self._publish_interval_sec = max(0.0, resolved_config.publish_interval_sec)
         self._initial_backoff_sec = max(0.0, resolved_config.initial_backoff_sec)
         self._max_backoff_sec = max(
@@ -201,6 +211,8 @@ class RuntimeStatusSender:
             self._snapshots.task_done()
 
     def _snapshots_for_publish(self) -> list[RelayRuntimeStatusPayload]:
+        if self._before_publish is not None:
+            self._before_publish()
         if isinstance(self._facility_id, str):
             return [self._diagnostics.to_payload(self._facility_id, None, 0)]
         return self._diagnostics.to_payloads(self._facility_id, None, 0)

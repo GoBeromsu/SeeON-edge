@@ -41,9 +41,12 @@ import worker.runtime.worker as worker_module
 from contracts.runner import Image, RunnerResult
 from shared.events.evidence_http_transport import HttpResult
 from worker.pipeline.ingest.lifecycle import IngestReporter
+from worker.pipeline.output.evidence.clip_recorder_models import ClipRecorderStats
 from worker.runtime.config import CameraRuntimeConfig, WorkerConfig
 from worker.runtime.lease import GpuLease
 from worker.runtime.profile.registry import VerifyResult
+from worker.runtime.telemetry.runtime_diagnostics import WorkerDiagnostics
+from worker.runtime.telemetry.wire import ClipRecorderStatus
 from worker.runtime.worker import WorkerRuntime
 
 
@@ -362,3 +365,68 @@ def test_runtime_status_payload_reports_registered_cameras_and_worker_status(
     assert isinstance(payload["worker"]["pid"], int)
     assert isinstance(payload["worker"]["started_at_sec"], float)
     assert payload["worker"]["profile_boot_error"] is None
+
+
+def test_refresh_clip_recorder_telemetry_reads_live_stats_into_diagnostics() -> None:
+    """Regression: ``set_clip_recorder_status`` is only ever called at
+    recorder start/failure (``worker.py``), so without
+    ``_refresh_clip_recorder_telemetry`` -- wired as ``RuntimeStatusSender``'s
+    ``before_publish`` hook -- every runtime-status payload's
+    ``clip_recorder`` counters stay frozen at their startup values forever,
+    even though ``ClipRecorderStats`` (``clip_actor.py``) keeps incrementing
+    the whole time (#165). This drives the method directly (isolated via
+    ``WorkerRuntime.__new__``, the same seam
+    ``tests/test_worker_real_warmup_no_stub.py`` uses for
+    ``_warm_models``) against a live ``ClipRecorderStats``, not a value
+    frozen at construction.
+    """
+    runtime = WorkerRuntime.__new__(WorkerRuntime)
+    runtime.diagnostics = WorkerDiagnostics()
+
+    class _StubRecorder:
+        def __init__(self) -> None:
+            self.stats = ClipRecorderStats()
+
+    recorder = _StubRecorder()
+    recorder.stats.dropped_frames = 4
+    recorder.stats.finalized_clips = 9
+    recorder.stats.video_unavailable_clips = 7
+    recorder.stats.encoder = "libx264"
+    runtime._clip_recorder = recorder  # type: ignore[assignment]  # noqa: SLF001
+
+    runtime._refresh_clip_recorder_telemetry()  # noqa: SLF001
+
+    payload = runtime.diagnostics.to_payload("facility-a", None, 0)
+    assert payload["clip_recorder"] == {
+        "available": True,
+        "dropped_frames": 4,
+        "dropped_events": 0,
+        "failed_writes": 0,
+        "finalized_clips": 9,
+        "video_unavailable_clips": 7,
+        "active_clips": 0,
+        "encoder": "libx264",
+    }
+
+    # A later tick (more frames/clips processed) reflects the *new* live
+    # values, not what was read the first time.
+    recorder.stats.dropped_frames = 11
+    recorder.stats.finalized_clips = 10
+
+    runtime._refresh_clip_recorder_telemetry()  # noqa: SLF001
+
+    payload = runtime.diagnostics.to_payload("facility-a", None, 0)
+    assert payload["clip_recorder"]["dropped_frames"] == 11
+    assert payload["clip_recorder"]["finalized_clips"] == 10
+
+
+def test_refresh_clip_recorder_telemetry_is_a_noop_when_the_recorder_never_started() -> None:
+    runtime = WorkerRuntime.__new__(WorkerRuntime)
+    runtime.diagnostics = WorkerDiagnostics()
+    runtime.diagnostics.set_clip_recorder_status(ClipRecorderStatus(available=False))
+    runtime._clip_recorder = None  # noqa: SLF001
+
+    runtime._refresh_clip_recorder_telemetry()  # noqa: SLF001
+
+    payload = runtime.diagnostics.to_payload("facility-a", None, 0)
+    assert payload["clip_recorder"]["available"] is False

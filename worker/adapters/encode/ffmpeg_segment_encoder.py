@@ -244,6 +244,8 @@ class FFmpegSegmentEncoder:
             except EncoderWriteError:
                 self._fail_session(session)
                 raise
+            event_time_sec = packet.pts if packet.pts is not None else packet.frame.time_sec
+            session.index.observe_frame(event_time_sec, session.geometry.fps)
             self._refresh_index(session)
 
     def _recreate_session_process(

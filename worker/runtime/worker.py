@@ -911,7 +911,12 @@ class WorkerRuntime:
             self.config.relay.token.get_secret_value(),
             request=runtime_status_sender_module.bounded_request,
         )
-        sender = RuntimeStatusSender(self.diagnostics, facility_by_camera, transport)
+        sender = RuntimeStatusSender(
+            self.diagnostics,
+            facility_by_camera,
+            transport,
+            before_publish=self._refresh_clip_recorder_telemetry,
+        )
         try:
             sender.start()
         except Exception:  # noqa: BLE001 - runtime-status delivery is a non-fatal camera boundary
@@ -1404,6 +1409,36 @@ class WorkerRuntime:
             return
         self._clip_recorder = recorder
         self.diagnostics.set_clip_recorder_status(ClipRecorderStatus(available=True))
+
+    def _refresh_clip_recorder_telemetry(self) -> None:
+        """Push the clip recorder's live counters into diagnostics.
+
+        ``set_clip_recorder_status`` (above) is only ever called at recorder
+        start/failure, so without this the counters it seeds
+        (``dropped_frames``, ``finalized_clips``, ``video_unavailable_clips``,
+        ...) stay frozen at their startup values for the rest of the
+        process -- ``ClipRecorderStats`` (``clip_actor.py``) keeps
+        incrementing them the whole time, but nothing ever re-reads them into
+        telemetry, so ``/status`` never reflects clip failures (#165). Wired
+        as ``RuntimeStatusSender``'s ``before_publish`` hook so it runs on
+        every periodic tick, right before that tick's payload is built.
+        """
+        recorder = self._clip_recorder
+        if recorder is None:
+            return
+        stats = recorder.stats
+        self.diagnostics.set_clip_recorder_status(
+            ClipRecorderStatus(
+                available=True,
+                dropped_frames=stats.dropped_frames,
+                dropped_events=stats.dropped_events,
+                failed_writes=stats.failed_writes,
+                finalized_clips=stats.finalized_clips,
+                video_unavailable_clips=stats.video_unavailable_clips,
+                active_clips=stats.active_clips,
+                encoder=stats.encoder,
+            )
+        )
 
     def _default_clip_recorder(self, camera: CameraRuntimeConfig) -> EventClipRecorder:
         if self._clip_recorder is None:

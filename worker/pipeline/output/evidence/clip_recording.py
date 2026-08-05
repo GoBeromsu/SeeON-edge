@@ -107,6 +107,19 @@ class SegmentedEncoderSession(Protocol):
         end_time_sec: float,
     ) -> tuple[Segment, ...]: ...
 
+    @property
+    def origin_time_sec(self) -> float | None:
+        """Event-clock value that maps to this session's segment-local 0.
+
+        ``select_segments`` filters segments after converting the requested
+        window into this same generation-local axis (#165); callers that
+        also compare against the *returned* segments' (still local) times --
+        such as ``_windowed_duration_s`` below -- must apply this same
+        offset to their own window bounds first, or they silently compare
+        two different clocks again one level up.
+        """
+        ...
+
 
 class SegmentedClipEncoder(Protocol):
     def open(
@@ -222,9 +235,12 @@ class ClipRecordingCoordinator:
             artifact = finalizer.finalize(segments, event)
         except (ClipRemuxError, CrossGenerationSegmentError):
             return ClipUnavailable(clip_id, ClipReasonCode.REMUX_FAILED)
+        origin = session.origin_time_sec
+        local_start = start_time_sec if origin is None else start_time_sec - origin
+        local_end = end_time_sec if origin is None else end_time_sec - origin
         artifact = replace(
             artifact,
-            duration_s=_windowed_duration_s(segments, start_time_sec, end_time_sec),
+            duration_s=_windowed_duration_s(segments, local_start, local_end),
         )
         return ClipReady(clip_id, artifact)
 

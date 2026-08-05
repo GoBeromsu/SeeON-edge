@@ -9,7 +9,7 @@ from worker.runtime.telemetry.runtime_status_sender import (
     RuntimeStatusSender,
     RuntimeStatusSenderConfig,
 )
-from worker.runtime.telemetry.wire import RelayRuntimeStatusPayload
+from worker.runtime.telemetry.wire import ClipRecorderStatus, RelayRuntimeStatusPayload
 
 # test_sender_uses_latest_snapshot_and_bearer_auth (edge): payload shape, generation
 # bookkeeping, and bearer auth are superseded by tests/test_worker_telemetry_status_sender.py
@@ -130,6 +130,45 @@ def test_sender_publish_never_blocks_when_latest_slot_is_full() -> None:
     assert sender.publish() is True
 
     assert time.monotonic() - start < 0.1
+
+
+def test_before_publish_hook_refreshes_diagnostics_on_every_tick() -> None:
+    """#165: nothing previously re-read live clip-recorder counters into
+    ``WorkerDiagnostics`` after recorder start, so every runtime-status
+    payload's ``clip_recorder`` stayed frozen at its startup values for the
+    rest of the process. ``before_publish`` is the seam that fixes that --
+    this pins that it actually runs on every publish (including background
+    ticks), not just once at construction.
+    """
+    diagnostics = _diagnostics()
+    calls = {"count": 0}
+
+    def before_publish() -> None:
+        calls["count"] += 1
+        diagnostics.set_clip_recorder_status(
+            ClipRecorderStatus(available=True, finalized_clips=calls["count"])
+        )
+
+    transport = _RecordingTransport()
+    sender = RuntimeStatusSender(
+        diagnostics,
+        "facility-a",
+        transport,
+        RuntimeStatusSenderConfig(publish_interval_sec=0.01),
+        before_publish=before_publish,
+    )
+
+    sender.start()
+    try:
+        _wait_until(lambda: len(transport.payloads) >= 2)
+    finally:
+        sender.stop()
+
+    # Called on every tick, not cached from the first call.
+    assert calls["count"] >= 2
+    # The most recently delivered payload reflects the latest live value,
+    # proving the hook re-runs (rather than a value snapshotted once).
+    assert transport.payloads[-1]["clip_recorder"]["finalized_clips"] == calls["count"]
 
 
 def _wait_until(predicate, timeout_sec: float = 0.5) -> None:  # noqa: ANN001

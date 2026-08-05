@@ -68,6 +68,10 @@ class FFmpegEncoderSession:
         return self._state.index
 
     @property
+    def origin_time_sec(self) -> float | None:
+        return self._state.index.origin_time_sec
+
+    @property
     def segment_list_path(self) -> Path:
         return self._state.index.list_path
 

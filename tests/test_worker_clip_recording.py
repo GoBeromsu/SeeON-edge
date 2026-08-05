@@ -57,6 +57,7 @@ class _FakeSession:
     closed: list[None] = field(default_factory=list)
     write_error: Exception | None = None
     select_error: Exception | None = None
+    origin_time_sec: float | None = None
 
     def write(self, packet: FramePacket) -> None:
         if self.write_error is not None:
@@ -244,6 +245,55 @@ def test_finalize_reports_duration_clamped_to_the_requested_window() -> None:
 
     assert isinstance(outcome, ClipReady)
     assert outcome.artifact.duration_s == 30.0
+
+
+def test_finalize_converts_the_duration_window_into_the_sessions_local_axis() -> None:
+    """Regression for #165: a shifted generation origin must also shift the
+    window used for duration clamping, not just segment selection -- else
+    the same event-clock-vs-segment-clock mismatch reappears one level up
+    (`_windowed_duration_s` comparing raw event-clock bounds against the
+    session's local-axis segments) and reports a bogus ``duration_s``
+    instead of the actual clamped overlap.
+    """
+    # This generation's local axis started at event-clock 12470.0 (its first
+    # frame arrived then); segments are expressed in that local axis, so
+    # they start at 0 rather than at the (much larger) event-clock reading.
+    boundary_segments = (
+        Segment(path=Path("/tmp/seg-a.mp4"), generation=7, start_time_sec=0.0, end_time_sec=40.0),
+        Segment(path=Path("/tmp/seg-b.mp4"), generation=7, start_time_sec=40.0, end_time_sec=80.0),
+    )
+    session = _FakeSession(
+        camera="cam-1",
+        geometry=EncoderGeometry(4, 2, 5.0),
+        segments=boundary_segments,
+        origin_time_sec=12470.0,
+    )
+    encoder = _FakeEncoder(sessions={"cam-1": session})
+    finalizer = _FakeFinalizer()
+    coordinator = _coordinator(
+        encoder,
+        finalizer,
+        window=ClipWindow(pre_event_seconds=30.0, post_event_seconds=30.0),
+    )
+    coordinator.write(_packet(1))
+
+    outcome = coordinator.finalize(
+        camera_id="cam-1",
+        clip_id="clip-1",
+        event_time_sec=12500.0,
+        event=_event(),
+    )
+
+    assert isinstance(outcome, ClipReady)
+    # Event window in event-clock terms: [12470.0, 12530.0].
+    assert session.windows == [(12470.0, 12530.0)]
+    # Converted into the session's local axis (subtract origin 12470.0):
+    # [0.0, 60.0]. Overlap with segment a (local 0..40) is 40.0, with
+    # segment b (local 40..80) is 20.0 -- total 60.0. Comparing the *raw*,
+    # unconverted event-clock bounds ([12470.0, 12530.0]) against these
+    # same local-axis segments (0..80) has no overlap at all and clamps to
+    # 0.0 -- the bug this test pins.
+    assert outcome.artifact.duration_s == 60.0
 
 
 def test_remux_failure_yields_typed_unavailable_without_losing_the_event() -> None:

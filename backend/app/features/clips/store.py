@@ -218,7 +218,13 @@ def _manifest_from_mapping(data: dict[str, object]) -> ClipManifest | None:
     started_at = _text(data.get("started_at"))
     codec = _text(data.get("codec"))
     path = _text(data.get("path")) or None
-    video_error = _text(data.get("video_error")) or None
+    # The worker writes the failure reason as `reason_code`
+    # (worker/pipeline/output/evidence/manifest_models.py:93), not
+    # `video_error` -- no manifest the worker produces has ever used that
+    # key. Prefer `reason_code` so `GET /clips` actually surfaces why a clip
+    # is unavailable; fall back to `video_error` for any pre-existing
+    # manifest written under that older, never-populated-in-practice key.
+    video_error = _text(data.get("reason_code")) or _text(data.get("video_error")) or None
     video_available_raw = data.get("video_available")
     finalized = data.get("finalized")
     duration_s_raw = data.get("duration_s")

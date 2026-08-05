@@ -93,6 +93,67 @@ def test_path_less_manifest_is_listed_with_video_unavailable(clip_env) -> None:
     assert row["video_error"] == "no working codec"
 
 
+def test_reason_code_is_surfaced_as_the_clips_failure_reason(clip_env) -> None:
+    """#165: the worker writes the failure reason as `reason_code`
+    (worker/pipeline/output/evidence/manifest_models.py:93), never as
+    `video_error` -- so `GET /clips` must read `reason_code`, not the key
+    the worker never populates.
+    """
+    clip_store = clip_env / "clip-store"
+    clip_dir = clip_store / "clips" / "clip-no-frames"
+    clip_dir.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "clip_id": "clip-no-frames",
+        "camera_id": "camera-1",
+        "event_ref": "event-clip-no-frames",
+        "event_type": "bed-exit",
+        "started_at": "2026-07-06T00:05:00Z",
+        "duration_s": 0.0,
+        "codec": None,
+        "path": None,
+        "video_available": False,
+        "reason_code": "NO_FRAMES",
+        "finalized": True,
+    }
+    (clip_dir / "manifest.json").write_text(json.dumps(payload), encoding="utf-8")
+
+    with TestClient(create_app(lifespan=no_lifespan)) as client:
+        _login(client)
+        listed = client.get("/api/v1/clips")
+
+    row = listed.json()["clips"][0]
+    assert row["video_available"] is False
+    assert row["video_error"] == "NO_FRAMES"
+
+
+def test_reason_code_takes_priority_over_a_legacy_video_error_field(clip_env) -> None:
+    clip_store = clip_env / "clip-store"
+    clip_dir = clip_store / "clips" / "clip-both-fields"
+    clip_dir.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "clip_id": "clip-both-fields",
+        "camera_id": "camera-1",
+        "event_ref": "event-clip-both-fields",
+        "event_type": "bed-exit",
+        "started_at": "2026-07-06T00:05:00Z",
+        "duration_s": 0.0,
+        "codec": None,
+        "path": None,
+        "video_available": False,
+        "video_error": "stale legacy reason",
+        "reason_code": "ENCODER_FAILED",
+        "finalized": True,
+    }
+    (clip_dir / "manifest.json").write_text(json.dumps(payload), encoding="utf-8")
+
+    with TestClient(create_app(lifespan=no_lifespan)) as client:
+        _login(client)
+        listed = client.get("/api/v1/clips")
+
+    row = listed.json()["clips"][0]
+    assert row["video_error"] == "ENCODER_FAILED"
+
+
 def test_legacy_manifest_without_field_defaults_video_available_true(clip_env) -> None:
     clip_store = clip_env / "clip-store"
     clip_dir = clip_store / "clips" / "clip-legacy"

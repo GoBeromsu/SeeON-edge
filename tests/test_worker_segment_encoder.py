@@ -180,6 +180,40 @@ def test_closed_segments_never_concatenate_across_generations(tmp_path: Path) ->
     assert session.select_segments(start_time_sec=0.0, end_time_sec=4.0) == current
 
 
+def test_write_session_records_the_first_frames_event_time_as_the_generation_origin(
+    tmp_path: Path,
+) -> None:
+    """#165: the origin anchors this generation's local (segment) clock to
+    the event clock, so later selections can convert between the two.
+    """
+    spawner = _SpawnSpy()
+    encoder = _encoder(tmp_path, spawner)
+    geometry = EncoderGeometry(4, 2, 5.0)
+
+    session = encoder.open("cam-1", "libx264", geometry)
+    assert session.origin_time_sec is None
+
+    session.write(_packet(1))  # _packet: time_sec = seq * 0.5 = 0.5
+
+    assert session.origin_time_sec == 0.5
+
+
+def test_write_session_resets_the_origin_for_a_recreated_generation(tmp_path: Path) -> None:
+    """A resolution-triggered recreate starts a fresh generation (#165's
+    ``ClipActor._finalize`` -> ``coordinator.close`` closes one just as
+    often); the new generation's origin must be re-anchored to *its* first
+    frame, not carried over from the closed generation.
+    """
+    spawner = _SpawnSpy()
+    encoder = _encoder(tmp_path, spawner)
+
+    session = encoder.open("cam-1", "libx264", EncoderGeometry(4, 2, 5.0))
+    session.write(_packet(1))  # origin = 0.5
+    session.write(_packet(2, width=8, height=4))  # resolution change -> new generation
+
+    assert session.origin_time_sec == 1.0
+
+
 def test_nvenc_session_open_failure_falls_back_to_libx264_once(tmp_path: Path) -> None:
     """#53's sanctioned exception to #43's "no implicit fallback" rule.
 
