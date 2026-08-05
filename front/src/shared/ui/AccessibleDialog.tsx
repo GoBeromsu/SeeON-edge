@@ -109,6 +109,11 @@ export function AccessibleDialog({
       <div ref={dialogRef} className={className} data-variant={variant} data-size={size} role="dialog" aria-modal="true" aria-labelledby={titleId}>
         <h2 id={titleId} tabIndex={-1}>{title}</h2>
         {children}
+        {/* 탭 순서상 맨 뒤에 둬서 'first-control' 초기 포커스가 기존처럼
+            실제 폼 컨트롤을 가리키게 한다. 시각적 위치는 CSS로 우상단에 고정. */}
+        <button type="button" className="accessible-dialog-close" aria-label="닫기" onClick={onClose}>
+          <span aria-hidden="true">&times;</span>
+        </button>
       </div>
     </div>,
     document.body,

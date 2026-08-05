@@ -79,18 +79,35 @@ describe('AccessibleDialog', () => {
     act(() => root.unmount());
   });
 
-  it('keeps focus on the heading when the dialog has no controls', () => {
+  it('keeps focus on the heading when the dialog has no controls beyond the close button', () => {
     const host = document.createElement('div');
     document.body.append(host);
     const root = createRoot(host);
     act(() => root.render(<AccessibleDialog open title="알림" onClose={vi.fn()} initialFocus="heading"><p>완료되었습니다.</p></AccessibleDialog>));
-    const heading = document.querySelector('[role="dialog"] h2');
+    const dialog = document.querySelector('[role="dialog"]');
+    const heading = dialog?.querySelector('h2');
+    const closeButton = dialog?.querySelector('.accessible-dialog-close');
     expect(document.activeElement).toBe(heading);
 
+    // 공용 셸의 닫기(X) 버튼이 유일한 컨트롤이므로, 탭은 그쪽으로 이동한다.
     const tab = new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true });
     act(() => heading?.dispatchEvent(tab));
     expect(tab.defaultPrevented).toBe(true);
-    expect(document.activeElement).toBe(heading);
+    expect(document.activeElement).toBe(closeButton);
+    act(() => root.unmount());
+  });
+
+  it('shows a labeled close (X) button that calls onClose, in every dialog', () => {
+    const onClose = vi.fn();
+    const host = document.createElement('div');
+    document.body.append(host);
+    const root = createRoot(host);
+    act(() => root.render(<AccessibleDialog open title="클립 재생" onClose={onClose}><p>내용</p></AccessibleDialog>));
+    const closeButton = document.querySelector<HTMLButtonElement>('[role="dialog"] .accessible-dialog-close');
+    expect(closeButton?.getAttribute('aria-label')).toBe('닫기');
+
+    act(() => closeButton?.click());
+    expect(onClose).toHaveBeenCalledTimes(1);
     act(() => root.unmount());
   });
 
