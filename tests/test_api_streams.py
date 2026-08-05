@@ -1,17 +1,22 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import urllib.error
 import urllib.request
-from collections.abc import Iterator
+from collections.abc import AsyncIterator, Callable, Iterator
 from email.message import Message
 from types import TracebackType
-from typing import NoReturn, Self, TypedDict
+from typing import NoReturn, Self, TypedDict, cast
 
+import httpx
 import pytest
+from fastapi import Request
 from fastapi.testclient import TestClient
 
 from backend.app.core.config import get_settings
+from backend.app.features.cameras import streams_router
+from backend.app.features.cameras.streams_router import _iter_upstream, _UpstreamCloser
 from backend.app.main import LifespanFactory, create_app, no_lifespan
 
 AUTH = {"Authorization": "Bearer relay-token"}
@@ -86,6 +91,29 @@ def stream_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     get_settings.cache_clear()
 
 
+class StreamCall(TypedDict):
+    url: str
+    method: str
+
+
+def _install_mock_transport(
+    monkeypatch: pytest.MonkeyPatch,
+    handler: Callable[[httpx.Request], httpx.Response],
+) -> None:
+    """camera_stream now proxies via httpx.AsyncClient (see streams_router.py)
+    instead of urllib, so these tests inject an httpx.MockTransport wherever
+    the router constructs its client -- ``httpx.AsyncClient(...)`` is looked
+    up on the module at call time, so patching the module attribute is
+    enough."""
+    real_async_client = httpx.AsyncClient
+
+    def _factory(*args: object, **kwargs: object) -> httpx.AsyncClient:
+        kwargs["transport"] = httpx.MockTransport(handler)
+        return real_async_client(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(httpx, "AsyncClient", _factory)
+
+
 def test_stream_proxy_forwards_mjpeg_with_a_dashboard_session(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -94,19 +122,17 @@ def test_stream_proxy_forwards_mjpeg_with_a_dashboard_session(
         b"Content-Type: image/jpeg\r\n\r\n"
         b"\xff\xd8camera-jpeg\xff\xd9\r\n"
     )
-    calls: list[UrlopenCall] = []
+    calls: list[StreamCall] = []
 
-    def fake_urlopen(request: urllib.request.Request, timeout: float) -> FiniteStreamResponse:
-        calls.append(
-            {
-                "url": request.full_url,
-                "timeout": timeout,
-                "method": request.get_method(),
-            }
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append({"url": str(request.url), "method": request.method})
+        return httpx.Response(
+            200,
+            headers={"Content-Type": "multipart/x-mixed-replace; boundary=frame"},
+            content=body,
         )
-        return FiniteStreamResponse(body)
 
-    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    _install_mock_transport(monkeypatch, handler)
 
     with TestClient(create_app(lifespan=NO_LIFESPAN)) as client:
         _login(client)
@@ -115,13 +141,7 @@ def test_stream_proxy_forwards_mjpeg_with_a_dashboard_session(
     assert response.status_code == 200
     assert response.content == body
     assert response.headers["content-type"].startswith("multipart/x-mixed-replace")
-    assert calls == [
-        {
-            "url": "http://worker.local:8090/stream/cam_sp_201",
-            "timeout": 3.0,
-            "method": "GET",
-        }
-    ]
+    assert calls == [{"url": "http://worker.local:8090/stream/cam_sp_201", "method": "GET"}]
 
 
 def test_stream_proxy_requires_a_dashboard_session(
@@ -132,12 +152,15 @@ def test_stream_proxy_requires_a_dashboard_session(
     dashboard auth always resolves (persisted file > env > built-in default)."""
     calls: list[str] = []
 
-    def fake_urlopen(request: urllib.request.Request, timeout: float) -> FiniteStreamResponse:
-        del timeout
-        calls.append(request.full_url)
-        return FiniteStreamResponse(b"--frame\r\n")
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(str(request.url))
+        return httpx.Response(
+            200,
+            headers={"Content-Type": "multipart/x-mixed-replace; boundary=frame"},
+            content=b"--frame\r\n",
+        )
 
-    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    _install_mock_transport(monkeypatch, handler)
 
     with TestClient(create_app(lifespan=NO_LIFESPAN)) as client:
         missing = client.get("/api/v1/streams/cam_sp_201")
@@ -158,17 +181,11 @@ def test_stream_proxy_preserves_upstream_404_and_503(
     code: int,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    def fake_urlopen(request: urllib.request.Request, timeout: float) -> NoReturn:
-        del timeout
-        raise urllib.error.HTTPError(
-            request.full_url,
-            code,
-            "upstream status",
-            hdrs=Message(),
-            fp=None,
-        )
+    def handler(request: httpx.Request) -> httpx.Response:
+        del request
+        return httpx.Response(code)
 
-    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    _install_mock_transport(monkeypatch, handler)
 
     with TestClient(create_app(lifespan=NO_LIFESPAN)) as client:
         _login(client)
@@ -181,11 +198,10 @@ def test_stream_proxy_preserves_upstream_404_and_503(
 def test_stream_proxy_reports_connection_failure_as_unavailable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    def fake_urlopen(request: urllib.request.Request, timeout: float) -> NoReturn:
-        del request, timeout
-        raise urllib.error.URLError("connection refused")
+    def handler(request: httpx.Request) -> NoReturn:
+        raise httpx.ConnectError("connection refused", request=request)
 
-    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    _install_mock_transport(monkeypatch, handler)
 
     with TestClient(create_app(lifespan=NO_LIFESPAN)) as client:
         _login(client)
@@ -193,6 +209,124 @@ def test_stream_proxy_reports_connection_failure_as_unavailable(
 
     assert response.status_code == 503
     assert response.json()["detail"] == "worker stream unavailable"
+
+
+def test_stream_proxy_closes_upstream_response_and_client_on_cancellation() -> None:
+    """핵심 회귀(연결 누수 버그): 클라이언트가 스트림을 중간에 끊으면 이 태스크가
+    asyncio.CancelledError로 취소되고, ``_iter_upstream``의 finally가 지연 없이
+    실행돼 upstream 응답(``aclose``)과 커넥션 풀(``client.aclose``)을 닫아야
+    한다. 실제 프로덕션에서는 uvicorn이 클라이언트 disconnect 시 요청 처리
+    태스크를 취소하는데, 그 취소가 (스레드풀로 감싼 블로킹 read와 달리) 이
+    async 제너레이터의 현재 await 지점에 곧바로 전달되는 것이 이번 수정의
+    핵심이다."""
+
+    class _StubUpstreamStream(httpx.AsyncByteStream):
+        def __init__(self, chunks: list[bytes]) -> None:
+            self._chunks = chunks
+            self.closed = False
+            self.yielded_first_chunk = asyncio.Event()
+
+        async def __aiter__(self) -> AsyncIterator[bytes]:
+            for chunk in self._chunks:
+                yield chunk
+                self.yielded_first_chunk.set()
+                # 실제 MJPEG 스트림처럼 다음 프레임을 무기한 기다린다 --
+                # 취소는 바로 이 await 지점에 꽂혀야 한다.
+                await asyncio.sleep(3600)
+
+        async def aclose(self) -> None:
+            self.closed = True
+
+    async def scenario() -> None:
+        upstream_stream = _StubUpstreamStream([b"--frame\r\njpeg-bytes\r\n"])
+        stream_request = httpx.Request("GET", "http://worker.local:8090/stream/cam_sp_201")
+        response = httpx.Response(200, stream=upstream_stream, request=stream_request)
+
+        def handler(_: httpx.Request) -> httpx.Response:
+            return response
+
+        client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        stream_ctx = client.stream("GET", "http://worker.local:8090/stream/cam_sp_201")
+        upstream = await stream_ctx.__aenter__()
+        closer = _UpstreamCloser(client, stream_ctx)
+
+        gen = _iter_upstream(closer, upstream)
+
+        async def consume() -> None:
+            async for _chunk in gen:
+                pass
+
+        task = asyncio.create_task(consume())
+        await asyncio.wait_for(upstream_stream.yielded_first_chunk.wait(), timeout=1.0)
+
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        assert upstream_stream.closed is True
+        assert client.is_closed is True
+
+    asyncio.run(scenario())
+
+
+def test_stream_proxy_closes_upstream_via_background_when_never_iterated(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """핵심 회귀(연결 누수 버그, 2차): 헤더 응답 직후 ~ Starlette가
+    ``body_iterator`` 순회를 시작하기 전 사이의 좁은 창에서 클라이언트가
+    끊기면(curl을 SIGTERM으로 죽이는 패턴에서 실측됨), 요청 처리 태스크가
+    한 번도 실행되지 못한 채 취소돼 ``_iter_upstream`` 제너레이터는 시작조차
+    되지 않는다 -- 시작한 적 없는 제너레이터는 닫아도 그 finally가 돌지
+    않으므로, 그 경로 하나에만 정리를 맡기면 upstream/client가 영영 새는
+    것이 실제로 재현됐다. camera_stream이 같은 closer를
+    ``StreamingResponse(background=...)``에도 걸어 두므로, body_iterator를
+    전혀 건드리지 않고 background만 실행해도 정리가 되는지 고정한다."""
+
+    closed = {"stream": False}
+    created_clients: list[httpx.AsyncClient] = []
+    real_async_client = httpx.AsyncClient
+
+    class _StubUpstreamStream(httpx.AsyncByteStream):
+        async def __aiter__(self) -> AsyncIterator[bytes]:
+            yield b"--frame\r\n"
+
+        async def aclose(self) -> None:
+            closed["stream"] = True
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, stream=_StubUpstreamStream(), request=request)
+
+    def _factory(*args: object, **kwargs: object) -> httpx.AsyncClient:
+        kwargs["transport"] = httpx.MockTransport(handler)
+        created_client = real_async_client(*args, **kwargs)  # type: ignore[arg-type]
+        created_clients.append(created_client)
+        return created_client
+
+    monkeypatch.setattr(httpx, "AsyncClient", _factory)
+    # camera_stream 자체의 배선(타임아웃 설정, closer/background 연결)을
+    # 실제로 거치도록 라우트 함수를 직접 호출한다 -- 여기선 대시보드 세션
+    # 검증이 관심사가 아니므로 _authorize만 이 모듈 안에서 no-op으로 바꾼다.
+    monkeypatch.setattr(streams_router, "_authorize", lambda *args, **kwargs: None)
+
+    async def scenario() -> None:
+        response = await streams_router.camera_stream(
+            "cam_sp_201",
+            request=cast(Request, object()),
+            authorization=None,
+            token=None,
+        )
+
+        assert response.background is not None
+        # body_iterator는 절대 건드리지 않는다 -- SIGTERM 재현 패턴에서
+        # Starlette가 실제로 밟는, "제너레이터를 한 번도 순회하지 않은 채
+        # background만 실행"하는 경로 그대로다.
+        await response.background()
+
+    asyncio.run(scenario())
+
+    assert closed["stream"] is True
+    assert len(created_clients) == 1
+    assert created_clients[0].is_closed is True
 
 
 def test_snapshot_proxy_forwards_jpeg_with_a_dashboard_session(

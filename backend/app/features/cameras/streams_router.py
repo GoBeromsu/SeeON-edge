@@ -1,15 +1,19 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import urllib.error
 import urllib.parse
 import urllib.request
-from collections.abc import Iterator
+from collections.abc import AsyncIterator
+from contextlib import AbstractAsyncContextManager
 from typing import Annotated, Literal, Protocol, get_args
 
+import httpx
 from fastapi import APIRouter, Header, HTTPException, Query, Request, status
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, ConfigDict
+from starlette.background import BackgroundTask
 
 from backend.app.core.config import get_settings
 from backend.app.shared.dashboard_auth import authorize_dashboard
@@ -57,7 +61,7 @@ class PoseOverlayResponse(BaseModel):
 
 
 @router.get("/streams/{camera_id}")
-def camera_stream(
+async def camera_stream(
     camera_id: str,
     request: Request,
     authorization: Annotated[str | None, Header(alias="Authorization")] = None,
@@ -66,27 +70,56 @@ def camera_stream(
     _authorize(request, authorization, query_token=token)
     settings = get_settings()
     upstream_url = _stream_url(settings.worker_stream_origin, camera_id)
-    upstream_request = urllib.request.Request(upstream_url, method="GET")
 
-    try:
-        upstream: _ReadableResponse = urllib.request.urlopen(
-            upstream_request,
-            timeout=settings.worker_stream_timeout_s,
+    # MJPEG 스트림은 장시간 연결이고 worker가 1초 간격 하트비트 프레임을
+    # 보내므로, 본문(read)에는 타임아웃을 걸지 않는다(read=None). 최초 응답
+    # 헤더까지는 아래 asyncio.wait_for로 worker_stream_timeout_s를 별도로
+    # 씌워 무한 대기를 막는다.
+    client = httpx.AsyncClient(
+        timeout=httpx.Timeout(
+            connect=settings.worker_stream_timeout_s,
+            read=None,
+            write=settings.worker_stream_timeout_s,
+            pool=settings.worker_stream_timeout_s,
         )
-    except urllib.error.HTTPError as exc:
-        raise _upstream_unavailable(exc.code) from exc
-    except urllib.error.URLError as exc:
-        raise _upstream_unavailable(status.HTTP_503_SERVICE_UNAVAILABLE) from exc
-
-    upstream_status = int(getattr(upstream, "status", status.HTTP_200_OK))
-    if upstream_status != status.HTTP_200_OK:
-        upstream.close()
-        raise _upstream_unavailable(upstream_status)
-
-    return StreamingResponse(
-        _iter_upstream(upstream),
-        media_type=_content_type(upstream),
     )
+    stream_ctx = client.stream("GET", upstream_url)
+    handed_off = False
+    try:
+        try:
+            upstream = await asyncio.wait_for(
+                stream_ctx.__aenter__(), timeout=settings.worker_stream_timeout_s
+            )
+        except (TimeoutError, httpx.HTTPError) as exc:
+            raise _upstream_unavailable(status.HTTP_503_SERVICE_UNAVAILABLE) from exc
+
+        if upstream.status_code != status.HTTP_200_OK:
+            upstream_status = upstream.status_code
+            await stream_ctx.__aexit__(None, None, None)
+            raise _upstream_unavailable(upstream_status)
+
+        media_type = _stream_content_type(upstream)
+        # 여기서부터는 커넥션/클라이언트 정리 책임이 closer로 넘어간다 --
+        # 클라이언트가 스트리밍 도중 끊으면(CancelledError) 블로킹 스레드 없이
+        # 이 태스크 자체가 즉시 취소되므로 _iter_upstream의 finally가 upstream
+        # 소켓을 지연 없이 닫는다. 그런데 "헤더 응답 직후 ~ Starlette가
+        # body_iterator 순회를 시작하기 전" 사이의 좁은 창에서 끊기면(SIGTERM
+        # 재현 패턴에서 실측됨) 그 async 제너레이터가 한 번도 시작되지 않아
+        # finally가 절대 실행되지 않는다 -- 시작한 적 없는 제너레이터는 닫아도
+        # 내부 코드가 돌지 않는다. StreamingResponse.__call__은 (uvicorn의
+        # h11/httptools 경로가 쓰는 spec_version 2.3에서는) body_iterator 순회가
+        # disconnect로 취소된 뒤에도 background를 항상 실행하므로, 같은 closer를
+        # background에도 걸어 두 경로 중 어느 쪽이 실제로 실행되든 정리되게 한다.
+        closer = _UpstreamCloser(client, stream_ctx)
+        handed_off = True
+        return StreamingResponse(
+            _iter_upstream(closer, upstream),
+            media_type=media_type,
+            background=BackgroundTask(closer.aclose),
+        )
+    finally:
+        if not handed_off:
+            await client.aclose()
 
 
 @router.get("/streams/{camera_id}/snapshot")
@@ -226,15 +259,58 @@ def _pose_request(
     return PoseOverlayResponse(mode=mode)  # type: ignore[arg-type]
 
 
-def _iter_upstream(upstream: _ReadableResponse) -> Iterator[bytes]:
+class _UpstreamCloser:
+    """upstream 응답과 커넥션 풀을 정확히 한 번만 닫는다.
+
+    닫는 경로가 두 곳이라 멱등성이 필요하다: (1) 스트림을 순회하던 중 취소되면
+    ``_iter_upstream``의 finally가 부르고, (2) 그 제너레이터가 한 번도
+    순회되지 않은 채(예: 헤더 응답 직후 ~ Starlette가 body_iterator 순회를
+    시작하기 전 사이에 클라이언트가 끊기는 경우, SIGTERM 재현 패턴에서 실측됨)
+    응답이 버려지면 ``StreamingResponse``의 background가 대신 부른다. 둘 중
+    어느 쪽이 먼저(또는 유일하게) 실행되든 안전하도록 ``_closed`` 플래그로
+    이중 close를 막는다.
+    """
+
+    def __init__(
+        self,
+        client: httpx.AsyncClient,
+        stream_ctx: AbstractAsyncContextManager[httpx.Response],
+    ) -> None:
+        self._client = client
+        self._stream_ctx = stream_ctx
+        self._closed = False
+
+    async def aclose(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        await self._stream_ctx.__aexit__(None, None, None)
+        await self._client.aclose()
+
+
+async def _iter_upstream(
+    closer: _UpstreamCloser,
+    upstream: httpx.Response,
+) -> AsyncIterator[bytes]:
     try:
-        while True:
-            chunk = upstream.read(_STREAM_CHUNK_SIZE)
-            if not chunk:
-                break
+        async for chunk in upstream.aiter_bytes(_STREAM_CHUNK_SIZE):
             yield chunk
     finally:
-        upstream.close()
+        # 클라이언트 disconnect는 asyncio.CancelledError로 이 제너레이터의
+        # 현재 await 지점(aiter_bytes 내부의 소켓 read)에 곧바로 꽂힌다 --
+        # 스레드풀로 감싼 블로킹 read와 달리 여기선 대기 중인 작업 자체가
+        # 취소되므로, 이 finally가 지연 없이 실행돼 upstream 응답과 커넥션
+        # 풀을 닫는다. (이 제너레이터가 아예 시작되지 않는 경로는
+        # camera_stream의 background=BackgroundTask(closer.aclose)가 대신
+        # 담당한다 -- 그 경우 이 finally 자체가 실행될 기회가 없다.)
+        await closer.aclose()
+
+
+def _stream_content_type(upstream: httpx.Response) -> str:
+    value = upstream.headers.get("Content-Type")
+    if value is not None and value.strip():
+        return value
+    return _DEFAULT_MEDIA_TYPE
 
 
 def _content_type(upstream: _ReadableResponse) -> str:

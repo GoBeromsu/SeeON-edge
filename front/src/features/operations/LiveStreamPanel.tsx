@@ -10,13 +10,17 @@ type LiveStreamPanelProps = {
 };
 
 /**
- * Live MJPEG-over-`<img>` view (no WebRTC/HLS per the codebase convention). The diagnostics chip
- * only renders fields that actually exist on RuntimeCameraDiagnostics (decode backend + measured
- * FPS) — the design mock implies separate decode/inference FPS and a frame counter, but the API
- * only ever reports one `measured_fps`, so this deliberately omits the fabricated fields.
+ * Live MJPEG-over-`fetch`+`<canvas>` view (no WebRTC/HLS per the codebase convention). The
+ * diagnostics chip only renders fields that actually exist on RuntimeCameraDiagnostics (decode
+ * backend + measured FPS) — the design mock implies separate decode/inference FPS and a frame
+ * counter, but the API only ever reports one `measured_fps`, so this deliberately omits the
+ * fabricated fields.
  *
- * Stall recovery (issue #83) is delegated to useMjpegStream: periodic forced re-mount + backoff
- * re-mount after consecutive onError, surfaced here as a "연결 끊김" overlay while reconnecting.
+ * Stall recovery (issue #83) is delegated to useMjpegStream: it draws each frame onto the canvas
+ * directly and only reconnects once frames have actually stopped arriving for a few seconds, so
+ * the last frame stays on screen the whole time. This panel surfaces that as a small corner badge
+ * (not a full-frame overlay) while `stream.status === 'stalled'`, so the frozen last frame stays
+ * visible underneath instead of being hidden.
  *
  * The bottom-left badge label mirrors design-handoff/Eldercare Prototype.dc.html:645's `liveLabel`
  * data model: '라이브 · 낙상 없음' when the camera's overlay mode is 'fall', else '라이브 · 온라인'.
@@ -27,7 +31,6 @@ type LiveStreamPanelProps = {
 export function LiveStreamPanel({ camera, diagnostics, overlayMode, onRetryConnection, onManageConnection }: LiveStreamPanelProps): JSX.Element {
   const online = camera.status === 'online';
   const stream = useMjpegStream(online ? getCameraStreamUrl(camera.id) : null);
-  const showStream = online && stream.src !== null;
 
   const fps = diagnostics?.measured_fps;
   const backend = diagnostics?.decode.selected ?? diagnostics?.decode.requested ?? null;
@@ -61,39 +64,29 @@ export function LiveStreamPanel({ camera, diagnostics, overlayMode, onRetryConne
 
   return (
     <div className="relative overflow-hidden rounded-card border border-border bg-card event-media-frame">
-      {showStream ? (
-        <img
-          key={stream.src}
-          src={stream.src ?? undefined}
-          alt={`${camera.label} 실시간 영상`}
-          className="h-full w-full object-cover"
-          onLoad={stream.onLoad}
-          onError={stream.onError}
-        />
-      ) : (
-        <span className="event-media-unavailable" role="status">실시간 영상을 불러올 수 없습니다</span>
-      )}
+      <canvas
+        ref={stream.canvasRef}
+        role="img"
+        aria-label={`${camera.label} 실시간 영상`}
+        className="h-full w-full object-cover"
+      />
 
-      {showStream ? (
-        <span
-          className="media-status-overlay tabular-nums absolute right-3 top-3 rounded-control px-2 py-1 text-xs font-semibold"
-          aria-label="스트림 진단 정보"
-        >
-          {fps !== null && fps !== undefined ? `${fps.toFixed(1)} FPS` : 'FPS 측정 중'}
-          {backend ? ` · ${backend}` : ''}
-        </span>
-      ) : null}
+      <span
+        className="media-status-overlay tabular-nums absolute right-3 top-3 rounded-control px-2 py-1 text-xs font-semibold"
+        aria-label="스트림 진단 정보"
+      >
+        {fps !== null && fps !== undefined ? `${fps.toFixed(1)} FPS` : 'FPS 측정 중'}
+        {backend ? ` · ${backend}` : ''}
+      </span>
 
-      {showStream ? (
-        <span className="media-status-overlay absolute bottom-2 left-2 rounded-control px-2.5 py-1 text-xs font-semibold">
-          {overlayMode === 'fall' ? '라이브 · 낙상 없음' : '라이브 · 온라인'}
-        </span>
-      ) : null}
+      <span className="media-status-overlay absolute bottom-2 left-2 rounded-control px-2.5 py-1 text-xs font-semibold">
+        {overlayMode === 'fall' ? '라이브 · 낙상 없음' : '라이브 · 온라인'}
+      </span>
 
-      {stream.status === 'reconnecting' ? (
+      {stream.status === 'stalled' ? (
         <span
           role="status"
-          className="absolute inset-0 flex items-center justify-center bg-black/60 text-sm font-semibold text-white"
+          className="media-status-overlay absolute left-3 top-3 rounded-control px-2 py-1 text-xs font-semibold"
         >
           연결 끊김 · 재연결 중…
         </span>

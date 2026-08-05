@@ -29,10 +29,11 @@ function useIsTileVisible(node: HTMLElement | null): boolean {
 }
 
 /**
- * 16:9 object-cover tile. Online + visible tiles stream live MJPEG (issue #82 — the wall must look
- * like playing video, not a 5s snapshot poll); offscreen tiles fall back to the SnapshotQueue
- * snapshot to save bandwidth, and any tile also falls back to the snapshot while the stream is
- * reconnecting after an error (issue #83). Offline tiles are unchanged (gray placeholder).
+ * 16:9 object-cover tile. Online + visible tiles stream live MJPEG via `fetch`+`<canvas>` (issue
+ * #82 — the wall must look like playing video, not a 5s snapshot poll); offscreen tiles fall back
+ * to the SnapshotQueue snapshot to save bandwidth, and any tile also falls back to the snapshot
+ * while the stream is stalled — no frame for a few seconds — and reconnecting (issue #83). Offline
+ * tiles are unchanged (gray placeholder).
  */
 export function CameraWallTile({ camera, snapshot, queue, onSelect }: CameraWallTileProps): JSX.Element {
   const online = camera.status === 'online';
@@ -40,10 +41,10 @@ export function CameraWallTile({ camera, snapshot, queue, onSelect }: CameraWall
   const isVisible = useIsTileVisible(tileNode);
   const streamActive = online && isVisible;
   const stream = useMjpegStream(streamActive ? getCameraStreamUrl(camera.id) : null);
-  const showingStream = streamActive && stream.status === 'connected';
+  const showingStream = streamActive && stream.status === 'live';
 
   const snapshotStale = !showingStream && (snapshot?.state === 'error' || snapshot?.state === 'stale') && !!snapshot?.lastLoadedUrl;
-  const showDisconnectedBadge = (streamActive && stream.status === 'reconnecting') || snapshotStale;
+  const showDisconnectedBadge = (streamActive && stream.status === 'stalled') || snapshotStale;
 
   return (
     <button
@@ -68,14 +69,12 @@ export function CameraWallTile({ camera, snapshot, queue, onSelect }: CameraWall
               {snapshot?.state === 'error' ? '영상을 불러올 수 없습니다' : '불러오는 중…'}
             </span>
           )}
-          {streamActive && stream.src ? (
-            <img
-              key={stream.src}
-              src={stream.src}
-              alt={`${camera.label} 실시간 영상`}
+          {streamActive ? (
+            <canvas
+              ref={stream.canvasRef}
+              role="img"
+              aria-label={`${camera.label} 실시간 영상`}
               className={`absolute inset-0 h-full w-full object-cover ${showingStream ? '' : 'opacity-0'}`}
-              onLoad={stream.onLoad}
-              onError={stream.onError}
             />
           ) : null}
           {snapshot?.requestUrl ? (
