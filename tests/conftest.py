@@ -44,6 +44,35 @@ def default_dashboard_credentials_store_to_tmp_path(
 
 
 @pytest.fixture(autouse=True)
+def isolate_state_dir_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """``resolve_state_dir``(``backend/app/shared/state_dir.py``,
+    ``worker/runtime/state_dir.py``)가 참조하는 ``Path.home()``을 테스트별
+    tmp로 격리한다.
+
+    ``resolve_state_dir``은 의도적으로 "단일 규칙, override 없음"으로
+    설계돼 있어 (이슈 #153) 환경변수 주입 지점이 없다 -- 그래서
+    ``resolve_state_dir`` 자체는 건드리지 않고, 그 유일한 입력원인
+    ``Path.home()``을 픽스처에서 리다이렉트한다 (``test_clips_catalog.py``의
+    ``test_catalog_from_env_resolves_under_state_dir_and_is_queryable``가
+    이미 쓰던 것과 동일한 패턴을 전역 autouse로 승격한 것).
+
+    ``HOME`` 환경변수 자체를 바꾸는 대신 ``Path.home``만 monkeypatch하는
+    이유: ``HOME``을 바꾸면 uv 캐시, git config, 서브프로세스 등 pytest와
+    무관한 것들까지 영향받는다. ``Path.home()`` 클래스메서드만 리다이렉트
+    하면 ``resolve_state_dir``이 참조하는 경로만 격리되고, ``os.path.
+    expanduser`` 등 다른 경로 해석 경로는 그대로 실제 홈을 본다.
+
+    이게 없으면 ``app.state.camera_registry``를 tmp_path로 주입하지 않는
+    테스트가 개발자의 실제 ``~/.local/state/ml-api/catalog.sqlite3``를
+    읽고 쓴다 (dev 스택에 카메라가 등록돼 있으면 카메라/설정 테스트가
+    무더기로 거짓 실패한다 -- 이슈 #153).
+    """
+
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    yield
+
+
+@pytest.fixture(autouse=True)
 def default_connection_settings_store_to_tmp_path(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> Iterator[None]:
