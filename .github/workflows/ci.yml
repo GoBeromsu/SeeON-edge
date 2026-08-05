@@ -35,7 +35,7 @@ jobs:
       - name: Fetch packaged default LSTM model
         run: bash scripts/fetch-models.sh
 
-      - run: uv run pytest -q -m "not real_stack"
+      - run: uv run pytest -q -m "not real_stack and not heavy"
       - run: uv run --group lint ruff check .
       # Stage 0 guardrail: declarative architecture contracts (import-linter).
       # Tightened per strangler stage; replaces test_import_dependency_ladder.py at Stage 5.

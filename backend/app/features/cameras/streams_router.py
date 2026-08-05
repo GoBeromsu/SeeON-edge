@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import os
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -13,7 +12,6 @@ from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, ConfigDict
 
 from backend.app.core.config import get_settings
-from backend.app.lifespan import API_EDGE_RELAY_TOKEN_ENV
 from backend.app.shared.dashboard_auth import authorize_dashboard
 
 router = APIRouter(tags=["streams"])
@@ -265,15 +263,19 @@ def _bearer_token(value: str | None) -> str | None:
 def _relay_token(request: Request) -> str | None:
     """The same worker-relay token cameras/router.py's ``_expected_relay_token``
     resolves for the ``/probe`` connection-test call (app.state.edge_relay_token,
-    set at boot from ``API_EDGE_RELAY_TOKEN`` -- see lifespan._configure_backend_ingest
-    -- falling back to reading the env var directly). Duplicated here (rather
+    set at boot from ``API_EDGE_RELAY_TOKEN`` -- see
+    lifespan._configure_backend_ingest, which is the only place that reads the
+    env var). Duplicated here (rather
     than importing the private helper from cameras/router.py) per issue #71's
     worker-side auth fix: the worker's pose GET/POST overlay routes now gate on
     this same token, so it must be forwarded on those upstream calls too.
     """
-    expected = getattr(request.app.state, "edge_relay_token", None) or os.environ.get(
-        API_EDGE_RELAY_TOKEN_ENV
-    )
+    # `app.state.edge_relay_token`이 유일한 출처다. 부팅 때
+    # `lifespan._configure_backend_ingest`가 `API_EDGE_RELAY_TOKEN`에서 한 번
+    # 채운다(`lifespan.py:105`가 반드시 부른다). 여기서 env를 또 읽으면
+    # state에 `None`을 명시적으로 넣어 미설정을 재현하려는 경우까지
+    # env가 조용히 덮어써서, 실제로 무엇이 유효한지 두 곳을 봐야 한다.
+    expected = getattr(request.app.state, "edge_relay_token", None)
     return expected if isinstance(expected, str) and expected else None
 
 

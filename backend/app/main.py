@@ -39,6 +39,12 @@ def create_app(*, lifespan: LifespanFactory | None = serving_lifespan) -> FastAP
         version="0.2.0",
         lifespan=lifespan,
     )
+    # relay 토큰의 유일한 출처는 `app.state.edge_relay_token`이다. 인증
+    # 호출부는 이 값만 읽는다(env를 다시 읽지 않는다). 여기서 채워 두면
+    # lifespan이 도는 서빙 경로와 lifespan 없이 만드는 테스트 경로가 같은
+    # 한 곳을 보게 된다. lifespan 쪽 시딩은 `hasattr` 가드가 있어 이 값을
+    # 덮지 않는다.
+    app.state.edge_relay_token = os.environ.get("API_EDGE_RELAY_TOKEN")
     app.include_router(health_routes.probe_router)
 
     api_router = APIRouter()

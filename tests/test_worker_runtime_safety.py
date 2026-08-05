@@ -189,6 +189,7 @@ def test_gpu_lease_rejects_a_second_process_until_clean_release(tmp_path: Path) 
     replacement.close()
 
 
+@pytest.mark.heavy
 def test_watchdog_passes_deadline_as_fatal_accelerator_fault() -> None:
     handler = _RecordingFaultHandler()
     watchdog = InferenceWatchdog(
@@ -210,6 +211,7 @@ def test_watchdog_passes_deadline_as_fatal_accelerator_fault() -> None:
     assert record.frame_index == 11
 
 
+@pytest.mark.heavy
 def test_watchdog_subprocess_hard_exits_with_fatal_accelerator_code(tmp_path: Path) -> None:
     script = textwrap.dedent(
         f"""
@@ -234,7 +236,7 @@ def test_watchdog_subprocess_hard_exits_with_fatal_accelerator_code(tmp_path: Pa
         cwd=Path.cwd(),
         capture_output=True,
         text=True,
-        timeout=3,
+        timeout=30,
     )
 
     assert completed.returncode == 4

@@ -20,7 +20,7 @@ from backend.app.features.cameras.store import CameraRegistryStore
 from backend.app.features.clips.catalog import CatalogConflictError, get_catalog_store
 from backend.app.features.status.heartbeat_store import get_heartbeat_store
 from backend.app.features.status.runtime_status_store import get_runtime_status_store
-from backend.app.lifespan import API_EDGE_RELAY_TOKEN_ENV, API_FACILITY_ID_ENV
+from backend.app.lifespan import API_FACILITY_ID_ENV
 from contracts import AlertEventType
 from contracts.decode_diagnostics import DECODE_BACKENDS, DECODE_FALLBACK_REASONS
 from contracts.worker_config import RESTART_EPOCH_KEY
@@ -455,9 +455,12 @@ def _record_alert_latency(request: Request, payload: RelayAlertRequest, received
 
 
 def _authorize(request: Request, relay_token: str | None) -> None:
-    expected = getattr(request.app.state, "edge_relay_token", None) or os.environ.get(
-        API_EDGE_RELAY_TOKEN_ENV
-    )
+    # `app.state.edge_relay_token`이 유일한 출처다. 부팅 때
+    # `lifespan._configure_backend_ingest`가 `API_EDGE_RELAY_TOKEN`에서 한 번
+    # 채운다(`lifespan.py:105`가 반드시 부른다). 여기서 env를 또 읽으면
+    # state에 `None`을 명시적으로 넣어 미설정을 재현하려는 경우까지
+    # env가 조용히 덮어써서, 실제로 무엇이 유효한지 두 곳을 봐야 한다.
+    expected = getattr(request.app.state, "edge_relay_token", None)
     if not expected:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
