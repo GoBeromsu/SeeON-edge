@@ -157,7 +157,7 @@ describe('CameraEditModal', () => {
 
     // 새 주소는 연결 확인을 통과해야 저장된다. 확인 없이 저장하면 오타가
     // 그대로 들어가 카메라가 조용히 죽는다.
-    await act(async () => findButton('연결').click());
+    await act(async () => findButton('연결 확인').click());
     await act(async () => findButton('저장').click());
 
     expect(updateCamera).toHaveBeenCalledWith('cam-1', { rtsp_url: 'rtsp://new-address/stream' });
@@ -179,7 +179,7 @@ describe('CameraEditModal', () => {
     const successSpy = vi.spyOn(toast, 'success');
     const { onUpdated, onClose } = render(camera);
 
-    await act(async () => findButton('연결').click());
+    await act(async () => findButton('연결 확인').click());
 
     expect(testCamera).toHaveBeenCalledWith('cam-1', undefined);
     expect(successSpy).toHaveBeenCalledWith('연결 성공');
@@ -191,7 +191,7 @@ describe('CameraEditModal', () => {
     vi.mocked(testCamera).mockResolvedValue({ ok: false, error_class: 'timeout' });
     render(camera);
 
-    await act(async () => findButton('연결').click());
+    await act(async () => findButton('연결 확인').click());
 
     expect(document.querySelector('[role="alert"]')?.textContent).toContain('연결 테스트에 실패했습니다');
   });
@@ -269,38 +269,37 @@ describe('CameraEditModal', () => {
     render(camera);
     setInput('rtsp_url', 'rtsp://typo.local/live');
 
-    await act(async () => findButton('연결').click());
+    await act(async () => findButton('연결 확인').click());
 
     expect(testCamera).toHaveBeenCalledWith('cam-1', 'rtsp://typo.local/live');
   });
 
-  it('I8 — 연결 확인 없이 새 RTSP를 저장하지 못한다', async () => {
+  it('연결 확인 없이도 새 RTSP를 저장한다', async () => {
+    // 저장을 연결 성공에 묶으면 주소를 고칠 방법이 사라진다: 주소가 틀려서
+    // 연결이 안 되는 카메라야말로 주소를 고쳐야 하는데, 고친 주소를 저장하려면
+    // 먼저 연결에 성공해야 했다.
     vi.mocked(updateCamera).mockResolvedValue(camera);
     render(camera);
     setInput('rtsp_url', 'rtsp://typo.local/live');
 
     await act(async () => findButton('저장').click());
 
-    expect(updateCamera).not.toHaveBeenCalled();
-    expect(document.querySelector('[role="alert"]')?.textContent).toContain('먼저 연결을 확인해 주세요');
+    expect(updateCamera).toHaveBeenCalledWith('cam-1', { rtsp_url: 'rtsp://typo.local/live' });
   });
 
-  it('I8 — 테스트 통과 후 주소를 바꾸면 다시 확인해야 저장된다', async () => {
-    // 이걸 막지 않으면 테스트를 강제한 의미가 사라진다: 성공시킨 뒤
-    // 한 글자만 고쳐 저장하면 검사받지 않은 URL이 들어간다.
+  it('주소를 고치면 앞선 연결 성공 표시를 지운다', async () => {
+    // 검사받지 않은 주소 위에 "연결 성공"이 남아 있으면 그게 방금 그 주소의
+    // 결과처럼 읽힌다.
     vi.mocked(testCamera).mockResolvedValue({ ok: true, width: 1920, height: 1080 });
-    vi.mocked(updateCamera).mockResolvedValue(camera);
     render(camera);
 
     setInput('rtsp_url', 'rtsp://good.local/live');
-    await act(async () => findButton('연결').click());
+    await act(async () => findButton('연결 확인').click());
+    expect(document.body.textContent).toContain('연결 성공');
 
-    // 통과한 뒤 주소를 변경한다.
     setInput('rtsp_url', 'rtsp://typo.local/live');
-    await act(async () => findButton('저장').click());
 
-    expect(updateCamera).not.toHaveBeenCalled();
-    expect(document.querySelector('[role="alert"]')?.textContent).toContain('먼저 연결을 확인해 주세요');
+    expect(document.body.textContent).not.toContain('연결 성공');
   });
 
   it('I8 — 통과한 주소 그대로면 저장된다', async () => {
@@ -309,7 +308,7 @@ describe('CameraEditModal', () => {
     render(camera);
 
     setInput('rtsp_url', 'rtsp://good.local/live');
-    await act(async () => findButton('연결').click());
+    await act(async () => findButton('연결 확인').click());
     await act(async () => findButton('저장').click());
 
     expect(updateCamera).toHaveBeenCalledWith('cam-1', { rtsp_url: 'rtsp://good.local/live' });

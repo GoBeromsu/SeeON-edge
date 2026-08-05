@@ -1906,9 +1906,17 @@ def test_create_camera_allows_dahua_subtype_variants_as_distinct_streams(
     assert main.json()["id"] != sub.json()["id"]
 
 
-def test_create_camera_without_force_register_rejects_on_probe_failure_and_persists_nothing(
+def test_create_camera_persists_on_probe_failure_without_force_register(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """등록은 저장이고, probe는 상태 표시일 뿐이다.
+
+    예전에는 probe 실패를 422로 거절했는데, 그러면 최초 등록이 구조적으로
+    막혔다: probe는 worker의 ``/probe``에 위임되는데 worker는 카메라가 한 대
+    이상일 때만 부팅하므로, 첫 카메라를 넣으려면 아직 뜨지 않은 worker의
+    판정을 통과해야 했다. 죽은 카메라는 offline/never_connected로 목록에
+    남고, 연결 여부는 worker의 첫 heartbeat이 확정한다.
+    """
     monkeypatch.setenv("ML_API_WORKER_PROBE_ORIGIN", "http://worker.local:8090")
 
     def fake_urlopen(request, timeout: float) -> FakeHTTPResponse:
@@ -1927,9 +1935,15 @@ def test_create_camera_without_force_register_rejects_on_probe_failure_and_persi
             json={"label": "Dead camera", "rtsp_url": "rtsp://dead.local/stream"},
         )
 
-    assert response.status_code == 422
-    assert response.json()["detail"] == {"error": "probe_failed", "error_class": "auth"}
-    assert store.snapshot() == {"registry_version": 0, "cameras": []}
+    assert response.status_code == 201
+    body = response.json()
+    assert body["status"] == "offline"
+    assert body["never_connected"] is True
+    assert body["last_ok_at"] is None
+
+    snapshot = store.snapshot()
+    assert snapshot["registry_version"] == 1
+    assert [camera["label"] for camera in snapshot["cameras"]] == ["Dead camera"]
 
 
 def test_create_camera_force_register_persists_despite_probe_failure(

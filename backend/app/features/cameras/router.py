@@ -126,9 +126,11 @@ class CreateCameraRequest(BaseModel):
     decode_backend: str | None = None
     fps: float | None = None
     floor: str | None = None
-    # Default False: registration probes the stream first and writes nothing
-    # on failure (see create_camera). True bypasses that gate for cameras
-    # that are known offline but should still be registered.
+    # 더 이상 아무것도 하지 않는다. 등록이 probe 통과를 요구하던 시절, 그
+    # 게이트를 건너뛰는 탈출구였다 (`create_camera` 참고). 지금은 등록이
+    # 항상 저장하므로 값과 무관하게 결과가 같다. 기존 클라이언트가 계속
+    # 보내고 있어(`extra="forbid"`라 지우면 422가 된다) 필드만 남겨 둔다 --
+    # 프론트의 "강제 등록" 흐름까지 걷어낼 때 같이 제거한다.
     force_register: bool = False
 
 
@@ -237,17 +239,18 @@ def create_camera(
     decode_backend = _normalize_decode_backend(payload.decode_backend)
     fps = _normalize_fps(payload.fps)
     floor = _normalize_floor(payload.floor)
+    # 등록은 저장이다. probe는 상태 표시(online/offline, never_connected)에만
+    # 쓰고 등록을 막지 않는다.
+    #
+    # 예전에는 probe 실패 시 422로 거절했는데(force_register만 예외), 그러면
+    # 최초 등록이 구조적으로 불가능했다: probe는 worker의 `/probe`에 위임되고
+    # (`_probe_rtsp_url`), worker는 카메라가 한 대 이상일 때만 부팅하므로
+    # (refuse-to-start), 첫 카메라를 넣으려면 아직 존재하지 않는 worker의
+    # 판정을 통과해야 했다. 게다가 worker에 닿지 못한 경우까지 전부
+    # `error_class="decode"`로 뭉개져서, 실제 원인(예: RTSP 401)이 "디코드
+    # 실패"로 잘못 표시됐다. 죽은 카메라는 offline/never_connected로 목록에
+    # 그대로 보이고, 연결 여부는 worker의 첫 heartbeat이 확정한다.
     probe = _probe_rtsp_url(request, payload.rtsp_url)
-    if not probe.ok and not payload.force_register:
-        # Registration gating: a dead camera is not persisted unless the
-        # caller explicitly opts in via force_register. Nothing is written.
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail={
-                "error": "probe_failed",
-                "error_class": probe.error_class or "decode",
-            },
-        )
     provisional_id = str(uuid.uuid4())
     mapping = _map_backend(
         request.app,

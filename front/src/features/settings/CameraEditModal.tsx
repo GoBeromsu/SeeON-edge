@@ -47,14 +47,12 @@ export function CameraEditModal({ camera, cameras, onClose, onUpdated, onRequest
   const [mode, setMode] = useState<'view' | 'reseg'>('view');
   const [busy, setBusy] = useState<'save' | 'test' | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
-  const [testResult, setTestResult] = useState<CameraTestResult | null>(null);
   /**
-   * 연결 테스트를 통과한 URL. 지금 입력창의 값과 같을 때만 유효하다.
-   *
-   * 이게 없으면 테스트 성공 뒤 주소를 한 글자만 바꿔도 testResult.ok가 그대로라
-   * 검사받지 않은 URL이 저장된다 — 테스트를 강제한 의미가 사라진다.
+   * 마지막 연결 확인 결과. 저장을 막지 않고 화면에만 보여준다. 주소를
+   * 고치면 지운다 — 검사받지 않은 주소 위에 "연결 성공"이 남아 있으면
+   * 그게 방금 그 주소의 결과처럼 읽힌다.
    */
-  const [testedUrl, setTestedUrl] = useState<string | null>(null);
+  const [testResult, setTestResult] = useState<CameraTestResult | null>(null);
   const busyRef = useRef(false);
   const openCameraIdRef = useRef<string | null>(null);
 
@@ -81,7 +79,6 @@ export function CameraEditModal({ camera, cameras, onClose, onUpdated, onRequest
     setMode('view');
     setSaveError(null);
     setTestResult(null);
-    setTestedUrl(null);
     setBusy(null);
     busyRef.current = false;
   }, [camera]);
@@ -103,8 +100,6 @@ export function CameraEditModal({ camera, cameras, onClose, onUpdated, onRequest
       const result = await testCamera(camera.id, draft || undefined);
       setTestResult(result);
       if (result.ok) {
-        // 어떤 URL이 통과했는지 기록한다. 저장 시 지금 값과 대조한다.
-        setTestedUrl(draft);
         toast.success('연결 성공');
         onUpdated();
       }
@@ -130,14 +125,14 @@ export function CameraEditModal({ camera, cameras, onClose, onUpdated, onRequest
       if (label.trim() !== camera.label) patch.label = label.trim();
       const draft = rtspUrl.trim();
       if (draft) {
-        // RTSP를 바꿨다면 그 값이 실제로 붙는지 확인된 뒤에만 저장한다.
-        // 확인 없이 저장하면 오타가 그대로 들어가 카메라가 조용히 죽는다.
-        // 테스트를 통과한 URL과 지금 값이 같아야 한다. 통과 뒤 주소를
-        // 바꿨다면 그 값은 검사받지 않은 것이다.
-        if (!testResult?.ok || testedUrl !== draft) {
-          setSaveError('먼저 연결을 확인해 주세요. 연결에 성공해야 저장할 수 있습니다.');
-          return;
-        }
+        // 저장은 저장이다. 연결 확인은 "연결 확인" 버튼으로 언제든 할 수
+        // 있고, 그 결과는 정보로만 보여준다.
+        //
+        // 예전에는 연결 테스트를 통과해야만 저장할 수 있었는데, 그러면
+        // 주소를 고칠 방법 자체가 사라진다: 주소가 틀려서 연결이 안 되는
+        // 카메라야말로 주소를 고쳐야 하는데, 고친 주소를 저장하려면 먼저
+        // 연결에 성공해야 했다. 틀린 주소는 목록에 오프라인으로 그대로
+        // 보이므로 조용히 죽지 않는다.
         patch.rtsp_url = draft;
       }
       // Only send floor when the user actually changed the selection (issue #85): saving without
@@ -224,7 +219,10 @@ export function CameraEditModal({ camera, cameras, onClose, onUpdated, onRequest
               name="rtsp_url"
               value={rtspUrl}
               disabled={busyFlag}
-              onChange={(event) => setRtspUrl(event.target.value)}
+              onChange={(event) => {
+                setRtspUrl(event.target.value);
+                setTestResult(null);
+              }}
               placeholder="새 주소 입력 시에만 작성"
               autoComplete="off"
             />
@@ -266,7 +264,7 @@ export function CameraEditModal({ camera, cameras, onClose, onUpdated, onRequest
               삭제
             </button>
             <button type="button" className="dialog-secondary-action" disabled={busyFlag} onClick={() => void handleTest()}>
-              {busy === 'test' ? '확인 중...' : '연결'}
+              {busy === 'test' ? '확인 중...' : '연결 확인'}
             </button>
             <button type="submit" className="brand-action inline-flex h-9 items-center justify-center rounded-control px-4 text-sm font-semibold" disabled={busyFlag}>
               {busy === 'save' ? '저장 중...' : '저장'}
