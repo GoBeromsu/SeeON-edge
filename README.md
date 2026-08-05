@@ -49,18 +49,67 @@ relay tokens.
 
 ## Run
 
-Run the backend:
+### Local state directories
+
+Three storage paths default to absolute container paths that a non-root local
+user cannot create. The defaults are correct for the edge images — where
+`compose.edge.yaml` bind-mounts them — but a local run fails on all three
+unless they are redirected:
+
+| Env var | Default | Owner |
+| --- | --- | --- |
+| `CLIP_STORE_DIR` | `/var/lib/clip-store` | worker writes clips, `ml-api` reads them |
+| `API_LABEL_STORE` | `/var/lib/ml-api-labels` | `ml-api` clip audit log |
+| `API_CONNECTION_SETTINGS_PATH` | `/var/lib/ml-api/connection-settings.sqlite3` | `ml-api` connection settings |
+
+Left at their defaults locally, the failures are not obvious: `GET /clips`
+returns 500 from an audit-log append (`PermissionError: '/var/lib/ml-api-labels'`),
+connection settings degrade to `unable to open database file`, and the worker
+logs `clip recorder failed to start; clips disabled` while otherwise running
+normally. Export a shared local root once:
 
 ```bash
+export ML_DEV_STATE="$HOME/.local/state/eldercare-dev"
+mkdir -p "$ML_DEV_STATE"/{clip-store,labels,ml-api}
+```
+
+`CLIP_STORE_DIR` must be the *same* path for both instances — the worker writes
+evidence clips there and `ml-api` reads them back.
+
+### Backend
+
+```bash
+API_EDGE_RELAY_TOKEN=local-edge-relay-token \
+CLIP_STORE_DIR="$ML_DEV_STATE/clip-store" \
+API_LABEL_STORE="$ML_DEV_STATE/labels" \
+API_CONNECTION_SETTINGS_PATH="$ML_DEV_STATE/ml-api/connection-settings.sqlite3" \
 uv run uvicorn backend.app.main:app --host 127.0.0.1 --port 8000
 ```
+
+`API_EDGE_RELAY_TOKEN` must equal `relay.token` in the worker's YAML — the
+worker sends it as `X-Edge-Relay-Token` and `ml-api` compares against this env
+var. `GET /api/v1/health` reports `relay.token_configured` so the pairing is
+observable without sending a relay call.
+
+### Worker
 
 Validate and run the worker with a local configuration:
 
 ```bash
 uv run python -m worker --config worker/ml-worker.local.yaml --check-config
+
+CLIP_STORE_DIR="$ML_DEV_STATE/clip-store" \
+ML_WORKER_PROFILE=cpu \
+ML_WORKER_DEV_MJPEG=true \
+ML_WORKER_DEV_MJPEG_HOST=127.0.0.1 \
+ML_WORKER_DEV_MJPEG_PORT=8090 \
 uv run python -m worker --config worker/ml-worker.local.yaml
 ```
+
+`ML_WORKER_DEV_MJPEG` serves the live view that the dashboard's room detail
+reads; port 8090 matches `Settings.worker_stream_origin`'s default, so leaving
+both at these values is what makes the live panel resolve. `cpu` is the only
+profile whose device check passes without a GPU.
 
 Run the front dev server:
 
