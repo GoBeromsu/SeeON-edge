@@ -305,6 +305,18 @@ describe('I7 — 클라우드 방(space) 선택', () => {
     expect(notice?.textContent).toContain('클라우드 현황판에는 나타나지 않습니다');
   });
 
+  it('roster가 비어 있으면 안내를 한 줄로 압축하고 세부 설명은 접어 둔다', () => {
+    render(true, vi.fn(), vi.fn(), []);
+
+    const notice = document.querySelector('[data-testid="no-spaces-notice"]') as HTMLElement;
+    expect(notice.textContent).toContain('방 목록을 받지 못해 방 지정 없이 저장됩니다. 등록 후 지정할 수 있습니다.');
+
+    const details = notice.querySelector('details');
+    expect(details).not.toBeNull();
+    expect(details?.open).toBe(false);
+    expect(details?.textContent).toContain('클라우드 현황판에는 나타나지 않습니다');
+  });
+
   it('빈 방이 있으면 안내 대신 선택 UI를 보여준다', () => {
     render(true, vi.fn(), vi.fn(), [rosterSpace]);
 

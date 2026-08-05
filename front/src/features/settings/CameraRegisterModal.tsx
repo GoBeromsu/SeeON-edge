@@ -242,12 +242,20 @@ export function CameraRegisterModal({ open, cameras, onClose, onCreated }: Camer
           ) : (
             /* 클라우드 roster가 아직 안 왔을 때. 등록 자체를 막으면 오프라인
                설치가 불가능해지므로 통과시키되, 침묵하지는 않는다 — 기사가
-               정상 등록으로 알고 현장을 떠나면 클라우드에는 영영 안 나타난다. */
-            <p data-testid="no-spaces-notice" className="text-sm text-amber-600">
-              클라우드에서 방 목록을 아직 받지 못했습니다. 지금 등록하면 방 지정
-              없이 저장되며, 클라우드 현황판에는 나타나지 않습니다. 연결 설정을
-              먼저 확인하거나, 등록 후 수정 화면에서 방을 지정하세요.
-            </p>
+               정상 등록으로 알고 현장을 떠나면 클라우드에는 영영 안 나타난다.
+               다만 등록 흐름 한가운데서 한 문단짜리 안내가 입력 필드보다
+               눈에 먼저 들어오지 않도록, 핵심만 한 줄로 남기고 나머지는
+               기본 접힘 상태의 <details>로 내린다. */
+            <div data-testid="no-spaces-notice" className="text-sm text-amber-600">
+              <p>방 목록을 받지 못해 방 지정 없이 저장됩니다. 등록 후 지정할 수 있습니다.</p>
+              <details className="mt-1">
+                <summary className="cursor-pointer select-none">자세히 ▾</summary>
+                <p className="mt-1 text-muted-foreground">
+                  클라우드 현황판에는 나타나지 않습니다. 연결 설정을 먼저 확인하거나,
+                  등록 후 수정 화면에서 방을 지정하세요.
+                </p>
+              </details>
+            </div>
           )}
 
           {errorMessage ? (
