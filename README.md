@@ -22,7 +22,8 @@ including the applicable source-disclosure requirements.
 
 ## Setup
 
-Requires Python 3.11+ and [uv](https://docs.astral.sh/uv/).
+Requires [uv](https://docs.astral.sh/uv/). The development interpreter is pinned
+to Python 3.12 by `.python-version`, which is what `uv sync` below resolves.
 
 ```bash
 uv sync
@@ -30,6 +31,16 @@ uv run pytest -q
 uvx ruff check .
 uv run --group lint lint-imports   # architecture-boundary enforcement
 ```
+
+`pyproject.toml` keeps `requires-python = ">=3.11"` because that floor is the
+union of two images that are deliberately not on the same interpreter:
+`Dockerfile.backend` builds `ml-api` on 3.11, `Dockerfile.edge` builds
+`ml-worker` on 3.12. Only the worker actually needs 3.12 — it uses
+`typing.override` (`worker/domains/base.py`), which is 3.12+. A single `uv sync`
+venv has to serve both instances plus the test suite (which imports `worker`),
+so the development pin takes the higher of the two. Neither Dockerfile copies
+`.python-version`, and both set `UV_PYTHON_DOWNLOADS=never`, so this pin does
+not reach either image build.
 
 Local model artifacts are intentionally ignored. Place them under `models/` and
 copy `worker/ml-worker.example.yaml` to `worker/ml-worker.local.yaml` before
