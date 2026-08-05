@@ -43,6 +43,10 @@ services:
       # 한다 — 코드 기본값 /var/lib/ml-api/는 볼륨이 아니라서, 그대로 두면
       # 기사님이 대시보드에서 저장한 연결 설정이 컨테이너 재생성 때 사라진다.
       API_CONNECTION_SETTINGS_PATH: /root/.local/state/ml-api/connection-settings.sqlite3
+      # 클립 라벨/감사로그 저장 경로. 코드 기본값(resolve_state_dir("ml-api"))도
+      # 이제 같은 볼륨 아래로 떨어지지만, 연결 설정과 같은 이유로 명시해 둔다 —
+      # 기본값이 바뀌어도 이 컨테이너의 라벨·감사로그가 볼륨 밖으로 새지 않게.
+      API_LABEL_STORE: /root/.local/state/ml-api/labels
       # Event clip relay remains disabled until operators explicitly enable rollout.
       ML_API_EVENT_CLIP_EXPORT_ENABLED: ${ML_API_EVENT_CLIP_EXPORT_ENABLED:-0}
       # Facility-wide processed FPS for live camera streams (unset -> worker 5.0

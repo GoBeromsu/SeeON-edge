@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sys
 import time
@@ -13,9 +14,11 @@ from typing import Any
 
 from backend.app.features.clips.store import (
     API_LABEL_STORE_ENV,
-    DEFAULT_LABEL_STORE_DIR,
+    default_label_store_dir,
     is_valid_clip_id,
 )
+
+logger = logging.getLogger(__name__)
 
 API_AUDIT_LOG_ENV = "API_AUDIT_LOG"
 API_AUDIT_LOG_MAX_BYTES_ENV = "API_AUDIT_LOG_MAX_BYTES"
@@ -78,10 +81,23 @@ class AuditLogStore:
         configured_path = os.environ.get(API_AUDIT_LOG_ENV)
         if configured_path:
             return cls(configured_path)
-        label_root = os.environ.get(API_LABEL_STORE_ENV, DEFAULT_LABEL_STORE_DIR)
-        return cls(Path(label_root) / "audit.jsonl")
+        label_root = os.environ.get(API_LABEL_STORE_ENV)
+        root = Path(label_root) if label_root else default_label_store_dir()
+        return cls(root / "audit.jsonl")
 
     def append(self, *, actor: str, action: str, clip_id: str) -> dict[str, object]:
+        """Record ``entry``, best-effort.
+
+        A read action (``list``, ``audit-view``) must not 500 just because
+        the audit trail itself couldn't be written (issue #152) -- and
+        crashing a write action (``label``) *after* its primary write already
+        landed durably would misreport a save that actually succeeded as a
+        failed request. So an unwritable audit log degrades the same way
+        ``LabelStore.save`` and ``RuntimeStatusStore`` already do: logged, not
+        raised. The best-effort backend backup below still runs regardless,
+        giving the entry a second (remote) chance to land even when the local
+        write failed.
+        """
         if not is_valid_clip_id(clip_id):
             raise ValueError("invalid clip_id")
         entry = {
@@ -90,10 +106,13 @@ class AuditLogStore:
             "action": action,
             "clip_id": clip_id,
         }
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._rotate_if_needed()
-        with self.path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(entry, ensure_ascii=False, separators=(",", ":")) + "\n")
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            self._rotate_if_needed()
+            with self.path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(entry, ensure_ascii=False, separators=(",", ":")) + "\n")
+        except OSError as exc:
+            logger.warning("clip audit log unavailable at %s: %s", self.path, exc)
         post_backend_backup("clip_audit", entry)
         return entry
 

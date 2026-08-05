@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import time
+from pathlib import Path
 
 import pytest
 
@@ -92,3 +93,36 @@ def test_rotation_is_a_no_op_when_the_live_file_does_not_exist_yet(tmp_path) -> 
     assert entry["actor"] == "admin"
     assert store.path.exists()
     assert list(tmp_path.glob("audit-*.jsonl")) == []
+
+
+def test_append_degrades_gracefully_and_logs_when_the_log_is_unwritable(
+    tmp_path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Issue #152: ``list_clips``/``clip_video``/``label_clip`` all call
+    ``append()`` after their own primary action already succeeded (or, for
+    ``list_clips``, as the *only* side effect of a pure read) -- an unwritable
+    audit log must never turn any of those into a 500. The failure must still
+    be visible in the logs rather than silently swallowed."""
+    store = AuditLogStore(tmp_path / "audit.jsonl")
+    original_open = Path.open
+
+    def guarded_open(self: Path, *args, **kwargs):
+        if self == store.path:
+            raise PermissionError("audit log mount unavailable")
+        return original_open(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", guarded_open)
+
+    with caplog.at_level("WARNING"):
+        entry = store.append(actor="admin", action="list", clip_id="-")
+
+    assert entry == {
+        "ts": entry["ts"],
+        "actor": "admin",
+        "action": "list",
+        "clip_id": "-",
+    }
+    assert not store.path.exists()
+    assert any(
+        "clip audit log unavailable" in record.message for record in caplog.records
+    )

@@ -51,26 +51,30 @@ relay tokens.
 
 ### Local state directories
 
-Three storage paths default to absolute container paths that a non-root local
+Two storage paths default to absolute container paths that a non-root local
 user cannot create. The defaults are correct for the edge images — where
-`compose.edge.yaml` bind-mounts them — but a local run fails on all three
-unless they are redirected:
+`compose.edge.yaml` bind-mounts them — but a local run fails on both unless
+they are redirected:
 
 | Env var | Default | Owner |
 | --- | --- | --- |
 | `CLIP_STORE_DIR` | `/var/lib/clip-store` | worker writes clips, `ml-api` reads them |
-| `API_LABEL_STORE` | `/var/lib/ml-api-labels` | `ml-api` clip audit log |
 | `API_CONNECTION_SETTINGS_PATH` | `/var/lib/ml-api/connection-settings.sqlite3` | `ml-api` connection settings |
 
-Left at their defaults locally, the failures are not obvious: `GET /clips`
-returns 500 from an audit-log append (`PermissionError: '/var/lib/ml-api-labels'`),
-connection settings degrade to `unable to open database file`, and the worker
-logs `clip recorder failed to start; clips disabled` while otherwise running
+(`API_LABEL_STORE` -- `ml-api` clip labels + audit log -- defaults to
+`resolve_state_dir("ml-api")` (`~/.local/state/ml-api/labels`,
+`backend/app/shared/state_dir.py`) instead, which a native dev process can
+already write; it only needs redirecting if you want labels/audit history
+kept somewhere else.)
+
+Left at their defaults locally, the failures are not obvious: connection
+settings degrade to `unable to open database file`, and the worker logs
+`clip recorder failed to start; clips disabled` while otherwise running
 normally. Export a shared local root once:
 
 ```bash
 export ML_DEV_STATE="$HOME/.local/state/eldercare-dev"
-mkdir -p "$ML_DEV_STATE"/{clip-store,labels,ml-api}
+mkdir -p "$ML_DEV_STATE"/{clip-store,ml-api}
 ```
 
 `CLIP_STORE_DIR` must be the *same* path for both instances — the worker writes
@@ -81,7 +85,6 @@ evidence clips there and `ml-api` reads them back.
 ```bash
 API_EDGE_RELAY_TOKEN=local-edge-relay-token \
 CLIP_STORE_DIR="$ML_DEV_STATE/clip-store" \
-API_LABEL_STORE="$ML_DEV_STATE/labels" \
 API_CONNECTION_SETTINGS_PATH="$ML_DEV_STATE/ml-api/connection-settings.sqlite3" \
 uv run uvicorn backend.app.main:app --host 127.0.0.1 --port 8000
 ```

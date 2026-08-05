@@ -195,6 +195,61 @@ def test_list_clips_and_audit_view_are_recorded_in_the_audit_log(clip_env) -> No
     ]
 
 
+def test_list_clips_returns_200_without_api_label_store_env_set(
+    clip_env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #152 acceptance: with ``API_LABEL_STORE`` unset entirely (the
+    native-dev shape before this fix -- the real default was the
+    container-root-only ``/var/lib/ml-api-labels``, unwritable by a local
+    dev user), ``LabelStore``/``AuditLogStore`` must fall back to
+    ``resolve_state_dir("ml-api")`` instead, a location the current process
+    user can always create. ``isolate_state_dir_home`` (conftest.py)
+    redirects ``Path.home()`` to this test's ``tmp_path`` (== ``clip_env``),
+    so the resolved default is asserted directly below."""
+    monkeypatch.delenv("API_LABEL_STORE", raising=False)
+    _write_manifest(clip_env / "clip-store", "clip-1")
+
+    with TestClient(create_app(lifespan=no_lifespan)) as client:
+        _login(client)
+        response = client.get("/api/v1/clips")
+
+    assert response.status_code == 200
+    assert [clip["clip_id"] for clip in response.json()["clips"]] == ["clip-1"]
+    audit_path = clip_env / ".local" / "state" / "ml-api" / "labels" / "audit.jsonl"
+    assert audit_path.exists()
+
+
+def test_list_clips_succeeds_even_when_the_audit_log_is_unwritable(
+    clip_env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #152: ``list_clips`` (``router.py``) appends a "list" audit entry
+    as a side effect of an otherwise pure read. Before this fix, an
+    unwritable audit log (e.g. the real ``/var/lib/ml-api-labels`` default
+    outside a container) crashed that append with an unhandled
+    ``PermissionError``, turning ``GET /clips`` into a 500 -- the operations
+    page couldn't load event history at all. The audit append is now
+    best-effort, so listing must succeed regardless."""
+    clip_store = clip_env / "clip-store"
+    _write_manifest(clip_store, "clip-1")
+    audit_path = clip_env / "label-store" / "audit.jsonl"
+    original_open = Path.open
+
+    def guarded_open(self: Path, *args, **kwargs):
+        if self == audit_path:
+            raise PermissionError("audit log mount unavailable")
+        return original_open(self, *args, **kwargs)
+
+    with TestClient(create_app(lifespan=no_lifespan)) as client:
+        _login(client)
+        monkeypatch.setattr(Path, "open", guarded_open)
+        response = client.get("/api/v1/clips")
+
+    assert response.status_code == 200
+    assert [clip["clip_id"] for clip in response.json()["clips"]] == ["clip-1"]
+    # The append attempted to write and failed -- the file was never created.
+    assert not audit_path.exists()
+
+
 def test_label_clip_saves_sidecar_and_audit(clip_env) -> None:
     clip_store = clip_env / "clip-store"
     label_store = clip_env / "label-store"

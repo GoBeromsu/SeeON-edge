@@ -10,12 +10,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
+from backend.app.shared.state_dir import resolve_state_dir
+
 logger = logging.getLogger(__name__)
 
 CLIP_STORE_DIR_ENV = "CLIP_STORE_DIR"
 API_LABEL_STORE_ENV = "API_LABEL_STORE"
 DEFAULT_CLIP_STORE_DIR = "/var/lib/clip-store"
-DEFAULT_LABEL_STORE_DIR = "/var/lib/ml-api-labels"
 
 LabelValue = Literal["TRUE_POSITIVE", "FALSE_POSITIVE"] | None
 
@@ -151,13 +152,27 @@ class ClipStore:
         return _manifest_from_mapping(parsed)
 
 
+def default_label_store_dir() -> Path:
+    """Default root for clip labels + the audit log, absent ``API_LABEL_STORE``.
+
+    Was a hardcoded ``/var/lib/ml-api-labels`` -- a container-root-only path
+    that a native (non-container) dev process cannot ``mkdir`` into (issue
+    #152: ``GET /clips`` 500s from the audit-log append's ``PermissionError``
+    before it ever reaches the read). Following ``resolve_state_dir``'s single
+    rule (``backend/app/shared/state_dir.py``) instead gives every runtime --
+    container or native -- a location its own user can already write.
+    """
+    return resolve_state_dir("ml-api") / "labels"
+
+
 class LabelStore:
     def __init__(self, root: Path | str) -> None:
         self.root = Path(root)
 
     @classmethod
     def from_env(cls) -> LabelStore:
-        return cls(os.environ.get(API_LABEL_STORE_ENV, DEFAULT_LABEL_STORE_DIR))
+        configured = os.environ.get(API_LABEL_STORE_ENV)
+        return cls(configured) if configured else cls(default_label_store_dir())
 
     def save(self, record: LabelRecord) -> bool:
         """Best-effort persist; an unwritable state dir must not crash the caller.
@@ -303,5 +318,6 @@ __all__ = [
     "LabelRecord",
     "LabelStore",
     "LabelValue",
+    "default_label_store_dir",
     "is_valid_clip_id",
 ]
