@@ -715,7 +715,11 @@ def _assert_untrusted_ci_security(workflow: dict[str, object]) -> None:
         # adding a step -- the security contract below (step count/order, no
         # external-binary fetch) is unchanged; only this step's own argument
         # changed. See tests/AGENTS.md for running the real-stack E2E locally.
-        {"run": 'uv run pytest -q -m "not real_stack"'},
+        # 무거운 워치독 테스트는 CI에서 뺀다(`heavy`). 실제 서브프로세스가
+        # 벽시계 deadline으로 죽기를 기다리므로 부하 걸린 러너에서 기동만으로
+        # 넘긴다. 이 문자열이 바뀌면 CI가 무엇을 돌리는지 바뀐 것이므로
+        # 여기서 잡는 것이 맞다 — 자동으로 따라가게 하지 않는다.
+        {"run": 'uv run pytest -q -m "not real_stack and not heavy"'},
         {"run": "uv run --group lint ruff check ."},
         {"run": "uv run --group lint lint-imports"},
     ]
