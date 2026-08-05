@@ -224,7 +224,7 @@ describe('CameraEditModal', () => {
     expect(document.querySelectorAll('[role="dialog"]').length).toBe(1);
     expect(document.body.textContent).toContain('침대 영역 인식이 필요합니다.');
 
-    await act(async () => findButton('인식 시작').click());
+    await act(async () => findButton('▶ 인식 시작').click());
     expect(onUpdated).toHaveBeenCalled();
 
     act(() => findButton('완료').click());

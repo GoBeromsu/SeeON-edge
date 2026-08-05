@@ -147,7 +147,7 @@ describe('CameraRegisterModal', () => {
     expect(errorSpy).toHaveBeenCalledWith('침대 영역 인식을 완료해야 저장할 수 있습니다.');
     expect(onCreated).not.toHaveBeenCalled();
 
-    await act(async () => findButton('인식 시작').click());
+    await act(async () => findButton('▶ 인식 시작').click());
     act(() => findButton('저장하고 완료').click());
 
     expect(successSpy).toHaveBeenCalledWith('카메라를 등록했습니다.');
