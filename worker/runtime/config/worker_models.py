@@ -152,7 +152,16 @@ class WorkerConfig(BaseModel):
     domains: DomainsConfig = Field(default_factory=DomainsConfig)
     dev_mjpeg: DevMjpegConfig = Field(default_factory=DevMjpegConfig)
     clip: ClipRecordingConfig = Field(default_factory=ClipRecordingConfig)
-    cameras: tuple[CameraRuntimeConfig, ...] = Field(min_length=1)
+    # Issue #150: an empty roster is a valid boot state, not a config error --
+    # a fresh install has zero cameras until an operator registers one, and
+    # the worker must still pass its boot gates (profile/device, decode
+    # preflight, model load) and stay up so the RTSP probe/MJPEG server is
+    # reachable *before* the first camera exists. This is deliberately
+    # distinct from "no config at all" (an unreadable/malformed YAML, or a
+    # relay pull with neither a fresh payload nor a last-known-good cache),
+    # which still refuses to boot exactly as issue #43 intended -- that gate
+    # lives upstream of this model, in `load_worker_config`/`config_pull.py`.
+    cameras: tuple[CameraRuntimeConfig, ...] = ()
 
     @model_validator(mode="before")
     @classmethod

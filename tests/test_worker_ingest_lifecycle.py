@@ -622,3 +622,65 @@ def test_stop_never_races_a_partially_started_thread_set(
     supervisor.join(timeout_sec=2.0)
     assert loop_a.stop_count >= 1
     assert loop_b.stop_count >= 1
+
+
+# --- issue #150: zero-camera roster ------------------------------------------
+
+
+def test_zero_loops_join_returns_immediately() -> None:
+    """Pins the exact failure mode issue #150 fixes: with no ingest loops at
+    all, ``join()`` has nothing to wait on and returns right away -- a caller
+    relying on it to keep a process alive would exit immediately after boot.
+    ``wait_until_stopped()`` (below) is the replacement for that case."""
+    supervisor = IngestSupervisor(())
+
+    supervisor.start()
+    supervisor.join(timeout_sec=5.0)  # must not hang even with no timeout
+
+
+def test_zero_loops_wait_until_stopped_blocks_until_an_external_stop() -> None:
+    """With zero cameras, ``wait_until_stopped()`` must actually block --
+    unlike ``join()`` above -- until something calls ``stop()``."""
+    supervisor = IngestSupervisor(())
+    supervisor.start()
+    unblocked = threading.Event()
+
+    def waiter() -> None:
+        supervisor.wait_until_stopped()
+        unblocked.set()
+
+    thread = threading.Thread(target=waiter)
+    thread.start()
+    try:
+        # Given: nothing has stopped the supervisor yet.
+        assert not unblocked.wait(timeout=0.2)
+
+        # When: an external stop() runs (mirrors WorkerRuntime.stop() on SIGTERM).
+        supervisor.stop()
+
+        # Then: the wait unblocks.
+        assert unblocked.wait(timeout=2.0)
+    finally:
+        thread.join(timeout=2.0)
+        assert not thread.is_alive()
+
+
+def test_zero_loops_wait_until_stopped_unblocks_when_restart_check_fires() -> None:
+    """With zero cameras, the restart watcher is what is supposed to end the
+    wait once a config pull reports a fresh directive (e.g. the first camera
+    got registered) -- proving the same mechanism issue #150 relies on to let
+    a zero-camera worker exit and restart into the real pipeline."""
+    calls: list[None] = []
+
+    def restart_check() -> bool:
+        calls.append(None)
+        return True
+
+    supervisor = IngestSupervisor(
+        (), restart_check=restart_check, restart_poll_interval_sec=0.01
+    )
+    supervisor.start()
+
+    supervisor.wait_until_stopped()
+
+    assert len(calls) >= 1

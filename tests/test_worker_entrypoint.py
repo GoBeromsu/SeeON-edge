@@ -116,9 +116,18 @@ def test_invalid_yaml_exits_with_config_error_code(tmp_path: Path) -> None:
 def test_config_missing_required_field_exits_with_config_error_code(
     tmp_path: Path,
 ) -> None:
+    """필수 섹션이 빠진 설정은 계속 config-error(2)로 죽는다.
+
+    이 픽스처는 원래 `relay`만 있고 `cameras`가 없는 YAML이었다. 이슈 #150
+    이후로는 그게 "필수 필드 누락"이 아니라 **유효한 0대 로스터**다 -- 새로
+    설치한 노드가 첫 카메라를 등록하기 전 상태이므로 부팅해야 한다. 그래서
+    실제로 여전히 필수인 `relay`를 빼도록 바꿨다. "설정 없음"은 예전처럼
+    죽고 "카메라 없음"은 뜬다는 구분(이슈 #43 대 #150)이 이 테스트가 지키는
+    선이다.
+    """
     incomplete_path = tmp_path / "incomplete.yaml"
     incomplete_path.write_text(
-        yaml.safe_dump({"relay": {"url": "http://127.0.0.1:8000", "token": "relay-token-1"}}),
+        yaml.safe_dump({"version": 1}),
         encoding="utf-8",
     )
 

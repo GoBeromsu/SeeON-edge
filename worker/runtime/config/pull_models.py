@@ -285,8 +285,32 @@ class BackendWorkerConfigPayload(BaseModel):
             for camera in resolved_cameras
             if camera.rtsp_url is not None
         )
-        if not cameras:
-            raise WorkerConfigError("worker config must include at least one camera")
+        # Issue #150: an *empty roster* (`self.cameras == ()`) is a legitimate
+        # config now -- a fresh install has no cameras until an operator
+        # registers one, and the worker must still boot so its probe/MJPEG
+        # server is reachable to validate that first camera's RTSP URL. This
+        # used to raise, and `config_pull.py` swallowed it as "malformed
+        # payload", so the first registration was structurally impossible.
+        #
+        # But "the payload declared cameras and every one of them failed to
+        # parse" is a different thing entirely, and still malformed. `cameras`
+        # is typed `tuple[object, ...]` precisely so one bad entry degrades
+        # per-camera in `resolved_cameras` instead of rejecting the payload --
+        # if that degradation consumed the *whole* roster, the payload is
+        # corrupt and we must not hand back an empty config. Doing so would
+        # silently discard a good last-known-good roster and stop monitoring
+        # every room. Raising here keeps the LKG fallback in charge.
+        #
+        # Note this checks `resolved_cameras` (parsed OK), not `cameras`
+        # (parsed OK *and* carries an RTSP URL). A roster whose entries all
+        # parse but have no `rtsp_url` is a real, non-corrupt state -- a
+        # camera registered in the cloud that this edge has no local record
+        # for yet -- and must boot with an empty usable roster rather than
+        # reject the pull.
+        if self.cameras and not resolved_cameras:
+            raise WorkerConfigError(
+                "worker config declared cameras but none of them parsed"
+            )
         detection_windows = {
             domain: NightWindowConfig(start=window.start, end=window.end, tz=window.tz)
             for domain, window in self.resolved_detection_windows.items()

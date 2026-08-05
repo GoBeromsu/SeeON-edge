@@ -712,7 +712,32 @@ class WorkerRuntime:
             self._start_clip_frame_feeders()
             self._start_live_view_server()
             if self._supervisor is not None:
-                self._supervisor.join()
+                # 판정 기준은 **설정된 로스터**(`config.cameras`)이지 활성화에
+                # 성공한 카메라(`self.cameras`)가 아니다. 카메라가 설정돼
+                # 있는데 전부 활성화에 실패한 경우(예: 도메인이 미등록
+                # extractor를 요구해 fail-closed되는 이슈 #47 경로)에는
+                # 예전처럼 즉시 반환해서 프로세스가 끝나야 한다 -- 그걸
+                # 무한 대기로 만들면 재시작 정책이 걸려 있어도 되살아나지
+                # 못하고 그냥 매달린다.
+                if self.config.cameras:
+                    self._supervisor.join()
+                else:
+                    # Issue #150: zero configured cameras is a valid boot
+                    # state -- every gate above already passed. `join()` has
+                    # no ingest threads to wait on and would return here
+                    # immediately, exiting the process right after boot and
+                    # taking the probe/MJPEG server down with it before an
+                    # installer ever gets to validate a camera's RTSP URL.
+                    # `wait_until_stopped()` blocks on the supervisor's own
+                    # stop signal instead, which an external SIGTERM/SIGINT
+                    # (`WorkerRuntime.stop()`) still sets, and which the
+                    # restart watcher (already started unconditionally in
+                    # `_activate`, camera count aside) sets itself the moment
+                    # it observes a fresh config pull -- i.e. once the first
+                    # camera is registered, this worker exits clean and the
+                    # container's `restart: unless-stopped` brings it back up
+                    # to pull the new roster and start the real pipeline.
+                    self._supervisor.wait_until_stopped()
         finally:
             self.stop()
 
@@ -1274,6 +1299,13 @@ class WorkerRuntime:
         off -- a failure with no relation to anything that worker uses.
         """
         if not export_enabled():
+            return None
+        if not self.config.cameras:
+            # Issue #150: zero configured cameras is a valid boot state, but
+            # `probe_camera_id` below has no camera to name -- there is also
+            # nothing staged to export yet with no camera producing events.
+            # Evidence delivery simply waits, same as everything else that is
+            # camera-scoped, for the first camera to be registered.
             return None
         clip_config = ClipRecorderConfig(store_dir=self._resolved_clip_store_dir())
         try:

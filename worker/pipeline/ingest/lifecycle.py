@@ -275,6 +275,19 @@ class IngestSupervisor:
         for thread in self._threads:
             thread.join(timeout=timeout_sec)
 
+    def wait_until_stopped(self) -> None:
+        """Block until `stop()` runs, even with zero ingest loops (issue #150).
+
+        `join()` only waits on `self._threads`, so with an empty camera
+        roster there is nothing to join and it returns immediately -- a
+        caller relying on it to keep the process alive would exit right
+        after boot. Every path that ends this supervisor (an external
+        `stop()` call, or the restart/completion watchers deciding to stop
+        it themselves) sets `self._stop_event` first, so waiting on it
+        directly blocks correctly regardless of loop count.
+        """
+        self._stop_event.wait()
+
     def stop(self, *, join_timeout_sec: float = 1.0) -> None:
         self._stop_event.set()
         for loop in self._loops:

@@ -487,6 +487,43 @@ def test_domain_requiring_an_unregistered_extractor_fails_closed(
     )
 
 
+def test_configured_cameras_that_all_fail_to_activate_do_not_hang_run(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """이슈 #150 회귀 방지: `run()`의 대기 분기는 **설정된 로스터**로 갈린다.
+
+    0대 부팅을 허용하면서 `run()`이 `join()` 대신 `wait_until_stopped()`를
+    타는 경로가 생겼는데, 그 판정을 활성화에 성공한 카메라(`self.cameras`)로
+    하면 "카메라가 설정돼 있는데 전부 활성화에 실패한" 경우까지 무한 대기에
+    빠진다 -- 실제로 `test_domain_requiring_an_unregistered_extractor_fails_closed`
+    가 영원히 멈췄다. 그 경우는 예전처럼 즉시 반환해야 재시작 정책이 걸린
+    환경에서 프로세스가 되살아난다.
+
+    (0대 로스터가 대기 상태로 계속 떠 있는 쪽은
+    `tests/test_worker_startup_config_resolution.py`가 고정한다.)
+    """
+    _stub_heartbeat_transport(monkeypatch)
+    serving = _FakeServingClient()
+    loops = _LoopFactory(serving)
+    ghost_bed_exit = replace(
+        worker_module.DOMAIN_REGISTRY["bed_exit"],
+        requires=frozenset({"pose", "bed", "ghost"}),
+    )
+    monkeypatch.setattr(
+        worker_module,
+        "DOMAIN_REGISTRY",
+        {**worker_module.DOMAIN_REGISTRY, "bed_exit": ghost_bed_exit},
+    )
+    runtime = _runtime(_config("camera-a"), serving, loops, tmp_path)
+
+    # 매달리면 이 호출이 반환하지 않는다 -- 그것이 이 테스트의 전부다.
+    runtime.run()
+
+    assert runtime.config.cameras != ()
+    assert runtime.cameras == ()
+
+
 def test_default_box_source_schedules_pose_and_bed_without_person(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

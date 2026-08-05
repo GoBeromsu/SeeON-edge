@@ -86,6 +86,38 @@ def test_to_worker_config_threads_bed_zone_polygon_into_camera_runtime_config() 
     assert cameras["camera-2"].bed_zone_image_height is None
 
 
+def test_to_worker_config_with_empty_camera_list_boots_with_an_empty_roster() -> None:
+    """Issue #150: a fresh install with zero registered cameras must still
+    resolve to a bootable ``WorkerConfig`` -- ``to_worker_config`` used to
+    raise ``WorkerConfigError("worker config must include at least one
+    camera")`` here, which ``config_pull.py`` swallowed as a malformed pull,
+    so the worker could never boot before its first camera existed."""
+    payload = BackendWorkerConfigPayload.model_validate({"config_version": 1, "cameras": []})
+
+    worker_config = payload.to_worker_config("http://relay.test", "relay-token")
+
+    assert worker_config.cameras == ()
+
+
+def test_to_worker_config_with_every_camera_missing_rtsp_url_boots_with_an_empty_roster() -> None:
+    """Same as the empty-list case above, but for the more realistic
+    mid-onboarding shape: cameras exist in the dashboard but none has an RTSP
+    URL yet, so every entry is dropped by the ``camera.rtsp_url is not None``
+    filter and the resolved roster is empty rather than raising."""
+    payload = BackendWorkerConfigPayload.model_validate(
+        {
+            "config_version": 1,
+            "cameras": [
+                {"camera_id": "camera-1", "facility_id": "facility-1", "rtsp_url": None},
+            ],
+        }
+    )
+
+    worker_config = payload.to_worker_config("http://relay.test", "relay-token")
+
+    assert worker_config.cameras == ()
+
+
 def test_to_worker_config_still_accepts_legacy_night_window_payload_field() -> None:
     payload = BackendWorkerConfigPayload.model_validate(
         {

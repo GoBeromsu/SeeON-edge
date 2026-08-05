@@ -35,6 +35,7 @@ from typing import Any
 import pytest
 import yaml
 from edge_worker_fixtures import edge_config_payload
+from pydantic import ValidationError
 
 import worker.__main__ as worker_main
 from worker.runtime.config import (
@@ -482,3 +483,84 @@ def test_check_config_with_yaml_never_calls_resolve_startup_config(
     monkeypatch.setattr(WorkerRuntime, "__init__", _fail)
 
     assert worker_main.main(["--config", str(config_path), "--check-config"]) == 0
+
+
+# --- issue #150: "카메라 없음" boots, "설정 없음"/malformed still fails fast ---
+#
+# The two paths this issue's fix must keep distinct:
+#
+# 1. No config at all, or a config that fails to parse/validate (unreadable
+#    YAML, a relay pull with neither a fresh payload nor a last-known-good
+#    cache, a config missing required fields like `relay`) -- issue #43's
+#    fail-fast boot is untouched here and still refuses to start.
+# 2. A config that resolves cleanly but with zero cameras (a fresh install,
+#    or every camera still missing its RTSP URL) -- this used to collapse
+#    into the same failure as (1) because `WorkerConfig.cameras` required
+#    `min_length=1` and `BackendWorkerConfigPayload.to_worker_config` raised
+#    on an empty resolved roster. Both gates are relaxed; this must now boot.
+
+
+def test_worker_config_accepts_zero_cameras() -> None:
+    """"카메라 없음" is a valid, bootable state -- `WorkerConfig.cameras` no
+    longer requires at least one entry."""
+    config = WorkerConfig(relay=RelayConfig(url="http://ml-api:8000", token="relay-token"))
+
+    assert config.cameras == ()
+
+
+def test_worker_config_still_rejects_a_config_missing_the_relay_section() -> None:
+    """"설정 없음"/malformed config keeps failing fast -- only the camera-count
+    gate was relaxed by issue #150, nothing else about `WorkerConfig`
+    validation changed."""
+    with pytest.raises(ValidationError):
+        WorkerConfig.model_validate({"cameras": []})
+
+
+def test_no_yaml_pull_resolving_to_zero_cameras_still_boots(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Issue #150: a relay pull that resolves to a zero-camera `WorkerConfig`
+    (a fresh install, or every camera still missing its RTSP URL) must reach
+    `WorkerRuntime` construction, not the "worker has no usable
+    configuration" exit -- unlike before this fix, where
+    `BackendWorkerConfigPayload.to_worker_config` raised on an empty roster
+    and `config_pull.py` swallowed that as a malformed pull, making
+    `load_worker_config_from_relay` return `None` for this exact case."""
+    monkeypatch.setenv("RELAY_URL", "http://ml-api:8000")
+    monkeypatch.setenv("RELAY_TOKEN", "relay-token")
+    zero_camera_config = WorkerConfig(
+        relay=RelayConfig(url="http://ml-api:8000", token="relay-token"),
+    )
+    snapshot = ConfigSnapshot(
+        config=zero_camera_config,
+        registry_version=1,
+        directive=RestartDirective(generation=0, version=1),
+        source=ConfigSource.PULLED,
+        stale=False,
+    )
+    monkeypatch.setattr(worker_main, "load_worker_config_from_relay", lambda *_a, **_k: snapshot)
+    constructed = _spy_workerruntime_config(monkeypatch)
+
+    exit_code = worker_main.main([])
+
+    assert exit_code == 0
+    assert len(constructed) == 1
+    assert constructed[0].config.cameras == ()
+
+
+def test_no_yaml_and_no_relay_url_still_exits_fast_with_zero_cameras_available(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Companion to the boot-succeeds test above: "설정 없음" (no `--config`/
+    `EDGE_CAMERA_CONFIG`, and no `RELAY_URL` either -- there is no config to
+    resolve at all, not even one with zero cameras) still refuses to start,
+    exactly as `test_no_yaml_and_no_relay_url_exits_with_config_error_code`
+    already pins -- restated here to keep both halves of issue #150's
+    contract next to each other in one file."""
+
+    def _fail(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("must not attempt a pull without RELAY_URL")
+
+    monkeypatch.setattr(worker_main, "load_worker_config_from_relay", _fail)
+
+    assert worker_main.main([]) == 2
