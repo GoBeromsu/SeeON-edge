@@ -93,6 +93,26 @@ class ConnectionSettings:
     updated_at: str | None
 
 
+def _normalize_api_base(base: str | None) -> str | None:
+    """호스트 base URL을 NestJS 전역 prefix까지 포함한 형태로 맞춘다.
+
+    클라우드 백엔드(NestJS)는 모든 라우트를 ``/api`` 아래에 둔다. 그래서
+    실제 heartbeat 경로는 ``/api/v1/events/heartbeat``인데, 여기서 base로부터
+    ``{base}/v1/events``를 파생하면 ``/api``가 빠져 404가 난다. 엣지는 그걸
+    조용한 실패로 넘겨서 카메라가 계속 online으로 남았다.
+
+    운영자가 base에 이미 ``/api``를 넣었으면 중복해서 붙이지 않는다.
+    """
+    if not base:
+        return None
+    trimmed = base.strip().rstrip("/")
+    if not trimmed:
+        return None
+    if trimmed.endswith("/api"):
+        return trimmed
+    return f"{trimmed}/api"
+
+
 class ConnectionSettingsStore:
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
@@ -118,7 +138,7 @@ class ConnectionSettingsStore:
         with self._lock:
             saved = self._read_unlocked()
         base = os.environ.get(API_BACKEND_BASE_URL_ENV)
-        base = base.rstrip("/") if base else None
+        base = _normalize_api_base(base)
         return ConnectionSettings(
             events_url=(
                 saved.get("events_url")

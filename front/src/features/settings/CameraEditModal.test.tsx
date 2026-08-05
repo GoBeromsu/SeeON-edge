@@ -149,11 +149,15 @@ describe('CameraEditModal', () => {
     expect(onClose).toHaveBeenCalled();
   });
 
-  it('includes rtsp_url in the patch only when the technician types a replacement', async () => {
+  it('includes rtsp_url in the patch after the technician verifies the replacement', async () => {
     vi.mocked(updateCamera).mockResolvedValue(camera);
+    vi.mocked(testCamera).mockResolvedValue({ ok: true, width: 1920, height: 1080 });
     render(camera);
     setInput('rtsp_url', 'rtsp://new-address/stream');
 
+    // 새 주소는 연결 확인을 통과해야 저장된다. 확인 없이 저장하면 오타가
+    // 그대로 들어가 카메라가 조용히 죽는다.
+    await act(async () => findButton('연결').click());
     await act(async () => findButton('저장').click());
 
     expect(updateCamera).toHaveBeenCalledWith('cam-1', { rtsp_url: 'rtsp://new-address/stream' });
@@ -177,7 +181,7 @@ describe('CameraEditModal', () => {
 
     await act(async () => findButton('연결').click());
 
-    expect(testCamera).toHaveBeenCalledWith('cam-1');
+    expect(testCamera).toHaveBeenCalledWith('cam-1', undefined);
     expect(successSpy).toHaveBeenCalledWith('연결 성공');
     expect(onUpdated).toHaveBeenCalled();
     expect(onClose).not.toHaveBeenCalled();
@@ -258,5 +262,56 @@ describe('CameraEditModal', () => {
     expect(rtspInput.value).toBe('');
     expect(document.body.textContent).toContain('현재 등록됨:');
     expect(document.body.textContent).toContain(camera.rtsp_url_masked);
+  });
+
+  it('I8 — 저장된 URL이 아니라 입력창의 새 URL을 검사한다', async () => {
+    vi.mocked(testCamera).mockResolvedValue({ ok: true, width: 1920, height: 1080 });
+    render(camera);
+    setInput('rtsp_url', 'rtsp://typo.local/live');
+
+    await act(async () => findButton('연결').click());
+
+    expect(testCamera).toHaveBeenCalledWith('cam-1', 'rtsp://typo.local/live');
+  });
+
+  it('I8 — 연결 확인 없이 새 RTSP를 저장하지 못한다', async () => {
+    vi.mocked(updateCamera).mockResolvedValue(camera);
+    render(camera);
+    setInput('rtsp_url', 'rtsp://typo.local/live');
+
+    await act(async () => findButton('저장').click());
+
+    expect(updateCamera).not.toHaveBeenCalled();
+    expect(document.querySelector('[role="alert"]')?.textContent).toContain('먼저 연결을 확인해 주세요');
+  });
+
+  it('I8 — 테스트 통과 후 주소를 바꾸면 다시 확인해야 저장된다', async () => {
+    // 이걸 막지 않으면 테스트를 강제한 의미가 사라진다: 성공시킨 뒤
+    // 한 글자만 고쳐 저장하면 검사받지 않은 URL이 들어간다.
+    vi.mocked(testCamera).mockResolvedValue({ ok: true, width: 1920, height: 1080 });
+    vi.mocked(updateCamera).mockResolvedValue(camera);
+    render(camera);
+
+    setInput('rtsp_url', 'rtsp://good.local/live');
+    await act(async () => findButton('연결').click());
+
+    // 통과한 뒤 주소를 변경한다.
+    setInput('rtsp_url', 'rtsp://typo.local/live');
+    await act(async () => findButton('저장').click());
+
+    expect(updateCamera).not.toHaveBeenCalled();
+    expect(document.querySelector('[role="alert"]')?.textContent).toContain('먼저 연결을 확인해 주세요');
+  });
+
+  it('I8 — 통과한 주소 그대로면 저장된다', async () => {
+    vi.mocked(testCamera).mockResolvedValue({ ok: true, width: 1920, height: 1080 });
+    vi.mocked(updateCamera).mockResolvedValue(camera);
+    render(camera);
+
+    setInput('rtsp_url', 'rtsp://good.local/live');
+    await act(async () => findButton('연결').click());
+    await act(async () => findButton('저장').click());
+
+    expect(updateCamera).toHaveBeenCalledWith('cam-1', { rtsp_url: 'rtsp://good.local/live' });
   });
 });

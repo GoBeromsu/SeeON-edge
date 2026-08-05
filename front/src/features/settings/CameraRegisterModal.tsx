@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   cameraDuplicateDetail,
   cameraProbeFailureDetail,
@@ -38,6 +38,36 @@ export function CameraRegisterModal({ open, cameras, onClose, onCreated }: Camer
   const [rtspUrl, setRtspUrl] = useState('');
   const [floor, setFloor] = useState<string | null>(null);
   const [extraFloors, setExtraFloors] = useState<string[]>([]);
+  // 클라우드 방 선택. 미지정으로 저장하면 roster_sync가 이 카메라를 push
+  // 대상에서 제외해, 엣지에는 보이는데 클라우드에는 영영 안 나타난다.
+  const [spaceId, setSpaceId] = useState<string>('');
+
+  /**
+   * 선택 가능한 클라우드 방.
+   *
+   * 엣지가 pull한 roster 중 아직 로컬 카메라와 매칭되지 않은 항목이
+   * "빈 방"이다. 카메라 1대 = 방 1개이므로 이미 점유된 방은 제외한다.
+   */
+  const availableSpaces = useMemo(() => {
+    const taken = new Set(
+      cameras
+        .filter((cam) => cam.mapping_pending === false && cam.space_id)
+        .map((cam) => cam.space_id as string),
+    );
+    const seen = new Set<string>();
+    return cameras
+      .filter((cam) => cam.space_id && !taken.has(cam.space_id))
+      .filter((cam) => {
+        if (seen.has(cam.space_id as string)) return false;
+        seen.add(cam.space_id as string);
+        return true;
+      })
+      .map((cam) => ({
+        id: cam.space_id as string,
+        name: cam.space_name ?? cam.label,
+        floorName: cam.floor_name ?? null,
+      }));
+  }, [cameras]);
   const [busy, setBusy] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [duplicateLabel, setDuplicateLabel] = useState<string | null>(null);
@@ -80,6 +110,13 @@ export function CameraRegisterModal({ open, cameras, onClose, onCreated }: Camer
       toast.error('RTSP 주소를 입력하세요.');
       return;
     }
+    // 방을 고르지 않으면 roster_sync가 이 카메라를 클라우드 push에서
+    // 제외한다. 엣지에는 보이는데 클라우드 현황판에는 안 나타나므로,
+    // 기사님이 현장을 떠난 뒤에야 발견된다. 등록 시점에 막는다.
+    if (availableSpaces.length > 0 && !spaceId) {
+      toast.error('이 카메라가 설치된 방을 선택하세요.');
+      return;
+    }
 
     busyRef.current = true;
     setBusy(true);
@@ -87,7 +124,12 @@ export function CameraRegisterModal({ open, cameras, onClose, onCreated }: Camer
     setDuplicateLabel(null);
     try {
       const created = await createCamera(
-        { label, rtsp_url: rtspUrl, floor: floor ?? undefined },
+        {
+          label,
+          rtsp_url: rtspUrl,
+          floor: floor ?? undefined,
+          space_id: spaceId || undefined,
+        },
         { forceRegister: force },
       );
       setCamera(created);
@@ -176,6 +218,37 @@ export function CameraRegisterModal({ open, cameras, onClose, onCreated }: Camer
               placeholder="rtsp://192.0.2.10:554/stream"
             />
           </label>
+
+          {availableSpaces.length > 0 ? (
+            <label>
+              설치된 방
+              <select
+                name="space_id"
+                value={spaceId}
+                disabled={busy || camera !== null}
+                onChange={(event) => setSpaceId(event.target.value)}
+              >
+                <option value="">방을 선택하세요</option>
+                {availableSpaces.map((space) => (
+                  <option key={space.id} value={space.id}>
+                    {space.floorName ? `${space.floorName} · ${space.name}` : space.name}
+                  </option>
+                ))}
+              </select>
+              <span className="text-sm text-muted-foreground">
+                방을 지정해야 클라우드 현황판에 이 카메라가 나타납니다.
+              </span>
+            </label>
+          ) : (
+            /* 클라우드 roster가 아직 안 왔을 때. 등록 자체를 막으면 오프라인
+               설치가 불가능해지므로 통과시키되, 침묵하지는 않는다 — 기사가
+               정상 등록으로 알고 현장을 떠나면 클라우드에는 영영 안 나타난다. */
+            <p data-testid="no-spaces-notice" className="text-sm text-amber-600">
+              클라우드에서 방 목록을 아직 받지 못했습니다. 지금 등록하면 방 지정
+              없이 저장되며, 클라우드 현황판에는 나타나지 않습니다. 연결 설정을
+              먼저 확인하거나, 등록 후 수정 화면에서 방을 지정하세요.
+            </p>
+          )}
 
           {errorMessage ? (
             <div>

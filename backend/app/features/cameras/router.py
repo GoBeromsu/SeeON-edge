@@ -143,6 +143,21 @@ class UpdateCameraRequest(BaseModel):
     floor: str | None = None
 
 
+class TestCameraRequest(BaseModel):
+    """연결 테스트 요청.
+
+    ``rtsp_url``을 주면 저장된 값 대신 그 값을 검사한다. 수정 화면에서
+    기사님이 방금 입력한 URL을 검사해야 하기 때문이다. 예전에는 저장된
+    URL만 검사해서, 오타를 넣어도 "연결 성공"이 뜬 뒤 그 오타가 저장됐다.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    # UpdateCameraRequest.rtsp_url과 같은 제약을 쓴다 — 빈 문자열을 보내
+    # 저장된 URL 검사로 조용히 되돌아가는 경로를 막는다.
+    rtsp_url: str | None = Field(default=None, min_length=1)
+
+
 class TestCameraResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -272,6 +287,7 @@ def create_camera(
 def test_camera(
     camera_id: str,
     request: Request,
+    payload: TestCameraRequest | None = None,
     relay_token: Annotated[str | None, Header(alias=RELAY_TOKEN_HEADER)] = None,
     authorization: Annotated[str | None, Header(alias="Authorization")] = None,
 ) -> dict[str, object]:
@@ -279,13 +295,22 @@ def test_camera(
     record = _store(request.app).get(camera_id)
     if record is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="camera not found")
-    probe = _probe_rtsp_url(request, str(record.get("rtsp_url", "")))
-    now = utc_now_iso()
-    updates: dict[str, object] = {"last_probed_at": now}
-    if probe.ok:
-        updates["last_ok_at"] = now
-        updates["never_connected"] = False
-    _store(request.app).update(camera_id, updates)
+
+    stored_url = str(record.get("rtsp_url", ""))
+    draft_url = (payload.rtsp_url or "").strip() if payload is not None else ""
+    # 기사님이 방금 입력한 값이 있으면 그것을 검사한다. 없으면 저장된 값.
+    target_url = draft_url or stored_url
+    probe = _probe_rtsp_url(request, target_url)
+
+    # 저장된 URL을 실제로 검사했을 때만 카메라 상태를 갱신한다. draft를
+    # 검사해놓고 저장된 카메라를 "정상"으로 표시하면 거짓 신호가 된다.
+    if target_url == stored_url:
+        now = utc_now_iso()
+        updates: dict[str, object] = {"last_probed_at": now}
+        if probe.ok:
+            updates["last_ok_at"] = now
+            updates["never_connected"] = False
+        _store(request.app).update(camera_id, updates)
     return _probe_response(probe)
 
 

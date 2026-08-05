@@ -112,6 +112,12 @@ export function normalizeCamera(value: unknown): Camera | null {
     rtsp_url_masked: rtspMasked || maskRtsp(rtspPlain),
     floor_name: pickNullableString(value, ['floor_name', 'floorName']),
     floor: pickNullableString(value, ['floor']),
+    space_id: pickNullableString(value, ['space_id', 'spaceId']),
+    space_name: pickNullableString(value, ['space_name', 'spaceName']),
+    // 클라우드 매핑 상태. 검증만 하고 버리면 기사님이 현장에서 "붙었는지"를
+    // 볼 방법이 없다. 값이 없으면 아직 안 붙은 것으로 본다(보수적).
+    backend_camera_id: pickNullableString(value, ['backend_camera_id', 'backendCameraId']),
+    mapping_pending: pickBoolean(value, ['mapping_pending', 'mappingPending']) ?? true,
     status: normalizeStatus(value),
     created_at: pickNullableString(value, ['created_at', 'createdAt']),
     decode_backend: normalizeDecodeBackend(value),

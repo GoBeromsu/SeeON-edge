@@ -39,6 +39,10 @@ services:
       ML_API_WORKER_PROBE_ORIGIN: http://ml-worker:${ML_WORKER_DEV_MJPEG_PORT:-8090}
       # Fixed container path of the evidence clip store (host bind below).
       CLIP_STORE_DIR: /var/lib/clip-store
+      # 연결 설정 sqlite의 컨테이너 경로. 아래 ml-api-state 볼륨 안이어야
+      # 한다 — 코드 기본값 /var/lib/ml-api/는 볼륨이 아니라서, 그대로 두면
+      # 기사님이 대시보드에서 저장한 연결 설정이 컨테이너 재생성 때 사라진다.
+      API_CONNECTION_SETTINGS_PATH: /root/.local/state/ml-api/connection-settings.sqlite3
       # Event clip relay remains disabled until operators explicitly enable rollout.
       ML_API_EVENT_CLIP_EXPORT_ENABLED: ${ML_API_EVENT_CLIP_EXPORT_ENABLED:-0}
       # Facility-wide processed FPS for live camera streams (unset -> worker 5.0

@@ -1,5 +1,6 @@
 import { FormEvent, useEffect, useRef, useState } from 'react';
 import { saveConnection, testConnection, type ConnectionTestResult, type ConnectionView } from '@/shared/api/client';
+import type { HeartbeatRelayStatus } from '@/shared/api/types';
 import {
   buildConnectionPayload,
   connectionFormFromView,
@@ -15,6 +16,28 @@ import { getConnectionStatus } from '@/shared/ui/StatusBadge';
 type ConnectionSettingsPanelProps = {
   resource: PollingResource<ConnectionView>;
 };
+
+/**
+ * 카메라 상태가 클라우드로 실제 전달되고 있는지.
+ *
+ * 이 값이 없으면 "엣지는 붙었는데 클라우드 현황판은 전부 회색"인 상황에서
+ * 원인을 로그로만 찾아야 한다. 사유별로 다음에 뭘 볼지까지 적는다.
+ */
+function heartbeatRelayLabel(relay: HeartbeatRelayStatus | undefined): string {
+  if (!relay) return '정보 없음';
+  if (!relay.enabled) return '꺼짐 — 카메라 상태가 클라우드로 전달되지 않습니다';
+  if (relay.last_error_class === 'auth') {
+    return '실패 (인증) — 시설 ID와 토큰을 확인하세요';
+  }
+  if (relay.last_error_class === 'timeout') {
+    return '실패 (응답 없음) — 서버 주소와 네트워크를 확인하세요';
+  }
+  if (relay.last_error_class === 'unreachable') {
+    return '실패 (연결 불가) — 서버 주소와 네트워크를 확인하세요';
+  }
+  if (!relay.last_success_at) return '전송 기록 없음';
+  return `정상 · 마지막 전송 ${formatLastSyncAt(relay.last_success_at)}`;
+}
 
 function formatLastSyncAt(value: string | null | undefined): string {
   if (!value) return '동기화 이력 없음';
@@ -164,6 +187,12 @@ export function ConnectionSettingsPanel({ resource }: ConnectionSettingsPanelPro
         <dd className="font-mono text-foreground">{view?.facility_token_masked ?? '토큰 없음'}</dd>
         <dt className="text-muted-foreground">마지막 동기화</dt>
         <dd className="tabular-nums text-foreground">{formatLastSyncAt(view?.last_ok_at)}</dd>
+        {/* 백엔드가 이미 내려주던 값인데 화면에 없었다. 카메라 상태가
+            클라우드에 실제로 전달되고 있는지 확인하려면 로그를 봐야 했다. */}
+        <dt className="text-muted-foreground">클라우드 전송</dt>
+        <dd data-testid="heartbeat-relay" className="text-foreground">
+          {heartbeatRelayLabel(view?.heartbeat_relay)}
+        </dd>
       </dl>
 
       {editing ? (

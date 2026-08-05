@@ -41,3 +41,23 @@ def default_dashboard_credentials_store_to_tmp_path(
         classmethod(lambda cls: cls(tmp_path / "catalog.sqlite3")),
     )
     yield
+
+
+@pytest.fixture(autouse=True)
+def default_connection_settings_store_to_tmp_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> Iterator[None]:
+    """``ConnectionSettingsStore``의 기본 경로를 테스트별 tmp로 돌린다.
+
+    기본값은 ``/var/lib/ml-api/connection-settings.sqlite3``라 로컬에서
+    열리지 않는다. 스토어는 실패를 삼키고 빈 값을 돌려주므로 테스트는
+    통과하지만, 매 실행마다 ``connection settings store unreadable`` 경고가
+    찍히고 **연결 설정을 실제로 저장·복원하는 경로가 한 번도 검증되지
+    않는다.** 위의 dashboard credentials 픽스처와 같은 이유다.
+    """
+
+    monkeypatch.setenv(
+        "API_CONNECTION_SETTINGS_PATH",
+        str(tmp_path / "connection-settings.sqlite3"),
+    )
+    yield

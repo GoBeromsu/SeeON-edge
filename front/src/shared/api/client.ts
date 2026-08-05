@@ -123,6 +123,11 @@ function cameraBody(input: CameraInput | CameraPatchInput, extra?: Record<string
   if ('floor' in input && input.floor !== undefined) {
     body.floor = input.floor;
   }
+  // 클라우드 방(space) 매핑. 이게 없으면 카메라가 클라우드 push 대상에서
+  // 통째로 제외돼(roster_sync), 등록은 됐는데 클라우드에는 영영 안 나타난다.
+  if ('space_id' in input && input.space_id !== undefined) {
+    body.space_id = input.space_id;
+  }
   if (extra) {
     Object.assign(body, extra);
   }
@@ -226,8 +231,19 @@ export async function deleteCamera(cameraId: string): Promise<void> {
   await requestJson(`/cameras/${encodeURIComponent(cameraId)}`, { method: 'DELETE' });
 }
 
-export async function testCamera(cameraId: string): Promise<CameraTestResult> {
-  return normalizeCameraTestResult(await requestJson(`/cameras/${encodeURIComponent(cameraId)}/test`, { method: 'POST' }));
+/**
+ * 카메라 연결 테스트.
+ *
+ * `rtspUrl`을 주면 저장된 값이 아니라 그 값을 검사한다. 수정 화면에서
+ * 방금 입력한 URL을 검사해야 오타를 저장 전에 잡을 수 있다.
+ */
+export async function testCamera(cameraId: string, rtspUrl?: string): Promise<CameraTestResult> {
+  return normalizeCameraTestResult(
+    await requestJson(`/cameras/${encodeURIComponent(cameraId)}/test`, {
+      method: 'POST',
+      ...(rtspUrl ? { body: JSON.stringify({ rtsp_url: rtspUrl }) } : {}),
+    }),
+  );
 }
 
 /** Structured 422 body the backend sends when bed-zone recognition finds no bed in the current frame. */

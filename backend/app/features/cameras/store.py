@@ -206,6 +206,10 @@ def public_camera(record: dict[str, object]) -> dict[str, object]:
         "rtsp_url_masked": mask_rtsp_url(str(record.get("rtsp_url", ""))),
         "space_id": _optional_str(record.get("space_id")),
         "backend_camera_id": _optional_str(record.get("backend_camera_id")),
+        # 클라우드 매핑이 아직 안 끝났는지. 기사님이 현장을 떠나기 전에
+        # "이 카메라가 클라우드에 제대로 붙었는가"를 한 화면에서 확인해야
+        # 하는데, 예전에는 이 값이 응답에서 빠져 로컬 상태만 보였다.
+        "mapping_pending": _optional_bool(record.get("mapping_pending")),
         "status": _status(record.get("status")),
         "decode_backend": _optional_str(record.get("decode_backend")),
         "fps": _optional_float(record.get("fps")),

@@ -126,8 +126,8 @@ class TestLoadBaseUrlPrecedence:
 
         settings = _store(tmp_path).load()
 
-        assert settings.events_url == "https://backend.example/v1/events"
-        assert settings.config_url == "https://backend.example/v1/ml-config"
+        assert settings.events_url == "https://backend.example/api/v1/events"
+        assert settings.config_url == "https://backend.example/api/v1/ml-config"
 
     def test_specific_env_var_overrides_base_derivation_per_field(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -139,7 +139,7 @@ class TestLoadBaseUrlPrecedence:
 
         assert settings.events_url == "https://override.example/events"
         # config_url has no specific override set, so it still falls back to base.
-        assert settings.config_url == "https://backend.example/v1/ml-config"
+        assert settings.config_url == "https://backend.example/api/v1/ml-config"
 
     def test_base_url_trailing_slash_is_normalized(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -148,8 +148,8 @@ class TestLoadBaseUrlPrecedence:
 
         settings = _store(tmp_path).load()
 
-        assert settings.events_url == "https://backend.example/v1/events"
-        assert settings.config_url == "https://backend.example/v1/ml-config"
+        assert settings.events_url == "https://backend.example/api/v1/events"
+        assert settings.config_url == "https://backend.example/api/v1/ml-config"
 
     def test_saved_row_still_wins_over_base_url(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -162,7 +162,7 @@ class TestLoadBaseUrlPrecedence:
 
         assert settings.events_url == "https://saved.example/events"
         # config_url was never saved, so it still falls back to the base var.
-        assert settings.config_url == "https://backend.example/v1/ml-config"
+        assert settings.config_url == "https://backend.example/api/v1/ml-config"
 
 
 class TestSavePartialUpdate:
@@ -324,3 +324,91 @@ class TestMasking:
         assert public["config_url"] == "https://backend.example/ml-config"
         assert public["facility_id"] == "facility-42"
         assert public["updated_at"] is not None
+
+
+class TestApiPrefixNormalization:
+    """I9: 호스트 base에서 파생한 URL이 NestJS 전역 prefix를 포함해야 한다.
+
+    실제 heartbeat 경로는 ``/api/v1/events/heartbeat``다. ``/api``가 빠지면
+    404가 나고, 엣지는 그걸 조용한 실패로 넘겨서 카메라가 계속 online으로
+    남는다 -- 프로덕션에서 7대가 이틀 동안 그 상태였다.
+    """
+
+    def test_base_url_gains_api_prefix(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv(API_BACKEND_BASE_URL_ENV, "https://backend.example")
+
+        settings = _store(tmp_path).load()
+
+        assert settings.events_url == "https://backend.example/api/v1/events"
+        assert settings.config_url == "https://backend.example/api/v1/ml-config"
+
+    def test_existing_api_prefix_is_not_duplicated(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv(API_BACKEND_BASE_URL_ENV, "https://backend.example/api")
+
+        settings = _store(tmp_path).load()
+
+        assert settings.events_url == "https://backend.example/api/v1/events"
+        assert "/api/api/" not in (settings.config_url or "")
+
+    def test_trailing_slash_with_api_prefix(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv(API_BACKEND_BASE_URL_ENV, "https://backend.example/api/")
+
+        settings = _store(tmp_path).load()
+
+        assert settings.events_url == "https://backend.example/api/v1/events"
+
+    def test_explicit_urls_are_left_alone(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # 운영자가 직접 지정한 URL에는 손대지 않는다.
+        monkeypatch.setenv(API_BACKEND_BASE_URL_ENV, "https://backend.example")
+        monkeypatch.setenv(API_BACKEND_EVENTS_URL_ENV, "https://custom.example/v1/events")
+
+        settings = _store(tmp_path).load()
+
+        assert settings.events_url == "https://custom.example/v1/events"
+
+    def test_empty_base_stays_none(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv(API_BACKEND_BASE_URL_ENV, "   ")
+
+        settings = _store(tmp_path).load()
+
+        assert settings.events_url is None
+
+
+def test_compose_edge_puts_settings_db_inside_the_persisted_volume() -> None:
+    """연결 설정이 컨테이너 재생성에도 살아남는지 배포 파일에서 고정한다.
+
+    ``DEFAULT_CONNECTION_SETTINGS_PATH``는 ``/var/lib/ml-api/``인데
+    ``compose.edge.yaml``의 ml-api 볼륨은 ``/root/.local/state/ml-api``에
+    마운트된다. 기본값을 그대로 쓰면 sqlite가 볼륨 밖에 생겨,
+    기사님이 대시보드에서 저장한 이벤트 URL/시설 토큰이 컨테이너를
+    다시 만들 때 사라진다. 읽기 실패는 조용히 빈 값으로 떨어지므로
+    (``store.py``의 ``connection settings store unreadable`` 경고)
+    현장에서는 "설정이 왜 초기화됐지"로만 보인다.
+    """
+    compose_path = Path(__file__).resolve().parents[1] / "compose.edge.yaml"
+    compose = compose_path.read_text()
+
+    mount_line = next(
+        line for line in compose.splitlines() if "ml-api-state:" in line and ":/" in line
+    )
+    container_dir = mount_line.split(":", 1)[1].strip()
+
+    setting_line = next(
+        line for line in compose.splitlines() if "API_CONNECTION_SETTINGS_PATH:" in line
+    )
+    settings_path = setting_line.split(":", 1)[1].strip()
+
+    assert settings_path.startswith(f"{container_dir}/"), (
+        f"connection settings db {settings_path!r} must live inside the persisted "
+        f"volume mount {container_dir!r}"
+    )

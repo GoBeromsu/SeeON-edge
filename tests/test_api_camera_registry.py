@@ -594,6 +594,8 @@ def test_example_camera_registry_seed_is_loadable_and_sanitized() -> None:
         "rtsp_url_masked": "rtsp://redacted-camera/trackID=1",
         "space_id": "example-room",
         "backend_camera_id": None,
+        # 기사님이 현장에서 클라우드 연동 여부를 확인해야 하므로 응답에 싣는다.
+        "mapping_pending": False,
         "status": "unknown",
         "decode_backend": None,
         "fps": None,

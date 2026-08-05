@@ -14,6 +14,17 @@ export type Camera = {
    * is this field first, falling back to `floor_name`: `camera.floor ?? camera.floor_name`.
    */
   floor?: string | null;
+  /** 클라우드 방 id. 없으면 roster_sync가 이 카메라를 push 대상에서 제외한다. */
+  space_id?: string | null;
+  /** 클라우드 방 이름(roster에서 옴). 읽기 전용. */
+  space_name?: string | null;
+  /** 클라우드가 발급한 카메라 id. null이면 아직 클라우드에 붙지 않았다. */
+  backend_camera_id?: string | null;
+  /**
+   * 클라우드 매핑이 아직 진행 중인지. 기사님이 현장을 떠나기 전에
+   * "이 카메라가 클라우드에 제대로 붙었는가"를 확인하는 값이다.
+   */
+  mapping_pending?: boolean;
   status: CameraStatus;
   created_at: string | null;
   decode_backend?: DecodeBackend | string | null;
@@ -127,6 +138,12 @@ export type CameraInput = {
   rtsp_url: string;
   /** Initial user-set floor override (issue #85); omit to leave unset (falls back to floor_name). */
   floor?: string;
+  /**
+   * 클라우드 방(space) id. 설치 시 반드시 지정해야 한다 — 없으면
+   * roster_sync가 이 카메라를 클라우드 push 대상에서 제외해, 엣지에는
+   * 등록됐는데 클라우드 현황판에는 영영 나타나지 않는다.
+   */
+  space_id?: string;
 };
 
 /**
