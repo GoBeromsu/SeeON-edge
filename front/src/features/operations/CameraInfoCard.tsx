@@ -1,4 +1,5 @@
 import type { Camera } from '@/shared/api/client';
+import { statusBadgeClassName } from '@/shared/ui/StatusBadge';
 
 /** 파싱 못 하는 값은 시각을 지어내지 않고 그대로 모른다고 말한다. */
 function formatConnectedAt(value: string): string {
@@ -34,11 +35,18 @@ export function CameraInfoCard({ camera, onManageConnection }: CameraInfoCardPro
         <dt className="text-muted-foreground">클라우드 연동</dt>
         <dd data-testid="cloud-mapping" className="text-foreground">
           {camera.mapping_pending === false && camera.backend_camera_id ? (
-            <span className="font-semibold text-emerald-600">연동 완료</span>
-          ) : (
-            <span className="font-semibold text-amber-600">
-              연동 대기 — 방을 지정해야 클라우드로 전송됩니다
+            <span className={statusBadgeClassName('approved')}>
+              <span aria-hidden="true" className="h-1.5 w-1.5 rounded-full bg-current" />
+              연동 완료
             </span>
+          ) : (
+            <div className="flex flex-col items-start gap-1">
+              <span className={statusBadgeClassName('pending')}>
+                <span aria-hidden="true" className="h-1.5 w-1.5 rounded-full bg-current" />
+                연동 대기
+              </span>
+              <span className="text-xs text-muted-foreground">방을 지정하면 전송됩니다.</span>
+            </div>
           )}
         </dd>
         {/* 한 번도 붙은 적 없는 카메라와 붙었다가 끊긴 카메라는 기사에게

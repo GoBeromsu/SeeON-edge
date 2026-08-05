@@ -76,7 +76,7 @@ describe('I10 — 클라우드 연동 상태 표시', () => {
 
     const text = host.querySelector('[data-testid="cloud-mapping"]')?.textContent ?? '';
     expect(text).toContain('연동 대기');
-    expect(text).toContain('방을 지정');
+    expect(text).toContain('방을 지정하면 전송됩니다.');
   });
 
   it('backend_camera_id가 없으면 pending이 false여도 완료로 표시하지 않는다', () => {
