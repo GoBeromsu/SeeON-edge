@@ -66,6 +66,10 @@ export function hasNullableString(record: Record<string, unknown>, key: string):
   return !(key in record) || isNullableString(record[key]);
 }
 
+export function hasNullableInteger(record: Record<string, unknown>, key: string): boolean {
+  return !(key in record) || isNullableInteger(record[key]);
+}
+
 export function isNullableNonNegativeNumber(value: unknown): value is number | null {
   return value === null || (typeof value === 'number' && Number.isFinite(value) && value >= 0);
 }

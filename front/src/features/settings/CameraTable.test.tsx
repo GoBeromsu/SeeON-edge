@@ -63,12 +63,22 @@ describe('CameraTable', () => {
     act(() => root.unmount());
   });
 
-  it('prefers the user-set floor override over the read-only floor_name (issue #85 precedence)', () => {
-    const overriddenCamera: Camera = { ...onlineCamera, id: 'cam-3', floor_name: '1층', floor: '사용자 지정 3층' };
+  it('prefers the user-set floor override over the read-only floor_name (issue #85 precedence), rendering the fixed label at display time (issue #155)', () => {
+    const overriddenCamera: Camera = { ...onlineCamera, id: 'cam-3', floor_name: '1층', floor: 3 };
     const { host, root } = render([overriddenCamera]);
 
     const floorCell = host.querySelector('tbody tr td:nth-child(2)');
-    expect(floorCell?.textContent).toBe('사용자 지정 3층');
+    expect(floorCell?.textContent).toBe('3층');
+
+    act(() => root.unmount());
+  });
+
+  it('renders a basement floor override as B<n>, not a negative number', () => {
+    const basementCamera: Camera = { ...onlineCamera, id: 'cam-4', floor_name: null, floor: -1 };
+    const { host, root } = render([basementCamera]);
+
+    const floorCell = host.querySelector('tbody tr td:nth-child(2)');
+    expect(floorCell?.textContent).toBe('B1');
 
     act(() => root.unmount());
   });

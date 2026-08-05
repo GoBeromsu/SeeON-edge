@@ -1,3 +1,4 @@
+import { floorLabel } from '@/features/settings/floorOptions';
 import { getCameraStatusMeta } from '@/shared/ui/StatusBadge';
 import type { Camera } from '@/shared/api/client';
 
@@ -39,7 +40,11 @@ export function CameraTable({ cameras, onEdit, onRequestDelete }: CameraTablePro
                 <div className="font-medium text-foreground">{camera.label}</div>
                 <div className="font-mono text-xs text-muted-foreground">{camera.rtsp_url_masked}</div>
               </td>
-              <td className="py-3 pr-2 text-foreground">{camera.floor ?? camera.floor_name ?? '미지정'}</td>
+              <td className="py-3 pr-2 text-foreground">
+                {camera.floor !== null && camera.floor !== undefined
+                  ? floorLabel(camera.floor)
+                  : camera.floor_name ?? '미지정'}
+              </td>
               <td className="py-3 pr-2">
                 <span className={statusMeta.className}>
                   <span aria-hidden="true" className="h-1.5 w-1.5 rounded-full bg-current" />

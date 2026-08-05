@@ -9,11 +9,13 @@ export type Camera = {
   /** Space-sync-owned floor name (external roster pull); read-only from the UI. See `floor`. */
   floor_name: string | null;
   /**
-   * User-set floor override (issue #85): editable via the settings UI's floor chips, persisted on
-   * the local registry record so it survives every space-sync re-pull untouched. Display precedence
-   * is this field first, falling back to `floor_name`: `camera.floor ?? camera.floor_name`.
+   * User-set floor override (issue #85; a fixed integer catalog since issue #155 -- B1 = -1 ..
+   * 10층 = 10, see `@/features/settings/floorOptions`), editable via the settings UI's floor
+   * select, persisted on the local registry record so it survives every space-sync re-pull
+   * untouched. Display precedence is this field first, falling back to `floor_name`:
+   * `camera.floor ?? camera.floor_name`.
    */
-  floor?: string | null;
+  floor?: number | null;
   /** 클라우드 방 id. 없으면 roster_sync가 이 카메라를 push 대상에서 제외한다. */
   space_id?: string | null;
   /** 클라우드 방 이름(roster에서 옴). 읽기 전용. */
@@ -138,8 +140,8 @@ export type StatusSnapshot = {
 export type CameraInput = {
   label: string;
   rtsp_url: string;
-  /** Initial user-set floor override (issue #85); omit to leave unset (falls back to floor_name). */
-  floor?: string;
+  /** Initial user-set floor override (issue #85; integer since #155); omit to leave unset (falls back to floor_name). */
+  floor?: number;
   /**
    * 클라우드 방(space) id. 설치 시 반드시 지정해야 한다 — 없으면
    * roster_sync가 이 카메라를 클라우드 push 대상에서 제외해, 엣지에는
@@ -152,12 +154,12 @@ export type CameraInput = {
  * Partial-update body: an omitted field is left untouched; for `floor`, an explicit `null` clears
  * the override back to the space-sync `floor_name` fallback (see cameraBody() in client.ts).
  * `floor` is redeclared here (rather than inherited via `Partial<CameraInput>`) so it can carry
- * `null` -- intersecting `Partial<CameraInput>`'s `floor?: string` with a `null`-inclusive override
- * would otherwise collapse to `string` only, silently losing the "clear" case.
+ * `null` -- intersecting `Partial<CameraInput>`'s `floor?: number` with a `null`-inclusive override
+ * would otherwise collapse to `number` only, silently losing the "clear" case.
  */
 export type CameraPatchInput = Partial<Omit<CameraInput, 'floor'>> & {
   decode_backend?: DecodeBackend;
-  floor?: string | null;
+  floor?: number | null;
 };
 
 export type CameraTestResult = {

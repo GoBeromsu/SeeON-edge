@@ -2,8 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { testCamera, updateCamera, type BedZone, type Camera, type CameraTestResult } from '@/shared/api/client';
 import { AccessibleDialog } from '@/shared/ui/AccessibleDialog';
 import { BedZoneRecognitionPanel } from '@/features/settings/BedZoneRecognitionPanel';
-import { FloorChips } from '@/features/settings/FloorChips';
-import { deriveFloorOptions } from '@/features/settings/floorOptions';
+import { FloorSelect } from '@/features/settings/FloorSelect';
 import { getCameraStatusMeta, statusBadgeClassName } from '@/shared/ui/StatusBadge';
 import { toast } from '@/shared/ui/Toast';
 
@@ -54,16 +53,17 @@ function RefreshIcon(): JSX.Element {
  * 포함되지 않는 두 번째 다이얼로그 때문에 자기 자신이 inert 처리되는 포커스 트랩 버그가 생긴다.
  * 삭제도 같은 이유로 이 모달 안에서 직접 확인창을 띄우지 않고, 부모(CameraSection)의 공용
  * DeleteCameraDialog로 위임한다(onRequestDelete) — 그래야 한 번에 다이얼로그가 하나만 열린다.
- * 층은 이 모달에서 편집 가능한 로컬 override다(issue #85 design handoff). 칩을 건드리지 않고
- * 저장하면 floor 패치 자체를 보내지 않아, 조용히 space-sync floor_name을 고정 override로
- * 바꿔버리는 부작용을 피한다 — 자세한 내용은 handleSave의 floor 비교 로직 참고.
+ * 층은 이 모달에서 편집 가능한 로컬 override다(issue #85 design handoff; 고정 목록 B1~10층의
+ * 정수, issue #155). 드롭다운을 건드리지 않고 저장하면 floor 패치 자체를 보내지 않아, 조용히
+ * space-sync floor_name을 고정 override로 바꿔버리는 부작용을 피한다 — 자세한 내용은 handleSave의
+ * floor 비교 로직 참고. 드롭다운의 "클라우드 값 사용" 옵션을 고르면 null을 보내 override를 지우고
+ * floor_name로 되돌린다.
  */
-export function CameraEditModal({ camera, cameras, onClose, onUpdated, onRequestDelete }: CameraEditModalProps): JSX.Element | null {
+export function CameraEditModal({ camera, onClose, onUpdated, onRequestDelete }: CameraEditModalProps): JSX.Element | null {
   const [label, setLabel] = useState('');
   const [rtspUrl, setRtspUrl] = useState('');
-  const [floor, setFloor] = useState<string | null>(null);
-  const [initialFloor, setInitialFloor] = useState<string | null>(null);
-  const [extraFloors, setExtraFloors] = useState<string[]>([]);
+  const [floor, setFloor] = useState<number | null>(null);
+  const [initialFloor, setInitialFloor] = useState<number | null>(null);
   const [bedZone, setBedZone] = useState<BedZone | null>(null);
   const [mode, setMode] = useState<'view' | 'reseg'>('view');
   const [busy, setBusy] = useState<'save' | 'test' | null>(null);
@@ -76,8 +76,6 @@ export function CameraEditModal({ camera, cameras, onClose, onUpdated, onRequest
   const [testResult, setTestResult] = useState<CameraTestResult | null>(null);
   const busyRef = useRef(false);
   const openCameraIdRef = useRef<string | null>(null);
-
-  const floorOptions = deriveFloorOptions(cameras, extraFloors);
 
   // Reset the form only when the targeted camera's identity changes (opening the modal for a
   // camera, or switching to a different one) — not on every re-render caused by the operations
@@ -92,10 +90,12 @@ export function CameraEditModal({ camera, cameras, onClose, onUpdated, onRequest
     openCameraIdRef.current = camera.id;
     setLabel(camera.label);
     setRtspUrl('');
-    const effectiveFloor = camera.floor ?? camera.floor_name ?? null;
+    // floor_name(공간 동기화가 채우는 표시용 문자열)과 섞지 않는다 -- 로컬
+    // override가 없으면 null로 두고, 드롭다운은 unsetLabel로 floor_name을
+    // 대체 표시만 한다(FloorSelect 참고).
+    const effectiveFloor = camera.floor ?? null;
     setFloor(effectiveFloor);
     setInitialFloor(effectiveFloor);
-    setExtraFloors([]);
     setBedZone(camera.bed_zone ?? null);
     setMode('view');
     setSaveError(null);
@@ -142,7 +142,7 @@ export function CameraEditModal({ camera, cameras, onClose, onUpdated, onRequest
     setBusy('save');
     setSaveError(null);
     try {
-      const patch: { label?: string; rtsp_url?: string; floor?: string | null } = {};
+      const patch: { label?: string; rtsp_url?: string; floor?: number | null } = {};
       if (label.trim() !== camera.label) patch.label = label.trim();
       const draft = rtspUrl.trim();
       if (draft) {
@@ -157,8 +157,9 @@ export function CameraEditModal({ camera, cameras, onClose, onUpdated, onRequest
         patch.rtsp_url = draft;
       }
       // Only send floor when the user actually changed the selection (issue #85): saving without
-      // touching the chips must not silently freeze the current space-sync floor_name as a local
-      // override -- see FloorChips' doc comment and the floor precedence contract on Camera.floor.
+      // touching the dropdown must not silently freeze the current space-sync floor_name as a
+      // local override -- see FloorSelect's doc comment and the floor precedence contract on
+      // Camera.floor.
       if (floor !== initialFloor) patch.floor = floor;
       await updateCamera(camera.id, patch);
       onUpdated();
@@ -222,18 +223,15 @@ export function CameraEditModal({ camera, cameras, onClose, onUpdated, onRequest
               onChange={(event) => setLabel(event.target.value)}
             />
           </label>
-          <div>
-            <span className="text-sm font-medium">층</span>
-            <FloorChips
-              options={floorOptions}
-              selected={floor}
-              onSelect={setFloor}
-              onAddFloor={(newFloor) => {
-                setExtraFloors((prev) => (prev.includes(newFloor) ? prev : [...prev, newFloor]));
-                setFloor(newFloor);
-              }}
+          <label>
+            층
+            <FloorSelect
+              value={floor}
+              onChange={setFloor}
+              unsetLabel={camera.floor_name ?? null}
+              disabled={busyFlag}
             />
-          </div>
+          </label>
           <label>
             RTSP 주소
             <input

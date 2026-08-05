@@ -1,23 +1,22 @@
-import type { Camera } from '@/shared/api/client';
-
 /**
- * Derives the selectable floor chip set for the camera add/edit modals (issue #85).
- *
- * There is no backend floor catalog -- the set is fully client-derived from the camera list's
- * effective floor (`camera.floor ?? camera.floor_name`, same precedence as elsewhere) plus any
- * `extra` values (session-local "+ 층 추가" additions, or the currently-selected floor for a
- * camera being edited, so its own chip always renders even if it doesn't overlap with another
- * camera's floor). Sorted with numeric-aware Korean collation so "2층" sorts before "10층".
+ * Fixed floor catalog (issue #155): B1 through 10층, encoded as an integer (basement negative,
+ * e.g. B1 = -1) instead of a free-text chip label. Previously the floor selector let facilities
+ * type in anything ('2층', '2', 'B1', '2 층' all became different values), which broke sorting
+ * (string sort puts '10층' before '2층') and made per-floor aggregation unreliable. The display
+ * string is generated at render time from the integer (`floorLabel`) rather than persisted, so
+ * relabeling never requires a data migration. Mirrors the backend's
+ * backend/app/features/cameras/store.py (FLOOR_VALUES/floor_label/is_valid_floor).
  */
-export function deriveFloorOptions(cameras: Camera[], extra: readonly string[] = []): string[] {
-  const values = new Set<string>();
-  for (const camera of cameras) {
-    const floor = camera.floor ?? camera.floor_name;
-    if (floor) values.add(floor);
-  }
-  for (const value of extra) {
-    const trimmed = value.trim();
-    if (trimmed) values.add(trimmed);
-  }
-  return Array.from(values).sort((a, b) => a.localeCompare(b, 'ko', { numeric: true }));
+export const FLOOR_MIN = -1;
+export const FLOOR_MAX = 10;
+export const DEFAULT_FLOOR = 1;
+
+export const FLOOR_VALUES: readonly number[] = [FLOOR_MIN, ...Array.from({ length: FLOOR_MAX }, (_, index) => index + 1)];
+
+export function floorLabel(value: number): string {
+  return value < 0 ? `B${-value}` : `${value}층`;
+}
+
+export function isValidFloor(value: number): boolean {
+  return FLOOR_VALUES.includes(value);
 }

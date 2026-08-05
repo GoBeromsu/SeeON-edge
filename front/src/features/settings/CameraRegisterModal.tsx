@@ -8,8 +8,8 @@ import {
 } from '@/shared/api/client';
 import { AccessibleDialog } from '@/shared/ui/AccessibleDialog';
 import { BedZoneRecognitionPanel } from '@/features/settings/BedZoneRecognitionPanel';
-import { FloorChips } from '@/features/settings/FloorChips';
-import { deriveFloorOptions } from '@/features/settings/floorOptions';
+import { FloorSelect } from '@/features/settings/FloorSelect';
+import { DEFAULT_FLOOR } from '@/features/settings/floorOptions';
 import { toast } from '@/shared/ui/Toast';
 
 type CameraRegisterModalProps = {
@@ -30,14 +30,14 @@ const PROBE_FAILURE_MESSAGE: Record<string, string> = {
  * 정보를 입력하면 그 자리에서 POST /cameras가 프로브 후 저장까지 수행하므로(별도 프로브 엔드포인트
  * 없음), 2단계는 이미 생성된 카메라에 대해 침대 영역을 인식하는 단계다. 층은 사용자가 이 모달에서
  * 선택하는 로컬 override(`floor`)이며, 외부 space-sync가 채우는 읽기 전용 `floor_name`과는 별개다
- * (issue #85; 정밀 계약은 CameraResponse.floor 문서 주석 참고).
+ * (issue #85; 정밀 계약은 CameraResponse.floor 문서 주석 참고). 고정 목록(B1~10층)에서 고르는
+ * 정수이고 기본값은 1층이다(issue #155).
  */
 export function CameraRegisterModal({ open, cameras, onClose, onCreated }: CameraRegisterModalProps): JSX.Element {
   const [step, setStep] = useState<1 | 2>(1);
   const [label, setLabel] = useState('');
   const [rtspUrl, setRtspUrl] = useState('');
-  const [floor, setFloor] = useState<string | null>(null);
-  const [extraFloors, setExtraFloors] = useState<string[]>([]);
+  const [floor, setFloor] = useState<number>(DEFAULT_FLOOR);
   // 클라우드 방 선택. 미지정으로 저장하면 roster_sync가 이 카메라를 push
   // 대상에서 제외해, 엣지에는 보이는데 클라우드에는 영영 안 나타난다.
   const [spaceId, setSpaceId] = useState<string>('');
@@ -76,15 +76,12 @@ export function CameraRegisterModal({ open, cameras, onClose, onCreated }: Camer
   const busyRef = useRef(false);
   const wasOpen = useRef(open);
 
-  const floorOptions = deriveFloorOptions(cameras, extraFloors);
-
   useEffect(() => {
     if (open && !wasOpen.current) {
       setStep(1);
       setLabel('');
       setRtspUrl('');
-      setFloor(null);
-      setExtraFloors([]);
+      setFloor(DEFAULT_FLOOR);
       setErrorMessage(null);
       setDuplicateLabel(null);
       setCamera(null);
@@ -127,7 +124,7 @@ export function CameraRegisterModal({ open, cameras, onClose, onCreated }: Camer
         {
           label,
           rtsp_url: rtspUrl,
-          floor: floor ?? undefined,
+          floor,
           space_id: spaceId || undefined,
         },
         { forceRegister: force },
@@ -196,18 +193,14 @@ export function CameraRegisterModal({ open, cameras, onClose, onCreated }: Camer
               placeholder="예: 101호"
             />
           </label>
-          <div>
-            <span className="text-sm font-medium">층</span>
-            <FloorChips
-              options={floorOptions}
-              selected={floor}
-              onSelect={setFloor}
-              onAddFloor={(newFloor) => {
-                setExtraFloors((prev) => (prev.includes(newFloor) ? prev : [...prev, newFloor]));
-                setFloor(newFloor);
-              }}
+          <label>
+            층
+            <FloorSelect
+              value={floor}
+              onChange={(next) => setFloor(next ?? DEFAULT_FLOOR)}
+              disabled={busy || camera !== null}
             />
-          </div>
+          </label>
           <label>
             RTSP 주소
             <input

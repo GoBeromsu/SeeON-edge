@@ -31,6 +31,7 @@ from backend.app.features.cameras.store import (
     DuplicateCameraError,
     ProbeErrorClass,
     ProbeResult,
+    is_valid_floor,
     public_camera,
     status_from_probe,
     utc_now_iso,
@@ -84,13 +85,15 @@ class CameraResponse(BaseModel):
     # Space-sync-owned floor name (external roster pull, read-only from here --
     # see _public_snapshot). None for a camera with no backend space mapping.
     floor_name: str | None = None
-    # User-set floor override (issue #85 design handoff: floor chip editing).
-    # Persisted on the local registry record, so it survives every space-sync
-    # roster re-sync untouched (that merge only ever assigns space_name/
-    # floor_name -- see CameraRegistryStore.public_camera). Display precedence
-    # is user-set floor first, falling back to the space-sync floor_name:
+    # User-set floor override (issue #85 design handoff: floor selector; a
+    # fixed integer catalog since issue #155 -- B1 = -1 .. 10층 = 10, see
+    # store.py's FLOOR_VALUES/floor_label). Persisted on the local registry
+    # record, so it survives every space-sync roster re-sync untouched (that
+    # merge only ever assigns space_name/floor_name -- see
+    # CameraRegistryStore.public_camera). Display precedence is user-set
+    # floor first, falling back to the space-sync floor_name:
     # `camera.floor ?? camera.floor_name`.
-    floor: str | None = None
+    floor: int | None = None
     # Roster-sync state (story G004): populated only by GET /cameras (see
     # _public_snapshot); create/update/delete/test responses leave this None
     # rather than racing the fire-and-forget background sync they trigger.
@@ -125,7 +128,7 @@ class CreateCameraRequest(BaseModel):
     space_id: str | None = None
     decode_backend: str | None = None
     fps: float | None = None
-    floor: str | None = None
+    floor: int | None = None
     # 더 이상 아무것도 하지 않는다. 등록이 probe 통과를 요구하던 시절, 그
     # 게이트를 건너뛰는 탈출구였다 (`create_camera` 참고). 지금은 등록이
     # 항상 저장하므로 값과 무관하게 결과가 같다. 기존 클라이언트가 계속
@@ -142,7 +145,7 @@ class UpdateCameraRequest(BaseModel):
     space_id: str | None = None
     decode_backend: str | None = None
     fps: float | None = None
-    floor: str | None = None
+    floor: int | None = None
 
 
 class TestCameraRequest(BaseModel):
@@ -968,19 +971,23 @@ def _default_frame_stride() -> int | None:
     return value if value > 0 else None
 
 
-def _normalize_floor(value: str | None) -> str | None:
-    """Validate a user-set floor override (issue #85).
+def _normalize_floor(value: object) -> int | None:
+    """Validate a user-set floor override (issue #155).
 
-    Free-text (not an enum like decode_backend) since floor labels are
-    facility-defined ("1층", "지하 1층", ...), not a fixed backend vocabulary.
-    None passes through untouched (not set). An explicit blank/whitespace-only
-    string normalizes to None (clear the override, fall back to floor_name)
-    rather than persisting a visually-empty chip.
+    Fixed catalog (not free-text like it was pre-#155): B1 through 10층,
+    encoded as an integer (basement negative, e.g. B1 = -1) so display
+    strings never drift and floors sort numerically instead of
+    lexicographically. None passes through untouched (not set / clear an
+    existing override, falling back to the space-sync floor_name). Anything
+    else is a 400, matching _normalize_decode_backend's shape -- unlike
+    parse_legacy_floor (used only for self-healing pre-#155 stored data),
+    a fresh write is never silently coerced to a default.
     """
     if value is None:
         return None
-    stripped = value.strip()
-    return stripped or None
+    if isinstance(value, bool) or not isinstance(value, int) or not is_valid_floor(value):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="invalid floor")
+    return value
 
 
 DECODE_BACKENDS = {"auto", "nvdec", "opencv", "cpu"}

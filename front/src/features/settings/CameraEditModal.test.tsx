@@ -65,6 +65,16 @@ function setInput(name: string, value: string): void {
   });
 }
 
+function setSelect(name: string, value: string): void {
+  const select = document.querySelector(`select[name="${name}"]`);
+  if (!(select instanceof HTMLSelectElement)) throw new Error(`missing select ${name}`);
+  act(() => {
+    const setter = Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype, 'value')?.set;
+    setter?.call(select, value);
+    select.dispatchEvent(new Event('change', { bubbles: true }));
+  });
+}
+
 beforeEach(() => {
   vi.mocked(testCamera).mockReset();
   vi.mocked(updateCamera).mockReset();
@@ -82,52 +92,47 @@ describe('CameraEditModal', () => {
     expect(document.querySelector('[role="dialog"]')).toBeNull();
   });
 
-  it('pre-fills the name, shows the current floor as a selected chip, and the 인식 필요 bed-zone badge', () => {
+  it('pre-fills the name, shows the cloud floor_name as the fallback select option, and the 인식 필요 bed-zone badge', () => {
     render(camera);
     expect((document.querySelector('input[name="label"]') as HTMLInputElement).value).toBe('101호');
-    expect(findButton('1층').getAttribute('aria-pressed')).toBe('true');
+    const select = document.querySelector('select[name="floor"]') as HTMLSelectElement;
+    // No local override yet -- the select shows the "use the cloud value" option, not a fixed floor.
+    expect(select.value).toBe('');
+    expect(select.selectedOptions[0]?.textContent).toContain('1층');
     expect(document.body.textContent).toContain('인식 필요');
   });
 
-  it('selects a different floor chip and includes the new floor in the patch', async () => {
-    vi.mocked(updateCamera).mockResolvedValue(camera);
-    render(camera, undefined, undefined, undefined, [camera, { ...camera, id: 'cam-2', floor_name: '2층' }]);
-
-    await act(async () => findButton('2층').click());
-    await act(async () => findButton('저장').click());
-
-    expect(updateCamera).toHaveBeenCalledWith('cam-1', { floor: '2층' });
-  });
-
-  it('deselects the active floor chip and sends floor: null to clear the override', async () => {
+  it('selects a different floor and sends the integer in the patch (issue #155)', async () => {
     vi.mocked(updateCamera).mockResolvedValue(camera);
     render(camera);
 
-    await act(async () => findButton('1층').click());
+    setSelect('floor', '2');
+    await act(async () => findButton('저장').click());
+
+    expect(updateCamera).toHaveBeenCalledWith('cam-1', { floor: 2 });
+  });
+
+  it('선택한 층이 지하면 음수로 patch에 포함시킨다', async () => {
+    vi.mocked(updateCamera).mockResolvedValue(camera);
+    render(camera);
+
+    setSelect('floor', '-1');
+    await act(async () => findButton('저장').click());
+
+    expect(updateCamera).toHaveBeenCalledWith('cam-1', { floor: -1 });
+  });
+
+  it('returns the select to "클라우드 값 사용" and sends floor: null to clear an existing override', async () => {
+    vi.mocked(updateCamera).mockResolvedValue(camera);
+    render({ ...camera, floor: 3 });
+
+    setSelect('floor', '');
     await act(async () => findButton('저장').click());
 
     expect(updateCamera).toHaveBeenCalledWith('cam-1', { floor: null });
   });
 
-  it('adds a new floor via "+ 층 추가" and includes it in the patch', async () => {
-    vi.mocked(updateCamera).mockResolvedValue(camera);
-    render(camera);
-
-    act(() => findButton('+ 층 추가').click());
-    const floorInput = document.querySelector('input[aria-label="새 층 이름"]') as HTMLInputElement;
-    act(() => {
-      const valueSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
-      valueSetter?.call(floorInput, '3층');
-      floorInput.dispatchEvent(new Event('input', { bubbles: true }));
-    });
-    act(() => floorInput.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })));
-
-    await act(async () => findButton('저장').click());
-
-    expect(updateCamera).toHaveBeenCalledWith('cam-1', { floor: '3층' });
-  });
-
-  it('omits floor from the patch when the chips are left untouched, avoiding an accidental override', async () => {
+  it('omits floor from the patch when the select is left untouched, avoiding an accidental override', async () => {
     vi.mocked(updateCamera).mockResolvedValue({ ...camera, label: '새 이름' });
     render(camera);
     setInput('label', '새 이름');

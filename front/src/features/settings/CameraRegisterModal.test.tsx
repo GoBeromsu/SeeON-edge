@@ -53,6 +53,16 @@ function findButton(label: string): HTMLButtonElement {
   return button;
 }
 
+function setSelect(name: string, value: string): void {
+  const select = document.querySelector(`select[name="${name}"]`);
+  if (!(select instanceof HTMLSelectElement)) throw new Error(`missing select ${name}`);
+  act(() => {
+    const setter = Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype, 'value')?.set;
+    setter?.call(select, value);
+    select.dispatchEvent(new Event('change', { bubbles: true }));
+  });
+}
+
 beforeEach(() => {
   vi.mocked(createCamera).mockReset();
   vi.mocked(recognizeBedZone).mockReset();
@@ -83,7 +93,7 @@ describe('CameraRegisterModal', () => {
 
     await act(async () => findButton('다음').click());
 
-    expect(createCamera).toHaveBeenCalledWith({ label: '101호', rtsp_url: 'rtsp://cam/1' }, { forceRegister: false });
+    expect(createCamera).toHaveBeenCalledWith({ label: '101호', rtsp_url: 'rtsp://cam/1', floor: 1 }, { forceRegister: false });
     expect(document.body.textContent).toContain('침대 영역 인식이 필요합니다.');
   });
 
@@ -129,7 +139,7 @@ describe('CameraRegisterModal', () => {
 
     await act(async () => findButton('그래도 등록').click());
 
-    expect(createCamera).toHaveBeenLastCalledWith({ label: '101호', rtsp_url: 'rtsp://cam/1' }, { forceRegister: true });
+    expect(createCamera).toHaveBeenLastCalledWith({ label: '101호', rtsp_url: 'rtsp://cam/1', floor: 1 }, { forceRegister: true });
     expect(document.body.textContent).toContain('침대 영역 인식이 필요합니다.');
   });
 
@@ -154,40 +164,47 @@ describe('CameraRegisterModal', () => {
     expect(onCreated).toHaveBeenCalled();
   });
 
-  it('includes a selected floor chip in the create-camera call', async () => {
+  it('층 드롭다운의 기본값은 1층이고, 건드리지 않으면 정수 1을 등록 요청에 포함시킨다 (issue #155)', async () => {
     vi.mocked(createCamera).mockResolvedValue(createdCamera);
-    render(true, undefined, undefined, [{ ...createdCamera, id: 'cam-existing', floor_name: '2층' }]);
+    render();
+    expect((document.querySelector('select[name="floor"]') as HTMLSelectElement).value).toBe('1');
     setInput('label', '101호');
     setInput('rtsp_url', 'rtsp://cam/1');
 
-    await act(async () => findButton('2층').click());
     await act(async () => findButton('다음').click());
 
     expect(createCamera).toHaveBeenCalledWith(
-      { label: '101호', rtsp_url: 'rtsp://cam/1', floor: '2층' },
+      { label: '101호', rtsp_url: 'rtsp://cam/1', floor: 1 },
       { forceRegister: false },
     );
   });
 
-  it('adds a new floor via "+ 층 추가" and includes it in the create-camera call', async () => {
+  it('선택한 층을 정수로 등록 요청에 포함시킨다', async () => {
     vi.mocked(createCamera).mockResolvedValue(createdCamera);
     render();
     setInput('label', '101호');
     setInput('rtsp_url', 'rtsp://cam/1');
-
-    act(() => findButton('+ 층 추가').click());
-    const floorInput = document.querySelector('input[aria-label="새 층 이름"]') as HTMLInputElement;
-    act(() => {
-      const valueSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
-      valueSetter?.call(floorInput, '3층');
-      floorInput.dispatchEvent(new Event('input', { bubbles: true }));
-    });
-    act(() => floorInput.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })));
+    setSelect('floor', '2');
 
     await act(async () => findButton('다음').click());
 
     expect(createCamera).toHaveBeenCalledWith(
-      { label: '101호', rtsp_url: 'rtsp://cam/1', floor: '3층' },
+      { label: '101호', rtsp_url: 'rtsp://cam/1', floor: 2 },
+      { forceRegister: false },
+    );
+  });
+
+  it('지하층을 선택하면 음수로 보낸다', async () => {
+    vi.mocked(createCamera).mockResolvedValue(createdCamera);
+    render();
+    setInput('label', '101호');
+    setInput('rtsp_url', 'rtsp://cam/1');
+    setSelect('floor', '-1');
+
+    await act(async () => findButton('다음').click());
+
+    expect(createCamera).toHaveBeenCalledWith(
+      { label: '101호', rtsp_url: 'rtsp://cam/1', floor: -1 },
       { forceRegister: false },
     );
   });
@@ -223,16 +240,6 @@ describe('I7 — 클라우드 방(space) 선택', () => {
     created_at: null,
   };
 
-  function setSelect(name: string, value: string): void {
-    const select = document.querySelector(`select[name="${name}"]`);
-    if (!(select instanceof HTMLSelectElement)) throw new Error(`missing select ${name}`);
-    act(() => {
-      const setter = Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype, 'value')?.set;
-      setter?.call(select, value);
-      select.dispatchEvent(new Event('change', { bubbles: true }));
-    });
-  }
-
   it('빈 방이 있으면 선택 UI를 보여준다', () => {
     render(true, vi.fn(), vi.fn(), [rosterSpace]);
 
@@ -263,7 +270,7 @@ describe('I7 — 클라우드 방(space) 선택', () => {
     await act(async () => findButton('다음').click());
 
     expect(createCamera).toHaveBeenCalledWith(
-      { label: '205호', rtsp_url: 'rtsp://cam/1', space_id: 'sp_205' },
+      { label: '205호', rtsp_url: 'rtsp://cam/1', floor: 1, space_id: 'sp_205' },
       { forceRegister: false },
     );
   });
@@ -290,7 +297,7 @@ describe('I7 — 클라우드 방(space) 선택', () => {
     await act(async () => findButton('다음').click());
 
     expect(createCamera).toHaveBeenCalledWith(
-      { label: '101호', rtsp_url: 'rtsp://cam/1' },
+      { label: '101호', rtsp_url: 'rtsp://cam/1', floor: 1 },
       { forceRegister: false },
     );
   });

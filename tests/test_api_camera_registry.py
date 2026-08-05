@@ -1087,13 +1087,40 @@ def test_create_camera_sets_floor(tmp_path, monkeypatch: pytest.MonkeyPatch) -> 
             json={
                 "label": "Lobby",
                 "rtsp_url": "rtsp://camera.local/live",
-                "floor": "2층",
+                "floor": 2,
                 "force_register": True,
             },
         )
 
     assert created.status_code == 201
-    assert created.json()["floor"] == "2층"
+    assert created.json()["floor"] == 2
+
+
+def test_create_camera_rejects_a_floor_outside_the_fixed_catalog(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def fake_urlopen(request, timeout: float) -> FakeHTTPResponse:
+        return FakeHTTPResponse({"ok": False, "error_class": "timeout"})
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    app = create_app(lifespan=no_lifespan)
+    app.state.edge_relay_token = "relay-token"
+    app.state.camera_registry = CameraRegistryStore(tmp_path / "catalog.sqlite3")
+
+    with TestClient(app) as client:
+        _login(client)
+        rejected = client.post(
+            "/api/v1/cameras",
+            headers=AUTH,
+            json={
+                "label": "Lobby",
+                "rtsp_url": "rtsp://camera.local/live",
+                "floor": 99,
+                "force_register": True,
+            },
+        )
+
+    assert rejected.status_code == 400
 
 
 def test_patch_camera_sets_floor(tmp_path) -> None:
@@ -1113,12 +1140,12 @@ def test_patch_camera_sets_floor(tmp_path) -> None:
         patched = client.patch(
             "/api/v1/cameras/camera-1",
             headers=AUTH,
-            json={"floor": "3층"},
+            json={"floor": 3},
         )
 
     assert patched.status_code == 200
-    assert patched.json()["floor"] == "3층"
-    assert store.get("camera-1")["floor"] == "3층"
+    assert patched.json()["floor"] == 3
+    assert store.get("camera-1")["floor"] == 3
 
 
 def test_patch_camera_clears_floor_with_explicit_null(tmp_path) -> None:
@@ -1131,7 +1158,7 @@ def test_patch_camera_clears_floor_with_explicit_null(tmp_path) -> None:
         rtsp_url="rtsp://camera/stream",
         space_id="space-1",
         status="online",
-        floor="3층",
+        floor=3,
     )
 
     with TestClient(app) as client:
@@ -1147,7 +1174,7 @@ def test_patch_camera_clears_floor_with_explicit_null(tmp_path) -> None:
     assert store.get("camera-1")["floor"] is None
 
 
-def test_patch_camera_normalizes_whitespace_only_floor_to_null(tmp_path) -> None:
+def test_patch_camera_rejects_a_floor_outside_the_fixed_catalog(tmp_path) -> None:
     app = create_app(lifespan=no_lifespan)
     app.state.edge_relay_token = "relay-token"
     store = app.state.camera_registry = CameraRegistryStore(tmp_path / "catalog.sqlite3")
@@ -1157,7 +1184,7 @@ def test_patch_camera_normalizes_whitespace_only_floor_to_null(tmp_path) -> None
         rtsp_url="rtsp://camera/stream",
         space_id="space-1",
         status="online",
-        floor="3층",
+        floor=3,
     )
 
     with TestClient(app) as client:
@@ -1165,12 +1192,12 @@ def test_patch_camera_normalizes_whitespace_only_floor_to_null(tmp_path) -> None
         patched = client.patch(
             "/api/v1/cameras/camera-1",
             headers=AUTH,
-            json={"floor": "   "},
+            json={"floor": 0},
         )
 
-    assert patched.status_code == 200
-    assert patched.json()["floor"] is None
-    assert store.get("camera-1")["floor"] is None
+    assert patched.status_code == 400
+    # Rejected write must not clobber the previously-stored valid floor.
+    assert store.get("camera-1")["floor"] == 3
 
 
 def test_list_cameras_user_set_floor_survives_roster_sync(tmp_path) -> None:
@@ -1189,7 +1216,7 @@ def test_list_cameras_user_set_floor_survives_roster_sync(tmp_path) -> None:
         space_id="space-101",
         status="online",
         backend_camera_id="backend-1",
-        floor="사용자 지정 3층",
+        floor=3,
     )
     app.state.pulled_config = PulledWorkerConfig(
         config_version=9,
@@ -1218,7 +1245,7 @@ def test_list_cameras_user_set_floor_survives_roster_sync(tmp_path) -> None:
     # The roster sync's floor_name lands as usual...
     assert camera["floor_name"] == "1층"
     # ...but the locally user-set floor is untouched by it.
-    assert camera["floor"] == "사용자 지정 3층"
+    assert camera["floor"] == 3
 
 
 def test_list_cameras_includes_backend_only_roster_camera(tmp_path) -> None:

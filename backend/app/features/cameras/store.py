@@ -15,6 +15,8 @@ responsibility).
 from __future__ import annotations
 
 import json
+import logging
+import re
 import sqlite3
 import uuid
 from dataclasses import dataclass
@@ -30,10 +32,88 @@ from backend.app.shared.state_dir import resolve_state_dir
 CameraStatus = Literal["online", "offline", "starting", "unknown"]
 ProbeErrorClass = Literal["timeout", "decode", "auth"]
 
+logger = logging.getLogger(__name__)
+
 _CREATE_CAMERA_REGISTRY_TABLE = (
     "CREATE TABLE IF NOT EXISTS camera_registry (id INTEGER PRIMARY KEY CHECK (id = 1), "
     "registry_version INTEGER NOT NULL, cameras_json TEXT NOT NULL) STRICT"
 )
+
+# Fixed floor catalog (issue #155): B1 through 10층, encoded as an integer
+# (basement negative) instead of a free-text chip label. Display strings are
+# generated at render time from this integer -- see floor_label() -- rather
+# than persisted, so "2층"/"2"/"B1"/"2 층" style drift is structurally
+# impossible for anything written from here on.
+FLOOR_MIN = -1
+FLOOR_MAX = 10
+DEFAULT_FLOOR = 1
+FLOOR_VALUES: tuple[int, ...] = (FLOOR_MIN, *range(1, FLOOR_MAX + 1))
+
+_FLOOR_BASEMENT_RE = re.compile(r"^B\s*(\d+)$", re.IGNORECASE)
+_FLOOR_LEVEL_RE = re.compile(r"^(-?\d+)\s*층$")
+_FLOOR_PLAIN_INT_RE = re.compile(r"^-?\d+$")
+
+
+def is_valid_floor(value: int) -> bool:
+    return value in FLOOR_VALUES
+
+
+def floor_label(value: int) -> str:
+    """Render-time display string for a canonical floor integer (issue #155).
+
+    The integer is the only thing persisted; this is deliberately not stored
+    anywhere, so relabeling never requires a data migration.
+    """
+    return f"B{-value}" if value < 0 else f"{value}층"
+
+
+def parse_legacy_floor(value: object, *, camera_id: str | None = None) -> int | None:
+    """Coerce a possibly pre-#155 floor value into the canonical integer.
+
+    Pre-#155 records store floor as a free-text chip label the facility
+    typed in by hand ('2층', '2', 'B1', '2 층', ...), which never round-trips
+    reliably: string sort puts '10층' before '2층', and the same floor could
+    be spelled four different ways. ``None`` means "not set" and passes
+    through untouched (falls back to the space-sync ``floor_name``).
+    Anything else that can't be parsed -- or parses to a value outside the
+    fixed B1..10층 catalog -- is never silently dropped (dropping it would
+    read as "the override was cleared"); it defaults to ``DEFAULT_FLOOR``
+    and is logged, so a stray legacy value doesn't 500 every request from
+    here on.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, bool) and isinstance(value, int):
+        if is_valid_floor(value):
+            return value
+        return _floor_parse_failed(value, camera_id)
+    if isinstance(value, str):
+        text = value.strip()
+        basement = _FLOOR_BASEMENT_RE.match(text)
+        if basement is not None:
+            candidate = -int(basement.group(1))
+        else:
+            level = _FLOOR_LEVEL_RE.match(text)
+            if level is not None:
+                candidate = int(level.group(1))
+            elif _FLOOR_PLAIN_INT_RE.match(text):
+                candidate = int(text)
+            else:
+                return _floor_parse_failed(value, camera_id)
+        if is_valid_floor(candidate):
+            return candidate
+        return _floor_parse_failed(value, camera_id)
+    return _floor_parse_failed(value, camera_id)
+
+
+def _floor_parse_failed(value: object, camera_id: str | None) -> int:
+    logger.warning(
+        "camera floor value could not be parsed, defaulting to %s (camera_id=%s, value=%r)",
+        DEFAULT_FLOOR,
+        camera_id,
+        value,
+    )
+    return DEFAULT_FLOOR
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,7 +165,7 @@ class CameraRegistryStore:
         mapping_pending: bool = False,
         decode_backend: str | None = None,
         fps: float | None = None,
-        floor: str | None = None,
+        floor: int | None = None,
         last_probed_at: str | None = None,
         last_ok_at: str | None = None,
         never_connected: bool = True,
@@ -159,6 +239,34 @@ class CameraRegistryStore:
                     return dict(record)
             return None
 
+    def migrate_legacy_string_floors(self) -> list[dict[str, object]]:
+        """One-time data migration (issue #155): rewrite any pre-existing
+        string floor values ('2층', 'B1', ...) to the canonical integer
+        in-place, so the persisted JSON itself is clean rather than relying
+        on read-time normalization (``public_camera``'s ``parse_legacy_floor``
+        call) forever. Safe to run more than once -- a floor that is already
+        an int (or unset) is left untouched. Returns the list of changes
+        made, for the caller (see scripts/migrate_camera_floor_to_int.py) to
+        log/print; callers are responsible for backing up the database file
+        before calling this.
+        """
+        changes: list[dict[str, object]] = []
+        with self._lock:
+            data = self._read_unlocked()
+            changed = False
+            for record in data["cameras"]:
+                old = record.get("floor")
+                if old is None or (isinstance(old, int) and not isinstance(old, bool)):
+                    continue
+                new = parse_legacy_floor(old, camera_id=_optional_str(record.get("id")))
+                record["floor"] = new
+                changed = True
+                changes.append({"camera_id": record.get("id"), "old": old, "new": new})
+            if changed:
+                data["registry_version"] += 1
+                self._write_unlocked(data)
+        return changes
+
     def _connect(self) -> sqlite3.Connection:
         if self._connection is None:
             # RTSP credentials are stored in the registry by design; API
@@ -219,14 +327,16 @@ def public_camera(record: dict[str, object]) -> dict[str, object]:
         "status": _status(record.get("status")),
         "decode_backend": _optional_str(record.get("decode_backend")),
         "fps": _optional_float(record.get("fps")),
-        # User-set floor override (issue #85): distinct from the space-sync-owned
-        # "floor_name" merged in later by _public_snapshot from the external
-        # roster pull. Kept in a separate key on purpose -- that merge only ever
-        # assigns "space_name"/"floor_name" and never touches this field, so a
-        # locally-set floor survives every roster re-sync instead of being
-        # clobbered by it. See CameraResponse.floor in router.py for the
-        # display-precedence contract (floor ?? floor_name).
-        "floor": _optional_str(record.get("floor")),
+        # User-set floor override (issue #85, integer since issue #155): distinct
+        # from the space-sync-owned "floor_name" merged in later by
+        # _public_snapshot from the external roster pull. Kept in a separate key
+        # on purpose -- that merge only ever assigns "space_name"/"floor_name"
+        # and never touches this field, so a locally-set floor survives every
+        # roster re-sync instead of being clobbered by it. See CameraResponse.floor
+        # in router.py for the display-precedence contract (floor ?? floor_name).
+        # parse_legacy_floor self-heals any pre-#155 string value on read (see
+        # migrate_legacy_string_floors for the one-time rewrite of stored data).
+        "floor": parse_legacy_floor(record.get("floor"), camera_id=_optional_str(record.get("id"))),
         "created_at": str(record.get("created_at", "")),
         # Probe-history fields (see CameraRegistryStore.create/update): surfaced
         # so the UI can render "never connected" / "last connected at" text.
@@ -348,10 +458,17 @@ def utc_now_iso() -> str:
 __all__ = [
     "CameraRegistryStore",
     "CameraStatus",
+    "DEFAULT_FLOOR",
     "DuplicateCameraError",
+    "FLOOR_MAX",
+    "FLOOR_MIN",
+    "FLOOR_VALUES",
     "ProbeResult",
+    "floor_label",
+    "is_valid_floor",
     "mask_rtsp_url",
     "normalize_stream_identity",
+    "parse_legacy_floor",
     "public_camera",
     "status_from_probe",
     "utc_now_iso",
