@@ -182,6 +182,7 @@ export function normalizeCameraTestResult(value: unknown): CameraTestResult {
     !isRecord(value)
     || typeof value.ok !== 'boolean'
     || ('error_class' in value && value.error_class !== null && value.error_class !== 'timeout' && value.error_class !== 'decode' && value.error_class !== 'auth')
+    || ('probe_unavailable' in value && typeof value.probe_unavailable !== 'boolean')
     || ('width' in value && !isNullableInteger(value.width))
     || ('height' in value && !isNullableInteger(value.height))
   ) {
@@ -189,6 +190,7 @@ export function normalizeCameraTestResult(value: unknown): CameraTestResult {
   }
   const result: CameraTestResult = { ok: value.ok };
   if (value.error_class === 'timeout' || value.error_class === 'decode' || value.error_class === 'auth') result.error_class = value.error_class;
+  if (value.probe_unavailable === true) result.probe_unavailable = true;
   if (typeof value.width === 'number') result.width = value.width;
   if (typeof value.height === 'number') result.height = value.height;
   return result;

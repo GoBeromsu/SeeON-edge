@@ -42,6 +42,12 @@ class ProbeResult:
     error_class: ProbeErrorClass | None = None
     width: int | None = None
     height: int | None = None
+    # worker의 /probe에 아예 닿지 못했음을 나타낸다 (origin 미설정, relay
+    # 토큰 없음, 연결 거부/타임아웃 이전 단계의 OS 레벨 실패 등) -- worker가
+    # 살아서 응답했지만 그 응답이 실패로 판정한 것(error_class)과는 다른
+    # 축이다. 이슈 #151: 이 둘이 구분 안 되면 "검사 자체를 못 함"이 전부
+    # "디코드 실패"로 오표시된다.
+    probe_unavailable: bool = False
 
 
 class DuplicateCameraError(Exception):

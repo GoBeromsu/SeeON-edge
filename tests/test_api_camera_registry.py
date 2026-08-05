@@ -2068,3 +2068,136 @@ def test_test_camera_persists_probe_result(tmp_path, monkeypatch: pytest.MonkeyP
     assert camera["never_connected"] is False
     assert camera["last_ok_at"] is not None
     assert camera["last_probed_at"] is not None
+
+
+def _register_camera_for_probe(
+    client: TestClient, label: str, rtsp_url: str
+) -> dict[str, object]:
+    """probe 분류를 검사하기 위한 카메라 한 대를 등록한다.
+
+    등록 자체는 probe 결과와 무관하므로(#147/#159로 게이트가 제거됐다) 어떤
+    probe 응답이 오든 201이다.
+    """
+    response = client.post(
+        "/api/v1/cameras", headers=AUTH, json={"label": label, "rtsp_url": rtsp_url}
+    )
+    assert response.status_code == 201
+    return response.json()
+
+
+def test_probe_reports_unavailable_when_worker_cannot_be_reached(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """worker에 닿지 못한 것을 "디코드 실패"라고 단정하면 안 된다 (이슈 #151).
+
+    예전에는 연결 거부/DNS 실패까지 전부 ``error_class="decode"``로 뭉갰다.
+    그래서 현장에서 RTSP 비밀번호가 틀렸을 때 대시보드가 "영상 스트림을
+    디코드하지 못했다"고 표시했고, 원인을 찾는 데 시간이 걸렸다. worker가
+    검사해서 실패한 것과 worker에 닿지 못해 검사 자체를 못 한 것은 다른
+    축이다.
+    """
+    monkeypatch.setenv("ML_API_WORKER_PROBE_ORIGIN", "http://worker.local:8090")
+
+    def refused_urlopen(request, timeout: float) -> FakeHTTPResponse:
+        raise urllib.error.URLError("connection refused")
+
+    monkeypatch.setattr("urllib.request.urlopen", refused_urlopen)
+    app = create_app(lifespan=no_lifespan)
+    app.state.edge_relay_token = "relay-token"
+    app.state.camera_registry = CameraRegistryStore(tmp_path / "catalog.sqlite3")
+
+    with TestClient(app) as client:
+        _login(client)
+        camera = _register_camera_for_probe(client, "Unreachable", "rtsp://cam.local/s")
+        tested = client.post(f"/api/v1/cameras/{camera['id']}/test", headers=AUTH)
+
+    assert tested.status_code == 200
+    body = tested.json()
+    assert body["ok"] is False
+    assert body["probe_unavailable"] is True
+    # 검사를 못 했으므로 어떤 분류도 단정하지 않는다.
+    assert "error_class" not in body
+
+
+def test_probe_reports_unavailable_when_worker_request_times_out(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """worker로 보낸 HTTP 요청의 timeout은 RTSP timeout이 아니다 (이슈 #151).
+
+    RTSP가 timeout하면 worker가 살아서 payload로 ``error_class="timeout"``을
+    알려준다. 여기까지 왔다는 건 worker가 제때 답을 못 했다는 뜻이므로,
+    카메라 탓으로 돌리면 안 된다.
+    """
+    monkeypatch.setenv("ML_API_WORKER_PROBE_ORIGIN", "http://worker.local:8090")
+
+    def timing_out_urlopen(request, timeout: float) -> FakeHTTPResponse:
+        raise TimeoutError
+
+    monkeypatch.setattr("urllib.request.urlopen", timing_out_urlopen)
+    app = create_app(lifespan=no_lifespan)
+    app.state.edge_relay_token = "relay-token"
+    app.state.camera_registry = CameraRegistryStore(tmp_path / "catalog.sqlite3")
+
+    with TestClient(app) as client:
+        _login(client)
+        camera = _register_camera_for_probe(client, "Slow worker", "rtsp://cam.local/s")
+        tested = client.post(f"/api/v1/cameras/{camera['id']}/test", headers=AUTH)
+
+    assert tested.status_code == 200
+    body = tested.json()
+    assert body["ok"] is False
+    assert body["probe_unavailable"] is True
+    assert "error_class" not in body
+
+
+def test_probe_reports_unavailable_when_probe_origin_is_unset(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """probe origin이 비어 있으면 요청을 보낼 주소조차 없다 (이슈 #151)."""
+    monkeypatch.setenv("ML_API_WORKER_PROBE_ORIGIN", "")
+
+    app = create_app(lifespan=no_lifespan)
+    app.state.edge_relay_token = "relay-token"
+    app.state.camera_registry = CameraRegistryStore(tmp_path / "catalog.sqlite3")
+
+    with TestClient(app) as client:
+        _login(client)
+        camera = _register_camera_for_probe(client, "No probe origin", "rtsp://cam.local/s")
+        tested = client.post(f"/api/v1/cameras/{camera['id']}/test", headers=AUTH)
+
+    assert tested.status_code == 200
+    body = tested.json()
+    assert body["ok"] is False
+    assert body["probe_unavailable"] is True
+    assert "error_class" not in body
+
+
+def test_probe_keeps_auth_classification_when_worker_answers(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """worker가 살아 있을 때의 auth/timeout/decode 분류는 그대로 유지한다.
+
+    이슈 #151의 원래 증상이 이것이다: RTSP 401을 "디코드 실패"로 오진했다.
+    worker가 응답한 이상 그 판정은 신뢰할 수 있으므로 그대로 실어 보낸다.
+    """
+    monkeypatch.setenv("ML_API_WORKER_PROBE_ORIGIN", "http://worker.local:8090")
+
+    def unauthorized_urlopen(request, timeout: float) -> FakeHTTPResponse:
+        return FakeHTTPResponse({"ok": False, "error_class": "auth"})
+
+    monkeypatch.setattr("urllib.request.urlopen", unauthorized_urlopen)
+    app = create_app(lifespan=no_lifespan)
+    app.state.edge_relay_token = "relay-token"
+    app.state.camera_registry = CameraRegistryStore(tmp_path / "catalog.sqlite3")
+
+    with TestClient(app) as client:
+        _login(client)
+        camera = _register_camera_for_probe(client, "Bad password", "rtsp://cam.local/s")
+        tested = client.post(f"/api/v1/cameras/{camera['id']}/test", headers=AUTH)
+
+    assert tested.status_code == 200
+    body = tested.json()
+    assert body["ok"] is False
+    assert body["error_class"] == "auth"
+    # worker가 실제로 검사했으므로 "검사 불가"가 아니다.
+    assert "probe_unavailable" not in body

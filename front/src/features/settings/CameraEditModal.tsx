@@ -15,6 +15,27 @@ type CameraEditModalProps = {
   onRequestDelete: (camera: Camera) => void;
 };
 
+/**
+ * `error_class`별 안내 (CameraRegisterModal의 PROBE_FAILURE_MESSAGE와 같은 값, 이 모달의 실패
+ * 메시지에는 지금까지 반영된 적이 없었다 -- 연결 확인이 실패해도 항상 뭉뚱그린 문구 하나만 보여줬다).
+ * `probe_unavailable`은 별도로 처리한다 (이슈 #151): worker의 /probe에 닿지 못해 검사 자체를
+ * 못 한 것이므로, 실제로 디코드/인증/타임아웃 중 어느 것도 확정된 게 아니다 -- 그걸 "디코드
+ * 실패"라고 단정하면 안 된다.
+ */
+const TEST_FAILURE_DETAIL: Record<string, string> = {
+  timeout: 'RTSP 연결 시간이 초과되었습니다. 주소와 네트워크를 확인하세요.',
+  auth: 'RTSP 인증에 실패했습니다. 계정 정보를 확인하세요.',
+  decode: '영상 스트림을 디코드하지 못했습니다. 카메라 설정을 확인하세요.',
+};
+
+function testFailureMessage(result: CameraTestResult): string {
+  if (result.probe_unavailable) {
+    return '연결 테스트에 실패했습니다. 카메라 검사 기능을 사용할 수 없습니다 (검사 서비스에 연결하지 못했습니다). 잠시 후 다시 시도하세요.';
+  }
+  const detail = result.error_class ? TEST_FAILURE_DETAIL[result.error_class] : undefined;
+  return detail ? `연결 테스트에 실패했습니다. ${detail}` : '연결 테스트에 실패했습니다.';
+}
+
 function RefreshIcon(): JSX.Element {
   return (
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.75} strokeLinecap="round" strokeLinejoin="round" className="h-4 w-4">
@@ -248,7 +269,7 @@ export function CameraEditModal({ camera, cameras, onClose, onUpdated, onRequest
 
           {testResult ? (
             <p role={testResult.ok ? 'status' : 'alert'} className={testResult.ok ? 'dialog-success' : 'auth-error'}>
-              {testResult.ok ? '연결 성공' : '연결 테스트에 실패했습니다.'}
+              {testResult.ok ? '연결 성공' : testFailureMessage(testResult)}
             </p>
           ) : null}
 

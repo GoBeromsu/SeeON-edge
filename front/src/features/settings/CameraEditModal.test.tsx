@@ -196,6 +196,19 @@ describe('CameraEditModal', () => {
     expect(document.querySelector('[role="alert"]')?.textContent).toContain('연결 테스트에 실패했습니다');
   });
 
+  // 이슈 #151: worker의 /probe에 닿지 못한 경우(probe_unavailable)는 실제로 디코드를
+  // 확인한 적이 없으므로, 그 실패 메시지가 "디코드" 관련 문구를 담아서는 안 된다.
+  it('does not claim a decode failure when the worker probe is unreachable', async () => {
+    vi.mocked(testCamera).mockResolvedValue({ ok: false, probe_unavailable: true });
+    render(camera);
+
+    await act(async () => findButton('연결 확인').click());
+
+    const message = document.querySelector('[role="alert"]')?.textContent ?? '';
+    expect(message).toContain('연결 테스트에 실패했습니다');
+    expect(message).not.toContain('디코드');
+  });
+
   it('delegates deletion to the parent instead of opening a nested dialog', () => {
     const { onRequestDelete } = render(camera);
     act(() => findButton('삭제').click());

@@ -165,6 +165,12 @@ class TestCameraResponse(BaseModel):
 
     ok: bool
     error_class: Literal["timeout", "decode", "auth"] | None = None
+    # worker의 /probe에 닿지 못해 검사 자체를 못 했다는 뜻이다 (True일 때만
+    # 응답에 실린다 -- response_model_exclude_none이 없애지 못하는 bool
+    # 기본값 노출을 피하려고 Optional로 선언했다). error_class는 이 경우
+    # 항상 None이다: worker가 응답하지 못했으니 timeout/decode/auth 중
+    # 어느 것도 아니다. 이슈 #151.
+    probe_unavailable: bool | None = None
     width: int | None = None
     height: int | None = None
 
@@ -1035,10 +1041,14 @@ def _probe_rtsp_url(request: Request, rtsp_url: str) -> ProbeResult:
     settings = get_settings()
     origin = settings.worker_probe_origin.strip().rstrip("/")
     if not origin:
-        return ProbeResult(ok=False, error_class="decode")
+        # ML_API_WORKER_PROBE_ORIGIN 자체가 미설정 -- worker에 요청을 보낼
+        # 주소가 없다. worker가 살아서 "디코드 실패"라고 답한 것과 전혀
+        # 다른 상황이므로 error_class를 채우지 않는다 (이슈 #151).
+        return ProbeResult(ok=False, probe_unavailable=True)
     token = _expected_relay_token(request)
     if token is None:
-        return ProbeResult(ok=False, error_class="decode")
+        # relay 토큰 미설정 -- 마찬가지로 검사 요청 자체를 보낼 수 없다.
+        return ProbeResult(ok=False, probe_unavailable=True)
     body = json.dumps({"rtsp_url": rtsp_url}, separators=(",", ":")).encode("utf-8")
     probe_request = urllib.request.Request(
         f"{origin}/probe",
@@ -1056,9 +1066,19 @@ def _probe_rtsp_url(request: Request, rtsp_url: str) -> ProbeResult:
         ) as response:
             payload = json.loads(response.read().decode("utf-8") or "{}")
     except TimeoutError:
-        return ProbeResult(ok=False, error_class="timeout")
+        # worker에 보낸 HTTP 요청이 timeout한 것이지 RTSP가 timeout한 게
+        # 아니다 -- RTSP 타임아웃은 worker가 살아서 payload로 알려주고
+        # (_probe_result_from_worker), 그쪽에서 error_class="timeout"이
+        # 채워진다. 여기까지 왔다는 건 worker가 제때 답을 못 했다는 뜻이므로
+        # "검사 불가"로 분류한다 (이슈 #151).
+        return ProbeResult(ok=False, probe_unavailable=True)
     except (OSError, urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError):
-        return ProbeResult(ok=False, error_class="decode")
+        # 연결 거부/DNS 실패/HTTP 레벨 오류 등 -- worker에 닿지 못했거나
+        # 응답을 아예 받지 못한 경우다. worker가 실제로 응답했는데 그
+        # 내용이 디코드 실패였던 것(_probe_result_from_worker 경로)과는
+        # 구분해야 한다 (이슈 #151: RTSP 401을 "디코드 실패"로 오진했던
+        # 원인 중 하나가 이 catch-all이었다).
+        return ProbeResult(ok=False, probe_unavailable=True)
     if not isinstance(payload, dict):
         return ProbeResult(ok=False, error_class="decode")
     return _probe_result_from_worker(payload)
@@ -1105,6 +1125,8 @@ def _probe_response(probe: ProbeResult) -> dict[str, object]:
     response: dict[str, object] = {"ok": probe.ok}
     if probe.error_class is not None:
         response["error_class"] = probe.error_class
+    if probe.probe_unavailable:
+        response["probe_unavailable"] = True
     if probe.width is not None:
         response["width"] = probe.width
     if probe.height is not None:

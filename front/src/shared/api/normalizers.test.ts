@@ -92,6 +92,9 @@ describe('camera connection test normalization', () => {
     [{ ok: false, error_class: 'timeout' }, { ok: false, error_class: 'timeout' }],
     [{ ok: true, error_class: null, width: null, height: null }, { ok: true }],
     [{ ok: true, width: 1920, height: 1080 }, { ok: true, width: 1920, height: 1080 }],
+    // 이슈 #151: worker의 /probe에 닿지 못한 경우 -- error_class 없이 probe_unavailable만 실린다.
+    [{ ok: false, probe_unavailable: true }, { ok: false, probe_unavailable: true }],
+    [{ ok: false, probe_unavailable: false }, { ok: false }],
   ])('accepts a contract-valid result %#', (payload, expected) => {
     expect(normalizeCameraTestResult(payload)).toEqual(expected);
   });
@@ -102,6 +105,7 @@ describe('camera connection test normalization', () => {
     ['malformed ok', { ok: 'true' }],
     ['unknown error class', { ok: false, error_class: 'network' }],
     ['malformed nullable error class', { ok: false, error_class: 1 }],
+    ['malformed probe_unavailable', { ok: false, probe_unavailable: 'true' }],
     ['fractional width', { ok: true, width: 1.5 }],
     ['malformed nullable height', { ok: true, height: '1080' }],
   ])('rejects a %s success envelope', (_case, payload) => {

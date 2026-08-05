@@ -161,6 +161,11 @@ export type CameraPatchInput = Partial<Omit<CameraInput, 'floor'>> & {
 export type CameraTestResult = {
   ok: boolean;
   error_class?: 'timeout' | 'decode' | 'auth' | string;
+  /** True only when the worker's `/probe` couldn't be reached at all (unconfigured origin, missing
+   * relay token, connection refused/timed-out before any response) -- distinct from `error_class`,
+   * which classifies a probe the worker actually completed. When true, `error_class` is never set:
+   * we genuinely don't know whether the stream would have decoded (issue #151). */
+  probe_unavailable?: boolean;
   width?: number;
   height?: number;
 };
