@@ -3,6 +3,11 @@ name: Edge ML Images
 on:
   release:
     types: [published]
+  # main always has a published image, independent of release cadence
+  # (#195): edge-worker-image.yml only builds+boot-tests Dockerfile.edge on
+  # PR/push, it never publishes to GHCR.
+  push:
+    branches: [main]
   workflow_dispatch:
     inputs:
       ref:
@@ -21,10 +26,10 @@ permissions:
 jobs:
   publish:
     name: Publish edge ML image refs
-    if: github.event_name == 'workflow_dispatch' || github.event.release.prerelease == false
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'push' || github.event.release.prerelease == false
     runs-on: ubuntu-latest
     env:
-      DEPLOY_REF: ${{ github.event.release.tag_name || inputs.ref }}
+      DEPLOY_REF: ${{ github.event.release.tag_name || inputs.ref || github.sha }}
       IMAGE_NAMESPACE: ghcr.io/seniorailab/eldercare-fall-ml
     steps:
       - uses: actions/checkout@v4

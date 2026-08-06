@@ -11,7 +11,7 @@ def test_release_image_build_keeps_dashboard_credentials_out_of_static_assets() 
         Loader=yaml.BaseLoader,
     )
     assert workflow["jobs"]["publish"]["env"]["DEPLOY_REF"] == (
-        "${{ github.event.release.tag_name || inputs.ref }}"
+        "${{ github.event.release.tag_name || inputs.ref || github.sha }}"
     )
     steps = workflow["jobs"]["publish"]["steps"]
 
