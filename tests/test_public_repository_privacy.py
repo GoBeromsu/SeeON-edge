@@ -102,6 +102,16 @@ _MEDIA_OR_ARCHIVE_MAGIC = (
     b"version https://git-lfs.github.com/spec/v1",
 )
 _SYNTHETIC_RTSP_FIXTURES = {
+    # 엣지 브링업 스킬의 두 URL 은 값이 아니라 변수 보간이다. 자격증명이 문자열
+    # 안에 들어 있는 게 아니라 실행 시점에 환경변수에서 온다. 허용 목록이 정확한
+    # 문자열로 매칭되니, 누군가 나중에 여기에 실제 비밀번호를 박아 넣으면 문자열이
+    # 달라져 가드가 그대로 잡는다 — 예외가 파일 전체로 번지지 않는다.
+    Path(".claude/skills/edge-bringup/references/worker-roster.md"): {
+        "rtsp://{CAM_USER}:{CAM_PASSWORD}@{camera_ip}:554/trackID=2",
+    },
+    Path(".claude/skills/edge-bringup/scripts/rtsp_sweep.sh"): {
+        "rtsp://${CAM_USER}:${CAM_PASSWORD}@${ip}:554/${TRACK}",
+    },
     Path("front/src/features/camera-management/CameraManagementPage.test.tsx"): {
         "rtsp://user:***@redacted-camera/live",
     },
