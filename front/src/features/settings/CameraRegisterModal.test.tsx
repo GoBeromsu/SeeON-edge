@@ -223,6 +223,30 @@ describe('CameraRegisterModal', () => {
     expect((document.querySelector('input[name="label"]') as HTMLInputElement).value).toBe('');
     expect(document.body.textContent).not.toContain('침대 영역 인식이 필요합니다.');
   });
+
+  it('warns (without blocking) when the RTSP address looks like an IDIS main stream (issue #154)', async () => {
+    vi.mocked(createCamera).mockResolvedValue(createdCamera);
+    render();
+    setInput('label', '101호');
+    setInput('rtsp_url', 'rtsp://admin:pw@192.0.2.10:554/trackID=1');
+
+    expect(document.querySelector('[data-testid="rtsp-substream-guidance"]')?.textContent).toContain('trackID=2');
+
+    await act(async () => findButton('다음').click());
+
+    expect(createCamera).toHaveBeenCalledWith(
+      { label: '101호', rtsp_url: 'rtsp://admin:pw@192.0.2.10:554/trackID=1', floor: 1 },
+      { forceRegister: false },
+    );
+  });
+
+  it('shows no substream warning once the address already selects the IDIS substream (trackID=2)', () => {
+    render();
+    setInput('label', '101호');
+    setInput('rtsp_url', 'rtsp://admin:pw@192.0.2.10:554/trackID=2');
+
+    expect(document.querySelector('[data-testid="rtsp-substream-guidance"]')).toBeNull();
+  });
 });
 
 describe('I7 — 클라우드 방(space) 선택', () => {

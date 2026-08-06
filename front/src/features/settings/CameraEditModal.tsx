@@ -1,8 +1,9 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { testCamera, updateCamera, type BedZone, type Camera, type CameraTestResult } from '@/shared/api/client';
 import { AccessibleDialog } from '@/shared/ui/AccessibleDialog';
 import { BedZoneRecognitionPanel } from '@/features/settings/BedZoneRecognitionPanel';
 import { FloorSelect } from '@/features/settings/FloorSelect';
+import { assessRtspSubstreamGuidance } from '@/features/settings/rtspSubstreamGuidance';
 import { getCameraStatusMeta, statusBadgeClassName } from '@/shared/ui/StatusBadge';
 import { toast } from '@/shared/ui/Toast';
 
@@ -76,6 +77,9 @@ export function CameraEditModal({ camera, onClose, onUpdated, onRequestDelete }:
   const [testResult, setTestResult] = useState<CameraTestResult | null>(null);
   const busyRef = useRef(false);
   const openCameraIdRef = useRef<string | null>(null);
+  // 등록 모달과 같은 안내다 (issue #154): 새 주소를 입력할 때만 평가하므로,
+  // 손대지 않은 기존 카메라(빈 draft)에는 아무것도 뜨지 않는다.
+  const substreamGuidance = useMemo(() => assessRtspSubstreamGuidance(rtspUrl), [rtspUrl]);
 
   // Reset the form only when the targeted camera's identity changes (opening the modal for a
   // camera, or switching to a different one) — not on every re-render caused by the operations
@@ -249,6 +253,11 @@ export function CameraEditModal({ camera, onClose, onUpdated, onRequestDelete }:
           <p className="mt-1 text-xs text-muted-foreground">
             현재 등록됨: <span className="font-mono">{camera.rtsp_url_masked}</span> — 변경할 때만 새 주소를 입력하세요.
           </p>
+          {substreamGuidance ? (
+            <p data-testid="rtsp-substream-guidance" className="mt-1 text-sm text-amber-600">
+              {substreamGuidance.message}
+            </p>
+          ) : null}
 
           <div className="flex items-center justify-between gap-2 text-sm">
             <span className="font-semibold text-muted-foreground">침대 영역</span>

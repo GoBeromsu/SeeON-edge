@@ -108,6 +108,10 @@ _SYNTHETIC_RTSP_FIXTURES = {
     # 달라져 가드가 그대로 잡는다 — 예외가 파일 전체로 번지지 않는다.
     Path(".claude/skills/edge-bringup/references/worker-roster.md"): {
         "rtsp://{CAM_USER}:{CAM_PASSWORD}@{camera_ip}:554/trackID=2",
+        # <사용자>/<비밀번호>/<카메라 IP> 도 값이 아니라 사람이 채워 넣을 자리
+        # 표시자다. 호스트 자리표시자에 공백이 있어(`<카메라 IP>`) 정규식이
+        # 호스트를 `<카메라` 에서 끊어 매칭한다.
+        "rtsp://<사용자>:<비밀번호>@<카메라",
     },
     Path(".claude/skills/edge-bringup/scripts/rtsp_sweep.sh"): {
         "rtsp://${CAM_USER}:${CAM_PASSWORD}@${ip}:554/${TRACK}",
@@ -133,6 +137,23 @@ _SYNTHETIC_RTSP_FIXTURES = {
     },
     Path("front/src/features/cameras/CameraCard.test.tsx"): {
         "rtsp://user:****@camera.local/stream",
+    },
+    # 세 IDIS 서브스트림 안내 테스트의 fixture. 192.0.2.10 은 실제 카메라가
+    # 아니라 문서용 TEST-NET-1 주소(RFC 5737)이고 admin:pw 는 고정 더미
+    # 자격증명이다.
+    Path("front/src/features/settings/CameraEditModal.test.tsx"): {
+        "rtsp://admin:pw@192.0.2.10:554/trackID=1",
+    },
+    Path("front/src/features/settings/CameraRegisterModal.test.tsx"): {
+        "rtsp://admin:pw@192.0.2.10:554/trackID=1",
+        "rtsp://admin:pw@192.0.2.10:554/trackID=2",
+    },
+    Path("front/src/features/settings/rtspSubstreamGuidance.test.ts"): {
+        "rtsp://admin:pw@192.0.2.10:554/trackID=1",
+        "rtsp://admin:pw@192.0.2.10:554/TrackId=1",
+        "rtsp://admin:pw@192.0.2.10:554/stream",
+        "rtsp://admin:pw@192.0.2.10:554/trackID=2",
+        "rtsp://admin:pw@192.0.2.10:554/trackID=3",
     },
     Path("front/src/shared/api/normalizers.test.ts"): {
         "rtsp://operator:hunter2@camera.internal.example:554/stream",

@@ -123,6 +123,48 @@ ML 입력은 서브스트림을 쓴다. IDIS 계열은 `trackID=2` 가 서브스
 `trackID=1` 이 메인이다. **API 스키마 어디에도 서브스트림을 고르는 필드가
 없다** — `rtsp_url` 문자열 자체에 원하는 트랙을 직접 넣어야 한다.
 
+```
+rtsp://<사용자>:<비밀번호>@<카메라 IP>:554/trackID=2   # 서브스트림 (이걸 써라)
+rtsp://<사용자>:<비밀번호>@<카메라 IP>:554/trackID=1   # 메인 스트림 (CPU 디코드에는 넣지 마라)
+```
+
+이게 왜 중요한지: 실증 엣지 노드는 GPU 가 없어 `ML_WORKER_PROFILE=cpu` 로
+돈다. 메인 스트림(고해상도 H265)을 CPU 로 디코드하면 카메라 대수가 늘수록
+디코드 실패가 누적된다 — 실제로 13 대를 메인 스트림으로 물렸을 때 최근 로그
+8000 줄 중 6700 줄이 HEVC 디코드 실패였다. 폴백 모델은 30 프레임 윈도우가
+필요해서, 여기서 드롭된 프레임이 곧 낙상 감지 누락으로 이어진다(issue #154).
+
+대시보드 등록/수정 화면(`front/src/features/settings/CameraRegisterModal.tsx`,
+`CameraEditModal.tsx`)은 `rtsp_url` 에 `trackID` 가 없거나 `trackID=1` 이면
+서브스트림을 쓰라는 경고 문구를 보여준다(`rtspSubstreamGuidance.ts`). **이건
+안내일 뿐 등록을 막지 않는다** — 벤더별로 서브스트림 경로 형식이 달라
+`rtsp_url` 문자열만으로는 IDIS 가 아닌 카메라를 안전하게 구분할 수 없고,
+하드 거부는 이미 등록된(메인 스트림을 넣은) 기존 카메라 행까지 깨뜨린다.
+기존 행을 서브스트림으로 옮기는 것은 이 스킬의 범위가 아닌 별도 운영
+판단이다. curl/스크립트로 직접 `POST /api/v1/cameras` 를 호출하는 경로(7절)
+는 이 경고를 거치지 않으므로, 그쪽에서 등록할 때는 `trackID=2` 를 직접
+챙겨야 한다.
+
+**등록 후 실제로 서브스트림에 붙었는지 확인해라.** 두 가지 방법이 있다.
+
+1. **엣지에서 `ffprobe`** (가장 확실하다, `references/troubleshooting.md`
+   A절 참고):
+
+   ```bash
+   ffprobe -v error -rtsp_transport tcp -select_streams v:0 \
+     -show_entries stream=codec_name,width,height,r_frame_rate \
+     -of csv=p=0 "rtsp://<사용자>:<비밀번호>@<카메라 IP>:554/trackID=2"
+   ```
+
+   IDIS 서브스트림 정상 출력은 `hevc,640,360,30/1` 이다. 해상도가 이보다 훨씬
+   크게 나오면 실제로는 메인 스트림에 붙은 것이다 — URL을 다시 확인해라.
+
+2. **등록/연결 확인 API 응답의 `width`/`height`**: `POST /api/v1/cameras` 와
+   `POST /api/v1/cameras/{id}/test` 는 probe 가 성공하면 해상도를 함께
+   돌려준다(`TestCameraResponse.width/height`, `router.py:167-179`). 카메라
+   목록 화면에서 "연결 확인"을 눌러도 같은 값을 볼 수 있다. `640x360` 근처가
+   아니면 서브스트림이 아니다.
+
 ## 4. 등록 후 워커를 재시작해라
 
 가장 잘 놓치는 지점이다. 워커의 재시작 판정은 로컬 레지스트리가 아니라

@@ -10,6 +10,7 @@ import { AccessibleDialog } from '@/shared/ui/AccessibleDialog';
 import { BedZoneRecognitionPanel } from '@/features/settings/BedZoneRecognitionPanel';
 import { FloorSelect } from '@/features/settings/FloorSelect';
 import { DEFAULT_FLOOR } from '@/features/settings/floorOptions';
+import { assessRtspSubstreamGuidance } from '@/features/settings/rtspSubstreamGuidance';
 import { toast } from '@/shared/ui/Toast';
 
 type CameraRegisterModalProps = {
@@ -68,6 +69,10 @@ export function CameraRegisterModal({ open, cameras, onClose, onCreated }: Camer
         floorName: cam.floor_name ?? null,
       }));
   }, [cameras]);
+  // 등록을 막지 않는 안내다 (issue #154): 벤더별 서브스트림 경로가 달라 강제
+  // 검증은 피하고, IDIS 메인 스트림(trackID=1) 또는 trackID 미지정처럼 보이면
+  // 저해상도 서브스트림을 권장하는 문구만 보여준다.
+  const substreamGuidance = useMemo(() => assessRtspSubstreamGuidance(rtspUrl), [rtspUrl]);
   const [busy, setBusy] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [duplicateLabel, setDuplicateLabel] = useState<string | null>(null);
@@ -211,6 +216,11 @@ export function CameraRegisterModal({ open, cameras, onClose, onCreated }: Camer
               placeholder="rtsp://192.0.2.10:554/stream"
             />
           </label>
+          {substreamGuidance ? (
+            <p data-testid="rtsp-substream-guidance" className="text-sm text-amber-600">
+              {substreamGuidance.message}
+            </p>
+          ) : null}
 
           {availableSpaces.length > 0 ? (
             <label>

@@ -282,6 +282,23 @@ describe('CameraEditModal', () => {
     expect(document.body.textContent).toContain(camera.rtsp_url_masked);
   });
 
+  it('shows no substream warning until the operator actually types a replacement address (issue #154)', () => {
+    render(camera);
+    expect(document.querySelector('[data-testid="rtsp-substream-guidance"]')).toBeNull();
+  });
+
+  it('warns (without blocking the save) when a replacement RTSP address looks like an IDIS main stream (issue #154)', async () => {
+    vi.mocked(updateCamera).mockResolvedValue({ ...camera, rtsp_url_masked: 'rtsp://***@10.0.0.5/trackID=1' });
+    render(camera);
+    setInput('rtsp_url', 'rtsp://admin:pw@192.0.2.10:554/trackID=1');
+
+    expect(document.querySelector('[data-testid="rtsp-substream-guidance"]')?.textContent).toContain('trackID=2');
+
+    await act(async () => findButton('저장').click());
+
+    expect(updateCamera).toHaveBeenCalledWith('cam-1', { rtsp_url: 'rtsp://admin:pw@192.0.2.10:554/trackID=1' });
+  });
+
   it('I8 — 저장된 URL이 아니라 입력창의 새 URL을 검사한다', async () => {
     vi.mocked(testCamera).mockResolvedValue({ ok: true, width: 1920, height: 1080 });
     render(camera);
