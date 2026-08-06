@@ -51,7 +51,15 @@ class _CameraPayload(BaseModel):
     fps: float | None = Field(default=None, gt=0)
     frame_stride: int | None = Field(default=None, gt=0)
     decode_backend: str | None = None
-    domains: tuple[str, ...] = ()
+    # ``None`` (the relay payload omitted this camera's ``domains`` key) and
+    # ``()`` (the relay explicitly declared this camera monitors zero
+    # domains) are different signals and must stay distinguishable -- see
+    # issue #191. Defaulting to ``()`` here would make every camera look
+    # like an explicit "no domains" opt-out even when the relay said
+    # nothing at all, which is exactly the ambiguity ``to_worker_config``
+    # needs to resolve to decide between the ambient registry default and a
+    # genuine opt-out.
+    domains: tuple[str, ...] | None = None
     bed_zone_polygon: tuple[tuple[int, int], ...] | None = None
     bed_zone_image_width: int | None = Field(default=None, gt=0)
     bed_zone_image_height: int | None = Field(default=None, gt=0)
@@ -330,13 +338,48 @@ class BackendWorkerConfigPayload(BaseModel):
                 detection_windows=detection_windows or None,
             )
         else:
-            camera_domains = tuple(
-                sorted({name for camera in resolved_cameras for name in camera.domains})
+            # Same None-vs-empty distinction as the override above, one
+            # level down: a camera whose ``domains`` is ``None`` said
+            # nothing, but a camera whose ``domains`` is ``()`` explicitly
+            # opted out, and the union must not blur the two (issue #191).
+            camera_declared_domains = any(
+                camera.domains is not None for camera in resolved_cameras
+            )
+            camera_domains = (
+                tuple(
+                    sorted(
+                        {
+                            name
+                            for camera in resolved_cameras
+                            for name in (camera.domains or ())
+                        }
+                    )
+                )
+                if camera_declared_domains
+                else None
             )
             domains_config = DomainsConfig(
-                enabled=camera_domains or None,
+                enabled=camera_domains,
                 detection_windows=detection_windows or None,
             )
+        # Issue #191: ``WorkerConfig.enabled_domains`` fails open to the
+        # registry default (fall, bed_exit) only when its ``domains`` field
+        # was never *passed at all* (pydantic's ``model_fields_set``, not
+        # its value). Passing ``domains=`` unconditionally -- even a
+        # ``DomainsConfig`` carrying no real signal -- always marks the
+        # field "set" and permanently disarms that fallback, which is
+        # exactly the fresh-install failure this issue reports: no domains
+        # override, no per-camera domains, no detection windows, and
+        # detection silently never starts. Comparing against a fresh
+        # ``DomainsConfig()`` catches that no-signal case (regardless of
+        # which branch above produced it) and omits the kwarg so the
+        # fail-open default in ``worker_models.py`` engages; any real
+        # signal -- an explicit enable/disable, a camera-declared domain
+        # list (including an explicit empty one), or a detection window --
+        # is still threaded through unconditionally.
+        domain_kwargs = (
+            {} if domains_config == DomainsConfig() else {"domains": domains_config}
+        )
         base_clip = clip if clip is not None else ClipRecordingConfig()
         subdir = self.resolved_clip_store_subdir
         resolved_clip = (
@@ -345,7 +388,7 @@ class BackendWorkerConfigPayload(BaseModel):
         return WorkerConfig(
             relay=RelayConfig.model_validate({"url": relay_url, "token": token}),
             models=models if models is not None else WorkerModelsConfig(),
-            domains=domains_config,
+            **domain_kwargs,
             clip=resolved_clip,
             dev_mjpeg=dev_mjpeg if dev_mjpeg is not None else DevMjpegConfig(),
             cameras=cameras,

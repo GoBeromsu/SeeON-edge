@@ -585,6 +585,25 @@ class WorkerRuntime:
         state_dir: Path | None = None,
     ) -> None:
         self.config = config
+        # Issue #191: a relay pull that carried no domains signal at all used
+        # to silently resolve to zero active domains (no fall/bed_exit
+        # detection scheduled, no error). Logging the resolved set --
+        # and which path produced it -- at startup makes that state visible
+        # instead of only discoverable by noticing detections never arrive.
+        resolved_domain_names = self.config.enabled_domains
+        domain_source = "relay-supplied"
+        if resolved_domain_names is None:
+            domain_source = "registry default"
+            resolved_domain_names = enabled_domains()
+        LOGGER.info(
+            "resolved active detection domains (%s): %s",
+            domain_source,
+            ", ".join(resolved_domain_names) or "(none)",
+        )
+        if not resolved_domain_names:
+            LOGGER.warning(
+                "resolved active detection domains is empty; no detection will run"
+            )
         self._env = os.environ if env is None else env
         self._serving = serving_client
         self._state_dir = state_dir if state_dir is not None else resolve_state_dir()

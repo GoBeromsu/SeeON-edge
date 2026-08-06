@@ -27,7 +27,7 @@ from pydantic import ValidationError
 from worker.pipeline.output.evidence.clip_config import CLIP_STORE_DIR_ENV, DEFAULT_CLIP_STORE_DIR
 from worker.runtime.config.pull_models import BackendWorkerConfigPayload
 from worker.runtime.config.worker_models import ClipRecordingConfig
-from worker.runtime.worker import WorkerRuntime
+from worker.runtime.worker import WorkerRuntime, _required_extractor_names
 
 
 def _camera_payload(camera_id: str = "camera-1") -> dict[str, object]:
@@ -177,6 +177,80 @@ def test_to_worker_config_domains_override_can_represent_all_domains_off() -> No
 
     assert config.domains.enabled == ()
     assert config.domains.enabled_domains == ()
+
+
+# --- to_worker_config: issue #191 fail-open default ------------------------
+#
+# ``WorkerConfig.enabled_domains`` only falls open to the registry default
+# (fall, bed_exit) when its ``domains`` field was never passed at all
+# (pydantic's ``model_fields_set``). ``to_worker_config`` used to pass
+# ``domains=`` unconditionally, so a relay pull that carried no domains
+# signal whatsoever (no override, no per-camera domains, no detection
+# windows -- the exact shape of a fresh install) permanently disarmed that
+# fallback and booted with detection silently off.
+
+
+def test_to_worker_config_with_no_domains_signal_falls_open_to_none() -> None:
+    """No domains override, no per-camera domains, no detection windows:
+    ``enabled_domains`` must be ``None`` (fail-open marker), not ``()``."""
+    payload = BackendWorkerConfigPayload.model_validate(
+        {"config_version": 1, "cameras": [_camera_payload()]}
+    )
+
+    config = payload.to_worker_config("http://ml-api:8000", "relay-secret")
+
+    assert config.enabled_domains is None
+
+
+def test_to_worker_config_with_explicit_empty_camera_domains_list_stays_off() -> None:
+    """A camera that explicitly declares zero domains (``"domains": []``) is
+    a genuine opt-out, distinct from a camera that never mentioned domains
+    at all, and must resolve to empty -- not the registry default."""
+    payload = BackendWorkerConfigPayload.model_validate(
+        {
+            "config_version": 1,
+            "cameras": [{**_camera_payload(), "domains": []}],
+        }
+    )
+
+    config = payload.to_worker_config("http://ml-api:8000", "relay-secret")
+
+    assert config.enabled_domains == ()
+
+
+def test_to_worker_config_with_specific_camera_domains_resolves_exactly_as_given() -> None:
+    payload = BackendWorkerConfigPayload.model_validate(
+        {
+            "config_version": 1,
+            "cameras": [{**_camera_payload(), "domains": ["fall"]}],
+        }
+    )
+
+    config = payload.to_worker_config("http://ml-api:8000", "relay-secret")
+
+    assert config.enabled_domains == ("fall",)
+
+
+def test_no_domains_signal_still_schedules_the_registry_default_extractors() -> None:
+    """The actual production consequence of issue #191: with no domains
+    signal at all, the runtime must resolve a non-empty active-domain set
+    and schedule the extractors those domains require, not silently
+    schedule nothing (``Scheduler.task_intervals`` empty,
+    ``CompositeExtractor.process`` calling no extractors)."""
+    from types import SimpleNamespace
+
+    payload = BackendWorkerConfigPayload.model_validate(
+        {"config_version": 1, "cameras": [_camera_payload()]}
+    )
+    config = payload.to_worker_config("http://ml-api:8000", "relay-secret")
+    runtime = SimpleNamespace(config=config)
+
+    domain_names = WorkerRuntime._active_domain_names(runtime)
+    required = _required_extractor_names(domain_names)
+
+    assert domain_names == ("fall", "bed_exit")
+    assert required != ()
+    assert "pose" in required
 
 
 def test_to_worker_config_clip_store_subdir_merges_into_a_local_clip_config() -> None:
