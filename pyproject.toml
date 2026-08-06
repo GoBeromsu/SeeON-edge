@@ -15,6 +15,9 @@ dependencies = [
     "numpy>=1.26",
     "opencv-python-headless>=4.10",
     "pyyaml>=6",
+    # 런타임 의존성이다. streams_router 가 모듈 최상단에서 import 하므로
+    # 슬림 백엔드 빌드(--no-default-groups)에도 반드시 들어가야 한다.
+    "httpx>=0.27",
 ]
 
 # Lifecycle separation: test/worker deps are isolated from the slim backend path.
@@ -25,7 +28,6 @@ lint = [
 ]
 test = [
     "pytest>=8.3",
-    "httpx>=0.27",
 ]
 worker = [
     "torch>=2.3",

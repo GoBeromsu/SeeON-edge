@@ -970,6 +970,7 @@ version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
     { name = "fastapi" },
+    { name = "httpx" },
     { name = "numpy" },
     { name = "opencv-python-headless" },
     { name = "pydantic" },
@@ -984,7 +985,6 @@ lint = [
     { name = "ruff" },
 ]
 test = [
-    { name = "httpx" },
     { name = "pytest" },
 ]
 worker = [
@@ -999,6 +999,7 @@ worker = [
 [package.metadata]
 requires-dist = [
     { name = "fastapi", specifier = ">=0.115" },
+    { name = "httpx", specifier = ">=0.27" },
     { name = "numpy", specifier = ">=1.26" },
     { name = "opencv-python-headless", specifier = ">=4.10" },
     { name = "pydantic", specifier = ">=2" },
@@ -1012,10 +1013,7 @@ lint = [
     { name = "import-linter", specifier = ">=2.13" },
     { name = "ruff", specifier = "==0.16.0" },
 ]
-test = [
-    { name = "httpx", specifier = ">=0.27" },
-    { name = "pytest", specifier = ">=8.3" },
-]
+test = [{ name = "pytest", specifier = ">=8.3" }]
 worker = [
     { name = "joblib", specifier = ">=1.4" },
     { name = "nvidia-ml-py", specifier = ">=12" },
