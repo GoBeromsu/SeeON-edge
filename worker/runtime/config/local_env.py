@@ -24,6 +24,7 @@ non-numeric operating_threshold, or an unrecognized boolean token) raises
 
 from __future__ import annotations
 
+import logging
 import os
 from collections.abc import Mapping
 from pathlib import Path
@@ -39,6 +40,8 @@ from worker.runtime.config.worker_models import (
     WorkerConfig,
     WorkerModelsConfig,
 )
+
+LOGGER: Final = logging.getLogger(__name__)
 
 ML_WORKER_FALL_MODEL_ARTIFACT_DIR_ENV: Final = "ML_WORKER_FALL_MODEL_ARTIFACT_DIR"
 ML_WORKER_FALL_MODEL_TYPE_ENV: Final = "ML_WORKER_FALL_MODEL_TYPE"
@@ -158,6 +161,28 @@ def _optional_int(name: str, env: Mapping[str, str]) -> int | None:
         raise WorkerConfigError(f"{name} must be an integer, got {raw!r}") from error
 
 
+def _optional_float(name: str, env: Mapping[str, str]) -> float | None:
+    raw = env.get(name, "").strip()
+    if raw == "":
+        return None
+    try:
+        return float(raw)
+    except ValueError as error:
+        raise WorkerConfigError(f"{name} must be a number, got {raw!r}") from error
+
+
+def _warn_if_env_ignored(name: str, env: Mapping[str, str], *, reason: str) -> None:
+    """Warn when ``name`` is set in the environment but the current code path
+    does not read it.
+
+    Issue #198 (and #191 before it): a "set, documented, silently dead" env
+    var is an operator-facing footgun regardless of which var it is, so this
+    stays a small generic check rather than one-off handling per variable.
+    """
+    if env.get(name, "").strip():
+        LOGGER.warning("%s is set but ignored: %s", name, reason)
+
+
 def clip_recording_config_from_environment(
     environ: Mapping[str, str] | None = None,
 ) -> ClipRecordingConfig:
@@ -182,17 +207,29 @@ def fall_model_config_from_environment(
 
     Issue #133: the worker must boot with zero env vars.
     ``ML_WORKER_FALL_MODEL_ARTIFACT_DIR`` is the on/off switch for *explicit*
-    configuration: unset (the out-of-the-box default) no longer means "no
-    fall model" -- it now resolves to the packaged default LSTM model at
-    ``models/fall/lstm`` (arch.json/metadata.yaml are tracked in git;
-    model.pt is fetched separately via ``scripts/fetch-models.sh`` since
-    weights stay gitignored). An explicit env value always overrides the
-    default outright, never blends with it. Once
-    ``ML_WORKER_FALL_MODEL_ARTIFACT_DIR`` is explicitly set, the rest of the
-    artifact contract (window/stride/operating_threshold) becomes required
-    so a partially configured fall model still fails loudly at boot rather
-    than silently defaulting (ADR-0002) -- issue #79 (track 2): every
-    malformed field is collected and reported together, not just the first.
+    artifact configuration: unset (the out-of-the-box default) no longer
+    means "no fall model" -- it now resolves to the packaged default LSTM
+    model at ``models/fall/lstm`` (arch.json/metadata.yaml are tracked in
+    git; model.pt is fetched separately via ``scripts/fetch-models.sh``
+    since weights stay gitignored). An explicit ``ARTIFACT_DIR`` env value
+    always overrides the default outright, never blends with it.
+
+    Issue #198: ``ARTIFACT_DIR`` being unset does *not* also gate
+    ``window``/``stride``/``operating_threshold`` -- those three are read
+    from their own env vars regardless of which artifact is in play, each
+    falling back independently to the packaged manifest's value only when
+    its own env var is absent. Reading them only inside the "artifact dir is
+    explicitly set" branch (the pre-#198 behavior) meant an operator-set
+    ``ML_WORKER_FALL_MODEL_OPERATING_THRESHOLD`` was silently discarded on
+    the packaged-default path -- the only path the shipped edge topology
+    actually takes.
+
+    Once ``ML_WORKER_FALL_MODEL_ARTIFACT_DIR`` is explicitly set, the
+    artifact contract tightens: window/stride/operating_threshold become
+    *required* (not just respected-if-present) so a partially configured
+    fall model still fails loudly at boot rather than silently defaulting
+    (ADR-0002) -- issue #79 (track 2): every malformed field is collected
+    and reported together, not just the first.
     ``framework``/``mode`` are not independent env vars: today's
     ``FallModelConfig`` only has one valid literal for each
     (pytorch/sequence), so there is nothing for an env var to select yet.
@@ -211,12 +248,54 @@ def fall_model_config_from_environment(
     is_default = not artifact_dir_raw
 
     if is_default:
+        # Issue #198: previously window/stride/operating_threshold were only
+        # ever read when ARTIFACT_DIR was also set, so an operator-set
+        # ML_WORKER_FALL_MODEL_OPERATING_THRESHOLD was silently discarded on
+        # the packaged-default path (the only path the shipped edge topology
+        # actually takes) and the field default (0.0007872396381571889, an
+        # upstream le2i operating point -- see the module docstring above)
+        # was used instead. An explicit env value now wins outright per
+        # field; env silence falls back to the packaged manifest default,
+        # same "explicit wins outright, silence defers" precedence used
+        # elsewhere in this module (see ``clip_recording_config_from_environment``).
         artifact_dir = _DEFAULT_ARTIFACT_DIR
-        window = _DEFAULT_WINDOW
-        stride = _DEFAULT_STRIDE
-        operating_threshold = _DEFAULT_OPERATING_THRESHOLD
+        window_env = _optional_int(ML_WORKER_FALL_MODEL_WINDOW_ENV, env)
+        stride_env = _optional_int(ML_WORKER_FALL_MODEL_STRIDE_ENV, env)
+        operating_threshold_env = _optional_float(
+            ML_WORKER_FALL_MODEL_OPERATING_THRESHOLD_ENV, env
+        )
+        window = _DEFAULT_WINDOW if window_env is None else window_env
+        stride = _DEFAULT_STRIDE if stride_env is None else stride_env
+        operating_threshold = (
+            _DEFAULT_OPERATING_THRESHOLD
+            if operating_threshold_env is None
+            else operating_threshold_env
+        )
+        operating_threshold_source = (
+            "packaged manifest default" if operating_threshold_env is None else "env"
+        )
         schema_version: int | None = _DEFAULT_SCHEMA_VERSION
         preprocessing_identity: str | None = _DEFAULT_PREPROCESSING_IDENTITY
+        # schema_version/preprocessing_identity have no packaged-default
+        # fallback path (unlike window/stride/operating_threshold above) --
+        # they always resolve to the packaged manifest's own values here, so
+        # an env value for either is unconditionally dead on this branch.
+        _warn_if_env_ignored(
+            ML_WORKER_FALL_MODEL_SCHEMA_VERSION_ENV,
+            env,
+            reason=(
+                f"only read when {ML_WORKER_FALL_MODEL_ARTIFACT_DIR_ENV} is also set; "
+                "the packaged default model's own manifest value is used instead"
+            ),
+        )
+        _warn_if_env_ignored(
+            ML_WORKER_FALL_MODEL_PREPROCESSING_IDENTITY_ENV,
+            env,
+            reason=(
+                f"only read when {ML_WORKER_FALL_MODEL_ARTIFACT_DIR_ENV} is also set; "
+                "the packaged default model's own manifest value is used instead"
+            ),
+        )
     else:
         artifact_dir = artifact_dir_raw
         because = f"when {ML_WORKER_FALL_MODEL_ARTIFACT_DIR_ENV} is set"
@@ -240,6 +319,8 @@ def fall_model_config_from_environment(
         assert window is not None
         assert stride is not None
         assert operating_threshold is not None
+        # Required (not optional) on this branch, so it is always env-sourced.
+        operating_threshold_source = "env"
         schema_version = _optional_int(ML_WORKER_FALL_MODEL_SCHEMA_VERSION_ENV, env)
         preprocessing_identity = (
             env.get(ML_WORKER_FALL_MODEL_PREPROCESSING_IDENTITY_ENV, "").strip() or None
@@ -249,6 +330,16 @@ def fall_model_config_from_environment(
     weights = env.get(ML_WORKER_FALL_MODEL_WEIGHTS_ENV, "").strip() or _DEFAULT_WEIGHTS
     architecture = (
         env.get(ML_WORKER_FALL_MODEL_ARCHITECTURE_ENV, "").strip() or _DEFAULT_ARCHITECTURE
+    )
+    # Issue #198: the only prior way to discover the effective operating
+    # threshold was dumping an emitted event's `audit` blob out of the SQLite
+    # outbox. Logging it once here, at the boot-only call site, makes the
+    # resolved value -- and whether it came from env or the packaged
+    # manifest default -- visible without waiting for a detection to fire.
+    LOGGER.info(
+        "fall model operating_threshold resolved to %s (source: %s)",
+        operating_threshold,
+        operating_threshold_source,
     )
     try:
         return FallModelConfig(
