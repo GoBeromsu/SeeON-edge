@@ -142,6 +142,7 @@ def _create_lstm_fall_model(config: FallModelConfigLike, device: str) -> FallMod
         device=device,
         expected_schema_version=config.schema_version,
         expected_preprocessing_identity=config.preprocessing_identity,
+        operating_threshold=config.operating_threshold,
     )
 
 

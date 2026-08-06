@@ -159,7 +159,7 @@ def test_create_fall_model_uses_the_configured_lstm_artifact(
             "preprocessing_identity": "v2-poses",
         }
     )
-    calls: list[tuple[Path, str, int | None, str | None]] = []
+    calls: list[tuple[Path, str, int | None, str | None, float | None]] = []
     sentinel = object()
 
     def fake_from_artifact_dir(
@@ -169,10 +169,17 @@ def test_create_fall_model_uses_the_configured_lstm_artifact(
         expected_schema_version: int | None = None,
         expected_preprocessing_identity: str | None = None,
         expected_artifact_digest: str | None = None,
+        operating_threshold: float | None = None,
     ) -> object:
         del expected_artifact_digest
         calls.append(
-            (Path(artifact_dir), device, expected_schema_version, expected_preprocessing_identity)
+            (
+                Path(artifact_dir),
+                device,
+                expected_schema_version,
+                expected_preprocessing_identity,
+                operating_threshold,
+            )
         )
         return sentinel
 
@@ -190,6 +197,7 @@ def test_create_fall_model_uses_the_configured_lstm_artifact(
             "cuda",
             fall_config.schema_version,
             fall_config.preprocessing_identity,
+            fall_config.operating_threshold,
         )
     ]
 

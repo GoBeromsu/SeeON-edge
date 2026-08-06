@@ -118,6 +118,7 @@ class LstmFallRunner:
         expected_schema_version: int | None = None,
         expected_preprocessing_identity: str | None = None,
         expected_artifact_digest: str | None = None,
+        operating_threshold: float | None = None,
     ) -> LstmFallRunner:
         manifest = LstmFallManifest.from_artifact_dir(artifact_dir)
         _validate_expected_identity(
@@ -138,7 +139,23 @@ class LstmFallRunner:
             manifest.weights_path,
             expected_artifact_digest if expected_artifact_digest is not None else declared_digest,
         )
-        resolved_manifest = replace(manifest, artifact_digest=digest)
+        # Issue #217: operating_threshold is a runtime-configured decision
+        # boundary, not an artifact identity field like schema_version/
+        # preprocessing_identity above -- so it overrides the packaged
+        # manifest value outright instead of being validated against it.
+        # ``None`` (no override supplied) leaves the manifest's own value in
+        # place, which is what keeps a zero-config boot working: the
+        # packaged default model must still produce a working detector with
+        # no ML_WORKER_FALL_MODEL_OPERATING_THRESHOLD set at all.
+        resolved_manifest = replace(
+            manifest,
+            artifact_digest=digest,
+            operating_threshold=(
+                manifest.operating_threshold
+                if operating_threshold is None
+                else operating_threshold
+            ),
+        )
         module = build_lstm_module_from_arch(resolved_manifest.architecture_path)
         state_dict = _load_state_dict(resolved_manifest.weights_path)
         try:
