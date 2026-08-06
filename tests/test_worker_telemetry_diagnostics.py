@@ -8,6 +8,8 @@ from dataclasses import dataclass
 import pytest
 
 from contracts.decode_diagnostics import DecodeSelection
+from contracts.observation import BedRegionCacheState
+from worker.pipeline.perception.scene_state import BedRegionCacheCounters
 from worker.runtime.telemetry.runtime_diagnostics import (
     EncoderLifecycleSnapshot,
     WorkerDiagnostics,
@@ -71,6 +73,8 @@ def test_local_snapshot_includes_stage_bus_encoder_and_failure_metrics() -> None
             unavailable_cameras=("camera-1",),
         )
     )
+    counters = BedRegionCacheCounters(fresh=3, cached=1, expired=1, reset=0, scheduled_empty=2)
+    diagnostics.record_bed_region("camera-1", BedRegionCacheState.CACHED, counters.snapshot())
 
     # When
     snapshot = diagnostics.snapshot()
@@ -86,6 +90,15 @@ def test_local_snapshot_includes_stage_bus_encoder_and_failure_metrics() -> None
     assert snapshot.encoder.failures == 1
     assert snapshot.encoder.finalized_segments == 8
     assert snapshot.encoder.unavailable_cameras == ("camera-1",)
+    assert camera.bed_region is not None
+    assert camera.bed_region.freshness == BedRegionCacheState.CACHED
+    assert camera.bed_region.counters == {
+        "fresh": 3,
+        "cached": 1,
+        "expired": 1,
+        "reset": 0,
+        "scheduled_empty": 2,
+    }
 
 
 def test_local_metric_is_excluded_from_frozen_wire_payload() -> None:
@@ -101,6 +114,28 @@ def test_local_metric_is_excluded_from_frozen_wire_payload() -> None:
     assert set(payload) == {"facility_id", "generation", "seq", "cameras", "clip_recorder"}
     assert set(payload["cameras"][0]) == {"camera_id", "decode"}
     assert "local_metric_must_not_leak" not in repr(payload)
+
+
+def test_bed_region_is_excluded_from_frozen_wire_payload() -> None:
+    """Bed-region diagnostics never cross the relay boundary (issue #207).
+
+    Same reasoning as ``encode`` (#53, see the comment on
+    ``CameraDiagnosticsSnapshot.bed_region``): the strict backend contract in
+    worker/runtime/telemetry/wire.py has no field for it, so it must stay
+    local-only, same as encode/stage_timings/bus already do.
+    """
+    # Given
+    diagnostics = WorkerDiagnostics()
+    diagnostics.update_decode("camera-1", _selection())
+    counters = BedRegionCacheCounters(fresh=1)
+    diagnostics.record_bed_region("camera-1", BedRegionCacheState.FRESH, counters.snapshot())
+
+    # When
+    payload = diagnostics.to_payload("facility-1", None, 1)
+
+    # Then
+    assert set(payload["cameras"][0]) == {"camera_id", "decode"}
+    assert "bed_region" not in repr(payload)
 
 
 def test_structured_log_contains_local_metrics(caplog: pytest.LogCaptureFixture) -> None:
@@ -125,3 +160,70 @@ def test_structured_log_contains_local_metrics(caplog: pytest.LogCaptureFixture)
             "max_sec": 0.25,
         }
     }
+
+
+def test_structured_log_lets_an_operator_read_bed_region_liveness_without_ssh(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A log line alone answers "is this camera's bed region alive?" (#207).
+
+    No SSH + sqlite required: `camera_id` plus `bed_region.freshness` is
+    sufficient, and the counters give the history behind that state.
+    """
+    # Given
+    diagnostics = WorkerDiagnostics()
+    counters = BedRegionCacheCounters(fresh=10, cached=4, expired=2, reset=1, scheduled_empty=6)
+    diagnostics.record_bed_region("camera-9", BedRegionCacheState.EXPIRED, counters.snapshot())
+
+    # When
+    with caplog.at_level(logging.INFO):
+        diagnostics.log_snapshot()
+
+    # Then
+    record = caplog.records[-1]
+    assert vars(record).get("camera_id") == "camera-9"
+    bed_region = vars(record).get("bed_region")
+    assert bed_region is not None
+    assert bed_region["freshness"] == "expired"
+    assert bed_region["counters"] == {
+        "fresh": 10,
+        "cached": 4,
+        "expired": 2,
+        "reset": 1,
+        "scheduled_empty": 6,
+    }
+
+
+def test_structured_log_bed_region_never_carries_a_url_ip_or_credential_shaped_value(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The bed-region log payload is closed to freeform strings (issue #207).
+
+    ``BedRegionCacheState`` is a four-member enum and the counters are plain
+    ints (`BedRegionCacheCounterSnapshot`) -- there is no string field an RTSP
+    URL, camera IP, or credential could ever be written into, so this asserts
+    the *shape* stays closed rather than pattern-matching for one leak.
+    """
+    # Given
+    diagnostics = WorkerDiagnostics()
+    counters = BedRegionCacheCounters(fresh=1, cached=0, expired=0, reset=0, scheduled_empty=0)
+    diagnostics.record_bed_region("camera-1", BedRegionCacheState.FRESH, counters.snapshot())
+
+    # When
+    with caplog.at_level(logging.INFO):
+        diagnostics.log_snapshot()
+
+    # Then
+    record = caplog.records[-1]
+    bed_region = vars(record).get("bed_region")
+    assert bed_region is not None
+    assert set(bed_region) == {"freshness", "counters", "updated_at_sec"}
+    assert bed_region["freshness"] in {"fresh", "cached", "empty", "expired"}
+    assert set(bed_region["counters"]) == {
+        "fresh",
+        "cached",
+        "expired",
+        "reset",
+        "scheduled_empty",
+    }
+    assert all(isinstance(value, int) for value in bed_region["counters"].values())

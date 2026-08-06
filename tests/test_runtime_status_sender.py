@@ -1,15 +1,23 @@
 from __future__ import annotations
 
+import logging
 import time
 from typing import final
 
+import pytest
+
 from contracts.decode_diagnostics import DecodeSelection
+from contracts.observation import BedRegionCacheState
+from worker.pipeline.perception.scene_state import BedRegionCacheCounters
 from worker.runtime.telemetry.runtime_diagnostics import WorkerDiagnostics
 from worker.runtime.telemetry.runtime_status_sender import (
     RuntimeStatusSender,
     RuntimeStatusSenderConfig,
 )
-from worker.runtime.telemetry.wire import ClipRecorderStatus, RelayRuntimeStatusPayload
+from worker.runtime.telemetry.wire import (
+    ClipRecorderStatus,
+    RelayRuntimeStatusPayload,
+)
 
 # test_sender_uses_latest_snapshot_and_bearer_auth (edge): payload shape, generation
 # bookkeeping, and bearer auth are superseded by tests/test_worker_telemetry_status_sender.py
@@ -169,6 +177,87 @@ def test_before_publish_hook_refreshes_diagnostics_on_every_tick() -> None:
     # The most recently delivered payload reflects the latest live value,
     # proving the hook re-runs (rather than a value snapshotted once).
     assert transport.payloads[-1]["clip_recorder"]["finalized_clips"] == calls["count"]
+
+
+def test_sender_logs_a_local_diagnostics_snapshot_on_its_own_tick(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """#207: the sender's existing background tick is reused to finally call
+    ``WorkerDiagnostics.log_snapshot()``, which had no production caller.
+    """
+    diagnostics = _diagnostics()
+    counters = BedRegionCacheCounters(fresh=2)
+    diagnostics.record_bed_region("camera-a", BedRegionCacheState.FRESH, counters.snapshot())
+    transport = _RecordingTransport()
+    sender = RuntimeStatusSender(
+        diagnostics,
+        "facility-a",
+        transport,
+        RuntimeStatusSenderConfig(publish_interval_sec=0.01),
+    )
+
+    with caplog.at_level(logging.INFO):
+        sender.start()
+        try:
+            _wait_until(lambda: bool(transport.payloads))
+        finally:
+            sender.stop()
+
+    telemetry_records = [
+        record for record in caplog.records if record.getMessage() == "worker.runtime.telemetry"
+    ]
+    assert telemetry_records
+    assert vars(telemetry_records[-1]).get("camera_id") == "camera-a"
+    assert vars(telemetry_records[-1]).get("bed_region", {}).get("freshness") == "fresh"
+
+
+@final
+class _LogSnapshotAlwaysFailsDiagnostics:
+    """Delegates the relay-facing methods to a real ``WorkerDiagnostics`` but
+    makes ``log_snapshot()`` raise, to pin that a local-logging defect can
+    never take down relay delivery (issue #207).
+    """
+
+    __slots__ = ("_inner",)
+
+    def __init__(self, inner: WorkerDiagnostics) -> None:
+        self._inner = inner
+
+    def to_payload(
+        self, facility_id: str, generation: int | None, seq: int
+    ) -> RelayRuntimeStatusPayload:
+        return self._inner.to_payload(facility_id, generation, seq)
+
+    def to_payloads(
+        self, camera_facilities: object, generation: int | None, seq: int
+    ) -> list[RelayRuntimeStatusPayload]:
+        return self._inner.to_payloads(camera_facilities, generation, seq)  # type: ignore[arg-type]
+
+    def log_snapshot(self) -> None:
+        raise RuntimeError("boom")
+
+
+def test_sender_survives_a_log_snapshot_failure_and_keeps_delivering(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    transport = _RecordingTransport()
+    sender = RuntimeStatusSender(
+        _LogSnapshotAlwaysFailsDiagnostics(_diagnostics()),  # type: ignore[arg-type]
+        "facility-a",
+        transport,
+        RuntimeStatusSenderConfig(publish_interval_sec=0.01),
+    )
+
+    with caplog.at_level(logging.WARNING):
+        sender.start()
+        try:
+            _wait_until(lambda: bool(transport.payloads))
+        finally:
+            sender.stop()
+
+    # Relay delivery happened despite log_snapshot() always raising.
+    assert transport.payloads
+    assert any("log_snapshot" in record.getMessage() for record in caplog.records)
 
 
 def _wait_until(predicate, timeout_sec: float = 0.5) -> None:  # noqa: ANN001

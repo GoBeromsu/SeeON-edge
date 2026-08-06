@@ -95,6 +95,20 @@ def log_snapshot(snapshot: RuntimeDiagnosticsSnapshot) -> None:
                         "last_reason": camera.encode.last_reason,
                     }
                 ),
+                # Issue #207: current cache state plus cumulative counts, so
+                # "is this camera's bed region alive?" is answerable from a
+                # worker log line alone -- never the polygon coordinates,
+                # RTSP URL, or camera IP (this repo is public; log lines get
+                # pasted into issues).
+                "bed_region": (
+                    None
+                    if camera.bed_region is None
+                    else {
+                        "freshness": camera.bed_region.freshness.value,
+                        "counters": dict(camera.bed_region.counters),
+                        "updated_at_sec": camera.bed_region.updated_at_sec,
+                    }
+                ),
             },
         )
 

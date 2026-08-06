@@ -5,7 +5,7 @@ from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from typing import Protocol
 
-from contracts.observation import FrameObservation
+from contracts.observation import BedRegionCacheState, FrameObservation
 from worker.pipeline.analytics.merge import authoritative_boxes, merge_module_results
 from worker.pipeline.analytics.models import NamedExtractor, ensure_unique_module_names
 from worker.pipeline.bus import Scheduler
@@ -15,6 +15,7 @@ from worker.pipeline.perception import (
     build_decision_input,
     build_frame_observation,
 )
+from worker.pipeline.perception.scene_state import BedRegionCacheCounterSnapshot
 from worker.types import DecisionInput, FramePacket, ModuleResult
 
 
@@ -55,6 +56,22 @@ class StageTimingRecorder(Protocol):
     def record_stage_timing(self, camera_id: str, stage: str, elapsed_sec: float) -> None: ...
 
 
+class BedRegionRecorder(Protocol):
+    """Structural view of ``WorkerDiagnostics.record_bed_region()``.
+
+    Kept narrow for the same layering reason as ``StageTimingRecorder``
+    above (issue #207): the pipeline layer depends on this shape instead of
+    importing ``worker.runtime.telemetry.runtime_diagnostics.WorkerDiagnostics``.
+    """
+
+    def record_bed_region(
+        self,
+        camera_id: str,
+        freshness: BedRegionCacheState,
+        counters: BedRegionCacheCounterSnapshot,
+    ) -> None: ...
+
+
 class CompositeExtractor:
     """Own one camera's analytics state while reusing shared named extractors."""
 
@@ -67,6 +84,7 @@ class CompositeExtractor:
         scene_state: SceneState,
         watchdog: InferenceGuard | None = None,
         stage_timing_recorder: StageTimingRecorder | None = None,
+        bed_region_recorder: BedRegionRecorder | None = None,
     ) -> None:
         frozen_extractors = tuple(extractors)
         ensure_unique_module_names(
@@ -81,6 +99,7 @@ class CompositeExtractor:
         }
         self._watchdog = watchdog
         self._stage_timing_recorder = stage_timing_recorder
+        self._bed_region_recorder = bed_region_recorder
 
     def _extract(self, extractor: NamedExtractor, packet: FramePacket) -> ModuleResult:
         """Run one module's forward pass, guarded against a hung driver.
@@ -134,6 +153,30 @@ class CompositeExtractor:
             bed_scheduled="bed" in scheduled_names,
             bed_interval=self.scheduler.task_intervals.get("bed", 30),
         )
+        if self._bed_region_recorder is not None:
+            # `decision_input.bed_region.source` (a `BedRegionDebugSnapshot`)
+            # is this frame's actual resolved state, not
+            # `scene_state.bed_region_freshness` -- on the persisted-polygon
+            # short-circuit (`resolve_bed_regions`, ~10/13 live cameras),
+            # `resolve_bed_regions` returns FRESH every frame but never
+            # touches `bed_region_freshness`/`bed_region_counters` at all, so
+            # reading those directly would misreport those cameras as
+            # permanently EMPTY (#207). `bed_region_counters` itself only
+            # advances on the live-detection cache path; staying all-zero
+            # forever on a persisted-polygon camera is correct and, paired
+            # with a constant FRESH source, is itself informative --  it
+            # marks the cache mechanism as never engaged rather than idle.
+            #
+            # Like `record_stage_timing` above, this only refreshes an
+            # in-memory value the recorder holds -- it is not itself a log
+            # call, so doing it every frame does not reproduce the
+            # "per-frame logging across 13 cameras" outage the issue warns
+            # against; the recorder decides its own emission cadence.
+            self._bed_region_recorder.record_bed_region(
+                self.scene_state.camera_id,
+                decision_input.bed_region.source,
+                self.scene_state.bed_region_counters.snapshot(),
+            )
         final_observation = decision_input.observation
         _ = self.scene_state.update(final_observation, track_ids=track_ids)
         return CompositeResult(
@@ -142,6 +185,7 @@ class CompositeExtractor:
             decision_input=decision_input,
         )
 __all__ = [
+    "BedRegionRecorder",
     "CompositeExtractor",
     "CompositeResult",
     "InferenceGuard",

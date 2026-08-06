@@ -1191,6 +1191,7 @@ class WorkerRuntime:
             scene_state=scene,
             watchdog=self.watchdog,
             stage_timing_recorder=self.diagnostics,
+            bed_region_recorder=self.diagnostics,
         )
         decision, domain_audit, domain_deciders = self._build_decision_stage(
             camera, self.fall_model

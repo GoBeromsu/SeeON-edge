@@ -198,6 +198,7 @@ class RuntimeStatusSender:
         delay = 0.0
         failures = 0
         while not self._stop_event.wait(delay):
+            self._log_local_snapshot()
             _ = self.publish()
             replacement = self._take_latest()
             if replacement is not None:
@@ -215,6 +216,35 @@ class RuntimeStatusSender:
                     self._max_backoff_sec,
                     backoff,
                 )
+
+    def _log_local_snapshot(self) -> None:
+        """Emit `WorkerDiagnostics.log_snapshot()` on this sender's own tick.
+
+        Issue #207: `WorkerDiagnostics.log_snapshot()` existed but had no
+        production caller anywhere, so the bed-region cache state it now
+        carries (and the pre-existing stage-timing/bus/encode fields, which
+        had the same problem) never actually reached a worker log line. This
+        thread already runs an independent, non-per-frame background tick
+        for the exact stated reason ("publish telemetry away from ingest and
+        frame-processing threads"), so it is reused here rather than adding a
+        second timer thread.
+
+        Deliberately decoupled from `_post`'s relay-delivery outcome: a log
+        line is not a relay call and must not inherit its retry/backoff
+        rhythm or be skipped because the relay is unreachable. The one
+        accepted trade-off is that a relay outage's growing backoff also
+        slows this local logging tick (bounded by `_max_backoff_sec`,
+        default 30s) -- still periodic, never per-frame, so it does not
+        reproduce the failure mode #207 warns against; call it explicitly
+        if that coupling ever needs to be broken.
+
+        Wrapped so a `log_snapshot()` defect can never take down relay
+        delivery, which is this sender's primary job.
+        """
+        try:
+            self._diagnostics.log_snapshot()
+        except Exception:  # noqa: BLE001 - local logging must never break relay delivery
+            LOGGER.warning("worker diagnostics log_snapshot failed", exc_info=True)
 
     def _take_latest(self) -> list[RelayRuntimeStatusPayload] | None:
         latest: list[RelayRuntimeStatusPayload] | None = None

@@ -9,12 +9,15 @@ from typing import final
 
 from contracts.decode_diagnostics import DECODE_FALLBACK_REASONS, DecodeSelection
 from contracts.encode_diagnostics import ENCODE_FALLBACK_REASONS, EncodeSelection
+from contracts.observation import BedRegionCacheState
+from worker.pipeline.perception.scene_state import BedRegionCacheCounterSnapshot
 from worker.runtime.telemetry.local_metrics import (
     StageTimingAccumulator,
     bus_snapshot,
     log_snapshot,
 )
 from worker.runtime.telemetry.models import (
+    BedRegionDiagnostics,
     BusMetricsSource,
     BusSubscriptionSnapshot,
     CameraDiagnosticsSnapshot,
@@ -59,6 +62,7 @@ class WorkerDiagnostics:
         self._measured_fps_by_camera: dict[str, tuple[float, float | None]] = {}
         self._stage_timings: dict[str, dict[str, StageTimingAccumulator]] = {}
         self._buses: dict[str, tuple[BusMetricsSource, tuple[str, ...]]] = {}
+        self._bed_region_by_camera: dict[str, BedRegionDiagnostics] = {}
         self._encoder = EncoderLifecycleSnapshot()
         self._clip_recorder = ClipRecorderStatus()
         self._gpu: RelayGpuPayload | None = None
@@ -159,6 +163,36 @@ class WorkerDiagnostics:
         with self._lock:
             return dict(self._encode_by_camera)
 
+    def record_bed_region(
+        self,
+        camera_id: str,
+        freshness: BedRegionCacheState,
+        counters: BedRegionCacheCounterSnapshot,
+    ) -> None:
+        """Refresh one camera's bed-region state (issue #207).
+
+        Called once per processed frame from ``CompositeExtractor`` (see
+        ``BedRegionRecorder`` in worker/pipeline/analytics/composite.py) --
+        like ``record_stage_timing``, this only updates an in-memory value;
+        it is not itself a log call, so per-frame frequency here does not
+        reproduce the "per-frame logging across 13 cameras" outage the issue
+        warns against. Actual emission is on `log_snapshot()`'s cadence.
+        """
+        with self._lock:
+            self._bed_region_by_camera[camera_id] = BedRegionDiagnostics(
+                freshness=freshness,
+                counters=counters,
+                updated_at_sec=self._wall_clock(),
+            )
+
+    def bed_region_selection(self, camera_id: str) -> BedRegionDiagnostics | None:
+        with self._lock:
+            return self._bed_region_by_camera.get(camera_id)
+
+    def bed_region_snapshot(self) -> Mapping[str, BedRegionDiagnostics]:
+        with self._lock:
+            return dict(self._bed_region_by_camera)
+
     def update_measured_fps(self, camera_id: str, measured_fps: float | None) -> None:
         with self._lock:
             self._measured_fps_by_camera[camera_id] = (self._clock(), measured_fps)
@@ -204,12 +238,14 @@ class WorkerDiagnostics:
             buses = dict(self._buses)
             encoder = self._encoder
             encode_by_camera = dict(self._encode_by_camera)
+            bed_region_by_camera = dict(self._bed_region_by_camera)
             camera_ids = (
                 set(self._decode_by_camera)
                 | set(stage_timings)
                 | set(buses)
                 | set(statuses)
                 | set(encode_by_camera)
+                | set(bed_region_by_camera)
             )
         cameras = tuple(
             CameraDiagnosticsSnapshot(
@@ -220,6 +256,7 @@ class WorkerDiagnostics:
                 stage_timings=stage_timings.get(camera_id, ()),
                 bus=bus_snapshot(buses.get(camera_id)),
                 encode=encode_by_camera.get(camera_id),
+                bed_region=bed_region_by_camera.get(camera_id),
             )
             for camera_id in sorted(camera_ids)
         )
@@ -299,6 +336,7 @@ class WorkerDiagnostics:
             worker = None if self._worker is None else self._worker.copy()
         return selections, measured_fps, clip_recorder, gpu, worker
 __all__ = [
+    "BedRegionDiagnostics",
     "BusMetricsSource",
     "BusSubscriptionSnapshot",
     "CameraDiagnosticsSnapshot",
