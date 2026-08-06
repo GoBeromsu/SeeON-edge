@@ -57,6 +57,13 @@ services:
       # keep detection cadence bounded while live view runs faster on
       # inference-bound hardware.
       ML_DEFAULT_FRAME_STRIDE: ${ML_DEFAULT_FRAME_STRIDE:-}
+      # IANA tz for locally-configured detection windows (see
+      # cameras/router.py's _resolved_tz): applies only when the backend has
+      # no externally-pulled window for the domain to inherit a tz from.
+      # Unset -> UTC, which silently shifts an intended night window to the
+      # wrong hours for any non-UTC facility (issue #206). Every edge
+      # deployment should set this to the facility's real tz.
+      ML_API_DETECTION_TZ: ${ML_API_DETECTION_TZ:-UTC}
     volumes:
       - ${ML_MODELS_DIR:-./models}:/app/models:ro
       - ml-api-state:/root/.local/state/ml-api
