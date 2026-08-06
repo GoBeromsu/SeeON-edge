@@ -19,8 +19,14 @@ class BoundingBox:
     y2: int
     confidence: float
     # Optional mask contour (issue #243): bed ROIs from instance segmentation
-    # carry the silhouette polygon for shape-accurate rendering. None for plain
-    # detection boxes (person/fall). x1..y2 stays the source of truth for IoU.
+    # or an operator's persisted `bed_zone_polygon` carry the silhouette
+    # polygon for shape-accurate rendering. None for plain detection boxes
+    # (person/fall). x1..y2 stays the source of truth for person-tracker IoU
+    # and remains the containment fallback when no polygon is present; when
+    # a bed carries one, `bed_exit.geometry.containment_ratio` (#219) reads
+    # it as the source of truth for bed containment instead of x1..y2, since
+    # x1..y2 alone is only an axis-aligned bounding box around the polygon
+    # and can measurably overstate a rotated/irregular bed's true area.
     polygon: tuple[tuple[int, int], ...] | None = None
 
 
