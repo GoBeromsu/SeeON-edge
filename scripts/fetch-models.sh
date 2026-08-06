@@ -42,8 +42,13 @@ Options:
   --force       Re-download even if the destination files already exist.
 
 Environment:
-  ML_WORKER_FETCH_MODELS_DEST   Override the destination directory
-                                 (default: <repo>/models/fall/lstm).
+  ML_WORKER_FETCH_MODELS_DEST       Override the destination directory
+                                     (default: <repo>/models/fall/lstm).
+  ML_WORKER_FETCH_MODELS_ATTEMPTS   Max download attempts per file
+                                     (default: 6). Each retry backs off
+                                     exponentially with jitter and honours a
+                                     Retry-After header when the server sends
+                                     one.
 EOF
 }
 
@@ -67,6 +72,71 @@ done
 mkdir -p "$dest_dir"
 
 # Fetches $HF_BASE_URL/$1 into $dest_dir/${2:-$1}, skipping when already
+# Issue #188: retries are driven here rather than by `curl --retry`, because
+# `--retry-delay` replaces curl's exponential backoff with a flat delay. The
+# old `--retry 3 --retry-delay 2` gave up roughly six seconds in, while the
+# rate-limit window Hugging Face applies to anonymous downloads is measured in
+# minutes -- so CI went red on a 429 that had nothing to do with the change
+# under test.
+#
+# The jitter matters as much as the backoff. This repo runs the same commit on
+# both `push` and `pull_request`, so two jobs fetch the same file at the same
+# moment as a matter of course. Without jitter they also retry in lockstep and
+# keep knocking each other out; that is how one job failed while its twin on
+# the identical commit passed.
+max_attempts="${ML_WORKER_FETCH_MODELS_ATTEMPTS:-6}"
+max_backoff_sec=120
+
+# Downloads $1 into $2, retrying on failure. Honours a Retry-After header when
+# the server sends one -- the server's own number beats anything we can guess.
+fetch_with_retry() {
+  local url="$1"
+  local dest_tmp="$2"
+  local headers attempt=1 status wait_sec
+
+  headers="$(mktemp)"
+  # shellcheck disable=SC2064  # expand $headers now, not at trap time
+  trap "rm -f '$headers'" RETURN
+
+  while :; do
+    status="$(curl -sSL --connect-timeout 20 -D "$headers" -o "$dest_tmp" \
+                   -w '%{http_code}' "$url")" || status=000
+    if [[ "$status" == 2* ]]; then
+      return 0
+    fi
+
+    # Only statuses that can plausibly succeed later are worth waiting on:
+    # 429/408 plus 5xx, and 000 for a transport error curl never got a status
+    # for. A 404 means the pinned revision or filename is wrong, and retrying
+    # that just turns a clear five-second failure into a slow, confusing one.
+    case "$status" in
+      429|408|5*|000) ;;
+      *)
+        echo "fetch-models.sh: $url returned HTTP $status; not retryable" >&2
+        rm -f "$dest_tmp"
+        return 1
+        ;;
+    esac
+
+    if (( attempt >= max_attempts )); then
+      echo "fetch-models.sh: giving up on $url after $attempt attempts (last HTTP status: $status)" >&2
+      rm -f "$dest_tmp"
+      return 1
+    fi
+
+    wait_sec="$(sed -n 's/^[Rr]etry-[Aa]fter:[[:space:]]*\([0-9]\{1,\}\).*/\1/p' "$headers" | tail -1)"
+    if [[ -z "$wait_sec" ]]; then
+      # 4, 8, 16, 32, 64 seconds, plus up to 5 seconds of jitter.
+      wait_sec=$(( 2 ** (attempt + 1) + RANDOM % 6 ))
+    fi
+    (( wait_sec > max_backoff_sec )) && wait_sec=$max_backoff_sec
+
+    echo "fetch-models.sh: attempt $attempt for $url failed (HTTP $status); retrying in ${wait_sec}s" >&2
+    sleep "$wait_sec"
+    attempt=$(( attempt + 1 ))
+  done
+}
+
 # present (unless --force), and prints the resulting file's sha256.
 fetch_one() {
   local remote_name="$1"
@@ -76,7 +146,7 @@ fetch_one() {
     echo "fetch-models.sh: $dest already exists; skipping (use --force to re-download)"
   else
     echo "fetch-models.sh: downloading $remote_name -> $dest"
-    curl -fSL --retry 3 --retry-delay 2 -o "$dest.tmp" "$HF_BASE_URL/$remote_name"
+    fetch_with_retry "$HF_BASE_URL/$remote_name" "$dest.tmp"
     mv "$dest.tmp" "$dest"
   fi
   if command -v shasum >/dev/null 2>&1; then
