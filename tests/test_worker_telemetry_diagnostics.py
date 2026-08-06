@@ -150,7 +150,8 @@ def test_structured_log_contains_local_metrics(caplog: pytest.LogCaptureFixture)
 
     # Then
     record = caplog.records[-1]
-    assert record.getMessage() == "worker.runtime.telemetry"
+    assert record.getMessage().startswith("worker.runtime.telemetry ")
+    assert "camera_id=camera-1" in record.getMessage()
     assert vars(record).get("camera_id") == "camera-1"
     assert vars(record).get("stage_timings") == {
         "inference": {
@@ -160,6 +161,41 @@ def test_structured_log_contains_local_metrics(caplog: pytest.LogCaptureFixture)
             "max_sec": 0.25,
         }
     }
+
+
+def test_structured_log_survives_the_entrypoints_basicconfig_format(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Values must appear in the *formatted* line, not just on the LogRecord.
+
+    ``worker/__main__.py`` configures the root logger with
+    ``logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s -
+    %(message)s")``. That format string never references an ``extra`` key, so
+    anything passed only through ``extra=`` -- which is what every field here
+    used to be -- is silently absent from what an operator actually reads,
+    even though ``caplog``/``vars(record)`` still see it as a LogRecord
+    attribute. Every other test in this file asserts against
+    ``vars(record)``, which is exactly why this gap went unnoticed: it proves
+    the call was made, never that the value survives formatting.
+    """
+    # Given -- the exact format string worker/__main__.py's basicConfig uses.
+    formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+    diagnostics = WorkerDiagnostics()
+    diagnostics.record_stage_timing("camera-1", "inference", 0.25)
+    counters = BedRegionCacheCounters(fresh=1, expired=3)
+    diagnostics.record_bed_region("camera-1", BedRegionCacheState.EXPIRED, counters.snapshot())
+
+    # When
+    with caplog.at_level(logging.INFO):
+        diagnostics.log_snapshot()
+    rendered = formatter.format(caplog.records[-1])
+
+    # Then
+    assert "camera_id=camera-1" in rendered
+    assert "stage_timings=" in rendered
+    assert "inference" in rendered
+    assert "bed_region=" in rendered
+    assert "'freshness': 'expired'" in rendered
 
 
 def test_structured_log_lets_an_operator_read_bed_region_liveness_without_ssh(

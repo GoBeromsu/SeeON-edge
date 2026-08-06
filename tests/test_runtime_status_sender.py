@@ -204,7 +204,9 @@ def test_sender_logs_a_local_diagnostics_snapshot_on_its_own_tick(
             sender.stop()
 
     telemetry_records = [
-        record for record in caplog.records if record.getMessage() == "worker.runtime.telemetry"
+        record
+        for record in caplog.records
+        if record.getMessage().startswith("worker.runtime.telemetry ")
     ]
     assert telemetry_records
     assert vars(telemetry_records[-1]).get("camera_id") == "camera-a"

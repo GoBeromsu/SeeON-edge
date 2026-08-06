@@ -61,54 +61,74 @@ def bus_snapshot(
 
 def log_snapshot(snapshot: RuntimeDiagnosticsSnapshot) -> None:
     for camera in snapshot.cameras:
+        stage_timings = {
+            timing.stage: {
+                "samples": timing.samples,
+                "total_sec": timing.total_sec,
+                "last_sec": timing.last_sec,
+                "max_sec": timing.max_sec,
+            }
+            for timing in camera.stage_timings
+        }
+        bus = {
+            metrics.name: {
+                "published": metrics.published,
+                "taken": metrics.taken,
+                "dropped": metrics.dropped,
+                "queue_age_sec": metrics.queue_age_sec,
+            }
+            for metrics in camera.bus
+        }
+        encode = (
+            None
+            if camera.encode is None
+            else {
+                "requested": camera.encode.requested,
+                "selected": camera.encode.selected,
+                "fallback_count": camera.encode.fallback_count,
+                "last_reason": camera.encode.last_reason,
+            }
+        )
+        # Issue #207: current cache state plus cumulative counts, so
+        # "is this camera's bed region alive?" is answerable from a
+        # worker log line alone -- never the polygon coordinates,
+        # RTSP URL, or camera IP (this repo is public; log lines get
+        # pasted into issues).
+        bed_region = (
+            None
+            if camera.bed_region is None
+            else {
+                "freshness": camera.bed_region.freshness.value,
+                "counters": dict(camera.bed_region.counters),
+                "updated_at_sec": camera.bed_region.updated_at_sec,
+            }
+        )
+        # The entrypoint's `logging.basicConfig(format=...)`
+        # (worker/__main__.py) never references `extra` keys, so anything
+        # passed only via `extra=` is silently absent from the rendered log
+        # line -- the line prints as bare "worker.runtime.telemetry" with
+        # none of the values below. Render every value into the message
+        # itself so it survives regardless of handler/formatter
+        # configuration; `extra` is kept alongside for any future structured
+        # (e.g. JSON) log consumer.
         LOGGER.info(
-            "worker.runtime.telemetry",
+            "worker.runtime.telemetry camera_id=%s failure_category=%s "
+            "stage_timings=%s bus=%s encoder=%s encode=%s bed_region=%s",
+            camera.camera_id,
+            camera.failure_category,
+            stage_timings,
+            bus,
+            snapshot.encoder,
+            encode,
+            bed_region,
             extra={
                 "camera_id": camera.camera_id,
                 "failure_category": camera.failure_category,
-                "stage_timings": {
-                    timing.stage: {
-                        "samples": timing.samples,
-                        "total_sec": timing.total_sec,
-                        "last_sec": timing.last_sec,
-                        "max_sec": timing.max_sec,
-                    }
-                    for timing in camera.stage_timings
-                },
-                "bus": {
-                    metrics.name: {
-                        "published": metrics.published,
-                        "taken": metrics.taken,
-                        "dropped": metrics.dropped,
-                        "queue_age_sec": metrics.queue_age_sec,
-                    }
-                    for metrics in camera.bus
-                },
+                "stage_timings": stage_timings,
+                "bus": bus,
                 "encoder": snapshot.encoder,
-                "encode": (
-                    None
-                    if camera.encode is None
-                    else {
-                        "requested": camera.encode.requested,
-                        "selected": camera.encode.selected,
-                        "fallback_count": camera.encode.fallback_count,
-                        "last_reason": camera.encode.last_reason,
-                    }
-                ),
-                # Issue #207: current cache state plus cumulative counts, so
-                # "is this camera's bed region alive?" is answerable from a
-                # worker log line alone -- never the polygon coordinates,
-                # RTSP URL, or camera IP (this repo is public; log lines get
-                # pasted into issues).
-                "bed_region": (
-                    None
-                    if camera.bed_region is None
-                    else {
-                        "freshness": camera.bed_region.freshness.value,
-                        "counters": dict(camera.bed_region.counters),
-                        "updated_at_sec": camera.bed_region.updated_at_sec,
-                    }
-                ),
+                "encode": encode,
+                "bed_region": bed_region,
             },
         )
 
