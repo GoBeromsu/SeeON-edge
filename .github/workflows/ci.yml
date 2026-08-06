@@ -40,3 +40,15 @@ jobs:
       # Stage 0 guardrail: declarative architecture contracts (import-linter).
       # Tightened per strangler stage; replaces test_import_dependency_ladder.py at Stage 5.
       - run: uv run --group lint lint-imports
+
+      # #179/#182: the shipped example must render on its own -- every
+      # compose.edge.yaml `${VAR:?...}` needs a value (default or
+      # placeholder) in .env.edge.prod.example, or an operator following the
+      # docs gets stuck at `docker compose config`. This only checks render
+      # success, not placeholder content (the example intentionally still
+      # has <placeholder> values -- scripts/edge-preflight/check-env.sh is
+      # what an operator runs against their filled-in .env.edge.prod).
+      - name: Edge env example renders (GPU + CPU-only overlay)
+        run: |
+          docker compose --env-file .env.edge.prod.example \
+            -f compose.edge.yaml -f compose.edge.cpu.yaml config -q

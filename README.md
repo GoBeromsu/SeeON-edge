@@ -123,12 +123,28 @@ ML_API_PROXY_TARGET=http://127.0.0.1:8000 pnpm --dir front dev
 
 ## Edge deployment
 
-Copy `.env.edge.prod.example` to `.env.edge.prod`, set the backend URLs,
-facility credentials, relay token, `ML_WORKER_PROFILE` (production uses `cuda`),
-host clip-store directory, and digest-pinned GHCR image references. Event clip export is off by default; set both
-`ML_API_EVENT_CLIP_EXPORT_ENABLED=1` and
-`ML_WORKER_EVENT_CLIP_EXPORT_ENABLED=1` only after backend capabilities are
-verified. Start the edge-only stack from this repository root:
+Copy `.env.edge.prod.example` to `.env.edge.prod`, then replace the real
+per-site values: the `.example` backend URLs, `<facility-id>` /
+`<relay-token>` / dashboard credentials, `ML_WORKER_PROFILE` (production uses
+`cuda`; CPU-only nodes use the overlay below), the host clip-store directory,
+and the digest-pinned GHCR image references
+(`docs/runbooks/edge-image-publish.md`). Every other variable
+`compose.edge.yaml` requires already ships with a working default, so a
+single `.env.edge.prod` is enough — no second env file needed.
+`ML_WORKER_EVENT_CLIP_EXPORT_ENABLED` defaults to `1` (it gates all alert
+delivery, not just clips — see #194); `ML_API_EVENT_CLIP_EXPORT_ENABLED`
+stays off by default until backend clip capability is verified for this
+deployment.
+
+Before `up`, verify the env file actually renders and has no leftover
+`<placeholder>` values:
+
+```bash
+scripts/edge-preflight/check-env.sh .env.edge.prod
+```
+
+Then start the edge-only stack from this repository root (add
+`-f compose.edge.cpu.yaml` on nodes without an NVIDIA GPU):
 
 ```bash
 docker compose --env-file .env.edge.prod -f compose.edge.yaml up -d

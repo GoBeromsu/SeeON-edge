@@ -373,7 +373,7 @@ def test_edge_compose_wires_worker_probe_origin_to_ml_api_only() -> None:
     )
 
 
-def test_event_clip_export_gates_are_explicit_off_by_default_allowlist() -> None:
+def test_event_clip_export_gates_are_explicit_allowlist() -> None:
     # Given: the tracked production Compose and its operator env example.
     services = _compose_services(EDGE_COMPOSE_FILE)
     api_env = _mapping_field(services["ml-api"], "environment")
@@ -388,10 +388,16 @@ def test_event_clip_export_gates_are_explicit_off_by_default_allowlist() -> None
         if "EVENT_CLIP_EXPORT_ENABLED" in key
     }
 
-    # Then: only the two owned gates are allowed and both require explicit opt-in.
+    # Then: only the two owned gates are allowed, and each keeps compose's own
+    # fallback (used when a caller omits the var entirely) off by default.
     assert configured == {
         "ML_API_EVENT_CLIP_EXPORT_ENABLED": "${ML_API_EVENT_CLIP_EXPORT_ENABLED:-0}",
         "ML_WORKER_EVENT_CLIP_EXPORT_ENABLED": ("${ML_WORKER_EVENT_CLIP_EXPORT_ENABLED:-0}"),
     }
+    # ml-api's clip-relay advertising stays off in the shipped example until
+    # backend clip capability is verified for a given deployment.
     assert "\nML_API_EVENT_CLIP_EXPORT_ENABLED=0\n" in env_example
-    assert "\nML_WORKER_EVENT_CLIP_EXPORT_ENABLED=0\n" in env_example
+    # ml-worker's gate ships ON in the example: despite the name, it's the
+    # only switch for the entire alert-delivery sender thread, not just clips
+    # (#194) -- leaving it off silently drops every detected event.
+    assert "\nML_WORKER_EVENT_CLIP_EXPORT_ENABLED=1\n" in env_example

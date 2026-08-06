@@ -134,16 +134,22 @@ curl -s -o /dev/null http://127.0.0.1:194NN/setup/page.js
 
 ```bash
 scripts/edge.sh run "cd '<repo>' && \
-  docker compose --env-file .env.edge.prod --env-file .env.edge.local \
-    -f compose.edge.yaml -f compose.edge.cpu.yaml -f compose.edge.local.yaml up -d"
+  docker compose --env-file .env.edge.prod \
+    -f compose.edge.yaml -f compose.edge.cpu.yaml up -d"
 ```
 
-**env 파일이 두 개인 것은 실수가 아니다.** `.env.edge.prod` 만 주면
-`CLIP_STORE_HOST_DIR is missing a value` 로 렌더 단계에서 죽는다. 노드별 값
-(이미지 태그, 호스트 경로, facility id)은 `.env.edge.local` 에 있다.
+**env 파일은 `.env.edge.prod` 하나면 된다** (#179, #182 이후). `compose.edge.yaml`
+이 요구하는 모든 변수는 `.env.edge.prod.example` 안에 기본값이나
+`<placeholder>` 로 이미 채워져 있다. `up` 하기 전에 항상 preflight 스크립트로
+먼저 확인해라 — `config` 렌더 실패뿐 아니라 남아 있는 `<placeholder>` 도 잡아준다.
+여기서 걸리는 것이 컨테이너를 띄운 뒤 디버깅하는 것보다 훨씬 싸다.
 
-`up` 하기 전에 항상 `config` 로 먼저 확인해라. 여기서 걸리는 것이 컨테이너를
-띄운 뒤 디버깅하는 것보다 훨씬 싸다.
+```bash
+scripts/edge.sh run "cd '<repo>' && \
+  scripts/edge-preflight/check-env.sh .env.edge.prod -f compose.edge.cpu.yaml"
+```
+
+GPU 예약이 실제로 지워졌는지도 같이 본다.
 
 ```bash
 docker compose ... config | grep -i nvidia   # 아무것도 안 나와야 한다

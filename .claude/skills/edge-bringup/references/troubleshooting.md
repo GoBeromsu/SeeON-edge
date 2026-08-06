@@ -101,29 +101,35 @@ test 그룹은 이미지에 아예 들어가지 않는다. 결과적으로 런�
 
 ---
 
-## D. compose 가 `.env.edge.prod` 만으로는 렌더되지 않는다 (#179, #182)
+## D. compose 가 `.env.edge.prod` 만으로는 렌더되지 않는다 (#179, #182) — 고쳐짐
 
-**증상**: `docker compose ... config` 또는 `up` 이 `CLIP_STORE_HOST_DIR is
-missing a value` 로 렌더 단계에서 죽는다.
+**증상 (과거형)**: `docker compose ... config` 또는 `up` 이
+`CLIP_STORE_HOST_DIR is missing a value` 같은 에러로 렌더 단계에서 죽었다.
 
-**원인**: 노드별로 달라지는 값(이미지 태그, 호스트 경로, facility id)은
-`.env.edge.local` 에만 있고 `.env.edge.prod` 에는 없다. env 파일이 두 개인
-것은 실수가 아니라 설계다 — prod 는 노드에 무관한 공통 값, local 은 이
-엣지 노드 고유의 값을 담는다. `--env-file` 을 여러 개 줄 때는 **뒤에 준 파일이
-이긴다**는 것도 같이 기억해야 한다.
+**원인**: `.env.edge.prod.example` 에 `compose.edge.yaml` 이 하드 요구하는
+(`${VAR:?...}`) 변수 중 일부(`API_EDGE_RELAY_TOKEN`,
+`API_DASHBOARD_USERNAME`/`_PASSWORD`)가 빈 값으로 남아 있었다. 현장에서는
+이걸 두 번째 env 파일(`.env.edge.local`)을 만들어 채우는 방식으로 우회했는데,
+그 우회 자체가 [G절](#g-relay-가-무조건-403--대시보드-런타임이-통째로-빈다-183)의
+원인이 됐다 — 두 파일에 서로 다른 facility_id 가 흩어지면서 맞아떨어질 수
+없는 조합이 만들어졌다.
+
+**고침**: `.env.edge.prod.example` 을 완전하게 만들어 이 우회 자체를
+없앴다. 이제 모든 하드 요구 변수가 작동하는 기본값이거나 명확한
+`<placeholder>` 로 채워져 있어서 **env 파일은 `.env.edge.prod` 하나면
+된다.** `.env.edge.local` 은 더 이상 필요하지 않다 — 만들지 마라, 만들면
+G절과 같은 종류의 불일치가 다시 생긴다.
 
 **왜 여태 안 잡혔나**: `.env.edge.prod` 하나만 봐서는 이 파일이 완전한
-설정이 아니라는 걸 알 수 없다. `CLIP_STORE_HOST_DIR` 처럼 로컬 값이 필요한
-변수가 빠져 있어도 파일 자체는 정상적으로 읽힌다.
+설정인지 알 수 없었다. 빈 변수가 있어도 파일 자체는 정상적으로 읽혔고,
+`config` 를 직접 돌려보기 전까지는 무엇이 빠졌는지 알 방법이 없었다.
 
-**대응**: `up` 을 실행하기 전에 항상 `docker compose ... config` 로 먼저
-렌더 결과를 확인하는 습관을 들여라. 여기서 걸리는 것이 컨테이너를 띄운 뒤
-디버깅하는 것보다 훨씬 싸다.
+**대응**: `up` 을 실행하기 전에 항상 preflight 스크립트로 먼저 확인하는
+습관을 들여라. 렌더 실패(빈 필수 변수)와 남아 있는 `<placeholder>` 를 둘 다
+잡아준다. 여기서 걸리는 것이 컨테이너를 띄운 뒤 디버깅하는 것보다 훨씬 싸다.
 
 ```bash
-docker compose --env-file .env.edge.prod --env-file .env.edge.local \
-  -f compose.edge.yaml -f compose.edge.cpu.yaml -f compose.edge.local.yaml \
-  config
+scripts/edge-preflight/check-env.sh .env.edge.prod -f compose.edge.cpu.yaml
 ```
 
 ---
@@ -189,6 +195,12 @@ runtime 항목이 계속 비어 있다. `ml-api` 로그에는
 **대응**: 자리표시자 인벤토리를 비워서 우선 막는다. 근본적인 해결은 facility
 id 를 배포 시점에 고정하지 않고 서버 등록 시 런타임에 부여받는 것이다 — 이건
 #183 에서 계속 추적한다.
+
+**후속 (#179, #182)**: 이 사고를 만든 두 env 파일 구조 자체가
+[D절](#d-compose-가-envedgeprod-만으로는-렌더되지-않는다-179-182--고쳐짐)에서
+없어졌다. `.env.edge.prod.example` 의 `API_CAMERA_INVENTORY` 기본값도 이제
+빈 문자열이라 (compose 기본값과 동일), 그대로 복사해 쓰는 한 이 조합
+자체가 발생하지 않는다.
 
 ---
 

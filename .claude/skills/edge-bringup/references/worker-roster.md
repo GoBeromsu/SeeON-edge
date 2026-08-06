@@ -146,8 +146,8 @@ API 호출이 따로 있어야만 오른다(아래 참고). **로컬 등록만�
 
 ```bash
 scripts/edge.sh run "cd '<repo>' && \
-  docker compose --env-file .env.edge.prod --env-file .env.edge.local \
-    -f compose.edge.yaml -f compose.edge.cpu.yaml -f compose.edge.local.yaml \
+  docker compose --env-file .env.edge.prod \
+    -f compose.edge.yaml -f compose.edge.cpu.yaml \
     restart ml-worker"
 ```
 

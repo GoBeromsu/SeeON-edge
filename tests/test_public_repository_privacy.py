@@ -732,6 +732,18 @@ def _assert_untrusted_ci_security(workflow: dict[str, object]) -> None:
         {"run": 'uv run pytest -q -m "not real_stack and not heavy"'},
         {"run": "uv run --group lint ruff check ."},
         {"run": "uv run --group lint lint-imports"},
+        # #179/#182: the shipped example must render on its own -- this only
+        # renders and validates compose config from the tracked, placeholder-
+        # only .env.edge.prod.example (never the gitignored real
+        # .env.edge.prod), pulls no images, starts no containers, uses no
+        # secrets/tokens, and re-checks out no other repository.
+        {
+            "name": "Edge env example renders (GPU + CPU-only overlay)",
+            "run": (
+                "docker compose --env-file .env.edge.prod.example \\\n"
+                "  -f compose.edge.yaml -f compose.edge.cpu.yaml config -q\n"
+            ),
+        },
     ]
 
     serialized = yaml.safe_dump(workflow)
