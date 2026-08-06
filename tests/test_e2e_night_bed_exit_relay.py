@@ -53,6 +53,9 @@ from e2e_worker_relay_fixtures import (
 )
 
 from worker.adapters.decode.cpu_av.adapter import CpuAvAdapter
+from worker.domains.bed_exit.detector import BedExitMonitor
+from worker.domains.bed_exit.schema import BedExitEvent, BedExitFrame
+from worker.types import DecisionInput
 
 RELAY_TOKEN = "e2e-relay-token"  # noqa: S105 - fixture-scoped test constant, not a real secret
 
@@ -96,6 +99,7 @@ def _run_scenario(
     domains: dict[str, object],
     serving_client: ScriptedServingClient,
     clip_enabled: bool = False,
+    models: dict[str, object] | None = None,
 ) -> Iterator[tuple[LiveBackend, WorkerRunHandle, Path]]:
     state_dir = tmp_path / "state"
     clip_store_dir = tmp_path / "clips"
@@ -120,6 +124,7 @@ def _run_scenario(
             rtsp_url=mediamtx.rtsp_url(path_name),
             domains=domains,
             clip_enabled=clip_enabled,
+            models=models,
         )
         handle = start_worker_runtime(
             config, serving_client, state_dir=state_dir, clip_store_dir=clip_store_dir
@@ -147,6 +152,16 @@ def test_night_bed_exit_reaches_relay_with_heartbeat_status_and_finalized_clip(
         # This is the one scenario that asserts on a finalized clip, so it opts
         # into clip recording explicitly. Clip recording is off by default.
         clip_enabled=True,
+        # box_source stays at its production default ("pose"): the walking-
+        # person-out-of-bed script runs through ScriptedBedExitPoseRunner's
+        # own boxes field, exactly the shape the real box_source="pose" path
+        # produces (see that class's docstring). observation.boxes is
+        # sourced from authoritative_boxes(), which prefers the pose
+        # extractor's boxes -- issue #209's original bug was that an earlier
+        # version of this fixture scripted the walk through a *separate*
+        # person runner and had to opt into box_source="person" to reach it,
+        # a configuration production can never resolve to, so the test never
+        # exercised the path the worker actually ships.
     ) as (live_backend, _handle, clip_store_dir):
         wait_until(
             lambda: live_backend.ingest_client.heartbeats >= 1,
@@ -229,6 +244,28 @@ def test_fall_reaches_relay_once_despite_two_rising_edges(
 def test_daytime_bed_exit_is_suppressed_before_relay(
     mediamtx: MediaMtxProcess, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    # Asserting only "zero alerts" cannot distinguish "correctly suppressed
+    # by the night window" from "bed-exit detection is completely broken" --
+    # both produce the same zero-alert observation from outside the domain
+    # layer (issue #209). Capture BedExitMonitor's own per-frame detections
+    # (BedExitFrame.events, computed *before* the night-window gate in
+    # BedExitMonitor.update) so the test can prove the walk-out was actually
+    # detected and only then suppressed, not simply never seen. Patched at
+    # the class level before start_worker_runtime constructs the instance,
+    # same pattern as the decoder-open counter in
+    # test_nominal_30fps_stream_decodes_continuously_without_a_reconnect_loop.
+    detected_events: list[BedExitEvent] = []
+    real_update_frame = BedExitMonitor._update_frame
+
+    def _capturing_update_frame(
+        self: BedExitMonitor, input_value: DecisionInput
+    ) -> BedExitFrame:
+        frame = real_update_frame(self, input_value)
+        detected_events.extend(frame.events)
+        return frame
+
+    monkeypatch.setattr(BedExitMonitor, "_update_frame", _capturing_update_frame)
+
     with _run_scenario(
         mediamtx=mediamtx,
         monkeypatch=monkeypatch,
@@ -248,6 +285,11 @@ def test_daytime_bed_exit_is_suppressed_before_relay(
         # window to fully play out before asserting nothing was relayed.
         time.sleep(6.0)
         assert live_backend.ingest_client.snapshot_alerts() == ()
+        assert detected_events, (
+            "bed-exit was never detected at the domain layer during the day "
+            "window -- suppression cannot be distinguished from a broken "
+            "detector when nothing is ever detected in the first place"
+        )
 
 
 def _assert_alert_carries_audit_and_snapshot(alert: RecordedAlert) -> None:

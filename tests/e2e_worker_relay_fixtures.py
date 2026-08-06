@@ -476,28 +476,37 @@ class _HoldingIndex:
 
 
 @final
-class ScriptedBedExitPersonRunner:
-    """Walks a person out of the bed region, holding the final position."""
+class ScriptedBedExitPoseRunner:
+    """Walks a person out of the bed region, holding the final position.
+
+    Emits the walk through ``boxes`` alone, exactly the shape the real
+    ``box_source="pose"`` production path produces: ``YoloPoseRunner``
+    (``worker/adapters/model/yolo_pose.py``) reads both keypoints and boxes
+    off the *same* Ultralytics forward pass -- ``_extract_boxes`` returns
+    the model's own detection boxes, not something a separate "person"
+    extractor has to supply. ``poses`` stays empty here because bed-exit
+    tracking runs on person geometry alone and doesn't need keypoint
+    signal; an empty-pose camera also can never fill the fall classifier's
+    per-track buffer even if the fall domain were enabled for this camera.
+
+    Issue #209: an earlier version of this fixture scripted the walk through
+    a dedicated ``person`` runner and set ``box_source="person"`` to route to
+    it. That made the test green through a configuration production can
+    never reach -- nothing in this repo ever sets ``box_source`` away from
+    its "pose" default (no env var, compose file, or example YAML does), so
+    a test exercising "person" covers a path the shipped worker never runs.
+    Scripting the walk through the pose runner's own ``boxes`` field instead
+    means this scenario runs the exact box_source="pose" default production
+    ships, and the scripted double now matches the real adapter's shape
+    (boxes conditioned on detection, not hardcoded empty).
+    """
 
     def __init__(self) -> None:
         self._index = _HoldingIndex(maximum=len(_BED_EXIT_XS) - 1)
 
     def __call__(self, _image: Image) -> RunnerResult:
         x1 = _BED_EXIT_XS[self._index.next()]
-        return person_result(boxes=((x1, 15.0, x1 + 70.0, 75.0, 0.95),))
-
-    def warmup(self) -> None:
-        return None
-
-
-@final
-class ScriptedEmptyPoseRunner:
-    """No pose data: bed-exit tracking runs on person geometry alone, and an
-    empty-pose camera can never fill the fall classifier's per-track buffer
-    even if the fall domain were enabled for this camera."""
-
-    def __call__(self, _image: Image) -> RunnerResult:
-        return pose_result(poses=(), boxes=())
+        return pose_result(poses=(), boxes=((x1, 15.0, x1 + 70.0, 75.0, 0.95),))
 
     def warmup(self) -> None:
         return None
@@ -575,13 +584,13 @@ class ScriptedServingClient:
         self,
         *,
         pose: object,
-        person: object,
         bed: object,
         fall: ScriptedFallModel,
+        person: object | None = None,
     ) -> None:
-        self._runners: dict[str, object] = {
-            "pose": pose, "person": person, "bed": bed, "fall": fall,
-        }
+        self._runners: dict[str, object] = {"pose": pose, "bed": bed, "fall": fall}
+        if person is not None:
+            self._runners["person"] = person
 
     def create(self, task: str, **_options: str | int | float | bool | None) -> object:
         try:
@@ -591,9 +600,14 @@ class ScriptedServingClient:
 
 
 def bed_exit_serving_client() -> ScriptedServingClient:
+    """No ``person`` runner: box_source stays at its production "pose"
+    default (see ``ScriptedBedExitPoseRunner``'s docstring), so the "person"
+    task is never requested here. Omitting it rather than wiring in an inert
+    stand-in means a future regression that starts scheduling "person"
+    unexpectedly fails loudly (``ScriptedServingClient.create`` raises)
+    instead of silently returning a runner nobody scripted."""
     return ScriptedServingClient(
-        pose=ScriptedEmptyPoseRunner(),
-        person=ScriptedBedExitPersonRunner(),
+        pose=ScriptedBedExitPoseRunner(),
         bed=ScriptedBedRunner(box=_BED_BOX),
         fall=ScriptedFallModel(),
     )
@@ -642,12 +656,19 @@ def build_worker_config(
     rtsp_url: str,
     domains: dict[str, object],
     clip_enabled: bool = False,
+    models: dict[str, object] | None = None,
 ) -> WorkerConfig:
     """Worker config for the real-stack e2e.
 
     ``clip_enabled`` mirrors the product default (off). Only the test that
     asserts on a finalized clip opts in, which keeps clip recording an explicit
     operating decision here exactly as it is in production.
+
+    ``models`` defaults to ``None`` (``WorkerModelsConfig``'s own default,
+    ``box_source="pose"`` -- the only value production ever resolves to; see
+    ``ScriptedBedExitPoseRunner``'s docstring for why). Kept as an explicit
+    override seam for scenarios that need something other than the
+    production default, rather than hardcoding it away entirely.
     """
     return WorkerConfig.model_validate(
         {
@@ -655,6 +676,7 @@ def build_worker_config(
             "relay": {"url": relay_url, "token": relay_token},
             "clip": {"enabled": clip_enabled},
             "domains": domains,
+            **({"models": models} if models is not None else {}),
             "cameras": [
                 {
                     "camera_id": camera_id,
@@ -783,9 +805,8 @@ __all__ = [
     "MediaMtxProcess",
     "RecordedAlert",
     "RecordingBackendIngestClient",
-    "ScriptedBedExitPersonRunner",
+    "ScriptedBedExitPoseRunner",
     "ScriptedBedRunner",
-    "ScriptedEmptyPoseRunner",
     "ScriptedFallModel",
     "ScriptedFallPersonRunner",
     "ScriptedFallPoseRunner",
