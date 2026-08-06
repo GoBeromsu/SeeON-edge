@@ -30,6 +30,7 @@ from worker.adapters.decode.cpu_av.adapter import CpuAvAdapter
 from worker.adapters.decode.cpu_av.models import CpuAvConfig
 from worker.adapters.decode.cpu_av.probe import probe_opencv_ffmpeg_capability
 from worker.adapters.decode.nvdec_cuvid.probe import probe_nvdec_cuvid_capability
+from worker.adapters.decode.vaapi.probe import probe_vaapi_capability
 from worker.adapters.device.cuda.probe import probe_cuda_capability
 from worker.adapters.device.mps.probe import probe_mps_capability
 from worker.adapters.device.nvml.probe import probe_nvml_gpu_status
@@ -452,10 +453,16 @@ def _verify_nvdec_decode() -> VerifyResult:
     return VerifyResult(capability.available, "cuda", "decode", capability.reason)
 
 
+def _verify_vaapi_decode() -> VerifyResult:
+    capability = probe_vaapi_capability()
+    return VerifyResult(capability.available, "igpu", "decode", capability.reason)
+
+
 _PRODUCTION_DECODE_PROBES: Final[Mapping[str, Callable[[], VerifyResult]]] = MappingProxyType(
     {
         "opencv": _verify_opencv_decode,
         "nvdec": _verify_nvdec_decode,
+        "vaapi": _verify_vaapi_decode,
     }
 )
 

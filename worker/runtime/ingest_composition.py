@@ -9,6 +9,8 @@ from worker.adapters.decode.cpu_av.adapter import CpuAvAdapter
 from worker.adapters.decode.cpu_av.models import CpuAvConfig
 from worker.adapters.decode.nvdec_cuvid.adapter import NvdecCuvidAdapter
 from worker.adapters.decode.nvdec_cuvid.models import NvdecCuvidConfig
+from worker.adapters.decode.vaapi.adapter import VaapiAdapter
+from worker.adapters.decode.vaapi.models import VaapiConfig
 from worker.interfaces.decode import DecodeAdapter
 from worker.pipeline.bus.frame_bus import BoundedFrameBus
 from worker.pipeline.ingest.lifecycle import (
@@ -24,7 +26,7 @@ from worker.runtime.profile.registry import DecodePolicy
 
 LOGGER: Final = logging.getLogger(__name__)
 
-DecodeConfig: TypeAlias = CpuAvConfig | NvdecCuvidConfig
+DecodeConfig: TypeAlias = CpuAvConfig | NvdecCuvidConfig | VaapiConfig
 
 
 def build_camera_source_registry(cameras: tuple[CameraRuntimeConfig, ...]) -> SourceRegistry:
@@ -87,6 +89,8 @@ def decoder_for(
         return CpuAvAdapter()
     if resolved == "nvdec":
         return NvdecCuvidAdapter()
+    if resolved == "vaapi":
+        return VaapiAdapter()
     raise RuntimeError(f"unsupported decode policy: {resolved!r}")
 
 
@@ -106,6 +110,13 @@ def _decode_config_factory(
             )
         if resolved == "nvdec":
             return NvdecCuvidConfig(
+                camera_id=camera_id,
+                url=camera.inference_rtsp_url,
+                open_timeout_ms=runtime.open_timeout_ms,
+                read_timeout_ms=runtime.read_timeout_ms,
+            )
+        if resolved == "vaapi":
+            return VaapiConfig(
                 camera_id=camera_id,
                 url=camera.inference_rtsp_url,
                 open_timeout_ms=runtime.open_timeout_ms,

@@ -422,7 +422,12 @@ def test_profile_policy_selects_cpu_decode_only_for_cpu_and_mps() -> None:
     decode_by_profile = {name: spec.decode for name, spec in profiles.items()}
 
     # Then
-    assert decode_by_profile == {"cuda": "nvdec", "mps": "opencv", "cpu": "opencv"}
+    assert decode_by_profile == {
+        "cuda": "nvdec",
+        "mps": "opencv",
+        "cpu": "opencv",
+        "igpu": "vaapi",
+    }
 
 
 def test_rtsp_source_degrades_only_failed_camera_and_closes_its_capture() -> None:

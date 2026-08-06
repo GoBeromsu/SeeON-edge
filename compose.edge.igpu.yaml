@@ -1,0 +1,46 @@
+# Intel iGPU(VAAPI) 엣지 오버레이 — compose.edge.yaml 위에 얹어서 쓴다.
+#
+#   docker compose -f compose.edge.yaml -f compose.edge.igpu.yaml up -d
+#
+# compose.edge.yaml 의 ml-worker 는 NVIDIA GPU 를 무조건 예약한다. Intel
+# iGPU 노드에는 NVIDIA 디바이스가 없으므로 그 예약 때문에 컨테이너 생성
+# 자체가 실패한다 — compose.edge.cpu.yaml 과 동일하게 deploy 블록을 통째로
+# 지운다.
+#
+# 이 프로필은 RTSP 디코드만 Intel iGPU(VAAPI)로 오프로드한다. 추론은 이번
+# PR에서 여전히 CPU에서 돈다 — OpenVINO GPU/NPU 추론은 별도 후속 작업이다
+# (worker/runtime/profile/registry.py 의 "igpu" ProfileSpec 참고: device="cpu").
+#
+# /dev/dri 를 통째로 통과시키고, 컨테이너 프로세스(root)가 렌더 노드에 접근할
+# 수 있도록 host 의 render/video 그룹을 group_add 로 추가한다. 정확한 GID는
+# 배포 호스트마다 다를 수 있으므로 `getent group render video` 로 확인해서
+# 아래 값을 맞춘다 (Debian/Ubuntu 기본값은 보통 render=104, video=44 이지만
+# 보장되지 않는다).
+#
+# 함께 쓸 .env.edge.prod 설정:
+#   ML_WORKER_PROFILE=igpu
+# 그리고 카메라별 decode_backend 는 지정하지 않거나(auto) opencv/cpu 로 둔다
+# — vaapi 는 프로필을 통해서만 선택되고, 카메라 단위로는 오버라이드할 수
+# 없다 (worker/runtime/config/camera_models.py).
+#
+# VAAPI 를 쓸 수 없는 호스트(드라이버 미설치, /dev/dri 없음, 코덱 미지원)에서는
+# 워커가 크래시하거나 프레임 없이 조용히 죽지 않는다 — 부팅 시 한 줄 WARNING을
+# 남기고 opencv(CPU) 디코드로 자동 전환한다
+# (worker/runtime/profile/boot.py:resolve_decode_or_fallback). 검증/트러블슈팅
+# 절차는 docs/runbooks/vaapi-igpu-decode.md 참고.
+services:
+  ml-worker:
+    deploy: !reset null
+    devices:
+      - /dev/dri:/dev/dri
+    group_add:
+      - "104" # render (getent group render 로 호스트 실제 GID 확인)
+      - "44" # video (getent group video 로 호스트 실제 GID 확인)
+    environment:
+      # GPU 예약이 없으므로 NVIDIA 드라이버 capability 도 의미가 없다.
+      NVIDIA_DRIVER_CAPABILITIES: ""
+      ML_WORKER_PROFILE: igpu
+      # ffmpeg/libva 가 iHD(Arrow Lake 포함 Gen9+) 드라이버를 명시적으로
+      # 선택하도록 강제한다 — 미설정 시 libva 가 i965(구형, Arrow Lake
+      # 미지원) 드라이버를 먼저 시도해 초기화가 실패할 수 있다.
+      LIBVA_DRIVER_NAME: iHD

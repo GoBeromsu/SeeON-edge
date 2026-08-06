@@ -165,4 +165,4 @@ uses `models/` as the default host model-artifact path.
 - [`docs/operations/clip-retention-policy.md`](docs/operations/clip-retention-policy.md) —
   clip storage and retention policy.
 - [`docs/runbooks/`](docs/runbooks/) — incident runbooks (worker rollback,
-  driver/CUDA alignment, local e2e RTSP source).
+  driver/CUDA alignment, local e2e RTSP source, Intel iGPU/VAAPI decode).

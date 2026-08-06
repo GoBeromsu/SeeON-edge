@@ -111,7 +111,7 @@ services:
       RELAY_URL: http://ml-api:8000
       RELAY_TOKEN: ${API_EDGE_RELAY_TOKEN:?edge worker requires relay token shared with ml-api}
       API_FACILITY_ID: ${API_FACILITY_ID:?edge worker requires the facility id to publish profile boot diagnostics}
-      ML_WORKER_PROFILE: ${ML_WORKER_PROFILE:?set cuda|mps|cpu}
+      ML_WORKER_PROFILE: ${ML_WORKER_PROFILE:?set cuda|mps|cpu|igpu}
       ML_WORKER_DEV_MJPEG: ${ML_WORKER_DEV_MJPEG:-true}
       ML_WORKER_DEV_MJPEG_HOST: 0.0.0.0
       ML_WORKER_DEV_MJPEG_PORT: ${ML_WORKER_DEV_MJPEG_PORT:-8090}

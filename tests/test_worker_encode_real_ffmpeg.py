@@ -96,7 +96,12 @@ def test_every_profile_encode_policy_is_an_accepted_encoder() -> None:
         name: parse_encode_policy(spec.encode) for name, spec in PROFILE_REGISTRY.items()
     }
 
-    assert resolved == {"cuda": "h264_nvenc", "mps": "libx264", "cpu": "libx264"}
+    assert resolved == {
+        "cuda": "h264_nvenc",
+        "mps": "libx264",
+        "cpu": "libx264",
+        "igpu": "libx264",
+    }
 
 
 def test_frame_packet_images_are_declared_to_ffmpeg_as_rgb() -> None:

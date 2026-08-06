@@ -2,13 +2,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-DECODE_BACKENDS = ("auto", "nvdec", "opencv", "cpu")
+DECODE_BACKENDS = ("auto", "nvdec", "opencv", "cpu", "vaapi")
 
 DECODE_FALLBACK_REASONS = (
     "ffprobe_unavailable",
     "unsupported_codec",
     "spawn_failed",
     "first_frame_failed",
+    "vaapi_probe_failed",
 )
 
 

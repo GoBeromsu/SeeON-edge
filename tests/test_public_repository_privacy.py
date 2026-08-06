@@ -219,6 +219,13 @@ _SYNTHETIC_RTSP_FIXTURES = {
     Path("tests/test_worker_nvdec_probe.py"): {
         "rtsp://operator:s3cr3t@camera.local/live?token=plain",
     },
+    Path("tests/test_worker_vaapi_adapter.py"): {
+        "rtsp://operator:s3cr3t@camera.local/live?token=plain",
+        "rtsp://***:***@camera.local/live?token=%2A%2A%2A",
+    },
+    Path("tests/test_worker_vaapi_probe.py"): {
+        "rtsp://operator:s3cr3t@camera.local/live?token=plain",
+    },
     Path("tests/test_public_repository_privacy.py"): {
         "rtsps" "://operator:not-a-fixture@camera.example/stream",
         "rtsps" "://operator:secret@camera.example/stream",

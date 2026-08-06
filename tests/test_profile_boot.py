@@ -4,6 +4,7 @@ import pytest
 
 from worker.runtime.profile.boot import (
     resolve_boot_context,
+    resolve_decode_or_fallback,
     resolve_encode_or_fallback,
     resolve_profile,
 )
@@ -140,13 +141,17 @@ def test_legacy_matching_allowed() -> None:
 
 
 def test_profile_registry_exact_keys() -> None:
-    assert set(PROFILE_REGISTRY) == {"cuda", "mps", "cpu"}
+    assert set(PROFILE_REGISTRY) == {"cuda", "mps", "cpu", "igpu"}
     assert PROFILE_REGISTRY["cuda"].device == "cuda"
     assert PROFILE_REGISTRY["cuda"].decode == "nvdec"
     assert PROFILE_REGISTRY["mps"].device == "mps"
     assert PROFILE_REGISTRY["mps"].decode == "opencv"
     assert PROFILE_REGISTRY["cpu"].device == "cpu"
     assert PROFILE_REGISTRY["cpu"].decode == "opencv"
+    # igpu keeps device="cpu" -- only decode moves to the iGPU in this PR;
+    # OpenVINO GPU/NPU inference is a separate follow-up.
+    assert PROFILE_REGISTRY["igpu"].device == "cpu"
+    assert PROFILE_REGISTRY["igpu"].decode == "vaapi"
 
 
 def _cuda_available() -> CudaProbe:
@@ -299,3 +304,122 @@ def test_resolve_boot_context_never_probes_encode_for_mps_or_cpu_profiles() -> N
     )
 
     assert context.encode == "libx264"
+
+
+def _vaapi_ok(decode: str) -> VerifyResult:
+    assert decode == "vaapi"
+    return VerifyResult(True, "igpu", "decode", "VAAPI device init succeeded")
+
+
+def _vaapi_unavailable(decode: str) -> VerifyResult:
+    assert decode == "vaapi"
+    return VerifyResult(False, "igpu", "decode", "VAAPI render device not found")
+
+
+def test_resolve_decode_or_fallback_keeps_vaapi_when_probe_succeeds() -> None:
+    selection = resolve_decode_or_fallback(PROFILE_REGISTRY["igpu"], _vaapi_ok)
+
+    assert selection.requested == "vaapi"
+    assert selection.selected == "vaapi"
+    assert selection.fallback_count == 0
+    assert selection.last_reason is None
+
+
+def test_resolve_decode_or_fallback_never_raises_and_falls_back_to_opencv(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Mirrors #53's resolve_encode_or_fallback: unlike nvdec/opencv's
+    fail-fast preflight_decode_or_raise, a failed VAAPI probe must never
+    abort boot -- it degrades to opencv (CPU) decode with a loud WARNING
+    instead (issues #191/#194: a silent no-frames failure is the actual
+    footgun, not a logged software-decode fallback)."""
+    with caplog.at_level("WARNING"):
+        selection = resolve_decode_or_fallback(PROFILE_REGISTRY["igpu"], _vaapi_unavailable)
+
+    assert selection.requested == "vaapi"
+    assert selection.selected == "opencv"
+    assert selection.fallback_count == 1
+    assert selection.last_reason == "vaapi_probe_failed"
+    assert any("opencv" in record.message for record in caplog.records)
+
+
+def test_resolve_decode_or_fallback_swallows_probe_exceptions() -> None:
+    def raising_probe(decode: str) -> VerifyResult:
+        del decode
+        raise RuntimeError("ffmpeg exploded")
+
+    selection = resolve_decode_or_fallback(PROFILE_REGISTRY["igpu"], raising_probe)
+
+    assert selection.selected == "opencv"
+    assert selection.fallback_count == 1
+    assert selection.last_reason == "vaapi_probe_failed"
+
+
+def test_resolve_decode_or_fallback_never_probes_non_vaapi_profiles() -> None:
+    def unexpected_probe(decode: str) -> VerifyResult:
+        del decode
+        raise AssertionError("non-vaapi profiles must never be probed here")
+
+    for profile_name in ("cuda", "mps", "cpu"):
+        selection = resolve_decode_or_fallback(PROFILE_REGISTRY[profile_name], unexpected_probe)
+        requested = PROFILE_REGISTRY[profile_name].decode
+        assert selection.requested == requested
+        assert selection.selected == requested
+        assert selection.fallback_count == 0
+
+
+def test_resolve_decode_or_fallback_uses_default_decode_probe_when_none_injected() -> None:
+    """Fail-closed default, mirroring default_encode_probe's precedent: no
+    injected probe means "capability unknown", never a false positive."""
+    selection = resolve_decode_or_fallback(PROFILE_REGISTRY["igpu"], None)
+
+    assert selection.selected == "opencv"
+    assert selection.fallback_count == 1
+
+
+def test_igpu_profile_resolves_to_vaapi_when_probe_succeeds() -> None:
+    context = resolve_boot_context({ML_WORKER_PROFILE_ENV: "igpu"}, _deps("igpu"), _vaapi_ok)
+
+    assert context.device == "cpu"
+    assert context.decode == "vaapi"
+    assert context.decode_selection is not None
+    assert context.decode_selection.selected == "vaapi"
+    assert context.decode_selection.fallback_count == 0
+
+
+def test_igpu_profile_falls_back_to_opencv_decode_instead_of_raising(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Deliverable #5: VAAPI unavailable at boot must not crash the worker or
+    produce zero frames -- the boot context resolves to opencv decode with a
+    logged reason instead of resolve_boot_context raising."""
+    with caplog.at_level("WARNING"):
+        context = resolve_boot_context(
+            {ML_WORKER_PROFILE_ENV: "igpu"}, _deps("igpu"), _vaapi_unavailable
+        )
+
+    assert context.device == "cpu"
+    assert context.decode == "opencv"
+    assert context.decode_selection is not None
+    assert context.decode_selection.requested == "vaapi"
+    assert context.decode_selection.selected == "opencv"
+    assert context.decode_selection.last_reason == "vaapi_probe_failed"
+    assert any("falling back to opencv" in record.message for record in caplog.records)
+
+
+def test_igpu_profile_device_verify_false_still_reports_decode_gate() -> None:
+    """Issue #79 (track 2) parity: igpu's device check failing must not skip
+    running the (non-raising) decode resolution -- both are independent
+    gates, same as every other profile."""
+    decode_calls: list[str] = []
+
+    def decode_probe(decode: str) -> VerifyResult:
+        decode_calls.append(decode)
+        return _vaapi_ok(decode)
+
+    with pytest.raises(ProfileVerifyError, match="igpu"):
+        resolve_boot_context(
+            {ML_WORKER_PROFILE_ENV: "igpu"}, _deps("igpu", ok=False), decode_probe
+        )
+
+    assert decode_calls == ["vaapi"]

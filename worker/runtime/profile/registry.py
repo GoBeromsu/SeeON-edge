@@ -8,7 +8,7 @@ from typing import Final, Literal, TypeAlias
 from worker.runtime.profile.device import CudaProbeSource, probe_cuda
 
 DevicePolicy: TypeAlias = Literal["cuda", "mps", "cpu"]
-DecodePolicy: TypeAlias = Literal["nvdec", "opencv"]
+DecodePolicy: TypeAlias = Literal["nvdec", "opencv", "vaapi"]
 EncodePolicy: TypeAlias = Literal["h264_nvenc", "libx264"]
 MpsProbeSource: TypeAlias = Callable[[], bool]
 
@@ -62,6 +62,11 @@ PROFILE_REGISTRY: Final[Mapping[str, ProfileSpec]] = MappingProxyType(
         "cuda": ProfileSpec("cuda", "cuda", "nvdec", "h264_nvenc"),
         "mps": ProfileSpec("mps", "mps", "opencv", "libx264"),
         "cpu": ProfileSpec("cpu", "cpu", "opencv", "libx264"),
+        # Intel iGPU RTSP decode via VAAPI (decode only -- inference stays on
+        # CPU here; OpenVINO GPU/NPU inference is a separate follow-up). Device
+        # stays "cpu" because torch has no XPU kernels on this repo's pinned
+        # cu130 index -- only the decode leg moves to the iGPU.
+        "igpu": ProfileSpec("igpu", "cpu", "vaapi", "libx264"),
     }
 )
 
@@ -88,6 +93,23 @@ def _verify_cpu() -> VerifyResult:
     return VerifyResult(True, "cpu", "device", "CPU is available")
 
 
+def _verify_igpu_device() -> VerifyResult:
+    """Device check for the "igpu" profile, which always succeeds like ``_verify_cpu``.
+
+    ``verify_device_or_raise`` keys ``BootDependencies.verifiers`` by
+    ``spec.name`` (``"cuda"``, ``"mps"``, ``"cpu"`` today, all of which equal
+    their own ``spec.device``) -- the "igpu" profile's *name* is ``"igpu"``
+    but its *device* is ``"cpu"`` (only decode moves to the iGPU in this PR;
+    inference stays on CPU), so it needs its own registered verifier key
+    rather than reusing ``"cpu"``'s. Its actual capability check is identical
+    to ``_verify_cpu``'s (torch on CPU always succeeds) -- the real,
+    hardware-touching VAAPI capability check lives in ``DecodeProbe``
+    (``worker.adapters.decode.vaapi.probe.probe_vaapi_capability``, wired in
+    by ``worker/runtime/worker.py``), not here.
+    """
+    return VerifyResult(True, "igpu", "device", "CPU is available (decode targets the iGPU)")
+
+
 def default_verifiers(
     *,
     cuda_source: CudaProbeSource | None = None,
@@ -99,6 +121,7 @@ def default_verifiers(
             "cuda": lambda: _verify_cuda(cuda_source),
             "mps": lambda: _verify_mps(mps_source),
             "cpu": _verify_cpu,
+            "igpu": _verify_igpu_device,
         }
     )
 

@@ -15,6 +15,7 @@ from worker.runtime.config import CameraRuntimeConfig, WorkerConfig, WorkerRunti
 from worker.runtime.ingest_composition import (
     CpuAvConfig,
     NvdecCuvidConfig,
+    VaapiConfig,
     build_camera_source_registry,
     compose_camera_ingest_loop,
     decoder_for,
@@ -122,6 +123,28 @@ def test_decoder_for_nvdec_token_constructs_only_the_nvdec_cuvid_adapter(
     assert calls == ["nvdec"]
 
 
+def test_decoder_for_vaapi_token_constructs_only_the_vaapi_adapter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sentinel = object()
+    calls: list[str] = []
+
+    def fake_vaapi_adapter() -> object:
+        calls.append("vaapi")
+        return sentinel
+
+    monkeypatch.setattr(ingest_composition_module, "VaapiAdapter", fake_vaapi_adapter)
+    monkeypatch.setattr(ingest_composition_module, "CpuAvAdapter", _forbid("CpuAvAdapter"))
+    monkeypatch.setattr(
+        ingest_composition_module, "NvdecCuvidAdapter", _forbid("NvdecCuvidAdapter")
+    )
+
+    result = decoder_for("vaapi")
+
+    assert result is sentinel
+    assert calls == ["vaapi"]
+
+
 def test_decoder_for_unknown_token_raises_without_constructing_any_adapter(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -129,6 +152,7 @@ def test_decoder_for_unknown_token_raises_without_constructing_any_adapter(
     monkeypatch.setattr(
         ingest_composition_module, "NvdecCuvidAdapter", _forbid("NvdecCuvidAdapter")
     )
+    monkeypatch.setattr(ingest_composition_module, "VaapiAdapter", _forbid("VaapiAdapter"))
 
     with pytest.raises(RuntimeError, match="unsupported decode policy"):
         decoder_for("mystery")  # type: ignore[arg-type]
@@ -233,6 +257,24 @@ def test_compose_camera_ingest_loop_wires_the_nvdec_cuvid_adapter_and_its_config
     resolved = registry.resolve(source_id="camera-b")
     config = loop._spec.make_decode_config("camera-b", resolved)  # noqa: SLF001
     assert config == NvdecCuvidConfig(camera_id="camera-b", url=camera.inference_rtsp_url)
+
+
+def test_compose_camera_ingest_loop_wires_the_vaapi_adapter_and_its_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sentinel = object()
+    monkeypatch.setattr(ingest_composition_module, "VaapiAdapter", lambda: sentinel)
+    camera = _camera("camera-c")
+    registry = build_camera_source_registry((camera,))
+
+    loop = compose_camera_ingest_loop(
+        camera, BoundedFrameBus(), _Reporter(), decode="vaapi", registry=registry
+    )
+
+    assert loop._ports.decoder is sentinel  # noqa: SLF001
+    resolved = registry.resolve(source_id="camera-c")
+    config = loop._spec.make_decode_config("camera-c", resolved)  # noqa: SLF001
+    assert config == VaapiConfig(camera_id="camera-c", url=camera.inference_rtsp_url)
 
 
 def test_compose_camera_ingest_loop_honors_a_per_camera_decode_backend_override(
@@ -413,6 +455,24 @@ def test_default_loop_factory_selects_the_nvdec_cuvid_adapter_for_the_nvdec_prof
     config = _config("camera-a")
     runtime = WorkerRuntime(config, serving_client=_FakeServingClient())
     runtime._boot = _boot_context_for("cuda")  # noqa: SLF001
+
+    loop = runtime._default_loop_factory(config.cameras[0], BoundedFrameBus(), _Reporter())
+
+    assert loop._ports.decoder is sentinel  # noqa: SLF001
+
+
+def test_default_loop_factory_selects_the_vaapi_adapter_for_the_igpu_profile(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sentinel = object()
+    monkeypatch.setattr(ingest_composition_module, "VaapiAdapter", lambda: sentinel)
+    monkeypatch.setattr(ingest_composition_module, "CpuAvAdapter", _forbid("CpuAvAdapter"))
+    monkeypatch.setattr(
+        ingest_composition_module, "NvdecCuvidAdapter", _forbid("NvdecCuvidAdapter")
+    )
+    config = _config("camera-a")
+    runtime = WorkerRuntime(config, serving_client=_FakeServingClient())
+    runtime._boot = _boot_context_for("igpu")  # noqa: SLF001
 
     loop = runtime._default_loop_factory(config.cameras[0], BoundedFrameBus(), _Reporter())
 

@@ -17,6 +17,7 @@ import pytest
 import worker.runtime.worker as worker_module
 from worker.adapters.decode.cpu_av.probe import OpenCvCapability
 from worker.adapters.decode.nvdec_cuvid.probe import NvdecCapability
+from worker.adapters.decode.vaapi.probe import VaapiCapability
 from worker.runtime.config import WorkerConfig
 from worker.runtime.lease import GpuLease
 from worker.runtime.profile.registry import VerifyResult
@@ -116,6 +117,52 @@ def test_production_decode_probe_nvdec_false_fails_closed_without_cuda(
     assert result.ok is False
     assert result.profile == "cuda"
     assert result.reason == "ffmpeg has no CUDA/CUVID/NVDEC hwaccel or *_cuvid decoder"
+
+
+def test_production_decode_probe_vaapi_true_when_capability_true(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Given
+    monkeypatch.setattr(
+        worker_module,
+        "probe_vaapi_capability",
+        lambda: VaapiCapability(True, "VAAPI device init succeeded on /dev/dri/renderD128"),
+    )
+
+    # When
+    result = production_decode_probe("vaapi")
+
+    # Then
+    assert result == VerifyResult(
+        True, "igpu", "decode", "VAAPI device init succeeded on /dev/dri/renderD128"
+    )
+
+
+def test_production_decode_probe_vaapi_false_fails_closed_without_render_device(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Given -- the target edge node's documented pre-Dockerfile-fix state:
+    # ffmpeg's VAAPI hwaccel API is compiled in, but the iHD driver package is
+    # not installed, so device init fails even though `-hwaccels` would list
+    # "vaapi". This is exactly what production_decode_probe must catch.
+    monkeypatch.setattr(
+        worker_module,
+        "probe_vaapi_capability",
+        lambda: VaapiCapability(
+            False,
+            "VAAPI device init failed with exit code 1 (iHD/i965 driver likely missing)",
+        ),
+    )
+
+    # When
+    result = production_decode_probe("vaapi")
+
+    # Then
+    assert result.ok is False
+    assert result.profile == "igpu"
+    assert result.reason == (
+        "VAAPI device init failed with exit code 1 (iHD/i965 driver likely missing)"
+    )
 
 
 def test_production_decode_probe_unknown_decode_fails_closed() -> None:

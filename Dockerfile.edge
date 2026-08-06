@@ -18,6 +18,47 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/* \
     && ffmpeg -version
 
+# Intel VAAPI runtime for the `igpu` profile (decode-only; see
+# worker/adapters/decode/vaapi/). `intel-media-va-driver-non-free` is the
+# real iHD driver Arrow Lake needs -- the free `intel-media-va-driver`
+# package only ships the legacy i965 driver, which does not support Arrow
+# Lake's Xe-class iGPU, so non-free is a hard requirement here, not a
+# convenience choice. It lives in Debian's non-free component, which the
+# base image's sources.list does not enable by default. `libva-drm2` is the
+# libva DRM winsys plugin (talks to /dev/dri render nodes); `vainfo` is a
+# diagnostic CLI only, for verifying the driver loads at runtime (see
+# docs/runbooks/vaapi-igpu-decode.md) -- neither pulls a desktop mesa/GL
+# stack. This installs on every profile's image (one shared Dockerfile), the
+# same tradeoff already made for ffmpeg above; it does not touch or gate the
+# nvdec/opencv/cuda paths.
+#
+# DO NOT add a second sources.list.d entry for deb.debian.org (e.g. a
+# legacy one-line `deb http://deb.debian.org/debian bookworm ...` file).
+# This base image ships /etc/apt/sources.list.d/debian.sources in deb822
+# format with an explicit `Signed-By:` keyring already pinned. A second
+# entry for the *same* repo+suite without a matching Signed-By makes apt
+# see two disagreeing values for one source and refuse to read sources at
+# all ("E: Conflicting values set for option Signed-By regarding source
+# http://deb.debian.org/debian/ bookworm: ... != ..."), failing the build
+# before any package install runs. Instead, widen the Components: already
+# present on that entry. The sed is scoped to the bookworm/bookworm-updates
+# stanza only, so it does not also enable non-free on the bookworm-security
+# stanza. If a future base image bump changes this layout, fail loudly here
+# instead of a silent no-op that only surfaces later as a confusing
+# "package not found" from apt-get install.
+RUN set -eux; \
+    sed -i '/^Suites: bookworm bookworm-updates$/,/^$/ s/^Components:.*/Components: main contrib non-free non-free-firmware/' \
+        /etc/apt/sources.list.d/debian.sources; \
+    grep -A5 '^Suites: bookworm bookworm-updates$' /etc/apt/sources.list.d/debian.sources \
+        | grep -q '^Components:.*non-free' \
+        || { echo "ERROR: failed to enable non-free components on debian.sources -- base image apt sources layout changed, update this RUN" >&2; exit 1; }
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        intel-media-va-driver-non-free \
+        libva-drm2 \
+        vainfo \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY pyproject.toml uv.lock ./
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-default-groups --group worker --no-install-project

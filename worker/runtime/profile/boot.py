@@ -6,6 +6,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Final
 
+from contracts.decode_diagnostics import DecodeSelection
 from contracts.encode_diagnostics import EncodeSelection
 from worker.runtime.profile.registry import (
     DEFAULT_PROFILE_NAME,
@@ -38,6 +39,7 @@ class BootContext:
     decode: DecodePolicy
     encode: EncodePolicy
     encode_selection: EncodeSelection | None = None
+    decode_selection: DecodeSelection | None = None
 
 
 def resolve_profile(
@@ -154,6 +156,70 @@ def resolve_encode_or_fallback(
     )
 
 
+def resolve_decode_or_fallback(
+    spec: ProfileSpec,
+    decode_probe: DecodeProbe | None,
+    *,
+    now: Callable[[], float] = time.time,
+) -> DecodeSelection:
+    """Resolve iGPU VAAPI decode, demoting to opencv (CPU/software) decode on a failed preflight.
+
+    Unlike `preflight_decode_or_raise` -- still used unchanged by nvdec/opencv,
+    whose ADR-0002 fail-fast semantics this does not touch -- a failed VAAPI
+    probe here never aborts boot. VAAPI and the ffmpeg/OpenCV software path
+    both decode the same RTSP stream into identical RGB FramePackets, so
+    trading iGPU offload for CPU decode cost never changes what a camera
+    records or what downstream inference sees. Issues #191/#194 established
+    that a *silent* no-frames failure is the actual footgun here, not a
+    loudly-logged software-decode fallback -- so unlike an adapter probing
+    its way to a different backend (disallowed per worker/adapters/AGENTS.md),
+    this decision is made once, at the boot/profile composition root, exactly
+    like `resolve_encode_or_fallback` (#53).
+
+    Profiles that don't request vaapi (cuda, mps, cpu) never call this --
+    they keep the existing fail-fast `preflight_decode_or_raise` path.
+    """
+    requested = spec.decode
+    if requested != "vaapi":
+        return DecodeSelection(
+            requested=requested,
+            selected=requested,
+            fallback_count=0,
+            last_reason=None,
+            updated_at_sec=now(),
+        )
+
+    probe = default_decode_probe if decode_probe is None else decode_probe
+    try:
+        result = probe(requested)
+    except (OSError, RuntimeError) as error:
+        result = VerifyResult(
+            False, spec.name, "decode", f"vaapi probe raised {type(error).__name__}: {error}"
+        )
+
+    if result.ok:
+        return DecodeSelection(
+            requested=requested,
+            selected=requested,
+            fallback_count=0,
+            last_reason=None,
+            updated_at_sec=now(),
+        )
+
+    LOGGER.warning(
+        "profile %r decode preflight failed (%s); falling back to opencv (CPU) decode",
+        spec.name,
+        result.reason,
+    )
+    return DecodeSelection(
+        requested=requested,
+        selected="opencv",
+        fallback_count=1,
+        last_reason="vaapi_probe_failed",
+        updated_at_sec=now(),
+    )
+
+
 def reject_legacy_conflicts(spec: ProfileSpec, env: Mapping[str, str]) -> None:
     for key in _LEGACY_DECODE_ENVIRONMENTS:
         configured = env.get(key)
@@ -191,10 +257,17 @@ def resolve_boot_context(
     except ProfileVerifyError as error:
         failures.append(str(error))
 
-    try:
-        _ = preflight_decode_or_raise(spec, decode_probe or default_decode_probe)
-    except ProfileVerifyError as error:
-        failures.append(str(error))
+    # vaapi is the one decode policy with an explicit, loud fallback (see
+    # `resolve_decode_or_fallback`) instead of the fail-fast preflight every
+    # other policy still uses -- nvdec/opencv keep raising on a failed probe.
+    decode_selection: DecodeSelection | None = None
+    if spec.decode == "vaapi":
+        decode_selection = resolve_decode_or_fallback(spec, decode_probe)
+    else:
+        try:
+            _ = preflight_decode_or_raise(spec, decode_probe or default_decode_probe)
+        except ProfileVerifyError as error:
+            failures.append(str(error))
 
     try:
         reject_legacy_conflicts(spec, env)
@@ -211,9 +284,10 @@ def resolve_boot_context(
     return BootContext(
         profile=spec,
         device=spec.device,
-        decode=spec.decode,
+        decode=(decode_selection.selected if decode_selection else spec.decode) or spec.decode,
         encode=encode_selection.selected or spec.encode,
         encode_selection=encode_selection,
+        decode_selection=decode_selection,
     )
 
 
@@ -222,6 +296,7 @@ __all__ = [
     "preflight_decode_or_raise",
     "reject_legacy_conflicts",
     "resolve_boot_context",
+    "resolve_decode_or_fallback",
     "resolve_encode_or_fallback",
     "resolve_profile",
     "verify_device_or_raise",
