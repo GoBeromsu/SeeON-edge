@@ -209,6 +209,159 @@ def test_clip_store_subdir_appears_once_a_selection_is_persisted_directly(tmp_pa
     assert response.json()["clip_store_subdir"] == "external-drive"
 
 
+def test_no_local_overrides_leaves_config_version_unchanged_from_pulled(tmp_path) -> None:
+    """Issue #190 regression, case 1: with nothing saved via
+    ``PUT /api/v1/detection-settings``, ``_apply_local_detection_overrides``
+    early-returns and the response's ``config_version`` must stay exactly
+    what was externally pulled -- no behavior change for this case."""
+    app = _app(tmp_path)
+    app.state.pulled_config = PulledWorkerConfig(
+        config_version=7,
+        restart_epoch=2,
+        night_window=None,
+        cameras=(),
+        detection_windows={},
+    )
+    # ``_live_pulled_config`` (cameras/router.py) reads the live version off
+    # ``app.state.config_version``/``app.state.restart_epoch`` directly (kept
+    # in sync with ``pulled_config`` by ``lifespan._apply_backend_config`` in
+    # production), not off ``pulled_config`` itself -- set both explicitly so
+    # this test exercises the same value the real merge sees.
+    app.state.config_version = 7
+    app.state.restart_epoch = 2
+
+    with TestClient(app) as client:
+        response = client.get("/api/v1/cameras/worker-config", headers=AUTH)
+
+    assert response.status_code == 200
+    assert response.json()["config_version"] == 7
+
+
+def test_local_overrides_present_move_config_version_away_from_pulled(tmp_path) -> None:
+    """Issue #190 regression, case 2: once an operator has saved detection
+    settings, ``config_version`` must differ from the raw pulled value --
+    otherwise the worker's restart poll (which compares only
+    ``(restart_epoch, config_version)``) never observes the edit."""
+    app = _app(tmp_path)
+    app.state.pulled_config = PulledWorkerConfig(
+        config_version=7,
+        restart_epoch=2,
+        night_window=None,
+        cameras=(),
+        detection_windows={},
+    )
+    # ``_live_pulled_config`` (cameras/router.py) reads the live version off
+    # ``app.state.config_version``/``app.state.restart_epoch`` directly (kept
+    # in sync with ``pulled_config`` by ``lifespan._apply_backend_config`` in
+    # production), not off ``pulled_config`` itself -- set both explicitly so
+    # this test exercises the same value the real merge sees.
+    app.state.config_version = 7
+    app.state.restart_epoch = 2
+
+    with TestClient(app) as client:
+        _login(client)
+        client.put(
+            "/api/v1/detection-settings",
+            json={
+                "domains": {
+                    "fall": {"on": True, "mode": "always"},
+                    "bed_exit": {"on": True, "mode": "always"},
+                }
+            },
+        )
+        response = client.get("/api/v1/cameras/worker-config", headers=AUTH)
+
+    body = response.json()
+    assert body["config_version"] != 7
+
+
+def test_same_overrides_saved_twice_yield_an_identical_config_version(tmp_path) -> None:
+    """Issue #190 regression, case 3 (restart-storm guard): the derived
+    version must be a pure function of the effective override content, not a
+    timestamp or a counter -- saving the exact same settings again (and
+    polling repeatedly in between) must not move ``config_version``, or the
+    worker would restart on every ~60s poll forever."""
+    app = _app(tmp_path)
+    app.state.pulled_config = PulledWorkerConfig(
+        config_version=7,
+        restart_epoch=2,
+        night_window=None,
+        cameras=(),
+        detection_windows={},
+    )
+    # ``_live_pulled_config`` (cameras/router.py) reads the live version off
+    # ``app.state.config_version``/``app.state.restart_epoch`` directly (kept
+    # in sync with ``pulled_config`` by ``lifespan._apply_backend_config`` in
+    # production), not off ``pulled_config`` itself -- set both explicitly so
+    # this test exercises the same value the real merge sees.
+    app.state.config_version = 7
+    app.state.restart_epoch = 2
+    payload = {
+        "domains": {
+            "fall": {"on": True, "mode": "window", "start": "09:00", "end": "18:00"},
+            "bed_exit": {"on": True, "mode": "always"},
+        }
+    }
+
+    with TestClient(app) as client:
+        _login(client)
+        client.put("/api/v1/detection-settings", json=payload)
+        first = client.get("/api/v1/cameras/worker-config", headers=AUTH).json()
+        second = client.get("/api/v1/cameras/worker-config", headers=AUTH).json()
+        # Re-saving byte-identical content must also leave it unchanged.
+        client.put("/api/v1/detection-settings", json=payload)
+        third = client.get("/api/v1/cameras/worker-config", headers=AUTH).json()
+
+    assert first["config_version"] == second["config_version"] == third["config_version"]
+
+
+def test_different_override_content_yields_a_different_config_version(tmp_path) -> None:
+    """Issue #190 regression, case 4: changing the effective override content
+    (here, flipping ``fall`` off) must move ``config_version`` to a new value
+    so the worker's restart poll picks up the change."""
+    app = _app(tmp_path)
+    app.state.pulled_config = PulledWorkerConfig(
+        config_version=7,
+        restart_epoch=2,
+        night_window=None,
+        cameras=(),
+        detection_windows={},
+    )
+    # ``_live_pulled_config`` (cameras/router.py) reads the live version off
+    # ``app.state.config_version``/``app.state.restart_epoch`` directly (kept
+    # in sync with ``pulled_config`` by ``lifespan._apply_backend_config`` in
+    # production), not off ``pulled_config`` itself -- set both explicitly so
+    # this test exercises the same value the real merge sees.
+    app.state.config_version = 7
+    app.state.restart_epoch = 2
+
+    with TestClient(app) as client:
+        _login(client)
+        client.put(
+            "/api/v1/detection-settings",
+            json={
+                "domains": {
+                    "fall": {"on": True, "mode": "always"},
+                    "bed_exit": {"on": True, "mode": "always"},
+                }
+            },
+        )
+        first = client.get("/api/v1/cameras/worker-config", headers=AUTH).json()
+
+        client.put(
+            "/api/v1/detection-settings",
+            json={
+                "domains": {
+                    "fall": {"on": False, "mode": "always"},
+                    "bed_exit": {"on": True, "mode": "always"},
+                }
+            },
+        )
+        second = client.get("/api/v1/cameras/worker-config", headers=AUTH).json()
+
+    assert first["config_version"] != second["config_version"]
+
+
 def test_worker_config_route_requires_relay_authorization(tmp_path) -> None:
     app = _app(tmp_path)
 

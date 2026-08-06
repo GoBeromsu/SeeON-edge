@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import hmac
 import json
 import os
@@ -556,6 +557,42 @@ def _apply_local_detection_overrides(
         # window is in effect -- drop the deprecated alias too rather than
         # leaving it pointing at a stale externally-pulled window.
         response.pop("night_window", None)
+    pulled_version = 0 if live_pulled is None else live_pulled.config_version
+    response["config_version"] = _local_config_version(
+        pulled_version, domains, detection_windows, response.get("night_window")
+    )
+
+
+def _local_config_version(
+    pulled_version: int,
+    domains: dict[str, dict[str, object]],
+    detection_windows: dict[str, dict[str, object]],
+    night_window: object,
+) -> int:
+    """Deterministically derive a ``config_version`` for a response carrying
+    local detection-setting overrides.
+
+    The worker's restart poll (``worker/runtime/config/restart.py``,
+    ``make_restart_check``) only compares ``(restart_epoch, config_version)``
+    on each ~60s pull. Before this, a local-only edit via
+    ``PUT /api/v1/detection-settings`` never moved either value, so the
+    override was saved to the DB but the running worker never learned about
+    it (issue #190).
+
+    This is a pure hash of the override content that ends up in the response
+    right next to it -- deliberately NOT a timestamp or a monotonic counter:
+    the endpoint can be polled indefinitely between edits and must be stable
+    (same override content -> same version) or the worker would restart on
+    every poll. It only needs to change when the *effective* override content
+    changes.
+    """
+    payload = json.dumps(
+        {"domains": domains, "detection_windows": detection_windows, "night_window": night_window},
+        sort_keys=True,
+    )
+    digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    offset = 1 + (int(digest[:8], 16) % 1_000_000)
+    return pulled_version + offset
 
 
 def _as_window_dict_map(value: object) -> dict[str, dict[str, object]]:
