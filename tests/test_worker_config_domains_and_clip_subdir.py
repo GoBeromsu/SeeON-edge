@@ -158,13 +158,15 @@ def test_to_worker_config_domains_override_replaces_camera_domains_entirely() ->
 
     config = payload.to_worker_config("http://ml-api:8000", "relay-secret")
 
-    assert config.domains.enabled == ("bed_exit",)
+    assert config.domains.resolved_overrides() == {"fall": False, "bed_exit": True}
+    assert config.enabled_domains == ("bed_exit",)
 
 
 def test_to_worker_config_domains_override_can_represent_all_domains_off() -> None:
     """The empty-tuple-vs-None ambiguity this override was designed to avoid:
-    an explicit "everything off" must stay an explicit empty tuple, not
-    collapse into DomainsConfig's "nothing configured" ambient enable-all."""
+    an explicit "everything off" must stay explicit -- both domains named
+    with ``enabled: false`` -- not collapse into the registry's ambient
+    enable-all (which only applies to a domain the override never names)."""
     payload = BackendWorkerConfigPayload.model_validate(
         {
             "config_version": 1,
@@ -175,31 +177,53 @@ def test_to_worker_config_domains_override_can_represent_all_domains_off() -> No
 
     config = payload.to_worker_config("http://ml-api:8000", "relay-secret")
 
-    assert config.domains.enabled == ()
-    assert config.domains.enabled_domains == ()
+    assert config.domains.resolved_overrides() == {"fall": False, "bed_exit": False}
+    assert config.enabled_domains == ()
 
 
-# --- to_worker_config: issue #191 fail-open default ------------------------
+def test_to_worker_config_domains_override_is_a_partial_overlay_not_a_replace() -> None:
+    """The actual defect this overlay fixes: an override naming only ONE
+    domain must not force every *other* known domain off. A domain the
+    override never mentions defers to the registry default (both domains
+    default enabled), not to a hardcoded "everything unmentioned is off"."""
+    payload = BackendWorkerConfigPayload.model_validate(
+        {
+            "config_version": 1,
+            "cameras": [_camera_payload()],
+            "domains": {"fall": {"enabled": False}},
+        }
+    )
+
+    config = payload.to_worker_config("http://ml-api:8000", "relay-secret")
+
+    assert config.domains.resolved_overrides() == {"fall": False}
+    assert config.enabled_domains == ("bed_exit",)
+
+
+# --- to_worker_config: issue #191 -- registry overlay, not replace ---------
 #
-# ``WorkerConfig.enabled_domains`` only falls open to the registry default
-# (fall, bed_exit) when its ``domains`` field was never passed at all
-# (pydantic's ``model_fields_set``). ``to_worker_config`` used to pass
-# ``domains=`` unconditionally, so a relay pull that carried no domains
+# ``WorkerConfig.enabled_domains`` resolves every domain against the
+# registry (``DOMAIN_REGISTRY[name].enabled``) overlaid by
+# ``config.domains.resolved_overrides()`` -- config no longer *replaces* the
+# registry's set of known domains, so a relay pull that carries no domains
 # signal whatsoever (no override, no per-camera domains, no detection
-# windows -- the exact shape of a fresh install) permanently disarmed that
-# fallback and booted with detection silently off.
+# windows -- the exact shape of a fresh install) can no longer disarm
+# anything: an empty overrides map just means every domain defers to its own
+# registry default.
 
 
-def test_to_worker_config_with_no_domains_signal_falls_open_to_none() -> None:
+def test_to_worker_config_with_no_domains_signal_resolves_to_registry_defaults() -> None:
     """No domains override, no per-camera domains, no detection windows:
-    ``enabled_domains`` must be ``None`` (fail-open marker), not ``()``."""
+    every domain defers to its registry default (fall, bed_exit both on) --
+    the boot floor -- rather than an undefined/fail-open marker."""
     payload = BackendWorkerConfigPayload.model_validate(
         {"config_version": 1, "cameras": [_camera_payload()]}
     )
 
     config = payload.to_worker_config("http://ml-api:8000", "relay-secret")
 
-    assert config.enabled_domains is None
+    assert config.domains.resolved_overrides() == {}
+    assert config.enabled_domains == ("fall", "bed_exit")
 
 
 def test_to_worker_config_with_explicit_empty_camera_domains_list_stays_off() -> None:

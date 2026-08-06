@@ -1,13 +1,19 @@
 from __future__ import annotations
 
+import sys
 from typing import ClassVar, Final, TypeAlias
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
+from worker.domains.registry import DOMAIN_REGISTRY
 from worker.runtime.config.errors import ConfigValidationError
 
-KNOWN_DOMAIN_NAMES: Final = frozenset({"fall", "bed_exit"})
+# Derived from the registry rather than hand-maintained, so this can never
+# drift from the set of domains `worker.domains.registry` actually knows how
+# to build -- see worker/domains/AGENTS.md and the module docstring below for
+# how a new registry entry is supposed to reach here without an edit.
+KNOWN_DOMAIN_NAMES: Final = frozenset(DOMAIN_REGISTRY)
 
 
 class NightWindowConfig(BaseModel):
@@ -152,6 +158,51 @@ class DomainsConfig(BaseModel):
         )
         configured_fields = KNOWN_DOMAIN_NAMES.intersection(self.model_fields_set)
         return configured if configured_fields else None
+
+    def resolved_overrides(self) -> dict[str, bool]:
+        """The per-domain enable/disable overlay on top of the registry.
+
+        This is the single resolution path config feeds into
+        ``DOMAIN_REGISTRY``: callers resolve one domain's active state as
+        ``overrides.get(name, DOMAIN_REGISTRY[name].enabled)``, iterating
+        ``DOMAIN_REGISTRY`` itself (never this map, and never this class) for
+        the set of domains that exist -- see
+        ``worker.runtime.config.worker_models.WorkerConfig.enabled_domains``.
+
+        Returns an unconditional ``dict``, never ``None``: an empty map
+        unambiguously means "no overrides, defer to the registry for every
+        domain" now that config only *overlays* the registry instead of
+        replacing it. A domain this config never mentions is simply absent
+        from the map -- it is not forced off, which is what made "not
+        configured" and "everything off" indistinguishable before this
+        overlay existed.
+
+        ``self.enabled`` (the legacy replace-list alias) takes priority when
+        present, since ``_reject_mixed_legacy_and_map`` already forbids
+        combining it with the per-domain map form below. It is still the
+        live relay's wire shape for per-camera-declared domains (see
+        ``pull_models.BackendWorkerConfigPayload.to_worker_config``), so it
+        stays supported -- deprecated, not removed -- and is converted to an
+        overlay by forcing every listed name on and every *other known*
+        domain off, matching its old all-or-nothing replace semantics for
+        anyone still sending it.
+        """
+        if self.enabled is not None:
+            print(
+                "domains.enabled (legacy replace-list) is deprecated; prefer "
+                "per-domain domains.<name>.enabled overrides instead. "
+                f"Treating {sorted(self.enabled)!r} as the complete active "
+                "set and forcing every other known domain off.",
+                file=sys.stderr,
+            )
+            listed = set(self.enabled)
+            return {name: name in listed for name in KNOWN_DOMAIN_NAMES}
+        overrides: dict[str, bool] = {}
+        for name in KNOWN_DOMAIN_NAMES:
+            config = self.domain_config(name)
+            if config is not None:
+                overrides[name] = config.enabled
+        return overrides
 
 
 __all__ = [

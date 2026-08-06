@@ -15,7 +15,9 @@ from contracts.worker_config import (
 from worker.runtime.config.camera_models import CameraRuntimeConfig, RelayConfig
 from worker.runtime.config.domain_models import (
     KNOWN_DOMAIN_NAMES,
+    BedExitDomainConfig,
     DomainsConfig,
+    FallDomainConfig,
     NightWindowConfig,
 )
 from worker.runtime.config.errors import ConfigValidationError, WorkerConfigError
@@ -325,15 +327,27 @@ class BackendWorkerConfigPayload(BaseModel):
         }
         domain_enabled = self.resolved_domain_enabled
         if self.domains is not None:
-            # An explicit local override (even an empty/all-malformed one)
-            # replaces the per-camera-domains-derived set entirely, and is
-            # passed as an explicit tuple (never coerced to ``None``) so an
-            # "everything off" state cannot collapse into
-            # ``DomainsConfig.enabled_domains``'s ambient "nothing configured
-            # -> enable everything" default.
+            # An explicit local override wins outright over the
+            # per-camera-domains-derived set below, but is threaded through
+            # as a *partial* per-domain overlay -- only the domains this
+            # override actually names -- rather than the legacy
+            # replace-list. A domain it never mentions is simply absent from
+            # both per-domain fields below, which ``DomainsConfig
+            # .resolved_overrides`` reads as "no opinion, defer to the
+            # registry" rather than forcing it on (the previous
+            # ``domain_enabled.get(name, True)`` hardcoded that default
+            # here instead of letting the registry decide it -- the
+            # config-replaces-registry defect this overlay exists to fix).
             domains_config = DomainsConfig(
-                enabled=tuple(
-                    sorted(name for name in KNOWN_DOMAIN_NAMES if domain_enabled.get(name, True))
+                fall=(
+                    FallDomainConfig(enabled=domain_enabled["fall"])
+                    if "fall" in domain_enabled
+                    else None
+                ),
+                bed_exit=(
+                    BedExitDomainConfig(enabled=domain_enabled["bed_exit"])
+                    if "bed_exit" in domain_enabled
+                    else None
                 ),
                 detection_windows=detection_windows or None,
             )
@@ -362,24 +376,16 @@ class BackendWorkerConfigPayload(BaseModel):
                 enabled=camera_domains,
                 detection_windows=detection_windows or None,
             )
-        # Issue #191: ``WorkerConfig.enabled_domains`` fails open to the
-        # registry default (fall, bed_exit) only when its ``domains`` field
-        # was never *passed at all* (pydantic's ``model_fields_set``, not
-        # its value). Passing ``domains=`` unconditionally -- even a
-        # ``DomainsConfig`` carrying no real signal -- always marks the
-        # field "set" and permanently disarms that fallback, which is
-        # exactly the fresh-install failure this issue reports: no domains
-        # override, no per-camera domains, no detection windows, and
-        # detection silently never starts. Comparing against a fresh
-        # ``DomainsConfig()`` catches that no-signal case (regardless of
-        # which branch above produced it) and omits the kwarg so the
-        # fail-open default in ``worker_models.py`` engages; any real
-        # signal -- an explicit enable/disable, a camera-declared domain
-        # list (including an explicit empty one), or a detection window --
-        # is still threaded through unconditionally.
-        domain_kwargs = (
-            {} if domains_config == DomainsConfig() else {"domains": domains_config}
-        )
+        # Issue #191's fresh-install failure -- a pull with no domains
+        # signal at all (no override, no per-camera domains, no detection
+        # windows) silently resolving to zero active domains -- no longer
+        # needs special-casing here. ``domains_config`` is always passed
+        # through unconditionally: ``WorkerConfig.enabled_domains`` resolves
+        # every domain against the registry (``DOMAIN_REGISTRY[name]
+        # .enabled``) overlaid by ``domains_config.resolved_overrides()``,
+        # and a ``DomainsConfig`` carrying no real signal produces an empty
+        # overrides map, which reads as "defer to the registry" rather than
+        # "nothing is active" -- whether or not the field was ever "set".
         base_clip = clip if clip is not None else ClipRecordingConfig()
         subdir = self.resolved_clip_store_subdir
         resolved_clip = (
@@ -388,7 +394,7 @@ class BackendWorkerConfigPayload(BaseModel):
         return WorkerConfig(
             relay=RelayConfig.model_validate({"url": relay_url, "token": token}),
             models=models if models is not None else WorkerModelsConfig(),
-            **domain_kwargs,
+            domains=domains_config,
             clip=resolved_clip,
             dev_mjpeg=dev_mjpeg if dev_mjpeg is not None else DevMjpegConfig(),
             cameras=cameras,

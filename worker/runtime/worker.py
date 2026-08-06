@@ -44,7 +44,6 @@ from worker.domains import (
     AuditContext,
     BedExitDomainDependencies,
     FallDomainDependencies,
-    enabled_domains,
 )
 from worker.domains.bed_exit import BedExitConfig, NightWindow
 from worker.domains.detection_window import DetectionWindow
@@ -610,14 +609,17 @@ class WorkerRuntime:
         self.config = config
         # Issue #191: a relay pull that carried no domains signal at all used
         # to silently resolve to zero active domains (no fall/bed_exit
-        # detection scheduled, no error). Logging the resolved set --
-        # and which path produced it -- at startup makes that state visible
-        # instead of only discoverable by noticing detections never arrive.
+        # detection scheduled, no error). Logging the resolved set -- and
+        # whether anything actually overrode the registry -- at startup
+        # makes that state visible instead of only discoverable by noticing
+        # detections never arrive. ``config.enabled_domains`` (the registry
+        # overlaid by ``config.domains.resolved_overrides()``) never returns
+        # an undefined/None state anymore, so there is no separate fallback
+        # branch here: an empty override map *is* "registry default".
         resolved_domain_names = self.config.enabled_domains
-        domain_source = "relay-supplied"
-        if resolved_domain_names is None:
-            domain_source = "registry default"
-            resolved_domain_names = enabled_domains()
+        domain_source = (
+            "config override" if self.config.domains.resolved_overrides() else "registry default"
+        )
         LOGGER.info(
             "resolved active detection domains (%s): %s",
             domain_source,
@@ -1581,10 +1583,7 @@ class WorkerRuntime:
         return self._camera_source_registry
 
     def _active_domain_names(self) -> tuple[str, ...]:
-        domain_names = self.config.enabled_domains
-        if domain_names is None:
-            domain_names = enabled_domains()
-        return domain_names
+        return self.config.enabled_domains
 
     def _build_decision_stage(
         self, camera: CameraRuntimeConfig, fall_model: FallModelProtocol

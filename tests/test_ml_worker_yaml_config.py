@@ -73,7 +73,11 @@ def test_ml_worker_yaml_config_loads_nested_contract(tmp_path: Path) -> None:
     assert config.models.fall is not None
     assert config.models.fall.type == "lstm"
     assert config.models.fall.input_shape == (3, 51)
-    assert config.enabled_domains == ("fall",)
+    # bed_exit is unmentioned in this YAML's ``domains`` block; under the
+    # registry overlay that means "no opinion", not "off" -- it still
+    # resolves active through its registry default (both domains default
+    # enabled), alongside the explicitly-configured fall.
+    assert config.enabled_domains == ("fall", "bed_exit")
     fall_domain = config.domains.domain_config("fall")
     assert fall_domain is not None
     assert fall_domain.enabled is True
@@ -81,6 +85,8 @@ def test_ml_worker_yaml_config_loads_nested_contract(tmp_path: Path) -> None:
 
 
 def test_ml_worker_yaml_config_preserves_absent_domain_defaults(tmp_path: Path) -> None:
+    """No ``domains`` key at all: every domain defers to its registry
+    default -- the boot floor -- rather than an undefined/fail-open marker."""
     path = _valid_yaml(tmp_path / "ml-worker.yaml")
     payload = yaml.safe_load(path.read_text(encoding="utf-8"))
     del payload["domains"]
@@ -88,11 +94,18 @@ def test_ml_worker_yaml_config_preserves_absent_domain_defaults(tmp_path: Path) 
 
     config = load_worker_config(path)
 
-    assert config.enabled_domains is None
-    assert "domains" not in config.model_fields_set
+    assert config.enabled_domains == ("fall", "bed_exit")
 
 
-def test_ml_worker_yaml_config_explicit_empty_domains_enable_none(tmp_path: Path) -> None:
+def test_ml_worker_yaml_config_explicit_empty_domains_object_activates_registry_defaults(
+    tmp_path: Path,
+) -> None:
+    """An explicit-but-empty ``domains: {}`` carries no per-domain signal --
+    it must resolve identically to omitting ``domains`` entirely (both
+    registry domains active), not collapse to "everything off" just because
+    the key was present. This is exactly the ambiguity the overlay exists to
+    remove: "not configured" and "everything off" used to be indistinguishable
+    once any ``domains`` key was present at all."""
     path = _valid_yaml(tmp_path / "ml-worker.yaml")
     payload = yaml.safe_load(path.read_text(encoding="utf-8"))
     payload["domains"] = {}
@@ -100,8 +113,8 @@ def test_ml_worker_yaml_config_explicit_empty_domains_enable_none(tmp_path: Path
 
     config = load_worker_config(path)
 
-    assert "domains" in config.model_fields_set
-    assert config.enabled_domains == ()
+    assert config.domains.resolved_overrides() == {}
+    assert config.enabled_domains == ("fall", "bed_exit")
 
 
 def test_ml_worker_yaml_config_all_disabled_domains_enable_none(tmp_path: Path) -> None:

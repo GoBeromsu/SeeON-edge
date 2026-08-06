@@ -8,6 +8,7 @@ from typing import ClassVar, Final, Literal, TypeAlias
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from typing_extensions import override
 
+from worker.domains.registry import DOMAIN_REGISTRY
 from worker.runtime.config.camera_models import CameraRuntimeConfig, RelayConfig
 from worker.runtime.config.domain_models import DomainsConfig
 from worker.runtime.config.errors import ConfigValidationError, WorkerConfigError
@@ -197,10 +198,28 @@ class WorkerConfig(BaseModel):
             raise WorkerConfigError("duplicate camera_id: " + ", ".join(duplicate_ids))
 
     @property
-    def enabled_domains(self) -> tuple[str, ...] | None:
-        if "domains" not in self.model_fields_set:
-            return None
-        return self.domains.enabled_domains or ()
+    def enabled_domains(self) -> tuple[str, ...]:
+        """Active domain names: the registry's own defaults, overlaid by
+        whatever per-domain overrides ``self.domains`` carries (see
+        ``DomainsConfig.resolved_overrides``).
+
+        Always resolves to a concrete tuple -- ``DOMAIN_REGISTRY`` is
+        iterated directly (never ``self.domains``) so the set of *known*
+        domains can never come from config, and "no config at all" still
+        yields every registry entry whose own default is enabled rather than
+        an empty or undefined set. This is the boot floor: a worker with an
+        unreachable relay and zero domain config still resolves fall and
+        bed_exit active, because the registry -- not config presence -- is
+        what "active" is measured against now. There is no longer a
+        fail-open sentinel to fall back to; config that names no override
+        for a domain simply defers to the registry, unconditionally.
+        """
+        overrides = self.domains.resolved_overrides()
+        return tuple(
+            name
+            for name, registration in DOMAIN_REGISTRY.items()
+            if overrides.get(name, registration.enabled)
+        )
 
     @property
     def relay_alert_url(self) -> str:
