@@ -47,8 +47,10 @@ class SceneState:
     latest_observation: FrameObservation | None = None
     track_ids: tuple[int, ...] = field(default_factory=tuple)
     bed_regions: tuple[BoundingBox, ...] = field(default_factory=tuple)
+    # Only ever used as an existence sentinel (None vs not-None) since the
+    # frame-index age comparison was deleted -- see resolve_bed_regions'
+    # docstring. The actual frame number is no longer read anywhere.
     last_bed_frame_index: int | None = None
-    last_processed_frame_index: int | None = None
     scheduled_empty_bed_cycles: int = 0
     bed_region_freshness: BedRegionCacheState = BedRegionCacheState.EMPTY
     bed_region_counters: BedRegionCacheCounters = field(default_factory=BedRegionCacheCounters)
@@ -68,7 +70,6 @@ class SceneState:
 
     def reset_for_new_source(self, reason: str = "source_restart") -> None:
         self.reset_bed_cache(reason)
-        self.last_processed_frame_index = None
         self.latest_observation = None
         self.track_ids = ()
 
@@ -93,32 +94,48 @@ class SceneState:
         bed_scheduled: bool,
         bed_interval: int,
     ) -> tuple[FrameObservation, BedRegionDebugSnapshot]:
-        """Resolve fresh, cached, empty, or expired bed regions for one frame."""
+        """Resolve fresh, cached, empty, or expired bed regions for one frame.
+
+        ``scheduled_empty_bed_cycles >= 2`` is the sole invalidation
+        mechanism: two consecutive scheduled segmentation cycles that find no
+        bed is the only evidence this cache treats as "the bed is actually
+        gone." There is deliberately no frame-index or wall-clock TTL on top
+        of it.
+
+        This repo's ingest lifecycle does not call ``reset_for_new_source()``
+        on an RTSP reconnect (see #208), and a reconnected decode session
+        typically restarts its frame counter near 0. An earlier version of
+        this method additionally reset the cache whenever ``frame_index``
+        stopped increasing (``_reset_if_discontinuous``) and gated the cache
+        on ``frame_index - last_bed_frame_index`` staying within a bounded
+        window (``_cached_boxes_if_fresh``'s age comparison). Both read
+        ``frame_index`` as if it were a single monotonic counter for the
+        camera's whole lifetime, when it is actually only monotonic *within
+        one decode session*. Every reconnect made both of them misfire and
+        wipe an otherwise-good cache -- which is indistinguishable, to
+        everything downstream, from the bed genuinely being empty. Neither
+        mechanism is reachable from bed_interval or persisted_bed_regions, so
+        deleting both leaves this method's behavior unchanged across a
+        reconnect and unchanged for every camera that isn't reconnecting.
+
+        ``bed_interval`` is accepted for backward-compatible call
+        compatibility (the scheduler already owns bed segmentation cadence
+        via ``Scheduler.task_intervals["bed"]``) but is no longer read here.
+        """
         if self.persisted_bed_regions:
             resolved = _replace_bed_boxes(observation, self.persisted_bed_regions)
-            snapshot = BedRegionDebugSnapshot(
-                source=BedRegionCacheState.FRESH,
-                age_frames=0,
-                empty_cycles=0,
-                reset_reason=None,
-            )
-            self._mark_processed(frame_index, resolved)
+            snapshot = BedRegionDebugSnapshot(source=BedRegionCacheState.FRESH, empty_cycles=0)
+            self._mark_processed(resolved)
             return resolved, snapshot
 
-        reset_reason = self._reset_if_discontinuous(frame_index)
         if bed_scheduled and observation.bed_boxes:
             self.bed_regions = observation.bed_boxes
             self.last_bed_frame_index = frame_index
             self.scheduled_empty_bed_cycles = 0
             self.bed_region_freshness = BedRegionCacheState.FRESH
             self.bed_region_counters.fresh += 1
-            snapshot = BedRegionDebugSnapshot(
-                source=BedRegionCacheState.FRESH,
-                age_frames=0,
-                empty_cycles=0,
-                reset_reason=reset_reason,
-            )
-            self._mark_processed(frame_index, observation)
+            snapshot = BedRegionDebugSnapshot(source=BedRegionCacheState.FRESH, empty_cycles=0)
+            self._mark_processed(observation)
             return observation, snapshot
 
         if bed_scheduled:
@@ -130,35 +147,29 @@ class SceneState:
                 resolved = _replace_bed_boxes(observation, ())
                 snapshot = BedRegionDebugSnapshot(
                     source=BedRegionCacheState.EXPIRED,
-                    age_frames=None,
                     empty_cycles=empty_cycles,
-                    reset_reason=reset_reason,
                 )
-                self._mark_processed(frame_index, resolved)
+                self._mark_processed(resolved)
                 return resolved, snapshot
 
             self.bed_region_freshness = BedRegionCacheState.EMPTY
             snapshot = BedRegionDebugSnapshot(
                 source=BedRegionCacheState.EMPTY,
-                age_frames=self._age(frame_index),
                 empty_cycles=self.scheduled_empty_bed_cycles,
-                reset_reason=reset_reason,
             )
-            self._mark_processed(frame_index, observation)
+            self._mark_processed(observation)
             return observation, snapshot
 
-        cached = self._cached_boxes_if_fresh(frame_index, bed_interval)
+        cached = self._cached_boxes_if_fresh()
         if cached:
             resolved = _replace_bed_boxes(observation, cached)
             self.bed_region_freshness = BedRegionCacheState.CACHED
             self.bed_region_counters.cached += 1
             snapshot = BedRegionDebugSnapshot(
                 source=BedRegionCacheState.CACHED,
-                age_frames=self._age(frame_index),
                 empty_cycles=self.scheduled_empty_bed_cycles,
-                reset_reason=reset_reason,
             )
-            self._mark_processed(frame_index, resolved)
+            self._mark_processed(resolved)
             return resolved, snapshot
 
         expired = bool(self.bed_regions) or self.last_bed_frame_index is not None
@@ -170,41 +181,22 @@ class SceneState:
         resolved = _replace_bed_boxes(observation, ())
         snapshot = BedRegionDebugSnapshot(
             source=source,
-            age_frames=None,
             empty_cycles=self.scheduled_empty_bed_cycles,
-            reset_reason=reset_reason,
         )
-        self._mark_processed(frame_index, resolved)
+        self._mark_processed(resolved)
         return resolved, snapshot
 
-    def _reset_if_discontinuous(self, frame_index: int) -> str | None:
-        if self.last_processed_frame_index is None:
-            return None
-        if frame_index > self.last_processed_frame_index:
-            return None
-        self.reset_bed_cache("frame_index_discontinuity")
-        return "frame_index_discontinuity"
+    def _cached_boxes_if_fresh(self) -> tuple[BoundingBox, ...]:
+        """Serve the last detected bed boxes as long as nothing has proven them gone.
 
-    def _cached_boxes_if_fresh(
-        self,
-        frame_index: int,
-        bed_interval: int,
-    ) -> tuple[BoundingBox, ...]:
+        No frame-index or wall-clock age check: ``scheduled_empty_bed_cycles``
+        is the only signal that invalidates this. See ``resolve_bed_regions``.
+        """
         if not self.bed_regions or self.last_bed_frame_index is None:
             return ()
         if self.scheduled_empty_bed_cycles >= 2:
             return ()
-        age_frames = frame_index - self.last_bed_frame_index
-        if age_frames < 0:
-            return ()
-        if age_frames <= 2 * max(1, bed_interval):
-            return self.bed_regions
-        return ()
-
-    def _age(self, frame_index: int) -> int | None:
-        if self.last_bed_frame_index is None:
-            return None
-        return max(0, frame_index - self.last_bed_frame_index)
+        return self.bed_regions
 
     def _expire_bed_cache(self) -> None:
         self.bed_regions = ()
@@ -212,8 +204,7 @@ class SceneState:
         self.bed_region_freshness = BedRegionCacheState.EXPIRED
         self.bed_region_counters.expired += 1
 
-    def _mark_processed(self, frame_index: int, observation: FrameObservation) -> None:
-        self.last_processed_frame_index = frame_index
+    def _mark_processed(self, observation: FrameObservation) -> None:
         _ = self.update(observation)
 
 

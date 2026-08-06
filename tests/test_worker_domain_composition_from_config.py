@@ -255,7 +255,7 @@ def _bed_exit_frame(
         live_track_ids=(),
         time_sec=time_sec,
         frame_index=frame_index,
-        bed_region=BedRegionDebugSnapshot(BedRegionCacheState.FRESH, 0),
+        bed_region=BedRegionDebugSnapshot(BedRegionCacheState.FRESH),
     )
 
 

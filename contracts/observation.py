@@ -118,9 +118,19 @@ class BedRegionCacheState(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class BedRegionDebugSnapshot:
-    """Per-frame bed-ROI cache provenance for the dev overlay and ops telemetry."""
+    """Per-frame bed-ROI cache provenance for the dev overlay and ops telemetry.
+
+    ``age_frames`` and ``reset_reason`` (frame-index age of the cached ROI,
+    and why a per-frame reset fired) were removed in #208 along with the
+    frame-index mechanisms that produced them. Both assumed ``frame_index``
+    was monotonic for a camera's whole lifetime; it is only monotonic within
+    one decode session, so both went silently wrong across a reconnect
+    (``age_frames`` could go negative before being clamped to a
+    misleadingly-confident 0; ``reset_reason`` fired on every reconnect, not
+    just genuine discontinuities). Nothing downstream reads either field.
+    ``scheduled_empty_bed_cycles >= 2`` is now the sole cache-invalidation
+    signal; see ``SceneState.resolve_bed_regions``.
+    """
 
     source: BedRegionCacheState
-    age_frames: int | None = None
     empty_cycles: int = 0
-    reset_reason: str | None = None

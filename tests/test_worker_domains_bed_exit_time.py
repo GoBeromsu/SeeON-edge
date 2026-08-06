@@ -27,7 +27,7 @@ def _decision_input(person: BoundingBox, bed: BoundingBox, frame_index: int) -> 
         live_track_ids=(11,),
         time_sec=float(frame_index),
         frame_index=frame_index,
-        bed_region=BedRegionDebugSnapshot(source=BedRegionCacheState.FRESH, age_frames=0),
+        bed_region=BedRegionDebugSnapshot(source=BedRegionCacheState.FRESH),
     )
 
 

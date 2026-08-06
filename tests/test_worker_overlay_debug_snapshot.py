@@ -104,7 +104,7 @@ def _decision_input(box: BoundingBox, *, frame_index: int) -> DecisionInput:
         live_track_ids=(7,),
         time_sec=float(frame_index),
         frame_index=frame_index,
-        bed_region=BedRegionDebugSnapshot(BedRegionCacheState.FRESH, age_frames=0),
+        bed_region=BedRegionDebugSnapshot(BedRegionCacheState.FRESH),
     )
 
 

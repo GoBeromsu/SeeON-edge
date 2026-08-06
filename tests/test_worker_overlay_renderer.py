@@ -62,7 +62,7 @@ def test_overlay_renderer_bedexit_does_not_call_bed_exit_update(monkeypatch) -> 
         person_boxes=(person,),
         bed_boxes=(bed,),
         statuses=(BedStatus(0, bed, "occupied", person_id=1),),
-        bed_region=BedRegionDebugSnapshot(source="fresh", age_frames=0),
+        bed_region=BedRegionDebugSnapshot(source="fresh"),
     )
 
     rendered = OverlayRenderer(mode="bedexit").render(

@@ -52,7 +52,7 @@ def _input(
         live_track_ids=live_track_ids,
         time_sec=float(frame_index),
         frame_index=frame_index,
-        bed_region=BedRegionDebugSnapshot(source=BedRegionCacheState.FRESH, age_frames=0),
+        bed_region=BedRegionDebugSnapshot(source=BedRegionCacheState.FRESH),
     )
 
 

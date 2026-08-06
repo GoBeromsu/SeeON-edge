@@ -74,7 +74,7 @@ def _decision_input(observation: FrameObservation, time_sec: float) -> DecisionI
         live_track_ids=(),
         time_sec=time_sec,
         frame_index=int(time_sec),
-        bed_region=BedRegionDebugSnapshot(BedRegionCacheState.FRESH, 0),
+        bed_region=BedRegionDebugSnapshot(BedRegionCacheState.FRESH),
     )
 
 

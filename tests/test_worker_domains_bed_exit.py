@@ -67,10 +67,7 @@ def _input(
         live_track_ids=tuple(track_id for track_id in track_ids if track_id is not None),
         time_sec=float(frame_index),
         frame_index=frame_index,
-        bed_region=BedRegionDebugSnapshot(
-            source=source,
-            age_frames=0 if source is BedRegionCacheState.FRESH else 99,
-        ),
+        bed_region=BedRegionDebugSnapshot(source=source),
     )
 
 
