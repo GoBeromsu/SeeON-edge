@@ -17,6 +17,7 @@ from worker.runtime.telemetry.local_metrics import (
     log_snapshot,
 )
 from worker.runtime.telemetry.models import (
+    BedExitScoringDiagnostics,
     BedRegionDiagnostics,
     BusMetricsSource,
     BusSubscriptionSnapshot,
@@ -63,6 +64,7 @@ class WorkerDiagnostics:
         self._stage_timings: dict[str, dict[str, StageTimingAccumulator]] = {}
         self._buses: dict[str, tuple[BusMetricsSource, tuple[str, ...]]] = {}
         self._bed_region_by_camera: dict[str, BedRegionDiagnostics] = {}
+        self._bed_exit_scoring_by_camera: dict[str, BedExitScoringDiagnostics] = {}
         self._encoder = EncoderLifecycleSnapshot()
         self._clip_recorder = ClipRecorderStatus()
         self._gpu: RelayGpuPayload | None = None
@@ -193,6 +195,37 @@ class WorkerDiagnostics:
         with self._lock:
             return dict(self._bed_region_by_camera)
 
+    def record_bed_exit_scoring(
+        self,
+        camera_id: str,
+        max_containment_observed: float,
+        grace_positive_transitions: int,
+        assignments_made: int,
+    ) -> None:
+        """Refresh one camera's cumulative bed_exit scoring signal (#238).
+
+        Called from ``BedExitMonitor.update()`` (see ``BedExitScoringRecorder``
+        in worker/domains/bed_exit/detector.py) once per processed frame --
+        like ``record_bed_region``, this only overwrites an in-memory value;
+        it is not itself a log call. Actual emission is on `log_snapshot()`'s
+        cadence.
+        """
+        with self._lock:
+            self._bed_exit_scoring_by_camera[camera_id] = BedExitScoringDiagnostics(
+                max_containment_observed=max_containment_observed,
+                grace_positive_transitions=grace_positive_transitions,
+                assignments_made=assignments_made,
+                updated_at_sec=self._wall_clock(),
+            )
+
+    def bed_exit_scoring_selection(self, camera_id: str) -> BedExitScoringDiagnostics | None:
+        with self._lock:
+            return self._bed_exit_scoring_by_camera.get(camera_id)
+
+    def bed_exit_scoring_snapshot(self) -> Mapping[str, BedExitScoringDiagnostics]:
+        with self._lock:
+            return dict(self._bed_exit_scoring_by_camera)
+
     def update_measured_fps(self, camera_id: str, measured_fps: float | None) -> None:
         with self._lock:
             self._measured_fps_by_camera[camera_id] = (self._clock(), measured_fps)
@@ -239,6 +272,7 @@ class WorkerDiagnostics:
             encoder = self._encoder
             encode_by_camera = dict(self._encode_by_camera)
             bed_region_by_camera = dict(self._bed_region_by_camera)
+            bed_exit_scoring_by_camera = dict(self._bed_exit_scoring_by_camera)
             camera_ids = (
                 set(self._decode_by_camera)
                 | set(stage_timings)
@@ -246,6 +280,7 @@ class WorkerDiagnostics:
                 | set(statuses)
                 | set(encode_by_camera)
                 | set(bed_region_by_camera)
+                | set(bed_exit_scoring_by_camera)
             )
         cameras = tuple(
             CameraDiagnosticsSnapshot(
@@ -257,6 +292,7 @@ class WorkerDiagnostics:
                 bus=bus_snapshot(buses.get(camera_id)),
                 encode=encode_by_camera.get(camera_id),
                 bed_region=bed_region_by_camera.get(camera_id),
+                bed_exit_scoring=bed_exit_scoring_by_camera.get(camera_id),
             )
             for camera_id in sorted(camera_ids)
         )
@@ -336,6 +372,7 @@ class WorkerDiagnostics:
             worker = None if self._worker is None else self._worker.copy()
         return selections, measured_fps, clip_recorder, gpu, worker
 __all__ = [
+    "BedExitScoringDiagnostics",
     "BedRegionDiagnostics",
     "BusMetricsSource",
     "BusSubscriptionSnapshot",

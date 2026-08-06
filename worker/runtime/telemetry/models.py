@@ -33,6 +33,27 @@ class BedRegionDiagnostics:
 
 
 @dataclass(frozen=True, slots=True)
+class BedExitScoringDiagnostics:
+    """One camera's cumulative bed_exit scoring signal (issue #238).
+
+    Distinguishes, from logs alone, (b) "person never scored inside the bed
+    polygon" from (c) "scored inside, but the exit counter never crossed the
+    grace threshold" when bed_exit fires zero events overnight --
+    ``BedRegionDiagnostics`` above only covers whether the region itself was
+    usable, not what ``BedExitMonitor`` did with it once it was. All three
+    numeric fields accumulate since worker boot (same convention as
+    ``BedRegionCacheCounterSnapshot``), never reset per `RuntimeStatusSender`
+    tick. Deliberately holds only scores/counts and the camera_id -- never a
+    bounding box, polygon coordinate, or track identity.
+    """
+
+    max_containment_observed: float
+    grace_positive_transitions: int
+    assignments_made: int
+    updated_at_sec: float
+
+
+@dataclass(frozen=True, slots=True)
 class StageTimingSnapshot:
     """Aggregated elapsed time for one camera pipeline stage."""
 
@@ -82,6 +103,8 @@ class CameraDiagnosticsSnapshot:
     encode: EncodeSelection | None = None
     # Local-only, same reasoning as `encode` above (#207).
     bed_region: BedRegionDiagnostics | None = None
+    # Local-only, same reasoning as `bed_region` above (#238).
+    bed_exit_scoring: BedExitScoringDiagnostics | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -126,6 +149,7 @@ class InvalidStageTimingError(ValueError):
 
 
 __all__ = [
+    "BedExitScoringDiagnostics",
     "BedRegionDiagnostics",
     "BusMetricsSource",
     "BusSubscriptionSnapshot",

@@ -103,6 +103,27 @@ def log_snapshot(snapshot: RuntimeDiagnosticsSnapshot) -> None:
                 "updated_at_sec": camera.bed_region.updated_at_sec,
             }
         )
+        # Issue #238: separates "person never scored inside the bed
+        # polygon" from "scored inside, but the exit counter never
+        # crossed the grace threshold" when bed_exit fires zero
+        # events -- `bed_region` above only says whether the region
+        # was usable, not what the monitor did with it. Numeric
+        # scores/counts only, same no-secrets discipline as
+        # `bed_region` (this repo is public).
+        bed_exit_scoring = (
+            None
+            if camera.bed_exit_scoring is None
+            else {
+                "max_containment_observed": (
+                    camera.bed_exit_scoring.max_containment_observed
+                ),
+                "grace_positive_transitions": (
+                    camera.bed_exit_scoring.grace_positive_transitions
+                ),
+                "assignments_made": camera.bed_exit_scoring.assignments_made,
+                "updated_at_sec": camera.bed_exit_scoring.updated_at_sec,
+            }
+        )
         # The entrypoint's `logging.basicConfig(format=...)`
         # (worker/__main__.py) never references `extra` keys, so anything
         # passed only via `extra=` is silently absent from the rendered log
@@ -113,7 +134,8 @@ def log_snapshot(snapshot: RuntimeDiagnosticsSnapshot) -> None:
         # (e.g. JSON) log consumer.
         LOGGER.info(
             "worker.runtime.telemetry camera_id=%s failure_category=%s "
-            "stage_timings=%s bus=%s encoder=%s encode=%s bed_region=%s",
+            "stage_timings=%s bus=%s encoder=%s encode=%s bed_region=%s "
+            "bed_exit_scoring=%s",
             camera.camera_id,
             camera.failure_category,
             stage_timings,
@@ -121,6 +143,7 @@ def log_snapshot(snapshot: RuntimeDiagnosticsSnapshot) -> None:
             snapshot.encoder,
             encode,
             bed_region,
+            bed_exit_scoring,
             extra={
                 "camera_id": camera.camera_id,
                 "failure_category": camera.failure_category,
@@ -129,6 +152,7 @@ def log_snapshot(snapshot: RuntimeDiagnosticsSnapshot) -> None:
                 "encoder": snapshot.encoder,
                 "encode": encode,
                 "bed_region": bed_region,
+                "bed_exit_scoring": bed_exit_scoring,
             },
         )
 

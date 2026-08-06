@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from datetime import datetime
+from typing import Protocol
 
 from contracts.observation import BedRegionCacheState
 from worker.domains.bed_exit.geometry import best_bed_id, containment_ratio
@@ -15,6 +16,25 @@ from worker.domains.bed_exit.schema import (
     BedStatus,
 )
 from worker.types import BusinessEvent, DecisionInput
+
+
+class BedExitScoringRecorder(Protocol):
+    """Structural view of ``WorkerDiagnostics.record_bed_exit_scoring()``.
+
+    Kept narrow for the same layering reason as
+    ``worker/pipeline/analytics/composite.py``'s ``BedRegionRecorder``
+    (issue #238): the domain layer depends on this shape instead of
+    importing ``worker.runtime.telemetry.runtime_diagnostics.WorkerDiagnostics``
+    directly.
+    """
+
+    def record_bed_exit_scoring(
+        self,
+        camera_id: str,
+        max_containment_observed: float,
+        grace_positive_transitions: int,
+        assignments_made: int,
+    ) -> None: ...
 
 
 class _Assignment:
@@ -52,13 +72,31 @@ class _Assignment:
 class BedExitMonitor:
     """Interpret numeric observations with camera-local bed assignment state."""
 
-    def __init__(self, *, config: BedExitConfig, clock: Callable[[], datetime]) -> None:
+    def __init__(
+        self,
+        *,
+        config: BedExitConfig,
+        clock: Callable[[], datetime],
+        scoring_recorder: BedExitScoringRecorder | None = None,
+    ) -> None:
         self._config: BedExitConfig = config
         self._clock: Callable[[], datetime] = clock
         self._night_window: NightWindow | None = config.night_window
         self._assignments: dict[int, _Assignment] = {}
         self._latch: BedExitLatch = BedExitLatch()
         self.last_debug_snapshot: BedExitDebugSnapshot | None = None
+        self._scoring_recorder = scoring_recorder
+        # Cumulative-since-boot, matching `StageTimingAccumulator.max_sec` and
+        # `BedRegionCacheCounterSnapshot`'s precedent elsewhere in this
+        # codebase -- never reset per `RuntimeStatusSender` tick. Distinguishes
+        # (b) "never scored inside the polygon" from (c) "scored inside, but
+        # the exit counter never crossed the grace threshold" when bed_exit
+        # fires zero events overnight (issue #238); #224's `BedRegionDiagnostics`
+        # only covers whether the region itself was usable, not what this
+        # monitor did with it once it was.
+        self._max_containment_observed: float = 0.0
+        self._grace_positive_transitions: int = 0
+        self._assignments_made: int = 0
 
     def update_night_window(self, night_window: NightWindow | None) -> None:
         self._night_window = night_window
@@ -77,6 +115,17 @@ class BedExitMonitor:
             return ()
 
         frame = self._update_frame(input_value)
+        if self._scoring_recorder is not None:
+            # Same discipline as `record_bed_region` (#207/#224): this only
+            # overwrites an in-memory value on the existing per-frame call
+            # path -- no new thread, timer, or per-frame I/O. Actual emission
+            # is on `log_snapshot()`'s ~5s `RuntimeStatusSender` cadence.
+            self._scoring_recorder.record_bed_exit_scoring(
+                self._config.camera_id,
+                self._max_containment_observed,
+                self._grace_positive_transitions,
+                self._assignments_made,
+            )
         self.last_debug_snapshot = BedExitDebugSnapshot(
             frame_index=input_value.frame_index,
             person_boxes=observation.boxes,
@@ -147,12 +196,18 @@ class BedExitMonitor:
             containments = tuple(
                 containment_ratio(person_box, bed_box) for bed_box in observation.bed_boxes
             )
+            # `observation.bed_boxes` is non-empty here -- `update()` returns
+            # early otherwise -- so `containments` always has at least one
+            # value (#238: this is signal (b), "was anyone ever scored close
+            # to a bed at all", independent of whether an assignment formed).
+            self._max_containment_observed = max(self._max_containment_observed, *containments)
             candidate_bed_id = best_bed_id(containments, self._config.min_containment)
             if assignment.bed_id is None:
                 assignment.update_candidate(candidate_bed_id)
                 if assignment.candidate_frames >= self._config.hold_frames:
                     assignment.bed_id = assignment.candidate_bed_id
                     assignment.grace_frames = 0
+                    self._assignments_made += 1
                 if assignment.bed_id is not None:
                     occupied[assignment.bed_id] = person_id
                 continue
@@ -170,7 +225,16 @@ class BedExitMonitor:
                 assignment.grace_frames = 0
                 continue
 
+            was_off_bed_start = assignment.grace_frames == 0
             assignment.grace_frames += 1
+            if was_off_bed_start:
+                # #238 signal (c): counts each *entry* into the grace window
+                # (0 -> 1), not distinct tracks -- a track that re-enters
+                # grace multiple times (e.g. brief re-containment resets it
+                # to 0, then it drifts off again) counts again each time.
+                # Deliberately a plain counter, not a set of track ids, to
+                # stay O(1) in memory for a full night across 13 cameras.
+                self._grace_positive_transitions += 1
             if assignment.grace_frames > self._config.grace_frames:
                 events.append(BedExitEvent(person_id=person_id, bed_id=own_bed_id))
                 exit_beds.add(own_bed_id)
@@ -211,4 +275,4 @@ def _bed_region_is_usable(source: BedRegionCacheState) -> bool:
     return source in (BedRegionCacheState.FRESH, BedRegionCacheState.CACHED)
 
 
-__all__ = ["BedExitMonitor"]
+__all__ = ["BedExitMonitor", "BedExitScoringRecorder"]

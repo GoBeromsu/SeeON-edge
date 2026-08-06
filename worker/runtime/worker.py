@@ -1661,6 +1661,7 @@ class WorkerRuntime:
             dependencies = BedExitDomainDependencies(
                 config=self._bed_exit_config(camera),
                 clock=lambda: datetime.now(UTC),
+                scoring_recorder=self.diagnostics,
             )
         else:
             raise RuntimeError(f"unsupported domain in registry: {name}")

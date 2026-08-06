@@ -21,7 +21,12 @@ from types import MappingProxyType
 from typing import Any
 
 from worker.domains.base import AuditContext, DomainAuditSnapshot, DomainDetector
-from worker.domains.bed_exit import BedExitConfig, BedExitDebugSnapshot, BedExitMonitor
+from worker.domains.bed_exit import (
+    BedExitConfig,
+    BedExitDebugSnapshot,
+    BedExitMonitor,
+    BedExitScoringRecorder,
+)
 from worker.domains.fall import FallEventLatch, FallModelProtocol
 
 
@@ -36,6 +41,7 @@ class FallDomainDependencies:
 class BedExitDomainDependencies:
     config: BedExitConfig
     clock: Callable[[], datetime]
+    scoring_recorder: BedExitScoringRecorder | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,7 +71,11 @@ def _build_fall(dependencies: FallDomainDependencies) -> FallEventLatch:
 
 
 def _build_bed_exit(dependencies: BedExitDomainDependencies) -> BedExitMonitor:
-    return BedExitMonitor(config=dependencies.config, clock=dependencies.clock)
+    return BedExitMonitor(
+        config=dependencies.config,
+        clock=dependencies.clock,
+        scoring_recorder=dependencies.scoring_recorder,
+    )
 
 
 def _audit_snapshot(context: AuditContext) -> DomainAuditSnapshot:

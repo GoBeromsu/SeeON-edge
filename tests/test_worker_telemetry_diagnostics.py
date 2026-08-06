@@ -184,6 +184,18 @@ def test_structured_log_survives_the_entrypoints_basicconfig_format(
     diagnostics.record_stage_timing("camera-1", "inference", 0.25)
     counters = BedRegionCacheCounters(fresh=1, expired=3)
     diagnostics.record_bed_region("camera-1", BedRegionCacheState.EXPIRED, counters.snapshot())
+    # Issue #238: same trap as bed_region -- a value that only reaches
+    # `extra=` renders invisibly, and this is the field tonight's redeploy
+    # depends on to tell (b) "never scored" from (c) "scored, exit counter
+    # never crossed" apart. Must be asserted against *rendered* output, not
+    # `vars(record)`, or a regression here goes uncaught the same way #224's
+    # did.
+    diagnostics.record_bed_exit_scoring(
+        "camera-1",
+        max_containment_observed=0.82,
+        grace_positive_transitions=2,
+        assignments_made=1,
+    )
 
     # When
     with caplog.at_level(logging.INFO):
@@ -196,6 +208,10 @@ def test_structured_log_survives_the_entrypoints_basicconfig_format(
     assert "inference" in rendered
     assert "bed_region=" in rendered
     assert "'freshness': 'expired'" in rendered
+    assert "bed_exit_scoring=" in rendered
+    assert "'max_containment_observed': 0.82" in rendered
+    assert "'grace_positive_transitions': 2" in rendered
+    assert "'assignments_made': 1" in rendered
 
 
 def test_structured_log_lets_an_operator_read_bed_region_liveness_without_ssh(
