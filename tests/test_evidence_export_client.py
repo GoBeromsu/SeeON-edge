@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import threading
 import time
 from dataclasses import replace
@@ -387,3 +388,83 @@ def test_backend_client_send_event_payload_skips_on_accepted_on_failure(
     # must not be invoked either.
     assert isinstance(result, DeliveryFailure)
     assert accepted_values == []
+
+
+# Issue #184: relay failure logs carried no status code, endpoint, or
+# classification, and repeated identical failures flooded the worker log
+# with one bare "relay heartbeat failed" line per attempt.
+
+
+def test_relay_client_logs_403_with_status_code_and_actionable_hint(
+    server_url: str,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Given: the relay rejects the alert the way #183's facility mismatch does.
+    ScriptedHandler.responses = [(403, {}, b'{"detail":"facility mismatch"}')]
+    client = RelayEvidenceClient(server_url, "relay-secret", timeout_sec=1.0)
+    payload = _json({"edge_event_id": EVENT_ID}).decode()
+
+    # When
+    with caplog.at_level("WARNING", logger="shared.events.evidence_export_client"):
+        result = client.send_event(payload, EVENT_ID)
+
+    # Then: the log line alone -- without cross-referencing another
+    # container's access log -- makes the failure actionable.
+    assert isinstance(result, DeliveryFailure)
+    assert result.status_code == 403
+    [record] = [r for r in caplog.records if "api/v1/relay/alerts" in r.message]
+    assert record.levelno == logging.ERROR
+    assert "403" in record.message
+    assert "check API_FACILITY_ID / auth" in record.message
+    # Response-body content never leaks into the log (only typed/sanitized
+    # results escape the client -- see the 429 test above).
+    assert "facility mismatch" not in record.message
+
+
+def test_relay_client_does_not_log_one_line_per_repeated_identical_failure(
+    server_url: str,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Given: the relay fails the same way on every attempt, as it did on the
+    # live edge (several identical lines per second).
+    ScriptedHandler.responses = [(502, {}, b"")] * 5
+    client = RelayEvidenceClient(server_url, "relay-secret", timeout_sec=1.0)
+    payload = _json({"edge_event_id": EVENT_ID}).decode()
+
+    # When: five consecutive attempts fail identically inside one dedup window.
+    with caplog.at_level("WARNING", logger="shared.events.evidence_export_client"):
+        for _ in range(5):
+            client.send_event(payload, EVENT_ID)
+
+    # Then: only the first occurrence is logged in full detail; the other
+    # four are folded, not one line each.
+    alert_records = [r for r in caplog.records if "api/v1/relay/alerts" in r.message]
+    assert len(alert_records) == 1
+    assert "502" in alert_records[0].message
+
+
+def test_relay_client_logs_recovery_after_failure(
+    server_url: str,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Given: two failures, then a success.
+    ScriptedHandler.responses = [
+        (502, {}, b""),
+        (502, {}, b""),
+        (202, {}, _json({"status": "accepted", "edge_event_id": EVENT_ID, "event_id": "evt"})),
+    ]
+    client = RelayEvidenceClient(server_url, "relay-secret", timeout_sec=1.0)
+    payload = _json({"edge_event_id": EVENT_ID}).decode()
+
+    # When
+    with caplog.at_level("INFO", logger="shared.events.evidence_export_client"):
+        client.send_event(payload, EVENT_ID)
+        client.send_event(payload, EVENT_ID)
+        result = client.send_event(payload, EVENT_ID)
+
+    # Then: recovery gets exactly one, distinctly-worded log line -- before
+    # this fix there was no way to see the relay start working again at all.
+    assert result == EventReceipt("accepted", EVENT_ID, "evt")
+    recovered_records = [r for r in caplog.records if "recovered" in r.message]
+    assert len(recovered_records) == 1
+    assert "api/v1/relay/alerts" in recovered_records[0].message

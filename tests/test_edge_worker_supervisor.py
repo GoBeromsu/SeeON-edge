@@ -27,6 +27,7 @@ only the one guarantee that has no existing worker-side test:
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from typing import final
 
@@ -97,6 +98,42 @@ def test_heartbeat_reporter_sends_only_on_the_ready_transition(
 
     reporter.mark_ready("camera-1")
     assert requests == ["http://relay.test/api/v1/relay/heartbeat"]
+
+
+def test_heartbeat_reporter_logs_status_code_endpoint_and_hint_on_403(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Issue #184: before this fix, a failed heartbeat only logged the bare
+    string "relay heartbeat failed" -- no status code, no endpoint, and no
+    way to tell a config error (#183's 403) from a transient one.
+    """
+
+    def bounded_request(
+        _url: str,
+        _method: str,
+        _headers: dict[str, str],
+        _data: bytes | None,
+        _timeout: float,
+        _on_response: Callable[[int], None] | None = None,
+    ) -> HttpResult:
+        return 403, {}, b'{"detail":"facility mismatch"}'
+
+    monkeypatch.setattr(worker_module, "bounded_request", bounded_request)
+    worker_config, camera = _config()
+    reporter = HeartbeatReporter(worker_config, camera)
+
+    with caplog.at_level("WARNING", logger="worker.runtime.worker"):
+        reporter.mark_ready("camera-1")
+
+    assert reporter.failure_count == 1
+    heartbeat_records = [r for r in caplog.records if "api/v1/relay/heartbeat" in r.message]
+    assert len(heartbeat_records) == 1
+    assert "403" in heartbeat_records[0].message
+    assert "check API_FACILITY_ID / auth" in heartbeat_records[0].message
+    assert heartbeat_records[0].levelno == logging.ERROR
+    # Response-body content never leaks into the log.
+    assert "facility mismatch" not in heartbeat_records[0].message
 
 
 @final

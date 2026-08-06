@@ -23,6 +23,10 @@ class DeliveryFailure:
     code: str
     status_code: int | None = None
     retry_after_seconds: float | None = None
+    # Set only on the transport-exception branch (no HTTP response at all):
+    # "<ExceptionClassName>: <str(exc)>", bounded in length. Never derived
+    # from a response body -- see shared/events/relay_failure_log.py.
+    transport_error: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

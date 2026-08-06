@@ -29,8 +29,23 @@ PayloadValue = TypeVar("PayloadValue")
 HttpResult: TypeAlias = tuple[int, Mapping[str, str], bytes] | DeliveryFailure
 
 
+MAX_TRANSPORT_ERROR_CHARS = 200
+
+
 class EvidenceClientConfigurationError(ValueError):
     """Raised when evidence transport configuration is invalid."""
+
+
+def _describe_exception(exc: BaseException) -> str:
+    """Render a transport exception's class + message for diagnostic logging.
+
+    Bounded in length -- some socket errors embed the full request URL or a
+    long OS error string, and this value flows straight into log messages.
+    """
+    text = f"{type(exc).__name__}: {exc}"
+    if len(text) > MAX_TRANSPORT_ERROR_CHARS:
+        return text[: MAX_TRANSPORT_ERROR_CHARS - 1] + "…"
+    return text
 
 
 def bounded_request(
@@ -50,8 +65,10 @@ def bounded_request(
             return response.status, response.headers, body
     except urllib.error.HTTPError as exc:
         return exc.code, dict(exc.headers.items()), exc.read(MAX_RESPONSE_BYTES + 1)
-    except (TimeoutError, OSError, urllib.error.URLError):
-        return DeliveryFailure(DeliveryDisposition.RETRY, "NETWORK")
+    except (TimeoutError, OSError, urllib.error.URLError) as exc:
+        return DeliveryFailure(
+            DeliveryDisposition.RETRY, "NETWORK", transport_error=_describe_exception(exc)
+        )
 
 
 def bounded_file_request(
@@ -75,8 +92,10 @@ def bounded_file_request(
         _ = connection.request("PUT", target, body=media, headers=dict(headers))
         response = connection.getresponse()
         return response.status, dict(response.headers), response.read(MAX_RESPONSE_BYTES + 1)
-    except (TimeoutError, OSError, http.client.HTTPException):
-        return DeliveryFailure(DeliveryDisposition.RETRY, "NETWORK")
+    except (TimeoutError, OSError, http.client.HTTPException) as exc:
+        return DeliveryFailure(
+            DeliveryDisposition.RETRY, "NETWORK", transport_error=_describe_exception(exc)
+        )
     finally:
         connection.close()
 

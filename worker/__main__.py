@@ -17,11 +17,17 @@ from types import FrameType
 
 from pydantic import ValidationError
 
-from shared.events.evidence_export_contract import DeliveryFailure
-from shared.events.evidence_http_transport import bounded_request, encode_json
+from shared.events.evidence_export_contract import DeliveryDisposition, DeliveryFailure
+from shared.events.evidence_http_transport import (
+    bounded_request,
+    classify_http_failure,
+    encode_json,
+)
+from shared.events.relay_failure_log import classify_relay_failure
 from worker.adapters.model.in_process import InProcessServingClient
 from worker.runtime.config import (
     EDGE_CAMERA_CONFIG_ENV,
+    RELAY_HEARTBEAT_PATH,
     RELAY_TOKEN_ENV,
     RELAY_URL_ENV,
     ConfigSnapshot,
@@ -126,10 +132,33 @@ def _send_heartbeat_on_start(config: WorkerConfig) -> None:
                 _HEARTBEAT_ON_START_TIMEOUT_SEC,
             )
         except Exception as exc:  # noqa: BLE001 - startup heartbeat is best-effort
-            LOGGER.warning("heartbeat-on-start failed for %s: %s", camera.camera_id, exc)
+            failure = DeliveryFailure(
+                DeliveryDisposition.RETRY,
+                "UNEXPECTED",
+                transport_error=f"{type(exc).__name__}: {exc}",
+            )
+            _log_heartbeat_on_start_failure(camera.camera_id, failure)
             continue
-        if isinstance(result, DeliveryFailure) or not 200 <= result[0] < 300:
-            LOGGER.warning("heartbeat-on-start rejected for %s", camera.camera_id)
+        if isinstance(result, DeliveryFailure):
+            _log_heartbeat_on_start_failure(camera.camera_id, result)
+            continue
+        status, headers_out, _body = result
+        if not 200 <= status < 300:
+            failure = classify_http_failure(status, headers_out)
+            _log_heartbeat_on_start_failure(camera.camera_id, failure)
+
+
+def _log_heartbeat_on_start_failure(camera_id: str, failure: DeliveryFailure) -> None:
+    outcome = classify_relay_failure(failure)
+    LOGGER.warning(
+        "heartbeat-on-start POST %s -> %s (%s: %s) camera_id=%s",
+        RELAY_HEARTBEAT_PATH,
+        outcome.reason,
+        outcome.failure_class.value,
+        outcome.hint,
+        camera_id,
+        extra={"camera_id": camera_id, "relay_failure_class": outcome.failure_class.value},
+    )
 
 
 def main(argv: list[str] | None = None) -> int:

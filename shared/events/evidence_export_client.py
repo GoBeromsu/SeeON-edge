@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import time
 import urllib.parse
 from collections.abc import Callable, Mapping, Sequence
@@ -30,6 +31,9 @@ from shared.events.evidence_http_transport import (
     parse_clip_result,
     parse_event_result,
 )
+from shared.events.relay_failure_log import RelayFailureLog
+
+LOGGER: Final = logging.getLogger(__name__)
 
 EdgeEventId = str
 PayloadValue = TypeVar("PayloadValue")
@@ -103,11 +107,32 @@ class UnavailableClipRequest(Protocol):
     reason: str
 
 
+def _capabilities_failure_log() -> RelayFailureLog:
+    return RelayFailureLog(LOGGER, channel="relay capabilities probe", method="GET")
+
+
+def _alerts_failure_log() -> RelayFailureLog:
+    return RelayFailureLog(LOGGER, channel="relay event delivery", method="POST")
+
+
+def _clips_failure_log() -> RelayFailureLog:
+    return RelayFailureLog(LOGGER, channel="relay clip delivery", method="PUT")
+
+
 @dataclass(frozen=True, slots=True)
 class RelayEvidenceClient:
     base_url: str
     relay_token: str = field(repr=False)
     timeout_sec: float = 2.0
+    _capabilities_failures: RelayFailureLog = field(
+        init=False, repr=False, compare=False, default_factory=_capabilities_failure_log
+    )
+    _alerts_failures: RelayFailureLog = field(
+        init=False, repr=False, compare=False, default_factory=_alerts_failure_log
+    )
+    _clips_failures: RelayFailureLog = field(
+        init=False, repr=False, compare=False, default_factory=_clips_failure_log
+    )
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "base_url", normalize_http_base(self.base_url))
@@ -115,29 +140,44 @@ class RelayEvidenceClient:
             raise EvidenceClientConfigurationError("relay token must be set")
 
     def probe_capabilities(self, camera_id: str) -> BackendCapabilities | DeliveryFailure:
-        url = join_http_url(self.base_url, "api/v1/relay/capabilities")
+        path = "api/v1/relay/capabilities"
+        url = join_http_url(self.base_url, path)
         url = f"{url}?{urllib.parse.urlencode({'camera_id': camera_id})}"
         result = bounded_request(url, "GET", self._headers(), None, self.timeout_sec)
         if isinstance(result, DeliveryFailure):
+            self._capabilities_failures.record_failure(result, path=path)
             return result
         status, headers, body = result
         if not 200 <= status < 300:
-            return classify_http_failure(status, headers)
-        return parse_capabilities(body)
+            failure = classify_http_failure(status, headers)
+            self._capabilities_failures.record_failure(failure, path=path)
+            return failure
+        parsed = parse_capabilities(body)
+        if isinstance(parsed, DeliveryFailure):
+            self._capabilities_failures.record_failure(parsed, path=path)
+        else:
+            self._capabilities_failures.record_success(path=path)
+        return parsed
 
     def send_event(
         self,
         payload_json: str,
         edge_event_id: EdgeEventId,
     ) -> EventReceipt | DeliveryFailure:
+        path = "api/v1/relay/alerts"
         result = bounded_request(
-            join_http_url(self.base_url, "api/v1/relay/alerts"),
+            join_http_url(self.base_url, path),
             "POST",
             {"Content-Type": "application/json", **self._headers()},
             payload_json.encode("utf-8"),
             self.timeout_sec,
         )
-        return parse_event_result(result, edge_event_id)
+        parsed = parse_event_result(result, edge_event_id)
+        if isinstance(parsed, DeliveryFailure):
+            self._alerts_failures.record_failure(parsed, path=path)
+        else:
+            self._alerts_failures.record_success(path=path)
+        return parsed
 
     def send_clip(self, claim: ClaimedClipRequest) -> ClipReceipt | DeliveryFailure:
         identity = _local_event_identity(claim.event_payload_json)
@@ -164,14 +204,20 @@ class RelayEvidenceClient:
             )
         else:
             payload["reason"] = _backend_reason(claim)
+        path = f"api/v1/relay/clips/{claim.clip_id}"
         result = bounded_request(
-            join_http_url(self.base_url, f"api/v1/relay/clips/{claim.clip_id}"),
+            join_http_url(self.base_url, path),
             "PUT",
             {"Content-Type": "application/json", **self._headers()},
             encode_json(payload),
             self.timeout_sec,
         )
-        return parse_clip_result(result, claim.clip_id, claim.state_version)
+        parsed = parse_clip_result(result, claim.clip_id, claim.state_version)
+        if isinstance(parsed, DeliveryFailure):
+            self._clips_failures.record_failure(parsed, path=path)
+        else:
+            self._clips_failures.record_success(path=path)
+        return parsed
 
     def _headers(self) -> dict[str, str]:
         return {"X-Edge-Relay-Token": self.relay_token}

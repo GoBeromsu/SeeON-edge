@@ -18,8 +18,13 @@ import worker.runtime.telemetry.runtime_status_sender as runtime_status_sender_m
 from contracts.decode_diagnostics import DecodeSelection
 from contracts.observation import BoundingBox
 from contracts.runner import BedRunnerResult, Image, RunnerProtocol
-from shared.events.evidence_export_contract import DeliveryFailure
-from shared.events.evidence_http_transport import bounded_request, encode_json
+from shared.events.evidence_export_contract import DeliveryDisposition, DeliveryFailure
+from shared.events.evidence_http_transport import (
+    bounded_request,
+    classify_http_failure,
+    encode_json,
+)
+from shared.events.relay_failure_log import RelayFailureLog
 from shared.events.schemas import build_audit_envelope
 from worker.adapters.decode.cpu_av.adapter import CpuAvAdapter
 from worker.adapters.decode.cpu_av.models import CpuAvConfig
@@ -84,7 +89,7 @@ from worker.pipeline.output.mjpeg_server import (
 )
 from worker.pipeline.output.overlay import OverlayRenderer
 from worker.pipeline.perception import GreedyIouTracker, SceneState
-from worker.runtime.config import CameraRuntimeConfig, WorkerConfig
+from worker.runtime.config import RELAY_HEARTBEAT_PATH, CameraRuntimeConfig, WorkerConfig
 from worker.runtime.faults.handler import FaultHandler
 from worker.runtime.faults.record import make_fault_record
 from worker.runtime.ingest_composition import (
@@ -260,6 +265,9 @@ class HeartbeatReporter:
         self._worker, self._camera = worker, camera
         self._last_attempt: float | None = None
         self.failure_count = 0
+        self._failure_log = RelayFailureLog(
+            LOGGER, channel=f"heartbeat camera_id={camera.camera_id}", method="POST"
+        )
 
     def mark_starting(self, camera_id: str) -> None:
         del camera_id
@@ -291,11 +299,23 @@ class HeartbeatReporter:
             )
         except FatalAcceleratorError:
             raise
-        except Exception:  # noqa: BLE001 - relay I/O is a non-fatal camera boundary
-            self._record_failure()
+        except Exception as exc:  # noqa: BLE001 - relay I/O is a non-fatal camera boundary
+            self._record_failure(
+                DeliveryFailure(
+                    DeliveryDisposition.RETRY,
+                    "UNEXPECTED",
+                    transport_error=f"{type(exc).__name__}: {exc}",
+                )
+            )
             return
-        if isinstance(result, DeliveryFailure) or not 200 <= result[0] < 300:
-            self._record_failure()
+        if isinstance(result, DeliveryFailure):
+            self._record_failure(result)
+            return
+        status, headers_out, _body = result
+        if not 200 <= status < 300:
+            self._record_failure(classify_http_failure(status, headers_out))
+            return
+        self._record_success()
 
     def mark_degraded(self, camera_id: str, *, category: str) -> None:
         del camera_id, category
@@ -303,9 +323,12 @@ class HeartbeatReporter:
     def emit(self, event: ingest.IngestEvent) -> None:
         del event
 
-    def _record_failure(self) -> None:
+    def _record_failure(self, failure: DeliveryFailure) -> None:
         self.failure_count += 1
-        LOGGER.warning("relay heartbeat failed", extra={"camera_id": self._camera.camera_id})
+        self._failure_log.record_failure(failure, path=RELAY_HEARTBEAT_PATH)
+
+    def _record_success(self) -> None:
+        self._failure_log.record_success(path=RELAY_HEARTBEAT_PATH)
 
 
 @final

@@ -2,22 +2,27 @@
 
 from __future__ import annotations
 
+import logging
 import queue
 import threading
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from typing import Protocol, final
+from typing import Final, Protocol, final
 
-from shared.events.evidence_export_contract import DeliveryFailure
+from shared.events.evidence_export_contract import DeliveryDisposition, DeliveryFailure
 from shared.events.evidence_http_transport import (
     bounded_request,
+    classify_http_failure,
     encode_json,
     join_http_url,
     normalize_http_base,
     parse_json_object,
 )
+from shared.events.relay_failure_log import RelayFailureLog
 from worker.runtime.telemetry.runtime_diagnostics import WorkerDiagnostics
 from worker.runtime.telemetry.wire import RelayRuntimeStatusPayload
+
+LOGGER: Final = logging.getLogger(__name__)
 
 RUNTIME_STATUS_PATH = "/api/v1/relay/runtime-status"
 
@@ -65,6 +70,7 @@ class RelayRuntimeStatusTransport:
         self._relay_token = relay_token
         self._timeout_sec = timeout_sec
         self._request = request
+        self._failure_log = RelayFailureLog(LOGGER, channel="runtime-status", method="POST")
 
     def send(self, payload: RelayRuntimeStatusPayload) -> int | None:
         result = self._request(
@@ -78,14 +84,23 @@ class RelayRuntimeStatusTransport:
             self._timeout_sec,
         )
         if isinstance(result, DeliveryFailure):
+            self._failure_log.record_failure(result, path=RUNTIME_STATUS_PATH)
             return None
-        status, _, body = result
+        status, headers, body = result
         if not 200 <= status < 300:
+            self._failure_log.record_failure(
+                classify_http_failure(status, headers), path=RUNTIME_STATUS_PATH
+            )
             return None
         response = parse_json_object(body)
         generation = response.get("generation")
         if response.get("accepted") is not True or not isinstance(generation, int):
+            failure = DeliveryFailure(
+                DeliveryDisposition.RETRY, "MALFORMED_RESPONSE", status_code=status
+            )
+            self._failure_log.record_failure(failure, path=RUNTIME_STATUS_PATH)
             return None
+        self._failure_log.record_success(path=RUNTIME_STATUS_PATH)
         return generation if generation >= 0 else None
 
 
