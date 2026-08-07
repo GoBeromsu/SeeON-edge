@@ -153,9 +153,19 @@ def parse_capabilities(body: bytes) -> BackendCapabilities | DeliveryFailure:
 
 
 def classify_http_failure(status: int, headers: Mapping[str, str]) -> DeliveryFailure:
+    # 401/403 are ambient auth/facility-config state, not a property of this
+    # specific payload (unlike 400/413/415/422, which are genuinely permanent
+    # -- retrying the exact same bytes cannot change a schema/size rejection).
+    # A wrong or not-yet-provisioned relay token/facility binding gets fixed
+    # out-of-band, and the event is still perfectly valid once it is -- so
+    # dead-lettering it forever turns a recoverable config error into data
+    # loss for no reason (see #183, #202). RETRY already has exactly the
+    # backoff behavior this needs: retry_after_seconds when the response
+    # supplies one, else capped exponential backoff (EvidenceSender._delay),
+    # indefinitely -- it never gives up on its own.
     if status in {404, 405}:
         disposition = DeliveryDisposition.COMPATIBILITY
-    elif status in {408, 425, 429} or 500 <= status <= 599:
+    elif status in {401, 403, 408, 425, 429} or 500 <= status <= 599:
         disposition = DeliveryDisposition.RETRY
     else:
         disposition = DeliveryDisposition.PERMANENT
