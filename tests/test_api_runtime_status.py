@@ -262,6 +262,75 @@ def test_runtime_status_rejects_missing_and_invalid_tokens() -> None:
     assert wrong.status_code == 403
 
 
+def test_runtime_status_accepts_despite_camera_inventory_facility_mismatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pins the #183 regression: a stale/mismatched camera_inventory entry
+    must not blank the dashboard for a facility that is otherwise legitimate.
+
+    Reproduces the exact production shape -- camera_inventory's own embedded
+    facility_id ("facility-prod") doesn't match the payload's facility_id
+    ("facility-1") -- while leaving API_FACILITY_ID unset, matching a device
+    that never got a real facility_id override. Before the fix,
+    _runtime_status_facility_binding() derived a facility set from
+    camera_inventory and 403'd anything not in it, unconditionally, even
+    though camera_inventory has no bearing on this purely-local endpoint.
+    """
+    monkeypatch.delenv("API_FACILITY_ID", raising=False)
+    app = create_app(lifespan=no_lifespan)
+    app.state.edge_relay_token = "relay-token"
+    app.state.camera_inventory = {
+        "cam-edge-01": {"camera_id": "cam-edge-01", "facility_id": "facility-prod"}
+    }
+    client = TestClient(app)
+
+    response = _post(client, _payload(facility_id="facility-1"))
+
+    assert response.status_code == 200
+    assert response.json()["accepted"] is True
+
+
+def test_runtime_status_accepts_despite_unresolved_camera(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A camera absent from camera_inventory/camera_registry must not block
+    the runtime-status snapshot for every other camera in the same payload:
+    relay_runtime_status never forwards a canonical camera id anywhere (no
+    backend egress happens here at all), so _camera_binding()'s "unknown
+    camera" 403 protected nothing downstream -- it just discarded the
+    dashboard's only view into camera-1's state.
+    """
+    monkeypatch.delenv("API_FACILITY_ID", raising=False)
+    app = create_app(lifespan=no_lifespan)
+    app.state.edge_relay_token = "relay-token"
+    app.state.camera_inventory = {}
+    client = TestClient(app)
+
+    response = _post(client, _payload(facility_id="facility-1"))
+
+    assert response.status_code == 200
+    assert response.json()["accepted"] is True
+
+
+def test_runtime_status_still_rejects_env_facility_mismatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The env-configured API_FACILITY_ID remains the real security boundary
+    for this endpoint even after the camera_inventory-derived check (#183) is
+    removed: a caller claiming a facility this device isn't configured for is
+    still rejected."""
+    monkeypatch.setenv("API_FACILITY_ID", "facility-configured")
+    app = create_app(lifespan=no_lifespan)
+    app.state.edge_relay_token = "relay-token"
+    app.state.camera_inventory = {}
+    client = TestClient(app)
+
+    response = _post(client, _payload(facility_id="facility-other"))
+
+    assert response.status_code == 403
+    assert "facility" in response.json()["detail"]
+
+
 def test_status_merges_runtime_snapshot() -> None:
     client = _client()
     assert _post(client, _payload()).status_code == 200

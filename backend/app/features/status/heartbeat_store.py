@@ -1,9 +1,11 @@
 """API-owned per-camera heartbeat liveness store.
 
 The worker relays liveness facts to ml-api ``/relay/heartbeat``. ml-api records
-the local ``received_at`` per camera (after relay-token auth + camera binding,
-before any backend egress) so ``/status`` reflects edge-local truth that is
-independent of backend reachability.
+the local ``received_at`` per camera right after relay-token auth -- before
+camera_inventory/registry binding is resolved and before any backend egress --
+so ``/status`` reflects edge-local truth that is independent both of backend
+reachability and of whether this camera has been onboarded onto the central
+backend's own roster yet (see #183, #202).
 
 This is NOT cross-process shared state with the worker: it is an api-local
 snapshot built from relayed facts (one owner, fed by HTTP facts). The worker
@@ -48,7 +50,8 @@ class HeartbeatStore:
         config_version: int | None = None,
     ) -> None:
         """Record a relayed heartbeat. ``received_at`` is stamped by the caller
-        after auth + camera binding and before any backend egress."""
+        right after relay-token auth, before camera binding and before any
+        backend egress."""
         stamped = time() if received_at is None else received_at
         self._beats[camera_id] = CameraHeartbeat(
             camera_id,

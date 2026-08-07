@@ -17,6 +17,7 @@ from backend.app.features.relay.router import (
     MAX_INLINE_SNAPSHOT_BASE64_CHARS,
     MAX_INLINE_SNAPSHOT_BYTES,
 )
+from backend.app.features.status.heartbeat_store import ONLINE, get_heartbeat_store
 from backend.app.features.status.runtime_status_store import RuntimeStatusStore
 from backend.app.main import create_app, no_lifespan
 from shared.events.evidence_export_contract import (
@@ -165,6 +166,26 @@ def test_relay_alert_rejects_facility_mismatch() -> None:
     assert "facility" in response.json()["detail"]
 
 
+def test_relay_alert_records_catalog_even_when_camera_unresolved(tmp_path) -> None:
+    """The local catalog is edge-local audit trail, not backend egress -- an
+    unresolved camera (which still 403s to the worker, unchanged) must not
+    leave zero local trace of the attempt (see #183, #202)."""
+    payload = _alert_payload(
+        camera_id="camera-unknown",
+        edge_event_id="00000000-0000-4000-8000-000000000030",
+    )
+
+    with _client(catalog_path=tmp_path / "catalog.sqlite3") as client:
+        response = client.post(
+            "/api/v1/relay/alerts",
+            json=payload,
+            headers={"X-Edge-Relay-Token": "relay-token"},
+        )
+
+        assert response.status_code == 403
+        assert client.app.state.catalog_store.records("events") == [{**payload}]
+
+
 def test_relay_alert_forwards_valid_event_to_backend_ingest_client() -> None:
     fake = FakeBackendIngestClient()
     response = _client(fake).post(
@@ -307,6 +328,24 @@ def test_relay_heartbeat_forwards_valid_camera_to_backend_ingest_client() -> Non
     assert response.status_code == 202
     assert response.json() == {"status": "accepted"}
     assert fake.heartbeats == 1
+
+
+def test_relay_heartbeat_records_local_liveness_even_when_camera_unresolved() -> None:
+    """Local liveness reflects edge-local truth and must not depend on
+    camera_inventory/registry binding: a camera absent from both still 403s
+    to the worker (backend egress is legitimately unresolvable), but ml-api's
+    own /status view must already know this camera beat in (see #183, #202)."""
+    client = _client()
+
+    response = client.post(
+        "/api/v1/relay/heartbeat",
+        json={"camera_id": "camera-unknown", "facility_id": "facility-1"},
+        headers={"X-Edge-Relay-Token": "relay-token"},
+    )
+
+    assert response.status_code == 403
+    snapshot = get_heartbeat_store(client.app).snapshot()
+    assert snapshot["cameras"]["camera-unknown"]["status"] == ONLINE
 
 
 def test_relay_accepts_canonical_camera_id_from_registry_when_inventory_missing(tmp_path) -> None:

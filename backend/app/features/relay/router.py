@@ -258,6 +258,13 @@ def relay_alert(
     relay_token: Annotated[str | None, Header(alias=RELAY_TOKEN_HEADER)] = None,
 ) -> dict[str, str]:
     _authorize(request, relay_token)
+    # Local catalog recording is edge-local audit trail, not backend egress --
+    # it must not depend on camera_inventory/registry binding or the backend
+    # call's outcome (see #183, #202). Recording it up front means ml-api
+    # keeps its own record of every alert attempt even when the camera can't
+    # yet be resolved or the backend can't be reached, instead of the attempt
+    # leaving no local trace at all when _camera_binding() 403s below.
+    catalog_result = _record_catalog(request, payload)
     binding = _camera_binding(request, payload.camera_id, payload.facility_id)
     canonical_camera_id = str(binding.get("camera_id") or payload.camera_id)
     client = _backend_ingest_client(request, camera_id=canonical_camera_id)
@@ -302,14 +309,14 @@ def relay_alert(
             "edge_event_id": result.edge_event_id,
             "event_id": result.event_id,
         }
-        return _alert_response(response, _record_catalog(request, payload))
+        return _alert_response(response, catalog_result)
     accepted = client.send_alert(**alert_kwargs)
     if not accepted:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail="backend ingest rejected alert",
         )
-    return _alert_response({"status": "accepted"}, _record_catalog(request, payload))
+    return _alert_response({"status": "accepted"}, catalog_result)
 
 
 @router.post("/heartbeat", status_code=status.HTTP_202_ACCEPTED)
@@ -319,15 +326,20 @@ def relay_heartbeat(
     relay_token: Annotated[str | None, Header(alias=RELAY_TOKEN_HEADER)] = None,
 ) -> dict[str, str]:
     _authorize(request, relay_token)
-    binding = _camera_binding(request, payload.camera_id, payload.facility_id)
-    # Stamp local liveness AFTER auth + camera binding and BEFORE backend egress
-    # so /status reflects edge-local truth even if backend egress fails.
+    # Stamp local liveness right after auth, BEFORE camera binding, so /status
+    # reflects edge-local truth even when camera_inventory/registry can't yet
+    # resolve this camera -- not just when backend egress later fails (see
+    # #183, #202). A worker holding a valid relay token recording a heartbeat
+    # for camera X is real local truth regardless of whether X is in
+    # camera_inventory yet; that list's job is backend-id translation for the
+    # egress call below, not admission to ml-api's own liveness bookkeeping.
     get_heartbeat_store(request.app).record(
         payload.camera_id,
         payload.facility_id,
         config_version=payload.config_version,
     )
     _clear_never_connected_on_first_heartbeat(request, payload.camera_id)
+    binding = _camera_binding(request, payload.camera_id, payload.facility_id)
     # Backend egress uses the canonical identity (explicit backend mapping when
     # present); the backend only knows its own camera ids, not local registry ids.
     canonical_camera_id = str(binding.get("camera_id") or payload.camera_id)
@@ -349,8 +361,7 @@ def relay_runtime_status(
 ) -> RelayRuntimeStatusResponse:
     _authorize(request, relay_token or _bearer_token(authorization))
     _runtime_status_facility_binding(request, payload.facility_id)
-    for camera in payload.cameras:
-        _camera_binding(request, camera.camera_id, payload.facility_id)
+    _log_unresolved_runtime_status_cameras(request, payload)
     data = payload.model_dump()
     if data["worker"] is not None and data["worker"]["profile_boot_error"] is None:
         data["worker"].pop("profile_boot_error")
@@ -482,25 +493,48 @@ def _bearer_token(authorization: str | None) -> str | None:
 
 
 def _runtime_status_facility_binding(request: Request, facility_id: str) -> None:
+    # This used to ALSO reject when facility_id wasn't present in
+    # camera_inventory's derived facility set. That check is removed (see
+    # #183, PR<runtime-status-fix>): camera_inventory's job is mapping local
+    # cameras onto the CENTRAL backend's own ids for egress, and
+    # relay_runtime_status never calls the backend at all -- the record below
+    # is purely local dashboard state. Gating it on camera_inventory meant an
+    # env-set inventory whose embedded facility_id didn't match API_FACILITY_ID
+    # (or wasn't populated yet) 403'd every runtime-status update with no
+    # relation to anything camera_inventory actually protects. The env-configured
+    # facility_id below remains the real boundary: it rejects a caller claiming
+    # a facility this device isn't configured for.
     expected = os.environ.get(API_FACILITY_ID_ENV)
     if expected and facility_id != expected.strip():
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="camera facility mismatch",
         )
-    inventory = getattr(request.app.state, "camera_inventory", {})
-    if not isinstance(inventory, dict) or not inventory:
-        return
-    facilities = {
-        binding.get("facility_id")
-        for binding in inventory.values()
-        if isinstance(binding, dict) and binding.get("facility_id") is not None
-    }
-    if facilities and facility_id not in facilities:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="camera facility mismatch",
-        )
+
+
+def _log_unresolved_runtime_status_cameras(
+    request: Request, payload: RelayRuntimeStatusRequest
+) -> None:
+    """Best-effort observability only -- never blocks the snapshot.
+
+    relay_runtime_status has no backend egress, so an unresolved camera_id
+    here is not a reason to drop the whole snapshot (see #183, #202): this
+    loop used to call the same _camera_binding() that relay_alert/
+    relay_heartbeat use to gate backend egress, whose return value was never
+    even used here. One camera missing from camera_inventory/camera_registry
+    could blank the dashboard for every camera in the payload, even the ones
+    that resolved fine.
+    """
+    for camera in payload.cameras:
+        try:
+            _camera_binding(request, camera.camera_id, payload.facility_id)
+        except HTTPException as exc:
+            logger.warning(
+                "runtime-status camera unresolved (recorded anyway): "
+                "camera_id=%s detail=%s",
+                camera.camera_id,
+                exc.detail,
+            )
 
 
 def _payload_clip_id(payload: RelayAlertRequest) -> str | None:
