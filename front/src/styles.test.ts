@@ -20,6 +20,7 @@ function readCssBundle(entry: string): string {
 }
 
 const css = readCssBundle('src/styles.css');
+const responsiveCss = readFileSync('src/styles/responsive-layout.css', 'utf8');
 const designContract = readFileSync('../DESIGN.md', 'utf8');
 
 // App.tsx-reachable components that were restyled onto the current token set (front/src/styles/tokens-base.css)
@@ -105,10 +106,21 @@ describe('design token contrast', () => {
     expect(css).not.toMatch(/\.auth-card\s*\{[^}]*grid-template-columns/s);
   });
 
-  it('keeps the top NavBar a single 56px bar with no left rail or bottom tab bar', () => {
+  it('keeps the desktop NavBar a 56px bar with no left rail or bottom tab bar', () => {
     expect(css).toMatch(/\.app-navbar\s*\{[^}]*height:\s*56px/s);
     expect(css).not.toMatch(/\.desktop-rail\s*\{/);
     expect(css).not.toMatch(/\.bottom-tab(?:s|-bar)?\s*\{/);
+  });
+
+  it('reflows narrow NavBars without wrapping labels or shrinking interactive targets', () => {
+    // Given: the dashboard shell is rendered below the tablet breakpoint.
+    const narrowViewportRules = responsiveCss.match(/@media\s*\(max-width:\s*767px\)\s*\{([\s\S]*)\}\s*@media\s*\(min-width:/)?.[1] ?? '';
+
+    // When: the narrow-viewport responsive rules are applied.
+    // Then: the shell reflows and every navigation action retains an unbroken 44px target.
+    expect(narrowViewportRules).toMatch(/\.app-navbar\s*\{[^}]*display:\s*grid;[^}]*grid-template-areas:\s*"brand brand"\s*"nav actions";/s);
+    expect(narrowViewportRules).toMatch(/\.app-nav button\s*\{[^}]*min-height:\s*44px;[^}]*white-space:\s*nowrap;/s);
+    expect(narrowViewportRules).toMatch(/\.icon-button,\s*\.logout-button\s*\{[^}]*min-height:\s*44px;/s);
   });
 
   it.each(Object.entries(appReachableComponentSources))('keeps App-reachable %s free of raw black/white utility aliases', (_name, source) => {

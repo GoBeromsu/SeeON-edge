@@ -16,7 +16,7 @@ The interface must reveal what is known, when it was last known, and what the op
 
 ## Information architecture
 
-There are exactly three primary destinations, all reachable from a single 56px top `NavBar` present at every viewport width. There is no left rail and no bottom tab bar.
+There are exactly three primary destinations, all reachable from the sticky top `NavBar`. At `768px` and wider it is a single 56px row; below `768px` it reflows into two rows without changing navigation content. There is no left rail and no bottom tab bar.
 
 | Query value | Navigation label | Owns |
 | --- | --- | --- |
@@ -137,7 +137,7 @@ Deliberate destination, filter, and selection changes call `pushState`. Default 
 
 ## Responsive viewport contract
 
-The shell is a single 56px sticky top `NavBar` at every width; only the horizontal gutter changes with viewport (`.app-main`/`.app-navbar` padding steps up at `768px`). There is no separate mobile chrome, no left rail, and no bottom tab bar at any width. Content below the `NavBar` is centered with `max-width: 1280px`.
+The shell uses one sticky top `NavBar` at every width. At `768px` and wider it remains a single 56px row and only the horizontal gutter steps up. Below `768px`, the same bar becomes a two-row grid: the brand owns the first row, while the destinations and account/logout actions share the second row in DOM and focus order. There is no separate mobile chrome, no left rail, and no bottom tab bar at any width. Content below the `NavBar` is centered with `max-width: 1280px`.
 
 At every width, critical controls wrap rather than clip, Korean text remains legible, the page has no horizontal overflow, and touch targets are at least 44px effective (compact 36px controls keep a 44px hit area where practical).
 
@@ -195,7 +195,7 @@ Every brand-filled primary action uses the `.brand-action` class (`background: v
 
 ### Spacing and geometry
 
-- `NavBar` is a fixed 56px sticky top bar. `.app-main` centers content at `max-width: 1280px` with 16-24px horizontal padding depending on viewport.
+- `NavBar` is a sticky 56px row at `768px` and wider, and a content-sized two-row grid below `768px`. `.app-main` centers content at `max-width: 1280px` with 16-24px horizontal padding depending on viewport.
 - Controls default to a 36px height (nav chips, icon buttons, inputs, secondary/primary dialog actions) — smaller than the historical 44px minimum, matching the design-handoff spec's compact control scale; keep effective touch targets reasonable on touch devices.
 - Radii: 8px for controls/nav, 12px for cards/dialogs.
 - Borders use `1px solid var(--border)`; only dialogs/sheets use a shadow (`--modal-shadow`).

@@ -1,3 +1,50 @@
+@media (max-width: 767px) {
+  .app-navbar {
+    height: auto;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-areas:
+      "brand brand"
+      "nav actions";
+    gap: 4px 8px;
+    padding: 8px 16px;
+  }
+
+  .app-navbar-brand { grid-area: brand; }
+
+  .app-nav {
+    grid-area: nav;
+    min-width: 0;
+    gap: 4px;
+  }
+
+  .app-nav button {
+    height: 44px;
+    min-height: 44px;
+    padding-inline: 4px;
+    white-space: nowrap;
+  }
+
+  .app-navbar-actions {
+    grid-area: actions;
+    gap: 4px;
+    margin-left: 0;
+  }
+
+  .icon-button,
+  .logout-button {
+    height: 44px;
+    min-height: 44px;
+  }
+
+  .icon-button { width: 44px; }
+
+  .logout-button {
+    padding-inline: 8px;
+    white-space: nowrap;
+  }
+}
+
 @media (min-width: 768px) {
   .app-main { padding: 24px 20px; }
   .app-navbar { padding-inline: 24px; }
