@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+# noqa: SIZE_OK
+
 import json
 import sqlite3
 import stat
@@ -70,7 +72,9 @@ class TestLoadPrecedence:
             updated_at=None,
         )
 
-    def test_env_seeds_when_no_row(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_only_url_env_seeds_when_no_row(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         monkeypatch.setenv(API_BACKEND_EVENTS_URL_ENV, "https://backend.example/events")
         monkeypatch.setenv(API_BACKEND_CONFIG_URL_ENV, "https://backend.example/ml-config")
         monkeypatch.setenv(API_FACILITY_ID_ENV, "facility-42")
@@ -80,8 +84,8 @@ class TestLoadPrecedence:
 
         assert settings.events_url == "https://backend.example/events"
         assert settings.config_url == "https://backend.example/ml-config"
-        assert settings.facility_id == "facility-42"
-        assert settings.facility_token == "supersecrettoken"
+        assert settings.facility_id is None
+        assert settings.facility_token is None
         assert settings.updated_at is None
 
     def test_saved_row_wins_over_env(
@@ -91,7 +95,9 @@ class TestLoadPrecedence:
         monkeypatch.setenv(EDGE_FACILITY_TOKEN_ENV, "env-token")
         store = _store(tmp_path)
 
-        store.save({"events_url": "https://saved.example/events", "facility_token": "saved-token"})
+        _ = store.save(
+            {"events_url": "https://saved.example/events", "facility_token": "saved-token"}
+        )
         settings = store.load()
 
         assert settings.events_url == "https://saved.example/events"
@@ -99,23 +105,23 @@ class TestLoadPrecedence:
 
     def test_saved_row_wins_across_new_store_instances(self, tmp_path: Path) -> None:
         path = tmp_path / "connection_settings.sqlite3"
-        ConnectionSettingsStore(path).save({"facility_id": "facility-1"})
+        _ = ConnectionSettingsStore(path).save({"facility_id": "facility-1"})
 
         reloaded = ConnectionSettingsStore(path).load()
 
         assert reloaded.facility_id == "facility-1"
 
-    def test_unsaved_field_still_falls_back_to_env_after_a_save(
+    def test_unsaved_identity_does_not_fall_back_to_env_after_a_save(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setenv(API_FACILITY_ID_ENV, "facility-from-env")
         store = _store(tmp_path)
 
-        store.save({"events_url": "https://saved.example/events"})
+        _ = store.save({"events_url": "https://saved.example/events"})
         settings = store.load()
 
         assert settings.events_url == "https://saved.example/events"
-        assert settings.facility_id == "facility-from-env"
+        assert settings.facility_id is None
 
 
 class TestLoadBaseUrlPrecedence:
@@ -157,7 +163,7 @@ class TestLoadBaseUrlPrecedence:
         monkeypatch.setenv(API_BACKEND_BASE_URL_ENV, "https://backend.example")
         store = _store(tmp_path)
 
-        store.save({"events_url": "https://saved.example/events"})
+        _ = store.save({"events_url": "https://saved.example/events"})
         settings = store.load()
 
         assert settings.events_url == "https://saved.example/events"
@@ -168,7 +174,7 @@ class TestLoadBaseUrlPrecedence:
 class TestSavePartialUpdate:
     def test_partial_save_preserves_other_fields(self, tmp_path: Path) -> None:
         store = _store(tmp_path)
-        store.save(
+        _ = store.save(
             {
                 "events_url": "https://backend.example/events",
                 "config_url": "https://backend.example/ml-config",
@@ -177,7 +183,7 @@ class TestSavePartialUpdate:
             }
         )
 
-        store.save({"facility_id": "facility-99"})
+        _ = store.save({"facility_id": "facility-99"})
         settings = store.load()
 
         assert settings.facility_id == "facility-99"
@@ -190,16 +196,16 @@ class TestSavePartialUpdate:
     ) -> None:
         monkeypatch.setenv(API_FACILITY_ID_ENV, "facility-from-env")
         store = _store(tmp_path)
-        store.save({"facility_id": "facility-saved"})
+        _ = store.save({"facility_id": "facility-saved"})
 
-        store.save({"facility_id": None})
+        _ = store.save({"facility_id": None})
         settings = store.load()
 
-        assert settings.facility_id == "facility-from-env"
+        assert settings.facility_id is None
 
     def test_unknown_field_raises(self, tmp_path: Path) -> None:
         with pytest.raises(ValueError, match="unknown connection setting field"):
-            _store(tmp_path).save({"timeout_sec": "5"})
+            _ = _store(tmp_path).save({"timeout_sec": "5"})
 
     def test_updated_at_stamped_on_save(self, tmp_path: Path) -> None:
         store = _store(tmp_path)
@@ -215,6 +221,7 @@ class TestSavePartialUpdate:
         first = store.save({"facility_id": "facility-1"})
         second = store.save({"facility_id": "facility-2"})
 
+        assert first.updated_at is not None
         assert second.updated_at is not None
         assert second.updated_at >= first.updated_at
 
@@ -230,25 +237,25 @@ class TestReprSafety:
 class TestAtomicWriteAndCorruption:
     def test_write_leaves_db_file_0600(self, tmp_path: Path) -> None:
         store = _store(tmp_path)
-        store.save({"facility_id": "facility-1"})
+        _ = store.save({"facility_id": "facility-1"})
 
         mode = stat.S_IMODE(store.path.stat().st_mode)
         assert mode == 0o600
 
     def test_write_leaves_no_leftover_tmp_file(self, tmp_path: Path) -> None:
         store = _store(tmp_path)
-        store.save({"facility_id": "facility-1"})
+        _ = store.save({"facility_id": "facility-1"})
 
         leftovers = list(tmp_path.glob("*.tmp"))
         assert leftovers == []
 
     def test_row_persists_via_real_sqlite_connection(self, tmp_path: Path) -> None:
         store = _store(tmp_path)
-        store.save({"facility_id": "facility-1", "facility_token": "token-abcd"})
+        _ = store.save({"facility_id": "facility-1", "facility_token": "token-abcd"})
 
         conn = sqlite3.connect(store.path)
         try:
-            row = conn.execute(
+            row: tuple[str, str] | None = conn.execute(
                 "SELECT facility_id, facility_token FROM connection_settings WHERE id = 1"
             ).fetchone()
         finally:
@@ -257,7 +264,7 @@ class TestAtomicWriteAndCorruption:
 
     def test_corrupt_db_file_treated_as_empty(self, tmp_path: Path) -> None:
         path = tmp_path / "connection_settings.sqlite3"
-        path.write_bytes(b"not a valid sqlite database, just garbage bytes")
+        _ = path.write_bytes(b"not a valid sqlite database, just garbage bytes")
 
         settings = ConnectionSettingsStore(path).load()
 
@@ -274,7 +281,7 @@ class TestAtomicWriteAndCorruption:
         store = ConnectionSettingsStore(path)
 
         assert store.load().facility_id is None
-        store.save({"facility_id": "facility-1"})
+        _ = store.save({"facility_id": "facility-1"})
 
         assert store.load().facility_id == "facility-1"
 
@@ -293,7 +300,7 @@ class TestMasking:
 
     def test_masked_dict_never_contains_raw_token(self, tmp_path: Path) -> None:
         store = _store(tmp_path)
-        store.save({"facility_token": "supersecrettoken1234"})
+        _ = store.save({"facility_token": "supersecrettoken1234"})
 
         public = store.masked()
 
@@ -310,7 +317,7 @@ class TestMasking:
 
     def test_masked_dict_reflects_other_fields(self, tmp_path: Path) -> None:
         store = _store(tmp_path)
-        store.save(
+        _ = store.save(
             {
                 "events_url": "https://backend.example/events",
                 "config_url": "https://backend.example/ml-config",
