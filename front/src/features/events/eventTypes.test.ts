@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { getEventTypeChipClassName, getEventTypeLabel, orderEventTypes } from '@/features/events/eventTypes';
+import {
+  getEventTypeChipClassName,
+  getEventTypeLabel,
+  orderEventTypes,
+} from '@/features/events/eventTypes';
+import { toEventFacet } from '@/shared/api/clipEventFacet';
 
 describe('eventTypes', () => {
   it('labels the two known detection types in Korean', () => {
@@ -7,8 +12,18 @@ describe('eventTypes', () => {
     expect(getEventTypeLabel('bed-exit')).toBe('침대 이탈');
   });
 
-  it('falls back to the raw value for an unrecognized event type', () => {
-    expect(getEventTypeLabel('detection-lost')).toBe('detection-lost');
+  it.each([
+    ['fall', 'fall'],
+    ['bed-exit', 'bed-exit'],
+    ['detection-lost', 'other'],
+    [null, 'other'],
+    [undefined, 'other'],
+  ])('maps raw event type %s to the bounded %s facet', (rawEventType, expectedFacet) => {
+    expect(toEventFacet(rawEventType)).toBe(expectedFacet);
+  });
+
+  it('labels an unrecognized event type as the other facet', () => {
+    expect(getEventTypeLabel('detection-lost')).toBe('기타');
   });
 
   it('gives fall and bed-exit distinct, non-default chip classes', () => {
@@ -21,13 +36,13 @@ describe('eventTypes', () => {
     expect(getEventTypeChipClassName('unknown-type')).toContain('muted');
   });
 
-  it('always orders the canonical types first (bed-exit, then fall), even with no data', () => {
-    expect(orderEventTypes([])).toEqual(['bed-exit', 'fall']);
+  it('always exposes the three bounded facets in the existing visual order', () => {
+    expect(orderEventTypes([])).toEqual(['bed-exit', 'fall', 'other']);
   });
 
-  it('appends unrecognized event types present in the data, sorted, after the canonical two', () => {
+  it('does not append unrecognized raw event types as controls', () => {
     expect(orderEventTypes(['fall', 'zzz-unknown', 'bed-exit', 'aaa-unknown'])).toEqual([
-      'bed-exit', 'fall', 'aaa-unknown', 'zzz-unknown',
+      'bed-exit', 'fall', 'other',
     ]);
   });
 });

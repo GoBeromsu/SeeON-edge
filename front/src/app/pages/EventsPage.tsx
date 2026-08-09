@@ -1,51 +1,68 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { getPageLabel } from '@/shared/ui/NavBar';
-import { useCamerasResource, useClipsResource } from '@/shared/api/usePollingResource';
+import { useCamerasResource } from '@/shared/api/usePollingResource';
 import { CameraFilterSelect } from '@/features/events/CameraFilterSelect';
 import { ClipGrid } from '@/features/events/ClipGrid';
 import { ClipPlaybackModal } from '@/features/events/ClipPlaybackModal';
 import { EventTypeFilterChips } from '@/features/events/EventTypeFilterChips';
+import { EventsPager } from '@/features/events/EventsPager';
+import { toEventFacet } from '@/shared/api/clipEventFacet';
 import { resolveCameraLabel } from '@/features/events/resolveCameraLabel';
+import { useClipMetadata } from '@/features/events/useClipMetadata';
+import { useEventsPage } from '@/features/events/useEventsPage';
 import { useEventsLocation } from '@/features/events/useEventsLocation';
 import type { Clip } from '@/shared/api/types';
+
+const EMPTY_CLIPS: readonly Clip[] = [];
 
 export function EventsPage(): JSX.Element {
   const [selectedCameraId, setSelectedCameraId] = useState('');
   const camerasResource = useCamerasResource(true);
-  const clipsResource = useClipsResource(true, selectedCameraId || undefined);
-  const { eventType, clipId, setEventType, openClip, closeClip } = useEventsLocation(clipsResource.status, clipsResource.data);
-
-  // useClipsResource's polling loop doesn't restart on a cameraId change alone (see
-  // usePollingResource: it only reruns its effect on `enabled`), so the camera filter needs an
-  // explicit refetch or it would keep showing the previous camera's clips for up to 8s.
-  const mountedRef = useRef(false);
-  useEffect(() => {
-    if (!mountedRef.current) {
-      mountedRef.current = true;
-      return;
-    }
-    clipsResource.retry();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedCameraId]);
-
-  const clips = clipsResource.data ?? [];
-  const hasData = clipsResource.data !== null;
-
-  const typeCounts = useMemo(() => {
-    const counts = new Map<string, number>();
-    for (const clip of clips) counts.set(clip.event_type, (counts.get(clip.event_type) ?? 0) + 1);
-    return counts;
-  }, [clips]);
-
-  const filteredClips = useMemo(
-    () => (eventType === undefined ? clips : clips.filter((clip) => clip.event_type === eventType)),
-    [clips, eventType],
+  const location = useEventsLocation();
+  const clipsResource = useEventsPage({
+    ...(selectedCameraId ? { cameraId: selectedCameraId } : {}),
+    ...(location.eventType ? { eventType: location.eventType } : {}),
+  });
+  const clips = clipsResource.data?.clips ?? EMPTY_CLIPS;
+  const typeCounts = useMemo(
+    () => new Map(Object.entries(clipsResource.data?.event_type_counts ?? {})),
+    [clipsResource.data?.event_type_counts],
   );
-
+  const totalCount = useMemo(
+    () => [...typeCounts.values()].reduce((total, count) => total + count, 0),
+    [typeCounts],
+  );
+  const metadata = useClipMetadata({
+    clipId: location.clipId,
+    pageClips: clips,
+    completeClips: clipsResource.data?.complete_clips ?? null,
+    pageReady: clipsResource.data !== null,
+  });
   const cameras = camerasResource.data?.cameras ?? [];
-  const activeClip = clipId ? clips.find((clip) => clip.id === clipId) ?? null : null;
+  const metadataMatchesFilters = metadata.clip !== null
+    && (!selectedCameraId || metadata.clip.camera_id === selectedCameraId)
+    && (!location.eventType || toEventFacet(metadata.clip.event_type) === location.eventType);
+  const activeClip = location.clipId
+    ? clips.find((clip) => clip.id === location.clipId) ?? (metadataMatchesFilters ? metadata.clip : null)
+    : null;
+
+  useEffect(() => {
+    location.validate(clipsResource.status, clips, [...typeCounts.keys()]);
+  }, [clips, clipsResource.status, location.validate, typeCounts]);
+
+  useEffect(() => {
+    if (metadata.status === 'invalid'
+      || (metadata.status === 'success' && metadata.clip !== null && !metadataMatchesFilters)) {
+      location.discardClip();
+    }
+  }, [location.discardClip, metadata.clip, metadata.status, metadataMatchesFilters]);
 
   const resolveLabel = useCallback((clip: Clip) => resolveCameraLabel(cameras, clip), [cameras]);
+  const lastSuccessDate = clipsResource.lastSuccessAt === null ? null : new Date(clipsResource.lastSuccessAt);
+  const handleCameraChange = useCallback((cameraId: string): void => {
+    setSelectedCameraId(cameraId);
+    if (cameraId && activeClip && activeClip.camera_id !== cameraId) location.discardClip();
+  }, [activeClip, location.discardClip]);
 
   return (
     <section>
@@ -54,26 +71,64 @@ export function EventsPage(): JSX.Element {
       </h1>
 
       <div className="mt-5 flex flex-wrap items-center gap-3">
-        <EventTypeFilterChips totalCount={clips.length} counts={typeCounts} selected={eventType} onSelect={setEventType} />
-        <CameraFilterSelect cameras={cameras} value={selectedCameraId} onChange={setSelectedCameraId} className="ml-auto" />
+        <EventTypeFilterChips totalCount={totalCount} counts={typeCounts} selected={location.eventType} onSelect={location.setEventType} />
+        <CameraFilterSelect cameras={cameras} value={selectedCameraId} onChange={handleCameraChange} className="ml-auto" />
       </div>
 
       <div className="mt-5">
+        {clipsResource.data !== null ? (
+          <div className="mb-3 flex flex-wrap items-center gap-3 text-sm text-muted-foreground" role="status">
+            {clipsResource.refreshing ? (
+              <span>이벤트 목록을 새로 고치는 중입니다.</span>
+            ) : clipsResource.status === 'error' ? (
+              <span className="text-status-pendingFg">이벤트 목록을 새로 고치지 못했습니다. 현재 페이지를 유지합니다.</span>
+            ) : null}
+            {lastSuccessDate ? (
+              <span>
+                마지막 확인{' '}
+                <time data-testid="events-last-success" dateTime={lastSuccessDate.toISOString()}>
+                  {lastSuccessDate.toLocaleTimeString('ko-KR')}
+                </time>
+              </span>
+            ) : null}
+            {clipsResource.status === 'error' && !clipsResource.refreshing ? (
+              <button
+                type="button"
+                className="inline-flex min-h-11 items-center justify-center rounded-control border border-border bg-card px-4 font-semibold text-foreground hover:bg-muted"
+                onClick={clipsResource.refresh}
+              >
+                다시 시도
+              </button>
+            ) : null}
+          </div>
+        ) : null}
         <ClipGrid
           status={clipsResource.status}
-          hasData={hasData}
-          clips={filteredClips}
+          hasData={clipsResource.data !== null}
+          clips={clips}
           resolveCameraLabel={resolveLabel}
-          onRetry={clipsResource.retry}
-          onSelect={openClip}
+          onRetry={clipsResource.refresh}
+          onSelect={location.openClip}
         />
+        {clipsResource.data ? (
+          <EventsPager
+            pageIndex={clipsResource.pageIndex}
+            total={clipsResource.data.pagination.total}
+            visibleCount={clips.length}
+            pendingPageIndex={clipsResource.pendingPageIndex}
+            onNavigate={clipsResource.navigate}
+            onRefresh={clipsResource.refresh}
+          />
+        ) : null}
       </div>
 
       <ClipPlaybackModal
         clip={activeClip}
         cameraLabel={activeClip ? resolveLabel(activeClip) : ''}
-        open={clipId !== undefined}
-        onClose={closeClip}
+        open={location.clipId !== undefined}
+        onClose={location.closeClip}
+        lookupStatus={metadata.status}
+        onRetry={metadata.retry}
       />
     </section>
   );

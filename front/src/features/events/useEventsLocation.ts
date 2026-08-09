@@ -14,14 +14,22 @@ export type EventsLocationState = {
   setEventType: (eventType: string | undefined) => void;
   openClip: (clipId: string) => void;
   closeClip: () => void;
+  discardClip: () => void;
+  validate: (status: PollingResourceStatus, clips: readonly Clip[], eventTypes: readonly string[]) => void;
 };
 
-function validationData(status: PollingResourceStatus, data: readonly Clip[] | null): DashboardLocationData | undefined {
+function validationData(
+  status: PollingResourceStatus,
+  data: readonly Clip[],
+  eventTypes: readonly string[],
+): DashboardLocationData | undefined {
   if (status !== 'success') return undefined;
   return {
     clips: {
       status: 'success',
-      data: (data ?? []).map((clip) => ({ id: clip.id, event_type: clip.event_type })),
+      data: data.map((clip) => ({ id: clip.id, event_type: clip.event_type })),
+      eventTypes,
+      complete: false,
     },
   };
 }
@@ -43,37 +51,36 @@ function writeSearch(search: string, mode: 'replace' | 'push'): void {
  * dashboardLocation.test.ts "strips floor/camera when the page is events") and that file is owned by
  * another lane this wave, so the camera filter is local component state instead (see EventsPage).
  */
-export function useEventsLocation(clipsStatus: PollingResourceStatus, clipsData: readonly Clip[] | null): EventsLocationState {
+export function useEventsLocation(): EventsLocationState {
   const [location, setLocation] = useState<DashboardLocation>(
     () => canonicalizeDashboardLocation(currentSearch()).location,
   );
 
   useEffect(() => {
-    const result = canonicalizeDashboardLocation(currentSearch(), validationData(clipsStatus, clipsData));
-    if (result.search !== currentSearch()) writeSearch(result.search, 'replace');
-    setLocation(result.location);
-  }, [clipsStatus, clipsData]);
-
-  useEffect(() => {
     function onPopState(): void {
-      setLocation(canonicalizeDashboardLocation(currentSearch(), validationData(clipsStatus, clipsData)).location);
+      setLocation(canonicalizeDashboardLocation(currentSearch()).location);
     }
     window.addEventListener('popstate', onPopState);
     return () => window.removeEventListener('popstate', onPopState);
-  }, [clipsStatus, clipsData]);
+  }, []);
 
-  const navigate = useCallback((update: Partial<Record<'event' | 'clip', string | null>>): void => {
-    const data = validationData(clipsStatus, clipsData);
-    const current = canonicalizeDashboardLocation(currentSearch(), data).location;
+  const navigate = useCallback((update: Partial<Record<'event' | 'clip', string | null>>, mode: 'replace' | 'push' = 'push'): void => {
+    const current = canonicalizeDashboardLocation(currentSearch()).location;
     const next: Record<string, string | undefined> = { ...current };
     for (const [key, value] of Object.entries(update)) {
       if (value === null || value === undefined) delete next[key];
       else next[key] = value;
     }
-    const result = canonicalizeDashboardLocation(serializeDashboardLocation(next as DashboardLocation), data);
-    if (result.search !== currentSearch()) writeSearch(result.search, 'push');
+    const result = canonicalizeDashboardLocation(serializeDashboardLocation(next as DashboardLocation));
+    if (result.search !== currentSearch()) writeSearch(result.search, mode);
     setLocation(result.location);
-  }, [clipsStatus, clipsData]);
+  }, []);
+
+  const validate = useCallback((status: PollingResourceStatus, clips: readonly Clip[], eventTypes: readonly string[]): void => {
+    const result = canonicalizeDashboardLocation(currentSearch(), validationData(status, clips, eventTypes));
+    if (result.search !== currentSearch()) writeSearch(result.search, 'replace');
+    setLocation((current) => serializeDashboardLocation(current) === result.search ? current : result.location);
+  }, []);
 
   return {
     eventType: location.event,
@@ -81,5 +88,7 @@ export function useEventsLocation(clipsStatus: PollingResourceStatus, clipsData:
     setEventType: (eventType) => navigate({ event: eventType ?? null }),
     openClip: (clipId) => navigate({ clip: clipId }),
     closeClip: () => navigate({ clip: null }),
+    discardClip: () => navigate({ clip: null }, 'replace'),
+    validate,
   };
 }

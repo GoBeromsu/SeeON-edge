@@ -7,7 +7,7 @@ type EventTypeFilterChipsProps = {
   onSelect: (eventType: string | undefined) => void;
 };
 
-const CHIP_BASE = 'inline-flex h-9 items-center whitespace-nowrap rounded-full border px-4 text-sm font-semibold tabular-nums';
+const CHIP_BASE = 'inline-flex h-9 min-h-11 items-center whitespace-nowrap rounded-full border px-4 text-sm font-semibold tabular-nums';
 const CHIP_SELECTED = 'border-primary/30 bg-primary/10 text-primary';
 const CHIP_UNSELECTED = 'border-border bg-card text-muted-foreground hover:bg-muted';
 

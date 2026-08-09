@@ -1,90 +1,18 @@
 import { act } from 'react';
-import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { EventsPage } from '@/app/pages/EventsPage';
-
-function resetLocation(search = '?page=events'): void {
-  window.history.replaceState(null, '', `/${search}`);
-}
-
-const cameraRegistry = {
-  registry_version: 1,
-  cameras: [
-    { id: 'cam-1', label: '301호', rtsp_url_masked: 'rtsp://***', status: 'online' },
-    { id: 'cam-2', label: '302호', rtsp_url_masked: 'rtsp://***', status: 'online' },
-  ],
-};
-
-function clipManifest(overrides: Record<string, unknown> = {}): Record<string, unknown> {
-  return {
-    clip_id: 'clip-1',
-    camera_id: 'cam-1',
-    event_ref: 'event-1',
-    event_type: 'fall',
-    started_at: '2026-08-02T03:12:00Z',
-    duration_s: 12,
-    codec: 'h264',
-    path: null,
-    video_available: true,
-    video_error: null,
-    finalized: true,
-    ...overrides,
-  };
-}
-
-// Deliberately omits camera_label (the real backend manifest has no such field), so these tests
-// also exercise EventsPage's resolveCameraLabel cross-reference against the cameras resource.
-const allClips = [
-  clipManifest({ clip_id: 'clip-1', camera_id: 'cam-1', event_type: 'fall', started_at: '2026-08-02T03:12:00Z' }),
-  clipManifest({ clip_id: 'clip-2', camera_id: 'cam-1', event_type: 'bed-exit', started_at: '2026-08-02T02:00:00Z' }),
-  clipManifest({
-    clip_id: 'clip-3',
-    camera_id: 'cam-2',
-    event_type: 'fall',
-    started_at: '2026-08-02T01:00:00Z',
-    video_available: false,
-    video_error: '저장된 영상을 사용할 수 없습니다.',
-  }),
-  clipManifest({ clip_id: 'clip-4', camera_id: 'cam-2', event_type: 'bed-exit', started_at: '2026-08-02T00:00:00Z' }),
-];
-
-function installFetchMock(clips: Record<string, unknown>[] = allClips): ReturnType<typeof vi.fn> {
-  const fetchMock = vi.fn((input: RequestInfo | URL) => {
-    const url = typeof input === 'string' ? input : input.toString();
-    if (url.includes('/cameras')) {
-      return Promise.resolve({ ok: true, status: 200, json: async () => cameraRegistry });
-    }
-    if (url.includes('/clips')) {
-      const match = /camera_id=([^&]+)/.exec(url);
-      const cameraId = match ? decodeURIComponent(match[1]) : undefined;
-      const scoped = cameraId ? clips.filter((clip) => clip.camera_id === cameraId) : clips;
-      return Promise.resolve({ ok: true, status: 200, json: async () => ({ clips: scoped }) });
-    }
-    return Promise.reject(new Error(`unexpected fetch: ${url}`));
-  });
-  vi.stubGlobal('fetch', fetchMock);
-  return fetchMock;
-}
-
-async function flush(): Promise<void> {
-  await act(async () => {
-    await Promise.resolve();
-    await Promise.resolve();
-    await Promise.resolve();
-  });
-}
-
-async function renderPage(): Promise<{ host: HTMLDivElement; root: Root }> {
-  const host = document.createElement('div');
-  document.body.append(host);
-  const root = createRoot(host);
-  act(() => root.render(<EventsPage />));
-  await flush();
-  return { host, root };
-}
+import {
+  cleanupPages,
+  clipRequestUrls,
+  flush,
+  installFetchMock,
+  renderPage,
+  resetLocation,
+} from '@/app/pages/EventsPage.testSupport';
 
 afterEach(() => {
+  cleanupPages();
   document.body.innerHTML = '';
+  vi.useRealTimers();
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
@@ -96,27 +24,23 @@ describe('EventsPage', () => {
     const { host } = await renderPage();
 
     expect(host.querySelector('h1')?.textContent).toBe('이벤트');
-    const cards = host.querySelectorAll('button.rounded-card');
-    expect(cards.length).toBe(4);
-    // resolveCameraLabel cross-references the cameras resource, since the raw clip manifest has
-    // no camera_label field at all.
+    expect(host.querySelectorAll('button.rounded-card')).toHaveLength(4);
     expect(host.textContent).toContain('301호');
     expect(host.textContent).toContain('302호');
     expect(host.textContent).not.toContain('카메라 미상');
   });
 
-  it('filters the grid by event-type chip without refetching', async () => {
+  it('filters the grid by event type on the server and resets to page 1', async () => {
     resetLocation();
     const fetchMock = installFetchMock();
     const { host } = await renderPage();
-    const callsBeforeFilter = fetchMock.mock.calls.length;
-
     const fallChip = Array.from(host.querySelectorAll('button')).find((button) => button.textContent?.startsWith('낙상'));
+
     act(() => fallChip?.click());
     await flush();
 
-    expect(host.querySelectorAll('button.rounded-card').length).toBe(2);
-    expect(fetchMock.mock.calls.length).toBe(callsBeforeFilter);
+    expect(host.querySelectorAll('button.rounded-card')).toHaveLength(2);
+    expect(clipRequestUrls(fetchMock)).toContain('/api/v1/clips?event_type=fall&limit=48&offset=0');
     expect(window.location.search).toContain('event=fall');
   });
 
@@ -124,9 +48,9 @@ describe('EventsPage', () => {
     resetLocation();
     const fetchMock = installFetchMock();
     const { host } = await renderPage();
-
     const select = host.querySelector('select') as HTMLSelectElement;
     const nativeSetter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value')?.set;
+
     act(() => {
       nativeSetter?.call(select, 'cam-1');
       select.dispatchEvent(new Event('change', { bubbles: true }));
@@ -134,30 +58,24 @@ describe('EventsPage', () => {
     await flush();
 
     const cards = Array.from(host.querySelectorAll('button.rounded-card'));
-    expect(cards.length).toBe(2);
+    expect(cards).toHaveLength(2);
     expect(cards.every((card) => !card.textContent?.includes('302호'))).toBe(true);
-    const clipsCalls = fetchMock.mock.calls.filter(([input]) => {
-      const url = typeof input === 'string' ? input : (input as URL | Request).toString();
-      return url.includes('/clips');
-    });
-    expect(clipsCalls.some(([input]) => {
-      const url = typeof input === 'string' ? input : (input as URL | Request).toString();
-      return url.includes('camera_id=cam-1');
-    })).toBe(true);
+    expect(clipRequestUrls(fetchMock)).toContain('/api/v1/clips?camera_id=cam-1&limit=48&offset=0');
   });
 
-  it('opens the clip modal via the URL when a card is clicked, and closes it on Escape', async () => {
+  it('opens only one modal video via the clip URL and closes it on Escape', async () => {
     resetLocation();
     installFetchMock();
     const { host } = await renderPage();
 
+    expect(host.querySelectorAll('video')).toHaveLength(0);
     const firstCard = host.querySelector('button.rounded-card') as HTMLButtonElement;
     act(() => firstCard.click());
     await flush();
 
     expect(window.location.search).toContain('clip=clip-1');
     const dialog = document.querySelector('[role="dialog"]');
-    expect(dialog).not.toBeNull();
+    expect(dialog?.querySelectorAll('video')).toHaveLength(1);
     expect(dialog?.textContent).toContain('낙상');
     expect(dialog?.textContent).toContain('301호');
 
@@ -168,15 +86,13 @@ describe('EventsPage', () => {
     expect(document.querySelector('[role="dialog"]')).toBeNull();
   });
 
-  it('shows the explicit unavailable state for a clip whose video is not available, in the grid and the modal', async () => {
+  it('shows explicit unavailable states in the grid and modal', async () => {
     resetLocation();
     installFetchMock();
     const { host } = await renderPage();
-
     const unavailableThumb = host.querySelector('[data-testid="clip-thumbnail-unavailable"]');
-    expect(unavailableThumb).not.toBeNull();
-    expect(unavailableThumb?.textContent).toBe('저장된 영상을 사용할 수 없습니다.');
 
+    expect(unavailableThumb?.textContent).toBe('저장된 영상을 사용할 수 없습니다.');
     const unavailableCard = unavailableThumb?.closest('button') as HTMLButtonElement;
     act(() => unavailableCard.click());
     await flush();

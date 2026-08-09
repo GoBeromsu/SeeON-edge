@@ -13,6 +13,8 @@ export type DashboardLocation = {
 type Resource<T> = {
   status: 'idle' | 'loading' | 'success' | 'error';
   data?: readonly T[];
+  eventTypes?: readonly string[];
+  complete?: boolean;
 };
 
 type LocationCamera = {
@@ -79,12 +81,14 @@ function validateOperations(location: DashboardLocation, cameras: readonly Locat
   }
 }
 
-function validateEvents(location: DashboardLocation, clips: readonly LocationClip[]): void {
-  if (location.event && !clips.some((clip) => clip.event_type === location.event)) {
+function validateEvents(location: DashboardLocation, clips: Resource<LocationClip>): void {
+  const data = clips.data ?? [];
+  const eventTypes = clips.eventTypes ?? data.map((clip) => clip.event_type);
+  if (location.event && !eventTypes.includes(location.event)) {
     delete location.event;
   }
-  if (location.clip) {
-    const match = clips.find((clip) => clip.id === location.clip);
+  if (location.clip && clips.complete !== false) {
+    const match = data.find((clip) => clip.id === location.clip);
     if (!match || (location.event && match.event_type !== location.event)) {
       delete location.clip;
     }
@@ -106,7 +110,7 @@ export function canonicalizeDashboardLocation(search: string, data: DashboardLoc
     validateOperations(location, data.cameras.data ?? []);
   }
   if (location.page === 'events' && data.clips?.status === 'success') {
-    validateEvents(location, data.clips.data ?? []);
+    validateEvents(location, data.clips);
   }
   const canonicalSearch = serializeDashboardLocation(location);
   return { location, search: canonicalSearch, changed: canonicalSearch !== search };

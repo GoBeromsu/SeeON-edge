@@ -5,11 +5,17 @@ from __future__ import annotations
 import json
 import logging
 import os
-import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
+from backend.app.features.clips.manifest import (
+    ClipManifest,
+    discover_manifest_paths,
+    is_valid_clip_id,
+    read_manifest_file,
+    video_file_from_dir,
+)
 from backend.app.shared.state_dir import resolve_state_dir
 
 logger = logging.getLogger(__name__)
@@ -19,45 +25,6 @@ API_LABEL_STORE_ENV = "API_LABEL_STORE"
 DEFAULT_CLIP_STORE_DIR = "/var/lib/clip-store"
 
 LabelValue = Literal["TRUE_POSITIVE", "FALSE_POSITIVE"] | None
-
-_CLIP_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
-_MEDIA_SUFFIXES = {".mp4", ".mov", ".m4v", ".webm", ".mkv"}
-
-
-@dataclass(frozen=True)
-class ClipManifest:
-    clip_id: str
-    camera_id: str
-    event_ref: str
-    event_type: str | None
-    started_at: str
-    duration_s: float
-    codec: str
-    path: str | None
-    video_available: bool
-    video_error: str | None
-    finalized: bool
-    # Not read from manifest.json (the recorder never writes it there); the
-    # router stats the resolved video file at response time and overrides
-    # this, so it stays None whenever that stat is unavailable/skipped.
-    size_bytes: int | None = None
-
-    def as_response(self) -> dict[str, object]:
-        return {
-            "clip_id": self.clip_id,
-            "camera_id": self.camera_id,
-            "event_ref": self.event_ref,
-            "event_type": self.event_type,
-            "started_at": self.started_at,
-            "duration_s": self.duration_s,
-            "codec": self.codec,
-            "path": self.path,
-            "video_available": self.video_available,
-            "video_error": self.video_error,
-            "finalized": self.finalized,
-            "size_bytes": self.size_bytes,
-        }
-
 
 @dataclass(frozen=True)
 class LabelRecord:
@@ -111,18 +78,12 @@ class ClipStore:
         rather than an unbounded recursive walk, since a clip store can
         accumulate many unrelated directories over time.
         """
-        if not self.root.is_dir():
-            return []
-        paths: list[Path] = []
-        paths.extend(self.root.glob("clips/*/manifest.json"))
-        paths.extend(self.root.glob("*/clips/*/manifest.json"))
-        paths.extend(self.root.glob("*/*/clips/*/manifest.json"))
-        return paths
+        return discover_manifest_paths(self.root)
 
     def get_manifest(self, clip_id: str) -> ClipManifest | None:
         if not is_valid_clip_id(clip_id):
             raise ValueError("invalid clip_id")
-        manifest = self._read_manifest_file(self.root / "clips" / clip_id / "manifest.json")
+        manifest = read_manifest_file(self.root / "clips" / clip_id / "manifest.json")
         if manifest is None or not manifest.finalized or manifest.clip_id != clip_id:
             return None
         return manifest
@@ -137,19 +98,13 @@ class ClipStore:
         if resolved != root and root not in resolved.parents:
             raise ValueError("manifest path escapes clip store")
         if resolved.is_dir():
-            resolved = _video_file_from_dir(resolved, manifest.clip_id)
+            resolved = video_file_from_dir(resolved, manifest.clip_id)
         if not resolved.is_file():
             raise FileNotFoundError(str(resolved))
         return resolved
 
     def _read_manifest_file(self, path: Path) -> ClipManifest | None:
-        try:
-            parsed = json.loads(path.read_text(encoding="utf-8"))
-        except (FileNotFoundError, json.JSONDecodeError, OSError):
-            return None
-        if not isinstance(parsed, dict):
-            return None
-        return _manifest_from_mapping(parsed)
+        return read_manifest_file(path)
 
 
 def default_label_store_dir() -> Path:
@@ -221,93 +176,10 @@ class LabelStore:
         )
 
 
-def is_valid_clip_id(value: str) -> bool:
-    return bool(_CLIP_ID_RE.fullmatch(value))
-
-
-def _manifest_from_mapping(data: dict[str, object]) -> ClipManifest | None:
-    clip_id = _text(data.get("clip_id"))
-    camera_id = _text(data.get("camera_id"))
-    event_ref = _text(data.get("event_ref"))
-    event_type = _text(data.get("event_type")) or None
-    started_at = _text(data.get("started_at"))
-    codec = _text(data.get("codec"))
-    path = _text(data.get("path")) or None
-    # The worker writes the failure reason as `reason_code`
-    # (worker/pipeline/output/evidence/manifest_models.py:93), not
-    # `video_error` -- no manifest the worker produces has ever used that
-    # key. Prefer `reason_code` so `GET /clips` actually surfaces why a clip
-    # is unavailable; fall back to `video_error` for any pre-existing
-    # manifest written under that older, never-populated-in-practice key.
-    video_error = _text(data.get("reason_code")) or _text(data.get("video_error")) or None
-    video_available_raw = data.get("video_available")
-    finalized = data.get("finalized")
-    duration_s_raw = data.get("duration_s")
-    # Path-less manifests are kept as diagnostic rows so the event->clip
-    # correlation survives even when the encoder produced no playable video.
-    if not all((clip_id, camera_id, event_ref, started_at)):
-        return None
-    if not is_valid_clip_id(clip_id):
-        return None
-    if not isinstance(finalized, bool):
-        return None
-    # Missing/invalid duration_s defaults to 0.0 rather than dropping the
-    # manifest: the wire contract (ClipManifestResponse.duration_s) requires
-    # a real, non-negative number, so a manifest can never be represented
-    # with duration_s absent -- but it must still be listed (diagnostic value)
-    # rather than silently disappearing from GET /clips.
-    if isinstance(duration_s_raw, bool) or not isinstance(duration_s_raw, int | float):
-        duration_s = 0.0
-    else:
-        duration_s = float(duration_s_raw)
-    if isinstance(video_available_raw, bool):
-        video_available = video_available_raw
-    else:
-        # Legacy manifests predate the field: assume playable when a path exists.
-        video_available = path is not None
-    return ClipManifest(
-        clip_id=clip_id,
-        camera_id=camera_id,
-        event_ref=event_ref,
-        event_type=event_type,
-        started_at=started_at,
-        duration_s=duration_s,
-        codec=codec,
-        path=path,
-        video_available=video_available,
-        video_error=video_error,
-        finalized=finalized,
-    )
-
-
 def _label_value(value: object) -> LabelValue:
     if value is None or value in ("TRUE_POSITIVE", "FALSE_POSITIVE"):
         return value
     raise ValueError("invalid label")
-
-
-def _text(value: object) -> str:
-    if not isinstance(value, str):
-        return ""
-    return value.strip()
-
-
-def _video_file_from_dir(directory: Path, clip_id: str) -> Path:
-    preferred = [
-        directory / f"{clip_id}.mp4",
-        directory / "clip.mp4",
-        directory / "video.mp4",
-        directory / "final.mp4",
-    ]
-    for candidate in preferred:
-        if candidate.is_file():
-            return candidate
-    media_files = sorted(
-        path for path in directory.iterdir() if path.suffix.lower() in _MEDIA_SUFFIXES
-    )
-    if len(media_files) == 1:
-        return media_files[0]
-    raise FileNotFoundError(str(directory))
 
 
 __all__ = [

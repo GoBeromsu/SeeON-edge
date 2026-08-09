@@ -4,6 +4,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ClipPlaybackModal } from '@/features/events/ClipPlaybackModal';
 import type { Clip } from '@/shared/api/types';
 
+const activeRoots = new Set<ReturnType<typeof createRoot>>();
+
 const baseClip: Clip = {
   id: 'clip-1',
   camera_id: 'cam-1',
@@ -19,7 +21,17 @@ function render(clip: Clip | null, open = true, onClose = vi.fn()) {
   const host = document.createElement('div');
   document.body.append(host);
   const root = createRoot(host);
-  act(() => root.render(<ClipPlaybackModal clip={clip} cameraLabel="301호" open={open} onClose={onClose} />));
+  activeRoots.add(root);
+  act(() => root.render(
+    <ClipPlaybackModal
+      clip={clip}
+      cameraLabel="301호"
+      open={open}
+      onClose={onClose}
+      lookupStatus="success"
+      onRetry={vi.fn()}
+    />,
+  ));
   return { host, root, onClose };
 }
 
@@ -28,6 +40,8 @@ function dialog(): HTMLElement {
 }
 
 afterEach(() => {
+  act(() => activeRoots.forEach((root) => root.unmount()));
+  activeRoots.clear();
   document.body.innerHTML = '';
 });
 

@@ -34,6 +34,7 @@ ALLOWED_PATHS: Final = {
     "/api/v1/clips/storage",
     "/api/v1/clips/storage/browse",
     "/api/v1/clips/storage/location",
+    "/api/v1/clips/{clip_id}/metadata",
     "/api/v1/connection",
     "/api/v1/connection/sync-cameras",
     "/api/v1/connection/test",

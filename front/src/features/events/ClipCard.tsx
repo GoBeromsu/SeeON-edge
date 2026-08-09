@@ -21,15 +21,11 @@ export function ClipCard({ clip, cameraLabel, onSelect }: ClipCardProps): JSX.El
           {cameraLabel}
         </span>
         {clip.video_available ? (
-          <video
-            className="h-full w-full object-cover"
-            src={clip.video_path}
-            muted
-            playsInline
-            preload="metadata"
-            tabIndex={-1}
-            aria-hidden="true"
-          />
+          <div className="flex h-full items-center justify-center" data-testid="clip-thumbnail-available" aria-hidden="true">
+            <svg className="h-8 w-8" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75">
+              <path d="M8.5 6.75v10.5L17 12 8.5 6.75Z" strokeLinejoin="round" />
+            </svg>
+          </div>
         ) : (
           <div className="event-media-unavailable h-full px-3 text-center text-xs" data-testid="clip-thumbnail-unavailable">
             {clip.video_error ?? '영상을 사용할 수 없습니다.'}

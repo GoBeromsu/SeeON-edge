@@ -2,17 +2,30 @@
 
 from __future__ import annotations
 
-from typing import Annotated, Literal
+from typing import Annotated
 
 from fastapi import APIRouter, Header, HTTPException, Query, Request, status
 from fastapi.responses import FileResponse
-from pydantic import BaseModel, ConfigDict, Field
 
 from backend.app.features.clips.audit_log import (
     AUDIT_NO_CLIP_ID,
     AuditLogStore,
     post_backend_backup,
     utc_now_iso,
+)
+from backend.app.features.clips.listing import select_clip_page
+from backend.app.features.clips.listing_index import (
+    ClipListingIndex,
+    ClipListingReconcileError,
+)
+from backend.app.features.clips.schemas import (
+    AuditResponse,
+    ClipListQuery,
+    ClipManifestResponse,
+    ClipsPaginationResponse,
+    LabelClipRequest,
+    LabelClipResponse,
+    ListClipsResponse,
 )
 from backend.app.features.clips.store import ClipManifest, ClipStore, LabelRecord, LabelStore
 from backend.app.shared.dashboard_auth import authorize_dashboard
@@ -29,69 +42,53 @@ _MEDIA_TYPES = {
 }
 
 
-class ClipManifestResponse(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    clip_id: str = Field(min_length=1)
-    camera_id: str = Field(min_length=1)
-    event_ref: str = Field(min_length=1)
-    event_type: str | None = Field(default=None, min_length=1)
-    started_at: str = Field(min_length=1)
-    duration_s: float = Field(ge=0)
-    codec: str = Field(default="")
-    path: str | None = Field(default=None)
-    video_available: bool
-    video_error: str | None = Field(default=None)
-    finalized: bool
-    size_bytes: int | None = Field(default=None, ge=0)
-
-
-class ListClipsResponse(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    clips: list[ClipManifestResponse]
-
-
-class LabelClipRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    label: Literal["TRUE_POSITIVE", "FALSE_POSITIVE"] | None
-    reviewer: str | None = Field(default=None, min_length=1)
-
-
-class LabelClipResponse(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    clip_id: str = Field(min_length=1)
-    label: Literal["TRUE_POSITIVE", "FALSE_POSITIVE"] | None
-    reviewer: str = Field(min_length=1)
-    reviewed_at: str = Field(min_length=1)
-
-
-class AuditResponse(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    entries: list[dict[str, object]]
-
-
 @router.get("/clips", response_model=ListClipsResponse)
 def list_clips(
     request: Request,
-    camera_id: str | None = None,
+    filters: Annotated[ClipListQuery, Query()],
     authorization: Annotated[str | None, Header(alias="Authorization")] = None,
-) -> dict[str, object]:
+) -> ListClipsResponse:
     actor = _authorize(request, authorization)
-    store = _clip_store(request)
-    manifests = store.list_manifests(camera_id=camera_id)
-    response = {"clips": [_clip_response(store, manifest) for manifest in manifests]}
-    _audit_store(request).append(actor=actor, action="list", clip_id=AUDIT_NO_CLIP_ID)
+    if filters.limit is None:
+        store = _clip_store(request)
+        page = select_clip_page(store.list_manifests(), filters)
+        clips = [_clip_response(store, manifest) for manifest in page.manifests]
+    else:
+        index = getattr(request.app.state, "clip_listing_index", None)
+        if not isinstance(index, ClipListingIndex):
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="clip listing index unavailable",
+            )
+        try:
+            page = index.page(filters)
+        except ClipListingReconcileError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="clip listing index unavailable",
+            ) from exc
+        clips = [
+            ClipManifestResponse.model_validate(manifest.as_response())
+            for manifest in page.manifests
+        ]
+    response = ListClipsResponse(
+        clips=clips,
+        pagination=ClipsPaginationResponse(
+            limit=filters.limit,
+            offset=filters.offset,
+            total=page.total,
+            has_more=page.has_more,
+        ),
+        event_type_counts=dict(page.event_type_counts),
+    )
+    _ = _audit_store(request).append(actor=actor, action="list", clip_id=AUDIT_NO_CLIP_ID)
     return response
 
 
-def _clip_response(store: ClipStore, manifest: ClipManifest) -> dict[str, object]:
+def _clip_response(store: ClipStore, manifest: ClipManifest) -> ClipManifestResponse:
     response = manifest.as_response()
     response["size_bytes"] = _clip_size_bytes(store, manifest)
-    return response
+    return ClipManifestResponse.model_validate(response)
 
 
 def _clip_size_bytes(store: ClipStore, manifest: ClipManifest) -> int | None:
@@ -105,6 +102,24 @@ def _clip_size_bytes(store: ClipStore, manifest: ClipManifest) -> int | None:
         return video_path.stat().st_size
     except OSError:
         return None
+
+
+@router.get("/clips/{clip_id}/metadata", response_model=ClipManifestResponse)
+def get_clip_metadata(
+    clip_id: str,
+    request: Request,
+    authorization: Annotated[str | None, Header(alias="Authorization")] = None,
+) -> ClipManifestResponse:
+    actor = _authorize(request, authorization)
+    store = _clip_store(request)
+    manifest = _get_manifest_or_404(request, clip_id)
+    response = _clip_response(store, manifest)
+    _ = _audit_store(request).append(
+        actor=actor,
+        action="metadata-view",
+        clip_id=manifest.clip_id,
+    )
+    return response
 
 
 @router.get("/clips/{clip_id}/video")
@@ -177,10 +192,16 @@ def list_audit(
 
 
 def _get_manifest_or_404(request: Request, clip_id: str):
+    store = _clip_store(request)
     try:
-        manifest = _clip_store(request).get_manifest(clip_id)
+        manifest = store.get_manifest(clip_id)
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    if manifest is None:
+        manifest = next(
+            (candidate for candidate in store.list_manifests() if candidate.clip_id == clip_id),
+            None,
+        )
     if manifest is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="clip not found")
     return manifest
@@ -227,6 +248,8 @@ def _bearer_token(value: str | None) -> str | None:
     if value is None or not value.startswith("Bearer "):
         return None
     return value.removeprefix("Bearer ").strip() or None
+
+
 def _media_type(filename: str) -> str:
     suffix = filename.rsplit(".", maxsplit=1)[-1].lower() if "." in filename else ""
     return _MEDIA_TYPES.get(f".{suffix}", "application/octet-stream")

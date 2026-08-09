@@ -35,10 +35,11 @@ function render(clip: Clip, onSelect = vi.fn()): { host: HTMLDivElement; onSelec
 }
 
 describe('ClipCard', () => {
-  it('renders a video preview and the camera-label overlay when the clip is available', () => {
+  it('renders a metadata-only preview without mounting video when the clip is available', () => {
     const { host } = render(availableClip);
 
-    expect(host.querySelector('video')).not.toBeNull();
+    expect(host.querySelector('video')).toBeNull();
+    expect(host.querySelector('[data-testid="clip-thumbnail-available"]')).not.toBeNull();
     expect(host.querySelector('[data-testid="clip-thumbnail-unavailable"]')).toBeNull();
     expect(host.textContent).toContain('301호');
     expect(host.textContent).toContain('낙상');

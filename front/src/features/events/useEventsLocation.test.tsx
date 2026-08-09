@@ -1,4 +1,4 @@
-import { act } from 'react';
+import { act, useEffect } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, describe, expect, it } from 'vitest';
 import { useEventsLocation } from '@/features/events/useEventsLocation';
@@ -29,7 +29,10 @@ function mount(clips: Clip[], status: 'idle' | 'loading' | 'success' | 'error' =
   document.body.append(host);
   const root = createRoot(host);
   function Component(): JSX.Element {
-    current = useEventsLocation(status, clips);
+    current = useEventsLocation();
+    useEffect(() => {
+      current.validate(status, clips, [...new Set(clips.map((item) => item.event_type))]);
+    }, [clips, current.validate, status]);
     return <span>{current.eventType ?? ''}|{current.clipId ?? ''}</span>;
   }
   act(() => root.render(<Component />));
@@ -87,9 +90,12 @@ describe('useEventsLocation', () => {
     act(() => view.root.unmount());
   });
 
-  it('drops a clip id from the URL once the clip list has loaded and it does not match any clip', () => {
+  it('preserves an off-page clip id until metadata confirms it is missing', () => {
     resetLocation('?page=events&clip=stale-clip');
     const view = mount([clip('clip-1', 'fall')]);
+
+    expect(view.current.clipId).toBe('stale-clip');
+    act(() => view.current.discardClip());
 
     expect(view.current.clipId).toBeUndefined();
     expect(window.location.search).not.toContain('clip=stale-clip');

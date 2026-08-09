@@ -13,7 +13,7 @@ export function CameraFilterSelect({ cameras, value, onChange, className = '' }:
       aria-label="카메라"
       value={value}
       onChange={(event) => onChange(event.target.value)}
-      className={`h-9 rounded-control border border-input bg-card px-3 text-sm font-medium text-foreground ${className}`}
+      className={`h-9 min-h-11 rounded-control border border-input bg-card px-3 text-sm font-medium text-foreground ${className}`}
     >
       <option value="">전체 카메라</option>
       {cameras.map((camera) => (

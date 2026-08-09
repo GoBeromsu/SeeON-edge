@@ -3,6 +3,7 @@ import { AccessibleDialog } from '@/shared/ui/AccessibleDialog';
 import { getEventTypeChipClassName, getEventTypeLabel } from '@/features/events/eventTypes';
 import { formatClipTimestamp, formatDuration, formatResolution } from '@/features/events/formatters';
 import { formatBytes } from '@/shared/format/bytes';
+import type { ClipMetadataStatus } from '@/features/events/useClipMetadata';
 import type { Clip } from '@/shared/api/types';
 
 type ClipPlaybackModalProps = {
@@ -10,6 +11,8 @@ type ClipPlaybackModalProps = {
   cameraLabel: string;
   open: boolean;
   onClose: () => void;
+  lookupStatus: ClipMetadataStatus;
+  onRetry: () => void;
 };
 
 type VideoMetadata = { duration: number; width: number; height: number };
@@ -23,7 +26,7 @@ type VideoMetadata = { duration: number; width: number; height: number };
  * video_path (an API URL) is safe to show. `크기` is shown only when the manifest carries
  * `size_bytes` — never fabricated.
  */
-export function ClipPlaybackModal({ clip, cameraLabel, open, onClose }: ClipPlaybackModalProps): JSX.Element | null {
+export function ClipPlaybackModal({ clip, cameraLabel, open, onClose, lookupStatus, onRetry }: ClipPlaybackModalProps): JSX.Element | null {
   const [metadata, setMetadata] = useState<VideoMetadata | null>(null);
   const clipId = clip?.id;
 
@@ -31,7 +34,27 @@ export function ClipPlaybackModal({ clip, cameraLabel, open, onClose }: ClipPlay
     setMetadata(null);
   }, [clipId]);
 
-  if (!clip) return null;
+  if (!clip) {
+    if (!open || (lookupStatus !== 'loading' && lookupStatus !== 'error')) return null;
+    return (
+      <AccessibleDialog open title="이벤트 확인" onClose={onClose} size="xl" initialFocus="heading">
+        {lookupStatus === 'loading' ? (
+          <p className="text-sm text-muted-foreground" role="status">이벤트 정보를 불러오는 중입니다.</p>
+        ) : (
+          <div className="space-y-4" role="alert">
+            <p className="text-sm text-status-rejectedFg">이벤트 정보를 불러오지 못했습니다.</p>
+            <button
+              type="button"
+              className="inline-flex min-h-11 items-center justify-center rounded-control border border-border bg-card px-4 text-sm font-semibold text-foreground hover:bg-muted"
+              onClick={onRetry}
+            >
+              다시 시도
+            </button>
+          </div>
+        )}
+      </AccessibleDialog>
+    );
+  }
 
   const title = `${getEventTypeLabel(clip.event_type)} · ${cameraLabel}`;
 

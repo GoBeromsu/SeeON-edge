@@ -10,7 +10,7 @@ import sys
 import urllib.request
 from collections.abc import AsyncIterator
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 from datetime import UTC, datetime
 from threading import Lock
 
@@ -18,6 +18,7 @@ from fastapi import FastAPI
 
 from backend.app.features.cameras.store import CameraRegistryStore
 from backend.app.features.clips.catalog import CatalogStore
+from backend.app.features.clips.listing_runtime import maintain_clip_listing
 from backend.app.features.status.backend_heartbeat_relay import (
     effective_relay_interval_sec,
     get_heartbeat_relay_state,
@@ -134,10 +135,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.backend_heartbeat_relay_executor = None
         app.state.backend_heartbeat_relay_task = None
 
+    clip_listing_stack = AsyncExitStack()
+    await clip_listing_stack.enter_async_context(maintain_clip_listing(app))
     app.state.readiness = {"ready": True, "status": "ready"}
     try:
         yield
     finally:
+        await clip_listing_stack.aclose()
         refresh_stop.set()
         refresh_task = app.state.backend_config_refresh_task
         try:
