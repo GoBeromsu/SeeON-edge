@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Annotated
 
 from fastapi import APIRouter, Header, HTTPException, Query, Request, status
-from fastapi.responses import FileResponse
+from fastapi.responses import Response
 
 from backend.app.features.clips.audit_log import (
     AUDIT_NO_CLIP_ID,
@@ -14,10 +14,9 @@ from backend.app.features.clips.audit_log import (
     utc_now_iso,
 )
 from backend.app.features.clips.listing import select_clip_page
-from backend.app.features.clips.listing_index import (
-    ClipListingIndex,
-    ClipListingReconcileError,
-)
+from backend.app.features.clips.listing_index import ClipListingIndex, ClipListingReconcileError
+from backend.app.features.clips.media_response import media_response, media_type
+from backend.app.features.clips.responses import clip_response, resolved_video_size
 from backend.app.features.clips.schemas import (
     AuditResponse,
     ClipListQuery,
@@ -27,20 +26,16 @@ from backend.app.features.clips.schemas import (
     LabelClipResponse,
     ListClipsResponse,
 )
-from backend.app.features.clips.store import ClipManifest, ClipStore, LabelRecord, LabelStore
+from backend.app.features.clips.store import (
+    ClipStore,
+    DuplicateClipIdError,
+    LabelRecord,
+    LabelStore,
+    LocatedClip,
+)
 from backend.app.shared.dashboard_auth import authorize_dashboard
 
 router = APIRouter(tags=["clips"])
-
-_MEDIA_TYPES = {
-    ".mp4": "video/mp4",
-    ".webm": "video/webm",
-    ".mkv": "video/x-matroska",
-    ".avi": "video/x-msvideo",
-    ".mov": "video/quicktime",
-    ".m4v": "video/x-m4v",
-}
-
 
 @router.get("/clips", response_model=ListClipsResponse)
 def list_clips(
@@ -52,7 +47,17 @@ def list_clips(
     if filters.limit is None:
         store = _clip_store(request)
         page = select_clip_page(store.list_manifests(), filters)
-        clips = [_clip_response(store, manifest) for manifest in page.manifests]
+        try:
+            clips = [
+                clip_response(
+                    manifest,
+                    resolved_video_size(store, manifest),
+                    store.thumbnail_available(manifest.clip_id),
+                )
+                for manifest in page.manifests
+            ]
+        except DuplicateClipIdError as exc:
+            raise _duplicate_clip_http_error(exc) from exc
     else:
         index = getattr(request.app.state, "clip_listing_index", None)
         if not isinstance(index, ClipListingIndex):
@@ -68,7 +73,11 @@ def list_clips(
                 detail="clip listing index unavailable",
             ) from exc
         clips = [
-            ClipManifestResponse.model_validate(manifest.as_response())
+            clip_response(
+                manifest,
+                manifest.size_bytes,
+                manifest.thumbnail_available,
+            )
             for manifest in page.manifests
         ]
     response = ListClipsResponse(
@@ -85,25 +94,6 @@ def list_clips(
     return response
 
 
-def _clip_response(store: ClipStore, manifest: ClipManifest) -> ClipManifestResponse:
-    response = manifest.as_response()
-    response["size_bytes"] = _clip_size_bytes(store, manifest)
-    return ClipManifestResponse.model_validate(response)
-
-
-def _clip_size_bytes(store: ClipStore, manifest: ClipManifest) -> int | None:
-    if not manifest.video_available:
-        return None
-    try:
-        video_path = store.resolve_video_path(manifest)
-    except (ValueError, FileNotFoundError):
-        return None
-    try:
-        return video_path.stat().st_size
-    except OSError:
-        return None
-
-
 @router.get("/clips/{clip_id}/metadata", response_model=ClipManifestResponse)
 def get_clip_metadata(
     clip_id: str,
@@ -112,8 +102,13 @@ def get_clip_metadata(
 ) -> ClipManifestResponse:
     actor = _authorize(request, authorization)
     store = _clip_store(request)
-    manifest = _get_manifest_or_404(request, clip_id)
-    response = _clip_response(store, manifest)
+    located = _get_located_clip_or_404(request, clip_id)
+    manifest = located.manifest
+    response = clip_response(
+        manifest,
+        resolved_video_size(store, located),
+        store.thumbnail_available(located),
+    )
     _ = _audit_store(request).append(
         actor=actor,
         action="metadata-view",
@@ -128,16 +123,17 @@ def clip_video(
     request: Request,
     authorization: Annotated[str | None, Header(alias="Authorization")] = None,
     token: Annotated[str | None, Query()] = None,
-) -> FileResponse:
+) -> Response:
     actor = _authorize(request, authorization, query_token=token)
-    manifest = _get_manifest_or_404(request, clip_id)
+    located = _get_located_clip_or_404(request, clip_id)
+    manifest = located.manifest
     if not manifest.video_available or manifest.path is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="clip video not available",
         )
     try:
-        video_path = _clip_store(request).resolve_video_path(manifest)
+        opened = _clip_store(request).open_located_video(located)
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     except FileNotFoundError as exc:
@@ -146,7 +142,34 @@ def clip_video(
             detail="clip video not found",
         ) from exc
     _audit_store(request).append(actor=actor, action="play", clip_id=manifest.clip_id)
-    return FileResponse(video_path, media_type=_media_type(video_path.name))
+    return media_response(
+        opened,
+        request.headers.get("range"),
+        media_type(opened.path.name),
+    )
+
+
+@router.get("/clips/{clip_id}/thumbnail")
+def clip_thumbnail(
+    clip_id: str,
+    request: Request,
+    authorization: Annotated[str | None, Header(alias="Authorization")] = None,
+) -> Response:
+    _ = _authorize(request, authorization)
+    store = _clip_store(request)
+    located = _get_located_clip_or_404(request, clip_id)
+    try:
+        content = store.read_thumbnail(located)
+    except FileNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="clip thumbnail not found",
+        ) from exc
+    return Response(
+        content=content,
+        media_type="image/jpeg",
+        headers={"Cache-Control": "private, no-store"},
+    )
 
 
 @router.put("/clips/{clip_id}/label", response_model=LabelClipResponse)
@@ -157,7 +180,7 @@ def label_clip(
     authorization: Annotated[str | None, Header(alias="Authorization")] = None,
 ) -> dict[str, object]:
     actor = _authorize(request, authorization)
-    manifest = _get_manifest_or_404(request, clip_id)
+    manifest = _get_located_clip_or_404(request, clip_id).manifest
     reviewer = payload.reviewer or actor
     record = LabelRecord(
         clip_id=manifest.clip_id,
@@ -191,20 +214,24 @@ def list_audit(
     return {"entries": entries}
 
 
-def _get_manifest_or_404(request: Request, clip_id: str):
+def _get_located_clip_or_404(request: Request, clip_id: str) -> LocatedClip:
     store = _clip_store(request)
     try:
-        manifest = store.get_manifest(clip_id)
+        located = store.locate_manifest(clip_id)
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
-    if manifest is None:
-        manifest = next(
-            (candidate for candidate in store.list_manifests() if candidate.clip_id == clip_id),
-            None,
-        )
-    if manifest is None:
+    except DuplicateClipIdError as exc:
+        raise _duplicate_clip_http_error(exc) from exc
+    if located is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="clip not found")
-    return manifest
+    return located
+
+
+def _duplicate_clip_http_error(exc: DuplicateClipIdError) -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail=f"duplicate clip_id: {exc.clip_id}",
+    )
 
 
 def _clip_store(request: Request) -> ClipStore:
@@ -248,11 +275,6 @@ def _bearer_token(value: str | None) -> str | None:
     if value is None or not value.startswith("Bearer "):
         return None
     return value.removeprefix("Bearer ").strip() or None
-
-
-def _media_type(filename: str) -> str:
-    suffix = filename.rsplit(".", maxsplit=1)[-1].lower() if "." in filename else ""
-    return _MEDIA_TYPES.get(f".{suffix}", "application/octet-stream")
 
 
 __all__ = ["router"]

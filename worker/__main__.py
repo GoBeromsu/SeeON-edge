@@ -24,7 +24,11 @@ from shared.events.evidence_http_transport import (
     encode_json,
 )
 from shared.events.relay_failure_log import classify_relay_failure
+from worker.adapters.encode.thumbnail import FFmpegThumbnailGenerator
 from worker.adapters.model.in_process import InProcessServingClient
+from worker.pipeline.output.evidence.clip_config import configured_ffmpeg_bin, configured_store_dir
+from worker.pipeline.output.evidence.clip_store_lock import ClipStoreLockedError
+from worker.pipeline.output.evidence.thumbnail_backfill import backfill_thumbnails
 from worker.runtime.config import (
     EDGE_CAMERA_CONFIG_ENV,
     RELAY_HEARTBEAT_PATH,
@@ -104,6 +108,14 @@ def _build_parser() -> argparse.ArgumentParser:
             "this many frames (default: run indefinitely)"
         ),
     )
+    parser.add_argument(
+        "--backfill-thumbnails",
+        action="store_true",
+        help=(
+            "Generate missing clip-local thumbnails under CLIP_STORE_DIR and exit; "
+            "returns nonzero while playable clips remain missing thumbnails"
+        ),
+    )
     return parser
 
 
@@ -177,6 +189,22 @@ def main(argv: list[str] | None = None) -> int:
         level=logging.INFO,
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     )
+
+    if args.backfill_thumbnails:
+        try:
+            report = backfill_thumbnails(
+                configured_store_dir(),
+                FFmpegThumbnailGenerator(ffmpeg_bin=configured_ffmpeg_bin()),
+            )
+        except ClipStoreLockedError as exc:
+            LOGGER.warning("thumbnail backfill refused: %s", exc)
+            return GENERIC_RUNTIME_ERROR_EXIT_CODE
+        print(report.summary())
+        return (
+            CLEAN_SHUTDOWN_EXIT_CODE
+            if report.missing == 0
+            else GENERIC_RUNTIME_ERROR_EXIT_CODE
+        )
 
     # Ordering note: legacy edge/runtime/edge_worker.py:141-149 runs
     # run_global_bootstrap([profile_verify_stage(...)]) BEFORE loading config

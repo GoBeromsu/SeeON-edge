@@ -23,15 +23,17 @@ from backend.app.features.clips.listing_queries import (
 from backend.app.features.clips.listing_schema import (
     ACTIVATE_GENERATION,
     ADVANCE_NEXT_GENERATION,
-    CREATE_STATEMENTS,
     DELETE_OLD_ROWS,
     DELETE_OLD_SUMMARIES,
+    DELETE_OLD_THUMBNAILS,
     INSERT_CLIP,
     INSERT_SUMMARY,
+    INSERT_THUMBNAIL,
     SELECT_ACTIVE_CLIPS,
     SELECT_ACTIVE_GENERATION,
     SELECT_NEXT_GENERATION,
 )
+from backend.app.features.clips.listing_schema_migration import initialize_listing_schema
 from backend.app.features.clips.schemas import ClipListQuery
 from backend.app.features.clips.store import ClipManifest
 from backend.app.shared.sqlite_bootstrap import connect_catalog_store
@@ -55,6 +57,9 @@ ActiveRow: TypeAlias = tuple[
     str | None,
     int,
     int | None,
+    int | None,
+    int | None,
+    int,
 ]
 PageRow: TypeAlias = tuple[
     str,
@@ -69,6 +74,7 @@ PageRow: TypeAlias = tuple[
     str | None,
     int,
     int | None,
+    int,
 ]
 _ACTIVE_ROWS = TypeAdapter(list[ActiveRow])
 _PAGE_ROWS = TypeAdapter(list[PageRow])
@@ -94,7 +100,13 @@ class ListingRepository:
     @classmethod
     def open(cls, path: Path | str) -> ListingRepository:
         resolved = Path(path)
-        return cls(resolved, connect_catalog_store(resolved, CREATE_STATEMENTS))
+        writer = connect_catalog_store(resolved, ())
+        try:
+            initialize_listing_schema(writer)
+        except sqlite3.Error:
+            writer.close()
+            raise
+        return cls(resolved, writer)
 
     def active_clips(self) -> dict[str, IndexedClip]:
         self._ensure_open()
@@ -109,7 +121,11 @@ class ListingRepository:
         try:
             _ = self._writer.executemany(
                 INSERT_CLIP,
-                (clip.sql_values(generation) for clip in prepared.clips),
+                (clip.base_sql_values(generation) for clip in prepared.clips),
+            )
+            _ = self._writer.executemany(
+                INSERT_THUMBNAIL,
+                (clip.thumbnail_sql_values(generation) for clip in prepared.clips),
             )
             _ = self._writer.executemany(
                 INSERT_SUMMARY,
@@ -128,6 +144,7 @@ class ListingRepository:
             raise
         _ = self._writer.execute("BEGIN IMMEDIATE")
         try:
+            _ = self._writer.execute(DELETE_OLD_THUMBNAILS, (generation,))
             _ = self._writer.execute(DELETE_OLD_ROWS, (generation,))
             _ = self._writer.execute(DELETE_OLD_SUMMARIES, (generation,))
             _ = self._writer.execute("COMMIT")
@@ -224,11 +241,27 @@ class ListingRepository:
 
 
 def _indexed_clip(row: ActiveRow) -> IndexedClip:
-    return IndexedClip(*row[:12], bool(row[12]), row[13], bool(row[14]), row[15])
+    return IndexedClip(
+        *row[:12],
+        bool(row[12]),
+        row[13],
+        bool(row[14]),
+        row[15],
+        row[16],
+        row[17],
+        bool(row[18]),
+    )
 
 
 def _manifest(row: PageRow) -> ClipManifest:
-    return ClipManifest(*row[:8], bool(row[8]), row[9], bool(row[10]), row[11])
+    return ClipManifest(
+        *row[:8],
+        bool(row[8]),
+        row[9],
+        bool(row[10]),
+        row[11],
+        bool(row[12]),
+    )
 
 
 def _plan(

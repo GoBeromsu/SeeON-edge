@@ -12,6 +12,10 @@ from typing import TypeAlias
 from backend.app.features.clips.listing import EventTypeFacet, effective_event_type
 from backend.app.features.clips.manifest import discover_manifest_paths, read_manifest_file
 from backend.app.features.clips.store import ClipManifest, ClipStore
+from backend.app.features.clips.thumbnail_files import (
+    ThumbnailFileState,
+    thumbnail_file_state,
+)
 
 SqlParameter: TypeAlias = str | int | float | None
 GLOBAL_CAMERA = ""
@@ -45,8 +49,11 @@ class IndexedClip:
     video_error: str | None
     finalized: bool
     size_bytes: int | None
+    thumbnail_mtime_ns: int | None
+    thumbnail_size_bytes: int | None
+    thumbnail_available: bool
 
-    def sql_values(self, generation: int) -> tuple[SqlParameter, ...]:
+    def base_sql_values(self, generation: int) -> tuple[SqlParameter, ...]:
         return (
             generation,
             self.clip_id,
@@ -67,6 +74,15 @@ class IndexedClip:
             self.size_bytes,
         )
 
+    def thumbnail_sql_values(self, generation: int) -> tuple[SqlParameter, ...]:
+        return (
+            generation,
+            self.clip_id,
+            self.thumbnail_mtime_ns,
+            self.thumbnail_size_bytes,
+            int(self.thumbnail_available),
+        )
+
     def to_manifest(self) -> ClipManifest:
         return ClipManifest(
             clip_id=self.clip_id,
@@ -81,6 +97,7 @@ class IndexedClip:
             video_error=self.video_error,
             finalized=self.finalized,
             size_bytes=self.size_bytes,
+            thumbnail_available=self.thumbnail_available,
         )
 
 
@@ -121,7 +138,8 @@ def prepare_generation(
             continue
         path_text = str(manifest_path)
         previous = existing.get(path_text)
-        if previous is not None and _same_fingerprint(previous, file_stat):
+        thumbnail_state = thumbnail_file_state(clip_store.root, manifest_path)
+        if previous is not None and _same_fingerprint(previous, file_stat, thumbnail_state):
             current[path_text] = previous
             unchanged += 1
             continue
@@ -139,7 +157,13 @@ def prepare_generation(
                 size_bytes = clip_store.resolve_video_path(manifest).stat().st_size
             except (ValueError, FileNotFoundError, OSError):
                 size_bytes = None
-        current[path_text] = _indexed_clip(manifest_path, file_stat, manifest, size_bytes)
+        current[path_text] = _indexed_clip(
+            manifest_path,
+            file_stat,
+            manifest,
+            size_bytes,
+            thumbnail_state,
+        )
         upserted += 1
     clips = tuple(current.values())
     if len({clip.clip_id for clip in clips}) != len(clips):
@@ -155,10 +179,17 @@ def prepare_generation(
     return PreparedGeneration(clips, summaries, stats)
 
 
-def _same_fingerprint(clip: IndexedClip, file_stat: os.stat_result) -> bool:
+def _same_fingerprint(
+    clip: IndexedClip,
+    file_stat: os.stat_result,
+    thumbnail_state: ThumbnailFileState,
+) -> bool:
     return (
         clip.manifest_mtime_ns == file_stat.st_mtime_ns
         and clip.manifest_size_bytes == file_stat.st_size
+        and clip.thumbnail_mtime_ns == thumbnail_state.mtime_ns
+        and clip.thumbnail_size_bytes == thumbnail_state.size_bytes
+        and clip.thumbnail_available == thumbnail_state.available
     )
 
 
@@ -167,6 +198,7 @@ def _indexed_clip(
     file_stat: os.stat_result,
     manifest: ClipManifest,
     size_bytes: int | None,
+    thumbnail_state: ThumbnailFileState,
 ) -> IndexedClip:
     return IndexedClip(
         manifest_path=str(path),
@@ -185,6 +217,9 @@ def _indexed_clip(
         video_error=manifest.video_error,
         finalized=manifest.finalized,
         size_bytes=size_bytes,
+        thumbnail_mtime_ns=thumbnail_state.mtime_ns,
+        thumbnail_size_bytes=thumbnail_state.size_bytes,
+        thumbnail_available=thumbnail_state.available,
     )
 
 

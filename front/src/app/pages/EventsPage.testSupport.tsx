@@ -21,7 +21,7 @@ export function clipManifest(overrides: Record<string, unknown> = {}): Record<st
   return {
     clip_id: 'clip-1', camera_id: 'cam-1', event_ref: 'event-1', event_type: 'fall',
     started_at: '2026-08-02T03:12:00Z', duration_s: 12, codec: 'h264', path: null,
-    video_available: true, video_error: null, finalized: true, ...overrides,
+    video_available: true, thumbnail_available: true, video_error: null, finalized: true, ...overrides,
   };
 }
 
@@ -30,7 +30,7 @@ export const allClips = [
   clipManifest({ clip_id: 'clip-2', camera_id: 'cam-1', event_type: 'bed-exit', started_at: '2026-08-02T02:00:00Z' }),
   clipManifest({
     clip_id: 'clip-3', camera_id: 'cam-2', event_type: 'fall', started_at: '2026-08-02T01:00:00Z',
-    video_available: false, video_error: '저장된 영상을 사용할 수 없습니다.',
+    video_available: false, thumbnail_available: false, video_error: '저장된 영상을 사용할 수 없습니다.',
   }),
   clipManifest({ clip_id: 'clip-4', camera_id: 'cam-2', event_type: 'bed-exit', started_at: '2026-08-02T00:00:00Z' }),
 ];

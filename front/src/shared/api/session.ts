@@ -16,6 +16,10 @@ export function getClipVideoUrl(clipId: string): string {
   return `${getApiBase()}/clips/${encodeURIComponent(clipId)}/video`;
 }
 
+export function getClipThumbnailUrl(clipId: string): string {
+  return `${getApiBase()}/clips/${encodeURIComponent(clipId)}/thumbnail`;
+}
+
 function normalizeApiBase(value: string | undefined): string {
   const configured = value?.trim() || DEFAULT_API_BASE;
   if (configured === '/') return '';

@@ -23,6 +23,7 @@ export function normalizeClip(value: unknown): Clip | null {
   }
   const videoAvailable = pickBoolean(value, ['video_available', 'videoAvailable']);
   const normalizedVideoAvailable = videoAvailable === true;
+  const thumbnailAvailable = pickBoolean(value, ['thumbnail_available', 'thumbnailAvailable']);
   return {
     id,
     camera_id: pickNullableString(value, ['camera_id', 'cameraId']),
@@ -31,6 +32,7 @@ export function normalizeClip(value: unknown): Clip | null {
     created_at: pickNullableString(value, ['created_at', 'createdAt', 'timestamp', 'started_at', 'startedAt']),
     video_path: getClipVideoUrl(id),
     video_available: normalizedVideoAvailable,
+    thumbnail_available: thumbnailAvailable === true,
     video_error: normalizedVideoAvailable
       ? null
       : videoAvailable === false
@@ -133,6 +135,7 @@ function isClipManifestResponse(value: unknown): value is Record<string, unknown
     && Number.isFinite(value.duration_s)
     && value.duration_s >= 0
     && typeof value.video_available === 'boolean'
+    && (!('thumbnail_available' in value) || typeof value.thumbnail_available === 'boolean')
     && typeof value.finalized === 'boolean'
     && (!('event_type' in value) || value.event_type === null || isNonEmptyString(value.event_type))
     && (!('codec' in value) || typeof value.codec === 'string')

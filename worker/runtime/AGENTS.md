@@ -68,6 +68,9 @@ owns argparse and exit codes and constructs `WorkerRuntime` from
 `--check-config`, `--heartbeat-on-start`, signal shutdown, and the documented
 exit codes. Do not add `worker.runtime.edge_worker` or an `edge` alias.
 `--check-config` performs no model, camera, or relay side effect.
+`--backfill-thumbnails` scans the bounded root/one-level/two-level clip layouts
+under `CLIP_STORE_DIR`, generates missing clip-local `thumbnail.jpg` artifacts,
+and exits non-zero while any playable clip remains without a valid thumbnail.
 
 ## Focused Tests
 

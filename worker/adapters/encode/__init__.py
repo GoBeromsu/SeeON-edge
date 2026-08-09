@@ -4,6 +4,10 @@ from worker.adapters.encode.adapter_errors import (
     EncoderPolicyError,
     EncoderStartError,
     EncoderWriteError,
+    ThumbnailGenerationError,
+    ThumbnailPayloadError,
+    ThumbnailSecurityError,
+    ThumbnailTimeoutError,
 )
 from worker.adapters.encode.clip_finalizer import FFmpegConcatFinalizer
 from worker.adapters.encode.csv_segment_index import Segment
@@ -16,6 +20,7 @@ from worker.adapters.encode.models import (
     SegmentEncoderConfig,
 )
 from worker.adapters.encode.session import FFmpegEncoderSession
+from worker.adapters.encode.thumbnail import FFmpegThumbnailGenerator
 
 __all__ = [
     "ClipArtifact",
@@ -30,6 +35,11 @@ __all__ = [
     "FFmpegConcatFinalizer",
     "FFmpegEncoderSession",
     "FFmpegSegmentEncoder",
+    "FFmpegThumbnailGenerator",
     "Segment",
     "SegmentEncoderConfig",
+    "ThumbnailGenerationError",
+    "ThumbnailPayloadError",
+    "ThumbnailSecurityError",
+    "ThumbnailTimeoutError",
 ]

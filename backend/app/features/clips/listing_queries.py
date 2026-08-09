@@ -11,9 +11,13 @@ from backend.app.features.clips.schemas import ClipListQuery
 SqlValues: TypeAlias = tuple[SqlParameter, ...]
 SUMMARY_SQL = """SELECT event_facet, count FROM clip_listing_summary
     WHERE generation = ? AND camera_id = ? ORDER BY event_facet"""
-_PAGE_COLUMNS = """SELECT clip_id, camera_id, event_ref, event_type, started_at,
-    duration_s, codec, media_path, video_available, video_error, finalized, size_bytes
-    FROM clip_listing_rows INDEXED BY {index_name}"""
+_PAGE_COLUMNS = """SELECT rows.clip_id, rows.camera_id, rows.event_ref, rows.event_type,
+    rows.started_at, rows.duration_s, rows.codec, rows.media_path, rows.video_available,
+    rows.video_error, rows.finalized, rows.size_bytes,
+    COALESCE(thumbnails.thumbnail_available, 0)
+    FROM clip_listing_rows AS rows INDEXED BY {index_name}
+    LEFT JOIN clip_listing_thumbnails AS thumbnails
+      ON thumbnails.generation = rows.generation AND thumbnails.clip_id = rows.clip_id"""
 
 
 @dataclass(frozen=True, slots=True)
@@ -32,15 +36,15 @@ class QueryPlans:
 
 
 def build_page_statements(generation: int, query: ClipListQuery) -> PageStatements:
-    clauses = ["generation = ?"]
+    clauses = ["rows.generation = ?"]
     values: list[SqlParameter] = [generation]
     index_name = "clip_listing_global_order_idx"
     if query.camera_id is not None:
-        clauses.append("camera_id = ?")
+        clauses.append("rows.camera_id = ?")
         values.append(query.camera_id)
         index_name = "clip_listing_camera_order_idx"
     if query.event_type is not None:
-        clauses.append("event_facet = ?")
+        clauses.append("rows.event_facet = ?")
         values.append(query.event_type)
         index_name = (
             "clip_listing_camera_facet_order_idx"
@@ -50,7 +54,7 @@ def build_page_statements(generation: int, query: ClipListQuery) -> PageStatemen
     page_sql = (
         f"{_PAGE_COLUMNS.format(index_name=index_name)} "
         f"WHERE {' AND '.join(clauses)} "
-        "ORDER BY started_at DESC, clip_id DESC LIMIT ? OFFSET ?"
+        "ORDER BY rows.started_at DESC, rows.clip_id DESC LIMIT ? OFFSET ?"
     )
     page_values = (*values, query.limit, query.offset)
     summary_camera = query.camera_id or GLOBAL_CAMERA

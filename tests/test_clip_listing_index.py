@@ -100,6 +100,33 @@ def test_reconcile_reads_only_new_or_changed_manifests(tmp_path: Path) -> None:
     assert unchanged_path.is_file()
 
 
+def test_reconcile_backfills_sidecar_creation_and_removal_without_manifest_changes(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "clip-store"
+    manifest_path = _write_manifest(root, "clip-sidecar")
+    original_manifest = manifest_path.read_bytes()
+    original_stat = manifest_path.stat()
+    thumbnail_path = manifest_path.parent / "thumbnail.jpg"
+    index = ClipListingIndex.open(tmp_path / "catalog.sqlite3")
+    _ = index.reconcile(ClipStore(root))
+
+    thumbnail_path.write_bytes(b"thumbnail")
+    created = index.reconcile(ClipStore(root))
+    created_page = index.page(ClipListQuery(limit=48))
+    thumbnail_path.unlink()
+    removed = index.reconcile(ClipStore(root))
+    removed_page = index.page(ClipListQuery(limit=48))
+    index.close()
+
+    assert manifest_path.read_bytes() == original_manifest
+    assert manifest_path.stat().st_mtime_ns == original_stat.st_mtime_ns
+    assert created == ReconcileStats(1, 1, 1, 0, 0)
+    assert created_page.manifests[0].thumbnail_available is True
+    assert removed == ReconcileStats(1, 1, 1, 0, 0)
+    assert removed_page.manifests[0].thumbnail_available is False
+
+
 def test_reconcile_removes_rows_after_retention_deletes_media(tmp_path: Path) -> None:
     # Given: two indexed clips.
     root = tmp_path / "clip-store"

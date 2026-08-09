@@ -3,73 +3,38 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import shutil
 from collections.abc import Mapping
-from dataclasses import dataclass
 from datetime import UTC, datetime
-from enum import StrEnum
 from pathlib import Path
-from typing import Protocol, TypeAlias, final
+from typing import Final, TypeAlias, final
 
+from worker.adapters.encode.adapter_errors import ThumbnailGenerationError
+from worker.adapters.encode.thumbnail import THUMBNAIL_FILENAME, FFmpegThumbnailGenerator
+from worker.interfaces import ThumbnailGenerator
 from worker.pipeline.output.evidence.clip_identity import ClipReservation
+from worker.pipeline.output.evidence.clip_publication_types import (
+    ClipPublicationConflictError,
+    ClipPublicationMetadata,
+    PublicationBarrier,
+    PublicationStage,
+    PublishedClip,
+)
 from worker.pipeline.output.evidence.durability import fsync_directory, fsync_file
 from worker.pipeline.output.evidence.evidence_manifest import (
-    ClipManifest,
     ReadyClipManifest,
     UnavailableClipManifest,
     finalize_ready_manifest,
     unavailable_manifest,
 )
-from worker.pipeline.output.evidence.evidence_outbox_types import (
-    ClipId,
-    EdgeEventId,
-    EvidenceReasonCode,
-)
+from worker.pipeline.output.evidence.evidence_outbox_types import EvidenceReasonCode
 
 JsonValue: TypeAlias = (
     str | int | float | bool | None | list["JsonValue"] | dict[str, "JsonValue"]
 )
-
-
-class PublicationStage(StrEnum):
-    MEDIA_FSYNCED = "MEDIA_FSYNCED"
-    MEDIA_RENAMED = "MEDIA_RENAMED"
-    MANIFEST_RENAMED = "MANIFEST_RENAMED"
-
-
-class PublicationBarrier(Protocol):
-    def __call__(self, stage: PublicationStage, path: Path, /) -> None: ...
-
-
-@dataclass(frozen=True, slots=True)
-class ClipPublicationMetadata:
-    camera_id: str
-    event_refs: tuple[EdgeEventId, ...]
-    event_type: str | None
-    clip_start_at: datetime
-    clip_end_at: datetime
-    finalized_at: datetime
-    started_at: datetime
-    duration_s: float
-    encoder: str
-
-
-@dataclass(frozen=True, slots=True)
-class PublishedClip:
-    clip_id: ClipId
-    manifest: ClipManifest
-    manifest_path: Path
-    video_path: Path | None
-
-
-@dataclass(slots=True)
-class ClipPublicationConflictError(Exception):
-    clip_id: ClipId
-    detail: str
-
-    def __str__(self) -> str:
-        return f"clip {self.clip_id} publication conflict: {self.detail}"
+LOGGER: Final = logging.getLogger(__name__)
 
 
 def _no_barrier(_stage: PublicationStage, _path: Path) -> None:
@@ -84,10 +49,12 @@ class ClipPublisher:
         *,
         barrier: PublicationBarrier = _no_barrier,
         ffprobe_bin: str = "ffprobe",
+        thumbnail_generator: ThumbnailGenerator | None = None,
     ) -> None:
         self._store_dir = store_dir
         self._barrier = barrier
         self._ffprobe_bin = ffprobe_bin
+        self._thumbnail_generator = thumbnail_generator or FFmpegThumbnailGenerator()
 
     def publish_ready(
         self,
@@ -97,6 +64,25 @@ class ClipPublisher:
     ) -> PublishedClip:
         self._validate_reservation(reservation)
         video_path = self._publish_media(reservation, artifact_path)
+        try:
+            thumbnail_path = self._thumbnail_generator.generate(
+                video_path,
+                reservation.final_dir / THUMBNAIL_FILENAME,
+                metadata.duration_s,
+            )
+        except ThumbnailGenerationError as exc:
+            LOGGER.warning(
+                "clip thumbnail generation failed camera_id=%r clip_id=%r error_type=%s",
+                metadata.camera_id,
+                str(reservation.clip_id),
+                type(exc).__name__,
+                extra={
+                    "camera_id": metadata.camera_id,
+                    "clip_id": str(reservation.clip_id),
+                },
+            )
+        else:
+            self._barrier(PublicationStage.THUMBNAIL_RENAMED, thumbnail_path)
         manifest = finalize_ready_manifest(
             video_path=video_path,
             clip_id=reservation.clip_id,

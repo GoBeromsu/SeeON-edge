@@ -74,7 +74,7 @@ export function RoomDetail({ camera, onBack, onRetryConnection }: RoomDetailProp
       </div>
 
       <div className="mt-8">
-        <EventHistoryList cameraId={camera.id} onSelectClip={setSelectedClip} />
+        <EventHistoryList cameraId={camera.id} cameraLabel={camera.label} onSelectClip={setSelectedClip} />
       </div>
 
       <ClipPlayerModal clip={selectedClip} cameraLabel={camera.label} onClose={() => setSelectedClip(null)} />
