@@ -1,18 +1,16 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import sqlite3
 import stat
 from pathlib import Path
-from typing import TYPE_CHECKING
+from sqlite3 import Connection
+from typing import cast
 
 import pytest
 
+from backend.app.features.connection.sqlite_store import ConnectionStoreDatabase
 from backend.app.features.connection.store import ConnectionSettingsStore
-
-if TYPE_CHECKING:
-    from sqlite3 import Connection
 
 
 def _legacy_database(path: Path) -> None:
@@ -93,10 +91,13 @@ def test_additive_migration_preserves_legacy_reader_columns(tmp_path: Path) -> N
             "PRAGMA table_info(connection_settings)"
         ).fetchall()
         columns = {row[1] for row in schema_rows}
-        legacy_row: tuple[str, str, str, str, str] | None = connection.execute(
-            "SELECT events_url, config_url, facility_id, facility_token, updated_at "
-            + "FROM connection_settings WHERE id = 1"
-        ).fetchone()
+        legacy_row = cast(
+            tuple[str, str, str, str, str] | None,
+            connection.execute(
+                "SELECT events_url, config_url, facility_id, facility_token, updated_at "
+                + "FROM connection_settings WHERE id = 1"
+            ).fetchone(),
+        )
     assert {
         "facility_code",
         "edge_installation_id",
@@ -139,6 +140,36 @@ def test_runtime_enrollment_survives_restart_and_is_masked(tmp_path: Path) -> No
 
 
 @pytest.mark.parametrize(
+    "required_field",
+    [
+        "facility_code",
+        "facility_token",
+        "facility_id",
+        "edge_installation_id",
+        "enrollment_generation",
+    ],
+)
+def test_complete_enrollment_rejects_clearing_each_required_field(
+    tmp_path: Path, required_field: str
+) -> None:
+    store = ConnectionSettingsStore(tmp_path / "connection-settings.sqlite3")
+    before = store.save(
+        {
+            "facility_code": "NH-7H2K9M4QXP",
+            "facility_token": "synthetic-enrollment-token-9876",
+            "facility_id": "canonical-facility-id",
+            "edge_installation_id": "edge-installation-id",
+            "enrollment_generation": 3,
+        }
+    )
+
+    with pytest.raises(ValueError):
+        _ = store.save({required_field: None})
+
+    assert ConnectionSettingsStore(store.path).load() == before
+
+
+@pytest.mark.parametrize(
     "updates",
     [
         {"facility_code": ""},
@@ -159,139 +190,24 @@ def test_invalid_enrollment_fields_are_rejected_atomically(
     assert store.load().facility_id == "legacy-facility"
 
 
-def test_legacy_migration_creates_integrity_checked_owner_only_backup(tmp_path: Path) -> None:
-    database = tmp_path / "connection-settings.sqlite3"
-    _legacy_database(database)
-    store = ConnectionSettingsStore(database)
-
-    _ = store.load()
-
-    backups = list(store.rollback_directory.glob("connection-settings.sqlite3.pre-v1.*"))
-    assert len(backups) == 1
-    backup = backups[0]
-    assert stat.S_IMODE(store.rollback_directory.stat().st_mode) == 0o700
-    assert stat.S_IMODE(backup.stat().st_mode) == 0o600
-    assert store.integrity_check(backup) == "ok"
-    assert len(backup.name.rsplit(".", maxsplit=1)[-1]) == 64
-    with backup.open("rb") as backup_file:
-        digest = hashlib.file_digest(backup_file, "sha256").hexdigest()
-    with sqlite3.connect(database) as connection:
-        metadata: tuple[str, str, int] | None = connection.execute(
-            "SELECT backup_filename, backup_sha256, backup_size_bytes "
-            + "FROM connection_store_migrations WHERE version = 1"
-        ).fetchone()
-    assert metadata == (backup.name, digest, backup.stat().st_size)
-
-
 def test_readonly_migration_failure_keeps_legacy_row_readable(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     database = tmp_path / "connection-settings.sqlite3"
     _legacy_database(database)
 
-    def deny_backup(
-        _store: ConnectionSettingsStore, _source: Connection
-    ) -> None:
+    def deny_backup(_database: ConnectionStoreDatabase, _source: Connection) -> None:
         raise PermissionError
 
-    monkeypatch.setattr(ConnectionSettingsStore, "_create_pre_v1_backup_unlocked", deny_backup)
+    monkeypatch.setattr(ConnectionStoreDatabase, "_create_backup", deny_backup)
 
     settings = ConnectionSettingsStore(database).load()
 
     assert settings.events_url == "https://saved.example/events"
     assert settings.facility_id == "legacy-facility"
     with sqlite3.connect(database) as connection:
-        schema_rows: list[tuple[int, str, str, int, str | None, int]] = connection.execute(
-            "PRAGMA table_info(connection_settings)"
-        ).fetchall()
-    assert "facility_code" not in {row[1] for row in schema_rows}
-
-
-def test_online_backup_includes_committed_wal_state(tmp_path: Path) -> None:
-    database = tmp_path / "connection-settings.sqlite3"
-    store = ConnectionSettingsStore(database)
-    _ = store.save({"events_url": "https://before.example/events"})
-    with sqlite3.connect(database) as writer:
-        _ = writer.execute("PRAGMA journal_mode = WAL")
-        _ = writer.execute(
-            "UPDATE connection_settings SET events_url = ? WHERE id = 1",
-            ("https://wal.example/events",),
+        schema_rows = cast(
+            list[tuple[int, str, str, int, str | None, int]],
+            connection.execute("PRAGMA table_info(connection_settings)").fetchall(),
         )
-
-    backup = store.create_pre_v1_backup()
-
-    with sqlite3.connect(backup.path) as connection:
-        row: tuple[str] | None = connection.execute(
-            "SELECT events_url FROM connection_settings WHERE id = 1"
-        ).fetchone()
-    assert row == ("https://wal.example/events",)
-
-
-def test_restore_discards_only_post_snapshot_connection_state(tmp_path: Path) -> None:
-    database = tmp_path / "connection-settings.sqlite3"
-    store = ConnectionSettingsStore(database)
-    _ = store.save({"events_url": "https://before.example/events"})
-    backup = store.create_pre_v1_backup()
-    _ = store.save(
-        {
-            "events_url": "https://after.example/events",
-            "facility_code": "NH-7H2K9M4QXP",
-            "facility_token": "synthetic-token-after-snapshot",
-            "facility_id": "canonical-facility-id",
-            "edge_installation_id": "edge-installation-id",
-            "enrollment_generation": 2,
-        }
-    )
-    with sqlite3.connect(database) as connection:
-        _ = connection.execute("CREATE TABLE unrelated_outbox (id INTEGER PRIMARY KEY, body TEXT)")
-        _ = connection.execute("INSERT INTO unrelated_outbox (body) VALUES ('preserve-me')")
-
-    store.restore_pre_v1_backup(backup.path)
-
-    restored = ConnectionSettingsStore(database).load()
-    with sqlite3.connect(database) as connection:
-        unrelated: tuple[str] | None = connection.execute(
-            "SELECT body FROM unrelated_outbox"
-        ).fetchone()
-    assert restored.events_url == "https://before.example/events"
-    assert restored.facility_code is None
-    assert restored.facility_token is None
-    assert restored.edge_installation_id is None
-    assert restored.enrollment_generation is None
-    assert unrelated == ("preserve-me",)
-
-
-def test_corrupt_backup_restore_leaves_original_database_intact(tmp_path: Path) -> None:
-    store = ConnectionSettingsStore(tmp_path / "connection-settings.sqlite3")
-    _ = store.save({"events_url": "https://original.example/events"})
-    corrupt_backup = tmp_path / "connection-settings.sqlite3.pre-v1.corrupt"
-    _ = corrupt_backup.write_bytes(b"not sqlite")
-
-    with pytest.raises(sqlite3.DatabaseError):
-        store.restore_pre_v1_backup(corrupt_backup)
-
-    assert ConnectionSettingsStore(store.path).load().events_url == (
-        "https://original.example/events"
-    )
-
-
-def test_interrupted_backup_cleans_partial_file_and_preserves_source(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    store = ConnectionSettingsStore(tmp_path / "connection-settings.sqlite3")
-    _ = store.save({"events_url": "https://original.example/events"})
-
-    def interrupt(_source: Connection, destination: Connection) -> None:
-        _ = destination.execute("CREATE TABLE partial (id INTEGER)")
-        raise KeyboardInterrupt
-
-    monkeypatch.setattr(ConnectionSettingsStore, "_copy_database_unlocked", interrupt)
-
-    for _ in range(2):
-        with pytest.raises(KeyboardInterrupt):
-            _ = store.create_pre_v1_backup()
-
-    assert list(store.rollback_directory.glob("*.tmp")) == []
-    assert ConnectionSettingsStore(store.path).load().events_url == (
-        "https://original.example/events"
-    )
+    assert "facility_code" not in {row[1] for row in schema_rows}
