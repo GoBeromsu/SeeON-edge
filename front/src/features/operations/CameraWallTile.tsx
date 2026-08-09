@@ -1,7 +1,5 @@
-import { useEffect, useState } from 'react';
-import { getCameraStreamUrl, type Camera } from '@/shared/api/client';
+import type { Camera } from '@/shared/api/client';
 import type { SnapshotEntry, SnapshotQueue } from '@/features/operations/SnapshotQueue';
-import { useMjpegStream } from '@/features/operations/useMjpegStream';
 
 type CameraWallTileProps = {
   camera: Camera;
@@ -10,46 +8,17 @@ type CameraWallTileProps = {
   onSelect: () => void;
 };
 
-/** Tracks whether `node` is at least partially in the viewport; `false` until IntersectionObserver
- * confirms visibility (jsdom/older browsers without IntersectionObserver stream unconditionally). */
-function useIsTileVisible(node: HTMLElement | null): boolean {
-  const [visible, setVisible] = useState(typeof IntersectionObserver === 'undefined');
-
-  useEffect(() => {
-    if (!node || typeof IntersectionObserver === 'undefined') return undefined;
-    const observer = new IntersectionObserver(
-      ([entry]) => setVisible(entry?.isIntersecting ?? false),
-      { threshold: 0.1 },
-    );
-    observer.observe(node);
-    return () => observer.disconnect();
-  }, [node]);
-
-  return visible;
-}
-
 /**
- * 16:9 object-cover tile. Online + visible tiles stream live MJPEG via `fetch`+`<canvas>` (issue
- * #82 — the wall must look like playing video, not a 5s snapshot poll); offscreen tiles fall back
- * to the SnapshotQueue snapshot to save bandwidth, and any tile also falls back to the snapshot
- * while the stream is stalled — no frame for a few seconds — and reconnecting (issue #83). Offline
- * tiles are unchanged (gray placeholder).
+ * 16:9 object-cover tile. Each active online identity displays one queued snapshot without opening
+ * a live stream; offline tiles retain the gray placeholder.
  */
 export function CameraWallTile({ camera, snapshot, queue, onSelect }: CameraWallTileProps): JSX.Element {
   const online = camera.status === 'online';
-  const [tileNode, setTileNode] = useState<HTMLButtonElement | null>(null);
-  const isVisible = useIsTileVisible(tileNode);
-  const streamActive = online && isVisible;
-  const stream = useMjpegStream(streamActive ? getCameraStreamUrl(camera.id) : null);
-  const showingStream = streamActive && stream.status === 'live';
-
-  const snapshotStale = !showingStream && (snapshot?.state === 'error' || snapshot?.state === 'stale') && !!snapshot?.lastLoadedUrl;
-  const showDisconnectedBadge = (streamActive && stream.status === 'stalled') || snapshotStale;
+  const showDisconnectedBadge = (snapshot?.state === 'error' || snapshot?.state === 'stale') && !!snapshot.lastLoadedUrl;
 
   return (
     <button
       type="button"
-      ref={setTileNode}
       onClick={onSelect}
       aria-label={`${camera.label} 열기`}
       data-camera-id={camera.id}
@@ -69,14 +38,6 @@ export function CameraWallTile({ camera, snapshot, queue, onSelect }: CameraWall
               {snapshot?.state === 'error' ? '영상을 불러올 수 없습니다' : '불러오는 중…'}
             </span>
           )}
-          {streamActive ? (
-            <canvas
-              ref={stream.canvasRef}
-              role="img"
-              aria-label={`${camera.label} 실시간 영상`}
-              className={`absolute inset-0 h-full w-full object-cover ${showingStream ? '' : 'opacity-0'}`}
-            />
-          ) : null}
           {snapshot?.requestUrl ? (
             <img
               src={snapshot.requestUrl}

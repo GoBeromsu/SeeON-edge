@@ -42,13 +42,6 @@ export function countCamerasByLiveness(cameras: readonly Camera[]): { online: nu
   return { online, offline: cameras.length - online };
 }
 
-/** Spreads concurrent snapshot polls across the 5s refresh window instead of bursting together. */
-export function snapshotJitterMs(cameraId: string): number {
-  let hash = 0;
-  for (const character of cameraId) hash = (hash * 31 + character.codePointAt(0)!) >>> 0;
-  return hash % 1_000;
-}
-
 // Canonical `event_type` strings are "bed-exit" and "fall" (contracts/event.py — see
 // features/events/eventTypes.ts, which documents the same contract for the events page).
 const EVENT_TYPE_LABELS: Record<string, string> = {

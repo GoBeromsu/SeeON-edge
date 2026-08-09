@@ -1,5 +1,5 @@
 import { useMemo } from 'react';
-import { countCamerasByLiveness, filterCamerasByFloor, listFloors } from '@/features/operations/operationsModel';
+import { countCamerasByLiveness, filterCamerasByFloor, isCameraOnline, listFloors } from '@/features/operations/operationsModel';
 import { CameraWallTile } from '@/features/operations/CameraWallTile';
 import { useSnapshotQueue } from '@/features/operations/useSnapshotQueue';
 import { getPageLabel } from '@/shared/ui/NavBar';
@@ -23,8 +23,9 @@ export function CameraWall({ status, cameras, floor, onFloorChange, onSelectCame
   const allCameras = cameras ?? [];
   const floors = useMemo(() => listFloors(allCameras), [allCameras]);
   const visible = useMemo(() => filterCamerasByFloor(allCameras, floor), [allCameras, floor]);
+  const onlineVisible = useMemo(() => visible.filter(isCameraOnline), [visible]);
   const { online, offline } = useMemo(() => countCamerasByLiveness(allCameras), [allCameras]);
-  const { entries, queue } = useSnapshotQueue(visible, status === 'success');
+  const { entries, queue } = useSnapshotQueue(onlineVisible, status === 'success');
 
   return (
     <section aria-label="카메라 월">

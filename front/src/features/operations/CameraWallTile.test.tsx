@@ -30,103 +30,21 @@ const loadedSnapshot: SnapshotEntry = {
   lastLoadedAt: Date.now(),
 };
 
-type IOEntry = { target: Element; isIntersecting: boolean };
-
-class MockIntersectionObserver {
-  callback: (entries: IOEntry[]) => void;
-  elements = new Set<Element>();
-  constructor(callback: (entries: IOEntry[]) => void) {
-    this.callback = callback;
-    ioInstances.push(this);
-  }
-  observe(el: Element): void { this.elements.add(el); }
-  unobserve(el: Element): void { this.elements.delete(el); }
-  disconnect(): void { this.elements.clear(); }
-}
-
-let ioInstances: MockIntersectionObserver[] = [];
-
-function setIntersecting(target: Element, isIntersecting: boolean): void {
-  for (const instance of ioInstances) {
-    if (instance.elements.has(target)) {
-      act(() => instance.callback([{ target, isIntersecting }]));
-    }
-  }
-}
-
-/** worker `_mjpeg_http.py:364-371` `_write_part` 의 와이어 포맷 그대로 파트 하나를 만든다. */
-function encodePart(jpeg: Uint8Array<ArrayBuffer>, boundary = 'frame'): Uint8Array<ArrayBuffer> {
-  const header = new TextEncoder().encode(`--${boundary}\r\nContent-Type: image/jpeg\r\nContent-Length: ${jpeg.length}\r\n\r\n`);
-  const trailer = new TextEncoder().encode('\r\n');
-  const out = new Uint8Array(header.length + jpeg.length + trailer.length);
-  out.set(header, 0);
-  out.set(jpeg, header.length);
-  out.set(trailer, header.length + jpeg.length);
-  return out;
-}
-
-type ReadResult = { done: boolean; value?: Uint8Array };
-
-/** `push` 를 호출하기 전까지는 `read()` 가 계속 대기한다 -- 스톨을 흉내 내는 데 필요하다. */
-function createControllableReader(): { reader: { read: () => Promise<ReadResult>; cancel: ReturnType<typeof vi.fn> }; push: (chunk: Uint8Array) => void } {
-  const pendingResolvers: Array<(result: ReadResult) => void> = [];
-  const queued: ReadResult[] = [];
-  const reader = {
-    read: (): Promise<ReadResult> => new Promise((resolve) => {
-      const next = queued.shift();
-      if (next) { resolve(next); return; }
-      pendingResolvers.push(resolve);
-    }),
-    cancel: vi.fn(async () => undefined),
-  };
-  const deliver = (result: ReadResult): void => {
-    const resolve = pendingResolvers.shift();
-    if (resolve) resolve(result); else queued.push(result);
-  };
-  return { reader, push: (chunk) => deliver({ done: false, value: chunk }) };
-}
-
-function stubStreamingFetch(): ReturnType<typeof createControllableReader>[] {
-  const streams: ReturnType<typeof createControllableReader>[] = [];
-  vi.stubGlobal('fetch', vi.fn(() => {
-    const controllable = createControllableReader();
-    streams.push(controllable);
-    return Promise.resolve({
-      ok: true,
-      status: 200,
-      headers: { get: () => 'multipart/x-mixed-replace; boundary=frame' },
-      body: { getReader: () => controllable.reader },
-    });
-  }));
-  return streams;
-}
-
-async function flushMicrotasks(times = 3): Promise<void> {
-  for (let i = 0; i < times; i += 1) {
-    // eslint-disable-next-line no-await-in-loop
-    await act(async () => { await Promise.resolve(); });
-  }
-}
-
-function render(camera: Camera, snapshot: SnapshotEntry | undefined = undefined): { host: HTMLDivElement; root: Root } {
+function render(camera: Camera, snapshot: SnapshotEntry | undefined = undefined): { host: HTMLDivElement; root: Root; queue: SnapshotQueue } {
   const host = document.createElement('div');
   document.body.append(host);
   const root = createRoot(host);
   const queue = new SnapshotQueue(() => '');
   act(() => root.render(<CameraWallTile camera={camera} snapshot={snapshot} queue={queue} onSelect={vi.fn()} />));
-  return { host, root };
+  return { host, root, queue };
 }
 
 beforeEach(() => {
-  ioInstances = [];
-  vi.useFakeTimers();
-  vi.stubGlobal('IntersectionObserver', MockIntersectionObserver);
-  vi.stubGlobal('createImageBitmap', vi.fn(async () => ({ width: 4, height: 4, close: vi.fn() })));
+  vi.stubGlobal('fetch', vi.fn());
 });
 
 afterEach(() => {
   document.body.innerHTML = '';
-  vi.useRealTimers();
   vi.unstubAllGlobals();
 });
 
@@ -155,47 +73,37 @@ describe('CameraWallTile', () => {
     expect(placeholders.length).toBe(0);
   });
 
-  it('does not mount the live MJPEG stream while the tile is offscreen, keeping the snapshot fallback', () => {
+  it('uses the loaded snapshot without opening an MJPEG stream for an online wall tile', () => {
+    // Given an online tile with one loaded snapshot.
     const { host } = render(onlineCamera, loadedSnapshot);
 
+    // When the wall tile renders in the active wall.
+    const tile = host.querySelector('button');
+
+    // Then it remains an accessible snapshot tile and never starts live media.
+    expect(tile?.getAttribute('aria-label')).toBe('101호 열기');
     expect(host.querySelector('canvas[aria-label="101호 실시간 영상"]')).toBeNull();
     expect(host.querySelector('img[alt="101호 최근 영상"]')).not.toBeNull();
+    expect(globalThis.fetch).not.toHaveBeenCalled();
   });
 
-  it('mounts the live MJPEG stream once the tile becomes visible, and reveals it once the first frame arrives', async () => {
-    const streams = stubStreamingFetch();
-    const { host } = render(onlineCamera, loadedSnapshot);
-    const target = host.querySelector('button') as Element;
-    setIntersecting(target, true);
+  it('renders the loading state before the one snapshot settles', () => {
+    // Given an online camera before a snapshot has loaded.
+    const loading = render(onlineCamera);
 
-    const streamCanvas = host.querySelector('canvas[aria-label="101호 실시간 영상"]') as HTMLCanvasElement;
-    expect(streamCanvas).not.toBeNull();
-    expect(streamCanvas.className).toContain('opacity-0');
-
-    await flushMicrotasks();
-    streams[0].push(encodePart(new Uint8Array([1, 2, 3])));
-    await flushMicrotasks();
-
-    const revealedCanvas = host.querySelector('canvas[aria-label="101호 실시간 영상"]') as HTMLCanvasElement;
-    expect(revealedCanvas.className).not.toContain('opacity-0');
+    // When its snapshot state is absent.
+    // Then the stable media frame exposes the loading copy.
+    expect(loading.host.textContent).toContain('불러오는 중…');
   });
 
-  it('shows a "연결 끊김" badge and falls back to the snapshot once the stream stalls (no frame for 3s+) after being live', async () => {
-    const streams = stubStreamingFetch();
-    const { host } = render(onlineCamera, loadedSnapshot);
-    const target = host.querySelector('button') as Element;
-    setIntersecting(target, true);
+  it('renders the unavailable state when the one snapshot fails', () => {
+    // Given an online camera after its one snapshot request fails.
+    const failedSnapshot: SnapshotEntry = { ...loadedSnapshot, state: 'error', lastLoadedUrl: null };
+    const unavailable = render(onlineCamera, failedSnapshot);
 
-    await flushMicrotasks();
-    streams[0].push(encodePart(new Uint8Array([1, 2, 3])));
-    await flushMicrotasks();
-    expect(host.querySelector('[role="status"]')).toBeNull();
-
-    await act(async () => { await vi.advanceTimersByTimeAsync(3_600); });
-
-    expect(host.querySelector('[role="status"]')?.textContent).toBe('연결 끊김');
-    const stillStreamCanvas = host.querySelector('canvas[aria-label="101호 실시간 영상"]') as HTMLCanvasElement;
-    expect(stillStreamCanvas.className).toContain('opacity-0');
+    // Then the tile exposes the unavailable copy without a live fallback.
+    expect(unavailable.host.textContent).toContain('영상을 불러올 수 없습니다');
+    expect(unavailable.host.querySelector('canvas')).toBeNull();
   });
 
   it('shows a "연결 끊김" badge when the snapshot itself goes stale/error after a frame previously loaded', () => {
@@ -206,9 +114,34 @@ describe('CameraWallTile', () => {
     expect(host.querySelector('img[alt="101호 최근 영상"]')).not.toBeNull();
   });
 
-  it('does not show the "연결 끊김" badge for a healthy, loaded snapshot while offscreen', () => {
+  it('does not show the "연결 끊김" badge for a healthy, loaded snapshot', () => {
     const { host } = render(onlineCamera, loadedSnapshot);
 
     expect(host.querySelector('[role="status"]')).toBeNull();
+  });
+
+  it('resolves the single hidden snapshot request through the queue', () => {
+    // Given a tile whose one-shot snapshot request is active.
+    const pendingSnapshot: SnapshotEntry = {
+      ...loadedSnapshot,
+      state: 'loading',
+      requestUrl: '/api/v1/streams/cam-1/snapshot?refresh=0',
+      lastLoadedUrl: null,
+      lastLoadedAt: null,
+    };
+    const { host, queue } = render(onlineCamera, pendingSnapshot);
+    const resolve = vi.spyOn(queue, 'resolve');
+    const requestImage = host.querySelector('img[aria-hidden="true"]');
+
+    // When the browser finishes the snapshot image request.
+    act(() => requestImage?.dispatchEvent(new Event('load')));
+
+    // Then exactly that request identity is settled.
+    expect(resolve).toHaveBeenCalledWith(
+      'cam-1',
+      'cam-1',
+      'loaded',
+      '/api/v1/streams/cam-1/snapshot?refresh=0',
+    );
   });
 });
