@@ -57,7 +57,12 @@ the current server revision, and trigger `POST /api/v1/connection/sync-cameras`.
 The exact registry snapshot converges stable identities. Do not stamp a facility
 ID into worker config or reconstruct it from a backup filename.
 
-Run the lifecycle smoke only after the preflight receipt is green:
+Run the lifecycle smoke only after the content-addressed execution receipt is
+green. Boolean declarations are not lifecycle evidence: the receipt must contain
+sequenced successful executions for enrollment, topology, heartbeat, event/clip,
+rotation, timeout retry, ML-first rollback, roll-forward, and restart. Its fresh
+post-restart generation repeats the complete lock/updater/capacity/volume/queue/
+backup/image/env/status/schema/scope validation.
 
 ```sh
 sh scripts/ops/cloud-enrollment-smoke.sh \

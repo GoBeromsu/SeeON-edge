@@ -9,8 +9,9 @@ or infer identity from environment variables.
 Before a workflow or updater command:
 
 1. Rehash the approved plan and compare it with the dual-review draft.
-2. Read `final-rc-seal.json` and require the exact ML Git SHA plus digest-pinned
-   ML API and worker images.
+2. Verify the independently recorded SHA-256 of `final-rc-seal.json`, then require
+   its exact repository identity, commit tree, ML Git SHA, image IDs, platforms,
+   and digest-pinned ML API/worker images with matching OCI provenance labels.
 3. Confirm the task worktree is clean and at the sealed SHA.
 4. Run all ML gates, both Docker builds, all five operational fixtures, review,
    security review, and the integration harness against that exact SHA.
@@ -48,8 +49,10 @@ sh scripts/ops/cloud-enrollment-smoke.sh --fixture --dry-run
 Builds are:
 
 ```sh
-docker build -f Dockerfile.backend -t "local/ml-api:$SEALED_ML_SHA" .
+docker build -f Dockerfile.backend --build-arg "SOURCE_REVISION=$SEALED_ML_SHA" \
+  -t "local/ml-api:$SEALED_ML_SHA" .
 docker build --platform linux/amd64 -f Dockerfile.edge \
+  --build-arg "SOURCE_REVISION=$SEALED_ML_SHA" \
   -t "local/ml-worker:$SEALED_ML_SHA" .
 ```
 
@@ -63,15 +66,20 @@ down -v`, edit Python on the host, or place enrollment identity in the env file.
 
 ```sh
 export EDGE_PROVISIONING_KNOWN_HOSTS=/secure/pointers/happy-known-hosts
+export EDGE_PROVISIONING_KNOWN_HOST_FINGERPRINT='<independently recorded SHA256 fingerprint>'
 export EDGE_PROVISIONING_MACHINE_BASELINE="$EVIDENCE/happy-machine-id.sha256"
 export EDGE_PROVISIONING_EDGE_READBACK="$EVIDENCE/edge-preflight-readback.json"
+export EDGE_PROVISIONING_EDGE_READBACK_SHA256='<independently recorded receipt digest>'
 sh scripts/ops/cloud-enrollment-smoke.sh \
   --host happy-nursing-home-raw --deploy --restart-check
 ```
 
-The wrapper verifies the approved-plan/seal/readback gates before invoking the
-existing updater. Enrollment then occurs through local versioned connection
-APIs, never through env mutation.
+The wrapper verifies independently anchored plan, seal, host-key, and execution
+receipt bytes before invoking the updater. After both services restart it parses
+the actual `/api/v1/status` and `/api/v1/system` schemas, verifies running image
+references, scans rendered Compose for facility identity residue, and revalidates
+the complete post-restart state. Enrollment then occurs through local versioned
+connection APIs, never through env mutation.
 
 ## Runtime enrollment and topology
 
