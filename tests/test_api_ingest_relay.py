@@ -134,6 +134,27 @@ def test_relay_alert_rejects_missing_token() -> None:
     assert response.status_code == 401
 
 
+def test_unenrolled_runtime_refuses_cloud_egress_with_nonsecret_status() -> None:
+    app = create_app(lifespan=no_lifespan)
+    app.state.edge_relay_token = "relay-token"
+    app.state.camera_inventory = {
+        "camera-1": {
+            "camera_id": "camera-1",
+            "facility_id": "facility-1",
+            "resident_id": None,
+        }
+    }
+
+    response = TestClient(app).post(
+        "/api/v1/relay/alerts",
+        json=_alert_payload(),
+        headers={"X-Edge-Relay-Token": "relay-token"},
+    )
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == "backend enrollment is required"
+
+
 def test_relay_alert_rejects_wrong_token() -> None:
     response = _client().post(
         "/api/v1/relay/alerts",

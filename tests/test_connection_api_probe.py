@@ -5,163 +5,62 @@ from pathlib import Path
 
 import pytest
 
+from backend.app.features.connection.store import API_BACKEND_BASE_URL_ENV
 from tests_support.connection_api import (
-    AuthFailHandler,
-    HangHandler,
-    OKHandler,
-    closed_port,
+    EnrollmentVerifyHandler,
     connection_client,
-    connection_store,
     login,
     response_json,
     run_server,
 )
 from tests_support.connection_api import clear_env as clear_env
 
+_PAYLOAD = {
+    "facility_code": "NH-7H2K9M4QXP",
+    "facility_token": "eft_v1.test.secret",
+    "client_installation_ref": "aa83ea3f-6e5f-4f45-a401-fb36c38835b6",
+}
 
-def test_connection_test_ok(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    OKHandler.received_auth = []
-    server = ThreadingHTTPServer(("127.0.0.1", 0), OKHandler)
+
+def test_connection_test_verifies_without_persisting(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    EnrollmentVerifyHandler.reset()
+    server = ThreadingHTTPServer(("127.0.0.1", 0), EnrollmentVerifyHandler)
     thread = run_server(server)
     try:
+        monkeypatch.setenv(API_BACKEND_BASE_URL_ENV, f"http://127.0.0.1:{server.server_port}")
         client = connection_client(tmp_path, monkeypatch)
         login(client)
-        response = client.post(
-            "/api/v1/connection/test",
-            json={
-                "config_url": f"http://127.0.0.1:{server.server_port}",
-                "facility_id": "facility-1",
-                "facility_token": "tok-1",
-            },
-        )
+
+        response = client.post("/api/v1/connection/test", json=_PAYLOAD)
+
         assert response.status_code == 200
         body = response_json(response)
         assert body["ok"] is True
-        assert body["error_class"] is None
-        assert body["probed_url"] == f"http://127.0.0.1:{server.server_port}/facility-1"
-        assert OKHandler.received_auth == ["Bearer tok-1"]
+        assert body["facility_id"] == "87d79f24-b32f-49a3-b534-19f0af7d9135"
+        assert client.get("/api/v1/connection").json()["enrolled"] is False
     finally:
         server.shutdown()
         thread.join(timeout=1.0)
 
 
-def test_connection_test_auth_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    server = ThreadingHTTPServer(("127.0.0.1", 0), AuthFailHandler)
-    thread = run_server(server)
-    try:
-        client = connection_client(tmp_path, monkeypatch)
-        login(client)
-        response = client.post(
-            "/api/v1/connection/test",
-            json={
-                "config_url": f"http://127.0.0.1:{server.server_port}",
-                "facility_id": "facility-1",
-                "facility_token": "wrong-secret-token",
-            },
-        )
-        assert response.status_code == 200
-        body = response_json(response)
-        assert body["ok"] is False
-        assert body["error_class"] == "auth"
-        assert "wrong-secret-token" not in response.text
-    finally:
-        server.shutdown()
-        thread.join(timeout=1.0)
-
-
-def test_connection_test_unreachable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    port = closed_port()
-    client = connection_client(tmp_path, monkeypatch)
-    login(client)
-    response = client.post(
-        "/api/v1/connection/test",
-        json={"config_url": f"http://127.0.0.1:{port}", "facility_id": "facility-1"},
-    )
-    assert response.status_code == 200
-    body = response_json(response)
-    assert body["ok"] is False
-    assert body["error_class"] == "unreachable"
-
-
-def test_connection_test_timeout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    server = ThreadingHTTPServer(("127.0.0.1", 0), HangHandler)
-    thread = run_server(server)
-    try:
-        client = connection_client(tmp_path, monkeypatch, test_timeout_s=0.2)
-        login(client)
-        response = client.post(
-            "/api/v1/connection/test",
-            json={
-                "config_url": f"http://127.0.0.1:{server.server_port}",
-                "facility_id": "facility-1",
-            },
-        )
-        assert response.status_code == 200
-        body = response_json(response)
-        assert body["ok"] is False
-        assert body["error_class"] == "timeout"
-    finally:
-        server.shutdown()
-        thread.join(timeout=1.0)
-
-
-def test_connection_test_unconfigured_with_empty_settings(
+def test_connection_test_requires_auth(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    client = connection_client(tmp_path, monkeypatch)
-    login(client)
-    response = client.post("/api/v1/connection/test", json={})
-    assert response.status_code == 200
-    body = response_json(response)
-    assert body["ok"] is False
-    assert body["error_class"] == "unconfigured"
-    assert body["probed_url"] is None
-
-
-def test_connection_test_requires_auth(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    client = connection_client(tmp_path, monkeypatch)
-    response = client.post("/api/v1/connection/test", json={})
+    response = connection_client(tmp_path, monkeypatch).post(
+        "/api/v1/connection/test", json=_PAYLOAD
+    )
     assert response.status_code == 401
 
 
-def test_connection_test_body_override_is_not_persisted(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    server = ThreadingHTTPServer(("127.0.0.1", 0), OKHandler)
-    thread = run_server(server)
-    try:
-        store = connection_store(tmp_path, monkeypatch)
-        _ = store.save(
-            {
-                "config_url": "http://saved.example/config",
-                "facility_id": "saved-facility",
-            }
-        )
-        client = connection_client(tmp_path, monkeypatch)
-        login(client)
-        response = client.post(
-            "/api/v1/connection/test",
-            json={
-                "config_url": f"http://127.0.0.1:{server.server_port}",
-                "facility_id": "facility-1",
-            },
-        )
-        assert response_json(response)["ok"] is True
-        unchanged = store.load()
-        assert unchanged.config_url == "http://saved.example/config"
-        assert unchanged.facility_id == "saved-facility"
-    finally:
-        server.shutdown()
-        thread.join(timeout=1.0)
-
-
-def test_connection_test_malformed_body_url_is_422(
+def test_connection_test_rejects_legacy_url_fields(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     client = connection_client(tmp_path, monkeypatch)
     login(client)
     response = client.post(
         "/api/v1/connection/test",
-        json={"config_url": "not-a-url", "facility_id": "facility-1"},
+        json={**_PAYLOAD, "config_url": "http://attacker.invalid"},
     )
     assert response.status_code == 422

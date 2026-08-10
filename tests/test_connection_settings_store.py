@@ -15,8 +15,6 @@ from backend.app.features.connection.store import (
 from backend.app.lifespan import (
     API_BACKEND_CONFIG_URL_ENV,
     API_BACKEND_EVENTS_URL_ENV,
-    API_FACILITY_ID_ENV,
-    EDGE_FACILITY_TOKEN_ENV,
 )
 
 
@@ -26,8 +24,8 @@ def clear_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
         API_CONNECTION_SETTINGS_PATH_ENV,
         API_BACKEND_EVENTS_URL_ENV,
         API_BACKEND_CONFIG_URL_ENV,
-        API_FACILITY_ID_ENV,
-        EDGE_FACILITY_TOKEN_ENV,
+        "API_FACILITY_ID",
+        "EDGE_FACILITY_TOKEN",
         API_BACKEND_BASE_URL_ENV,
     ):
         monkeypatch.delenv(name, raising=False)
@@ -71,8 +69,8 @@ class TestLoadPrecedence:
     ) -> None:
         monkeypatch.setenv(API_BACKEND_EVENTS_URL_ENV, "https://backend.example/events")
         monkeypatch.setenv(API_BACKEND_CONFIG_URL_ENV, "https://backend.example/ml-config")
-        monkeypatch.setenv(API_FACILITY_ID_ENV, "facility-42")
-        monkeypatch.setenv(EDGE_FACILITY_TOKEN_ENV, "supersecrettoken")
+        monkeypatch.setenv("API_FACILITY_ID", "facility-42")
+        monkeypatch.setenv("EDGE_FACILITY_TOKEN", "supersecrettoken")
 
         settings = _store(tmp_path).load()
 
@@ -86,7 +84,7 @@ class TestLoadPrecedence:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setenv(API_BACKEND_EVENTS_URL_ENV, "https://env.example/events")
-        monkeypatch.setenv(EDGE_FACILITY_TOKEN_ENV, "env-token")
+        monkeypatch.setenv("EDGE_FACILITY_TOKEN", "env-token")
         store = _store(tmp_path)
 
         _ = store.save(
@@ -105,10 +103,28 @@ class TestLoadPrecedence:
 
         assert reloaded.facility_id == "facility-1"
 
+    def test_complete_enrollment_persists_client_ref_across_restart(self, tmp_path: Path) -> None:
+        path = tmp_path / "connection_settings.sqlite3"
+        ConnectionSettingsStore(path).save(
+            {
+                "facility_code": "NH-7H2K9M4QXP",
+                "client_installation_ref": "aa83ea3f-6e5f-4f45-a401-fb36c38835b6",
+                "facility_id": "87d79f24-b32f-49a3-b534-19f0af7d9135",
+                "facility_token": "stored-token",
+                "edge_installation_id": "d17e0eb8-cb81-4d8e-a427-dfe690518f2b",
+                "enrollment_generation": 3,
+            }
+        )
+
+        reloaded = ConnectionSettingsStore(path).load()
+
+        assert reloaded.client_installation_ref == "aa83ea3f-6e5f-4f45-a401-fb36c38835b6"
+        assert reloaded.enrollment_generation == 3
+
     def test_unsaved_identity_does_not_fall_back_to_env_after_a_save(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.setenv(API_FACILITY_ID_ENV, "facility-from-env")
+        monkeypatch.setenv("API_FACILITY_ID", "facility-from-env")
         store = _store(tmp_path)
 
         _ = store.save({"events_url": "https://saved.example/events"})
@@ -188,7 +204,7 @@ class TestSavePartialUpdate:
     def test_explicit_none_clears_a_saved_field(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.setenv(API_FACILITY_ID_ENV, "facility-from-env")
+        monkeypatch.setenv("API_FACILITY_ID", "facility-from-env")
         store = _store(tmp_path)
         _ = store.save({"facility_id": "facility-saved"})
 

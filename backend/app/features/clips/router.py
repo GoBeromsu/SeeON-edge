@@ -28,6 +28,7 @@ from backend.app.features.clips.schemas import (
     ListClipsResponse,
 )
 from backend.app.features.clips.store import ClipManifest, ClipStore, LabelRecord, LabelStore
+from backend.app.shared.backend_client_bundle import backend_client_bundle
 from backend.app.shared.dashboard_auth import authorize_dashboard
 
 router = APIRouter(tags=["clips"])
@@ -81,7 +82,12 @@ def list_clips(
         ),
         event_type_counts=dict(page.event_type_counts),
     )
-    _ = _audit_store(request).append(actor=actor, action="list", clip_id=AUDIT_NO_CLIP_ID)
+    _ = _audit_store(request).append(
+        actor=actor,
+        action="list",
+        clip_id=AUDIT_NO_CLIP_ID,
+        backend_token=_backend_token(request),
+    )
     return response
 
 
@@ -118,6 +124,7 @@ def get_clip_metadata(
         actor=actor,
         action="metadata-view",
         clip_id=manifest.clip_id,
+        backend_token=_backend_token(request),
     )
     return response
 
@@ -145,7 +152,12 @@ def clip_video(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="clip video not found",
         ) from exc
-    _audit_store(request).append(actor=actor, action="play", clip_id=manifest.clip_id)
+    _audit_store(request).append(
+        actor=actor,
+        action="play",
+        clip_id=manifest.clip_id,
+        backend_token=_backend_token(request),
+    )
     return FileResponse(video_path, media_type=_media_type(video_path.name))
 
 
@@ -171,8 +183,14 @@ def label_clip(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="label store unavailable",
         )
-    post_backend_backup("clip_label", record.as_response())
-    _audit_store(request).append(actor=reviewer, action="label", clip_id=manifest.clip_id)
+    backend_token = _backend_token(request)
+    post_backend_backup("clip_label", record.as_response(), backend_token=backend_token)
+    _audit_store(request).append(
+        actor=reviewer,
+        action="label",
+        clip_id=manifest.clip_id,
+        backend_token=backend_token,
+    )
     return record.as_response()
 
 
@@ -187,7 +205,12 @@ def list_audit(
     # the log state prior to this request, matching how "play"/"label" audit
     # entries never appear until after their triggering action completes.
     entries = store.list_entries()
-    store.append(actor=actor, action="audit-view", clip_id=AUDIT_NO_CLIP_ID)
+    store.append(
+        actor=actor,
+        action="audit-view",
+        clip_id=AUDIT_NO_CLIP_ID,
+        backend_token=_backend_token(request),
+    )
     return {"entries": entries}
 
 
@@ -229,6 +252,11 @@ def _audit_store(request: Request) -> AuditLogStore:
         store = AuditLogStore.from_env()
         request.app.state.clip_audit_log = store
     return store
+
+
+def _backend_token(request: Request) -> str | None:
+    bundle = backend_client_bundle(request.app)
+    return None if bundle is None else bundle.facility_token
 
 
 def _authorize(

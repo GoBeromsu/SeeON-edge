@@ -33,6 +33,7 @@ class ConnectionSettings:
     facility_token: str | None = field(repr=False)
     updated_at: str | None
     facility_code: str | None = None
+    client_installation_ref: str | None = None
     edge_installation_id: str | None = None
     enrollment_generation: int | None = None
     enrollment_created_at: str | None = None
@@ -99,6 +100,7 @@ class ConnectionSettingsStore:
             facility_token=_text(saved["facility_token"]),
             updated_at=_text(saved["updated_at"]),
             facility_code=_text(saved["facility_code"]),
+            client_installation_ref=_text(saved["client_installation_ref"]),
             edge_installation_id=_text(saved["edge_installation_id"]),
             enrollment_generation=_positive_int(saved["enrollment_generation"]),
             enrollment_created_at=_text(saved["enrollment_created_at"]),
@@ -152,7 +154,13 @@ def _validate_updates(updates: Mapping[str, ConnectionValue]) -> None:
             field_name=", ".join(sorted(unknown)),
             reason="unknown connection setting field(s)",
         )
-    for field_name in ("facility_code", "facility_id", "facility_token", "edge_installation_id"):
+    for field_name in (
+        "facility_code",
+        "client_installation_ref",
+        "facility_id",
+        "facility_token",
+        "edge_installation_id",
+    ):
         value = updates.get(field_name)
         invalid_text = value is not None and (
             not isinstance(value, str) or not value.strip()

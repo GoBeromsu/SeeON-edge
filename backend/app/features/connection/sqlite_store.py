@@ -17,20 +17,23 @@ DatabaseRow: TypeAlias = tuple[ConnectionValue, ...]
 SchemaRow: TypeAlias = tuple[int, str, str, int, str | None, int]
 
 SAVE_FIELDS: Final = (
-    "events_url", "config_url", "facility_code", "facility_id", "facility_token",
+    "events_url", "config_url", "facility_code", "client_installation_ref",
+    "facility_id", "facility_token",
     "edge_installation_id", "enrollment_generation",
 )
 COLUMNS: Final = (*SAVE_FIELDS, "enrollment_created_at", "enrollment_updated_at", "updated_at")
-ENROLLMENT_MARKER_FIELDS: Final = ("facility_code", "edge_installation_id", "enrollment_generation")
+ENROLLMENT_MARKER_FIELDS: Final = (
+    "facility_code", "client_installation_ref", "edge_installation_id",
+    "enrollment_generation",
+)
 REQUIRED_ENROLLMENT_FIELDS: Final = (
-    "facility_code", "facility_token", "facility_id",
+    "facility_code", "client_installation_ref", "facility_token", "facility_id",
     "edge_installation_id", "enrollment_generation",
 )
-_MIGRATION_VERSION: Final = 1
 _SCHEMA_SQL: Final = """CREATE TABLE IF NOT EXISTS connection_settings (
     id INTEGER PRIMARY KEY CHECK (id = 1),
     events_url TEXT, config_url TEXT, facility_id TEXT, facility_token TEXT, updated_at TEXT,
-    facility_code TEXT, edge_installation_id TEXT,
+    facility_code TEXT, client_installation_ref TEXT, edge_installation_id TEXT,
     enrollment_generation INTEGER CHECK (enrollment_generation > 0),
     enrollment_created_at TEXT, enrollment_updated_at TEXT
 ) STRICT"""
@@ -45,6 +48,9 @@ _ALTER_STATEMENTS: Final = (
     + "CHECK (enrollment_generation > 0)",
     "ALTER TABLE connection_settings ADD COLUMN enrollment_created_at TEXT",
     "ALTER TABLE connection_settings ADD COLUMN enrollment_updated_at TEXT",
+)
+_CLIENT_REF_ALTER: Final = (
+    "ALTER TABLE connection_settings ADD COLUMN client_installation_ref TEXT"
 )
 _LEGACY_COLUMNS: Final = ("events_url", "config_url", "facility_id", "facility_token", "updated_at")
 
@@ -134,27 +140,39 @@ class ConnectionStoreDatabase:
         )
         if table_exists is None:
             _ = connection.execute(_SCHEMA_SQL)
-            self._record_migration(connection, None)
+            self._record_migration(connection, 1, "runtime-facility-enrollment", None)
             connection.commit()
             return
         schema_rows = cast(
             list[SchemaRow],
             connection.execute("PRAGMA table_info(connection_settings)").fetchall(),
         )
-        v1_columns = set(ENROLLMENT_MARKER_FIELDS) | {
+        v1_columns = {"facility_code", "edge_installation_id", "enrollment_generation"} | {
             "enrollment_created_at", "enrollment_updated_at",
         }
-        if v1_columns <= {row[1] for row in schema_rows}:
+        existing_columns = {row[1] for row in schema_rows}
+        if "client_installation_ref" in existing_columns:
             _ = connection.execute(_MIGRATION_SCHEMA_SQL)
             return
         backup = self._create_backup(connection)
         with connection:
-            for statement in _ALTER_STATEMENTS:
-                _ = connection.execute(statement)
-            self._record_migration(connection, backup)
+            if not v1_columns <= existing_columns:
+                for statement in _ALTER_STATEMENTS:
+                    _ = connection.execute(statement)
+                self._record_migration(
+                    connection, 1, "runtime-facility-enrollment", backup
+                )
+            _ = connection.execute(_CLIENT_REF_ALTER)
+            self._record_migration(
+                connection, 2, "enrollment-client-installation-ref", backup
+            )
 
     def _record_migration(
-        self, connection: sqlite3.Connection, backup: ConnectionStoreBackup | None
+        self,
+        connection: sqlite3.Connection,
+        version: int,
+        name: str,
+        backup: ConnectionStoreBackup | None,
     ) -> None:
         _ = connection.execute(_MIGRATION_SCHEMA_SQL)
         _ = connection.execute(
@@ -162,8 +180,8 @@ class ConnectionStoreDatabase:
             + "(version, name, applied_at, backup_filename, backup_sha256, backup_size_bytes) "
             + "VALUES (?, ?, ?, ?, ?, ?)",
             (
-                _MIGRATION_VERSION,
-                "runtime-facility-enrollment",
+                version,
+                name,
                 utc_now_iso(),
                 backup.path.name if backup else None,
                 backup.sha256 if backup else None,
@@ -227,8 +245,9 @@ class ConnectionStoreDatabase:
         row = cast(
             DatabaseRow | None,
             connection.execute(
-                "SELECT events_url, config_url, facility_code, facility_id, facility_token, "
-                + "edge_installation_id, enrollment_generation, enrollment_created_at, "
+                "SELECT events_url, config_url, facility_code, client_installation_ref, "
+                + "facility_id, facility_token, edge_installation_id, enrollment_generation, "
+                + "enrollment_created_at, "
                 + "enrollment_updated_at, updated_at FROM connection_settings WHERE id = 1"
             ).fetchone(),
         )

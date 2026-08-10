@@ -17,6 +17,7 @@ from typing_extensions import override
 
 from backend.app.core.config import get_settings
 from backend.app.features.connection.store import (
+    API_BACKEND_BASE_URL_ENV,
     API_CONNECTION_SETTINGS_PATH_ENV,
     ConnectionSettingsStore,
 )
@@ -24,8 +25,6 @@ from backend.app.lifespan import (
     API_BACKEND_CONFIG_URL_ENV,
     API_BACKEND_EVENTS_URL_ENV,
     API_EDGE_RELAY_TOKEN_ENV,
-    API_FACILITY_ID_ENV,
-    EDGE_FACILITY_TOKEN_ENV,
 )
 from backend.app.main import create_app, no_lifespan
 
@@ -54,10 +53,11 @@ class ConnectionTestClient(Protocol):
 def clear_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     for name in (
         API_CONNECTION_SETTINGS_PATH_ENV,
+        API_BACKEND_BASE_URL_ENV,
         API_BACKEND_EVENTS_URL_ENV,
         API_BACKEND_CONFIG_URL_ENV,
-        API_FACILITY_ID_ENV,
-        EDGE_FACILITY_TOKEN_ENV,
+        "API_FACILITY_ID",
+        "EDGE_FACILITY_TOKEN",
         API_EDGE_RELAY_TOKEN_ENV,
         TEST_TIMEOUT_ENV,
     ):
@@ -119,6 +119,47 @@ class AuthFailHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802
         self.send_response(401)
         self.end_headers()
+
+    @override
+    def log_message(self, format: str, *args: str) -> None:
+        return
+
+
+class EnrollmentVerifyHandler(BaseHTTPRequestHandler):
+    received_auth: list[str | None] = []
+    received_paths: list[str] = []
+    received_bodies: list[dict[str, JsonValue]] = []
+    response_status = 200
+
+    def do_POST(self) -> None:  # noqa: N802
+        length = int(self.headers.get("Content-Length", "0"))
+        body = cast(dict[str, JsonValue], json.loads(self.rfile.read(length)))
+        self.__class__.received_auth.append(self.headers.get("Authorization"))
+        self.__class__.received_paths.append(self.path)
+        self.__class__.received_bodies.append(body)
+        response = {
+            "schemaVersion": 1,
+            "edgeInstallationId": "d17e0eb8-cb81-4d8e-a427-dfe690518f2b",
+            "enrollmentGeneration": 3,
+            "facility": {
+                "id": "87d79f24-b32f-49a3-b534-19f0af7d9135",
+                "displayName": "Test Facility",
+            },
+            "serverRevision": 7,
+        }
+        encoded = json.dumps(response).encode("utf-8")
+        self.send_response(self.__class__.response_status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(encoded)))
+        self.end_headers()
+        _ = self.wfile.write(encoded)
+
+    @classmethod
+    def reset(cls) -> None:
+        cls.received_auth = []
+        cls.received_paths = []
+        cls.received_bodies = []
+        cls.response_status = 200
 
     @override
     def log_message(self, format: str, *args: str) -> None:

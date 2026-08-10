@@ -94,6 +94,7 @@ def test_restore_discards_only_post_snapshot_connection_state(tmp_path: Path) ->
         {
             "events_url": "https://after.example/events",
             "facility_code": "NH-7H2K9M4QXP",
+            "client_installation_ref": "aa83ea3f-6e5f-4f45-a401-fb36c38835b6",
             "facility_token": "synthetic-token-after-snapshot",
             "facility_id": "canonical-facility-id",
             "edge_installation_id": "edge-installation-id",

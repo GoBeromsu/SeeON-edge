@@ -121,6 +121,7 @@ def test_runtime_enrollment_survives_restart_and_is_masked(tmp_path: Path) -> No
     saved = store.save(
         {
             "facility_code": "NH-7H2K9M4QXP",
+            "client_installation_ref": "aa83ea3f-6e5f-4f45-a401-fb36c38835b6",
             "facility_token": "synthetic-enrollment-token-9876",
             "facility_id": "canonical-facility-id",
             "edge_installation_id": "edge-installation-id",
@@ -143,6 +144,7 @@ def test_runtime_enrollment_survives_restart_and_is_masked(tmp_path: Path) -> No
     "required_field",
     [
         "facility_code",
+        "client_installation_ref",
         "facility_token",
         "facility_id",
         "edge_installation_id",
@@ -156,6 +158,7 @@ def test_complete_enrollment_rejects_clearing_each_required_field(
     before = store.save(
         {
             "facility_code": "NH-7H2K9M4QXP",
+            "client_installation_ref": "aa83ea3f-6e5f-4f45-a401-fb36c38835b6",
             "facility_token": "synthetic-enrollment-token-9876",
             "facility_id": "canonical-facility-id",
             "edge_installation_id": "edge-installation-id",

@@ -278,38 +278,12 @@ def _result_from_state(sync_state: RosterSyncState, *, attempted: bool) -> Roste
 
 
 def _build_mapper(app: object) -> BackendCameraMapper:
-    """Resolve endpoint/token/facility_id from ``ConnectionSettingsStore``
-    effective settings (file-over-env), not raw env directly -- lazy import
-    to avoid a circular import (store.py imports lifespan.py's env-name
-    constants at module load, same trick connection/router.py uses).
-    """
-    import os
+    from backend.app.shared.backend_client_bundle import backend_client_bundle
 
-    from backend.app.features.connection.store import ConnectionSettingsStore
-    from backend.app.shared.backend_mapping import (
-        API_BACKEND_CAMERA_MAPPING_TIMEOUT_SEC_ENV,
-        API_BACKEND_EDGE_CAMERAS_URL_ENV,
-        API_BACKEND_URL_ENV,
-        derive_edge_cameras_endpoint,
-    )
-
-    settings = ConnectionSettingsStore.from_env().load()
-    explicit = (os.environ.get(API_BACKEND_EDGE_CAMERAS_URL_ENV) or "").strip() or None
-    base = (os.environ.get(API_BACKEND_URL_ENV) or "").strip() or None
-    if explicit:
-        endpoint = explicit
-    elif base:
-        endpoint = f"{base.rstrip('/')}/api/v1/edge/cameras"
-    else:
-        endpoint = derive_edge_cameras_endpoint(settings.events_url)
-    raw_timeout = os.environ.get(API_BACKEND_CAMERA_MAPPING_TIMEOUT_SEC_ENV)
-    timeout_sec = 0.5 if raw_timeout is None else float(raw_timeout)
-    return BackendCameraMapper(
-        endpoint=endpoint,
-        token=settings.facility_token,
-        facility_id=settings.facility_id,
-        timeout_sec=timeout_sec,
-    )
+    bundle = backend_client_bundle(app)
+    if bundle is not None:
+        return bundle.camera_mapper
+    return BackendCameraMapper(endpoint=None, token=None)
 
 
 def _split_roster_payload(

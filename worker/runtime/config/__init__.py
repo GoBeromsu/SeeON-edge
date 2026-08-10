@@ -11,7 +11,6 @@ from worker.runtime.config.camera_models import (
     RelayConfig,
 )
 from worker.runtime.config.config_pull import (
-    API_FACILITY_ID_ENV,
     RELAY_TOKEN_ENV,
     RELAY_URL_ENV,
     ConfigSnapshot,
@@ -83,7 +82,6 @@ from worker.runtime.config.worker_models import (
 )
 
 __all__ = [
-    "API_FACILITY_ID_ENV",
     "CONFIG_HISTORY_RETENTION_COUNT",
     "CONFIG_VERSION_KEY",
     "EDGE_CAMERA_CONFIG_ENV",

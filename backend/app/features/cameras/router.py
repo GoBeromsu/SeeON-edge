@@ -45,7 +45,7 @@ from backend.app.features.cameras.topology import (
 from backend.app.features.clips.storage_location_store import ClipStorageLocationStore
 from backend.app.features.detection_settings.store import DetectionSettingsStore
 from backend.app.features.status.heartbeat_store import ONLINE, get_heartbeat_store
-from backend.app.lifespan import API_FACILITY_ID_ENV
+from backend.app.shared.backend_client_bundle import backend_client_bundle
 from backend.app.shared.backend_mapping import (
     BackendCameraMapper,
     MappingResult,
@@ -672,7 +672,7 @@ def worker_config_snapshot(
     request: Request, *, require_available: bool = False
 ) -> dict[str, object]:
     snapshot = _store(request.app).snapshot()
-    facility_id = _facility_id()
+    facility_id = _facility_id(request.app)
     bed_zones = _bed_zone_store(request.app).get_all()
     cameras = []
     for record in _snapshot_camera_records(snapshot):
@@ -1131,6 +1131,9 @@ def _lookup_bed_zone(
 
 
 def _mapper(app: FastAPI) -> BackendCameraMapper:
+    bundle = backend_client_bundle(app)
+    if bundle is not None:
+        return bundle.camera_mapper
     mapper = getattr(app.state, "backend_camera_mapper", None)
     if not isinstance(mapper, BackendCameraMapper):
         mapper = BackendCameraMapper.from_env()
@@ -1190,8 +1193,14 @@ def _bearer_token(value: str | None) -> str | None:
     return token or None
 
 
-def _facility_id() -> str:
-    return os.environ.get(API_FACILITY_ID_ENV, "local-facility").strip() or "local-facility"
+def _facility_id(app: FastAPI) -> str:
+    bundle = backend_client_bundle(app)
+    if bundle is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="backend enrollment is required",
+        )
+    return bundle.facility_id
 
 def _default_camera_fps() -> float | None:
     """Facility-wide processed FPS for live camera streams (worker default 5.0).

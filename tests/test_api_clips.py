@@ -2,12 +2,17 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Self
+from typing import Self, TypedDict
 
 import pytest
 from fastapi.testclient import TestClient
 
 from backend.app.features.clips.audit_log import AUDIT_NO_CLIP_ID
+from backend.app.features.connection.store import (
+    API_CONNECTION_SETTINGS_PATH_ENV,
+    ConnectionSettingsStore,
+)
+from backend.app.lifespan import apply_connection_settings
 from backend.app.main import create_app, no_lifespan
 
 # Dashboard auth now always resolves to a session store (persisted file > env
@@ -31,6 +36,14 @@ class FakeHTTPResponse:
 
     def __exit__(self, exc_type, exc, traceback) -> None:
         return None
+
+
+class BackupCall(TypedDict):
+    url: str
+    method: str
+    authorization: str | None
+    timeout: float
+    body: dict[str, object]
 
 
 def _write_manifest(
@@ -300,11 +313,8 @@ def test_label_clip_signals_degradation_when_label_store_is_unwritable(
 
     It also must not report the label as saved *elsewhere*: a failed local
     save must short-circuit before the best-effort backend backup POST and
-    before the audit log records a "label" action, or callers/auditors would
-    see evidence of a save that never actually persisted anywhere. The
-    trailing ``GET /audit`` call below still records its own "audit-view"
-    entry (see #131 audit coverage) and backs *that* up -- it is unrelated
-    to the failed label save and is asserted separately."""
+    before the audit log records a "label" action. Without an enrollment
+    bundle, the trailing ``GET /audit`` remains local and makes no cloud call."""
     clip_store = clip_env / "clip-store"
     label_store_root = clip_env / "label-store"
     _write_manifest(clip_store, "clip-1")
@@ -344,8 +354,7 @@ def test_label_clip_signals_degradation_when_label_store_is_unwritable(
     assert response.status_code == 503
     assert not (labels_dir / "clip-1.json").exists()
     assert audit.json()["entries"] == []
-    assert [call["body"]["type"] for call in backup_calls] == ["clip_audit"]
-    assert backup_calls[0]["body"]["payload"]["action"] == "audit-view"
+    assert backup_calls == []
 
 
 def test_clip_routes_require_a_dashboard_session(clip_env) -> None:
@@ -482,7 +491,7 @@ def test_label_and_audit_backend_backup_is_best_effort(
     _write_manifest(clip_env / "clip-store", "clip-1")
     monkeypatch.setenv("API_BACKEND_CLIP_EVENTS_URL", "http://backend/api/v1/clip-events")
     monkeypatch.setenv("API_BACKEND_FACILITY_TOKEN", "facility-token")
-    calls: list[dict[str, object]] = []
+    calls: list[BackupCall] = []
 
     def fake_urlopen(request, timeout: float) -> FakeHTTPResponse:
         calls.append(
@@ -497,8 +506,26 @@ def test_label_and_audit_backend_backup_is_best_effort(
         return FakeHTTPResponse()
 
     monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    monkeypatch.setenv(
+        API_CONNECTION_SETTINGS_PATH_ENV,
+        str(clip_env / "connection-settings.sqlite3"),
+    )
+    _ = ConnectionSettingsStore.from_env().save(
+        {
+            "events_url": "http://backend/api/v1/events",
+            "config_url": "http://backend/api/v1/ml-config",
+            "facility_code": "NH-7H2K9M4QXP",
+            "client_installation_ref": "aa83ea3f-6e5f-4f45-a401-fb36c38835b6",
+            "facility_id": "87d79f24-b32f-49a3-b534-19f0af7d9135",
+            "facility_token": "facility-token",
+            "edge_installation_id": "d17e0eb8-cb81-4d8e-a427-dfe690518f2b",
+            "enrollment_generation": 3,
+        }
+    )
+    app = create_app(lifespan=no_lifespan)
+    apply_connection_settings(app)
 
-    with TestClient(create_app(lifespan=no_lifespan)) as client:
+    with TestClient(app) as client:
         _login(client)
         response = client.put(
             "/api/v1/clips/clip-1/label",
