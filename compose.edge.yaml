@@ -17,22 +17,15 @@ services:
     ports:
       - "127.0.0.1:${ML_SERVING_PORT:-8000}:8000"
     environment:
-      # 주소는 패키징 시점에 여기서 굽는 값이고, 시설 ID·토큰은 대시보드 UI에서 현장 입력.
+      # 주소는 패키징 시점에 여기서 굽고 시설 ID·토큰은 등록 API가 SQLite에 저장한다.
       # events_url/config_url are derived from this at runtime (`{base}/v1/events`,
       # `{base}/v1/ml-config`); API_BACKEND_EVENTS_URL/API_BACKEND_CONFIG_URL still
       # work as per-field overrides if a deployment ever needs to diverge from the
       # single base host.
       API_BACKEND_BASE_URL: ${API_BACKEND_BASE_URL:-https://api.eldercare-fall-ai.example}
-      # Bearer token ml-api sends to the backend Event API (issue #552). Optional:
-      # unset keeps the pre-#552 no-auth-header request shape. Must match the
-      # backend's EDGE_FACILITY_TOKEN exactly once the backend enforces the guard.
-      EDGE_FACILITY_TOKEN: ${EDGE_FACILITY_TOKEN:-}
       API_EDGE_RELAY_TOKEN: ${API_EDGE_RELAY_TOKEN:?edge api requires worker relay token}
       API_DASHBOARD_USERNAME: ${API_DASHBOARD_USERNAME:?edge api requires dashboard username}
       API_DASHBOARD_PASSWORD: ${API_DASHBOARD_PASSWORD:?edge api requires dashboard password}
-      # Backend config-read (PR-7): ml-api pulls camera inventory + night window +
-      # config_version from the backend ML config-read. This is the PRIMARY config source.
-      API_FACILITY_ID: ${API_FACILITY_ID:?edge api requires the facility id to pull config for}
       # Fallback camera inventory: used ONLY when the backend config pull is unavailable.
       API_CAMERA_INVENTORY: ${API_CAMERA_INVENTORY:-}
       ML_API_WORKER_STREAM_ORIGIN: http://ml-worker:${ML_WORKER_DEV_MJPEG_PORT:-8090}
@@ -110,7 +103,6 @@ services:
       EDGE_CAMERA_CONFIG: ${EDGE_CAMERA_CONFIG:-}
       RELAY_URL: http://ml-api:8000
       RELAY_TOKEN: ${API_EDGE_RELAY_TOKEN:?edge worker requires relay token shared with ml-api}
-      API_FACILITY_ID: ${API_FACILITY_ID:?edge worker requires the facility id to publish profile boot diagnostics}
       ML_WORKER_PROFILE: ${ML_WORKER_PROFILE:?set cuda|mps|cpu|igpu}
       ML_WORKER_DEV_MJPEG: ${ML_WORKER_DEV_MJPEG:-true}
       ML_WORKER_DEV_MJPEG_HOST: 0.0.0.0

@@ -194,3 +194,12 @@ def _history_versions(database: Path) -> set[int]:
         }
     finally:
         connection.close()
+
+
+def test_worker_and_compose_have_no_facility_identity_env_contract() -> None:
+    root = Path(__file__).resolve().parents[1]
+
+    assert "API_FACILITY_ID_ENV" not in (root / "worker/runtime/config/config_pull.py").read_text()
+    compose = (root / "compose.edge.yaml").read_text()
+    assert "API_FACILITY_ID:" not in compose
+    assert "EDGE_FACILITY_TOKEN:" not in compose

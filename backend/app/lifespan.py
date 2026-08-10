@@ -26,9 +26,13 @@ from backend.app.features.status.backend_heartbeat_relay import (
 )
 from backend.app.features.status.heartbeat_store import DEFAULT_STALE_AFTER_SEC, HeartbeatStore
 from backend.app.features.status.runtime_status_store import RuntimeStatusStore
+from backend.app.shared.backend_client_bundle import (
+    BackendClientBundle,
+    backend_client_bundle,
+)
 from backend.app.shared.backend_mapping import (
     BackendCameraMapper,
-    backend_status_from_env,
+    derive_edge_cameras_endpoint,
     mark_backend_status,
 )
 from backend.app.shared.state_dir import resolve_state_dir
@@ -46,12 +50,7 @@ from shared.events.edge_ingest_client import (
 
 API_BACKEND_EVENTS_URL_ENV = "API_BACKEND_EVENTS_URL"
 API_EDGE_RELAY_TOKEN_ENV = "API_EDGE_RELAY_TOKEN"
-# Shared secret for the ml-api -> backend Event API bearer auth (issue #552).
-# Name matches the backend's EdgeFacilityTokenGuard config key exactly so the
-# same value can be copied verbatim across the edge and host env files.
-EDGE_FACILITY_TOKEN_ENV = "EDGE_FACILITY_TOKEN"
 API_CAMERA_INVENTORY_ENV = "API_CAMERA_INVENTORY"
-API_FACILITY_ID_ENV = "API_FACILITY_ID"
 API_BACKEND_CONFIG_URL_ENV = "API_BACKEND_CONFIG_URL"
 API_BACKEND_INGEST_TIMEOUT_SEC_ENV = "API_BACKEND_INGEST_TIMEOUT_SEC"
 API_HEARTBEAT_STALE_AFTER_SEC_ENV = "API_HEARTBEAT_STALE_AFTER_SEC"
@@ -77,15 +76,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     if not isinstance(getattr(app.state, "camera_registry", None), CameraRegistryStore):
         app.state.camera_registry = CameraRegistryStore.from_env()
-    if not isinstance(getattr(app.state, "backend_camera_mapper", None), BackendCameraMapper):
-        app.state.backend_camera_mapper = BackendCameraMapper.from_env()
-    backend_status = backend_status_from_env()
-    app.state.backend_configured = backend_status["configured"]
+    _configure_backend_ingest(app)
+    bundle = backend_client_bundle(app)
+    app.state.backend_configured = bundle is not None
     app.state.backend_reachable = getattr(
-        app.state, "backend_reachable", backend_status["reachable"]
+        app.state, "backend_reachable", None
     )
     app.state.backend_last_ok_at = getattr(
-        app.state, "backend_last_ok_at", backend_status["last_ok_at"]
+        app.state, "backend_last_ok_at", None
     )
 
     app.state.restart_epoch = getattr(app.state, "restart_epoch", 0)
@@ -103,7 +101,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     )
     app.state.backend_config_refresh_executor = refresh_executor
 
-    _configure_backend_ingest(app)
+    from backend.app.features.cameras.roster_sync import recover_camera_roster_on_boot
+
+    await asyncio.get_running_loop().run_in_executor(
+        refresh_executor, recover_camera_roster_on_boot, app
+    )
     await asyncio.get_running_loop().run_in_executor(
         refresh_executor, _pull_backend_config, app, refresh_stop
     )
@@ -198,71 +200,75 @@ def _configure_backend_ingest(app: FastAPI) -> None:
 
 
 def apply_connection_settings(app: FastAPI) -> None:
-    """Rebuild the backend ingest/evidence clients from ConnectionSettingsStore.
-
-    Public entrypoint for G003's settings-save route: call this after
-    ``ConnectionSettingsStore.save(...)`` to make a connection-settings change
-    (Event API URL / facility token) take effect immediately, without
-    restarting the process.
-
-    Safe under concurrency: relay/evidence routers look up
-    ``app.state.backend_ingest_client`` / ``backend_evidence_client`` fresh on
-    every request (relay/router.py, evidence/router.py, routes/models.py,
-    routes/health.py all read these off ``request.app.state`` per-call), so a
-    plain reassignment here is sufficient -- an in-flight request keeps
-    whatever client object it already looked up, and the very next request
-    picks up the rebuilt one.
-
-    Caveat: ``backend_ingest_client`` and ``backend_evidence_client`` are
-    reassigned as two separate statements below, not swapped atomically as a
-    pair. A caller reading both attributes within a single request must not
-    assume they were built from the same settings generation -- a relink
-    racing in between the two assignments could hand back one client from
-    the old generation and one from the new.
-    """
-    # Lazy import: store.py imports lifespan's env-name constants at module
-    # level, so importing it here at module load would be circular. Same
-    # trick lifespan.py already uses for cameras.router in
-    # refresh_backend_config().
+    """Atomically publish all cloud clients for one persisted enrollment generation."""
     from backend.app.features.connection.store import ConnectionSettingsStore
 
     settings = ConnectionSettingsStore.from_env().load()
-    events_url = settings.events_url
-    if not events_url:
-        # Delete rather than set-to-None: routes/models.py and routes/health.py
-        # report "backend_configured" via hasattr(app.state, ...), not
-        # getattr(..., None) -- setting the attribute to None would leave
-        # hasattr() true and those status endpoints permanently wrong after a
-        # runtime clear. Deleting matches the pre-existing boot invariant
-        # (the attribute is simply never set when no events_url is configured)
-        # and is still None-like for the getattr(..., None) consumers in
-        # relay/router.py and evidence/router.py.
-        if hasattr(app.state, "backend_ingest_client"):
-            del app.state.backend_ingest_client
-        if hasattr(app.state, "backend_evidence_client"):
-            del app.state.backend_evidence_client
+    required = (
+        settings.events_url,
+        settings.config_url,
+        settings.facility_code,
+        settings.client_installation_ref,
+        settings.facility_id,
+        settings.facility_token,
+        settings.edge_installation_id,
+        settings.enrollment_generation,
+    )
+    if any(value is None for value in required):
+        for attribute in (
+            "backend_client_bundle",
+            "backend_ingest_client",
+            "backend_evidence_client",
+            "backend_camera_mapper",
+        ):
+            if hasattr(app.state, attribute):
+                delattr(app.state, attribute)
+        app.state.backend_configured = False
         return
-
-    # camera_id fallback identity for the rebuilt EdgeIngestClient. Every real
-    # caller reaches the client through `.for_camera()` (relay/evidence
-    # routers), which overrides camera_id per request, so this default is
-    # currently inert -- kept only for parity with the pre-G002 boot
-    # construction. It can go stale if camera_inventory changed since boot or
-    # the last relink; harmless today, but worth knowing if a future caller
-    # ever uses the client without `.for_camera()`.
+    assert settings.events_url is not None
+    assert settings.config_url is not None
+    assert settings.facility_code is not None
+    assert settings.client_installation_ref is not None
+    assert settings.facility_id is not None
+    assert settings.facility_token is not None
+    assert settings.edge_installation_id is not None
+    assert settings.enrollment_generation is not None
     first_camera = next(iter((getattr(app.state, "camera_inventory", None) or {}).values()), {})
     timeout_sec = _backend_ingest_timeout_sec()
-    app.state.backend_ingest_client = EdgeIngestClient(
-        events_url=events_url,
+    ingest_client = EdgeIngestClient(
+        events_url=settings.events_url,
         camera_id=str(first_camera.get("camera_id", "api-relay")),
         timeout_sec=timeout_sec,
         bearer_token=settings.facility_token,
     )
-    app.state.backend_evidence_client = BackendEvidenceClient(
-        events_url=events_url,
+    evidence_client = BackendEvidenceClient(
+        events_url=settings.events_url,
         bearer_token=settings.facility_token,
         timeout_sec=timeout_sec,
     )
+    camera_mapper = BackendCameraMapper(
+        endpoint=derive_edge_cameras_endpoint(settings.events_url),
+        token=settings.facility_token,
+        timeout_sec=timeout_sec,
+    )
+    bundle = BackendClientBundle(
+        facility_code=settings.facility_code,
+        client_installation_ref=settings.client_installation_ref,
+        facility_id=settings.facility_id,
+        edge_installation_id=settings.edge_installation_id,
+        enrollment_generation=settings.enrollment_generation,
+        facility_token=settings.facility_token,
+        events_url=settings.events_url,
+        config_url=settings.config_url,
+        ingest_client=ingest_client,
+        evidence_client=evidence_client,
+        camera_mapper=camera_mapper,
+    )
+    app.state.backend_client_bundle = bundle
+    app.state.backend_ingest_client = bundle.ingest_client
+    app.state.backend_evidence_client = bundle.evidence_client
+    app.state.backend_camera_mapper = bundle.camera_mapper
+    app.state.backend_configured = True
 
 
 def _pull_backend_config(app: FastAPI, stop_token: asyncio.Event) -> None:
@@ -284,23 +290,28 @@ def refresh_backend_config(app: FastAPI, stop_token: asyncio.Event | None = None
     try:
         if not _backend_config_refresh_is_current(app, stop_token):
             return False
+        bundle = backend_client_bundle(app)
+        if bundle is None:
+            mark_backend_status(app.state, None)
+            _mark_backend_roster_stale(app)
+            return False
         restart_epoch = int(getattr(app.state, "restart_epoch", 0))
-        cfg = _fetch_backend_config(restart_epoch)
+        cfg = _fetch_backend_config(bundle, restart_epoch)
         if not _backend_config_refresh_is_current(app, stop_token):
             return False
-        if cfg is None:
+        if cfg is None or backend_client_bundle(app) is not bundle:
             mark_backend_status(app.state, False)
             _mark_backend_roster_stale(app)
             return False
+        was_reachable = getattr(app.state, "backend_reachable", None)
         mark_backend_status(app.state, True)
-        _apply_backend_config(app, cfg)
-        # A reachable backend is the moment pending explicit camera mappings
-        # can converge; the refresh owner is single-flight, so this stays
-        # bounded and never runs concurrently with itself. Imported lazily:
-        # api.routes.cameras imports lifespan env-name constants at module load.
-        from backend.app.features.cameras.router import retry_pending_backend_mappings
+        _apply_backend_config(app, cfg, bundle)
+        if was_reachable is not True:
+            from backend.app.features.cameras.roster_sync import (
+                resume_camera_roster_after_connectivity,
+            )
 
-        retry_pending_backend_mappings(app)
+            resume_camera_roster_after_connectivity(app)
         return True
     finally:
         refresh_lock.release()
@@ -358,24 +369,15 @@ def _backend_config_refresh_is_current(app: FastAPI, stop_token: asyncio.Event |
     )
 
 
-def _fetch_backend_config(restart_epoch: int) -> PulledWorkerConfig | None:
-    # Lazy import: see the matching comment in apply_connection_settings() --
-    # store.py imports this module's env-name constants at module level.
-    from backend.app.features.connection.store import ConnectionSettingsStore
-
-    settings = ConnectionSettingsStore.from_env().load()
-    facility_id = settings.facility_id
-    base_url = settings.config_url
-    if not facility_id or not base_url:
-        return None
+def _fetch_backend_config(
+    bundle: BackendClientBundle, restart_epoch: int
+) -> PulledWorkerConfig | None:
     try:
-        url = f"{base_url.rstrip('/')}/{facility_id}"
+        url = f"{bundle.config_url.rstrip('/')}/{bundle.facility_id}"
         # The production backend guards the RTSP-bearing ml-config read with the
         # same shared edge bearer the Event API ingest already sends.
         headers: dict[str, str] = {"Accept": "application/json"}
-        bearer = settings.facility_token
-        if bearer:
-            headers["Authorization"] = f"Bearer {bearer}"
+        headers["Authorization"] = f"Bearer {bundle.facility_token}"
         request = urllib.request.Request(url, headers=headers, method="GET")
         # urlopen applies this timeout to both the connect and socket reads.
         # Keep it within the lifespan shutdown wait bound.
@@ -394,8 +396,9 @@ def _fetch_backend_config(restart_epoch: int) -> PulledWorkerConfig | None:
         return None
 
 
-def _apply_backend_config(app: FastAPI, cfg: PulledWorkerConfig) -> None:
-    facility_id = os.environ.get(API_FACILITY_ID_ENV)
+def _apply_backend_config(
+    app: FastAPI, cfg: PulledWorkerConfig, bundle: BackendClientBundle
+) -> None:
     app.state.pulled_config = cfg
     app.state.config_version = cfg.config_version
     app.state.backend_roster = {
@@ -406,7 +409,7 @@ def _apply_backend_config(app: FastAPI, cfg: PulledWorkerConfig) -> None:
     app.state.camera_inventory = {
         camera.camera_id: {
             "camera_id": camera.camera_id,
-            "facility_id": facility_id,
+            "facility_id": bundle.facility_id,
             "resident_id": None,
         }
         for camera in cfg.cameras

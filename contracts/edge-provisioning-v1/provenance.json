@@ -1,0 +1,7 @@
+{
+  "sourceRepository": "eldercare-fall-ai",
+  "sourcePath": "backend/test/fixtures/edge-provisioning-v1/contract-fixtures.json",
+  "sourceCommit": "17b4f0a24bcd806c1f8c8f71d9576309e25bd87e",
+  "canonicalSha256": "5e64609fdeba5968864b9c78807ae71864a54143c70bffb82924788957c3f2ff",
+  "digestScope": "RFC 8785 JCS document with metadata.canonicalSha256 omitted"
+}

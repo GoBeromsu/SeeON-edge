@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
+from backend.app import lifespan as lifespan_module
 from backend.app.features.connection.store import (
     API_CONNECTION_SETTINGS_PATH_ENV,
     ConnectionSettingsStore,
@@ -17,21 +18,10 @@ from backend.app.lifespan import (
     API_BACKEND_CONFIG_URL_ENV,
     API_BACKEND_EVENTS_URL_ENV,
     API_EDGE_RELAY_TOKEN_ENV,
-    API_FACILITY_ID_ENV,
-    EDGE_FACILITY_TOKEN_ENV,
     apply_connection_settings,
 )
 from backend.app.main import create_app, no_lifespan
-from shared.events.edge_ingest_client import BackendEvidenceClient, EdgeIngestClient
-
-_ALERT_PAYLOAD = {
-    "event_type": "bed-exit",
-    "probability": 0.87,
-    "detected_at": "2026-06-25T12:00:00.000Z",
-    "camera_id": "camera-1",
-    "facility_id": "facility-1",
-    "evidence": {"domain": "night-bed-exit", "clip_id": "clip-123"},
-}
+from contracts.worker_config import PulledWorkerConfig
 
 
 @pytest.fixture(autouse=True)
@@ -40,8 +30,8 @@ def clear_env(monkeypatch: pytest.MonkeyPatch) -> None:
         API_CONNECTION_SETTINGS_PATH_ENV,
         API_BACKEND_EVENTS_URL_ENV,
         API_BACKEND_CONFIG_URL_ENV,
-        API_FACILITY_ID_ENV,
-        EDGE_FACILITY_TOKEN_ENV,
+        "API_FACILITY_ID",
+        "EDGE_FACILITY_TOKEN",
         API_EDGE_RELAY_TOKEN_ENV,
         "API_CAMERA_INVENTORY",
     ):
@@ -51,91 +41,6 @@ def clear_env(monkeypatch: pytest.MonkeyPatch) -> None:
 def _settings_store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> ConnectionSettingsStore:
     monkeypatch.setenv(API_CONNECTION_SETTINGS_PATH_ENV, str(tmp_path / "connection_settings.json"))
     return ConnectionSettingsStore.from_env()
-
-
-def test_apply_connection_settings_rebuilds_clients_without_restart(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    store = _settings_store(tmp_path, monkeypatch)
-
-    with TestClient(create_app()) as client:
-        app = client.app
-        # No env, no saved file yet -- boot leaves both clients unset.
-        assert getattr(app.state, "backend_ingest_client", None) is None
-        assert getattr(app.state, "backend_evidence_client", None) is None
-
-        store.save(
-            {
-                "events_url": "http://backend.example/api/v1/edge/events",
-                "facility_token": "tok-1",
-            }
-        )
-        apply_connection_settings(app)  # same app instance -- no restart
-
-        ingest = app.state.backend_ingest_client
-        evidence = app.state.backend_evidence_client
-        assert isinstance(ingest, EdgeIngestClient)
-        assert isinstance(evidence, BackendEvidenceClient)
-        assert ingest.events_url == "http://backend.example/api/v1/edge/events"
-        assert ingest.bearer_token == "tok-1"
-        assert evidence.events_url == "http://backend.example/api/v1/edge/events"
-        assert evidence.bearer_token == "tok-1"
-
-
-def test_apply_connection_settings_relinks_to_a_new_saved_events_url(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    store = _settings_store(tmp_path, monkeypatch)
-
-    with TestClient(create_app()) as client:
-        app = client.app
-        store.save({"events_url": "http://backend-1.example/api/v1/edge/events"})
-        apply_connection_settings(app)
-        first_ingest = app.state.backend_ingest_client
-        first_evidence = app.state.backend_evidence_client
-
-        store.save({"events_url": "http://backend-2.example/api/v1/edge/events"})
-        apply_connection_settings(app)
-        second_ingest = app.state.backend_ingest_client
-        second_evidence = app.state.backend_evidence_client
-
-        assert second_ingest is not first_ingest
-        assert second_evidence is not first_evidence
-        assert second_ingest.events_url == "http://backend-2.example/api/v1/edge/events"
-        assert second_evidence.events_url == "http://backend-2.example/api/v1/edge/events"
-
-
-def test_apply_connection_settings_clears_clients_and_relay_returns_503(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    store = _settings_store(tmp_path, monkeypatch)
-    store.save(
-        {"events_url": "http://backend.example/api/v1/edge/events", "facility_token": "tok-1"}
-    )
-
-    # no_lifespan pattern from tests/test_api_ingest_relay.py: wire the app
-    # state a boot would normally set, without running the real lifespan.
-    app = create_app(lifespan=no_lifespan)
-    app.state.edge_relay_token = "relay-token"
-    app.state.camera_inventory = {
-        "camera-1": {"camera_id": "camera-1", "facility_id": "facility-1", "resident_id": None},
-    }
-    apply_connection_settings(app)
-    assert isinstance(app.state.backend_ingest_client, EdgeIngestClient)
-    assert isinstance(app.state.backend_evidence_client, BackendEvidenceClient)
-
-    store.save({"events_url": None})
-    apply_connection_settings(app)
-
-    assert getattr(app.state, "backend_ingest_client", None) is None
-    assert getattr(app.state, "backend_evidence_client", None) is None
-
-    response = TestClient(app).post(
-        "/api/v1/relay/alerts",
-        json=_ALERT_PAYLOAD,
-        headers={"X-Edge-Relay-Token": "relay-token"},
-    )
-    assert response.status_code == 503
 
 
 def test_boot_time_fixture_injection_still_survives_boot(
@@ -148,8 +53,120 @@ def test_boot_time_fixture_injection_still_survives_boot(
     app = create_app()
     app.state.backend_ingest_client = sentinel  # assigned before lifespan runs
 
-    with TestClient(app) as client:
+    with TestClient(app):
         # The hasattr guard in _configure_backend_ingest() must keep the
         # pre-assigned fixture client intact at boot, even though a saved
         # connection-settings file is present and would otherwise rebuild it.
-        assert client.app.state.backend_ingest_client is sentinel
+        assert app.state.backend_ingest_client is sentinel
+
+
+def test_complete_enrollment_restores_one_generation_bundle_on_restart(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = _settings_store(tmp_path, monkeypatch)
+    store.save(
+        {
+            "events_url": "http://backend.example/api/v1/events",
+            "config_url": "http://backend.example/api/v1/ml-config",
+            "facility_code": "NH-7H2K9M4QXP",
+            "client_installation_ref": "aa83ea3f-6e5f-4f45-a401-fb36c38835b6",
+            "facility_id": "87d79f24-b32f-49a3-b534-19f0af7d9135",
+            "facility_token": "persisted-token",
+            "edge_installation_id": "d17e0eb8-cb81-4d8e-a427-dfe690518f2b",
+            "enrollment_generation": 4,
+        }
+    )
+    monkeypatch.setenv("API_FACILITY_ID", "env-must-not-win")
+    monkeypatch.setenv("EDGE_FACILITY_TOKEN", "env-token-must-not-win")
+
+    app = create_app()
+    with TestClient(app):
+        bundle = app.state.backend_client_bundle
+        assert bundle.facility_id == "87d79f24-b32f-49a3-b534-19f0af7d9135"
+        assert bundle.enrollment_generation == 4
+        assert bundle.ingest_client.bearer_token == "persisted-token"
+        assert bundle.evidence_client.bearer_token == "persisted-token"
+        assert bundle.camera_mapper.token == "persisted-token"
+
+
+def test_relink_publishes_a_whole_new_generation_bundle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = _settings_store(tmp_path, monkeypatch)
+    app = create_app(lifespan=no_lifespan)
+    for generation, token in ((1, "token-one"), (2, "token-two")):
+        store.save(
+            {
+                "events_url": "http://backend.example/api/v1/events",
+                "config_url": "http://backend.example/api/v1/ml-config",
+                "facility_code": "NH-7H2K9M4QXP",
+                "client_installation_ref": "aa83ea3f-6e5f-4f45-a401-fb36c38835b6",
+                "facility_id": "87d79f24-b32f-49a3-b534-19f0af7d9135",
+                "facility_token": token,
+                "edge_installation_id": "d17e0eb8-cb81-4d8e-a427-dfe690518f2b",
+                "enrollment_generation": generation,
+            }
+        )
+        apply_connection_settings(app)
+        bundle = app.state.backend_client_bundle
+        assert bundle.enrollment_generation == generation
+        assert {
+            bundle.ingest_client.bearer_token,
+            bundle.evidence_client.bearer_token,
+            bundle.camera_mapper.token,
+        } == {token}
+
+
+def test_config_refresh_discards_result_when_relink_changes_generation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = _settings_store(tmp_path, monkeypatch)
+    app = create_app(lifespan=no_lifespan)
+
+    def save_generation(generation: int, token: str) -> None:
+        _ = store.save(
+            {
+                "events_url": "http://backend.example/api/v1/events",
+                "config_url": "http://backend.example/api/v1/ml-config",
+                "facility_code": "NH-7H2K9M4QXP",
+                "client_installation_ref": "aa83ea3f-6e5f-4f45-a401-fb36c38835b6",
+                "facility_id": "87d79f24-b32f-49a3-b534-19f0af7d9135",
+                "facility_token": token,
+                "edge_installation_id": "d17e0eb8-cb81-4d8e-a427-dfe690518f2b",
+                "enrollment_generation": generation,
+            }
+        )
+        apply_connection_settings(app)
+
+    save_generation(1, "token-one")
+
+    def relink_during_fetch(_bundle: object, restart_epoch: int) -> PulledWorkerConfig:
+        save_generation(2, "token-two")
+        return PulledWorkerConfig(
+            config_version=7,
+            restart_epoch=restart_epoch,
+            night_window=None,
+            cameras=(),
+        )
+
+    monkeypatch.setattr(lifespan_module, "_fetch_backend_config", relink_during_fetch)
+
+    assert lifespan_module.refresh_backend_config(app) is False
+    assert getattr(app.state, "pulled_config", None) is None
+    assert app.state.backend_client_bundle.enrollment_generation == 2
+
+
+def test_corrupt_enrollment_store_fails_closed_despite_identity_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "connection_settings.sqlite3"
+    path.write_bytes(b"not-a-sqlite-database")
+    monkeypatch.setenv(API_CONNECTION_SETTINGS_PATH_ENV, str(path))
+    monkeypatch.setenv("API_FACILITY_ID", "env-facility")
+    monkeypatch.setenv("EDGE_FACILITY_TOKEN", "env-token")
+    app = create_app(lifespan=no_lifespan)
+
+    apply_connection_settings(app)
+
+    assert getattr(app.state, "backend_client_bundle", None) is None
+    assert app.state.backend_configured is False

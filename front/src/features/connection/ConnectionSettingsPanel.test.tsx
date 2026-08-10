@@ -1,290 +1,153 @@
 import { act } from 'react';
-import { createRoot } from 'react-dom/client';
+import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { saveConnection, testConnection } from '@/shared/api/client';
+import { saveConnection, testConnection, type ConnectionView } from '@/shared/api/client';
+import { HttpError } from '@/shared/api/http';
 import { ConnectionSettingsPanel } from '@/features/connection/ConnectionSettingsPanel';
-import { toast } from '@/shared/ui/Toast';
-import type { ConnectionView } from '@/shared/api/client';
 import type { PollingResource } from '@/shared/api/usePollingResource';
 
 vi.mock('@/shared/api/client', async () => {
   const actual = await vi.importActual<typeof import('@/shared/api/client')>('@/shared/api/client');
-  return {
-    ...actual,
-    saveConnection: vi.fn(),
-    testConnection: vi.fn(),
-  };
+  return { ...actual, saveConnection: vi.fn(), testConnection: vi.fn() };
 });
 
-const baseView: ConnectionView = {
-  events_url: 'https://backend.example.com/v1/events',
-  config_url: 'https://backend.example.com/v1/config',
-  facility_id: 'facility-42',
+const enrolledView: ConnectionView = {
+  events_url: 'https://api.eldercare.example/api/v1/events',
+  config_url: 'https://api.eldercare.example/api/v1/ml-config',
+  facility_code: 'NH-7H2K9M4QXP',
+  client_installation_ref: 'aa83ea3f-6e5f-4f45-a401-fb36c38835b6',
+  facility_id: 'facility-canonical-42',
+  edge_installation_id: 'c72bd9a7-3e04-47ba-a8cd-a56e54f98152',
+  enrollment_generation: 3,
   facility_token_set: true,
   facility_token_masked: '****ab12',
+  enrolled: true,
   configured: true,
   reachable: true,
   last_ok_at: '2026-08-01T00:00:00Z',
   updated_at: '2026-08-01T00:00:00Z',
 };
 
-function makeResource(overrides: Partial<PollingResource<ConnectionView>> = {}): PollingResource<ConnectionView> {
-  return {
-    status: 'success',
-    data: baseView,
-    error: null,
-    lastSuccessAt: Date.now(),
-    refreshing: false,
-    retry: vi.fn(),
-    ...overrides,
-  };
+function resource(data: ConnectionView = enrolledView): PollingResource<ConnectionView> {
+  return { status: 'success', data, error: null, lastSuccessAt: Date.now(), refreshing: false, retry: vi.fn() };
 }
 
-function renderPanel(resource: PollingResource<ConnectionView> = makeResource()): { host: HTMLDivElement; root: ReturnType<typeof createRoot> } {
+function renderPanel(value = resource()): { readonly host: HTMLDivElement; readonly root: Root } {
   const host = document.createElement('div');
   document.body.append(host);
   const root = createRoot(host);
-  act(() => root.render(<ConnectionSettingsPanel resource={resource} />));
+  act(() => root.render(<ConnectionSettingsPanel resource={value} />));
   return { host, root };
 }
 
 function setInput(host: HTMLElement, name: string, value: string): void {
   const input = host.querySelector(`input[name="${name}"]`);
-  if (!(input instanceof HTMLInputElement)) {
-    throw new Error(`missing input ${name}`);
-  }
+  if (!(input instanceof HTMLInputElement)) throw new Error(`missing input ${name}`);
   act(() => {
-    const valueSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
-    valueSetter?.call(input, value);
+    Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set?.call(input, value);
     input.dispatchEvent(new Event('input', { bubbles: true }));
   });
 }
 
-function findButton(host: HTMLElement, label: string): HTMLButtonElement {
-  const button = Array.from(host.querySelectorAll('button')).find((candidate) => candidate.textContent === label);
-  if (!button) {
-    throw new Error(`missing button ${label}`);
-  }
-  return button;
+function button(host: HTMLElement, label: string): HTMLButtonElement {
+  const match = Array.from(host.querySelectorAll('button')).find((candidate) => candidate.textContent === label);
+  if (!match) throw new Error(`missing button ${label}`);
+  return match;
 }
 
-function clickButton(host: HTMLElement, label: string): void {
-  act(() => findButton(host, label).click());
-}
-
-function openEdit(host: HTMLElement): void {
-  act(() => host.querySelector<HTMLButtonElement>('[aria-label="서버 연결 편집"]')?.click());
+function openEnrollment(host: HTMLElement): void {
+  act(() => host.querySelector<HTMLButtonElement>('[aria-label="등록 정보 변경"]')?.click());
 }
 
 beforeEach(() => {
+  vi.stubGlobal('crypto', { randomUUID: vi.fn(() => '78c1eaad-bd4b-44fc-88a1-401135d65a70') });
   vi.mocked(saveConnection).mockReset();
-  vi.mocked(saveConnection).mockResolvedValue(baseView);
+  vi.mocked(saveConnection).mockResolvedValue(enrolledView);
   vi.mocked(testConnection).mockReset();
-  vi.mocked(testConnection).mockResolvedValue({ ok: true, error_class: null, detail: '연결 성공', probed_url: null });
+  vi.mocked(testConnection).mockResolvedValue({
+    ok: true,
+    error_class: null,
+    detail: '등록 정보를 확인했습니다.',
+    facility_id: 'facility-canonical-42',
+    edge_installation_id: 'c72bd9a7-3e04-47ba-a8cd-a56e54f98152',
+    enrollment_generation: 3,
+  });
 });
 
 afterEach(() => {
+  document.body.innerHTML = '';
+  vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
 
-describe('ConnectionSettingsPanel read mode', () => {
-  it('renders facility id, masked token, and last sync as a read-only dl, with no form yet', () => {
-    const { host, root } = renderPanel();
+describe('ConnectionSettingsPanel', () => {
+  it('shows the deployment backend, canonical facility, masked token, and generation without exposing installation internals', () => {
+    const { host } = renderPanel();
 
-    expect(host.textContent).toContain('facility-42');
+    expect(host.textContent).toContain('api.eldercare.example');
+    expect(host.textContent).toContain('facility-canonical-42');
+    expect(host.textContent).toContain('3세대');
     expect(host.textContent).toContain('****ab12');
-    expect(host.querySelector('form')).toBeNull();
-    act(() => root.unmount());
+    expect(host.textContent).not.toContain('aa83ea3f');
+    expect(host.textContent).not.toContain('c72bd9a7');
   });
 
-  it('opens the edit form pre-filled with facility_id and a blank token when the pencil button is clicked', () => {
-    const { host, root } = renderPanel();
+  it('accepts exactly facility code and token and submits one stable generated installation reference', async () => {
+    const { host } = renderPanel(resource({ ...enrolledView, enrolled: false, facility_code: null, client_installation_ref: null }));
+    openEnrollment(host);
+    setInput(host, 'facility_code', 'NH-7H2K9M4QXP');
+    setInput(host, 'facility_token', 'one-time-secret');
 
-    openEdit(host);
+    await act(async () => button(host, '등록 저장').click());
 
-    expect((host.querySelector('input[name="facility_id"]') as HTMLInputElement).value).toBe('facility-42');
+    expect(saveConnection).toHaveBeenCalledWith({
+      facility_code: 'NH-7H2K9M4QXP',
+      facility_token: 'one-time-secret',
+      client_installation_ref: '78c1eaad-bd4b-44fc-88a1-401135d65a70',
+    });
+    expect(host.querySelector('input[name="facility_id"]')).toBeNull();
+    expect(host.textContent).not.toContain('one-time-secret');
+    openEnrollment(host);
     expect((host.querySelector('input[name="facility_token"]') as HTMLInputElement).value).toBe('');
-    act(() => root.unmount());
   });
 
-  it('closes the edit form and discards a draft change when the pencil is toggled again', () => {
-    const { host, root } = renderPanel();
-    openEdit(host);
-    setInput(host, 'facility_id', '작성 중인 ID');
+  it('preserves unsaved code and token when fresh masked state arrives during editing', () => {
+    const first = resource();
+    const { host, root } = renderPanel(first);
+    openEnrollment(host);
+    setInput(host, 'facility_code', 'NH-9H2K9M4QXP');
+    setInput(host, 'facility_token', 'draft-secret');
 
-    act(() => host.querySelector<HTMLButtonElement>('[aria-label="서버 연결 편집 닫기"]')?.click());
+    act(() => root.render(<ConnectionSettingsPanel resource={resource({ ...enrolledView, enrollment_generation: 4 })} />));
 
-    expect(host.querySelector('form')).toBeNull();
-    openEdit(host);
-    expect((host.querySelector('input[name="facility_id"]') as HTMLInputElement).value).toBe('facility-42');
-    act(() => root.unmount());
-  });
-});
-
-describe('ConnectionSettingsPanel busy states', () => {
-  it('disables both actions while a save is in flight, then closes the form on success', async () => {
-    let resolveSave: ((view: ConnectionView) => void) | undefined;
-    vi.mocked(saveConnection).mockReturnValue(new Promise((resolve) => {
-      resolveSave = resolve;
-    }));
-    const { host, root } = renderPanel();
-    openEdit(host);
-
-    act(() => clickButton(host, '저장'));
-
-    expect(findButton(host, '연결').disabled).toBe(true);
-    expect(findButton(host, '저장 중...').disabled).toBe(true);
-
-    await act(async () => resolveSave?.(baseView));
-
-    expect(host.querySelector('form')).toBeNull();
-    act(() => root.unmount());
+    expect((host.querySelector('input[name="facility_code"]') as HTMLInputElement).value).toBe('NH-9H2K9M4QXP');
+    expect((host.querySelector('input[name="facility_token"]') as HTMLInputElement).value).toBe('draft-secret');
   });
 
-  it('disables both actions while a connection test is in flight, then re-enables them', async () => {
-    let resolveTest: ((result: Awaited<ReturnType<typeof testConnection>>) => void) | undefined;
-    vi.mocked(testConnection).mockReturnValue(new Promise((resolve) => {
-      resolveTest = resolve;
-    }));
-    const { host, root } = renderPanel();
-    openEdit(host);
+  it('classifies a relink conflict without rendering backend bodies or the token', async () => {
+    vi.mocked(saveConnection).mockRejectedValue(new HttpError(409, { detail: 'internal conflict body' }));
+    const { host } = renderPanel();
+    openEnrollment(host);
+    setInput(host, 'facility_token', 'conflict-secret');
 
-    act(() => clickButton(host, '연결'));
+    await act(async () => button(host, '등록 저장').click());
 
-    expect(findButton(host, '확인 중...').disabled).toBe(true);
-    expect(findButton(host, '저장').disabled).toBe(true);
-
-    await act(async () => resolveTest?.({ ok: true, error_class: null, detail: '연결 성공', probed_url: null }));
-
-    expect(findButton(host, '연결').disabled).toBe(false);
-    expect(findButton(host, '저장').disabled).toBe(false);
-    act(() => root.unmount());
-  });
-});
-
-describe('ConnectionSettingsPanel save behavior', () => {
-  it('shows a success toast and refreshes the resource on save, without leaking the raw token', async () => {
-    const successSpy = vi.spyOn(toast, 'success');
-    const resource = makeResource();
-    const { host, root } = renderPanel(resource);
-    openEdit(host);
-    setInput(host, 'facility_token', 'super-secret-token');
-
-    await act(async () => clickButton(host, '저장'));
-
-    expect(saveConnection).toHaveBeenCalledWith({ facility_id: 'facility-42', facility_token: 'super-secret-token' });
-    expect(resource.retry).toHaveBeenCalled();
-    expect(successSpy).toHaveBeenCalledWith('연결 설정을 저장했습니다.');
-    expect(host.textContent).not.toContain('super-secret-token');
-    act(() => root.unmount());
+    expect(host.querySelector('[role="alert"]')?.textContent).toContain('다른 장치');
+    expect(host.textContent).not.toContain('internal conflict body');
+    expect(host.textContent).not.toContain('conflict-secret');
   });
 
-  it('omits facility_token from the payload when the technician never touches it', async () => {
-    const { host, root } = renderPanel();
-    openEdit(host);
+  it('prevents duplicate saves while enrollment is in flight', async () => {
+    let finish: ((value: ConnectionView) => void) | undefined;
+    vi.mocked(saveConnection).mockReturnValue(new Promise((resolve) => { finish = resolve; }));
+    const { host } = renderPanel();
+    openEnrollment(host);
+    setInput(host, 'facility_token', 'busy-secret');
 
-    await act(async () => clickButton(host, '저장'));
+    const submit = button(host, '등록 저장');
+    act(() => { submit.click(); submit.click(); });
 
-    const payload = vi.mocked(saveConnection).mock.calls[0]?.[0];
-    expect(payload && 'facility_token' in payload).toBe(false);
-    expect(payload).toEqual({ facility_id: 'facility-42' });
-    act(() => root.unmount());
-  });
-
-  it('keeps the form open and shows an inline error when save fails', async () => {
-    vi.mocked(saveConnection).mockRejectedValue(new Error('save failed'));
-    const { host, root } = renderPanel();
-    openEdit(host);
-
-    await act(async () => clickButton(host, '저장'));
-
-    expect(host.querySelector('form')).not.toBeNull();
-    const alert = host.querySelector('[role="alert"]');
-    expect(alert?.textContent).toContain('연결 설정 저장에 실패했습니다');
-    act(() => root.unmount());
-  });
-
-  it('shows the test failure detail inline without leaking the raw token', async () => {
-    vi.mocked(testConnection).mockResolvedValue({ ok: false, error_class: 'auth', detail: '인증에 실패했습니다.', probed_url: null });
-    const { host, root } = renderPanel();
-    openEdit(host);
-    setInput(host, 'facility_token', 'super-secret-token');
-
-    await act(async () => clickButton(host, '연결'));
-
-    const alert = host.querySelector('[role="alert"]');
-    expect(alert?.textContent).toContain('인증에 실패했습니다.');
-    expect(host.textContent).not.toContain('super-secret-token');
-    act(() => root.unmount());
-  });
-});
-
-describe('클라우드 전송 상태 표시', () => {
-  function withRelay(relay: ConnectionView['heartbeat_relay']) {
-    return makeResource({ data: { ...baseView, heartbeat_relay: relay } });
-  }
-
-  function relayText(host: HTMLElement): string {
-    return host.querySelector('[data-testid="heartbeat-relay"]')?.textContent ?? '';
-  }
-
-  it('정상 전송 중이면 마지막 전송 시각을 보여준다', () => {
-    const { host } = renderPanel(
-      withRelay({
-        enabled: true,
-        last_success_at: '2026-08-04T00:00:00Z',
-        last_error_class: null,
-        detail: null,
-      }),
-    );
-
-    expect(relayText(host)).toContain('정상');
-  });
-
-  it('인증 실패면 무엇을 확인할지 알려준다', () => {
-    const { host } = renderPanel(
-      withRelay({
-        enabled: true,
-        last_success_at: null,
-        last_error_class: 'auth',
-        detail: null,
-      }),
-    );
-
-    expect(relayText(host)).toContain('인증');
-    expect(relayText(host)).toContain('시설 ID와 토큰');
-  });
-
-  it('연결 불가면 서버 주소와 네트워크를 가리킨다', () => {
-    const { host } = renderPanel(
-      withRelay({
-        enabled: true,
-        last_success_at: null,
-        last_error_class: 'unreachable',
-        detail: null,
-      }),
-    );
-
-    expect(relayText(host)).toContain('서버 주소와 네트워크');
-  });
-
-  it('전송이 꺼져 있으면 그 사실을 명시한다', () => {
-    const { host } = renderPanel(
-      withRelay({
-        enabled: false,
-        last_success_at: null,
-        last_error_class: null,
-        detail: null,
-      }),
-    );
-
-    expect(relayText(host)).toContain('꺼짐');
-    expect(relayText(host)).toContain('전달되지 않습니다');
-  });
-
-  it('구버전 백엔드처럼 필드가 없으면 지어내지 않는다', () => {
-    const { host } = renderPanel(makeResource());
-
-    expect(relayText(host)).toBe('정보 없음');
+    expect(saveConnection).toHaveBeenCalledTimes(1);
+    await act(async () => finish?.(enrolledView));
   });
 });

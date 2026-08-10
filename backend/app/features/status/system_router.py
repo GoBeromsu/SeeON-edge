@@ -10,7 +10,7 @@ from fastapi import APIRouter, Request
 from pydantic import BaseModel, ConfigDict
 
 from backend.app.features.clips.store import CLIP_STORE_DIR_ENV, DEFAULT_CLIP_STORE_DIR
-from backend.app.shared.backend_mapping import backend_status_from_env
+from backend.app.shared.backend_client_bundle import backend_client_bundle
 
 router = APIRouter(tags=["system"])
 
@@ -55,9 +55,9 @@ class SystemResponse(BaseModel):
 
 @router.get("/system", response_model=SystemResponse)
 def system(request: Request) -> dict[str, object]:
-    baseline = backend_status_from_env()
-    reachable = getattr(request.app.state, "backend_reachable", baseline["reachable"])
-    last_ok_at = getattr(request.app.state, "backend_last_ok_at", baseline["last_ok_at"])
+    enrolled = backend_client_bundle(request.app) is not None
+    reachable = getattr(request.app.state, "backend_reachable", None)
+    last_ok_at = getattr(request.app.state, "backend_last_ok_at", None)
     return {
         "version": os.environ.get("ML_EDGE_VERSION", "dev"),
         "image_digests": {
@@ -65,7 +65,7 @@ def system(request: Request) -> dict[str, object]:
             "ml_worker": _clean_env("ML_WORKER_IMAGE_DIGEST"),
         },
         "backend": {
-            "configured": baseline["configured"],
+            "configured": enrolled,
             "reachable": reachable,
             "last_ok_at": last_ok_at,
         },

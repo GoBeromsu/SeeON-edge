@@ -2,6 +2,13 @@ import { describe, expect, it } from 'vitest';
 import { getBackendStatus, getCameraStatusMeta, getConnectionStatus } from '@/shared/ui/StatusBadge';
 import type { ConnectionView, SystemSnapshot } from '@/shared/api/client';
 
+const connectionBase = {
+  events_url: null, config_url: null, facility_code: null, client_installation_ref: null,
+  facility_id: null, edge_installation_id: null, enrollment_generation: null,
+  facility_token_set: false, facility_token_masked: null, enrolled: false,
+  last_ok_at: null, updated_at: null,
+};
+
 describe('status badge mapping', () => {
   it.each([
     ['online', '온라인', 'approved'],
@@ -42,11 +49,7 @@ describe('status badge mapping', () => {
     [{ configured: true, reachable: null }, '확인 중'],
   ] as const)('maps connection state %# to the 서버 연결 카드 wording', (backend, label) => {
     const connection: ConnectionView | null = backend === null ? null : {
-      events_url: null,
-      config_url: null,
-      facility_id: null,
-      facility_token_set: false,
-      facility_token_masked: null,
+      ...connectionBase,
       ...backend,
       last_ok_at: null,
       updated_at: null,
@@ -63,8 +66,8 @@ describe('status badge mapping', () => {
     ];
     const connectionStates: Array<ConnectionView | null> = [
       null,
-      { events_url: null, config_url: null, facility_id: null, facility_token_set: false, facility_token_masked: null, configured: false, reachable: null, last_ok_at: null, updated_at: null },
-      { events_url: null, config_url: null, facility_id: null, facility_token_set: false, facility_token_masked: null, configured: true, reachable: true, last_ok_at: null, updated_at: null },
+      { ...connectionBase, configured: false, reachable: null },
+      { ...connectionBase, configured: true, reachable: true },
     ];
     const classNames = [
       ...(['online', 'offline', 'starting', 'unknown'] as const).map((status) => getCameraStatusMeta(status).className),

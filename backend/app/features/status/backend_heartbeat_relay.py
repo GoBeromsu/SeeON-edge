@@ -25,6 +25,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from backend.app.features.status.heartbeat_store import ONLINE, get_heartbeat_store
+from backend.app.shared.backend_client_bundle import backend_client_bundle
 
 logger = logging.getLogger(__name__)
 
@@ -91,7 +92,12 @@ def relay_heartbeats_once(app: object, now: float | None = None) -> RelayTickRes
     ``app.state.backend_ingest_client`` unset -- the exact state a freshly
     booted app without connection settings, or a test app, is already in.
     """
-    client = getattr(app.state, "backend_ingest_client", None)
+    bundle = backend_client_bundle(app)
+    client = (
+        bundle.ingest_client
+        if bundle is not None
+        else getattr(app.state, "backend_ingest_client", None)
+    )
     if client is None or not hasattr(client, "for_camera"):
         return RelayTickResult(skipped_reason="no_client")
 

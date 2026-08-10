@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Final
 
 from fastapi.routing import APIRoute
+from starlette.routing import Mount, Route
 
 from backend.app.main import create_app, no_lifespan
 
@@ -26,6 +27,11 @@ ALLOWED_PATHS: Final = {
     "/api/v1/relay/runtime-status",
     "/api/v1/audit",
     "/api/v1/cameras",
+    "/api/v1/cameras/topology",
+    "/api/v1/cameras/topology/floors",
+    "/api/v1/cameras/topology/floors/{edge_ref}",
+    "/api/v1/cameras/topology/rooms",
+    "/api/v1/cameras/topology/rooms/{edge_ref}",
     "/api/v1/cameras/worker-config",
     "/api/v1/cameras/{camera_id}",
     "/api/v1/cameras/{camera_id}/test",
@@ -38,6 +44,8 @@ ALLOWED_PATHS: Final = {
     "/api/v1/connection",
     "/api/v1/connection/sync-cameras",
     "/api/v1/connection/test",
+    "/api/v1/connection/topology-preview",
+    "/api/v1/connection/topology-preview/confirm",
     "/api/v1/clips/{clip_id}/label",
     "/api/v1/clips/{clip_id}/thumbnail",
     "/api/v1/clips/{clip_id}/video",
@@ -97,7 +105,9 @@ def test_serving_app_exposes_only_documented_boundary_routes() -> None:
     app = create_app(lifespan=no_lifespan)
     api_routes = [route for route in app.routes if isinstance(route, APIRoute)]
 
-    exposed_paths = {route.path for route in app.routes}
+    exposed_paths = {
+        route.path for route in app.routes if isinstance(route, (APIRoute, Route, Mount))
+    }
     production_routes = [
         route.path
         for route in api_routes
@@ -116,6 +126,8 @@ def test_serving_files_do_not_import_ml_runtime_or_event_schema_modules() -> Non
     for path in _serving_python_files():
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         for node in ast.walk(tree):
+            if not isinstance(node, (ast.Import, ast.ImportFrom)):
+                continue
             import_name = _import_name(node)
             if import_name is None:
                 continue

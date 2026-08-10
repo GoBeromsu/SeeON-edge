@@ -133,6 +133,8 @@ export function normalizeCamera(value: unknown): Camera | null {
     last_heartbeat_at: pickNumber(value, ['last_heartbeat_at', 'lastHeartbeatAt']),
     heartbeat_age_sec: pickNumber(value, ['heartbeat_age_sec', 'heartbeatAgeSec']),
     bed_zone: normalizeBedZone(value.bed_zone),
+    edge_ref: pickNullableString(value, ['edge_ref', 'edgeRef']),
+    room_edge_ref: pickNullableString(value, ['room_edge_ref', 'roomEdgeRef']),
   };
 }
 
@@ -174,6 +176,8 @@ function isCameraResponse(value: unknown): value is Record<string, unknown> {
     && hasNullableInteger(value, 'floor')
     && hasNullableString(value, 'last_ok_at')
     && hasNullableString(value, 'last_probed_at')
+    && hasNullableString(value, 'edge_ref')
+    && hasNullableString(value, 'room_edge_ref')
     && (!('last_heartbeat_at' in value) || isNullableFiniteNumber(value.last_heartbeat_at))
     && (!('heartbeat_age_sec' in value) || isNullableFiniteNumber(value.heartbeat_age_sec));
 }
