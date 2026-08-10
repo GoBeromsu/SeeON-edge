@@ -1,156 +1,68 @@
-# Runbook: worker migration rollback (image digest)
+# Roll back edge enrollment safely
 
-Use this when a newly deployed `ml-worker` image misbehaves on an edge host and
-you need the previous known-good worker back.
+Rollback is digest-based and ML-first. It preserves API state, worker state,
+camera registry, outboxes, models, and clip storage. It is not a source revert
+and never uses a mutable image tag, direct SQL, or environment-derived facility
+identity. Deployment inputs remain `compose.edge.yaml` and the contract described
+by `.env.edge.prod.example`.
 
-Rollback is **image-digest based, not a source revert**. Do not `git revert`,
-rebuild, or edit Python on the edge host: the host pulls prebuilt GHCR images
-only. You change one value — `ML_WORKER_IMAGE` — back to the prior digest and
-restart that one service. Model, state, and clip volumes are preserved unchanged.
+The preserved storage identities are `ml-worker-state`, `ml-api-state`, and the
+`clip-store` bind mount. A container may be recreated; these storage identities
+must not be recreated or removed.
 
-Inputs, exactly as described by
-[`.env.edge.prod.example`](../../.env.edge.prod.example) and
-[`compose.edge.yaml`](../../compose.edge.yaml):
+## Before deployment
 
-```sh
-cd /opt/eldercare-fall-ml   # the checkout that owns .env.edge.prod
-# GPU host
-DC='docker compose --env-file .env.edge.prod -f compose.edge.yaml'
+Record the exact running and target API/worker image digests. Under the catalog
+process lock:
 
-# CPU-only host: use this instead of the GPU value above.
-# DC='docker compose --env-file .env.edge.prod -f compose.edge.yaml -f compose.edge.cpu.yaml'
-```
+1. checkpoint WAL with `PRAGMA wal_checkpoint(FULL)`
+2. use the SQLite online backup API into a root-only `0700` directory and `0600`
+   timestamped file
+3. run `PRAGMA integrity_check`
+4. fsync the backup file and parent directory
+5. record only filename, SHA-256, and size
 
-`compose.edge.yaml` requires `ML_WORKER_PROFILE` (`cuda|mps|cpu`). If it is
-missing from `.env.edge.prod`, even `$DC ps` fails with
-`${ML_WORKER_PROFILE:?set cuda|mps|cpu}`. Fix that before any compose action, or
-you will misread a config error as a rollback failure.
+Retain the previous digests and backups through the rollback window. Never put
+SQLite bytes or secret values in `.omo` evidence.
 
-## 1. Record the image you are leaving and the image you are returning to
+## Rollback gate
 
-```sh
-# The configured reference of the currently running worker.
-CURRENT_WORKER_IMAGE=$(docker inspect --format '{{.Config.Image}}' \
-  "$($DC ps -q ml-worker)")
-printf 'current worker image: %s\n' "$CURRENT_WORKER_IMAGE"
+Rehash the approved plan, verify `final-rc-seal.json`, recheck the pinned host
+key/hostname/machine baseline, acquire the edge deployment lock, and reject a
+running updater. Require healthy volumes, drained queues, at least 20 GiB free
+clip capacity, and a verified backup before changing containers.
 
-# Set this to the prior digest reference recorded before the failed deployment.
-PRIOR_WORKER_IMAGE='ghcr.io/seniorailab/eldercare-fall-ml/ml-worker@sha256:<prior-digest>'
-case "$PRIOR_WORKER_IMAGE" in
-  *@sha256:*) ;;
-  *) printf '%s\n' 'PRIOR_WORKER_IMAGE must be an @sha256: reference' >&2; exit 1 ;;
-esac
-```
+## Order
 
-Use the prior reference recorded in the deployment record or the prior successful
-`edge-ml-image-refs-<sha>` workflow artifact. Do not infer a prior deployment
-from a mutable tag.
+1. Stop new v1 work and drain topology, relay, and evidence queues.
+2. Restore `ML_API_IMAGE` and `ML_WORKER_IMAGE` to the recorded previous
+   `@sha256:` references.
+3. Pull and recreate only `ml-api` and `ml-worker`. Do not use `down -v`.
+   Worker-only recovery uses `up -d --no-deps ml-worker` after the API is proven
+   compatible.
+4. Verify both previous digests, `/health/ready`, `/api/v1/system`, and all
+   enumerated legacy AI routes.
+5. Verify normal heartbeats and no duplicate topology or events.
+6. Only after ML is proven compatible may AI perform a binary-only rollback.
 
-`update-edge.sh`, when used independently, writes one overwritten file at
-`${EDGE_UPDATER_DATA_DIR:-/var/lib/edge-updater}/snapshot.json`; it does not keep
-a `snapshots/` directory or copy `.env.edge.prod` files. Its committed snapshot
-describes the then-current target, so it is not the rollback source for this
-manual procedure. Write both references down before continuing.
+AI database restore is prohibited after post-v1 traffic. Restore the pre-v1 ML
+SQLite backup only if the old image cannot read the additive state. That restore
+discards post-snapshot enrollment/topology-send state but preserves unrelated
+camera registry, outbox, and media state.
 
-## 2. Preserve the volumes (read this before you touch compose)
+## Roll forward
 
-The worker's durable state is not in the image. `compose.edge.yaml` mounts:
+Deploy the sealed ML digests again, enroll through `PUT /api/v1/connection`, read
+the current server revision, and trigger `POST /api/v1/connection/sync-cameras`.
+The exact registry snapshot converges stable identities. Do not stamp a facility
+ID into worker config or reconstruct it from a backup filename.
 
-| Mount | Kind | Contents |
-| --- | --- | --- |
-| `ml-worker-state:/root/.local/state/ml-worker` | named volume | `ML_WORKER_STATE_DIR`: LKG config, first-fault records, GPU lease, outbox DB |
-| `ml-api-state:/root/.local/state/ml-api` | named volume | ml-api local state |
-| `${CLIP_STORE_HOST_DIR}:/var/lib/clip-store` | host bind | evidence clips and manifests (worker `rw`, api `ro`) |
-| `${ML_MODELS_DIR:-./models}:/app/models:ro` | host bind | model artifacts, read-only |
-
-Rules:
-
-- **Never** run `docker compose down -v` / `docker volume rm` during a rollback.
-  `-v` destroys `ml-worker-state` and `ml-api-state`, taking the last-known-good
-  config, the durable evidence outbox, and the first-fault record with it.
-- Recreating the container is fine and expected; recreating the **volume** is not.
-- The clip store and models directory are host paths. Leave
-  `CLIP_STORE_HOST_DIR` and `ML_MODELS_DIR` untouched so both image versions read
-  the same evidence and the same weights.
-- Take a copy of the state volume before rolling back if the failing image may
-  have migrated the on-disk outbox schema forward. A forward-migrated SQLite
-  outbox is not guaranteed readable by the older image:
-
-   ```sh
-   WORKER_CONTAINER=$($DC ps -q ml-worker)
-   WORKER_STATE_VOLUME=$(docker inspect --format '{{range .Mounts}}{{if eq .Destination "/root/.local/state/ml-worker"}}{{.Name}}{{end}}{{end}}' "$WORKER_CONTAINER")
-   test -n "$WORKER_STATE_VOLUME"
-   STATE_MOUNT=$(docker volume inspect --format '{{.Mountpoint}}' "$WORKER_STATE_VOLUME")
-   sudo tar -C "$STATE_MOUNT" -cf /var/tmp/ml-worker-state-pre-rollback.tar .
-   ```
-
-  Keep that archive until the rollback is verified. It is the only way back if
-  the older image rejects a migrated outbox.
-
-## 3. Set the prior digest and restart only the worker
-
-Leave every other key exactly as it is. The deployment identity is frozen: the
-service and image stay `ml-worker`, the file names stay `compose.edge.yaml` /
-`.env.edge.prod`, and the `ML_WORKER_*`, `WORKER_*`, `ML_API_*`, `API_*` keys are
-unchanged across both image versions. A rollback that also renames something is
-not a rollback.
+Run the lifecycle smoke only after the preflight receipt is green:
 
 ```sh
-umask 077
-awk -v image="$PRIOR_WORKER_IMAGE" '
-  /^ML_WORKER_IMAGE=/ { print "ML_WORKER_IMAGE=" image; found=1; next }
-  { print }
-  END { if (!found) exit 1 }
-' .env.edge.prod > .env.edge.prod.rollback.tmp
-mv .env.edge.prod.rollback.tmp .env.edge.prod
-
-$DC pull ml-worker
-$DC up -d --no-deps ml-worker
+sh scripts/ops/cloud-enrollment-smoke.sh \
+  --host happy-nursing-home-raw --full-lifecycle --rollback-drill
 ```
 
-`--no-deps` keeps `ml-api` running. The worker→ml-api relay surface
-(`/api/v1/relay/{config,restart,alerts,heartbeat,runtime-status}`) is unchanged
-by the worker migration, so the worker can be rolled back on its own. Roll back
-`ML_API_IMAGE` only if ml-api itself is the faulty component.
-
-## 4. Verify
-
-```sh
-# The container now uses the exact prior reference, not merely an image ID.
-ACTUAL_WORKER_IMAGE=$(docker inspect --format '{{.Config.Image}}' "$($DC ps -q ml-worker)")
-test "$ACTUAL_WORKER_IMAGE" = "$PRIOR_WORKER_IMAGE"
-
-# ml-api stayed healthy and is receiving worker facts
-$DC ps
-PORT=$(awk -F= '$1 == "ML_SERVING_PORT" { print $2 }' .env.edge.prod)
-: "${PORT:=8000}"
-curl -fsS http://127.0.0.1:"$PORT"/health/ready
-
-# Worker boot: profile resolution, model warmup, per-camera activation
-$DC logs --tail 200 ml-worker
-```
-
-Expected: the digest matches the prior digest from step 1, ml-api is `healthy`,
-the worker logs a resolved profile and completed warmup, and heartbeats resume.
-Volumes must be the same ones as before — confirm with `docker volume ls` that
-no `*_ml-worker-state` volume was recreated.
-
-If the older image fails to start against the current state volume, restore the
-step-2 archive into the volume and retry. If it fails again, the fault is not in
-the worker image and this runbook is finished; escalate with the worker logs and
-the first-fault record from `ML_WORKER_STATE_DIR`.
-
-## 5. Close the loop
-
-- Record both digests, the reason, and the outcome in the operations log.
-- Keep the pre-rollback state archive until the replacement image ships.
-- Report the failing digest against the migration issue so the next image is not
-  built on the same defect. A rollback is not a fix.
-
-## Related
-
-- [`docs/architecture.md`](../architecture.md) — worker layers, entrypoint
-  (`python -m worker`), and the failure matrix that tells you whether a fault is
-  global (process exits non-zero) or per camera (only that camera degrades).
-- [`docs/runbooks/driver-cuda-alignment.md`](driver-cuda-alignment.md) — host
-  driver/CUDA faults. An image rollback does not repair a GPU in a bad state.
+Success evidence contains only plan/SHA/digest bindings, backup metadata,
+versioned API statuses, counts, and redacted lifecycle results.
