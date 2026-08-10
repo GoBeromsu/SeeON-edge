@@ -102,6 +102,7 @@ ignore = ["TRY003"]
 [tool.pytest.ini_options]
 pythonpath = ["."]
 markers = [
+    "integration: local multi-service integration tests excluded from the default CI suite.",
     "real_stack: real-stack E2E tests that require external RTSP tooling (mediamtx, ffmpeg) on PATH; deselected in CI via `-m \"not real_stack\"`, see tests/AGENTS.md for running locally.",
     "heavy: spawns a real interpreter subprocess whose exit depends on wall-clock supervision (watchdog deadlines, hard-exit paths). Correct on an idle host, flaky on a loaded CI runner because process start alone can outlast the deadline. Deselected in CI via `-m \"not heavy\"`; run locally before touching worker/runtime.",
 ]
