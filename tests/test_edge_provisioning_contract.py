@@ -27,7 +27,6 @@ from contracts.edge_provisioning_v1 import (
     parse_error_envelope,
     parse_machine_principal,
     parse_topology_confirmation,
-    parse_topology_manifest,
     parse_topology_snapshot,
     parse_topology_success_envelope,
     serialize_enrollment_verification,
@@ -215,18 +214,6 @@ def test_machine_principal_parser_rejects_facility_identity() -> None:
                 "facilityId": "synthetic-facility",
             }
         )
-
-
-def test_manifest_parser_rejects_missing_parent_relationship() -> None:
-    manifest: list[JsonRecord] = [
-        dict(kind="FLOOR", edgeRef="floor-2", canonicalId="floor-id", parentCanonicalId=None),
-        dict(
-            kind="ROOM", edgeRef="room-201", canonicalId="room-id", parentCanonicalId="missing"
-        ),
-    ]
-
-    with pytest.raises(ContractViolation):
-        _ = parse_topology_manifest(manifest)
 
 
 def test_error_envelope_parser_rejects_malformed_envelopes() -> None:

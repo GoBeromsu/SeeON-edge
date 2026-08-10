@@ -1,19 +1,44 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal, TypeAlias, TypedDict
+from enum import StrEnum, unique
+from typing import Literal, NotRequired, TypeAlias, TypedDict, final
 
 JsonValue: TypeAlias = str | int | float | bool | None | list["JsonValue"] | dict[str, "JsonValue"]
 JsonRecord: TypeAlias = dict[str, JsonValue]
 TopologyKind: TypeAlias = Literal["FLOOR", "ROOM", "CAMERA"]
 
 
-@dataclass(frozen=True, slots=True)
+@unique
+class EdgeErrorCode(StrEnum):
+    INVALID_SCHEMA = "INVALID_SCHEMA"
+    INVALID_TOPOLOGY = "INVALID_TOPOLOGY"
+    EDGE_CREDENTIAL_REQUIRED = "EDGE_CREDENTIAL_REQUIRED"
+    EDGE_CREDENTIAL_INVALID = "EDGE_CREDENTIAL_INVALID"
+    EDGE_CREDENTIAL_INACTIVE = "EDGE_CREDENTIAL_INACTIVE"
+    FACILITY_BINDING_MISMATCH = "FACILITY_BINDING_MISMATCH"
+    INSTALLATION_CONFLICT = "INSTALLATION_CONFLICT"
+    IDEMPOTENCY_CONFLICT = "IDEMPOTENCY_CONFLICT"
+    CLIENT_REVISION_OUT_OF_SEQUENCE = "CLIENT_REVISION_OUT_OF_SEQUENCE"
+    STALE_SERVER_REVISION = "STALE_SERVER_REVISION"
+    STALE_ENROLLMENT_GENERATION = "STALE_ENROLLMENT_GENERATION"
+    TOPOLOGY_CONFLICT = "TOPOLOGY_CONFLICT"
+    TOPOLOGY_TRANSFER_CONFLICT = "TOPOLOGY_TRANSFER_CONFLICT"
+    LEGACY_MAPPING_REQUIRED = "LEGACY_MAPPING_REQUIRED"
+    CONFIRMATION_STALE = "CONFIRMATION_STALE"
+    CONFIRMATION_EXPIRED = "CONFIRMATION_EXPIRED"
+    ENROLLMENT_RATE_LIMITED = "ENROLLMENT_RATE_LIMITED"
+    EDGE_AUTH_NOT_CONFIGURED = "EDGE_AUTH_NOT_CONFIGURED"
+
+
+@final
 class ContractViolation(Exception):
+    __slots__ = ("detail",)
     detail: str
 
-    def __str__(self) -> str:
-        return self.detail
+    def __init__(self, detail: str) -> None:
+        super().__init__(detail)
+        self.detail = detail
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,6 +79,7 @@ class TopologyRoom:
     room_type: str
     capacity: int
     cameras: tuple[TopologyCamera, ...]
+    legacy_canonical_space_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,7 +115,7 @@ class TopologyManifestEntry:
 
 @dataclass(frozen=True, slots=True)
 class ErrorEnvelope:
-    code: str
+    code: EdgeErrorCode
     message: str
     retryable: bool
     request_id: str
@@ -100,6 +126,8 @@ class MutationCounts:
     created: int
     updated: int
     unchanged: int
+    reactivated: int = 0
+    deactivated: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -120,12 +148,19 @@ class OmissionPreview:
 
 
 @dataclass(frozen=True, slots=True)
+class OwnershipTransferPreview:
+    manifest_digest: str
+    items: tuple[TopologyManifestEntry, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class TopologySuccessEnvelope:
     snapshot_id: str
     client_revision: int
     server_revision: int
     result: TopologyMutationResult
     omissions: OmissionPreview | None
+    ownership_transfer_required: OwnershipTransferPreview | None = None
 
 
 class EnrollmentVerificationBody(TypedDict):
@@ -147,9 +182,10 @@ class TopologyCameraBody(TypedDict):
 class TopologyRoomBody(TypedDict):
     edgeRef: str
     name: str
-    type: str
-    capacity: int
     cameras: list[TopologyCameraBody]
+    type: NotRequired[str]
+    capacity: NotRequired[int]
+    legacyCanonicalSpaceId: NotRequired[str]
 
 
 class TopologyFloorBody(TypedDict):
@@ -167,7 +203,7 @@ class TopologyConfirmationBody(TypedDict):
 
 
 class ErrorDetailBody(TypedDict):
-    code: str
+    code: EdgeErrorCode
     message: str
     retryable: bool
     requestId: str
@@ -183,6 +219,7 @@ __all__ = [
     "EnrollmentVerification",
     "EnrollmentVerificationBody",
     "EnrollmentVerificationResult",
+    "EdgeErrorCode",
     "ErrorDetailBody",
     "ErrorEnvelope",
     "ErrorEnvelopeBody",
@@ -193,6 +230,7 @@ __all__ = [
     "MachinePrincipalBody",
     "MutationCounts",
     "OmissionPreview",
+    "OwnershipTransferPreview",
     "TopologyCamera",
     "TopologyCameraBody",
     "TopologyConfirmation",

@@ -12,6 +12,7 @@ from contracts.edge_provisioning_enrollment import (
 )
 from contracts.edge_provisioning_models import (
     ContractViolation,
+    EdgeErrorCode,
     EnrollmentVerification,
     EnrollmentVerificationResult,
     ErrorEnvelope,
@@ -19,6 +20,7 @@ from contracts.edge_provisioning_models import (
     MachinePrincipal,
     MutationCounts,
     OmissionPreview,
+    OwnershipTransferPreview,
     TopologyCamera,
     TopologyConfirmation,
     TopologyFloor,
@@ -29,17 +31,20 @@ from contracts.edge_provisioning_models import (
     TopologySuccessEnvelope,
 )
 from contracts.edge_provisioning_parse import (
-    parse_error_envelope,
     parse_machine_principal,
     parse_topology_confirmation,
     parse_topology_manifest,
     parse_topology_snapshot,
+)
+from contracts.edge_provisioning_response import (
+    parse_error_envelope,
     parse_topology_success_envelope,
 )
 
 __all__ = [
     "CANONICAL_SCHEMA_VERSION",
     "ContractViolation",
+    "EdgeErrorCode",
     "EnrollmentVerification",
     "EnrollmentVerificationResult",
     "ErrorEnvelope",
@@ -47,6 +52,7 @@ __all__ = [
     "MachinePrincipal",
     "MutationCounts",
     "OmissionPreview",
+    "OwnershipTransferPreview",
     "TopologyCamera",
     "TopologyConfirmation",
     "TopologyFloor",
