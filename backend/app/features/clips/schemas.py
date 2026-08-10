@@ -24,6 +24,7 @@ class ClipManifestResponse(BaseModel):
     video_error: str | None = Field(default=None)
     finalized: bool
     size_bytes: int | None = Field(default=None, ge=0)
+    thumbnail_available: bool = False
 
 
 class ClipsPaginationResponse(BaseModel):

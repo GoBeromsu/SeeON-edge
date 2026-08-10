@@ -1,4 +1,4 @@
-# 엣지 이미지 발행 — `main` 병합만으로는 이미지가 생기지 않는다
+# 엣지 이미지 발행과 digest 확인
 
 파일럿 런칭 당일 절차의 일부다. 제품 저장소(`eldercare-fall-ai`)의
 `docs/rules/pilot-launch-runbook.md` 2.5단계가 이 문서를 가리킨다.
@@ -8,39 +8,42 @@
 문자열로 갖지 않는다(`eldercare-fall-ai/scripts/repo-residue-check.mjs`가
 검사한다).
 
-## 왜 별도 단계인가
+## `main` 병합 뒤에 생기는 것
 
 `.env.edge.prod`의 `ML_API_IMAGE` / `ML_WORKER_IMAGE`는 GHCR에 **이미 올라가
 있는** 이미지를 가리킨다. 그 이미지를 만드는 워크플로
-(`.github/workflows/edge-images.yml`)는 **`main` push로 돌지 않는다.**
-트리거는 `release: published`와 `workflow_dispatch` 둘뿐이다.
+(`.github/workflows/edge-images.yml`)는 `release: published`, `main` push,
+`workflow_dispatch`에서 실행된다.
 
-즉 PR을 병합해도 이미지는 그대로다. 새 코드가 담긴 이미지를 원하면
-사람이 한 번 돌려야 한다.
+즉 PR이 `main`에 병합되면 워크플로가 자동으로 `ml-api`와 `ml-worker`를
+빌드하고 GHCR에 올린다. `ml-api` 이미지에는 프런트엔드도 함께 들어간다.
+배포에 쓸 값은 태그가 아니라 그 실행이 남긴 digest-pinned artifact에서
+가져온다.
 
 클라우드(`eldercare-fall-ai`)는 사정이 다르다. 릴리스 발행이 Jenkins를
 깨우고 Jenkins가 `Jenkinsfile`에서 backend/front 이미지를 직접 빌드한다.
-**사람이 이미지 발행을 따로 해야 하는 것은 엣지뿐이다.**
+`workflow_dispatch`는 특정 tag, branch, SHA를 다시 빌드해야 할 때만 쓴다.
 
 ## 절차
 
-병합 직후 `main`으로 굽는다.
+병합 뒤에는 해당 `main` push 실행이 성공할 때까지 기다린다. 아래 명령은
+현재 `main`의 SHA로 실행을 고르므로, 뒤이어 다른 병합이 있어도 엉뚱한
+artifact를 받지 않는다.
 
 ```bash
-gh workflow run edge-images.yml --repo SeniorAILab/eldercare-fall-ml-v2 -f ref=main
-
-# 실행 id를 얻어서 지켜본다. `gh run watch`는 인자 없이 쓰면 대화형으로
-# 목록을 띄우므로 id를 넘긴다.
-sleep 5   # 목록에 뜨기까지 잠깐 걸린다
-RUN=$(gh run list --repo SeniorAILab/eldercare-fall-ml-v2 \
-      --workflow edge-images.yml --limit 1 --json databaseId -q '.[0].databaseId')
+set -eu
+REPO=SeniorAILab/eldercare-fall-ml-v2
+MAIN_SHA=$(gh api "repos/$REPO/commits/main" --jq .sha)
+RUN=$(gh run list --repo "$REPO" --workflow edge-images.yml \
+      --commit "$MAIN_SHA" --limit 1 --json databaseId --jq '.[0].databaseId')
+test -n "$RUN"
 echo "run=$RUN"
-gh run watch "$RUN" --repo SeniorAILab/eldercare-fall-ml-v2
+gh run watch "$RUN" --repo "$REPO"
 ```
 
-> 이 워크플로는 아직 한 번도 돈 적이 없어 `gh run list`가 **빈 목록**을
-> 낸다(확인함). 위 `RUN`이 비어 있으면 워크플로가 아직 시작되지 않은
-> 것이므로 몇 초 뒤 다시 조회한다.
+GitHub가 실행을 목록에 반영하기 전에는 `RUN`이 비어 있을 수 있다. 그때는
+몇 초 기다린 뒤 같은 조회 명령부터 다시 실행한다. 실행이 실패하면 artifact를
+사용하지 말고 실행 로그의 실패 단계를 해결한다.
 
 **값을 손으로 만들지 않는다.** 워크플로 마지막 단계
 (`Write edge image env artifact`)가 `ML_API_IMAGE` / `ML_WORKER_IMAGE`
@@ -48,18 +51,20 @@ gh run watch "$RUN" --repo SeniorAILab/eldercare-fall-ml-v2
 블록으로 보이므로 복사해서 `.env.edge.prod`에 붙인다.
 
 ```bash
-# 실행 요약(웹)에서 바로 복사하거나, 아티팩트로 받는다.
-# 아티팩트 이름에 SHA가 붙으므로 이름을 지정하지 말고 run id로 받는다 —
-# 이 워크플로는 아티팩트를 하나만 올린다.
-#
-# 위 블록과 다른 셸이면 $RUN이 없다. 그때는 다시 얻는다:
-RUN=${RUN:-$(gh run list --repo SeniorAILab/eldercare-fall-ml-v2 \
-      --workflow edge-images.yml --limit 1 --json databaseId -q '.[0].databaseId')}
+# 실행 요약(웹)에서 바로 복사하거나, 현재 main SHA에 정확히 대응하는
+# 이름의 artifact 하나만 받는다.
+set -eu
+REPO=SeniorAILab/eldercare-fall-ml-v2
+MAIN_SHA=$(gh api "repos/$REPO/commits/main" --jq .sha)
+RUN=${RUN:-$(gh run list --repo "$REPO" --workflow edge-images.yml \
+       --commit "$MAIN_SHA" --limit 1 --json databaseId --jq '.[0].databaseId')}
+test -n "$RUN"
 
-# 받는 위치는 어디든 된다. 아래 두 줄만 복사해 .env.edge.prod에 붙일 것이라
-# 임시 디렉터리로 받는다.
-gh run download "$RUN" --repo SeniorAILab/eldercare-fall-ml-v2 --dir /tmp/edge-refs
-find /tmp/edge-refs -name edge-ml-image-refs.env -exec cat {} +
+# artifact name is derived by edge-images.yml from the resolved deploy SHA.
+ARTIFACT="edge-ml-image-refs-$MAIN_SHA"
+rm -rf /tmp/edge-refs
+gh run download "$RUN" --repo "$REPO" --name "$ARTIFACT" --dir /tmp/edge-refs
+cat /tmp/edge-refs/edge-ml-image-refs.env
 ```
 
 받은 두 줄은 **태그가 아니라 `@sha256:` digest**다.
@@ -72,10 +77,7 @@ find /tmp/edge-refs -name edge-ml-image-refs.env -exec cat {} +
 > `compose.edge.yaml`이 digest 형식을 그대로 받는 것을 확인했다 —
 > 가짜 digest로 `docker compose config`를 돌려 해석되는 것을 봤다.
 
-## 첫 실행이 막힐 수 있다
-
-**이 워크플로는 아직 한 번도 돈 적이 없다(`Total runs 0`).** 시간을
-넉넉히 잡는다.
+## GHCR 권한 오류
 
 푸시 대상 네임스페이스는 GitHub상 **구 저장소**(`eldercare-fall-ml`)에
 연결돼 있는데, 워크플로는 이 저장소(`eldercare-fall-ml-v2`)에서 돈다.
@@ -110,4 +112,6 @@ docker login ghcr.io
 ## 진행 조건
 
 워크플로 성공, 그리고 `.env.edge.prod`의 두 줄이 그 실행이 찍어 준
-digest와 **글자 그대로 같음**. 옮겨 적지 말고 복사한다.
+digest와 **글자 그대로 같음**. 옮겨 적지 말고 복사한다. 배포 순서나
+one-off 데이터 작업이 필요한 변경은
+[`event-thumbnail-rollout.md`](event-thumbnail-rollout.md)를 따른다.

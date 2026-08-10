@@ -3,6 +3,7 @@ import { AccessibleDialog } from '@/shared/ui/AccessibleDialog';
 import { eventTypeLabel, formatClipDateTime } from '@/features/operations/operationsModel';
 import { formatBytes } from '@/shared/format/bytes';
 import type { Clip } from '@/shared/api/client';
+import { AutoplayVideo } from '@/shared/ui/AutoplayVideo';
 
 type ClipPlayerModalProps = {
   clip: Clip | null;
@@ -46,19 +47,13 @@ export function ClipPlayerModal({ clip, cameraLabel, onClose }: ClipPlayerModalP
         <div className="flex flex-col gap-4">
           <p className="tabular-nums text-sm text-muted-foreground">{formatClipDateTime(clip.created_at)}</p>
 
-          <div className="event-media-frame">
+          <div className="event-media-frame relative">
             {clip.video_available ? (
-              <video
+              <AutoplayVideo
                 key={clip.id}
-                className="h-full w-full object-cover"
                 src={clip.video_path}
-                controls
-                playsInline
-                preload="metadata"
-                onLoadedMetadata={(event) => {
-                  const video = event.currentTarget;
-                  setMetadata({ duration: video.duration, width: video.videoWidth, height: video.videoHeight });
-                }}
+                className="h-full w-full object-cover"
+                onLoadedMetadata={(video) => setMetadata({ duration: video.duration, width: video.videoWidth, height: video.videoHeight })}
               />
             ) : (
               <span className="event-media-unavailable">{clip.video_error ?? '영상을 사용할 수 없습니다.'}</span>

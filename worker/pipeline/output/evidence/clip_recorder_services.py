@@ -4,7 +4,11 @@ from dataclasses import dataclass
 from functools import partial
 from typing import Protocol
 
-from worker.adapters.encode import FFmpegConcatFinalizer, FFmpegSegmentEncoder
+from worker.adapters.encode import (
+    FFmpegConcatFinalizer,
+    FFmpegSegmentEncoder,
+    FFmpegThumbnailGenerator,
+)
 from worker.adapters.encode.models import SegmentEncoderConfig
 from worker.pipeline.output.evidence.clip_actor import (
     ClipPublicationPort,
@@ -81,7 +85,11 @@ def default_services(
     )
     return ClipRecorderServices(
         coordinator,
-        ClipPublisher(config.store_dir, ffprobe_bin=ffprobe_bin),
+        ClipPublisher(
+            config.store_dir,
+            ffprobe_bin=ffprobe_bin,
+            thumbnail_generator=FFmpegThumbnailGenerator(ffmpeg_bin=config.ffmpeg_bin),
+        ),
         encoder_name,
     )
 

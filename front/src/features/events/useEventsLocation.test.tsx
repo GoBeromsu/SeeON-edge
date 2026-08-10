@@ -17,6 +17,7 @@ function clip(id: string, eventType: string): Clip {
     created_at: '2026-08-02T03:12:00Z',
     video_path: `/api/v1/clips/${id}/video`,
     video_available: true,
+    thumbnail_available: false,
     video_error: null,
   };
 }

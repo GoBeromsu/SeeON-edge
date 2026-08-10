@@ -1,6 +1,6 @@
 import { act } from 'react';
 import { createRoot } from 'react-dom/client';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ClipPlayerModal } from '@/features/operations/ClipPlayerModal';
 import type { Clip } from '@/shared/api/client';
 
@@ -12,6 +12,7 @@ const baseClip: Clip = {
   created_at: '2026-08-02T03:12:00Z',
   video_path: '/api/v1/clips/clip-1/video',
   video_available: true,
+  thumbnail_available: true,
   video_error: null,
 };
 
@@ -27,11 +28,39 @@ function dialog(): HTMLElement {
   return document.querySelector('[role="dialog"]') as HTMLElement;
 }
 
+beforeEach(() => {
+  vi.spyOn(HTMLMediaElement.prototype, 'play').mockResolvedValue();
+});
+
 afterEach(() => {
   document.body.innerHTML = '';
+  vi.restoreAllMocks();
 });
 
 describe('ClipPlayerModal', () => {
+  it('mounts exactly one native video with controls and attempts inline autoplay', async () => {
+    render(baseClip);
+    await act(async () => Promise.resolve());
+
+    const videos = dialog().querySelectorAll('video');
+    expect(videos).toHaveLength(1);
+    expect(videos[0]?.controls).toBe(true);
+    expect(videos[0]?.autoplay).toBe(true);
+    expect(videos[0]?.playsInline).toBe(true);
+    expect(HTMLMediaElement.prototype.play).toHaveBeenCalledOnce();
+  });
+
+  it('keeps native controls and explains how to continue when autoplay is rejected', async () => {
+    vi.mocked(HTMLMediaElement.prototype.play).mockRejectedValueOnce(new DOMException('blocked', 'NotAllowedError'));
+
+    render(baseClip);
+    await act(async () => Promise.resolve());
+
+    const video = dialog().querySelector('video');
+    expect(video?.controls).toBe(true);
+    expect(dialog().querySelector('[role="status"]')?.textContent).toContain('재생 버튼');
+  });
+
   it('renders at the 720px design-spec width', () => {
     render(baseClip);
     expect(dialog().getAttribute('data-size')).toBe('xl');

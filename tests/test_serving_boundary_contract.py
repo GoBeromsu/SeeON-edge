@@ -47,6 +47,7 @@ ALLOWED_PATHS: Final = {
     "/api/v1/connection/topology-preview",
     "/api/v1/connection/topology-preview/confirm",
     "/api/v1/clips/{clip_id}/label",
+    "/api/v1/clips/{clip_id}/thumbnail",
     "/api/v1/clips/{clip_id}/video",
     "/api/v1/detection-settings",
     "/api/v1/status",

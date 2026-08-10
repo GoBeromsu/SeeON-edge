@@ -7,7 +7,7 @@ import json
 import pytest
 from fastapi.testclient import TestClient
 
-from backend.app.features.clips.router import _media_type
+from backend.app.features.clips.media_response import media_type as _media_type
 from backend.app.main import create_app, no_lifespan
 
 # Dashboard auth now always resolves to a session store (persisted file > env

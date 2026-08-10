@@ -3,6 +3,7 @@ import { AccessibleDialog } from '@/shared/ui/AccessibleDialog';
 import { getEventTypeChipClassName, getEventTypeLabel } from '@/features/events/eventTypes';
 import { formatClipTimestamp, formatDuration, formatResolution } from '@/features/events/formatters';
 import { formatBytes } from '@/shared/format/bytes';
+import { AutoplayVideo } from '@/shared/ui/AutoplayVideo';
 import type { ClipMetadataStatus } from '@/features/events/useClipMetadata';
 import type { Clip } from '@/shared/api/types';
 
@@ -67,17 +68,13 @@ export function ClipPlaybackModal({ clip, cameraLabel, open, onClose, lookupStat
         {getEventTypeLabel(clip.event_type)}
       </span>
 
-      <div className="event-media-frame">
+      <div className="event-media-frame relative">
         {clip.video_available ? (
-          <video
-            className="h-full w-full"
+          <AutoplayVideo
+            key={clip.id}
             src={clip.video_path}
-            controls
-            preload="metadata"
-            onLoadedMetadata={(event) => {
-              const target = event.currentTarget;
-              setMetadata({ duration: target.duration, width: target.videoWidth, height: target.videoHeight });
-            }}
+            className="h-full w-full"
+            onLoadedMetadata={(video) => setMetadata({ duration: video.duration, width: video.videoWidth, height: video.videoHeight })}
           />
         ) : (
           <div className="event-media-unavailable h-full px-4 text-center text-sm" data-testid="clip-modal-unavailable">

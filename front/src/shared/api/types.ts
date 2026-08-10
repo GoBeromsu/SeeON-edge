@@ -207,6 +207,7 @@ export type Clip = {
   created_at: string | null;
   video_path: string;
   video_available: boolean;
+  thumbnail_available: boolean;
   video_error: string | null;
   /**
    * Clip duration in seconds. Optional (not just nullable): an older backend that hasn't shipped

@@ -9,6 +9,7 @@ from worker.interfaces.encode import ClipEncoder, ClipFinalizer, EncoderSession
 from worker.interfaces.extract import Extractor
 from worker.interfaces.output import EventSink
 from worker.interfaces.serving import BatchServingClient, ServingClient
+from worker.interfaces.thumbnail import ThumbnailGenerator
 
 __all__ = [
     "BatchServingClient",
@@ -23,4 +24,5 @@ __all__ = [
     "FrameBus",
     "FrameSubscription",
     "ServingClient",
+    "ThumbnailGenerator",
 ]

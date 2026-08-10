@@ -1,6 +1,7 @@
 import { getEventTypeChipClassName, getEventTypeLabel } from '@/features/events/eventTypes';
 import { formatClipTimestamp } from '@/features/events/formatters';
 import type { Clip } from '@/shared/api/types';
+import { ClipThumbnail } from '@/shared/ui/ClipThumbnail';
 
 type ClipCardProps = {
   clip: Clip;
@@ -20,17 +21,7 @@ export function ClipCard({ clip, cameraLabel, onSelect }: ClipCardProps): JSX.El
         <span className="media-status-overlay absolute left-2 top-2 rounded-full px-2 py-0.5 text-xs font-semibold">
           {cameraLabel}
         </span>
-        {clip.video_available ? (
-          <div className="flex h-full items-center justify-center" data-testid="clip-thumbnail-available" aria-hidden="true">
-            <svg className="h-8 w-8" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75">
-              <path d="M8.5 6.75v10.5L17 12 8.5 6.75Z" strokeLinejoin="round" />
-            </svg>
-          </div>
-        ) : (
-          <div className="event-media-unavailable h-full px-3 text-center text-xs" data-testid="clip-thumbnail-unavailable">
-            {clip.video_error ?? '영상을 사용할 수 없습니다.'}
-          </div>
-        )}
+        <ClipThumbnail clip={clip} alt={`${cameraLabel} ${getEventTypeLabel(clip.event_type)} 이벤트 썸네일`} />
       </div>
       <div className="flex items-center justify-between gap-2 p-3">
         <span className={`inline-flex items-center rounded-full border px-2.5 py-1 text-xs font-semibold ${getEventTypeChipClassName(clip.event_type)}`}>

@@ -14,7 +14,11 @@ Inputs, exactly as described by
 
 ```sh
 cd /opt/eldercare-fall-ml   # the checkout that owns .env.edge.prod
+# GPU host
 DC='docker compose --env-file .env.edge.prod -f compose.edge.yaml'
+
+# CPU-only host: use this instead of the GPU value above.
+# DC='docker compose --env-file .env.edge.prod -f compose.edge.yaml -f compose.edge.cpu.yaml'
 ```
 
 `compose.edge.yaml` requires `ML_WORKER_PROFILE` (`cuda|mps|cpu`). If it is
@@ -22,29 +26,31 @@ missing from `.env.edge.prod`, even `$DC ps` fails with
 `${ML_WORKER_PROFILE:?set cuda|mps|cpu}`. Fix that before any compose action, or
 you will misread a config error as a rollback failure.
 
-## 1. Record the digest you are leaving and the digest you are returning to
+## 1. Record the image you are leaving and the image you are returning to
 
 ```sh
-# Currently running worker image (resolved digest, not the mutable tag)
-docker inspect --format '{{index .Config.Image}} {{.Image}}' \
-  "$($DC ps -q ml-worker)"
-docker inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' \
-  ghcr.io/seniorailab/eldercare-fall-ml/ml-worker
+# The configured reference of the currently running worker.
+CURRENT_WORKER_IMAGE=$(docker inspect --format '{{.Config.Image}}' \
+  "$($DC ps -q ml-worker)")
+printf 'current worker image: %s\n' "$CURRENT_WORKER_IMAGE"
 
-# Previous edge-updater snapshot, if the updater performed the upgrade
-sudo ls -1t /var/lib/edge-updater/snapshots | head -5
-sudo grep -h ML_WORKER_IMAGE /var/lib/edge-updater/snapshots/<snapshot>/.env.edge.prod
+# Set this to the prior digest reference recorded before the failed deployment.
+PRIOR_WORKER_IMAGE='ghcr.io/seniorailab/eldercare-fall-ml/ml-worker@sha256:<prior-digest>'
+case "$PRIOR_WORKER_IMAGE" in
+  *@sha256:*) ;;
+  *) printf '%s\n' 'PRIOR_WORKER_IMAGE must be an @sha256: reference' >&2; exit 1 ;;
+esac
 ```
 
-The edge updater (`scripts/edge-updater/update-edge.sh`, documented in
-[`scripts/edge-updater/README.md`](../../scripts/edge-updater/README.md))
-snapshots the edge inputs before it applies images, so the prior
-`ML_WORKER_IMAGE` digest is normally already on disk. If no snapshot exists, take
-the digest from the `edge-ml-image-refs-<sha>` workflow artifact of the previous
-release.
+Use the prior reference recorded in the deployment record or the prior successful
+`edge-ml-image-refs-<sha>` workflow artifact. Do not infer a prior deployment
+from a mutable tag.
 
-Write both digests down before continuing. Rolling back to a mutable tag defeats
-the purpose; always use the `@sha256:<digest>` form.
+`update-edge.sh`, when used independently, writes one overwritten file at
+`${EDGE_UPDATER_DATA_DIR:-/var/lib/edge-updater}/snapshot.json`; it does not keep
+a `snapshots/` directory or copy `.env.edge.prod` files. Its committed snapshot
+describes the then-current target, so it is not the rollback source for this
+manual procedure. Write both references down before continuing.
 
 ## 2. Preserve the volumes (read this before you touch compose)
 
@@ -52,8 +58,8 @@ The worker's durable state is not in the image. `compose.edge.yaml` mounts:
 
 | Mount | Kind | Contents |
 | --- | --- | --- |
-| `ml-worker-state:/var/lib/ml-worker` | named volume | `ML_WORKER_STATE_DIR`: LKG config, first-fault records, GPU lease, outbox DB |
-| `ml-api-state:/var/lib/ml-api` | named volume | ml-api local state |
+| `ml-worker-state:/root/.local/state/ml-worker` | named volume | `ML_WORKER_STATE_DIR`: LKG config, first-fault records, GPU lease, outbox DB |
+| `ml-api-state:/root/.local/state/ml-api` | named volume | ml-api local state |
 | `${CLIP_STORE_HOST_DIR}:/var/lib/clip-store` | host bind | evidence clips and manifests (worker `rw`, api `ro`) |
 | `${ML_MODELS_DIR:-./models}:/app/models:ro` | host bind | model artifacts, read-only |
 
@@ -70,24 +76,18 @@ Rules:
   have migrated the on-disk outbox schema forward. A forward-migrated SQLite
   outbox is not guaranteed readable by the older image:
 
-  ```sh
-  sudo tar -C /var/lib/docker/volumes/eldercare-fall-ml_ml-worker-state/_data \
-    -cf /var/tmp/ml-worker-state-pre-rollback.tar .
-  ```
+   ```sh
+   WORKER_CONTAINER=$($DC ps -q ml-worker)
+   WORKER_STATE_VOLUME=$(docker inspect --format '{{range .Mounts}}{{if eq .Destination "/root/.local/state/ml-worker"}}{{.Name}}{{end}}{{end}}' "$WORKER_CONTAINER")
+   test -n "$WORKER_STATE_VOLUME"
+   STATE_MOUNT=$(docker volume inspect --format '{{.Mountpoint}}' "$WORKER_STATE_VOLUME")
+   sudo tar -C "$STATE_MOUNT" -cf /var/tmp/ml-worker-state-pre-rollback.tar .
+   ```
 
   Keep that archive until the rollback is verified. It is the only way back if
   the older image rejects a migrated outbox.
 
 ## 3. Set the prior digest and restart only the worker
-
-Edit `.env.edge.prod` (gitignored; never commit it):
-
-```sh
-# before
-ML_WORKER_IMAGE=ghcr.io/seniorailab/eldercare-fall-ml/ml-worker@sha256:<bad-digest>
-# after
-ML_WORKER_IMAGE=ghcr.io/seniorailab/eldercare-fall-ml/ml-worker@sha256:<prior-digest>
-```
 
 Leave every other key exactly as it is. The deployment identity is frozen: the
 service and image stay `ml-worker`, the file names stay `compose.edge.yaml` /
@@ -96,6 +96,14 @@ unchanged across both image versions. A rollback that also renames something is
 not a rollback.
 
 ```sh
+umask 077
+awk -v image="$PRIOR_WORKER_IMAGE" '
+  /^ML_WORKER_IMAGE=/ { print "ML_WORKER_IMAGE=" image; found=1; next }
+  { print }
+  END { if (!found) exit 1 }
+' .env.edge.prod > .env.edge.prod.rollback.tmp
+mv .env.edge.prod.rollback.tmp .env.edge.prod
+
 $DC pull ml-worker
 $DC up -d --no-deps ml-worker
 ```
@@ -108,12 +116,15 @@ by the worker migration, so the worker can be rolled back on its own. Roll back
 ## 4. Verify
 
 ```sh
-# The container now runs the intended digest
-docker inspect --format '{{.Image}}' "$($DC ps -q ml-worker)"
+# The container now uses the exact prior reference, not merely an image ID.
+ACTUAL_WORKER_IMAGE=$(docker inspect --format '{{.Config.Image}}' "$($DC ps -q ml-worker)")
+test "$ACTUAL_WORKER_IMAGE" = "$PRIOR_WORKER_IMAGE"
 
 # ml-api stayed healthy and is receiving worker facts
 $DC ps
-curl -fsS http://127.0.0.1:"${ML_SERVING_PORT:-8000}"/health/ready
+PORT=$(awk -F= '$1 == "ML_SERVING_PORT" { print $2 }' .env.edge.prod)
+: "${PORT:=8000}"
+curl -fsS http://127.0.0.1:"$PORT"/health/ready
 
 # Worker boot: profile resolution, model warmup, per-camera activation
 $DC logs --tail 200 ml-worker

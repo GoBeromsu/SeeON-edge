@@ -442,16 +442,17 @@ def test_clip_recorder_fsyncs_media_and_manifest_before_staging_cleanup(
 
     Edge's original test intercepted ``os.fsync`` and used
     ``os.readlink("/proc/self/fd/N")`` purely as test-only instrumentation
-    to identify *which* file/directory each fsync call targeted, then
-    asserted the durability ordering: clips-dir fsync, media rename+fsync,
-    manifest rename+fsync, then staging cleanup+fsync. That instrumentation
+    to identify *which* file/directory each fsync call targeted. The trace may
+    contain duplicate basenames from media inspection, so phase lookups anchor
+    to the relevant replace operations: media, thumbnail, manifest, and staging
+    cleanup. That instrumentation
     technique ports unchanged -- the new code's own fsync calls
     (``worker/pipeline/output/evidence/durability.py:8-21``'s
     ``fsync_file``/``fsync_directory``, invoked from ``clip_publication.py``
     and ``clip_identity.py``) still take a bare file descriptor, and
     ``/proc/self/fd/N`` is still how the test resolves it back to a path --
-    and the ordering assertions below are unchanged from edge's original
-    intent.
+    and the ordering assertions below preserve edge's original durability
+    intent while covering the thumbnail publication phases.
 
     On a host with a working ``/proc`` (e.g. Linux CI), every event is
     recorded and the full ordering assertion passes. On this repo's
@@ -487,18 +488,29 @@ def test_clip_recorder_fsyncs_media_and_manifest_before_staging_cleanup(
     real_fsync = os.fsync
     real_rmtree = shutil.rmtree
 
-    def _record_replace(source: Path, target: Path) -> None:
+    def _record_replace(
+        source: str | os.PathLike[str],
+        target: str | os.PathLike[str],
+        *,
+        src_dir_fd: int | None = None,
+        dst_dir_fd: int | None = None,
+    ) -> None:
         events.append(("replace", Path(source).name, Path(target).name))
-        real_replace(source, target)
+        real_replace(
+            source,
+            target,
+            src_dir_fd=src_dir_fd,
+            dst_dir_fd=dst_dir_fd,
+        )
 
     def _record_fsync(descriptor: int) -> None:
         target = Path(os.readlink(f"/proc/self/fd/{descriptor}")).name
         events.append(("fsync", target, ""))
         real_fsync(descriptor)
 
-    def _record_rmtree(path: Path, *args: object, **kwargs: object) -> None:
+    def _record_rmtree(path: str | os.PathLike[str]) -> None:
         events.append(("rmtree", Path(path).name, ""))
-        real_rmtree(path, *args, **kwargs)
+        real_rmtree(path)
 
     monkeypatch.setattr(
         "worker.pipeline.output.evidence.clip_publication.os.replace", _record_replace
@@ -521,30 +533,36 @@ def test_clip_recorder_fsyncs_media_and_manifest_before_staging_cleanup(
     assert clip_id is not None
     clips_dir_fsync = events.index(("fsync", "clips", ""))
     media_replace = events.index(("replace", "clip.mp4", "clip.mp4"))
-    # The staged artifact and the final destination are both named
-    # "clip.mp4" (the real FFmpegConcatFinalizer always writes "clip.mp4"),
-    # so there are two "clip.mp4" fsync events: a durability fsync of the
-    # staged copy *before* the rename (matching
-    # tests/test_worker_clip_publication.py::
-    # test_ready_publication_fsyncs_before_renames_and_staging_cleanup, which
-    # pins that same pre-rename fsync using a distinct staged basename) and
-    # the one this assertion cares about, of the destination *after* the
-    # rename. Scope the lookup past ``media_replace`` to find the latter.
     media_fsync = events.index(("fsync", "clip.mp4", ""), media_replace)
-    first_dir_fsync = events.index(("fsync", clip_id, ""), media_fsync)
+    media_dir_fsync = events.index(("fsync", clip_id, ""), media_fsync)
+    thumbnail_replace = next(
+        index
+        for index, event in enumerate(events)
+        if event[0] == "replace" and event[2] == "thumbnail.jpg"
+    )
+    thumbnail_temp = events[thumbnail_replace][1]
+    thumbnail_temp_fsync = next(
+        index
+        for index, event in enumerate(events[:thumbnail_replace])
+        if event == ("fsync", thumbnail_temp, "")
+    )
+    thumbnail_dir_fsync = events.index(("fsync", clip_id, ""), thumbnail_replace)
     manifest_replace = events.index(("replace", "manifest.json.tmp", "manifest.json"))
-    manifest_fsync = events.index(("fsync", "manifest.json", ""))
-    second_dir_fsync = events.index(("fsync", clip_id, ""), first_dir_fsync + 1)
+    manifest_fsync = events.index(("fsync", "manifest.json", ""), manifest_replace)
+    manifest_dir_fsync = events.index(("fsync", clip_id, ""), manifest_fsync)
     staging_cleanup = events.index(("rmtree", clip_id, ""))
     staging_dir_fsync = events.index(("fsync", ".staging", ""), staging_cleanup)
     assert (
         clips_dir_fsync
         < media_replace
         < media_fsync
-        < first_dir_fsync
+        < media_dir_fsync
+        < thumbnail_temp_fsync
+        < thumbnail_replace
+        < thumbnail_dir_fsync
         < manifest_replace
         < manifest_fsync
-        < second_dir_fsync
+        < manifest_dir_fsync
         < staging_cleanup
         < staging_dir_fsync
     )

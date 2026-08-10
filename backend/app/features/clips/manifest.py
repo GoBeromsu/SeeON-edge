@@ -28,6 +28,7 @@ class ClipManifestPayload(TypedDict):
     video_error: str | None
     finalized: bool
     size_bytes: int | None
+    thumbnail_available: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,6 +45,7 @@ class ClipManifest:
     video_error: str | None
     finalized: bool
     size_bytes: int | None = None
+    thumbnail_available: bool = False
 
     def as_response(self) -> ClipManifestPayload:
         return {
@@ -59,6 +61,7 @@ class ClipManifest:
             "video_error": self.video_error,
             "finalized": self.finalized,
             "size_bytes": self.size_bytes,
+            "thumbnail_available": self.thumbnail_available,
         }
 
 
