@@ -101,6 +101,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     )
     app.state.backend_config_refresh_executor = refresh_executor
 
+    from backend.app.features.cameras.roster_sync import recover_camera_roster_on_boot
+
+    await asyncio.get_running_loop().run_in_executor(
+        refresh_executor, recover_camera_roster_on_boot, app
+    )
     await asyncio.get_running_loop().run_in_executor(
         refresh_executor, _pull_backend_config, app, refresh_stop
     )
@@ -298,15 +303,15 @@ def refresh_backend_config(app: FastAPI, stop_token: asyncio.Event | None = None
             mark_backend_status(app.state, False)
             _mark_backend_roster_stale(app)
             return False
+        was_reachable = getattr(app.state, "backend_reachable", None)
         mark_backend_status(app.state, True)
         _apply_backend_config(app, cfg, bundle)
-        # A reachable backend is the moment pending explicit camera mappings
-        # can converge; the refresh owner is single-flight, so this stays
-        # bounded and never runs concurrently with itself. Imported lazily:
-        # api.routes.cameras imports lifespan env-name constants at module load.
-        from backend.app.features.cameras.router import retry_pending_backend_mappings
+        if was_reachable is not True:
+            from backend.app.features.cameras.roster_sync import (
+                resume_camera_roster_after_connectivity,
+            )
 
-        retry_pending_backend_mappings(app)
+            resume_camera_roster_after_connectivity(app)
         return True
     finally:
         refresh_lock.release()

@@ -46,11 +46,6 @@ from backend.app.features.clips.storage_location_store import ClipStorageLocatio
 from backend.app.features.detection_settings.store import DetectionSettingsStore
 from backend.app.features.status.heartbeat_store import ONLINE, get_heartbeat_store
 from backend.app.shared.backend_client_bundle import backend_client_bundle
-from backend.app.shared.backend_mapping import (
-    BackendCameraMapper,
-    MappingResult,
-    mark_backend_status,
-)
 from backend.app.shared.dashboard_auth import authorize_dashboard
 from contracts.edge_provisioning_models import EdgeErrorCode, TopologyFloor, TopologyRoom
 from contracts.worker_config import PulledWorkerConfig
@@ -328,6 +323,7 @@ def get_camera_topology(
 def create_topology_floor(
     payload: CreateTopologyFloorRequest,
     request: Request,
+    background_tasks: BackgroundTasks,
     relay_token: Annotated[str | None, Header(alias=RELAY_TOKEN_HEADER)] = None,
     authorization: Annotated[str | None, Header(alias="Authorization")] = None,
 ) -> dict[str, object]:
@@ -338,6 +334,7 @@ def create_topology_floor(
         )
     except TopologyConflictError as error:
         raise _topology_conflict(error) from error
+    background_tasks.add_task(_trigger_roster_sync, request.app)
     return payload.model_dump()
 
 
@@ -346,17 +343,21 @@ def update_topology_floor(
     edge_ref: str,
     payload: UpdateTopologyFloorRequest,
     request: Request,
+    background_tasks: BackgroundTasks,
 ) -> dict[str, object]:
     _authorize(request, None, None)
     if not _store(request.app).update_floor(
         edge_ref, name=payload.name, order_index=payload.order_index
     ):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="floor not found")
+    background_tasks.add_task(_trigger_roster_sync, request.app)
     return {"edge_ref": edge_ref, **payload.model_dump()}
 
 
 @router.delete("/topology/floors/{edge_ref}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_topology_floor(edge_ref: str, request: Request) -> Response:
+def delete_topology_floor(
+    edge_ref: str, request: Request, background_tasks: BackgroundTasks
+) -> Response:
     _authorize(request, None, None)
     try:
         changed = _store(request.app).delete_floor(edge_ref)
@@ -364,6 +365,7 @@ def delete_topology_floor(edge_ref: str, request: Request) -> Response:
         raise _topology_conflict(error) from error
     if not changed:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="floor not found")
+    background_tasks.add_task(_trigger_roster_sync, request.app)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
@@ -371,6 +373,7 @@ def delete_topology_floor(edge_ref: str, request: Request) -> Response:
 def create_topology_room(
     payload: CreateTopologyRoomRequest,
     request: Request,
+    background_tasks: BackgroundTasks,
     relay_token: Annotated[str | None, Header(alias=RELAY_TOKEN_HEADER)] = None,
     authorization: Annotated[str | None, Header(alias="Authorization")] = None,
 ) -> dict[str, object]:
@@ -384,21 +387,28 @@ def create_topology_room(
         )
     except TopologyConflictError as error:
         raise _topology_conflict(error) from error
+    background_tasks.add_task(_trigger_roster_sync, request.app)
     return payload.model_dump()
 
 
 @router.patch("/topology/rooms/{edge_ref}")
 def update_topology_room(
-    edge_ref: str, payload: UpdateTopologyRoomRequest, request: Request
+    edge_ref: str,
+    payload: UpdateTopologyRoomRequest,
+    request: Request,
+    background_tasks: BackgroundTasks,
 ) -> dict[str, str]:
     _authorize(request, None, None)
     if not _store(request.app).update_room(edge_ref, name=payload.name):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="room not found")
+    background_tasks.add_task(_trigger_roster_sync, request.app)
     return {"edge_ref": edge_ref, "name": payload.name}
 
 
 @router.delete("/topology/rooms/{edge_ref}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_topology_room(edge_ref: str, request: Request) -> Response:
+def delete_topology_room(
+    edge_ref: str, request: Request, background_tasks: BackgroundTasks
+) -> Response:
     _authorize(request, None, None)
     try:
         changed = _store(request.app).delete_room(edge_ref)
@@ -406,6 +416,7 @@ def delete_topology_room(edge_ref: str, request: Request) -> Response:
         raise _topology_conflict(error) from error
     if not changed:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="room not found")
+    background_tasks.add_task(_trigger_roster_sync, request.app)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
@@ -434,23 +445,16 @@ def create_camera(
     # 그대로 보이고, 연결 여부는 worker의 첫 heartbeat이 확정한다.
     probe = _probe_rtsp_url(request, payload.rtsp_url)
     provisional_id = str(uuid.uuid4())
-    mapping = _map_backend(
-        request.app,
-        camera_id=provisional_id,
-        label=payload.label,
-        space_id=payload.space_id,
-    )
-    camera_id = mapping.backend_camera_id or provisional_id
     now = utc_now_iso()
     try:
         record = _store(request.app).create(
-            camera_id=camera_id,
+            camera_id=provisional_id,
             label=payload.label,
             rtsp_url=payload.rtsp_url,
             space_id=payload.space_id,
             status=status_from_probe(probe),
-            backend_camera_id=mapping.backend_camera_id,
-            mapping_pending=mapping.pending,
+            backend_camera_id=None,
+            mapping_pending=False,
             decode_backend=decode_backend,
             fps=fps,
             floor=floor,
@@ -519,11 +523,8 @@ def update_camera(
     if not payload.model_fields_set:
         return public_camera(current)
     updates: dict[str, object] = {}
-    next_label = str(current.get("label", ""))
-    next_space_id = current.get("space_id") if current.get("space_id") is not None else None
     if "label" in payload.model_fields_set and payload.label is not None:
         updates["label"] = payload.label
-        next_label = payload.label
     if "rtsp_url" in payload.model_fields_set and payload.rtsp_url is not None:
         probe = _probe_rtsp_url(request, payload.rtsp_url)
         updates["rtsp_url"] = payload.rtsp_url
@@ -535,26 +536,12 @@ def update_camera(
             updates["never_connected"] = False
     if "space_id" in payload.model_fields_set:
         updates["space_id"] = payload.space_id
-        next_space_id = payload.space_id
     if "decode_backend" in payload.model_fields_set:
         updates["decode_backend"] = _normalize_decode_backend(payload.decode_backend)
     if "fps" in payload.model_fields_set:
         updates["fps"] = _normalize_fps(payload.fps)
     if "floor" in payload.model_fields_set:
         updates["floor"] = _normalize_floor(payload.floor)
-
-    if "space_id" in payload.model_fields_set or "label" in payload.model_fields_set:
-        mapping = _map_backend(
-        request.app,
-            camera_id=camera_id,
-            label=next_label,
-            space_id=next_space_id if isinstance(next_space_id, str) else None,
-        )
-        if mapping.backend_camera_id is not None:
-            updates["backend_camera_id"] = mapping.backend_camera_id
-        elif current.get("backend_camera_id") is None:
-            updates["backend_camera_id"] = None
-        updates["mapping_pending"] = mapping.pending
 
     try:
         updated = _store(request.app).update(camera_id, updates)
@@ -876,39 +863,6 @@ def _live_pulled_config(request: Request, pulled: PulledWorkerConfig) -> PulledW
         detection_windows=pulled.detection_windows,
     )
 
-def retry_pending_backend_mappings(app: FastAPI) -> int:
-    """Resolve explicit backend mappings for registry records still pending.
-
-    Called by the roster-refresh owner after a successful backend pull so a
-    camera created/edited while the backend was unreachable (or before the
-    facility token was wired) converges to its canonical backend identity.
-    """
-    store = _store(app)
-    retried = 0
-    for record in _snapshot_camera_records(store.snapshot()):
-        if not record.get("mapping_pending"):
-            continue
-        space_id = record.get("space_id")
-        label = record.get("label")
-        camera_id = record.get("id")
-        if not isinstance(space_id, str) or not space_id.strip():
-            continue
-        if not isinstance(label, str) or not label.strip():
-            continue
-        if not isinstance(camera_id, str) or not camera_id.strip():
-            continue
-        mapping = _map_backend(app, camera_id=camera_id, label=label, space_id=space_id)
-        if mapping.backend_camera_id is None:
-            continue
-        store.update(
-            camera_id,
-            {"backend_camera_id": mapping.backend_camera_id, "mapping_pending": mapping.pending},
-        )
-        retried += 1
-    return retried
-
-
-
 def _public_snapshot(
     app: FastAPI,
     snapshot: CameraRegistryData | dict[str, object],
@@ -1128,32 +1082,6 @@ def _lookup_bed_zone(
         if isinstance(candidate, str) and candidate in bed_zones:
             return bed_zones[candidate]
     return None
-
-
-def _mapper(app: FastAPI) -> BackendCameraMapper:
-    bundle = backend_client_bundle(app)
-    if bundle is not None:
-        return bundle.camera_mapper
-    mapper = getattr(app.state, "backend_camera_mapper", None)
-    if not isinstance(mapper, BackendCameraMapper):
-        mapper = BackendCameraMapper.from_env()
-        app.state.backend_camera_mapper = mapper
-    return mapper
-
-
-def _map_backend(
-    app: FastAPI,
-    *,
-    camera_id: str,
-    label: str,
-    space_id: str | None,
-) -> MappingResult:
-    mapper = _mapper(app)
-    if space_id is None:
-        return MappingResult(backend_camera_id=None, pending=False, reachable=None)
-    result = mapper.put_mapping(edge_camera_ref=camera_id, label=label, space_id=space_id)
-    mark_backend_status(app.state, result.reachable)
-    return result
 
 
 def _authorize(request: Request, relay_token: str | None, authorization: str | None) -> None:
@@ -1409,4 +1337,4 @@ def _probe_response(probe: ProbeResult) -> dict[str, object]:
     return response
 
 
-__all__ = ["retry_pending_backend_mappings", "router", "worker_config_snapshot"]
+__all__ = ["router", "worker_config_snapshot"]

@@ -8,7 +8,7 @@ from fastapi.exceptions import HTTPException
 from pydantic import UUID4, BaseModel, ConfigDict, Field
 
 from backend.app.core.config import get_settings
-from backend.app.features.cameras.roster_sync import SyncStatus, sync_camera_roster
+from backend.app.features.cameras.roster_sync import sync_camera_roster
 from backend.app.features.cameras.router import RELAY_TOKEN_HEADER, _authorize
 from backend.app.features.connection.enrollment import (
     EnrollmentCredentials,
@@ -17,9 +17,12 @@ from backend.app.features.connection.enrollment import (
     verify_enrollment,
 )
 from backend.app.features.connection.store import ConnectionSettingsStore
+from backend.app.features.connection.topology_retry_coordinator import (
+    TopologySyncErrorClass,
+    TopologySyncStatus,
+)
 from backend.app.features.status.backend_heartbeat_relay import HeartbeatRelayState
 from backend.app.lifespan import apply_connection_settings, refresh_backend_config
-from backend.app.shared.backend_mapping import RosterErrorClass
 
 router = APIRouter(prefix="/connection", tags=["connection"])
 
@@ -88,8 +91,8 @@ class ConnectionTestResponse(BaseModel):
 class CameraRosterSyncResponse(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    status: SyncStatus
-    error_class: RosterErrorClass | None = None
+    status: TopologySyncStatus
+    error_class: TopologySyncErrorClass | None = None
     detail: str | None = None
     last_ok_at: str | None = None
     next_retry_at: str | None = None
@@ -251,7 +254,7 @@ def _heartbeat_relay_view(app: FastAPI) -> dict[str, object]:
 
 def _trigger_roster_sync(app: FastAPI) -> None:
     try:
-        sync_camera_roster(app)
+        sync_camera_roster(app, _force=True, _refresh=True)
     except Exception:  # noqa: BLE001, S110
         pass
 

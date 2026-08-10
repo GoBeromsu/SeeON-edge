@@ -332,17 +332,25 @@ class CameraRegistryStore:
 
     def topology_snapshot(self) -> RegistryTopologySnapshot:
         with self._lock:
-            data = self._read_unlocked()
-            camera_ids = tuple(
-                str(record["id"])
-                for record in data["cameras"]
-                if isinstance(record, dict) and isinstance(record.get("id"), str)
-            )
-            return self._topology.snapshot(
-                self._connect(),
-                registry_version=data["registry_version"],
-                camera_ids=camera_ids,
-            )
+            connection = self._connect()
+            connection.execute("BEGIN")
+            try:
+                data = self._read_unlocked()
+                camera_ids = tuple(
+                    str(record["id"])
+                    for record in data["cameras"]
+                    if isinstance(record, dict) and isinstance(record.get("id"), str)
+                )
+                snapshot = self._topology.snapshot(
+                    connection,
+                    registry_version=data["registry_version"],
+                    camera_ids=camera_ids,
+                )
+            except BaseException:
+                connection.execute("ROLLBACK")
+                raise
+            connection.execute("COMMIT")
+            return snapshot
 
     def migrate_legacy_string_floors(self) -> list[dict[str, object]]:
         """One-time data migration (issue #155): rewrite any pre-existing
