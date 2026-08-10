@@ -130,7 +130,7 @@ def test_heartbeat_reporter_logs_status_code_endpoint_and_hint_on_403(
     heartbeat_records = [r for r in caplog.records if "api/v1/relay/heartbeat" in r.message]
     assert len(heartbeat_records) == 1
     assert "403" in heartbeat_records[0].message
-    assert "check API_FACILITY_ID / auth" in heartbeat_records[0].message
+    assert "check runtime enrollment / auth" in heartbeat_records[0].message
     assert heartbeat_records[0].levelno == logging.ERROR
     # Response-body content never leaks into the log.
     assert "facility mismatch" not in heartbeat_records[0].message

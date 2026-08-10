@@ -73,6 +73,8 @@ def scan_file(
     for line_number, line in enumerate(text.splitlines(), start=1):
         if relative.endswith("verify_scope_fidelity.py"):
             continue
+        if line.lstrip().startswith("#"):
+            continue
         for pattern, category in patterns:
             if pattern.search(line):
                 findings.append(Finding(relative, line_number, category))
@@ -125,7 +127,9 @@ def run_fixture() -> None:
         safe = root / "backend" / "app"
         safe.mkdir(parents=True)
         _ = (safe / "runtime.py").write_text(
-            'endpoint = "/api/v1/connection/sync-cameras"\n', encoding="utf-8"
+            '# Historical API_FACILITY_ID note is not executable residue.\n'
+            'endpoint = "/api/v1/connection/sync-cameras"\n',
+            encoding="utf-8",
         )
         _ = subprocess.run(["git", "-C", str(root), "add", "."], check=True)
         if scan(root):

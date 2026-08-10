@@ -415,7 +415,7 @@ def test_relay_client_logs_403_with_status_code_and_actionable_hint(
     [record] = [r for r in caplog.records if "api/v1/relay/alerts" in r.message]
     assert record.levelno == logging.ERROR
     assert "403" in record.message
-    assert "check API_FACILITY_ID / auth" in record.message
+    assert "check runtime enrollment / auth" in record.message
     # Response-body content never leaks into the log (only typed/sanitized
     # results escape the client -- see the 429 test above).
     assert "facility mismatch" not in record.message
