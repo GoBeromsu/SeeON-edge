@@ -14,8 +14,11 @@ import re
 import sqlite3
 import stat
 import threading
+from collections.abc import Generator
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from enum import Enum, auto
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
@@ -490,6 +493,10 @@ class CatalogSchemaNewerThanSupportedError(Exception):
         return f"catalog schema {self.found} is newer than supported {self.supported}"
 
 
+class _CatalogStoreLifecycle(Enum):
+    OPEN, CLOSING, CLOSED = auto(), auto(), auto()
+
+
 def _raise_conflict(table: str, key: str) -> None:
     raise CatalogConflictError(f"conflicting {table} record: {key}")
 
@@ -509,21 +516,12 @@ def _column_values(table: str, payload: dict[str, Any]) -> tuple[Any, ...]:
 class CatalogStore:
     """Single-process API catalog with explicit crash-safe SQLite policy."""
 
-    def __init__(self, path: Path) -> None:
+    def __init__(self, path: Path, connection: sqlite3.Connection) -> None:
         self._path = path
-        self._local = threading.local()
-        self._connections: list[sqlite3.Connection] = []
-        self._connections_lock = threading.Lock()
-
-    @property
-    def _connection(self) -> sqlite3.Connection:
-        connection = getattr(self._local, "connection", None)
-        if connection is None:
-            connection = self._connect(self._path)
-            self._local.connection = connection
-            with self._connections_lock:
-                self._connections.append(connection)
-        return connection
+        self._connection = connection
+        self._operation_lock = threading.Lock()
+        self._state_condition = threading.Condition()
+        self._state = _CatalogStoreLifecycle.OPEN
 
     @staticmethod
     def _connect(path: Path) -> sqlite3.Connection:
@@ -544,13 +542,14 @@ class CatalogStore:
     def open(cls, path: Path | str) -> CatalogStore:
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
-        connection = cls._connect(path)
-        try:
+        with ExitStack() as cleanup:
+            connection = cls._connect(path)
+            cleanup.callback(connection.close)
             cls._migrate(connection)
             os.chmod(path, 0o600)
-        finally:
-            connection.close()
-        return cls(path)
+            store = cls(path, connection)
+            _ = cleanup.pop_all()
+            return store
 
     @staticmethod
     def _migrate(connection: sqlite3.Connection) -> None:
@@ -598,17 +597,39 @@ class CatalogStore:
             raise
 
     def close(self) -> None:
-        with self._connections_lock:
-            for connection in self._connections:
-                connection.close()
-            self._connections.clear()
+        with self._state_condition:
+            if self._state is _CatalogStoreLifecycle.CLOSED:
+                return
+            if self._state is _CatalogStoreLifecycle.CLOSING:
+                _ = self._state_condition.wait_for(
+                    lambda: self._state is _CatalogStoreLifecycle.CLOSED
+                )
+                return
+            self._state = _CatalogStoreLifecycle.CLOSING
+        try:
+            with self._operation_lock:
+                self._connection.close()
+        finally:
+            with self._state_condition:
+                self._state = _CatalogStoreLifecycle.CLOSED
+                self._state_condition.notify_all()
 
     def record(self, table: str, key: str, payload: dict[str, Any]) -> bool:
         """Compare-or-insert a canonical payload, returning True only on insertion."""
-        return self.record_many(((table, key, payload),))[0]
+        with self._serialized_operation():
+            return self._record_unlocked(table, key, payload)
 
     def record_many(self, records: tuple[tuple[str, str, dict[str, Any]], ...]) -> tuple[bool, ...]:
         """Atomically compare-or-insert all records in one transaction."""
+        with self._serialized_operation():
+            return self._record_many_unlocked(records)
+
+    def _record_unlocked(self, table: str, key: str, payload: dict[str, Any]) -> bool:
+        return self._record_many_unlocked(((table, key, payload),))[0]
+
+    def _record_many_unlocked(
+        self, records: tuple[tuple[str, str, dict[str, Any]], ...]
+    ) -> tuple[bool, ...]:
         connection = self._connection
         encoded_records: list[tuple[str, str, dict[str, Any], str]] = []
         for table, key, payload in records:
@@ -652,25 +673,30 @@ class CatalogStore:
         started_at_to: str | None = None,
         event_type: str | None = None,
     ) -> list[dict[str, Any]]:
-        clauses: list[str] = []
-        values: list[str] = []
-        for column, value, operator in (
-            ("camera_id", camera_id, "="),
-            ("started_at", started_at_from, ">="),
-            ("started_at", started_at_to, "<="),
-            ("event_type", event_type, "="),
-        ):
-            if value is not None:
-                clauses.append(f"{column} {operator} ?")
-                values.append(value)
-        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
-        rows = self._connection.execute(
-            f"SELECT payload_json FROM clips{where} ORDER BY started_at DESC, clip_id", values
-        ).fetchall()
-        return [json.loads(row[0]) for row in rows]
+        with self._serialized_operation():
+            clauses: list[str] = []
+            values: list[str] = []
+            for column, value, operator in (
+                ("camera_id", camera_id, "="),
+                ("started_at", started_at_from, ">="),
+                ("started_at", started_at_to, "<="),
+                ("event_type", event_type, "="),
+            ):
+                if value is not None:
+                    clauses.append(f"{column} {operator} ?")
+                    values.append(value)
+            where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+            rows = self._connection.execute(
+                f"SELECT payload_json FROM clips{where} ORDER BY started_at DESC, clip_id", values
+            ).fetchall()
+            return [json.loads(row[0]) for row in rows]
 
     def records_with_columns(self, table: str) -> list[CatalogRecord]:
         """Return canonical payloads with the persisted primary/promoted SQL values."""
+        with self._serialized_operation():
+            return self._records_with_columns_unlocked(table)
+
+    def _records_with_columns_unlocked(self, table: str) -> list[CatalogRecord]:
         if table not in _TABLE_KEYS:
             raise ValueError("unknown catalog table")
         key_column = _TABLE_KEYS[table]
@@ -688,10 +714,12 @@ class CatalogStore:
         ]
 
     def records(self, table: str) -> list[dict[str, Any]]:
-        return [record.payload for record in self.records_with_columns(table)]
+        with self._serialized_operation():
+            return [record.payload for record in self._records_with_columns_unlocked(table)]
 
     def integrity_check(self) -> str:
-        return str(self._connection.execute("PRAGMA integrity_check").fetchone()[0])
+        with self._serialized_operation():
+            return str(self._connection.execute("PRAGMA integrity_check").fetchone()[0])
 
     def backfill(
         self,
@@ -700,26 +728,43 @@ class CatalogStore:
         audit_log: Any | None = None,
         label_store: Any | None = None,
     ) -> None:
-        for record in strict_manifest_records(clip_store):
-            self.record("clips", record.manifest.clip_id, record.payload)
-            if label_store is not None:
-                label = label_store.get(record.manifest.clip_id)
-                if label is not None:
-                    self.record("labels", record.manifest.clip_id, label.as_response())
-        if camera_registry is not None:
-            for camera in camera_registry.snapshot().get("cameras", []):
-                if isinstance(camera, dict) and isinstance(camera.get("id"), str) and camera["id"]:
-                    self.record("cameras", camera["id"], sanitized_camera_payload(camera))
-        if audit_log is not None:
-            for entry in audit_log.list_entries():
-                audit_id = str(
-                    entry.get("audit_id")
-                    or entry.get("id")
-                    or hashlib.sha256(
-                        json.dumps(entry, sort_keys=True, separators=(",", ":")).encode()
-                    ).hexdigest()
-                )
-                self.record("audit", audit_id, entry)
+        with self._serialized_operation():
+            for record in strict_manifest_records(clip_store):
+                self._record_unlocked("clips", record.manifest.clip_id, record.payload)
+                if label_store is not None:
+                    label = label_store.get(record.manifest.clip_id)
+                    if label is not None:
+                        self._record_unlocked(
+                            "labels", record.manifest.clip_id, label.as_response()
+                        )
+            if camera_registry is not None:
+                for camera in camera_registry.snapshot().get("cameras", []):
+                    if (
+                        isinstance(camera, dict)
+                        and isinstance(camera.get("id"), str)
+                        and camera["id"]
+                    ):
+                        self._record_unlocked(
+                            "cameras", camera["id"], sanitized_camera_payload(camera)
+                        )
+            if audit_log is not None:
+                for entry in audit_log.list_entries():
+                    audit_id = str(
+                        entry.get("audit_id")
+                        or entry.get("id")
+                        or hashlib.sha256(
+                            json.dumps(entry, sort_keys=True, separators=(",", ":")).encode()
+                        ).hexdigest()
+                    )
+                    self._record_unlocked("audit", audit_id, entry)
+
+    @contextmanager
+    def _serialized_operation(self) -> Generator[None, None, None]:
+        with self._operation_lock:
+            with self._state_condition:
+                if self._state is not _CatalogStoreLifecycle.OPEN:
+                    raise RuntimeError("catalog store is closed")
+            yield
 
 
 __all__ = [
