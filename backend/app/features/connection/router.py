@@ -20,7 +20,6 @@ from backend.app.features.connection.store import ConnectionSettingsStore
 from backend.app.features.connection.topology_retry_coordinator import (
     TopologySyncErrorClass,
     TopologySyncStatus,
-    topology_retry_coordinator,
 )
 from backend.app.features.status.backend_heartbeat_relay import HeartbeatRelayState
 from backend.app.lifespan import apply_connection_settings, refresh_backend_config
@@ -98,14 +97,6 @@ class CameraRosterSyncResponse(BaseModel):
     last_ok_at: str | None = None
     next_retry_at: str | None = None
     camera_count: int
-
-
-class TopologyConfirmRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-    confirmation_id: str = Field(min_length=1)
-    digest: str = Field(pattern=r"^[a-f0-9]{64}$")
-    client_revision: int = Field(gt=0)
-    server_revision: int = Field(ge=0)
 
 
 @router.get("", response_model=ConnectionStatusResponse)
@@ -194,53 +185,6 @@ def sync_cameras(
 ) -> dict[str, object]:
     _authorize(request, relay_token, authorization)
     result = sync_camera_roster(request.app)
-    return {
-        "status": result.status,
-        "error_class": result.error_class,
-        "detail": result.detail,
-        "last_ok_at": result.last_ok_at,
-        "next_retry_at": result.next_retry_at,
-        "camera_count": result.camera_count,
-    }
-
-
-@router.get("/topology-preview")
-def topology_preview(
-    request: Request,
-    relay_token: Annotated[str | None, Header(alias=RELAY_TOKEN_HEADER)] = None,
-    authorization: Annotated[str | None, Header(alias="Authorization")] = None,
-) -> dict[str, object]:
-    _authorize(request, relay_token, authorization)
-    preview = topology_retry_coordinator(request.app).preview()
-    if preview is None:
-        return {"preview": None}
-    return {
-        "preview": {
-            "confirmation_id": preview.confirmation_id,
-            "digest": preview.digest,
-            "expires_at": preview.expires_at,
-            "snapshot_id": preview.snapshot_id,
-            "client_revision": preview.client_revision,
-            "server_revision": preview.server_revision,
-            "cameras": preview.cameras,
-            "rooms": preview.rooms,
-            "floors": preview.floors,
-            "confirmed": preview.confirmed,
-        }
-    }
-
-
-@router.post("/topology-preview/confirm", response_model=CameraRosterSyncResponse)
-def confirm_topology_preview(
-    payload: TopologyConfirmRequest,
-    request: Request,
-    relay_token: Annotated[str | None, Header(alias=RELAY_TOKEN_HEADER)] = None,
-    authorization: Annotated[str | None, Header(alias="Authorization")] = None,
-) -> dict[str, object]:
-    _authorize(request, relay_token, authorization)
-    result = topology_retry_coordinator(request.app).confirm(
-        payload.confirmation_id, payload.digest, payload.client_revision, payload.server_revision
-    )
     return {
         "status": result.status,
         "error_class": result.error_class,

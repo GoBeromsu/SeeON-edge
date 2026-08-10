@@ -87,3 +87,73 @@ def test_camera_topology_api_returns_typed_conflict_without_partial_write(
     assert response.status_code == 409
     assert response.json()["detail"]["code"] == "MISSING_PARENT"
     assert store.topology_snapshot().registry_version == 0
+
+
+def test_camera_patch_binds_explicit_edge_and_room_refs_in_one_registry_revision(
+    tmp_path,
+) -> None:
+    # Given
+    app = create_app(lifespan=no_lifespan)
+    store = app.state.camera_registry = CameraRegistryStore(tmp_path / "catalog.sqlite3")
+    store.create_floor(edge_ref="floor-a", name="First", order_index=1)
+    store.create_room(edge_ref="room-a", floor_edge_ref="floor-a", name="101")
+    store.create(
+        camera_id="camera-local",
+        label="Legacy camera",
+        rtsp_url="rtsp://camera/live",
+        space_id=None,
+        status="online",
+    )
+
+    # When
+    with TestClient(app) as client:
+        _login(client)
+        response = client.patch(
+            "/api/v1/cameras/camera-local",
+            json={"edge_ref": "camera-a", "room_edge_ref": "room-a"},
+        )
+
+    # Then
+    assert response.status_code == 200
+    assert response.json()["edge_ref"] == "camera-a"
+    assert response.json()["room_edge_ref"] == "room-a"
+    snapshot = store.topology_snapshot()
+    assert snapshot.registry_version == 4
+    assert snapshot.floors[0].rooms[0].cameras[0].edge_ref == "camera-a"
+    assert snapshot.dirty is not None
+    assert snapshot.dirty.registry_version == 4
+
+
+def test_camera_patch_invalid_rebind_rolls_back_record_binding_and_dirty_marker(
+    tmp_path,
+) -> None:
+    # Given
+    app = create_app(lifespan=no_lifespan)
+    store = app.state.camera_registry = CameraRegistryStore(tmp_path / "catalog.sqlite3")
+    store.create_floor(edge_ref="floor-a", name="First", order_index=1)
+    store.create_room(edge_ref="room-a", floor_edge_ref="floor-a", name="101")
+    store.create(
+        camera_id="camera-local",
+        label="Bound camera",
+        rtsp_url="rtsp://camera/live",
+        space_id=None,
+        status="online",
+        edge_ref="camera-a",
+        room_edge_ref="room-a",
+    )
+    before_record = store.get("camera-local")
+    before_topology = store.topology_snapshot()
+
+    # When
+    with TestClient(app) as client:
+        _login(client)
+        response = client.patch(
+            "/api/v1/cameras/camera-local",
+            json={"edge_ref": "camera-b", "room_edge_ref": "missing-room"},
+        )
+
+    # Then
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "MISSING_PARENT"
+    assert store.get("camera-local") == before_record
+    assert store.topology_snapshot() == before_topology

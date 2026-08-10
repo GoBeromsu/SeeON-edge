@@ -24,6 +24,7 @@ from backend.app.features.connection.topology_retry_coordinator import (
 from contracts.edge_provisioning_v1 import (
     MachinePrincipal,
     MutationCounts,
+    TopologyConfirmation,
     TopologyMutationResult,
     TopologySuccessEnvelope,
 )
@@ -68,6 +69,7 @@ class _Client:
     ) -> None:
         self.outcomes = outcomes
         self.sent: list[PendingTopologySnapshot] = []
+        self.confirmations: list[tuple[str, TopologyConfirmation]] = []
         self.refreshed_revision: int | None = None
 
     def put(self, pending: PendingTopologySnapshot) -> TopologyPutResult:
@@ -76,6 +78,12 @@ class _Client:
 
     def refresh_server_revision(self) -> int | None:
         return self.refreshed_revision
+
+    def confirm(
+        self, snapshot_id: str, confirmation: TopologyConfirmation
+    ) -> TopologyPutResult:
+        self.confirmations.append((snapshot_id, confirmation))
+        return TopologyRetryable("unreachable")
 
 
 def test_timeout_after_commit_restarts_with_byte_identical_pending_snapshot(tmp_path: Path) -> None:
