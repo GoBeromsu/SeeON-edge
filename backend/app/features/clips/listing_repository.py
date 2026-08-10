@@ -5,12 +5,20 @@ from __future__ import annotations
 import sqlite3
 from collections.abc import Generator
 from contextlib import contextmanager
+from enum import Enum, auto
 from pathlib import Path
+from threading import Condition, Lock
 from typing import TypeAlias, final
 
 from pydantic import TypeAdapter, ValidationError
 
-from backend.app.features.clips.listing import ClipPage, EventTypeFacet
+from backend.app.features.clips._listing_rows import (
+    ACTIVE_ROWS,
+    PAGE_ROWS,
+    indexed_clip_from_row,
+    manifest_from_row,
+)
+from backend.app.features.clips.listing import ClipPage
 from backend.app.features.clips.listing_generation import (
     TOTAL_FACET,
     IndexedClip,
@@ -36,49 +44,10 @@ from backend.app.features.clips.listing_schema import (
 )
 from backend.app.features.clips.listing_schema_migration import initialize_listing_schema
 from backend.app.features.clips.schemas import ClipListQuery
-from backend.app.features.clips.store import ClipManifest
 from backend.app.shared.sqlite_bootstrap import connect_catalog_store
 
 SqlValue: TypeAlias = str | int | float | bytes | None
 SqlRows: TypeAlias = list[tuple[SqlValue, ...]]
-ActiveRow: TypeAlias = tuple[
-    str,
-    int,
-    int,
-    str,
-    str,
-    str,
-    str | None,
-    EventTypeFacet,
-    str,
-    float,
-    str,
-    str | None,
-    int,
-    str | None,
-    int,
-    int | None,
-    int | None,
-    int | None,
-    int,
-]
-PageRow: TypeAlias = tuple[
-    str,
-    str,
-    str,
-    str | None,
-    str,
-    float,
-    str,
-    str | None,
-    int,
-    str | None,
-    int,
-    int | None,
-    int,
-]
-_ACTIVE_ROWS = TypeAdapter(list[ActiveRow])
-_PAGE_ROWS = TypeAdapter(list[PageRow])
 _SUMMARY_ROWS = TypeAdapter(list[tuple[str, int]])
 _GENERATION_ROWS = TypeAdapter(list[tuple[int]])
 _PLAN_ROWS = TypeAdapter(list[tuple[int, int, int, str]])
@@ -88,12 +57,18 @@ class ListingRepositoryClosedError(RuntimeError):
     pass
 
 
+class _Lifecycle(Enum):
+    OPEN, CLOSING, CLOSED = auto(), auto(), auto()
+
+
 @final
 class ListingRepository:
     def __init__(self, path: Path, writer: sqlite3.Connection) -> None:
-        self._path = path
         self._writer = writer
-        self._closed = False
+        self._reader_lock = Lock()
+        self._state_condition = Condition()
+        self._state = _Lifecycle.OPEN
+        self._reader_connection = connect_catalog_store(path, ())
 
     @classmethod
     def open(cls, path: Path | str) -> ListingRepository:
@@ -101,15 +76,15 @@ class ListingRepository:
         writer = connect_catalog_store(resolved, ())
         try:
             initialize_listing_schema(writer)
-        except sqlite3.Error:
+            return cls(resolved, writer)
+        except (OSError, sqlite3.Error):
             writer.close()
             raise
-        return cls(resolved, writer)
 
     def active_clips(self) -> dict[str, IndexedClip]:
         self._ensure_open()
         raw: SqlRows = self._writer.execute(SELECT_ACTIVE_CLIPS).fetchall()
-        clips = (_indexed_clip(row) for row in _ACTIVE_ROWS.validate_python(raw))
+        clips = (indexed_clip_from_row(row) for row in ACTIVE_ROWS.validate_python(raw))
         return {clip.manifest_path: clip for clip in clips}
 
     def publish(self, prepared: PreparedGeneration) -> None:
@@ -166,7 +141,9 @@ class ListingRepository:
                 raw_rows: SqlRows = connection.execute(
                     statements.page_sql, statements.page_values
                 ).fetchall()
-                manifests = tuple(_manifest(row) for row in _PAGE_ROWS.validate_python(raw_rows))
+                manifests = tuple(
+                    manifest_from_row(row) for row in PAGE_ROWS.validate_python(raw_rows)
+                )
                 page = ClipPage(
                     manifests=manifests,
                     total=total,
@@ -187,8 +164,9 @@ class ListingRepository:
             return QueryPlans(page=page, summary=summary, summary_sql=statements.summary_sql)
 
     def rollback(self) -> None:
-        if self._closed:
-            return
+        with self._state_condition:
+            if self._state is not _Lifecycle.OPEN:
+                return
         try:
             if self._writer.in_transaction:
                 _ = self._writer.execute("ROLLBACK")
@@ -196,10 +174,23 @@ class ListingRepository:
             return
 
     def close(self) -> None:
-        if self._closed:
-            return
-        self._closed = True
-        self._writer.close()
+        with self._state_condition:
+            if self._state is _Lifecycle.CLOSED:
+                return
+            if self._state is _Lifecycle.CLOSING:
+                _ = self._state_condition.wait_for(lambda: self._state is _Lifecycle.CLOSED)
+                return
+            self._state = _Lifecycle.CLOSING
+        try:
+            try:
+                with self._reader_lock:
+                    self._reader_connection.close()
+            finally:
+                self._writer.close()
+        finally:
+            with self._state_condition:
+                self._state = _Lifecycle.CLOSED
+                self._state_condition.notify_all()
 
     def _reserve_generation(self) -> int:
         _ = self._writer.execute("BEGIN IMMEDIATE")
@@ -216,12 +207,9 @@ class ListingRepository:
 
     @contextmanager
     def _reader(self) -> Generator[sqlite3.Connection, None, None]:
-        self._ensure_open()
-        connection = connect_catalog_store(self._path, ())
-        try:
-            yield connection
-        finally:
-            connection.close()
+        with self._reader_lock:
+            self._ensure_open()
+            yield self._reader_connection
 
     @staticmethod
     def _active_generation(connection: sqlite3.Connection) -> int:
@@ -229,32 +217,9 @@ class ListingRepository:
         return _GENERATION_ROWS.validate_python(raw)[0][0]
 
     def _ensure_open(self) -> None:
-        if self._closed:
-            raise ListingRepositoryClosedError("clip listing repository is closed")
-
-
-def _indexed_clip(row: ActiveRow) -> IndexedClip:
-    return IndexedClip(
-        *row[:12],
-        bool(row[12]),
-        row[13],
-        bool(row[14]),
-        row[15],
-        row[16],
-        row[17],
-        bool(row[18]),
-    )
-
-
-def _manifest(row: PageRow) -> ClipManifest:
-    return ClipManifest(
-        *row[:8],
-        bool(row[8]),
-        row[9],
-        bool(row[10]),
-        row[11],
-        bool(row[12]),
-    )
+        with self._state_condition:
+            if self._state is not _Lifecycle.OPEN:
+                raise ListingRepositoryClosedError("clip listing repository is closed")
 
 
 def _plan(
