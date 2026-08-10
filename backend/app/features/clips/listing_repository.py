@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import sqlite3
-import threading
+from collections.abc import Generator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import TypeAlias, final
 
@@ -92,9 +93,6 @@ class ListingRepository:
     def __init__(self, path: Path, writer: sqlite3.Connection) -> None:
         self._path = path
         self._writer = writer
-        self._local = threading.local()
-        self._readers: list[sqlite3.Connection] = []
-        self._readers_lock = threading.Lock()
         self._closed = False
 
     @classmethod
@@ -153,40 +151,40 @@ class ListingRepository:
             raise
 
     def page(self, query: ClipListQuery) -> ClipPage:
-        connection = self._reader()
-        _ = connection.execute("BEGIN")
-        try:
-            generation = self._active_generation(connection)
-            statements = build_page_statements(generation, query)
-            raw_summaries: SqlRows = connection.execute(
-                statements.summary_sql, statements.summary_values
-            ).fetchall()
-            summary = dict(_SUMMARY_ROWS.validate_python(raw_summaries))
-            total_key = query.event_type or TOTAL_FACET
-            total = summary.get(total_key, 0)
-            facets = {key: count for key, count in summary.items() if key != TOTAL_FACET}
-            raw_rows: SqlRows = connection.execute(
-                statements.page_sql, statements.page_values
-            ).fetchall()
-            manifests = tuple(_manifest(row) for row in _PAGE_ROWS.validate_python(raw_rows))
-            page = ClipPage(
-                manifests=manifests,
-                total=total,
-                has_more=query.offset + len(manifests) < total,
-                event_type_counts=facets,
-            )
-            _ = connection.execute("COMMIT")
-        finally:
-            if connection.in_transaction:
-                connection.rollback()
+        with self._reader() as connection:
+            _ = connection.execute("BEGIN")
+            try:
+                generation = self._active_generation(connection)
+                statements = build_page_statements(generation, query)
+                raw_summaries: SqlRows = connection.execute(
+                    statements.summary_sql, statements.summary_values
+                ).fetchall()
+                summary = dict(_SUMMARY_ROWS.validate_python(raw_summaries))
+                total_key = query.event_type or TOTAL_FACET
+                total = summary.get(total_key, 0)
+                facets = {key: count for key, count in summary.items() if key != TOTAL_FACET}
+                raw_rows: SqlRows = connection.execute(
+                    statements.page_sql, statements.page_values
+                ).fetchall()
+                manifests = tuple(_manifest(row) for row in _PAGE_ROWS.validate_python(raw_rows))
+                page = ClipPage(
+                    manifests=manifests,
+                    total=total,
+                    has_more=query.offset + len(manifests) < total,
+                    event_type_counts=facets,
+                )
+                _ = connection.execute("COMMIT")
+            finally:
+                if connection.in_transaction:
+                    connection.rollback()
         return page
 
     def explain(self, query: ClipListQuery) -> QueryPlans:
-        connection = self._reader()
-        statements = build_page_statements(self._active_generation(connection), query)
-        page = _plan(connection, statements.page_sql, statements.page_values)
-        summary = _plan(connection, statements.summary_sql, statements.summary_values)
-        return QueryPlans(page=page, summary=summary, summary_sql=statements.summary_sql)
+        with self._reader() as connection:
+            statements = build_page_statements(self._active_generation(connection), query)
+            page = _plan(connection, statements.page_sql, statements.page_values)
+            summary = _plan(connection, statements.summary_sql, statements.summary_values)
+            return QueryPlans(page=page, summary=summary, summary_sql=statements.summary_sql)
 
     def rollback(self) -> None:
         if self._closed:
@@ -202,10 +200,6 @@ class ListingRepository:
             return
         self._closed = True
         self._writer.close()
-        with self._readers_lock:
-            for connection in self._readers:
-                connection.close()
-            self._readers.clear()
 
     def _reserve_generation(self) -> int:
         _ = self._writer.execute("BEGIN IMMEDIATE")
@@ -220,15 +214,14 @@ class ListingRepository:
         else:
             return generation
 
-    def _reader(self) -> sqlite3.Connection:
+    @contextmanager
+    def _reader(self) -> Generator[sqlite3.Connection, None, None]:
         self._ensure_open()
-        connection = getattr(self._local, "connection", None)
-        if not isinstance(connection, sqlite3.Connection):
-            connection = connect_catalog_store(self._path, ())
-            self._local.connection = connection
-            with self._readers_lock:
-                self._readers.append(connection)
-        return connection
+        connection = connect_catalog_store(self._path, ())
+        try:
+            yield connection
+        finally:
+            connection.close()
 
     @staticmethod
     def _active_generation(connection: sqlite3.Connection) -> int:
