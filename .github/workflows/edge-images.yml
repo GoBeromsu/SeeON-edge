@@ -59,6 +59,7 @@ jobs:
           push: true
           build-args: |
             VITE_ML_API_BASE_URL=/api/v1
+            SOURCE_REVISION=${{ env.DEPLOY_SHA }}
           tags: |
             ${{ env.IMAGE_NAMESPACE }}/ml-api:${{ env.DEPLOY_SHA }}
           cache-from: type=gha,scope=edge-ml-api
@@ -71,6 +72,8 @@ jobs:
           context: .
           file: Dockerfile.edge
           push: true
+          build-args: |
+            SOURCE_REVISION=${{ env.DEPLOY_SHA }}
           tags: |
             ${{ env.IMAGE_NAMESPACE }}/ml-worker:${{ env.DEPLOY_SHA }}
           cache-from: type=gha,scope=edge-ml-worker
