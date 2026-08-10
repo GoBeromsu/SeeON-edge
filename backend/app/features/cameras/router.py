@@ -28,6 +28,7 @@ from backend.app.features.cameras.bed_zone_router import BedZonePayload
 from backend.app.features.cameras.bed_zone_store import BedZone, BedZoneStore
 from backend.app.features.cameras.roster_sync import camera_sync_view, sync_camera_roster
 from backend.app.features.cameras.store import (
+    CameraRegistryData,
     CameraRegistryStore,
     DuplicateCameraError,
     ProbeErrorClass,
@@ -36,6 +37,10 @@ from backend.app.features.cameras.store import (
     public_camera,
     status_from_probe,
     utc_now_iso,
+)
+from backend.app.features.cameras.topology import (
+    RegistryTopologySnapshot,
+    TopologyConflictError,
 )
 from backend.app.features.clips.storage_location_store import ClipStorageLocationStore
 from backend.app.features.detection_settings.store import DetectionSettingsStore
@@ -47,6 +52,7 @@ from backend.app.shared.backend_mapping import (
     mark_backend_status,
 )
 from backend.app.shared.dashboard_auth import authorize_dashboard
+from contracts.edge_provisioning_models import EdgeErrorCode, TopologyFloor, TopologyRoom
 from contracts.worker_config import PulledWorkerConfig
 
 RELAY_TOKEN_HEADER = "X-Edge-Relay-Token"
@@ -112,6 +118,8 @@ class CameraResponse(BaseModel):
     # Persisted on-demand bed-zone recognition result (see bed_zone_router.py
     # and BedZoneStore); None when never recognized for this camera.
     bed_zone: BedZonePayload | None = None
+    edge_ref: str | None = Field(default=None, exclude_if=lambda value: value is None)
+    room_edge_ref: str | None = Field(default=None, exclude_if=lambda value: value is None)
 
 
 class ListCamerasResponse(BaseModel):
@@ -130,6 +138,8 @@ class CreateCameraRequest(BaseModel):
     decode_backend: str | None = None
     fps: float | None = None
     floor: int | None = None
+    edge_ref: str | None = Field(default=None, min_length=1, max_length=64)
+    room_edge_ref: str | None = Field(default=None, min_length=1, max_length=64)
     # 더 이상 아무것도 하지 않는다. 등록이 probe 통과를 요구하던 시절, 그
     # 게이트를 건너뛰는 탈출구였다 (`create_camera` 참고). 지금은 등록이
     # 항상 저장하므로 값과 무관하게 결과가 같다. 기존 클라이언트가 계속
@@ -147,6 +157,73 @@ class UpdateCameraRequest(BaseModel):
     decode_backend: str | None = None
     fps: float | None = None
     floor: int | None = None
+
+
+class CreateTopologyFloorRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    edge_ref: str = Field(min_length=1, max_length=64)
+    name: str = Field(min_length=1, max_length=120)
+    order_index: int = Field(ge=0)
+
+
+class UpdateTopologyFloorRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1, max_length=120)
+    order_index: int = Field(ge=0)
+
+
+class CreateTopologyRoomRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    edge_ref: str = Field(min_length=1, max_length=64)
+    floor_edge_ref: str = Field(min_length=1, max_length=64)
+    name: str = Field(min_length=1, max_length=120)
+    legacy_canonical_space_id: str | None = Field(default=None, max_length=36)
+
+
+class UpdateTopologyRoomRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1, max_length=120)
+
+
+class TopologyCameraResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    edge_ref: str
+    label: str
+
+
+class TopologyRoomResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    edge_ref: str
+    name: str
+    room_type: Literal["ROOM"]
+    capacity: int
+    legacy_canonical_space_id: str | None
+    cameras: list[TopologyCameraResponse]
+
+
+class TopologyFloorResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    edge_ref: str
+    name: str
+    order_index: int
+    rooms: list[TopologyRoomResponse]
+
+
+class CameraTopologyResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    registry_version: int = Field(ge=0)
+    dirty_registry_version: int | None = Field(default=None, ge=1)
+    readiness_error: EdgeErrorCode | None
+    unmapped_camera_ids: list[str]
+    floors: list[TopologyFloorResponse]
 
 
 class TestCameraRequest(BaseModel):
@@ -237,6 +314,101 @@ def list_cameras(
     )
 
 
+@router.get("/topology", response_model=CameraTopologyResponse)
+def get_camera_topology(
+    request: Request,
+    relay_token: Annotated[str | None, Header(alias=RELAY_TOKEN_HEADER)] = None,
+    authorization: Annotated[str | None, Header(alias="Authorization")] = None,
+) -> dict[str, object]:
+    _authorize(request, relay_token, authorization)
+    return _topology_response(_store(request.app).topology_snapshot())
+
+
+@router.post("/topology/floors", status_code=status.HTTP_201_CREATED)
+def create_topology_floor(
+    payload: CreateTopologyFloorRequest,
+    request: Request,
+    relay_token: Annotated[str | None, Header(alias=RELAY_TOKEN_HEADER)] = None,
+    authorization: Annotated[str | None, Header(alias="Authorization")] = None,
+) -> dict[str, object]:
+    _authorize(request, relay_token, authorization)
+    try:
+        _store(request.app).create_floor(
+            edge_ref=payload.edge_ref, name=payload.name, order_index=payload.order_index
+        )
+    except TopologyConflictError as error:
+        raise _topology_conflict(error) from error
+    return payload.model_dump()
+
+
+@router.patch("/topology/floors/{edge_ref}")
+def update_topology_floor(
+    edge_ref: str,
+    payload: UpdateTopologyFloorRequest,
+    request: Request,
+) -> dict[str, object]:
+    _authorize(request, None, None)
+    if not _store(request.app).update_floor(
+        edge_ref, name=payload.name, order_index=payload.order_index
+    ):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="floor not found")
+    return {"edge_ref": edge_ref, **payload.model_dump()}
+
+
+@router.delete("/topology/floors/{edge_ref}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_topology_floor(edge_ref: str, request: Request) -> Response:
+    _authorize(request, None, None)
+    try:
+        changed = _store(request.app).delete_floor(edge_ref)
+    except TopologyConflictError as error:
+        raise _topology_conflict(error) from error
+    if not changed:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="floor not found")
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post("/topology/rooms", status_code=status.HTTP_201_CREATED)
+def create_topology_room(
+    payload: CreateTopologyRoomRequest,
+    request: Request,
+    relay_token: Annotated[str | None, Header(alias=RELAY_TOKEN_HEADER)] = None,
+    authorization: Annotated[str | None, Header(alias="Authorization")] = None,
+) -> dict[str, object]:
+    _authorize(request, relay_token, authorization)
+    try:
+        _store(request.app).create_room(
+            edge_ref=payload.edge_ref,
+            floor_edge_ref=payload.floor_edge_ref,
+            name=payload.name,
+            legacy_canonical_space_id=payload.legacy_canonical_space_id,
+        )
+    except TopologyConflictError as error:
+        raise _topology_conflict(error) from error
+    return payload.model_dump()
+
+
+@router.patch("/topology/rooms/{edge_ref}")
+def update_topology_room(
+    edge_ref: str, payload: UpdateTopologyRoomRequest, request: Request
+) -> dict[str, str]:
+    _authorize(request, None, None)
+    if not _store(request.app).update_room(edge_ref, name=payload.name):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="room not found")
+    return {"edge_ref": edge_ref, "name": payload.name}
+
+
+@router.delete("/topology/rooms/{edge_ref}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_topology_room(edge_ref: str, request: Request) -> Response:
+    _authorize(request, None, None)
+    try:
+        changed = _store(request.app).delete_room(edge_ref)
+    except TopologyConflictError as error:
+        raise _topology_conflict(error) from error
+    if not changed:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="room not found")
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
 @router.post("", status_code=status.HTTP_201_CREATED, response_model=CameraResponse)
 def create_camera(
     payload: CreateCameraRequest,
@@ -285,9 +457,13 @@ def create_camera(
             last_probed_at=now,
             last_ok_at=now if probe.ok else None,
             never_connected=not probe.ok,
+            edge_ref=payload.edge_ref,
+            room_edge_ref=payload.room_edge_ref,
         )
     except DuplicateCameraError as exc:
         raise _duplicate_camera_error(exc) from exc
+    except TopologyConflictError as error:
+        raise _topology_conflict(error) from error
     background_tasks.add_task(_trigger_roster_sync, request.app)
     return public_camera(record)
 
@@ -415,6 +591,47 @@ def _duplicate_camera_error(exc: DuplicateCameraError) -> HTTPException:
             "existing_label": existing.get("label"),
         },
     )
+
+
+def _topology_conflict(error: TopologyConflictError) -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail={"code": error.code.value, "edge_ref": error.edge_ref},
+    )
+
+
+def _topology_response(snapshot: RegistryTopologySnapshot) -> dict[str, object]:
+    return {
+        "registry_version": snapshot.registry_version,
+        "dirty_registry_version": (
+            None if snapshot.dirty is None else snapshot.dirty.registry_version
+        ),
+        "readiness_error": snapshot.readiness_error,
+        "unmapped_camera_ids": list(snapshot.unmapped_camera_ids),
+        "floors": [_topology_floor_response(floor) for floor in snapshot.floors],
+    }
+
+
+def _topology_floor_response(floor: TopologyFloor) -> dict[str, object]:
+    return {
+        "edge_ref": floor.edge_ref,
+        "name": floor.name,
+        "order_index": floor.order_index,
+        "rooms": [_topology_room_response(room) for room in floor.rooms],
+    }
+
+
+def _topology_room_response(room: TopologyRoom) -> dict[str, object]:
+    return {
+        "edge_ref": room.edge_ref,
+        "name": room.name,
+        "room_type": room.room_type,
+        "capacity": room.capacity,
+        "legacy_canonical_space_id": room.legacy_canonical_space_id,
+        "cameras": [
+            {"edge_ref": camera.edge_ref, "label": camera.label} for camera in room.cameras
+        ],
+    }
 
 
 @router.delete("/{camera_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -693,7 +910,10 @@ def retry_pending_backend_mappings(app: FastAPI) -> int:
 
 
 def _public_snapshot(
-    app: FastAPI, snapshot: dict[str, object], pulled: object, heartbeats: object = None
+    app: FastAPI,
+    snapshot: CameraRegistryData | dict[str, object],
+    pulled: object,
+    heartbeats: object = None,
 ) -> dict[str, object]:
     records = _snapshot_camera_records(snapshot)
     bed_zones = _bed_zone_store(app).get_all()
@@ -872,7 +1092,9 @@ def _heartbeat_camera_fields(
     )
 
 
-def _snapshot_camera_records(snapshot: dict[str, object]) -> list[dict[str, object]]:
+def _snapshot_camera_records(
+    snapshot: CameraRegistryData | dict[str, object],
+) -> list[dict[str, object]]:
     cameras = snapshot.get("cameras")
     if not isinstance(cameras, list):
         return []

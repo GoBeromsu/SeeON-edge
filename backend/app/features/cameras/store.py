@@ -19,18 +19,27 @@ import logging
 import re
 import sqlite3
 import uuid
+from collections.abc import Generator, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from threading import Lock
-from typing import Literal
+from typing import Literal, TypedDict
 from urllib.parse import parse_qsl, urlsplit, urlunsplit
 
+from backend.app.features.cameras.topology import CameraTopologyStore, RegistryTopologySnapshot
+from backend.app.features.cameras.topology_schema import TOPOLOGY_SCHEMA
 from backend.app.shared.sqlite_bootstrap import connect_catalog_store
 from backend.app.shared.state_dir import resolve_state_dir
 
 CameraStatus = Literal["online", "offline", "starting", "unknown"]
 ProbeErrorClass = Literal["timeout", "decode", "auth"]
+
+
+class CameraRegistryData(TypedDict):
+    registry_version: int
+    cameras: list[dict[str, object]]
 
 logger = logging.getLogger(__name__)
 
@@ -144,12 +153,13 @@ class CameraRegistryStore:
         self.path = Path(path)
         self._lock = Lock()
         self._connection: sqlite3.Connection | None = None
+        self._topology = CameraTopologyStore()
 
     @classmethod
     def from_env(cls) -> CameraRegistryStore:
         return cls(resolve_state_dir("ml-api") / "catalog.sqlite3")
 
-    def snapshot(self) -> dict[str, object]:
+    def snapshot(self) -> CameraRegistryData:
         with self._lock:
             return self._read_unlocked()
 
@@ -169,67 +179,81 @@ class CameraRegistryStore:
         last_probed_at: str | None = None,
         last_ok_at: str | None = None,
         never_connected: bool = True,
+        edge_ref: str | None = None,
+        room_edge_ref: str | None = None,
     ) -> dict[str, object]:
         with self._lock:
-            data = self._read_unlocked()
-            # Duplicate check runs INSIDE the lock (not as a router pre-check):
-            # a pre-check outside the lock is TOCTOU-racy, since two concurrent
-            # POSTs could both pass it before either writes.
-            duplicate = _find_duplicate(data["cameras"], rtsp_url)
-            if duplicate is not None:
-                raise DuplicateCameraError(dict(duplicate))
-            record = {
-                "id": camera_id or str(uuid.uuid4()),
-                "label": label,
-                "rtsp_url": rtsp_url,
-                "space_id": space_id,
-                "backend_camera_id": backend_camera_id,
-                "mapping_pending": mapping_pending,
-                "status": status,
-                "decode_backend": decode_backend,
-                "fps": fps,
-                "floor": floor,
-                "created_at": utc_now_iso(),
-                "last_probed_at": last_probed_at,
-                "last_ok_at": last_ok_at,
-                "never_connected": never_connected,
-            }
-            data["cameras"].append(record)
-            data["registry_version"] += 1
-            self._write_unlocked(data)
-            return dict(record)
+            with self._transaction_unlocked() as connection:
+                data = self._read_unlocked()
+                # Duplicate check runs INSIDE the lock (not as a router pre-check):
+                # a pre-check outside the lock is TOCTOU-racy, since two concurrent
+                # POSTs could both pass it before either writes.
+                duplicate = _find_duplicate(data["cameras"], rtsp_url)
+                if duplicate is not None:
+                    raise DuplicateCameraError(dict(duplicate))
+                record: dict[str, object] = {
+                    "id": camera_id or str(uuid.uuid4()),
+                    "label": label,
+                    "rtsp_url": rtsp_url,
+                    "space_id": space_id,
+                    "backend_camera_id": backend_camera_id,
+                    "mapping_pending": mapping_pending,
+                    "status": status,
+                    "decode_backend": decode_backend,
+                    "fps": fps,
+                    "floor": floor,
+                    "created_at": utc_now_iso(),
+                    "last_probed_at": last_probed_at,
+                    "last_ok_at": last_ok_at,
+                    "never_connected": never_connected,
+                    "edge_ref": edge_ref,
+                    "room_edge_ref": room_edge_ref,
+                }
+                data["cameras"].append(record)
+                data["registry_version"] += 1
+                self._topology.bind_camera(
+                    connection,
+                    camera_id=str(record["id"]),
+                    edge_ref=edge_ref,
+                    room_edge_ref=room_edge_ref,
+                )
+                self._write_mutation_unlocked(connection, data)
+                return dict(record)
 
     def update(self, camera_id: str, updates: dict[str, object]) -> dict[str, object] | None:
         with self._lock:
-            data = self._read_unlocked()
-            for index, record in enumerate(data["cameras"]):
-                if record.get("id") != camera_id:
-                    continue
-                new_rtsp_url = updates.get("rtsp_url")
-                if isinstance(new_rtsp_url, str):
-                    duplicate = _find_duplicate(
-                        data["cameras"], new_rtsp_url, exclude_camera_id=camera_id
-                    )
-                    if duplicate is not None:
-                        raise DuplicateCameraError(dict(duplicate))
-                updated = {**record, **updates}
-                data["cameras"][index] = updated
-                data["registry_version"] += 1
-                self._write_unlocked(data)
-                return dict(updated)
+            with self._transaction_unlocked() as connection:
+                data = self._read_unlocked()
+                for index, record in enumerate(data["cameras"]):
+                    if record.get("id") != camera_id:
+                        continue
+                    new_rtsp_url = updates.get("rtsp_url")
+                    if isinstance(new_rtsp_url, str):
+                        duplicate = _find_duplicate(
+                            data["cameras"], new_rtsp_url, exclude_camera_id=camera_id
+                        )
+                        if duplicate is not None:
+                            raise DuplicateCameraError(dict(duplicate))
+                    updated = {**record, **updates}
+                    data["cameras"][index] = updated
+                    data["registry_version"] += 1
+                    self._write_mutation_unlocked(connection, data)
+                    return dict(updated)
             return None
 
     def delete(self, camera_id: str) -> bool:
         with self._lock:
-            data = self._read_unlocked()
-            cameras = data["cameras"]
-            kept = [record for record in cameras if record.get("id") != camera_id]
-            if len(kept) == len(cameras):
-                return False
-            data["cameras"] = kept
-            data["registry_version"] += 1
-            self._write_unlocked(data)
-            return True
+            with self._transaction_unlocked() as connection:
+                data = self._read_unlocked()
+                cameras = data["cameras"]
+                kept = [record for record in cameras if record.get("id") != camera_id]
+                if len(kept) == len(cameras):
+                    return False
+                data["cameras"] = kept
+                data["registry_version"] += 1
+                self._topology.delete_camera(connection, camera_id)
+                self._write_mutation_unlocked(connection, data)
+                return True
 
     def get(self, camera_id: str) -> dict[str, object] | None:
         with self._lock:
@@ -238,6 +262,87 @@ class CameraRegistryStore:
                 if record.get("id") == camera_id:
                     return dict(record)
             return None
+
+    def create_floor(self, *, edge_ref: str, name: str, order_index: int) -> None:
+        with self._lock, self._transaction_unlocked() as connection:
+            data = self._read_unlocked()
+            self._topology.create_floor(
+                connection, edge_ref=edge_ref, name=name, order_index=order_index
+            )
+            data["registry_version"] += 1
+            self._write_mutation_unlocked(connection, data)
+
+    def update_floor(self, edge_ref: str, *, name: str, order_index: int) -> bool:
+        with self._lock, self._transaction_unlocked() as connection:
+            data = self._read_unlocked()
+            changed = self._topology.update_floor(
+                connection, edge_ref, name=name, order_index=order_index
+            )
+            if changed:
+                data["registry_version"] += 1
+                self._write_mutation_unlocked(connection, data)
+            return changed
+
+    def delete_floor(self, edge_ref: str) -> bool:
+        with self._lock, self._transaction_unlocked() as connection:
+            data = self._read_unlocked()
+            changed = self._topology.delete_floor(connection, edge_ref)
+            if changed:
+                data["registry_version"] += 1
+                self._write_mutation_unlocked(connection, data)
+            return changed
+
+    def create_room(
+        self,
+        *,
+        edge_ref: str,
+        floor_edge_ref: str,
+        name: str,
+        legacy_canonical_space_id: str | None = None,
+    ) -> None:
+        with self._lock, self._transaction_unlocked() as connection:
+            data = self._read_unlocked()
+            self._topology.create_room(
+                connection,
+                edge_ref=edge_ref,
+                floor_edge_ref=floor_edge_ref,
+                name=name,
+                legacy_canonical_space_id=legacy_canonical_space_id,
+            )
+            data["registry_version"] += 1
+            self._write_mutation_unlocked(connection, data)
+
+    def update_room(self, edge_ref: str, *, name: str) -> bool:
+        with self._lock, self._transaction_unlocked() as connection:
+            data = self._read_unlocked()
+            changed = self._topology.update_room(connection, edge_ref, name=name)
+            if changed:
+                data["registry_version"] += 1
+                self._write_mutation_unlocked(connection, data)
+            return changed
+
+    def delete_room(self, edge_ref: str) -> bool:
+        with self._lock, self._transaction_unlocked() as connection:
+            data = self._read_unlocked()
+            changed = self._topology.delete_room(connection, edge_ref)
+            if changed:
+                data["registry_version"] += 1
+                self._write_mutation_unlocked(connection, data)
+            return changed
+
+    def topology_snapshot(self) -> RegistryTopologySnapshot:
+        with self._lock:
+            data = self._read_unlocked()
+            camera_ids = tuple(
+                str(record["id"])
+                for record in data["cameras"]
+                if isinstance(record, dict) and isinstance(record.get("id"), str)
+            )
+            return self._topology.snapshot(
+                self._connect(),
+                registry_version=data["registry_version"],
+                camera_ids=camera_ids,
+            )
 
     def migrate_legacy_string_floors(self) -> list[dict[str, object]]:
         """One-time data migration (issue #155): rewrite any pre-existing
@@ -263,19 +368,24 @@ class CameraRegistryStore:
                 changed = True
                 changes.append({"camera_id": record.get("id"), "old": old, "new": new})
             if changed:
-                data["registry_version"] += 1
-                self._write_unlocked(data)
+                with self._transaction_unlocked() as connection:
+                    data["registry_version"] += 1
+                    self._write_mutation_unlocked(connection, data)
         return changes
 
     def _connect(self) -> sqlite3.Connection:
-        if self._connection is None:
+        connection = self._connection
+        if connection is None:
             # RTSP credentials are stored in the registry by design; API
             # responses and logs must use mask_rtsp_url(), and the database
             # file is best-effort 0600 (see connect_catalog_store).
-            self._connection = connect_catalog_store(self.path, (_CREATE_CAMERA_REGISTRY_TABLE,))
-        return self._connection
+            connection = connect_catalog_store(
+                self.path, (_CREATE_CAMERA_REGISTRY_TABLE, *TOPOLOGY_SCHEMA)
+            )
+            self._connection = connection
+        return connection
 
-    def _read_unlocked(self) -> dict[str, object]:
+    def _read_unlocked(self) -> CameraRegistryData:
         try:
             connection = self._connect()
             row = connection.execute(
@@ -287,20 +397,25 @@ class CameraRegistryStore:
             return {"registry_version": 0, "cameras": []}
         registry_version, cameras_json = row
         try:
-            cameras = json.loads(cameras_json)
+            loaded = json.loads(str(cameras_json))
         except (json.JSONDecodeError, TypeError, ValueError):
             return {"registry_version": 0, "cameras": []}
         if isinstance(registry_version, bool) or not isinstance(registry_version, int):
             registry_version = 0
-        if not isinstance(cameras, list):
-            cameras = []
+        cameras = loaded if isinstance(loaded, list) else []
         return {
             "registry_version": max(0, registry_version),
-            "cameras": [record for record in cameras if isinstance(record, dict)],
+            "cameras": [
+                {str(key): value for key, value in record.items()}
+                for record in cameras
+                if isinstance(record, dict)
+            ],
         }
 
-    def _write_unlocked(self, data: dict[str, object]) -> None:
-        connection = self._connect()
+    def _write_unlocked(
+        self, data: CameraRegistryData, connection: sqlite3.Connection | None = None
+    ) -> None:
+        connection = connection or self._connect()
         cameras_json = json.dumps(
             data["cameras"], ensure_ascii=False, sort_keys=True, separators=(",", ":")
         )
@@ -312,9 +427,27 @@ class CameraRegistryStore:
             (data["registry_version"], cameras_json),
         )
 
+    def _write_mutation_unlocked(
+        self, connection: sqlite3.Connection, data: CameraRegistryData
+    ) -> None:
+        self._write_unlocked(data, connection)
+        connection.execute(
+            "INSERT INTO topology_dirty (id, registry_version, created_at) VALUES (1, ?, ?) "
+            "ON CONFLICT(id) DO UPDATE SET registry_version = excluded.registry_version, "
+            "created_at = excluded.created_at",
+            (data["registry_version"], utc_now_iso()),
+        )
+
+    @contextmanager
+    def _transaction_unlocked(self) -> Generator[sqlite3.Connection]:
+        connection = self._connect()
+        connection.execute("BEGIN IMMEDIATE")
+        with connection:
+            yield connection
+
 
 def public_camera(record: dict[str, object]) -> dict[str, object]:
-    return {
+    response: dict[str, object] = {
         "id": str(record.get("id", "")),
         "label": str(record.get("label", "")),
         "rtsp_url_masked": mask_rtsp_url(str(record.get("rtsp_url", ""))),
@@ -346,6 +479,13 @@ def public_camera(record: dict[str, object]) -> dict[str, object]:
         "last_ok_at": _optional_str(record.get("last_ok_at")),
         "last_probed_at": _optional_str(record.get("last_probed_at")),
     }
+    edge_ref = _optional_str(record.get("edge_ref"))
+    room_edge_ref = _optional_str(record.get("room_edge_ref"))
+    if edge_ref is not None:
+        response["edge_ref"] = edge_ref
+    if room_edge_ref is not None:
+        response["room_edge_ref"] = room_edge_ref
+    return response
 
 
 def normalize_stream_identity(rtsp_url: str) -> str:
@@ -392,12 +532,13 @@ def normalize_stream_identity(rtsp_url: str) -> str:
 
 
 def _find_duplicate(
-    cameras: list[object], rtsp_url: str, *, exclude_camera_id: str | None = None
+    cameras: Sequence[dict[str, object]],
+    rtsp_url: str,
+    *,
+    exclude_camera_id: str | None = None,
 ) -> dict[str, object] | None:
     target = normalize_stream_identity(rtsp_url)
     for record in cameras:
-        if not isinstance(record, dict):
-            continue
         if exclude_camera_id is not None and record.get("id") == exclude_camera_id:
             continue
         existing_rtsp = record.get("rtsp_url")
@@ -448,7 +589,13 @@ def _optional_float(value: object) -> float | None:
 
 
 def _status(value: object) -> CameraStatus:
-    return value if value in {"online", "offline", "starting", "unknown"} else "unknown"
+    if value == "online":
+        return "online"
+    if value == "offline":
+        return "offline"
+    if value == "starting":
+        return "starting"
+    return "unknown"
 
 
 def utc_now_iso() -> str:
