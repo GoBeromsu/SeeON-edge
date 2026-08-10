@@ -28,9 +28,14 @@ const detectionSettings = {
 const connectionView = {
   events_url: 'https://facility.example/events',
   config_url: 'https://facility.example/config',
+  facility_code: 'NH-7H2K9M4QXP',
+  client_installation_ref: 'aa83ea3f-6e5f-4f45-a401-fb36c38835b6',
   facility_id: 'facility-42',
+  edge_installation_id: 'c72bd9a7-3e04-47ba-a8cd-a56e54f98152',
+  enrollment_generation: 3,
   facility_token_set: true,
   facility_token_masked: '••••cd42',
+  enrolled: true,
   configured: true,
   reachable: true,
   last_ok_at: '2026-08-02T00:00:00Z',
@@ -50,9 +55,13 @@ const clipStorage = {
   used_pct: 20,
 };
 
+const topology = { registry_version: 1, dirty_registry_version: null, readiness_error: null, unmapped_camera_ids: [], floors: [] };
+
 function installFetchMock(): ReturnType<typeof vi.fn> {
   const fetchMock = vi.fn((input: RequestInfo | URL) => {
     const url = typeof input === 'string' ? input : input.toString();
+    if (url.includes('/cameras/topology')) return Promise.resolve({ ok: true, status: 200, json: async () => topology });
+    if (url.includes('/connection/topology-preview')) return Promise.resolve({ ok: true, status: 200, json: async () => ({ preview: null }) });
     if (url.includes('/cameras')) return Promise.resolve({ ok: true, status: 200, json: async () => cameraRegistry });
     if (url.includes('/system')) return Promise.resolve({ ok: true, status: 200, json: async () => systemSnapshot });
     if (url.includes('/detection-settings')) {
@@ -99,7 +108,8 @@ describe('SettingsPage', () => {
     expect(host.textContent).toContain('카메라');
     expect(host.textContent).toContain('101호');
     expect(host.textContent).toContain('탐지 설정');
-    expect(host.textContent).toContain('서버 연결');
+    expect(host.textContent).toContain('장치 등록');
+    expect(host.textContent).toContain('시설 토폴로지');
     expect(host.textContent).toContain('처리 상태');
     expect(host.textContent).toContain('클립 저장 공간');
   });

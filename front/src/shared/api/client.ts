@@ -128,6 +128,8 @@ function cameraBody(input: CameraInput | CameraPatchInput, extra?: Record<string
   if ('space_id' in input && input.space_id !== undefined) {
     body.space_id = input.space_id;
   }
+  if ('edge_ref' in input && input.edge_ref !== undefined) body.edge_ref = input.edge_ref.trim();
+  if ('room_edge_ref' in input && input.room_edge_ref !== undefined) body.room_edge_ref = input.room_edge_ref.trim();
   if (extra) {
     Object.assign(body, extra);
   }
@@ -141,12 +143,11 @@ function cameraBody(input: CameraInput | CameraPatchInput, extra?: Record<string
  * backend (see ConnectionSettingsUpdateRequest.model_fields_set in the backend router).
  */
 function connectionBody(input: ConnectionInput): string {
-  const body: Record<string, unknown> = {};
-  if (input.events_url !== undefined) body.events_url = input.events_url;
-  if (input.config_url !== undefined) body.config_url = input.config_url;
-  if (input.facility_id !== undefined) body.facility_id = input.facility_id;
-  if (input.facility_token !== undefined) body.facility_token = input.facility_token;
-  return JSON.stringify(body);
+  return JSON.stringify({
+    facility_code: input.facility_code.trim(),
+    facility_token: input.facility_token,
+    client_installation_ref: input.client_installation_ref,
+  });
 }
 
 export async function fetchConnection(signal?: AbortSignal): Promise<ConnectionView> {
@@ -158,9 +159,9 @@ export async function saveConnection(input: ConnectionInput): Promise<Connection
 }
 
 /** Tests the current (possibly unsaved) form values via a probe-only body override, or the saved settings when omitted. */
-export async function testConnection(input?: ConnectionInput): Promise<ConnectionTestResult> {
+export async function testConnection(input: ConnectionInput): Promise<ConnectionTestResult> {
   return normalizeConnectionTestResult(
-    await requestJson('/connection/test', { method: 'POST', body: input ? connectionBody(input) : undefined }),
+    await requestJson('/connection/test', { method: 'POST', body: connectionBody(input) }),
   );
 }
 
