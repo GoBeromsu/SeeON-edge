@@ -26,8 +26,12 @@ from backend.app.features.cameras.topology_client import (
     TopologyRetryable,
     TopologySnapshotBuilder,
 )
+from backend.app.features.cameras.topology_confirmation_state import (
+    TopologyConfirmationPreview,
+    TopologyConfirmationStore,
+)
 from backend.app.shared.backend_client_bundle import backend_client_bundle
-from contracts.edge_provisioning_v1 import MachinePrincipal
+from contracts.edge_provisioning_v1 import MachinePrincipal, TopologyConfirmation
 
 TopologySyncStatus: TypeAlias = Literal["pending", "synced", "failed", "disabled"]
 TopologySyncErrorClass: TypeAlias = Literal[
@@ -46,6 +50,9 @@ class TopologyClientProtocol(Protocol):
     def put(self, pending: PendingTopologySnapshot) -> TopologyPutResult: ...
 
     def refresh_server_revision(self) -> int | None: ...
+    def confirm(
+        self, snapshot_id: str, confirmation: TopologyConfirmation
+    ) -> TopologyPutResult: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,6 +76,7 @@ class TopologyRetryCoordinator:
         self._registry = registry
         self._state_store = state_store
         self._client_provider = client_provider
+        self._preview_store = TopologyConfirmationStore(registry.path)
         self._lock = threading.Lock()
 
     def trigger(
@@ -140,6 +148,40 @@ class TopologyRetryCoordinator:
         )
         return self._result(state, attempted, status, None, None)
 
+    def preview(self) -> TopologyConfirmationPreview | None:
+        return self._preview_store.load()
+
+    def confirm(
+        self, confirmation_id: str, digest: str, client_revision: int, server_revision: int
+    ) -> TopologyRetryResult:
+        preview = self._preview_store.load()
+        client = self._client_provider()
+        if preview is None or client is None:
+            return self.current_result()
+        if preview.confirmed:
+            return self.current_result(attempted=False)
+        topology = self._registry.topology_snapshot()
+        if (
+            preview.principal != client.principal
+            or preview.registry_version != topology.registry_version
+            or preview.confirmation_id != confirmation_id
+            or preview.digest != digest
+            or preview.client_revision != client_revision
+            or preview.server_revision != server_revision
+        ):
+            return self.current_result(attempted=False)
+        outcome = client.confirm(
+            preview.snapshot_id, TopologyConfirmation(confirmation_id, digest, server_revision)
+        )
+        match outcome:
+            case TopologyAccepted():
+                self._preview_store.confirm(confirmation_id)
+                return self.current_result(attempted=True)
+            case TopologyRetryable() | TopologyPaused():
+                return self.current_result(attempted=True)
+            case unreachable:
+                assert_never(unreachable)
+
     def _resume_if_refreshed(
         self,
         client: TopologyClientProtocol,
@@ -161,6 +203,10 @@ class TopologyRetryCoordinator:
     ) -> TopologyRetryResult:
         match outcome:
             case TopologyAccepted(response=response):
+                pending = self._state_store.load().pending
+                if pending is None:
+                    raise RuntimeError("accepted topology has no pending snapshot")
+                self._preview_store.save(response, pending.principal, pending.registry_version)
                 state = self._state_store.accept(snapshot_id, response, now_epoch=now)
                 return self._result(state, True, "synced", None, None)
             case TopologyRetryable(error_class=error_class):
@@ -242,9 +288,7 @@ def _iso_timestamp(value: float | None) -> str | None:
     if value is None:
         return None
     return (
-        datetime.fromtimestamp(value, UTC)
-        .isoformat(timespec="milliseconds")
-        .replace("+00:00", "Z")
+        datetime.fromtimestamp(value, UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
     )
 
 

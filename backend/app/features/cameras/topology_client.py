@@ -21,9 +21,11 @@ from backend.app.shared.backend_client_bundle import BackendClientBundle
 from contracts.edge_provisioning_v1 import (
     ContractViolation,
     MachinePrincipal,
+    TopologyConfirmation,
     TopologySnapshot,
     TopologySuccessEnvelope,
     parse_topology_success_envelope,
+    serialize_topology_confirmation,
     serialize_topology_snapshot,
 )
 from shared.events.evidence_export_contract import DeliveryFailure
@@ -136,6 +138,43 @@ class TopologyClient:
                 return TopologyRetryable("unreachable")
             case _:
                 return TopologyPaused(TopologyPauseReason.CONFLICT, status_code)
+
+    def confirm(self, snapshot_id: str, confirmation: TopologyConfirmation) -> TopologyPutResult:
+        body = json.dumps(
+            serialize_topology_confirmation(confirmation), separators=(",", ":"), sort_keys=True
+        ).encode()
+        result = bounded_request(
+            f"{_topology_base(self.events_url)}/{snapshot_id}/confirm",
+            "POST",
+            {
+                "Accept": "application/json",
+                "Authorization": f"Bearer {self.bearer_token}",
+                "Content-Type": "application/json",
+            },
+            body,
+            self.timeout_sec,
+        )
+        if isinstance(result, DeliveryFailure):
+            return TopologyRetryable("unreachable")
+        status_code, _headers, response_body = result
+        match status_code:
+            case 401:
+                return TopologyPaused(TopologyPauseReason.AUTH, status_code)
+            case 403:
+                return TopologyPaused(TopologyPauseReason.FORBIDDEN, status_code)
+            case 409:
+                return TopologyPaused(TopologyPauseReason.CONFLICT, status_code)
+            case code if 200 <= code < 300:
+                try:
+                    return TopologyAccepted(
+                        parse_topology_success_envelope(
+                            _RESPONSE_ADAPTER.validate_json(response_body)
+                        )
+                    )
+                except (ContractViolation, ValidationError):
+                    return TopologyRetryable("unreachable")
+            case _:
+                return TopologyRetryable("unreachable")
 
     def refresh_server_revision(self) -> int | None:
         credentials = EnrollmentCredentials(

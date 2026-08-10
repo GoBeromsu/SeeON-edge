@@ -152,6 +152,8 @@ class UpdateCameraRequest(BaseModel):
     decode_backend: str | None = None
     fps: float | None = None
     floor: int | None = None
+    edge_ref: str | None = Field(default=None, min_length=1, max_length=64)
+    room_edge_ref: str | None = Field(default=None, min_length=1, max_length=64)
 
 
 class CreateTopologyFloorRequest(BaseModel):
@@ -542,11 +544,17 @@ def update_camera(
         updates["fps"] = _normalize_fps(payload.fps)
     if "floor" in payload.model_fields_set:
         updates["floor"] = _normalize_floor(payload.floor)
+    if "edge_ref" in payload.model_fields_set:
+        updates["edge_ref"] = payload.edge_ref
+    if "room_edge_ref" in payload.model_fields_set:
+        updates["room_edge_ref"] = payload.room_edge_ref
 
     try:
         updated = _store(request.app).update(camera_id, updates)
     except DuplicateCameraError as exc:
         raise _duplicate_camera_error(exc) from exc
+    except TopologyConflictError as error:
+        raise _topology_conflict(error) from error
     if updated is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="camera not found")
     background_tasks.add_task(_trigger_roster_sync, request.app)
@@ -706,8 +714,7 @@ def worker_config_snapshot(
             response["night_window"] = live_pulled.night_window.as_dict()
         if live_pulled.detection_windows:
             response["detection_windows"] = {
-                domain: window.as_dict()
-                for domain, window in live_pulled.detection_windows.items()
+                domain: window.as_dict() for domain, window in live_pulled.detection_windows.items()
             }
     # Local overrides run unconditionally (not only when an external pull
     # exists): an operator can save detection settings or a clip storage
@@ -863,6 +870,7 @@ def _live_pulled_config(request: Request, pulled: PulledWorkerConfig) -> PulledW
         detection_windows=pulled.detection_windows,
     )
 
+
 def _public_snapshot(
     app: FastAPI,
     snapshot: CameraRegistryData | dict[str, object],
@@ -938,9 +946,7 @@ def _public_snapshot(
         # because of which id happened to be recorded under.
         candidate_ids: tuple[str, ...] = tuple(
             dict.fromkeys(
-                candidate
-                for candidate in (canonical_id, local_id)
-                if isinstance(candidate, str)
+                candidate for candidate in (canonical_id, local_id) if isinstance(candidate, str)
             )
         )
         camera["status"], camera["last_heartbeat_at"], camera["heartbeat_age_sec"] = (
@@ -1129,6 +1135,7 @@ def _facility_id(app: FastAPI) -> str:
             detail="backend enrollment is required",
         )
     return bundle.facility_id
+
 
 def _default_camera_fps() -> float | None:
     """Facility-wide processed FPS for live camera streams (worker default 5.0).
