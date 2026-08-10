@@ -161,8 +161,10 @@ class TopologyRetryCoordinator:
         if preview.confirmed:
             return self.current_result(attempted=False)
         topology = self._registry.topology_snapshot()
+        expires_at = datetime.fromisoformat(preview.expires_at.replace("Z", "+00:00"))
         if (
-            preview.principal != client.principal
+            expires_at <= datetime.now(UTC)
+            or preview.principal != client.principal
             or preview.registry_version != topology.registry_version
             or preview.confirmation_id != confirmation_id
             or preview.digest != digest
