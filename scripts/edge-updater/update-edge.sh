@@ -63,7 +63,7 @@ now_utc() {
 }
 
 json_safe() {
-  printf '%s' "$1" | tr '\n\r\t"\\' '     '
+  printf '%s' "$1" | tr '\n\r\t' '   ' | sed 's/["\\]/ /g'
 }
 
 log_event() {
@@ -325,6 +325,7 @@ compose_pull() {
     log_event "PULL" "dry_run" "would run docker compose pull"
     return 0
   fi
+  # shellcheck disable=SC2086
   docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" pull $SERVICES
 }
 
@@ -333,6 +334,7 @@ compose_up() {
     log_event "APPLY" "dry_run" "would run docker compose up -d"
     return 0
   fi
+  # shellcheck disable=SC2086
   docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" up -d $SERVICES
 }
 
@@ -383,48 +385,34 @@ base_url() {
   printf 'http://127.0.0.1:%s' "$port"
 }
 
-system_digest_key() {
-  case "$1" in
-    ml-api) printf '%s' 'ml_api' ;;
-    ml-worker) printf '%s' 'ml_worker' ;;
-    *) printf '%s' "$(printf '%s' "$1" | tr '[:lower:]-' '[:lower:]_')" ;;
-  esac
-}
-
-body_contains_json_string() {
-  body=$1
-  key=$2
-  value=$3
-  [ -n "$value" ] || return 1
-  case "$body" in
-    *'"'"$key"'"'*':'*'"'"$value"'"'*) return 0 ;;
-    *) return 1 ;;
-  esac
-}
-
 system_body_matches() {
   body=$1
   expected=$2
-  case "$body" in
-    *'"version"'*'"image_digests"'*) ;;
-    *) return 1 ;;
-  esac
-
   expected_version=${EDGE_UPDATER_EXPECTED_VERSION:-$(env_value ML_EDGE_VERSION || true)}
-  if [ -n "$expected_version" ]; then
-    body_contains_json_string "$body" "version" "$expected_version" || return 1
-  fi
+  printf '%s' "$body" | python3 -c '
+import json, sys
+expected, version = sys.argv[1:]
+value = json.load(sys.stdin)
+assert isinstance(value, dict)
+assert isinstance(value.get("image_digests"), dict)
+if version:
+    assert value.get("version") == version
+keys = {"ml-api": "ml_api", "ml-worker": "ml_worker"}
+for pair in expected.split(","):
+    service, digest = pair.split("=", 1)
+    assert value["image_digests"][keys.get(service, service.replace("-", "_"))] == digest
+' "$expected" "$expected_version" >/dev/null 2>&1
+}
 
-  check_values=$(printf '%s' "$expected" | tr ',' ' ')
-  for pair in $check_values; do
-    service=${pair%%=*}
-    value=${pair#*=}
-    [ -n "$service" ] || continue
-    [ -n "$value" ] || continue
-    digest_key=$(system_digest_key "$service")
-    body_contains_json_string "$body" "$digest_key" "$value" || return 1
-  done
-  return 0
+status_body_matches() {
+  printf '%s' "$1" | python3 -c '
+import json, sys
+value = json.load(sys.stdin)
+assert isinstance(value, dict)
+assert isinstance(value.get("cameras"), dict)
+assert isinstance(value.get("runtime"), dict)
+assert isinstance(value.get("stale_after_sec"), (int, float))
+' >/dev/null 2>&1
 }
 
 verify_once() {
@@ -433,10 +421,7 @@ verify_once() {
   health_code=$(curl -fsS -o /dev/null -w '%{http_code}' "$root_url$HEALTH_PATH" 2>/dev/null || printf '000')
   [ "$health_code" = "200" ] || return 1
   status_body=$(curl -fsS "$root_url$STATUS_PATH" 2>/dev/null || true)
-  case "$status_body" in
-    *online*|*'"status":"ok"'*|*'"ok":true'*) ;;
-    *) return 1 ;;
-  esac
+  status_body_matches "$status_body" || return 1
   system_body=$(curl -fsS "$root_url$SYSTEM_PATH" 2>/dev/null || true)
   system_body_matches "$system_body" "$expected_digests" || return 1
   return 0
