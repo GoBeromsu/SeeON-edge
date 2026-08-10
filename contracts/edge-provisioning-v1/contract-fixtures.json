@@ -1,0 +1,1117 @@
+{
+  "metadata": {
+    "sourceVersion": "edge-provisioning-v1",
+    "canonicalization": "RFC 8785 JSON Canonicalization Scheme (JCS)",
+    "digestAlgorithm": "SHA-256",
+    "digestScope": "Entire document with metadata.canonicalSha256 omitted",
+    "canonicalSha256": "5e64609fdeba5968864b9c78807ae71864a54143c70bffb82924788957c3f2ff",
+    "redaction": "Synthetic identifiers and redacted one-time values only"
+  },
+  "happy": {
+    "admin.issue": {
+      "method": "POST",
+      "path": "/api/v1/admin/edge-credentials",
+      "successStatus": "201",
+      "auth": {
+        "kind": "product-session",
+        "requiredRole": "SUPER_ADMIN"
+      },
+      "request": {
+        "headers": {
+          "Idempotency-Key": "0197f671-3a31-7a6c-a6e4-83ed412de801"
+        },
+        "body": {
+          "schemaVersion": 1,
+          "facilityId": "a5ff4ed1-7e63-4a4f-9ef0-42e807d74a64"
+        }
+      },
+      "response": {
+        "schemaVersion": 1,
+        "operationId": "0197f671-3a31-7a6c-a6e4-83ed412de802",
+        "facilityCode": "NH-7H2K9M4QXP",
+        "edgeInstallationId": "c72bd9a7-3e04-47ba-a8cd-a56e54f98152",
+        "enrollmentGeneration": 1,
+        "lifecycle": "ACTIVE",
+        "oneTimeDisplay": {
+          "redacted": true,
+          "tokenId": "7H2K9M4QXP3R",
+          "prefix": "redacted-prefix"
+        },
+        "createdAt": "2026-01-01T00:00:00.000Z"
+      },
+      "semantics": {
+        "installationState": "PENDING_CLAIM",
+        "serverStoresRecoverableValue": false
+      }
+    },
+    "admin.list": {
+      "method": "GET",
+      "path": "/api/v1/admin/edge-credentials",
+      "successStatus": "200",
+      "auth": {
+        "kind": "product-session",
+        "requiredRole": "SUPER_ADMIN"
+      },
+      "request": {
+        "query": {
+          "facilityId": "a5ff4ed1-7e63-4a4f-9ef0-42e807d74a64"
+        }
+      },
+      "response": {
+        "schemaVersion": 1,
+        "items": [
+          {
+            "tokenId": "7H2K9M4QXP3R",
+            "prefix": "redacted-prefix",
+            "lifecycle": "ACTIVE",
+            "edgeInstallationId": "c72bd9a7-3e04-47ba-a8cd-a56e54f98152",
+            "enrollmentGeneration": 1,
+            "createdAt": "2026-01-01T00:00:00.000Z",
+            "valueState": "not-returned"
+          }
+        ]
+      }
+    },
+    "admin.rotate": {
+      "method": "POST",
+      "path": "/api/v1/admin/edge-credentials/{tokenId}/rotate",
+      "successStatus": "201",
+      "auth": {
+        "kind": "product-session",
+        "requiredRole": "SUPER_ADMIN"
+      },
+      "request": {
+        "headers": {
+          "Idempotency-Key": "0197f671-3a31-7a6c-a6e4-83ed412de803"
+        },
+        "pathParams": {
+          "tokenId": "7H2K9M4QXP3R"
+        },
+        "body": {
+          "schemaVersion": 1,
+          "expectedLifecycle": "ACTIVE"
+        }
+      },
+      "response": {
+        "schemaVersion": 1,
+        "operationId": "0197f671-3a31-7a6c-a6e4-83ed412de804",
+        "edgeInstallationId": "c72bd9a7-3e04-47ba-a8cd-a56e54f98152",
+        "enrollmentGeneration": 1,
+        "prior": {
+          "tokenId": "7H2K9M4QXP3R",
+          "lifecycle": "GRACE",
+          "graceEndsAt": "2026-01-02T00:00:00.000Z"
+        },
+        "replacement": {
+          "lifecycle": "ACTIVE"
+        },
+        "oneTimeDisplay": {
+          "redacted": true,
+          "tokenId": "8J3M0N5RQV4S",
+          "prefix": "redacted-prefix"
+        }
+      },
+      "semantics": {
+        "preservesInstallation": true,
+        "preservesEnrollmentGeneration": true
+      }
+    },
+    "admin.revoke": {
+      "method": "POST",
+      "path": "/api/v1/admin/edge-credentials/{tokenId}/revoke",
+      "successStatus": "200",
+      "auth": {
+        "kind": "product-session",
+        "requiredRole": "SUPER_ADMIN"
+      },
+      "request": {
+        "headers": {
+          "Idempotency-Key": "0197f671-3a31-7a6c-a6e4-83ed412de805"
+        },
+        "pathParams": {
+          "tokenId": "7H2K9M4QXP3R"
+        },
+        "body": {
+          "schemaVersion": 1,
+          "expectedLifecycle": "ACTIVE",
+          "reason": "ADMIN_REVOKED"
+        }
+      },
+      "response": {
+        "schemaVersion": 1,
+        "operationId": "0197f671-3a31-7a6c-a6e4-83ed412de806",
+        "tokenId": "7H2K9M4QXP3R",
+        "lifecycle": "REVOKED",
+        "revokedAt": "2026-01-01T00:05:00.000Z"
+      }
+    },
+    "admin.replace": {
+      "method": "POST",
+      "path": "/api/v1/admin/edge-installations/{edgeInstallationId}/replace",
+      "successStatus": "201",
+      "auth": {
+        "kind": "product-session",
+        "requiredRole": "SUPER_ADMIN"
+      },
+      "request": {
+        "headers": {
+          "Idempotency-Key": "0197f671-3a31-7a6c-a6e4-83ed412de807"
+        },
+        "pathParams": {
+          "edgeInstallationId": "c72bd9a7-3e04-47ba-a8cd-a56e54f98152"
+        },
+        "body": {
+          "schemaVersion": 1,
+          "expectedEnrollmentGeneration": 1,
+          "newClientInstallationRef": "d4c5d430-24a4-4fe4-899a-bf8e5e90d46e"
+        }
+      },
+      "response": {
+        "schemaVersion": 1,
+        "operation": {
+          "operationId": "0197f671-3a31-7a6c-a6e4-83ed412de808",
+          "status": "SUCCEEDED",
+          "createdAt": "2026-01-01T00:06:00.000Z",
+          "updatedAt": "2026-01-01T00:06:00.000Z"
+        },
+        "edgeInstallationId": "c72bd9a7-3e04-47ba-a8cd-a56e54f98152",
+        "previousEnrollmentGeneration": 1,
+        "enrollmentGeneration": 2,
+        "installationState": "PENDING_CLAIM",
+        "oneTimeDisplay": {
+          "redacted": true,
+          "tokenId": "9K4N1P6STW5X",
+          "prefix": "redacted-prefix"
+        }
+      },
+      "semantics": {
+        "invalidatesOmissionPreviews": true,
+        "revokesPriorGeneration": true,
+        "acceptedClientRevisionResetTo": 0
+      }
+    },
+    "admin.recover-secret": {
+      "method": "POST",
+      "path": "/api/v1/admin/edge-operations/{operationId}/recover-secret",
+      "successStatus": "201",
+      "auth": {
+        "kind": "product-session",
+        "requiredRole": "SUPER_ADMIN"
+      },
+      "request": {
+        "headers": {
+          "Idempotency-Key": "0197f671-3a31-7a6c-a6e4-83ed412de809"
+        },
+        "pathParams": {
+          "operationId": "0197f671-3a31-7a6c-a6e4-83ed412de802"
+        },
+        "body": {
+          "schemaVersion": 1,
+          "expectedTokenId": "7H2K9M4QXP3R"
+        }
+      },
+      "response": {
+        "schemaVersion": 1,
+        "operation": {
+          "operationId": "0197f671-3a31-7a6c-a6e4-83ed412de80a",
+          "status": "SUCCEEDED",
+          "createdAt": "2026-01-01T00:07:00.000Z",
+          "updatedAt": "2026-01-01T00:07:00.000Z"
+        },
+        "edgeInstallationId": "c72bd9a7-3e04-47ba-a8cd-a56e54f98152",
+        "enrollmentGeneration": 1,
+        "revokedTokenId": "7H2K9M4QXP3R",
+        "replacement": {
+          "tokenId": "0M5P2Q7VXY6Z",
+          "prefix": "redacted-prefix",
+          "lifecycle": "ACTIVE"
+        },
+        "oneTimeDisplay": {
+          "redacted": true,
+          "tokenId": "0M5P2Q7VXY6Z",
+          "prefix": "redacted-prefix"
+        },
+        "replay": {
+          "redacted": true,
+          "tokenId": "0M5P2Q7VXY6Z",
+          "prefix": "redacted-prefix"
+        }
+      },
+      "semantics": {
+        "lostValueRevokedWithoutGrace": true,
+        "replacementPreservesBinding": true
+      }
+    },
+    "admin.transfer": {
+      "method": "POST",
+      "path": "/api/v1/admin/edge-installations/{edgeInstallationId}/transfers",
+      "successStatus": "200",
+      "auth": {
+        "kind": "product-session",
+        "requiredRole": "SUPER_ADMIN"
+      },
+      "request": {
+        "headers": {
+          "Idempotency-Key": "0197f671-3a31-7a6c-a6e4-83ed412de80b"
+        },
+        "pathParams": {
+          "edgeInstallationId": "c72bd9a7-3e04-47ba-a8cd-a56e54f98152"
+        },
+        "body": {
+          "schemaVersion": 1,
+          "expectedEnrollmentGeneration": 1,
+          "expectedServerRevision": 1,
+          "manifestDigest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "manifest": [
+            {
+              "kind": "FLOOR",
+              "edgeRef": "floor-2",
+              "canonicalId": "f1111111-1111-4111-8111-111111111111",
+              "parentCanonicalId": null
+            },
+            {
+              "kind": "ROOM",
+              "edgeRef": "room-201",
+              "canonicalId": "a2222222-2222-4222-8222-222222222222",
+              "parentCanonicalId": "f1111111-1111-4111-8111-111111111111"
+            },
+            {
+              "kind": "CAMERA",
+              "edgeRef": "camera-001",
+              "canonicalId": "b3333333-3333-4333-8333-333333333333",
+              "parentCanonicalId": "a2222222-2222-4222-8222-222222222222"
+            }
+          ]
+        }
+      },
+      "response": {
+        "schemaVersion": 1,
+        "operation": {
+          "operationId": "0197f671-3a31-7a6c-a6e4-83ed412de80c",
+          "status": "SUCCEEDED",
+          "createdAt": "2026-01-01T00:08:00.000Z",
+          "updatedAt": "2026-01-01T00:08:00.000Z"
+        },
+        "edgeInstallationId": "c72bd9a7-3e04-47ba-a8cd-a56e54f98152",
+        "enrollmentGeneration": 1,
+        "serverRevision": 2,
+        "transferred": {
+          "floors": 1,
+          "rooms": 1,
+          "cameras": 1
+        },
+        "appliedAt": "2026-01-01T00:08:00.000Z"
+      },
+      "semantics": {
+        "changesOwnershipAndRefsOnly": true,
+        "preservesHistory": true,
+        "exactReplayReturnsStoredResult": true
+      }
+    },
+    "admin.validation-run": {
+      "method": "POST",
+      "path": "/api/v1/admin/edge-installations/{edgeInstallationId}/validation-runs",
+      "successStatus": "201",
+      "auth": {
+        "kind": "product-session",
+        "requiredRole": "SUPER_ADMIN"
+      },
+      "request": {
+        "headers": {
+          "Idempotency-Key": "0197f671-3a31-7a6c-a6e4-83ed412de80d"
+        },
+        "pathParams": {
+          "edgeInstallationId": "c72bd9a7-3e04-47ba-a8cd-a56e54f98152"
+        },
+        "body": {
+          "schemaVersion": 1,
+          "expectedEnrollmentGeneration": 1,
+          "durationSeconds": 900
+        }
+      },
+      "response": {
+        "schemaVersion": 1,
+        "operation": {
+          "operationId": "0197f671-3a31-7a6c-a6e4-83ed412de80e",
+          "status": "SUCCEEDED",
+          "createdAt": "2026-01-01T00:09:00.000Z",
+          "updatedAt": "2026-01-01T00:09:00.000Z"
+        },
+        "validationRunId": "0197f671-3a31-7a6c-a6e4-83ed412de80f",
+        "edgeInstallationId": "c72bd9a7-3e04-47ba-a8cd-a56e54f98152",
+        "enrollmentGeneration": 1,
+        "status": "ACTIVE",
+        "createdAt": "2026-01-01T00:09:00.000Z",
+        "expiresAt": "2026-01-01T00:15:00.000Z"
+      },
+      "semantics": {
+        "excludedFromOrdinaryReadSurfaces": true,
+        "excludedFromAlertsAndDelivery": true,
+        "cleanupRequired": true
+      }
+    },
+    "edge.verify": {
+      "method": "POST",
+      "path": "/api/v1/edge/enrollments/verify",
+      "successStatus": "200",
+      "auth": {
+        "kind": "edge-bearer",
+        "valueState": "not-in-fixture"
+      },
+      "request": {
+        "body": {
+          "schemaVersion": 1,
+          "facilityCode": "NH-7H2K9M4QXP",
+          "clientInstallationRef": "8b0f5ba2-d359-4d8e-948f-e386ac40c347"
+        }
+      },
+      "response": {
+        "schemaVersion": 1,
+        "edgeInstallationId": "c72bd9a7-3e04-47ba-a8cd-a56e54f98152",
+        "enrollmentGeneration": 1,
+        "facility": {
+          "id": "a5ff4ed1-7e63-4a4f-9ef0-42e807d74a64",
+          "displayName": "Test Facility"
+        },
+        "serverRevision": 0
+      },
+      "semantics": {
+        "claim": "CAS binds the pending installation to the client reference",
+        "exactReplay": "returns the existing binding",
+        "differentClientInstallationRef": {
+          "status": 409,
+          "code": "INSTALLATION_CONFLICT",
+          "retryable": false
+        }
+      }
+    },
+    "topology.put": {
+      "method": "PUT",
+      "path": "/api/v1/edge/topology-snapshots/{snapshotId}",
+      "successStatus": "200",
+      "auth": {
+        "kind": "edge-bearer",
+        "valueState": "not-in-fixture"
+      },
+      "expectedPrincipal": {
+        "facilityScope": "token-derived",
+        "edgeInstallationId": "c72bd9a7-3e04-47ba-a8cd-a56e54f98152",
+        "enrollmentGeneration": 1
+      },
+      "request": {
+        "pathParams": {
+          "snapshotId": "0197f671-3a31-7a6c-a6e4-83ed412de81a"
+        },
+        "body": {
+          "schemaVersion": 1,
+          "edgeInstallationId": "c72bd9a7-3e04-47ba-a8cd-a56e54f98152",
+          "enrollmentGeneration": 1,
+          "clientRevision": 1,
+          "expectedServerRevision": 0,
+          "floors": [
+            {
+              "edgeRef": "floor-2",
+              "name": "2F Test",
+              "orderIndex": 2,
+              "rooms": [
+                {
+                  "edgeRef": "room-201",
+                  "name": "Room Test",
+                  "type": "ROOM",
+                  "capacity": 1,
+                  "cameras": [
+                    {
+                      "edgeRef": "camera-001",
+                      "label": "Camera Test"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      },
+      "response": {
+        "schemaVersion": 1,
+        "snapshotId": "0197f671-3a31-7a6c-a6e4-83ed412de81a",
+        "clientRevision": 1,
+        "serverRevision": 1,
+        "result": {
+          "floors": {
+            "created": 1,
+            "updated": 0,
+            "unchanged": 0
+          },
+          "rooms": {
+            "created": 1,
+            "updated": 0,
+            "unchanged": 0
+          },
+          "cameras": {
+            "created": 1,
+            "updated": 0,
+            "unchanged": 0
+          }
+        },
+        "omissions": {
+          "confirmationId": "0197f671-3a31-7a6c-a6e4-83ed412de81b",
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "expiresAt": "2026-01-01T00:15:00.000Z",
+          "cameras": ["camera-000-old"],
+          "rooms": ["room-200-old"],
+          "floors": ["floor-1-old"]
+        }
+      },
+      "semantics": {
+        "arraysSortedBy": "edgeRef",
+        "exactReplayReturnsStoredResponse": true,
+        "changedBodySameSnapshot": "IDEMPOTENCY_CONFLICT",
+        "semanticallyIdenticalNextRevisionAdvancesClientOnly": true
+      }
+    },
+    "topology.confirm": {
+      "method": "POST",
+      "path": "/api/v1/edge/topology-snapshots/{snapshotId}/confirm",
+      "successStatus": "200",
+      "auth": {
+        "kind": "edge-bearer",
+        "valueState": "not-in-fixture"
+      },
+      "expectedPrincipal": {
+        "facilityScope": "token-derived",
+        "edgeInstallationId": "c72bd9a7-3e04-47ba-a8cd-a56e54f98152",
+        "enrollmentGeneration": 1
+      },
+      "request": {
+        "pathParams": {
+          "snapshotId": "0197f671-3a31-7a6c-a6e4-83ed412de81a"
+        },
+        "body": {
+          "schemaVersion": 1,
+          "confirmationId": "0197f671-3a31-7a6c-a6e4-83ed412de81b",
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "expectedServerRevision": 1
+        }
+      },
+      "response": {
+        "schemaVersion": 1,
+        "snapshotId": "0197f671-3a31-7a6c-a6e4-83ed412de81a",
+        "clientRevision": 1,
+        "serverRevision": 2,
+        "result": {
+          "floors": {
+            "created": 0,
+            "updated": 1,
+            "unchanged": 0
+          },
+          "rooms": {
+            "created": 0,
+            "updated": 1,
+            "unchanged": 0
+          },
+          "cameras": {
+            "created": 0,
+            "updated": 1,
+            "unchanged": 0
+          }
+        },
+        "omissions": null
+      },
+      "semantics": {
+        "deactivationOrder": ["cameras", "rooms", "empty-floors"],
+        "edgeOwnedRowsOnly": true,
+        "exactReplayReturnsStoredResult": true,
+        "stalePreviewWrites": 0
+      }
+    },
+    "machine.events.create": {
+      "method": "POST",
+      "path": "/api/v1/events",
+      "successStatus": "201",
+      "auth": {
+        "kind": "edge-bearer",
+        "valueState": "not-in-fixture"
+      },
+      "expectedPrincipal": {
+        "facilityScope": "token-derived",
+        "edgeInstallationId": "c72bd9a7-3e04-47ba-a8cd-a56e54f98152",
+        "enrollmentGeneration": 1
+      },
+      "request": {
+        "body": {
+          "camera_id": "camera-001",
+          "type": "fall",
+          "detected_at": "2026-01-01T00:01:00.000Z",
+          "confidence": 0.98,
+          "config_version": 1,
+          "model_version": "test-model-v1",
+          "detector_version": "test-detector-v1",
+          "operating_threshold": 0.75,
+          "clock_source": "edge",
+          "edge_event_id": "event-test-001"
+        }
+      },
+      "response": {
+        "id": "c4444444-4444-4444-8444-444444444444",
+        "status": "created"
+      },
+      "resultVariants": {
+        "duplicate": {
+          "successStatus": "201",
+          "response": {
+            "id": "c4444444-4444-4444-8444-444444444444",
+            "status": "duplicate"
+          }
+        },
+        "accepted": {
+          "successStatus": "201",
+          "response": {
+            "id": "c4444444-4444-4444-8444-444444444444",
+            "event_id": "c4444444-4444-4444-8444-444444444444",
+            "edge_event_id": "event-test-001",
+            "status": "accepted"
+          }
+        }
+      }
+    },
+    "machine.events.heartbeat": {
+      "method": "POST",
+      "path": "/api/v1/events/heartbeat",
+      "successStatus": "200",
+      "auth": {
+        "kind": "edge-bearer",
+        "valueState": "not-in-fixture"
+      },
+      "expectedPrincipal": {
+        "facilityScope": "token-derived",
+        "edgeInstallationId": "c72bd9a7-3e04-47ba-a8cd-a56e54f98152",
+        "enrollmentGeneration": 1
+      },
+      "request": {
+        "body": {
+          "camera_id": "camera-001"
+        }
+      },
+      "response": {
+        "ok": true
+      }
+    },
+    "machine.events.snapshot": {
+      "method": "PUT",
+      "path": "/api/v1/events/{eventId}/snapshot",
+      "successStatus": "201",
+      "auth": {
+        "kind": "edge-bearer",
+        "valueState": "not-in-fixture"
+      },
+      "expectedPrincipal": {
+        "facilityScope": "token-derived",
+        "edgeInstallationId": "c72bd9a7-3e04-47ba-a8cd-a56e54f98152",
+        "enrollmentGeneration": 1
+      },
+      "request": {
+        "pathParams": {
+          "eventId": "c4444444-4444-4444-8444-444444444444"
+        },
+        "headers": {
+          "content-type": "image/jpeg"
+        },
+        "body": "[binary-redacted]"
+      },
+      "response": {
+        "snapshotKey": "events/c4444444-4444-4444-8444-444444444444/snapshot.jpg"
+      }
+    },
+    "machine.ml-config.get": {
+      "method": "GET",
+      "path": "/api/v1/ml-config/{facilityId}",
+      "successStatus": "200",
+      "auth": {
+        "kind": "edge-bearer",
+        "valueState": "not-in-fixture"
+      },
+      "expectedPrincipal": {
+        "facilityScope": "token-derived",
+        "edgeInstallationId": "c72bd9a7-3e04-47ba-a8cd-a56e54f98152",
+        "enrollmentGeneration": 1,
+        "pathFacilityMatchRequired": true
+      },
+      "request": {
+        "pathParams": {
+          "facilityId": "a5ff4ed1-7e63-4a4f-9ef0-42e807d74a64"
+        }
+      },
+      "response": {
+        "configVersion": 1,
+        "nightWindow": {
+          "start": "22:00",
+          "end": "06:00",
+          "tz": "Etc/UTC"
+        },
+        "cameras": [
+          {
+            "id": "b3333333-3333-4333-8333-333333333333",
+            "spaceId": "a2222222-2222-4222-8222-222222222222",
+            "label": "Camera Test",
+            "rtspUrl": null,
+            "online": true,
+            "spaceName": "Room Test",
+            "floorName": "2F Test",
+            "createdAt": "2026-01-01T00:00:00.000Z"
+          }
+        ]
+      }
+    },
+    "machine.edge-cameras.put": {
+      "method": "PUT",
+      "path": "/api/v1/edge/cameras",
+      "successStatus": "200",
+      "auth": {
+        "kind": "edge-bearer",
+        "valueState": "not-in-fixture"
+      },
+      "expectedPrincipal": {
+        "facilityScope": "token-derived",
+        "edgeInstallationId": "c72bd9a7-3e04-47ba-a8cd-a56e54f98152",
+        "enrollmentGeneration": 1
+      },
+      "request": {
+        "body": {
+          "edge_camera_ref": "camera-001",
+          "label": "Camera Test",
+          "spaceId": "a2222222-2222-4222-8222-222222222222"
+        }
+      },
+      "response": {
+        "cameraId": "b3333333-3333-4333-8333-333333333333",
+        "spaceId": "a2222222-2222-4222-8222-222222222222",
+        "facilityId": "a5ff4ed1-7e63-4a4f-9ef0-42e807d74a64"
+      }
+    },
+    "machine.events.capabilities.get": {
+      "method": "GET",
+      "path": "/api/v1/events/capabilities",
+      "successStatus": "200",
+      "auth": {
+        "kind": "edge-bearer",
+        "valueState": "not-in-fixture"
+      },
+      "expectedPrincipal": {
+        "facilityScope": "token-derived",
+        "edgeInstallationId": "c72bd9a7-3e04-47ba-a8cd-a56e54f98152",
+        "enrollmentGeneration": 1
+      },
+      "request": {
+        "query": {
+          "camera_id": "camera-001"
+        }
+      },
+      "response": {
+        "event_idempotency": 1,
+        "clip_export": 1
+      }
+    },
+    "machine.events.clips.put": {
+      "method": "PUT",
+      "path": "/api/v1/events/clips/{clipId}",
+      "successStatus": "200",
+      "auth": {
+        "kind": "edge-bearer",
+        "valueState": "not-in-fixture"
+      },
+      "expectedPrincipal": {
+        "facilityScope": "token-derived",
+        "edgeInstallationId": "c72bd9a7-3e04-47ba-a8cd-a56e54f98152",
+        "enrollmentGeneration": 1
+      },
+      "request": {
+        "pathParams": {
+          "clipId": "clip-test-001"
+        },
+        "headers": {
+          "content-type": "video/mp4",
+          "X-Edge-Camera-Id": "camera-001",
+          "X-Edge-Event-Refs": "[\"e5555555-5555-4555-8555-555555555555\"]",
+          "X-Clip-Start-At": "2026-01-01T00:01:00.000Z",
+          "X-Clip-End-At": "2026-01-01T00:01:05.000Z",
+          "X-Clip-Finalized-At": "2026-01-01T00:01:06.000Z",
+          "X-Clip-Sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "X-Clip-Size-Bytes": 1024,
+          "X-Clip-Duration-Ms": 5000,
+          "X-Clip-State-Version": 1
+        },
+        "body": "[binary-redacted]"
+      },
+      "response": {
+        "clip_id": "clip-test-001",
+        "state": "READY",
+        "state_version": 1,
+        "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "size_bytes": 1024
+      }
+    },
+    "machine.events.clips.state.put": {
+      "method": "PUT",
+      "path": "/api/v1/events/clips/{clipId}/state",
+      "successStatus": "200",
+      "auth": {
+        "kind": "edge-bearer",
+        "valueState": "not-in-fixture"
+      },
+      "expectedPrincipal": {
+        "facilityScope": "token-derived",
+        "edgeInstallationId": "c72bd9a7-3e04-47ba-a8cd-a56e54f98152",
+        "enrollmentGeneration": 1
+      },
+      "request": {
+        "pathParams": {
+          "clipId": "clip-test-002"
+        },
+        "body": {
+          "camera_id": "camera-001",
+          "event_refs": ["e5555555-5555-4555-8555-555555555555"],
+          "state_version": 1,
+          "reason": "CAPTURE_FAILED"
+        }
+      },
+      "response": {
+        "clip_id": "clip-test-002",
+        "state": "UNAVAILABLE",
+        "state_version": 1
+      }
+    },
+    "admin.alert-media.download.get": {
+      "method": "GET",
+      "path": "/api/v1/alerts/{alertId}/media/download",
+      "successStatus": "200",
+      "auth": {
+        "kind": "product-session",
+        "requiredCapability": "facilityAdmin"
+      },
+      "request": {
+        "pathParams": {
+          "alertId": "d6666666-6666-4666-8666-666666666666"
+        }
+      },
+      "response": {
+        "headers": {
+          "Content-Disposition": "attachment; filename=\"incident-clip.mp4\"",
+          "Accept-Ranges": "bytes",
+          "Cache-Control": "private, no-store, no-transform",
+          "ETag": "\"sha256-dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"",
+          "Content-Length": 1024
+        },
+        "body": {
+          "mediaState": "binary-redacted",
+          "byteLength": 1024
+        },
+        "auditOutcome": "COMPLETED"
+      }
+    },
+    "admin.alert-media.download.head": {
+      "method": "HEAD",
+      "path": "/api/v1/alerts/{alertId}/media/download",
+      "successStatus": "200",
+      "auth": {
+        "kind": "product-session",
+        "requiredCapability": "facilityAdmin"
+      },
+      "request": {
+        "pathParams": {
+          "alertId": "d6666666-6666-4666-8666-666666666666"
+        }
+      },
+      "response": {
+        "headers": {
+          "Content-Disposition": "attachment; filename=\"incident-clip.mp4\"",
+          "Accept-Ranges": "bytes",
+          "Cache-Control": "private, no-store, no-transform",
+          "ETag": "\"sha256-dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"",
+          "Content-Length": 1024
+        },
+        "bodyState": "omitted",
+        "auditOutcome": "NOT_CREATED"
+      }
+    }
+  },
+  "rejections": {
+    "missing-schema-version": {
+      "valid": false,
+      "request": {
+        "body": {
+          "floors": []
+        }
+      },
+      "error": {
+        "code": "INVALID_SCHEMA",
+        "message": "Request does not match edge provisioning v1.",
+        "retryable": false,
+        "requestId": "request-test-001"
+      }
+    },
+    "wrong-schema-version": {
+      "valid": false,
+      "request": {
+        "body": {
+          "schemaVersion": 2,
+          "floors": []
+        }
+      },
+      "error": {
+        "code": "INVALID_SCHEMA",
+        "message": "Request does not match edge provisioning v1.",
+        "retryable": false,
+        "requestId": "request-test-002"
+      }
+    },
+    "duplicate-edge-refs": {
+      "valid": false,
+      "request": {
+        "body": {
+          "schemaVersion": 1,
+          "clientRevision": 1,
+          "floors": [
+            {
+              "edgeRef": "floor-a",
+              "name": "Floor A",
+              "orderIndex": 1,
+              "rooms": []
+            },
+            {
+              "edgeRef": "floor-a",
+              "name": "Floor B",
+              "orderIndex": 2,
+              "rooms": []
+            }
+          ]
+        }
+      },
+      "error": {
+        "code": "INVALID_TOPOLOGY",
+        "message": "Topology request is invalid.",
+        "retryable": false,
+        "requestId": "request-test-003"
+      }
+    },
+    "duplicate-json-key": {
+      "valid": false,
+      "rawJson": "{\"schemaVersion\":1,\"floors\":[{\"edgeRef\":\"floor-a\",\"edgeRef\":\"floor-b\"}]}",
+      "error": {
+        "code": "INVALID_SCHEMA",
+        "message": "Request does not match edge provisioning v1.",
+        "retryable": false,
+        "requestId": "request-test-004"
+      }
+    },
+    "two-cameras-in-one-room": {
+      "valid": false,
+      "request": {
+        "body": {
+          "schemaVersion": 1,
+          "floors": [
+            {
+              "edgeRef": "floor-a",
+              "name": "Floor A",
+              "orderIndex": 1,
+              "rooms": [
+                {
+                  "edgeRef": "room-a",
+                  "name": "Room A",
+                  "type": "ROOM",
+                  "capacity": 1,
+                  "cameras": [
+                    {
+                      "edgeRef": "camera-a",
+                      "label": "Camera A"
+                    },
+                    {
+                      "edgeRef": "camera-b",
+                      "label": "Camera B"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      },
+      "error": {
+        "code": "INVALID_TOPOLOGY",
+        "message": "Topology request is invalid.",
+        "retryable": false,
+        "requestId": "request-test-005"
+      }
+    },
+    "nonpositive-client-revision": {
+      "valid": false,
+      "request": {
+        "body": {
+          "schemaVersion": 1,
+          "clientRevision": 0,
+          "expectedServerRevision": 0,
+          "floors": []
+        }
+      },
+      "error": {
+        "code": "INVALID_SCHEMA",
+        "message": "Request does not match edge provisioning v1.",
+        "retryable": false,
+        "requestId": "request-test-006"
+      }
+    },
+    "skipped-client-revision": {
+      "valid": false,
+      "request": {
+        "body": {
+          "schemaVersion": 1,
+          "clientRevision": 3,
+          "expectedServerRevision": 1,
+          "floors": []
+        }
+      },
+      "error": {
+        "code": "CLIENT_REVISION_OUT_OF_SEQUENCE",
+        "message": "Request state does not match current edge state.",
+        "retryable": false,
+        "requestId": "request-test-007"
+      }
+    },
+    "stale-server-revision": {
+      "valid": false,
+      "request": {
+        "body": {
+          "schemaVersion": 1,
+          "clientRevision": 2,
+          "expectedServerRevision": 0,
+          "floors": []
+        }
+      },
+      "error": {
+        "code": "STALE_SERVER_REVISION",
+        "message": "Request state does not match current edge state.",
+        "retryable": false,
+        "requestId": "request-test-008"
+      }
+    },
+    "stale-enrollment-generation": {
+      "valid": false,
+      "request": {
+        "body": {
+          "schemaVersion": 1,
+          "enrollmentGeneration": 1,
+          "clientRevision": 1,
+          "expectedServerRevision": 2,
+          "floors": []
+        }
+      },
+      "error": {
+        "code": "STALE_ENROLLMENT_GENERATION",
+        "message": "Request state does not match current edge state.",
+        "retryable": false,
+        "requestId": "request-test-009"
+      }
+    },
+    "facility-header-identity": {
+      "valid": false,
+      "request": {
+        "headers": {
+          "x-facility-id": "synthetic-facility"
+        },
+        "body": {
+          "schemaVersion": 1
+        }
+      },
+      "error": {
+        "code": "INVALID_SCHEMA",
+        "message": "Request does not match edge provisioning v1.",
+        "retryable": false,
+        "requestId": "request-test-010"
+      }
+    },
+    "facility-body-identity": {
+      "valid": false,
+      "request": {
+        "body": {
+          "schemaVersion": 1,
+          "facilityId": "synthetic-facility"
+        }
+      },
+      "error": {
+        "code": "INVALID_SCHEMA",
+        "message": "Request does not match edge provisioning v1.",
+        "retryable": false,
+        "requestId": "request-test-011"
+      }
+    },
+    "unknown-field": {
+      "valid": false,
+      "request": {
+        "body": {
+          "schemaVersion": 1,
+          "unexpectedField": "synthetic-value"
+        }
+      },
+      "error": {
+        "code": "INVALID_SCHEMA",
+        "message": "Request does not match edge provisioning v1.",
+        "retryable": false,
+        "requestId": "request-test-012"
+      }
+    },
+    "invalid-edge-ref": {
+      "valid": false,
+      "request": {
+        "body": {
+          "schemaVersion": 1,
+          "floors": [
+            {
+              "edgeRef": " invalid ref ",
+              "name": "Floor A",
+              "orderIndex": 1,
+              "rooms": []
+            }
+          ]
+        }
+      },
+      "error": {
+        "code": "INVALID_TOPOLOGY",
+        "message": "Topology request is invalid.",
+        "retryable": false,
+        "requestId": "request-test-013"
+      }
+    },
+    "rtsp-field": {
+      "valid": false,
+      "forbiddenField": "rtspUrl",
+      "rawJson": "{\"schemaVersion\":1,\"rtspUrl\":\"[redacted]\"}",
+      "error": {
+        "code": "INVALID_SCHEMA",
+        "message": "Request does not match edge provisioning v1.",
+        "retryable": false,
+        "requestId": "request-test-014"
+      }
+    },
+    "camera-credential-field": {
+      "valid": false,
+      "forbiddenField": "cameraPassword",
+      "rawJson": "{\"schemaVersion\":1,\"cameraPassword\":\"[redacted]\"}",
+      "error": {
+        "code": "INVALID_SCHEMA",
+        "message": "Request does not match edge provisioning v1.",
+        "retryable": false,
+        "requestId": "request-test-015"
+      }
+    },
+    "secret-shaped-field": {
+      "valid": false,
+      "forbiddenField": "secret",
+      "rawJson": "{\"schemaVersion\":1,\"secret\":\"[redacted]\"}",
+      "error": {
+        "code": "INVALID_SCHEMA",
+        "message": "Request does not match edge provisioning v1.",
+        "retryable": false,
+        "requestId": "request-test-016"
+      }
+    }
+  }
+}
