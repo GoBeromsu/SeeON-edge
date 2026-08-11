@@ -33,6 +33,7 @@ from contracts.edge_provisioning_v1 import (
     serialize_topology_confirmation,
     serialize_topology_snapshot,
 )
+from contracts.edge_provisioning_validation import require_canonical_id
 
 REPO_ROOT: Final = Path(__file__).resolve().parents[1]
 FIXTURE_PATH: Final = REPO_ROOT / "contracts/edge-provisioning-v1/contract-fixtures.json"
@@ -83,6 +84,32 @@ def test_enrollment_verification_serializer_is_frozen_to_v1_fields() -> None:
         }
     )
     assert response.facility.display_name == "Test"
+
+
+def test_enrollment_verification_result_accepts_hub_cuid_facility_id() -> None:
+    response = parse_enrollment_verification_result(
+        {
+            "schemaVersion": 1,
+            "edgeInstallationId": "d77dc8cd-8af5-4172-a5a8-e629d77ae262",
+            "enrollmentGeneration": 1,
+            "facility": {
+                "id": "cmrkv2mqd0000nz5t44td921i",
+                "displayName": "행복한요양원 녹양역점",
+            },
+            "serverRevision": 0,
+        }
+    )
+
+    assert response.facility.facility_id == "cmrkv2mqd0000nz5t44td921i"
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["", "a" * 65, "has space", "has/slash", "has.dot"],
+)
+def test_require_canonical_id_rejects_malformed_values(value: str) -> None:
+    with pytest.raises(ContractViolation):
+        _ = require_canonical_id(value)
 
 
 def test_topology_snapshot_round_trips_without_facility_or_secret_fields() -> None:

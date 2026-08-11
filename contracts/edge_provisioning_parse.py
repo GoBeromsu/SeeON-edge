@@ -16,6 +16,7 @@ from contracts.edge_provisioning_models import (
     TopologySnapshot,
 )
 from contracts.edge_provisioning_validation import (
+    require_canonical_id,
     require_edge_ref,
     require_fields,
     require_initial_alias_scope,
@@ -141,7 +142,7 @@ def _parse_room(value: JsonValue) -> TopologyRoom:
     if room_type != "ROOM":
         raise ContractViolation("room type must be ROOM")
     legacy_id = (
-        require_uuid(record["legacyCanonicalSpaceId"])
+        require_canonical_id(record["legacyCanonicalSpaceId"])
         if "legacyCanonicalSpaceId" in record
         else None
     )
@@ -167,7 +168,7 @@ def _parse_camera(value: JsonValue) -> TopologyCamera:
 def _parse_manifest_entry(value: Mapping[str, JsonValue]) -> TopologyManifestEntry:
     require_fields(value, frozenset({"kind", "edgeRef", "canonicalId", "parentCanonicalId"}))
     parent_value = value["parentCanonicalId"]
-    parent_id = None if parent_value is None else require_uuid(parent_value)
+    parent_id = None if parent_value is None else require_canonical_id(parent_value)
     raw_kind = require_string(value["kind"], 6)
     try:
         kind = _TOPOLOGY_KINDS[raw_kind]
@@ -176,7 +177,7 @@ def _parse_manifest_entry(value: Mapping[str, JsonValue]) -> TopologyManifestEnt
     return TopologyManifestEntry(
         kind=kind,
         edge_ref=require_edge_ref(value["edgeRef"]),
-        canonical_id=require_uuid(value["canonicalId"]),
+        canonical_id=require_canonical_id(value["canonicalId"]),
         parent_canonical_id=parent_id,
     )
 

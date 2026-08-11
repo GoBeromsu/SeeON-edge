@@ -13,6 +13,7 @@ from contracts.edge_provisioning_models import (
     MachinePrincipal,
 )
 from contracts.edge_provisioning_validation import (
+    require_canonical_id,
     require_fields,
     require_nonnegative,
     require_positive,
@@ -53,7 +54,7 @@ def parse_enrollment_verification_result(
             enrollment_generation=require_positive(value["enrollmentGeneration"]),
         ),
         facility=FacilityIdentity(
-            facility_id=require_uuid(facility["id"]),
+            facility_id=require_canonical_id(facility["id"]),
             display_name=require_string(facility["displayName"], 120),
         ),
         server_revision=require_nonnegative(value["serverRevision"]),

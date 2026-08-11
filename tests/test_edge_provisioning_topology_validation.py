@@ -131,6 +131,23 @@ def test_manifest_parser_allows_same_ref_across_entity_kinds() -> None:
     assert len(parse_topology_manifest(manifest)) == 3
 
 
+def test_manifest_parser_accepts_hub_cuid_canonical_ids() -> None:
+    floor_id = "cm0floor00000nz5t44td921i"
+    room_id = "cm0room000000nz5t44td921i"
+    manifest: list[JsonRecord] = [
+        dict(kind="FLOOR", edgeRef="shared", canonicalId=floor_id, parentCanonicalId=None),
+        dict(kind="ROOM", edgeRef="shared", canonicalId=room_id, parentCanonicalId=floor_id),
+        dict(
+            kind="CAMERA",
+            edgeRef="shared",
+            canonicalId="cm0camera0000nz5t44td921i",
+            parentCanonicalId=room_id,
+        ),
+    ]
+
+    assert len(parse_topology_manifest(manifest)) == 3
+
+
 def test_manifest_parser_rejects_missing_parent_relationship() -> None:
     manifest: list[JsonRecord] = [
         dict(
@@ -160,6 +177,17 @@ def test_room_parser_accepts_defaults_and_optional_legacy_alias() -> None:
     assert parsed_room.legacy_canonical_space_id == LEGACY_SPACE_ID
     output_room = _records(_records(serialized["floors"])[0]["rooms"])[0]
     assert output_room["legacyCanonicalSpaceId"] == LEGACY_SPACE_ID
+
+
+def test_room_parser_accepts_hub_cuid_legacy_alias() -> None:
+    cuid_legacy_id = "cmrkv2mqd0000nz5t44td921i"
+    body = _snapshot_body()
+    room = _records(_records(body["floors"])[0]["rooms"])[0]
+    room["legacyCanonicalSpaceId"] = cuid_legacy_id
+
+    parsed = parse_topology_snapshot(body)
+
+    assert parsed.floors[0].rooms[0].legacy_canonical_space_id == cuid_legacy_id
 
 
 @pytest.mark.parametrize("field", ["enrollmentGeneration", "clientRevision"])
@@ -206,7 +234,7 @@ def test_alias_serializer_rejects_noninitial_generation_or_revision(
         ("floor", "name", ""),
         ("room", "name", "x" * 121),
         ("room", "type", "WARD"),
-        ("room", "legacyCanonicalSpaceId", "invalid"),
+        ("room", "legacyCanonicalSpaceId", "in valid"),
         ("room", "legacyCanonicalSpaceId", None),
         ("camera", "label", "x" * 121),
         ("root", "clientRevision", True),

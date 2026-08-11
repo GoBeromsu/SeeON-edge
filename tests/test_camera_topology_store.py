@@ -136,7 +136,7 @@ def test_legacy_space_id_is_validated_and_never_inferred(tmp_path) -> None:
             edge_ref="room-a",
             floor_edge_ref="floor-a",
             name="Room 192.168.0.2",
-            legacy_canonical_space_id="not-a-uuid",
+            legacy_canonical_space_id="not a valid id",
         )
     assert exc_info.value.code is TopologyErrorCode.INVALID_LEGACY_SPACE_ID
 

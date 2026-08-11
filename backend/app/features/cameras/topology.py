@@ -8,7 +8,7 @@ from backend.app.features.cameras.topology_query import (
     TopologyDirtyMarker,
     read_topology_snapshot,
 )
-from contracts.edge_provisioning_validation import require_edge_ref, require_uuid
+from contracts.edge_provisioning_validation import require_canonical_id, require_edge_ref
 
 
 @unique
@@ -160,7 +160,7 @@ def _legacy_id(value: str | None, edge_ref: str) -> str | None:
     if value is None:
         return None
     try:
-        return require_uuid(value)
+        return require_canonical_id(value)
     except Exception as error:
         raise TopologyConflictError(TopologyErrorCode.INVALID_LEGACY_SPACE_ID, edge_ref) from error
 

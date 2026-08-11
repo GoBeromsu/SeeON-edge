@@ -18,6 +18,7 @@ _UUID_V7: Final = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
 )
 _EDGE_REF: Final = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,63}$")
+_CANONICAL_ID: Final = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 _SHA256: Final = re.compile(r"^[a-f0-9]{64}$")
 _RFC3339_MILLIS_UTC: Final = re.compile(
     r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$"
@@ -70,6 +71,15 @@ def require_uuid_v7(value: JsonValue) -> str:
     parsed = require_string(value, 36)
     if _UUID_V7.fullmatch(parsed) is None:
         raise ContractViolation("value must be a lowercase UUIDv7")
+    return parsed
+
+
+def require_canonical_id(value: JsonValue) -> str:
+    """Hub-owned canonical identifier: opaque, bounded. The backend issues
+    cuid ids today and may issue UUIDs; the Edge must not assume a format."""
+    parsed = require_string(value, 64)
+    if _CANONICAL_ID.fullmatch(parsed) is None:
+        raise ContractViolation("value must be a canonical backend id")
     return parsed
 
 
@@ -129,6 +139,7 @@ def require_initial_alias_scope(snapshot: TopologySnapshot) -> None:
 
 
 __all__ = [
+    "require_canonical_id",
     "require_edge_ref",
     "require_fields",
     "require_initial_alias_scope",
