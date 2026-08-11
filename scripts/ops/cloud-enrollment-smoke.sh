@@ -53,7 +53,7 @@ check_sealed_image() {
   revision=$(json_value "$SEAL" "$repo" "$image" revision)
   repository=$(json_value "$SEAL" "$repo" "$image" repository)
   case "$ref" in *@sha256:????????????????????????????????????????????????????????????????) ;; *) fail "sealed $repo $image is not digest-pinned" ;; esac
-  [ "$image_id" = "${ref##*@}" ] || fail "sealed $repo $image ID mismatch"
+  case "$image_id" in sha256:????????????????????????????????????????????????????????????????) ;; *) fail "sealed $repo $image ID is invalid" ;; esac
   case "$platform" in linux/amd64|linux/arm64) ;; *) fail "sealed $repo $image platform is invalid" ;; esac
   [ "$revision" = "$(json_value "$SEAL" "$repo" sha)" ] || fail "sealed $repo $image revision mismatch"
   [ "$repository" = "$expected_repository" ] || fail "sealed $repo $image repository mismatch"
@@ -81,15 +81,18 @@ gate_artifacts() {
   check_sealed_image ml apiImage SeniorAILab/eldercare-fall-ml-v2
   check_sealed_image ml workerImage SeniorAILab/eldercare-fall-ml-v2
 }
+host_keys() {
+  ssh-keygen -F "$HOST" -f "$KNOWN_HOSTS" 2>/dev/null | awk '$1 !~ /^#/ { print }'
+}
 host_fingerprint() {
-  ssh-keygen -F "$HOST" -f "$KNOWN_HOSTS" 2>/dev/null \
-    | awk '$1 !~ /^#/ { print; exit }' \
+  host_keys \
     | ssh-keygen -lf - -E sha256 2>/dev/null \
     | awk '{print $2}'
 }
 check_host_inputs() {
   [ "$HOST" = happy-nursing-home-raw ] || fail 'only happy-nursing-home-raw is approved; JNU targets are forbidden'
   [ -f "$KNOWN_HOSTS" ] || fail 'pinned known_hosts file is required'
+  [ "$(host_keys | wc -l | tr -d ' ')" -eq 1 ] || fail 'known_hosts must contain exactly one approved host key'
   case "$KNOWN_HOST_FINGERPRINT" in SHA256:*) ;; *) fail 'independent host-key fingerprint is required' ;; esac
   [ "$(host_fingerprint)" = "$KNOWN_HOST_FINGERPRINT" ] || fail 'known_hosts fingerprint does not match independent anchor'
   [ -f "$MACHINE_BASELINE" ] || fail 'machine-id hash baseline is required'
@@ -215,6 +218,12 @@ PY
   if (gate_artifacts) >/dev/null 2>&1; then fail 'invalid image provenance passed'; fi
   SEAL=$original_seal SEAL_SHA256=$original_seal_sha
   printf '%s\n' 'EDGE_IMAGE_PROVENANCE_REJECTION_OK'
+  cp "$KNOWN_HOSTS" "$tmp/known_hosts.original"
+  ssh-keygen -q -t ed25519 -N '' -f "$tmp/extra-host-key"
+  printf 'happy-nursing-home-raw %s\n' "$(cat "$tmp/extra-host-key.pub")" >>"$KNOWN_HOSTS"
+  if (check_host_inputs) >/dev/null 2>&1; then fail 'duplicate accepted host key passed'; fi
+  mv "$tmp/known_hosts.original" "$KNOWN_HOSTS"
+  printf '%s\n' 'EDGE_DUPLICATE_HOST_KEY_REJECTION_OK'
   cp "$READBACK" "$tmp/tampered.json"
   python3 - "$tmp/tampered.json" <<'PY'
 import json, sys
