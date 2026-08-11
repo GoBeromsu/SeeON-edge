@@ -1,4 +1,5 @@
 #!/usr/bin/env sh
+# allow: SIZE_OK - rollout ordering and fail-closed transitions remain auditable in one script.
 set -eu
 set +x
 
@@ -42,6 +43,21 @@ for key in sys.argv[2:]: value=value[key]
 assert isinstance(value, (str,int,bool)); print(str(value).lower() if isinstance(value,bool) else value)' "$@"
 }
 approved_sha() { awk -F': *' '$1 == "approved_plan_sha256" { print $2; exit }' "$1"; }
+check_sealed_image() {
+  repo=$1
+  image=$2
+  expected_repository=$3
+  ref=$(json_value "$SEAL" "$repo" "$image" ref)
+  image_id=$(json_value "$SEAL" "$repo" "$image" imageId)
+  platform=$(json_value "$SEAL" "$repo" "$image" platform)
+  revision=$(json_value "$SEAL" "$repo" "$image" revision)
+  repository=$(json_value "$SEAL" "$repo" "$image" repository)
+  case "$ref" in *@sha256:????????????????????????????????????????????????????????????????) ;; *) fail "sealed $repo $image is not digest-pinned" ;; esac
+  [ "$image_id" = "${ref##*@}" ] || fail "sealed $repo $image ID mismatch"
+  case "$platform" in linux/amd64|linux/arm64) ;; *) fail "sealed $repo $image platform is invalid" ;; esac
+  [ "$revision" = "$(json_value "$SEAL" "$repo" sha)" ] || fail "sealed $repo $image revision mismatch"
+  [ "$repository" = "$expected_repository" ] || fail "sealed $repo $image repository mismatch"
+}
 gate_artifacts() {
   [ -f "$PLAN" ] && [ -f "$DRAFT" ] && [ -f "$SEAL" ] || fail 'approved plan, draft, and sealed RC receipt are required'
   require_sha256 "$APPROVED_PLAN_SHA256" 'approved plan anchor'
@@ -60,18 +76,10 @@ gate_artifacts() {
     case "$sha$tree" in *[!0-9a-f]*) fail "sealed $repo commit provenance is invalid" ;; esac
     [ "${#sha}" -eq 40 ] && [ "${#tree}" -eq 40 ] || fail "sealed $repo commit provenance is invalid"
   done
-  for image in backendImage frontImage; do
-    ref=$(json_value "$SEAL" ai "$image" ref)
-    revision=$(json_value "$SEAL" ai "$image" revision)
-    case "$ref" in *@sha256:????????????????????????????????????????????????????????????????) ;; *) fail "sealed AI $image is not digest-pinned" ;; esac
-    [ "$revision" = "$(json_value "$SEAL" ai sha)" ] || fail "sealed AI $image revision mismatch"
-  done
-  for image in apiImage workerImage; do
-    ref=$(json_value "$SEAL" ml "$image" ref)
-    revision=$(json_value "$SEAL" ml "$image" revision)
-    case "$ref" in *@sha256:????????????????????????????????????????????????????????????????) ;; *) fail "sealed ML $image is not digest-pinned" ;; esac
-    [ "$revision" = "$(json_value "$SEAL" ml sha)" ] || fail "sealed ML $image revision mismatch"
-  done
+  check_sealed_image ai backendImage SeniorAILab/eldercare-fall-ai
+  check_sealed_image ai frontImage SeniorAILab/eldercare-fall-ai
+  check_sealed_image ml apiImage SeniorAILab/eldercare-fall-ml-v2
+  check_sealed_image ml workerImage SeniorAILab/eldercare-fall-ml-v2
 }
 host_fingerprint() {
   ssh-keygen -F "$HOST" -f "$KNOWN_HOSTS" 2>/dev/null \
@@ -110,14 +118,20 @@ execution_ok() {
   execution_id=$1
   python3 - "$READBACK" "$execution_id" <<'PY'
 import datetime as dt
+import hashlib
 import json
+from pathlib import Path
 import re
 import sys
-body = json.load(open(sys.argv[1], encoding="utf-8"))
+receipt = Path(sys.argv[1])
+body = json.loads(receipt.read_text(encoding="utf-8"))
 item = next((value for value in body["executions"] if value.get("id") == sys.argv[2]), None)
 assert item is not None and item.get("exitCode") == 0
 assert isinstance(item.get("sequence"), int) and item["sequence"] > 0
 assert re.fullmatch(r"[a-f0-9]{64}", item.get("evidenceSha256", ""))
+assert item.get("evidencePath") == f"executions/{sys.argv[2]}.txt"
+evidence = receipt.parent / item["evidencePath"]
+assert hashlib.sha256(evidence.read_bytes()).hexdigest() == item["evidenceSha256"]
 started = dt.datetime.fromisoformat(item["startedAt"].replace("Z", "+00:00"))
 completed = dt.datetime.fromisoformat(item["completedAt"].replace("Z", "+00:00"))
 assert completed >= started
@@ -152,7 +166,7 @@ fixture() {
   APPROVED_PLAN_SHA256=$(sha256_file "$tmp/plan.md")
   printf 'approved_plan_sha256: %s\nround_status: approved\n' "$APPROVED_PLAN_SHA256" >"$tmp/draft.md"
   cat >"$tmp/seal.json" <<EOF
-{"schemaVersion":2,"approvedPlanSha256":"$APPROVED_PLAN_SHA256","ai":{"repository":"SeniorAILab/eldercare-fall-ai","sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","tree":"1111111111111111111111111111111111111111","backendImage":{"ref":"local/backend@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","revision":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"frontImage":{"ref":"local/front@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","revision":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}},"ml":{"repository":"SeniorAILab/eldercare-fall-ml-v2","sha":"dddddddddddddddddddddddddddddddddddddddd","tree":"2222222222222222222222222222222222222222","apiImage":{"ref":"local/api@sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee","revision":"dddddddddddddddddddddddddddddddddddddddd"},"workerImage":{"ref":"local/worker@sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff","revision":"dddddddddddddddddddddddddddddddddddddddd"}}}
+{"schemaVersion":2,"approvedPlanSha256":"$APPROVED_PLAN_SHA256","ai":{"repository":"SeniorAILab/eldercare-fall-ai","sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","tree":"1111111111111111111111111111111111111111","backendImage":{"ref":"local/backend@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","imageId":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","platform":"linux/arm64","revision":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","repository":"SeniorAILab/eldercare-fall-ai"},"frontImage":{"ref":"local/front@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","imageId":"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","platform":"linux/arm64","revision":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","repository":"SeniorAILab/eldercare-fall-ai"}},"ml":{"repository":"SeniorAILab/eldercare-fall-ml-v2","sha":"dddddddddddddddddddddddddddddddddddddddd","tree":"2222222222222222222222222222222222222222","apiImage":{"ref":"local/api@sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee","imageId":"sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee","platform":"linux/arm64","revision":"dddddddddddddddddddddddddddddddddddddddd","repository":"SeniorAILab/eldercare-fall-ml-v2"},"workerImage":{"ref":"local/worker@sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff","imageId":"sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff","platform":"linux/amd64","revision":"dddddddddddddddddddddddddddddddddddddddd","repository":"SeniorAILab/eldercare-fall-ml-v2"}}}
 EOF
   printf fixture-machine | sha256_file /dev/stdin >"$tmp/machine.sha256"
   ssh-keygen -q -t ed25519 -N '' -f "$tmp/host-key"
@@ -162,9 +176,18 @@ EOF
   snapshot='"hostAlias":"happy-nursing-home-raw","hostname":"happy-edge-fixture","machineIdSha256":"'"$machine"'","deployLockAvailable":true,"updaterIdle":true,"clipStoreFreeMiB":20480,"volumesHealthy":true,"queuesDrained":true,"sqliteBackupVerified":true,"apiImage":"local/api@sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee","workerImage":"local/worker@sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff","envFacilityIdentityAbsent":true,"apiReady":true,"statusSchemaValid":true,"schemaIntegrity":true,"scopeVerified":true'
   executions=
   sequence=0
+  mkdir "$tmp/executions" "$tmp/state"
   for id in enrollment topology-sync heartbeat event-clip credential-rotation timeout-retry rollback roll-forward restart; do
     sequence=$((sequence + 1))
-    row="{\"id\":\"$id\",\"sequence\":$sequence,\"startedAt\":\"2026-08-11T00:00:00Z\",\"completedAt\":\"2026-08-11T00:00:01Z\",\"exitCode\":0,\"evidenceSha256\":\"$(printf '%064d' "$sequence")\"}"
+    case "$id" in
+      rollback) printf 'before\n' >"$tmp/state/runtime"; cp "$tmp/state/runtime" "$tmp/state/snapshot"; printf 'changed\n' >"$tmp/state/runtime"; cp "$tmp/state/snapshot" "$tmp/state/runtime"; cmp "$tmp/state/runtime" "$tmp/state/snapshot" ;;
+      roll-forward) printf 'forward\n' >"$tmp/state/runtime" ;;
+      restart) printf '2\n' >"$tmp/state/generation" ;;
+      *) printf '%s\n' "$id" >"$tmp/state/$id" ;;
+    esac >"$tmp/executions/$id.txt" 2>&1
+    printf 'action=%s exit=0\n' "$id" >>"$tmp/executions/$id.txt"
+    evidence_sha=$(sha256_file "$tmp/executions/$id.txt")
+    row="{\"id\":\"$id\",\"sequence\":$sequence,\"startedAt\":\"2026-08-11T00:00:00Z\",\"completedAt\":\"2026-08-11T00:00:01Z\",\"exitCode\":0,\"evidencePath\":\"executions/$id.txt\",\"evidenceSha256\":\"$evidence_sha\"}"
     [ -z "$executions" ] && executions=$row || executions="$executions,$row"
   done
   printf '{"schemaVersion":2,"preflight":{"generation":1,"observedAt":"2026-08-10T23:59:59Z",%s},"executions":[%s],"postRestart":{"generation":2,"observedAt":"2026-08-11T00:00:02Z",%s}}\n' "$snapshot" "$executions" "$snapshot" >"$tmp/readback.json"
@@ -173,6 +196,25 @@ EOF
   gate_artifacts
   check_host_inputs
   check_readback
+  cp "$tmp/executions/restart.txt" "$tmp/restart.txt.original"
+  printf 'forged\n' >>"$tmp/executions/restart.txt"
+  if (check_readback) >/dev/null 2>&1; then fail 'forged execution evidence passed'; fi
+  mv "$tmp/restart.txt.original" "$tmp/executions/restart.txt"
+  printf '%s\n' 'EDGE_EXECUTION_CONTENT_ADDRESS_REJECTION_OK'
+  cp "$SEAL" "$tmp/bad-seal.json"
+  python3 - "$tmp/bad-seal.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+path = Path(sys.argv[1])
+value = json.loads(path.read_text(encoding="utf-8"))
+value["ml"]["workerImage"]["repository"] = "attacker/repository"
+path.write_text(json.dumps(value), encoding="utf-8")
+PY
+  original_seal=$SEAL original_seal_sha=$SEAL_SHA256 SEAL=$tmp/bad-seal.json SEAL_SHA256=$(sha256_file "$tmp/bad-seal.json")
+  if (gate_artifacts) >/dev/null 2>&1; then fail 'invalid image provenance passed'; fi
+  SEAL=$original_seal SEAL_SHA256=$original_seal_sha
+  printf '%s\n' 'EDGE_IMAGE_PROVENANCE_REJECTION_OK'
   cp "$READBACK" "$tmp/tampered.json"
   python3 - "$tmp/tampered.json" <<'PY'
 import json, sys

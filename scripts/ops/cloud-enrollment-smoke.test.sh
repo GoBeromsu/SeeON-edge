@@ -5,6 +5,10 @@ SCRIPT=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)/cloud-enrollment-smoke.sh
 TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/cloud-enrollment-smoke-test.XXXXXX")
 trap 'rm -rf "$TMP_ROOT"' EXIT HUP INT TERM
 
+FIXTURE_OUTPUT=$(sh "$SCRIPT" --fixture --dry-run)
+printf '%s\n' "$FIXTURE_OUTPUT" | grep -Fx 'EDGE_EXECUTION_CONTENT_ADDRESS_REJECTION_OK' >/dev/null
+printf '%s\n' "$FIXTURE_OUTPUT" | grep -Fx 'EDGE_IMAGE_PROVENANCE_REJECTION_OK' >/dev/null
+
 printf 'approved fixture plan\n' >"$TMP_ROOT/plan.md"
 PLAN_DIGEST=$(shasum -a 256 "$TMP_ROOT/plan.md" | awk '{print $1}')
 printf 'approved_plan_sha256: %s\nround_status: approved\n' "$PLAN_DIGEST" >"$TMP_ROOT/draft.md"
