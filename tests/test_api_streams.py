@@ -6,6 +6,7 @@ import urllib.error
 import urllib.request
 from collections.abc import AsyncIterator, Callable, Iterator
 from email.message import Message
+from pathlib import Path
 from types import TracebackType
 from typing import NoReturn, Self, TypedDict, cast
 
@@ -16,6 +17,7 @@ from fastapi.testclient import TestClient
 
 from backend.app.core.config import get_settings
 from backend.app.features.cameras import streams_router
+from backend.app.features.cameras.store import CameraRegistryStore
 from backend.app.features.cameras.streams_router import _iter_upstream, _UpstreamCloser
 from backend.app.main import LifespanFactory, create_app, no_lifespan
 
@@ -142,6 +144,43 @@ def test_stream_proxy_forwards_mjpeg_with_a_dashboard_session(
     assert response.content == body
     assert response.headers["content-type"].startswith("multipart/x-mixed-replace")
     assert calls == [{"url": "http://worker.local:8090/stream/cam_sp_201", "method": "GET"}]
+
+
+def test_stream_proxy_resolves_dashboard_id_to_worker_id(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    calls: list[StreamCall] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append({"url": str(request.url), "method": request.method})
+        return httpx.Response(
+            200,
+            headers={"Content-Type": "multipart/x-mixed-replace; boundary=frame"},
+            content=b"--frame\r\n",
+        )
+
+    _install_mock_transport(monkeypatch, handler)
+    registry = CameraRegistryStore(tmp_path / "catalog.sqlite3")
+    _ = registry.create(
+        camera_id="dashboard-camera-id",
+        label="Room 201",
+        rtsp_url="rtsp://camera/stream",
+        space_id=None,
+        status="online",
+        backend_camera_id="worker-camera-id",
+    )
+    app = create_app(lifespan=NO_LIFESPAN)
+    app.state.camera_registry = registry
+
+    with TestClient(app) as client:
+        _login(client)
+        response = client.get("/api/v1/streams/dashboard-camera-id")
+
+    assert response.status_code == 200
+    assert calls == [
+        {"url": "http://worker.local:8090/stream/worker-camera-id", "method": "GET"}
+    ]
 
 
 def test_stream_proxy_requires_a_dashboard_session(
@@ -307,6 +346,9 @@ def test_stream_proxy_closes_upstream_via_background_when_never_iterated(
     # 실제로 거치도록 라우트 함수를 직접 호출한다 -- 여기선 대시보드 세션
     # 검증이 관심사가 아니므로 _authorize만 이 모듈 안에서 no-op으로 바꾼다.
     monkeypatch.setattr(streams_router, "_authorize", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        streams_router, "_worker_camera_id", lambda _request, camera_id: camera_id
+    )
 
     async def scenario() -> None:
         response = await streams_router.camera_stream(

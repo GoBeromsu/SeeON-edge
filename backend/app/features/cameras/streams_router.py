@@ -16,6 +16,7 @@ from pydantic import BaseModel, ConfigDict
 from starlette.background import BackgroundTask
 
 from backend.app.core.config import get_settings
+from backend.app.features.cameras.store import CameraRegistryStore
 from backend.app.shared.dashboard_auth import authorize_dashboard
 
 router = APIRouter(tags=["streams"])
@@ -69,7 +70,9 @@ async def camera_stream(
 ) -> StreamingResponse:
     _authorize(request, authorization, query_token=token)
     settings = get_settings()
-    upstream_url = _stream_url(settings.worker_stream_origin, camera_id)
+    upstream_url = _stream_url(
+        settings.worker_stream_origin, _worker_camera_id(request, camera_id)
+    )
 
     # MJPEG 스트림은 장시간 연결이고 worker가 1초 간격 하트비트 프레임을
     # 보내므로, 본문(read)에는 타임아웃을 걸지 않는다(read=None). 최초 응답
@@ -131,7 +134,9 @@ def camera_snapshot(
 ) -> Response:
     _authorize(request, authorization, query_token=token)
     settings = get_settings()
-    upstream_url = _snapshot_url(settings.worker_stream_origin, camera_id)
+    upstream_url = _snapshot_url(
+        settings.worker_stream_origin, _worker_camera_id(request, camera_id)
+    )
     upstream_request = urllib.request.Request(upstream_url, method="GET")
 
     try:
@@ -167,7 +172,9 @@ def camera_pose_get(
 ) -> PoseOverlayResponse:
     _authorize(request, authorization, query_token=token)
     settings = get_settings()
-    upstream_url = _pose_url(settings.worker_stream_origin, camera_id)
+    upstream_url = _pose_url(
+        settings.worker_stream_origin, _worker_camera_id(request, camera_id)
+    )
     return _pose_request(
         upstream_url, settings.worker_stream_timeout_s, relay_token=_relay_token(request)
     )
@@ -183,7 +190,9 @@ def camera_pose_set(
 ) -> PoseOverlayResponse:
     _authorize(request, authorization, query_token=token)
     settings = get_settings()
-    upstream_url = _pose_url(settings.worker_stream_origin, camera_id)
+    upstream_url = _pose_url(
+        settings.worker_stream_origin, _worker_camera_id(request, camera_id)
+    )
     body = json.dumps({"mode": payload.mode}).encode("utf-8")
     return _pose_request(
         upstream_url,
@@ -202,6 +211,23 @@ def _worker_url(origin: str, segment: str, camera_id: str, *, suffix: str = "") 
         )
     encoded_camera_id = urllib.parse.quote(camera_id, safe="")
     return f"{base}/{segment}/{encoded_camera_id}{suffix}"
+
+
+def _worker_camera_id(request: Request, camera_id: str) -> str:
+    store = getattr(request.app.state, "camera_registry", None)
+    if not isinstance(store, CameraRegistryStore):
+        return camera_id
+    cameras = store.snapshot().get("cameras")
+    if not isinstance(cameras, list):
+        return camera_id
+    for record in cameras:
+        if not isinstance(record, dict):
+            continue
+        local_id = record.get("id")
+        backend_id = record.get("backend_camera_id")
+        if camera_id in {local_id, backend_id}:
+            return backend_id if isinstance(backend_id, str) and backend_id else camera_id
+    return camera_id
 
 
 def _stream_url(origin: str, camera_id: str) -> str:
