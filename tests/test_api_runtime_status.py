@@ -312,23 +312,19 @@ def test_runtime_status_accepts_despite_unresolved_camera(
     assert response.json()["accepted"] is True
 
 
-def test_runtime_status_still_rejects_env_facility_mismatch(
+def test_runtime_status_accepts_any_facility_without_env_gate(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The env-configured API_FACILITY_ID remains the real security boundary
-    for this endpoint even after the camera_inventory-derived check (#183) is
-    removed: a caller claiming a facility this device isn't configured for is
-    still rejected."""
+    """Env API_FACILITY_ID is no longer an admission gate for runtime-status."""
     monkeypatch.setenv("API_FACILITY_ID", "facility-configured")
     app = create_app(lifespan=no_lifespan)
     app.state.edge_relay_token = "relay-token"
-    app.state.camera_inventory = {}
     client = TestClient(app)
 
     response = _post(client, _payload(facility_id="facility-other"))
 
-    assert response.status_code == 403
-    assert "facility" in response.json()["detail"]
+    assert response.status_code == 200
+    assert response.json()["accepted"] is True
 
 
 def test_status_merges_runtime_snapshot() -> None:

@@ -5,6 +5,7 @@
 # ///
 # --- How to run ---
 # uv run python scripts/verify_scope_fidelity.py --fixture
+# uv run python scripts/verify_scope_fidelity.py --repo
 # uv run python scripts/verify_scope_fidelity.py --plan <plan> --evidence <evidence>
 from __future__ import annotations
 
@@ -20,6 +21,15 @@ IDENTITY_PATTERN: Final = (
     re.compile(r"\bAPI_FACILITY_ID\b|\bEDGE_FACILITY_TOKEN\b"),
     "environment facility identity",
 )
+# The camera roster is owned by the Edge camera_registry DB (dashboard-entered)
+# and pulled by ml-worker from ml-api. It must never be provisionable through
+# the environment, because an env var reaches the runtime via compose, and
+# compose is in Git. `--config` remains a CLI-only developer/e2e path.
+ROSTER_PATTERN: Final = (
+    re.compile(r"\bEDGE_CAMERA_CONFIG(?:_FILE)?\b|\bAPI_CAMERA_INVENTORY\b"),
+    "environment camera roster",
+)
+NAME_ONLY_MARKER: Final = "scope-fidelity: name-only"
 OPS_PATTERNS: Final = (
     (
         re.compile(
@@ -75,6 +85,12 @@ def scan_file(
             continue
         if line.lstrip().startswith("#"):
             continue
+        # Explicit, auditable escape for a *name-only* constant: a definition
+        # that merely spells the env key so tests and docs can assert it is not
+        # an admission authority. Legitimate only when no production code reads
+        # the variable -- the marker documents intent, it does not grant a read.
+        if NAME_ONLY_MARKER in line:
+            continue
         for pattern, category in patterns:
             if pattern.search(line):
                 findings.append(Finding(relative, line_number, category))
@@ -86,7 +102,7 @@ def scan(root: Path) -> tuple[Finding, ...]:
         finding
         for path in tracked_files(root, RUNTIME_PATHS + DEPLOYMENT_PATHS + OPS_PATHS)
         if path.is_file()
-        for finding in scan_file(root, path, (IDENTITY_PATTERN,))
+        for finding in scan_file(root, path, (IDENTITY_PATTERN, ROSTER_PATTERN))
     )
     deployment_findings = tuple(
         finding
@@ -156,8 +172,18 @@ def run_fixture() -> None:
     print("SCOPE_FIDELITY_FIXTURE_OK")
 
 
-def parse_cli(argv: list[str]) -> tuple[bool, Path | None, Path | None]:
+def scan_repo(root: Path) -> None:
+    findings = scan(root)
+    if findings:
+        details = ", ".join(
+            f"{finding.path}:{finding.line} ({finding.category})" for finding in findings
+        )
+        raise ScopeError(details)
+
+
+def parse_cli(argv: list[str]) -> tuple[bool, bool, Path | None, Path | None]:
     fixture = False
+    repo = False
     plan: Path | None = None
     evidence: Path | None = None
     index = 0
@@ -165,6 +191,9 @@ def parse_cli(argv: list[str]) -> tuple[bool, Path | None, Path | None]:
         match argv[index]:
             case "--fixture":
                 fixture = True
+                index += 1
+            case "--repo":
+                repo = True
                 index += 1
             case ("--plan" | "--evidence") as flag:
                 if index + 1 >= len(argv):
@@ -177,23 +206,27 @@ def parse_cli(argv: list[str]) -> tuple[bool, Path | None, Path | None]:
                 index += 2
             case unknown:
                 raise ScopeError(f"unknown argument: {unknown}")
-    return fixture, plan, evidence
+    return fixture, repo, plan, evidence
 
 
 def main() -> int:
-    fixture, plan, evidence = parse_cli(sys.argv[1:])
+    fixture, repo, plan, evidence = parse_cli(sys.argv[1:])
     if fixture:
         run_fixture()
         return 0
+    root = Path(__file__).resolve().parents[1]
+    # `--repo` runs the residue scan on its own. The --plan/--evidence mode
+    # below also scans, but requires a plan file plus 17 evidence files, so it
+    # cannot run in CI -- which is why the scan never actually guarded the
+    # tree and env residue (EDGE_FACILITY_TOKEN in compose.edge.yaml) survived
+    # despite already matching IDENTITY_PATTERN.
+    if repo:
+        scan_repo(root)
+        print("SCOPE_FIDELITY_REPO_OK")
+        return 0
     if plan is None or evidence is None:
         raise ScopeError("--plan and --evidence are required")
-    root = Path(__file__).resolve().parents[1]
-    findings = scan(root)
-    if findings:
-        details = ", ".join(
-            f"{finding.path}:{finding.line} ({finding.category})" for finding in findings
-        )
-        raise ScopeError(details)
+    scan_repo(root)
     verify_plan_and_evidence(plan.resolve(), evidence.resolve())
     print("SCOPE_FIDELITY_OK")
     return 0

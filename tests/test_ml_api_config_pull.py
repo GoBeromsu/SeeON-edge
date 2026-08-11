@@ -79,10 +79,38 @@ def _backend_config() -> dict[str, object]:
     }
 
 
-def _set_pull_env(monkeypatch: pytest.MonkeyPatch) -> None:
+def _set_pull_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path | None = None) -> None:
     monkeypatch.setenv("API_EDGE_RELAY_TOKEN", "relay-token")
-    monkeypatch.setenv("API_FACILITY_ID", "facility-pulled")
     monkeypatch.setenv("API_BACKEND_CONFIG_URL", "http://backend:3000/api/v1/ml-config/")
+    # facility_id is DB-only; seed connection_settings so ml-config pull runs.
+    # A backend_client_bundle (and therefore refresh_backend_config) is only
+    # published once every enrollment field is present -- not just the
+    # ml-config pull's own config_url/facility_id/facility_token -- so a
+    # complete enrollment row is required here even though this module's
+    # tests only exercise the config-pull half of that bundle.
+    from backend.app.features.connection.store import (
+        API_CONNECTION_SETTINGS_PATH_ENV,
+        ConnectionSettingsStore,
+    )
+
+    path = (tmp_path or Path("/tmp")) / "connection-settings-pull.sqlite3"
+    if tmp_path is None:
+        import tempfile
+
+        path = Path(tempfile.mkdtemp()) / "connection-settings-pull.sqlite3"
+    monkeypatch.setenv(API_CONNECTION_SETTINGS_PATH_ENV, str(path))
+    ConnectionSettingsStore(path).save(
+        {
+            "events_url": "http://backend:3000/api/v1/events",
+            "config_url": "http://backend:3000/api/v1/ml-config/",
+            "facility_code": "NH-7H2K9M4QXP",
+            "client_installation_ref": "aa83ea3f-6e5f-4f45-a401-fb36c38835b6",
+            "facility_id": "facility-pulled",
+            "facility_token": "facility-token",
+            "edge_installation_id": "d17e0eb8-cb81-4d8e-a427-dfe690518f2b",
+            "enrollment_generation": 1,
+        }
+    )
 
 
 def _dashboard_camera_registry(tmp_path: Path) -> CameraRegistryStore:
@@ -103,16 +131,15 @@ def _dashboard_camera_registry(tmp_path: Path) -> CameraRegistryStore:
     return store
 
 
-def test_backend_config_pull_seeds_inventory_but_not_worker_config_roster(
+def test_backend_config_pull_applies_metadata_not_camera_roster(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
-    """Backend ml-config pull still seeds app.state.camera_inventory (used by
-    heartbeat/status, unaffected by issue #33). It must NOT seed the worker
-    roster: /cameras/worker-config (require_available=False) must return an
-    empty cameras list rather than the pulled camera, and /relay/config
-    (require_available=True) must treat the now-genuinely-empty dashboard
-    registry as unavailable (503) rather than silently substituting the
-    pulled roster."""
+    """ml-config pull keeps detection windows/config_version only.
+
+    Pulled cameras must not become a local inventory authority; worker-config
+    stays registry-only (empty when registry is empty).
+    """
     captured: list[tuple[str, str | None, float]] = []
 
     def fake_urlopen(request: urllib.request.Request, timeout: float) -> FakeHTTPResponse:
@@ -121,8 +148,7 @@ def test_backend_config_pull_seeds_inventory_but_not_worker_config_roster(
         )
         return FakeHTTPResponse(_backend_config())
 
-    _set_pull_env(monkeypatch)
-    monkeypatch.setenv("EDGE_FACILITY_TOKEN", "facility-token")
+    _set_pull_env(monkeypatch, tmp_path)
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
 
     with TestClient(create_app()) as client:
@@ -135,18 +161,7 @@ def test_backend_config_pull_seeds_inventory_but_not_worker_config_roster(
             )
         ]
         assert app.state.config_version == 7
-        assert app.state.camera_inventory == {
-            "cam-pulled-1": {
-                "camera_id": "cam-pulled-1",
-                "facility_id": "facility-pulled",
-                "resident_id": None,
-            },
-            "cam-pulled-2": {
-                "camera_id": "cam-pulled-2",
-                "facility_id": "facility-pulled",
-                "resident_id": None,
-            },
-        }
+        assert not hasattr(app.state, "camera_inventory")
 
         worker_config = client.get(
             "/api/v1/cameras/worker-config",
@@ -230,7 +245,6 @@ def test_backend_detection_windows_present_ignores_legacy_night_window_entirely(
     assert body["cameras"] == [
         {
             "camera_id": "dashboard-camera",
-            "facility_id": "facility-pulled",
             "rtsp_url": "rtsp://dashboard/stream",
         }
     ]
@@ -313,7 +327,6 @@ def test_backend_config_pull_survives_invalid_window_and_never_populates_cameras
     assert body["cameras"] == [
         {
             "camera_id": "dashboard-camera",
-            "facility_id": "facility-pulled",
             "rtsp_url": "rtsp://dashboard/stream",
         }
     ]
@@ -321,13 +334,14 @@ def test_backend_config_pull_survives_invalid_window_and_never_populates_cameras
     assert body["detection_windows"]["fall"] == {"start": "22:00", "end": "05:00", "tz": "UTC"}
 
 
-def test_backend_config_pull_failure_keeps_env_inventory_fallback(
+def test_backend_config_pull_failure_does_not_create_inventory(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     def fake_urlopen(url: str, timeout: float) -> FakeHTTPResponse:
         raise TimeoutError("boom")
 
-    _set_pull_env(monkeypatch)
+    _set_pull_env(monkeypatch, tmp_path)
     monkeypatch.setenv(
         "API_CAMERA_INVENTORY",
         json.dumps(
@@ -344,13 +358,7 @@ def test_backend_config_pull_failure_keeps_env_inventory_fallback(
 
     with TestClient(create_app()) as client:
         assert client.app.state.pulled_config is None
-        assert client.app.state.camera_inventory == {
-            "cam-env": {
-                "camera_id": "cam-env",
-                "facility_id": "facility-env",
-                "resident_id": "resident-env",
-            }
-        }
+        assert not hasattr(client.app.state, "camera_inventory")
 
 
 def test_config_and_restart_require_token_and_restart_reflects_live_epoch(
@@ -400,28 +408,30 @@ def test_config_and_restart_require_token_and_restart_reflects_live_epoch(
 
 def test_heartbeat_config_version_surfaces_in_status_and_remains_optional(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     monkeypatch.setenv("API_EDGE_RELAY_TOKEN", "relay-token")
-    monkeypatch.setenv(
-        "API_CAMERA_INVENTORY",
-        json.dumps(
-            [
-                {"camera_id": "cam-1", "facility_id": "facility-1"},
-                {"camera_id": "cam-2", "facility_id": "facility-1"},
-            ]
-        ),
-    )
+    store = CameraRegistryStore(tmp_path / "catalog.sqlite3")
+    for camera_id in ("cam-1", "cam-2"):
+        store.create(
+            camera_id=camera_id,
+            label=camera_id,
+            rtsp_url=f"rtsp://example/{camera_id}",
+            space_id=None,
+            status="online",
+        )
 
     with TestClient(create_app()) as client:
+        client.app.state.camera_registry = store
         client.app.state.backend_ingest_client = FakeBackendIngestClient()
         with_version = client.post(
             "/api/v1/relay/heartbeat",
-            json={"camera_id": "cam-1", "facility_id": "facility-1", "config_version": 7},
+            json={"camera_id": "cam-1", "facility_id": "local", "config_version": 7},
             headers={"X-Edge-Relay-Token": "relay-token"},
         )
         without_version = client.post(
             "/api/v1/relay/heartbeat",
-            json={"camera_id": "cam-2", "facility_id": "facility-1"},
+            json={"camera_id": "cam-2", "facility_id": "local"},
             headers={"X-Edge-Relay-Token": "relay-token"},
         )
         status = client.get("/api/v1/status")
@@ -568,11 +578,12 @@ def test_config_refresh_rejects_partial_roster_and_preserves_last_good(
     with TestClient(create_app()) as client:
         app = client.app
         previous_roster = app.state.backend_roster.copy()
-        previous_inventory = app.state.camera_inventory.copy()
+        previous_config = app.state.pulled_config
 
         assert refresh_backend_config(app) is False
+        assert app.state.pulled_config is previous_config
         assert app.state.pulled_config.config_version == 7
-        assert app.state.camera_inventory == previous_inventory
+        assert not hasattr(app.state, "camera_inventory")
         assert app.state.backend_roster == {
             "config_version": 7,
             "received_at": previous_roster["received_at"],
@@ -641,49 +652,64 @@ def test_shutdown_bounds_late_refresh_and_discards_its_result(
         with TestClient(app):
             assert refresh_started.wait(timeout=2)
             previous_config = app.state.pulled_config
-            previous_inventory = app.state.camera_inventory.copy()
             shutdown_started_at = time.monotonic()
 
         assert time.monotonic() - shutdown_started_at < BACKEND_CONFIG_SHUTDOWN_WAIT_SEC + 0.5
         assert app.state.backend_config_refresh_task is None
         assert app.state.pulled_config == previous_config
         assert app.state.config_version == 7
-        assert app.state.camera_inventory == previous_inventory
+        assert not hasattr(app.state, "camera_inventory")
 
         release_refresh.set()
         assert refresh_finished.wait(timeout=2)
         assert app.state.pulled_config == previous_config
         assert app.state.config_version == 7
-        assert app.state.camera_inventory == previous_inventory
+        assert not hasattr(app.state, "camera_inventory")
     finally:
         release_refresh.set()
 
 
-def test_successful_refresh_retries_pending_backend_mappings(
+def test_successful_refresh_resumes_roster_sync_without_per_camera_mapping(
     monkeypatch: pytest.MonkeyPatch, tmp_path
 ) -> None:
-    """A reachable backend converges mapping_pending registry records to their
-    canonical backend camera id via the refresh owner."""
-    from backend.app.features.cameras.store import CameraRegistryStore
-    from backend.app.shared.backend_mapping import BackendCameraMapper, MappingResult
+    """A backend connectivity recovery (refresh_backend_config transitioning
+    unreachable -> reachable) resumes pending roster-sync work via
+    ``resume_camera_roster_after_connectivity`` -> ``topology_retry_coordinator
+    .trigger(force=True, refresh=True)`` -- not a per-camera mapping PUT any
+    more (there is no ``_map_backend`` retry path left to exercise; see
+    BLOCKER 2 in the merge notes). That trigger only ever reaches the backend
+    once every registered camera has an explicit floor/room reference; this
+    camera has neither, so the coordinator's readiness check stops the
+    snapshot before any outbound call.
 
-    _set_pull_env(monkeypatch)
-    monkeypatch.setattr(
-        urllib.request, "urlopen", lambda url, timeout: FakeHTTPResponse(_backend_config())
+    Pinning the two BLOCKER-2 properties this test actually protects:
+    (2) unmapped camera retained rather than dropped -- refresh leaves the
+    pending record exactly as it was (still local-id-addressed, still
+    unmapped), it does not get spuriously mapped or removed; and (1)
+    canonical id resolution -- the worker-config projection falls back to the
+    record's own local id while it is unmapped.
+    """
+    from backend.app.features.cameras.store import CameraRegistryStore
+    from backend.app.features.connection.store import ConnectionSettingsStore
+
+    _set_pull_env(monkeypatch, tmp_path)
+    # Roster sync resolves its client off the connection store's events_url
+    # (via backend_client_bundle), same as ml-config pull. _set_pull_env only
+    # seeds config_url; seed events_url here too so a client is constructible
+    # (even though, per the docstring above, no call ends up going out).
+    ConnectionSettingsStore(tmp_path / "connection-settings-pull.sqlite3").save(
+        {"events_url": "http://backend/api/v1/events"}
     )
 
-    class FakeMapper(BackendCameraMapper):
-        def __init__(self) -> None:
-            super().__init__(endpoint="http://backend/api/v1/edge/cameras", token="tok")
-            self.calls: list[dict[str, str]] = []
+    mapping_calls: list[dict[str, object]] = []
 
-        def put_mapping(self, *, edge_camera_ref: str, label: str, space_id: str) -> MappingResult:
-            self.calls.append(
-                {"edge_camera_ref": edge_camera_ref, "label": label, "space_id": space_id}
-            )
-            return MappingResult(
-                backend_camera_id="backend-cam-9", pending=False, reachable=True
-            )
+    def fake_urlopen(request, timeout: float) -> FakeHTTPResponse:
+        if request.full_url == "http://backend/api/v1/edge/cameras":
+            mapping_calls.append(json.loads(request.data.decode("utf-8")))
+            return FakeHTTPResponse({"cameraId": "backend-cam-9"})
+        return FakeHTTPResponse(_backend_config())
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
 
     with TestClient(create_app()) as client:
         store = CameraRegistryStore(tmp_path / "catalog.sqlite3")
@@ -697,26 +723,41 @@ def test_successful_refresh_retries_pending_backend_mappings(
             mapping_pending=True,
         )
         client.app.state.camera_registry = store
-        mapper = FakeMapper()
-        client.app.state.backend_camera_mapper = mapper
 
         assert refresh_backend_config(client.app) is True
 
         record = store.get("local-uuid-9")
         assert record is not None
-        assert record["backend_camera_id"] == "backend-cam-9"
-        assert record["mapping_pending"] is False
-        assert mapper.calls == [
-            {"edge_camera_ref": "local-uuid-9", "label": "Room 9", "space_id": "space-9"}
-        ]
+        # (2) Retained, not dropped: refresh does not touch this record --
+        # no legacy per-camera mapping endpoint exists any more to call.
+        assert record["backend_camera_id"] is None
+        assert record["mapping_pending"] is True
+        assert mapping_calls == []
+
+        # (1) Canonical id resolution: unmapped falls back to the local id.
+        worker_config = client.get(
+            "/api/v1/cameras/worker-config",
+            headers={"X-Edge-Relay-Token": "relay-token"},
+        )
+        assert worker_config.status_code == 200
+        camera = worker_config.json()["cameras"][0]
+        assert camera["camera_id"] == "local-uuid-9"
 
 
-def test_backend_camera_mapper_accepts_canonical_edge_facility_token(
+def test_backend_camera_mapper_has_no_env_constructor(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """EDGE_FACILITY_TOKEN (the name lifespan + compose use) must configure the
-    mapper; the legacy aliases stay accepted."""
+    """Regression guard: ``BackendCameraMapper`` must not grow a ``from_env()``
+    (or similarly named) constructor again. Facility identity -- including the
+    mapper's bearer token -- is DB-only (``ConnectionSettingsStore``,
+    dashboard-entered); the only construction site is ``lifespan.py``, which
+    passes DB-sourced values explicitly. An env-seeded constructor previously
+    existed here, was dead in production, and was removed because it was the
+    only way EDGE_FACILITY_TOKEN (or its legacy aliases) could reintroduce a
+    token through the environment/compose/Git."""
     from backend.app.shared.backend_mapping import BackendCameraMapper
+
+    assert not hasattr(BackendCameraMapper, "from_env")
 
     for name in (
         "EDGE_FACILITY_TOKEN",
@@ -724,15 +765,15 @@ def test_backend_camera_mapper_accepts_canonical_edge_facility_token(
         "API_BACKEND_FACILITY_TOKEN",
         "API_EDGE_FACILITY_TOKEN",
     ):
-        monkeypatch.delenv(name, raising=False)
-    monkeypatch.setenv("API_BACKEND_EVENTS_URL", "http://backend:8080/api/v1/events")
-    assert BackendCameraMapper.from_env().configured is False
+        monkeypatch.setenv(name, "should-be-ignored")
 
-    monkeypatch.setenv("EDGE_FACILITY_TOKEN", "facility-token")
-    mapper = BackendCameraMapper.from_env()
-    assert mapper.configured is True
-    assert mapper.token == "facility-token"
-    assert mapper.endpoint == "http://backend:8080/api/v1/edge/cameras"
+    # Constructing directly with no token (as an unenrolled edge would be,
+    # since nothing DB-sourced is passed) must not somehow pick up the env
+    # values set above -- there is no code path left that could, but this
+    # pins the observable behavior.
+    mapper = BackendCameraMapper(endpoint="http://backend:8080/api/v1/edge/cameras", token=None)
+    assert mapper.configured is False
+    assert mapper.token is None
 
 
 def test_backend_detection_windows_populate_per_domain_map_and_bed_exit_alias(
@@ -799,7 +840,6 @@ def test_backend_detection_windows_populate_per_domain_map_and_bed_exit_alias(
     assert body["cameras"] == [
         {
             "camera_id": "dashboard-camera",
-            "facility_id": "facility-pulled",
             "rtsp_url": "rtsp://dashboard/stream",
         }
     ]

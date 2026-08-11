@@ -16,6 +16,17 @@ Design notes:
   the relay loop's wait via ``HeartbeatRelayState`` (state lives on
   ``app.state``, not module globals, so it is per-app like every other store
   here).
+- HeartbeatStore records liveness under whatever raw id the worker sends
+  (typically the local registry id -- see ``relay/router.py``'s
+  ``relay_heartbeat``, which stamps liveness before resolving any backend
+  mapping). The external backend only knows its own camera ids, so every id
+  must be canonicalized through the camera registry's ``backend_camera_id``
+  mapping before being pushed -- mirroring the one-shot alert/heartbeat path
+  in ``relay/router.py``'s ``_camera_binding_from_registry``. Unlike that
+  one-shot path (which falls back to the local id when no backend mapping
+  exists yet, because the registry lookup there also gates local admission),
+  this periodic tick has nothing to gate: an unmapped camera is simply
+  skipped-and-logged rather than sent as a guaranteed-404 request.
 """
 
 from __future__ import annotations
@@ -101,8 +112,12 @@ def relay_heartbeats_once(app: object, now: float | None = None) -> RelayTickRes
     if client is None or not hasattr(client, "for_camera"):
         return RelayTickResult(skipped_reason="no_client")
 
-    inventory = getattr(app.state, "camera_inventory", None)
-    snapshot = get_heartbeat_store(app).snapshot(inventory, now=now)
+    from backend.app.features.cameras.store import CameraRegistryStore, registry_expected_cameras
+
+    registry = getattr(app.state, "camera_registry", None)
+    registry_store = registry if isinstance(registry, CameraRegistryStore) else None
+    expected = registry_expected_cameras(registry_store)
+    snapshot = get_heartbeat_store(app).snapshot(expected, now=now)
     online_camera_ids = [
         camera_id
         for camera_id, info in snapshot["cameras"].items()
@@ -111,13 +126,31 @@ def relay_heartbeats_once(app: object, now: float | None = None) -> RelayTickRes
     if not online_camera_ids:
         return RelayTickResult(skipped_reason="no_online_cameras")
 
-    result = RelayTickResult(attempted=len(online_camera_ids))
+    # HeartbeatStore ids are worker-local (see module docstring); canonicalize
+    # to the backend's own camera id before pushing, and skip -- rather than
+    # send a guaranteed-404 -- any camera the registry has no backend mapping
+    # for yet.
+    canonical_camera_ids: list[str] = []
+    for camera_id in online_camera_ids:
+        canonical_id = _canonical_backend_camera_id(registry_store, camera_id)
+        if canonical_id is None:
+            logger.info(
+                "backend heartbeat relay: skipping camera_id=%s, no backend mapping yet",
+                camera_id,
+            )
+            continue
+        canonical_camera_ids.append(canonical_id)
+
+    if not canonical_camera_ids:
+        return RelayTickResult(skipped_reason="no_mapped_cameras")
+
+    result = RelayTickResult(attempted=len(canonical_camera_ids))
     # Sequential POSTs, one per online camera, each bounded by the ingest
     # client's own timeout (default 0.5s, env API_BACKEND_INGEST_TIMEOUT_SEC).
     # Worst case a tick takes N * timeout_sec wall time; fine at edge scale
     # (single-digit cameras per facility) but would need fan-out if that
     # roster ever grows large.
-    for camera_id in online_camera_ids:
+    for camera_id in canonical_camera_ids:
         ok, error_class = _send_one(client, camera_id)
         if ok:
             result.sent += 1
@@ -129,6 +162,34 @@ def relay_heartbeats_once(app: object, now: float | None = None) -> RelayTickRes
     _update_backoff(relay_state, result)
     _update_error_state(relay_state, result)
     return result
+
+
+def _canonical_backend_camera_id(registry: object | None, camera_id: str) -> str | None:
+    """Resolve a HeartbeatStore camera_id (worker-local or already-canonical)
+    to the external backend's own camera id, or ``None`` if the registry has
+    no explicit ``backend_camera_id`` mapping for it yet.
+
+    Mirrors ``relay/router.py``'s ``_camera_binding_from_registry`` matching
+    (by local id OR backend_camera_id), but deliberately does NOT fall back
+    to the local id when unmapped -- that one-shot path's fallback exists to
+    gate local admission, which this periodic tick has no equivalent of; here
+    an unmapped camera must be skipped, not sent under an id the backend will
+    reject.
+    """
+    if registry is None:
+        return None
+    snapshot = registry.snapshot()  # type: ignore[attr-defined]
+    cameras = snapshot.get("cameras")
+    if not isinstance(cameras, list):
+        return None
+    for record in cameras:
+        if not isinstance(record, dict):
+            continue
+        local_id = record.get("id")
+        backend_id = record.get("backend_camera_id")
+        if camera_id in (local_id, backend_id):
+            return backend_id if isinstance(backend_id, str) and backend_id else None
+    return None
 
 
 def _send_one(client: object, camera_id: str) -> tuple[bool, str | None]:

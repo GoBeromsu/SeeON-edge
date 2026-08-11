@@ -19,7 +19,6 @@ from backend.app.features.cameras.store import CameraRegistryStore
 from backend.app.features.clips.catalog import CatalogConflictError, get_catalog_store
 from backend.app.features.status.heartbeat_store import get_heartbeat_store
 from backend.app.features.status.runtime_status_store import get_runtime_status_store
-from backend.app.shared.backend_client_bundle import backend_client_bundle
 from contracts import AlertEventType
 from contracts.decode_diagnostics import DECODE_BACKENDS, DECODE_FALLBACK_REASONS
 from contracts.worker_config import RESTART_EPOCH_KEY
@@ -258,15 +257,18 @@ def relay_alert(
 ) -> dict[str, str]:
     _authorize(request, relay_token)
     # Local catalog recording is edge-local audit trail, not backend egress --
-    # it must not depend on camera_inventory/registry binding or the backend
-    # call's outcome (see #183, #202). Recording it up front means ml-api
-    # keeps its own record of every alert attempt even when the camera can't
-    # yet be resolved or the backend can't be reached, instead of the attempt
+    # it must not depend on registry binding or the backend call's outcome
+    # (see #183, #202). Recording it up front means ml-api keeps its own
+    # record of every alert attempt even when the camera can't yet be
+    # resolved or the backend can't be reached, instead of the attempt
     # leaving no local trace at all when _camera_binding() 403s below.
     catalog_result = _record_catalog(request, payload)
     binding = _camera_binding(request, payload.camera_id, payload.facility_id)
     canonical_camera_id = str(binding.get("camera_id") or payload.camera_id)
-    client = _backend_ingest_client(request, camera_id=canonical_camera_id)
+    client = _optional_backend_ingest_client(request, camera_id=canonical_camera_id)
+    if client is None:
+        # Registry-bound local accept; cloud only when store built a client.
+        return _alert_response({"status": "accepted"}, catalog_result)
     alert_kwargs: dict[str, object] = {
         "event_type": payload.event_type,
         "detected_at": payload.detected_at,
@@ -326,12 +328,12 @@ def relay_heartbeat(
 ) -> dict[str, str]:
     _authorize(request, relay_token)
     # Stamp local liveness right after auth, BEFORE camera binding, so /status
-    # reflects edge-local truth even when camera_inventory/registry can't yet
-    # resolve this camera -- not just when backend egress later fails (see
-    # #183, #202). A worker holding a valid relay token recording a heartbeat
-    # for camera X is real local truth regardless of whether X is in
-    # camera_inventory yet; that list's job is backend-id translation for the
-    # egress call below, not admission to ml-api's own liveness bookkeeping.
+    # reflects edge-local truth even when the registry can't yet resolve this
+    # camera -- not just when backend egress later fails (see #183, #202). A
+    # worker holding a valid relay token recording a heartbeat for camera X is
+    # real local truth regardless of whether X is registered yet; registry
+    # binding is for backend-id translation on egress, not admission to
+    # ml-api's own liveness bookkeeping.
     get_heartbeat_store(request.app).record(
         payload.camera_id,
         payload.facility_id,
@@ -342,7 +344,9 @@ def relay_heartbeat(
     # Backend egress uses the canonical identity (explicit backend mapping when
     # present); the backend only knows its own camera ids, not local registry ids.
     canonical_camera_id = str(binding.get("camera_id") or payload.camera_id)
-    client = _backend_ingest_client(request, camera_id=canonical_camera_id)
+    client = _optional_backend_ingest_client(request, camera_id=canonical_camera_id)
+    if client is None:
+        return {"status": "accepted"}
     if not client.send_heartbeat():
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
@@ -492,23 +496,13 @@ def _bearer_token(authorization: str | None) -> str | None:
 
 
 def _runtime_status_facility_binding(request: Request, facility_id: str) -> None:
-    # This used to ALSO reject when facility_id wasn't present in
-    # camera_inventory's derived facility set. That check is removed (see
-    # #183, PR<runtime-status-fix>): camera_inventory's job is mapping local
-    # cameras onto the CENTRAL backend's own ids for egress, and
-    # relay_runtime_status never calls the backend at all -- the record below
-    # is purely local dashboard state. Gating it on camera_inventory meant an
-    # env-set inventory whose embedded facility_id didn't match API_FACILITY_ID
-    # (or wasn't populated yet) 403'd every runtime-status update with no
-    # relation to anything camera_inventory actually protects. The env-configured
-    # facility_id below remains the real boundary: it rejects a caller claiming
-    # a facility this device isn't configured for.
-    bundle = backend_client_bundle(request.app)
-    if bundle is not None and facility_id != bundle.facility_id:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="camera facility mismatch",
-        )
+    """No-op facility gate for local runtime-status recording.
+
+    Runtime-status is purely local dashboard state (no cloud egress). Site
+    facility identity lives in ConnectionSettingsStore and is not compared
+    against the worker payload or any env var here.
+    """
+    del request, facility_id
 
 
 def _log_unresolved_runtime_status_cameras(
@@ -520,9 +514,8 @@ def _log_unresolved_runtime_status_cameras(
     here is not a reason to drop the whole snapshot (see #183, #202): this
     loop used to call the same _camera_binding() that relay_alert/
     relay_heartbeat use to gate backend egress, whose return value was never
-    even used here. One camera missing from camera_inventory/camera_registry
-    could blank the dashboard for every camera in the payload, even the ones
-    that resolved fine.
+    even used here. One camera missing from camera_registry could blank the
+    dashboard for every camera in the payload, even the ones that resolved fine.
     """
     for camera in payload.cameras:
         try:
@@ -546,38 +539,26 @@ def _payload_clip_id(payload: RelayAlertRequest) -> str | None:
 
 
 def _camera_binding(request: Request, camera_id: str, facility_id: str) -> dict[str, str | None]:
-    registry_binding = _camera_binding_from_registry(request, camera_id, facility_id)
-    if registry_binding is not None:
-        return registry_binding
-    inventory = getattr(request.app.state, "camera_inventory", {})
-    binding = inventory.get(camera_id) if isinstance(inventory, dict) else None
-    if binding is None:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="unknown camera")
-    binding_facility = binding.get("facility_id") if isinstance(binding, dict) else None
-    if binding_facility != facility_id:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN, detail="camera facility mismatch"
-        )
-    return dict(binding)
+    """Resolve egress camera binding from the dashboard registry only.
+
+    ``facility_id`` is accepted on the worker→ml-api wire (may be the local
+    placeholder ``"local"``) but is not compared to env or used for admission.
+    """
+    return _camera_binding_from_registry(request, camera_id, facility_id)
 
 
 def _camera_binding_from_registry(
     request: Request,
     camera_id: str,
     facility_id: str,
-) -> dict[str, str | None] | None:
+) -> dict[str, str | None]:
     store = getattr(request.app.state, "camera_registry", None)
     if not isinstance(store, CameraRegistryStore):
-        return None
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="unknown camera")
     snapshot = store.snapshot()
     cameras = snapshot.get("cameras")
     if not isinstance(cameras, list) or not cameras:
-        return None
-    bundle = backend_client_bundle(request.app)
-    if bundle is not None and facility_id != bundle.facility_id:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN, detail="camera facility mismatch"
-        )
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="unknown camera")
     for record in cameras:
         if not isinstance(record, dict):
             continue
@@ -626,20 +607,28 @@ def _find_registry_record(store: CameraRegistryStore, camera_id: str) -> dict[st
     return None
 
 
+def _optional_backend_ingest_client(
+    request: Request, *, camera_id: str
+) -> BackendIngestClient | None:
+    """Return the cloud ingest client when connection settings built one.
+
+    Missing client means unconfigured cloud path: local accept still OK.
+    """
+    client = getattr(request.app.state, "backend_ingest_client", None)
+    if client is None:
+        return None
+    if hasattr(client, "for_camera"):
+        return client.for_camera(camera_id)
+    return client
+
+
 def _backend_ingest_client(request: Request, *, camera_id: str) -> BackendIngestClient:
-    bundle = backend_client_bundle(request.app)
-    client = (
-        bundle.ingest_client
-        if bundle is not None
-        else getattr(request.app.state, "backend_ingest_client", None)
-    )
+    client = _optional_backend_ingest_client(request, camera_id=camera_id)
     if client is None:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="backend enrollment is required",
+            detail="backend ingest client is not configured",
         )
-    if hasattr(client, "for_camera"):
-        return client.for_camera(camera_id)
     return client
 
 

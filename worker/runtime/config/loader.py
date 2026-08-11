@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 from pathlib import Path
 from typing import Final
 
@@ -10,7 +9,6 @@ from pydantic import JsonValue, TypeAdapter, ValidationError
 from worker.runtime.config.errors import WorkerConfigError
 from worker.runtime.config.worker_models import WorkerConfig
 
-EDGE_CAMERA_CONFIG_ENV: Final = "EDGE_CAMERA_CONFIG"
 ML_WORKER_DEV_MJPEG_ENV: Final = "ML_WORKER_DEV_MJPEG"
 ML_WORKER_DEV_MJPEG_HOST_ENV: Final = "ML_WORKER_DEV_MJPEG_HOST"
 ML_WORKER_DEV_MJPEG_PORT_ENV: Final = "ML_WORKER_DEV_MJPEG_PORT"
@@ -45,17 +43,21 @@ def load_worker_config(path: str | Path) -> WorkerConfig:
 
 
 def resolve_config_path(value: str | None = None) -> Path:
-    raw_path = value if value is not None else os.environ.get(EDGE_CAMERA_CONFIG_ENV, "")
-    stripped = raw_path.strip()
+    """Resolve an explicit ``--config`` YAML roster path.
+
+    Deliberately reads no environment variable. A camera roster must never
+    arrive through the environment (and therefore through compose, and
+    therefore through Git); on a real Edge the roster is pulled from ml-api,
+    which serves the dashboard-entered camera_registry DB. ``--config`` stays
+    available as an explicit developer/e2e escape hatch.
+    """
+    stripped = (value or "").strip()
     if not stripped:
-        raise WorkerConfigError(
-            f"worker camera config path required via --config or {EDGE_CAMERA_CONFIG_ENV}"
-        )
+        raise WorkerConfigError("worker camera config path required via --config")
     return Path(stripped)
 
 
 __all__ = [
-    "EDGE_CAMERA_CONFIG_ENV",
     "ML_WORKER_DEV_MJPEG_ENV",
     "ML_WORKER_DEV_MJPEG_HOST_ENV",
     "ML_WORKER_DEV_MJPEG_PORT_ENV",

@@ -8,6 +8,7 @@ from typing import BinaryIO
 
 from fastapi.testclient import TestClient
 
+from backend.app.features.cameras.store import CameraRegistryStore
 from backend.app.main import create_app, no_lifespan
 from shared.events.evidence_export_contract import BackendCapabilities, ClipReceipt, DeliveryFailure
 
@@ -47,13 +48,19 @@ class FakeBackendEvidenceClient:
 def _client(tmp_path: Path, backend: FakeBackendEvidenceClient, *, enabled: bool) -> TestClient:
     app = create_app(lifespan=no_lifespan)
     app.state.edge_relay_token = TOKEN
-    app.state.camera_inventory = {
-        "camera-1": {
-            "camera_id": "camera-1",
-            "facility_id": "facility-1",
-            "resident_id": None,
-        }
-    }
+    # Camera binding is registry-only now (no camera_inventory fallback --
+    # see _camera_binding_from_registry in relay/router.py), so the fixture
+    # must register "camera-1" in a CameraRegistryStore for _camera_binding
+    # to resolve it instead of 403ing every export.
+    registry = CameraRegistryStore(tmp_path / "catalog.sqlite3")
+    registry.create(
+        camera_id="camera-1",
+        label="Camera 1",
+        rtsp_url="rtsp://camera/1",
+        space_id="facility-1",
+        status="online",
+    )
+    app.state.camera_registry = registry
     app.state.backend_evidence_client = backend
     app.state.event_clip_export_enabled = enabled
     app.state.clip_store_root = tmp_path / "clip-store"
@@ -190,16 +197,27 @@ def test_clip_relay_rejects_duplicate_or_non_uuid4_event_refs(tmp_path: Path) ->
     assert backend.ready_calls == 0
 
 
-def test_ready_relay_rejects_missing_or_cross_facility_media_without_backend_call(
+def test_ready_relay_rejects_missing_media_without_backend_call(
     tmp_path: Path,
 ) -> None:
-    # Given: no owned media exists and the payload claims another facility.
+    # Given: no owned media exists for this clip id, and the payload claims a
+    # mismatched facility. That mismatch is not what drives the 404 here,
+    # though -- an Edge is single-facility by construction (one Edge install
+    # serves one facility), so `facility_id` on the wire is informational,
+    # not an admission key: `_camera_binding` (relay/router.py) resolves
+    # ownership from the local camera registry alone and never compares it
+    # to `facility_id`, and clip storage on disk isn't partitioned by
+    # facility either -- `_verified_media` below builds the path from
+    # `clip_id` alone (`root/clips/<clip_id>/clip.mp4`). So the only real
+    # rejection reason left is what's actually true -- no media was ever
+    # written for this clip id -- and 404 (not found), not 403 (forbidden),
+    # is the honest status for that.
     backend = FakeBackendEvidenceClient()
     client = _client(tmp_path, backend, enabled=True)
     payload = _ready_payload()
     payload["facility_id"] = "facility-other"
 
-    # When: the worker submits the invalid ownership tuple.
+    # When: the worker relays metadata for a clip whose media was never written.
     response = client.put(
         "/api/v1/relay/clips/clip-1",
         json=payload,
@@ -207,6 +225,6 @@ def test_ready_relay_rejects_missing_or_cross_facility_media_without_backend_cal
     )
 
     # Then: the route fails before backend egress and leaks no local path.
-    assert response.status_code == 403
+    assert response.status_code == 404
     assert "clip-store" not in response.text
     assert backend.ready_calls == 0

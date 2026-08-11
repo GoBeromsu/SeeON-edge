@@ -2,10 +2,10 @@
 
 The worker relays liveness facts to ml-api ``/relay/heartbeat``. ml-api records
 the local ``received_at`` per camera right after relay-token auth -- before
-camera_inventory/registry binding is resolved and before any backend egress --
-so ``/status`` reflects edge-local truth that is independent both of backend
-reachability and of whether this camera has been onboarded onto the central
-backend's own roster yet (see #183, #202).
+registry binding is resolved and before any backend egress -- so ``/status``
+reflects edge-local truth that is independent both of backend reachability and
+of whether this camera has been onboarded onto the central backend's own roster
+yet (see #183, #202).
 
 This is NOT cross-process shared state with the worker: it is an api-local
 snapshot built from relayed facts (one owner, fed by HTTP facts). The worker
@@ -62,29 +62,34 @@ class HeartbeatStore:
 
     def snapshot(
         self,
-        inventory: object = None,
+        expected_cameras: object = None,
         *,
         now: float | None = None,
     ) -> dict[str, Any]:
-        """Derive per-camera liveness over the union of inventory + seen cameras.
+        """Derive per-camera liveness over the union of expected + seen cameras.
 
-        Local truth only: a camera is ``online`` while its last heartbeat age is
-        within ``stale_after_sec``, ``stale`` once it exceeds it, and
-        ``never_seen`` when it is in inventory but no heartbeat has arrived.
+        ``expected_cameras`` is the registry-derived id index (never env
+        inventory). Local truth only: a camera is ``online`` while its last
+        heartbeat age is within ``stale_after_sec``, ``stale`` once it exceeds
+        it, and ``never_seen`` when it is expected but no heartbeat has arrived.
         """
         current = time() if now is None else now
         camera_ids: set[str] = set(self._beats)
-        if isinstance(inventory, dict):
-            camera_ids |= set(inventory)
+        if isinstance(expected_cameras, dict):
+            camera_ids |= set(expected_cameras)
         cameras: dict[str, dict[str, Any]] = {}
         for camera_id in sorted(camera_ids):
             beat = self._beats.get(camera_id)
-            inv = inventory.get(camera_id) if isinstance(inventory, dict) else None
-            inv_facility = inv.get("facility_id") if isinstance(inv, dict) else None
+            expected = (
+                expected_cameras.get(camera_id) if isinstance(expected_cameras, dict) else None
+            )
+            expected_facility = (
+                expected.get("facility_id") if isinstance(expected, dict) else None
+            )
             if beat is None:
                 cameras[camera_id] = {
                     "camera_id": camera_id,
-                    "facility_id": inv_facility,
+                    "facility_id": expected_facility,
                     "status": NEVER_SEEN,
                     "last_heartbeat_at": None,
                     "age_sec": None,

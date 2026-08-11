@@ -46,6 +46,7 @@ import uvicorn
 from numpy.typing import NDArray
 
 import worker.runtime.worker as worker_module
+from backend.app.features.cameras.store import CameraRegistryStore
 from backend.app.features.clips.catalog import CatalogStore
 from backend.app.features.status.runtime_status_store import (
     RuntimeStatusStore,
@@ -401,9 +402,25 @@ class LiveBackend:
         self.ingest_client = RecordingBackendIngestClient()
         self.app = create_app(lifespan=no_lifespan)
         self.app.state.edge_relay_token = relay_token
-        self.app.state.camera_inventory = camera_inventory
-        self.app.state.backend_ingest_client = self.ingest_client
         state_dir.mkdir(parents=True, exist_ok=True)
+        # Camera binding is registry-only now (no camera_inventory fallback --
+        # see _camera_binding_from_registry in relay/router.py), so each
+        # inventory entry must be seeded into a CameraRegistryStore instead.
+        # Shares state_dir/"catalog.sqlite3" with runtime_status_store/
+        # catalog_store below, matching CameraRegistryStore.from_env()'s own
+        # resolve_state_dir("ml-api")/"catalog.sqlite3" convention.
+        registry = CameraRegistryStore(state_dir / "catalog.sqlite3")
+        for camera_id, entry in camera_inventory.items():
+            facility_id = entry.get("facility_id")
+            registry.create(
+                camera_id=camera_id,
+                label=camera_id,
+                rtsp_url=f"rtsp://camera/{camera_id}",
+                space_id=facility_id if isinstance(facility_id, str) else None,
+                status="online",
+            )
+        self.app.state.camera_registry = registry
+        self.app.state.backend_ingest_client = self.ingest_client
         self.app.state.runtime_status_store = RuntimeStatusStore(
             latency_state_path=state_dir / "catalog.sqlite3"
         )

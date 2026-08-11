@@ -30,7 +30,6 @@ from worker.pipeline.output.evidence.clip_config import configured_ffmpeg_bin, c
 from worker.pipeline.output.evidence.clip_store_lock import ClipStoreLockedError
 from worker.pipeline.output.evidence.thumbnail_backfill import backfill_thumbnails
 from worker.runtime.config import (
-    EDGE_CAMERA_CONFIG_ENV,
     RELAY_HEARTBEAT_PATH,
     RELAY_TOKEN_ENV,
     RELAY_URL_ENV,
@@ -87,7 +86,11 @@ def _build_parser() -> argparse.ArgumentParser:
         "--config",
         type=str,
         default=None,
-        help="YAML config file path (default: EDGE_CAMERA_CONFIG env var)",
+        help=(
+            "YAML camera roster path (developer/e2e escape hatch). Omit on a "
+            "real Edge: the roster is pulled from ml-api. There is no "
+            "environment-variable equivalent, by design."
+        ),
     )
     parser.add_argument(
         "--check-config",
@@ -223,19 +226,18 @@ def main(argv: list[str] | None = None) -> int:
     # Startup config resolution (docs/architecture.md "Entrypoint",
     # worker/runtime/config/config_pull.py). Two branches:
     #
-    # 1. Explicit YAML (--config or a non-empty EDGE_CAMERA_CONFIG): load it
-    #    exactly as before, then let `resolve_startup_config` attempt a relay
-    #    pull that takes precedence when the backend is reachable, falling
-    #    back to the YAML on any pull failure. This keeps the offline-dev
-    #    escape hatch alive without ever losing the YAML fallback.
-    # 2. No YAML at all (the production default per compose.edge.yaml): pull
-    #    directly from the relay via `load_worker_config_from_relay`, which
-    #    already saves a successful pull to the last-known-good (LKG) store
-    #    and falls back to that store on a failed pull. Refuse to start only
-    #    when there is neither a fresh pull nor an LKG.
-    yaml_requested = args.config is not None or bool(
-        os.environ.get(EDGE_CAMERA_CONFIG_ENV, "").strip()
-    )
+    # 1. Explicit YAML (`--config` only — there is deliberately no env
+    #    equivalent, so a roster can never arrive through compose or Git):
+    #    load it, then let `resolve_startup_config` attempt a relay pull that
+    #    takes precedence when the backend is reachable, falling back to the
+    #    YAML on any pull failure. This keeps the developer/e2e escape hatch
+    #    alive without ever losing the YAML fallback.
+    # 2. No YAML at all (the production default): pull directly from the relay
+    #    via `load_worker_config_from_relay`, which already saves a successful
+    #    pull to the last-known-good (LKG) store and falls back to that store
+    #    on a failed pull. Refuse to start only when there is neither a fresh
+    #    pull nor an LKG.
+    yaml_requested = args.config is not None
     snapshot: ConfigSnapshot | None = None
 
     if yaml_requested:
@@ -274,17 +276,15 @@ def main(argv: list[str] | None = None) -> int:
 
         if not relay_url:
             LOGGER.error(
-                "worker config: no --config/%s provided and %s is unset; "
+                "worker config: no --config provided and %s is unset; "
                 "cannot resolve a live config",
-                EDGE_CAMERA_CONFIG_ENV,
                 RELAY_URL_ENV,
             )
             return CONFIG_ERROR_EXIT_CODE
         if not relay_token:
             LOGGER.error(
-                "worker config: no --config/%s provided and %s is unset; "
+                "worker config: no --config provided and %s is unset; "
                 "cannot authenticate with the relay",
-                EDGE_CAMERA_CONFIG_ENV,
                 RELAY_TOKEN_ENV,
             )
             return CONFIG_ERROR_EXIT_CODE
@@ -346,12 +346,11 @@ def main(argv: list[str] | None = None) -> int:
                 "no cached last-known-good config exists either. See the "
                 "preceding stderr line ('request failed' vs 'malformed "
                 "payload') for which. Fix relay reachability or %s/%s, finish "
-                "camera setup in the dashboard, or provide --config/%s as a "
+                "camera setup in the dashboard, or provide --config as a "
                 "fallback.",
                 relay_url,
                 RELAY_URL_ENV,
                 RELAY_TOKEN_ENV,
-                EDGE_CAMERA_CONFIG_ENV,
             )
             return CONFIG_ERROR_EXIT_CODE
         config = snapshot.config

@@ -15,6 +15,7 @@ from backend.app.features.connection.store import (
 from backend.app.lifespan import (
     API_BACKEND_CONFIG_URL_ENV,
     API_BACKEND_EVENTS_URL_ENV,
+    EDGE_FACILITY_TOKEN_ENV,
 )
 
 
@@ -76,7 +77,11 @@ class TestLoadPrecedence:
 
         assert settings.events_url == "https://backend.example/events"
         assert settings.config_url == "https://backend.example/ml-config"
+        # facility_id is DB-only; env API_FACILITY_ID must not seed.
         assert settings.facility_id is None
+        # facility_token is also DB-only now (see store.py: the former
+        # EDGE_FACILITY_TOKEN env gap-fill was removed -- a token in the
+        # environment/compose/Git is exactly what deployment rules forbid).
         assert settings.facility_token is None
         assert settings.updated_at is None
 
@@ -124,14 +129,18 @@ class TestLoadPrecedence:
     def test_unsaved_identity_does_not_fall_back_to_env_after_a_save(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.setenv("API_FACILITY_ID", "facility-from-env")
+        monkeypatch.setenv(EDGE_FACILITY_TOKEN_ENV, "token-from-env")
         store = _store(tmp_path)
 
         _ = store.save({"events_url": "https://saved.example/events"})
         settings = store.load()
 
         assert settings.events_url == "https://saved.example/events"
+        # Neither facility_id nor facility_token has an env seed/gap-fill:
+        # both are DB-only, so saving an unrelated field (events_url) must
+        # not cause the env-set token to leak in.
         assert settings.facility_id is None
+        assert settings.facility_token is None
 
 
 class TestLoadBaseUrlPrecedence:
@@ -211,6 +220,7 @@ class TestSavePartialUpdate:
         _ = store.save({"facility_id": None})
         settings = store.load()
 
+        # Cleared DB field stays None even when env API_FACILITY_ID is set.
         assert settings.facility_id is None
 
     def test_unknown_field_raises(self, tmp_path: Path) -> None:

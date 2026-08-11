@@ -35,11 +35,32 @@ jobs:
       - name: Fetch packaged default LSTM model
         run: bash scripts/fetch-models.sh
 
-      - run: uv run pytest -q -m "not real_stack and not heavy"
+      # `integration` is deselected here because that is what the marker has
+      # always claimed in pyproject.toml ("excluded from the default CI suite")
+      # while this command never actually excluded it. The one test carrying it
+      # (test_cloud_edge_provisioning_integration.py) drives a *live* enrolled
+      # ml-api over CLOUD_EDGE_ML_URL against a real catalog sqlite file, so on
+      # a runner it can only fail with "CLOUD_EDGE_ML_URL is required" -- and it
+      # has been failing on main for exactly that reason. It is not `real_stack`
+      # (that marker means external RTSP tooling on PATH, which this needs none
+      # of), so the marker is right and the filter was wrong.
+      - run: uv run pytest -q -m "not real_stack and not heavy and not integration"
       - run: uv run --group lint ruff check .
       # Stage 0 guardrail: declarative architecture contracts (import-linter).
       # Tightened per strangler stage; replaces test_import_dependency_ladder.py at Stage 5.
       - run: uv run --group lint lint-imports
+
+      # Facility identity (facility id / facility token) and the camera roster
+      # must never be provisionable through the environment: an env var reaches
+      # the runtime via compose, and compose is tracked in Git. `--fixture`
+      # proves the scanner still detects residue; `--repo` scans this tree.
+      # Before `--repo` existed the scan was only reachable behind
+      # --plan/--evidence (a plan file plus 17 evidence files), so it never ran
+      # in CI and residue survived in compose.edge.yaml despite matching.
+      - name: Scope fidelity (no env-provisioned identity or camera roster)
+        run: |
+          uv run python scripts/verify_scope_fidelity.py --fixture
+          uv run python scripts/verify_scope_fidelity.py --repo
 
       # #179/#182: the shipped example must render on its own -- every
       # compose.edge.yaml `${VAR:?...}` needs a value (default or

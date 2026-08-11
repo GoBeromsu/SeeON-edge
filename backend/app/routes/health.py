@@ -25,6 +25,12 @@ def ready(request: Request, response: Response) -> dict[str, Any]:
 
 @router.get("/health")
 def legacy_health(request: Request) -> dict[str, Any]:
+    from backend.app.features.cameras.store import CameraRegistryStore, registry_expected_cameras
+
+    registry = getattr(request.app.state, "camera_registry", None)
+    expected = registry_expected_cameras(
+        registry if isinstance(registry, CameraRegistryStore) else None
+    )
     return {
         "status": "ok",
         "gateway": (
@@ -35,6 +41,6 @@ def legacy_health(request: Request) -> dict[str, Any]:
         "relay": {
             "token_configured": bool(getattr(request.app.state, "edge_relay_token", None)),
             "backend_configured": hasattr(request.app.state, "backend_ingest_client"),
-            "camera_count": len(getattr(request.app.state, "camera_inventory", {}) or {}),
+            "camera_count": len(expected),
         },
     }

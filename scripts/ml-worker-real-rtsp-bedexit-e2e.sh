@@ -276,7 +276,6 @@ run_worker() {
   local log="$2"
   : >"$log"
   OPENCV_FFMPEG_CAPTURE_OPTIONS="rtsp_transport;tcp" \
-    EDGE_CAMERA_CONFIG="$config" \
     PYTHONUNBUFFERED=1 \
     uv run \
     python -m worker \

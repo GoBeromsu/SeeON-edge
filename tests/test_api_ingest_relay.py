@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import sqlite3
+import tempfile
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -79,17 +80,24 @@ class FakeBackendIngestClient:
 
 
 def _client(
-    fake: FakeBackendIngestClient | None = None, *, catalog_path: Path | None = None
+    fake: FakeBackendIngestClient | None = None,
+    *,
+    catalog_path: Path | None = None,
+    registry_dir: Path | None = None,
 ) -> TestClient:
     app = create_app(lifespan=no_lifespan)
     app.state.edge_relay_token = "relay-token"
-    app.state.camera_inventory = {
-        "camera-1": {
-            "camera_id": "camera-1",
-            "facility_id": "facility-1",
-            "resident_id": "resident-1",
-        }
-    }
+    registry_root = registry_dir if registry_dir is not None else Path(tempfile.mkdtemp())
+    store = CameraRegistryStore(registry_root / "catalog.sqlite3")
+    store.create(
+        camera_id="camera-1",
+        label="camera-1",
+        rtsp_url="rtsp://example/camera-1",
+        space_id=None,
+        status="online",
+        backend_camera_id="camera-1",
+    )
+    app.state.camera_registry = store
     app.state.backend_ingest_client = fake or FakeBackendIngestClient()
     if catalog_path is not None:
         # Pre-set app.state.catalog_store so get_catalog_store() (called
@@ -134,16 +142,33 @@ def test_relay_alert_rejects_missing_token() -> None:
     assert response.status_code == 401
 
 
-def test_unenrolled_runtime_refuses_cloud_egress_with_nonsecret_status() -> None:
+def test_unenrolled_runtime_accepts_alert_locally_without_cloud_egress() -> None:
+    """An edge that hasn't completed backend enrollment yet (no
+    ``backend_ingest_client`` published -- see ``apply_connection_settings``)
+    must still accept and locally record alerts for a camera the registry
+    already knows about; cloud egress is attempted only once a backend
+    client exists (see relay/router.py's ``relay_alert``, "Registry-bound
+    local accept; cloud only when store built a client", #183/#202). This
+    replaces a prior expectation of a 503 "backend enrollment is required"
+    refusal, which described pre-store-only-mapping behavior no longer
+    present in the route.
+    """
     app = create_app(lifespan=no_lifespan)
     app.state.edge_relay_token = "relay-token"
-    app.state.camera_inventory = {
-        "camera-1": {
-            "camera_id": "camera-1",
-            "facility_id": "facility-1",
-            "resident_id": None,
-        }
-    }
+    # Camera binding is registry-only now (no camera_inventory fallback --
+    # see _camera_binding_from_registry in relay/router.py); the camera must
+    # resolve here so the request reaches the backend-enrollment branch this
+    # test actually exercises, instead of 403ing earlier as an unknown camera.
+    store = CameraRegistryStore(Path(tempfile.mkdtemp()) / "catalog.sqlite3")
+    store.create(
+        camera_id="camera-1",
+        label="camera-1",
+        rtsp_url="rtsp://example/camera-1",
+        space_id="facility-1",
+        status="online",
+    )
+    app.state.camera_registry = store
+    # No app.state.backend_ingest_client: this IS the unenrolled condition.
 
     response = TestClient(app).post(
         "/api/v1/relay/alerts",
@@ -151,8 +176,8 @@ def test_unenrolled_runtime_refuses_cloud_egress_with_nonsecret_status() -> None
         headers={"X-Edge-Relay-Token": "relay-token"},
     )
 
-    assert response.status_code == 503
-    assert response.json()["detail"] == "backend enrollment is required"
+    assert response.status_code == 202
+    assert response.json()["status"] == "accepted"
 
 
 def test_relay_alert_rejects_wrong_token() -> None:
@@ -176,15 +201,16 @@ def test_relay_alert_rejects_unknown_camera() -> None:
     assert "unknown camera" in response.json()["detail"]
 
 
-def test_relay_alert_rejects_facility_mismatch() -> None:
+def test_relay_alert_accepts_any_wire_facility_when_registry_has_camera() -> None:
+    """Worker wire facility_id is not compared to env; registry camera_id binds."""
     response = _client().post(
         "/api/v1/relay/alerts",
         json=_alert_payload(facility_id="facility-2"),
         headers={"X-Edge-Relay-Token": "relay-token"},
     )
 
-    assert response.status_code == 403
-    assert "facility" in response.json()["detail"]
+    assert response.status_code == 202
+    assert response.json()["status"] == "accepted"
 
 
 def test_relay_alert_records_catalog_even_when_camera_unresolved(tmp_path) -> None:
@@ -383,13 +409,12 @@ def test_relay_accepts_canonical_camera_id_from_registry_when_inventory_missing(
         backend_camera_id="backend-camera-1",
     )
     app.state.camera_registry = store
-    app.state.camera_inventory = {}
     app.state.backend_ingest_client = fake
 
     with TestClient(app) as client:
         response = client.post(
             "/api/v1/relay/heartbeat",
-            json={"camera_id": "backend-camera-1", "facility_id": "local-facility"},
+            json={"camera_id": "backend-camera-1", "facility_id": "local"},
             headers={"X-Edge-Relay-Token": "relay-token"},
         )
 
@@ -410,7 +435,6 @@ def _registry_app(fake: FakeBackendIngestClient, tmp_path, *, backend_camera_id:
         backend_camera_id=backend_camera_id,
     )
     app.state.camera_registry = store
-    app.state.camera_inventory = {}
     app.state.backend_ingest_client = fake
     return app
 

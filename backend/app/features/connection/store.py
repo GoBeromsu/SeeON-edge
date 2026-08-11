@@ -1,3 +1,28 @@
+"""Persistent storage for the external-backend connection settings.
+
+Historically the ml-api -> backend link (Event API URL, ml-config pull URL,
+facility id, facility bearer token) was configured exclusively through env
+vars. This module is the persistent sqlite3-backed store (the sqlite3 access
+layer itself lives in ``sqlite_store.py``) so a technician can configure the
+link from the dashboard UI, or complete facility-code + enrollment-token
+provisioning, without env vars or a restart.
+
+Site ``facility_id`` **and** ``facility_token`` are DB-only and are never
+seeded from env -- see ``ConnectionSettingsStore.load()``. The former
+environment gap-fill for the facility token is gone: a token supplied
+through the environment (and therefore through compose, and therefore
+through Git) is precisely what the deployment rules forbid, and it let a
+half-enrolled Edge report itself configured while holding a token no
+technician typed. Dashboard enrollment is the only way a token gets here.
+
+Below the two specific backend-URL env vars sits one more, lower-priority
+seed: ``API_BACKEND_BASE_URL``. Packaging already knows the backend host at
+build/deploy time, so a single base URL can be baked into the image and
+this module derives ``events_url``/``config_url`` from it
+(``{base}/v1/events`` and ``{base}/v1/ml-config``) whenever the specific
+vars are unset.
+"""
+
 from __future__ import annotations
 
 import os
@@ -96,7 +121,13 @@ class ConnectionSettingsStore:
                 or os.environ.get(API_BACKEND_CONFIG_URL_ENV)
                 or (f"{base}/v1/ml-config" if base else None)
             ),
+            # Site facility id is dashboard/DB only — never seed from env.
             facility_id=_text(saved["facility_id"]),
+            # Token is dashboard/DB only, like facility_id. The previous
+            # EDGE_FACILITY_TOKEN env gap-fill is removed: a facility token in
+            # the environment (or in Git, via compose) is exactly what the
+            # deployment rules forbid, and it let a half-enrolled Edge look
+            # configured while carrying a token nobody typed.
             facility_token=_text(saved["facility_token"]),
             updated_at=_text(saved["updated_at"]),
             facility_code=_text(saved["facility_code"]),

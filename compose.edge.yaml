@@ -22,12 +22,25 @@ services:
       # `{base}/v1/ml-config`); API_BACKEND_EVENTS_URL/API_BACKEND_CONFIG_URL still
       # work as per-field overrides if a deployment ever needs to diverge from the
       # single base host.
-      API_BACKEND_BASE_URL: ${API_BACKEND_BASE_URL:-https://api.eldercare-fall-ai.example}
-      API_EDGE_RELAY_TOKEN: ${API_EDGE_RELAY_TOKEN:?edge api requires worker relay token}
+      # iwinv Hub, reached over the public internet. Plain host, no `/api`
+      # suffix and no trailing slash — store._normalize_api_base() appends
+      # `/api`, so events resolve to `{base}/api/v1/events`.
+      # http:// is deliberate for this rollout: TLS is a separate follow-up, so
+      # this hop is unencrypted. Tailscale is the operator SSH/deploy channel
+      # only and is never the data path.
+      API_BACKEND_BASE_URL: ${API_BACKEND_BASE_URL:-http://49.247.204.81}
+      # The bearer token ml-api sends to the backend Event API (issue #552) is
+      # deliberately absent here. Facility identity — facility code and the
+      # single-use enrollment token — is typed into the Edge dashboard and
+      # stored in the connection_settings SQLite volume. Never provision it
+      # through the environment or Git.
+      # Internal worker↔ml-api pairing secret. Baked default — not a site secret.
+      # Override only if you deliberately rotate the internal pair on both sides.
+      API_EDGE_RELAY_TOKEN: ${API_EDGE_RELAY_TOKEN:-eldercare-internal-edge-relay}
       API_DASHBOARD_USERNAME: ${API_DASHBOARD_USERNAME:?edge api requires dashboard username}
       API_DASHBOARD_PASSWORD: ${API_DASHBOARD_PASSWORD:?edge api requires dashboard password}
-      # Fallback camera inventory: used ONLY when the backend config pull is unavailable.
-      API_CAMERA_INVENTORY: ${API_CAMERA_INVENTORY:-}
+      # Facility id + cameras are dashboard/DB only (connection_settings +
+      # camera_registry). Do not provision API_FACILITY_ID or API_CAMERA_INVENTORY.
       ML_API_WORKER_STREAM_ORIGIN: http://ml-worker:${ML_WORKER_DEV_MJPEG_PORT:-8090}
       ML_API_WORKER_PROBE_ORIGIN: http://ml-worker:${ML_WORKER_DEV_MJPEG_PORT:-8090}
       # Fixed container path of the evidence clip store (host bind below).
@@ -94,22 +107,23 @@ services:
               count: all
               capabilities: [gpu]
     environment:
-      # Optional offline-dev override: set
-      # EDGE_CAMERA_CONFIG=/run/secrets/ml-worker.yaml and mount the secret
-      # below to boot from a static YAML roster instead of pulling from
-      # ml-api. Left unset (the production default), worker/__main__.py pulls
-      # the live config from ml-api over RELAY_URL/RELAY_TOKEN below, with
-      # the worker's own last-known-good cache as fallback on a pull failure.
-      EDGE_CAMERA_CONFIG: ${EDGE_CAMERA_CONFIG:-}
+      # Camera roster is pull-only. worker/__main__.py pulls the live config
+      # from ml-api over RELAY_URL/RELAY_TOKEN below, with the worker's own
+      # last-known-good cache as fallback on a pull failure. There is
+      # deliberately no env or YAML roster override here: the camera list is
+      # owned by the Edge camera_registry DB (dashboard-entered), never by
+      # environment or Git. Use `--config` on a developer machine if you need
+      # a static roster; production has no such path.
       RELAY_URL: http://ml-api:8000
-      RELAY_TOKEN: ${API_EDGE_RELAY_TOKEN:?edge worker requires relay token shared with ml-api}
+      # Same baked default as ml-api API_EDGE_RELAY_TOKEN (internal pair only).
+      RELAY_TOKEN: ${API_EDGE_RELAY_TOKEN:-eldercare-internal-edge-relay}
       ML_WORKER_PROFILE: ${ML_WORKER_PROFILE:?set cuda|mps|cpu|igpu}
       ML_WORKER_DEV_MJPEG: ${ML_WORKER_DEV_MJPEG:-true}
       ML_WORKER_DEV_MJPEG_HOST: 0.0.0.0
       ML_WORKER_DEV_MJPEG_PORT: ${ML_WORKER_DEV_MJPEG_PORT:-8090}
       # models.fall/clip.enabled are locally-sourced (issues #66/#68): the
-      # pull-first topology above (EDGE_CAMERA_CONFIG unset) has no local YAML
-      # to carry them, and the backend pull only ever carries fleet-level
+      # pull-only topology above has no local YAML to carry them, and the
+      # backend pull only ever carries fleet-level
       # state (relay/domains/cameras), so these two are edge-local env vars
       # instead, mounted from the same ML_MODELS_DIR volume as ml-api above.
       ML_WORKER_FALL_MODEL_ARTIFACT_DIR: ${ML_WORKER_FALL_MODEL_ARTIFACT_DIR:-/app/models/fall/lstm}
@@ -134,11 +148,6 @@ services:
       - ml-worker-state:/root/.local/state/ml-worker
       # Evidence clips persist on the nursing-home host; worker writes, api reads.
       - ${CLIP_STORE_HOST_DIR:?edge requires host clip-store dir}:/var/lib/clip-store:rw
-    # Optional offline-dev YAML bootstrap (see EDGE_CAMERA_CONFIG above); the
-    # production default (unset) pulls config from ml-api instead.
-    # secrets:
-    #   - source: ml-worker-config
-    #     target: ml-worker.yaml
     depends_on:
       ml-api:
         condition: service_healthy
@@ -148,10 +157,6 @@ services:
       - worker
       - --heartbeat-on-start
 
-# Optional offline-dev YAML bootstrap:
-# secrets:
-#   ml-worker-config:
-#     file: ${EDGE_CAMERA_CONFIG_FILE:-./ml-worker.yaml}
 volumes:
   ml-api-state: {}
   ml-worker-state: {}

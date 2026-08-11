@@ -6,9 +6,9 @@ Before this change, ``BackendWorkerConfigPayload.to_worker_config()``
 from only ``relay``/``domains``/``cameras``, so ``models``/``clip`` always
 resolved to their pydantic defaults (``fall=None``, ``enabled=False``) on
 every relay pull -- including the shipped pull-first production topology
-(``compose.edge.yaml``'s default empty ``EDGE_CAMERA_CONFIG``), where a fall
-model could never be configured (the #43 boot gate then refuses to start) and
-clip recording could never be turned on.
+(``compose.edge.yaml`` passes no ``--config``, so the worker always pulls
+live), where a fall model could never be configured (the #43 boot gate then
+refuses to start) and clip recording could never be turned on.
 
 ``worker/runtime/config/local_env.py`` gives both fields a real,
 production-reachable env-var surface, and ``resolve_local_overrides`` settles

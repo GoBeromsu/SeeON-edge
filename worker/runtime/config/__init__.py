@@ -39,7 +39,6 @@ from worker.runtime.config.lkg_store import (
     WorkerConfigLkgStore,
 )
 from worker.runtime.config.loader import (
-    EDGE_CAMERA_CONFIG_ENV,
     ML_WORKER_DEV_MJPEG_ENV,
     ML_WORKER_DEV_MJPEG_HOST_ENV,
     ML_WORKER_DEV_MJPEG_PORT_ENV,
@@ -84,7 +83,6 @@ from worker.runtime.config.worker_models import (
 __all__ = [
     "CONFIG_HISTORY_RETENTION_COUNT",
     "CONFIG_VERSION_KEY",
-    "EDGE_CAMERA_CONFIG_ENV",
     "KNOWN_DOMAIN_NAMES",
     "ML_WORKER_CLIP_RECORDING_ENABLED_ENV",
     "ML_WORKER_DEV_MJPEG_ENV",

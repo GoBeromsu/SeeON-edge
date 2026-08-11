@@ -1,13 +1,24 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from fastapi.testclient import TestClient
 
+from backend.app.features.cameras.store import CameraRegistryStore
 from backend.app.main import create_app, no_lifespan
 
 
-def test_models_reports_gateway_metadata_only() -> None:
+def test_models_reports_gateway_metadata_only(tmp_path: Path) -> None:
     app = create_app(lifespan=no_lifespan)
-    app.state.camera_inventory = {"camera-1": {"camera_id": "camera-1"}}
+    store = CameraRegistryStore(tmp_path / "catalog.sqlite3")
+    store.create(
+        camera_id="camera-1",
+        label="c1",
+        rtsp_url="rtsp://example/1",
+        space_id=None,
+        status="online",
+    )
+    app.state.camera_registry = store
     app.state.backend_ingest_client = object()
 
     response = TestClient(app).get("/api/v1/models")

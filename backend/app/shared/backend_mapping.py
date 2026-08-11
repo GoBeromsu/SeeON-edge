@@ -1,5 +1,24 @@
 """Best-effort backend edge-camera mapping client.
 
+Boot-time status reporting only: ``backend_status_from_env`` and
+``BackendCameraMapper.from_env`` read raw process env directly (including
+the legacy facility-token aliases below), matching the compose/env-file
+names an operator sets. ``facility_id`` is never env-seeded anywhere in this
+module -- ``from_env`` always leaves it unset (``None``); camera provisioning
+identity comes exclusively from ``ConnectionSettingsStore`` (DB) via
+``BackendClientBundle``.
+
+Camera provisioning itself no longer goes through this client's per-camera
+``put_mapping``/``push_camera``/``put_roster`` calls: the dashboard camera
+registry publishes complete topology snapshots to the backend instead (see
+``features/cameras/roster_sync.py`` and
+``features/connection/topology_retry_coordinator.py``), using a
+``TopologyClient`` built from the store-derived ``BackendClientBundle``.
+``BackendCameraMapper`` is still constructed onto that bundle (see
+``backend/app/lifespan.py``), but its push methods below are currently
+unexercised by that path -- kept for the bundle's shape and for direct
+callers/tests of this module.
+
 ``PUT /v1/edge/cameras`` (the ``EdgeCamerasController.upsert`` handler on the
 fall-ai backend) takes exactly ONE ``EdgeCameraMappingRequestDto`` per call --
 ``{edge_camera_ref, label, spaceId}``, all three required (see the ADR) -- not
@@ -31,6 +50,10 @@ API_BACKEND_EDGE_CAMERAS_URL_ENV = "API_BACKEND_EDGE_CAMERAS_URL"
 API_BACKEND_URL_ENV = "API_BACKEND_URL"
 API_BACKEND_EVENTS_URL_ENV = "API_BACKEND_EVENTS_URL"
 API_BACKEND_CAMERA_MAPPING_TIMEOUT_SEC_ENV = "API_BACKEND_CAMERA_MAPPING_TIMEOUT_SEC"
+# NOTE: no facility token or facility id env constants here. Both are DB-only
+# (dashboard-entered, connection_settings). The four token env aliases that
+# used to live here fed a from_env() constructor that no production code
+# called; both are removed so the environment cannot supply facility identity.
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,13 +107,12 @@ class BackendCameraMapper:
         self.facility_id = _clean(facility_id)
         self.timeout_sec = timeout_sec
 
-    @classmethod
-    def from_env(cls) -> BackendCameraMapper:
-        return cls(
-            endpoint=_mapping_endpoint_from_env(),
-            token=None,
-            timeout_sec=_timeout_sec(),
-        )
+    # There is deliberately no `from_env()` constructor. Facility identity —
+    # facility_id and the facility token — is owned by the Edge
+    # connection_settings DB (dashboard-entered), so the only construction site
+    # is lifespan.py, which passes DB-sourced values explicitly. An env-seeded
+    # constructor was dead in production and existed only as a way to
+    # reintroduce a token through the environment.
 
     @property
     def configured(self) -> bool:

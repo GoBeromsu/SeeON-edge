@@ -228,8 +228,18 @@ def _status_response(app: FastAPI) -> dict[str, object]:
         "facility_token_masked": (
             None if settings.facility_token is None else f"****{settings.facility_token[-4:]}"
         ),
+        # "enrolled" is the strict full facility-code + enrollment-token
+        # provisioning contract; "configured" is the looser legacy
+        # events_url/facility_id/token check so a technician who only used
+        # the dashboard settings form (no enrollment flow) still reads as
+        # configured.
         "enrolled": enrolled,
-        "configured": enrolled,
+        "configured": bool(
+            settings.events_url and settings.facility_id and settings.facility_token
+        ),
+        # Reuses the flags mark_backend_status() already maintains on
+        # app.state (shared/backend_mapping.py) instead of tracking a
+        # parallel copy of backend reachability here.
         "reachable": getattr(app.state, "backend_reachable", None),
         "last_ok_at": getattr(app.state, "backend_last_ok_at", None),
         "updated_at": settings.updated_at,

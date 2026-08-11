@@ -92,9 +92,9 @@ def test_edge_worker_runtime_status_environment_contract() -> None:
     assert {
         "RELAY_URL",
         "RELAY_TOKEN",
-        "API_FACILITY_ID",
         "ML_WORKER_PROFILE",
     } <= set(worker_environment)
+    assert "API_FACILITY_ID" not in worker_environment
 
 
 def test_edge_compose_contains_exactly_ml_edge_api_and_worker() -> None:

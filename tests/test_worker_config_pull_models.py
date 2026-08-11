@@ -120,25 +120,22 @@ def test_camera_with_bad_fps_type_drops_only_that_camera_and_logs(
     assert "camera-2" in err
 
 
-def test_camera_missing_location_drops_only_that_camera_and_logs(
-    capsys: pytest.CaptureFixture[str],
-) -> None:
+def test_camera_without_facility_or_space_is_accepted_as_local() -> None:
     payload = BackendWorkerConfigPayload.model_validate(
         {
             "config_version": 5,
             "cameras": [
                 _camera_payload(camera_id="camera-1"),
-                # No facility_id or space_id: fails _CameraPayload._require_location.
+                # camera_id + rtsp is enough; facility defaults to "local".
                 {"camera_id": "camera-2", "rtsp_url": "rtsp://camera-2/stream"},
             ],
         }
     )
 
-    pulled = payload.to_pulled_config()
-
-    assert [camera.camera_id for camera in pulled.cameras] == ["camera-1"]
-    err = capsys.readouterr().err
-    assert "camera-2" in err
+    config = payload.to_worker_config("http://ml-api:8000", "relay-token")
+    by_id = {camera.camera_id: camera for camera in config.cameras}
+    assert set(by_id) == {"camera-1", "camera-2"}
+    assert by_id["camera-2"].facility_id == "local"
 
 
 def test_missing_cameras_key_still_rejects_whole_payload() -> None:

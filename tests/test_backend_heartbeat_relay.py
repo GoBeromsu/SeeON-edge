@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import tempfile
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
 
+from backend.app.features.cameras.store import CameraRegistryStore
 from backend.app.features.status.backend_heartbeat_relay import (
     HeartbeatRelayState,
     get_heartbeat_relay_state,
@@ -72,10 +75,52 @@ class FakeClassifiedIngestClient:
         return SimpleNamespace(ok=error_class is None, error_class=error_class)
 
 
-def _make_app(*, client: object | None, inventory: dict[str, dict[str, str | None]]) -> object:
+def _registry(records: list[dict[str, str | None]]) -> CameraRegistryStore:
+    """Build a real (tempdir-backed) CameraRegistryStore seeded with the given
+    ``{id, backend_camera_id}`` records. relay_heartbeats_once only trusts an
+    actual ``CameraRegistryStore`` instance (its ``isinstance`` check treats
+    anything else, including a duck-typed fake, as "no registry" -- see
+    ``registry_store = registry if isinstance(registry, CameraRegistryStore)
+    else None``), so tests need the real thing rather than a stub."""
+    store = CameraRegistryStore(Path(tempfile.mkdtemp()) / "catalog.sqlite3")
+    for record in records:
+        camera_id = record["id"]
+        assert isinstance(camera_id, str)
+        store.create(
+            camera_id=camera_id,
+            label=camera_id,
+            rtsp_url=f"rtsp://{camera_id}",
+            space_id=None,
+            status="offline",
+            backend_camera_id=record.get("backend_camera_id"),
+        )
+    return store
+
+
+def _make_app(
+    *,
+    client: object | None,
+    inventory: dict[str, dict[str, str | None]] | None = None,
+    registry_records: list[dict[str, str | None]] | None = None,
+) -> object:
+    """Cameras keyed in ``inventory`` get an identity registry mapping
+    (``backend_camera_id`` == the same id): these tests exist to exercise
+    relay mechanics (backoff, error classification, per-camera failure
+    isolation), not id translation, so a passthrough mapping keeps them
+    unaffected by the canonicalization step. Pass ``registry_records``
+    explicitly for tests that care about a distinct backend id or an
+    unmapped/pending camera -- a camera recorded via
+    ``heartbeat_store.record()`` but absent from the registry, or present
+    with ``backend_camera_id=None``, must be skipped rather than relayed
+    under a guessed id (see ``_canonical_backend_camera_id``).
+    """
+    if registry_records is None:
+        registry_records = [
+            {"id": camera_id, "backend_camera_id": camera_id} for camera_id in (inventory or {})
+        ]
     state = SimpleNamespace(
         heartbeat_store=HeartbeatStore(stale_after_sec=90.0),
-        camera_inventory=inventory,
+        camera_registry=_registry(registry_records),
     )
     if client is not None:
         state.backend_ingest_client = client
@@ -83,13 +128,14 @@ def _make_app(*, client: object | None, inventory: dict[str, dict[str, str | Non
 
 
 def test_online_camera_relayed_stale_and_never_seen_not_called() -> None:
-    inventory = {
-        "cam-online": {"camera_id": "cam-online", "facility_id": "fac-1"},
-        "cam-stale": {"camera_id": "cam-stale", "facility_id": "fac-1"},
-        "cam-never-seen": {"camera_id": "cam-never-seen", "facility_id": "fac-1"},
-    }
     client = FakeIngestClient()
-    app = _make_app(client=client, inventory=inventory)
+    app = _make_app(
+        client=client,
+        inventory={
+            "cam-online": {"camera_id": "cam-online"},
+            "cam-stale": {"camera_id": "cam-stale"},
+        },
+    )
     app.state.heartbeat_store.record("cam-online", "fac-1", received_at=1000.0)
     app.state.heartbeat_store.record("cam-stale", "fac-1", received_at=0.0)
 
@@ -193,6 +239,75 @@ def test_backoff_doubles_on_consecutive_all_fail_ticks_and_resets_on_success() -
     relay_heartbeats_once(app, now=1050.0)
     assert state.backoff_multiplier == 1
     assert state.consecutive_all_fail_ticks == 0
+
+
+# --------------------------------------------------------------------------
+# Backend-id canonicalization (bug fix: periodic relay must not send
+# HeartbeatStore's worker-local ids straight through -- see
+# _canonical_backend_camera_id and relay/router.py's
+# _camera_binding_from_registry for the one-shot equivalent).
+# --------------------------------------------------------------------------
+
+
+def test_relay_canonicalizes_worker_local_id_to_backend_camera_id() -> None:
+    client = FakeIngestClient()
+    app = _make_app(
+        client=client,
+        registry_records=[{"id": "cam-local-1", "backend_camera_id": "backend-cam-9"}],
+    )
+    app.state.heartbeat_store.record("cam-local-1", "fac-1", received_at=1000.0)
+
+    result = relay_heartbeats_once(app, now=1010.0)
+
+    # The backend only knows its own camera id -- it must never see the
+    # worker-local HeartbeatStore id.
+    assert client.calls == ["backend-cam-9"]
+    assert result.attempted == 1
+    assert result.sent == 1
+
+
+def test_camera_with_no_backend_mapping_is_skipped_while_mapped_camera_still_relayed(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    client = FakeIngestClient()
+    app = _make_app(
+        client=client,
+        registry_records=[
+            {"id": "cam-mapped", "backend_camera_id": "backend-cam-1"},
+            # Registered but not yet mapped to a backend id (e.g. pending
+            # roster sync) -- must be skipped, not sent under a guessed id.
+            {"id": "cam-pending", "backend_camera_id": None},
+        ],
+    )
+    app.state.heartbeat_store.record("cam-mapped", "fac-1", received_at=1000.0)
+    app.state.heartbeat_store.record("cam-pending", "fac-1", received_at=1000.0)
+    # Never registered in the camera registry at all.
+    app.state.heartbeat_store.record("cam-unknown", "fac-1", received_at=1000.0)
+
+    caplog.set_level("INFO", logger="backend.app.features.status.backend_heartbeat_relay")
+    result = relay_heartbeats_once(app, now=1010.0)
+
+    assert client.calls == ["backend-cam-1"]
+    assert result.attempted == 1
+    assert result.sent == 1
+    skipped_logs = [r.message for r in caplog.records if "no backend mapping yet" in r.message]
+    assert len(skipped_logs) == 2  # cam-pending and cam-unknown both skipped-and-logged
+
+
+def test_all_cameras_unmapped_is_skipped_tick_and_backoff_untouched() -> None:
+    app = _make_app(
+        client=FakeIngestClient(),
+        registry_records=[{"id": "cam-a", "backend_camera_id": None}],
+    )
+    app.state.heartbeat_store.record("cam-a", "fac-1", received_at=1000.0)
+    relay_state = get_heartbeat_relay_state(app)
+    relay_state.backoff_multiplier = 4
+
+    result = relay_heartbeats_once(app, now=1010.0)
+
+    assert result.skipped_reason == "no_mapped_cameras"
+    assert result.attempted == 0
+    assert relay_state.backoff_multiplier == 4  # untouched: not a delivery attempt
 
 
 # --------------------------------------------------------------------------
@@ -326,7 +441,7 @@ def test_real_lifespan_boots_and_shuts_down_cleanly_with_relay_enabled_and_empty
     with TestClient(create_app()) as client:
         app = client.app
         assert app.state.backend_heartbeat_relay_task is not None
-        assert app.state.camera_inventory == {}
+        assert not hasattr(app.state, "camera_inventory")
 
     assert app.state.backend_heartbeat_relay_task is None
     assert app.state.backend_heartbeat_relay_executor is None

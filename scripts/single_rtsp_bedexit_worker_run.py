@@ -8,7 +8,12 @@ pipe before exec'ing the reader -- so the script hung there with no output. The
 Linux edge host /bin/bash is itself a modern bash, so the body had to move into
 a file. Byte-identical to the heredoc it replaced. See issue #9.
 
-Usage: python single_rtsp_bedexit_worker_run.py <frames>
+Usage: python single_rtsp_bedexit_worker_run.py <frames> <config_path>
+
+``config_path`` is a positional argument, not the former ``EDGE_CAMERA_CONFIG``
+env var: the camera roster/config path must never be provisionable through the
+environment (an env var reaches the runtime via compose, and compose is
+tracked in Git) -- see scripts/verify_scope_fidelity.py's ROSTER_PATTERN.
 """
 
 from __future__ import annotations
@@ -188,7 +193,7 @@ def main() -> int:
     _FrozenDatetime._frozen = frozen_now
     worker_module.datetime = _FrozenDatetime
 
-    config = load_worker_config(os.environ["EDGE_CAMERA_CONFIG"])
+    config = load_worker_config(sys.argv[2])
     done = threading.Event()
     serving = _ScriptedServingClient(target_frames=frames, done=done)
     runtime = WorkerRuntime(

@@ -7,7 +7,7 @@ Own pytest coverage for the ML uv project, including dependency-boundary guards 
 - `test_contract_symbol_exports.py`: contract-symbol export checks (runner/tracker/worker_config). Import boundaries are enforced by import-linter (`uv run --group lint lint-imports`), not a pytest walker.
 - `edge_worker_fixtures.py`, `demo_app_control_helpers.py`, `e2e_worker_relay_fixtures.py`: shared test helpers.
 - `test_*`: package-specific and cross-boundary tests.
-- `test_e2e_night_bed_exit_relay.py`: real-stack E2E (marked `real_stack`) -- synthetic RTSP via `mediamtx` + `ffmpeg` into the real worker/backend composition. Deselected in CI (`-m "not real_stack and not heavy"`) and skipped locally when `mediamtx` is not on PATH; see "Real-stack E2E" below.
+- `test_e2e_night_bed_exit_relay.py`: real-stack E2E (marked `real_stack`) -- synthetic RTSP via `mediamtx` + `ffmpeg` into the real worker/backend composition. Deselected in CI (`-m "not real_stack and not heavy and not integration"`) and skipped locally when `mediamtx` is not on PATH; see "Real-stack E2E" below.
 
 ## Imports
 
@@ -25,7 +25,7 @@ uv run --group lint lint-imports
 
 `test_e2e_night_bed_exit_relay.py` is marked `real_stack` and requires the `mediamtx`
 RTSP server binary (plus `ffmpeg`, already a default dev dependency) on PATH. CI
-deselects it (`uv run pytest -q -m "not real_stack and not heavy"`) rather than fetching an
+deselects it (`uv run pytest -q -m "not real_stack and not heavy and not integration"`) rather than fetching an
 external binary, per `tests/test_public_repository_privacy.py`'s untrusted-CI
 contract -- it runs locally only. To run it:
 
@@ -37,6 +37,30 @@ uv run pytest -m real_stack
 ```
 
 Without `mediamtx` on PATH, the tests are skipped (not errored) with an explicit reason.
+
+## Live-stack integration (`integration`)
+
+`test_cloud_edge_provisioning_integration.py` is marked `integration` and drives a
+**running, already-enrolled ml-api** — it is not a mock-backed test. CI deselects it
+(the `not integration` above); the marker always said so in `pyproject.toml`, but the
+CI argument only started honouring it once the test began failing on `main` with
+`RuntimeError: CLOUD_EDGE_ML_URL is required`. Unlike `real_stack` it needs no RTSP
+tooling, so `real_stack` would be the wrong marker for it.
+
+It fails loudly rather than skipping, because every one of its inputs is a deliberate
+pointer at live state that must not be guessed. Run it against a real Edge:
+
+```bash
+CLOUD_EDGE_ML_URL=http://<edge-host>:8000 \
+CLOUD_EDGE_RELAY_TOKEN=... \
+CLOUD_EDGE_ML_CATALOG_PATH=/var/lib/ml-api/catalog.sqlite3 \
+CLOUD_EDGE_PRE_V1_BACKUP_PATH=... \
+CLOUD_EDGE_SECRET_HANDOFF_PATH=... \
+uv run pytest -m integration
+```
+
+It writes to the catalog sqlite file it is pointed at, so never aim it at a production
+volume.
 
 ## Gotchas
 
@@ -58,7 +82,7 @@ Keep boundary tests small and explicit. When import policy changes, update the `
 `test_watchdog_subprocess_hard_exits_with_fatal_accelerator_code`만
 `TimeoutExpired`로 두 번 연속 실패했다. 로컬에서는 2.1초에 통과한다.
 
-그래서 CI는 `-m "not real_stack and not heavy"`로 제외한다. 타임아웃 여유를
+그래서 CI는 `-m "not real_stack and not heavy and not integration"`로 제외한다. 타임아웃 여유를
 늘리는 것으로 덮지 않는다 — 그러면 CI 시간만 늘고 같은 종류의 불안정이
 남는다.
 

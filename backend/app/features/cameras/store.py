@@ -623,6 +623,40 @@ def utc_now_iso() -> str:
     return datetime.now(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
+def registry_expected_cameras(
+    store: CameraRegistryStore | None,
+) -> dict[str, dict[str, str | None]]:
+    """Build the camera-id index used by status/heartbeat enumeration.
+
+    Keys are the canonical worker-facing ids (backend_camera_id or local id).
+    Values are thin binding dicts compatible with HeartbeatStore.snapshot.
+    """
+    if store is None:
+        return {}
+    snapshot = store.snapshot()
+    cameras = snapshot.get("cameras")
+    if not isinstance(cameras, list):
+        return {}
+    index: dict[str, dict[str, str | None]] = {}
+    for record in cameras:
+        if not isinstance(record, dict):
+            continue
+        local_id = record.get("id")
+        backend_id = record.get("backend_camera_id")
+        canonical = backend_id or local_id
+        if not isinstance(canonical, str) or not canonical.strip():
+            continue
+        binding = {
+            "camera_id": canonical,
+            "facility_id": None,
+            "resident_id": None,
+        }
+        index[canonical] = binding
+        if isinstance(local_id, str) and local_id and local_id != canonical:
+            index[local_id] = binding
+    return index
+
+
 __all__ = [
     "CameraRegistryStore",
     "CameraStatus",
@@ -638,6 +672,7 @@ __all__ = [
     "normalize_stream_identity",
     "parse_legacy_floor",
     "public_camera",
+    "registry_expected_cameras",
     "status_from_probe",
     "utc_now_iso",
 ]

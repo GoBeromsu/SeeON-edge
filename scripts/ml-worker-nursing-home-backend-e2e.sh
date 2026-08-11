@@ -34,7 +34,7 @@ runtime_model_dir="$edge_models_dir/fall/lstm-runtime"
 runtime_metadata="$tmpdir/lstm-runtime.env"
 
 cleanup_containers() {
-  ML_WORKER_PROFILE="$profile" EDGE_CAMERA_CONFIG="$config" ML_MODELS_DIR="$edge_models_dir" docker compose \
+  ML_WORKER_PROFILE="$profile" ML_MODELS_DIR="$edge_models_dir" docker compose \
     -p "$compose_project" \
     -f compose.edge.yaml \
     down --remove-orphans >/dev/null 2>&1 || true
@@ -153,12 +153,17 @@ YAML
 }
 
 start_compose_network() {
+  # The worker gets its camera roster via --config (see run_worker below),
+  # not an env var -- a camera roster must never be provisionable through
+  # the environment (compose is tracked in Git). Inventory env is gone.
   ML_API_IMAGE="$ml_api_image" \
     ML_WORKER_IMAGE="$ml_worker_image" \
     API_BACKEND_EVENTS_URL="${backend_base_url}/api/v1/events" \
     API_EDGE_RELAY_TOKEN="$relay_token" \
-    API_CAMERA_INVENTORY="[{\"camera_id\":\"${camera_id}\",\"facility_id\":\"${facility_id}\",\"resident_id\":\"${resident_id}\"}]" \
-    ML_WORKER_PROFILE="$profile" EDGE_CAMERA_CONFIG="$config" ML_MODELS_DIR="$edge_models_dir" docker compose \
+    API_DASHBOARD_USERNAME="${API_DASHBOARD_USERNAME:-admin}" \
+    API_DASHBOARD_PASSWORD="${API_DASHBOARD_PASSWORD:-admin}" \
+    CLIP_STORE_HOST_DIR="${CLIP_STORE_HOST_DIR:-/tmp/eldercare-e2e-clip-store}" \
+    ML_WORKER_PROFILE="$profile" ML_MODELS_DIR="$edge_models_dir" docker compose \
     -p "$compose_project" \
     -f compose.edge.yaml \
     create ml-api ml-worker >/dev/null
@@ -169,8 +174,10 @@ run_worker() {
     ML_WORKER_IMAGE="$ml_worker_image" \
     API_BACKEND_EVENTS_URL="${backend_base_url}/api/v1/events" \
     API_EDGE_RELAY_TOKEN="$relay_token" \
-    API_CAMERA_INVENTORY="[{\"camera_id\":\"${camera_id}\",\"facility_id\":\"${facility_id}\",\"resident_id\":\"${resident_id}\"}]" \
-    ML_WORKER_PROFILE="$profile" EDGE_CAMERA_CONFIG="$config" ML_MODELS_DIR="$edge_models_dir" docker compose \
+    API_DASHBOARD_USERNAME="${API_DASHBOARD_USERNAME:-admin}" \
+    API_DASHBOARD_PASSWORD="${API_DASHBOARD_PASSWORD:-admin}" \
+    CLIP_STORE_HOST_DIR="${CLIP_STORE_HOST_DIR:-/tmp/eldercare-e2e-clip-store}" \
+    ML_WORKER_PROFILE="$profile" ML_MODELS_DIR="$edge_models_dir" docker compose \
     -p "$compose_project" \
     -f compose.edge.yaml \
     run -T --rm \

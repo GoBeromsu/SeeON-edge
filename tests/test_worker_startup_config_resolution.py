@@ -4,17 +4,21 @@ Before this wiring, the live `WorkerConfig` handed to `WorkerRuntime` came
 exclusively from local YAML (`load_worker_config`); the relay-pull path
 (`resolve_startup_config` / `load_worker_config_from_relay`,
 `worker/runtime/config/config_pull.py`) had zero non-test callers, so the
-shipped `compose.edge.yaml` (leaving `EDGE_CAMERA_CONFIG` unset) crash-looped
-the production worker and dashboard-configured cameras never reached it.
+shipped `compose.edge.yaml` (which passes no `--config`) crash-looped the
+production worker and dashboard-configured cameras never reached it.
 
 `worker/__main__.py:main` now has two startup branches:
 
-- No `--config`/`EDGE_CAMERA_CONFIG`: pull directly via
-  `load_worker_config_from_relay`, which returns `None` only when there is
-  neither a fresh pull nor a last-known-good (LKG) cache.
-- `--config`/`EDGE_CAMERA_CONFIG` set: load the YAML, then let
-  `resolve_startup_config` attempt a pull that takes precedence, falling
-  back to the YAML on any failure.
+- No `--config`: pull directly via `load_worker_config_from_relay`, which
+  returns `None` only when there is neither a fresh pull nor a
+  last-known-good (LKG) cache.
+- `--config` set: load the YAML, then let `resolve_startup_config` attempt a
+  pull that takes precedence, falling back to the YAML on any failure.
+
+There is no environment-variable equivalent of `--config` any more (the
+former `EDGE_CAMERA_CONFIG` env fallback was removed -- the camera roster
+must never be provisionable through the environment, since compose is
+tracked in Git); a static-YAML boot is CLI-flag-only.
 
 These tests monkeypatch `worker_main.load_worker_config_from_relay` /
 `worker_main.resolve_startup_config` directly (the same seam
@@ -551,9 +555,9 @@ def test_no_yaml_pull_resolving_to_zero_cameras_still_boots(
 def test_no_yaml_and_no_relay_url_still_exits_fast_with_zero_cameras_available(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Companion to the boot-succeeds test above: "설정 없음" (no `--config`/
-    `EDGE_CAMERA_CONFIG`, and no `RELAY_URL` either -- there is no config to
-    resolve at all, not even one with zero cameras) still refuses to start,
+    """Companion to the boot-succeeds test above: "설정 없음" (no `--config`,
+    and no `RELAY_URL` either -- there is no config to resolve at all, not
+    even one with zero cameras) still refuses to start,
     exactly as `test_no_yaml_and_no_relay_url_exits_with_config_error_code`
     already pins -- restated here to keep both halves of issue #150's
     contract next to each other in one file."""

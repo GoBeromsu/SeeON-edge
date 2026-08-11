@@ -2,8 +2,8 @@
 
 Issues #66/#68: ``BackendWorkerConfigPayload.to_worker_config()``
 (``worker/runtime/config/pull_models.py``) never carried ``models``/``clip``
-through a relay pull, so the shipped pull-first production topology
-(``compose.edge.yaml``'s default empty ``EDGE_CAMERA_CONFIG``) could never
+through a relay pull, so the shipped pull-only production topology (no
+local YAML roster at all) could never
 configure a fall model or turn on clip recording -- both YAML-only fields
 always resolved to their pydantic defaults (``fall=None``,
 ``enabled=False``).

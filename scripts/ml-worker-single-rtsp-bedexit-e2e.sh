@@ -96,15 +96,39 @@ YAML
   chmod 600 "$config"
 }
 
+seed_camera_registry() {
+  # Registry is the sole camera SSOT for relay binding (no API_CAMERA_INVENTORY).
+  HOME="$sandbox_home" \
+  CAMERA_ID="$camera_id" \
+  RTSP_URL="$rtsp_url" \
+  uv run python - <<'PY'
+from backend.app.features.cameras.store import CameraRegistryStore
+from backend.app.shared.state_dir import resolve_state_dir
+
+camera_id = __import__("os").environ["CAMERA_ID"]
+rtsp_url = __import__("os").environ["RTSP_URL"]
+store = CameraRegistryStore(resolve_state_dir("ml-api") / "catalog.sqlite3")
+if store.get(camera_id) is None:
+    store.create(
+        camera_id=camera_id,
+        label="e2e-camera",
+        rtsp_url=rtsp_url,
+        space_id=None,
+        status="online",
+        backend_camera_id=camera_id,
+    )
+PY
+}
+
 start_api() {
   HOME="$sandbox_home" \
   API_BACKEND_EVENTS_URL="${backend_base_url}/api/v1/events" \
   API_EDGE_RELAY_TOKEN="$relay_token" \
-  API_CAMERA_INVENTORY="[{\"camera_id\":\"${camera_id}\",\"facility_id\":\"${facility_id}\",\"resident_id\":\"${resident_id}\"}]" \
   uv run uvicorn backend.app.main:app --host 127.0.0.1 --port "${relay_base_url##*:}" >"$api_log" 2>&1 &
   api_pid="$!"
   for _ in $(seq 1 60); do
     if curl -fsS "${relay_base_url}/health/live" >/dev/null 2>&1; then
+      seed_camera_registry
       return 0
     fi
     sleep 1
@@ -153,7 +177,7 @@ run_worker_with_clock() {
   # working directory on sys.path, while running a file puts the *script's*
   # directory there instead -- so `import worker` resolved as a heredoc and
   # would not as a file. Setting it restores what the heredoc got implicitly.
-  if ! HOME="$sandbox_home" PYTHONPATH="$repo_root" OPENCV_FFMPEG_CAPTURE_OPTIONS="rtsp_transport;tcp" BED_EXIT_NOW="$now" EDGE_CAMERA_CONFIG="$config" uv run python "$repo_root/scripts/single_rtsp_bedexit_worker_run.py" "$frames" >>"$worker_log" 2>&1
+  if ! HOME="$sandbox_home" PYTHONPATH="$repo_root" OPENCV_FFMPEG_CAPTURE_OPTIONS="rtsp_transport;tcp" BED_EXIT_NOW="$now" uv run python "$repo_root/scripts/single_rtsp_bedexit_worker_run.py" "$frames" "$config" >>"$worker_log" 2>&1
   then
     printf 'worker run failed; log follows:\n' >&2
     sed -n '1,200p' "$worker_log" >&2

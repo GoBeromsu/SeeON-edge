@@ -86,7 +86,7 @@ describe('ConnectionSettingsPanel', () => {
 
     expect(host.textContent).toContain('api.eldercare.example');
     expect(host.textContent).toContain('facility-canonical-42');
-    expect(host.textContent).toContain('3세대');
+    expect(host.textContent).toContain('3회');
     expect(host.textContent).toContain('****ab12');
     expect(host.textContent).not.toContain('aa83ea3f');
     expect(host.textContent).not.toContain('c72bd9a7');
@@ -135,6 +135,75 @@ describe('ConnectionSettingsPanel', () => {
     expect(host.querySelector('[role="alert"]')?.textContent).toContain('다른 장치');
     expect(host.textContent).not.toContain('internal conflict body');
     expect(host.textContent).not.toContain('conflict-secret');
+  });
+
+  it('distinguishes a wrong/unreachable Hub address from a credential failure and shows the address on save', async () => {
+    vi.mocked(saveConnection).mockRejectedValue(new HttpError(503, { detail: '외부 백엔드에 연결할 수 없습니다.' }));
+    const { host } = renderPanel();
+    openEnrollment(host);
+    setInput(host, 'facility_token', 'unreachable-secret');
+
+    await act(async () => button(host, '등록 저장').click());
+
+    const alert = host.querySelector('[role="alert"]')?.textContent ?? '';
+    expect(alert).toContain('연결할 수 없습니다');
+    expect(alert).toContain('api.eldercare.example');
+    expect(alert).not.toContain('시설 코드');
+    expect(alert).not.toContain('외부 백엔드');
+  });
+
+  it('distinguishes a Hub timeout the same way as unreachable, showing the address rather than a generic save failure', async () => {
+    vi.mocked(saveConnection).mockRejectedValue(new HttpError(504, { detail: '외부 백엔드 응답 시간이 초과되었습니다.' }));
+    const { host } = renderPanel();
+    openEnrollment(host);
+    setInput(host, 'facility_token', 'timeout-secret');
+
+    await act(async () => button(host, '등록 저장').click());
+
+    const alert = host.querySelector('[role="alert"]')?.textContent ?? '';
+    expect(alert).toContain('연결할 수 없습니다');
+    expect(alert).toContain('api.eldercare.example');
+  });
+
+  it('shows the wrong/unreachable Hub address distinctly on the inline connection test, not the raw backend detail', async () => {
+    vi.mocked(testConnection).mockResolvedValue({
+      ok: false,
+      error_class: 'unreachable',
+      detail: '외부 백엔드에 연결할 수 없습니다.',
+      facility_id: null,
+      edge_installation_id: null,
+      enrollment_generation: null,
+    });
+    const { host } = renderPanel();
+    openEnrollment(host);
+    setInput(host, 'facility_token', 'test-secret');
+
+    await act(async () => button(host, '등록 확인').click());
+
+    const alert = host.querySelector('[role="alert"]')?.textContent ?? '';
+    expect(alert).toContain('연결할 수 없습니다');
+    expect(alert).toContain('api.eldercare.example');
+    expect(alert).not.toContain('외부 백엔드');
+  });
+
+  it('still shows an auth failure from the inline connection test as a credential problem, not a server-address one', async () => {
+    vi.mocked(testConnection).mockResolvedValue({
+      ok: false,
+      error_class: 'auth',
+      detail: '등록 코드 또는 토큰을 확인해 주세요.',
+      facility_id: null,
+      edge_installation_id: null,
+      enrollment_generation: null,
+    });
+    const { host } = renderPanel();
+    openEnrollment(host);
+    setInput(host, 'facility_token', 'bad-token');
+
+    await act(async () => button(host, '등록 확인').click());
+
+    const alert = host.querySelector('[role="alert"]')?.textContent ?? '';
+    expect(alert).toContain('등록 코드 또는 토큰');
+    expect(alert).not.toContain('연결할 수 없습니다');
   });
 
   it('prevents duplicate saves while enrollment is in flight', async () => {

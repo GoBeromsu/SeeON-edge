@@ -108,8 +108,9 @@ describe('SettingsPage', () => {
     expect(host.textContent).toContain('카메라');
     expect(host.textContent).toContain('101호');
     expect(host.textContent).toContain('탐지 설정');
-    expect(host.textContent).toContain('장치 등록');
-    expect(host.textContent).toContain('시설 토폴로지');
+    expect(host.textContent).toContain('1단계 · 장치 연결');
+    expect(host.textContent).toContain('2단계 · 카메라 확인');
+    expect(host.textContent).toContain('3단계 · 서버 반영');
     expect(host.textContent).toContain('처리 상태');
     expect(host.textContent).toContain('클립 저장 공간');
   });

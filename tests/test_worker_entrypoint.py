@@ -134,13 +134,21 @@ def test_config_missing_required_field_exits_with_config_error_code(
     assert worker_main.main(["--config", str(incomplete_path)]) == 2
 
 
-def test_config_path_falls_back_to_edge_camera_config_env(
+def test_edge_camera_config_env_has_no_effect(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    """Regression guard: the camera roster/config path must never be
+    provisionable through the environment (an env var reaches the runtime via
+    compose, and compose is tracked in Git) -- see
+    ``scripts/verify_scope_fidelity.py``'s ``ROSTER_PATTERN``. A static-YAML
+    boot is CLI-flag-only (``--config``); setting ``EDGE_CAMERA_CONFIG`` must
+    be inert, so with no ``--config`` and no ``RELAY_URL`` this still exits
+    config-error(2) exactly as if the env var were never set."""
     config_path = _write_config(tmp_path)
     monkeypatch.setenv("EDGE_CAMERA_CONFIG", str(config_path))
+    monkeypatch.delenv("RELAY_URL", raising=False)
 
-    assert worker_main.main(["--check-config"]) == 0
+    assert worker_main.main(["--check-config"]) == 2
 
 
 # --- --check-config has zero model/camera/relay side effects -----------
