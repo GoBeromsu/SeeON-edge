@@ -29,7 +29,6 @@ from worker.runtime.config.worker_models import (
 
 RELAY_URL_ENV: Final = "RELAY_URL"
 RELAY_TOKEN_ENV: Final = "RELAY_TOKEN"
-API_FACILITY_ID_ENV: Final = "API_FACILITY_ID"
 
 _JSON_OBJECT_ADAPTER: Final = TypeAdapter(JsonObject)
 
@@ -252,7 +251,6 @@ def _stored_key(stored: StoredConfigPayload) -> tuple[RestartDirective, int]:
 
 
 __all__ = [
-    "API_FACILITY_ID_ENV",
     "RELAY_TOKEN_ENV",
     "RELAY_URL_ENV",
     "ConfigSnapshot",

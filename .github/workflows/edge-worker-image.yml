@@ -39,6 +39,8 @@ jobs:
           context: .
           file: Dockerfile.edge
           load: true
+          build-args: |
+            SOURCE_REVISION=${{ github.sha }}
           tags: eldercare-fall-ml-worker:ci
           # Same cache scope as edge-images.yml's ml-worker build so PR runs
           # and release publishes warm each other's layer cache instead of

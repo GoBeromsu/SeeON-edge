@@ -7,7 +7,6 @@ import binascii
 import hashlib
 import json
 import logging
-import os
 import sqlite3
 from collections.abc import Callable
 from typing import Annotated, Any, Protocol
@@ -20,7 +19,7 @@ from backend.app.features.cameras.store import CameraRegistryStore
 from backend.app.features.clips.catalog import CatalogConflictError, get_catalog_store
 from backend.app.features.status.heartbeat_store import get_heartbeat_store
 from backend.app.features.status.runtime_status_store import get_runtime_status_store
-from backend.app.lifespan import API_FACILITY_ID_ENV
+from backend.app.shared.backend_client_bundle import backend_client_bundle
 from contracts import AlertEventType
 from contracts.decode_diagnostics import DECODE_BACKENDS, DECODE_FALLBACK_REASONS
 from contracts.worker_config import RESTART_EPOCH_KEY
@@ -504,8 +503,8 @@ def _runtime_status_facility_binding(request: Request, facility_id: str) -> None
     # relation to anything camera_inventory actually protects. The env-configured
     # facility_id below remains the real boundary: it rejects a caller claiming
     # a facility this device isn't configured for.
-    expected = os.environ.get(API_FACILITY_ID_ENV)
-    if expected and facility_id != expected.strip():
+    bundle = backend_client_bundle(request.app)
+    if bundle is not None and facility_id != bundle.facility_id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="camera facility mismatch",
@@ -574,8 +573,8 @@ def _camera_binding_from_registry(
     cameras = snapshot.get("cameras")
     if not isinstance(cameras, list) or not cameras:
         return None
-    expected_facility = os.environ.get(API_FACILITY_ID_ENV, "local-facility").strip()
-    if expected_facility and facility_id != expected_facility:
+    bundle = backend_client_bundle(request.app)
+    if bundle is not None and facility_id != bundle.facility_id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN, detail="camera facility mismatch"
         )
@@ -628,11 +627,16 @@ def _find_registry_record(store: CameraRegistryStore, camera_id: str) -> dict[st
 
 
 def _backend_ingest_client(request: Request, *, camera_id: str) -> BackendIngestClient:
-    client = getattr(request.app.state, "backend_ingest_client", None)
+    bundle = backend_client_bundle(request.app)
+    client = (
+        bundle.ingest_client
+        if bundle is not None
+        else getattr(request.app.state, "backend_ingest_client", None)
+    )
     if client is None:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="backend ingest client is not configured",
+            detail="backend enrollment is required",
         )
     if hasattr(client, "for_camera"):
         return client.for_camera(camera_id)

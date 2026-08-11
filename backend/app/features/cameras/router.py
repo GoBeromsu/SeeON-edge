@@ -28,6 +28,7 @@ from backend.app.features.cameras.bed_zone_router import BedZonePayload
 from backend.app.features.cameras.bed_zone_store import BedZone, BedZoneStore
 from backend.app.features.cameras.roster_sync import camera_sync_view, sync_camera_roster
 from backend.app.features.cameras.store import (
+    CameraRegistryData,
     CameraRegistryStore,
     DuplicateCameraError,
     ProbeErrorClass,
@@ -37,16 +38,16 @@ from backend.app.features.cameras.store import (
     status_from_probe,
     utc_now_iso,
 )
+from backend.app.features.cameras.topology import (
+    RegistryTopologySnapshot,
+    TopologyConflictError,
+)
 from backend.app.features.clips.storage_location_store import ClipStorageLocationStore
 from backend.app.features.detection_settings.store import DetectionSettingsStore
 from backend.app.features.status.heartbeat_store import ONLINE, get_heartbeat_store
-from backend.app.lifespan import API_FACILITY_ID_ENV
-from backend.app.shared.backend_mapping import (
-    BackendCameraMapper,
-    MappingResult,
-    mark_backend_status,
-)
+from backend.app.shared.backend_client_bundle import backend_client_bundle
 from backend.app.shared.dashboard_auth import authorize_dashboard
+from contracts.edge_provisioning_models import EdgeErrorCode, TopologyFloor, TopologyRoom
 from contracts.worker_config import PulledWorkerConfig
 
 RELAY_TOKEN_HEADER = "X-Edge-Relay-Token"
@@ -112,6 +113,8 @@ class CameraResponse(BaseModel):
     # Persisted on-demand bed-zone recognition result (see bed_zone_router.py
     # and BedZoneStore); None when never recognized for this camera.
     bed_zone: BedZonePayload | None = None
+    edge_ref: str | None = Field(default=None, exclude_if=lambda value: value is None)
+    room_edge_ref: str | None = Field(default=None, exclude_if=lambda value: value is None)
 
 
 class ListCamerasResponse(BaseModel):
@@ -130,6 +133,8 @@ class CreateCameraRequest(BaseModel):
     decode_backend: str | None = None
     fps: float | None = None
     floor: int | None = None
+    edge_ref: str | None = Field(default=None, min_length=1, max_length=64)
+    room_edge_ref: str | None = Field(default=None, min_length=1, max_length=64)
     # 더 이상 아무것도 하지 않는다. 등록이 probe 통과를 요구하던 시절, 그
     # 게이트를 건너뛰는 탈출구였다 (`create_camera` 참고). 지금은 등록이
     # 항상 저장하므로 값과 무관하게 결과가 같다. 기존 클라이언트가 계속
@@ -147,6 +152,75 @@ class UpdateCameraRequest(BaseModel):
     decode_backend: str | None = None
     fps: float | None = None
     floor: int | None = None
+    edge_ref: str | None = Field(default=None, min_length=1, max_length=64)
+    room_edge_ref: str | None = Field(default=None, min_length=1, max_length=64)
+
+
+class CreateTopologyFloorRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    edge_ref: str = Field(min_length=1, max_length=64)
+    name: str = Field(min_length=1, max_length=120)
+    order_index: int = Field(ge=0)
+
+
+class UpdateTopologyFloorRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1, max_length=120)
+    order_index: int = Field(ge=0)
+
+
+class CreateTopologyRoomRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    edge_ref: str = Field(min_length=1, max_length=64)
+    floor_edge_ref: str = Field(min_length=1, max_length=64)
+    name: str = Field(min_length=1, max_length=120)
+    legacy_canonical_space_id: str | None = Field(default=None, max_length=36)
+
+
+class UpdateTopologyRoomRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1, max_length=120)
+
+
+class TopologyCameraResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    edge_ref: str
+    label: str
+
+
+class TopologyRoomResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    edge_ref: str
+    name: str
+    room_type: Literal["ROOM"]
+    capacity: int
+    legacy_canonical_space_id: str | None
+    cameras: list[TopologyCameraResponse]
+
+
+class TopologyFloorResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    edge_ref: str
+    name: str
+    order_index: int
+    rooms: list[TopologyRoomResponse]
+
+
+class CameraTopologyResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    registry_version: int = Field(ge=0)
+    dirty_registry_version: int | None = Field(default=None, ge=1)
+    readiness_error: EdgeErrorCode | None
+    unmapped_camera_ids: list[str]
+    floors: list[TopologyFloorResponse]
 
 
 class TestCameraRequest(BaseModel):
@@ -237,6 +311,117 @@ def list_cameras(
     )
 
 
+@router.get("/topology", response_model=CameraTopologyResponse)
+def get_camera_topology(
+    request: Request,
+    relay_token: Annotated[str | None, Header(alias=RELAY_TOKEN_HEADER)] = None,
+    authorization: Annotated[str | None, Header(alias="Authorization")] = None,
+) -> dict[str, object]:
+    _authorize(request, relay_token, authorization)
+    return _topology_response(_store(request.app).topology_snapshot())
+
+
+@router.post("/topology/floors", status_code=status.HTTP_201_CREATED)
+def create_topology_floor(
+    payload: CreateTopologyFloorRequest,
+    request: Request,
+    background_tasks: BackgroundTasks,
+    relay_token: Annotated[str | None, Header(alias=RELAY_TOKEN_HEADER)] = None,
+    authorization: Annotated[str | None, Header(alias="Authorization")] = None,
+) -> dict[str, object]:
+    _authorize(request, relay_token, authorization)
+    try:
+        _store(request.app).create_floor(
+            edge_ref=payload.edge_ref, name=payload.name, order_index=payload.order_index
+        )
+    except TopologyConflictError as error:
+        raise _topology_conflict(error) from error
+    background_tasks.add_task(_trigger_roster_sync, request.app)
+    return payload.model_dump()
+
+
+@router.patch("/topology/floors/{edge_ref}")
+def update_topology_floor(
+    edge_ref: str,
+    payload: UpdateTopologyFloorRequest,
+    request: Request,
+    background_tasks: BackgroundTasks,
+) -> dict[str, object]:
+    _authorize(request, None, None)
+    if not _store(request.app).update_floor(
+        edge_ref, name=payload.name, order_index=payload.order_index
+    ):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="floor not found")
+    background_tasks.add_task(_trigger_roster_sync, request.app)
+    return {"edge_ref": edge_ref, **payload.model_dump()}
+
+
+@router.delete("/topology/floors/{edge_ref}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_topology_floor(
+    edge_ref: str, request: Request, background_tasks: BackgroundTasks
+) -> Response:
+    _authorize(request, None, None)
+    try:
+        changed = _store(request.app).delete_floor(edge_ref)
+    except TopologyConflictError as error:
+        raise _topology_conflict(error) from error
+    if not changed:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="floor not found")
+    background_tasks.add_task(_trigger_roster_sync, request.app)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post("/topology/rooms", status_code=status.HTTP_201_CREATED)
+def create_topology_room(
+    payload: CreateTopologyRoomRequest,
+    request: Request,
+    background_tasks: BackgroundTasks,
+    relay_token: Annotated[str | None, Header(alias=RELAY_TOKEN_HEADER)] = None,
+    authorization: Annotated[str | None, Header(alias="Authorization")] = None,
+) -> dict[str, object]:
+    _authorize(request, relay_token, authorization)
+    try:
+        _store(request.app).create_room(
+            edge_ref=payload.edge_ref,
+            floor_edge_ref=payload.floor_edge_ref,
+            name=payload.name,
+            legacy_canonical_space_id=payload.legacy_canonical_space_id,
+        )
+    except TopologyConflictError as error:
+        raise _topology_conflict(error) from error
+    background_tasks.add_task(_trigger_roster_sync, request.app)
+    return payload.model_dump()
+
+
+@router.patch("/topology/rooms/{edge_ref}")
+def update_topology_room(
+    edge_ref: str,
+    payload: UpdateTopologyRoomRequest,
+    request: Request,
+    background_tasks: BackgroundTasks,
+) -> dict[str, str]:
+    _authorize(request, None, None)
+    if not _store(request.app).update_room(edge_ref, name=payload.name):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="room not found")
+    background_tasks.add_task(_trigger_roster_sync, request.app)
+    return {"edge_ref": edge_ref, "name": payload.name}
+
+
+@router.delete("/topology/rooms/{edge_ref}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_topology_room(
+    edge_ref: str, request: Request, background_tasks: BackgroundTasks
+) -> Response:
+    _authorize(request, None, None)
+    try:
+        changed = _store(request.app).delete_room(edge_ref)
+    except TopologyConflictError as error:
+        raise _topology_conflict(error) from error
+    if not changed:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="room not found")
+    background_tasks.add_task(_trigger_roster_sync, request.app)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
 @router.post("", status_code=status.HTTP_201_CREATED, response_model=CameraResponse)
 def create_camera(
     payload: CreateCameraRequest,
@@ -262,32 +447,29 @@ def create_camera(
     # 그대로 보이고, 연결 여부는 worker의 첫 heartbeat이 확정한다.
     probe = _probe_rtsp_url(request, payload.rtsp_url)
     provisional_id = str(uuid.uuid4())
-    mapping = _map_backend(
-        request.app,
-        camera_id=provisional_id,
-        label=payload.label,
-        space_id=payload.space_id,
-    )
-    camera_id = mapping.backend_camera_id or provisional_id
     now = utc_now_iso()
     try:
         record = _store(request.app).create(
-            camera_id=camera_id,
+            camera_id=provisional_id,
             label=payload.label,
             rtsp_url=payload.rtsp_url,
             space_id=payload.space_id,
             status=status_from_probe(probe),
-            backend_camera_id=mapping.backend_camera_id,
-            mapping_pending=mapping.pending,
+            backend_camera_id=None,
+            mapping_pending=False,
             decode_backend=decode_backend,
             fps=fps,
             floor=floor,
             last_probed_at=now,
             last_ok_at=now if probe.ok else None,
             never_connected=not probe.ok,
+            edge_ref=payload.edge_ref,
+            room_edge_ref=payload.room_edge_ref,
         )
     except DuplicateCameraError as exc:
         raise _duplicate_camera_error(exc) from exc
+    except TopologyConflictError as error:
+        raise _topology_conflict(error) from error
     background_tasks.add_task(_trigger_roster_sync, request.app)
     return public_camera(record)
 
@@ -343,11 +525,8 @@ def update_camera(
     if not payload.model_fields_set:
         return public_camera(current)
     updates: dict[str, object] = {}
-    next_label = str(current.get("label", ""))
-    next_space_id = current.get("space_id") if current.get("space_id") is not None else None
     if "label" in payload.model_fields_set and payload.label is not None:
         updates["label"] = payload.label
-        next_label = payload.label
     if "rtsp_url" in payload.model_fields_set and payload.rtsp_url is not None:
         probe = _probe_rtsp_url(request, payload.rtsp_url)
         updates["rtsp_url"] = payload.rtsp_url
@@ -359,31 +538,23 @@ def update_camera(
             updates["never_connected"] = False
     if "space_id" in payload.model_fields_set:
         updates["space_id"] = payload.space_id
-        next_space_id = payload.space_id
     if "decode_backend" in payload.model_fields_set:
         updates["decode_backend"] = _normalize_decode_backend(payload.decode_backend)
     if "fps" in payload.model_fields_set:
         updates["fps"] = _normalize_fps(payload.fps)
     if "floor" in payload.model_fields_set:
         updates["floor"] = _normalize_floor(payload.floor)
-
-    if "space_id" in payload.model_fields_set or "label" in payload.model_fields_set:
-        mapping = _map_backend(
-        request.app,
-            camera_id=camera_id,
-            label=next_label,
-            space_id=next_space_id if isinstance(next_space_id, str) else None,
-        )
-        if mapping.backend_camera_id is not None:
-            updates["backend_camera_id"] = mapping.backend_camera_id
-        elif current.get("backend_camera_id") is None:
-            updates["backend_camera_id"] = None
-        updates["mapping_pending"] = mapping.pending
+    if "edge_ref" in payload.model_fields_set:
+        updates["edge_ref"] = payload.edge_ref
+    if "room_edge_ref" in payload.model_fields_set:
+        updates["room_edge_ref"] = payload.room_edge_ref
 
     try:
         updated = _store(request.app).update(camera_id, updates)
     except DuplicateCameraError as exc:
         raise _duplicate_camera_error(exc) from exc
+    except TopologyConflictError as error:
+        raise _topology_conflict(error) from error
     if updated is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="camera not found")
     background_tasks.add_task(_trigger_roster_sync, request.app)
@@ -415,6 +586,47 @@ def _duplicate_camera_error(exc: DuplicateCameraError) -> HTTPException:
             "existing_label": existing.get("label"),
         },
     )
+
+
+def _topology_conflict(error: TopologyConflictError) -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail={"code": error.code.value, "edge_ref": error.edge_ref},
+    )
+
+
+def _topology_response(snapshot: RegistryTopologySnapshot) -> dict[str, object]:
+    return {
+        "registry_version": snapshot.registry_version,
+        "dirty_registry_version": (
+            None if snapshot.dirty is None else snapshot.dirty.registry_version
+        ),
+        "readiness_error": snapshot.readiness_error,
+        "unmapped_camera_ids": list(snapshot.unmapped_camera_ids),
+        "floors": [_topology_floor_response(floor) for floor in snapshot.floors],
+    }
+
+
+def _topology_floor_response(floor: TopologyFloor) -> dict[str, object]:
+    return {
+        "edge_ref": floor.edge_ref,
+        "name": floor.name,
+        "order_index": floor.order_index,
+        "rooms": [_topology_room_response(room) for room in floor.rooms],
+    }
+
+
+def _topology_room_response(room: TopologyRoom) -> dict[str, object]:
+    return {
+        "edge_ref": room.edge_ref,
+        "name": room.name,
+        "room_type": room.room_type,
+        "capacity": room.capacity,
+        "legacy_canonical_space_id": room.legacy_canonical_space_id,
+        "cameras": [
+            {"edge_ref": camera.edge_ref, "label": camera.label} for camera in room.cameras
+        ],
+    }
 
 
 @router.delete("/{camera_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -455,7 +667,7 @@ def worker_config_snapshot(
     request: Request, *, require_available: bool = False
 ) -> dict[str, object]:
     snapshot = _store(request.app).snapshot()
-    facility_id = _facility_id()
+    facility_id = _facility_id(request.app)
     bed_zones = _bed_zone_store(request.app).get_all()
     cameras = []
     for record in _snapshot_camera_records(snapshot):
@@ -502,8 +714,7 @@ def worker_config_snapshot(
             response["night_window"] = live_pulled.night_window.as_dict()
         if live_pulled.detection_windows:
             response["detection_windows"] = {
-                domain: window.as_dict()
-                for domain, window in live_pulled.detection_windows.items()
+                domain: window.as_dict() for domain, window in live_pulled.detection_windows.items()
             }
     # Local overrides run unconditionally (not only when an external pull
     # exists): an operator can save detection settings or a clip storage
@@ -659,41 +870,12 @@ def _live_pulled_config(request: Request, pulled: PulledWorkerConfig) -> PulledW
         detection_windows=pulled.detection_windows,
     )
 
-def retry_pending_backend_mappings(app: FastAPI) -> int:
-    """Resolve explicit backend mappings for registry records still pending.
-
-    Called by the roster-refresh owner after a successful backend pull so a
-    camera created/edited while the backend was unreachable (or before the
-    facility token was wired) converges to its canonical backend identity.
-    """
-    store = _store(app)
-    retried = 0
-    for record in _snapshot_camera_records(store.snapshot()):
-        if not record.get("mapping_pending"):
-            continue
-        space_id = record.get("space_id")
-        label = record.get("label")
-        camera_id = record.get("id")
-        if not isinstance(space_id, str) or not space_id.strip():
-            continue
-        if not isinstance(label, str) or not label.strip():
-            continue
-        if not isinstance(camera_id, str) or not camera_id.strip():
-            continue
-        mapping = _map_backend(app, camera_id=camera_id, label=label, space_id=space_id)
-        if mapping.backend_camera_id is None:
-            continue
-        store.update(
-            camera_id,
-            {"backend_camera_id": mapping.backend_camera_id, "mapping_pending": mapping.pending},
-        )
-        retried += 1
-    return retried
-
-
 
 def _public_snapshot(
-    app: FastAPI, snapshot: dict[str, object], pulled: object, heartbeats: object = None
+    app: FastAPI,
+    snapshot: CameraRegistryData | dict[str, object],
+    pulled: object,
+    heartbeats: object = None,
 ) -> dict[str, object]:
     records = _snapshot_camera_records(snapshot)
     bed_zones = _bed_zone_store(app).get_all()
@@ -764,9 +946,7 @@ def _public_snapshot(
         # because of which id happened to be recorded under.
         candidate_ids: tuple[str, ...] = tuple(
             dict.fromkeys(
-                candidate
-                for candidate in (canonical_id, local_id)
-                if isinstance(candidate, str)
+                candidate for candidate in (canonical_id, local_id) if isinstance(candidate, str)
             )
         )
         camera["status"], camera["last_heartbeat_at"], camera["heartbeat_age_sec"] = (
@@ -872,7 +1052,9 @@ def _heartbeat_camera_fields(
     )
 
 
-def _snapshot_camera_records(snapshot: dict[str, object]) -> list[dict[str, object]]:
+def _snapshot_camera_records(
+    snapshot: CameraRegistryData | dict[str, object],
+) -> list[dict[str, object]]:
     cameras = snapshot.get("cameras")
     if not isinstance(cameras, list):
         return []
@@ -906,29 +1088,6 @@ def _lookup_bed_zone(
         if isinstance(candidate, str) and candidate in bed_zones:
             return bed_zones[candidate]
     return None
-
-
-def _mapper(app: FastAPI) -> BackendCameraMapper:
-    mapper = getattr(app.state, "backend_camera_mapper", None)
-    if not isinstance(mapper, BackendCameraMapper):
-        mapper = BackendCameraMapper.from_env()
-        app.state.backend_camera_mapper = mapper
-    return mapper
-
-
-def _map_backend(
-    app: FastAPI,
-    *,
-    camera_id: str,
-    label: str,
-    space_id: str | None,
-) -> MappingResult:
-    mapper = _mapper(app)
-    if space_id is None:
-        return MappingResult(backend_camera_id=None, pending=False, reachable=None)
-    result = mapper.put_mapping(edge_camera_ref=camera_id, label=label, space_id=space_id)
-    mark_backend_status(app.state, result.reachable)
-    return result
 
 
 def _authorize(request: Request, relay_token: str | None, authorization: str | None) -> None:
@@ -968,8 +1127,15 @@ def _bearer_token(value: str | None) -> str | None:
     return token or None
 
 
-def _facility_id() -> str:
-    return os.environ.get(API_FACILITY_ID_ENV, "local-facility").strip() or "local-facility"
+def _facility_id(app: FastAPI) -> str:
+    bundle = backend_client_bundle(app)
+    if bundle is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="backend enrollment is required",
+        )
+    return bundle.facility_id
+
 
 def _default_camera_fps() -> float | None:
     """Facility-wide processed FPS for live camera streams (worker default 5.0).
@@ -1178,4 +1344,4 @@ def _probe_response(probe: ProbeResult) -> dict[str, object]:
     return response
 
 
-__all__ = ["retry_pending_backend_mappings", "router", "worker_config_snapshot"]
+__all__ = ["router", "worker_config_snapshot"]

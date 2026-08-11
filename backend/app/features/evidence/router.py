@@ -16,6 +16,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from backend.app.features.clips.store import CLIP_STORE_DIR_ENV, DEFAULT_CLIP_STORE_DIR
 from backend.app.features.relay.router import RELAY_TOKEN_HEADER, _authorize, _camera_binding
+from backend.app.shared.backend_client_bundle import backend_client_bundle
 from shared.events.evidence_export_contract import (
     BackendCapabilities,
     ClipReceipt,
@@ -264,7 +265,12 @@ def _enabled(request: Request) -> bool:
 
 
 def _backend_client(request: Request, camera_id: str) -> BackendEvidenceClient:
-    client = getattr(request.app.state, "backend_evidence_client", None)
+    bundle = backend_client_bundle(request.app)
+    client = (
+        bundle.evidence_client
+        if bundle is not None
+        else getattr(request.app.state, "backend_evidence_client", None)
+    )
     if client is None:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,

@@ -2,6 +2,14 @@
 
 FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim
 
+ARG SOURCE_REVISION=0000000000000000000000000000000000000000
+RUN if [ "${#SOURCE_REVISION}" -ne 40 ] || printf '%s' "$SOURCE_REVISION" | grep -Eq '[^0123456789abcdef]'; then \
+      printf '%s\n' 'SOURCE_REVISION must be exactly 40 lowercase hexadecimal characters' >&2; \
+      exit 1; \
+    fi
+LABEL org.opencontainers.image.revision="${SOURCE_REVISION}" \
+      org.opencontainers.image.source="SeniorAILab/eldercare-fall-ml-v2"
+
 ENV UV_LINK_MODE=copy \
     UV_PYTHON_DOWNLOADS=never \
     PYTHONDONTWRITEBYTECODE=1 \

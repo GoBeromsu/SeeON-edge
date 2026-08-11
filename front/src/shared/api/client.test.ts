@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { bedZoneRecognitionFailureDetail, browseClipStorage, cameraDuplicateDetail, cameraProbeFailureDetail, createCamera, fetchCameraOverlay, fetchCameras, fetchClips, fetchClipStorage, fetchDetectionSettings, fetchStatus, fetchSystem, getApiBase, getCameraSnapshotUrl, getCameraStreamUrl, loginDashboard, logoutDashboard, recognizeBedZone, saveClipStorageLocation, saveDetectionSettings, setCameraOverlay, testCamera, updateCamera, updateCameraDecodeBackend } from '@/shared/api/client';
+import { bedZoneRecognitionFailureDetail, browseClipStorage, cameraDuplicateDetail, cameraProbeFailureDetail, createCamera, fetchCameraOverlay, fetchCameras, fetchClips, fetchClipStorage, fetchDetectionSettings, fetchStatus, fetchSystem, getApiBase, getCameraSnapshotUrl, getCameraStreamUrl, loginDashboard, logoutDashboard, recognizeBedZone, saveClipStorageLocation, saveConnection, saveDetectionSettings, setCameraOverlay, testCamera, testConnection, updateCamera, updateCameraDecodeBackend } from '@/shared/api/client';
 import { HttpError } from '@/shared/api/http';
 import type { DetectionSettings } from '@/shared/api/client';
 
@@ -76,6 +76,29 @@ describe('api client contracts', () => {
       method: 'PATCH',
       body: JSON.stringify({ label: '301호 A', rtsp_url: 'rtsp://camera/a' }),
     }));
+  });
+
+  it('serializes enrollment as exactly code, token, and stable installation reference', async () => {
+    const connection = {
+      events_url: 'https://api.example/events', config_url: 'https://api.example/config',
+      facility_code: 'NH-7H2K9M4QXP', client_installation_ref: 'aa83ea3f-6e5f-4f45-a401-fb36c38835b6',
+      facility_id: 'facility-42', edge_installation_id: 'c72bd9a7-3e04-47ba-a8cd-a56e54f98152',
+      enrollment_generation: 3, facility_token_set: true, facility_token_masked: '****ab12', enrolled: true,
+      configured: true, reachable: true, last_ok_at: null, updated_at: null,
+      heartbeat_relay: { enabled: false, last_success_at: null, last_error_class: null, detail: null },
+    };
+    const verified = { ok: true, error_class: null, detail: 'ok', facility_id: 'facility-42', edge_installation_id: connection.edge_installation_id, enrollment_generation: 3 };
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce({ ok: true, status: 200, json: async () => connection })
+      .mockResolvedValueOnce({ ok: true, status: 200, json: async () => verified });
+    vi.stubGlobal('fetch', fetchMock);
+    const input = { facility_code: 'NH-7H2K9M4QXP', facility_token: 'opaque-secret', client_installation_ref: connection.client_installation_ref };
+
+    await saveConnection(input);
+    await testConnection(input);
+
+    expect(fetchMock).toHaveBeenNthCalledWith(1, '/api/v1/connection', expect.objectContaining({ method: 'PUT', body: JSON.stringify(input) }));
+    expect(fetchMock).toHaveBeenNthCalledWith(2, '/api/v1/connection/test', expect.objectContaining({ method: 'POST', body: JSON.stringify(input) }));
   });
 
   it.each([

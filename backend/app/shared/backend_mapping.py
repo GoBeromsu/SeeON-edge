@@ -1,26 +1,5 @@
 """Best-effort backend edge-camera mapping client.
 
-G002 note: unlike the Event API ingest clients in ``backend/app/lifespan.py``,
-this module's env readers (``backend_status_from_env``,
-``_mapping_endpoint_from_env``, ``BackendCameraMapper.from_env``) still read
-raw process env, not ``ConnectionSettingsStore``. The mapping endpoint has its
-own override chain (``API_BACKEND_EDGE_CAMERAS_URL``, ``API_BACKEND_URL``,
-falling back to deriving from ``API_BACKEND_EVENTS_URL``) that
-``ConnectionSettingsStore`` does not model (it only tracks a single
-``events_url``), so routing this through the store would either drop those
-overrides or require inventing new store fields -- left for a follow-up if
-runtime-relinking the camera-mapping endpoint is ever needed.
-
-G004 note: ``BackendCameraMapper.put_roster`` (roster sync, used by
-``features/cameras/roster_sync.py``) is the one caller that DOES route
-endpoint/token through ``ConnectionSettingsStore`` effective settings,
-constructing its own ``BackendCameraMapper`` instance via
-``derive_edge_cameras_endpoint(store_settings.events_url)`` rather than
-``BackendCameraMapper.from_env()`` -- see roster_sync.py's ``_build_mapper``.
-That path only recognizes ``EDGE_FACILITY_TOKEN`` (the store's single
-fallback), not the three legacy token aliases below; see
-``docs/decisions/0004-camera-roster-sync-contract-assumptions.md``.
-
 ``PUT /v1/edge/cameras`` (the ``EdgeCamerasController.upsert`` handler on the
 fall-ai backend) takes exactly ONE ``EdgeCameraMappingRequestDto`` per call --
 ``{edge_camera_ref, label, spaceId}``, all three required (see the ADR) -- not
@@ -38,19 +17,20 @@ import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Literal
+from typing import Literal, Protocol
 
 RosterErrorClass = Literal["unreachable", "timeout", "auth", "unconfigured"]
+
+
+class BackendStatusState(Protocol):
+    backend_reachable: bool | None
+    backend_last_ok_at: str | None
+
 
 API_BACKEND_EDGE_CAMERAS_URL_ENV = "API_BACKEND_EDGE_CAMERAS_URL"
 API_BACKEND_URL_ENV = "API_BACKEND_URL"
 API_BACKEND_EVENTS_URL_ENV = "API_BACKEND_EVENTS_URL"
 API_BACKEND_CAMERA_MAPPING_TIMEOUT_SEC_ENV = "API_BACKEND_CAMERA_MAPPING_TIMEOUT_SEC"
-EDGE_FACILITY_TOKEN_ENV = "EDGE_FACILITY_TOKEN"
-API_FACILITY_TOKEN_ENV = "API_FACILITY_TOKEN"
-API_BACKEND_FACILITY_TOKEN_ENV = "API_BACKEND_FACILITY_TOKEN"
-API_EDGE_FACILITY_TOKEN_ENV = "API_EDGE_FACILITY_TOKEN"
-API_FACILITY_ID_ENV = "API_FACILITY_ID"
 
 
 @dataclass(frozen=True, slots=True)
@@ -108,8 +88,7 @@ class BackendCameraMapper:
     def from_env(cls) -> BackendCameraMapper:
         return cls(
             endpoint=_mapping_endpoint_from_env(),
-            token=_facility_token_from_env(),
-            facility_id=os.environ.get(API_FACILITY_ID_ENV),
+            token=None,
             timeout_sec=_timeout_sec(),
         )
 
@@ -125,6 +104,8 @@ class BackendCameraMapper:
         shared by ``put_mapping`` and ``push_camera`` so both send an
         identical request shape.
         """
+        assert self.endpoint is not None
+        assert self.token is not None
         payload = {
             "edge_camera_ref": edge_camera_ref,
             "label": label,
@@ -234,7 +215,7 @@ def backend_status_from_env() -> dict[str, object]:
     return {"configured": configured, "reachable": None, "last_ok_at": None}
 
 
-def mark_backend_status(state: object, reachable: bool | None) -> None:
+def mark_backend_status(state: BackendStatusState, reachable: bool | None) -> None:
     state.backend_reachable = reachable
     if reachable:
         state.backend_last_ok_at = _utc_now()
@@ -264,22 +245,6 @@ def derive_edge_cameras_endpoint(events_url: str | None) -> str | None:
     parsed = urllib.parse.urlsplit(cleaned)
     origin = urllib.parse.urlunsplit(parsed._replace(path="", query="", fragment=""))
     return f'{origin.rstrip("/")}/api/v1/edge/cameras'
-
-
-def _facility_token_from_env() -> str | None:
-    for name in (
-        # Canonical name shared with the ingest client (api/lifespan.py) and
-        # compose.edge.yaml; the same value is copied verbatim across the edge
-        # and host env files. Legacy aliases below are kept for compatibility.
-        EDGE_FACILITY_TOKEN_ENV,
-        API_FACILITY_TOKEN_ENV,
-        API_BACKEND_FACILITY_TOKEN_ENV,
-        API_EDGE_FACILITY_TOKEN_ENV,
-    ):
-        token = _clean(os.environ.get(name))
-        if token is not None:
-            return token
-    return None
 
 
 def _camera_id_from_response(value: object) -> str | None:

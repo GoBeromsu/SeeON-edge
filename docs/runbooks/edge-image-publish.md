@@ -1,117 +1,105 @@
-# 엣지 이미지 발행과 digest 확인
+# Publish sealed edge images
 
-파일럿 런칭 당일 절차의 일부다. 제품 저장소(`eldercare-fall-ai`)의
-`docs/rules/pilot-launch-runbook.md` 2.5단계가 이 문서를 가리킨다.
+This procedure publishes the ML release candidate only after the backward-
+compatible AI release is healthy. It does not enroll a facility, edit topology,
+or infer identity from environment variables.
 
-**이 저장소가 GHCR 네임스페이스와 워커 이미지를 소유하므로 구체적인
-이미지 참조는 여기에만 둔다.** 제품 저장소는 ML 이미지 네임스페이스를
-문자열로 갖지 않는다(`eldercare-fall-ai/scripts/repo-residue-check.mjs`가
-검사한다).
+## Gate
 
-## `main` 병합 뒤에 생기는 것
+Before a workflow or updater command:
 
-`.env.edge.prod`의 `ML_API_IMAGE` / `ML_WORKER_IMAGE`는 GHCR에 **이미 올라가
-있는** 이미지를 가리킨다. 그 이미지를 만드는 워크플로
-(`.github/workflows/edge-images.yml`)는 `release: published`, `main` push,
-`workflow_dispatch`에서 실행된다.
+1. Rehash the approved plan and compare it with the dual-review draft.
+2. Verify the independently recorded SHA-256 of `final-rc-seal.json`, then require
+   its exact repository identity, commit tree, ML Git SHA, image IDs, platforms,
+   and digest-pinned ML API/worker images with matching OCI provenance labels.
+3. Confirm the task worktree is clean and at the sealed SHA.
+4. Run all ML gates, both Docker builds, all five operational fixtures, review,
+   security review, and the integration harness against that exact SHA.
+5. If source changes, discard the seal and repeat the complete process.
 
-즉 PR이 `main`에 병합되면 워크플로가 자동으로 `ml-api`와 `ml-worker`를
-빌드하고 GHCR에 올린다. `ml-api` 이미지에는 프런트엔드도 함께 들어간다.
-배포에 쓸 값은 태그가 아니라 그 실행이 남긴 digest-pinned artifact에서
-가져온다.
+The workflow artifact name is `edge-ml-image-refs-<sealed-sha>`. Its two values
+must use `@sha256:` and must match locally built image digests recorded in the
+seal. Never substitute `latest`, `dev`, a branch, or a hand-written digest.
 
-클라우드(`eldercare-fall-ai`)는 사정이 다르다. 릴리스 발행이 Jenkins를
-깨우고 Jenkins가 `Jenkinsfile`에서 backend/front 이미지를 직접 빌드한다.
-`workflow_dispatch`는 특정 tag, branch, SHA를 다시 빌드해야 할 때만 쓴다.
+## Host preflight
 
-## 절차
+The only approved edge alias is `happy-nursing-home-raw`. SSH uses
+`StrictHostKeyChecking=yes`, `CheckHostIP=yes`, `IdentitiesOnly=yes`, and a
+dedicated pinned `UserKnownHostsFile`. Reject JNU signatures.
 
-병합 뒤에는 해당 `main` push 실행이 성공할 때까지 기다린다. 아래 명령은
-현재 `main`의 SHA로 실행을 고르므로, 뒤이어 다른 병합이 있어도 엉뚱한
-artifact를 받지 않는다.
+The first authorized preflight records only SHA-256 of `/etc/machine-id`.
+Subsequent preflights require an exact match. Also require:
 
-```bash
-set -eu
-REPO=SeniorAILab/eldercare-fall-ml-v2
-MAIN_SHA=$(gh api "repos/$REPO/commits/main" --jq .sha)
-RUN=$(gh run list --repo "$REPO" --workflow edge-images.yml \
-      --commit "$MAIN_SHA" --limit 1 --json databaseId --jq '.[0].databaseId')
-test -n "$RUN"
-echo "run=$RUN"
-gh run watch "$RUN" --repo "$REPO"
+- edge deployment lock available and `edge-updater` idle
+- clip-store free capacity at least 20 GiB
+- existing API/worker state volumes healthy
+- durable relay, evidence, and topology queues drained
+- WAL-safe mode-0600 SQLite backups with integrity and fsync receipts
+- current and previous API/worker image digests retained
+- no facility ID or token in Compose/container environment
+
+Run the local fixture before using a host:
+
+```sh
+sh scripts/ops/cloud-enrollment-smoke.sh --fixture --dry-run
 ```
 
-GitHub가 실행을 목록에 반영하기 전에는 `RUN`이 비어 있을 수 있다. 그때는
-몇 초 기다린 뒤 같은 조회 명령부터 다시 실행한다. 실행이 실패하면 artifact를
-사용하지 말고 실행 로그의 실패 단계를 해결한다.
+## Publish and deploy
 
-**값을 손으로 만들지 않는다.** 워크플로 마지막 단계
-(`Write edge image env artifact`)가 `ML_API_IMAGE` / `ML_WORKER_IMAGE`
-두 줄을 **digest로 고정해** 그대로 찍어 준다. 실행 요약 화면에 `dotenv`
-블록으로 보이므로 복사해서 `.env.edge.prod`에 붙인다.
+Builds are:
 
-```bash
-# 실행 요약(웹)에서 바로 복사하거나, 현재 main SHA에 정확히 대응하는
-# 이름의 artifact 하나만 받는다.
-set -eu
-REPO=SeniorAILab/eldercare-fall-ml-v2
-MAIN_SHA=$(gh api "repos/$REPO/commits/main" --jq .sha)
-RUN=${RUN:-$(gh run list --repo "$REPO" --workflow edge-images.yml \
-       --commit "$MAIN_SHA" --limit 1 --json databaseId --jq '.[0].databaseId')}
-test -n "$RUN"
-
-# artifact name is derived by edge-images.yml from the resolved deploy SHA.
-ARTIFACT="edge-ml-image-refs-$MAIN_SHA"
-rm -rf /tmp/edge-refs
-gh run download "$RUN" --repo "$REPO" --name "$ARTIFACT" --dir /tmp/edge-refs
-cat /tmp/edge-refs/edge-ml-image-refs.env
+```sh
+docker build -f Dockerfile.backend --build-arg "SOURCE_REVISION=$SEALED_ML_SHA" \
+  -t "local/ml-api:$SEALED_ML_SHA" .
+docker build --platform linux/amd64 -f Dockerfile.edge \
+  --build-arg "SOURCE_REVISION=$SEALED_ML_SHA" \
+  -t "local/ml-worker:$SEALED_ML_SHA" .
 ```
 
-받은 두 줄은 **태그가 아니라 `@sha256:` digest**다.
+Publish only through `.github/workflows/edge-images.yml` for the sealed SHA.
+Download the exact-SHA artifact and compare both digests with the seal before
+updating the deployment receipt.
 
-> **digest로 붙이는 편이 낫다.** 태그는 나중에 같은 이름으로 다른 이미지를
-> 가리킬 수 있지만 digest는 고정이다. 엣지가 어떤 바이너리를 돌렸는지
-> 나중에 다투지 않아도 된다. `.env.edge.prod.example`도 digest 형태를
-> 예시로 든다.
->
-> `compose.edge.yaml`이 digest 형식을 그대로 받는 것을 확인했다 —
-> 가짜 digest로 `docker compose config`를 돌려 해석되는 것을 봤다.
+The host updater owns image replacement. It must run under the deployment lock,
+preserve volumes, and reject a concurrent updater. Do not run `docker compose
+down -v`, edit Python on the host, or place enrollment identity in the env file.
 
-## GHCR 권한 오류
-
-푸시 대상 네임스페이스는 GitHub상 **구 저장소**(`eldercare-fall-ml`)에
-연결돼 있는데, 워크플로는 이 저장소(`eldercare-fall-ml-v2`)에서 돈다.
-GHCR은 다른 저장소에 연결된 패키지로의 푸시를 기본적으로 막으므로
-`denied` 계열 오류가 날 수 있다.
-
-막히면 둘 중 하나다.
-
-- 패키지 설정에서 `eldercare-fall-ml-v2`에 write 권한을 준다
-  (GitHub → Packages → 해당 패키지 → Manage Actions access → 저장소 추가)
-- 또는 `edge-images.yml`의 `IMAGE_NAMESPACE`를 이 저장소가 소유하는
-  이름으로 바꿔 다시 돌린다
-
-**막혔다고 예전 이미지로 그냥 진행하지 않는다.** GHCR의 기존 이미지에는
-`_normalize_api_base`(heartbeat URL의 `/api` prefix 보정)가 없다. 그대로
-띄우면 엣지가 `{base}/v1/events/...`로 쏘고 클라우드는 모든 라우트를
-`/api` 아래 두므로 404가 나는데, 엣지는 그것을 조용한 실패로 넘겨
-**카메라가 계속 online으로 보인다.** 증상만 보고는 원인을 못 찾는다.
-
-## pull 권한
-
-엣지 기기에서 한 번도 pull한 적이 없으면 `read:packages` 권한 토큰으로
-로그인한다(`.env.edge.prod.example`이 같은 안내를 한다).
-
-```bash
-docker login ghcr.io
+```sh
+export EDGE_PROVISIONING_KNOWN_HOSTS=/secure/pointers/happy-known-hosts
+export EDGE_PROVISIONING_KNOWN_HOST_FINGERPRINT='<independently recorded SHA256 fingerprint>'
+export EDGE_PROVISIONING_MACHINE_BASELINE="$EVIDENCE/happy-machine-id.sha256"
+export EDGE_PROVISIONING_EDGE_READBACK="$EVIDENCE/edge-preflight-readback.json"
+export EDGE_PROVISIONING_EDGE_READBACK_SHA256='<independently recorded receipt digest>'
+sh scripts/ops/cloud-enrollment-smoke.sh \
+  --host happy-nursing-home-raw --deploy --restart-check
 ```
 
-기동 시 `manifest unknown`이나 `denied`가 나면 십중팔구 이 로그인 또는
-위 이미지 참조 문제다.
+The wrapper verifies independently anchored plan, seal, host-key, and execution
+receipt bytes before invoking the updater. After both services restart it parses
+the actual `/api/v1/status` and `/api/v1/system` schemas, verifies running image
+references, scans rendered Compose for facility identity residue, and revalidates
+the complete post-restart state. Enrollment then occurs through local versioned
+connection APIs, never through env mutation.
 
-## 진행 조건
+## Runtime enrollment and topology
 
-워크플로 성공, 그리고 `.env.edge.prod`의 두 줄이 그 실행이 찍어 준
-digest와 **글자 그대로 같음**. 옮겨 적지 말고 복사한다. 배포 순서나
-one-off 데이터 작업이 필요한 변경은
-[`event-thumbnail-rollout.md`](event-thumbnail-rollout.md)를 따른다.
+The technician enters only facility code and one-time token. The local API
+sequence is:
+
+1. `PUT /api/v1/connection`
+2. `POST /api/v1/connection/test`
+3. restart and `GET /api/v1/connection`
+4. `POST /api/v1/connection/sync-cameras`
+5. `GET /api/v1/connection/topology-preview`
+6. explicit `POST /api/v1/connection/topology-preview/confirm` only when the
+   approved omission digest is exact
+
+The cloud verification endpoint is `/api/v1/edge/enrollments/verify`. Canonical
+facility identity, installation ID, and enrollment generation come from its
+response and persist in SQLite. Complete topology comes from the camera registry.
+
+## Stop conditions
+
+Stop before mutation on any plan, SHA, digest, host key, hostname, machine ID,
+lock, concurrency, capacity, volume, queue, backup, schema, or scope mismatch.
+Do not continue with an old image or alternate host when publication fails.

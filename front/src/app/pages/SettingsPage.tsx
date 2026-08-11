@@ -10,6 +10,7 @@ import {
 import { CameraSection } from '@/features/settings/CameraSection';
 import { DetectionSettingsCard } from '@/features/settings/DetectionSettingsCard';
 import { ConnectionSettingsPanel } from '@/features/connection/ConnectionSettingsPanel';
+import { TopologyEditor } from '@/features/cameras/TopologyEditor';
 import { ProcessingStatusCard } from '@/features/settings/ProcessingStatusCard';
 import { ClipStorageCard } from '@/features/settings/ClipStorageCard';
 
@@ -36,6 +37,7 @@ export function SettingsPage(): JSX.Element {
         <div className="flex flex-col gap-5 lg:col-span-5">
           <DetectionSettingsCard resource={detectionResource} />
           <ConnectionSettingsPanel resource={connectionResource} />
+          <TopologyEditor camerasResource={camerasResource} />
           <ProcessingStatusCard resource={statusResource} />
           <ClipStorageCard resource={clipStorageResource} />
         </div>

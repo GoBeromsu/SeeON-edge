@@ -24,8 +24,6 @@ API_AUDIT_LOG_ENV = "API_AUDIT_LOG"
 API_AUDIT_LOG_MAX_BYTES_ENV = "API_AUDIT_LOG_MAX_BYTES"
 API_AUDIT_ARCHIVE_RETENTION_DAYS_ENV = "API_AUDIT_ARCHIVE_RETENTION_DAYS"
 API_BACKEND_CLIP_EVENTS_URL_ENV = "API_BACKEND_CLIP_EVENTS_URL"
-API_BACKEND_FACILITY_TOKEN_ENV = "API_BACKEND_FACILITY_TOKEN"
-API_FACILITY_TOKEN_ENV = "API_FACILITY_TOKEN"
 DEFAULT_BACKEND_TIMEOUT_SEC = 0.5
 
 # Rotate the live audit.jsonl once it passes this size so a single file never
@@ -85,7 +83,14 @@ class AuditLogStore:
         root = Path(label_root) if label_root else default_label_store_dir()
         return cls(root / "audit.jsonl")
 
-    def append(self, *, actor: str, action: str, clip_id: str) -> dict[str, object]:
+    def append(
+        self,
+        *,
+        actor: str,
+        action: str,
+        clip_id: str,
+        backend_token: str | None = None,
+    ) -> dict[str, object]:
         """Record ``entry``, best-effort.
 
         A read action (``list``, ``audit-view``) must not 500 just because
@@ -113,7 +118,7 @@ class AuditLogStore:
                 handle.write(json.dumps(entry, ensure_ascii=False, separators=(",", ":")) + "\n")
         except OSError as exc:
             logger.warning("clip audit log unavailable at %s: %s", self.path, exc)
-        post_backend_backup("clip_audit", entry)
+        post_backend_backup("clip_audit", entry, backend_token=backend_token)
         return entry
 
     def _rotate_if_needed(self) -> None:
@@ -181,9 +186,11 @@ def utc_now_iso() -> str:
     return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
 
-def post_backend_backup(event_type: str, payload: dict[str, Any]) -> bool:
+def post_backend_backup(
+    event_type: str, payload: dict[str, Any], *, backend_token: str | None = None
+) -> bool:
     url = os.environ.get(API_BACKEND_CLIP_EVENTS_URL_ENV)
-    if not url:
+    if not url or backend_token is None:
         return False
     envelope = {"type": event_type, "payload": payload}
     body = json.dumps(envelope, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
@@ -193,9 +200,7 @@ def post_backend_backup(event_type: str, payload: dict[str, Any]) -> bool:
         headers={"Content-Type": "application/json"},
         method="POST",
     )
-    token = os.environ.get(API_BACKEND_FACILITY_TOKEN_ENV) or os.environ.get(API_FACILITY_TOKEN_ENV)
-    if token:
-        request.add_header("Authorization", f"Bearer {token}")
+    request.add_header("Authorization", f"Bearer {backend_token}")
     try:
         with urllib.request.urlopen(request, timeout=DEFAULT_BACKEND_TIMEOUT_SEC) as response:
             status = int(getattr(response, "status", 200))

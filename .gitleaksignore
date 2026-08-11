@@ -1,0 +1,23 @@
+# Byte-frozen, provenance-pinned edge provisioning contract fixtures.
+# These exact synthetic token identifiers and idempotency keys must retain the
+# upstream canonical digest; no path, rule, or pattern-wide exclusion is used.
+/repo/contracts/edge-provisioning-v1/contract-fixtures.json:generic-api-key:21
+/repo/contracts/edge-provisioning-v1/contract-fixtures.json:generic-api-key:37
+/repo/contracts/edge-provisioning-v1/contract-fixtures.json:generic-api-key:64
+/repo/contracts/edge-provisioning-v1/contract-fixtures.json:generic-api-key:85
+/repo/contracts/edge-provisioning-v1/contract-fixtures.json:generic-api-key:88
+/repo/contracts/edge-provisioning-v1/contract-fixtures.json:generic-api-key:101
+/repo/contracts/edge-provisioning-v1/contract-fixtures.json:generic-api-key:110
+/repo/contracts/edge-provisioning-v1/contract-fixtures.json:generic-api-key:129
+/repo/contracts/edge-provisioning-v1/contract-fixtures.json:generic-api-key:132
+/repo/contracts/edge-provisioning-v1/contract-fixtures.json:generic-api-key:143
+/repo/contracts/edge-provisioning-v1/contract-fixtures.json:generic-api-key:158
+/repo/contracts/edge-provisioning-v1/contract-fixtures.json:generic-api-key:183
+/repo/contracts/edge-provisioning-v1/contract-fixtures.json:generic-api-key:203
+/repo/contracts/edge-provisioning-v1/contract-fixtures.json:generic-api-key:210
+/repo/contracts/edge-provisioning-v1/contract-fixtures.json:generic-api-key:223
+/repo/contracts/edge-provisioning-v1/contract-fixtures.json:generic-api-key:225
+/repo/contracts/edge-provisioning-v1/contract-fixtures.json:generic-api-key:231
+/repo/contracts/edge-provisioning-v1/contract-fixtures.json:generic-api-key:236
+/repo/contracts/edge-provisioning-v1/contract-fixtures.json:generic-api-key:255
+/repo/contracts/edge-provisioning-v1/contract-fixtures.json:generic-api-key:321

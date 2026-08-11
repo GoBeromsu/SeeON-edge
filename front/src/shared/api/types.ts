@@ -45,6 +45,8 @@ export type Camera = {
   heartbeat_age_sec?: number | null;
   /** Auto-recognized bed area, or null when recognition has never succeeded ("인식 필요" in the UI). */
   bed_zone?: BedZone | null;
+  edge_ref?: string | null;
+  room_edge_ref?: string | null;
 };
 
 export type CameraRegistry = {
@@ -148,6 +150,8 @@ export type CameraInput = {
    * 등록됐는데 클라우드 현황판에는 영영 나타나지 않는다.
    */
   space_id?: string;
+  edge_ref?: string;
+  room_edge_ref?: string;
 };
 
 /**
@@ -227,9 +231,14 @@ export type HeartbeatRelayStatus = {
 export type ConnectionView = {
   events_url: string | null;
   config_url: string | null;
+  facility_code: string | null;
+  client_installation_ref: string | null;
   facility_id: string | null;
+  edge_installation_id: string | null;
+  enrollment_generation: number | null;
   facility_token_set: boolean;
   facility_token_masked: string | null;
+  enrolled: boolean;
   configured: boolean;
   reachable: boolean | null;
   last_ok_at: string | null;
@@ -242,21 +251,21 @@ export type ConnectionView = {
   heartbeat_relay?: HeartbeatRelayStatus;
 };
 
-/** Partial update body: an omitted field is left untouched; an explicit `null` clears it. */
 export type ConnectionInput = {
-  events_url?: string | null;
-  config_url?: string | null;
-  facility_id?: string | null;
-  facility_token?: string | null;
+  facility_code: string;
+  facility_token: string;
+  client_installation_ref: string;
 };
 
-export type ConnectionErrorClass = 'unconfigured' | 'invalid_url' | 'unreachable' | 'timeout' | 'auth';
+export type ConnectionErrorClass = 'unreachable' | 'timeout' | 'auth' | 'conflict' | 'invalid_response';
 
 export type ConnectionTestResult = {
   ok: boolean;
   error_class: ConnectionErrorClass | null;
   detail: string;
-  probed_url: string | null;
+  facility_id: string | null;
+  edge_installation_id: string | null;
+  enrollment_generation: number | null;
 };
 
 /** GET/PUT /detection-settings domain keys — global, applied to every camera. */

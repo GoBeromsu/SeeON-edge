@@ -45,7 +45,7 @@ class RelayFailureClass(StrEnum):
 
 _CLIENT_ERROR_HINTS: Final[dict[int, str]] = {
     401: "check relay token",
-    403: "check API_FACILITY_ID / auth",
+    403: "check runtime enrollment / auth",
 }
 _DEFAULT_CLIENT_HINT: Final = "check worker relay config"
 _DEFAULT_SERVER_HINT: Final = "upstream relay is down; will keep retrying"

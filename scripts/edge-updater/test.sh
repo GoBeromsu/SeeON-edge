@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+ROOT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd)
 UPDATER=$ROOT_DIR/scripts/edge-updater/update-edge.sh
 TMP_ROOT=${TMPDIR:-/tmp}/edge-updater-test.$$
 MOCK_BIN=$TMP_ROOT/bin
@@ -114,7 +114,15 @@ case "$last_arg" in
     exit 0
     ;;
   */api/v1/status)
-    printf '{"cameras":{"cam-edge-01":{"status":"online"}}}'
+    up_count=0
+    if [ -f "$TEST_STATE/up_count" ]; then
+      up_count=$(cat "$TEST_STATE/up_count")
+    fi
+    if [ "${TEST_SCENARIO:-success}" = "bad_status" ] && [ "$up_count" -lt 2 ]; then
+      printf '{"cameras":{"cam-edge-01":{"status":"online"}}}'
+    else
+      printf '{"cameras":{"cam-edge-01":{"status":"online"}},"stale_after_sec":90.0,"runtime":{}}'
+    fi
     exit 0
     ;;
   */api/v1/system)
@@ -124,7 +132,7 @@ case "$last_arg" in
     fi
     if [ "${TEST_SCENARIO:-success}" = "rollback" ] && [ "$up_count" -lt 2 ]; then
       printf '{"version":"test-version","image_digests":{"ml_api":"sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee","ml_worker":"sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"},"backend":{"configured":false,"reachable":null,"last_ok_at":null},"storage":{"clip_store":{"total_bytes":null,"used_bytes":null,"used_pct":null}},"updated_at":"2026-07-07T00:00:00Z"}'
-    elif [ "${TEST_SCENARIO:-success}" = "rollback" ]; then
+    elif [ "${TEST_SCENARIO:-success}" = "rollback" ] || [ "${TEST_SCENARIO:-success}" = "bad_status" ]; then
       printf '{"version":"test-version","image_digests":{"ml_api":"%s","ml_worker":"%s"},"backend":{"configured":false,"reachable":null,"last_ok_at":null},"storage":{"clip_store":{"total_bytes":null,"used_bytes":null,"used_pct":null}},"updated_at":"2026-07-07T00:00:00Z"}' "$API_OLD" "$WORKER_OLD"
     else
       printf '{"version":"test-version","image_digests":{"ml_api":"%s","ml_worker":"%s"},"backend":{"configured":false,"reachable":null,"last_ok_at":null},"storage":{"clip_store":{"total_bytes":null,"used_bytes":null,"used_pct":null}},"updated_at":"2026-07-07T00:00:00Z"}' "$API_NEW" "$WORKER_NEW"
@@ -222,10 +230,37 @@ run_rollback_case() {
   assert_contains "$case_dir/.env.edge.prod" "ML_WORKER_IMAGE=ghcr.io/acme/ml-worker@$WORKER_OLD" 'worker rollback digest'
 }
 
+run_status_schema_case() {
+  case_dir=$TMP_ROOT/bad-status
+  data_dir=$case_dir/data
+  write_case_files "$case_dir"
+  mkdir -p "$data_dir"
+  : >"$STATE_DIR/docker.log"
+  rm -f "$STATE_DIR/up_count" "$STATE_DIR/report.log"
+  set +e
+  TEST_STATE=$STATE_DIR \
+  TEST_SCENARIO=bad_status \
+  API_OLD=$API_OLD API_NEW=$API_NEW WORKER_OLD=$WORKER_OLD WORKER_NEW=$WORKER_NEW \
+  PATH="$MOCK_BIN:$PATH" \
+  EDGE_UPDATER_DATA_DIR=$data_dir \
+  EDGE_UPDATER_ENV_FILE=$case_dir/.env.edge.prod \
+  EDGE_UPDATER_COMPOSE_FILE=$case_dir/compose.edge.yaml \
+  EDGE_UPDATER_VERIFY_TIMEOUT_SEC=0 \
+  sh "$UPDATER" >/dev/null
+  code=$?
+  set -e
+  if [ "$code" -eq 0 ]; then
+    printf 'invalid status schema unexpectedly exited 0\n' >&2
+    exit 1
+  fi
+  assert_contains "$data_dir/update.log" '"status":"rollback_success"' 'status-schema rollback report'
+}
+
 if command -v shellcheck >/dev/null 2>&1; then
   shellcheck "$UPDATER" "$0"
 fi
 
 run_success_case
 run_rollback_case
+run_status_schema_case
 printf 'edge-updater tests passed\n'
