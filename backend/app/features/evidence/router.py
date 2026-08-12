@@ -15,7 +15,8 @@ from fastapi import APIRouter, Header, HTTPException, Request, status
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from backend.app.features.clips.store import CLIP_STORE_DIR_ENV, DEFAULT_CLIP_STORE_DIR
-from backend.app.features.relay.router import RELAY_TOKEN_HEADER, _authorize, _camera_binding
+from backend.app.features.relay.auth import authorize_relay as _authorize
+from backend.app.features.relay.router import RELAY_TOKEN_HEADER, _camera_binding
 from backend.app.shared.backend_client_bundle import backend_client_bundle
 from shared.events.evidence_export_contract import (
     BackendCapabilities,
