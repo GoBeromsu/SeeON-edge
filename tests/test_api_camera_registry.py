@@ -283,6 +283,77 @@ def test_camera_registry_crud_masks_rtsp_versions_and_worker_config_auth(
     ]
 
 
+def test_list_cameras_survives_conflict_paused_topology_sync(tmp_path) -> None:
+    """Regression test for the 2026-08-12 prod incident: while topology roster
+    sync is paused with ``pause_reason=CONFLICT`` (a 409 from the backend's
+    topology-snapshots endpoint), ``current_retry_result`` reports
+    ``error_class="conflict"`` (see backend/app/features/connection/
+    topology_retry_result.py). The ``CameraSyncStatus`` response model's
+    ``error_class`` literal used to omit ``"conflict"``, so GET /api/v1/cameras
+    500'd with a pydantic validation error (``Input should be 'unreachable',
+    'timeout', 'auth' or 'unconfigured'``) for every camera any time roster
+    sync was conflict-paused.
+    """
+    from backend.app.features.cameras.edge_topology_sync_state import (
+        EdgeTopologySyncStateStore,
+        TopologyPauseReason,
+    )
+    from backend.app.features.cameras.topology_client import TopologyPaused
+    from backend.app.features.connection.topology_retry_coordinator import (
+        TopologyRetryCoordinator,
+    )
+    from contracts.edge_provisioning_v1 import MachinePrincipal
+
+    registry_path = tmp_path / "catalog.sqlite3"
+    registry = CameraRegistryStore(registry_path)
+    registry.create_floor(edge_ref="floor-1", name="1F", order_index=1)
+    registry.create_room(edge_ref="room-101", floor_edge_ref="floor-1", name="101")
+    registry.create(
+        label="Lobby",
+        rtsp_url="rtsp://user:secret@camera.local:8554/live",
+        space_id=None,
+        status="online",
+        edge_ref="camera-1",
+        room_edge_ref="room-101",
+    )
+
+    class _ConflictClient:
+        principal = MachinePrincipal("c72bd9a7-3e04-47ba-a8cd-a56e54f98152", 1)
+
+        def put(self, pending):
+            return TopologyPaused(TopologyPauseReason.CONFLICT, 409)
+
+        def refresh_server_revision(self) -> int | None:
+            return None
+
+        def confirm(self, snapshot_id, confirmation):
+            raise AssertionError("not exercised by this test")
+
+    coordinator = TopologyRetryCoordinator(
+        registry, EdgeTopologySyncStateStore(registry_path), lambda: _ConflictClient()
+    )
+    # Drive the coordinator directly (mirrors tests/test_topology_retry_coordinator.py)
+    # so the persisted state actually has pause_reason=CONFLICT before GET /cameras.
+    paused = coordinator.trigger(force=True, now_epoch=100.0)
+    assert paused.status == "failed"
+    assert paused.error_class == "conflict"
+
+    app = create_app(lifespan=no_lifespan)
+    app.state.camera_registry = registry
+    app.state.topology_retry_coordinator = coordinator
+
+    with TestClient(app) as client:
+        _login(client)
+        response = client.get("/api/v1/cameras", headers=AUTH)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert len(body["cameras"]) == 1
+    sync = body["cameras"][0]["sync"]
+    assert sync["status"] == "failed"
+    assert sync["error_class"] == "conflict"
+
+
 def test_create_camera_is_store_only_and_never_credentialed_from_env(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,

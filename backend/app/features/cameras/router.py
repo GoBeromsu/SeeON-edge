@@ -67,7 +67,11 @@ class CameraSyncStatus(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     status: Literal["synced", "pending", "failed", "disabled"]
-    error_class: Literal["unreachable", "timeout", "auth", "unconfigured"] | None = None
+    # Must mirror TopologySyncErrorClass (backend/app/features/connection/
+    # topology_retry_result.py), the actual source of these values -- a
+    # conflict-paused topology sync reports error_class="conflict" and this
+    # literal previously omitted it, 500ing every GET /cameras while paused.
+    error_class: Literal["unreachable", "timeout", "auth", "unconfigured", "conflict"] | None = None
     detail: str | None = None
     last_ok_at: str | None = None
 
