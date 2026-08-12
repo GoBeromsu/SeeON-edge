@@ -29,6 +29,10 @@ services:
       # this hop is unencrypted. Tailscale is the operator SSH/deploy channel
       # only and is never the data path.
       API_BACKEND_BASE_URL: ${API_BACKEND_BASE_URL:-http://49.247.204.81}
+      # 코드 기본값 0.5s는 LAN 릴레이 기준이라 공인망에서는 토폴로지 스냅샷
+      # PUT(업로드 + Hub 트랜잭션 처리)이 매번 타임아웃된다. 이벤트 인제스트와
+      # 스냅샷 업로드가 같은 타임아웃을 공유하므로 공인망 여유치로 올린다.
+      API_BACKEND_INGEST_TIMEOUT_SEC: ${API_BACKEND_INGEST_TIMEOUT_SEC:-10}
       # The bearer token ml-api sends to the backend Event API (issue #552) is
       # deliberately absent here. Facility identity — facility code and the
       # single-use enrollment token — is typed into the Edge dashboard and
