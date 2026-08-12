@@ -93,7 +93,7 @@ def claim_operator(
             SELECT edge_event_id
             FROM evidence_events
             WHERE edge_event_id = ? AND operator_only = 1
-              AND next_attempt_at <= ? AND delivery_state = 'PENDING'
+              AND next_attempt_at <= ? AND delivery_state != 'ACKED'
               AND (
                 state = 'READY'
                 OR (state = 'IN_FLIGHT' AND lease_expires_at <= ?)
@@ -107,8 +107,9 @@ def claim_operator(
         connection.execute(
             """
             UPDATE evidence_events
-            SET state = 'IN_FLIGHT', lease_owner = ?, lease_expires_at = ?,
-                attempt_count = attempt_count + 1
+            SET state = 'IN_FLIGHT', delivery_state = 'PENDING',
+                lease_owner = ?, lease_expires_at = ?,
+                attempt_count = attempt_count + 1, last_error_code = NULL
             WHERE edge_event_id = ?
             """,
             (lease.owner, lease_expires_at, edge_event_id),

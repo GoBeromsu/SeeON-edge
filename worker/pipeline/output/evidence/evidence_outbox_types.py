@@ -66,6 +66,16 @@ class AcknowledgedEvent:
 
 
 @dataclass(frozen=True, slots=True)
+class OperatorEventRegistration:
+    validation_run_id: str
+    edge_event_id: EdgeEventId
+    payload_json: str
+    delivery_state: EventDeliveryState
+    backend_event_id: str | None
+    created: bool
+
+
+@dataclass(frozen=True, slots=True)
 class ClaimedEvent:
     edge_event_id: EdgeEventId
     detected_at: str
@@ -195,6 +205,7 @@ __all__ = [
     "EvidenceReasonCode",
     "MissingStagedEventError",
     "NewerSchemaVersionError",
+    "OperatorEventRegistration",
     "StagedEvent",
     "StagedEventConflictError",
 ]

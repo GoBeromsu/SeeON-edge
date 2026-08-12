@@ -181,6 +181,39 @@ def test_system_test_cli_emits_safe_machine_outcome_and_exits(
     }
 
 
+def test_system_test_cli_treats_previously_acked_recovery_as_success(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv("ML_WORKER_SYSTEM_TEST_GATE", "SYSTEM_TEST_OPERATOR_ENABLED")
+    monkeypatch.setattr(worker_main, "resolve_state_dir", lambda: tmp_path)
+    monkeypatch.setattr(
+        worker_main,
+        "execute_system_test",
+        lambda *_args: SystemTestOutcome(
+            status=worker_main.SystemTestStatus.PREVIOUSLY_ACKED,
+            edge_event_id="00000000-0000-4000-8000-000000000099",
+            correlation_id="00000000-0000-4000-8000-000000000099",
+            backend_event_id="backend-system-test",
+        ),
+    )
+
+    exit_code = worker_main.main(
+        [
+            "--system-test",
+            "emit",
+            "--system-test-validation-run-id",
+            "0197f671-3a31-7a6c-a6e4-83ed412de80f",
+            "--confirm-system-test",
+            "SYSTEM_TEST",
+        ]
+    )
+
+    assert exit_code == 0
+    assert json.loads(capsys.readouterr().out)["status"] == "PREVIOUSLY_ACKED"
+
+
 # --- config resolution / exit code 2 -----------------------------------
 
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Callable
 from pathlib import Path
 from types import TracebackType
 from typing import Self
@@ -14,7 +15,10 @@ from worker.pipeline.output.evidence.evidence_outbox_database import (
     database_settings,
     open_connection,
 )
-from worker.pipeline.output.evidence.evidence_outbox_stage import stage_event
+from worker.pipeline.output.evidence.evidence_outbox_stage import (
+    create_or_load_operator_event,
+    stage_event,
+)
 from worker.pipeline.output.evidence.evidence_outbox_types import (
     AcknowledgedEvent,
     ClaimedClip,
@@ -30,6 +34,7 @@ from worker.pipeline.output.evidence.evidence_outbox_types import (
     EvidenceReasonCode,
     MissingStagedEventError,
     NewerSchemaVersionError,
+    OperatorEventRegistration,
     StagedEvent,
     StagedEventConflictError,
 )
@@ -60,6 +65,17 @@ class EvidenceOutbox:
 
     def stage(self, event: StagedEvent) -> None:
         stage_event(self._connection, event)
+
+    def create_or_load_operator_event(
+        self,
+        validation_run_id: str,
+        event_factory: Callable[[], StagedEvent],
+    ) -> OperatorEventRegistration:
+        return create_or_load_operator_event(
+            self._connection,
+            validation_run_id,
+            event_factory,
+        )
 
     def bind_clip(self, edge_event_id: EdgeEventId, clip_id: ClipId) -> int:
         return clip_store.bind_clip(self._connection, edge_event_id, clip_id)
@@ -237,6 +253,7 @@ __all__ = [
     "EvidenceReasonCode",
     "MissingStagedEventError",
     "NewerSchemaVersionError",
+    "OperatorEventRegistration",
     "StagedEvent",
     "StagedEventConflictError",
 ]

@@ -2,7 +2,7 @@
 
 from typing import Final
 
-SCHEMA_VERSION: Final = 7
+SCHEMA_VERSION: Final = 8
 
 SCHEMA_V1_STATEMENTS: Final = (
     """
@@ -208,7 +208,46 @@ SCHEMA_V7_STATEMENTS: Final = (
 )
 """Operator-only rows share the production outbox transitions but are excluded
 from the periodic sender. Only an explicit ID-bound operator invocation may claim
-them, preventing SYSTEM_TEST retries from becoming background traffic."""
+these rows."""
+
+SCHEMA_V8_STATEMENTS: Final = (
+    """
+    CREATE TABLE system_test_runs (
+        validation_run_id TEXT PRIMARY KEY,
+        edge_event_id TEXT NOT NULL UNIQUE
+            REFERENCES evidence_events(edge_event_id) ON DELETE RESTRICT
+    ) STRICT
+    """,
+    """
+    INSERT INTO system_test_runs (validation_run_id, edge_event_id)
+    SELECT json_extract(candidate.payload_json, '$.validation_run_id'),
+           candidate.edge_event_id
+    FROM evidence_events AS candidate
+    WHERE candidate.operator_only = 1
+      AND json_valid(candidate.payload_json)
+      AND json_type(candidate.payload_json, '$.validation_run_id') = 'text'
+      AND NOT EXISTS (
+          SELECT 1
+          FROM evidence_events AS earlier
+          WHERE earlier.operator_only = 1
+            AND json_valid(earlier.payload_json)
+            AND json_type(earlier.payload_json, '$.validation_run_id') = 'text'
+            AND json_extract(earlier.payload_json, '$.validation_run_id') =
+                json_extract(candidate.payload_json, '$.validation_run_id')
+            AND (
+                earlier.queued_at < candidate.queued_at
+                OR (
+                    earlier.queued_at = candidate.queued_at
+                    AND earlier.edge_event_id < candidate.edge_event_id
+                )
+            )
+      )
+    """,
+)
+"""The validation-run mapping provides durable create-or-load idempotency. An
+existing schema-v7 database may contain duplicate SYSTEM_TEST rows from the original
+implementation; migration preserves every event row and maps the earliest immutable
+identity so future invocations recover it without creating another."""
 
 MIGRATIONS: Final = (
     SCHEMA_V1_STATEMENTS,
@@ -218,6 +257,7 @@ MIGRATIONS: Final = (
     SCHEMA_V5_STATEMENTS,
     SCHEMA_V6_STATEMENTS,
     SCHEMA_V7_STATEMENTS,
+    SCHEMA_V8_STATEMENTS,
 )
 
 __all__ = ["MIGRATIONS", "SCHEMA_VERSION"]

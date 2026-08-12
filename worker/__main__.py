@@ -266,6 +266,7 @@ def main(argv: list[str] | None = None) -> int:
             if outcome.status
             in {
                 SystemTestStatus.ACKED,
+                SystemTestStatus.PREVIOUSLY_ACKED,
                 SystemTestStatus.REPLAY_ACKED,
                 SystemTestStatus.AUTH_CLASSIFIED,
             }

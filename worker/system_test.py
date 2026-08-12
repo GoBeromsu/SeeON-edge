@@ -21,6 +21,7 @@ from worker.pipeline.output.evidence.evidence_outbox import (
     EvidenceOutbox,
     StagedEvent,
 )
+from worker.pipeline.output.evidence.evidence_outbox_types import EventDeliveryState
 from worker.pipeline.output.evidence.evidence_sender import (
     EvidenceSender,
     SenderConfig,
@@ -43,6 +44,7 @@ class SystemTestAction(StrEnum):
 
 class SystemTestStatus(StrEnum):
     ACKED = "ACKED"
+    PREVIOUSLY_ACKED = "PREVIOUSLY_ACKED"
     RETRY_SCHEDULED = "RETRY_SCHEDULED"
     REPLAY_ACKED = "REPLAY_ACKED"
     AUTH_CLASSIFIED = "AUTH_CLASSIFIED"
@@ -113,6 +115,27 @@ class SystemTestEmitter:
         )
 
     def emit(self, validation_run_id: UUID) -> SystemTestOutcome:
+        with EvidenceOutbox.open(self._config.database_path) as outbox:
+            registration = outbox.create_or_load_operator_event(
+                str(validation_run_id),
+                lambda: self._new_event(validation_run_id),
+            )
+        if (
+            not registration.created
+            and registration.delivery_state is EventDeliveryState.ACKED
+            and registration.backend_event_id is not None
+        ):
+            outcome = SystemTestOutcome(
+                status=SystemTestStatus.PREVIOUSLY_ACKED,
+                edge_event_id=registration.edge_event_id,
+                correlation_id=registration.edge_event_id,
+                backend_event_id=registration.backend_event_id,
+            )
+            self._log(outcome)
+            return outcome
+        return self._attempt(registration.edge_event_id)
+
+    def _new_event(self, validation_run_id: UUID) -> StagedEvent:
         now = self._clock().astimezone(UTC)
         event_id = EdgeEventId(str(self._event_id_factory()))
         payload = _SystemTestPayload(
@@ -120,23 +143,17 @@ class SystemTestEmitter:
             detected_at=now.isoformat(timespec="milliseconds").replace("+00:00", "Z"),
             validation_run_id=validation_run_id,
         )
-        with EvidenceOutbox.open(self._config.database_path) as outbox:
-            outbox.stage(
-                StagedEvent(
-                    edge_event_id=event_id,
-                    detected_at=payload.detected_at,
-                    payload_json=json.dumps(
-                        payload.model_dump(mode="json"),
-                        separators=(",", ":"),
-                        sort_keys=True,
-                    ),
-                    queued_at=now.timestamp(),
-                    operator_only=True,
-                )
-            )
-            if not outbox.mark_ready(event_id):
-                raise SystemTestConfigurationError("SYSTEM_TEST row could not become ready")
-        return self._attempt(event_id)
+        return StagedEvent(
+            edge_event_id=event_id,
+            detected_at=payload.detected_at,
+            payload_json=json.dumps(
+                payload.model_dump(mode="json"),
+                separators=(",", ":"),
+                sort_keys=True,
+            ),
+            queued_at=now.timestamp(),
+            operator_only=True,
+        )
 
     def retry(self, edge_event_id: EdgeEventId) -> SystemTestOutcome:
         """Explicitly retry one pending operator-only row when its backoff is due."""
@@ -179,11 +196,16 @@ class SystemTestEmitter:
         step = self._sender().run_operator_once(edge_event_id)
         with EvidenceOutbox.open(self._config.database_path) as outbox:
             backend_event_id = outbox.event_backend_event_id(edge_event_id)
+            delivery_state = outbox.event_delivery_state(edge_event_id)
         status = (
             SystemTestStatus.ACKED
             if step is SenderStep.EVENT_ACKED
+            else SystemTestStatus.PREVIOUSLY_ACKED
+            if delivery_state == EventDeliveryState.ACKED.value
+            and backend_event_id is not None
             else SystemTestStatus.RETRY_SCHEDULED
             if step is SenderStep.RETRY_SCHEDULED
+            or (step is SenderStep.IDLE and delivery_state == EventDeliveryState.PENDING.value)
             else SystemTestStatus.FAILED
         )
         outcome = SystemTestOutcome(
