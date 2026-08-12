@@ -30,6 +30,7 @@ from shared.events.evidence_http_transport import (
     parse_capabilities,
     parse_clip_result,
     parse_event_result,
+    parse_json_object,
 )
 from shared.events.relay_failure_log import RelayFailureLog
 
@@ -164,7 +165,11 @@ class RelayEvidenceClient:
         payload_json: str,
         edge_event_id: EdgeEventId,
     ) -> EventReceipt | DeliveryFailure:
-        path = "api/v1/relay/alerts"
+        path = (
+            "api/v1/relay/system-tests"
+            if _payload_type(payload_json) == "SYSTEM_TEST"
+            else "api/v1/relay/alerts"
+        )
         result = bounded_request(
             join_http_url(self.base_url, path),
             "POST",
@@ -178,6 +183,40 @@ class RelayEvidenceClient:
         else:
             self._alerts_failures.record_success(path=path)
         return parsed
+
+    def classify_invalid_auth(self) -> DeliveryFailure:
+        """Run ml-api's payload-free, in-memory invalid-auth diagnostic."""
+        path = "api/v1/relay/system-tests/auth-check"
+        result = bounded_request(
+            join_http_url(self.base_url, path),
+            "POST",
+            {"Content-Type": "application/json", **self._headers()},
+            b"{}",
+            self.timeout_sec,
+        )
+        if isinstance(result, DeliveryFailure):
+            return result
+        status, headers, body = result
+        if not 200 <= status < 300:
+            return classify_http_failure(status, headers)
+        payload = parse_json_object(body)
+        code = payload.get("code")
+        status_code = payload.get("status_code")
+        valid = (
+            payload.get("disposition") == DeliveryDisposition.RETRY.value
+            and isinstance(code, str)
+            and code in {"HTTP_401", "HTTP_403"}
+            and type(status_code) is int
+            and status_code in {401, 403}
+            and code == f"HTTP_{status_code}"
+        )
+        if not valid or not isinstance(code, str) or type(status_code) is not int:
+            return DeliveryFailure(DeliveryDisposition.RETRY, "MALFORMED_RECEIPT")
+        return DeliveryFailure(
+            DeliveryDisposition.RETRY,
+            code,
+            status_code=status_code,
+        )
 
     def send_clip(self, claim: ClaimedClipRequest) -> ClipReceipt | DeliveryFailure:
         identity = _local_event_identity(claim.event_payload_json)
@@ -234,6 +273,10 @@ class BackendEvidenceClient:
 
     def for_camera(self, _camera_id: str) -> BackendEvidenceClient:
         return self
+
+    def with_bearer_token(self, bearer_token: str) -> BackendEvidenceClient:
+        """Clone transport settings with an in-memory-only diagnostic token."""
+        return BackendEvidenceClient(self.events_url, bearer_token, self.timeout_sec)
 
     def probe_capabilities(self, camera_id: str) -> BackendCapabilities | DeliveryFailure:
         url = join_http_url(self.events_url, "capabilities")
@@ -321,6 +364,17 @@ class BackendEvidenceClient:
         if not self.bearer_token:
             return {}
         return {"Authorization": f"Bearer {self.bearer_token}"}
+
+
+def _payload_type(payload_json: str) -> str | None:
+    try:
+        payload = cast(JsonValue, json.loads(payload_json))
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, Mapping):
+        return None
+    event_type = payload.get("type")
+    return event_type if isinstance(event_type, str) else None
 
 
 def _local_event_identity(payload_json: str) -> tuple[str, str] | None:

@@ -47,6 +47,7 @@ class StagedEvent:
     detected_at: str
     payload_json: str
     queued_at: float
+    operator_only: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,6 +55,24 @@ class ClaimLease:
     owner: str
     now: float
     duration: float
+
+
+@dataclass(frozen=True, slots=True)
+class AcknowledgedEvent:
+    edge_event_id: EdgeEventId
+    payload_json: str
+    backend_event_id: str
+    attempt_count: int
+
+
+@dataclass(frozen=True, slots=True)
+class OperatorEventRegistration:
+    validation_run_id: str
+    edge_event_id: EdgeEventId
+    payload_json: str
+    delivery_state: EventDeliveryState
+    backend_event_id: str | None
+    created: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -139,7 +158,9 @@ class EventClipConflictError(Exception):
 @dataclass(slots=True)
 class StagedEventConflictError(Exception):
     edge_event_id: EdgeEventId
-    mismatched_fields: tuple[Literal["detected_at", "payload_json"], ...]
+    mismatched_fields: tuple[
+        Literal["detected_at", "payload_json", "operator_only"], ...
+    ]
 
     def __str__(self) -> str:
         fields = ", ".join(self.mismatched_fields)
@@ -168,6 +189,7 @@ class ClipOutcomeConflictError(Exception):
 
 
 __all__ = [
+    "AcknowledgedEvent",
     "ClaimLease",
     "ClaimedClip",
     "ClaimedEvent",
@@ -183,6 +205,7 @@ __all__ = [
     "EvidenceReasonCode",
     "MissingStagedEventError",
     "NewerSchemaVersionError",
+    "OperatorEventRegistration",
     "StagedEvent",
     "StagedEventConflictError",
 ]

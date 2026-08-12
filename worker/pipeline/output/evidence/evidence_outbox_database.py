@@ -31,13 +31,26 @@ def open_connection(path: Path, *, busy_timeout_ms: int = 5000) -> sqlite3.Conne
     try:
         connection.execute(f"PRAGMA busy_timeout = {busy_timeout_ms}")
         connection.execute("PRAGMA foreign_keys = ON")
+        _enable_wal_and_migrate(connection, version)
         connection.execute("PRAGMA synchronous = FULL")
-        connection.execute("PRAGMA journal_mode = WAL")
-        _migrate(connection, version)
-    except sqlite3.Error:
+    except (sqlite3.Error, NewerSchemaVersionError):
         connection.close()
         raise
     return connection
+
+
+def _enable_wal_and_migrate(connection: sqlite3.Connection, version: int) -> None:
+    # Acquire the same write lock used by migrations before changing journal
+    # mode. PRAGMA journal_mode=WAL can otherwise report SQLITE_BUSY
+    # immediately during concurrent first opens, ignoring busy_timeout.
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        connection.commit()
+        connection.execute("PRAGMA journal_mode = WAL")
+        _migrate(connection, version)
+    except (sqlite3.Error, NewerSchemaVersionError):
+        connection.rollback()
+        raise
 
 
 def database_settings(connection: sqlite3.Connection) -> DatabaseSettings:
@@ -56,7 +69,15 @@ def _migrate(connection: sqlite3.Connection, version: int) -> None:
         return
     connection.execute("BEGIN IMMEDIATE")
     try:
-        for target_version in range(version + 1, SCHEMA_VERSION + 1):
+        # Another process may have completed migration while this connection
+        # waited for the write lock. Re-read under BEGIN IMMEDIATE before
+        # applying any DDL so concurrent first opens cannot replay migrations.
+        current_row = connection.execute("PRAGMA user_version").fetchone()
+        current = 0 if current_row is None else int(current_row[0])
+        if current > SCHEMA_VERSION:
+            connection.rollback()
+            raise NewerSchemaVersionError(found=current, supported=SCHEMA_VERSION)
+        for target_version in range(current + 1, SCHEMA_VERSION + 1):
             for statement in MIGRATIONS[target_version - 1]:
                 connection.execute(statement)
             connection.execute(f"PRAGMA user_version = {target_version}")

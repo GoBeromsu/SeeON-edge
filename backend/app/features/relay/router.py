@@ -17,6 +17,8 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from backend.app.features.cameras.router import worker_config_snapshot
 from backend.app.features.cameras.store import CameraRegistryStore
 from backend.app.features.clips.catalog import CatalogConflictError, get_catalog_store
+from backend.app.features.relay.auth import authorize_relay
+from backend.app.features.relay.system_test import router as system_test_router
 from backend.app.features.status.heartbeat_store import get_heartbeat_store
 from backend.app.features.status.runtime_status_store import get_runtime_status_store
 from contracts import AlertEventType
@@ -235,7 +237,7 @@ def worker_config(
     request: Request,
     relay_token: Annotated[str | None, Header(alias=RELAY_TOKEN_HEADER)] = None,
 ) -> dict[str, object]:
-    _authorize(request, relay_token)
+    authorize_relay(request, relay_token)
     return worker_config_snapshot(request, require_available=True)
 
 
@@ -244,7 +246,7 @@ def bump_restart(
     request: Request,
     relay_token: Annotated[str | None, Header(alias=RELAY_TOKEN_HEADER)] = None,
 ) -> dict[str, int]:
-    _authorize(request, relay_token)
+    authorize_relay(request, relay_token)
     request.app.state.restart_epoch = int(getattr(request.app.state, "restart_epoch", 0)) + 1
     return {RESTART_EPOCH_KEY: request.app.state.restart_epoch}
 
@@ -255,7 +257,7 @@ def relay_alert(
     request: Request,
     relay_token: Annotated[str | None, Header(alias=RELAY_TOKEN_HEADER)] = None,
 ) -> dict[str, str]:
-    _authorize(request, relay_token)
+    authorize_relay(request, relay_token)
     # Local catalog recording is edge-local audit trail, not backend egress --
     # it must not depend on registry binding or the backend call's outcome
     # (see #183, #202). Recording it up front means ml-api keeps its own
@@ -326,7 +328,7 @@ def relay_heartbeat(
     request: Request,
     relay_token: Annotated[str | None, Header(alias=RELAY_TOKEN_HEADER)] = None,
 ) -> dict[str, str]:
-    _authorize(request, relay_token)
+    authorize_relay(request, relay_token)
     # Stamp local liveness right after auth, BEFORE camera binding, so /status
     # reflects edge-local truth even when the registry can't yet resolve this
     # camera -- not just when backend egress later fails (see #183, #202). A
@@ -362,7 +364,7 @@ def relay_runtime_status(
     relay_token: Annotated[str | None, Header(alias=RELAY_TOKEN_HEADER)] = None,
     authorization: Annotated[str | None, Header()] = None,
 ) -> RelayRuntimeStatusResponse:
-    _authorize(request, relay_token or _bearer_token(authorization))
+    authorize_relay(request, relay_token or _bearer_token(authorization))
     _runtime_status_facility_binding(request, payload.facility_id)
     _log_unresolved_runtime_status_cameras(request, payload)
     data = payload.model_dump()
@@ -466,24 +468,6 @@ def _record_alert_latency(request: Request, payload: RelayAlertRequest, received
     get_runtime_status_store(request.app).record_latency(
         payload.facility_id, payload.detected_at, received_at=received_at
     )
-
-
-def _authorize(request: Request, relay_token: str | None) -> None:
-    # `app.state.edge_relay_token`이 유일한 출처다. 부팅 때
-    # `lifespan._configure_backend_ingest`가 `API_EDGE_RELAY_TOKEN`에서 한 번
-    # 채운다(`lifespan.py:105`가 반드시 부른다). 여기서 env를 또 읽으면
-    # state에 `None`을 명시적으로 넣어 미설정을 재현하려는 경우까지
-    # env가 조용히 덮어써서, 실제로 무엇이 유효한지 두 곳을 봐야 한다.
-    expected = getattr(request.app.state, "edge_relay_token", None)
-    if not expected:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="relay token is not configured",
-        )
-    if relay_token is None:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="relay token required")
-    if relay_token != expected:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="relay token mismatch")
 
 
 def _bearer_token(authorization: str | None) -> str | None:
@@ -631,5 +615,7 @@ def _backend_ingest_client(request: Request, *, camera_id: str) -> BackendIngest
         )
     return client
 
+
+router.include_router(system_test_router)
 
 __all__ = ["router"]

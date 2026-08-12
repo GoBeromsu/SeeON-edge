@@ -5,6 +5,7 @@ from __future__ import annotations
 import sqlite3
 
 from worker.pipeline.output.evidence.evidence_outbox_types import (
+    AcknowledgedEvent,
     ClaimedEvent,
     ClaimLease,
     ClipId,
@@ -32,7 +33,8 @@ def claim(connection: sqlite3.Connection, lease: ClaimLease) -> ClaimedEvent | N
             """
             SELECT edge_event_id
             FROM evidence_events
-            WHERE next_attempt_at <= ?
+            WHERE operator_only = 0
+              AND next_attempt_at <= ?
               AND delivery_state = 'PENDING'
               AND (
                 state = 'READY'
@@ -77,6 +79,58 @@ def claim(connection: sqlite3.Connection, lease: ClaimLease) -> ClaimedEvent | N
         lease_owner=lease.owner,
         lease_expires_at=lease_expires_at,
         attempt_count=int(claimed[4]),
+    )
+
+
+def claim_operator(
+    connection: sqlite3.Connection,
+    edge_event_id: EdgeEventId,
+    lease: ClaimLease,
+) -> ClaimedEvent | None:
+    with ImmediateTransaction(connection):
+        candidate = connection.execute(
+            """
+            SELECT edge_event_id
+            FROM evidence_events
+            WHERE edge_event_id = ? AND operator_only = 1
+              AND next_attempt_at <= ? AND delivery_state != 'ACKED'
+              AND (
+                state = 'READY'
+                OR (state = 'IN_FLIGHT' AND lease_expires_at <= ?)
+              )
+            """,
+            (edge_event_id, lease.now, lease.now),
+        ).fetchone()
+        if candidate is None:
+            return None
+        lease_expires_at = lease.now + lease.duration
+        connection.execute(
+            """
+            UPDATE evidence_events
+            SET state = 'IN_FLIGHT', delivery_state = 'PENDING',
+                lease_owner = ?, lease_expires_at = ?,
+                attempt_count = attempt_count + 1, last_error_code = NULL
+            WHERE edge_event_id = ?
+            """,
+            (lease.owner, lease_expires_at, edge_event_id),
+        )
+        claimed = connection.execute(
+            """
+            SELECT edge_event_id, detected_at, payload_json, attempt_count
+            FROM evidence_events WHERE edge_event_id = ?
+            """,
+            (edge_event_id,),
+        ).fetchone()
+        if claimed is None:
+            raise MissingStagedEventError(edge_event_id)
+    return ClaimedEvent(
+        edge_event_id=EdgeEventId(str(claimed[0])),
+        detected_at=str(claimed[1]),
+        payload_json=str(claimed[2]),
+        clip_id=None,
+        lease_owner=lease.owner,
+        lease_expires_at=lease_expires_at,
+        attempt_count=int(claimed[3]),
     )
 
 
@@ -156,6 +210,38 @@ def delivery_state(connection: sqlite3.Connection, edge_event_id: EdgeEventId) -
     return None if row is None else str(row[0])
 
 
+def acknowledged_operator_event(
+    connection: sqlite3.Connection,
+    edge_event_id: EdgeEventId,
+) -> AcknowledgedEvent | None:
+    row = connection.execute(
+        """
+        SELECT payload_json, backend_event_id, attempt_count
+        FROM evidence_events
+        WHERE edge_event_id = ? AND operator_only = 1
+          AND state = 'ACKED' AND delivery_state = 'ACKED'
+          AND backend_event_id IS NOT NULL
+        """,
+        (edge_event_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    return AcknowledgedEvent(
+        edge_event_id=edge_event_id,
+        payload_json=str(row[0]),
+        backend_event_id=str(row[1]),
+        attempt_count=int(row[2]),
+    )
+
+
+def backend_event_id(connection: sqlite3.Connection, edge_event_id: EdgeEventId) -> str | None:
+    row = connection.execute(
+        "SELECT backend_event_id FROM evidence_events WHERE edge_event_id = ?",
+        (edge_event_id,),
+    ).fetchone()
+    return None if row is None or row[0] is None else str(row[0])
+
+
 def attempt_count(connection: sqlite3.Connection, edge_event_id: EdgeEventId) -> int | None:
     row = connection.execute(
         "SELECT attempt_count FROM evidence_events WHERE edge_event_id = ?",
@@ -173,8 +259,11 @@ def pending_count(connection: sqlite3.Connection) -> int:
 
 __all__ = [
     "acknowledge",
+    "acknowledged_operator_event",
     "attempt_count",
+    "backend_event_id",
     "claim",
+    "claim_operator",
     "delivery_state",
     "mark_failure",
     "mark_ready",

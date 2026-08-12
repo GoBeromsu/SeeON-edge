@@ -25,6 +25,8 @@ ALLOWED_PATHS: Final = {
     "/api/v1/relay/heartbeat",
     "/api/v1/relay/restart",
     "/api/v1/relay/runtime-status",
+    "/api/v1/relay/system-tests",
+    "/api/v1/relay/system-tests/auth-check",
     "/api/v1/audit",
     "/api/v1/cameras",
     "/api/v1/cameras/topology",
