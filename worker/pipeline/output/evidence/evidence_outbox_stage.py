@@ -16,7 +16,7 @@ def stage_event(connection: sqlite3.Connection, event: StagedEvent) -> None:
     with ImmediateTransaction(connection):
         existing = connection.execute(
             """
-            SELECT detected_at, payload_json
+            SELECT detected_at, payload_json, operator_only
             FROM evidence_events
             WHERE edge_event_id = ?
             """,
@@ -29,8 +29,8 @@ def stage_event(connection: sqlite3.Connection, event: StagedEvent) -> None:
             """
             INSERT INTO evidence_events (
                 edge_event_id, detected_at, payload_json, state,
-                queued_at, next_attempt_at
-            ) VALUES (?, ?, ?, 'STAGED', ?, ?)
+                queued_at, next_attempt_at, operator_only
+            ) VALUES (?, ?, ?, 'STAGED', ?, ?, ?)
             """,
             (
                 event.edge_event_id,
@@ -38,16 +38,19 @@ def stage_event(connection: sqlite3.Connection, event: StagedEvent) -> None:
                 event.payload_json,
                 event.queued_at,
                 event.queued_at,
+                int(event.operator_only),
             ),
         )
 
 
 def _refuse_mismatched_replay(event: StagedEvent, existing: sqlite3.Row) -> None:
-    mismatches: list[Literal["detected_at", "payload_json"]] = []
+    mismatches: list[Literal["detected_at", "payload_json", "operator_only"]] = []
     if str(existing[0]) != event.detected_at:
         mismatches.append("detected_at")
     if str(existing[1]) != event.payload_json:
         mismatches.append("payload_json")
+    if bool(existing[2]) is not event.operator_only:
+        mismatches.append("operator_only")
     if mismatches:
         raise StagedEventConflictError(event.edge_event_id, tuple(mismatches))
 

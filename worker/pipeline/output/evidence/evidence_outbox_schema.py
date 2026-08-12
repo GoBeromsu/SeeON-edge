@@ -2,7 +2,7 @@
 
 from typing import Final
 
-SCHEMA_VERSION: Final = 6
+SCHEMA_VERSION: Final = 7
 
 SCHEMA_V1_STATEMENTS: Final = (
     """
@@ -193,6 +193,23 @@ semantics the JSON file's unconditional tmp-then-rename already had, not a
 permanent cross-restart audit log. See worker/runtime/faults/record.py for
 the write path and its zero-busy-timeout, never-blocks-exit contract."""
 
+SCHEMA_V7_STATEMENTS: Final = (
+    """
+    ALTER TABLE evidence_events ADD COLUMN operator_only INTEGER NOT NULL DEFAULT 0
+        CHECK (operator_only IN (0, 1))
+    """,
+    """
+    CREATE INDEX evidence_events_operator_claim_idx
+    ON evidence_events (
+        operator_only, delivery_state, state, next_attempt_at,
+        lease_expires_at, edge_event_id
+    )
+    """,
+)
+"""Operator-only rows share the production outbox transitions but are excluded
+from the periodic sender. Only an explicit ID-bound operator invocation may claim
+them, preventing SYSTEM_TEST retries from becoming background traffic."""
+
 MIGRATIONS: Final = (
     SCHEMA_V1_STATEMENTS,
     SCHEMA_V2_STATEMENTS,
@@ -200,6 +217,7 @@ MIGRATIONS: Final = (
     SCHEMA_V4_STATEMENTS,
     SCHEMA_V5_STATEMENTS,
     SCHEMA_V6_STATEMENTS,
+    SCHEMA_V7_STATEMENTS,
 )
 
 __all__ = ["MIGRATIONS", "SCHEMA_VERSION"]
