@@ -111,6 +111,9 @@ services:
               count: all
               capabilities: [gpu]
     environment:
+      # This explicit allowlist is the complete persistent worker environment
+      # contract. Do not forward the host environment wholesale or persist
+      # one-shot operator/test activation gates in this service.
       # Camera roster is pull-only. worker/__main__.py pulls the live config
       # from ml-api over RELAY_URL/RELAY_TOKEN below, with the worker's own
       # last-known-good cache as fallback on a pull failure. There is

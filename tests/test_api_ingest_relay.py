@@ -21,10 +21,6 @@ from backend.app.features.relay.router import (
 from backend.app.features.status.heartbeat_store import ONLINE, get_heartbeat_store
 from backend.app.features.status.runtime_status_store import RuntimeStatusStore
 from backend.app.main import create_app, no_lifespan
-from backend.app.shared.backend_client_bundle import BackendClientBundle
-from backend.app.shared.backend_mapping import BackendCameraMapper
-from shared.events.edge_ingest_client import EdgeIngestClient
-from shared.events.evidence_export_client import BackendEvidenceClient
 from shared.events.evidence_export_contract import (
     DeliveryDisposition,
     DeliveryFailure,
@@ -140,172 +136,39 @@ def _snapshot_metadata(content: bytes, **overrides: object) -> dict[str, object]
 
 
 
-def _system_test_payload(**overrides: object) -> dict[str, object]:
-    payload: dict[str, object] = {
-        "edge_event_id": "00000000-0000-4000-8000-000000000099",
-        "type": "SYSTEM_TEST",
-        "source": "SYSTEM_TEST",
-        "test_mode": "SYSTEM_TEST",
-        "label": "SYSTEM TEST - NOT A RESIDENT ALERT",
-        "detected_at": "2026-08-12T00:00:00Z",
-        "validation_run_id": "0197f671-3a31-7a6c-a6e4-83ed412de80f",
-        "attempt_ordinal": 1,
-    }
-    payload.update(overrides)
-    return payload
-
-
-def test_system_test_relay_requires_complete_enrolled_backend_path() -> None:
-    # Given: local relay auth exists but ml-api has no enrolled eft_v1 client bundle.
-    app = create_app(lifespan=no_lifespan)
-    app.state.edge_relay_token = "relay-token"
-
-    # When: an explicit SYSTEM_TEST is submitted through the local relay.
-    response = TestClient(app).post(
-        "/api/v1/relay/system-tests",
-        json=_system_test_payload(),
-        headers={"X-Edge-Relay-Token": "relay-token"},
-    )
-
-    # Then: it fails closed instead of accepting locally or impersonating backend auth.
-    assert response.status_code == 503
-
-
-def _enrolled_system_test_client(evidence_client: BackendEvidenceClient) -> TestClient:
-    app = create_app(lifespan=no_lifespan)
-    app.state.edge_relay_token = "relay-token"
-    app.state.backend_client_bundle = BackendClientBundle(
-        facility_code="TEST-FACILITY",
-        client_installation_ref="00000000-0000-4000-8000-000000000001",
-        facility_id="facility-test",
-        edge_installation_id="00000000-0000-4000-8000-000000000002",
-        enrollment_generation=1,
-        facility_token="eft_v1.persisted.test",
-        events_url="http://127.0.0.1:1/api/v1/events",
-        config_url="http://127.0.0.1:1/api/v1/ml-config",
-        ingest_client=EdgeIngestClient(
-            "http://127.0.0.1:1/api/v1/events",
-            "unused-system-test-camera",
-            bearer_token="eft_v1.persisted.test",
-        ),
-        evidence_client=evidence_client,
-        camera_mapper=BackendCameraMapper(
-            endpoint="http://127.0.0.1:1/api/v1/edge/cameras",
-            token="eft_v1.persisted.test",
-        ),
-    )
-    return TestClient(app)
-
-
-def test_system_test_relay_forwards_exact_privacy_safe_backend_schema() -> None:
-    # Given: a complete enrolled client and an in-memory capture at the backend seam.
-    class CapturingBackendEvidenceClient(BackendEvidenceClient):
-        captured: list[dict[str, object]] = []
-
-        def send_event_payload(self, payload, edge_event_id, on_accepted=None):
-            del on_accepted
-            self.captured.append(dict(payload))
-            return EventReceipt("accepted", edge_event_id, "backend-system-test")
-
-    backend = CapturingBackendEvidenceClient(
-        "http://127.0.0.1:1/api/v1/events",
-        "eft_v1.persisted.test",
-    )
-
-    # When: SYSTEM_TEST crosses the real FastAPI relay schema.
-    response = _enrolled_system_test_client(backend).post(
-        "/api/v1/relay/system-tests",
-        json=_system_test_payload(),
-        headers={"X-Edge-Relay-Token": "relay-token"},
-    )
-
-    # Then: only facility-level machine fields reach the enrolled backend client.
-    assert response.status_code == 202
-    assert response.json() == {
-        "status": "accepted",
-        "edge_event_id": "00000000-0000-4000-8000-000000000099",
-        "event_id": "backend-system-test",
-    }
-    assert backend.captured == [
-        {
-            "edge_event_id": "00000000-0000-4000-8000-000000000099",
-            "type": "SYSTEM_TEST",
-            "test_mode": "SYSTEM_TEST",
-            "detected_at": "2026-08-12T00:00:00Z",
-            "validation_run_id": "0197f671-3a31-7a6c-a6e4-83ed412de80f",
-        }
-    ]
-
-
 @pytest.mark.parametrize(
-    "private_field",
+    "path",
     (
-        "camera_id",
-        "facility_id",
-        "room_id",
-        "resident_id",
-        "person_id",
-        "snapshot",
-        "clip_id",
-        "media",
-        "evidence",
-        "rtsp_url",
+        "/api/v1/relay/system-tests",
+        "/api/v1/relay/system-tests/auth-check",
     ),
 )
-def test_system_test_relay_rejects_private_or_media_fields(private_field: str) -> None:
-    backend = BackendEvidenceClient(
-        "http://127.0.0.1:1/api/v1/events",
-        "eft_v1.persisted.test",
-    )
-
-    response = _enrolled_system_test_client(backend).post(
-        "/api/v1/relay/system-tests",
-        json=_system_test_payload(**{private_field: "forbidden"}),
-        headers={"X-Edge-Relay-Token": "relay-token"},
-    )
-
-    assert response.status_code == 422
-
-
-def test_system_test_auth_check_uses_only_an_in_memory_invalid_credential() -> None:
-    # Given: an enrolled client whose clone seam captures the diagnostic credential.
-    class DiagnosticBackendEvidenceClient(BackendEvidenceClient):
-        diagnostic_tokens: list[str] = []
-
-        def with_bearer_token(self, bearer_token: str) -> BackendEvidenceClient:
-            self.diagnostic_tokens.append(bearer_token)
-            return self
-
-        def probe_capabilities(self, camera_id: str):
-            assert camera_id == "SYSTEM_TEST"
-            return DeliveryFailure(
-                DeliveryDisposition.RETRY,
-                "HTTP_401",
-                status_code=401,
-            )
-
-    backend = DiagnosticBackendEvidenceClient(
-        "http://127.0.0.1:1/api/v1/events",
-        "eft_v1.persisted.test",
-    )
-
-    # When: the payload-free local diagnostic is explicitly invoked.
-    response = _enrolled_system_test_client(backend).post(
-        "/api/v1/relay/system-tests/auth-check",
+def test_removed_system_test_relay_routes_are_not_registered(path: str) -> None:
+    response = _client().post(
+        path,
         json={},
         headers={"X-Edge-Relay-Token": "relay-token"},
     )
 
-    # Then: actual 401 classification is returned and the enrolled token object is unchanged.
-    assert response.status_code == 200
-    assert response.json() == {
-        "disposition": "RETRY",
-        "code": "HTTP_401",
-        "status_code": 401,
-    }
-    assert backend.bearer_token == "eft_v1.persisted.test"
-    assert len(backend.diagnostic_tokens) == 1
-    assert backend.diagnostic_tokens[0] != backend.bearer_token
+    assert response.status_code == 404
+
+
+def test_system_test_variant_cannot_cross_the_ordinary_alert_contract() -> None:
+    fake = FakeBackendIngestClient()
+    response = _client(fake).post(
+        "/api/v1/relay/alerts",
+        json={
+            "edge_event_id": "00000000-0000-4000-8000-000000000099",
+            "type": "SYSTEM_TEST",
+            "source": "SYSTEM_TEST",
+            "test_mode": "SYSTEM_TEST",
+            "detected_at": "2026-08-12T00:00:00Z",
+        },
+        headers={"X-Edge-Relay-Token": "relay-token"},
+    )
+
+    assert response.status_code == 422
+    assert fake.alerts == []
 
 
 def test_relay_alert_rejects_missing_token() -> None:

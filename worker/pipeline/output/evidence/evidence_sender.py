@@ -113,44 +113,6 @@ class EvidenceSender:
                 return self._send_clip(outbox, clip, now)
         return SenderStep.IDLE
 
-    def run_operator_once(self, edge_event_id: EdgeEventId) -> SenderStep:
-        """Drive one explicit operator row through the normal send/ACK transitions."""
-        if not self.config.enabled:
-            return SenderStep.DISABLED
-        now = self._clock()
-        lease = ClaimLease(self._owner, now, self.config.lease_seconds)
-        with EvidenceOutbox.open(self.database_path) as outbox:
-            event = outbox.claim_operator(edge_event_id, lease)
-            if event is None:
-                return SenderStep.IDLE
-            return self._send_event(outbox, event, now)
-
-    def replay_operator(
-        self,
-        edge_event_id: EdgeEventId,
-    ) -> EventReceipt | DeliveryFailure:
-        """Replay one terminal operator payload without changing its outbox row."""
-        if not self.config.enabled:
-            return DeliveryFailure(DeliveryDisposition.PERMANENT, "DISABLED")
-        with EvidenceOutbox.open(self.database_path) as outbox:
-            event = outbox.acknowledged_operator_event(edge_event_id)
-        if event is None:
-            return DeliveryFailure(DeliveryDisposition.PERMANENT, "NOT_ACKED")
-        result = self._transport.send_event(
-            _payload_with_attempt_ordinal(event.payload_json, event.attempt_count + 1),
-            event.edge_event_id,
-        )
-        if isinstance(result, DeliveryFailure):
-            return result
-        exact = (
-            result.status == "accepted"
-            and result.edge_event_id == event.edge_event_id
-            and result.event_id == event.backend_event_id
-        )
-        if not exact:
-            return DeliveryFailure(DeliveryDisposition.RETRY, "RECEIPT_MISMATCH")
-        return result
-
     def _send_event(
         self,
         outbox: EvidenceOutbox,

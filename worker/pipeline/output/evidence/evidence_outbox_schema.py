@@ -2,7 +2,7 @@
 
 from typing import Final
 
-SCHEMA_VERSION: Final = 8
+SCHEMA_VERSION: Final = 9
 
 SCHEMA_V1_STATEMENTS: Final = (
     """
@@ -244,10 +244,30 @@ SCHEMA_V8_STATEMENTS: Final = (
       )
     """,
 )
-"""The validation-run mapping provides durable create-or-load idempotency. An
-existing schema-v7 database may contain duplicate SYSTEM_TEST rows from the original
-implementation; migration preserves every event row and maps the earliest immutable
-identity so future invocations recover it without creating another."""
+"""The validation-run mapping provided durable create-or-load idempotency for
+schema 8. It remains in migration history so schema 6 and 7 databases follow the
+same forward path before the temporary feature is removed by schema 9."""
+
+SCHEMA_V9_STATEMENTS: Final = (
+    """
+    DELETE FROM clip_events
+    WHERE edge_event_id IN (
+        SELECT edge_event_id FROM evidence_events WHERE operator_only = 1
+    )
+    """,
+    "DROP TABLE system_test_runs",
+    "DELETE FROM evidence_events WHERE operator_only = 1",
+    "DROP INDEX evidence_events_operator_claim_idx",
+    "ALTER TABLE evidence_events DROP COLUMN operator_only",
+)
+"""Remove the temporary operator-test state while preserving all ordinary events,
+clips, relations, config snapshots, and fault rows. Migrations run inside the
+existing BEGIN IMMEDIATE transaction, so relation cleanup, table/index removal,
+column removal, and user_version advancement commit atomically in WAL mode.
+
+The deployed Python 3.11/3.12 Debian images provide SQLite >= 3.35, whose native
+DROP COLUMN rewrites the table transactionally and preserves its remaining schema.
+Dropping dependent objects first is required by SQLite's DROP COLUMN contract."""
 
 MIGRATIONS: Final = (
     SCHEMA_V1_STATEMENTS,
@@ -258,6 +278,7 @@ MIGRATIONS: Final = (
     SCHEMA_V6_STATEMENTS,
     SCHEMA_V7_STATEMENTS,
     SCHEMA_V8_STATEMENTS,
+    SCHEMA_V9_STATEMENTS,
 )
 
 __all__ = ["MIGRATIONS", "SCHEMA_VERSION"]

@@ -37,7 +37,6 @@ EVENT_ID = EdgeEventId("00000000-0000-4000-8000-000000000001")
 class ScriptedHandler(BaseHTTPRequestHandler):
     responses: ClassVar[list[tuple[int, dict[str, str], bytes]]] = []
     requests: ClassVar[list[tuple[str, str, bytes, str | None]]] = []
-    authorization_headers: ClassVar[list[str | None]] = []
 
     def do_GET(self) -> None:
         self._respond()
@@ -58,7 +57,6 @@ class ScriptedHandler(BaseHTTPRequestHandler):
                 self.headers.get("X-Edge-Relay-Token"),
             )
         )
-        type(self).authorization_headers.append(self.headers.get("Authorization"))
         status, headers, payload = type(self).responses.pop(0)
         self.send_response(status)
         for name, value in headers.items():
@@ -75,7 +73,6 @@ class ScriptedHandler(BaseHTTPRequestHandler):
 def server_url():
     ScriptedHandler.responses = []
     ScriptedHandler.requests = []
-    ScriptedHandler.authorization_headers = []
     server = ThreadingHTTPServer(("127.0.0.1", 0), ScriptedHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -155,57 +152,21 @@ def test_relay_client_parses_typed_event_receipt_and_retry_after(server_url: str
     ]
 
 
-def test_relay_client_routes_system_test_through_dedicated_local_contract(
-    server_url: str,
-) -> None:
-    # Given: an immutable facility-level SYSTEM_TEST payload and accepted receipt.
-    ScriptedHandler.responses = [
-        (202, {}, _json({"status": "accepted", "edge_event_id": EVENT_ID, "event_id": "evt"}))
-    ]
+def test_relay_client_has_no_system_test_payload_route(server_url: str) -> None:
+    ScriptedHandler.responses = [(422, {}, b'{"detail":"invalid alert payload"}')]
     client = RelayEvidenceClient(server_url, "relay-secret", timeout_sec=1.0)
-    payload = json.dumps(
-        {
-            "edge_event_id": EVENT_ID,
-            "type": "SYSTEM_TEST",
-            "source": "SYSTEM_TEST",
-            "test_mode": "SYSTEM_TEST",
-            "label": "SYSTEM TEST - NOT A RESIDENT ALERT",
-            "detected_at": "2026-08-12T00:00:00Z",
-            "validation_run_id": "0197f671-3a31-7a6c-a6e4-83ed412de80f",
-        },
-        separators=(",", ":"),
-    )
+    payload = _json({"type": "SYSTEM_TEST", "source": "SYSTEM_TEST"}).decode()
 
-    # When: the existing event client sends the durable payload.
     result = client.send_event(payload, EVENT_ID)
 
-    # Then: it uses the dedicated schema boundary with the existing relay credential.
-    assert result == EventReceipt("accepted", EVENT_ID, "evt")
+    assert result == DeliveryFailure(
+        DeliveryDisposition.PERMANENT,
+        "HTTP_422",
+        status_code=422,
+    )
     assert [(method, path, token) for method, path, _body, token in ScriptedHandler.requests] == [
-        ("POST", "/api/v1/relay/system-tests", "relay-secret")
+        ("POST", "/api/v1/relay/alerts", "relay-secret")
     ]
-
-
-def test_relay_client_classifies_in_memory_invalid_auth_diagnostic(server_url: str) -> None:
-    # Given: ml-api reports an actual backend 403 using its in-memory diagnostic token.
-    ScriptedHandler.responses = [
-        (
-            200,
-            {},
-            _json({"disposition": "RETRY", "code": "HTTP_403", "status_code": 403}),
-        )
-    ]
-    client = RelayEvidenceClient(server_url, "relay-secret", timeout_sec=1.0)
-
-    # When: the explicit diagnostic crosses the local relay client.
-    result = client.classify_invalid_auth()
-
-    # Then: classification is typed and no credential is sent in payload or output.
-    assert result == DeliveryFailure(DeliveryDisposition.RETRY, "HTTP_403", status_code=403)
-    request = ScriptedHandler.requests[0]
-    assert request[:2] == ("POST", "/api/v1/relay/system-tests/auth-check")
-    assert request[2] == b"{}"
-    assert request[3] == "relay-secret"
 
 
 def test_relay_client_treats_exact_409_receipt_as_idempotent_success(server_url: str) -> None:
@@ -377,61 +338,6 @@ def test_relay_client_rejects_invalid_local_event_identity_without_http(
         "INVALID_EVENT_PAYLOAD",
     )
     assert ScriptedHandler.requests == []
-
-
-def test_backend_client_sends_system_test_through_enrolled_bearer_http_path(
-    server_url: str,
-) -> None:
-    # Given: a local backend contract and an enrolled-format test credential.
-    ScriptedHandler.responses = [
-        (202, {}, _json({"status": "accepted", "edge_event_id": EVENT_ID, "event_id": "evt"}))
-    ]
-    client = BackendEvidenceClient(
-        f"{server_url}/api/v1/events",
-        "eft_v1.test.secret",
-        timeout_sec=1.0,
-    )
-    payload = {
-        "edge_event_id": EVENT_ID,
-        "type": "SYSTEM_TEST",
-        "source": "SYSTEM_TEST",
-        "test_mode": "SYSTEM_TEST",
-        "label": "SYSTEM TEST - NOT A RESIDENT ALERT",
-        "detected_at": "2026-08-12T00:00:00Z",
-        "validation_run_id": "0197f671-3a31-7a6c-a6e4-83ed412de80f",
-    }
-
-    # When: ml-api forwards through the existing BackendEvidenceClient.
-    result = client.send_event_payload(payload, EVENT_ID)
-
-    # Then: the exact media-free schema uses the existing Bearer credential path.
-    assert result == EventReceipt("accepted", EVENT_ID, "evt")
-    assert ScriptedHandler.authorization_headers == ["Bearer eft_v1.test.secret"]
-    assert json.loads(ScriptedHandler.requests[0][2]) == payload
-
-
-def test_backend_invalid_auth_clone_does_not_mutate_enrolled_client(server_url: str) -> None:
-    # Given: a persisted-client object and an actual local 401 response.
-    ScriptedHandler.responses = [(401, {}, b"")]
-    enrolled = BackendEvidenceClient(
-        f"{server_url}/api/v1/events",
-        "eft_v1.persisted.test",
-        timeout_sec=1.0,
-    )
-
-    # When: a cloned in-memory credential probes capability authentication.
-    result = enrolled.with_bearer_token("eft_v1.system-test.invalid").probe_capabilities(
-        "SYSTEM_TEST"
-    )
-
-    # Then: 401 is retryable and the enrolled object/token remain unchanged.
-    assert result == DeliveryFailure(
-        DeliveryDisposition.RETRY,
-        "HTTP_401",
-        status_code=401,
-    )
-    assert enrolled.bearer_token == "eft_v1.persisted.test"
-    assert ScriptedHandler.authorization_headers == ["Bearer eft_v1.system-test.invalid"]
 
 
 def test_backend_client_send_event_payload_calls_on_accepted_with_wall_clock_time(

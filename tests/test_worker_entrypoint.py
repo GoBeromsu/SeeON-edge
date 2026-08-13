@@ -12,6 +12,7 @@ TypeError cannot recur.
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import signal
 from pathlib import Path
@@ -24,7 +25,6 @@ from edge_worker_fixtures import edge_config_payload
 import worker.__main__ as worker_main
 from worker.runtime.config import RestartDirective
 from worker.runtime.worker import WorkerRuntime
-from worker.system_test import SystemTestOutcome
 
 
 def _write_config(tmp_path: Path, *, camera_count: int = 1, version: int = 1) -> Path:
@@ -94,124 +94,42 @@ def test_help_flag_exits_zero_and_documents_all_flags(
     assert "--check-config" in output
     assert "--heartbeat-on-start" in output
     assert "--max-frames-per-camera" in output
-    assert "--system-test" in output
-    assert "--system-test-validation-run-id" in output
-    assert "--system-test-edge-event-id" in output
-    assert "--confirm-system-test" in output
+    for removed_flag in (
+        "--system-test",
+        "--system-test-validation-run-id",
+        "--system-test-edge-event-id",
+        "--confirm-system-test",
+    ):
+        assert removed_flag not in output
 
 
-def test_system_test_is_disabled_by_default_before_config_or_camera_boot(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    # Given: no typed SYSTEM_TEST gate and traps on normal worker boot seams.
-    monkeypatch.delenv("ML_WORKER_SYSTEM_TEST_GATE", raising=False)
+@pytest.mark.parametrize(
+    "argv",
+    (
+        ("--system-test", "emit"),
+        ("--system-test-validation-run-id", "0197f671-3a31-7a6c-a6e4-83ed412de80f"),
+        ("--system-test-edge-event-id", "00000000-0000-4000-8000-000000000099"),
+        ("--confirm-system-test", "SYSTEM_TEST"),
+    ),
+)
+def test_removed_system_test_arguments_are_rejected(argv: tuple[str, ...]) -> None:
+    with pytest.raises(SystemExit) as raised:
+        worker_main._build_parser().parse_args(argv)
 
-    def _fail(*_args: object, **_kwargs: object) -> object:
-        raise AssertionError("disabled SYSTEM_TEST must not load config or start inference")
+    assert raised.value.code == 2
 
-    monkeypatch.setattr(worker_main, "load_worker_config", _fail)
-    monkeypatch.setattr(WorkerRuntime, "__init__", _fail)
 
-    # When: an operator-shaped invocation is attempted without the gate.
-    exit_code = worker_main.main(
-        [
-            "--system-test",
-            "emit",
-            "--system-test-validation-run-id",
-            "0197f671-3a31-7a6c-a6e4-83ed412de80f",
-            "--confirm-system-test",
-            "SYSTEM_TEST",
-        ]
+def test_removed_system_test_module_and_environment_gate_are_not_shipped() -> None:
+    root = Path(__file__).resolve().parents[1]
+    runtime_contracts = (
+        *root.glob("compose*.yaml"),
+        *root.glob(".env*.example"),
+        *root.glob("Dockerfile*"),
     )
 
-    # Then: it fails closed before any normal inference/config path.
-    assert exit_code == 2
-
-
-def test_system_test_cli_emits_safe_machine_outcome_and_exits(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    # Given: the exact gate and an injected successful operator service outcome.
-    monkeypatch.setenv("ML_WORKER_SYSTEM_TEST_GATE", "SYSTEM_TEST_OPERATOR_ENABLED")
-    monkeypatch.setenv("RELAY_URL", "http://127.0.0.1:8000")
-    monkeypatch.setenv("RELAY_TOKEN", "local-relay-token")
-    monkeypatch.setattr(worker_main, "resolve_state_dir", lambda: tmp_path)
-    calls: list[object] = []
-
-    def _fail_runtime(*_args: object, **_kwargs: object) -> object:
-        raise AssertionError("SYSTEM_TEST must not construct the inference runtime")
-
-    monkeypatch.setattr(WorkerRuntime, "__init__", _fail_runtime)
-
-    def _execute(request: object, environment: object, state_dir: Path) -> object:
-        calls.append((request, environment, state_dir))
-        return SystemTestOutcome(
-            status=worker_main.SystemTestStatus.ACKED,
-            edge_event_id="00000000-0000-4000-8000-000000000099",
-            correlation_id="00000000-0000-4000-8000-000000000099",
-            backend_event_id="backend-system-test",
-        )
-
-    monkeypatch.setattr(worker_main, "execute_system_test", _execute)
-
-    # When: the explicit one-shot action is invoked.
-    exit_code = worker_main.main(
-        [
-            "--system-test",
-            "emit",
-            "--system-test-validation-run-id",
-            "0197f671-3a31-7a6c-a6e4-83ed412de80f",
-            "--confirm-system-test",
-            "SYSTEM_TEST",
-        ]
-    )
-
-    # Then: no worker runtime is constructed and stdout contains only safe IDs/status.
-    assert exit_code == 0
-    assert len(calls) == 1
-    output = json.loads(capsys.readouterr().out)
-    assert output == {
-        "status": "ACKED",
-        "edge_event_id": "00000000-0000-4000-8000-000000000099",
-        "correlation_id": "00000000-0000-4000-8000-000000000099",
-        "backend_event_id": "backend-system-test",
-        "error_code": None,
-    }
-
-
-def test_system_test_cli_treats_previously_acked_recovery_as_success(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    monkeypatch.setenv("ML_WORKER_SYSTEM_TEST_GATE", "SYSTEM_TEST_OPERATOR_ENABLED")
-    monkeypatch.setattr(worker_main, "resolve_state_dir", lambda: tmp_path)
-    monkeypatch.setattr(
-        worker_main,
-        "execute_system_test",
-        lambda *_args: SystemTestOutcome(
-            status=worker_main.SystemTestStatus.PREVIOUSLY_ACKED,
-            edge_event_id="00000000-0000-4000-8000-000000000099",
-            correlation_id="00000000-0000-4000-8000-000000000099",
-            backend_event_id="backend-system-test",
-        ),
-    )
-
-    exit_code = worker_main.main(
-        [
-            "--system-test",
-            "emit",
-            "--system-test-validation-run-id",
-            "0197f671-3a31-7a6c-a6e4-83ed412de80f",
-            "--confirm-system-test",
-            "SYSTEM_TEST",
-        ]
-    )
-
-    assert exit_code == 0
-    assert json.loads(capsys.readouterr().out)["status"] == "PREVIOUSLY_ACKED"
+    assert importlib.util.find_spec("worker.system_test") is None
+    for contract in runtime_contracts:
+        assert "ML_WORKER_SYSTEM_TEST_GATE" not in contract.read_text(encoding="utf-8")
 
 
 # --- config resolution / exit code 2 -----------------------------------

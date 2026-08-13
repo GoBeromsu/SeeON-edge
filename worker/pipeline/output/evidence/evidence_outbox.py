@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import sqlite3
-from collections.abc import Callable
 from pathlib import Path
 from types import TracebackType
 from typing import Self
@@ -15,12 +14,8 @@ from worker.pipeline.output.evidence.evidence_outbox_database import (
     database_settings,
     open_connection,
 )
-from worker.pipeline.output.evidence.evidence_outbox_stage import (
-    create_or_load_operator_event,
-    stage_event,
-)
+from worker.pipeline.output.evidence.evidence_outbox_stage import stage_event
 from worker.pipeline.output.evidence.evidence_outbox_types import (
-    AcknowledgedEvent,
     ClaimedClip,
     ClaimedEvent,
     ClaimLease,
@@ -34,7 +29,6 @@ from worker.pipeline.output.evidence.evidence_outbox_types import (
     EvidenceReasonCode,
     MissingStagedEventError,
     NewerSchemaVersionError,
-    OperatorEventRegistration,
     StagedEvent,
     StagedEventConflictError,
 )
@@ -66,17 +60,6 @@ class EvidenceOutbox:
     def stage(self, event: StagedEvent) -> None:
         stage_event(self._connection, event)
 
-    def create_or_load_operator_event(
-        self,
-        validation_run_id: str,
-        event_factory: Callable[[], StagedEvent],
-    ) -> OperatorEventRegistration:
-        return create_or_load_operator_event(
-            self._connection,
-            validation_run_id,
-            event_factory,
-        )
-
     def bind_clip(self, edge_event_id: EdgeEventId, clip_id: ClipId) -> int:
         return clip_store.bind_clip(self._connection, edge_event_id, clip_id)
 
@@ -85,13 +68,6 @@ class EvidenceOutbox:
 
     def claim(self, lease: ClaimLease) -> ClaimedEvent | None:
         return event_store.claim(self._connection, lease)
-
-    def claim_operator(
-        self,
-        edge_event_id: EdgeEventId,
-        lease: ClaimLease,
-    ) -> ClaimedEvent | None:
-        return event_store.claim_operator(self._connection, edge_event_id, lease)
 
     def schedule_retry(self, claim: ClaimedEvent, *, next_attempt_at: float) -> bool:
         return event_store.schedule_retry(
@@ -131,15 +107,6 @@ class EvidenceOutbox:
 
     def event_attempt_count(self, edge_event_id: EdgeEventId) -> int | None:
         return event_store.attempt_count(self._connection, edge_event_id)
-
-    def event_backend_event_id(self, edge_event_id: EdgeEventId) -> str | None:
-        return event_store.backend_event_id(self._connection, edge_event_id)
-
-    def acknowledged_operator_event(
-        self,
-        edge_event_id: EdgeEventId,
-    ) -> AcknowledgedEvent | None:
-        return event_store.acknowledged_operator_event(self._connection, edge_event_id)
 
     def claim_clip(self, lease: ClaimLease) -> ClaimedClip | None:
         return delivery_store.claim_clip(self._connection, lease)
@@ -238,7 +205,6 @@ class EvidenceOutbox:
 
 
 __all__ = [
-    "AcknowledgedEvent",
     "ClaimLease",
     "ClaimedClip",
     "ClaimedEvent",
@@ -253,7 +219,6 @@ __all__ = [
     "EvidenceReasonCode",
     "MissingStagedEventError",
     "NewerSchemaVersionError",
-    "OperatorEventRegistration",
     "StagedEvent",
     "StagedEventConflictError",
 ]

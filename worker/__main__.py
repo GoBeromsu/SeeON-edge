@@ -9,7 +9,6 @@ supported contract.
 from __future__ import annotations
 
 import argparse
-import json
 import logging
 import os
 import signal
@@ -49,14 +48,6 @@ from worker.runtime.config import (
 )
 from worker.runtime.state_dir import resolve_state_dir
 from worker.runtime.worker import WorkerRuntime
-from worker.system_test import (
-    SystemTestAction,
-    SystemTestCommand,
-    SystemTestConfigurationError,
-    SystemTestDisabledError,
-    SystemTestStatus,
-    execute_system_test,
-)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -119,28 +110,6 @@ def _build_parser() -> argparse.ArgumentParser:
             "Bounded-run cap: exit cleanly once every camera has processed "
             "this many frames (default: run indefinitely)"
         ),
-    )
-    parser.add_argument(
-        "--system-test",
-        type=SystemTestAction,
-        choices=tuple(SystemTestAction),
-        default=None,
-        help="One-shot operator action: emit, retry, replay, or auth-check",
-    )
-    parser.add_argument(
-        "--system-test-validation-run-id",
-        default=None,
-        help="Active SYSTEM_TEST-capable backend validation-run UUID (emit only)",
-    )
-    parser.add_argument(
-        "--system-test-edge-event-id",
-        default=None,
-        help="Previously emitted lowercase UUIDv4 (retry/replay only)",
-    )
-    parser.add_argument(
-        "--confirm-system-test",
-        default=None,
-        help="Required literal confirmation: SYSTEM_TEST",
     )
     parser.add_argument(
         "--backfill-thumbnails",
@@ -223,55 +192,6 @@ def main(argv: list[str] | None = None) -> int:
         level=logging.INFO,
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     )
-
-    if args.system_test is not None:
-        mixed_with_worker = any(
-            (
-                args.config is not None,
-                args.check_config,
-                args.heartbeat_on_start,
-                args.max_frames_per_camera is not None,
-                args.backfill_thumbnails,
-            )
-        )
-        if mixed_with_worker:
-            LOGGER.error("SYSTEM_TEST cannot be combined with worker runtime actions")
-            return CONFIG_ERROR_EXIT_CODE
-        command = SystemTestCommand(
-            action=args.system_test,
-            confirmation=args.confirm_system_test,
-            validation_run_id=args.system_test_validation_run_id,
-            edge_event_id=args.system_test_edge_event_id,
-        )
-        try:
-            outcome = execute_system_test(command, os.environ, resolve_state_dir())
-        except (SystemTestDisabledError, SystemTestConfigurationError) as exc:
-            # Expected operator refusal: keep output concise and omit a traceback.
-            LOGGER.error("SYSTEM_TEST refused: %s", exc)  # noqa: TRY400
-            return CONFIG_ERROR_EXIT_CODE
-        print(
-            json.dumps(
-                {
-                    "status": outcome.status.value,
-                    "edge_event_id": outcome.edge_event_id,
-                    "correlation_id": outcome.correlation_id,
-                    "backend_event_id": outcome.backend_event_id,
-                    "error_code": outcome.error_code,
-                },
-                separators=(",", ":"),
-            )
-        )
-        return (
-            CLEAN_SHUTDOWN_EXIT_CODE
-            if outcome.status
-            in {
-                SystemTestStatus.ACKED,
-                SystemTestStatus.PREVIOUSLY_ACKED,
-                SystemTestStatus.REPLAY_ACKED,
-                SystemTestStatus.AUTH_CLASSIFIED,
-            }
-            else GENERIC_RUNTIME_ERROR_EXIT_CODE
-        )
 
     if args.backfill_thumbnails:
         try:

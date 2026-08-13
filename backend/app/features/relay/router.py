@@ -18,7 +18,6 @@ from backend.app.features.cameras.router import worker_config_snapshot
 from backend.app.features.cameras.store import CameraRegistryStore
 from backend.app.features.clips.catalog import CatalogConflictError, get_catalog_store
 from backend.app.features.relay.auth import authorize_relay
-from backend.app.features.relay.system_test import router as system_test_router
 from backend.app.features.status.heartbeat_store import get_heartbeat_store
 from backend.app.features.status.runtime_status_store import get_runtime_status_store
 from contracts import AlertEventType
@@ -614,8 +613,5 @@ def _backend_ingest_client(request: Request, *, camera_id: str) -> BackendIngest
             detail="backend ingest client is not configured",
         )
     return client
-
-
-router.include_router(system_test_router)
 
 __all__ = ["router"]

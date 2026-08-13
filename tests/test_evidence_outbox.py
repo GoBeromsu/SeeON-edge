@@ -153,33 +153,6 @@ def test_stage_replay_conflict_refuses_mismatch_and_preserves_original(
     assert claimed.payload_json == original.payload_json
 
 
-def test_stage_replay_cannot_change_operator_only_isolation(tmp_path: Path) -> None:
-    # Given: an ordinary row whose immutable identity and payload match a replay.
-    database_path = tmp_path / "evidence.sqlite3"
-    original = _event(1)
-    operator_replay = StagedEvent(
-        edge_event_id=original.edge_event_id,
-        detected_at=original.detected_at,
-        payload_json=original.payload_json,
-        queued_at=original.queued_at,
-        operator_only=True,
-    )
-    with EvidenceOutbox.open(database_path) as outbox:
-        outbox.stage(original)
-
-        # When: a replay attempts to convert it into operator-only traffic.
-        with pytest.raises(StagedEventConflictError) as raised:
-            outbox.stage(operator_replay)
-
-        outbox.bind_clip(original.edge_event_id, ClipId("clip-original"))
-        periodic = outbox.claim(ClaimLease("periodic", 1000.0, 10.0))
-
-    # Then: the isolation flag is immutable and the original remains periodic work.
-    assert raised.value.mismatched_fields == ("operator_only",)
-    assert periodic is not None
-    assert periodic.edge_event_id == original.edge_event_id
-
-
 def test_committed_event_survives_process_kill_and_reopen(tmp_path: Path) -> None:
     # Given: a child process that commits evidence and exits without cleanup.
     database_path = tmp_path / "evidence.sqlite3"
@@ -238,35 +211,6 @@ def test_queue_saturation_does_not_drop_committed_rows(tmp_path: Path) -> None:
     assert len(references) == expected_count
     assert references[0] == _event(0).edge_event_id
     assert references[-1] == _event(expected_count - 1).edge_event_id
-
-
-def test_operator_only_event_is_never_claimed_by_periodic_sender(tmp_path: Path) -> None:
-    # Given: an explicitly operator-only event is ready beside an ordinary event.
-    database_path = tmp_path / "evidence.sqlite3"
-    operator_event = StagedEvent(
-        edge_event_id=EdgeEventId("00000000-0000-4000-8000-000000000099"),
-        detected_at="2026-07-16T00:00:00Z",
-        payload_json='{"type":"SYSTEM_TEST"}',
-        queued_at=1.0,
-        operator_only=True,
-    )
-    with EvidenceOutbox.open(database_path) as outbox:
-        outbox.stage(operator_event)
-        assert outbox.mark_ready(operator_event.edge_event_id)
-        _stage_ready(outbox, 1)
-
-        # When: the normal periodic sender and explicit operator each claim work.
-        periodic_claim = outbox.claim(ClaimLease("periodic", 100.0, 10.0))
-        operator_claim = outbox.claim_operator(
-            operator_event.edge_event_id,
-            ClaimLease("operator", 100.0, 10.0),
-        )
-
-    # Then: only explicit ID-bound operator action can lease SYSTEM_TEST state.
-    assert periodic_claim is not None
-    assert periodic_claim.edge_event_id == _event(1).edge_event_id
-    assert operator_claim is not None
-    assert operator_claim.edge_event_id == operator_event.edge_event_id
 
 
 def test_concurrent_claimers_receive_distinct_events(tmp_path: Path) -> None:
