@@ -808,11 +808,18 @@ def _assert_untrusted_ci_security(workflow: dict[str, object]) -> None:
             "d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86",
             "with": {"enable-cache": "false", "version": "0.11.27"},
         },
+        # fonts-noto-cjk provisions the same real CJK glyph file the runtime
+        # image installs (Dockerfile.edge). It is a plain distro apt package:
+        # it fetches no other repository, reads no secret, starts no container,
+        # and re-checks out nothing, so it stays admissible under this
+        # closed-world contract. Declared here because a step added to public
+        # CI must be listed, not inferred.
         {
-            "name": "Install FFmpeg test dependency",
+            "name": "Install FFmpeg and packaged CJK overlay font",
             "run": (
                 "sudo apt-get update && "
-                "sudo apt-get install -y --no-install-recommends ffmpeg"
+                "sudo apt-get install -y --no-install-recommends "
+                "ffmpeg fonts-noto-cjk"
             ),
         },
         {"run": "uv sync --frozen --group lint"},
