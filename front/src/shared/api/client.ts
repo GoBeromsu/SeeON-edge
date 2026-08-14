@@ -23,6 +23,10 @@ import type {
   CameraRegistry,
   CameraTestResult,
   Clip,
+  ClipAnalysis,
+  ClipArtifacts,
+  ClipDeleteResult,
+  ClipDerivative,
   ClipStorageBrowseResult,
   ClipStorageInfo,
   ConnectionInput,
@@ -31,6 +35,12 @@ import type {
   DecodeBackend,
   DetectionSettings,
   DetectionSettingsInput,
+  DetectionPolicyApplyInput,
+  DetectionPolicyCatalog,
+  DetectionPolicyComparedPayload,
+  DetectionPolicyDiff,
+  DetectionPolicyRollbackInput,
+  Incident,
   OverlayMode,
   RuntimeSettings,
   RuntimeSettingsInput,
@@ -49,6 +59,8 @@ export type {
   CameraHeartbeat,
   CameraTestResult,
   Clip,
+  ClipDeleteResult,
+  ClipDeleteStatus,
   ClipStorageBrowseEntry,
   ClipStorageBrowseResult,
   ClipStorageInfo,
@@ -62,16 +74,23 @@ export type {
   DetectionMode,
   DetectionSettings,
   DetectionSettingsInput,
+  DetectionPolicyApplyInput,
+  DetectionPolicyCatalog,
+  DetectionPolicyComparedPayload,
+  DetectionPolicyDiff,
+  DetectionPolicyRollbackInput,
+  Incident,
   HeartbeatStatus,
   OverlayMode,
   RuntimeCameraDiagnostics,
+  RuntimeClipExportApplied,
   RuntimeClipRecorder,
   RuntimeDecodeDiagnostics,
   RuntimeDeviceDiagnostics,
   RuntimeLatencyDiagnostics,
-  RuntimeWorkerDiagnostics,
   RuntimeSettings,
   RuntimeSettingsInput,
+  RuntimeWorkerDiagnostics,
   StatusSnapshot,
   SystemSnapshot,
 } from '@/shared/api/types';
@@ -275,6 +294,16 @@ export async function recognizeBedZone(cameraId: string): Promise<BedZone> {
   );
 }
 
+export async function fetchRuntimeSettings(signal?: AbortSignal): Promise<RuntimeSettings> {
+  return normalizeRuntimeSettings(await requestJson('/runtime-settings', { signal }));
+}
+
+export async function saveRuntimeSettings(input: RuntimeSettingsInput): Promise<RuntimeSettings> {
+  return normalizeRuntimeSettings(
+    await requestJson('/runtime-settings', { method: 'PUT', body: JSON.stringify(input) }),
+  );
+}
+
 export async function fetchDetectionSettings(signal?: AbortSignal): Promise<DetectionSettings> {
   return normalizeDetectionSettings(await requestJson('/detection-settings', { signal }));
 }
@@ -286,14 +315,68 @@ export async function saveDetectionSettings(input: DetectionSettingsInput): Prom
   );
 }
 
-export async function fetchRuntimeSettings(signal?: AbortSignal): Promise<RuntimeSettings> {
-  return normalizeRuntimeSettings(await requestJson('/runtime-settings', { signal }));
+export async function fetchDetectionPolicies(signal?: AbortSignal): Promise<DetectionPolicyCatalog> {
+  return await requestJson('/detection-policies', { signal }) as DetectionPolicyCatalog;
 }
 
-export async function saveRuntimeSettings(input: RuntimeSettingsInput): Promise<RuntimeSettings> {
-  return normalizeRuntimeSettings(
-    await requestJson('/runtime-settings', { method: 'PUT', body: JSON.stringify(input) }),
-  );
+export async function diffDetectionPolicy(
+  input: DetectionPolicyComparedPayload,
+  signal?: AbortSignal,
+): Promise<DetectionPolicyDiff> {
+  return await requestJson('/detection-policies/diff', {
+    method: 'POST',
+    body: JSON.stringify(input),
+    signal,
+  }) as DetectionPolicyDiff;
+}
+
+export async function applyDetectionPolicy(input: DetectionPolicyApplyInput): Promise<void> {
+  await requestJson('/detection-policies/apply', { method: 'POST', body: JSON.stringify(input) });
+}
+
+export async function rollbackDetectionPolicy(input: DetectionPolicyRollbackInput): Promise<void> {
+  await requestJson('/detection-policies/rollback', { method: 'POST', body: JSON.stringify(input) });
+}
+
+export async function fetchIncidents(signal?: AbortSignal): Promise<Incident[]> {
+  const response = await requestJson('/incidents', { signal }) as { incidents?: Incident[] };
+  return Array.isArray(response.incidents) ? response.incidents : [];
+}
+
+export async function reviewIncident(incidentId: string, input: { expected_version: number; disposition: 'TRUE_POSITIVE' | 'FALSE_POSITIVE'; notes: string | null }): Promise<Incident> {
+  return await requestJson(`/incident-reviews/${encodeURIComponent(incidentId)}`, { method: 'PUT', body: JSON.stringify(input) }) as Incident;
+}
+
+export async function fetchClipArtifacts(clipId: string): Promise<ClipArtifacts> {
+  return await requestJson(`/clips/${encodeURIComponent(clipId)}/artifacts`) as ClipArtifacts;
+}
+
+export async function fetchClipAnalysis(clipId: string): Promise<ClipAnalysis> {
+  return await requestJson(`/clips/${encodeURIComponent(clipId)}/analysis`) as ClipAnalysis;
+}
+
+export async function controlClipDerivative(clipId: string, kind: 'still' | 'video', action: 'request' | 'cancel' | 'status'): Promise<ClipDerivative> {
+  return await requestJson(`/clips/${encodeURIComponent(clipId)}/derivatives/${kind}`, { method: action === 'request' ? 'POST' : action === 'cancel' ? 'DELETE' : 'GET' }) as ClipDerivative;
+}
+
+const CLIP_DELETE_STATUSES = new Set<ClipDeleteResult['status']>([
+  'PURGED', 'HELD', 'MISSING', 'UNVERIFIABLE', 'DELETE_FAILED', 'VERIFICATION_FAILED',
+]);
+
+function normalizeClipDeleteResult(value: unknown): ClipDeleteResult {
+  if (!isRecord(value) || typeof value.clip_id !== 'string' || value.clip_id.length === 0
+    || typeof value.status !== 'string' || !CLIP_DELETE_STATUSES.has(value.status as ClipDeleteResult['status'])) {
+    throw new Error('Invalid clip deletion response');
+  }
+  return { clip_id: value.clip_id, status: value.status as ClipDeleteResult['status'] };
+}
+
+/** Explicit exact clip-id confirmation is required server-side; a mismatch is rejected as 422 before any worker call. */
+export async function deleteClip(clipId: string, confirmClipId: string): Promise<ClipDeleteResult> {
+  return normalizeClipDeleteResult(await requestJson(`/clips/${encodeURIComponent(clipId)}`, {
+    method: 'DELETE',
+    body: JSON.stringify({ confirm_clip_id: confirmClipId }),
+  }));
 }
 
 export async function fetchClipStorage(signal?: AbortSignal): Promise<ClipStorageInfo> {

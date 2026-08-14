@@ -133,6 +133,7 @@ export type RuntimeClipRecorder = {
   encoder: string | null;
 };
 
+
 export type StatusSnapshot = {
   cameras: Record<string, CameraHeartbeat>;
   stale_after_sec: number | null;
@@ -144,6 +145,7 @@ export type StatusSnapshot = {
     clip_recorder: RuntimeClipRecorder | null;
     stale_after_sec: number | null;
   };
+  runtime_settings?: RuntimeSettings;
 };
 
 export type CameraInput = {
@@ -295,18 +297,75 @@ export type DetectionSettings = {
 /** PUT body is a full replace of the same shape as the GET response. */
 export type DetectionSettingsInput = DetectionSettings;
 
-export type RuntimeSettings = {
-  clip_export_enabled: boolean;
-  version: number;
+export type EffectiveDetectionPolicy = {
+  module_id: string;
+  module_version: number;
+  schema_id: string;
+  schema_version: number;
+  source: 'image-default' | 'facility-default' | 'camera-override';
+  facility_revision_id: number | null;
+  camera_revision_id: number | null;
+  values: Record<string, number>;
+  effective_policy_id: string;
 };
 
-export type RuntimeSettingsInput = Pick<RuntimeSettings, 'clip_export_enabled'> & {
-  expected_version: number;
+/** Exact change document frozen by POST /detection-policies/diff. */
+export type DetectionPolicyComparedPayload = {
+  module_id: string;
+  module_version: number;
+  schema_id: string;
+  schema_version: number;
+  camera_id: string | null;
+  values: Record<string, number> | null;
+};
+
+export type DetectionPolicyDiff = {
+  changed: boolean;
+  current: EffectiveDetectionPolicy;
+  proposed: EffectiveDetectionPolicy;
+  compared_payload: DetectionPolicyComparedPayload;
+  /** Scope CAS token; 0 means image-default / inherited / generation-zero. */
+  concurrency_token: number;
+};
+
+export type DetectionPolicyApplyInput = DetectionPolicyComparedPayload & {
+  expected_revision_id: number;
+};
+
+export type DetectionPolicyRollbackInput = {
+  module_id: string;
+  module_version: number;
+  camera_id: string | null;
+  expected_revision_id: number;
+};
+
+export type DetectionPolicyCatalog = {
+  activation_generation: number;
+  modules: Array<{ qualified_id: string; policy_qualified_id: string; units: Record<string, string> }>;
+  effective: { defaults: Record<string, EffectiveDetectionPolicy>; cameras: Record<string, Record<string, EffectiveDetectionPolicy>> };
+  activations: Array<{ module_id: string; module_version: number; camera_id: string | null; active_revision_id: number | null; previous_revision_id: number | null; activation_generation: number; status: 'pending' | 'applied' | 'failed'; refusal_reason: string | null }>;
 };
 
 /** GET /clips/storage — usage + current selection under the CLIP_STORE_DIR mount root. */
+export type IncidentReview = { version: number; disposition: 'TRUE_POSITIVE' | 'FALSE_POSITIVE'; reviewed_at: string; notes: string | null };
+export type Incident = { incident_id: string; edge_event_id: string; camera_id: string; event_type: string; detected_at: string; lifecycle_state: string; revision: number; failure_reason: string | null; runtime_manifest_sha256: string | null; decision_trace_id: string | null; module_qualified_id: string | null; policy_qualified_id: string | null; primary_clip_id: string | null; primary_artifact_state: string | null; snapshot_artifact_state: string | null; derivative_state: string | null; event_delivery_state: string; clip_publish_state: string | null; retention_state: string | null; review: IncidentReview | null };
+export type IncidentListPage = {
+  incidents: Incident[];
+  pagination: { limit: number; next_cursor: string | null; has_more: boolean };
+};
+
+export type ArtifactState = 'AVAILABLE' | 'UNAVAILABLE' | 'MISSING' | 'CORRUPT' | 'TRUNCATED' | 'QUEUED' | 'RUNNING' | 'CANCELLED' | 'NOT_REQUESTED';
+
+/** GET/PUT status for `DELETE /clips/{clip_id}` -- always the truthful worker-owned retention outcome, never a bare ack. */
+export type ClipDeleteStatus = 'PURGED' | 'HELD' | 'MISSING' | 'UNVERIFIABLE' | 'DELETE_FAILED' | 'VERIFICATION_FAILED';
+export type ClipDeleteResult = { clip_id: string; status: ClipDeleteStatus };
+export type ClipArtifacts = { clip_id: string; clean: ArtifactState; analysis: ArtifactState; annotated: ArtifactState; playback_view: 'clean' | 'annotated'; annotated_fallback_to_clean: boolean };
+export type ClipDerivative = { incident_id: string; kind: 'STILL' | 'VIDEO'; request_id: string; state: ArtifactState; reason: string | null; attempt_count: number; render_backend: string | null; primary_clip_id: string | null; decision_trace_id: string | null; runtime_manifest_sha256: string | null };
+export type ClipAnalysis = { clip_id: string; decision_trace_id: string; module_qualified_id: string; policy_qualified_id: string; effective_policy_id: string; runtime_manifest_sha256: string; reason: string; previous_state: string; current_state: string; triggered: boolean; track_id: number | null; bed_id: number | null; values: Array<{ name: string; value: number | null; missing_reason: string | null }> };
+
 export type ClipStorageInfo = {
-  root: string;
+  /** Stable non-filesystem label for the configured mount (never an absolute host path). */
+  mount_label: string;
   /** "" means the mount root itself; otherwise a relative subdirectory path. */
   selected_path: string;
   total_bytes: number | null;
@@ -324,4 +383,13 @@ export type ClipStorageBrowseResult = {
   path: string;
   parent: string | null;
   directories: ClipStorageBrowseEntry[];
+};
+
+export type RuntimeSettings = {
+  clip_export_enabled: boolean;
+  version: number;
+};
+
+export type RuntimeSettingsInput = Pick<RuntimeSettings, 'clip_export_enabled'> & {
+  expected_version: number;
 };

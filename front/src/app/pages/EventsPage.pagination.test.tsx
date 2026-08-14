@@ -118,6 +118,9 @@ describe('EventsPage pagination', () => {
       if (url.includes('/cameras')) {
         return Promise.resolve({ ok: true, status: 200, json: async () => cameraRegistry });
       }
+      if (url.includes('/incidents')) {
+        return Promise.resolve({ ok: true, status: 200, json: async () => ({ incidents: [] }) });
+      }
       clipsCallCount += 1;
       if (clipsCallCount === 2) return Promise.reject(new Error('background unavailable'));
       const params = new URL(url, 'http://localhost').searchParams;

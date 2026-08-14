@@ -19,13 +19,14 @@ export function CameraTable({ cameras, onEdit, onRequestDelete }: CameraTablePro
   }
 
   return (
-    <table className="w-full border-collapse text-sm">
+    // table-fixed + break-all keeps long masked RTSPS URLs from expanding body.scrollWidth on narrow viewports (QA F1).
+    <table className="w-full table-fixed border-collapse text-sm">
       <thead>
         <tr className="border-b border-border text-left text-xs text-muted-foreground">
-          <th className="py-2 pr-2 font-medium">카메라</th>
-          <th className="py-2 pr-2 font-medium">층</th>
-          <th className="py-2 pr-2 font-medium">상태</th>
-          <th className="py-2 pl-2 text-right font-medium">작업</th>
+          <th className="min-w-0 py-2 pr-2 font-medium">카메라</th>
+          <th className="w-12 py-2 pr-2 font-medium whitespace-nowrap sm:w-16">층</th>
+          <th className="w-[5.75rem] py-2 pr-2 font-medium whitespace-nowrap sm:w-28">상태</th>
+          <th className="w-12 py-2 pl-2 text-right font-medium whitespace-nowrap sm:w-[4.5rem]">작업</th>
         </tr>
       </thead>
       <tbody>
@@ -36,36 +37,38 @@ export function CameraTable({ cameras, onEdit, onRequestDelete }: CameraTablePro
               key={camera.id}
               className={`border-b border-border last:border-0 ${camera.status === 'offline' ? 'bg-status-rejectedBg' : ''}`}
             >
-              <td className="py-3 pr-2">
-                <div className="font-medium text-foreground">{camera.label}</div>
-                <div className="font-mono text-xs text-muted-foreground">{camera.rtsp_url_masked}</div>
+              <td className="min-w-0 py-3 pr-2 align-top">
+                <div className="break-words font-medium text-foreground">{camera.label}</div>
+                <div className="break-all font-mono text-xs text-muted-foreground">{camera.rtsp_url_masked}</div>
               </td>
-              <td className="py-3 pr-2 text-foreground">
+              <td className="py-3 pr-2 align-top whitespace-nowrap text-foreground">
                 {camera.floor !== null && camera.floor !== undefined
                   ? floorLabel(camera.floor)
                   : camera.floor_name ?? '미지정'}
               </td>
-              <td className="py-3 pr-2">
+              <td className="py-3 pr-2 align-top whitespace-nowrap">
                 <span className={statusMeta.className}>
-                  <span aria-hidden="true" className="h-1.5 w-1.5 rounded-full bg-current" />
+                  <span aria-hidden="true" className="h-1.5 w-1.5 shrink-0 rounded-full bg-current" />
                   {statusMeta.label}
                 </span>
               </td>
-              <td className="py-3 pl-2 text-right">
-                <button
-                  type="button"
-                  className="text-sm font-semibold text-primary hover:underline"
-                  onClick={() => onEdit(camera)}
-                >
-                  수정
-                </button>
-                <button
-                  type="button"
-                  className="ml-3 text-sm font-semibold text-destructive hover:underline"
-                  onClick={() => onRequestDelete(camera)}
-                >
-                  삭제
-                </button>
+              <td className="py-3 pl-2 align-top text-right whitespace-nowrap">
+                <div className="inline-flex flex-col items-end gap-1 sm:flex-row sm:items-center sm:gap-0">
+                  <button
+                    type="button"
+                    className="text-sm font-semibold text-primary hover:underline"
+                    onClick={() => onEdit(camera)}
+                  >
+                    수정
+                  </button>
+                  <button
+                    type="button"
+                    className="text-sm font-semibold text-destructive hover:underline sm:ml-3"
+                    onClick={() => onRequestDelete(camera)}
+                  >
+                    삭제
+                  </button>
+                </div>
               </td>
             </tr>
           );

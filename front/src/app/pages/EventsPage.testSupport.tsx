@@ -41,6 +41,9 @@ export function installFetchMock(clips: readonly Record<string, unknown>[] = all
     if (url.includes('/cameras')) {
       return Promise.resolve({ ok: true, status: 200, json: async () => cameraRegistry });
     }
+    if (url.includes('/incidents')) {
+      return Promise.resolve({ ok: true, status: 200, json: async () => ({ incidents: [] }) });
+    }
     if (url.includes('/clips')) {
       const params = new URL(url, 'http://localhost').searchParams;
       const cameraId = params.get('camera_id');
@@ -76,6 +79,9 @@ export function installLegacyFetchMock(clips: readonly Record<string, unknown>[]
     const url = typeof input === 'string' ? input : input.toString();
     if (url.includes('/cameras')) {
       return Promise.resolve({ ok: true, status: 200, json: async () => cameraRegistry });
+    }
+    if (url.includes('/incidents')) {
+      return Promise.resolve({ ok: true, status: 200, json: async () => ({ incidents: [] }) });
     }
     if (url.includes('/clips')) {
       return Promise.resolve({ ok: true, status: 200, json: async () => ({ clips }) });

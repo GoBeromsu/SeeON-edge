@@ -333,14 +333,7 @@ describe('status normalization', () => {
     expect(normalizeStatusSnapshot({ cameras: {}, runtime: { cameras: {} } })).toEqual({
       cameras: {},
       stale_after_sec: null,
-      runtime: {
-        cameras: {},
-        worker: null,
-        device: null,
-        clip_export_applied: { enabled: null, version: null, freshness: 'unknown' },
-        clip_recorder: null,
-        stale_after_sec: null,
-      },
+      runtime: { cameras: {}, worker: null, device: null, clip_export_applied: { enabled: null, version: null, freshness: 'unknown' }, clip_recorder: null, stale_after_sec: null },
     });
   });
 

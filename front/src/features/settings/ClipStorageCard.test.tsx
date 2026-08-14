@@ -13,7 +13,7 @@ vi.mock('@/shared/api/client', async () => {
 });
 
 const storage: ClipStorageInfo = {
-  root: '/var/lib/clip-store',
+  mount_label: 'clip-store',
   selected_path: '',
   total_bytes: 10 * 1024 ** 3,
   used_bytes: 2 * 1024 ** 3,
@@ -81,7 +81,7 @@ describe('ClipStorageCard', () => {
   it('renders the usage gauge and current path', () => {
     const { host, root } = render();
     expect(host.textContent).toContain('2.0 / 10.0 GB');
-    expect(host.textContent).toContain('/var/lib/clip-store');
+    expect(host.textContent).toContain('clip-store');
     const bar = host.querySelector('[role="progressbar"]');
     expect(bar?.getAttribute('aria-valuenow')).toBe('20');
     act(() => root.unmount());
@@ -90,7 +90,7 @@ describe('ClipStorageCard', () => {
   it('shows the joined subdirectory path when a subdirectory is selected', () => {
     const nested: ClipStorageInfo = { ...storage, selected_path: 'cam-101a' };
     const { host, root } = render(makeResource({ data: nested }));
-    expect(host.textContent).toContain('/var/lib/clip-store/cam-101a');
+    expect(host.textContent).toContain('clip-store/cam-101a');
     act(() => root.unmount());
   });
 

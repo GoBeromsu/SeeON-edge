@@ -43,12 +43,12 @@ export function CameraSection({ camerasResource, systemResource }: CameraSection
   }
 
   return (
-    <article className="rounded-card border border-border bg-card p-5">
+    <article className="min-w-0 rounded-card border border-border bg-card p-5">
       <div className="flex items-center justify-between gap-3">
         <h2 className="text-base font-semibold text-foreground">카메라</h2>
         <button
           type="button"
-          className="inline-flex h-8 items-center gap-1.5 rounded-control bg-primary px-3 text-xs font-semibold text-primary-foreground"
+          className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-control bg-primary px-3 text-xs font-semibold text-primary-foreground"
           onClick={() => setRegisterOpen(true)}
         >
           <CameraPlusIcon />
@@ -56,7 +56,7 @@ export function CameraSection({ camerasResource, systemResource }: CameraSection
         </button>
       </div>
 
-      <div className="mt-4">
+      <div className="mt-4 min-w-0">
         {camerasResource.status === 'loading' && !camerasResource.data ? (
           <p className="py-6 text-center text-sm text-muted-foreground">카메라 목록을 불러오는 중입니다...</p>
         ) : camerasResource.status === 'error' && !camerasResource.data ? (

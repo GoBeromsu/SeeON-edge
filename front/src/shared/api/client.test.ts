@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { bedZoneRecognitionFailureDetail, browseClipStorage, cameraDuplicateDetail, cameraProbeFailureDetail, createCamera, fetchCameraOverlay, fetchCameras, fetchClips, fetchClipStorage, fetchDetectionSettings, fetchRuntimeSettings, fetchStatus, fetchSystem, getApiBase, getCameraSnapshotUrl, getCameraStreamUrl, loginDashboard, logoutDashboard, recognizeBedZone, saveClipStorageLocation, saveConnection, saveDetectionSettings, saveRuntimeSettings, setCameraOverlay, testCamera, testConnection, updateCamera, updateCameraDecodeBackend } from '@/shared/api/client';
+import { bedZoneRecognitionFailureDetail, browseClipStorage, cameraDuplicateDetail, cameraProbeFailureDetail, createCamera, deleteClip, fetchCameraOverlay, fetchCameras, fetchClips, fetchClipStorage, fetchDetectionSettings, fetchRuntimeSettings, fetchStatus, fetchSystem, getApiBase, getCameraSnapshotUrl, getCameraStreamUrl, loginDashboard, logoutDashboard, recognizeBedZone, saveClipStorageLocation, saveConnection, saveDetectionSettings, saveRuntimeSettings, setCameraOverlay, testCamera, testConnection, updateCamera, updateCameraDecodeBackend } from '@/shared/api/client';
 import { HttpError } from '@/shared/api/http';
 import type { DetectionSettings } from '@/shared/api/client';
 
@@ -41,6 +41,21 @@ describe('api client contracts', () => {
     await expect(load()).rejects.toThrow(/Invalid .* response/);
   });
 
+  it('sends an encoded explicit clip-delete request and rejects invalid worker responses', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true, status: 202, json: async () => ({ clip_id: 'clip/a', status: 'PURGED' }),
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(deleteClip('clip/a', 'clip/a')).resolves.toEqual({ clip_id: 'clip/a', status: 'PURGED' });
+    expect(fetchMock).toHaveBeenCalledWith('/api/v1/clips/clip%2Fa', expect.objectContaining({
+      method: 'DELETE', body: JSON.stringify({ confirm_clip_id: 'clip/a' }),
+    }));
+
+    fetchMock.mockResolvedValueOnce({ ok: true, status: 202, json: async () => ({ clip_id: 'clip-a', status: 'PENDING' }) });
+    await expect(deleteClip('clip-a', 'clip-a')).rejects.toThrow('Invalid clip deletion response');
+  });
+
   it('keeps valid empty list envelopes as successful empty data', async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ registry_version: 0, cameras: [] }) })
@@ -52,14 +67,7 @@ describe('api client contracts', () => {
     await expect(fetchStatus()).resolves.toEqual({
       cameras: {},
       stale_after_sec: null,
-      runtime: {
-        cameras: {},
-        worker: null,
-        device: null,
-        clip_export_applied: { enabled: null, version: null, freshness: 'unknown' },
-        clip_recorder: null,
-        stale_after_sec: null,
-      },
+      runtime: { cameras: {}, worker: null, device: null, clip_export_applied: { enabled: null, version: null, freshness: 'unknown' }, clip_recorder: null, stale_after_sec: null },
     });
     await expect(fetchClips()).resolves.toEqual([]);
   });
@@ -432,7 +440,7 @@ describe('api client contracts', () => {
     await expect(fetchDetectionSettings()).rejects.toThrow('Invalid detection settings response');
   });
 
-  it('fetches and explicitly saves runtime clip export settings', async () => {
+    it('fetches and explicitly saves runtime clip export settings', async () => {
     const setting = { clip_export_enabled: false, version: 0 };
     const saved = { clip_export_enabled: true, version: 1 };
     const fetchMock = vi.fn()
@@ -453,7 +461,7 @@ describe('api client contracts', () => {
   });
 
   it('fetches clip storage info, browses a relative subdirectory, and saves a new location', async () => {
-    const storageInfo = { root: '/var/lib/clip-store', selected_path: '', total_bytes: 100, used_bytes: 10, used_pct: 10 };
+    const storageInfo = { mount_label: 'clip-store', selected_path: '', total_bytes: 100, used_bytes: 10, used_pct: 10 };
     // The browse endpoint's "" parent means "at the mount root" -- pickNullableString normalizes that to null.
     const browseResult = { path: 'cam-101a', parent: '', directories: [] };
     const fetchMock = vi.fn()
