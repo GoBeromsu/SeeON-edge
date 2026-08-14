@@ -27,8 +27,14 @@ jobs:
           version: "0.11.27"
           enable-cache: false
 
-      - name: Install FFmpeg test dependency
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
+      # ffmpeg drives the clip recorder's H.264 encode path; fonts-noto-cjk
+      # provisions the same real CJK glyph file the runtime image installs
+      # (Dockerfile.edge -> /usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc).
+      # The overlay renderer fails closed via OverlayFontUnavailable when no real
+      # CJK font is discoverable, so the CJK render tests can only pass once the
+      # runner carries the packaged font -- exactly as production does.
+      - name: Install FFmpeg and packaged CJK overlay font
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg fonts-noto-cjk
 
       - run: uv sync --frozen --group lint
 
