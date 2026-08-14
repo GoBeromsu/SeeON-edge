@@ -23,7 +23,7 @@ from pathlib import Path
 from threading import Lock
 
 from backend.app.shared.sqlite_bootstrap import connect_catalog_store
-from backend.app.shared.state_dir import resolve_state_dir
+from shared.edge_db import EDGE_DATABASE_PATH
 
 DOMAINS: tuple[str, ...] = ("fall", "bed_exit")
 
@@ -61,7 +61,7 @@ class DetectionSettingsStore:
 
     @classmethod
     def from_env(cls) -> DetectionSettingsStore:
-        return cls(resolve_state_dir("ml-api") / "catalog.sqlite3")
+        return cls(EDGE_DATABASE_PATH)
 
     def get_all(self) -> dict[str, DomainDetectionSetting]:
         with self._lock:

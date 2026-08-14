@@ -85,26 +85,58 @@ class ClaimedClipRequest(Protocol):
 
 
 class ReadyClipRequest(Protocol):
-    clip_id: str
-    camera_id: str
-    event_refs: Sequence[str]
-    state_version: int
-    sha256: str
-    size_bytes: int
-    mime_type: str
-    codec: str
-    duration_ms: int
-    clip_start_at: str
-    clip_end_at: str
-    finalized_at: str
+    @property
+    def clip_id(self) -> str: ...
+
+    @property
+    def camera_id(self) -> str: ...
+
+    @property
+    def event_refs(self) -> Sequence[str]: ...
+
+    @property
+    def state_version(self) -> int: ...
+
+    @property
+    def sha256(self) -> str: ...
+
+    @property
+    def size_bytes(self) -> int: ...
+
+    @property
+    def mime_type(self) -> str: ...
+
+    @property
+    def codec(self) -> str: ...
+
+    @property
+    def duration_ms(self) -> int: ...
+
+    @property
+    def clip_start_at(self) -> str: ...
+
+    @property
+    def clip_end_at(self) -> str: ...
+
+    @property
+    def finalized_at(self) -> str: ...
 
 
 class UnavailableClipRequest(Protocol):
-    clip_id: str
-    camera_id: str
-    event_refs: Sequence[str]
-    state_version: int
-    reason: str
+    @property
+    def clip_id(self) -> str: ...
+
+    @property
+    def camera_id(self) -> str: ...
+
+    @property
+    def event_refs(self) -> Sequence[str]: ...
+
+    @property
+    def state_version(self) -> int: ...
+
+    @property
+    def reason(self) -> str: ...
 
 
 def _capabilities_failure_log() -> RelayFailureLog:

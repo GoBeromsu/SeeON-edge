@@ -29,13 +29,15 @@ import worker.runtime.worker as worker_module
 from contracts.frame import Frame
 from contracts.runner import Image, RunnerResult
 from shared.events.evidence_http_transport import HttpResult
+from worker.domains.module_definition import ComponentBinding
 from worker.pipeline.bus import BoundedFrameBus
 from worker.pipeline.ingest.lifecycle import IngestReporter
 from worker.pipeline.output.evidence.evidence_outbox import EvidenceOutbox
 from worker.pipeline.output.evidence.evidence_outbox_types import EdgeEventId, StagedEvent
 from worker.runtime.config import CameraRuntimeConfig, WorkerConfig
 from worker.runtime.lease import GpuLease
-from worker.runtime.profile.registry import VerifyResult
+from worker.runtime.profile.boot import BootContext
+from worker.runtime.profile.registry import PROFILE_REGISTRY, VerifyResult
 from worker.runtime.worker import WorkerRuntime
 
 
@@ -49,9 +51,12 @@ class _FallMetadata:
 @final
 class _FakeRunner:
     def __init__(self, task: str) -> None:
+        binding = _compiled_binding_for_task(task)
         self.task = task
         self.metadata = _FallMetadata()
         self.operating_threshold = 0.5
+        self.artifact_digest = binding.artifact_digest
+        self.preprocessing_identity = binding.preprocessing_identity
         self.warmup_count = 0
 
     def __call__(self, _image: Image) -> RunnerResult:
@@ -62,6 +67,16 @@ class _FakeRunner:
 
     def warmup(self) -> None:
         self.warmup_count += 1
+
+
+def _compiled_binding_for_task(task: str) -> ComponentBinding:
+    component_id = "fall-classifier" if task == "fall" else task
+    return next(
+        binding
+        for definition in worker_module.DETECTION_MODULE_REGISTRY.definitions
+        for binding in definition.shared_bindings
+        if binding.component_id == component_id
+    )
 
 
 @final
@@ -214,10 +229,26 @@ def _runtime(
         hard_exit=hard_exit,
         clip_recorder_factory=clip_recorder_factory,
         state_dir=state_dir,
+        clip_store_dir=state_dir / "clip-store",
     )
 
 
-def _config(*camera_ids: str, clip_enabled: bool = True) -> WorkerConfig:
+def _build_camera_through_preflight(runtime: WorkerRuntime) -> None:
+    """Build through the same global graph and camera preflight as activation."""
+    profile = PROFILE_REGISTRY["cpu"]
+    boot = BootContext(profile, profile.device, profile.decode, profile.encode)
+    _ = runtime._initialize_models(boot)  # noqa: SLF001
+    _ = runtime._warm_models()  # noqa: SLF001
+    camera = runtime.config.cameras[0]
+    plan = runtime._preflight_camera_graph(camera)  # noqa: SLF001
+    _ = runtime._build_camera(camera, runtime.shared_yolo, plan)  # noqa: SLF001
+
+
+def _config(
+    *camera_ids: str,
+    clip_enabled: bool = True,
+    delivery_enabled: bool = True,
+) -> WorkerConfig:
     """Config for these tests.
 
     Clip recording is configurable via ``ClipRecordingConfig`` and always-on
@@ -230,7 +261,10 @@ def _config(*camera_ids: str, clip_enabled: bool = True) -> WorkerConfig:
         {
             "version": 7,
             "relay": {"url": "http://relay.test", "token": "relay-token"},
-            "clip": {"enabled": clip_enabled},
+            "clip": {
+                "enabled": clip_enabled,
+                "delivery_enabled": delivery_enabled,
+            },
             "cameras": [
                 {
                     "camera_id": camera_id,
@@ -301,8 +335,7 @@ def _stage_one_admitted_event(outbox_path: Path) -> str:
     return payload_json
 
 
-def _enable_export(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
-    monkeypatch.setenv("CLIP_STORE_DIR", str(tmp_path / "clip-store"))
+def _outbox_path(tmp_path: Path) -> Path:
     # Matches the default `_evidence_outbox_path(state_dir)` filename -- the
     # composition root always threads `state_dir=tmp_path` into `WorkerRuntime`
     # (via `_runtime`), so this is where the real outbox lands.
@@ -345,7 +378,7 @@ def test_admitted_event_staged_in_the_outbox_is_delivered_to_the_relay_alerts_ur
     """Wired lifecycle: outbox row -> EvidenceSender -> RelayEvidenceClient ->
     a real HTTP-transport-level fake, asserting the actual POST URL/payload."""
     _stub_heartbeat_transport(monkeypatch)
-    outbox_path = _enable_export(monkeypatch, tmp_path)
+    outbox_path = _outbox_path(tmp_path)
     _stage_one_admitted_event(outbox_path)
 
     posts: list[tuple[str, bytes | None]] = []
@@ -387,7 +420,7 @@ def test_worker_stop_joins_the_evidence_export_sender_thread(
     tmp_path: Path,
 ) -> None:
     _stub_heartbeat_transport(monkeypatch)
-    outbox_path = _enable_export(monkeypatch, tmp_path)
+    outbox_path = _outbox_path(tmp_path)
     _stage_one_admitted_event(outbox_path)
 
     delivered = threading.Event()
@@ -435,7 +468,6 @@ def test_per_camera_clip_recorder_views_are_distinct_objects_over_one_shared_rec
     is one shared actor/encoder (the existing design), but composition must
     still hand each camera a distinct EventClipRecorder object."""
     _stub_heartbeat_transport(monkeypatch)
-    monkeypatch.setenv("CLIP_STORE_DIR", str(tmp_path / "clip-store"))
 
     recorders: dict[str, object] = {}
     serving = _FakeServingClient()
@@ -531,6 +563,20 @@ class _RecordingEvidenceRuntime:
         del clip_id
         return False
 
+    def begin_clip_purge(self, clip_id: str) -> bool:
+        del clip_id
+        return True
+
+    def complete_clip_purge(self, clip_id: str) -> None:
+        del clip_id
+
+    def fail_clip_purge(self, clip_id: str, reason: str) -> None:
+        del clip_id, reason
+
+    def clip_retention_state(self, clip_id: str) -> str | None:
+        del clip_id
+        return None
+
     def notify_clip_finalized(self, clip_id: str) -> None:
         del clip_id
 
@@ -542,11 +588,11 @@ def _compose_with(
     tmp_path: Path,
 ) -> None:
     """Run composition with the export runtime and clip store stubbed out."""
-    monkeypatch.setenv("CLIP_STORE_DIR", str(tmp_path / "clipstore"))
+    recorder_config = worker_module.ClipRecorderConfig(store_dir=tmp_path / "clipstore")
     monkeypatch.setattr(
         worker_module,
         "ClipRecorderConfig",
-        lambda **_kwargs: SimpleNamespace(store_dir=tmp_path / "clipstore"),
+        lambda **_kwargs: recorder_config,
     )
     monkeypatch.setattr(
         runtime,
@@ -613,6 +659,9 @@ def test_clip_enabled_initializes_delivery_exactly_once_through_the_recorder_hoo
             if hook is not None:
                 hook()  # type: ignore[operator]
             started.append(self)
+
+        def delete_clip(self, clip_id: str) -> object:
+            raise AssertionError("clip deletion is not exercised by this composition test")
 
     monkeypatch.setattr(worker_module, "ClipRecorder", _Recorder)
     monkeypatch.setattr(worker_module, "default_services", lambda *_a, **_k: object())
@@ -763,6 +812,9 @@ def test_recorder_start_success_reports_available_clip_recorder_status(
             if hook is not None:
                 hook()  # type: ignore[operator]
 
+        def delete_clip(self, clip_id: str) -> object:
+            raise AssertionError("clip deletion is not exercised by this composition test")
+
     monkeypatch.setattr(worker_module, "ClipRecorder", _Recorder)
     monkeypatch.setattr(worker_module, "default_services", lambda *_a, **_k: object())
 
@@ -786,7 +838,6 @@ def test_clip_recording_default_on_boots_without_crashing_on_this_platform(
     explicitly.
     """
     _stub_heartbeat_transport(monkeypatch)
-    monkeypatch.setenv("CLIP_STORE_DIR", str(tmp_path / "clip-store"))
 
     serving = _FakeServingClient()
     loops = _InstantLoopFactory()
@@ -831,21 +882,7 @@ def test_clip_disabled_shrinks_the_evidence_tap_built_by_composition(
     def _evidence_capacity(*, clip_enabled: bool) -> int:
         captured.clear()
         runtime = _runtime(_config("camera-a", clip_enabled=clip_enabled), serving, loops, tmp_path)
-        # _build_camera refuses to run without a fall model, and that guard
-        # sits before the bus is built. A sentinel is enough: nothing after the
-        # bus construction matters for this assertion.
-        runtime.fall_model = object()  # type: ignore[assignment]
-        # _build_camera needs a fall model; everything after the bus is
-        # irrelevant here, so let it fail once the bus has been built.
-        try:
-            _ = runtime._build_camera(  # noqa: SLF001
-                runtime.config.cameras[0],
-                SimpleNamespace(extractors=()),  # type: ignore[arg-type]
-            )
-        except Exception as exc:  # noqa: BLE001 - only the constructed bus matters
-            # Recorded rather than swallowed silently: if the bus was never
-            # built, this is the reason the assertion below reports.
-            _ = repr(exc)
+        _build_camera_through_preflight(runtime)
         assert captured, "composition never constructed a frame bus"
         return captured[0].evidence.capacity
 
@@ -863,13 +900,22 @@ def test_misconfigured_event_delivery_fails_closed_instead_of_going_quiet(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Relay credentials are required because event delivery is never gated off."""
+    """ADR-0003: a switched-on, misconfigured export must not degrade silently.
+
+    ``EvidenceExportRuntime.from_config`` raises on its own when
+    the env gate is off -- that is the explicit opt-out. A ``ValueError`` means
+    the gate is ON and the configuration is incomplete, which used to be logged
+    as a warning and turned into "no delivery". A worker that looks healthy
+    while alerts pile up unsent is exactly what that decision removes.
+    """
+    # The versioned config delivery policy is ON by default: this test is about
+    # "switched on and broken", and composition short-circuits when it is off.
     serving = _FakeServingClient()
     loops = _InstantLoopFactory()
     runtime = _runtime(_config("camera-a", clip_enabled=False), serving, loops, tmp_path)
 
     def _misconfigured(**_kwargs: object) -> object:
-        raise ValueError("evidence export requires relay URL, token, and camera")
+        raise ValueError("evidence delivery requires relay URL, token, and camera identity")
 
     monkeypatch.setattr(
         worker_module.EvidenceExportRuntime, "from_config", staticmethod(_misconfigured)
@@ -974,21 +1020,29 @@ def test_sender_start_is_a_noop_when_export_is_not_enabled(
     runtime._start_export_sender()  # noqa: SLF001
 
 
-def test_clip_retention_env_cannot_brick_event_delivery_when_recording_is_off(
+def test_clip_only_env_cannot_brick_event_delivery_when_clip_recording_is_off(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Event delivery does not parse recorder retention configuration."""
-    monkeypatch.setenv("CLIP_STORE_RETENTION_DAYS", "not-a-number")
-    monkeypatch.setenv("CLIP_STORE_DIR", str(tmp_path / "clip-store"))
+    """Event delivery must compose without building ClipRecorderConfig.
 
-    # Sanity: the malformed value really does break the config object.
+    ``ClipRecorderConfig`` parses clip-only environment variables and raises on
+    malformed values. Event delivery uses the resolved clip store path directly
+    and must not consult that recorder-only config object when recording is off.
+    """
+    monkeypatch.setenv("CLIP_STORE_RETENTION_DAYS", "not-a-number")
+
     with pytest.raises(ValueError, match="invalid literal"):
         _ = worker_module.ClipRecorderConfig()
 
     serving = _FakeServingClient()
     loops = _InstantLoopFactory()
-    runtime = _runtime(_config("camera-a", clip_enabled=False), serving, loops, tmp_path)
+    runtime = _runtime(
+        _config("camera-a", clip_enabled=False),
+        serving,
+        loops,
+        tmp_path,
+    )
 
     runtime._compose_evidence_export(  # noqa: SLF001
         SimpleNamespace(encode=SimpleNamespace())
@@ -1000,7 +1054,6 @@ def test_clip_retention_env_cannot_brick_event_delivery_when_recording_is_off(
 
 def test_recorder_off_init_failure_is_typed_whatever_the_exception_class(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A non-OSError init failure must still surface as EvidenceDeliveryError.
 
@@ -1010,16 +1063,16 @@ def test_recorder_off_init_failure_is_typed_whatever_the_exception_class(
     fail with more than ``OSError`` (a locked sqlite outbox raises
     ``sqlite3.OperationalError``, which is not an ``OSError`` subclass).
 
-    ``CLIP_STORE_DIR`` is redirected at a writable path on purpose. Left at its
-    ``/var/lib/clip-store`` default, ``ClipStoreLock.acquire`` raises
-    ``PermissionError`` before ``initialize_under_lock`` is ever called -- and
-    ``PermissionError`` *is* an ``OSError``, so the test would have passed
-    against the old narrow handler without exercising anything.
+    The runtime's injected clip-store root is a writable temporary path on
+    purpose. Left at its ``/var/lib/clip-store`` production default,
+    ``ClipStoreLock.acquire`` raises ``PermissionError`` before
+    ``initialize_under_lock`` is ever called -- and ``PermissionError`` *is* an
+    ``OSError``, so the test would have passed against the old narrow handler
+    without exercising anything.
 
     Asserting on ``RuntimeError`` is likewise deliberate: it is not an
     ``OSError``, so this fails if the narrow handler ever comes back.
     """
-    monkeypatch.setenv("CLIP_STORE_DIR", str(tmp_path / "clip-store"))
     serving = _FakeServingClient()
     loops = _InstantLoopFactory()
     runtime = _runtime(_config("camera-a", clip_enabled=False), serving, loops, tmp_path)
@@ -1041,7 +1094,6 @@ def test_recorder_off_init_failure_is_typed_whatever_the_exception_class(
 
 def test_recorder_off_init_failure_does_not_leak_the_store_path(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The typed error must not carry filesystem detail into operator logs.
 
@@ -1050,7 +1102,6 @@ def test_recorder_off_init_failure_does_not_leak_the_store_path(
     chain still carries the detail for anyone debugging.
     """
     store_dir = tmp_path / "clip-store"
-    monkeypatch.setenv("CLIP_STORE_DIR", str(store_dir))
     serving = _FakeServingClient()
     loops = _InstantLoopFactory()
     runtime = _runtime(_config("camera-a", clip_enabled=False), serving, loops, tmp_path)

@@ -32,6 +32,11 @@ from pathlib import Path
 from threading import Lock
 from typing import Final, TypedDict
 
+from backend.app.features.connection.hub_url import (
+    API_BACKEND_ALLOW_INSECURE_HTTP_ENV,
+    hub_url_transport_allowed,
+    reject_hub_url_reason,
+)
 from backend.app.features.connection.sqlite_store import (
     ENROLLMENT_MARKER_FIELDS,
     REQUIRED_ENROLLMENT_FIELDS,
@@ -42,12 +47,13 @@ from backend.app.features.connection.sqlite_store import (
     ConnectionValue,
     utc_now_iso,
 )
+from shared.edge_db import EDGE_DATABASE_PATH
 
 API_CONNECTION_SETTINGS_PATH_ENV: Final = "API_CONNECTION_SETTINGS_PATH"
 API_BACKEND_BASE_URL_ENV: Final = "API_BACKEND_BASE_URL"
 API_BACKEND_CONFIG_URL_ENV: Final = "API_BACKEND_CONFIG_URL"
 API_BACKEND_EVENTS_URL_ENV: Final = "API_BACKEND_EVENTS_URL"
-DEFAULT_CONNECTION_SETTINGS_PATH: Final = "/var/lib/ml-api/connection-settings.sqlite3"
+DEFAULT_CONNECTION_SETTINGS_PATH: Final = str(EDGE_DATABASE_PATH)
 
 
 @dataclass(frozen=True, slots=True)
@@ -90,7 +96,22 @@ def _normalize_api_base(base: str | None) -> str | None:
     trimmed = base.strip().rstrip("/")
     if not trimmed:
         return None
+    # Reject cleartext public Hub bases before deriving events/config paths so a
+    # mis-baked compose default cannot seed bearer-bearing outbound URLs.
+    if not hub_url_transport_allowed(trimmed):
+        return None
     return trimmed if trimmed.endswith("/api") else f"{trimmed}/api"
+
+
+def _permitted_hub_url(value: str | None) -> str | None:
+    """Return ``value`` only when it satisfies the Hub transport policy."""
+
+    if value is None:
+        return None
+    cleaned = value.strip()
+    if not cleaned:
+        return None
+    return cleaned if hub_url_transport_allowed(cleaned) else None
 
 
 class ConnectionSettingsStore:
@@ -102,25 +123,30 @@ class ConnectionSettingsStore:
 
     @classmethod
     def from_env(cls) -> ConnectionSettingsStore:
-        return cls(
-            os.environ.get(API_CONNECTION_SETTINGS_PATH_ENV, DEFAULT_CONNECTION_SETTINGS_PATH)
-        )
+        """Open the baked state resolver path; path env authority is retired."""
+        return cls(EDGE_DATABASE_PATH)
 
     def load(self) -> ConnectionSettings:
         with self._lock:
             saved = self._database.read()
         base = _normalize_api_base(os.environ.get(API_BACKEND_BASE_URL_ENV))
+        legacy_events = (
+            _permitted_hub_url(_text(saved["events_url"]))
+            if self.path.name != "edge.sqlite3"
+            else None
+        )
+        legacy_config = (
+            _permitted_hub_url(_text(saved["config_url"]))
+            if self.path.name != "edge.sqlite3"
+            else None
+        )
         return ConnectionSettings(
-            events_url=(
-                _text(saved["events_url"])
-                or os.environ.get(API_BACKEND_EVENTS_URL_ENV)
-                or (f"{base}/v1/events" if base else None)
-            ),
-            config_url=(
-                _text(saved["config_url"])
-                or os.environ.get(API_BACKEND_CONFIG_URL_ENV)
-                or (f"{base}/v1/ml-config" if base else None)
-            ),
+            # The public base URL is the sole deployment authority. Legacy
+            # saved/per-field URLs remain in the pre-cutover schema only so
+            # Todo 6 can import them; they never override this deployment.
+            # Cleartext public bases never seed events/config (HTTPS policy).
+            events_url=(f"{base}/v1/events" if base else legacy_events),
+            config_url=(f"{base}/v1/ml-config" if base else legacy_config),
             # Site facility id is dashboard/DB only — never seed from env.
             facility_id=_text(saved["facility_id"]),
             # Token is dashboard/DB only, like facility_id. The previous
@@ -201,6 +227,23 @@ def _validate_updates(updates: Mapping[str, ConnectionValue]) -> None:
                 field_name=field_name,
                 reason="invalid connection setting field",
             )
+    for field_name in ("events_url", "config_url"):
+        if field_name not in updates:
+            continue
+        value = updates[field_name]
+        if value is None:
+            continue
+        if not isinstance(value, str) or not value.strip():
+            raise InvalidConnectionSettingError(
+                field_name=field_name,
+                reason="invalid connection setting field",
+            )
+        reason = reject_hub_url_reason(value)
+        if reason is not None:
+            raise InvalidConnectionSettingError(
+                field_name=field_name,
+                reason=reason,
+            )
     generation = updates.get("enrollment_generation")
     if generation is not None and (type(generation) is not int or generation < 1):
         raise InvalidConnectionSettingError(
@@ -236,6 +279,7 @@ def mask_facility_token(token: str | None) -> str | None:
 
 
 __all__ = [
+    "API_BACKEND_ALLOW_INSECURE_HTTP_ENV",
     "API_BACKEND_BASE_URL_ENV",
     "API_CONNECTION_SETTINGS_PATH_ENV",
     "DEFAULT_CONNECTION_SETTINGS_PATH",

@@ -188,15 +188,14 @@ def test_failed_reconcile_disables_pages_until_a_successful_retry(
 
 def test_lifespan_reconciles_listing_index_before_serving(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # Given: a clip published before ml-api starts.
     root = tmp_path / "clip-store"
     _write_manifest(root, "clip-before-start")
-    monkeypatch.setenv("CLIP_STORE_DIR", str(root))
 
     # When: the production application lifespan starts.
     app = create_app()
+    app.state.clip_store = ClipStore(root)
     with TestClient(app) as client:
         _ = client.get("/health/ready")
         index = app.state.clip_listing_index
@@ -213,7 +212,6 @@ def test_lifespan_background_reconcile_publishes_new_manifest(
     # Given: a running app whose next periodic reconciliation is held at the boundary.
     root = tmp_path / "clip-store"
     _write_manifest(root, "clip-initial")
-    monkeypatch.setenv("CLIP_STORE_DIR", str(root))
     monkeypatch.setattr(listing_runtime, "RECONCILE_INTERVAL_SEC", 0.01)
     allow_background = threading.Event()
     background_complete = threading.Event()
@@ -234,6 +232,7 @@ def test_lifespan_background_reconcile_publishes_new_manifest(
 
     # When: a new manifest is atomically visible before the held pass continues.
     app = create_app()
+    app.state.clip_store = ClipStore(root)
     with TestClient(app):
         _write_manifest(root, "clip-new")
         allow_background.set()

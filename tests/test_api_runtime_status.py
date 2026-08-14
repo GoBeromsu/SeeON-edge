@@ -369,6 +369,11 @@ def test_status_merges_runtime_snapshot() -> None:
     assert facility["clip_recorder"]["available"] is True
     assert runtime["cameras"]["camera-1"]["decode"]["selected"] == "opencv"
     assert runtime["clip_recorder"]["finalized_clips"] == 2
+    assert runtime["clip_export_applied"] == {
+        "enabled": True,
+        "version": 4,
+        "freshness": "fresh",
+    }
     assert runtime["worker"] is None
     assert runtime["device"] is None
 

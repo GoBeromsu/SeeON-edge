@@ -13,6 +13,7 @@ from backend.app.features.cameras.store import (
     _CREATE_CAMERA_REGISTRY_TABLE,
     CameraRegistryStore,
 )
+from backend.app.features.clips import catalog as catalog_module
 from backend.app.features.clips.catalog import (
     _V3_TABLE_STATEMENTS,
     SCHEMA_VERSION,
@@ -65,13 +66,9 @@ def _write_manifest(root, payload: dict[str, object]) -> None:
     path.write_text(json.dumps(payload), encoding="utf-8")
 
 
-def test_catalog_from_env_resolves_under_state_dir_and_is_queryable(tmp_path, monkeypatch) -> None:
-    """``from_env()`` has no env override anymore -- it always resolves under
-    ``~/.local/state/ml-api/``, so the test controls the resolved path by
-    redirecting ``Path.home()`` (the resolver's own source of truth) rather
-    than an environment variable."""
-    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
-    catalog_path = tmp_path / ".local" / "state" / "ml-api" / "catalog.sqlite3"
+def test_catalog_from_env_resolves_under_state_dir_and_is_queryable(tmp_path) -> None:
+    """``from_env()`` resolves through the central database seam."""
+    catalog_path = catalog_module.EDGE_DATABASE_PATH
 
     store = CatalogStore.from_env()
     try:
@@ -145,9 +142,9 @@ def test_catalog_downgrade_degrades_instead_of_crashing_startup(tmp_path, monkey
     pointed at a newer ``catalog.sqlite3`` must degrade at startup instead of
     crashing, matching ``get_catalog_store``'s existing OSError/sqlite3.Error
     degradation behavior."""
-    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
-    catalog_path = tmp_path / ".local" / "state" / "ml-api" / "catalog.sqlite3"
-    catalog_path.parent.mkdir(parents=True)
+    catalog_path = tmp_path / "catalog.sqlite3"
+    monkeypatch.setattr(catalog_module, "EDGE_DATABASE_PATH", catalog_path)
+    catalog_path.parent.mkdir(parents=True, exist_ok=True)
     with sqlite3.connect(catalog_path) as connection:
         connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION + 1}")
 

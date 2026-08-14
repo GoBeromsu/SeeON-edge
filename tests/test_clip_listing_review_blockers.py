@@ -3,12 +3,14 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
+from collections.abc import Iterable
 from pathlib import Path
 from time import perf_counter
 
 import pytest
 from fastapi.testclient import TestClient
 
+from backend.app.features.clips import listing_repository
 from backend.app.features.clips.listing_index import (
     ClipListingIndex,
     ClipListingReconcileError,
@@ -16,6 +18,7 @@ from backend.app.features.clips.listing_index import (
 from backend.app.features.clips.schemas import ClipListQuery
 from backend.app.features.clips.store import ClipStore
 from backend.app.main import create_app, no_lifespan
+from shared.edge_db.migrator import migrate_database
 
 
 def _write_manifest(
@@ -235,15 +238,44 @@ def test_event_type_filter_rejects_noncanonical_values(
     assert response.status_code == 422
 
 
-def test_listing_lifespan_can_enter_same_app_twice(
+def test_runtime_open_on_migrated_edge_database_executes_no_ddl(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Given: the one-shot migrator has provisioned the complete central database.
+    path = tmp_path / "edge.sqlite3"
+    migrate_database(path)
+    statements: list[str] = []
+    connect = listing_repository.connect_catalog_store
+
+    def connect_traced(database: Path, create_statements: Iterable[str]) -> sqlite3.Connection:
+        connection = connect(database, create_statements)
+        connection.set_trace_callback(statements.append)
+        return connection
+
+    monkeypatch.setattr(listing_repository, "connect_catalog_store", connect_traced)
+
+    # When: listing runtime repositories repeatedly open the migrated database.
+    for _ in range(2):
+        repository = listing_repository.ListingRepository.open(path)
+        repository.close()
+
+    # Then: runtime only validates existing schema and never attempts DDL.
+    ddl_prefixes = ("ALTER ", "CREATE ", "DROP ", "REINDEX ", "VACUUM ")
+    assert statements
+    assert not [
+        statement for statement in statements if statement.lstrip().upper().startswith(ddl_prefixes)
+    ]
+
+
+def test_listing_lifespan_can_enter_same_app_twice(
+    tmp_path: Path,
 ) -> None:
     # Given: one FastAPI application and one persisted clip.
     root = tmp_path / "clip-store"
     _write_manifest(root, "clip-01")
-    monkeypatch.setenv("CLIP_STORE_DIR", str(root))
     app = create_app()
+    app.state.clip_store = ClipStore(root)
 
     # When: the same application's production lifespan is entered twice.
     indexes: list[ClipListingIndex] = []

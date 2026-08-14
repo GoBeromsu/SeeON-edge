@@ -20,7 +20,6 @@ supervisor's ``join()`` waits for every managed loop to finish -- and that
 from __future__ import annotations
 
 import threading
-import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -34,13 +33,16 @@ import worker.runtime.worker as worker_module
 from contracts.frame import Frame
 from contracts.runner import Image, RunnerResult
 from shared.events.evidence_http_transport import HttpResult
+from worker.domains.module_definition import ComponentBinding
 from worker.pipeline.bus import BoundedFrameBus
 from worker.pipeline.ingest.lifecycle import IngestReporter
 from worker.runtime.config import CameraRuntimeConfig, WorkerConfig
 from worker.runtime.lease import GpuLease
 from worker.runtime.profile.registry import VerifyResult
 from worker.runtime.worker import WorkerRuntime
-from worker.types import FramePacket
+from worker.types import BusinessEvent, FramePacket
+
+_TEST_BUILD_REVISION = "1" * 40
 
 
 def _packet(camera_id: str, seq: int) -> FramePacket:
@@ -59,9 +61,12 @@ class _FallMetadata:
 @final
 class _FakeRunner:
     def __init__(self, task: str) -> None:
+        binding = _compiled_binding_for_task(task)
         self.task = task
         self.metadata = _FallMetadata()
         self.operating_threshold = 0.5
+        self.artifact_digest = binding.artifact_digest
+        self.preprocessing_identity = binding.preprocessing_identity
         self.warmup_count = 0
 
     def __call__(self, _image: Image) -> RunnerResult:
@@ -72,6 +77,16 @@ class _FakeRunner:
 
     def warmup(self) -> None:
         self.warmup_count += 1
+
+
+def _compiled_binding_for_task(task: str) -> ComponentBinding:
+    component_id = "fall-classifier" if task == "fall" else task
+    return next(
+        binding
+        for definition in worker_module.DETECTION_MODULE_REGISTRY.definitions
+        for binding in definition.shared_bindings
+        if binding.component_id == component_id
+    )
 
 
 @final
@@ -105,7 +120,12 @@ def _pump_factory(
     return _NoOpPump(camera.camera_id)
 
 
-def _make_recording_clip_recorder_class(created: list[object]) -> type:
+def _make_recording_clip_recorder_class(
+    created: list[object],
+    *,
+    expected_frame_count: int,
+    delivered: threading.Event,
+) -> type:
     """Composition always resolves a real encoder-backed ``ClipRecorder``
     (see ``test_worker_evidence_export_composition.py``'s
     ``test_per_camera_clip_recorder_views_are_distinct_objects_over_one_shared_recorder``),
@@ -122,30 +142,35 @@ def _make_recording_clip_recorder_class(created: list[object]) -> type:
             self.frames: list[tuple[str, Frame]] = []
             self._lock = threading.Lock()
             startup_hook = kwargs.get("startup_hook")
-            self._startup_hook = startup_hook if callable(startup_hook) else lambda: None
+            self._startup_hook = startup_hook if callable(startup_hook) else None
             created.append(self)
 
         def start(self) -> None:
-            self._startup_hook()
+            if self._startup_hook is not None:
+                self._startup_hook()
 
         def stop(self, *, timeout: float = 5.0) -> None:
             del timeout
 
-        def on_frame(self, camera_id: str, frame: Frame) -> bool:
+        def on_frame(self, packet: FramePacket) -> bool:
             with self._lock:
-                self.frames.append((camera_id, frame))
+                self.frames.append((packet.camera_id, packet.borrow_host_frame()))
+                if len(self.frames) == expected_frame_count:
+                    delivered.set()
             return True
 
         def on_event(
             self,
-            camera_id: str,
-            event_ref: str,
-            event_type: str | None = None,
+            trigger_packet: FramePacket,
+            event: BusinessEvent,
             *,
             allow_new_clip: bool = True,
         ) -> str | None:
-            del camera_id, event_ref, event_type, allow_new_clip
+            del trigger_packet, event, allow_new_clip
             return None
+
+        def delete_clip(self, clip_id: str) -> object:
+            raise AssertionError("clip deletion is not exercised by this composition test")
 
     return _RecordingClipRecorder
 
@@ -153,10 +178,10 @@ def _make_recording_clip_recorder_class(created: list[object]) -> type:
 @final
 class _FramePublishingLoop:
     """Ingest loop fake that publishes real packets onto the camera's *real*
-    bus (the same one the composed feeder drains), then blocks until the
-    feeder has actually consumed every one of them before returning.
+    bus (the same one the composed feeder drains), then awaits the exact
+    delivery signal from the recording fake before returning.
 
-    Without this wait, ``IngestSupervisor.join()`` (which only waits on
+    Without this signal, ``IngestSupervisor.join()`` (which only waits on
     ingest/pump loops, not the independently-started feeder threads) could
     return -- triggering ``stop()`` and tearing everything down -- before the
     feeder's background thread ever got a chance to drain the bus, making the
@@ -169,13 +194,13 @@ class _FramePublishingLoop:
         bus: BoundedFrameBus,
         reporter: IngestReporter,
         packets: tuple[FramePacket, ...],
-        created: list[object],
+        delivered: threading.Event,
     ) -> None:
         self.camera_id = camera_id
         self._bus = bus
         self._reporter = reporter
         self._packets = packets
-        self._created = created
+        self._delivered = delivered
         self.stop_count = 0
 
     def run(self) -> None:
@@ -184,16 +209,8 @@ class _FramePublishingLoop:
         self._reporter.mark_starting(self.camera_id)
         for packet in self._packets:
             self._bus.publish(packet)
-        assert self._wait_for_drain(), "clip frame feeder never drained the published frames"
+        self._delivered.wait(timeout=5.0)
         self._reporter.mark_ready(self.camera_id)
-
-    def _wait_for_drain(self) -> bool:
-        deadline = time.monotonic() + 5.0
-        while time.monotonic() < deadline:
-            if self._created and len(self._created[0].frames) >= len(self._packets):
-                return True
-            time.sleep(0.01)
-        return False
 
     def stop(self) -> None:
         self.stop_count += 1
@@ -246,12 +263,14 @@ def _runtime(
     return WorkerRuntime(
         config,
         env={"ML_WORKER_PROFILE": "cpu"},
+        build_revision=_TEST_BUILD_REVISION,
         serving_client=_FakeServingClient(),
         loop_factory=loop_factory,  # type: ignore[arg-type]
         pump_factory=_pump_factory,
         acquire_lease=lambda: GpuLease.acquire(state_dir),
         decode_probe=lambda _decode: VerifyResult(True, "cpu", "decode", "available"),
         hard_exit=lambda _code: None,
+        clip_store_dir=state_dir / "clip-store",
     )
 
 
@@ -275,17 +294,23 @@ def test_frames_published_on_the_bus_actually_reach_the_clip_recorders_on_frame(
 ) -> None:
     _stub_heartbeat_transport(monkeypatch)
     created: list[object] = []
-    monkeypatch.setattr(worker_module, "ClipRecorder", _make_recording_clip_recorder_class(created))
+    delivered = threading.Event()
+    monkeypatch.setattr(
+        worker_module,
+        "ClipRecorder",
+        _make_recording_clip_recorder_class(created, expected_frame_count=5, delivered=delivered),
+    )
     packets = tuple(_packet("camera-a", seq) for seq in range(1, 6))
 
     def loop_factory(
         camera: CameraRuntimeConfig, bus: BoundedFrameBus, reporter: IngestReporter
     ) -> _FramePublishingLoop:
-        return _FramePublishingLoop(camera.camera_id, bus, reporter, packets, created)
+        return _FramePublishingLoop(camera.camera_id, bus, reporter, packets, delivered)
 
     runtime = _runtime(_config("camera-a"), loop_factory, tmp_path)
     runtime.run()
 
+    assert delivered.is_set(), "clip frame feeder never drained the published frames"
     assert created, "composition never constructed a ClipRecorder"
     recorder = created[0]
     assert [frame.index for _camera_id, frame in recorder.frames] == [1, 2, 3, 4, 5]  # type: ignore[attr-defined]
@@ -297,7 +322,12 @@ def test_worker_stop_joins_every_clip_frame_feeder_thread(
 ) -> None:
     _stub_heartbeat_transport(monkeypatch)
     created: list[object] = []
-    monkeypatch.setattr(worker_module, "ClipRecorder", _make_recording_clip_recorder_class(created))
+    delivered = threading.Event()
+    monkeypatch.setattr(
+        worker_module,
+        "ClipRecorder",
+        _make_recording_clip_recorder_class(created, expected_frame_count=2, delivered=delivered),
+    )
     packets_by_camera = {
         "camera-a": (_packet("camera-a", 1),),
         "camera-b": (_packet("camera-b", 1),),
@@ -307,12 +337,17 @@ def test_worker_stop_joins_every_clip_frame_feeder_thread(
         camera: CameraRuntimeConfig, bus: BoundedFrameBus, reporter: IngestReporter
     ) -> _FramePublishingLoop:
         return _FramePublishingLoop(
-            camera.camera_id, bus, reporter, packets_by_camera[camera.camera_id], created
+            camera.camera_id,
+            bus,
+            reporter,
+            packets_by_camera[camera.camera_id],
+            delivered,
         )
 
     runtime = _runtime(_config("camera-a", "camera-b"), loop_factory, tmp_path)
     runtime.run()
 
+    assert delivered.is_set(), "clip frame feeders never drained the published frames"
     assert len(runtime._clip_frame_feeders) == 2  # noqa: SLF001
     assert len(runtime._clip_frame_feeder_threads) == 2  # noqa: SLF001
     names = {thread.name for thread in runtime._clip_frame_feeder_threads}  # noqa: SLF001

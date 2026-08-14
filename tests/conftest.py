@@ -1,11 +1,47 @@
 """Cross-suite compatibility fixtures."""
 
+import importlib
+import ipaddress
 from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
 
+from backend.app.features.connection.store import ConnectionSettingsStore
 from backend.app.shared.dashboard_credentials import DashboardCredentialsStore
+from shared.edge_db.migrator import migrate_database
+
+
+@pytest.fixture(autouse=True)
+def isolate_central_edge_database(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> Iterator[None]:
+    database = tmp_path / ".central-fixture" / "edge.sqlite3"
+    migrate_database(database)
+    modules = (
+        "backend.app.lifespan",
+        "backend.app.shared.dashboard_credentials",
+        "backend.app.features.detection_settings.store",
+        "backend.app.features.detection_settings.policy_store",
+        "backend.app.features.cameras.bed_zone_store",
+        "backend.app.features.cameras.store",
+        "backend.app.features.clips.artifacts",
+        "backend.app.features.clips.catalog",
+        "backend.app.features.clips.listing_index",
+        "backend.app.features.clips.storage_location_store",
+        "backend.app.features.status.runtime_status_store",
+        "backend.app.features.runtime_settings.store",
+        "backend.app.features.connection.store",
+        "backend.app.features.evidence.record_store",
+        "worker.runtime.config.lkg_store",
+        "worker.runtime.faults.record",
+        "worker.runtime.worker",
+    )
+    for module_name in modules:
+        module = importlib.import_module(module_name)
+        if hasattr(module, "EDGE_DATABASE_PATH"):
+            monkeypatch.setattr(module, "EDGE_DATABASE_PATH", database)
+    yield
 
 
 @pytest.fixture(autouse=True)
@@ -15,6 +51,37 @@ def enable_legacy_dashboard_auth_for_pre_session_contracts(
     """Keep old API contract tests explicit while production fails closed by default."""
 
     monkeypatch.setenv("API_ALLOW_LEGACY_DASHBOARD_AUTH", "1")
+    yield
+
+
+@pytest.fixture(autouse=True)
+def explicit_dashboard_bootstrap_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+) -> Iterator[None]:
+    """Provide dashboard authority via explicit env fixtures, not runtime defaults.
+
+    Production refuses a missing bootstrap pair. The suite keeps disposable
+    login ergonomics by setting API_DASHBOARD_* explicitly for every test;
+    tests that assert the unconfigured/corrupt paths must delenv these.
+    """
+
+    monkeypatch.setenv("API_DASHBOARD_USERNAME", "admin")
+    monkeypatch.setenv("API_DASHBOARD_PASSWORD", "admin")
+    yield
+
+
+@pytest.fixture(autouse=True)
+def allow_insecure_hub_http_for_local_fixtures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> Iterator[None]:
+    """Opt local fixtures into cleartext Hub HTTP (never a production default).
+
+    Production requires HTTPS for non-loopback Hub origins. Suite fixtures that
+    still speak ``http://backend...`` must set this contract explicitly.
+    HTTPS-policy tests delenv it.
+    """
+
+    monkeypatch.setenv("API_BACKEND_ALLOW_INSECURE_HTTP", "1")
     yield
 
 
@@ -85,8 +152,40 @@ def default_connection_settings_store_to_tmp_path(
     않는다.** 위의 dashboard credentials 픽스처와 같은 이유다.
     """
 
-    monkeypatch.setenv(
-        "API_CONNECTION_SETTINGS_PATH",
-        str(tmp_path / "connection-settings.sqlite3"),
+    monkeypatch.delenv("API_CONNECTION_SETTINGS_PATH", raising=False)
+    monkeypatch.setattr(
+        ConnectionSettingsStore,
+        "from_env",
+        classmethod(lambda cls: cls(tmp_path / "connection-settings.sqlite3")),
     )
+    yield
+
+
+@pytest.fixture(autouse=True)
+def stub_rtsp_hostname_resolution(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Keep API/worker suite fixtures offline while still exercising DNS policy.
+
+    Production resolves via ``socket.getaddrinfo``. Tests that need a specific
+    answer set pass an explicit ``resolver=`` into ``resolve_rtsp_endpoint`` or
+    monkeypatch ``resolve_host_a_aaaa`` themselves. The real getaddrinfo driver
+    lives in ``tests/test_rtsp_url_policy.py`` and calls the implementation
+    without this stub.
+    """
+
+    import shared.rtsp_url_policy as rtsp_url_policy
+
+    def _stub(hostname: str) -> tuple[str, ...]:
+        host = hostname.strip().lower().rstrip(".")
+        if not host:
+            return ()
+        try:
+            return (str(ipaddress.ip_address(host)),)
+        except ValueError:
+            pass
+        if host == "localhost" or host.endswith(".localhost"):
+            return ("127.0.0.1",)
+        # Well-known public unicast (Google DNS); not special-use/private.
+        return ("8.8.8.8",)
+
+    monkeypatch.setattr(rtsp_url_policy, "resolve_host_a_aaaa", _stub)
     yield

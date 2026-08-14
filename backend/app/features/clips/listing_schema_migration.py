@@ -7,8 +7,11 @@ from enum import StrEnum
 from typing import assert_never, final
 
 from backend.app.features.clips.listing_schema import (
+    CREATE_GENERATION_TABLE,
+    CREATE_INDEX_STATEMENTS,
     CREATE_ROWS_TABLE,
     CREATE_STATEMENTS,
+    CREATE_SUMMARY_TABLE,
     CREATE_THUMBNAILS_TABLE,
     KNOWN_DRAFT_ROWS_TABLE,
 )
@@ -39,6 +42,45 @@ class ListingSchemaError(sqlite3.DatabaseError):
     def __init__(self, detail: str) -> None:
         self.detail = detail
         super().__init__(detail)
+
+
+def validate_listing_schema(connection: sqlite3.Connection) -> None:
+    expected_tables = (
+        ("clip_listing_generation", CREATE_GENERATION_TABLE),
+        ("clip_listing_rows", CREATE_ROWS_TABLE),
+        ("clip_listing_thumbnails", CREATE_THUMBNAILS_TABLE),
+        ("clip_listing_summary", CREATE_SUMMARY_TABLE),
+    )
+    for table, expected_sql in expected_tables:
+        sql = _table_sql(connection, table)
+        if sql is None or _normalize(sql) != _normalize(expected_sql):
+            raise ListingSchemaError(f"unsupported {table} schema")
+
+    expected_indexes = {
+        statement.split()[5]: _normalize(statement) for statement in CREATE_INDEX_STATEMENTS
+    }
+    index_rows = connection.execute(
+        "SELECT name, sql FROM sqlite_schema WHERE type = 'index' "
+        "AND tbl_name = 'clip_listing_rows' AND sql IS NOT NULL"
+    ).fetchall()
+    actual_indexes = {str(name): _normalize(str(sql)) for name, sql in index_rows}
+    if actual_indexes != expected_indexes:
+        raise ListingSchemaError("unsupported clip_listing_rows schema objects")
+
+    generations = connection.execute(
+        "SELECT id, active_generation, next_generation FROM clip_listing_generation"
+    ).fetchall()
+    if len(generations) != 1:
+        raise ListingSchemaError("clip listing generation state is not initialized")
+    identifier, active_generation, next_generation = generations[0]
+    if (
+        identifier != 1
+        or not isinstance(active_generation, int)
+        or not isinstance(next_generation, int)
+        or active_generation < 0
+        or next_generation <= active_generation
+    ):
+        raise ListingSchemaError("clip listing generation state is invalid")
 
 
 def initialize_listing_schema(connection: sqlite3.Connection) -> None:
@@ -134,4 +176,8 @@ def _migrate_draft(connection: sqlite3.Connection) -> None:
         raise
 
 
-__all__ = ["ListingSchemaError", "initialize_listing_schema"]
+__all__ = [
+    "ListingSchemaError",
+    "initialize_listing_schema",
+    "validate_listing_schema",
+]

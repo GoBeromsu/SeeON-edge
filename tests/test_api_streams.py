@@ -39,10 +39,11 @@ def _login(client: TestClient) -> None:
     assert response.status_code == 204
 
 
-class UrlopenCall(TypedDict):
+class UrlopenCall(TypedDict, total=False):
     url: str
     timeout: float
     method: str
+    headers: dict[str, str]
 
 
 class UrlopenCallWithHeaders(TypedDict):
@@ -96,6 +97,7 @@ def stream_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
 class StreamCall(TypedDict):
     url: str
     method: str
+    headers: dict[str, str]
 
 
 def _install_mock_transport(
@@ -127,7 +129,17 @@ def test_stream_proxy_forwards_mjpeg_with_a_dashboard_session(
     calls: list[StreamCall] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
-        calls.append({"url": str(request.url), "method": request.method})
+        calls.append(
+            {
+                "url": str(request.url),
+                "method": request.method,
+                "headers": {
+                    key: value
+                    for key, value in request.headers.items()
+                    if key.lower() == "x-edge-relay-token"
+                },
+            }
+        )
         return httpx.Response(
             200,
             headers={"Content-Type": "multipart/x-mixed-replace; boundary=frame"},
@@ -143,7 +155,16 @@ def test_stream_proxy_forwards_mjpeg_with_a_dashboard_session(
     assert response.status_code == 200
     assert response.content == body
     assert response.headers["content-type"].startswith("multipart/x-mixed-replace")
-    assert calls == [{"url": "http://worker.local:8090/stream/cam_sp_201", "method": "GET"}]
+    # Relay token is forwarded server-side only; never appears in the browser response.
+    assert "relay-token" not in response.text
+    assert "X-Edge-Relay-Token" not in response.headers
+    assert calls == [
+        {
+            "url": "http://worker.local:8090/stream/cam_sp_201",
+            "method": "GET",
+            "headers": {"x-edge-relay-token": "relay-token"},
+        }
+    ]
 
 
 def test_stream_proxy_resolves_dashboard_id_to_worker_id(
@@ -153,7 +174,17 @@ def test_stream_proxy_resolves_dashboard_id_to_worker_id(
     calls: list[StreamCall] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
-        calls.append({"url": str(request.url), "method": request.method})
+        calls.append(
+            {
+                "url": str(request.url),
+                "method": request.method,
+                "headers": {
+                    key: value
+                    for key, value in request.headers.items()
+                    if key.lower() == "x-edge-relay-token"
+                },
+            }
+        )
         return httpx.Response(
             200,
             headers={"Content-Type": "multipart/x-mixed-replace; boundary=frame"},
@@ -179,7 +210,11 @@ def test_stream_proxy_resolves_dashboard_id_to_worker_id(
 
     assert response.status_code == 200
     assert calls == [
-        {"url": "http://worker.local:8090/stream/worker-camera-id", "method": "GET"}
+        {
+            "url": "http://worker.local:8090/stream/worker-camera-id",
+            "method": "GET",
+            "headers": {"x-edge-relay-token": "relay-token"},
+        }
     ]
 
 
@@ -349,6 +384,9 @@ def test_stream_proxy_closes_upstream_via_background_when_never_iterated(
     monkeypatch.setattr(
         streams_router, "_worker_camera_id", lambda _request, camera_id: camera_id
     )
+    # This closer-only scenario passes a bare object as Request; stub relay
+    # headers so the media-auth forward path is not under test here.
+    monkeypatch.setattr(streams_router, "_worker_relay_headers", lambda _request: {})
 
     async def scenario() -> None:
         response = await streams_router.camera_stream(
@@ -386,6 +424,7 @@ def test_snapshot_proxy_forwards_jpeg_with_a_dashboard_session(
                 "url": request.full_url,
                 "timeout": timeout,
                 "method": request.get_method(),
+                "headers": dict(request.headers),
             }
         )
         return JpegResponse(body)
@@ -400,11 +439,14 @@ def test_snapshot_proxy_forwards_jpeg_with_a_dashboard_session(
     assert response.content == body
     assert response.headers["content-type"] == "image/jpeg"
     assert response.headers["cache-control"] == "no-store"
+    assert "relay-token" not in response.text
+    assert "X-Edge-Relay-Token" not in response.headers
     assert calls == [
         {
             "url": "http://worker.local:8090/snapshot/cam_sp_201",
             "timeout": 3.0,
             "method": "GET",
+            "headers": {"X-edge-relay-token": "relay-token"},
         }
     ]
 
@@ -547,6 +589,49 @@ def test_pose_set_forwards_the_requested_value_with_a_dashboard_session(
             "timeout": 3.0,
             "method": "POST",
             "body": json.dumps({"mode": "bedexit"}).encode("utf-8"),
+        }
+    ]
+
+
+def test_stream_proxy_forwards_the_relay_token_to_the_worker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Security finding #3: worker /stream requires the relay token; the API
+    proxy must forward it server-side without exposing it to the browser.
+    """
+    calls: list[StreamCall] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(
+            {
+                "url": str(request.url),
+                "method": request.method,
+                "headers": {
+                    key: value
+                    for key, value in request.headers.items()
+                    if key.lower() == "x-edge-relay-token"
+                },
+            }
+        )
+        return httpx.Response(
+            200,
+            headers={"Content-Type": "multipart/x-mixed-replace; boundary=frame"},
+            content=b"--frame\r\n",
+        )
+
+    _install_mock_transport(monkeypatch, handler)
+
+    with TestClient(create_app(lifespan=NO_LIFESPAN)) as client:
+        _login(client)
+        response = client.get("/api/v1/streams/cam_sp_201")
+
+    assert response.status_code == 200
+    assert "relay-token" not in response.text
+    assert calls == [
+        {
+            "url": "http://worker.local:8090/stream/cam_sp_201",
+            "method": "GET",
+            "headers": {"x-edge-relay-token": "relay-token"},
         }
     ]
 

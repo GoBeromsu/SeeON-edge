@@ -22,7 +22,7 @@ from backend.app.features.clips.listing_repository import (
 )
 from backend.app.features.clips.schemas import ClipListQuery
 from backend.app.features.clips.store import ClipStore
-from backend.app.shared.state_dir import resolve_state_dir
+from shared.edge_db import EDGE_DATABASE_PATH
 
 
 @final
@@ -47,7 +47,7 @@ class ClipListingIndex:
 
     @classmethod
     def from_env(cls) -> ClipListingIndex:
-        return cls.open(resolve_state_dir("ml-api") / "catalog.sqlite3")
+        return cls.open(EDGE_DATABASE_PATH)
 
     @property
     def is_closed(self) -> bool:

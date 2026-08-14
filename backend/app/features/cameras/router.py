@@ -5,7 +5,6 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
-import os
 import urllib.error
 import urllib.request
 import uuid
@@ -46,12 +45,19 @@ from backend.app.features.cameras.topology import (
     TopologyConflictError,
 )
 from backend.app.features.clips.storage_location_store import ClipStorageLocationStore
+from backend.app.features.connection.store import ConnectionSettingsStore
+from backend.app.features.detection_settings.policy_store import (
+    DetectionPolicyStore,
+    PolicyActivationRefused,
+    PolicyCameraIdentity,
+)
 from backend.app.features.detection_settings.store import DetectionSettingsStore
 from backend.app.features.runtime_settings.store import get_runtime_settings_store
 from backend.app.features.status.heartbeat_store import ONLINE, get_heartbeat_store
 from backend.app.shared.dashboard_auth import authorize_dashboard
 from contracts.edge_provisioning_models import EdgeErrorCode, TopologyFloor, TopologyRoom
 from contracts.worker_config import PulledWorkerConfig
+from shared.rtsp_url_policy import assert_rtsp_endpoint_allowed
 
 RELAY_TOKEN_HEADER = "X-Edge-Relay-Token"
 
@@ -249,7 +255,7 @@ class TestCameraResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     ok: bool
-    error_class: Literal["timeout", "decode", "auth"] | None = None
+    error_class: Literal["timeout", "decode", "auth", "unsupported"] | None = None
     # worker의 /probe에 닿지 못해 검사 자체를 못 했다는 뜻이다 (True일 때만
     # 응답에 실린다 -- response_model_exclude_none이 없애지 못하는 bool
     # 기본값 노출을 피하려고 Optional로 선언했다). error_class는 이 경우
@@ -298,6 +304,9 @@ class WorkerConfigResponse(BaseModel):
     # externally pulled above. Consumed by the worker's
     # BackendWorkerConfigPayload.domains (worker/runtime/config/pull_models.py).
     domains: dict[str, dict[str, object]] | None = None
+    # Closed typed numeric-policy bundle. The worker parses this as one unit and
+    # refuses unknown module/version/schema/fields rather than partially applying it.
+    detection_policies: dict[str, object] | None = None
     # Selected clip storage subdirectory (see clips/storage_router.py),
     # relative to the worker's CLIP_STORE_DIR mount; omitted/None means the
     # mount root (the pre-existing default, unchanged). Consumed by
@@ -443,6 +452,7 @@ def create_camera(
     authorization: Annotated[str | None, Header(alias="Authorization")] = None,
 ) -> dict[str, object]:
     _authorize(request, relay_token, authorization)
+    rtsp_url = _validated_rtsp_url(payload.rtsp_url)
     decode_backend = _normalize_decode_backend(payload.decode_backend)
     fps = _normalize_fps(payload.fps)
     floor = _normalize_floor(payload.floor)
@@ -457,14 +467,14 @@ def create_camera(
     # `error_class="decode"`로 뭉개져서, 실제 원인(예: RTSP 401)이 "디코드
     # 실패"로 잘못 표시됐다. 죽은 카메라는 offline/never_connected로 목록에
     # 그대로 보이고, 연결 여부는 worker의 첫 heartbeat이 확정한다.
-    probe = _probe_rtsp_url(request, payload.rtsp_url)
+    probe = _probe_rtsp_url(request, rtsp_url)
     provisional_id = str(uuid.uuid4())
     now = utc_now_iso()
     try:
         record = _store(request.app).create(
             camera_id=provisional_id,
             label=payload.label,
-            rtsp_url=payload.rtsp_url,
+            rtsp_url=rtsp_url,
             space_id=payload.space_id,
             status=status_from_probe(probe),
             backend_camera_id=None,
@@ -506,7 +516,7 @@ def test_camera(
     stored_url = str(record.get("rtsp_url", ""))
     draft_url = (payload.rtsp_url or "").strip() if payload is not None else ""
     # 기사님이 방금 입력한 값이 있으면 그것을 검사한다. 없으면 저장된 값.
-    target_url = draft_url or stored_url
+    target_url = _validated_rtsp_url(draft_url or stored_url)
     probe = _probe_rtsp_url(request, target_url)
 
     # 저장된 URL을 실제로 검사했을 때만 카메라 상태를 갱신한다. draft를
@@ -540,8 +550,9 @@ def update_camera(
     if "label" in payload.model_fields_set and payload.label is not None:
         updates["label"] = payload.label
     if "rtsp_url" in payload.model_fields_set and payload.rtsp_url is not None:
-        probe = _probe_rtsp_url(request, payload.rtsp_url)
-        updates["rtsp_url"] = payload.rtsp_url
+        rtsp_url = _validated_rtsp_url(payload.rtsp_url)
+        probe = _probe_rtsp_url(request, rtsp_url)
+        updates["rtsp_url"] = rtsp_url
         updates["status"] = status_from_probe(probe)
         now = utc_now_iso()
         updates["last_probed_at"] = now
@@ -680,7 +691,9 @@ def worker_config_snapshot(
 ) -> dict[str, object]:
     snapshot = _store(request.app).snapshot()
     bed_zones = _bed_zone_store(request.app).get_all()
+    facility_id = _connection_settings_store(request.app).load().facility_id
     cameras = []
+    policy_cameras: list[PolicyCameraIdentity] = []
     for record in _snapshot_camera_records(snapshot):
         rtsp_url = record.get("rtsp_url")
         if not isinstance(rtsp_url, str) or not rtsp_url.strip():
@@ -692,6 +705,7 @@ def worker_config_snapshot(
             "camera_id": canonical_id,
             "rtsp_url": rtsp_url,
         }
+        policy_cameras.append(PolicyCameraIdentity(camera_id=canonical_id))
         space_id = record.get("space_id")
         if isinstance(space_id, str) and space_id.strip():
             camera["space_id"] = space_id
@@ -736,6 +750,12 @@ def worker_config_snapshot(
     # location before the backend has ever successfully pulled anything.
     _apply_local_detection_overrides(request.app, response, live_pulled)
     _apply_clip_storage_override(request.app, response)
+    _apply_numeric_detection_policies(
+        request.app,
+        response,
+        facility_id=facility_id,
+        cameras=tuple(policy_cameras),
+    )
     runtime_setting = get_runtime_settings_store(request.app).get()
     response["clip_export_enabled"] = runtime_setting.clip_export_enabled
     response["clip_export_version"] = runtime_setting.version
@@ -849,7 +869,7 @@ def _resolved_tz(live_pulled: PulledWorkerConfig | None, domain: str) -> str:
             window = live_pulled.night_window
         if window is not None:
             return window.tz
-    return os.environ.get("ML_API_DETECTION_TZ", "UTC").strip() or "UTC"
+    return "UTC"
 
 
 def _apply_clip_storage_override(app: FastAPI, response: dict[str, object]) -> None:
@@ -863,10 +883,82 @@ def _apply_clip_storage_override(app: FastAPI, response: dict[str, object]) -> N
         response["clip_store_subdir"] = selected
 
 
+def acknowledge_applied_detection_policies(
+    request: Request, *, facility_id: str, config_version: int | None
+) -> None:
+    """Move pending activations to applied only after a restarted worker heartbeats."""
+    enrolled_facility = _connection_settings_store(request.app).load().facility_id
+    if enrolled_facility != facility_id or config_version is None:
+        return
+    expected = worker_config_snapshot(request).get("config_version")
+    if expected != config_version:
+        return
+    store = _detection_policy_store(request.app)
+    store.mark_applied(facility_id, store.generation(facility_id))
+
+
+def _apply_numeric_detection_policies(
+    app: FastAPI,
+    response: dict[str, object],
+    *,
+    facility_id: str | None,
+    cameras: tuple[PolicyCameraIdentity, ...],
+) -> None:
+    """Resolve immutable policy revisions at the worker-restart boundary.
+
+    Running camera modules retain their boot-time ``WorkerConfig``. A policy
+    activation increments the persisted generation below; restart polling sees
+    that generation and only the next worker process receives this bundle.
+    """
+    store = _detection_policy_store(app)
+    generation = store.generation(facility_id)
+    # Before the first explicit Apply there is no desired policy revision to
+    # publish. New workers parse absence as the typed image-default bundle;
+    # omitting it preserves the established old-worker/setup wire contract.
+    if generation == 0:
+        return
+    try:
+        bundle = store.resolve_bundle(facility_id, cameras)
+    except PolicyActivationRefused as error:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(error),
+        ) from error
+    response["detection_policies"] = bundle.as_dict()
+    if facility_id is not None:
+        response_cameras = response.get("cameras")
+        if isinstance(response_cameras, list):
+            for camera in response_cameras:
+                if isinstance(camera, dict):
+                    camera["facility_id"] = facility_id
+    raw_base_version = response.get("config_version", 0)
+    base_version = raw_base_version if isinstance(raw_base_version, int) else 0
+    policy_hash_part = int(bundle.content_sha256[:8], 16) % 1_000_000_000
+    response["config_version"] = base_version * 1_000_000_000 + policy_hash_part
+    raw_restart_epoch = response.get("restart_epoch", 0)
+    restart_epoch = raw_restart_epoch if isinstance(raw_restart_epoch, int) else 0
+    response["restart_epoch"] = restart_epoch + generation
+
+
+def _detection_policy_store(app: FastAPI) -> DetectionPolicyStore:
+    store = getattr(app.state, "detection_policy_store", None)
+    if not isinstance(store, DetectionPolicyStore):
+        store = DetectionPolicyStore.from_env()
+        app.state.detection_policy_store = store
+    return store
+
+
+def _connection_settings_store(app: FastAPI) -> ConnectionSettingsStore:
+    store = getattr(app.state, "connection_settings_store", None)
+    if isinstance(store, ConnectionSettingsStore):
+        return store
+    return ConnectionSettingsStore.from_env()
+
+
 def _detection_settings_store(app: FastAPI) -> DetectionSettingsStore:
     store = getattr(app.state, "detection_settings_store", None)
     if not isinstance(store, DetectionSettingsStore):
-        store = DetectionSettingsStore.from_env()
+        store = DetectionSettingsStore(_store(app).path)
         app.state.detection_settings_store = store
     return store
 
@@ -874,7 +966,7 @@ def _detection_settings_store(app: FastAPI) -> DetectionSettingsStore:
 def _clip_storage_location_store(app: FastAPI) -> ClipStorageLocationStore:
     store = getattr(app.state, "clip_storage_location_store", None)
     if not isinstance(store, ClipStorageLocationStore):
-        store = ClipStorageLocationStore.from_env()
+        store = ClipStorageLocationStore(_store(app).path)
         app.state.clip_storage_location_store = store
     return store
 
@@ -1090,7 +1182,7 @@ def _store(app: FastAPI) -> CameraRegistryStore:
 def _bed_zone_store(app: FastAPI) -> BedZoneStore:
     store = getattr(app.state, "bed_zone_store", None)
     if not isinstance(store, BedZoneStore):
-        store = BedZoneStore.from_env()
+        store = BedZoneStore(_store(app).path)
         app.state.bed_zone_store = store
     return store
 
@@ -1152,14 +1244,7 @@ def _default_camera_fps() -> float | None:
     runs at this rate). Unset -> worker keeps its 5.0 default. GPU headroom
     permitting, 12-15 gives a noticeably smoother wall without corruption.
     """
-    raw = os.environ.get("ML_DEFAULT_CAMERA_FPS", "").strip()
-    if not raw:
-        return None
-    try:
-        value = float(raw)
-    except ValueError:
-        return None
-    return value if value > 0 else None
+    return None
 
 
 def _default_frame_stride() -> int | None:
@@ -1172,14 +1257,7 @@ def _default_frame_stride() -> int | None:
     frame). Lets deployments raise fps for a smoother live wall without
     overloading inference-bound hardware.
     """
-    raw = os.environ.get("ML_DEFAULT_FRAME_STRIDE", "").strip()
-    if not raw:
-        return None
-    try:
-        value = int(raw)
-    except ValueError:
-        return None
-    return value if value > 0 else None
+    return None
 
 
 def _normalize_floor(value: object) -> int | None:
@@ -1249,13 +1327,31 @@ def _default_decode_backend() -> str | None:
     do not set a per-camera decode_backend. Unset or invalid -> None (worker
     keeps its own "auto" default).
     """
-    raw = os.environ.get("ML_DEFAULT_DECODE_BACKEND", "").strip().lower()
-    if not raw:
-        return None
-    return raw if raw in DECODE_BACKENDS else None
+    return None
+
+
+def _validated_rtsp_url(rtsp_url: str) -> str:
+    """Admit only policy-allowed RTSP destinations before store or probe.
+
+    Resolves hostnames and rejects when any A/AAAA answer violates policy.
+    The original (hostname) URL is stored; workers pin the IP at open/probe.
+    """
+
+    try:
+        endpoint = assert_rtsp_endpoint_allowed(rtsp_url)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    return endpoint.original_url
 
 
 def _probe_rtsp_url(request: Request, rtsp_url: str) -> ProbeResult:
+    # Re-check (including DNS answers) at the probe boundary so a future
+    # caller cannot bypass create/update admission.
+    try:
+        endpoint = assert_rtsp_endpoint_allowed(rtsp_url)
+    except ValueError:
+        return ProbeResult(ok=False, error_class="unsupported")
+    rtsp_url = endpoint.original_url
     settings = get_settings()
     origin = settings.worker_probe_origin.strip().rstrip("/")
     if not origin:
@@ -1311,6 +1407,8 @@ def _probe_result_from_worker(payload: dict[object, object]) -> ProbeResult:
         error_class = "decode"
     elif raw_error_class == "auth":
         error_class = "auth"
+    elif raw_error_class == "unsupported":
+        error_class = "unsupported"
     else:
         error_class = None
     width = _optional_positive_int(payload.get("width"))
@@ -1352,4 +1450,8 @@ def _probe_response(probe: ProbeResult) -> dict[str, object]:
     return response
 
 
-__all__ = ["router", "worker_config_snapshot"]
+__all__ = [
+    "acknowledge_applied_detection_policies",
+    "router",
+    "worker_config_snapshot",
+]

@@ -42,7 +42,10 @@ from backend.app.features.clips.listing_schema import (
     SELECT_ACTIVE_GENERATION,
     SELECT_NEXT_GENERATION,
 )
-from backend.app.features.clips.listing_schema_migration import initialize_listing_schema
+from backend.app.features.clips.listing_schema_migration import (
+    initialize_listing_schema,
+    validate_listing_schema,
+)
 from backend.app.features.clips.schemas import ClipListQuery
 from backend.app.shared.sqlite_bootstrap import connect_catalog_store
 
@@ -75,7 +78,10 @@ class ListingRepository:
         resolved = Path(path)
         writer = connect_catalog_store(resolved, ())
         try:
-            initialize_listing_schema(writer)
+            if resolved.name == "edge.sqlite3":
+                validate_listing_schema(writer)
+            else:
+                initialize_listing_schema(writer)
             return cls(resolved, writer)
         except (OSError, sqlite3.Error):
             writer.close()

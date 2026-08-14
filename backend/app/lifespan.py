@@ -5,17 +5,21 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import os
 import sys
 import urllib.request
 from collections.abc import AsyncIterator
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import AsyncExitStack, asynccontextmanager
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from threading import Lock
+from typing import Protocol, TypeGuard
 
 from fastapi import FastAPI
 
+from backend.app.core.config import reject_retired_backend_environment
 from backend.app.features.cameras.store import CameraRegistryStore
 from backend.app.features.clips.catalog import CatalogStore
 from backend.app.features.clips.listing_runtime import maintain_clip_listing
@@ -42,8 +46,8 @@ from contracts.worker_config import (
     PulledWorkerConfig,
     detection_window_validation_error,
 )
+from shared.edge_db import EDGE_DATABASE_PATH
 from shared.events.edge_ingest_client import (
-    DEFAULT_TIMEOUT_SEC,
     BackendEvidenceClient,
     EdgeIngestClient,
 )
@@ -66,17 +70,25 @@ API_BACKEND_HEARTBEAT_RELAY_SEC_ENV = "API_BACKEND_HEARTBEAT_RELAY_SEC"
 BACKEND_CONFIG_SHUTDOWN_WAIT_SEC = 1.0
 BACKEND_HEARTBEAT_RELAY_SHUTDOWN_WAIT_SEC = 1.0
 
+
+class InvalidBackendIngestTimeoutError(ValueError):
+    """The public ingest timeout is malformed or outside the finite positive domain."""
+
+
 logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Boot ml-api as a thin backend gateway (ADR)."""
+    reject_retired_backend_environment(os.environ)
     logger.info("ml-api state directory resolved to %s", resolve_state_dir("ml-api"))
     _load_config(app)
 
     if not isinstance(getattr(app.state, "heartbeat_store", None), HeartbeatStore):
-        app.state.heartbeat_store = HeartbeatStore(stale_after_sec=_heartbeat_stale_after_sec())
+        app.state.heartbeat_store = HeartbeatStore(
+            stale_after_sec=_heartbeat_stale_after_sec(), database_path=EDGE_DATABASE_PATH
+        )
     if not isinstance(getattr(app.state, "runtime_status_store", None), RuntimeStatusStore):
         app.state.runtime_status_store = RuntimeStatusStore()
 
@@ -85,12 +97,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     _configure_backend_ingest(app)
     bundle = backend_client_bundle(app)
     app.state.backend_configured = bundle is not None
-    app.state.backend_reachable = getattr(
-        app.state, "backend_reachable", None
-    )
-    app.state.backend_last_ok_at = getattr(
-        app.state, "backend_last_ok_at", None
-    )
+    app.state.backend_reachable = getattr(app.state, "backend_reachable", None)
+    app.state.backend_last_ok_at = getattr(app.state, "backend_last_ok_at", None)
 
     app.state.restart_epoch = getattr(app.state, "restart_epoch", 0)
     app.state.config_version = getattr(app.state, "config_version", 0)
@@ -290,10 +298,7 @@ def refresh_backend_config(app: FastAPI, stop_token: asyncio.Event | None = None
     if stop_token is None:
         candidate = getattr(app.state, "backend_config_refresh_stop", None)
         stop_token = candidate if isinstance(candidate, asyncio.Event) else None
-    refresh_lock = getattr(app.state, "backend_config_refresh_lock", None)
-    if not hasattr(refresh_lock, "acquire"):
-        refresh_lock = Lock()
-        app.state.backend_config_refresh_lock = refresh_lock
+    refresh_lock = _backend_config_refresh_lock(app)
     if not refresh_lock.acquire(blocking=False):
         return False
     try:
@@ -301,19 +306,19 @@ def refresh_backend_config(app: FastAPI, stop_token: asyncio.Event | None = None
             return False
         bundle = backend_client_bundle(app)
         if bundle is None:
-            mark_backend_status(app.state, None)
+            _mark_app_backend_status(app, None)
             _mark_backend_roster_stale(app)
             return False
-        restart_epoch = int(getattr(app.state, "restart_epoch", 0))
+        restart_epoch = _as_int(getattr(app.state, "restart_epoch", 0), default=0)
         cfg = _fetch_backend_config(bundle, restart_epoch)
         if not _backend_config_refresh_is_current(app, stop_token):
             return False
         if cfg is None or backend_client_bundle(app) is not bundle:
-            mark_backend_status(app.state, False)
+            _mark_app_backend_status(app, False)
             _mark_backend_roster_stale(app)
             return False
         was_reachable = getattr(app.state, "backend_reachable", None)
-        mark_backend_status(app.state, True)
+        _mark_app_backend_status(app, True)
         _apply_backend_config(app, cfg)
         if was_reachable is not True:
             from backend.app.features.cameras.roster_sync import (
@@ -364,9 +369,7 @@ async def _backend_heartbeat_relay_loop(
             pass
         if stop_event.is_set():
             break
-        await asyncio.get_running_loop().run_in_executor(
-            executor, relay_heartbeats_once, app
-        )
+        await asyncio.get_running_loop().run_in_executor(executor, relay_heartbeats_once, app)
 
 
 def _backend_config_refresh_is_current(app: FastAPI, stop_token: asyncio.Event | None) -> bool:
@@ -426,16 +429,60 @@ def _mark_backend_roster_stale(app: FastAPI) -> None:
     previous = getattr(app.state, "backend_roster", {})
     received_at = previous.get("received_at") if isinstance(previous, dict) else None
     app.state.backend_roster = {
-        "config_version": int(getattr(app.state, "config_version", 0)),
+        "config_version": _as_int(getattr(app.state, "config_version", 0), default=0),
         "received_at": received_at,
         "stale": True,
     }
 
 
+class _RefreshLock(Protocol):
+    def acquire(self, blocking: bool = True, timeout: float = -1) -> bool: ...
+
+    def release(self) -> None: ...
+
+
+def _is_refresh_lock(value: object) -> TypeGuard[_RefreshLock]:
+    return callable(getattr(value, "acquire", None)) and callable(getattr(value, "release", None))
+
+
+def _backend_config_refresh_lock(app: FastAPI) -> _RefreshLock:
+    candidate = getattr(app.state, "backend_config_refresh_lock", None)
+    if _is_refresh_lock(candidate):
+        return candidate
+    refresh_lock = Lock()
+    app.state.backend_config_refresh_lock = refresh_lock
+    return refresh_lock
+
+
+@dataclass(slots=True)
+class _BackendStatusBuffer:
+    backend_reachable: bool | None
+    backend_last_ok_at: str | None
+
+
+def _mark_app_backend_status(app: FastAPI, reachable: bool | None) -> None:
+    """Copy FastAPI dynamic state into a typed buffer, mutate, write back."""
+    reachable_raw = getattr(app.state, "backend_reachable", None)
+    last_ok_raw = getattr(app.state, "backend_last_ok_at", None)
+    buffer = _BackendStatusBuffer(
+        backend_reachable=reachable_raw if isinstance(reachable_raw, bool) else None,
+        backend_last_ok_at=last_ok_raw if isinstance(last_ok_raw, str) else None,
+    )
+    mark_backend_status(buffer, reachable)
+    app.state.backend_reachable = buffer.backend_reachable
+    app.state.backend_last_ok_at = buffer.backend_last_ok_at
+
+
+def _as_int(value: object, *, default: int) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        return default
+    return value
+
+
 def _as_mapping(value: object) -> dict[str, object]:
     if not isinstance(value, dict):
         raise TypeError("backend config response must be an object")
-    return value
+    return {str(key): item for key, item in value.items()}
 
 
 def _backend_config_version(data: dict[str, object]) -> int:
@@ -555,8 +602,18 @@ def _optional_text(data: dict[str, object], name: str) -> str | None:
 def _backend_ingest_timeout_sec() -> float:
     raw = os.environ.get(API_BACKEND_INGEST_TIMEOUT_SEC_ENV)
     if raw is None:
-        return DEFAULT_TIMEOUT_SEC
-    return float(raw)
+        return 10.0
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise InvalidBackendIngestTimeoutError(
+            f"{API_BACKEND_INGEST_TIMEOUT_SEC_ENV} must be a finite positive number, got {raw!r}"
+        ) from exc
+    if not math.isfinite(value) or value <= 0:
+        raise InvalidBackendIngestTimeoutError(
+            f"{API_BACKEND_INGEST_TIMEOUT_SEC_ENV} must be a finite positive number, got {raw!r}"
+        )
+    return value
 
 
 def _backend_config_timeout_sec() -> float:

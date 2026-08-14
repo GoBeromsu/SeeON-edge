@@ -11,6 +11,8 @@ from pathlib import Path
 from typing import Final, TypeAlias, cast
 from uuid import uuid4
 
+from shared.edge_db.connection import RuntimeActor, open_runtime_database
+
 ConnectionValue: TypeAlias = str | int | None
 ConnectionData: TypeAlias = dict[str, ConnectionValue]
 DatabaseRow: TypeAlias = tuple[ConnectionValue, ...]
@@ -123,6 +125,8 @@ class ConnectionStoreDatabase:
                     self._upsert(destination, restored)
 
     def _connect(self, *, create: bool) -> sqlite3.Connection:
+        if self.path.name == "edge.sqlite3":
+            return open_runtime_database(self.path, actor=RuntimeActor.API)
         if create:
             self.path.parent.mkdir(parents=True, exist_ok=True)
         connection = sqlite3.connect(self.path, timeout=5.0)
@@ -131,6 +135,8 @@ class ConnectionStoreDatabase:
         return connection
 
     def _ensure_schema(self, connection: sqlite3.Connection) -> None:
+        if self.path.name == "edge.sqlite3":
+            return
         table_exists = cast(
             tuple[int] | None,
             connection.execute(

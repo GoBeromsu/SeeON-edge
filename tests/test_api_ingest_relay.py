@@ -119,6 +119,8 @@ def _alert_payload(**overrides) -> dict:
     }
     payload.update(overrides)
     return payload
+
+
 def _snapshot_metadata(content: bytes, **overrides: object) -> dict[str, object]:
     snapshot = {
         "snapshot_id": "snapshot-1",
@@ -132,8 +134,6 @@ def _snapshot_metadata(content: bytes, **overrides: object) -> dict[str, object]
     }
     snapshot.update(overrides)
     return snapshot
-
-
 
 
 @pytest.mark.parametrize(
@@ -356,6 +356,8 @@ def test_relay_alert_skips_overdeep_catalog_record_but_delivers_alert() -> None:
     assert "maximum depth" in response.json()["catalog_reason"]
     assert len(fake.alerts) == 1
     assert not hasattr(client.app.state, "catalog_store")
+
+
 class FailingCatalogStore:
     def record_many(self, records: tuple[tuple[str, str, dict], ...]) -> None:
         raise sqlite3.OperationalError("database is locked")
@@ -377,8 +379,6 @@ def test_relay_alert_delivers_before_sqlite_catalog_failure(monkeypatch) -> None
     assert response.json()["catalog"] == "not_recorded"
     assert "operational failure" in response.json()["catalog_reason"]
     assert len(fake.alerts) == 1
-
-
 
 
 def test_relay_alert_omits_missing_clip_id_for_backward_compatibility() -> None:
@@ -611,6 +611,8 @@ def test_relay_alert_forwards_audit_and_snapshot_when_present() -> None:
         "clock_source": "edge_wall_clock",
     }
     assert forwarded["snapshot_bytes"] == b"jpeg-bytes"
+
+
 def test_relay_alert_accepts_inline_snapshot_at_decoded_size_limit(tmp_path) -> None:
     content = b"x" * MAX_INLINE_SNAPSHOT_BYTES
     fake = FakeBackendIngestClient()

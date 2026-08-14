@@ -9,6 +9,7 @@ from typing import Literal, final
 
 from pydantic import JsonValue, TypeAdapter, ValidationError
 
+from backend.app.features.connection.hub_url import hub_url_transport_allowed
 from contracts.edge_provisioning_codec import serialize_enrollment_verification
 from contracts.edge_provisioning_enrollment import parse_enrollment_verification_result
 from contracts.edge_provisioning_models import (
@@ -48,6 +49,8 @@ def verify_enrollment(
 ) -> EnrollmentVerificationResult:
     endpoint = enrollment_endpoint(events_url)
     if endpoint is None:
+        # Refuse before building an Authorization header so a rejected cleartext
+        # public origin never observes the facility bearer token.
         raise EnrollmentVerificationFailure("unreachable", 503)
     body = serialize_enrollment_verification(
         EnrollmentVerification(
@@ -66,6 +69,8 @@ def verify_enrollment(
         method="POST",
     )
     try:
+        # Default SSL context (normal certificate validation). Never pass an
+        # unverified context — Hub enrollment must not skip TLS checks.
         with urllib.request.urlopen(request, timeout=timeout_sec) as response:
             parsed = _JSON_RECORD.validate_json(response.read())
         return parse_enrollment_verification_result(parsed)
@@ -88,8 +93,11 @@ def verify_enrollment(
 def enrollment_endpoint(events_url: str | None) -> str | None:
     if events_url is None:
         return None
-    parsed = urllib.parse.urlsplit(events_url.strip())
+    cleaned = events_url.strip()
+    parsed = urllib.parse.urlsplit(cleaned)
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return None
+    if not hub_url_transport_allowed(cleaned):
         return None
     origin = urllib.parse.urlunsplit(parsed._replace(path="", query="", fragment=""))
     return f"{origin.rstrip('/')}/api/v1/edge/enrollments/verify"

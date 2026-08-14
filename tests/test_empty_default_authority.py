@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
+from backend.app.core.config import reject_retired_backend_environment
 from backend.app.features.cameras.store import CameraRegistryStore
 from backend.app.features.connection.store import (
     API_BACKEND_BASE_URL_ENV,
@@ -48,22 +49,9 @@ def _client_with_registry(tmp_path: Path, *, camera_id: str = "cam-1") -> TestCl
 
 
 class TestNoCameraInventoryAuthority:
-    def test_lifespan_ignores_api_camera_inventory_env(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-    ) -> None:
-        monkeypatch.setenv(
-            "API_CAMERA_INVENTORY",
-            '[{"camera_id":"ghost","facility_id":"fac"}]',
-        )
-        monkeypatch.setenv("API_EDGE_RELAY_TOKEN", "relay-token")
-        monkeypatch.setenv(
-            "API_CONNECTION_SETTINGS_PATH",
-            str(tmp_path / "connection.sqlite3"),
-        )
-        with TestClient(create_app()) as client:
-            assert not hasattr(client.app.state, "camera_inventory")
-            body = client.get("/api/v1/status").json()
-            assert "ghost" not in body["cameras"]
+    def test_lifespan_rejects_api_camera_inventory_env(self) -> None:
+        with pytest.raises(ValueError, match="API_CAMERA_INVENTORY"):
+            reject_retired_backend_environment({"API_CAMERA_INVENTORY": '[{"camera_id":"ghost"}]'})
 
 
 class TestConnectionFacilityDbOnly:
@@ -81,11 +69,13 @@ class TestConnectionFacilityDbOnly:
     def test_configured_requires_facility_id_and_token(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.setenv(
-            "API_CONNECTION_SETTINGS_PATH", str(tmp_path / "connection.sqlite3")
-        )
         monkeypatch.setenv(API_BACKEND_BASE_URL_ENV, "https://api.example.com")
-        store = ConnectionSettingsStore.from_env()
+        store = ConnectionSettingsStore(tmp_path / "connection.sqlite3")
+        monkeypatch.setattr(
+            ConnectionSettingsStore,
+            "from_env",
+            classmethod(lambda cls: store),
+        )
         store.save({"events_url": "https://api.example.com/api/v1/events"})
         app = create_app(lifespan=no_lifespan)
         client = TestClient(app)
@@ -301,7 +291,6 @@ class TestProductionGrepGates:
 
     FORBIDDEN_SUBSTRINGS = (
         "camera_inventory",
-        "API_CAMERA_INVENTORY",
         "def _facility_id",
     )
     FORBIDDEN_ENV_READ_PATTERNS = (

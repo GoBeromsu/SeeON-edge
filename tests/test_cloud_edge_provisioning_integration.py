@@ -17,7 +17,20 @@ from pydantic import BaseModel, ConfigDict, JsonValue, TypeAdapter
 
 from backend.app.features.connection.store import ConnectionSettingsStore
 
-pytestmark = pytest.mark.integration
+_CLOUD_ENV = (
+    "CLOUD_EDGE_ML_URL",
+    "CLOUD_EDGE_RELAY_TOKEN",
+    "CLOUD_EDGE_ML_CATALOG_PATH",
+    "CLOUD_EDGE_PRE_V1_BACKUP_PATH",
+    "CLOUD_EDGE_SECRET_HANDOFF_PATH",
+)
+pytestmark = [
+    pytest.mark.integration,
+    pytest.mark.skipif(
+        any(not os.environ.get(name) for name in _CLOUD_ENV),
+        reason="cloud edge integration environment is not configured",
+    ),
+]
 
 _RELAY_HEADER: Final = "X-Edge-Relay-Token"
 _JSON_OBJECT_ADAPTER: Final = TypeAdapter(dict[str, JsonValue])
