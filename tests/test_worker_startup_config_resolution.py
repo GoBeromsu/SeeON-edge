@@ -424,6 +424,95 @@ def test_yaml_set_pull_raising_validationerror_exits_with_config_error_code(
     assert worker_main.main(["--config", str(config_path)]) == 2
 
 
+# --- packaged-model resolution runs before the guarded pull -----------------
+#
+# On the env-only production topology (no `--config`), `resolve_local_overrides`
+# resolves the packaged default fall model BEFORE the relay pull. The CI
+# `Dockerfile.edge` image bakes empty model directories (weights stay
+# gitignored, mounted at runtime), so on that image this call raises
+# `WorkerConfigError` ("packaged default LSTM fall model is not fully
+# provisioned"). That call sits before the guarded pull, so the failure must
+# still surface as the documented CONFIG_ERROR_EXIT_CODE (2) with a logged
+# message -- not escape `main()` as a raw traceback that reports the generic
+# runtime exit code (1) and misrepresents a config/packaging fault. The guard
+# must not weaken the validation itself: a missing packaged model still refuses
+# to boot.
+
+
+def test_no_yaml_missing_packaged_model_exits_with_config_error_code(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    monkeypatch.setenv("RELAY_TOKEN", "relay-token")
+
+    def _raise(*_args: object, **_kwargs: object) -> object:
+        raise WorkerConfigError(
+            "packaged default LSTM fall model is not fully provisioned at "
+            "'models/fall/lstm'; run scripts/fetch-models.sh"
+        )
+
+    monkeypatch.setattr(worker_main, "resolve_local_overrides", _raise)
+
+    def _fail(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError(
+            "a relay pull must not be attempted once local model resolution has failed"
+        )
+
+    monkeypatch.setattr(worker_main, "load_worker_config_from_relay", _fail)
+
+    with caplog.at_level(logging.ERROR):
+        exit_code = worker_main.main([])
+
+    assert exit_code == 2
+    assert any("model" in record.getMessage().lower() for record in caplog.records)
+
+
+def test_no_yaml_local_override_validationerror_exits_with_config_error_code(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Sibling of the WorkerConfigError guard above: a malformed packaged
+    manifest can surface a raw `pydantic.ValidationError` out of
+    `resolve_local_overrides`. Both exception types must map to the documented
+    config-error exit code, mirroring the guarded relay-pull branch."""
+    monkeypatch.setenv("RELAY_TOKEN", "relay-token")
+
+    def _raise(*_args: object, **_kwargs: object) -> object:
+        RelayConfig.model_validate({"url": "not-a-url", "token": "relay-token"})
+        raise AssertionError("RelayConfig.model_validate should have raised")
+
+    monkeypatch.setattr(worker_main, "resolve_local_overrides", _raise)
+    monkeypatch.setattr(
+        worker_main,
+        "load_worker_config_from_relay",
+        lambda *_a, **_k: (_ for _ in ()).throw(
+            AssertionError("must not pull once local model resolution has failed")
+        ),
+    )
+
+    assert worker_main.main([]) == 2
+
+
+def test_check_config_no_yaml_never_resolves_local_model_overrides(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The boot-smoke contract: `--check-config` is a static import/relay-token
+    check and must exit 0 even when the packaged model is absent (the CI image
+    bakes empty model dirs). It must therefore never reach
+    `resolve_local_overrides`, which is the runtime model-provisioning gate.
+    """
+    monkeypatch.setenv("RELAY_TOKEN", "relay-token")
+
+    def _fail(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError(
+            "--check-config must not resolve local model overrides -- it is a "
+            "static, no-side-effect check that must pass without a provisioned model"
+        )
+
+    monkeypatch.setattr(worker_main, "resolve_local_overrides", _fail)
+
+    assert worker_main.main(["--check-config"]) == 0
+
+
 # --- the fatal no-config message must not assert an unestablished cause ----
 
 

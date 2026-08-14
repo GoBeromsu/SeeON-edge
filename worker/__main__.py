@@ -318,34 +318,55 @@ def main(argv: list[str] | None = None) -> int:
             return CONFIG_ERROR_EXIT_CODE
 
         if args.check_config:
-            # Strictly static: RELAY_URL/RELAY_TOKEN presence and shape only.
-            # No network call and no LKG write -- `WorkerConfigLkgStore.load`
-            # is read-only, so reporting whether a cache exists is safe, but
-            # the live pull (and any `lkg_store.save`) is deferred to boot.
-            # `--check-config` must never mutate the resolved worker state
-            # directory (`worker/runtime/state_dir.py`, `~/.local/state/ml-worker`,
-            # no env override) (worker/runtime/AGENTS.md, "--check-config
-            # performs no model, camera, or relay side effect").
+            # Strictly static: the baked relay endpoint plus RELAY_TOKEN
+            # presence and shape only. RELAY_URL is retired (rejected above by
+            # `reject_retired_worker_environment`), so this reports the baked
+            # endpoint, not an env var. No network call and no LKG write --
+            # `WorkerConfigLkgStore.load` is read-only, so reporting whether a
+            # cache exists is safe, but the live pull (and any
+            # `lkg_store.save`) is deferred to boot. `--check-config` must
+            # never mutate the resolved worker state directory
+            # (`worker/runtime/state_dir.py`, `~/.local/state/ml-worker`, no
+            # env override) and must not touch the packaged model
+            # (`resolve_local_overrides`, below) (worker/runtime/AGENTS.md,
+            # "--check-config performs no model, camera, or relay side
+            # effect").
             stored = WorkerConfigLkgStore(state_dir=resolve_state_dir()).load()
             if stored is None:
                 LOGGER.info(
-                    "config validation passed (static check): %s/%s set; no "
-                    "last-known-good cache yet -- the live pull happens at boot",
-                    RELAY_URL_ENV,
+                    "config validation passed (static check): baked relay endpoint "
+                    "%s + %s set; no last-known-good cache yet -- the live pull "
+                    "happens at boot",
+                    relay_url,
                     RELAY_TOKEN_ENV,
                 )
             else:
                 LOGGER.info(
-                    "config validation passed (static check): %s/%s set; "
-                    "last-known-good cache present (registry_version=%d) -- "
-                    "the live pull still happens at boot",
-                    RELAY_URL_ENV,
+                    "config validation passed (static check): baked relay endpoint "
+                    "%s + %s set; last-known-good cache present (registry_version=%d) "
+                    "-- the live pull still happens at boot",
+                    relay_url,
                     RELAY_TOKEN_ENV,
                     stored.registry_version,
                 )
             return CLEAN_SHUTDOWN_EXIT_CODE
 
-        models, clip, dev_mjpeg = resolve_local_overrides(None, os.environ)
+        # `resolve_local_overrides` provisions the packaged default fall model
+        # (worker/runtime/config/local_env.py) and runs *before* the guarded
+        # relay pull. A missing/dangling packaged artifact -- the CI
+        # `Dockerfile.edge` image bakes empty model dirs; real edges mount the
+        # weights at runtime -- makes it raise `WorkerConfigError`, and a
+        # malformed manifest can surface `ValidationError`. Both are
+        # config/packaging faults, so they map to CONFIG_ERROR_EXIT_CODE with a
+        # logged message rather than escaping `main()` as a raw traceback that
+        # reports the generic runtime exit code and misrepresents the fault.
+        # This guard does not weaken the validation: a missing model still
+        # refuses to boot, fail-closed.
+        try:
+            models, clip, dev_mjpeg = resolve_local_overrides(None, os.environ)
+        except (WorkerConfigError, ValidationError):
+            LOGGER.exception("worker local model/clip configuration failed")
+            return CONFIG_ERROR_EXIT_CODE
         try:
             snapshot = load_worker_config_from_relay(
                 relay_url, relay_token, models=models, clip=clip, dev_mjpeg=dev_mjpeg
