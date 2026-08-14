@@ -1,16 +1,19 @@
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
+import sqlite3
 import threading
 import time
+import uuid
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from time import monotonic
 from types import MappingProxyType
-from typing import Any, Final, Protocol, TypeAlias, final, runtime_checkable
+from typing import Any, Final, Protocol, TypeAlias, cast, final, runtime_checkable
 
 import worker.pipeline.ingest.lifecycle as ingest
 import worker.runtime.bootstrap as bootstrap
@@ -18,6 +21,9 @@ import worker.runtime.telemetry.runtime_status_sender as runtime_status_sender_m
 from contracts.decode_diagnostics import DecodeSelection
 from contracts.observation import BoundingBox
 from contracts.runner import BedRunnerResult, Image, RunnerProtocol
+from shared.detection_policies import LATEST_POLICY_VERSIONS
+from shared.edge_db import EDGE_DATABASE_PATH
+from shared.edge_db.compatibility import CURRENT_SCHEMA_RANGE
 from shared.events.evidence_export_contract import DeliveryDisposition, DeliveryFailure
 from shared.events.evidence_http_transport import (
     bounded_request,
@@ -30,8 +36,9 @@ from worker.adapters.decode.cpu_av.adapter import CpuAvAdapter
 from worker.adapters.decode.cpu_av.models import CpuAvConfig
 from worker.adapters.decode.cpu_av.probe import probe_opencv_ffmpeg_capability
 from worker.adapters.decode.nvdec_cuvid.probe import probe_nvdec_cuvid_capability
+from worker.adapters.decode.nvdec_device.capability import probe_device_resident_capability
 from worker.adapters.decode.vaapi.probe import probe_vaapi_capability
-from worker.adapters.device.cuda.probe import probe_cuda_capability
+from worker.adapters.device.cuda.probe import probe_cuda_capability, probe_nvenc_capability
 from worker.adapters.device.mps.probe import probe_mps_capability
 from worker.adapters.device.nvml.probe import probe_nvml_gpu_status
 from worker.adapters.model import warmup_to_ready
@@ -41,18 +48,20 @@ from worker.adapters.model.fall_family_registry import (
     UnknownFallModelTypeError,
 )
 from worker.domains import (
+    AVAILABLE_OBSERVATION_CHANNELS,
+    DETECTION_MODULE_REGISTRY,
     DOMAIN_REGISTRY,
-    AuditContext,
-    BedExitDomainDependencies,
-    FallDomainDependencies,
+    CameraModuleContext,
+    CompiledDetectionModuleRegistry,
+    DetectionModuleDefinition,
 )
-from worker.domains.bed_exit import BedExitConfig, NightWindow
 from worker.domains.detection_window import DetectionWindow
 from worker.domains.fall import FallModelProtocol
 from worker.interfaces.decision import Decider
 from worker.interfaces.output import EventSink
 from worker.interfaces.serving import ServingClient
-from worker.pipeline.analytics import CompositeExtractor
+from worker.pipeline.analytics import CompositeExtractor, NamedExtractor
+from worker.pipeline.analytics.merge import result_merger_names
 from worker.pipeline.bus import BoundedFrameBus, Scheduler
 from worker.pipeline.camera_pipeline import CameraPipelinePump
 from worker.pipeline.decision import EventAggregator, IncidentManager
@@ -60,7 +69,7 @@ from worker.pipeline.decision.event_identity import event_identity_path
 from worker.pipeline.ingest.probe import RTSPProbeError, probe_first_frame
 from worker.pipeline.ingest.registry import SourceRegistry
 from worker.pipeline.output.event_sink import EventClipRecorder, EvidenceEventSink
-from worker.pipeline.output.evidence.clip_config import CLIP_STORE_DIR_ENV
+from worker.pipeline.output.evidence.clip_config import DEFAULT_CLIP_STORE_DIR
 from worker.pipeline.output.evidence.clip_frame_feeder import ClipFrameFeeder
 from worker.pipeline.output.evidence.clip_recorder import ClipRecorder
 from worker.pipeline.output.evidence.clip_recorder_models import ClipRecorderConfig
@@ -71,6 +80,8 @@ from worker.pipeline.output.evidence.clip_store_lock import (
 )
 from worker.pipeline.output.evidence.evidence_runtime import EvidenceExportRuntime
 from worker.pipeline.output.evidence.evidence_stager import DurableEvidenceStager
+from worker.pipeline.output.evidence.packet_repository import PacketRingRepository
+from worker.pipeline.output.evidence.packet_ring import PacketRingLimits
 from worker.pipeline.output.evidence.snapshot_store import SnapshotStore
 from worker.pipeline.output.evidence_attacher import AlertEvidenceAttacher
 from worker.pipeline.output.live_view import LatestFrameStore, LiveViewSubscriber
@@ -86,11 +97,17 @@ from worker.pipeline.output.mjpeg_server import (
 )
 from worker.pipeline.output.overlay import OverlayRenderer
 from worker.pipeline.perception import GreedyIouTracker, SceneState
+from worker.pipeline.trace import BoundedTraceWriter, TraceCapture, TraceIdentity
+from worker.runtime.clip_deletion_control import ClipDeletionControlService
 from worker.runtime.config import (
     RELAY_HEARTBEAT_PATH,
     CameraRuntimeConfig,
     LiveClipExportPolicy,
     WorkerConfig,
+)
+from worker.runtime.derivative_runtime import (
+    DerivativeControlService,
+    DerivativeProductionRuntime,
 )
 from worker.runtime.faults.handler import FaultHandler
 from worker.runtime.faults.record import make_fault_record
@@ -100,15 +117,31 @@ from worker.runtime.ingest_composition import (
     resolve_decode_backend,
 )
 from worker.runtime.lease import GpuLease
-from worker.runtime.model_composition import SharedYoloExtractors, compose_yolo_extractors
+from worker.runtime.model_composition import (
+    ProvisionedSharedComponent,
+    SharedComponentGraph,
+    SharedComponentPool,
+    SharedYoloExtractors,
+    compose_shared_components,
+)
 from worker.runtime.profile.boot import BootContext
 from worker.runtime.profile.device import CudaProbe
 from worker.runtime.profile.registry import (
     DecodeProbe,
+    EncodeProbe,
     VerifyResult,
     default_decode_probe,
     default_verifiers,
 )
+from worker.runtime.provenance import (
+    AppliedDetectionWindow,
+    AppliedRuntimeManifest,
+    AppliedRuntimeManifestStore,
+    RuntimeEnvironmentFacts,
+    build_applied_camera_state,
+    build_applied_runtime_manifest,
+)
+from worker.runtime.provenance.environment import collect_runtime_environment_facts
 from worker.runtime.state_dir import resolve_state_dir
 from worker.runtime.telemetry.runtime_diagnostics import WorkerDiagnostics
 from worker.runtime.telemetry.runtime_status_sender import (
@@ -121,7 +154,7 @@ from worker.runtime.telemetry.wire import (
     RelayWorkerPayload,
 )
 from worker.runtime.watchdog import InferenceWatchdog
-from worker.types import BusinessEvent, DecisionInput
+from worker.types import BusinessEvent, DecisionInput, FramePacket
 
 LOGGER: Final = logging.getLogger(__name__)
 HEARTBEAT_TIMEOUT_SEC: Final = 0.5
@@ -163,6 +196,7 @@ PumpFactory: TypeAlias = Callable[
 EventSinkFactory: TypeAlias = Callable[[CameraRuntimeConfig], EventSink]
 
 ClipRecorderFactory: TypeAlias = Callable[[CameraRuntimeConfig], EventClipRecorder]
+EnvironmentFactsFactory: TypeAlias = Callable[[BootContext, str | None], RuntimeEnvironmentFacts]
 
 
 def _processed_count(pump: _RunnableIngest) -> int:
@@ -175,21 +209,12 @@ def _processed_count(pump: _RunnableIngest) -> int:
 
 
 def _required_extractor_names(domain_names: Sequence[str]) -> tuple[str, ...]:
-    """Union of extractor module names every active domain requires.
-
-    Domain registry iteration order (fixed by ``DOMAIN_REGISTRY``) drives the
-    result order for determinism; within one domain, ``requires`` names are
-    sorted for the same reason. Fails closed -- ``RuntimeError``, mirroring
-    ``_build_decider``'s unsupported-domain check -- for any active domain
-    name absent from the registry (issue #47).
-    """
+    """Resolve normalized extractor requirements from compiled modules."""
     required: dict[str, None] = {}
-    for name in domain_names:
-        registration = DOMAIN_REGISTRY.get(name)
-        if registration is None:
-            raise RuntimeError(f"unsupported domain in registry: {name}")
-        for extractor_name in sorted(registration.requires):
-            required.setdefault(extractor_name, None)
+    for definition in DETECTION_MODULE_REGISTRY.selected(domain_names):
+        for binding in definition.shared_bindings:
+            if binding.component_kind == "extractor" and binding.activation_flag is None:
+                required.setdefault(binding.component_id, None)
     return tuple(required)
 
 
@@ -223,6 +248,7 @@ class _Warmable(Protocol):
 
 def _debug_snapshots_provider(
     domain_deciders: Mapping[str, Decider],
+    definitions: Mapping[str, DetectionModuleDefinition] | None = None,
 ) -> Callable[[int], tuple[Any, ...]]:
     """Build one camera's cross-domain debug-snapshot collector.
 
@@ -234,7 +260,11 @@ def _debug_snapshots_provider(
     def provider(frame_index: int) -> tuple[Any, ...]:
         snapshots: list[Any] = []
         for name, detector in domain_deciders.items():
-            adapter = DOMAIN_REGISTRY[name].debug_snapshot_adapter
+            adapter = (
+                DOMAIN_REGISTRY[name].debug_snapshot_adapter
+                if definitions is None
+                else definitions[name].debug_adapter
+            )
             if adapter is None:
                 continue
             snapshot = adapter(detector, frame_index)
@@ -256,7 +286,18 @@ class CameraRuntimeContext:
     heartbeat: HeartbeatReporter
     ingest_loop: _RunnableIngest
     pump: _RunnableIngest
-    clip_frame_feeder: _RunnableIngest | None = None
+    clip_frame_feeder: ClipFrameFeeder | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class CameraDetectionPlan:
+    tracker: GreedyIouTracker
+    schedule: Mapping[str, int]
+    detection_windows: Mapping[str, DetectionWindow | None]
+    decision: EventAggregator
+    domain_audit: Mapping[str, Mapping[str, object]]
+    domain_deciders: Mapping[str, Decider]
+    definitions: Mapping[str, DetectionModuleDefinition]
 
 
 @final
@@ -370,21 +411,16 @@ class _FaultAwareLoop:
 
 @final
 class _NullClipRecorder:
-    """Interim ``EventClipRecorder``: real clip binding lands with the clip-encoder
-    composition; until then, events still stage durably without a bound clip
-    (the same branch :class:`EvidenceEventSink` already exercises when
-    recording is unavailable).
-    """
+    """Interim ``EventClipRecorder`` used when recording is unavailable."""
 
     def on_event(
         self,
-        camera_id: str,
-        event_ref: str,
-        event_type: str | None = None,
+        trigger_packet: FramePacket,
+        event: BusinessEvent,
         *,
         allow_new_clip: bool = True,
     ) -> str | None:
-        del camera_id, event_ref, event_type, allow_new_clip
+        del trigger_packet, event, allow_new_clip
         return None
 
 
@@ -407,14 +443,17 @@ class _CameraClipRecorderView:
 
     def on_event(
         self,
-        camera_id: str,
-        event_ref: str,
-        event_type: str | None = None,
+        trigger_packet: FramePacket,
+        event: BusinessEvent,
         *,
         allow_new_clip: bool = True,
     ) -> str | None:
+        if trigger_packet.camera_id != self.camera_id:
+            raise ValueError("trigger packet camera does not match recorder view")
         return self.recorder.on_event(
-            camera_id, event_ref, event_type, allow_new_clip=allow_new_clip
+            trigger_packet,
+            event,
+            allow_new_clip=allow_new_clip,
         )
 
 
@@ -434,15 +473,60 @@ class _WindowGatedDecider:
     decider: Decider
     window: DetectionWindow
     clock: Callable[[], datetime]
+    last_trace_snapshots: object = ()
 
     def update(self, input_value: DecisionInput) -> tuple[BusinessEvent, ...]:
         if not self.window.contains(self.clock()):
+            # Local import keeps this shared composition-root file's change
+            # confined to the window-gate hunk owned by this remediation lane.
+            from worker.types.trace import DecisionTraceSnapshot
+
+            object.__setattr__(
+                self,
+                "last_trace_snapshots",
+                (
+                    DecisionTraceSnapshot(
+                        reason="outside-detection-window",
+                        previous_state="not-evaluated",
+                        current_state="not-evaluated",
+                        triggered=False,
+                        track_id=None,
+                        bed_id=None,
+                        missing_values={"decision_state": "outside-detection-window"},
+                    ),
+                ),
+            )
             return ()
-        return self.decider.update(input_value)
+        events = self.decider.update(input_value)
+        object.__setattr__(
+            self,
+            "last_trace_snapshots",
+            getattr(self.decider, "last_trace_snapshots", ()),
+        )
+        return events
 
 
 def _evidence_outbox_path(state_dir: Path) -> Path:
-    return state_dir / "worker-state.sqlite3"
+    return (
+        EDGE_DATABASE_PATH
+        if state_dir == resolve_state_dir()
+        else state_dir / "worker-state.sqlite3"
+    )
+
+
+def _derivative_schema_available(database_path: Path) -> bool:
+    if not database_path.is_file():
+        return False
+    try:
+        with sqlite3.connect(f"file:{database_path}?mode=ro", uri=True) as connection:
+            return (
+                connection.execute(
+                    "SELECT 1 FROM sqlite_schema WHERE type='table' AND name='derivative_jobs'"
+                ).fetchone()
+                is not None
+            )
+    except sqlite3.Error:
+        return False
 
 
 def _verify_opencv_decode() -> VerifyResult:
@@ -498,6 +582,11 @@ def production_decode_probe(decode: str) -> VerifyResult:
     return default_decode_probe(decode, _PRODUCTION_DECODE_PROBES)
 
 
+def production_encode_probe() -> VerifyResult:
+    capability = probe_nvenc_capability()
+    return VerifyResult(capability.available, "cuda", "encode", capability.reason)
+
+
 def _production_cuda_source() -> CudaProbe:
     capability = probe_cuda_capability()
     return CudaProbe(
@@ -510,6 +599,25 @@ def _production_cuda_source() -> CudaProbe:
 
 def _production_mps_source() -> bool:
     return probe_mps_capability().available
+
+
+def _production_device_resident_source() -> VerifyResult:
+    """Todo 17's own concrete-stage verifier for `nvidia-device-experimental`.
+
+    Wraps ``probe_device_resident_capability``
+    (``worker.adapters.decode.nvdec_device.capability``): a strictly
+    narrower, distinct check than ``_production_cuda_source`` above --
+    it additionally requires NVML device identity, real
+    ``torch.cuda.Stream``/``torch.cuda.Event`` construction, and DLPack
+    support before this experimental profile's boot gate can pass. A host
+    that only satisfies the plain-CUDA check (e.g. `nvidia-host-bridge`
+    already boots there) still fails this one closed with the probe's own
+    truthful reason -- see ``DeviceResidentCapability``.
+    """
+    capability = probe_device_resident_capability()
+    return VerifyResult(
+        capability.available, "nvidia-device-experimental", "device", capability.reason
+    )
 
 
 def production_boot_dependencies() -> bootstrap.BootDependencies:
@@ -548,7 +656,11 @@ def production_boot_dependencies() -> bootstrap.BootDependencies:
     is unaffected either way -- ``_verify_cpu`` never consults a source.
     """
     return bootstrap.BootDependencies(
-        default_verifiers(cuda_source=_production_cuda_source, mps_source=_production_mps_source)
+        default_verifiers(
+            cuda_source=_production_cuda_source,
+            mps_source=_production_mps_source,
+            device_resident_source=_production_device_resident_source,
+        )
     )
 
 
@@ -606,6 +718,7 @@ class WorkerRuntime:
         env: Mapping[str, str] | None = None,
         acquire_lease: bootstrap.LeaseAcquirer | None = None,
         decode_probe: DecodeProbe | None = None,
+        encode_probe: EncodeProbe | None = None,
         boot_dependencies: bootstrap.BootDependencies | None = None,
         hard_exit: Callable[[int], None] = os._exit,  # noqa: SLF001
         restart_check: Callable[[], bool] | None = None,
@@ -615,8 +728,25 @@ class WorkerRuntime:
         clip_recorder_factory: ClipRecorderFactory | None = None,
         max_frames_per_camera: int | None = None,
         state_dir: Path | None = None,
+        clip_store_dir: Path | None = None,
+        module_registry: CompiledDetectionModuleRegistry | None = None,
+        restart_generation: int = 0,
+        build_revision: str | None = None,
+        environment_facts_factory: EnvironmentFactsFactory = collect_runtime_environment_facts,
     ) -> None:
         self.config = config
+        self._module_registry = module_registry or DETECTION_MODULE_REGISTRY
+        self._module_versions = config.domains.selected_versions(self._module_registry)
+        self._restart_generation = restart_generation
+        self._build_revision = build_revision
+        self._environment_facts_factory = environment_facts_factory
+        self._boot_instance_id = f"worker:{uuid.uuid4()}"
+        self._runtime_manifest: AppliedRuntimeManifest | None = None
+        self._trace_writer: BoundedTraceWriter | None = None
+        self._camera_trace_captures: dict[str, TraceCapture] = {}
+        self._clip_store_dir = (
+            Path(DEFAULT_CLIP_STORE_DIR) if clip_store_dir is None else clip_store_dir
+        )
         # Issue #191: a relay pull that carried no domains signal at all used
         # to silently resolve to zero active domains (no fall/bed_exit
         # detection scheduled, no error). Logging the resolved set -- and
@@ -626,7 +756,7 @@ class WorkerRuntime:
         # overlaid by ``config.domains.resolved_overrides()``) never returns
         # an undefined/None state anymore, so there is no separate fallback
         # branch here: an empty override map *is* "registry default".
-        resolved_domain_names = self.config.enabled_domains
+        resolved_domain_names = tuple(self._module_versions)
         domain_source = (
             "config override" if self.config.domains.resolved_overrides() else "registry default"
         )
@@ -647,6 +777,7 @@ class WorkerRuntime:
         self._clip_recorder_factory = clip_recorder_factory or self._default_clip_recorder
         self._acquire = acquire_lease or (lambda: GpuLease.acquire(self._state_dir))
         self._decode_probe = decode_probe or production_decode_probe
+        self._encode_probe = encode_probe or production_encode_probe
         self._boot_dependencies = boot_dependencies or production_boot_dependencies()
         self._hard_exit = hard_exit
         self._restart_check = restart_check
@@ -660,11 +791,18 @@ class WorkerRuntime:
         self._supervisor: ingest.IngestSupervisor | None = None
         self.shared_yolo: SharedYoloExtractors | None = None
         self.fall_model: FallModelProtocol | None = None
+        self._shared_component_pool = SharedComponentPool()
+        self._shared_graph: SharedComponentGraph | None = None
+        self._warmed_component_ids: frozenset[str] = frozenset()
         self.fault_handler: FaultHandler | None = None
         self.watchdog: InferenceWatchdog | None = None
         self.cameras: tuple[CameraRuntimeContext, ...] = ()
         self._clip_recorder: ClipRecorder | None = None
+        self._packet_repository: PacketRingRepository | None = None
         self._evidence_export_runtime: EvidenceExportRuntime | None = None
+        self._derivative_runtime: DerivativeProductionRuntime | None = None
+        self._derivative_control: DerivativeControlService | None = None
+        self._clip_deletion_control: ClipDeletionControlService | None = None
         self._runtime_status_sender: RuntimeStatusSender | None = None
         self._clip_frame_feeders: tuple[ClipFrameFeeder, ...] = ()
         self._clip_frame_feeder_threads: tuple[threading.Thread, ...] = ()
@@ -745,6 +883,7 @@ class WorkerRuntime:
             warmups={"models": lambda _models: self._warm_models()},
             activate=self._activate,
             decode_probe=self._decode_probe,
+            encode_probe=self._encode_probe,
             deps=self._boot_dependencies,
             acquire=self._acquire,
         )
@@ -762,6 +901,7 @@ class WorkerRuntime:
                 )
             )
             self._start_export_sender()
+            self._start_derivative_runtime()
             self._start_runtime_status_sender()
             self._start_clip_frame_feeders()
             self._start_live_view_server()
@@ -804,15 +944,26 @@ class WorkerRuntime:
             self._evidence_export_runtime.stop_sender()
         if self._runtime_status_sender is not None:
             self._runtime_status_sender.stop()
+        if self._mjpeg_server is not None:
+            self._mjpeg_server.stop()
+            self._mjpeg_server = None
+        if self._derivative_runtime is not None:
+            self._derivative_runtime.stop()
+            self._derivative_runtime = None
+            self._derivative_control = None
+        self._clip_deletion_control = None
         for feeder in self._clip_frame_feeders:
             feeder.stop()
         for thread in self._clip_frame_feeder_threads:
             thread.join(timeout=5.0)
         if self._clip_recorder is not None:
             self._clip_recorder.stop()
-        if self._mjpeg_server is not None:
-            self._mjpeg_server.stop()
-            self._mjpeg_server = None
+        if self._packet_repository is not None:
+            self._packet_repository.close()
+            self._packet_repository = None
+        if self._trace_writer is not None:
+            self._trace_writer.stop()
+            self._trace_writer = None
         self._context.release_lease()
 
     def _start_live_view_server(self) -> None:
@@ -827,20 +978,25 @@ class WorkerRuntime:
         cosmetic view losing its port must not take fall detection down with
         it, so the failure is logged and the worker keeps running.
         """
-        if self._live_view is None:
-            # Issue #113: this used to return with zero logging, so a
-            # dev_mjpeg config silently discarded upstream (e.g. a relay pull
-            # resetting it to disabled) looked externally identical to an
-            # indefinite boot hang -- nothing on disk distinguished "off on
-            # purpose" from "never got this far". Every exit out of this
-            # method must now say which of the three it took.
+        if (
+            self._live_view is None
+            and self._derivative_control is None
+            and self._clip_deletion_control is None
+        ):
             LOGGER.info("dev_mjpeg disabled; live view server not started")
             return
+        server_config = self._mjpeg_config
+        if (
+            self._derivative_control is not None or self._clip_deletion_control is not None
+        ) and not server_config.enabled:
+            server_config = replace(server_config, enabled=True)
         self._mjpeg_server = start_optional_mjpeg_server(
             self._live_frames,
-            self._mjpeg_config,
+            server_config,
             probe=self._rtsp_probe,
             bed_zone_recognizer=self._bed_zone_recognizer,
+            derivative_control=self._derivative_control,
+            clip_deletion_control=self._clip_deletion_control,
         )
         if self._mjpeg_server is None:
             LOGGER.warning(
@@ -851,8 +1007,10 @@ class WorkerRuntime:
                 },
             )
         else:
+            surface = "live view" if self._live_view is not None else "derivative control"
             LOGGER.info(
-                "live view server bound",
+                "%s server bound",
+                surface,
                 extra={
                     "host": self._mjpeg_config.host,
                     "port": self._mjpeg_config.port,
@@ -871,16 +1029,31 @@ class WorkerRuntime:
         (``self.config.runtime``) rather than inventing separate probe-only
         ones, so a registration probe fails for the same reasons the camera
         itself would have.
+
+        Destination policy is re-applied here (static + every A/AAAA answer)
+        so a forged internal ``/probe`` call cannot bypass API admission
+        (SSRF / DNS rebinding). The decoder opens the pinned IP URL.
+        Facility LAN and local fixture QA opt in via
+        ``ML_RTSP_ALLOW_PRIVATE_DESTINATIONS`` /
+        ``ML_RTSP_ALLOW_LOCAL_DESTINATIONS``.
         """
+        from shared.rtsp_url_policy import assert_rtsp_endpoint_allowed
+
+        try:
+            endpoint = assert_rtsp_endpoint_allowed(rtsp_url)
+        except ValueError as exc:
+            raise MjpegProbeError("unsupported") from exc
+        # Open the pinned IP URL so the decoder cannot re-resolve past policy.
+        pinned_url = endpoint.pinned_url
         config = CpuAvConfig(
             camera_id="probe",
-            url=rtsp_url,
+            url=pinned_url,
             open_timeout_ms=self.config.runtime.open_timeout_ms,
             read_timeout_ms=self.config.runtime.read_timeout_ms,
         )
         try:
             result = probe_first_frame(
-                rtsp_url,
+                pinned_url,
                 decoder=CpuAvAdapter(),
                 config=config,
                 requested_backend="cpu_av",
@@ -917,20 +1090,31 @@ class WorkerRuntime:
         best_box: Sequence[float | Sequence[Sequence[int]]] | None = None
         best_score = -1.0
         for box in result.boxes:
+            if not isinstance(box[4], (int, float)):
+                continue
             score = float(box[4])
             if score > best_score:
                 best_score = score
                 best_box = box
         if best_box is None:
             raise BedZoneNotFoundError("no bed detected in the current frame")
+        coordinates = cast("Sequence[float]", best_box[:5])
         polygon_field = best_box[5] if len(best_box) > 5 else ()
-        polygon = [[int(point[0]), int(point[1])] for point in polygon_field]  # type: ignore[index]
+        polygon = (
+            [
+                [int(point[0]), int(point[1])]
+                for point in polygon_field
+                if isinstance(point, Sequence)
+            ]
+            if isinstance(polygon_field, Sequence)
+            else []
+        )
         if not polygon:
             x1, y1, x2, y2 = (
-                int(best_box[0]),
-                int(best_box[1]),
-                int(best_box[2]),
-                int(best_box[3]),
+                int(coordinates[0]),
+                int(coordinates[1]),
+                int(coordinates[2]),
+                int(coordinates[3]),
             )
             polygon = [[x1, y1], [x2, y1], [x2, y2], [x1, y2]]
         return {"polygon": polygon, "image_width": width, "image_height": height}
@@ -957,6 +1141,18 @@ class WorkerRuntime:
             raise EvidenceDeliveryError(
                 "evidence export sender failed to start; staged alerts would not reach the relay"
             ) from exc
+
+    def _start_derivative_runtime(self) -> None:
+        database_path = _evidence_outbox_path(self._state_dir)
+        if not _derivative_schema_available(database_path):
+            return
+        runtime = DerivativeProductionRuntime(
+            database_path,
+            self._resolved_clip_store_dir(),
+        )
+        runtime.start()
+        self._derivative_runtime = runtime
+        self._derivative_control = DerivativeControlService(runtime)
 
     def _start_runtime_status_sender(self) -> None:
         """Start periodic runtime-status relay delivery (default 5s cadence).
@@ -1029,19 +1225,44 @@ class WorkerRuntime:
             threads.append(thread)
         self._clip_frame_feeder_threads = tuple(threads)
 
-    def _initialize_models(
-        self, boot: BootContext
-    ) -> tuple[SharedYoloExtractors, FallModelProtocol]:
+    def _initialize_models(self, boot: BootContext) -> SharedComponentGraph:
         self._boot = boot
         self.fault_handler = FaultHandler(
             boot.profile.name, hard_exit=self._hard_exit, state_dir=self._state_dir
         )
         self.watchdog = InferenceWatchdog(self.fault_handler, profile=boot.profile.name)
-        self.shared_yolo = compose_yolo_extractors(
-            self._serving, device=boot.device, box_source=self.config.models.box_source
+        flags = {"person-box-source": self.config.models.box_source == "person"}
+        graph = compose_shared_components(
+            self._module_registry,
+            module_versions=self._module_versions,
+            serving_client=self._serving,
+            runtime=boot.runtime_profile.effective_inference_backend,
+            device=boot.device,
+            flags=flags,
+            pool=self._shared_component_pool,
+            provisioners={
+                "fall-model-family-registry": lambda _binding, device: ProvisionedSharedComponent(
+                    self._create_fall_model(device)
+                ),
+            },
         )
-        self.fall_model = self._create_fall_model(boot.device)
-        return self.shared_yolo, self.fall_model
+        self._shared_graph = graph
+        fall_component = graph.components.get("fall-classifier")
+        self.fall_model = (
+            cast("FallModelProtocol", fall_component)
+            if isinstance(fall_component, FallModelProtocol)
+            else None
+        )
+        pose = graph.components.get("pose")
+        bed = graph.components.get("bed")
+        person = graph.components.get("person")
+        if isinstance(pose, NamedExtractor) and isinstance(bed, NamedExtractor):
+            self.shared_yolo = SharedYoloExtractors(
+                pose=pose,
+                person=person if isinstance(person, NamedExtractor) else None,
+                bed=bed,
+            )
+        return graph
 
     def _create_fall_model(self, device: str) -> FallModelProtocol:
         """Construct the fall model, fail closed if none or unknown is configured.
@@ -1070,12 +1291,21 @@ class WorkerRuntime:
             raise RuntimeError(str(exc)) from exc
 
     def _warm_models(self) -> tuple[str, ...]:
-        if self.shared_yolo is None or self.fall_model is None or self._boot is None:
+        if self._shared_graph is None or self._boot is None:
             raise RuntimeError("models cannot warm before initialization")
-        for extractor in self.shared_yolo.extractors:
-            self._warm_one(extractor.runner, self._boot.device)
-        self._warm_one(self.fall_model, self._boot.device)
-        return tuple(extractor.module_name for extractor in self.shared_yolo.extractors) + ("fall",)
+        required_bindings = self._module_registry.shared_bindings(
+            self._module_versions,
+            flags={"person-box-source": self.config.models.box_source == "person"},
+        )
+        for binding in required_bindings:
+            component = self._shared_graph.components[binding.component_id]
+            model = component.runner if isinstance(component, NamedExtractor) else component
+            if binding.warmup_required:
+                self._warm_one(cast("RunnerProtocol | FallModelProtocol", model), self._boot.device)
+        self._warmed_component_ids = frozenset(
+            binding.component_id for binding in required_bindings
+        )
+        return tuple(sorted(self._warmed_component_ids))
 
     def _warm_one(self, model: RunnerProtocol | FallModelProtocol, device: str) -> None:
         if not isinstance(model, _Warmable):
@@ -1083,9 +1313,15 @@ class WorkerRuntime:
         _ = warmup_to_ready(model, device=device)
 
     def _activate(self, boot: BootContext) -> tuple[bootstrap.CameraStageOutcome, ...]:
-        yolo, handler, watchdog = self.shared_yolo, self.fault_handler, self.watchdog
-        if yolo is None or handler is None or watchdog is None:
+        graph, handler, watchdog = self._shared_graph, self.fault_handler, self.watchdog
+        if graph is None or handler is None or watchdog is None:
             raise RuntimeError("camera activation requires initialized shared state")
+        # Structural graph failures are global boot failures. Build every complete
+        # camera plan before entering the camera-local degradation boundary.
+        plans = {
+            camera.camera_id: self._preflight_camera_graph(camera) for camera in self.config.cameras
+        }
+        self._apply_runtime_manifest(boot, plans)
         self._compose_evidence_export(boot)
         contexts: list[CameraRuntimeContext] = []
         outcomes: list[bootstrap.CameraStageOutcome] = []
@@ -1095,7 +1331,11 @@ class WorkerRuntime:
                 bootstrap.run_camera_stage(
                     camera.camera_id,
                     lambda camera=camera, built=built: built.append(
-                        self._build_camera(camera, yolo)
+                        self._build_camera(
+                            camera,
+                            self.shared_yolo,
+                            plans[camera.camera_id],
+                        )
                     ),
                 )
             )
@@ -1128,11 +1368,84 @@ class WorkerRuntime:
         self._supervisor.start()
         return tuple(outcomes)
 
+    def _apply_runtime_manifest(
+        self,
+        boot: BootContext,
+        plans: Mapping[str, CameraDetectionPlan],
+    ) -> None:
+        database_path = _evidence_outbox_path(self._state_dir)
+        if database_path.name != "edge.sqlite3":
+            return
+        graph = self._shared_graph
+        if graph is None:
+            raise RuntimeError("runtime provenance requires initialized components")
+        cameras = tuple(
+            build_applied_camera_state(
+                camera_id=camera.camera_id,
+                effective_decode_backend=resolve_decode_backend(boot.decode, camera.decode_backend),
+                ingest_target_fps=camera.fps,
+                module_qualified_ids=tuple(
+                    definition.qualified_id
+                    for definition in plans[camera.camera_id].definitions.values()
+                ),
+                schedule=plans[camera.camera_id].schedule,
+                detection_windows={
+                    module_id: (
+                        None
+                        if window is None
+                        else AppliedDetectionWindow(window.start, window.end, window.tz)
+                    )
+                    for module_id, window in plans[camera.camera_id].detection_windows.items()
+                },
+                policies=MappingProxyType(
+                    {
+                        definition.module_id: self.config.detection_policies.resolve(
+                            camera.camera_id,
+                            definition.module_id,
+                            definition.version,
+                        )
+                        for definition in plans[camera.camera_id].definitions.values()
+                    }
+                ),
+                bed_zone_polygon=camera.bed_zone_polygon,
+                bed_zone_image_width=camera.bed_zone_image_width,
+                bed_zone_image_height=camera.bed_zone_image_height,
+            )
+            for camera in self.config.cameras
+        )
+        manifest = build_applied_runtime_manifest(
+            boot=boot,
+            module_registry=self._module_registry,
+            module_versions=self._module_versions,
+            component_identities=graph.identities,
+            cameras=cameras,
+            config_version=self.config.version,
+            restart_generation=self._restart_generation,
+            detector_version=DETECTOR_VERSION,
+            environment=self._environment_facts_factory(boot, self._build_revision),
+            edge_database_schema_version=CURRENT_SCHEMA_RANGE.maximum,
+        )
+        applied_at = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+        AppliedRuntimeManifestStore(database_path).persist(
+            manifest,
+            boot_instance_id=self._boot_instance_id,
+            applied_at=applied_at,
+        )
+        self._runtime_manifest = manifest
+        trace_writer = BoundedTraceWriter(database_path)
+        trace_writer.start()
+        self._trace_writer = trace_writer
+
     def _build_camera(
-        self, camera: CameraRuntimeConfig, yolo: SharedYoloExtractors
+        self,
+        camera: CameraRuntimeConfig,
+        yolo: SharedYoloExtractors | None,
+        plan: CameraDetectionPlan | None = None,
     ) -> CameraRuntimeContext:
-        if self.fall_model is None:
-            raise RuntimeError("camera activation requires an initialized fall model")
+        resolved_plan = plan or self._preflight_camera_graph(camera)
+        graph = self._shared_graph
+        if graph is None and yolo is None:
+            raise RuntimeError("camera activation requires initialized shared components")
         # The evidence tap is a FIFO that only ``ClipFrameFeeder`` drains. With
         # clip recording off there is no feeder, so a full-size tap would retain
         # frames nothing will ever read. Size it from the same flag that decides
@@ -1150,32 +1463,21 @@ class WorkerRuntime:
         # refined by `update_decode`/`record_decode_open_failure` once actual
         # decode selection runs.
         self.diagnostics.register_decode(camera.camera_id, camera.decode_backend or "auto")
-        tracker = GreedyIouTracker()
-        domain_names = self._active_domain_names()
-        required = _required_extractor_names(domain_names)
-        available = {extractor.module_name for extractor in yolo.extractors}
-        missing = sorted(name for name in required if name not in available)
-        if missing:
-            raise RuntimeError("domain requires unregistered extractor(s): " + ", ".join(missing))
+        tracker = resolved_plan.tracker
         persisted_bed_regions = _persisted_bed_regions(camera)
-        if persisted_bed_regions:
-            # A persisted bed polygon is authoritative and never expires
-            # (`SceneState.resolve_bed_regions` short-circuits on it) --
-            # scheduling the live bed-seg extractor on top of it would only
-            # pay its cost for a result nothing ever reads (issue #41).
-            required = tuple(name for name in required if name != "bed")
-        intervals: dict[str, int] = {
-            name: (30 if name == "bed" else camera.frame_stride) for name in required
-        }
-        if self.config.models.box_source == "person":
-            intervals["person"] = camera.frame_stride
+        if graph is not None:
+            extractors = graph.extractors
+        elif yolo is not None:
+            extractors = yolo.extractors
+        else:
+            raise RuntimeError("camera activation has no extractor graph")
         scene = SceneState(
             camera.camera_id,
             persisted_bed_regions=persisted_bed_regions,
         )
-        scheduler = Scheduler(intervals)
+        scheduler = Scheduler(dict(resolved_plan.schedule))
         analytics = CompositeExtractor(
-            extractors=yolo.extractors,
+            extractors=extractors,
             scheduler=scheduler,
             tracker=tracker,
             scene_state=scene,
@@ -1183,19 +1485,27 @@ class WorkerRuntime:
             stage_timing_recorder=self.diagnostics,
             bed_region_recorder=self.diagnostics,
         )
-        decision, domain_audit, domain_deciders = self._build_decision_stage(
-            camera, self.fall_model
-        )
+        decision = resolved_plan.decision
+        domain_audit = resolved_plan.domain_audit
+        domain_deciders = resolved_plan.domain_deciders
+        if self._trace_writer is not None:
+            self._camera_trace_captures[camera.camera_id] = self._build_trace_capture(
+                camera.camera_id,
+                resolved_plan,
+            )
         # One collector per camera, shared by the two consumers that need the
         # same per-frame snapshots: the alert overlay burned into evidence, and
         # the operator live view. Building it twice would read the same live
         # deciders through two closures for no reason.
-        debug_snapshots = _debug_snapshots_provider(domain_deciders)
+        debug_snapshots = _debug_snapshots_provider(domain_deciders, resolved_plan.definitions)
         self._camera_debug_snapshots[camera.camera_id] = debug_snapshots
         self._camera_evidence_attachers[camera.camera_id] = AlertEvidenceAttacher(
             domain_audit=domain_audit,
             overlay_renderer=self._overlay_renderer,
             debug_snapshots_provider=debug_snapshots,
+            runtime_manifest_sha256=(
+                None if self._runtime_manifest is None else self._runtime_manifest.sha256
+            ),
         )
         if self._live_view is not None:
             # Register before the server binds so a camera is never a 404 on a
@@ -1252,7 +1562,59 @@ class WorkerRuntime:
             max_frames=self._max_frames_per_camera,
             live_view=self._live_view,
             debug_snapshots_provider=self._camera_debug_snapshots.get(camera.camera_id),
+            trace_capture=self._camera_trace_captures.get(camera.camera_id),
+            trace_writer=self._trace_writer,
         )
+
+    def _build_trace_capture(
+        self,
+        camera_id: str,
+        plan: CameraDetectionPlan,
+    ) -> TraceCapture:
+        manifest = self._runtime_manifest
+        graph = self._shared_graph
+        if manifest is None or graph is None:
+            raise RuntimeError("trace capture requires applied runtime provenance")
+        shared_digests = {
+            identity.component_id: identity.artifact_digest for identity in graph.identities
+        }
+        identities: list[TraceIdentity] = []
+        for module_id, definition in plan.definitions.items():
+            decider = plan.domain_deciders[module_id]
+            policy = self.config.detection_policies.resolve(
+                camera_id,
+                module_id,
+                definition.version,
+            )
+            component_ids = tuple(
+                f"{binding.component_id}.sha256."
+                + shared_digests.get(
+                    binding.component_id,
+                    hashlib.sha256(
+                        f"{definition.qualified_id}:{binding.component_id}".encode()
+                    ).hexdigest(),
+                )
+                for binding in definition.component_bindings
+            )
+
+            def snapshots(
+                definition: DetectionModuleDefinition = definition,
+                decider: Decider = decider,
+            ) -> object:
+                adapter = definition.trace_adapter
+                return {} if adapter is None else adapter(decider)
+
+            identities.append(
+                TraceIdentity(
+                    module_qualified_id=definition.qualified_id,
+                    component_qualified_ids=component_ids,
+                    policy_qualified_id=definition.policy_schema.qualified_id,
+                    effective_policy_id=policy.effective_policy_id,
+                    runtime_manifest_sha256=manifest.sha256,
+                    snapshot_provider=snapshots,
+                )
+            )
+        return TraceCapture(tuple(identities))
 
     def _max_frames_completion_check(self) -> bool:
         """True once every camera's pump has processed its frame cap.
@@ -1276,6 +1638,9 @@ class WorkerRuntime:
             resident_id=camera.resident_id,
             config_version=self.config.version,
             clock=time.time,
+            runtime_manifest_sha256=(
+                None if self._runtime_manifest is None else self._runtime_manifest.sha256
+            ),
         )
         return EvidenceEventSink(
             stager=stager,
@@ -1318,21 +1683,20 @@ class WorkerRuntime:
     def _resolved_clip_store_dir(self) -> Path:
         """The clip store root this worker records into.
 
-        ``CLIP_STORE_DIR`` is the fixed physical volume in production. An
-        injected environment that omits it (tests and embedded runtimes) uses
-        a writable directory under the worker state root. A
-        backend-selected ``clip.store_subdir`` (see ``ClipRecordingConfig``,
-        pulled from ml-api's persisted clip-storage-location choice) is
-        appended underneath it so an operator's dashboard selection actually
-        changes where clips land. ``pull_models.py`` already validates the
-        subdir (relative, no ``..`` traversal) before it ever reaches
-        ``WorkerConfig``, but a path used for filesystem construction is
-        re-checked here too rather than trusted at a distance -- ``Path(base)
-        / value`` silently discards ``base`` and becomes absolute if ``value``
-        starts with ``/``.
+        The constructor's default ``/var/lib/clip-store`` is the fixed baked
+        production volume. Tests and alternate runtime compositions may inject
+        a portable root through that constructor seam without reviving the
+        retired ``CLIP_STORE_DIR`` environment authority. A backend-selected
+        ``clip.store_subdir`` (see ``ClipRecordingConfig``, pulled from ml-api's
+        persisted clip-storage-location choice) is appended underneath it so
+        an operator's dashboard selection actually changes where clips land.
+        ``pull_models.py`` already validates the subdir (relative, no ``..``
+        traversal) before it ever reaches ``WorkerConfig``, but a path used for
+        filesystem construction is re-checked here too rather than trusted at
+        a distance -- ``Path(base) / value`` silently discards ``base`` and
+        becomes absolute if ``value`` starts with ``/``.
         """
-        configured_base = self._env.get(CLIP_STORE_DIR_ENV, "").strip()
-        base = Path(configured_base) if configured_base else self._state_dir / "clip-store"
+        base = self._clip_store_dir
         subdir = self.config.clip.store_subdir
         if not subdir:
             return base
@@ -1440,10 +1804,36 @@ class WorkerRuntime:
                     "evidence delivery failed to initialize under the clip-store lock"
                 ) from exc
 
+        packet_repository = PacketRingRepository(
+            tuple(camera.camera_id for camera in self.config.cameras),
+            per_camera_limits=PacketRingLimits(
+                clip_config.packet_ring_max_packets,
+                clip_config.packet_ring_max_bytes_per_camera,
+                clip_config.pre_event_seconds
+                + clip_config.post_event_seconds
+                + clip_config.finalize_grace_seconds,
+            ),
+            global_max_bytes=clip_config.packet_ring_global_max_bytes,
+        )
+        self._packet_repository = packet_repository
         recorder = ClipRecorder(
             clip_config,
-            services=default_services(clip_config, boot.encode),
+            services=default_services(clip_config, packet_repository),
             is_clip_held=None if evidence_runtime is None else evidence_runtime.is_clip_held,
+            begin_clip_purge=(
+                None if evidence_runtime is None else evidence_runtime.begin_clip_purge
+            ),
+            complete_clip_purge=(
+                None if evidence_runtime is None else evidence_runtime.complete_clip_purge
+            ),
+            fail_clip_purge=(
+                None if evidence_runtime is None else evidence_runtime.fail_clip_purge
+            ),
+            operator_delete_preflight=(
+                None
+                if evidence_runtime is None
+                else getattr(evidence_runtime, "operator_delete_preflight", None)
+            ),
             startup_hook=_startup_hook,
             on_clip_finalized=(
                 None if evidence_runtime is None else evidence_runtime.notify_clip_finalized
@@ -1455,6 +1845,8 @@ class WorkerRuntime:
             # Delivery initialization is fatal, not an optional clip boundary.
             raise
         except Exception:  # noqa: BLE001 - clip recording is a non-fatal camera boundary
+            packet_repository.close()
+            self._packet_repository = None
             LOGGER.warning("clip recorder failed to start; clips disabled", exc_info=True)
             # Fail-visible: clips are always-on by default, so a start failure
             # must surface through runtime diagnostics (`/status`) rather than
@@ -1471,6 +1863,17 @@ class WorkerRuntime:
                 self._initialize_delivery_without_recorder(evidence_runtime)
             return
         self._clip_recorder = recorder
+        self._clip_deletion_control = ClipDeletionControlService(
+            delete_clip=recorder.delete_clip,
+            retention_state=(
+                (lambda _clip_id: None)
+                if evidence_runtime is None
+                else evidence_runtime.clip_retention_state
+            ),
+            complete_pending_purge=(
+                None if evidence_runtime is None else evidence_runtime.complete_clip_purge
+            ),
+        )
         self.diagnostics.set_clip_recorder_status(ClipRecorderStatus(available=True))
 
     def _refresh_runtime_status_telemetry(self) -> None:
@@ -1539,6 +1942,7 @@ class WorkerRuntime:
             decode=self._boot.decode,
             registry=self._ingest_source_registry(),
             runtime=self.config.runtime,
+            packet_sink=self._packet_repository,
         )
         self._record_decode_selection(camera, resolved_backend)
         return loop
@@ -1575,113 +1979,130 @@ class WorkerRuntime:
         return self._camera_source_registry
 
     def _active_domain_names(self) -> tuple[str, ...]:
-        return self.config.enabled_domains
+        return tuple(self._module_versions)
 
-    def _build_decision_stage(
-        self, camera: CameraRuntimeConfig, fall_model: FallModelProtocol
-    ) -> tuple[EventAggregator, Mapping[str, Mapping[str, object]], Mapping[str, Decider]]:
-        domain_names = self._active_domain_names()
-        deciders = tuple(self._build_decider(name, camera, fall_model) for name in domain_names)
-        domain_deciders = dict(zip(domain_names, deciders, strict=True))
-        domain_audit = {name: self._build_domain_audit(name, fall_model) for name in domain_names}
+    def _preflight_camera_graph(
+        self,
+        camera: CameraRuntimeConfig,
+        tracker: GreedyIouTracker | None = None,
+    ) -> CameraDetectionPlan:
+        graph = self._shared_graph
+        if graph is None:
+            raise RuntimeError("detection graph preflight requires initialized components")
+        persisted_bed_regions = _persisted_bed_regions(camera)
+        flags = {
+            "person-box-source": self.config.models.box_source == "person",
+            "persisted-bed-region": bool(persisted_bed_regions),
+        }
+        activation = self._module_registry.activation(
+            module_versions=self._module_versions,
+            available_observation_channels=AVAILABLE_OBSERVATION_CHANNELS,
+            available_component_ids=graph.components,
+            warmed_component_ids=self._warmed_component_ids,
+            output_adapter_ids=result_merger_names(),
+            camera_frame_stride=camera.frame_stride,
+            flags=flags,
+        )
+        camera_components: Mapping[str, object] = MappingProxyType(
+            {} if tracker is None else {"person-tracker": tracker}
+        )
+        domain_deciders: dict[str, Decider] = {}
+        domain_audit: dict[str, Mapping[str, object]] = {}
+        definitions: dict[str, DetectionModuleDefinition] = {}
+        detection_windows: dict[str, DetectionWindow | None] = {}
+        for definition in activation.definitions:
+            window = self._resolved_window(definition.module_id)
+            detection_windows[definition.module_id] = window
+            context = CameraModuleContext(
+                camera_id=camera.camera_id,
+                facility_id=camera.facility_id,
+                shared_components=graph.components,
+                camera_components=camera_components,
+                detection_window=window,
+                clock=lambda: datetime.now(UTC),
+                diagnostics=self.diagnostics,
+                policy=(
+                    self.config.detection_policies.resolve(
+                        camera.camera_id,
+                        definition.module_id,
+                        definition.version,
+                    )
+                    if definition.module_id in LATEST_POLICY_VERSIONS
+                    else None
+                ),
+            )
+            camera_module = definition.create_camera_module(context)
+            camera_components = camera_module.camera_components
+            decider = camera_module.decider
+            if definition.window_mode == "external" and window is not None:
+                decider = _WindowGatedDecider(decider, window, clock=lambda: datetime.now(UTC))
+            domain_deciders[definition.module_id] = decider
+            definitions[definition.module_id] = definition
+            if definition.audit_adapter is not None:
+                audit_context = replace(context, camera_components=camera_components)
+                snapshot = definition.audit_adapter(audit_context)
+                domain_audit[definition.module_id] = build_audit_envelope(
+                    model_version=snapshot.model_version,
+                    detector_version=DETECTOR_VERSION,
+                    operating_threshold=snapshot.operating_threshold,
+                )
+        resolved_tracker = camera_components.get("person-tracker")
+        if not isinstance(resolved_tracker, GreedyIouTracker):
+            resolved_tracker = tracker or GreedyIouTracker()
         incidents = IncidentManager(
             identity_path=event_identity_path(camera.camera_id, self._state_dir)
         )
-        aggregator = EventAggregator(deciders=deciders, incidents=incidents)
-        return aggregator, domain_audit, domain_deciders
-
-    def _build_domain_audit(self, name: str, fall_model: FallModelProtocol) -> Mapping[str, object]:
-        """Precompute one domain's static audit envelope (GAP #1, todo 20).
-
-        `DomainRegistration.audit_metadata_provider` only takes an
-        `AuditContext` (worker/domains/registry.py's `_audit_snapshot` is a
-        pure passthrough), so this is safe to resolve once per camera build
-        rather than per event -- mirrors edge's `_attach_alert_metadata`
-        (edge/runtime/camera_worker.py:289-336) using `build_audit_envelope`.
-        """
-        registration = DOMAIN_REGISTRY[name]
-        if registration.audit_metadata_provider is None:
-            return {}
-        snapshot = registration.audit_metadata_provider(
-            self._domain_audit_context(name, fall_model)
-        )
-        return build_audit_envelope(
-            model_version=snapshot.model_version,
-            detector_version=DETECTOR_VERSION,
-            operating_threshold=snapshot.operating_threshold,
+        aggregator = EventAggregator(deciders=tuple(domain_deciders.values()), incidents=incidents)
+        return CameraDetectionPlan(
+            tracker=resolved_tracker,
+            schedule=activation.schedule,
+            detection_windows=MappingProxyType(detection_windows),
+            decision=aggregator,
+            domain_audit=MappingProxyType(domain_audit),
+            domain_deciders=MappingProxyType(domain_deciders),
+            definitions=MappingProxyType(definitions),
         )
 
-    def _domain_audit_context(self, name: str, fall_model: FallModelProtocol) -> AuditContext:
-        """Resolve model identity for the audit trail.
-
-        Only "fall" has an ML model; `FallModelProtocol` has no `model_version`
-        field, so `LstmFallRunner.manifest.artifact_digest` is the closest
-        existing identity concept (read defensively -- a serving-client model
-        may not expose `.manifest` at all). "bed_exit" is a geometric monitor
-        with no model and no probability-threshold analog worth misrepresenting
-        as one, so it gets an empty context (still yields a `clock_source`
-        envelope from `build_audit_envelope`).
-        """
-        if name != "fall":
-            return AuditContext(model_version=None, operating_threshold=None)
-        manifest = getattr(fall_model, "manifest", None)
-        model_version = None if manifest is None else getattr(manifest, "artifact_digest", None)
-        return AuditContext(
-            model_version=model_version,
-            operating_threshold=fall_model.operating_threshold,
-        )
+    def _build_decision_stage(
+        self, camera: CameraRuntimeConfig, tracker: GreedyIouTracker
+    ) -> tuple[EventAggregator, Mapping[str, Mapping[str, object]], Mapping[str, Decider]]:
+        plan = self._preflight_camera_graph(camera, tracker)
+        return plan.decision, plan.domain_audit, plan.domain_deciders
 
     def _build_decider(
-        self, name: str, camera: CameraRuntimeConfig, fall_model: FallModelProtocol
+        self,
+        name: str,
+        camera: CameraRuntimeConfig,
+        fall_model: FallModelProtocol,
+        tracker: GreedyIouTracker | None = None,
     ) -> Decider:
-        registration = DOMAIN_REGISTRY[name]
-        if name == "fall":
-            dependencies: object = FallDomainDependencies(
-                model=fall_model,
-                camera_id=camera.camera_id,
-                facility_id=camera.facility_id,
-            )
-        elif name == "bed_exit":
-            dependencies = BedExitDomainDependencies(
-                config=self._bed_exit_config(camera),
-                clock=lambda: datetime.now(UTC),
-                scoring_recorder=self.diagnostics,
-            )
-        else:
-            raise RuntimeError(f"unsupported domain in registry: {name}")
-        decider = registration.factory(dependencies)
-        # bed_exit gates its own window internally (BedExitMonitor.update()
-        # keeps tracking per-frame containment/latch state regardless of the
-        # window and only gates final event *emission*); wrapping it here as
-        # well would freeze that internal state while the window is closed,
-        # which would delay/alter its emitted events at window-open
-        # boundaries. So bed_exit keeps its existing wiring and is never
-        # wrapped by the common gate below -- every other domain is.
-        if name == "bed_exit":
-            return decider
+        """Compile one registered module without domain-name dispatch."""
+        definition = self._module_registry.get(name, self._module_versions.get(name))
         window = self._resolved_window(name)
-        if window is None:
-            return decider
-        return _WindowGatedDecider(decider, window, clock=lambda: datetime.now(UTC))
+        context = CameraModuleContext(
+            camera_id=camera.camera_id,
+            facility_id=camera.facility_id,
+            shared_components=MappingProxyType({"fall-classifier": fall_model}),
+            camera_components=MappingProxyType({"person-tracker": tracker or GreedyIouTracker()}),
+            detection_window=window,
+            clock=lambda: datetime.now(UTC),
+            diagnostics=self.diagnostics,
+            policy=self.config.detection_policies.resolve(
+                camera.camera_id,
+                definition.module_id,
+                definition.version,
+            ),
+        )
+        decider = definition.create_camera_module(context).decider
+        if definition.window_mode == "external" and window is not None:
+            return _WindowGatedDecider(decider, window, clock=lambda: datetime.now(UTC))
+        return decider
 
     def _resolved_window(self, name: str) -> DetectionWindow | None:
         configured = self.config.domains.resolved_detection_window(name)
         if configured is None:
             return None
         return DetectionWindow(start=configured.start, end=configured.end, tz=configured.tz)
-
-    def _bed_exit_config(self, camera: CameraRuntimeConfig) -> BedExitConfig:
-        configured = self.config.domains.resolved_detection_window("bed_exit")
-        night_window = (
-            None
-            if configured is None
-            else NightWindow(start=configured.start, end=configured.end, tz=configured.tz)
-        )
-        return BedExitConfig(
-            camera_id=camera.camera_id,
-            facility_id=camera.facility_id,
-            night_window=night_window,
-        )
 
 
 __all__ = [

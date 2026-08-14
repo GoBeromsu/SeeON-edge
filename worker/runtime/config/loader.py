@@ -29,6 +29,27 @@ def load_worker_config(path: str | Path) -> WorkerConfig:
             raise WorkerConfigError(
                 f"worker camera config must contain a YAML mapping: {config_path}"
             )
+        cameras = raw.get("cameras")
+        if isinstance(cameras, list) and cameras:
+            raise WorkerConfigError(
+                "static camera roster is retired; register cameras in the dashboard "
+                "and pull the versioned worker config"
+            )
+        # Reject by field presence before WorkerConfig can parse, normalize, or
+        # validate any policy content. Static YAML is never a numeric-policy
+        # authority, including when its document is malformed or forged.
+        if "detection_policies" in raw:
+            raise WorkerConfigError(
+                "static detection_policies authority is retired; numeric detection "
+                "policies must be pulled from central edge.sqlite3 via the versioned "
+                "worker config"
+            )
+        for field in ("models", "domains", "clip"):
+            if field in raw:
+                raise WorkerConfigError(
+                    f"static {field} policy is retired; use the versioned worker "
+                    "config authority (Todo 9 owns detailed policy revisions)"
+                )
         return WorkerConfig.model_validate(raw)
     except OSError as error:
         raise WorkerConfigError(f"worker camera config not readable: {config_path}") from error

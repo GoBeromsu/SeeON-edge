@@ -3,14 +3,19 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Final
 
 from contracts.decode_diagnostics import DecodeSelection
 from contracts.encode_diagnostics import EncodeSelection
+from worker.runtime.profile.capability_graph import (
+    CapabilityMismatchError,
+    ValidatedCapabilityGraph,
+    validate_capability_graph,
+    validate_runtime_profile_descriptor,
+)
+from worker.runtime.profile.descriptor import RuntimeProfileDescriptor
 from worker.runtime.profile.registry import (
-    DEFAULT_PROFILE_NAME,
-    ML_WORKER_PROFILE_ENV,
     PROFILE_REGISTRY,
     BootDependencies,
     DecodePolicy,
@@ -18,14 +23,16 @@ from worker.runtime.profile.registry import (
     DevicePolicy,
     EncodePolicy,
     EncodeProbe,
-    ProfileError,
     ProfileSpec,
     ProfileVerifyError,
     VerifyResult,
     default_decode_probe,
     default_encode_probe,
     default_verifiers,
+    runtime_descriptor_for,
+    select_profile,
 )
+from worker.types.capabilities import ConverterCapabilities, PipelineProfile
 
 LOGGER: Final = logging.getLogger(__name__)
 
@@ -38,8 +45,34 @@ class BootContext:
     device: DevicePolicy
     decode: DecodePolicy
     encode: EncodePolicy
+    requested_profile: str = ""
+    degraded_reasons: tuple[str, ...] = ()
+    pipeline_profile: PipelineProfile | None = None
+    capability_graph: ValidatedCapabilityGraph = field(init=False)
     encode_selection: EncodeSelection | None = None
     decode_selection: DecodeSelection | None = None
+    runtime_profile: RuntimeProfileDescriptor = field(init=False)
+
+    def __post_init__(self) -> None:
+        requested = self.requested_profile or self.profile.name
+        object.__setattr__(self, "requested_profile", requested)
+        runtime_profile = runtime_descriptor_for(
+            self.profile,
+            requested_profile=requested,
+            effective_decode=self.decode,
+            effective_encode=self.encode,
+            degraded_reasons=self.degraded_reasons,
+        )
+        object.__setattr__(self, "runtime_profile", runtime_profile)
+        object.__setattr__(
+            self,
+            "capability_graph",
+            validate_runtime_profile_descriptor(runtime_profile),
+        )
+
+    @property
+    def canonical_profile(self) -> str:
+        return self.profile.name
 
 
 def resolve_profile(
@@ -56,22 +89,35 @@ def resolve_profile(
     ``ML_WORKER_PROFILE=gpu`` must not be silently reinterpreted as the
     default.
     """
-    raw = env.get(ML_WORKER_PROFILE_ENV)
-    profile_name = DEFAULT_PROFILE_NAME if raw is None or not raw.strip() else raw
+    return select_profile(env, registry).spec
 
+
+def resolve_capability_graph_or_raise(
+    spec: ProfileSpec,
+    *,
+    converters: tuple[ConverterCapabilities, ...] = (),
+) -> ValidatedCapabilityGraph:
+    if spec.pipeline is None:
+        raise ProfileVerifyError(f"profile {spec.name!r} has no legacy linear capability graph")
     try:
-        return registry[profile_name]
-    except KeyError as error:
-        choices = "|".join(sorted(registry))
-        message = f"unknown ML_WORKER_PROFILE {profile_name!r}; set {choices}"
-        raise ProfileError(message) from error
+        return validate_capability_graph(spec.pipeline, converters=converters)
+    except (CapabilityMismatchError, ValueError) as error:
+        raise ProfileVerifyError(
+            f"profile {spec.name!r} capability graph failed: {error}"
+        ) from error
 
 
 def verify_device_or_raise(spec: ProfileSpec, deps: BootDependencies) -> VerifyResult:
+    verifier = next(
+        (deps.verifiers[name] for name in spec.accepted_names if name in deps.verifiers),
+        None,
+    )
+    if verifier is None:
+        message = f"profile {spec.name!r} device verification failed: no verifier configured"
+        raise ProfileVerifyError(message)
     try:
-        verifier = deps.verifiers[spec.name]
         result = verifier()
-    except (KeyError, RuntimeError) as error:
+    except RuntimeError as error:
         message = f"profile {spec.name!r} device verification failed: {error}"
         raise ProfileVerifyError(message) from error
 
@@ -116,7 +162,7 @@ def resolve_encode_or_fallback(
     there is nothing to fall back from.
     """
     requested = spec.encode
-    if requested != "h264_nvenc":
+    if spec.encode_fallback is None:
         return EncodeSelection(
             requested=requested,
             selected=requested,
@@ -149,7 +195,7 @@ def resolve_encode_or_fallback(
     )
     return EncodeSelection(
         requested=requested,
-        selected="libx264",
+        selected=spec.encode_fallback,
         fallback_count=1,
         last_reason="nvenc_probe_failed",
         updated_at_sec=now(),
@@ -180,7 +226,7 @@ def resolve_decode_or_fallback(
     they keep the existing fail-fast `preflight_decode_or_raise` path.
     """
     requested = spec.decode
-    if requested != "vaapi":
+    if spec.decode_fallback is None:
         return DecodeSelection(
             requested=requested,
             selected=requested,
@@ -213,11 +259,29 @@ def resolve_decode_or_fallback(
     )
     return DecodeSelection(
         requested=requested,
-        selected="opencv",
+        selected=spec.decode_fallback,
         fallback_count=1,
         last_reason="vaapi_probe_failed",
         updated_at_sec=now(),
     )
+
+
+def effective_decode_policy(spec: ProfileSpec, selection: DecodeSelection | None) -> DecodePolicy:
+    selected = selection.selected if selection is not None else spec.decode
+    if selected not in ("nvdec", "opencv", "vaapi"):
+        raise ProfileVerifyError(
+            f"profile {spec.name!r} resolved unsupported decode backend {selected!r}"
+        )
+    return selected
+
+
+def effective_encode_policy(spec: ProfileSpec, selection: EncodeSelection) -> EncodePolicy:
+    selected = selection.selected or spec.encode
+    if selected not in ("h264_nvenc", "libx264"):
+        raise ProfileVerifyError(
+            f"profile {spec.name!r} resolved unsupported encode backend {selected!r}"
+        )
+    return selected
 
 
 def reject_legacy_conflicts(spec: ProfileSpec, env: Mapping[str, str]) -> None:
@@ -236,6 +300,7 @@ def resolve_boot_context(
     deps: BootDependencies | None = None,
     decode_probe: DecodeProbe | None = None,
     encode_probe: EncodeProbe | None = None,
+    capability_converters: tuple[ConverterCapabilities, ...] = (),
 ) -> BootContext:
     """Resolve the full boot gate: profile, device, decode, legacy-conflict.
 
@@ -249,7 +314,12 @@ def resolve_boot_context(
     collected into one raised ``ProfileVerifyError`` naming every failed
     gate instead of just the first.
     """
-    spec = resolve_profile(env)
+    selection = select_profile(env)
+    spec = selection.spec
+    if capability_converters:
+        raise ProfileVerifyError(
+            "boot capability converters must be declared by the runtime profile descriptor"
+        )
     failures: list[str] = []
 
     try:
@@ -281,11 +351,21 @@ def resolve_boot_context(
         )
 
     encode_selection = resolve_encode_or_fallback(spec, encode_probe)
+    degraded_reasons = tuple(
+        reason
+        for reason in (
+            decode_selection.last_reason if decode_selection else None,
+            encode_selection.last_reason,
+        )
+        if reason is not None
+    )
     return BootContext(
         profile=spec,
         device=spec.device,
-        decode=(decode_selection.selected if decode_selection else spec.decode) or spec.decode,
-        encode=encode_selection.selected or spec.encode,
+        decode=effective_decode_policy(spec, decode_selection),
+        encode=effective_encode_policy(spec, encode_selection),
+        requested_profile=selection.requested_name,
+        degraded_reasons=degraded_reasons,
         encode_selection=encode_selection,
         decode_selection=decode_selection,
     )
@@ -293,9 +373,12 @@ def resolve_boot_context(
 
 __all__ = [
     "BootContext",
+    "effective_decode_policy",
+    "effective_encode_policy",
     "preflight_decode_or_raise",
     "reject_legacy_conflicts",
     "resolve_boot_context",
+    "resolve_capability_graph_or_raise",
     "resolve_decode_or_fallback",
     "resolve_encode_or_fallback",
     "resolve_profile",

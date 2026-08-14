@@ -1,0 +1,343 @@
+from __future__ import annotations
+
+from datetime import UTC, datetime
+from pathlib import Path
+
+import numpy as np
+import pytest
+
+from contracts.event import EventPayload
+from contracts.frame import Frame
+from contracts.observation import (
+    BedRegionCacheState,
+    BedRegionDebugSnapshot,
+    BoundingBox,
+    FrameObservation,
+)
+from shared.detection_policies import FallPolicyV1, make_effective_policy
+from shared.edge_db.migrator import migrate_database
+from worker.domains.bed_exit import BedExitConfig, BedExitMonitor
+from worker.domains.fall import FallEventLatch
+from worker.pipeline.analytics.composite import CompositeResult
+from worker.pipeline.camera_pipeline import CameraPipelinePump
+from worker.pipeline.decision import EventAggregator, IncidentManager
+from worker.pipeline.output.evidence.evidence_stager import DurableEvidenceStager
+from worker.pipeline.trace import (
+    BoundedTraceWriter,
+    TraceCapture,
+    TraceIdentity,
+    TraceRetentionPolicy,
+)
+from worker.types import DecisionInput, FramePacket
+
+RUNTIME_MANIFEST_SHA256 = "a" * 64
+COMPONENT_SHA256 = "b" * 64
+
+
+class _Metadata:
+    window = 1
+    stride = 1
+    mode = "features"
+
+
+class _FallModel:
+    metadata = _Metadata()
+    operating_threshold = 0.7
+    artifact_digest = COMPONENT_SHA256
+
+    def predict(self, _features: object) -> float:
+        return 0.8
+
+
+def _input(person: BoundingBox, *, frame_index: int, live: tuple[int, ...] = (9,)) -> DecisionInput:
+    bed = BoundingBox(0, 0, 80, 100, 0.9)
+    pose = tuple((index + 1, index + 2, 0.9) for index in range(17))
+    observation = FrameObservation(
+        detections=((person,), ()),
+        poses=(pose,),
+        regions=((bed,), ()),
+        track_ids=(9,),
+    )
+    return DecisionInput(
+        observation=observation,
+        frame_width=180,
+        frame_height=120,
+        live_track_ids=live,
+        time_sec=float(frame_index),
+        frame_index=frame_index,
+        bed_region=BedRegionDebugSnapshot(source=BedRegionCacheState.FRESH),
+    )
+
+
+def test_fall_trace_records_score_threshold_and_latch_transition() -> None:
+    detector = FallEventLatch(
+        _FallModel(),
+        camera_id="camera-a",
+        facility_id="facility-a",
+        operating_threshold=0.7,
+    )
+
+    events = detector.update(_input(BoundingBox(10, 10, 70, 90, 0.9), frame_index=1))
+
+    assert len(events) == 1
+    trace = detector.last_trace_snapshots[0]
+    assert trace.reason == "fall-onset"
+    assert trace.previous_state == "clear"
+    assert trace.current_state == "fall"
+    assert trace.track_id == 9
+    assert trace.values == {
+        "fall_probability": 0.8,
+        "operating_threshold": 0.7,
+        "window_frames": 1,
+    }
+
+
+def test_bed_exit_trace_distinguishes_live_grace_from_stale_track_exit() -> None:
+    detector = BedExitMonitor(
+        config=BedExitConfig(
+            camera_id="camera-bed",
+            facility_id="facility-bed",
+            min_containment=0.5,
+            hold_frames=1,
+            grace_frames=2,
+        ),
+        clock=lambda: datetime(2026, 8, 13, tzinfo=UTC),
+    )
+    inside = BoundingBox(10, 10, 70, 90, 0.9)
+    outside = BoundingBox(100, 10, 160, 90, 0.9)
+    assert detector.update(_input(inside, frame_index=0)) == ()
+    assert detector.update(_input(outside, frame_index=1)) == ()
+    live_trace = detector.last_trace_snapshots[0]
+
+    events = detector.update(_input(outside, frame_index=2, live=()))
+
+    assert live_trace.reason == "live-grace"
+    assert live_trace.values["containment_ratio"] == 0.0
+    assert live_trace.values["grace_frames_before"] == 0
+    assert live_trace.values["grace_frames_after"] == 1
+    assert len(events) == 1
+    stale_trace = detector.last_trace_snapshots[0]
+    assert stale_trace.reason == "stale-track-exit"
+    assert stale_trace.previous_state == "live-grace"
+    assert stale_trace.current_state == "triggered"
+    assert stale_trace.values["grace_frames_before"] == 1
+    assert stale_trace.values["grace_threshold"] == 2
+
+
+def _packet() -> FramePacket:
+    return FramePacket(
+        camera_id="camera-a",
+        frame=Frame(1, 1.0, np.zeros((4, 4, 3), dtype=np.uint8)),
+        pts=1.0,
+        seq=1,
+        width=4,
+        height=4,
+        decode_time_ms=0.0,
+        worker_boot_id="boot-a",
+        stream_epoch=1,
+    )
+
+
+def _trace_capture(detector: FallEventLatch) -> TraceCapture:
+    policy = make_effective_policy(
+        module_id="fall",
+        module_version=1,
+        values=FallPolicyV1(0.7),
+        source="image-default",
+        facility_revision_id=None,
+        camera_revision_id=None,
+    )
+    return TraceCapture(
+        identities=(
+            TraceIdentity(
+                module_qualified_id="fall.v1",
+                component_qualified_ids=(f"fall-classifier.sha256.{COMPONENT_SHA256}",),
+                policy_qualified_id="fall.policy.v1",
+                effective_policy_id=policy.effective_policy_id,
+                runtime_manifest_sha256=RUNTIME_MANIFEST_SHA256,
+                snapshot_provider=lambda: detector.last_trace_snapshots,
+            ),
+        )
+    )
+
+
+def _stager(database: Path) -> DurableEvidenceStager:
+    return DurableEvidenceStager(
+        database_path=database,
+        camera_id="camera-a",
+        facility_id="facility-a",
+        resident_id=None,
+        config_version=1,
+        clock=lambda: 1.0,
+        runtime_manifest_sha256=RUNTIME_MANIFEST_SHA256,
+    )
+
+
+def test_real_camera_pump_captures_before_emitting_the_admitted_event(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "edge.sqlite3"
+    migrate_database(database)
+    import sqlite3
+
+    connection = sqlite3.connect(database)
+    try:
+        connection.execute(
+            "INSERT INTO runtime_manifest_contents VALUES (?, 1, '{}', ?)",
+            (RUNTIME_MANIFEST_SHA256, "2026-08-13T00:00:00Z"),
+        )
+        connection.execute(
+            "INSERT INTO runtime_manifest_boots VALUES ('boot-a', ?, ?)",
+            (RUNTIME_MANIFEST_SHA256, "2026-08-13T00:00:00Z"),
+        )
+        connection.execute(
+            "INSERT INTO runtime_manifest_cameras VALUES ('boot-a', 'camera-a', ?, ?)",
+            (RUNTIME_MANIFEST_SHA256, "2026-08-13T00:00:00Z"),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+    detector = FallEventLatch(
+        _FallModel(), camera_id="camera-a", facility_id="facility-a", operating_threshold=0.7
+    )
+    decision_input = _input(BoundingBox(10, 10, 70, 90, 0.9), frame_index=1)
+    result = CompositeResult((), decision_input.observation, decision_input)
+
+    class _Analytics:
+        def process(self, _packet: FramePacket) -> CompositeResult:
+            return result
+
+    class _Sink:
+        def __init__(self) -> None:
+            self.events: list[object] = []
+
+        def emit_for_frame(self, event: object, _packet: FramePacket) -> None:
+            self.events.append(event)
+
+        def emit(self, event: object) -> None:
+            self.events.append(event)
+
+    class _Subscription:
+        def take(self, timeout_sec: float | None = None) -> None:
+            del timeout_sec
+            return None
+
+    writer = BoundedTraceWriter(database, TraceRetentionPolicy.testing())
+    writer.start()
+    sink = _Sink()
+    pump = CameraPipelinePump(
+        "camera-a",
+        _Subscription(),  # type: ignore[arg-type]
+        _Analytics(),  # type: ignore[arg-type]
+        EventAggregator((detector,), IncidentManager(cooldown_sec=0.0), monotonic=lambda: 1.0),
+        sink,  # type: ignore[arg-type]
+        trace_capture=_trace_capture(detector),
+        trace_writer=writer,
+    )
+    try:
+        pump._pump_one(_packet())  # noqa: SLF001
+    finally:
+        writer.stop()
+
+    assert len(sink.events) == 1
+    event = sink.events[0]
+    assert hasattr(event, "audit") and event.audit is not None
+    trace_id = event.audit["decision_trace_id"]
+    assert writer.recover_camera("camera-a").decisions[0].trace_id == trace_id
+
+
+def test_admitted_event_trace_reference_is_transactional_and_orphans_fail_closed(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "edge.sqlite3"
+    migrate_database(database)
+    from worker.runtime.provenance import AppliedRuntimeManifestStore
+    from worker.runtime.provenance.models import AppliedRuntimeManifest
+
+    # Minimal valid manifest contents are inserted directly through the worker-owned seam.
+    manifest = AppliedRuntimeManifest(
+        schema_version=1,
+        canonical_json='{"cameras":[{"camera_id":"camera-a"}],"manifest_schema_version":1}',
+        sha256=RUNTIME_MANIFEST_SHA256,
+    )
+    AppliedRuntimeManifestStore(database).persist(
+        manifest,
+        boot_instance_id="boot-a",
+        applied_at="2026-08-13T00:00:00Z",
+    )
+
+    orphan: EventPayload = {
+        "edge_event_id": "event-orphan",
+        "event_type": "fall",
+        "probability": 0.8,
+        "detected_at": "2026-08-13T00:00:01Z",
+        "audit": {
+            "runtime_manifest_sha256": RUNTIME_MANIFEST_SHA256,
+            "decision_trace_id": "d" * 64,
+        },
+    }
+    with pytest.raises(ValueError, match="decision trace reference"):
+        _stager(database).stage(orphan)
+
+    detector = FallEventLatch(
+        _FallModel(), camera_id="camera-a", facility_id="facility-a", operating_threshold=0.7
+    )
+    decision_input = _input(BoundingBox(10, 10, 70, 90, 0.9), frame_index=1)
+    events = detector.update(decision_input)
+    result = CompositeResult((), decision_input.observation, decision_input)
+    writer = BoundedTraceWriter(database, TraceRetentionPolicy.testing())
+    writer.start()
+    try:
+        traced_events = _trace_capture(detector).capture(
+            writer, _packet(), result, events, require_persisted=True
+        )
+    finally:
+        writer.stop()
+    assert len(traced_events) == 1
+    audit = traced_events[0].audit
+    assert audit is not None
+    trace_id = audit["decision_trace_id"]
+    assert isinstance(trace_id, str)
+
+    payload: EventPayload = {
+        "edge_event_id": "event-valid",
+        "event_type": "fall",
+        "probability": 0.8,
+        "detected_at": "2026-08-13T00:00:01Z",
+        "audit": {
+            "runtime_manifest_sha256": RUNTIME_MANIFEST_SHA256,
+            "decision_trace_id": trace_id,
+        },
+    }
+    stager = _stager(database)
+    stager.stage(payload)
+    stager.complete("event-valid", "clip-valid")
+
+    import sqlite3
+
+    connection = sqlite3.connect(database)
+    try:
+        assert connection.execute(
+            "SELECT decision_trace_id FROM evidence_event_trace_refs "
+            "WHERE edge_event_id='event-valid'"
+        ).fetchone() == (trace_id,)
+        assert connection.execute(
+            "SELECT trace.decision_trace_id FROM clip_events AS link "
+            "JOIN evidence_event_trace_refs AS trace USING(edge_event_id) "
+            "WHERE link.clip_id='clip-valid'"
+        ).fetchone() == (trace_id,)
+    finally:
+        connection.close()
+
+
+def test_numeric_decision_trace_is_hardware_neutral_for_equal_inputs() -> None:
+    cpu = FallEventLatch(
+        _FallModel(), camera_id="camera-a", facility_id="f", operating_threshold=0.7
+    )
+    nvidia = FallEventLatch(
+        _FallModel(), camera_id="camera-a", facility_id="f", operating_threshold=0.7
+    )
+    input_value = _input(BoundingBox(10, 10, 70, 90, 0.9), frame_index=1)
+
+    assert cpu.update(input_value) == nvidia.update(input_value)
+    assert cpu.last_trace_snapshots == nvidia.last_trace_snapshots

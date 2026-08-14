@@ -3,58 +3,56 @@
 #
 # Homebrew bash 5.3.15 writes a heredoc body into a pipe before exec'ing the
 # reader, so any body over PIPE_BUF (512 bytes on macOS) blocks forever against
-# a pipe nothing is draining -- the command is never exec'd and the script hangs
-# with no output. This file has two such heredocs (`compute_windows` at 527 B
-# and `write_config`'s YAML at 797 B). bash 3.2.57 stages heredocs in a temp
-# file and is unaffected at any size. See issue #9.
+# a pipe nothing is draining. bash 3.2.57 stages heredocs in a temp file and is
+# unaffected at any size. See issue #9.
 set -euo pipefail
+umask 077
 
-# allow: SIZE_OK - this real-RTSP proof keeps preflight, config, run, DB readback,
-# and evidence writing in one audited operator command for reproducibility.
+# allow: SIZE_OK - this real-RTSP proof keeps preflight, authority updates, run,
+# DB readback, and evidence writing in one audited operator command.
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 usage() {
   cat <<'EOF'
-Usage: scripts/ml-worker-real-rtsp-bedexit-e2e.sh
+Usage: scripts/ml-worker-real-rtsp-bedexit-e2e.sh [--dry-run]
 
-Runs the real RTSP bed-exit worker proof for an operator-supplied facility and camera.
+Runs the real RTSP bed-exit worker proof using ml-api's runtime camera registry
+and detection-settings authority. The worker pulls its config from ml-api; this
+script never renders a worker YAML roster or model/domain/clip policy.
 
 Options:
   -h, --help                 Show this help and exit.
-  --render-config PATH       Render the include-pass worker YAML to PATH, or - for stdout, without preflight.
+  --dry-run                  Print the redacted execution plan without network or file writes.
 
 Environment:
-  BED_EXIT_RTSP_URL        RTSP stream URL to consume.
-  ML_MODELS_DIR           Model artifact root, default: <repo>/models.
-  BACKEND_BASE_URL        Backend URL, default: http://127.0.0.1:8080.
-  RELAY_URL               ML API relay URL, default: http://127.0.0.1:8000.
-  RELAY_TOKEN             Relay bearer token.
-  E2E_FACILITY_ID         Facility id, required.
-  E2E_CAMERA_ID           Camera id, required.
-  E2E_RESIDENT_ID         Resident id, required.
-  MAX_FRAMES_PER_CAMERA   Worker frame limit, default: 3200.
-  EVIDENCE_DIR            Evidence output directory.
-  ML_EDGE_E2E_RUNTIME_LSTM_DIR
-                          LSTM artifact directory used by --render-config.
+  BED_EXIT_RTSP_URL          RTSP stream URL to set on the registered camera.
+  ML_MODELS_DIR              Model artifact root, default: <repo>/models.
+  BACKEND_BASE_URL           Backend URL, default: http://127.0.0.1:8080.
+  RELAY_URL                  ml-api relay URL, default: http://127.0.0.1:8000.
+  RELAY_TOKEN                Relay bearer token.
+  E2E_DASHBOARD_USERNAME     ml-api dashboard username.
+  E2E_DASHBOARD_PASSWORD     ml-api dashboard password.
+  E2E_FACILITY_ID            Facility id, required.
+  E2E_CAMERA_ID              Existing registry/backend camera id, required.
+  E2E_RESIDENT_ID            Resident id used by evidence labels, required.
+  MAX_FRAMES_PER_CAMERA      Worker frame limit, default: 3200.
+  EVIDENCE_DIR               Evidence output directory.
+  BED_EXIT_NIGHT_WINDOW_TZ   Expected ml-api detection timezone, default: Asia/Seoul.
 EOF
 }
 
-render_config_path=""
+mode="run"
 case "${1:-}" in
   -h|--help)
     usage
     exit 0
     ;;
-  --render-config)
-    render_config_path="${2:-}"
-    [[ -n "$render_config_path" ]] || {
-      echo "ERROR: --render-config requires an output path" >&2
+  --dry-run)
+    [[ $# -eq 1 ]] || {
+      echo "ERROR: --dry-run accepts no arguments" >&2
       exit 1
     }
-    [[ $# -eq 2 ]] || {
-      echo "ERROR: --render-config accepts exactly one output path" >&2
-      exit 1
-    }
+    mode="dry-run"
     ;;
   "")
     ;;
@@ -70,48 +68,93 @@ relay_base_url="${RELAY_URL:-http://127.0.0.1:8000}"
 relay_token="${RELAY_TOKEN:-local-edge-relay-token}"
 rtsp_url="${BED_EXIT_RTSP_URL:-rtsp://127.0.0.1:8554/s1/trackID-1/streamID-2}"
 models_dir="${ML_MODELS_DIR:-$repo_root/models}"
-facility_id="${E2E_FACILITY_ID:?E2E_FACILITY_ID is required}"
-resident_id="${E2E_RESIDENT_ID:?E2E_RESIDENT_ID is required}"
-camera_id="${E2E_CAMERA_ID:?E2E_CAMERA_ID is required}"
+facility_id="${E2E_FACILITY_ID:-}"
+resident_id="${E2E_RESIDENT_ID:-}"
+camera_id="${E2E_CAMERA_ID:-}"
+dashboard_username="${E2E_DASHBOARD_USERNAME:-${API_DASHBOARD_USERNAME:-}}"
+dashboard_password="${E2E_DASHBOARD_PASSWORD:-${API_DASHBOARD_PASSWORD:-}}"
 frames="${MAX_FRAMES_PER_CAMERA:-3200}"
 night_window_tz="${BED_EXIT_NIGHT_WINDOW_TZ:-Asia/Seoul}"
 policy_cooldown_sec="${ALERT_COOLDOWN_SEC:-60}"
+include_window_start=""
+include_window_end=""
+exclude_window_start=""
+exclude_window_end=""
+window_now=""
 db_container="${E2E_DB_CONTAINER:-eldercare-fall-db}"
 postgres_user="${POSTGRES_USER:-fall}"
 postgres_db="${POSTGRES_DB:-fall_dev}"
-runtime_lstm_dir="${ML_EDGE_E2E_RUNTIME_LSTM_DIR:-$models_dir/fall/lstm}"
 
 fail() {
   printf 'ERROR: %s\n' "$*" >&2
   exit 1
 }
 
+require_value() {
+  [[ -n "$2" ]] || fail "$1 is required"
+}
+
 require_command() {
   command -v "$1" >/dev/null 2>&1 || fail "missing required command: $1"
 }
 
-redact_url_userinfo() {
+redact_url() {
   python3 - "$1" <<'PY'
 from __future__ import annotations
 
 import sys
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import urlsplit
 
-url = sys.argv[1]
-parts = urlsplit(url)
-if not parts.username and not parts.password:
-    print(url)
-    raise SystemExit
-
-host = parts.hostname or ""
-if ":" in host and not host.startswith("["):
-    host = f"[{host}]"
-if parts.port is not None:
-    host = f"{host}:{parts.port}"
-
-print(urlunsplit((parts.scheme, f"<redacted>@{host}", parts.path, parts.query, parts.fragment)))
+scheme = urlsplit(sys.argv[1]).scheme or "rtsp"
+print(f"{scheme}://<redacted>")
 PY
 }
+
+require_value E2E_FACILITY_ID "$facility_id"
+require_value E2E_CAMERA_ID "$camera_id"
+require_value E2E_RESIDENT_ID "$resident_id"
+require_value E2E_DASHBOARD_USERNAME "$dashboard_username"
+require_value E2E_DASHBOARD_PASSWORD "$dashboard_password"
+[[ "$frames" =~ ^[1-9][0-9]*$ ]] || fail "MAX_FRAMES_PER_CAMERA must be a positive integer"
+[[ "$facility_id" != *"'"* && "$camera_id" != *"'"* ]] || fail "facility/camera ids must not contain quotes"
+
+if [[ "$mode" == "dry-run" ]]; then
+  redacted_rtsp_url="$(redact_url "$rtsp_url")"
+  DRY_RELAY_URL="$relay_base_url" \
+    DRY_FACILITY_ID="$facility_id" \
+    DRY_CAMERA_ID="$camera_id" \
+    DRY_RESIDENT_ID="$resident_id" \
+    DRY_RTSP_URL="$redacted_rtsp_url" \
+    DRY_FRAMES="$frames" \
+    DRY_TZ="$night_window_tz" \
+    python3 - <<'PY'
+import json
+import os
+
+relay = os.environ["DRY_RELAY_URL"].rstrip("/")
+print(
+    json.dumps(
+        {
+            "mode": "dry-run",
+            "authority": {
+                "camera_registry": f"{relay}/api/v1/cameras",
+                "detection_settings": f"{relay}/api/v1/detection-settings",
+                "worker_config": f"{relay}/api/v1/relay/config",
+            },
+            "worker_yaml": False,
+            "facility_id": os.environ["DRY_FACILITY_ID"],
+            "camera_id": os.environ["DRY_CAMERA_ID"],
+            "resident_id": os.environ["DRY_RESIDENT_ID"],
+            "rtsp_url": os.environ["DRY_RTSP_URL"],
+            "frames_per_pass": int(os.environ["DRY_FRAMES"]),
+            "expected_detection_timezone": os.environ["DRY_TZ"],
+        },
+        sort_keys=True,
+    )
+)
+PY
+  exit 0
+fi
 
 psql_scalar() {
   docker exec "$db_container" psql -U "$postgres_user" -d "$postgres_db" -tAc "$1" | tr -d '[:space:]'
@@ -181,85 +224,195 @@ print(f'window_now="{now.isoformat()}"')
 PY
 }
 
-write_config() {
-  local path="$1"
-  local window_start="$2"
-  local window_end="$3"
-  local output="$path"
-  if [[ "$path" == "-" ]]; then
-    output="/dev/stdout"
+api_request() {
+  local method="$1"
+  local path="$2"
+  local output="$3"
+  local input="${4:-}"
+  local args=(
+    -fsS
+    -X "$method"
+    --cookie "$session_cookie"
+    -H 'Accept: application/json'
+    -o "$output"
+  )
+  if [[ -n "$input" ]]; then
+    args+=(-H 'Content-Type: application/json' --data-binary "@$input")
   fi
-  cat >"$output" <<YAML
-version: 1
-relay:
-  url: ${relay_base_url}
-  token: ${relay_token}
-runtime:
-  max_failures: 30
-  open_timeout_ms: 20000
-  read_timeout_ms: 20000
-models:
-  fall:
-    type: lstm
-    framework: pytorch
-    mode: sequence
-    artifact_dir: ${runtime_lstm_dir}
-    weights: model.pt
-    architecture: arch.json
-    metadata: metadata.yaml
-    window: 30
-    stride: 5
-    input_shape: [30, 51]
-    operating_threshold: 0.5
-domains:
-  fall:
-    enabled: false
-  bed_exit:
-    enabled: true
-    night_window:
-      start: "${window_start}"
-      end: "${window_end}"
-      tz: ${night_window_tz}
-cameras:
-  - camera_id: ${camera_id}
-    facility_id: ${facility_id}
-    resident_id: ${resident_id}
-    rtsp_url: ${rtsp_url}
-    heartbeat_interval_sec: 30
-    frame_stride: 1
-    label: real-rtsp-bed-exit
-YAML
-  if [[ "$path" != "-" ]]; then
-    chmod 600 "$path"
-  fi
+  curl "${args[@]}" "${relay_base_url}${path}"
 }
 
-redact_config() {
-  local source="$1"
-  local target="$2"
-  local redacted_rtsp_url
-  redacted_rtsp_url="$(redact_url_userinfo "$rtsp_url")"
-  python3 - "$source" "$target" "$redacted_rtsp_url" <<'PY'
-from __future__ import annotations
-
-import re
+login_dashboard() {
+  local login_request="$tmpdir/dashboard-login.json"
+  touch "$session_cookie" "$login_request"
+  chmod 600 "$session_cookie" "$login_request"
+  DASHBOARD_USERNAME="$dashboard_username" DASHBOARD_PASSWORD="$dashboard_password" \
+    python3 - "$login_request" <<'PY'
+import json
+import os
 import sys
 from pathlib import Path
 
-source = Path(sys.argv[1])
-target = Path(sys.argv[2])
-redacted_rtsp_url = sys.argv[3]
-
-text = source.read_text()
-text = re.sub(r"^  token: .*$", "  token: <redacted>", text, flags=re.MULTILINE)
-text = re.sub(
-    r"^(    rtsp_url: ).*$",
-    rf"\g<1>{redacted_rtsp_url}",
-    text,
-    flags=re.MULTILINE,
+Path(sys.argv[1]).write_text(
+    json.dumps(
+        {
+            "username": os.environ["DASHBOARD_USERNAME"],
+            "password": os.environ["DASHBOARD_PASSWORD"],
+        }
+    ),
+    encoding="utf-8",
 )
-target.write_text(text)
 PY
+  curl -fsS \
+    -X POST \
+    -H 'Content-Type: application/json' \
+    --data-binary "@$login_request" \
+    --cookie-jar "$session_cookie" \
+    -o /dev/null \
+    "${relay_base_url}/api/v1/auth/session" || fail "ml-api dashboard authentication failed"
+  rm -f "$login_request"
+}
+
+capture_and_update_camera() {
+  local public_snapshot="$tmpdir/cameras-public.json"
+  local worker_snapshot="$tmpdir/worker-config-before.json"
+  local desired_patch="$tmpdir/camera-desired.json"
+  local patch_response="$tmpdir/camera-patch-response.json"
+
+  api_request GET /api/v1/cameras "$public_snapshot"
+  curl -fsS \
+    -H "@$relay_header_file" \
+    -o "$worker_snapshot" \
+    "${relay_base_url}/api/v1/relay/config"
+  CAMERA_ID="$camera_id" DESIRED_RTSP_URL="$rtsp_url" python3 - \
+    "$public_snapshot" "$worker_snapshot" "$camera_restore_request" "$desired_patch" "$camera_local_id_file" <<'PY'
+import json
+import os
+import sys
+from pathlib import Path
+
+public_path, worker_path, restore_path, desired_path, local_id_path = map(Path, sys.argv[1:])
+target = os.environ["CAMERA_ID"]
+desired_url = os.environ["DESIRED_RTSP_URL"]
+public = json.loads(public_path.read_text(encoding="utf-8"))
+worker = json.loads(worker_path.read_text(encoding="utf-8"))
+records = [
+    camera
+    for camera in public.get("cameras", [])
+    if target in {camera.get("id"), camera.get("backend_camera_id")}
+]
+if len(records) != 1:
+    raise SystemExit(
+        f"expected exactly one existing ml-api registry camera for {target!r}, found {len(records)}; "
+        "register and map it in the dashboard before running this proof"
+    )
+runtime = [camera for camera in worker.get("cameras", []) if camera.get("camera_id") == target]
+if len(runtime) != 1 or not isinstance(runtime[0].get("rtsp_url"), str):
+    raise SystemExit(f"runtime camera authority has no unique usable camera {target!r}")
+restore_path.write_text(json.dumps({"rtsp_url": runtime[0]["rtsp_url"]}), encoding="utf-8")
+desired_path.write_text(json.dumps({"rtsp_url": desired_url}), encoding="utf-8")
+local_id_path.write_text(str(records[0]["id"]), encoding="utf-8")
+PY
+  chmod 600 "$worker_snapshot" "$camera_restore_request" "$desired_patch" "$camera_local_id_file"
+  camera_local_id="$(cat "$camera_local_id_file")"
+  api_request PATCH "/api/v1/cameras/${camera_local_id}" "$patch_response" "$desired_patch"
+  camera_changed=1
+}
+
+write_detection_settings() {
+  local path="$1"
+  local window_start="$2"
+  local window_end="$3"
+  python3 - "$path" "$window_start" "$window_end" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+Path(sys.argv[1]).write_text(
+    json.dumps(
+        {
+            "domains": {
+                "fall": {"on": False, "mode": "always"},
+                "bed_exit": {
+                    "on": True,
+                    "mode": "window",
+                    "start": sys.argv[2],
+                    "end": sys.argv[3],
+                },
+            }
+        }
+    ),
+    encoding="utf-8",
+)
+PY
+  chmod 600 "$path"
+}
+
+apply_detection_settings() {
+  local request="$1"
+  local response="$tmpdir/detection-settings-response.json"
+  api_request PUT /api/v1/detection-settings "$response" "$request"
+  settings_changed=1
+}
+
+capture_authority_evidence() {
+  local label="$1"
+  local expected_start="$2"
+  local expected_end="$3"
+  local raw="$tmpdir/${label}-worker-config.json"
+  local redacted="$evidence_dir/${label}-runtime-authority.redacted.json"
+  curl -fsS \
+    -H "@$relay_header_file" \
+    -o "$raw" \
+    "${relay_base_url}/api/v1/relay/config"
+  chmod 600 "$raw"
+  CAMERA_ID="$camera_id" RTSP_URL="$rtsp_url" EXPECTED_TZ="$night_window_tz" python3 - \
+    "$raw" "$redacted" "$expected_start" "$expected_end" <<'PY'
+import json
+import os
+import sys
+from pathlib import Path
+from urllib.parse import urlsplit
+
+source, target = map(Path, sys.argv[1:3])
+expected_start, expected_end = sys.argv[3:5]
+payload = json.loads(source.read_text(encoding="utf-8"))
+cameras = [camera for camera in payload.get("cameras", []) if camera.get("camera_id") == os.environ["CAMERA_ID"]]
+if len(cameras) != 1 or cameras[0].get("rtsp_url") != os.environ["RTSP_URL"]:
+    raise SystemExit("ml-api runtime camera registry did not publish the requested RTSP camera")
+domains = payload.get("domains", {})
+if domains.get("fall", {}).get("enabled") is not False or domains.get("bed_exit", {}).get("enabled") is not True:
+    raise SystemExit("ml-api runtime domain authority did not publish fall=off, bed_exit=on")
+window = payload.get("detection_windows", {}).get("bed_exit", {})
+expected_window = {
+    "start": expected_start,
+    "end": expected_end,
+    "tz": os.environ["EXPECTED_TZ"],
+}
+if window != expected_window:
+    raise SystemExit(f"ml-api runtime bed-exit window mismatch: expected {expected_window!r}, got {window!r}")
+for camera in payload.get("cameras", []):
+    value = camera.get("rtsp_url")
+    if isinstance(value, str):
+        scheme = urlsplit(value).scheme or "rtsp"
+        camera["rtsp_url"] = f"{scheme}://<redacted>"
+target.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+PY
+  chmod 600 "$redacted"
+}
+
+restore_authority() {
+  if [[ "${camera_changed:-0}" -eq 1 && -s "${camera_restore_request:-}" && -s "${camera_local_id_file:-}" ]]; then
+    camera_local_id="$(cat "$camera_local_id_file")"
+    if ! api_request PATCH "/api/v1/cameras/${camera_local_id}" /dev/null "$camera_restore_request"; then
+      printf 'WARNING: failed to restore camera registry RTSP URL for %s\n' "$camera_id" >&2
+    fi
+  fi
+  if [[ "${settings_changed:-0}" -eq 1 && -s "${saved_detection_settings:-}" ]]; then
+    if ! api_request PUT /api/v1/detection-settings /dev/null "$saved_detection_settings"; then
+      printf 'WARNING: failed to restore ml-api detection settings\n' >&2
+    fi
+  fi
 }
 
 wait_for_policy_cooldown() {
@@ -272,14 +425,18 @@ wait_for_policy_cooldown() {
 }
 
 run_worker() {
-  local config="$1"
-  local log="$2"
+  local log="$1"
   : >"$log"
   OPENCV_FFMPEG_CAPTURE_OPTIONS="rtsp_transport;tcp" \
     PYTHONUNBUFFERED=1 \
+    RELAY_URL="$relay_base_url" \
+    RELAY_TOKEN="$relay_token" \
+    ML_WORKER_FALL_MODEL_ARTIFACT_DIR="$runtime_lstm_dir" \
+    ML_WORKER_FALL_MODEL_WINDOW=30 \
+    ML_WORKER_FALL_MODEL_STRIDE=5 \
+    ML_WORKER_FALL_MODEL_OPERATING_THRESHOLD=0.5 \
     uv run \
     python -m worker \
-    --config "$config" \
     --max-frames-per-camera "$frames" \
     --heartbeat-on-start >"$log" 2>&1
 }
@@ -303,19 +460,22 @@ capture_rows_since() {
 
 write_command_file() {
   local redacted_rtsp_url
-  redacted_rtsp_url="$(redact_url_userinfo "$rtsp_url")"
+  redacted_rtsp_url="$(redact_url "$rtsp_url")"
   cat >"$command_file" <<EOF
 BED_EXIT_RTSP_URL='${redacted_rtsp_url}' \\
 ML_MODELS_DIR='${models_dir}' \\
 BACKEND_BASE_URL='${backend_base_url}' \\
 RELAY_URL='${relay_base_url}' \\
 RELAY_TOKEN='<redacted>' \\
+E2E_DASHBOARD_USERNAME='<redacted>' \\
+E2E_DASHBOARD_PASSWORD='<redacted>' \\
 E2E_FACILITY_ID='${facility_id}' \\
 E2E_CAMERA_ID='${camera_id}' \\
 E2E_RESIDENT_ID='${resident_id}' \\
 MAX_FRAMES_PER_CAMERA='${frames}' \\
 scripts/ml-worker-real-rtsp-bedexit-e2e.sh
 EOF
+  chmod 600 "$command_file"
 }
 
 write_summary() {
@@ -326,12 +486,13 @@ write_summary() {
   local exclude_events="$5"
   local exclude_alerts="$6"
   local redacted_rtsp_url
-  redacted_rtsp_url="$(redact_url_userinfo "$rtsp_url")"
+  redacted_rtsp_url="$(redact_url "$rtsp_url")"
   cat >"$summary" <<EOF
 # Real RTSP worker bed-exit E2E
 
 - Captured at: $(date -u +%Y-%m-%dT%H:%M:%SZ)
-- Worker: real \`python -m worker\`
+- Worker: real \`python -m worker\`, pull-only runtime config
+- Runtime authority: ml-api camera registry and detection settings
 - RTSP source: \`${redacted_rtsp_url}\`
 - Facility/camera/resident: \`${facility_id}\` / \`${camera_id}\` / \`${resident_id}\`
 - Backend: \`${backend_base_url}\`
@@ -362,41 +523,36 @@ write_summary() {
 - Events readback: \`$evidence_dir/exclude-events.json\`
 - Alerts readback: \`$evidence_dir/exclude-alerts.json\`
 
-## Config evidence
+## Runtime authority evidence
 
-- Include config redacted: \`$evidence_dir/include-config.redacted.yaml\`
-- Exclude config redacted: \`$evidence_dir/exclude-config.redacted.yaml\`
+- Include snapshot redacted: \`$evidence_dir/include-runtime-authority.redacted.json\`
+- Exclude snapshot redacted: \`$evidence_dir/exclude-runtime-authority.redacted.json\`
 - Exact command: \`$command_file\`
 EOF
 }
-
-if [[ -n "$render_config_path" ]]; then
-  [[ -n "$facility_id" ]] || fail "--render-config requires E2E_FACILITY_ID"
-  eval "$(compute_windows)"
-  write_config "$render_config_path" "$include_window_start" "$include_window_end"
-  exit 0
-fi
-
-if [ -z "$facility_id" ]; then
-  facility_id="$(docker exec "$db_container" psql -U "$postgres_user" -d "$postgres_db" -tAc "SELECT id FROM facilities WHERE code='happy-nokyang'" | tr -d '[:space:]')"
-fi
-if [ -z "$facility_id" ]; then
-  fail "could not resolve demo facility id (code=happy-nokyang). Seed the DB first: pnpm --filter backend run prisma:reset:local"
-fi
 
 evidence_dir="${EVIDENCE_DIR:-$repo_root/.omo/evidence/ml-event-alert-e2e-nokyang/worker-real-rtsp}"
 tmp_root="${ML_EDGE_E2E_TMP_ROOT:-$repo_root/.omo/tmp}"
 mkdir -p "$evidence_dir" "$tmp_root"
 tmpdir="$(mktemp -d "$tmp_root/ml-worker-real-rtsp-bedexit.XXXXXX")"
 runtime_lstm_dir="$tmpdir/models/fall/lstm-runtime"
-include_config="$tmpdir/ml-worker-include.yaml"
-exclude_config="$tmpdir/ml-worker-exclude.yaml"
+include_settings="$tmpdir/detection-settings-include.json"
+exclude_settings="$tmpdir/detection-settings-exclude.json"
+saved_detection_settings="$tmpdir/detection-settings-before.json"
+session_cookie="$tmpdir/dashboard-cookie.txt"
+relay_header_file="$tmpdir/relay-header.txt"
+camera_restore_request="$tmpdir/camera-restore.json"
+camera_local_id_file="$tmpdir/camera-local-id.txt"
 include_log="$evidence_dir/worker-include.log"
 exclude_log="$evidence_dir/worker-exclude.log"
 summary="$evidence_dir/summary.md"
 command_file="$evidence_dir/command.txt"
+camera_changed=0
+settings_changed=0
+printf 'X-Edge-Relay-Token: %s\n' "$relay_token" >"$relay_header_file"
 
 cleanup() {
+  restore_authority
   rm -rf "$tmpdir"
 }
 trap cleanup EXIT
@@ -407,21 +563,30 @@ require_command python3
 require_command uv
 require_services
 require_artifacts
+login_dashboard
+api_request GET /api/v1/detection-settings "$saved_detection_settings"
+chmod 600 "$saved_detection_settings"
+capture_and_update_camera
 write_lstm_runtime_artifact
 eval "$(compute_windows)"
-write_config "$include_config" "$include_window_start" "$include_window_end"
-write_config "$exclude_config" "$exclude_window_start" "$exclude_window_end"
-redact_config "$include_config" "$evidence_dir/include-config.redacted.yaml"
-redact_config "$exclude_config" "$evidence_dir/exclude-config.redacted.yaml"
+write_detection_settings "$include_settings" "$include_window_start" "$include_window_end"
+write_detection_settings "$exclude_settings" "$exclude_window_start" "$exclude_window_end"
 write_command_file
 
-uv run python -m worker --config "$include_config" --check-config >/dev/null
-uv run python -m worker --config "$exclude_config" --check-config >/dev/null
+RELAY_URL="$relay_base_url" \
+RELAY_TOKEN="$relay_token" \
+ML_WORKER_FALL_MODEL_ARTIFACT_DIR="$runtime_lstm_dir" \
+ML_WORKER_FALL_MODEL_WINDOW=30 \
+ML_WORKER_FALL_MODEL_STRIDE=5 \
+ML_WORKER_FALL_MODEL_OPERATING_THRESHOLD=0.5 \
+uv run python -m worker --check-config >/dev/null
 
+apply_detection_settings "$include_settings"
+capture_authority_evidence include "$include_window_start" "$include_window_end"
 wait_for_policy_cooldown
 
 include_started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-run_worker "$include_config" "$include_log"
+run_worker "$include_log"
 include_events="$(count_events_since "$include_started_at")"
 include_alerts="$(count_alerts_since "$include_started_at")"
 capture_rows_since include "$include_started_at"
@@ -434,8 +599,10 @@ if [[ "$include_events" -lt 1 || "$include_alerts" -lt 1 ]]; then
   exit 1
 fi
 
+apply_detection_settings "$exclude_settings"
+capture_authority_evidence exclude "$exclude_window_start" "$exclude_window_end"
 exclude_started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-run_worker "$exclude_config" "$exclude_log"
+run_worker "$exclude_log"
 exclude_events="$(count_events_since "$exclude_started_at")"
 exclude_alerts="$(count_alerts_since "$exclude_started_at")"
 capture_rows_since exclude "$exclude_started_at"

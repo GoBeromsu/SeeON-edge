@@ -16,8 +16,10 @@ from pathlib import Path
 import pytest
 
 import worker.runtime.worker as worker_module
+from worker.adapters.decode.nvdec_device.capability import DeviceResidentCapability
 from worker.adapters.device.cuda.probe import CudaCapability
 from worker.adapters.device.mps.probe import MpsCapability
+from worker.adapters.device.nvml.probe import NvmlGpuStatus
 from worker.runtime.config import WorkerConfig
 from worker.runtime.lease import GpuLease
 from worker.runtime.worker import WorkerRuntime, production_boot_dependencies
@@ -134,6 +136,92 @@ def test_production_boot_dependencies_mps_false_fails_closed_without_mps(
     assert result.ok is False
     assert result.profile == "mps"
     assert result.reason == "MPS is unavailable"
+
+
+def test_production_boot_dependencies_device_resident_true_when_capability_true(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Given -- a real NVIDIA host where every Todo 17 concrete-stage gate passes
+    monkeypatch.setattr(
+        worker_module,
+        "probe_device_resident_capability",
+        lambda: DeviceResidentCapability(
+            available=True,
+            reason="device-resident concrete stages are available",
+            cuda=CudaCapability(True, "cuda available", device_count=1, arch_list=("sm_90",)),
+            nvml=NvmlGpuStatus(True, "ok", driver_version="580.1", device_name="RTX 5070 Ti"),
+            stream_event_supported=True,
+            dlpack_supported=True,
+        ),
+    )
+
+    # When
+    result = production_boot_dependencies().verifiers["nvidia-device-experimental"]()
+
+    # Then
+    assert result.ok is True
+    assert result.profile == "nvidia-device-experimental"
+    assert result.stage == "device"
+    assert result.reason == "device-resident concrete stages are available"
+
+
+def test_production_boot_dependencies_device_resident_false_fails_closed_without_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Given -- the real signal on this repo's macOS dev machines: no NVIDIA device
+    monkeypatch.setattr(
+        worker_module,
+        "probe_device_resident_capability",
+        lambda: DeviceResidentCapability(
+            available=False,
+            reason=(
+                "cuda capability unavailable: torch.cuda.is_available() is False "
+                "and no CUDA devices are visible"
+            ),
+            cuda=CudaCapability(False, "no cuda"),
+            nvml=NvmlGpuStatus(False, "no nvml"),
+            stream_event_supported=False,
+            dlpack_supported=False,
+        ),
+    )
+
+    # When
+    result = production_boot_dependencies().verifiers["nvidia-device-experimental"]()
+
+    # Then
+    assert result.ok is False
+    assert result.profile == "nvidia-device-experimental"
+    assert "cuda capability unavailable" in result.reason
+
+
+def test_production_boot_dependencies_device_resident_never_satisfies_plain_cuda(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A positive device-resident probe must never leak into the production
+    `cuda`/`nvidia-host-bridge` verifier -- they stay wired to
+    `probe_cuda_capability` only."""
+    monkeypatch.setattr(
+        worker_module,
+        "probe_device_resident_capability",
+        lambda: DeviceResidentCapability(
+            available=True,
+            reason="device-resident concrete stages are available",
+            cuda=CudaCapability(True, "cuda available", device_count=1, arch_list=("sm_90",)),
+            nvml=NvmlGpuStatus(True, "ok"),
+            stream_event_supported=True,
+            dlpack_supported=True,
+        ),
+    )
+    monkeypatch.setattr(
+        worker_module,
+        "probe_cuda_capability",
+        lambda: CudaCapability(False, "no cuda"),
+    )
+
+    result = production_boot_dependencies().verifiers["cuda"]()
+
+    assert result.ok is False
+    assert result.profile == "cuda"
 
 
 def test_worker_runtime_defaults_boot_dependencies_to_production_dependencies(

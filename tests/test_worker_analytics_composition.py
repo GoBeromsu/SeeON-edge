@@ -1,25 +1,15 @@
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 
 import numpy as np
 
 from contracts.frame import Frame
-from contracts.runner import (
-    Image,
-    RunnerProtocol,
-    RunnerResult,
-    bed_result,
-    person_result,
-    pose_result,
-)
+from contracts.runner import Image, RunnerResult, pose_result
 from worker.pipeline.analytics import CompositeExtractor, NamedExtractor
 from worker.pipeline.bus import BoundedFrameBus, Scheduler
 from worker.pipeline.perception import GreedyIouTracker, SceneState
-from worker.runtime.model_composition import compose_yolo_extractors
 from worker.types import FramePacket
-
-ServingOption = str | int | float | bool | None
 
 
 class _Runner:
@@ -34,14 +24,13 @@ class _Runner:
         return self._result
 
 
-class _ServingClient:
-    def __init__(self, runners: Mapping[str, RunnerProtocol]) -> None:
-        self._runners: Mapping[str, RunnerProtocol] = runners
-        self.create_calls: list[tuple[str, dict[str, ServingOption]]] = []
-
-    def create(self, task: str, **kwargs: ServingOption) -> RunnerProtocol:
-        self.create_calls.append((task, dict(kwargs)))
-        return self._runners[task]
+def _extractor(module_name: str, runner: _Runner) -> NamedExtractor:
+    return NamedExtractor(
+        module_name=module_name,
+        runner=runner,
+        _call=runner.run,
+        _clock=lambda: 0.0,
+    )
 
 
 def _packet() -> FramePacket:
@@ -75,50 +64,14 @@ def _composite(
     )
 
 
-def test_production_composition_provisions_yolo_tasks_once_through_serving_seam() -> None:
-    runners = {
-        "pose": _Runner(_pose_result()),
-        "person": _Runner(person_result(((1, 1, 4, 5, 0.9),))),
-        "bed": _Runner(bed_result(())),
-    }
-    client = _ServingClient(runners)
-
-    # box_source="person" (issue #44): exercises all three production tasks
-    # provisioned once and shared across cameras, including person.
-    shared = compose_yolo_extractors(client, device="cuda:0", box_source="person")
-    camera_a = _composite(shared.extractors, "camera-a")
-    camera_b = _composite(shared.extractors, "camera-b")
-
-    assert tuple(extractor.module_name for extractor in shared.extractors) == (
-        "pose",
-        "person",
-        "bed",
-    )
-    assert client.create_calls == [
-        ("pose", {"device": "cuda:0"}),
-        ("person", {"device": "cuda:0"}),
-        ("bed", {"device": "cuda:0"}),
-    ]
-    assert camera_a.extractors == camera_b.extractors == shared.extractors
-    assert all(
-        first.runner is second.runner
-        for first, second in zip(camera_a.extractors, camera_b.extractors, strict=True)
-    )
-    assert camera_a.tracker is not camera_b.tracker
-    assert camera_a.scene_state is not camera_b.scene_state
-
-
 def test_raw_frame_fanout_keeps_pixels_with_model_evidence_and_live_consumers() -> None:
     pose = _Runner(_pose_result())
-    client = _ServingClient({
-        "pose": pose,
-        "person": _Runner(person_result(())),
-        "bed": _Runner(bed_result(())),
-    })
-    shared = compose_yolo_extractors(client, device="cpu")
-    composite = _composite(shared.extractors, "camera-a")
+    composite = _composite((_extractor("pose", pose),), "camera-a")
     bus = BoundedFrameBus()
     packet = _packet()
+    source_frame = packet.frame
+    source_frame_key = packet.frame_key
+    source_lease = packet.lease
 
     bus.publish(packet)
     model_packet = bus.inference.take(timeout_sec=0)
@@ -127,14 +80,23 @@ def test_raw_frame_fanout_keeps_pixels_with_model_evidence_and_live_consumers() 
     assert model_packet is not None
     assert evidence_packet is not None
     assert live_packet is not None
-    assert model_packet is packet
-    assert evidence_packet is packet
-    assert live_packet is packet
+    assert model_packet is not packet
+    assert evidence_packet is not packet
+    assert live_packet is not packet
+    assert model_packet is not evidence_packet is not live_packet
+    assert model_packet.frame_key == evidence_packet.frame_key == live_packet.frame_key
+    assert model_packet.frame_key == source_frame_key
+    assert model_packet.lease is not source_lease
+    assert evidence_packet.lease is not source_lease
+    assert live_packet.lease is not source_lease
+    assert model_packet.lease is not evidence_packet.lease
+    assert evidence_packet.lease is not live_packet.lease
+    assert model_packet.frame is evidence_packet.frame is live_packet.frame is source_frame
 
     result = composite.process(model_packet)
 
-    assert pose.last_image is packet.frame.image
-    assert evidence_packet.frame.image is packet.frame.image
-    assert live_packet.frame.image is packet.frame.image
+    assert pose.last_image is source_frame.image
+    assert evidence_packet.frame.image is source_frame.image
+    assert live_packet.frame.image is source_frame.image
     assert not hasattr(result.decision_input, "frame")
     assert not hasattr(result.decision_input, "image")

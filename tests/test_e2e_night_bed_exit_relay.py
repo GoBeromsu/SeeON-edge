@@ -41,9 +41,7 @@ from e2e_worker_relay_fixtures import (
     RecordedAlert,
     ScriptedServingClient,
     WorkerRunHandle,
-    bed_exit_serving_client,
     build_worker_config,
-    fall_serving_client,
     free_tcp_port,
     night_window_excluding_now,
     night_window_including_now,
@@ -51,10 +49,18 @@ from e2e_worker_relay_fixtures import (
     stop_worker_runtime,
     wait_until,
 )
+from e2e_worker_relay_fixtures import (
+    bed_exit_serving_client as scripted_bed_exit_serving_client,
+)
+from e2e_worker_relay_fixtures import (
+    fall_serving_client as scripted_fall_serving_client,
+)
 
+import worker.runtime.worker as worker_module
 from worker.adapters.decode.cpu_av.adapter import CpuAvAdapter
 from worker.domains.bed_exit.detector import BedExitMonitor
 from worker.domains.bed_exit.schema import BedExitEvent, BedExitFrame
+from worker.domains.registry import DETECTION_MODULE_REGISTRY
 from worker.types import DecisionInput
 
 RELAY_TOKEN = "e2e-relay-token"  # noqa: S105 - fixture-scoped test constant, not a real secret
@@ -70,6 +76,40 @@ DAY_FACILITY_ID = "facility-e2e-day"
 # `-m "not real_stack"` (no external-binary fetch step is added there -- see
 # tests/test_public_repository_privacy.py); run locally per tests/AGENTS.md.
 pytestmark = pytest.mark.real_stack
+
+
+def _scripted_serving_client_with_compiled_identities(
+    client: ScriptedServingClient,
+) -> ScriptedServingClient:
+    """Expose compiled provenance without changing scripted model behavior."""
+    task_bindings = (
+        ("bed_exit", "pose", "pose"),
+        ("bed_exit", "bed", "bed"),
+        ("fall", "fall-classifier", "fall"),
+    )
+    for module_id, component_id, serving_task in task_bindings:
+        binding = next(
+            binding
+            for binding in DETECTION_MODULE_REGISTRY.get(module_id).shared_bindings
+            if binding.component_id == component_id
+        )
+        assert binding.artifact_digest is not None
+        assert binding.preprocessing_identity is not None
+        component = client.create(serving_task)
+        for field, value in (
+            ("artifact_digest", binding.artifact_digest),
+            ("preprocessing_identity", binding.preprocessing_identity),
+        ):
+            setattr(component, field, value)
+    return client
+
+
+def _bed_exit_serving_client() -> ScriptedServingClient:
+    return _scripted_serving_client_with_compiled_identities(scripted_bed_exit_serving_client())
+
+
+def _fall_serving_client() -> ScriptedServingClient:
+    return _scripted_serving_client_with_compiled_identities(scripted_fall_serving_client())
 
 
 @pytest.fixture(scope="module")
@@ -101,6 +141,11 @@ def _run_scenario(
 ) -> Iterator[tuple[LiveBackend, WorkerRunHandle, Path]]:
     state_dir = tmp_path / "state"
     clip_store_dir = tmp_path / "clips"
+    monkeypatch.setenv("ML_WORKER_EVENT_CLIP_EXPORT_ENABLED", "1")
+    # WorkerRuntime's explicit clip-store constructor seam defaults to the
+    # production root. Keep the real SnapshotStore/evidence path active while
+    # confining this local process to its scenario-owned temporary directory.
+    monkeypatch.setattr(worker_module, "DEFAULT_CLIP_STORE_DIR", str(clip_store_dir))
 
     publisher = FfmpegPublisher(url=mediamtx.rtsp_url(path_name))
     live_backend = LiveBackend(
@@ -145,7 +190,7 @@ def test_night_bed_exit_reaches_relay_with_heartbeat_status_and_finalized_clip(
         camera_id=NIGHT_CAMERA_ID,
         facility_id=NIGHT_FACILITY_ID,
         domains={"bed_exit": {"night_window": night_window_including_now()}},
-        serving_client=bed_exit_serving_client(),
+        serving_client=_bed_exit_serving_client(),
         # This is the one scenario that asserts on a finalized clip, so it opts
         # into clip recording explicitly. Clip recording is off by default.
         clip_enabled=True,
@@ -203,7 +248,7 @@ def test_fall_reaches_relay_once_despite_two_rising_edges(
         camera_id=FALL_CAMERA_ID,
         facility_id=FALL_FACILITY_ID,
         domains={"fall": {}},
-        serving_client=fall_serving_client(),
+        serving_client=_fall_serving_client(),
     ) as (live_backend, _handle, _clip_store_dir):
         wait_until(
             lambda: live_backend.ingest_client.heartbeats >= 1,
@@ -268,7 +313,7 @@ def test_daytime_bed_exit_is_suppressed_before_relay(
         camera_id=DAY_CAMERA_ID,
         facility_id=DAY_FACILITY_ID,
         domains={"bed_exit": {"night_window": night_window_excluding_now()}},
-        serving_client=bed_exit_serving_client(),
+        serving_client=_bed_exit_serving_client(),
     ) as (live_backend, _handle, _clip_store_dir):
         wait_until(
             lambda: live_backend.ingest_client.heartbeats >= 1,
@@ -416,7 +461,7 @@ def test_nominal_30fps_stream_decodes_continuously_without_a_reconnect_loop(
         camera_id=FALL_CAMERA_ID,
         facility_id=FALL_FACILITY_ID,
         domains={"fall": {}},
-        serving_client=fall_serving_client(),
+        serving_client=_fall_serving_client(),
     ) as (live_backend, handle, _clip_store_dir):
         # READY: the worker has booted through its real probes and is relaying.
         wait_until(

@@ -13,6 +13,10 @@ import numpy as np
 import pytest
 
 import worker.__main__ as worker_main
+from worker.pipeline.output.evidence.clip_config import (
+    DEFAULT_CLIP_STORE_DIR,
+    configured_store_dir,
+)
 
 
 def _backfill_module() -> ModuleType:
@@ -192,21 +196,69 @@ def test_backfill_failure_log_escapes_control_characters(
     assert all("\r" not in message and "\n" not in message for message in messages)
 
 
+def test_configured_store_dir_uses_injected_or_baked_root_not_environment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    injected = tmp_path / "portable-clip-store"
+    monkeypatch.setenv("CLIP_STORE_DIR", str(tmp_path / "retired-environment-root"))
+
+    assert configured_store_dir(injected) == injected
+    assert configured_store_dir() == Path(DEFAULT_CLIP_STORE_DIR)
+
+
 def test_worker_cli_backfill_needs_no_camera_config_and_prints_summary(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    monkeypatch.setenv("CLIP_STORE_DIR", str(tmp_path / "clip-store"))
+    root = tmp_path / "clip-store"
     monkeypatch.delenv("EDGE_CAMERA_CONFIG", raising=False)
 
-    exit_code = worker_main.main(["--backfill-thumbnails"])
+    exit_code = worker_main.main(["--backfill-thumbnails", "--clip-store-dir", str(root)])
 
     assert exit_code == 0
+    assert root.joinpath(".worker.lock").is_file()
     assert capsys.readouterr().out.strip() == (
-        "thumbnail backfill: scanned=0 playable=0 generated=0 "
-        "skipped=0 failed=0 missing=0"
+        "thumbnail backfill: scanned=0 playable=0 generated=0 skipped=0 failed=0 missing=0"
     )
+
+
+def test_worker_cli_backfill_defaults_to_baked_store_root(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _backfill_module()
+    report = module.BackfillReport(0, 0, 0, 0, 0, 0)
+    roots: list[Path] = []
+
+    def _backfill(root: Path, generator: object) -> object:
+        del generator
+        roots.append(root)
+        return report
+
+    monkeypatch.setattr(worker_main, "backfill_thumbnails", _backfill)
+
+    assert worker_main.main(["--backfill-thumbnails"]) == 0
+    assert roots == [Path(DEFAULT_CLIP_STORE_DIR)]
+
+
+def test_worker_cli_rejects_clip_store_dir_without_backfill(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _fail_runtime(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("backfill-only option must not start the worker")
+
+    monkeypatch.setattr(worker_main.WorkerRuntime, "__init__", _fail_runtime)
+
+    assert worker_main.main(["--clip-store-dir", str(tmp_path)]) == 2
+
+
+def test_worker_cli_help_documents_portable_backfill_store_seam() -> None:
+    help_text = worker_main._build_parser().format_help()  # noqa: SLF001
+
+    assert "--clip-store-dir" in help_text
+    assert "backfill" in help_text
 
 
 def test_worker_cli_backfill_exits_nonzero_while_playable_clip_is_missing(
@@ -216,14 +268,15 @@ def test_worker_cli_backfill_exits_nonzero_while_playable_clip_is_missing(
 ) -> None:
     module = _backfill_module()
     report = module.BackfillReport(1, 1, 0, 0, 1, 1)
-    monkeypatch.setenv("CLIP_STORE_DIR", str(tmp_path / "clip-store"))
     monkeypatch.setattr(
         worker_main,
         "backfill_thumbnails",
         lambda root, generator: report,
     )
 
-    exit_code = worker_main.main(["--backfill-thumbnails"])
+    exit_code = worker_main.main(
+        ["--backfill-thumbnails", "--clip-store-dir", str(tmp_path / "clip-store")]
+    )
 
     assert exit_code == 1
     assert capsys.readouterr().out.strip().endswith("failed=1 missing=1")
@@ -231,15 +284,11 @@ def test_worker_cli_backfill_exits_nonzero_while_playable_clip_is_missing(
 
 def test_worker_cli_backfill_refuses_active_recorder_with_nonzero_exit(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    lock_module = importlib.import_module(
-        "worker.pipeline.output.evidence.clip_store_lock"
-    )
+    lock_module = importlib.import_module("worker.pipeline.output.evidence.clip_store_lock")
     root = tmp_path / "clip-store"
-    monkeypatch.setenv("CLIP_STORE_DIR", str(root))
 
     with lock_module.ClipStoreLock.acquire(root):
-        exit_code = worker_main.main(["--backfill-thumbnails"])
+        exit_code = worker_main.main(["--backfill-thumbnails", "--clip-store-dir", str(root)])
 
     assert exit_code == 1

@@ -25,6 +25,7 @@ from worker.runtime.config.local_env import (
     ML_WORKER_FALL_MODEL_STRIDE_ENV,
     ML_WORKER_FALL_MODEL_WINDOW_ENV,
     fall_model_config_from_environment,
+    reject_retired_worker_environment,
 )
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -127,53 +128,18 @@ def test_default_env_with_no_overrides_resolves_packaged_manifest_defaults(
     assert config.operating_threshold == pytest.approx(0.0007872396381571889)
 
 
-def test_default_env_respects_explicit_operating_threshold_without_artifact_dir(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Regression for issue #198: ``ML_WORKER_FALL_MODEL_OPERATING_THRESHOLD``
-    (and window/stride) must be honored even when
-    ``ML_WORKER_FALL_MODEL_ARTIFACT_DIR`` is unset -- the packaged-default
-    path the shipped edge topology actually takes. Before the fix, this env
-    var was read only when ``ARTIFACT_DIR`` was also set, so an operator-set
-    ``0.5`` was silently discarded in favor of the field default
-    (``0.0007872396381571889``), producing 352 false fall events/hour in
-    production."""
-    _write_fake_packaged_default(tmp_path, monkeypatch)
+def test_model_policy_environment_keys_are_retired_explicitly() -> None:
     environ = {
         ML_WORKER_FALL_MODEL_WINDOW_ENV: "45",
         ML_WORKER_FALL_MODEL_STRIDE_ENV: "9",
         ML_WORKER_FALL_MODEL_OPERATING_THRESHOLD_ENV: "0.5",
     }
 
-    config = fall_model_config_from_environment(environ)
+    with pytest.raises(WorkerConfigError) as excinfo:
+        reject_retired_worker_environment(environ)
 
-    assert config.window == 45
-    assert config.stride == 9
-    assert config.input_shape == (45, 51)
-    assert config.operating_threshold == pytest.approx(0.5)
-
-
-def test_default_env_logs_resolved_operating_threshold_and_its_source(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """Issue #198: the resolved operating_threshold -- and whether it came
-    from env or the packaged manifest default -- must be logged once at
-    boot, since previously the only way to discover the effective value was
-    dumping an emitted event's ``audit`` blob out of the SQLite outbox."""
-    _write_fake_packaged_default(tmp_path, monkeypatch)
-
-    with caplog.at_level("INFO"):
-        fall_model_config_from_environment(
-            {ML_WORKER_FALL_MODEL_OPERATING_THRESHOLD_ENV: "0.5"}
-        )
-
-    assert any(
-        record.getMessage()
-        == "fall model operating_threshold resolved to 0.5 (source: env)"
-        for record in caplog.records
-    )
+    assert all(name in str(excinfo.value) for name in environ)
+    assert "versioned worker config authority" in str(excinfo.value)
 
 
 def test_default_env_with_no_threshold_override_logs_manifest_default_source(
@@ -192,38 +158,16 @@ def test_default_env_with_no_threshold_override_logs_manifest_default_source(
     )
 
 
-def test_default_env_warns_when_schema_version_env_is_set_but_ignored(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """General "set, documented, silently dead" guard (issue #198, matching
-    #191): ``ML_WORKER_FALL_MODEL_SCHEMA_VERSION``/``..._PREPROCESSING_IDENTITY``
-    still only apply once ``ARTIFACT_DIR`` is explicitly set (unlike
-    window/stride/operating_threshold, they have no packaged-default
-    fallback path), so setting either without ``ARTIFACT_DIR`` must warn
-    instead of failing silently."""
-    _write_fake_packaged_default(tmp_path, monkeypatch)
+def test_retired_manifest_environment_keys_fail_instead_of_warning() -> None:
     environ = {
         ML_WORKER_FALL_MODEL_SCHEMA_VERSION_ENV: "2",
         ML_WORKER_FALL_MODEL_PREPROCESSING_IDENTITY_ENV: "some-other-identity",
     }
 
-    with caplog.at_level("WARNING"):
-        config = fall_model_config_from_environment(environ)
+    with pytest.raises(WorkerConfigError) as excinfo:
+        reject_retired_worker_environment(environ)
 
-    # The env values are ignored -- packaged manifest defaults still apply.
-    assert config.schema_version == 1
-    assert config.preprocessing_identity == "legacy-coco17-xyc-frame-normalized-zero-fill-v1"
-    messages = [record.getMessage() for record in caplog.records]
-    assert any(
-        ML_WORKER_FALL_MODEL_SCHEMA_VERSION_ENV in message and "ignored" in message
-        for message in messages
-    )
-    assert any(
-        ML_WORKER_FALL_MODEL_PREPROCESSING_IDENTITY_ENV in message and "ignored" in message
-        for message in messages
-    )
+    assert all(name in str(excinfo.value) for name in environ)
 
 
 def test_explicit_artifact_dir_aggregates_multiple_invalid_env_vars(tmp_path: Path) -> None:

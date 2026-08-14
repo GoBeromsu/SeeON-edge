@@ -86,15 +86,18 @@ def probe_first_frame(
                 if monotonic() >= deadline:
                     _raise_timeout(masked_url, timeout_ms)
                 continue
-            height, width, channels = _frame_dimensions(packet, masked_url)
-            return RTSPProbeResult(
-                masked_url=masked_url,
-                requested_backend=requested_backend,
-                backend=selected_backend,
-                width=width,
-                height=height,
-                channels=channels,
-            )
+            try:
+                height, width, channels = _frame_dimensions(packet, masked_url)
+                return RTSPProbeResult(
+                    masked_url=masked_url,
+                    requested_backend=requested_backend,
+                    backend=selected_backend,
+                    width=width,
+                    height=height,
+                    channels=channels,
+                )
+            finally:
+                packet.release()
     except RTSPProbeError:
         raise
     except Exception as exc:  # noqa: BLE001 - decoder errors are normalized at this boundary.
@@ -108,7 +111,11 @@ def _frame_dimensions(
     packet: FramePacket,
     masked_url: str,
 ) -> tuple[int, int, int]:
-    shape = tuple(int(dimension) for dimension in packet.frame.image.shape)
+    descriptor = packet.descriptor
+    if descriptor.width != packet.width or descriptor.height != packet.height:
+        raise _probe_error("decode", masked_url, 0)
+
+    shape = tuple(int(dimension) for dimension in packet.borrow_host_frame().image.shape)
     if len(shape) == 2:
         height, width = shape
         channels = 1
@@ -116,7 +123,13 @@ def _frame_dimensions(
         height, width, channels = shape
     else:
         raise _probe_error("decode", masked_url, 0)
-    if height <= 0 or width <= 0 or channels <= 0:
+    if (
+        height <= 0
+        or width <= 0
+        or channels <= 0
+        or width != descriptor.width
+        or height != descriptor.height
+    ):
         raise _probe_error("decode", masked_url, 0)
     return int(height), int(width), int(channels)
 

@@ -72,8 +72,11 @@ def pull_worker_config_poll(
         return None
     try:
         parsed = BackendWorkerConfigPayload.model_validate(payload)
-    except ValidationError:
-        print("worker config pull skipped: malformed payload", file=sys.stderr)
+    except (ValidationError, WorkerConfigError) as error:
+        if "detection policy refused" in str(error):
+            print(str(error), file=sys.stderr)
+        else:
+            print("worker config pull skipped: malformed payload", file=sys.stderr)
         return None
     return WorkerConfigPoll(
         restart_config=parsed.to_pulled_config(),
@@ -128,8 +131,11 @@ def load_worker_config_from_relay(
                 clip=clip,
                 dev_mjpeg=dev_mjpeg,
             )
-        except (ValidationError, WorkerConfigError):
-            print("worker config pull skipped: malformed payload", file=sys.stderr)
+        except (ValidationError, WorkerConfigError) as error:
+            if "detection policy refused" in str(error):
+                print(str(error), file=sys.stderr)
+            else:
+                print("worker config pull skipped: malformed payload", file=sys.stderr)
         else:
             saved = lkg_store.save(payload, fresh.directive)
             if saved:
@@ -157,8 +163,11 @@ def load_worker_config_from_relay(
         return _snapshot_from_stored(
             stored, relay_url, relay_token, models=models, clip=clip, dev_mjpeg=dev_mjpeg
         )
-    except (ValidationError, WorkerConfigError):
-        print("worker config LKG skipped: malformed payload", file=sys.stderr)
+    except (ValidationError, WorkerConfigError) as error:
+        if "detection policy refused" in str(error):
+            print(f"worker config LKG {error}", file=sys.stderr)
+        else:
+            print("worker config LKG skipped: malformed payload", file=sys.stderr)
         return None
 
 

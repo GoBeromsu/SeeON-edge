@@ -96,7 +96,7 @@ Global bootstrap stages (profile/device, decode capability, model backend, real
 warmup) are fatal and exit non-zero. Per-camera failures degrade only that
 camera. There is no silent CPU or OpenCV fallback, and `auto` is a loud failure.
 
-Stored clips are re-encoded derivatives. ADR-0001 source-packet preservation is
-an open follow-up
-(<https://github.com/SeniorAILab/eldercare-fall-ml-v2/issues/2>); never describe
-worker output as original-stream evidence.
+Primary clean clips use ADR-0001 source-packet stream-copy/remux through bounded
+camera-local packet rings. Decoded frames remain analysis/snapshot taps only;
+never add a silent re-encode fallback or describe a transformed derivative as
+the preserved source clip.

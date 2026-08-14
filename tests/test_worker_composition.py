@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
+from types import MappingProxyType
 from typing import Literal, final
 
 import numpy as np
@@ -16,6 +17,7 @@ from shared.events.evidence_http_transport import HttpResult
 from worker.adapters.model.errors import FatalAcceleratorError
 from worker.domains.bed_exit import BedExitMonitor
 from worker.domains.fall import FallEventLatch
+from worker.domains.module_definition import ComponentBinding, ScheduleRule
 from worker.pipeline.bus import BoundedFrameBus
 from worker.pipeline.ingest.lifecycle import IngestReporter
 from worker.runtime.config import CameraRuntimeConfig, WorkerConfig
@@ -36,9 +38,12 @@ class _FallMetadata:
 @final
 class _FakeRunner:
     def __init__(self, task: str) -> None:
+        binding = _compiled_binding_for_task(task)
         self.task = task
         self.metadata = _FallMetadata()
         self.operating_threshold = 0.5
+        self.artifact_digest = binding.artifact_digest
+        self.preprocessing_identity = binding.preprocessing_identity
         self.warmup_count = 0
 
     def __call__(self, _image: Image) -> RunnerResult:
@@ -49,6 +54,16 @@ class _FakeRunner:
 
     def warmup(self) -> None:
         self.warmup_count += 1
+
+
+def _compiled_binding_for_task(task: str) -> ComponentBinding:
+    component_id = "fall-classifier" if task == "fall" else task
+    return next(
+        binding
+        for definition in worker_module.DETECTION_MODULE_REGISTRY.definitions
+        for binding in definition.shared_bindings
+        if binding.component_id == component_id
+    )
 
 
 @final
@@ -451,6 +466,37 @@ def test_bed_exit_disabled_excludes_bed_from_intervals(
     assert "bed" not in intervals
 
 
+def _registry_with_ghost_bed_exit() -> object:
+    registry = worker_module.DETECTION_MODULE_REGISTRY
+    bed_exit = registry.get("bed_exit")
+    ghost_bed_exit = replace(
+        bed_exit,
+        component_bindings=bed_exit.component_bindings
+        + (
+            ComponentBinding(
+                component_id="ghost",
+                component_kind="extractor",
+                model_family="ghost-family",
+                provisioner="test",
+                artifact_digest="a" * 64,
+                preprocessing_identity="ghost-v1",
+                output_adapter="ghost",
+                warmup_required=True,
+            ),
+        ),
+        schedule_rules=bed_exit.schedule_rules + (ScheduleRule("ghost", "camera-frame-stride"),),
+    )
+    definitions = tuple(
+        ghost_bed_exit if definition.module_id == "bed_exit" else definition
+        for definition in registry.definitions
+    )
+    return replace(
+        registry,
+        definitions=definitions,
+        by_id=MappingProxyType({**registry.by_id, "bed_exit": ghost_bed_exit}),
+    )
+
+
 def test_domain_requiring_an_unregistered_extractor_fails_closed(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -466,23 +512,15 @@ def test_domain_requiring_an_unregistered_extractor_fails_closed(
     _stub_heartbeat_transport(monkeypatch)
     serving = _FakeServingClient()
     loops = _LoopFactory(serving)
-    ghost_bed_exit = replace(
-        worker_module.DOMAIN_REGISTRY["bed_exit"],
-        requires=frozenset({"pose", "bed", "ghost"}),
-    )
-    monkeypatch.setattr(
-        worker_module,
-        "DOMAIN_REGISTRY",
-        {**worker_module.DOMAIN_REGISTRY, "bed_exit": ghost_bed_exit},
-    )
+    monkeypatch.setattr(worker_module, "DETECTION_MODULE_REGISTRY", _registry_with_ghost_bed_exit())
     runtime = _runtime(_config("camera-a"), serving, loops, tmp_path)
 
-    with caplog.at_level("WARNING"):
+    with caplog.at_level("CRITICAL"), pytest.raises(SystemExit):
         runtime.run()
 
     assert runtime.cameras == ()
     assert any(
-        "domain requires unregistered extractor(s): ghost" in record.getMessage()
+        "detection module requires unavailable component(s): ghost" in record.getMessage()
         for record in caplog.records
     )
 
@@ -506,19 +544,11 @@ def test_configured_cameras_that_all_fail_to_activate_do_not_hang_run(
     _stub_heartbeat_transport(monkeypatch)
     serving = _FakeServingClient()
     loops = _LoopFactory(serving)
-    ghost_bed_exit = replace(
-        worker_module.DOMAIN_REGISTRY["bed_exit"],
-        requires=frozenset({"pose", "bed", "ghost"}),
-    )
-    monkeypatch.setattr(
-        worker_module,
-        "DOMAIN_REGISTRY",
-        {**worker_module.DOMAIN_REGISTRY, "bed_exit": ghost_bed_exit},
-    )
+    monkeypatch.setattr(worker_module, "DETECTION_MODULE_REGISTRY", _registry_with_ghost_bed_exit())
     runtime = _runtime(_config("camera-a"), serving, loops, tmp_path)
 
-    # 매달리면 이 호출이 반환하지 않는다 -- 그것이 이 테스트의 전부다.
-    runtime.run()
+    with pytest.raises(SystemExit):
+        runtime.run()
 
     assert runtime.config.cameras != ()
     assert runtime.cameras == ()
@@ -594,6 +624,7 @@ def _runtime(
         decode_probe=lambda _decode: VerifyResult(True, "cpu", "decode", "available"),
         hard_exit=hard_exit,
         state_dir=state_dir,
+        clip_store_dir=state_dir / "clip-store",
     )
 
 

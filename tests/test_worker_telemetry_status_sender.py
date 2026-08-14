@@ -28,6 +28,7 @@ class _FrozenWireTransport:
             "generation",
             "seq",
             "cameras",
+            "clip_export",
             "clip_recorder",
             "clip_export",
             "gpu",

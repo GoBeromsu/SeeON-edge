@@ -9,7 +9,7 @@ detection-settings and clip-storage-location backend slices (see
 * ``BackendWorkerConfigPayload.clip_store_subdir`` -- a single relative
   subdirectory (``backend/app/features/clips/storage_location_store.py``)
   threaded into ``ClipRecordingConfig.store_subdir`` and, at the worker
-  runtime, appended under ``configured_store_dir()``.
+  runtime, appended under the constructor-injected clip-store root.
 
 Both fields degrade fail-open per malformed entry (mirroring the existing
 ``detection_windows``/``cameras`` degradation covered by
@@ -19,14 +19,12 @@ payload.
 
 from __future__ import annotations
 
-import os
-from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
 
-from worker.pipeline.output.evidence.clip_config import CLIP_STORE_DIR_ENV, DEFAULT_CLIP_STORE_DIR
+from worker.pipeline.output.evidence.clip_config import DEFAULT_CLIP_STORE_DIR
 from worker.runtime.config.pull_models import BackendWorkerConfigPayload
 from worker.runtime.config.worker_models import ClipRecordingConfig
 from worker.runtime.worker import WorkerRuntime, _required_extractor_names
@@ -269,7 +267,10 @@ def test_no_domains_signal_still_schedules_the_registry_default_extractors() -> 
         {"config_version": 1, "cameras": [_camera_payload()]}
     )
     config = payload.to_worker_config("http://ml-api:8000", "relay-secret")
-    runtime = SimpleNamespace(config=config)
+    runtime = SimpleNamespace(
+        config=config,
+        _module_versions=config.selected_module_versions,
+    )
 
     domain_names = WorkerRuntime._active_domain_names(runtime)
     required = _required_extractor_names(domain_names)
@@ -329,23 +330,18 @@ def test_clip_recording_config_rejects_unsafe_store_subdir(value: str) -> None:
 def _fake_runtime(
     store_subdir: str | None,
     *,
-    env: Mapping[str, str] = os.environ,
-    state_dir: Path = Path(DEFAULT_CLIP_STORE_DIR).parent,
+    clip_store_dir: Path = Path(DEFAULT_CLIP_STORE_DIR),
 ) -> WorkerRuntime:
-    """Minimal shape for the unbound store-resolution method."""
+    """A minimal stand-in carrying the state read by the unbound method."""
     from types import SimpleNamespace
 
     return SimpleNamespace(
         config=SimpleNamespace(clip=SimpleNamespace(store_subdir=store_subdir)),
-        _env=env,
-        _state_dir=state_dir,
+        _clip_store_dir=clip_store_dir,
     )
 
 
-def test_resolved_clip_store_dir_is_the_bare_root_when_no_subdir_selected(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.delenv(CLIP_STORE_DIR_ENV, raising=False)
+def test_resolved_clip_store_dir_is_the_bare_root_when_no_subdir_selected() -> None:
     runtime = _fake_runtime(None)
 
     resolved = WorkerRuntime._resolved_clip_store_dir(runtime)
@@ -353,21 +349,8 @@ def test_resolved_clip_store_dir_is_the_bare_root_when_no_subdir_selected(
     assert resolved == Path(DEFAULT_CLIP_STORE_DIR)
 
 
-def test_injected_environment_without_clip_store_uses_worker_state(
-    tmp_path: Path,
-) -> None:
-    runtime = _fake_runtime(None, env={}, state_dir=tmp_path)
-
-    resolved = WorkerRuntime._resolved_clip_store_dir(runtime)
-
-    assert resolved == tmp_path / "clip-store"
-
-
-def test_resolved_clip_store_dir_appends_a_selected_subdir(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    monkeypatch.setenv(CLIP_STORE_DIR_ENV, str(tmp_path))
-    runtime = _fake_runtime("backup/clips")
+def test_resolved_clip_store_dir_appends_a_selected_subdir(tmp_path: Path) -> None:
+    runtime = _fake_runtime("backup/clips", clip_store_dir=tmp_path)
 
     resolved = WorkerRuntime._resolved_clip_store_dir(runtime)
 
@@ -376,13 +359,12 @@ def test_resolved_clip_store_dir_appends_a_selected_subdir(
 
 @pytest.mark.parametrize("unsafe_subdir", ["/etc/passwd", "../escape", "sub/../../escape"])
 def test_resolved_clip_store_dir_defensively_rejects_an_unsafe_subdir(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, unsafe_subdir: str
+    tmp_path: Path, unsafe_subdir: str
 ) -> None:
     """Belt-and-suspenders: pull_models.py already validates this before it
     reaches WorkerConfig, but a path feeding filesystem construction is
     re-checked here rather than trusted at a distance."""
-    monkeypatch.setenv(CLIP_STORE_DIR_ENV, str(tmp_path))
-    runtime = _fake_runtime(unsafe_subdir)
+    runtime = _fake_runtime(unsafe_subdir, clip_store_dir=tmp_path)
 
     resolved = WorkerRuntime._resolved_clip_store_dir(runtime)
 

@@ -13,6 +13,7 @@ import logging
 import os
 import signal
 import sys
+from pathlib import Path
 from types import FrameType
 
 from pydantic import ValidationError
@@ -43,10 +44,12 @@ from worker.runtime.config import (
     load_worker_config_from_relay,
     make_restart_check,
     pull_worker_config_poll,
+    reject_retired_worker_environment,
     resolve_config_path,
     resolve_local_overrides,
     resolve_startup_config,
 )
+from worker.runtime.provenance.environment import resolve_worker_build_revision
 from worker.runtime.state_dir import resolve_state_dir
 from worker.runtime.worker import WorkerRuntime
 
@@ -59,6 +62,7 @@ GENERIC_RUNTIME_ERROR_EXIT_CODE = 1
 CONFIG_ERROR_EXIT_CODE = 2
 
 _HEARTBEAT_ON_START_TIMEOUT_SEC = 0.5
+_EDGE_RELAY_URL = "http://ml-api:8000"
 
 
 def _positive_int(raw: str) -> int:
@@ -116,8 +120,17 @@ def _build_parser() -> argparse.ArgumentParser:
         "--backfill-thumbnails",
         action="store_true",
         help=(
-            "Generate missing clip-local thumbnails under CLIP_STORE_DIR and exit; "
-            "returns nonzero while playable clips remain missing thumbnails"
+            "Generate missing clip-local thumbnails and exit; returns nonzero "
+            "while playable clips remain missing thumbnails"
+        ),
+    )
+    parser.add_argument(
+        "--clip-store-dir",
+        type=Path,
+        default=None,
+        help=(
+            "Portable clip-store root for --backfill-thumbnails only "
+            "(default: baked /var/lib/clip-store)"
         ),
     )
     return parser
@@ -194,10 +207,20 @@ def main(argv: list[str] | None = None) -> int:
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     )
 
+    if args.clip_store_dir is not None and not args.backfill_thumbnails:
+        LOGGER.error("--clip-store-dir requires --backfill-thumbnails")
+        return CONFIG_ERROR_EXIT_CODE
+
+    try:
+        reject_retired_worker_environment(os.environ)
+    except WorkerConfigError as exc:
+        LOGGER.error("worker configuration refused: %s", exc)  # noqa: TRY400
+        return CONFIG_ERROR_EXIT_CODE
+
     if args.backfill_thumbnails:
         try:
             report = backfill_thumbnails(
-                configured_store_dir(),
+                configured_store_dir(args.clip_store_dir),
                 FFmpegThumbnailGenerator(ffmpeg_bin=configured_ffmpeg_bin()),
             )
         except ClipStoreLockedError as exc:
@@ -248,7 +271,7 @@ def main(argv: list[str] | None = None) -> int:
             LOGGER.info("config validation passed (%d camera(s))", len(yaml_config.cameras))
             return CLEAN_SHUTDOWN_EXIT_CODE
 
-        relay_url = os.environ.get(RELAY_URL_ENV, yaml_config.relay.url)
+        relay_url = yaml_config.relay.url
         relay_token = (
             os.environ.get(RELAY_TOKEN_ENV, "").strip()
             or yaml_config.relay.token.get_secret_value()
@@ -268,7 +291,7 @@ def main(argv: list[str] | None = None) -> int:
             return CONFIG_ERROR_EXIT_CODE
         config = snapshot.config
     else:
-        relay_url = os.environ.get(RELAY_URL_ENV, "").strip()
+        relay_url = _EDGE_RELAY_URL
         relay_token = os.environ.get(RELAY_TOKEN_ENV, "").strip() or None
 
         if not relay_url:
@@ -362,7 +385,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.heartbeat_on_start:
         _send_heartbeat_on_start(config)
 
-    relay_url = os.environ.get(RELAY_URL_ENV, config.relay.url)
+    relay_url = config.relay.url
     relay_token = (
         os.environ.get(RELAY_TOKEN_ENV, "").strip() or config.relay.token.get_secret_value()
     )
@@ -400,6 +423,8 @@ def main(argv: list[str] | None = None) -> int:
         clip_export_policy=clip_export_policy,
         max_frames_per_camera=args.max_frames_per_camera,
         state_dir=resolve_state_dir(),
+        restart_generation=snapshot.directive.generation,
+        build_revision=resolve_worker_build_revision(os.environ.get("ML_WORKER_BUILD_REVISION")),
     )
 
     def _handle_signal(signum: int, frame: FrameType | None) -> None:

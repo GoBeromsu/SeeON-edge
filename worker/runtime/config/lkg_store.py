@@ -11,6 +11,7 @@ from typing import Final, TypeAlias
 
 from pydantic import JsonValue
 
+from shared.edge_db import EDGE_DATABASE_PATH
 from worker.pipeline.output.evidence.evidence_outbox_database import open_connection
 from worker.pipeline.output.evidence.evidence_outbox_types import NewerSchemaVersionError
 from worker.pipeline.output.evidence.outbox_transaction import ImmediateTransaction
@@ -211,8 +212,9 @@ def _prune_config_history(connection: sqlite3.Connection, *, keep_last: int) -> 
 
 
 def _worker_state_db_path(state_dir: Path | None = None) -> Path:
-    resolved = state_dir if state_dir is not None else resolve_state_dir()
-    return resolved / WORKER_STATE_DB_FILENAME
+    if state_dir is None or state_dir == resolve_state_dir():
+        return EDGE_DATABASE_PATH
+    return state_dir / WORKER_STATE_DB_FILENAME
 
 
 def _registry_version(payload: JsonObject) -> int:

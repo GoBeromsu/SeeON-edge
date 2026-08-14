@@ -284,15 +284,11 @@ def test_cpu_av_refuses_to_degrade_when_the_open_signature_is_unsupported() -> N
 
 def test_probe_first_frame_classifies_decode_failure_and_closes_session() -> None:
     config = _DecodeConfig("rtsp://camera.local/live")
-    malformed = FramePacket(
-        "camera-a",
-        Frame(index=0, time_sec=0.0, image=np.zeros((1,), dtype=np.uint8)),
-        0.0,
-        0,
-        0,
-        0,
-        0.0,
-    )
+    malformed = _packet(0)
+    # A decoder is an infrastructure boundary and can violate its return type at
+    # runtime. Forge only the packet envelope after valid lease ownership exists;
+    # the probe must classify the invalid geometry and release that ownership.
+    object.__setattr__(malformed, "width", 0)
     session = _Session([malformed])
     adapter = _Adapter([session])
 
@@ -301,6 +297,7 @@ def test_probe_first_frame_classifies_decode_failure_and_closes_session() -> Non
 
     assert error.value.error_class == "decode"
     assert "codec" in str(error.value)
+    assert malformed.released is True
     assert session.closed is True
 
 
@@ -465,3 +462,44 @@ def test_rtsp_source_subtracts_consumer_time_from_pacing_delay() -> None:
     now += 0.6  # consumer time exceeds the frame interval: no wait needed
     assert list(packets) == []
     assert waits == pytest.approx([0.3])
+
+
+def test_rtsp_reconnect_assigns_a_new_epoch_after_each_sessions_first_frame() -> None:
+    config = _DecodeConfig("rtsp://camera/live")
+    first = _Session([_packet(0), None])
+    second = _Session([_packet(0), None])
+    source = RTSPSource(
+        config,
+        _Adapter([first, second]),
+        worker_boot_id="worker-boot-1",
+        max_failures=1,
+        max_total_reconnects=1,
+        sleep=lambda _delay: None,
+        pace_wait=lambda _delay: False,
+    )
+
+    packets = list(source)
+
+    assert [packet.seq for packet in packets] == [0, 0]
+    assert [packet.pts for packet in packets] == [0.0, 0.0]
+    assert packets[0].worker_boot_id == packets[1].worker_boot_id == "worker-boot-1"
+    assert packets[0].stream_epoch != packets[1].stream_epoch
+    assert packets[0].frame_key != packets[1].frame_key
+
+
+def test_failed_open_does_not_consume_a_stream_epoch() -> None:
+    config = _DecodeConfig("rtsp://camera/live")
+    recovered = _Session([_packet(0), None])
+    source = RTSPSource(
+        config,
+        _Adapter([OSError("unavailable"), recovered]),
+        worker_boot_id="worker-boot-1",
+        max_failures=1,
+        max_total_reconnects=1,
+        sleep=lambda _delay: None,
+        pace_wait=lambda _delay: False,
+    )
+
+    packet = next(iter(source))
+
+    assert packet.stream_epoch == 1

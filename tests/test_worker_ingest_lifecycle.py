@@ -140,6 +140,21 @@ def _packet(camera_id: str, seq: int) -> FramePacket:
     return FramePacket(camera_id, frame, seq / 5.0, seq, 3, 2, 0.25)
 
 
+def _assert_published_packets(actual: list[FramePacket], source: list[FramePacket]) -> None:
+    assert len(actual) == len(source)
+    for published, decoded in zip(actual, source, strict=True):
+        assert published is not decoded
+        assert published.frame is decoded.frame
+        assert published.lease is decoded.lease
+        assert (published.camera_id, published.seq, published.pts) == (
+            decoded.camera_id,
+            decoded.seq,
+            decoded.pts,
+        )
+        assert published.worker_boot_id
+        assert published.stream_epoch > 0
+
+
 def _registry(*camera_ids: str) -> SourceRegistry:
     records = {
         camera_id: SourceRecord(
@@ -197,8 +212,7 @@ def test_registered_loop_publishes_the_exact_packet_and_closes_its_session() -> 
     # Then
     assert isinstance(bus, FrameBus)
     assert adapter.configs == [_DecodeConfig("camera-a", "rtsp://example.test/camera-a")]
-    assert bus.packets[0] is packets[0]
-    assert bus.packets[1] is packets[1]
+    _assert_published_packets(bus.packets, packets)
     assert [(packet.seq, packet.pts) for packet in bus.packets] == [(7, 1.4), (8, 1.6)]
     assert reporter.states == {"camera-a": "ready"}
     assert session.close_count == 1
@@ -249,7 +263,7 @@ def test_registered_loop_reports_reconnect_and_recovery_without_replacing_packet
     loop.run()
 
     # Then
-    assert bus.packets == [recovered_packet]
+    _assert_published_packets(bus.packets, [recovered_packet])
     assert [event.event_type for event in reporter.events] == [
         "camera.offline",
         "camera.recovered",
@@ -342,7 +356,7 @@ def test_two_camera_supervisor_isolates_read_failure_and_masks_credentials() -> 
     IngestSupervisor((bad_loop, good_loop)).run()
 
     # Then
-    assert bus.packets == good_packets
+    _assert_published_packets(bus.packets, good_packets)
     assert set(bus.thread_names) == {"worker-ingest-camera-good"}
     assert reporter.states == {"camera-bad": "degraded", "camera-good": "ready"}
     offline_cameras = [
@@ -427,7 +441,7 @@ def test_omitting_restart_check_preserves_default_clean_completion() -> None:
     supervisor.run()
 
     # Then: ingestion completes exactly as it did before restart_check existed.
-    assert bus.packets == packets
+    _assert_published_packets(bus.packets, packets)
     assert reporter.states == {"camera-a": "ready"}
     assert session.close_count == 1
 
@@ -503,7 +517,7 @@ def test_omitting_completion_check_preserves_default_clean_completion() -> None:
     supervisor.run()
 
     # Then: ingestion completes exactly as it did before completion_check existed.
-    assert bus.packets == packets
+    _assert_published_packets(bus.packets, packets)
     assert reporter.states == {"camera-a": "ready"}
     assert session.close_count == 1
 
@@ -539,7 +553,7 @@ def test_restart_check_always_false_is_consulted_but_never_stops_early() -> None
 
     # Then: the always-false directive is consulted at least once, and ingestion still
     # completes in full instead of terminating early.
-    assert bus.packets == packets
+    _assert_published_packets(bus.packets, packets)
     assert reporter.states == {"camera-a": "ready"}
     assert len(calls) >= 1
 

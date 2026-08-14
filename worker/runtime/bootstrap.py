@@ -49,17 +49,22 @@ from worker.runtime.faults.handler import FATAL_ACCELERATOR_EXIT_CODE
 from worker.runtime.lease import GpuLease
 from worker.runtime.profile.boot import (
     BootContext,
+    effective_decode_policy,
+    effective_encode_policy,
     preflight_decode_or_raise,
     reject_legacy_conflicts,
-    resolve_profile,
+    resolve_decode_or_fallback,
+    resolve_encode_or_fallback,
     verify_device_or_raise,
 )
 from worker.runtime.profile.registry import (
     BootDependencies,
     DecodeProbe,
+    EncodeProbe,
     ProfileSpec,
     default_decode_probe,
     default_verifiers,
+    select_profile,
 )
 
 LOGGER: Final = logging.getLogger(__name__)
@@ -133,6 +138,7 @@ class BootstrapContext:
 
     lease: GpuLease | None = None
     profile: ProfileSpec | None = None
+    requested_profile: str | None = None
     boot: BootContext | None = None
     runners: dict[str, object] = field(default_factory=dict)
     warmed: tuple[str, ...] = ()
@@ -258,9 +264,11 @@ def profile_device_stage(
     """
 
     def _run() -> object:
-        spec = resolve_profile(env)
+        selection = select_profile(env)
+        spec = selection.spec
         _ = verify_device_or_raise(spec, deps or BootDependencies(default_verifiers()))
         context.profile = spec
+        context.requested_profile = selection.requested_name
         return spec
 
     return Stage(PROFILE_DEVICE_STAGE, _run, REFUSE_TO_START_EXIT_CODE)
@@ -270,6 +278,7 @@ def decode_capability_stage(
     context: BootstrapContext,
     env: Mapping[str, str],
     decode_probe: DecodeProbe | None = None,
+    encode_probe: EncodeProbe | None = None,
 ) -> Stage:
     """Preflight the profile's decode backend and resolve the exact runtime triple.
 
@@ -286,13 +295,30 @@ def decode_capability_stage(
                 REFUSE_TO_START_EXIT_CODE,
                 "requires a completed profile/device stage",
             )
-        _ = preflight_decode_or_raise(spec, decode_probe or default_decode_probe)
+        decode_selection = None
+        if spec.decode_fallback is not None:
+            decode_selection = resolve_decode_or_fallback(spec, decode_probe)
+        else:
+            _ = preflight_decode_or_raise(spec, decode_probe or default_decode_probe)
         reject_legacy_conflicts(spec, env)
+        encode_selection = resolve_encode_or_fallback(spec, encode_probe)
+        degraded_reasons = tuple(
+            reason
+            for reason in (
+                decode_selection.last_reason if decode_selection else None,
+                encode_selection.last_reason,
+            )
+            if reason is not None
+        )
         boot = BootContext(
             profile=spec,
             device=spec.device,
-            decode=spec.decode,
-            encode=spec.encode,
+            decode=effective_decode_policy(spec, decode_selection),
+            encode=effective_encode_policy(spec, encode_selection),
+            requested_profile=context.requested_profile or spec.name,
+            degraded_reasons=degraded_reasons,
+            encode_selection=encode_selection,
+            decode_selection=decode_selection,
         )
         context.boot = boot
         return boot
@@ -407,6 +433,7 @@ def named_stages(
     warmups: Mapping[str, BackendWarmup],
     activate: Callable[[BootContext], Iterable[CameraStageOutcome]],
     decode_probe: DecodeProbe | None = None,
+    encode_probe: EncodeProbe | None = None,
     deps: BootDependencies | None = None,
     acquire: LeaseAcquirer | None = None,
     acquire_lease: LeaseAcquirer | None = None,
@@ -425,7 +452,7 @@ def named_stages(
     return (
         gpu_lease_stage(context, acquire=resolved),
         profile_device_stage(context, env, deps),
-        decode_capability_stage(context, env, decode_probe),
+        decode_capability_stage(context, env, decode_probe, encode_probe),
         model_backend_init_stage(context, initializers),
         warmup_stage(context, warmups),
         camera_activation_stage(context, activate),
