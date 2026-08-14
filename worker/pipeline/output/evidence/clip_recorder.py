@@ -118,6 +118,7 @@ class ClipRecorder:
                 ClipActorDependencies(
                     coordinator=self._services.coordinator,
                     publisher=self._services.publisher,
+                    close=self._admission.close,
                     release=self._admission.release,
                     cancel=self._admission.cancel,
                     finalized=self._on_clip_finalized,

@@ -74,6 +74,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 COPY contracts ./contracts
 COPY shared ./shared
 COPY worker ./worker
+COPY scripts/repair_clip_consistency.py ./scripts/repair_clip_consistency.py
 RUN mkdir -p /app/models/fall/lstm-runtime /app/models/pose /app/models/bed
 # State dir is image-owned (matches worker/runtime/state_dir.py's resolver for
 # the root container user); deliberately no VOLUME here to avoid anonymous-

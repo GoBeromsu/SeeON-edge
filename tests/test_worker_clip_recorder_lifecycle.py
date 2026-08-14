@@ -79,6 +79,8 @@ class _Coordinator:
     outcome: ClipOutcome | None = None
     write_started: threading.Event | None = None
     allow_write: threading.Event | None = None
+    seal_started: threading.Event | None = None
+    allow_seal: threading.Event | None = None
     close_all_calls: list[None] = field(default_factory=list)
 
     def set_camera_fps(self, camera_id: str, fps: float) -> None:
@@ -93,6 +95,9 @@ class _Coordinator:
 
     def seal(self, camera_id: str) -> bool:
         del camera_id
+        if self.seal_started is not None and self.allow_seal is not None:
+            self.seal_started.set()
+            assert self.allow_seal.wait(timeout=1.0)
         return True
 
     def finalize(
@@ -159,6 +164,62 @@ def test_recorder_coalesces_event_ids_and_preserves_reference_order(tmp_path: Pa
 
     assert publisher.published == [ClipId(first)]
     assert publisher.metadata[0].event_refs == ("event-1", "event-2")
+
+
+def test_event_admitted_before_finalization_stays_on_active_clip(tmp_path: Path) -> None:
+    publisher = _Publisher()
+    recorder = _recorder(
+        tmp_path,
+        _Coordinator(ClipUnavailable("", ClipReasonCode.ENCODER_FAILED)),
+        publisher,
+        post_event_seconds=1.0,
+    )
+    recorder.start()
+    try:
+        first = recorder.on_event("cam-1", "event-1", "fall.detected")
+        second = recorder.on_event("cam-1", "event-2", "fall.detected")
+        assert first is not None
+        assert second == first
+        assert recorder.on_frame("cam-1", _frame(1, 1.0))
+        assert recorder.flush()
+    finally:
+        recorder.stop()
+
+    assert publisher.metadata[0].event_refs == ("event-1", "event-2")
+
+
+def test_event_admitted_after_finalization_starts_gets_fresh_clip_id(
+    tmp_path: Path,
+) -> None:
+    seal_started = threading.Event()
+    allow_seal = threading.Event()
+    publisher = _Publisher()
+    coordinator = _Coordinator(
+        ClipUnavailable("", ClipReasonCode.ENCODER_FAILED),
+        seal_started=seal_started,
+        allow_seal=allow_seal,
+    )
+    recorder = _recorder(tmp_path, coordinator, publisher)
+    recorder.start()
+    try:
+        first = recorder.on_event("cam-1", "event-1", "fall.detected")
+        assert first is not None
+        assert seal_started.wait(timeout=1.0)
+
+        second = recorder.on_event("cam-1", "event-2", "fall.detected")
+
+        assert second is not None
+        assert second != first
+        allow_seal.set()
+        assert recorder.flush()
+    finally:
+        allow_seal.set()
+        recorder.stop()
+
+    assert [metadata.event_refs for metadata in publisher.metadata] == [
+        ("event-1",),
+        ("event-2",),
+    ]
 
 
 def test_stop_drains_full_queue_after_blocked_frame_write(tmp_path: Path) -> None:

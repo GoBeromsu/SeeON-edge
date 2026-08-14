@@ -144,6 +144,7 @@ def _actor(
         ClipActorDependencies(
             coordinator=coordinator,
             publisher=publisher,
+            close=lambda _camera_id, _clip_id: None,
             release=lambda _camera_id, _clip_id: None,
             finalized=finalized.append,
         ),

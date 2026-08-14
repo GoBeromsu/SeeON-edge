@@ -63,3 +63,9 @@ jobs:
             -e RELAY_TOKEN=ci-boot-smoke-test \
             eldercare-fall-ml-worker:ci \
             python -m worker --check-config
+
+      - name: Packaged clip consistency maintenance CLI smoke
+        run: |
+          docker run --rm \
+            eldercare-fall-ml-worker:ci \
+            python scripts/repair_clip_consistency.py --help

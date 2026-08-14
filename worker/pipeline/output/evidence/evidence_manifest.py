@@ -2,15 +2,14 @@
 
 from __future__ import annotations
 
-import json
-import os
-import stat
 from datetime import datetime
 from pathlib import Path
 from typing import Final
 
 from pydantic import ValidationError
 
+from worker.pipeline.output.evidence.clip_consistency_io import read_strict_json
+from worker.pipeline.output.evidence.clip_consistency_types import ClipConsistencyError
 from worker.pipeline.output.evidence.evidence_media import (
     ClipEvidenceError,
     inspect_finalized_media,
@@ -93,8 +92,12 @@ def verify_ready_manifest(
 
 def parse_manifest(path: Path) -> ClipManifest:
     try:
-        payload = json.loads(_read_manifest(path))
-        state = payload.get("state") if isinstance(payload, dict) else None
+        payload = read_strict_json(
+            path,
+            max_bytes=MAX_MANIFEST_BYTES,
+            error_code="manifest_invalid",
+        )
+        state = payload.get("state")
         match state:
             case "READY":
                 return ReadyClipManifest.model_validate(payload)
@@ -102,31 +105,8 @@ def parse_manifest(path: Path) -> ClipManifest:
                 return UnavailableClipManifest.model_validate(payload)
             case _:
                 raise ClipEvidenceError(EvidenceReasonCode.CORRUPT, "manifest state invalid")
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValidationError) as exc:
+    except (OSError, UnicodeDecodeError, ValidationError, ClipConsistencyError) as exc:
         raise ClipEvidenceError(EvidenceReasonCode.CORRUPT, "manifest invalid") from exc
-
-
-def _read_manifest(path: Path) -> str:
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-    descriptor = os.open(path, flags)
-    try:
-        info = os.fstat(descriptor)
-        if not stat.S_ISREG(info.st_mode) or not 0 < info.st_size <= MAX_MANIFEST_BYTES:
-            raise OSError("manifest file shape invalid")
-        chunks: list[bytes] = []
-        remaining = MAX_MANIFEST_BYTES + 1
-        while remaining > 0:
-            chunk = os.read(descriptor, min(8192, remaining))
-            if not chunk:
-                break
-            chunks.append(chunk)
-            remaining -= len(chunk)
-        payload = b"".join(chunks)
-        if len(payload) > MAX_MANIFEST_BYTES:
-            raise OSError("manifest exceeds size limit")
-        return payload.decode("utf-8")
-    finally:
-        os.close(descriptor)
 
 
 __all__ = [

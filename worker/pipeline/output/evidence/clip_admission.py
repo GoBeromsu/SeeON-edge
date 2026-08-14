@@ -128,22 +128,26 @@ class ClipAdmission:
                 return False
         return True
 
-    def release(self, camera_id: str, clip_id: ClipId) -> None:
+    def close(self, camera_id: str, clip_id: ClipId) -> None:
         with self._lock:
             reservation = self._reservations_by_camera.get(camera_id)
             if reservation is None or reservation.clip_id != clip_id:
                 return
             self._reservations_by_camera.pop(camera_id, None)
 
+    def release(self, camera_id: str, clip_id: ClipId) -> None:
+        self.close(camera_id, clip_id)
+
     def cancel(self, reservation: ClipReservation) -> None:
         with self._lock:
             registered = self._reservations_by_camera.get(reservation.camera_id)
-            if registered != reservation:
-                return
-            self._reservations_by_camera.pop(reservation.camera_id, None)
+            if registered == reservation:
+                self._reservations_by_camera.pop(reservation.camera_id, None)
             self._cancel(reservation)
 
     def _cancel(self, reservation: ClipReservation) -> None:
+        if not reservation.staging_dir.exists():
+            return
         try:
             shutil.rmtree(reservation.staging_dir)
             fsync_directory(reservation.staging_dir.parent)

@@ -74,6 +74,10 @@ class ClipPublicationPort(Protocol):
     ) -> PublishedClip | None: ...
 
 
+class ClipCloseHook(Protocol):
+    def __call__(self, camera_id: str, clip_id: ClipId, /) -> None: ...
+
+
 class ClipReleaseHook(Protocol):
     def __call__(self, camera_id: str, clip_id: ClipId, /) -> None: ...
 
@@ -90,6 +94,7 @@ class ClipFinalizedHook(Protocol):
 class ClipActorDependencies:
     coordinator: RecordingCoordinator
     publisher: ClipPublicationPort
+    close: ClipCloseHook
     release: ClipReleaseHook
     finalized: ClipFinalizedHook | None = None
     encoder_name: str = "libx264"
@@ -181,6 +186,7 @@ class ClipActor:
         if forced and active.last_time_sec < active.cutoff_time_sec:
             self._stats.forced_finalized += 1
         try:
+            self._dependencies.close(camera_id, active.reservation.clip_id)
             _ = self._dependencies.coordinator.seal(camera_id)
             outcome = self._dependencies.coordinator.finalize(
                 camera_id=camera_id,
