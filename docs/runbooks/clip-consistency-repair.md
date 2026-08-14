@@ -1,12 +1,12 @@
 # Edge clip consistency repair
 
-Use this runbook only for the schema-9 worker database repair shipped with
+Use this runbook only for the central edge evidence database repair shipped with
 `repair_clip_consistency.py`. It reconciles `clip_events` from validated final
 READY/UNAVAILABLE manifests. It does not modify events, clip records, final
 manifests, or final media.
 
 Do not run apply or resume against a live worker. Keep the generated journal,
-backup, and receipts in the worker state volume. Apply defaults to off; a plain
+backup, and receipts in the edge-state volume. Apply defaults to off; a plain
 invocation is a dry-run.
 
 ## 1. Select the production Compose command
@@ -27,14 +27,18 @@ The selected `ml-worker` image must contain
 independent persisted paths from `compose.edge.yaml`:
 
 ```text
-state database: /root/.local/state/ml-worker/worker-state.sqlite3
+state database: /var/lib/seeon-state/edge.sqlite3
 clip store:     /var/lib/clip-store
-maintenance:    /root/.local/state/ml-worker/clip-consistency-maintenance
+maintenance:    /var/lib/seeon-state/clip-consistency-maintenance
 ```
+
+Legacy worker-state.sqlite3 remains accepted when a site has not cut over; the
+tool fingerprints either the worker-state lineage or the central edge schema-15
+evidence relation surface. Prefer the central path on current deployments.
 
 Do not substitute the clip-store path for the state database path.
 
-## 2. Stop all worker-state writers and create operator proof
+## 2. Stop all edge database writers and create operator proof
 
 Stop the normal worker first. `--no-deps` on every one-off command prevents
 Compose from starting another service.
@@ -49,13 +53,13 @@ import os
 import time
 from pathlib import Path
 
-root = Path('/root/.local/state/ml-worker/clip-consistency-maintenance')
+root = Path('/var/lib/seeon-state/clip-consistency-maintenance')
 root.mkdir(mode=0o700, parents=True, exist_ok=True)
 os.chmod(root, 0o700)
 now = int(time.time())
 receipt = {
     'format_version': 1,
-    'state_db': '/root/.local/state/ml-worker/worker-state.sqlite3',
+    'state_db': '/var/lib/seeon-state/edge.sqlite3',
     'clip_store': '/var/lib/clip-store',
     'stopped_service': 'ml-worker',
     'stopped_db_writers': ['event', 'config', 'fault'],
@@ -80,7 +84,7 @@ check.
 ```sh
 $DC run --rm --no-deps ml-worker \
   python scripts/repair_clip_consistency.py \
-  --state-db /root/.local/state/ml-worker/worker-state.sqlite3 \
+  --state-db /var/lib/seeon-state/edge.sqlite3 \
   --clip-store /var/lib/clip-store
 ```
 
@@ -98,12 +102,12 @@ another apply.
 ```sh
 $DC run --rm --no-deps ml-worker \
   python scripts/repair_clip_consistency.py \
-  --state-db /root/.local/state/ml-worker/worker-state.sqlite3 \
+  --state-db /var/lib/seeon-state/edge.sqlite3 \
   --clip-store /var/lib/clip-store \
   --apply \
-  --maintenance-root /root/.local/state/ml-worker/clip-consistency-maintenance \
-  --journal /root/.local/state/ml-worker/clip-consistency-maintenance/apply.json \
-  --quiescence-receipt /root/.local/state/ml-worker/clip-consistency-maintenance/quiescence.json
+  --maintenance-root /var/lib/seeon-state/clip-consistency-maintenance \
+  --journal /var/lib/seeon-state/clip-consistency-maintenance/apply.json \
+  --quiescence-receipt /var/lib/seeon-state/clip-consistency-maintenance/quiescence.json
 ```
 
 Apply creates an owner-only online SQLite backup and strict receipt before any
@@ -120,12 +124,12 @@ Re-check quiescence, recreate the short-lived receipt, and run:
 ```sh
 $DC run --rm --no-deps ml-worker \
   python scripts/repair_clip_consistency.py \
-  --state-db /root/.local/state/ml-worker/worker-state.sqlite3 \
+  --state-db /var/lib/seeon-state/edge.sqlite3 \
   --clip-store /var/lib/clip-store \
   --resume \
-  --maintenance-root /root/.local/state/ml-worker/clip-consistency-maintenance \
-  --journal /root/.local/state/ml-worker/clip-consistency-maintenance/apply.json \
-  --quiescence-receipt /root/.local/state/ml-worker/clip-consistency-maintenance/quiescence.json
+  --maintenance-root /var/lib/seeon-state/clip-consistency-maintenance \
+  --journal /var/lib/seeon-state/clip-consistency-maintenance/apply.json \
+  --quiescence-receipt /var/lib/seeon-state/clip-consistency-maintenance/quiescence.json
 ```
 
 Resume is idempotent. A PREPARED journal first requires the schema and every

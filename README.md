@@ -124,10 +124,9 @@ ML_API_PROXY_TARGET=http://127.0.0.1:8000 pnpm --dir front dev
 ## Edge deployment
 
 Copy `.env.edge.prod.example` to `.env.edge.prod`, then replace the real
-per-site values: the `.example` backend URLs, `<facility-id>` /
-`<relay-token>` / dashboard credentials, `ML_WORKER_PROFILE` (production uses
-`cuda`; CPU-only nodes use the overlay below), the host clip-store directory,
-and the digest-pinned GHCR image references
+per-site values: the `.example` backend URL, relay token, dashboard
+credentials, `ML_WORKER_PROFILE`, the host clip-store directory, and the
+digest-pinned GHCR image references
 (`docs/runbooks/edge-image-publish.md`). Every other variable
 `compose.edge.yaml` requires already ships with a working default, so a
 single `.env.edge.prod` is enough — no second env file needed.
@@ -136,17 +135,28 @@ is a persisted Edge dashboard setting that defaults OFF and applies live without
 a worker restart; backend capability checks still gate actual clip relay.
 
 Before `up`, verify the env file actually renders and has no leftover
-`<placeholder>` values:
+`<placeholder>` values. The preflight selects the Intel or NVIDIA overlay from
+`ML_WORKER_PROFILE` and rejects a caller-supplied NVIDIA overlay for CPU, MPS,
+or Intel profiles:
 
 ```bash
 scripts/edge-preflight/check-env.sh .env.edge.prod
 ```
 
-Then start the edge-only stack from this repository root (add
-`-f compose.edge.cpu.yaml` on nodes without an NVIDIA GPU):
+Then start the edge-only stack from this repository root with the same profile
+topology: base Compose only for CPU/MPS, the NVIDIA overlay for
+`nvidia-host-bridge` / `nvidia-device-experimental` (or legacy `cuda`), or the
+Intel overlay for `intel-vaapi-host` (or legacy `igpu`).
 
 ```bash
+# CPU / Apple MPS
 docker compose --env-file .env.edge.prod -f compose.edge.yaml up -d
+
+# NVIDIA
+docker compose --env-file .env.edge.prod -f compose.edge.yaml -f compose.edge.nvidia.yaml up -d
+
+# Intel VAAPI
+docker compose --env-file .env.edge.prod -f compose.edge.yaml -f compose.edge.igpu.yaml up -d
 ```
 
 The images are published as
