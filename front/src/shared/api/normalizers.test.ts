@@ -333,7 +333,14 @@ describe('status normalization', () => {
     expect(normalizeStatusSnapshot({ cameras: {}, runtime: { cameras: {} } })).toEqual({
       cameras: {},
       stale_after_sec: null,
-      runtime: { cameras: {}, worker: null, device: null, clip_recorder: null, stale_after_sec: null },
+      runtime: {
+        cameras: {},
+        worker: null,
+        device: null,
+        clip_export_applied: { enabled: null, version: null, freshness: 'unknown' },
+        clip_recorder: null,
+        stale_after_sec: null,
+      },
     });
   });
 
@@ -374,6 +381,7 @@ describe('status normalization', () => {
         },
         worker: { alive: true, pid: 1234, started_at_sec: 1_719_999_000 },
         device: { backend: 'nvdec', available: true, device_name: 'NVIDIA Test GPU', captured_at_sec: 1_720_000_000 },
+        clip_export_applied: { enabled: true, version: 7, freshness: 'fresh' },
         clip_recorder: { available: true, finalized_clips: 4 },
         stale_after_sec: 15,
       },
@@ -401,6 +409,7 @@ describe('status normalization', () => {
         },
         worker: { alive: true, pid: 1234, started_at_sec: 1_719_999_000 },
         device: { backend: 'nvdec', available: true, device_name: 'NVIDIA Test GPU', captured_at_sec: 1_720_000_000 },
+        clip_export_applied: { enabled: true, version: 7, freshness: 'fresh' },
         clip_recorder: {
           available: true, dropped_frames: null, dropped_events: null, failed_writes: null,
           finalized_clips: 4, video_unavailable_clips: null, active_clips: null, encoder: null,
@@ -444,6 +453,7 @@ describe('status normalization', () => {
         cameras: {},
         worker: null,
         device: null,
+        clip_export_applied: { enabled: null, version: null, freshness: 'unknown' },
         clip_recorder: null,
         stale_after_sec: null,
       },

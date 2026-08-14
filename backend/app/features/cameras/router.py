@@ -47,6 +47,7 @@ from backend.app.features.cameras.topology import (
 )
 from backend.app.features.clips.storage_location_store import ClipStorageLocationStore
 from backend.app.features.detection_settings.store import DetectionSettingsStore
+from backend.app.features.runtime_settings.store import get_runtime_settings_store
 from backend.app.features.status.heartbeat_store import ONLINE, get_heartbeat_store
 from backend.app.shared.dashboard_auth import authorize_dashboard
 from contracts.edge_provisioning_models import EdgeErrorCode, TopologyFloor, TopologyRoom
@@ -302,6 +303,8 @@ class WorkerConfigResponse(BaseModel):
     # mount root (the pre-existing default, unchanged). Consumed by
     # BackendWorkerConfigPayload.clip_store_subdir.
     clip_store_subdir: str | None = None
+    clip_export_enabled: bool = False
+    clip_export_version: int = Field(default=0, ge=0)
 
 
 @router.get("", response_model=ListCamerasResponse)
@@ -733,6 +736,9 @@ def worker_config_snapshot(
     # location before the backend has ever successfully pulled anything.
     _apply_local_detection_overrides(request.app, response, live_pulled)
     _apply_clip_storage_override(request.app, response)
+    runtime_setting = get_runtime_settings_store(request.app).get()
+    response["clip_export_enabled"] = runtime_setting.clip_export_enabled
+    response["clip_export_version"] = runtime_setting.version
     return response
 
 

@@ -11,13 +11,18 @@ function deferred<T>() {
   return { promise, resolve, reject };
 }
 
-function mount<T>(loader: (signal: AbortSignal) => Promise<T>, enabled = true, intervalMs = 1_000) {
+function mount<T>(
+  loader: (signal: AbortSignal) => Promise<T>,
+  enabled = true,
+  intervalMs = 1_000,
+  accept?: (incoming: T, current: T) => boolean,
+) {
   let current!: PollingResource<T>;
   const host = document.createElement('div');
   document.body.append(host);
   const root = createRoot(host);
   function Harness(): JSX.Element {
-    current = usePollingResource(loader, { enabled, intervalMs });
+    current = usePollingResource(loader, { enabled, intervalMs, accept });
     return <span>{current.status}</span>;
   }
   act(() => root.render(<Harness />));
@@ -142,6 +147,39 @@ describe('usePollingResource', () => {
     await act(async () => { second.resolve('new'); await second.promise; });
     await act(async () => { first.resolve('old'); await first.promise; });
     expect(view.current.data).toBe('new');
+    act(() => view.root.unmount());
+  });
+
+  it('keeps an authoritative mutation response when the follow-up refresh fails', async () => {
+    const first = deferred<string>();
+    const loader = vi.fn().mockReturnValueOnce(first.promise).mockRejectedValueOnce(new Error('offline'));
+    const view = mount(loader);
+
+    act(() => view.current.replace('saved-v2'));
+    act(() => view.current.retry());
+    await act(async () => { await Promise.resolve(); });
+    await act(async () => { first.resolve('stale-v1'); await first.promise; });
+
+    expect(view.current).toMatchObject({ status: 'error', data: 'saved-v2' });
+    act(() => view.root.unmount());
+  });
+
+  it('rejects a successful refresh older than an authoritative versioned response', async () => {
+    const stale = deferred<{ version: number }>();
+    const loader = vi.fn().mockResolvedValueOnce({ version: 1 }).mockReturnValueOnce(stale.promise);
+    const view = mount<{ version: number }>(
+      loader,
+      true,
+      1_000,
+      (incoming, current) => incoming.version >= current.version,
+    );
+    await act(async () => { await Promise.resolve(); });
+
+    act(() => view.current.replace({ version: 2 }));
+    act(() => view.current.retry());
+    await act(async () => { stale.resolve({ version: 1 }); await stale.promise; });
+
+    expect(view.current).toMatchObject({ status: 'success', data: { version: 2 } });
     act(() => view.root.unmount());
   });
 

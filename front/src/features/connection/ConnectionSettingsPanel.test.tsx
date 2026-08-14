@@ -29,7 +29,7 @@ const enrolledView: ConnectionView = {
 };
 
 function resource(data: ConnectionView = enrolledView): PollingResource<ConnectionView> {
-  return { status: 'success', data, error: null, lastSuccessAt: Date.now(), refreshing: false, retry: vi.fn() };
+  return { status: 'success', data, error: null, lastSuccessAt: Date.now(), refreshing: false, retry: vi.fn(), replace: vi.fn() };
 }
 
 function renderPanel(value = resource()): { readonly host: HTMLDivElement; readonly root: Root } {

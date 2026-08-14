@@ -19,6 +19,8 @@ payload.
 
 from __future__ import annotations
 
+import os
+from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
@@ -324,13 +326,20 @@ def test_clip_recording_config_rejects_unsafe_store_subdir(value: str) -> None:
 # --- WorkerRuntime._resolved_clip_store_dir ---------------------------------
 
 
-def _fake_runtime(store_subdir: str | None) -> WorkerRuntime:
-    """A minimal stand-in with just enough shape for
-    ``_resolved_clip_store_dir`` (an unbound instance method) to run: it only
-    reads ``self.config.clip.store_subdir``."""
+def _fake_runtime(
+    store_subdir: str | None,
+    *,
+    env: Mapping[str, str] = os.environ,
+    state_dir: Path = Path(DEFAULT_CLIP_STORE_DIR).parent,
+) -> WorkerRuntime:
+    """Minimal shape for the unbound store-resolution method."""
     from types import SimpleNamespace
 
-    return SimpleNamespace(config=SimpleNamespace(clip=SimpleNamespace(store_subdir=store_subdir)))
+    return SimpleNamespace(
+        config=SimpleNamespace(clip=SimpleNamespace(store_subdir=store_subdir)),
+        _env=env,
+        _state_dir=state_dir,
+    )
 
 
 def test_resolved_clip_store_dir_is_the_bare_root_when_no_subdir_selected(
@@ -342,6 +351,16 @@ def test_resolved_clip_store_dir_is_the_bare_root_when_no_subdir_selected(
     resolved = WorkerRuntime._resolved_clip_store_dir(runtime)
 
     assert resolved == Path(DEFAULT_CLIP_STORE_DIR)
+
+
+def test_injected_environment_without_clip_store_uses_worker_state(
+    tmp_path: Path,
+) -> None:
+    runtime = _fake_runtime(None, env={}, state_dir=tmp_path)
+
+    resolved = WorkerRuntime._resolved_clip_store_dir(runtime)
+
+    assert resolved == tmp_path / "clip-store"
 
 
 def test_resolved_clip_store_dir_appends_a_selected_subdir(

@@ -75,9 +75,7 @@ pytestmark = pytest.mark.real_stack
 @pytest.fixture(scope="module")
 def mediamtx() -> Iterator[MediaMtxProcess]:
     if shutil.which("mediamtx") is None:
-        pytest.skip(
-            "mediamtx not on PATH; real-stack E2E runs locally only -- see tests/AGENTS.md"
-        )
+        pytest.skip("mediamtx not on PATH; real-stack E2E runs locally only -- see tests/AGENTS.md")
     process = MediaMtxProcess(
         rtsp_port=free_tcp_port(), path_names=("night", "fall", "day", "nominal")
     )
@@ -103,7 +101,6 @@ def _run_scenario(
 ) -> Iterator[tuple[LiveBackend, WorkerRunHandle, Path]]:
     state_dir = tmp_path / "state"
     clip_store_dir = tmp_path / "clips"
-    monkeypatch.setenv("ML_WORKER_EVENT_CLIP_EXPORT_ENABLED", "1")
 
     publisher = FfmpegPublisher(url=mediamtx.rtsp_url(path_name))
     live_backend = LiveBackend(
@@ -215,8 +212,7 @@ def test_fall_reaches_relay_once_despite_two_rising_edges(
         )
         wait_until(
             lambda: any(
-                alert.event_type == "fall"
-                for alert in live_backend.ingest_client.snapshot_alerts()
+                alert.event_type == "fall" for alert in live_backend.ingest_client.snapshot_alerts()
             ),
             timeout=25.0,
             what="fall alert relay delivery",
@@ -257,9 +253,7 @@ def test_daytime_bed_exit_is_suppressed_before_relay(
     detected_events: list[BedExitEvent] = []
     real_update_frame = BedExitMonitor._update_frame
 
-    def _capturing_update_frame(
-        self: BedExitMonitor, input_value: DecisionInput
-    ) -> BedExitFrame:
+    def _capturing_update_frame(self: BedExitMonitor, input_value: DecisionInput) -> BedExitFrame:
         frame = real_update_frame(self, input_value)
         detected_events.extend(frame.events)
         return frame
@@ -321,8 +315,16 @@ def _assert_h264_yuv420p_faststart(clip_path: Path) -> None:
     assert ffprobe is not None, "ffprobe must be on PATH for the clip-finalize assertion"
     result = subprocess.run(  # noqa: S603 - fixed local test binary, no shell
         [
-            ffprobe, "-v", "error", "-select_streams", "v:0",
-            "-show_entries", "stream=codec_name,pix_fmt", "-of", "json", str(clip_path),
+            ffprobe,
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=codec_name,pix_fmt",
+            "-of",
+            "json",
+            str(clip_path),
         ],
         check=True,
         capture_output=True,
@@ -358,6 +360,7 @@ def _moov_precedes_mdat(path: Path) -> bool:
                 break
             offset += box_size
     return moov_offset is not None and mdat_offset is not None and moov_offset < mdat_offset
+
 
 def test_nominal_30fps_stream_decodes_continuously_without_a_reconnect_loop(
     mediamtx: MediaMtxProcess, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -428,9 +431,7 @@ def test_nominal_30fps_stream_decodes_continuously_without_a_reconnect_loop(
             time.sleep(window_sec)
             samples.append(pump.processed_count)
 
-        deltas = [
-            samples[index + 1] - samples[index] for index in range(len(samples) - 1)
-        ]
+        deltas = [samples[index + 1] - samples[index] for index in range(len(samples) - 1)]
         stalled = [index for index, delta in enumerate(deltas) if delta < min_per_window]
 
         assert not stalled, (

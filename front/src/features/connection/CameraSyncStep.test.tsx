@@ -44,7 +44,7 @@ function cameras(list: CameraRegistry['cameras']): CameraRegistry {
 }
 
 function cameraResource(data: CameraRegistry): PollingResource<CameraRegistry> {
-  return { status: 'success', data, error: null, lastSuccessAt: Date.now(), refreshing: false, retry: vi.fn() };
+  return { status: 'success', data, error: null, lastSuccessAt: Date.now(), refreshing: false, retry: vi.fn(), replace: vi.fn() };
 }
 
 async function renderStep(topology: CameraTopology, camerasData: CameraRegistry, onChanged = () => Promise.resolve()): Promise<{ readonly host: HTMLDivElement; readonly root: Root }> {

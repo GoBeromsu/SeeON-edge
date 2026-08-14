@@ -47,6 +47,8 @@ const statusSnapshot = {
   runtime: { cameras: {}, worker: { alive: true, pid: 1, started_at_sec: 0 }, device: null, clip_recorder: null },
 };
 
+const runtimeSettings = { clip_export_enabled: false, version: 0 };
+
 const clipStorage = {
   root: '/var/lib/clip-store',
   selected_path: '',
@@ -69,6 +71,7 @@ function installFetchMock(): ReturnType<typeof vi.fn> {
     }
     if (url.includes('/connection')) return Promise.resolve({ ok: true, status: 200, json: async () => connectionView });
     if (url.includes('/status')) return Promise.resolve({ ok: true, status: 200, json: async () => statusSnapshot });
+    if (url.includes('/runtime-settings')) return Promise.resolve({ ok: true, status: 200, json: async () => runtimeSettings });
     if (url.includes('/clips/storage')) return Promise.resolve({ ok: true, status: 200, json: async () => clipStorage });
     return Promise.reject(new Error(`unexpected fetch: ${url}`));
   });
@@ -112,6 +115,7 @@ describe('SettingsPage', () => {
     expect(host.textContent).toContain('2단계 · 카메라 확인');
     expect(host.textContent).toContain('3단계 · 서버 반영');
     expect(host.textContent).toContain('처리 상태');
+    expect(host.textContent).toContain('클립 내보내기');
     expect(host.textContent).toContain('클립 저장 공간');
   });
 

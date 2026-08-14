@@ -32,6 +32,7 @@ from worker.runtime.telemetry.status_store import StatusStore
 from worker.runtime.telemetry.wire import (
     ClipRecorderStatus,
     RelayCameraPayload,
+    RelayClipExportPayload,
     RelayClipRecorderPayload,
     RelayDecodePayload,
     RelayGpuPayload,
@@ -67,12 +68,17 @@ class WorkerDiagnostics:
         self._bed_exit_scoring_by_camera: dict[str, BedExitScoringDiagnostics] = {}
         self._encoder = EncoderLifecycleSnapshot()
         self._clip_recorder = ClipRecorderStatus()
+        self._clip_export = RelayClipExportPayload(enabled=False, version=0)
         self._gpu: RelayGpuPayload | None = None
         self._worker: RelayWorkerPayload | None = None
 
     def set_clip_recorder_status(self, status: ClipRecorderStatus) -> None:
         with self._lock:
             self._clip_recorder = status
+
+    def set_clip_export_applied(self, *, enabled: bool, version: int) -> None:
+        with self._lock:
+            self._clip_export = RelayClipExportPayload(enabled=enabled, version=version)
 
     def set_gpu_status(self, status: RelayGpuPayload | None) -> None:
         with self._lock:
@@ -258,14 +264,10 @@ class WorkerDiagnostics:
             )
 
     def snapshot(self) -> RuntimeDiagnosticsSnapshot:
-        statuses = {
-            record.camera_id: record for record in self._status_store.snapshot().cameras
-        }
+        statuses = {record.camera_id: record for record in self._status_store.snapshot().cameras}
         with self._lock:
             stage_timings = {
-                camera_id: tuple(
-                    stages[stage].snapshot(stage) for stage in sorted(stages)
-                )
+                camera_id: tuple(stages[stage].snapshot(stage) for stage in sorted(stages))
                 for camera_id, stages in self._stage_timings.items()
             }
             buses = dict(self._buses)
@@ -307,7 +309,7 @@ class WorkerDiagnostics:
         generation: int | None,
         seq: int,
     ) -> RelayRuntimeStatusPayload:
-        selections, measured_fps, clip_recorder, gpu, worker = self._wire_inputs()
+        selections, measured_fps, clip_recorder, clip_export, gpu, worker = self._wire_inputs()
         cameras = [
             camera_payload(camera_id, selection, measured_fps.get(camera_id))
             for camera_id, selection in sorted(selections.items())
@@ -318,6 +320,7 @@ class WorkerDiagnostics:
             seq,
             cameras,
             clip_recorder,
+            clip_export,
             gpu,
             worker,
         )
@@ -328,7 +331,7 @@ class WorkerDiagnostics:
         generation: int | None,
         seq: int,
     ) -> list[RelayRuntimeStatusPayload]:
-        selections, measured_fps, clip_recorder, gpu, worker = self._wire_inputs()
+        selections, measured_fps, clip_recorder, clip_export, gpu, worker = self._wire_inputs()
         cameras_by_facility: dict[str, list[RelayCameraPayload]] = {
             facility_id: [] for facility_id in set(camera_facilities.values())
         }
@@ -345,6 +348,7 @@ class WorkerDiagnostics:
                 seq,
                 cameras,
                 clip_recorder,
+                clip_export,
                 gpu,
                 worker,
             )
@@ -357,6 +361,7 @@ class WorkerDiagnostics:
         dict[str, DecodeSelection],
         dict[str, float | None],
         ClipRecorderStatus,
+        RelayClipExportPayload,
         RelayGpuPayload | None,
         RelayWorkerPayload | None,
     ]:
@@ -368,9 +373,12 @@ class WorkerDiagnostics:
                 if self._clock() - updated_at <= MEASURED_FPS_MAX_AGE_SEC
             }
             clip_recorder = self._clip_recorder
+            clip_export = self._clip_export.copy()
             gpu = None if self._gpu is None else self._gpu.copy()
             worker = None if self._worker is None else self._worker.copy()
-        return selections, measured_fps, clip_recorder, gpu, worker
+        return selections, measured_fps, clip_recorder, clip_export, gpu, worker
+
+
 __all__ = [
     "BedExitScoringDiagnostics",
     "BedRegionDiagnostics",
@@ -381,6 +389,7 @@ __all__ = [
     "EncodeSelection",
     "EncoderLifecycleSnapshot",
     "RelayCameraPayload",
+    "RelayClipExportPayload",
     "RelayClipRecorderPayload",
     "RelayDecodePayload",
     "RelayGpuPayload",

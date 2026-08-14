@@ -20,6 +20,7 @@ const status: StatusSnapshot = {
     },
     worker: { alive: true, pid: 123, started_at_sec: 100 },
     device: { backend: 'MPS', available: true, device_name: 'Apple M2', captured_at_sec: 100 },
+    clip_export_applied: { enabled: false, version: 0, freshness: 'fresh' },
     clip_recorder: {
       available: true,
       dropped_frames: 0,
@@ -42,6 +43,7 @@ function makeResource(overrides: Partial<PollingResource<StatusSnapshot>> = {}):
     lastSuccessAt: Date.now(),
     refreshing: false,
     retry: vi.fn(),
+    replace: vi.fn(),
     ...overrides,
   };
 }
@@ -84,6 +86,47 @@ describe('ProcessingStatusCard', () => {
     act(() => root.unmount());
   });
 
+  it('shows worker-applied clip export separately with freshness and version', () => {
+    const { host, root } = render();
+    expect(host.textContent).toContain('워커 적용: OFF');
+    expect(host.textContent).toContain('버전 0');
+
+    const stale: StatusSnapshot = {
+      ...status,
+      runtime: {
+        ...status.runtime,
+        clip_export_applied: { enabled: true, version: 4, freshness: 'stale' },
+      },
+    };
+    act(() => root.render(<ProcessingStatusCard resource={makeResource({ data: stale })} />));
+    expect(host.textContent).toContain('워커 적용: ON');
+    expect(host.textContent).toContain('상태 지연');
+    act(() => root.unmount());
+  });
+
+  it('labels offline and unknown applied-state freshness without inventing a value', () => {
+    const offline: StatusSnapshot = {
+      ...status,
+      runtime: {
+        ...status.runtime,
+        clip_export_applied: { enabled: true, version: 5, freshness: 'offline' },
+      },
+    };
+    const { host, root } = render(makeResource({ data: offline }));
+    expect(host.textContent).toContain('워커 오프라인');
+
+    const unknown: StatusSnapshot = {
+      ...status,
+      runtime: {
+        ...status.runtime,
+        clip_export_applied: { enabled: null, version: null, freshness: 'unknown' },
+      },
+    };
+    act(() => root.render(<ProcessingStatusCard resource={makeResource({ data: unknown })} />));
+    expect(host.textContent).toContain('워커 적용: 확인 중');
+    act(() => root.unmount());
+  });
+
   it('shows 정상 when the worker is alive', () => {
     const { host, root } = render();
     expect(host.textContent).toContain('정상');
@@ -101,7 +144,14 @@ describe('ProcessingStatusCard', () => {
     const empty: StatusSnapshot = {
       cameras: {},
       stale_after_sec: null,
-      runtime: { cameras: {}, worker: null, device: null, clip_recorder: null, stale_after_sec: null },
+      runtime: {
+        cameras: {},
+        worker: null,
+        device: null,
+        clip_export_applied: { enabled: null, version: null, freshness: 'unknown' },
+        clip_recorder: null,
+        stale_after_sec: null,
+      },
     };
     const { host, root } = render(makeResource({ data: empty }));
     const text = host.textContent ?? '';

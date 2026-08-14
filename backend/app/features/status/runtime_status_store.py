@@ -56,6 +56,7 @@ class RuntimeStatusSnapshot:
     received_at: float
     cameras: tuple[dict[str, Any], ...]
     clip_recorder: dict[str, Any]
+    clip_export: dict[str, Any] | None
     gpu: dict[str, Any] | None
     worker: dict[str, Any] | None
 
@@ -92,10 +93,13 @@ class RuntimeStatusStore:
         seq = int(payload["seq"])
         cameras = payload["cameras"]
         clip_recorder = payload["clip_recorder"]
+        clip_export = payload.get("clip_export")
         gpu = payload.get("gpu")
         worker = payload.get("worker")
         if not isinstance(cameras, list) or not isinstance(clip_recorder, dict):
             raise TypeError("runtime status payload has invalid telemetry fields")
+        if clip_export is not None and not isinstance(clip_export, dict):
+            raise TypeError("runtime status payload has invalid clip_export")
         if gpu is not None and not isinstance(gpu, dict):
             raise TypeError("runtime status payload has invalid gpu")
         if worker is not None and not isinstance(worker, dict):
@@ -122,6 +126,7 @@ class RuntimeStatusStore:
                 received_at=stamped,
                 cameras=tuple(deepcopy(cameras)),
                 clip_recorder=deepcopy(clip_recorder),
+                clip_export=deepcopy(clip_export),
                 gpu=deepcopy(gpu),
                 worker=deepcopy(worker),
             )
@@ -141,6 +146,7 @@ class RuntimeStatusStore:
                     "stale": current - status.received_at > self.stale_after_sec,
                     "cameras": deepcopy(list(status.cameras)),
                     "clip_recorder": deepcopy(status.clip_recorder),
+                    "clip_export": deepcopy(status.clip_export),
                     "gpu": deepcopy(status.gpu),
                     "worker": deepcopy(status.worker),
                     "latency": deepcopy(self._latency_for_facility(facility_id)),

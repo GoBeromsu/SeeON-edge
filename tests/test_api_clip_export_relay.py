@@ -9,6 +9,7 @@ from typing import BinaryIO
 from fastapi.testclient import TestClient
 
 from backend.app.features.cameras.store import CameraRegistryStore
+from backend.app.features.runtime_settings.store import RuntimeSettingsStore
 from backend.app.main import create_app, no_lifespan
 from shared.events.evidence_export_contract import BackendCapabilities, ClipReceipt, DeliveryFailure
 
@@ -62,7 +63,10 @@ def _client(tmp_path: Path, backend: FakeBackendEvidenceClient, *, enabled: bool
     )
     app.state.camera_registry = registry
     app.state.backend_evidence_client = backend
-    app.state.event_clip_export_enabled = enabled
+    runtime_settings = RuntimeSettingsStore(tmp_path / "catalog.sqlite3")
+    if enabled:
+        runtime_settings.set_clip_export_enabled(True)
+    app.state.runtime_settings_store = runtime_settings
     app.state.clip_store_root = tmp_path / "clip-store"
     return TestClient(app)
 
@@ -119,6 +123,27 @@ def test_capability_stays_zero_when_feature_is_disabled(tmp_path: Path) -> None:
     # Then: environment support alone never advertises backend readiness.
     assert response.status_code == 200
     assert response.json() == {"event_idempotency": 1, "clip_export": 0}
+
+
+def test_capability_reads_live_persisted_setting_without_app_rebuild(tmp_path: Path) -> None:
+    backend = FakeBackendEvidenceClient()
+    client = _client(tmp_path, backend, enabled=False)
+    headers = {"X-Edge-Relay-Token": TOKEN}
+
+    before = client.get(
+        "/api/v1/relay/capabilities",
+        params={"camera_id": "camera-1"},
+        headers=headers,
+    )
+    RuntimeSettingsStore(tmp_path / "catalog.sqlite3").set_clip_export_enabled(True)
+    after = client.get(
+        "/api/v1/relay/capabilities",
+        params={"camera_id": "camera-1"},
+        headers=headers,
+    )
+
+    assert before.json()["clip_export"] == 0
+    assert after.json()["clip_export"] == 1
 
 
 def test_ready_relay_resolves_owned_media_by_clip_id_and_returns_typed_receipt(

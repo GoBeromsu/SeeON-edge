@@ -78,11 +78,11 @@ const pendingPreview: TopologyPreview = {
 };
 
 function connectionResource(data: ConnectionView): PollingResource<ConnectionView> {
-  return { status: 'success', data, error: null, lastSuccessAt: Date.now(), refreshing: false, retry: vi.fn() };
+  return { status: 'success', data, error: null, lastSuccessAt: Date.now(), refreshing: false, retry: vi.fn(), replace: vi.fn() };
 }
 
 function camerasResource(data: CameraRegistry): PollingResource<CameraRegistry> {
-  return { status: 'success', data, error: null, lastSuccessAt: Date.now(), refreshing: false, retry: vi.fn() };
+  return { status: 'success', data, error: null, lastSuccessAt: Date.now(), refreshing: false, retry: vi.fn(), replace: vi.fn() };
 }
 
 async function flush(): Promise<void> {

@@ -23,7 +23,8 @@ import yaml
 from edge_worker_fixtures import edge_config_payload
 
 import worker.__main__ as worker_main
-from worker.runtime.config import RestartDirective
+from contracts.worker_config import PulledWorkerConfig
+from worker.runtime.config import RestartDirective, WorkerConfigPoll
 from worker.runtime.worker import WorkerRuntime
 
 
@@ -70,9 +71,7 @@ def _isolate_from_default_ingest_composition(monkeypatch: pytest.MonkeyPatch) ->
     """
     real_init = WorkerRuntime.__init__
 
-    def _init_with_fake_loop_factory(
-        self: WorkerRuntime, *args: object, **kwargs: object
-    ) -> None:
+    def _init_with_fake_loop_factory(self: WorkerRuntime, *args: object, **kwargs: object) -> None:
         kwargs.setdefault("loop_factory", _fake_loop_factory)
         real_init(self, *args, **kwargs)
 
@@ -305,8 +304,28 @@ def test_restart_check_wired_from_config_relay_settings(
     assert relay_url == "http://127.0.0.1:8000"
     assert relay_token == "relay-token-1"
     assert boot_directive == RestartDirective(generation=0, version=0)
-    assert pull_config is worker_main.pull_worker_config
+    assert callable(pull_config)
+    assert getattr(pull_config, "__name__", "") == "_pull_and_apply_runtime_settings"
     assert constructed[0]._restart_check is sentinel_check  # noqa: SLF001
+
+    live_update = WorkerConfigPoll(
+        restart_config=PulledWorkerConfig(
+            config_version=0,
+            restart_epoch=0,
+            night_window=None,
+            cameras=(),
+        ),
+        clip_export_enabled=True,
+        clip_export_version=1,
+    )
+    monkeypatch.setattr(
+        worker_main,
+        "pull_worker_config_poll",
+        lambda *_args, **_kwargs: live_update,
+    )
+
+    assert pull_config(relay_url, relay_token) is live_update.restart_config
+    assert constructed[0]._clip_export_policy.enabled() is True  # noqa: SLF001
 
 
 def test_restart_check_relay_env_vars_override_config(
@@ -347,9 +366,7 @@ def test_max_frames_per_camera_wired_to_workerruntime_constructor(
     monkeypatch.setattr(WorkerRuntime, "__init__", _spy_init)
     monkeypatch.setattr(WorkerRuntime, "run", lambda self: None)
 
-    exit_code = worker_main.main(
-        ["--config", str(config_path), "--max-frames-per-camera", "3200"]
-    )
+    exit_code = worker_main.main(["--config", str(config_path), "--max-frames-per-camera", "3200"])
 
     assert exit_code == 0
     assert len(constructed) == 1
@@ -460,9 +477,7 @@ def test_heartbeat_on_start_failure_is_nonfatal_and_run_continues(
 # --- exit codes 0 / 1 / 3 from runtime.run() ------------------------------
 
 
-def test_clean_run_returns_zero_exit_code(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def test_clean_run_returns_zero_exit_code(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     config_path = _write_config(tmp_path)
     monkeypatch.setattr(WorkerRuntime, "run", lambda self: None)
 

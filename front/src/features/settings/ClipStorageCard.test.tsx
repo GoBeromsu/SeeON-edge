@@ -34,6 +34,7 @@ function makeResource(overrides: Partial<PollingResource<ClipStorageInfo>> = {})
     lastSuccessAt: Date.now(),
     refreshing: false,
     retry: vi.fn(),
+    replace: vi.fn(),
     ...overrides,
   };
 }

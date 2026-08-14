@@ -302,7 +302,6 @@ def _stage_one_admitted_event(outbox_path: Path) -> str:
 
 
 def _enable_export(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
-    monkeypatch.setenv("ML_WORKER_EVENT_CLIP_EXPORT_ENABLED", "1")
     monkeypatch.setenv("CLIP_STORE_DIR", str(tmp_path / "clip-store"))
     # Matches the default `_evidence_outbox_path(state_dir)` filename -- the
     # composition root always threads `state_dir=tmp_path` into `WorkerRuntime`
@@ -543,6 +542,7 @@ def _compose_with(
     tmp_path: Path,
 ) -> None:
     """Run composition with the export runtime and clip store stubbed out."""
+    monkeypatch.setenv("CLIP_STORE_DIR", str(tmp_path / "clipstore"))
     monkeypatch.setattr(
         worker_module,
         "ClipRecorderConfig",
@@ -830,9 +830,7 @@ def test_clip_disabled_shrinks_the_evidence_tap_built_by_composition(
 
     def _evidence_capacity(*, clip_enabled: bool) -> int:
         captured.clear()
-        runtime = _runtime(
-            _config("camera-a", clip_enabled=clip_enabled), serving, loops, tmp_path
-        )
+        runtime = _runtime(_config("camera-a", clip_enabled=clip_enabled), serving, loops, tmp_path)
         # _build_camera refuses to run without a fall model, and that guard
         # sits before the bus is built. A sentinel is enough: nothing after the
         # bus construction matters for this assertion.
@@ -861,21 +859,11 @@ def test_clip_disabled_shrinks_the_evidence_tap_built_by_composition(
     assert off_capacity == 1
 
 
-def test_enabled_but_misconfigured_export_fails_closed_instead_of_going_quiet(
+def test_misconfigured_event_delivery_fails_closed_instead_of_going_quiet(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """ADR-0003: a switched-on, misconfigured export must not degrade silently.
-
-    ``EvidenceExportRuntime.from_environment`` returns ``None`` on its own when
-    the env gate is off -- that is the explicit opt-out. A ``ValueError`` means
-    the gate is ON and the configuration is incomplete, which used to be logged
-    as a warning and turned into "no delivery". A worker that looks healthy
-    while alerts pile up unsent is exactly what that decision removes.
-    """
-    # The gate must be ON: this test is about "switched on and broken", and
-    # composition now short-circuits before building anything when it is off.
-    monkeypatch.setenv("ML_WORKER_EVENT_CLIP_EXPORT_ENABLED", "1")
+    """Relay credentials are required because event delivery is never gated off."""
     serving = _FakeServingClient()
     loops = _InstantLoopFactory()
     runtime = _runtime(_config("camera-a", clip_enabled=False), serving, loops, tmp_path)
@@ -884,7 +872,7 @@ def test_enabled_but_misconfigured_export_fails_closed_instead_of_going_quiet(
         raise ValueError("evidence export requires relay URL, token, and camera")
 
     monkeypatch.setattr(
-        worker_module.EvidenceExportRuntime, "from_environment", staticmethod(_misconfigured)
+        worker_module.EvidenceExportRuntime, "from_config", staticmethod(_misconfigured)
     )
     monkeypatch.setattr(
         worker_module,
@@ -986,21 +974,13 @@ def test_sender_start_is_a_noop_when_export_is_not_enabled(
     runtime._start_export_sender()  # noqa: SLF001
 
 
-def test_clip_only_env_cannot_brick_a_worker_with_clip_and_export_both_off(
+def test_clip_retention_env_cannot_brick_event_delivery_when_recording_is_off(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A stray clip setting must not fail a worker that uses neither.
-
-    ``ClipRecorderConfig`` parses clip-only environment variables and raises on
-    malformed values (``int(raw)`` / ``float(raw)`` in
-    ``worker/pipeline/output/evidence/clip_config.py``). Building it before the
-    export gate is consulted meant that with clip recording off *and* export
-    off -- the default posture -- a malformed CLIP_STORE_RETENTION_DAYS still
-    aborted camera activation, for a subsystem that process never uses.
-    """
+    """Event delivery does not parse recorder retention configuration."""
     monkeypatch.setenv("CLIP_STORE_RETENTION_DAYS", "not-a-number")
-    monkeypatch.delenv("ML_WORKER_EVENT_CLIP_EXPORT_ENABLED", raising=False)
+    monkeypatch.setenv("CLIP_STORE_DIR", str(tmp_path / "clip-store"))
 
     # Sanity: the malformed value really does break the config object.
     with pytest.raises(ValueError, match="invalid literal"):
@@ -1010,13 +990,13 @@ def test_clip_only_env_cannot_brick_a_worker_with_clip_and_export_both_off(
     loops = _InstantLoopFactory()
     runtime = _runtime(_config("camera-a", clip_enabled=False), serving, loops, tmp_path)
 
-    # Composition must not touch that config when export is gated off.
     runtime._compose_evidence_export(  # noqa: SLF001
         SimpleNamespace(encode=SimpleNamespace())
     )
 
-    assert runtime._evidence_export_runtime is None  # noqa: SLF001
+    assert runtime._evidence_export_runtime is not None  # noqa: SLF001
     assert runtime._clip_recorder is None  # noqa: SLF001
+
 
 def test_recorder_off_init_failure_is_typed_whatever_the_exception_class(
     tmp_path: Path,

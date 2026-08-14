@@ -23,6 +23,7 @@ function camerasResource(overrides: Partial<PollingResource<CameraRegistry>> = {
     lastSuccessAt: Date.now(),
     refreshing: false,
     retry: vi.fn(),
+    replace: vi.fn(),
     ...overrides,
   };
 }
@@ -39,6 +40,7 @@ function systemResource(overrides: Partial<PollingResource<SystemSnapshot>> = {}
     lastSuccessAt: Date.now(),
     refreshing: false,
     retry: vi.fn(),
+    replace: vi.fn(),
     ...overrides,
   };
 }

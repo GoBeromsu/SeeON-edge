@@ -42,7 +42,7 @@ from contracts.runner import Image, RunnerResult
 from shared.events.evidence_http_transport import HttpResult
 from worker.pipeline.ingest.lifecycle import IngestReporter
 from worker.pipeline.output.evidence.clip_recorder_models import ClipRecorderStats
-from worker.runtime.config import CameraRuntimeConfig, WorkerConfig
+from worker.runtime.config import CameraRuntimeConfig, LiveClipExportPolicy, WorkerConfig
 from worker.runtime.lease import GpuLease
 from worker.runtime.profile.registry import VerifyResult
 from worker.runtime.telemetry.runtime_diagnostics import WorkerDiagnostics
@@ -365,6 +365,19 @@ def test_runtime_status_payload_reports_registered_cameras_and_worker_status(
     assert isinstance(payload["worker"]["pid"], int)
     assert isinstance(payload["worker"]["started_at_sec"], float)
     assert payload["worker"]["profile_boot_error"] is None
+
+
+def test_runtime_status_tick_reads_the_latest_applied_clip_export_policy() -> None:
+    runtime = WorkerRuntime.__new__(WorkerRuntime)
+    runtime.diagnostics = WorkerDiagnostics()
+    runtime._clip_recorder = None  # noqa: SLF001
+    runtime._clip_export_policy = LiveClipExportPolicy(False, 0)  # noqa: SLF001
+
+    runtime._clip_export_policy.apply(enabled=True, version=4)  # noqa: SLF001
+    runtime._refresh_runtime_status_telemetry()  # noqa: SLF001
+
+    payload = runtime.diagnostics.to_payload("facility-a", None, 0)
+    assert payload["clip_export"] == {"enabled": True, "version": 4}
 
 
 def test_refresh_clip_recorder_telemetry_reads_live_stats_into_diagnostics() -> None:

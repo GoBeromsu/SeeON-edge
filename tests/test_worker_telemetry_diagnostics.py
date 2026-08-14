@@ -111,7 +111,14 @@ def test_local_metric_is_excluded_from_frozen_wire_payload() -> None:
     payload = diagnostics.to_payload("facility-1", None, 1)
 
     # Then
-    assert set(payload) == {"facility_id", "generation", "seq", "cameras", "clip_recorder"}
+    assert set(payload) == {
+        "facility_id",
+        "generation",
+        "seq",
+        "cameras",
+        "clip_recorder",
+        "clip_export",
+    }
     assert set(payload["cameras"][0]) == {"camera_id", "decode"}
     assert "local_metric_must_not_leak" not in repr(payload)
 

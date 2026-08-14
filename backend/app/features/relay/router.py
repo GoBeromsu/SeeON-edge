@@ -101,10 +101,7 @@ class RelayAlertRequest(BaseModel):
                     raise ValueError("inline snapshot requires an edge_event_id")
                 if self.snapshot.mime_type != "image/jpeg":
                     raise ValueError("inline snapshot MIME type must be image/jpeg")
-                if (
-                    self.snapshot.size_bytes <= 0
-                    or self.snapshot.size_bytes != len(snapshot_bytes)
-                ):
+                if self.snapshot.size_bytes <= 0 or self.snapshot.size_bytes != len(snapshot_bytes):
                     raise ValueError("inline snapshot size_bytes must exactly match decoded bytes")
                 if self.snapshot.sha256 != hashlib.sha256(snapshot_bytes).hexdigest():
                     raise ValueError("inline snapshot sha256 must match decoded bytes")
@@ -171,6 +168,13 @@ class RelayWorkerStatus(BaseModel):
     profile_boot_error: str | None = Field(default=None)
 
 
+class RelayClipExportStatus(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    enabled: bool = Field()
+    version: int = Field(ge=0)
+
+
 class RelayClipRecorderStatus(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -192,6 +196,7 @@ class RelayRuntimeStatusRequest(BaseModel):
     seq: int = Field(ge=0)
     cameras: list[RelayRuntimeStatusCamera] = Field()
     clip_recorder: RelayClipRecorderStatus
+    clip_export: RelayClipExportStatus | None = Field(default=None)
     gpu: RelayGpuStatus | None = Field(default=None)
     worker: RelayWorkerStatus | None = Field(default=None)
 
@@ -505,8 +510,7 @@ def _log_unresolved_runtime_status_cameras(
             _camera_binding(request, camera.camera_id, payload.facility_id)
         except HTTPException as exc:
             logger.warning(
-                "runtime-status camera unresolved (recorded anyway): "
-                "camera_id=%s detail=%s",
+                "runtime-status camera unresolved (recorded anyway): camera_id=%s detail=%s",
                 camera.camera_id,
                 exc.detail,
             )
@@ -613,5 +617,6 @@ def _backend_ingest_client(request: Request, *, camera_id: str) -> BackendIngest
             detail="backend ingest client is not configured",
         )
     return client
+
 
 __all__ = ["router"]

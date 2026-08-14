@@ -73,9 +73,7 @@ class FallModelConfig(BaseModel):
             raise ConfigValidationError("input_shape must be [window, 51]")
         for relative in (self.weights, self.architecture, self.metadata):
             if not (self.artifact_dir / relative).exists():
-                raise ConfigValidationError(
-                    f"missing {relative} at configured artifact directory"
-                )
+                raise ConfigValidationError(f"missing {relative} at configured artifact directory")
         return self
 
 
@@ -110,11 +108,10 @@ class ClipRecordingConfig(BaseModel):
     runtime diagnostics (``set_clip_recorder_status``) instead of silently
     disabling clips.
 
-    This is independent of, and takes no precedence over, the
-    ``ML_WORKER_EVENT_CLIP_EXPORT_ENABLED`` environment gate. That gate is the
-    export *sender* opt-in (whether staged evidence is shipped to the relay);
-    this flag controls whether a *recorder* exists in the first place. All four
-    combinations are valid, and evidence delivery is composed either way.
+    This is independent of the persisted live clip-export policy: this flag
+    controls whether a recorder exists, while the runtime setting controls
+    whether already-durable clips may be claimed for relay. Event delivery is
+    composed in either state.
     """
 
     model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True, extra="forbid")
@@ -153,6 +150,8 @@ class WorkerConfig(BaseModel):
     domains: DomainsConfig = Field(default_factory=DomainsConfig)
     dev_mjpeg: DevMjpegConfig = Field(default_factory=DevMjpegConfig)
     clip: ClipRecordingConfig = Field(default_factory=ClipRecordingConfig)
+    clip_export_enabled: bool = False
+    clip_export_version: int = Field(default=0, ge=0)
     # Issue #150: an empty roster is a valid boot state, not a config error --
     # a fresh install has zero cameras until an operator registers one, and
     # the worker must still pass its boot gates (profile/device, decode

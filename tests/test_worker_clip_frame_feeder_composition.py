@@ -118,13 +118,15 @@ def _make_recording_clip_recorder_class(created: list[object]) -> type:
 
     @final
     class _RecordingClipRecorder:
-        def __init__(self, *_args: object, **_kwargs: object) -> None:
+        def __init__(self, *_args: object, **kwargs: object) -> None:
             self.frames: list[tuple[str, Frame]] = []
             self._lock = threading.Lock()
+            startup_hook = kwargs.get("startup_hook")
+            self._startup_hook = startup_hook if callable(startup_hook) else lambda: None
             created.append(self)
 
         def start(self) -> None:
-            return None
+            self._startup_hook()
 
         def stop(self, *, timeout: float = 5.0) -> None:
             del timeout
@@ -273,9 +275,7 @@ def test_frames_published_on_the_bus_actually_reach_the_clip_recorders_on_frame(
 ) -> None:
     _stub_heartbeat_transport(monkeypatch)
     created: list[object] = []
-    monkeypatch.setattr(
-        worker_module, "ClipRecorder", _make_recording_clip_recorder_class(created)
-    )
+    monkeypatch.setattr(worker_module, "ClipRecorder", _make_recording_clip_recorder_class(created))
     packets = tuple(_packet("camera-a", seq) for seq in range(1, 6))
 
     def loop_factory(
@@ -297,9 +297,7 @@ def test_worker_stop_joins_every_clip_frame_feeder_thread(
 ) -> None:
     _stub_heartbeat_transport(monkeypatch)
     created: list[object] = []
-    monkeypatch.setattr(
-        worker_module, "ClipRecorder", _make_recording_clip_recorder_class(created)
-    )
+    monkeypatch.setattr(worker_module, "ClipRecorder", _make_recording_clip_recorder_class(created))
     packets_by_camera = {
         "camera-a": (_packet("camera-a", 1),),
         "camera-b": (_packet("camera-b", 1),),

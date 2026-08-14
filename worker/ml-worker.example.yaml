@@ -45,8 +45,8 @@ domains:
 # running without clips and the degraded state surfaces through runtime
 # diagnostics (/status) instead of failing silently.
 #
-# Independent of the ML_WORKER_EVENT_CLIP_EXPORT_ENABLED environment gate,
-# which controls the export *sender* rather than whether a recorder exists.
+# Clip export is an independent persisted runtime setting in the Edge
+# dashboard. It defaults OFF and never disables event delivery.
 clip:
   enabled: true
 cameras:

@@ -27,6 +27,7 @@ function makeResource(overrides: Partial<PollingResource<DetectionSettings>> = {
     lastSuccessAt: Date.now(),
     refreshing: false,
     retry: vi.fn(),
+    replace: vi.fn(),
     ...overrides,
   };
 }

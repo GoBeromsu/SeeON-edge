@@ -4,6 +4,7 @@ import {
   useClipStorageResource,
   useConnectionResource,
   useDetectionSettingsResource,
+  useRuntimeSettingsResource,
   useStatusResource,
   useSystemResource,
 } from '@/shared/api/usePollingResource';
@@ -12,6 +13,7 @@ import { DetectionSettingsCard } from '@/features/settings/DetectionSettingsCard
 import { EdgeSetupWizard } from '@/features/connection/EdgeSetupWizard';
 import { ProcessingStatusCard } from '@/features/settings/ProcessingStatusCard';
 import { ClipStorageCard } from '@/features/settings/ClipStorageCard';
+import { ClipExportSettingsCard } from '@/features/settings/ClipExportSettingsCard';
 
 /** 설정 화면 — 카메라(좌) + 탐지 설정/서버 연결/처리 상태/클립 저장 공간(우) 7:5 2컬럼 (front/design-handoff/README.md §5). */
 export function SettingsPage(): JSX.Element {
@@ -21,6 +23,7 @@ export function SettingsPage(): JSX.Element {
   const connectionResource = useConnectionResource(true);
   const statusResource = useStatusResource(true);
   const clipStorageResource = useClipStorageResource(true);
+  const runtimeSettingsResource = useRuntimeSettingsResource(true);
 
   return (
     <section className="page-placeholder">
@@ -37,6 +40,7 @@ export function SettingsPage(): JSX.Element {
           <DetectionSettingsCard resource={detectionResource} />
           <EdgeSetupWizard connectionResource={connectionResource} camerasResource={camerasResource} />
           <ProcessingStatusCard resource={statusResource} />
+          <ClipExportSettingsCard resource={runtimeSettingsResource} />
           <ClipStorageCard resource={clipStorageResource} />
         </div>
       </div>

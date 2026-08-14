@@ -113,15 +113,27 @@ def test_evidence_startup_failure_releases_lock_and_never_accepts_clip(
     assert events == ["lock", "lock-close"]
 
 
-def test_export_runtime_is_disabled_by_default_without_network_configuration(
-    tmp_path: Path,
-) -> None:
-    assert EvidenceExportRuntime.from_environment(
+def test_event_delivery_runtime_exists_when_clip_policy_is_off(tmp_path: Path) -> None:
+    runtime = EvidenceExportRuntime.from_config(
         store_dir=tmp_path,
-        relay_url="",
-        relay_token=None,
+        relay_url="http://relay.test",
+        relay_token="relay-token",
         probe_camera_id="camera-1",
-    ) is None
+        clip_export_enabled=lambda: False,
+    )
+
+    assert runtime is not None
+
+
+def test_event_delivery_runtime_rejects_missing_relay_credentials(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="relay URL, token"):
+        EvidenceExportRuntime.from_config(
+            store_dir=tmp_path,
+            relay_url="",
+            relay_token=None,
+            probe_camera_id="camera-1",
+            clip_export_enabled=lambda: False,
+        )
 
 
 def test_runtime_builds_stager_on_the_initialized_outbox(tmp_path: Path) -> None:

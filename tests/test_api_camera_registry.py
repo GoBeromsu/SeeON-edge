@@ -223,6 +223,8 @@ def test_camera_registry_crud_masks_rtsp_versions_and_worker_config_auth(
         assert worker_config.status_code == 200
         assert worker_config.json() == {
             "registry_version": 1,
+            "clip_export_enabled": False,
+            "clip_export_version": 0,
             "cameras": [
                 {
                     "camera_id": camera["id"],
@@ -471,6 +473,8 @@ def test_worker_config_uses_registry_first_and_metadata_from_backend_pull(tmp_pa
     assert worker_config.status_code == 200
     expected = {
         "registry_version": 1,
+        "clip_export_enabled": False,
+        "clip_export_version": 0,
         "cameras": [
             {
                 "camera_id": "camera-1",
@@ -715,6 +719,8 @@ def test_worker_config_surfaces_empty_roster_when_registry_empty(tmp_path) -> No
 
     expected = {
         "registry_version": 0,
+        "clip_export_enabled": False,
+        "clip_export_version": 0,
         "cameras": [],
         "config_version": 42,
         "restart_epoch": 5,
@@ -1519,6 +1525,8 @@ def test_list_cameras_includes_backend_only_roster_camera(tmp_path) -> None:
             "bed_zone": None,
         }
     ]
+
+
 def test_list_cameras_includes_backend_only_roster_camera_without_created_at(tmp_path) -> None:
     app = create_app(lifespan=no_lifespan)
     app.state.edge_relay_token = "relay-token"
@@ -1570,8 +1578,6 @@ def test_list_cameras_includes_backend_only_roster_camera_without_created_at(tmp
             "bed_zone": None,
         }
     ]
-
-
 
 
 def test_list_cameras_includes_local_only_camera_with_null_roster_names(tmp_path) -> None:
@@ -1771,6 +1777,7 @@ def test_space_fallback_never_steals_explicitly_mapped_roster_row(
     backend_ids = [c.get("backend_camera_id") for c in cameras.values()]
     assert backend_ids.count("backend-1") == 1
 
+
 @pytest.mark.parametrize(
     ("local_ids", "backend_ids"),
     (
@@ -1873,6 +1880,7 @@ def test_list_cameras_reflects_room_name_after_roster_refresh(
         "API_CONNECTION_SETTINGS_PATH", str(tmp_path / "connection-settings.sqlite3")
     )
     from backend.app.features.connection.store import ConnectionSettingsStore
+
     # refresh_backend_config only runs once a backend_client_bundle exists, which
     # requires the full enrollment row -- not just config_url/facility_id.
     ConnectionSettingsStore(tmp_path / "connection-settings.sqlite3").save(
@@ -1896,9 +1904,10 @@ def test_list_cameras_reflects_room_name_after_roster_refresh(
     assert refresh_backend_config(app) is True
     with TestClient(app) as client:
         _login(client)
-        assert client.get("/api/v1/cameras", headers=AUTH).json()["cameras"][0][
-            "space_name"
-        ] == "101호"
+        assert (
+            client.get("/api/v1/cameras", headers=AUTH).json()["cameras"][0]["space_name"]
+            == "101호"
+        )
 
         assert refresh_backend_config(app) is True
         response = client.get("/api/v1/cameras", headers=AUTH)
@@ -1934,6 +1943,7 @@ def test_roster_refresh_failure_preserves_last_good_and_marks_stale(
 
     monkeypatch.setenv("API_BACKEND_CONFIG_URL", "http://backend/ml-config")
     from backend.app.features.connection.store import ConnectionSettingsStore
+
     conn_path = tmp_path / "connection-settings.sqlite3"
     monkeypatch.setenv("API_CONNECTION_SETTINGS_PATH", str(conn_path))
     # refresh_backend_config only runs once a backend_client_bundle exists, which
@@ -2270,9 +2280,7 @@ def test_create_camera_force_register_persists_despite_probe_failure(
     assert record["last_probed_at"] is not None
 
 
-def test_patch_camera_rtsp_url_rejects_duplicate(
-    tmp_path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_patch_camera_rtsp_url_rejects_duplicate(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ML_API_WORKER_PROBE_ORIGIN", "http://worker.local:8090")
 
     def fake_urlopen(request, timeout: float) -> FakeHTTPResponse:
@@ -2353,9 +2361,7 @@ def test_test_camera_persists_probe_result(tmp_path, monkeypatch: pytest.MonkeyP
     assert camera["last_probed_at"] is not None
 
 
-def _register_camera_for_probe(
-    client: TestClient, label: str, rtsp_url: str
-) -> dict[str, object]:
+def _register_camera_for_probe(client: TestClient, label: str, rtsp_url: str) -> dict[str, object]:
     """probe 분류를 검사하기 위한 카메라 한 대를 등록한다.
 
     등록 자체는 probe 결과와 무관하므로(#147/#159로 게이트가 제거됐다) 어떤

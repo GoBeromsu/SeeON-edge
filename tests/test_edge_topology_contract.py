@@ -373,31 +373,15 @@ def test_edge_compose_wires_worker_probe_origin_to_ml_api_only() -> None:
     )
 
 
-def test_event_clip_export_gates_are_explicit_allowlist() -> None:
-    # Given: the tracked production Compose and its operator env example.
+def test_clip_export_is_not_managed_by_topology_environment() -> None:
     services = _compose_services(EDGE_COMPOSE_FILE)
     api_env = _mapping_field(services["ml-api"], "environment")
     worker_env = _mapping_field(services["ml-worker"], "environment")
-    env_example = (REPO_ROOT / ".env.edge.prod.example").read_text(encoding="utf-8")
+    env_examples = "\n".join(
+        (REPO_ROOT / name).read_text(encoding="utf-8")
+        for name in (".env.example", ".env.edge.prod.example")
+    )
 
-    # When: event-clip export environment entries are selected from each service.
-    configured = {
-        key: value
-        for environment in (api_env, worker_env)
-        for key, value in environment.items()
-        if "EVENT_CLIP_EXPORT_ENABLED" in key
-    }
-
-    # Then: only the two owned gates are allowed, and each keeps compose's own
-    # fallback (used when a caller omits the var entirely) off by default.
-    assert configured == {
-        "ML_API_EVENT_CLIP_EXPORT_ENABLED": "${ML_API_EVENT_CLIP_EXPORT_ENABLED:-0}",
-        "ML_WORKER_EVENT_CLIP_EXPORT_ENABLED": ("${ML_WORKER_EVENT_CLIP_EXPORT_ENABLED:-0}"),
-    }
-    # ml-api's clip-relay advertising stays off in the shipped example until
-    # backend clip capability is verified for a given deployment.
-    assert "\nML_API_EVENT_CLIP_EXPORT_ENABLED=0\n" in env_example
-    # ml-worker's gate ships ON in the example: despite the name, it's the
-    # only switch for the entire alert-delivery sender thread, not just clips
-    # (#194) -- leaving it off silently drops every detected event.
-    assert "\nML_WORKER_EVENT_CLIP_EXPORT_ENABLED=1\n" in env_example
+    assert not any("EVENT_CLIP_EXPORT_ENABLED" in key for key in api_env)
+    assert not any("EVENT_CLIP_EXPORT_ENABLED" in key for key in worker_env)
+    assert "EVENT_CLIP_EXPORT_ENABLED" not in env_examples

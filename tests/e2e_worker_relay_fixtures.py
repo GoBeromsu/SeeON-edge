@@ -154,9 +154,7 @@ class MediaMtxProcess:
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             if self._process.poll() is not None:
-                raise RuntimeError(
-                    f"mediamtx exited early with code {self._process.returncode}"
-                )
+                raise RuntimeError(f"mediamtx exited early with code {self._process.returncode}")
             try:
                 with socket.create_connection(("127.0.0.1", self._rtsp_port), timeout=0.2):
                     return
@@ -218,19 +216,31 @@ class FfmpegPublisher:
             [
                 binary,
                 "-nostdin",
-                "-loglevel", "warning",
+                "-loglevel",
+                "warning",
                 "-re",
-                "-f", "lavfi",
-                "-i", f"testsrc=size={width}x{height}:rate={fps}",
-                "-c:v", "libx264",
-                "-preset", "ultrafast",
-                "-tune", "zerolatency",
-                "-g", str(keyframe_interval),
-                "-keyint_min", str(keyframe_interval),
-                "-sc_threshold", "0",
-                "-pix_fmt", "yuv420p",
-                "-f", "rtsp",
-                "-rtsp_transport", "tcp",
+                "-f",
+                "lavfi",
+                "-i",
+                f"testsrc=size={width}x{height}:rate={fps}",
+                "-c:v",
+                "libx264",
+                "-preset",
+                "ultrafast",
+                "-tune",
+                "zerolatency",
+                "-g",
+                str(keyframe_interval),
+                "-keyint_min",
+                str(keyframe_interval),
+                "-sc_threshold",
+                "0",
+                "-pix_fmt",
+                "yuv420p",
+                "-f",
+                "rtsp",
+                "-rtsp_transport",
+                "tcp",
                 url,
             ],
             env=_inherited_env(),
@@ -434,9 +444,7 @@ class LiveBackend:
             target=self._server.run, daemon=True, name="e2e-live-backend"
         )
         self._thread.start()
-        wait_until(
-            lambda: self._server.started, timeout=10.0, what="live backend uvicorn startup"
-        )
+        wait_until(lambda: self._server.started, timeout=10.0, what="live backend uvicorn startup")
 
     @property
     def base_url(self) -> str:
@@ -577,7 +585,9 @@ class ScriptedFallModel:
     duplicate suppression collapses them into exactly one relayed alert."""
 
     def __init__(
-        self, probabilities: Sequence[float] = (0.1, 0.9, 0.1, 0.1, 0.1, 0.9, 0.1, 0.1), *,
+        self,
+        probabilities: Sequence[float] = (0.1, 0.9, 0.1, 0.1, 0.1, 0.9, 0.1, 0.1),
+        *,
         operating_threshold: float = 0.5,
     ) -> None:
         self.metadata = _FallMetadata()
@@ -728,8 +738,8 @@ def fast_clip_recorder_config_factory(store_dir: Path) -> Callable[[], ClipRecor
         # WorkerRuntime now calls ClipRecorderConfig(store_dir=...) itself
         # (see _resolved_clip_store_dir); accept and ignore that kwarg here
         # rather than the closed-over store_dir it already resolves to
-        # (CLIP_STORE_DIR_ENV is pinned to store_dir above, and this
-        # harness's WorkerConfig sets no clip.store_subdir), so this fixture
+        # (the runtime's injected CLIP_STORE_DIR is pinned to store_dir, and
+        # this harness's WorkerConfig sets no clip.store_subdir), so this fixture
         # never has to track that call signature.
         return ClipRecorderConfig(
             store_dir=store_dir,
@@ -774,32 +784,23 @@ def start_worker_runtime(
     state_dir: Path,
     clip_store_dir: Path,
 ) -> WorkerRunHandle:
-    original_clip_store_dir_env = os.environ.get(CLIP_STORE_DIR_ENV)
-    os.environ[CLIP_STORE_DIR_ENV] = str(clip_store_dir)
-    try:
-        # SnapshotStore() (worker.py's WorkerRuntime.__init__) has no DI seam
-        # of its own -- it resolves configured_store_dir() synchronously
-        # right here, so CLIP_STORE_DIR must already be pointed at the
-        # test's own directory before this call.
-        runtime = WorkerRuntime(
-            config,
-            env={"ML_WORKER_PROFILE": "cpu"},
-            serving_client=serving,
-            acquire_lease=lambda: GpuLease.acquire(state_dir),
-            hard_exit=lambda _code: None,
-            state_dir=state_dir,
-        )
-    finally:
-        if original_clip_store_dir_env is None:
-            os.environ.pop(CLIP_STORE_DIR_ENV, None)
-        else:
-            os.environ[CLIP_STORE_DIR_ENV] = original_clip_store_dir_env
-
     original_clip_recorder_config = worker_module.ClipRecorderConfig
     worker_module.ClipRecorderConfig = fast_clip_recorder_config_factory(clip_store_dir)
     original_create_fall_model = WorkerRuntime._create_fall_model
     WorkerRuntime._create_fall_model = _fall_model_via_serving_client  # type: ignore[method-assign]
     try:
+        # Snapshot and evidence-delivery composition share one injected store.
+        runtime = WorkerRuntime(
+            config,
+            env={
+                "ML_WORKER_PROFILE": "cpu",
+                CLIP_STORE_DIR_ENV: str(clip_store_dir),
+            },
+            serving_client=serving,
+            acquire_lease=lambda: GpuLease.acquire(state_dir),
+            hard_exit=lambda _code: None,
+            state_dir=state_dir,
+        )
         thread = threading.Thread(target=runtime.run, daemon=True, name="e2e-worker-runtime")
         thread.start()
         wait_until(lambda: len(runtime.cameras) > 0, timeout=20.0, what="camera activation")

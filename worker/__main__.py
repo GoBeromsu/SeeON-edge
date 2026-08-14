@@ -34,6 +34,7 @@ from worker.runtime.config import (
     RELAY_TOKEN_ENV,
     RELAY_URL_ENV,
     ConfigSnapshot,
+    LiveClipExportPolicy,
     RelayConfig,
     WorkerConfig,
     WorkerConfigError,
@@ -41,7 +42,7 @@ from worker.runtime.config import (
     load_worker_config,
     load_worker_config_from_relay,
     make_restart_check,
-    pull_worker_config,
+    pull_worker_config_poll,
     resolve_config_path,
     resolve_local_overrides,
     resolve_startup_config,
@@ -203,11 +204,7 @@ def main(argv: list[str] | None = None) -> int:
             LOGGER.warning("thumbnail backfill refused: %s", exc)
             return GENERIC_RUNTIME_ERROR_EXIT_CODE
         print(report.summary())
-        return (
-            CLEAN_SHUTDOWN_EXIT_CODE
-            if report.missing == 0
-            else GENERIC_RUNTIME_ERROR_EXIT_CODE
-        )
+        return CLEAN_SHUTDOWN_EXIT_CODE if report.missing == 0 else GENERIC_RUNTIME_ERROR_EXIT_CODE
 
     # Ordering note: legacy edge/runtime/edge_worker.py:141-149 runs
     # run_global_bootstrap([profile_verify_stage(...)]) BEFORE loading config
@@ -276,8 +273,7 @@ def main(argv: list[str] | None = None) -> int:
 
         if not relay_url:
             LOGGER.error(
-                "worker config: no --config provided and %s is unset; "
-                "cannot resolve a live config",
+                "worker config: no --config provided and %s is unset; cannot resolve a live config",
                 RELAY_URL_ENV,
             )
             return CONFIG_ERROR_EXIT_CODE
@@ -370,11 +366,26 @@ def main(argv: list[str] | None = None) -> int:
     relay_token = (
         os.environ.get(RELAY_TOKEN_ENV, "").strip() or config.relay.token.get_secret_value()
     )
+    clip_export_policy = LiveClipExportPolicy(
+        config.clip_export_enabled,
+        config.clip_export_version,
+    )
+
+    def _pull_and_apply_runtime_settings(url: str, token: str | None):
+        polled = pull_worker_config_poll(url, token)
+        if polled is None:
+            return None
+        clip_export_policy.apply(
+            enabled=polled.clip_export_enabled,
+            version=polled.clip_export_version,
+        )
+        return polled.restart_config
+
     restart_check = make_restart_check(
         relay_url,
         relay_token,
         snapshot.directive,
-        pull_config=pull_worker_config,
+        pull_config=_pull_and_apply_runtime_settings,
     )
 
     # `loop_factory` is intentionally omitted here: composing the real
@@ -386,6 +397,7 @@ def main(argv: list[str] | None = None) -> int:
         config,
         serving_client=InProcessServingClient(),
         restart_check=restart_check,
+        clip_export_policy=clip_export_policy,
         max_frames_per_camera=args.max_frames_per_camera,
         state_dir=resolve_state_dir(),
     )

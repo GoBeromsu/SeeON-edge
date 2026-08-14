@@ -145,7 +145,10 @@ def _run_in_background(
     return thread, finished, errors
 
 
-def test_zero_cameras_run_blocks_instead_of_exiting_immediately(tmp_path: Path) -> None:
+def test_zero_cameras_run_blocks_instead_of_exiting_immediately(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
     """The core of issue #150: with a restart watcher wired in (as
     `worker/__main__.py` always does) `run()` must stay up -- not return the
     instant `IngestSupervisor.join()` finds zero ingest threads to join --
@@ -153,13 +156,22 @@ def test_zero_cameras_run_blocks_instead_of_exiting_immediately(tmp_path: Path) 
     camera activation with an empty roster) along the way, and only return
     once something actually stops it.
     """
+    supervisor_started = threading.Event()
+
+    @final
+    class _SignalingIngestSupervisor(IngestSupervisor):
+        def start(self) -> None:
+            super().start()
+            supervisor_started.set()
+
+    monkeypatch.setattr(worker_module.ingest, "IngestSupervisor", _SignalingIngestSupervisor)
     runtime = _runtime(tmp_path, restart_check=lambda: False)
     thread, finished, errors = _run_in_background(runtime)
     try:
-        # Given: boot has had time to finish and nothing has told it to stop.
-        assert not finished.wait(timeout=0.3), (
-            f"run() returned immediately with zero cameras (errors={errors!r})"
-        )
+        # Given: boot reached the exact supervisor-start boundary and nothing
+        # has told the zero-camera worker to stop.
+        assert supervisor_started.wait(timeout=10.0), "supervisor never started"
+        assert not finished.is_set(), f"run() returned during boot (errors={errors!r})"
         assert runtime.cameras == ()
         assert runtime._supervisor is not None  # noqa: SLF001
 
@@ -169,6 +181,7 @@ def test_zero_cameras_run_blocks_instead_of_exiting_immediately(tmp_path: Path) 
         # Then: run() unblocks and returns cleanly.
         assert finished.wait(timeout=2.0), "run() never returned after stop()"
     finally:
+        runtime.stop()
         thread.join(timeout=2.0)
         assert not thread.is_alive()
     assert not errors, f"run() raised: {errors!r}"

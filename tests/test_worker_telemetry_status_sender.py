@@ -29,12 +29,12 @@ class _FrozenWireTransport:
             "seq",
             "cameras",
             "clip_recorder",
+            "clip_export",
             "gpu",
             "worker",
         }
         assert all(
-            set(camera) <= {"camera_id", "decode", "measured_fps"}
-            for camera in payload["cameras"]
+            set(camera) <= {"camera_id", "decode", "measured_fps"} for camera in payload["cameras"]
         )
         self.payloads.append(payload)
         return self.generations.pop(0)
@@ -53,6 +53,16 @@ def _diagnostics() -> WorkerDiagnostics:
         ),
     )
     return diagnostics
+
+
+def test_payload_reports_worker_applied_clip_export_value_and_version() -> None:
+    diagnostics = _diagnostics()
+    diagnostics.set_clip_export_applied(enabled=True, version=7)
+    transport = _FrozenWireTransport([3])
+
+    assert RuntimeStatusSender(diagnostics, "facility-1", transport).publish_once() is True
+
+    assert transport.payloads[0]["clip_export"] == {"enabled": True, "version": 7}
 
 
 def test_local_metric_is_caught_before_transport_and_never_leaks() -> None:
@@ -113,8 +123,7 @@ def test_sender_partitions_cameras_by_facility() -> None:
         "facility-2",
     ]
     camera_ids = [
-        [camera["camera_id"] for camera in payload["cameras"]]
-        for payload in transport.payloads
+        [camera["camera_id"] for camera in payload["cameras"]] for payload in transport.payloads
     ]
     assert camera_ids == [
         ["camera-1"],

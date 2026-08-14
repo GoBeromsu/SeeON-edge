@@ -10,6 +10,7 @@ import {
   normalizeConnectionTestResult,
   normalizeConnectionView,
   normalizeDetectionSettings,
+  normalizeRuntimeSettings,
   normalizeStatusSnapshot,
   normalizeSystemSnapshot,
 } from '@/shared/api/normalizers';
@@ -31,6 +32,8 @@ import type {
   DetectionSettings,
   DetectionSettingsInput,
   OverlayMode,
+  RuntimeSettings,
+  RuntimeSettingsInput,
   StatusSnapshot,
   SystemSnapshot,
 } from '@/shared/api/types';
@@ -67,6 +70,8 @@ export type {
   RuntimeDeviceDiagnostics,
   RuntimeLatencyDiagnostics,
   RuntimeWorkerDiagnostics,
+  RuntimeSettings,
+  RuntimeSettingsInput,
   StatusSnapshot,
   SystemSnapshot,
 } from '@/shared/api/types';
@@ -278,6 +283,16 @@ export async function fetchDetectionSettings(signal?: AbortSignal): Promise<Dete
 export async function saveDetectionSettings(input: DetectionSettingsInput): Promise<DetectionSettings> {
   return normalizeDetectionSettings(
     await requestJson('/detection-settings', { method: 'PUT', body: JSON.stringify(input) }),
+  );
+}
+
+export async function fetchRuntimeSettings(signal?: AbortSignal): Promise<RuntimeSettings> {
+  return normalizeRuntimeSettings(await requestJson('/runtime-settings', { signal }));
+}
+
+export async function saveRuntimeSettings(input: RuntimeSettingsInput): Promise<RuntimeSettings> {
+  return normalizeRuntimeSettings(
+    await requestJson('/runtime-settings', { method: 'PUT', body: JSON.stringify(input) }),
   );
 }
 

@@ -24,6 +24,7 @@ from backend.app.features.connection.topology_confirmation_router import (
 from backend.app.features.detection_settings.router import router as detection_settings_router
 from backend.app.features.evidence.router import router as evidence_router
 from backend.app.features.relay.router import router as relay_router
+from backend.app.features.runtime_settings.router import router as runtime_settings_router
 from backend.app.features.status.router import router as status_router
 from backend.app.features.status.system_router import router as system_router
 from backend.app.lifespan import lifespan as serving_lifespan
@@ -64,6 +65,7 @@ def create_app(*, lifespan: LifespanFactory | None = serving_lifespan) -> FastAP
     api_router.include_router(clips_router)
     api_router.include_router(clip_storage_router)
     api_router.include_router(detection_settings_router)
+    api_router.include_router(runtime_settings_router)
     api_router.include_router(streams_router)
     api_router.include_router(system_router)
     app.include_router(api_router, prefix=prefix)

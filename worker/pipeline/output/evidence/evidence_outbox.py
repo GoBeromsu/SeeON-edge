@@ -111,6 +111,9 @@ class EvidenceOutbox:
     def claim_clip(self, lease: ClaimLease) -> ClaimedClip | None:
         return delivery_store.claim_clip(self._connection, lease)
 
+    def release_clip_claim(self, claim: ClaimedClip) -> bool:
+        return delivery_store.release_clip_claim(self._connection, claim)
+
     def schedule_clip_retry(
         self,
         claim: ClaimedClip,

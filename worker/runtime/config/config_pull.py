@@ -48,13 +48,20 @@ class ConfigSnapshot:
     stale: bool
 
 
-def pull_worker_config(
+@dataclass(frozen=True, slots=True)
+class WorkerConfigPoll:
+    restart_config: PulledWorkerConfig
+    clip_export_enabled: bool
+    clip_export_version: int
+
+
+def pull_worker_config_poll(
     relay_url: str,
     relay_token: str | None,
     *,
     timeout_sec: float = 5.0,
     urlopen: UrlOpen | None = None,
-) -> PulledWorkerConfig | None:
+) -> WorkerConfigPoll | None:
     payload = _pull_payload(
         relay_url,
         relay_token,
@@ -64,10 +71,31 @@ def pull_worker_config(
     if payload is None:
         return None
     try:
-        return BackendWorkerConfigPayload.model_validate(payload).to_pulled_config()
+        parsed = BackendWorkerConfigPayload.model_validate(payload)
     except ValidationError:
         print("worker config pull skipped: malformed payload", file=sys.stderr)
         return None
+    return WorkerConfigPoll(
+        restart_config=parsed.to_pulled_config(),
+        clip_export_enabled=parsed.clip_export_enabled,
+        clip_export_version=parsed.clip_export_version,
+    )
+
+
+def pull_worker_config(
+    relay_url: str,
+    relay_token: str | None,
+    *,
+    timeout_sec: float = 5.0,
+    urlopen: UrlOpen | None = None,
+) -> PulledWorkerConfig | None:
+    polled = pull_worker_config_poll(
+        relay_url,
+        relay_token,
+        timeout_sec=timeout_sec,
+        urlopen=urlopen,
+    )
+    return None if polled is None else polled.restart_config
 
 
 def load_worker_config_from_relay(
@@ -195,6 +223,8 @@ def _pull_payload(
     except (OSError, UnicodeDecodeError, ValidationError, WorkerConfigError):
         print("worker config pull skipped: request failed", file=sys.stderr)
         return None
+
+
 def _snapshot_from_payload(
     payload: JsonObject,
     relay_url: str,
@@ -255,8 +285,10 @@ __all__ = [
     "RELAY_URL_ENV",
     "ConfigSnapshot",
     "ConfigSource",
+    "WorkerConfigPoll",
     "UrlOpen",
     "load_worker_config_from_relay",
     "pull_worker_config",
+    "pull_worker_config_poll",
     "resolve_startup_config",
 ]

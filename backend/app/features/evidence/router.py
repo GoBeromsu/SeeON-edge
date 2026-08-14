@@ -8,7 +8,7 @@ import re
 import stat
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Annotated, BinaryIO, Literal, Protocol
+from typing import Annotated, BinaryIO, Literal, Never, Protocol, cast
 from uuid import UUID
 
 from fastapi import APIRouter, Header, HTTPException, Request, status
@@ -17,6 +17,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from backend.app.features.clips.store import CLIP_STORE_DIR_ENV, DEFAULT_CLIP_STORE_DIR
 from backend.app.features.relay.auth import authorize_relay as _authorize
 from backend.app.features.relay.router import RELAY_TOKEN_HEADER, _camera_binding
+from backend.app.features.runtime_settings.store import get_runtime_settings_store
 from backend.app.shared.backend_client_bundle import backend_client_bundle
 from shared.events.evidence_export_contract import (
     BackendCapabilities,
@@ -255,14 +256,7 @@ def _verified_media(request: Request, clip_id: str, payload: ReadyClipPayload) -
 
 
 def _enabled(request: Request) -> bool:
-    value = getattr(request.app.state, "event_clip_export_enabled", None)
-    if isinstance(value, bool):
-        return value
-    return os.environ.get("ML_API_EVENT_CLIP_EXPORT_ENABLED", "").strip().lower() in {
-        "1",
-        "true",
-        "yes",
-    }
+    return get_runtime_settings_store(request.app).get().clip_export_enabled
 
 
 def _backend_client(request: Request, camera_id: str) -> BackendEvidenceClient:
@@ -278,11 +272,11 @@ def _backend_client(request: Request, camera_id: str) -> BackendEvidenceClient:
             detail="backend evidence export unavailable",
         )
     if hasattr(client, "for_camera"):
-        return client.for_camera(camera_id)
-    return client
+        return cast(BackendEvidenceClient, client.for_camera(camera_id))
+    return cast(BackendEvidenceClient, client)
 
 
-def _raise_failure(failure: DeliveryFailure) -> None:
+def _raise_failure(failure: DeliveryFailure) -> Never:
     if failure.disposition is DeliveryDisposition.RETRY:
         code = status.HTTP_503_SERVICE_UNAVAILABLE
     elif failure.disposition is DeliveryDisposition.COMPATIBILITY:

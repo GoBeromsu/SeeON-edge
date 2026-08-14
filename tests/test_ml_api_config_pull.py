@@ -143,9 +143,7 @@ def test_backend_config_pull_applies_metadata_not_camera_roster(
     captured: list[tuple[str, str | None, float]] = []
 
     def fake_urlopen(request: urllib.request.Request, timeout: float) -> FakeHTTPResponse:
-        captured.append(
-            (request.full_url, request.get_header("Authorization"), timeout)
-        )
+        captured.append((request.full_url, request.get_header("Authorization"), timeout))
         return FakeHTTPResponse(_backend_config())
 
     _set_pull_env(monkeypatch, tmp_path)
@@ -175,13 +173,13 @@ def test_backend_config_pull_applies_metadata_not_camera_roster(
     assert worker_config.status_code == 200
     assert worker_config.json() == {
         "registry_version": 0,
+        "clip_export_enabled": False,
+        "clip_export_version": 0,
         "cameras": [],
         "config_version": 7,
         "restart_epoch": 0,
         "night_window": {"start": "21:00", "end": "06:00", "tz": "Asia/Seoul"},
-        "detection_windows": {
-            "bed_exit": {"start": "21:00", "end": "06:00", "tz": "Asia/Seoul"}
-        },
+        "detection_windows": {"bed_exit": {"start": "21:00", "end": "06:00", "tz": "Asia/Seoul"}},
     }
     assert relay_config.status_code == 503
 
@@ -546,6 +544,8 @@ def test_config_refresh_preserves_last_good_on_failure(
     # A transient refresh failure preserves the last-good config (200, not 503/blanked).
     assert response.status_code == 200
     assert response.json()["config_version"] == 7
+
+
 def test_config_refresh_rejects_partial_roster_and_preserves_last_good(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -626,6 +626,8 @@ def test_shutdown_waits_for_inflight_backend_refresh(
     assert time.monotonic() - started_at >= 0.05
     assert calls["count"] == 2
     assert app.state.backend_config_refresh_task is None
+
+
 def test_shutdown_bounds_late_refresh_and_discards_its_result(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -820,9 +822,7 @@ def test_backend_detection_windows_populate_per_domain_map_and_bed_exit_alias(
             "bed_exit": PulledNightWindow(start="21:00", end="06:00", tz="Asia/Seoul"),
             "fall": PulledNightWindow(start="22:00", end="05:00", tz="UTC"),
         }
-        assert pulled.night_window == PulledNightWindow(
-            start="21:00", end="06:00", tz="Asia/Seoul"
-        )
+        assert pulled.night_window == PulledNightWindow(start="21:00", end="06:00", tz="Asia/Seoul")
 
         response = client.get(
             "/api/v1/relay/config",

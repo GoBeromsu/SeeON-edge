@@ -57,8 +57,6 @@ services:
       # 이제 같은 볼륨 아래로 떨어지지만, 연결 설정과 같은 이유로 명시해 둔다 —
       # 기본값이 바뀌어도 이 컨테이너의 라벨·감사로그가 볼륨 밖으로 새지 않게.
       API_LABEL_STORE: /root/.local/state/ml-api/labels
-      # Event clip relay remains disabled until operators explicitly enable rollout.
-      ML_API_EVENT_CLIP_EXPORT_ENABLED: ${ML_API_EVENT_CLIP_EXPORT_ENABLED:-0}
       # Facility-wide processed FPS for live camera streams (unset -> worker 5.0
       # default). Raise (e.g. 15) to smooth the live wall where GPU headroom allows.
       ML_DEFAULT_CAMERA_FPS: ${ML_DEFAULT_CAMERA_FPS:-}
@@ -140,13 +138,11 @@ services:
       ML_WORKER_FALL_MODEL_SCHEMA_VERSION: ${ML_WORKER_FALL_MODEL_SCHEMA_VERSION:-1}
       ML_WORKER_FALL_MODEL_PREPROCESSING_IDENTITY: ${ML_WORKER_FALL_MODEL_PREPROCESSING_IDENTITY:-legacy-coco17-xyc-frame-normalized-zero-fill-v1}
       # Evidence clip recording stays off by default -- see the clip.enabled
-      # doc in worker/ml-worker.example.yaml. Independent of
-      # ML_WORKER_EVENT_CLIP_EXPORT_ENABLED below (the export sender gate).
+      # doc in worker/ml-worker.example.yaml. Export is controlled at runtime
+      # from the authenticated Edge dashboard and does not gate event delivery.
       ML_WORKER_CLIP_RECORDING_ENABLED: ${ML_WORKER_CLIP_RECORDING_ENABLED:-false}
       # Fixed container path of the evidence clip store (host bind below).
       CLIP_STORE_DIR: /var/lib/clip-store
-      # Durable sending remains disabled until operators explicitly enable rollout.
-      ML_WORKER_EVENT_CLIP_EXPORT_ENABLED: ${ML_WORKER_EVENT_CLIP_EXPORT_ENABLED:-0}
       # NVENC clip encoding needs the `video` driver capability in addition to
       # the compute/utility default granted by the GPU reservation above.
       NVIDIA_DRIVER_CAPABILITIES: compute,utility,video

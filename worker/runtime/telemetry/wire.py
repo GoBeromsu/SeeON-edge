@@ -53,6 +53,13 @@ class RelayClipRecorderPayload(TypedDict):
     encoder: str | None
 
 
+class RelayClipExportPayload(TypedDict):
+    """Clip-export setting currently applied by this worker."""
+
+    enabled: bool
+    version: int
+
+
 class RelayGpuPayload(TypedDict):
     """Existing optional GPU runtime-status wire fields."""
 
@@ -81,6 +88,7 @@ class RelayRuntimeStatusPayload(TypedDict):
     seq: int
     cameras: list[RelayCameraPayload]
     clip_recorder: RelayClipRecorderPayload
+    clip_export: RelayClipExportPayload
     gpu: NotRequired[RelayGpuPayload]
     worker: NotRequired[RelayWorkerPayload]
 
@@ -111,6 +119,7 @@ def facility_payload(
     seq: int,
     cameras: list[RelayCameraPayload],
     clip_recorder: ClipRecorderStatus,
+    clip_export: RelayClipExportPayload,
     gpu: RelayGpuPayload | None,
     worker: RelayWorkerPayload | None,
 ) -> RelayRuntimeStatusPayload:
@@ -119,6 +128,7 @@ def facility_payload(
         generation=generation,
         seq=seq,
         cameras=sorted(cameras, key=lambda camera: camera["camera_id"]),
+        clip_export=clip_export,
         clip_recorder=RelayClipRecorderPayload(
             available=clip_recorder.available,
             dropped_frames=clip_recorder.dropped_frames,
@@ -140,6 +150,7 @@ def facility_payload(
 __all__ = [
     "ClipRecorderStatus",
     "RelayCameraPayload",
+    "RelayClipExportPayload",
     "RelayClipRecorderPayload",
     "RelayDecodePayload",
     "RelayGpuPayload",

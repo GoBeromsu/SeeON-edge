@@ -42,13 +42,9 @@ api_pid=""
 # is the only sandboxing seam left. It is set only on the api/worker process
 # invocations below (start_api, run_worker_with_clock), not for this whole
 # script, so `uv run` here keeps resolving its own cache under the real
-# HOME instead of an empty one. Also turn on relay export --
-# EvidenceExportRuntime.from_environment() (worker/pipeline/output/evidence/
-# evidence_runtime.py) is disabled unless ML_WORKER_EVENT_CLIP_EXPORT_ENABLED=1,
-# in which case admitted events stage to the durable outbox but are never
-# sent to the relay, and this harness's whole point is proving relay delivery.
+# HOME instead of an empty one. Event delivery is always composed once relay
+# credentials are valid; clip export is a separate persisted runtime policy.
 sandbox_home="$tmpdir/home"
-export ML_WORKER_EVENT_CLIP_EXPORT_ENABLED=1
 mkdir -p "$sandbox_home"
 
 cleanup() {

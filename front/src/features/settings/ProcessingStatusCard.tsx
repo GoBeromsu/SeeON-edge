@@ -32,6 +32,19 @@ function latencyLabel(status: StatusSnapshot): string {
   return `최대 ${Math.max(...maxSec).toFixed(2)}초`;
 }
 
+function clipExportAppliedLabel(status: StatusSnapshot): string {
+  const applied = status.runtime.clip_export_applied;
+  if (applied.enabled === null || applied.version === null || applied.freshness === 'unknown') {
+    return `워커 적용: ${UNKNOWN}`;
+  }
+  const freshness = applied.freshness === 'stale'
+    ? ' · 상태 지연'
+    : applied.freshness === 'offline'
+      ? ' · 워커 오프라인'
+      : '';
+  return `워커 적용: ${applied.enabled ? 'ON' : 'OFF'} · 버전 ${applied.version}${freshness}`;
+}
+
 function workerBadge(status: StatusSnapshot | null): { label: string; className: string } {
   const alive = status?.runtime.worker?.alive;
   if (alive === true) return { label: '정상', className: statusBadgeClassName('approved') };
@@ -84,6 +97,8 @@ export function ProcessingStatusCard({ resource }: ProcessingStatusCardProps): J
         <dd className="text-right text-foreground">{status ? decodeLabel(status) : UNKNOWN}</dd>
         <dt className="text-muted-foreground">인코드</dt>
         <dd className="text-right text-foreground">{status ? encodeLabel(status) : UNKNOWN}</dd>
+        <dt className="text-muted-foreground">클립 내보내기</dt>
+        <dd className="text-right text-foreground">{status ? clipExportAppliedLabel(status) : `워커 적용: ${UNKNOWN}`}</dd>
         <dt className="text-muted-foreground">전송 지연</dt>
         <dd className="text-right tabular-nums text-foreground">{status ? latencyLabel(status) : UNKNOWN}</dd>
       </dl>

@@ -8,6 +8,7 @@ import {
 import type {
   CameraHeartbeat,
   RuntimeCameraDiagnostics,
+  RuntimeClipExportApplied,
   RuntimeClipRecorder,
   RuntimeDecodeDiagnostics,
   RuntimeDeviceDiagnostics,
@@ -85,6 +86,19 @@ function normalizeRuntimeWorker(value: unknown): RuntimeWorkerDiagnostics | null
   };
 }
 
+function normalizeRuntimeClipExportApplied(value: unknown): RuntimeClipExportApplied {
+  if (!isRecord(value)) return { enabled: null, version: null, freshness: 'unknown' };
+  const freshness = pickString(value, ['freshness']);
+  const version = pickNonNegativeNumber(value, ['version']);
+  return {
+    enabled: pickBoolean(value, ['enabled']),
+    version: version !== null && Number.isInteger(version) ? version : null,
+    freshness: freshness === 'fresh' || freshness === 'stale' || freshness === 'offline'
+      ? freshness
+      : 'unknown',
+  };
+}
+
 function normalizeRuntimeClipRecorder(value: unknown): RuntimeClipRecorder | null {
   if (!isRecord(value)) return null;
   return {
@@ -126,6 +140,7 @@ export function normalizeStatusSnapshot(value: unknown): StatusSnapshot {
       cameras: runtimeCameras,
       worker: normalizeRuntimeWorker(rawRuntime.worker),
       device: normalizeRuntimeDevice(rawRuntime.device),
+      clip_export_applied: normalizeRuntimeClipExportApplied(rawRuntime.clip_export_applied),
       clip_recorder: normalizeRuntimeClipRecorder(rawRuntime.clip_recorder),
       stale_after_sec: pickNonNegativeNumber(rawRuntime, ['stale_after_sec', 'staleAfterSec']),
     },

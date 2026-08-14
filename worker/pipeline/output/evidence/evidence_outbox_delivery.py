@@ -108,6 +108,27 @@ def claim_clip(connection: sqlite3.Connection, lease: ClaimLease) -> ClaimedClip
     )
 
 
+def release_clip_claim(connection: sqlite3.Connection, claim: ClaimedClip) -> bool:
+    """Undo an undispatched claim when live export turns off.
+
+    The lease CAS prevents releasing a claim that another sender has already
+    recovered. Since no dispatch occurred, restore the attempt counter too.
+    """
+    result = connection.execute(
+        """
+        UPDATE evidence_clips
+        SET publish_state = 'WAITING', publish_lease_owner = NULL,
+            publish_lease_expires_at = NULL,
+            publish_attempt_count = publish_attempt_count - 1
+        WHERE clip_id = ? AND publish_state = 'IN_FLIGHT'
+          AND publish_lease_owner = ? AND publish_lease_expires_at = ?
+          AND publish_attempt_count > 0
+        """,
+        (claim.clip_id, claim.lease_owner, claim.lease_expires_at),
+    )
+    return result.rowcount == 1
+
+
 def schedule_clip_retry(
     connection: sqlite3.Connection,
     claim: ClaimedClip,

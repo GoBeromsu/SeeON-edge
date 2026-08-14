@@ -12,6 +12,7 @@ from typing import Any
 from fastapi import APIRouter, Request
 
 from backend.app.features.cameras.store import CameraRegistryStore, registry_expected_cameras
+from backend.app.features.runtime_settings.store import get_runtime_settings_store
 from backend.app.features.status.heartbeat_store import get_heartbeat_store
 from backend.app.features.status.runtime_status_store import get_runtime_status_store
 
@@ -33,7 +34,9 @@ def status(request: Request) -> dict[str, object]:
     runtime["worker"] = primary.get("worker") if primary else None
     runtime["device"] = _to_device_diagnostics(primary.get("gpu") if primary else None)
     runtime["clip_recorder"] = primary.get("clip_recorder") if primary else None
+    runtime["clip_export_applied"] = _clip_export_applied(primary)
     response["runtime"] = runtime
+    response["runtime_settings"] = get_runtime_settings_store(request.app).get().as_dict()
     return response
 
 
@@ -74,6 +77,26 @@ def _primary_facility(facilities: dict[str, Any]) -> dict[str, Any] | None:
     if not facilities:
         return None
     return max(facilities.values(), key=lambda facility: facility.get("received_at", 0.0))
+
+
+def _clip_export_applied(facility: dict[str, Any] | None) -> dict[str, object]:
+    if facility is None:
+        return {"enabled": None, "version": None, "freshness": "unknown"}
+    applied = facility.get("clip_export")
+    if not isinstance(applied, dict):
+        return {"enabled": None, "version": None, "freshness": "unknown"}
+    worker = facility.get("worker")
+    if isinstance(worker, dict) and worker.get("alive") is False:
+        freshness = "offline"
+    elif facility.get("stale") is True:
+        freshness = "stale"
+    else:
+        freshness = "fresh"
+    return {
+        "enabled": applied.get("enabled"),
+        "version": applied.get("version"),
+        "freshness": freshness,
+    }
 
 
 def _to_device_diagnostics(gpu: dict[str, Any] | None) -> dict[str, Any] | None:

@@ -60,7 +60,7 @@ from worker.pipeline.decision.event_identity import event_identity_path
 from worker.pipeline.ingest.probe import RTSPProbeError, probe_first_frame
 from worker.pipeline.ingest.registry import SourceRegistry
 from worker.pipeline.output.event_sink import EventClipRecorder, EvidenceEventSink
-from worker.pipeline.output.evidence.clip_config import configured_store_dir
+from worker.pipeline.output.evidence.clip_config import CLIP_STORE_DIR_ENV
 from worker.pipeline.output.evidence.clip_frame_feeder import ClipFrameFeeder
 from worker.pipeline.output.evidence.clip_recorder import ClipRecorder
 from worker.pipeline.output.evidence.clip_recorder_models import ClipRecorderConfig
@@ -69,10 +69,7 @@ from worker.pipeline.output.evidence.clip_store_lock import (
     ClipStoreLock,
     ClipStoreLockedError,
 )
-from worker.pipeline.output.evidence.evidence_runtime import (
-    EvidenceExportRuntime,
-    export_enabled,
-)
+from worker.pipeline.output.evidence.evidence_runtime import EvidenceExportRuntime
 from worker.pipeline.output.evidence.evidence_stager import DurableEvidenceStager
 from worker.pipeline.output.evidence.snapshot_store import SnapshotStore
 from worker.pipeline.output.evidence_attacher import AlertEvidenceAttacher
@@ -89,7 +86,12 @@ from worker.pipeline.output.mjpeg_server import (
 )
 from worker.pipeline.output.overlay import OverlayRenderer
 from worker.pipeline.perception import GreedyIouTracker, SceneState
-from worker.runtime.config import RELAY_HEARTBEAT_PATH, CameraRuntimeConfig, WorkerConfig
+from worker.runtime.config import (
+    RELAY_HEARTBEAT_PATH,
+    CameraRuntimeConfig,
+    LiveClipExportPolicy,
+    WorkerConfig,
+)
 from worker.runtime.faults.handler import FaultHandler
 from worker.runtime.faults.record import make_fault_record
 from worker.runtime.ingest_composition import (
@@ -131,9 +133,9 @@ DETECTOR_VERSION: Final = "worker-domain-detectors-v1"
 class EvidenceDeliveryError(RuntimeError):
     """Evidence delivery is enabled but cannot be brought up safely.
 
-    ADR-0003: the export env gate is the explicit opt-out. Once export is
-    switched on, a misconfiguration or a clip store owned by another process is
-    a real failure, not something to degrade past with a warning -- a worker
+    ADR-0003: event delivery is always active. A relay misconfiguration or a
+    clip store owned by another process is a real failure, not something to
+    degrade past with a warning -- a worker
     that looks healthy while alerts pile up unsent is the exact failure mode
     that decision removes. Messages are sanitized: relay URLs and tokens stay
     on ``__cause__``.
@@ -607,6 +609,7 @@ class WorkerRuntime:
         boot_dependencies: bootstrap.BootDependencies | None = None,
         hard_exit: Callable[[int], None] = os._exit,  # noqa: SLF001
         restart_check: Callable[[], bool] | None = None,
+        clip_export_policy: LiveClipExportPolicy | None = None,
         pump_factory: PumpFactory | None = None,
         event_sink_factory: EventSinkFactory | None = None,
         clip_recorder_factory: ClipRecorderFactory | None = None,
@@ -633,9 +636,7 @@ class WorkerRuntime:
             ", ".join(resolved_domain_names) or "(none)",
         )
         if not resolved_domain_names:
-            LOGGER.warning(
-                "resolved active detection domains is empty; no detection will run"
-            )
+            LOGGER.warning("resolved active detection domains is empty; no detection will run")
         self._env = os.environ if env is None else env
         self._serving = serving_client
         self._state_dir = state_dir if state_dir is not None else resolve_state_dir()
@@ -649,6 +650,10 @@ class WorkerRuntime:
         self._boot_dependencies = boot_dependencies or production_boot_dependencies()
         self._hard_exit = hard_exit
         self._restart_check = restart_check
+        self._clip_export_policy = clip_export_policy or LiveClipExportPolicy(
+            config.clip_export_enabled,
+            config.clip_export_version,
+        )
         self._max_frames_per_camera = max_frames_per_camera
         self._context = bootstrap.BootstrapContext()
         self._boot: BootContext | None = None
@@ -682,7 +687,7 @@ class WorkerRuntime:
         # (useful for fall review too) while keeping bed context for bed_exit
         # alerts.
         self._overlay_renderer = OverlayRenderer(mode="bedexit")
-        self._snapshot_store = SnapshotStore()
+        self._snapshot_store = SnapshotStore(self._resolved_clip_store_dir())
         self._camera_evidence_attachers: dict[str, AlertEvidenceAttacher] = {}
         # #15: `mjpeg_server.py` was ported without a call site, so `:8090`
         # never opened and the dashboard's camera view stayed dead even though
@@ -698,9 +703,7 @@ class WorkerRuntime:
         # runtime pose toggle for one camera's live view can never leak into
         # another camera or into audit snapshots.
         self._live_view: LiveViewSubscriber | None = (
-            LiveViewSubscriber(self._live_frames)
-            if self._mjpeg_config.enabled
-            else None
+            LiveViewSubscriber(self._live_frames) if self._mjpeg_config.enabled else None
         )
         self._mjpeg_server: MjpegServer | None = None
         self._camera_debug_snapshots: dict[str, Callable[[int], tuple[Any, ...]]] = {}
@@ -939,11 +942,9 @@ class WorkerRuntime:
         by the time ``bootstrap_or_exit`` returns, so this only needs to flip
         the sender's background thread on.
 
-        ``self._evidence_export_runtime is None`` is the explicit opt-out: the
-        export env gate was off, so there is nothing to deliver and returning
-        is correct.
-
-        A runtime that *does* exist and then fails to start its sender is not
+        ``self._evidence_export_runtime is None`` means camera activation did
+        not compose delivery. A runtime that *does* exist and then fails to
+        start its sender is not
         an optional boundary. ADR-0003: swallowing it leaves staged alerts
         accumulating in the local outbox while the worker reports healthy --
         the same silent-degrade this decision removes. Fail closed instead.
@@ -954,8 +955,7 @@ class WorkerRuntime:
             self._evidence_export_runtime.start_sender()
         except Exception as exc:  # noqa: BLE001 - re-raised as a typed sanitized error
             raise EvidenceDeliveryError(
-                "evidence export sender failed to start; staged alerts would "
-                "not reach the relay"
+                "evidence export sender failed to start; staged alerts would not reach the relay"
             ) from exc
 
     def _start_runtime_status_sender(self) -> None:
@@ -991,7 +991,7 @@ class WorkerRuntime:
             self.diagnostics,
             facility_by_camera,
             transport,
-            before_publish=self._refresh_clip_recorder_telemetry,
+            before_publish=self._refresh_runtime_status_telemetry,
         )
         try:
             sender.start()
@@ -1063,13 +1063,9 @@ class WorkerRuntime:
         """
         configured = self.config.models.fall
         if configured is None:
-            raise RuntimeError(
-                "fall model must be explicitly configured; refusing to boot"
-            )
+            raise RuntimeError("fall model must be explicitly configured; refusing to boot")
         try:
-            return DEFAULT_FALL_MODEL_FAMILY_REGISTRY.create(
-                configured.type, configured, device
-            )
+            return DEFAULT_FALL_MODEL_FAMILY_REGISTRY.create(configured.type, configured, device)
         except UnknownFallModelTypeError as exc:
             raise RuntimeError(str(exc)) from exc
 
@@ -1079,9 +1075,7 @@ class WorkerRuntime:
         for extractor in self.shared_yolo.extractors:
             self._warm_one(extractor.runner, self._boot.device)
         self._warm_one(self.fall_model, self._boot.device)
-        return tuple(extractor.module_name for extractor in self.shared_yolo.extractors) + (
-            "fall",
-        )
+        return tuple(extractor.module_name for extractor in self.shared_yolo.extractors) + ("fall",)
 
     def _warm_one(self, model: RunnerProtocol | FallModelProtocol, device: str) -> None:
         if not isinstance(model, _Warmable):
@@ -1144,9 +1138,7 @@ class WorkerRuntime:
         # frames nothing will ever read. Size it from the same flag that decides
         # whether a recorder exists at all.
         bus = (
-            BoundedFrameBus()
-            if self.config.clip.enabled
-            else BoundedFrameBus(evidence_capacity=1)
+            BoundedFrameBus() if self.config.clip.enabled else BoundedFrameBus(evidence_capacity=1)
         )
         self.diagnostics.register_bus(camera.camera_id, bus)
         # #(runtime.cameras): `register_decode` is the only thing that seeds
@@ -1164,9 +1156,7 @@ class WorkerRuntime:
         available = {extractor.module_name for extractor in yolo.extractors}
         missing = sorted(name for name in required if name not in available)
         if missing:
-            raise RuntimeError(
-                "domain requires unregistered extractor(s): " + ", ".join(missing)
-            )
+            raise RuntimeError("domain requires unregistered extractor(s): " + ", ".join(missing))
         persisted_bed_regions = _persisted_bed_regions(camera)
         if persisted_bed_regions:
             # A persisted bed polygon is authoritative and never expires
@@ -1217,7 +1207,15 @@ class WorkerRuntime:
         pump = self._pump_factory(camera, bus, analytics, decision, sink)
         clip_frame_feeder = self._build_clip_frame_feeder(camera.camera_id, bus)
         return CameraRuntimeContext(
-            bus, tracker, scene, scheduler, analytics, decision, heartbeat, loop, pump,
+            bus,
+            tracker,
+            scene,
+            scheduler,
+            analytics,
+            decision,
+            heartbeat,
+            loop,
+            pump,
             clip_frame_feeder,
         )
 
@@ -1320,8 +1318,9 @@ class WorkerRuntime:
     def _resolved_clip_store_dir(self) -> Path:
         """The clip store root this worker records into.
 
-        ``configured_store_dir()`` (``CLIP_STORE_DIR`` env, default
-        ``/var/lib/clip-store``) is the fixed physical volume; a
+        ``CLIP_STORE_DIR`` is the fixed physical volume in production. An
+        injected environment that omits it (tests and embedded runtimes) uses
+        a writable directory under the worker state root. A
         backend-selected ``clip.store_subdir`` (see ``ClipRecordingConfig``,
         pulled from ml-api's persisted clip-storage-location choice) is
         appended underneath it so an operator's dashboard selection actually
@@ -1332,7 +1331,8 @@ class WorkerRuntime:
         / value`` silently discards ``base`` and becomes absolute if ``value``
         starts with ``/``.
         """
-        base = configured_store_dir()
+        configured_base = self._env.get(CLIP_STORE_DIR_ENV, "").strip()
+        base = Path(configured_base) if configured_base else self._state_dir / "clip-store"
         subdir = self.config.clip.store_subdir
         if not subdir:
             return base
@@ -1341,43 +1341,22 @@ class WorkerRuntime:
             return base
         return base / subdir
 
-    def _compose_evidence_delivery(self) -> EvidenceExportRuntime | None:
-        """Build the export runtime. Never gated on clip recording.
-
-        The export gate is checked *before* ``ClipRecorderConfig()`` is built.
-        That config reads clip-only environment variables and raises on
-        malformed values, so building it unconditionally would let a stray clip
-        setting fail a worker that has both clip recording and export switched
-        off -- a failure with no relation to anything that worker uses.
-        """
-        if not export_enabled():
-            return None
-        if not self.config.cameras:
-            # Issue #150: zero configured cameras is a valid boot state, but
-            # `probe_camera_id` below has no camera to name -- there is also
-            # nothing staged to export yet with no camera producing events.
-            # Evidence delivery simply waits, same as everything else that is
-            # camera-scoped, for the first camera to be registered.
-            return None
-        clip_config = ClipRecorderConfig(store_dir=self._resolved_clip_store_dir())
+    def _compose_evidence_delivery(self) -> EvidenceExportRuntime:
+        """Always build event delivery; the live policy only gates clip claims."""
+        probe_camera_id = self.config.cameras[0].camera_id if self.config.cameras else "worker"
         try:
-            return EvidenceExportRuntime.from_environment(
-                store_dir=clip_config.store_dir,
+            return EvidenceExportRuntime.from_config(
+                store_dir=self._resolved_clip_store_dir(),
                 relay_url=self.config.relay.url,
                 relay_token=self.config.relay.token.get_secret_value(),
-                probe_camera_id=self.config.cameras[0].camera_id,
+                probe_camera_id=probe_camera_id,
+                clip_export_enabled=self._clip_export_policy.enabled,
                 database_path=_evidence_outbox_path(self._state_dir),
             )
         except ValueError as exc:
-            # ADR-0003: the env gate (ML_WORKER_EVENT_CLIP_EXPORT_ENABLED) is the
-            # explicit opt-out and returns None on its own. Reaching this branch
-            # means the operator switched export ON and left it misconfigured, so
-            # degrading to "no delivery" would hide a configuration error behind a
-            # worker that looks healthy. Fail closed. The message is sanitized --
-            # the relay URL and token stay on __cause__, never in this text.
             raise EvidenceDeliveryError(
-                "evidence export is enabled but misconfigured: relay URL, relay "
-                "token, and probe camera id are all required"
+                "evidence delivery is misconfigured: relay URL, relay token, "
+                "and a probe identity are required"
             ) from exc
 
     def _initialize_delivery_without_recorder(
@@ -1392,9 +1371,9 @@ class WorkerRuntime:
         """
         if evidence_runtime is None:
             return
-        clip_config = ClipRecorderConfig(store_dir=self._resolved_clip_store_dir())
+        store_dir = self._resolved_clip_store_dir()
         try:
-            with ClipStoreLock.acquire(clip_config.store_dir):
+            with ClipStoreLock.acquire(store_dir):
                 evidence_runtime.initialize_under_lock()
         except ClipStoreLockedError as exc:
             # Another process already owns this clip store. Continuing would run
@@ -1493,6 +1472,11 @@ class WorkerRuntime:
             return
         self._clip_recorder = recorder
         self.diagnostics.set_clip_recorder_status(ClipRecorderStatus(available=True))
+
+    def _refresh_runtime_status_telemetry(self) -> None:
+        enabled, version = self._clip_export_policy.snapshot()
+        self.diagnostics.set_clip_export_applied(enabled=enabled, version=version)
+        self._refresh_clip_recorder_telemetry()
 
     def _refresh_clip_recorder_telemetry(self) -> None:
         """Push the clip recorder's live counters into diagnostics.

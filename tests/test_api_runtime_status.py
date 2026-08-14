@@ -32,6 +32,7 @@ def _payload(**overrides: object) -> dict[str, object]:
                 },
             }
         ],
+        "clip_export": {"enabled": True, "version": 4},
         "clip_recorder": {
             "available": True,
             "dropped_frames": 0,
@@ -114,6 +115,11 @@ def test_runtime_status_exposes_additive_diagnostics() -> None:
         "captured_at_sec": 1.0,
     }
     assert runtime["clip_recorder"]["finalized_clips"] == 2
+    assert runtime["clip_export_applied"] == {
+        "enabled": True,
+        "version": 4,
+        "freshness": "fresh",
+    }
 
 
 def test_flatten_runtime_cameras_marks_stale_camera_without_erasing_last_fps() -> None:
@@ -235,6 +241,26 @@ def test_runtime_status_rejects_reversed_sequence_within_generation() -> None:
 
     assert reversed_sequence.status_code == 409
     assert reversed_sequence.json()["detail"] == "old_seq"
+
+
+def test_status_marks_applied_clip_export_stale_and_offline_separately() -> None:
+    app = create_app(lifespan=no_lifespan)
+    app.state.edge_relay_token = "relay-token"
+    app.state.camera_inventory = {
+        "camera-1": {"camera_id": "camera-1", "facility_id": "facility-1"}
+    }
+    app.state.runtime_status_store = RuntimeStatusStore(stale_after_sec=1.0)
+    client = TestClient(app)
+
+    app.state.runtime_status_store.record(_payload(), received_at=0.0)
+    stale = client.get("/api/v1/status").json()["runtime"]["clip_export_applied"]
+    app.state.runtime_status_store.record(
+        _payload(generation=None, worker={"alive": False, "pid": None, "started_at_sec": None})
+    )
+    offline = client.get("/api/v1/status").json()["runtime"]["clip_export_applied"]
+
+    assert stale == {"enabled": True, "version": 4, "freshness": "stale"}
+    assert offline == {"enabled": True, "version": 4, "freshness": "offline"}
 
 
 def test_runtime_status_snapshot_is_stale_after_ttl() -> None:
@@ -387,6 +413,8 @@ def test_worker_runtime_payload_round_trips_through_runtime_status_route() -> No
         "active_clips": None,
         "encoder": None,
     }
+
+
 def test_profile_boot_failure_status_with_no_cameras_is_accepted() -> None:
     diagnostics = WorkerDiagnostics()
     diagnostics.set_gpu_status(
@@ -399,9 +427,7 @@ def test_profile_boot_failure_status_with_no_cameras_is_accepted() -> None:
             "captured_at_sec": 1.0,
         }
     )
-    diagnostics.set_worker_status(
-        {"alive": False, "profile_boot_error": "no usable CUDA device"}
-    )
+    diagnostics.set_worker_status({"alive": False, "profile_boot_error": "no usable CUDA device"})
     client = _client()
 
     response = _post(client, diagnostics.to_payload("facility-1", None, 0))
@@ -412,6 +438,7 @@ def test_profile_boot_failure_status_with_no_cameras_is_accepted() -> None:
     assert facility["clip_recorder"]["available"] is False
     assert facility["gpu"]["nvml_available"] is False
     assert facility["worker"]["profile_boot_error"] == "no usable CUDA device"
+
 
 def test_decode_open_failure_is_visible_before_any_backend_is_selected() -> None:
     diagnostics = WorkerDiagnostics()
@@ -430,7 +457,6 @@ def test_decode_open_failure_is_visible_before_any_backend_is_selected() -> None
             "updated_at_sec": camera["decode"]["updated_at_sec"],
         },
     }
-
 
 
 def test_runtime_status_store_preserves_highest_sequence_under_concurrent_recording() -> None:

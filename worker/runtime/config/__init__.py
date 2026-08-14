@@ -16,8 +16,10 @@ from worker.runtime.config.config_pull import (
     ConfigSnapshot,
     ConfigSource,
     UrlOpen,
+    WorkerConfigPoll,
     load_worker_config_from_relay,
     pull_worker_config,
+    pull_worker_config_poll,
     resolve_startup_config,
 )
 from worker.runtime.config.config_resolver import resolve_runtime_config
@@ -30,6 +32,7 @@ from worker.runtime.config.domain_models import (
     NightWindowConfig,
 )
 from worker.runtime.config.errors import ConfigValidationError, WorkerConfigError
+from worker.runtime.config.live_settings import LiveClipExportPolicy
 from worker.runtime.config.lkg_store import (
     CONFIG_HISTORY_RETENTION_COUNT,
     WORKER_STATE_DB_FILENAME,
@@ -122,6 +125,7 @@ __all__ = [
     "FallModelConfig",
     "JsonObject",
     "JsonValue",
+    "LiveClipExportPolicy",
     "NightWindowConfig",
     "PullWorkerConfig",
     "RelayConfig",
@@ -132,6 +136,7 @@ __all__ = [
     "WorkerConfig",
     "WorkerConfigError",
     "WorkerConfigLkgStore",
+    "WorkerConfigPoll",
     "WorkerModelsConfig",
     "WorkerRuntimeConfig",
     "clip_recording_config_from_environment",
@@ -140,6 +145,7 @@ __all__ = [
     "load_worker_config_from_relay",
     "make_restart_check",
     "pull_worker_config",
+    "pull_worker_config_poll",
     "resolve_config_path",
     "resolve_local_overrides",
     "resolve_runtime_config",

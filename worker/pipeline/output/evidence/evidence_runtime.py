@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import threading
 import time
 from collections.abc import Callable
@@ -21,8 +20,6 @@ from worker.pipeline.output.evidence.evidence_sender import (
     SenderStep,
 )
 from worker.pipeline.output.evidence.evidence_stager import DurableEvidenceStager
-
-EXPORT_ENABLED_ENV = "ML_WORKER_EVENT_CLIP_EXPORT_ENABLED"
 
 
 class SenderProtocol(Protocol):
@@ -46,32 +43,34 @@ class EvidenceExportRuntime:
     _wake_sender: threading.Event = field(default_factory=threading.Event, init=False)
 
     @classmethod
-    def from_environment(
+    def from_config(
         cls,
         *,
         store_dir: Path,
         relay_url: str,
         relay_token: str | None,
         probe_camera_id: str,
+        clip_export_enabled: Callable[[], bool],
         database_path: Path | None = None,
-    ) -> EvidenceExportRuntime | None:
-        if not _enabled(os.environ.get(EXPORT_ENABLED_ENV)):
-            return None
+    ) -> EvidenceExportRuntime:
         token = "" if relay_token is None else relay_token.strip()
         if not relay_url.strip() or not token or not probe_camera_id.strip():
-            raise ValueError("evidence export requires relay URL, token, and camera")
+            raise ValueError("evidence delivery requires relay URL, token, and camera identity")
         if database_path is None:
             database_path = store_dir / "worker-state.sqlite3"
         config = SenderConfig(
             relay_url=relay_url,
             relay_token=token,
             probe_camera_id=probe_camera_id,
-            enabled=True,
         )
         return cls(
             store_dir=store_dir,
             database_path=database_path,
-            sender=EvidenceSender(database_path, config),
+            sender=EvidenceSender(
+                database_path,
+                config,
+                clip_export_enabled=clip_export_enabled,
+            ),
         )
 
     def initialize_under_lock(self) -> None:
@@ -161,21 +160,4 @@ class EvidenceExportRuntime:
                 self._pending_finalized.remove(clip_id)
 
 
-def _enabled(value: str | None) -> bool:
-    return (value or "").strip().lower() in {"1", "true", "yes"}
-
-
-def export_enabled() -> bool:
-    """Whether evidence export is switched on for this process.
-
-    Public so the composition root can ask *before* building collaborators that
-    only export needs. ``from_environment`` answers the same question
-    internally, but it requires a ``store_dir`` argument -- and building that
-    config reads clip-only environment variables that can themselves be
-    malformed. Asking first stops a clip-only misconfiguration from failing a
-    worker which has both clip recording and export switched off.
-    """
-    return _enabled(os.environ.get(EXPORT_ENABLED_ENV))
-
-
-__all__ = ["EvidenceExportRuntime", "export_enabled"]
+__all__ = ["EvidenceExportRuntime"]

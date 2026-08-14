@@ -33,7 +33,8 @@ from worker.pipeline.output.evidence.evidence_outbox_types import (
 
 
 class SenderStep(StrEnum):
-    DISABLED = "DISABLED"
+    DISABLED = "DISABLED"  # legacy value; live policy uses CLIP_POLICY_BLOCKED
+    CLIP_POLICY_BLOCKED = "CLIP_POLICY_BLOCKED"
     CAPABILITY_BLOCKED = "CAPABILITY_BLOCKED"
     RETRY_SCHEDULED = "RETRY_SCHEDULED"
     PERMANENT_FAILURE = "PERMANENT_FAILURE"
@@ -60,7 +61,6 @@ class SenderConfig:
     relay_url: str
     relay_token: str = field(repr=False)
     probe_camera_id: str
-    enabled: bool = False
     lease_seconds: float = 30.0
     max_backoff_seconds: float = 300.0
     compatibility_reprobe_seconds: float = 60.0
@@ -73,6 +73,7 @@ class EvidenceSender:
         config: SenderConfig,
         *,
         transport: EvidenceTransport | None = None,
+        clip_export_enabled: Callable[[], bool] = lambda: False,
         clock: Callable[[], float] = time.time,
         random_value: Callable[[], float] = random.random,
         owner: str | None = None,
@@ -80,37 +81,55 @@ class EvidenceSender:
         self.database_path = database_path
         self.config = config
         self._transport = transport or RelayEvidenceClient(config.relay_url, config.relay_token)
+        self._clip_export_enabled = clip_export_enabled
         self._clock = clock
         self._random_value = random_value
         self._owner = owner or f"sender-{uuid.uuid4()}"
         self._next_capability_probe_at = 0.0
 
     def run_once(self) -> SenderStep:
-        if not self.config.enabled:
-            return SenderStep.DISABLED
-        probe_now = self._clock()
-        if probe_now < self._next_capability_probe_at:
+        event_now = self._clock()
+        event_lease = ClaimLease(self._owner, event_now, self.config.lease_seconds)
+        with EvidenceOutbox.open(self.database_path) as outbox:
+            outbox.release_compatibility()
+            event = outbox.claim(event_lease)
+            if event is not None:
+                return self._send_event(outbox, event, event_now)
+
+        if not self._clip_export_enabled():
+            return SenderStep.CLIP_POLICY_BLOCKED
+        if event_now < self._next_capability_probe_at:
             return SenderStep.CAPABILITY_BLOCKED
         capabilities = self._transport.probe_capabilities(self.config.probe_camera_id)
         if isinstance(capabilities, DeliveryFailure):
             if capabilities.disposition is DeliveryDisposition.COMPATIBILITY:
                 self._next_capability_probe_at = (
-                    probe_now + self.config.compatibility_reprobe_seconds
+                    event_now + self.config.compatibility_reprobe_seconds
                 )
             return SenderStep.CAPABILITY_BLOCKED
         self._next_capability_probe_at = 0.0
-        now = self._clock()
-        lease = ClaimLease(self._owner, now, self.config.lease_seconds)
+        if capabilities.clip_export != 1:
+            return SenderStep.CAPABILITY_BLOCKED
+        # The capability probe is network I/O. Re-read the live switch after
+        # it returns so an OFF transition cannot race into a durable claim.
+        if not self._clip_export_enabled():
+            return SenderStep.CLIP_POLICY_BLOCKED
+
+        clip_now = self._clock()
+        clip_lease = ClaimLease(self._owner, clip_now, self.config.lease_seconds)
         with EvidenceOutbox.open(self.database_path) as outbox:
-            outbox.release_compatibility()
-            event = outbox.claim(lease)
-            if event is not None:
-                return self._send_event(outbox, event, now)
-            if capabilities.clip_export != 1:
-                return SenderStep.CAPABILITY_BLOCKED
-            clip = outbox.claim_clip(lease)
+            clip = outbox.claim_clip(clip_lease)
             if clip is not None:
-                return self._send_clip(outbox, clip, now)
+                # This is the final dispatch boundary. If OFF wins after the
+                # claim, release it with the lease CAS and restore the attempt
+                # count because no request was sent.
+                if not self._clip_export_enabled():
+                    return (
+                        SenderStep.CLIP_POLICY_BLOCKED
+                        if outbox.release_clip_claim(clip)
+                        else SenderStep.LEASE_LOST
+                    )
+                return self._send_clip(outbox, clip, clip_now)
         return SenderStep.IDLE
 
     def _send_event(

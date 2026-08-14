@@ -131,10 +131,9 @@ and the digest-pinned GHCR image references
 (`docs/runbooks/edge-image-publish.md`). Every other variable
 `compose.edge.yaml` requires already ships with a working default, so a
 single `.env.edge.prod` is enough — no second env file needed.
-`ML_WORKER_EVENT_CLIP_EXPORT_ENABLED` defaults to `1` (it gates all alert
-delivery, not just clips — see #194); `ML_API_EVENT_CLIP_EXPORT_ENABLED`
-stays off by default until backend clip capability is verified for this
-deployment.
+Event delivery is always active once relay credentials are valid. Clip export
+is a persisted Edge dashboard setting that defaults OFF and applies live without
+a worker restart; backend capability checks still gate actual clip relay.
 
 Before `up`, verify the env file actually renders and has no leftover
 `<placeholder>` values:
