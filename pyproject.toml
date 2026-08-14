@@ -34,7 +34,9 @@ worker = [
     "scikit-learn>=1.5",
     "joblib>=1.4",
     "ultralytics>=8.3",
+    "pillow>=12",
     "nvidia-ml-py>=12",
+    "av>=15,<17",
 ]
 
 [tool.uv]
@@ -123,10 +125,16 @@ type = "independence"
 modules = ["backend", "worker"]
 
 [[tool.importlinter.contracts]]
+name = "runtime packages cannot import edge database DDL"
+type = "forbidden"
+source_modules = ["backend", "worker"]
+forbidden_modules = ["shared.edge_db.migrator", "shared.edge_db.schema"]
+
+[[tool.importlinter.contracts]]
 name = "contracts is a leaf (imports nothing internal)"
 type = "forbidden"
 source_modules = ["contracts"]
-forbidden_modules = ["backend", "shared.events", "worker"]
+forbidden_modules = ["backend", "shared.events", "shared.edge_db", "worker"]
 
 [[tool.importlinter.contracts]]
 # Stage 2b: 2-depth ownership inside backend — base (core/shared) must not import
