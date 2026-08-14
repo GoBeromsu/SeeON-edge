@@ -15,8 +15,13 @@ class DecodeSession(Protocol):
 
 
 @runtime_checkable
+class StreamIdentityDecodeSession(DecodeSession, Protocol):
+    def set_stream_identity(self, worker_boot_id: str, stream_epoch: int) -> None: ...
+
+
+@runtime_checkable
 class DecodeAdapter(Protocol[_DecodeConfigT]):
     def open(self, config: _DecodeConfigT) -> DecodeSession: ...
 
 
-__all__ = ["DecodeAdapter", "DecodeSession"]
+__all__ = ["DecodeAdapter", "DecodeSession", "StreamIdentityDecodeSession"]

@@ -19,20 +19,33 @@ from contracts.observation import (
     FrameObservation,
 )
 from contracts.runner import DetectionRunnerResult, RunnerResult
-from worker.types import BusinessEvent, DecisionInput, FramePacket, ModuleResult
+from worker.types import (
+    BusinessEvent,
+    DecisionInput,
+    FrameKey,
+    FrameLease,
+    FramePacket,
+    ModuleResult,
+)
 
 _ROOT = Path(__file__).resolve().parents[1]
 _EXPECTED_FIELDS = {
     FramePacket: (
         "camera_id",
-        "frame",
+        "_frame",
         "pts",
         "seq",
         "width",
         "height",
         "decode_time_ms",
+        "worker_boot_id",
+        "stream_epoch",
+        "source_pts",
+        "source_dts",
+        "source_time_base",
+        "lease",
     ),
-    ModuleResult: ("module_name", "result", "elapsed_ms"),
+    ModuleResult: ("module_name", "result", "elapsed_ms", "output_adapter"),
     DecisionInput: (
         "observation",
         "frame_width",
@@ -86,9 +99,10 @@ def _build_pipeline_values() -> tuple[FramePacket, ModuleResult, DecisionInput, 
     detection = DetectionResult(boxes=boxes, labels=labels, keypoints=keypoints)
     runner_result = DetectionRunnerResult(kind="detection", detections=detection)
     module_result = ModuleResult(
-        module_name="yolo-pose",
+        module_name="mobility-v2",
         result=runner_result,
         elapsed_ms=4.5,
+        output_adapter="pose",
     )
     normalized = FrameObservation.from_detection_result(runner_result.detections)
     observation = FrameObservation(
@@ -125,10 +139,24 @@ def test_worker_envelopes_have_exact_fields_and_authoritative_types() -> None:
         assert tuple(item.name for item in fields(envelope_type)) == expected_fields
         assert tuple(envelope_type.__slots__) == expected_fields
 
-    assert get_type_hints(FramePacket)["frame"] is Frame
+    assert get_type_hints(FramePacket)["_frame"] is Frame
+    assert get_type_hints(FramePacket)["lease"] is FrameLease
     assert get_type_hints(ModuleResult)["result"] == RunnerResult
+    assert get_type_hints(ModuleResult)["output_adapter"] == str | None
     assert get_type_hints(DecisionInput)["observation"] is FrameObservation
     assert get_type_hints(DecisionInput)["bed_region"] is BedRegionDebugSnapshot
+
+
+def test_frame_key_includes_boot_camera_epoch_sequence_and_pts() -> None:
+    packet = replace(
+        _build_pipeline_values()[0],
+        worker_boot_id="boot-7",
+        stream_epoch=4,
+    )
+
+    assert packet.frame_key == FrameKey("boot-7", "camera-7", 4, 4, 1.25)
+    assert packet.frame_key != replace(packet, stream_epoch=5).frame_key
+    assert packet.frame_key != replace(packet, pts=1.5).frame_key
 
 
 def test_worker_envelopes_support_value_equality_and_hashing() -> None:
@@ -179,6 +207,8 @@ def test_pipeline_values_preserve_box_keypoint_and_track_alignment_without_image
     packet, module_result, decision_input, business_event = _build_pipeline_values()
     runner_result = module_result.result
     assert isinstance(runner_result, DetectionRunnerResult)
+    assert module_result.module_name == "mobility-v2"
+    assert module_result.output_adapter == "pose"
 
     observation = decision_input.observation
     assert observation.boxes == runner_result.detections.boxes
