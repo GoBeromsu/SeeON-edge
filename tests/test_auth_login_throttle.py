@@ -49,6 +49,13 @@ def test_login_throttle_returns_429_after_bounded_failures(tmp_path, monkeypatch
     # After the window elapses, attempts are admitted again without sleeping.
     assert throttle.allow(key, now=now + 61) is True
 
+    # The unit phase above injects absolute stamps (1000..1002) that are unrelated
+    # to the real ``time.monotonic`` clock the HTTP phase below uses. On a fresh
+    # runner monotonic can be < 1000, so those stamps read as future, never prune,
+    # and would trip 429 before the first 401. Clear the shared key so the HTTP
+    # phase starts from an empty window.
+    throttle.clear(key)
+
     with _client(tmp_path) as client:
         for _ in range(3):
             denied = client.post(
