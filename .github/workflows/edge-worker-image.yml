@@ -56,10 +56,11 @@ jobs:
         # no-side-effect boot path (worker/runtime/AGENTS.md) -- it forces
         # every top-level import in worker/__main__.py's module graph to
         # resolve before returning, without a relay pull or any disk write.
-        # RELAY_URL/RELAY_TOKEN only need to be well-formed, not reachable.
+        # The relay URL is fixed in-code now (RELAY_URL is retired); only
+        # RELAY_TOKEN is required and it only needs to be well-formed, not
+        # reachable.
         run: |
           docker run --rm \
-            -e RELAY_URL=http://relay.invalid \
             -e RELAY_TOKEN=ci-boot-smoke-test \
             eldercare-fall-ml-worker:ci \
             python -m worker --check-config
