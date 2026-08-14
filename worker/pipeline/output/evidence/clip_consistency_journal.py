@@ -27,13 +27,15 @@ from worker.pipeline.output.evidence.clip_consistency_quarantine import (
     canonical_quarantine_rows,
     quarantine_rows_sha256,
 )
+from worker.pipeline.output.evidence.clip_consistency_schema import (
+    is_supported_schema_version,
+)
 from worker.pipeline.output.evidence.clip_consistency_types import (
     ClipConsistencyError,
     FaultHook,
     JournalState,
     RepairCounters,
 )
-from worker.pipeline.output.evidence.evidence_outbox_schema import SCHEMA_VERSION
 
 _FORMAT_VERSION = 2
 
@@ -41,6 +43,7 @@ _FORMAT_VERSION = 2
 @dataclass(frozen=True, slots=True)
 class ApplyJournal:
     state: JournalState
+    schema_version: int
     owner_uid: int
     state_db: str
     clip_store: str
@@ -78,7 +81,7 @@ class ApplyJournal:
         return {
             "format_version": _FORMAT_VERSION,
             "state": self.state,
-            "schema_version": SCHEMA_VERSION,
+            "schema_version": self.schema_version,
             "owner_uid": self.owner_uid,
             "state_db": self.state_db,
             "clip_store": self.clip_store,
@@ -103,6 +106,7 @@ class ApplyJournal:
 
 def prepared_journal(
     *,
+    schema_version: int,
     owner_uid: int,
     state_db: Path,
     clip_store: Path,
@@ -118,6 +122,7 @@ def prepared_journal(
     quarantine = canonical_quarantine_rows(plan.quarantine_clip_ids, plan.plan_sha256)
     return ApplyJournal(
         state="PREPARED",
+        schema_version=schema_version,
         owner_uid=owner_uid,
         state_db=str(state_db.resolve(strict=True)),
         clip_store=str(clip_store.resolve(strict=True)),
@@ -180,6 +185,7 @@ def read_journal(
         raise ClipConsistencyError("journal_invalid", "journal key set differs")
     journal = ApplyJournal(
         state=journal_state(string(payload, "state")),
+        schema_version=integer(payload, "schema_version"),
         owner_uid=integer(payload, "owner_uid"),
         state_db=string(payload, "state_db"),
         clip_store=string(payload, "clip_store"),
@@ -218,7 +224,7 @@ def read_journal(
     )
     valid_identity = (
         integer(payload, "format_version") == _FORMAT_VERSION
-        and integer(payload, "schema_version") == SCHEMA_VERSION
+        and is_supported_schema_version(journal.schema_version)
         and journal.owner_uid == expected_uid
         and journal.state_db == str(state_db.resolve(strict=True))
         and journal.clip_store == str(clip_store.resolve(strict=True))

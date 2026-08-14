@@ -3,16 +3,13 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Literal
 
-import numpy as np
-from numpy.typing import NDArray
-
 from contracts.observation import (
     BedRegionCacheState,
     BedRegionDebugSnapshot,
     FrameObservation,
 )
 from worker.domains.fall import FallWindowClassifier
-from worker.types import DecisionInput
+from worker.types import DecisionInput, FallModelInput
 
 
 @dataclass(frozen=True, slots=True)
@@ -27,10 +24,10 @@ class _Model:
     metadata: _Metadata
     probabilities: tuple[float, ...]
     operating_threshold: float
-    inputs: list[NDArray[np.float32]] = field(default_factory=list)
+    inputs: list[FallModelInput] = field(default_factory=list)
 
-    def predict(self, features: NDArray[np.float32]) -> float:
-        self.inputs.append(features.copy())
+    def predict(self, features: FallModelInput) -> float:
+        self.inputs.append(features)
         index = min(len(self.inputs) - 1, len(self.probabilities) - 1)
         return self.probabilities[index]
 
@@ -79,9 +76,14 @@ def test_sequence_mode_normalizes_window_and_preserves_probability() -> None:
     assert second.labels[0].confidence == 0.812345
     assert second.labels[0].is_fall
     assert len(model.inputs) == 1
-    assert model.inputs[0].shape == (2, 51)
-    np.testing.assert_allclose(model.inputs[0][0, :3], (0.25, 0.5, 0.9))
-    np.testing.assert_allclose(model.inputs[0][1, :3], (0.35, 0.5, 0.9))
+    captured = model.inputs[0]
+    assert isinstance(captured, tuple)
+    assert len(captured) == 2  # window rows
+    rows = [row for row in captured if isinstance(row, tuple)]
+    assert len(rows) == 2
+    assert all(len(row) == 51 for row in rows)
+    assert rows[0][:3] == (0.25, 0.5, 0.9)
+    assert rows[1][:3] == (0.35, 0.5, 0.9)
 
 
 def test_engineered_feature_mode_preserves_probability() -> None:
@@ -101,8 +103,10 @@ def test_engineered_feature_mode_preserves_probability() -> None:
     # Then
     assert result.labels[0].confidence == 0.623456
     assert len(model.inputs) == 1
-    assert model.inputs[0].shape == (45,)
-    np.testing.assert_array_equal(model.inputs[0], np.zeros(45, dtype=np.float32))
+    captured = model.inputs[0]
+    assert isinstance(captured, tuple)
+    assert len(captured) == 45  # flat engineered-feature vector
+    assert all(value == 0.0 for value in captured)
 
 
 def test_live_track_without_pose_appends_zero_pose() -> None:
@@ -123,9 +127,8 @@ def test_live_track_without_pose_appends_zero_pose() -> None:
 
     # Then
     assert len(model.inputs) == 1
-    row_size_bytes = 51 * np.dtype(np.float32).itemsize
-    captured_bytes = model.inputs[0].tobytes()
-    assert captured_bytes[row_size_bytes : 2 * row_size_bytes] == bytes(row_size_bytes)
+    middle_row = model.inputs[0][1]
+    assert middle_row == (0.0,) * 51
 
 
 def test_evicted_track_cannot_reuse_probability_or_window() -> None:

@@ -3,9 +3,9 @@
 ``BoundedFrameBus.evidence`` (``worker/pipeline/bus/frame_bus.py``) is a
 bounded FIFO subscription that exists for exactly one purpose: feeding
 decoded frames to clip recording. Nothing reads it on its own --
-``ClipRecorder`` only ever receives frames a caller pushes through
+``ClipRecorder`` only ever receives packets a caller pushes through
 ``on_frame``. This module is that caller: one feeder per camera drains its
-own ``evidence`` subscription and forwards each packet's ``Frame`` payload.
+own ``evidence`` subscription and forwards each complete packet unchanged.
 
 Mirrors ``worker.pipeline.camera_pipeline.CameraPipelinePump``'s shape (bounded
 poll loop, ``stop_event``, per-packet failure isolation) so it satisfies the
@@ -58,14 +58,17 @@ class ClipFrameFeeder:
             packet = self._subscription.take(timeout_sec=self._poll_timeout_sec)
             if packet is None:
                 continue
-            self._feed_one(packet)
+            try:
+                self._feed_one(packet)
+            finally:
+                packet.release()
 
     def stop(self) -> None:
         self._stop_event.set()
 
     def _feed_one(self, packet: FramePacket) -> None:
         try:
-            _ = self._recorder.on_frame(self._camera_id, packet.frame)
+            _ = self._recorder.on_frame(packet)
         except Exception as error:  # noqa: BLE001 - per-camera boundary, mirrors CameraPipelinePump
             self.failure_count += 1
             LOGGER.warning(

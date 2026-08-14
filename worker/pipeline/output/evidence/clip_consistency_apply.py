@@ -69,7 +69,7 @@ def apply_repair(request: RepairRequest) -> RepairReceipt:
     committed = False
     commit_attempted = False
     try:
-        validate_database(control, now=time.time())
+        schema_version = validate_database(control, now=time.time())
         authority = _authority(request)
         plan = plan_relations(
             control,
@@ -83,6 +83,7 @@ def apply_repair(request: RepairRequest) -> RepairReceipt:
             receipt_path=request.prebackup_receipt,
             maintenance_root=root,
             expected_uid=request.expected_owner_uid,
+            schema_version=schema_version,
             hook=request.fault_hook,
         )
         moved = plan_staging_quarantine(
@@ -91,6 +92,7 @@ def apply_repair(request: RepairRequest) -> RepairReceipt:
             plan.plan_sha256,
         )
         journal = prepared_journal(
+            schema_version=schema_version,
             owner_uid=request.expected_owner_uid,
             state_db=request.state_db,
             clip_store=request.clip_store,
@@ -162,7 +164,11 @@ def resume_repair(request: RepairRequest) -> RepairReceipt:
         return journal_receipt("resume", journal)
     control = open_write_exclusion(request.state_db)
     try:
-        validate_database(control, now=time.time())
+        schema_version = validate_database(control, now=time.time())
+        if schema_version != journal.schema_version:
+            raise ClipConsistencyError(
+                "resume_conflict", "database schema version differs from journal"
+            )
         if non_relation_preimage_sha256(control) != journal.non_relation_state_sha256:
             raise ClipConsistencyError(
                 "resume_conflict", "non-relation database preimage changed"

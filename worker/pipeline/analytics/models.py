@@ -38,21 +38,23 @@ class ExtractorSpec:
 
 @dataclass(frozen=True, slots=True)
 class NamedExtractor:
-    """Adapt one shared runner to the packet-oriented Extractor port."""
+    """Adapt one shared runner while preserving identity and output semantics."""
 
     module_name: str
     runner: RunnerProtocol = field(compare=False, hash=False, repr=False)
     _call: RunnerCall = field(compare=False, hash=False, repr=False)
     _clock: Clock = field(compare=False, hash=False, repr=False)
+    output_adapter: str | None = None
 
     def extract(self, packet: FramePacket) -> ModuleResult:
         started_at = self._clock()
-        result = self._call(packet.frame.image)
+        result = self._call(packet.borrow_host_frame().image)
         elapsed_ms = max(0.0, (self._clock() - started_at) * 1000.0)
         return ModuleResult(
             module_name=self.module_name,
             result=result,
             elapsed_ms=elapsed_ms,
+            output_adapter=self.output_adapter,
         )
 
 
@@ -77,6 +79,7 @@ def provision_extractors(
                 runner=runner,
                 _call=_runner_call(runner),
                 _clock=clock,
+                output_adapter=spec.module_name,
             )
         )
     return tuple(extractors)

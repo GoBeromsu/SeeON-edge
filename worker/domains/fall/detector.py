@@ -3,12 +3,13 @@ from __future__ import annotations
 from typing import ClassVar
 
 from contracts.observation import FrameObservation
+from shared.detection_policies import FALL_POLICY_V1_DEFAULT
 from worker.domains.fall.classifier import (
     FallModelProtocol,
     FallWindowClassifier,
 )
 from worker.domains.fall.schema import FallEvent
-from worker.types import BusinessEvent, DecisionInput
+from worker.types import BusinessEvent, DecisionInput, DecisionTraceSnapshot
 
 
 class FallEventLatch:
@@ -26,18 +27,55 @@ class FallEventLatch:
         *,
         camera_id: str,
         facility_id: str,
+        operating_threshold: float = FALL_POLICY_V1_DEFAULT.operating_threshold,
     ) -> None:
-        self.classifier = FallWindowClassifier(model)
+        self.classifier = FallWindowClassifier(model, operating_threshold)
         self.camera_id = camera_id
         self.facility_id = facility_id
         self.event_count = 0
         self.first_event_sec = None
         self._previous_fall = False
+        self.last_trace_snapshots: tuple[DecisionTraceSnapshot, ...] = ()
 
     def update(self, input_value: DecisionInput) -> tuple[BusinessEvent, ...]:
         observation = self.classifier.classify(input_value)
         time_sec = 0.0 if input_value.time_sec is None else input_value.time_sec
-        event = self.update_event(_is_fall(observation), time_sec)
+        previous_fall = self._previous_fall
+        is_fall = _is_fall(observation)
+        event = self.update_event(is_fall, time_sec)
+        probability, track_id = _fall_probability_and_track(
+            observation, frozenset(input_value.live_track_ids)
+        )
+        reason = (
+            "score-missing"
+            if probability is None
+            else "fall-onset"
+            if event is not None
+            else "fall-active"
+            if is_fall
+            else "below-threshold"
+        )
+        values: dict[str, int | float] = {
+            "operating_threshold": self.classifier.operating_threshold,
+            "window_frames": self.classifier.model.metadata.window,
+        }
+        missing_values: dict[str, str] = {}
+        if probability is None:
+            missing_values["fall_probability"] = "no-live-classified-track"
+        else:
+            values["fall_probability"] = probability
+        self.last_trace_snapshots = (
+            DecisionTraceSnapshot(
+                reason=reason,
+                previous_state="fall" if previous_fall else "clear",
+                current_state="fall" if is_fall else "clear",
+                triggered=event is not None,
+                track_id=track_id,
+                bed_id=None,
+                values=values,
+                missing_values=missing_values,
+            ),
+        )
         if event is None:
             return ()
         return (
@@ -48,7 +86,7 @@ class FallEventLatch:
                 camera_id=self.camera_id,
                 facility_id=self.facility_id,
                 time_sec=event.onset_sec,
-                probability=_fall_probability(observation),
+                probability=1.0 if probability is None else probability,
             ),
         )
 
@@ -79,11 +117,22 @@ def _is_fall(observation: FrameObservation) -> bool:
     return any(label.is_fall for label in observation.labels)
 
 
-def _fall_probability(observation: FrameObservation) -> float:
-    return max(
-        (label.confidence for label in observation.labels if label.is_fall),
-        default=1.0,
+def _fall_probability_and_track(
+    observation: FrameObservation,
+    live_track_ids: frozenset[int],
+) -> tuple[float | None, int | None]:
+    track_ids = tuple(
+        track_id
+        for track_id in observation.track_ids
+        if track_id is not None and track_id in live_track_ids
     )
+    pairs = tuple(
+        (label.confidence, track_id)
+        for label, track_id in zip(observation.labels, track_ids, strict=True)
+    )
+    if not pairs:
+        return None, None
+    return max(pairs, key=lambda item: (item[0], -item[1]))
 
 
 __all__ = ["FallEventLatch"]

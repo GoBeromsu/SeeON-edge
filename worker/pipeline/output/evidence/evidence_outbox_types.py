@@ -36,6 +36,7 @@ class EvidenceReasonCode(StrEnum):
     ENCODER_FAILED = "ENCODER_FAILED"
     NO_FRAMES = "NO_FRAMES"
     FINALIZE_FAILED = "FINALIZE_FAILED"
+    STREAM_EPOCH_MISMATCH = "STREAM_EPOCH_MISMATCH"
     INTERRUPTED_FINALIZE = "INTERRUPTED_FINALIZE"
     MISSING = "MISSING"
     CORRUPT = "CORRUPT"
@@ -112,6 +113,14 @@ class ClipOutcome:
     clip_end_at: str | None = None
     finalized_at: str | None = None
     unavailable_reason: EvidenceReasonCode | None = None
+    manifest_sha256: str | None = None
+    manifest_size_bytes: int | None = None
+    audio_codec: str | None = None
+    runtime_manifest_sha256: str | None = None
+    source_media_json: str | None = None
+    time_origin_json: str | None = None
+    truncation_json: str = "[]"
+    source_missing_reason: str | None = None
 
 
 @dataclass(slots=True)
@@ -139,7 +148,10 @@ class EventClipConflictError(Exception):
 @dataclass(slots=True)
 class StagedEventConflictError(Exception):
     edge_event_id: EdgeEventId
-    mismatched_fields: tuple[Literal["detected_at", "payload_json"], ...]
+    mismatched_fields: tuple[
+        Literal["detected_at", "payload_json", "decision_trace_id"],
+        ...,
+    ]
 
     def __str__(self) -> str:
         fields = ", ".join(self.mismatched_fields)
@@ -161,10 +173,7 @@ class ClipOutcomeConflictError(Exception):
     requested_state: ClipLocalState
 
     def __str__(self) -> str:
-        return (
-            f"clip {self.clip_id} outcome is {self.existing_state}, "
-            f"not {self.requested_state}"
-        )
+        return f"clip {self.clip_id} outcome is {self.existing_state}, not {self.requested_state}"
 
 
 __all__ = [

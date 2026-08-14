@@ -33,6 +33,24 @@ class ClipRemuxError(RuntimeError):
 
 
 @final
+class CrossEpochFrameError(RuntimeError):
+    def __init__(self, expected_epoch: int, actual_epoch: int) -> None:
+        self.expected_epoch = expected_epoch
+        self.actual_epoch = actual_epoch
+        super().__init__(
+            f"encoder generation stream epoch changed: {expected_epoch} -> {actual_epoch}"
+        )
+
+
+@final
+class CrossEpochSegmentError(RuntimeError):
+    def __init__(self, epochs: tuple[int, ...]) -> None:
+        self.epochs = epochs
+        values = ", ".join(str(epoch) for epoch in epochs)
+        super().__init__(f"cannot finalize segments from multiple stream epochs: {values}")
+
+
+@final
 class CrossGenerationSegmentError(RuntimeError):
     def __init__(self, generations: tuple[int, ...]) -> None:
         self.generations = generations
@@ -71,6 +89,8 @@ class ThumbnailSecurityError(ThumbnailGenerationError):
 
 __all__ = [
     "ClipRemuxError",
+    "CrossEpochFrameError",
+    "CrossEpochSegmentError",
     "CrossGenerationSegmentError",
     "EncoderPolicyError",
     "EncoderStartError",

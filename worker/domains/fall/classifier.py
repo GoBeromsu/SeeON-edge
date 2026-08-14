@@ -4,20 +4,22 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Literal, Protocol, runtime_checkable
 
-import numpy as np
-from numpy.typing import NDArray
-
 from contracts.observation import (
     FALL_LABEL_TEXT,
     NORMAL_LABEL_TEXT,
     DetectionLabel,
     FrameObservation,
 )
+from shared.detection_policies import FALL_POLICY_V1_DEFAULT
 from worker.domains.fall.preprocessing import (
+    NormalizedPose,
     extract_window_features,
     normalize_pose,
 )
-from worker.types import DecisionInput
+from worker.types import DecisionInput, FallModelInput
+
+_KEYPOINT_COUNT = 17
+_ZERO_POSE: NormalizedPose = tuple((0.0, 0.0, 0.0) for _ in range(_KEYPOINT_COUNT))
 
 
 class FallModelMetadataProtocol(Protocol):
@@ -39,13 +41,14 @@ class FallModelProtocol(Protocol):
     @property
     def operating_threshold(self) -> float: ...
 
-    def predict(self, features: NDArray[np.float32]) -> float: ...
+    def predict(self, features: FallModelInput) -> float: ...
 
 
-@dataclass(slots=True)  # noqa: MUTABLE_OK - owns rolling per-camera model state
+@dataclass(slots=True)
 class FallWindowClassifier:
     model: FallModelProtocol
-    _buffers: dict[int, deque[NDArray[np.float32]]] = field(
+    operating_threshold: float = FALL_POLICY_V1_DEFAULT.operating_threshold
+    _buffers: dict[int, deque[NormalizedPose]] = field(
         default_factory=dict,
         init=False,
     )
@@ -71,9 +74,7 @@ class FallWindowClassifier:
                 )
 
         for track_id in live_ids - active_ids:
-            self._buffer_for(track_id).append(
-                np.zeros((17, 3), dtype=np.float32)
-            )
+            self._buffer_for(track_id).append(_ZERO_POSE)
 
         for track_id in tuple(self._buffers):
             if track_id not in live_ids:
@@ -96,13 +97,11 @@ class FallWindowClassifier:
             track_ids=observation.track_ids,
         )
 
-    def _buffer_for(self, track_id: int) -> deque[NDArray[np.float32]]:
+    def _buffer_for(self, track_id: int) -> deque[NormalizedPose]:
         existing_buffer = self._buffers.get(track_id)
         if existing_buffer is not None:
             return existing_buffer
-        new_buffer: deque[NDArray[np.float32]] = deque(
-            maxlen=self.model.metadata.window
-        )
+        new_buffer: deque[NormalizedPose] = deque(maxlen=self.model.metadata.window)
         self._buffers[track_id] = new_buffer
         return new_buffer
 
@@ -111,19 +110,21 @@ class FallWindowClassifier:
         for track_id, buffer in self._buffers.items():
             if len(buffer) < metadata.window:
                 continue
-            window = np.stack(tuple(buffer), axis=0)
+            window = tuple(buffer)
+            model_input: FallModelInput
             match metadata.mode:
                 case "features":
                     model_input = extract_window_features(window)
                 case "sequence":
-                    model_input = window.reshape(metadata.window, 51).astype(
-                        np.float32
+                    model_input = tuple(
+                        tuple(coordinate for keypoint in pose for coordinate in keypoint)
+                        for pose in window
                     )
             self._last_probabilities[track_id] = self.model.predict(model_input)
 
     def _label_for_track(self, track_id: int) -> DetectionLabel:
         probability = self._last_probabilities.get(track_id, 0.0)
-        is_fall = probability >= self.model.operating_threshold
+        is_fall = probability >= self.operating_threshold
         return DetectionLabel(
             text=FALL_LABEL_TEXT if is_fall else NORMAL_LABEL_TEXT,
             confidence=probability,

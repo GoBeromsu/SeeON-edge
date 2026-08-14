@@ -117,8 +117,7 @@ def _seed_removed_v7_row(connection: sqlite3.Connection) -> None:
            ) VALUES (?, '2026-08-12T00:00:04Z', ?, 'READY', 6.0, 6.0, 'PENDING', 1)""",
         (
             REMOVED_EVENT_ID,
-            '{"type":"SYSTEM_TEST","validation_run_id":'
-            '"0197f671-3a31-7a6c-a6e4-83ed412de80f"}',
+            '{"type":"SYSTEM_TEST","validation_run_id":"0197f671-3a31-7a6c-a6e4-83ed412de80f"}',
         ),
     )
 
@@ -178,6 +177,7 @@ def test_open_migrates_v1_database_to_current_clip_manifest_schema(tmp_path: Pat
         "sha256",
         "size_bytes",
         "unavailable_reason",
+        "unavailable_reason_code",
     } <= columns
 
 
@@ -207,6 +207,10 @@ def test_schema_6_7_8_upgrade_preserves_ordinary_state_and_removes_feature_state
             str(row[1])
             for row in connection.execute("PRAGMA table_info(evidence_events)").fetchall()
         }
+        clip_columns = {
+            str(row[1])
+            for row in connection.execute("PRAGMA table_info(evidence_clips)").fetchall()
+        }
         objects = {
             str(row[0])
             for row in connection.execute(
@@ -216,17 +220,23 @@ def test_schema_6_7_8_upgrade_preserves_ordinary_state_and_removes_feature_state
         integrity = connection.execute("PRAGMA integrity_check").fetchone()
         foreign_keys = connection.execute("PRAGMA foreign_key_check").fetchall()
         version = connection.execute("PRAGMA user_version").fetchone()
+        reason_code = connection.execute(
+            "SELECT unavailable_reason_code FROM evidence_clips WHERE clip_id = ?",
+            (CLIP_ID,),
+        ).fetchone()
 
     expected = dict(before)
     expected["evidence_events"] = [
         row for row in before["evidence_events"] if row[0] != REMOVED_EVENT_ID
     ]
     if source_version >= 7:
-        expected["evidence_events"] = [
-            tuple(row[:-1]) for row in expected["evidence_events"]
-        ]
+        expected["evidence_events"] = [tuple(row[:-1]) for row in expected["evidence_events"]]
+    # Schema 10 adds unavailable_reason_code after the released v9 retirement.
+    expected["evidence_clips"] = [(*row, None) for row in expected["evidence_clips"]]
     assert after == expected
     assert "operator_only" not in event_columns
+    assert "unavailable_reason_code" in clip_columns
+    assert reason_code == (None,)
     assert "system_test_runs" not in objects
     assert "evidence_events_operator_claim_idx" not in objects
     assert integrity == ("ok",)
@@ -241,9 +251,7 @@ def test_schema_8_upgrade_removes_feature_relation_without_deleting_clip(
     with _create_schema(database, 8) as connection:
         _seed_v6_rows(connection)
         _seed_removed_v7_row(connection)
-        connection.execute(
-            "INSERT INTO evidence_clips (clip_id) VALUES ('feature-shared-clip')"
-        )
+        connection.execute("INSERT INTO evidence_clips (clip_id) VALUES ('feature-shared-clip')")
         connection.execute(
             "INSERT INTO clip_events (clip_id, edge_event_id, ordinal) VALUES (?, ?, 0)",
             ("feature-shared-clip", REMOVED_EVENT_ID),
@@ -260,19 +268,56 @@ def test_schema_8_upgrade_removes_feature_relation_without_deleting_clip(
         assert connection.execute(
             "SELECT clip_id FROM evidence_clips WHERE clip_id = 'feature-shared-clip'"
         ).fetchone() == ("feature-shared-clip",)
+        assert (
+            connection.execute(
+                "SELECT edge_event_id FROM clip_events WHERE edge_event_id = ?",
+                (REMOVED_EVENT_ID,),
+            ).fetchone()
+            is None
+        )
+
+
+def test_origin_main_v9_upgrade_adds_unavailable_reason_code(tmp_path: Path) -> None:
+    """Released main schema 9 already retired SYSTEM_TEST; this branch adds v10."""
+    database = tmp_path / "worker-state-main-v9.sqlite3"
+    with _create_schema(database, 9) as connection:
+        _seed_v6_rows(connection)
+        # Simulate a main-v9 database: operator state already gone, clip still has
+        # only the legacy unavailable_reason column until v10 runs.
+        connection.execute(
+            "UPDATE evidence_clips SET unavailable_reason = 'NO_FRAMES' WHERE clip_id = ?",
+            (CLIP_ID,),
+        )
+        assert "operator_only" not in {
+            str(row[1]) for row in connection.execute("PRAGMA table_info(evidence_events)")
+        }
+        assert "unavailable_reason_code" not in {
+            str(row[1]) for row in connection.execute("PRAGMA table_info(evidence_clips)")
+        }
+
+    with EvidenceOutbox.open(database) as outbox:
+        assert outbox.pending_count() == 1
+
+    with sqlite3.connect(database) as connection:
         assert connection.execute(
-            "SELECT edge_event_id FROM clip_events WHERE edge_event_id = ?",
-            (REMOVED_EVENT_ID,),
-        ).fetchone() is None
+            "SELECT unavailable_reason, unavailable_reason_code FROM evidence_clips "
+            "WHERE clip_id = ?",
+            (CLIP_ID,),
+        ).fetchone() == ("NO_FRAMES", "NO_FRAMES")
+        assert connection.execute(
+            "SELECT edge_event_id FROM evidence_events ORDER BY edge_event_id"
+        ).fetchall() == [(ORDINARY_EVENT_ID,), (PENDING_EVENT_ID,)]
 
 
-def test_schema_9_is_a_forward_boundary_for_schema_6_7_8_images(tmp_path: Path) -> None:
+def test_current_schema_is_a_forward_boundary_for_schema_6_7_8_9_images(
+    tmp_path: Path,
+) -> None:
     database = tmp_path / "worker-state.sqlite3"
     with EvidenceOutbox.open(database):
         pass
     before = database.read_bytes()
 
-    for supported in (6, 7, 8):
+    for supported in (6, 7, 8, 9):
         with pytest.raises(NewerSchemaVersionError) as raised:
             with sqlite3.connect(f"file:{database}?mode=ro", uri=True) as connection:
                 found = int(connection.execute("PRAGMA user_version").fetchone()[0])

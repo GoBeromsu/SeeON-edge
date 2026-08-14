@@ -5,13 +5,11 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Final, Literal, Protocol, TypeAlias
 
-import numpy as np
-from numpy.typing import NDArray
-
 from contracts.runner import RunnerProtocol
 from worker.adapters.model.yolo_bed_seg import YoloBedSegRunner
 from worker.adapters.model.yolo_person import YoloPersonRunner
 from worker.adapters.model.yolo_pose import YoloPoseRunner
+from worker.types import FallModelInput
 
 ModelOption: TypeAlias = str | int | float | bool | None
 
@@ -34,7 +32,7 @@ class FallModel(Protocol):
     @property
     def operating_threshold(self) -> float: ...
 
-    def predict(self, features: NDArray[np.float32]) -> float: ...
+    def predict(self, features: FallModelInput) -> float: ...
 
     def warmup(self) -> None: ...
 
@@ -43,7 +41,9 @@ class WarmupModel(Protocol):
     def warmup(self) -> None: ...
 
 
-ModelAdapter: TypeAlias = RunnerProtocol | FallModel | WarmupModel
+# This registry provisions only camera runners. Fall models use the separate
+# fall-family registry; warmup is an optional runner capability, not a model kind.
+ModelAdapter: TypeAlias = RunnerProtocol
 RunnerFactory: TypeAlias = Callable[..., ModelAdapter]
 
 _MODEL_TASKS: Final = ("pose", "person", "bed", "fall")

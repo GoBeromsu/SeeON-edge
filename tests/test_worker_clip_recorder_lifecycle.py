@@ -26,7 +26,7 @@ from worker.pipeline.output.evidence.evidence_outbox_types import (
     ClipId,
     EvidenceReasonCode,
 )
-from worker.types import BusinessEvent, FramePacket
+from worker.types import BusinessEvent, FrameKey, FramePacket
 
 
 class _DiskUsage(NamedTuple):
@@ -37,6 +37,14 @@ class _DiskUsage(NamedTuple):
 
 def _frame(index: int, time_sec: float) -> Frame:
     return Frame(index, time_sec, np.zeros((8, 8, 3), dtype=np.uint8))
+
+
+def _packet(index: int, time_sec: float) -> FramePacket:
+    return FramePacket("cam-1", _frame(index, time_sec), time_sec, index, 8, 8, 0.1)
+
+
+def _event(identity: str, time_sec: float = 1.0) -> BusinessEvent:
+    return BusinessEvent("fall", "fall.detected", identity, "cam-1", "facility-1", time_sec, 0.9)
 
 
 @dataclass(frozen=True, slots=True)
@@ -108,8 +116,9 @@ class _Coordinator:
         event_time_sec: float,
         event: BusinessEvent,
         output_dir: Path | None = None,
+        trigger_frame_key: FrameKey | None = None,
     ) -> ClipOutcome:
-        del camera_id, event_time_sec, event, output_dir
+        del camera_id, event_time_sec, event, output_dir, trigger_frame_key
         if self.outcome is None:
             raise OSError("staging unavailable")
         return self.outcome
@@ -150,20 +159,24 @@ def test_recorder_coalesces_event_ids_and_preserves_reference_order(tmp_path: Pa
         post_event_seconds=10.0,
     )
     recorder.start()
+    packet = _packet(1, 1.0)
     try:
-        assert recorder.on_frame("cam-1", _frame(1, 1.0))
-        first = recorder.on_event("cam-1", "event-1", "fall.detected")
-        duplicate = recorder.on_event("cam-1", "event-1", "fall.detected")
-        second = recorder.on_event("cam-1", "event-2", "fall.detected")
+        assert recorder.on_frame(packet)
+        first = recorder.on_event(packet, _event("event-1"))
+        duplicate = recorder.on_event(packet, _event("event-1"))
+        second = recorder.on_event(packet, _event("event-2"))
         assert first is not None
         assert duplicate == first
         assert second == first
         assert recorder.flush()
     finally:
+        packet.release()
         recorder.stop()
 
     assert publisher.published == [ClipId(first)]
     assert publisher.metadata[0].event_refs == ("event-1", "event-2")
+
+
 
 
 def test_event_admitted_before_finalization_stays_on_active_clip(tmp_path: Path) -> None:
@@ -175,14 +188,16 @@ def test_event_admitted_before_finalization_stays_on_active_clip(tmp_path: Path)
         post_event_seconds=1.0,
     )
     recorder.start()
+    packet = _packet(1, 1.0)
     try:
-        first = recorder.on_event("cam-1", "event-1", "fall.detected")
-        second = recorder.on_event("cam-1", "event-2", "fall.detected")
+        first = recorder.on_event(packet, _event("event-1"))
+        second = recorder.on_event(packet, _event("event-2"))
         assert first is not None
         assert second == first
-        assert recorder.on_frame("cam-1", _frame(1, 1.0))
+        assert recorder.on_frame(packet)
         assert recorder.flush()
     finally:
+        packet.release()
         recorder.stop()
 
     assert publisher.metadata[0].event_refs == ("event-1", "event-2")
@@ -201,12 +216,14 @@ def test_event_admitted_after_finalization_starts_gets_fresh_clip_id(
     )
     recorder = _recorder(tmp_path, coordinator, publisher)
     recorder.start()
+    first_packet = _packet(1, 1.0)
+    second_packet = _packet(2, 2.0)
     try:
-        first = recorder.on_event("cam-1", "event-1", "fall.detected")
+        first = recorder.on_event(first_packet, _event("event-1"))
         assert first is not None
         assert seal_started.wait(timeout=1.0)
 
-        second = recorder.on_event("cam-1", "event-2", "fall.detected")
+        second = recorder.on_event(second_packet, _event("event-2"))
 
         assert second is not None
         assert second != first
@@ -214,13 +231,14 @@ def test_event_admitted_after_finalization_starts_gets_fresh_clip_id(
         assert recorder.flush()
     finally:
         allow_seal.set()
+        first_packet.release()
+        second_packet.release()
         recorder.stop()
 
     assert [metadata.event_refs for metadata in publisher.metadata] == [
         ("event-1",),
         ("event-2",),
     ]
-
 
 def test_stop_drains_full_queue_after_blocked_frame_write(tmp_path: Path) -> None:
     write_started = threading.Event()
@@ -233,16 +251,18 @@ def test_stop_drains_full_queue_after_blocked_frame_write(tmp_path: Path) -> Non
     publisher = _Publisher()
     recorder = _recorder(tmp_path, coordinator, publisher, max_queue_size=1)
     recorder.start()
+    packet = _packet(1, 1.0)
     try:
-        assert recorder.on_frame("cam-1", _frame(1, 1.0))
+        assert recorder.on_frame(packet)
         assert write_started.wait(timeout=1.0)
-        clip_id = recorder.on_event("cam-1", "event-1", "fall.detected")
+        clip_id = recorder.on_event(packet, _event("event-1"))
         assert clip_id is not None
         recorder.stop(timeout=0.01)
         assert recorder._thread is not None and recorder._thread.is_alive()
         allow_write.set()
         recorder.stop(timeout=1.0)
     finally:
+        packet.release()
         allow_write.set()
         recorder.stop()
 
@@ -256,13 +276,17 @@ def test_recorder_cleans_failed_reservation_before_retrying_event(tmp_path: Path
     publisher = _Publisher()
     recorder = _recorder(tmp_path, coordinator, publisher)
     recorder.start()
+    first_packet = _packet(1, 1.0)
+    second_packet = _packet(2, 2.0)
     try:
-        first = recorder.on_event("cam-1", "event-1", "fall.detected")
+        first = recorder.on_event(first_packet, _event("event-1"))
         assert first is not None
         assert recorder.flush()
         assert not (tmp_path / "clips" / ".staging" / first).exists()
-        second = recorder.on_event("cam-1", "event-2", "fall.detected")
+        second = recorder.on_event(second_packet, _event("event-2", 2.0))
         assert second is not None
         assert second != first
     finally:
+        first_packet.release()
+        second_packet.release()
         recorder.stop()

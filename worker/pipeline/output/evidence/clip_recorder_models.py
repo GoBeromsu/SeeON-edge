@@ -15,7 +15,7 @@ from worker.pipeline.output.evidence.clip_config import (
     configured_store_dir,
 )
 from worker.pipeline.output.evidence.clip_identity import ClipReservation
-from worker.types import BusinessEvent, FramePacket
+from worker.types import BusinessEvent, FrameKey, FramePacket
 
 
 @dataclass(frozen=True, slots=True)
@@ -32,6 +32,9 @@ class ClipRecorderConfig:
     stale_staging_seconds: float = 60.0 * 60.0
     rotate_min_interval_seconds: float = 30.0
     ffmpeg_bin: str = field(default_factory=configured_ffmpeg_bin)
+    packet_ring_max_packets: int = 32_768
+    packet_ring_max_bytes_per_camera: int = 32 * 1024 * 1024
+    packet_ring_global_max_bytes: int = 256 * 1024 * 1024
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -39,6 +42,12 @@ class ClipRecorderConfig:
             "retention_days",
             max(MIN_RETENTION_DAYS, self.retention_days),
         )
+        if (
+            self.packet_ring_max_packets <= 0
+            or self.packet_ring_max_bytes_per_camera <= 0
+            or self.packet_ring_global_max_bytes <= 0
+        ):
+            raise ValueError("packet ring limits must be positive")
 
 
 @final
@@ -88,6 +97,7 @@ class EventMessage:
     event_ref: str
     event_type: str | None
     event: BusinessEvent
+    trigger_packet: FramePacket
     allow_new_clip: bool
 
 
@@ -113,6 +123,7 @@ class ActiveClip:
         "reservation",
         "start_time_sec",
         "started_at",
+        "trigger_frame_key",
     )
 
     def __init__(
@@ -127,6 +138,7 @@ class ActiveClip:
         start_time_sec: float,
         last_time_sec: float,
         event_refs: list[str],
+        trigger_frame_key: FrameKey | None = None,
         opened_monotonic: float | None = None,
     ) -> None:
         self.reservation = reservation
@@ -139,9 +151,8 @@ class ActiveClip:
         self.start_time_sec = start_time_sec
         self.last_time_sec = last_time_sec
         self.event_refs = event_refs
-        self.opened_monotonic = (
-            time.monotonic() if opened_monotonic is None else opened_monotonic
-        )
+        self.trigger_frame_key = trigger_frame_key
+        self.opened_monotonic = time.monotonic() if opened_monotonic is None else opened_monotonic
 
 
 __all__ = [

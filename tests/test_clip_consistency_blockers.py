@@ -58,7 +58,6 @@ def _layout(tmp_path: Path) -> tuple[Path, Path, Path]:
         "finalized_at": TIMESTAMP,
         "state_version": 2,
         "reason_code": "NO_FRAMES",
-        "legacy_extra": {"allowed": True},
     }
     final = clip_store / "clips" / "clip-a"
     final.mkdir()

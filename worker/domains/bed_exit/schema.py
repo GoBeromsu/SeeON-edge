@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from typing import Literal
 
 from contracts.observation import BedRegionDebugSnapshot, BoundingBox
+from shared.detection_policies import BED_EXIT_POLICY_V1_DEFAULT
 from worker.domains.bed_exit.night_window import NightWindow
 
 BedOccupancy = Literal["empty", "occupied", "exit"]
@@ -17,9 +18,9 @@ class _BedExitConfigurationError(ValueError):
 class BedExitConfig:
     camera_id: str
     facility_id: str
-    min_containment: float = 0.35
-    hold_frames: int = 2
-    grace_frames: int = 3
+    min_containment: float = BED_EXIT_POLICY_V1_DEFAULT.min_containment
+    hold_frames: int = BED_EXIT_POLICY_V1_DEFAULT.hold_frames
+    grace_frames: int = BED_EXIT_POLICY_V1_DEFAULT.grace_frames
     night_window: NightWindow | None = None
 
     def __post_init__(self) -> None:

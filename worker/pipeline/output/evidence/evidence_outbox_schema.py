@@ -2,7 +2,7 @@
 
 from typing import Final
 
-SCHEMA_VERSION: Final = 9
+SCHEMA_VERSION: Final = 10
 
 SCHEMA_V1_STATEMENTS: Final = (
     """
@@ -269,6 +269,22 @@ The deployed Python 3.11/3.12 Debian images provide SQLite >= 3.35, whose native
 DROP COLUMN rewrites the table transactionally and preserves its remaining schema.
 Dropping dependent objects first is required by SQLite's DROP COLUMN contract."""
 
+SCHEMA_V10_STATEMENTS: Final = (
+    """
+    ALTER TABLE evidence_clips ADD COLUMN unavailable_reason_code TEXT CHECK (
+        unavailable_reason_code IS NULL OR unavailable_reason_code IN (
+            'ENCODER_FAILED', 'NO_FRAMES', 'FINALIZE_FAILED',
+            'STREAM_EPOCH_MISMATCH', 'INTERRUPTED_FINALIZE', 'MISSING', 'CORRUPT'
+        )
+    )
+    """,
+    "UPDATE evidence_clips SET unavailable_reason_code = unavailable_reason "
+    "WHERE unavailable_reason IS NOT NULL",
+)
+"""Forward-only addition of the exhaustive clip unavailable-reason code used by
+central edge evidence and clip-deletion paths. Kept after schema 9 so released
+main images that already retired SYSTEM_TEST at v9 can upgrade without rewrite."""
+
 MIGRATIONS: Final = (
     SCHEMA_V1_STATEMENTS,
     SCHEMA_V2_STATEMENTS,
@@ -279,6 +295,7 @@ MIGRATIONS: Final = (
     SCHEMA_V7_STATEMENTS,
     SCHEMA_V8_STATEMENTS,
     SCHEMA_V9_STATEMENTS,
+    SCHEMA_V10_STATEMENTS,
 )
 
 __all__ = ["MIGRATIONS", "SCHEMA_VERSION"]

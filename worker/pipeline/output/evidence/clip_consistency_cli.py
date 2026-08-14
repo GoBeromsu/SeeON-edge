@@ -1,4 +1,4 @@
-"""CLI for authoritative schema-9 clip consistency repair."""
+"""CLI for authoritative clip consistency repair."""
 
 from __future__ import annotations
 
@@ -31,7 +31,7 @@ class _Arguments(argparse.Namespace):
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Repair schema-9 clip relations from authoritative final manifests."
+        description="Repair clip relations from authoritative final manifests."
     )
     _ = parser.add_argument("--state-db", type=Path, required=True)
     _ = parser.add_argument("--clip-store", type=Path, required=True)

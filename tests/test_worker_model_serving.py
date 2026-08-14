@@ -58,7 +58,7 @@ def test_model_registry_unknown_task_error_names_the_task() -> None:
 
 
 def test_in_process_client_satisfies_only_the_single_item_protocol() -> None:
-    client = InProcessServingClient(ModelRegistry())
+    client: ServingClient = InProcessServingClient(ModelRegistry())
 
     assert isinstance(client, ServingClient)
     assert not isinstance(client, BatchServingClient)

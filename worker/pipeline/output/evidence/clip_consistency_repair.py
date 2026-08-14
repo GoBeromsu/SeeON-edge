@@ -1,4 +1,4 @@
-"""Recoverable authoritative-manifest repair for schema-9 clip relations."""
+"""Recoverable authoritative-manifest repair for clip relations."""
 
 from __future__ import annotations
 
@@ -34,7 +34,6 @@ from worker.pipeline.output.evidence.clip_consistency_types import (
     RepairRequest,
 )
 from worker.pipeline.output.evidence.clip_store_lock import ClipStoreLock
-from worker.pipeline.output.evidence.evidence_outbox_schema import SCHEMA_VERSION
 
 
 def repair_clip_consistency(request: RepairRequest) -> RepairReceipt:
@@ -72,7 +71,7 @@ def _dry_run(request: RepairRequest) -> RepairReceipt:
     )
     try:
         connection.execute("BEGIN")
-        validate_database(connection, now=time.time())
+        schema_version = validate_database(connection, now=time.time())
         authority = scan_manifest_authority(
             request.clip_store,
             expected_uid=request.expected_owner_uid,
@@ -87,7 +86,7 @@ def _dry_run(request: RepairRequest) -> RepairReceipt:
             RECEIPT_VERSION,
             "dry-run",
             "DRY_RUN",
-            SCHEMA_VERSION,
+            schema_version,
             build_counters(plan, authority),
             None,
             None,

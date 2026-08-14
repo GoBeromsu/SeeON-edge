@@ -1,4 +1,4 @@
-"""Config/maintenance and macOS-environment-floor coverage for the new
+"""Config, maintenance, real-encode, and durability coverage for the new
 ``worker.pipeline.output.evidence.clip_recorder.ClipRecorder``, replacing the
 deleted ``edge.evidence.clip_recorder`` module this file used to test.
 
@@ -16,10 +16,8 @@ and queueing), ``ClipActor`` (coalescing, expiry, finalize orchestration),
 itself is now a thin queue-driven facade over these. Most of the original
 white-box tests are superseded by tests written directly against the
 collaborator that now owns the property; this file ports only what still has
-no equivalent coverage, plus the two tests that pin this repo's macOS
-environment floor (no ``/proc``, so ``os.readlink("/proc/self/fd/N")``
-fails) so CI continues to fail closed on the same signature rather than
-silently losing the regression check.
+no equivalent coverage, including the real-encode publication path and its
+fsync ordering.
 
 Ported as-is (config/maintenance surface unchanged in the new module):
 
@@ -30,14 +28,9 @@ Ported as-is (config/maintenance surface unchanged in the new module):
 * ``test_clip_recorder_start_sweeps_old_staging_directories``
 * ``test_legacy_retention_clock_uses_manifest_mtime_not_started_at``
 
-Preserved to pin the macOS ``/proc`` environment floor (see module docstring
-above and each test's own docstring for the exact failure signature this
-repo's sandboxed macOS CI observes; both are rooted in ``os.readlink(
-"/proc/self/fd/N")`` raising ``FileNotFoundError`` since macOS has no
-``/proc``, propagating up as an ``OSError`` that ``ClipActor._finalize``
-(``worker/pipeline/output/evidence/clip_actor.py:212-218``) catches and
-counts as a failed write rather than a partial manifest -- a stricter
-behavior than edge's, which wrote a manifest even on this failure):
+Preserved as end-to-end publication and durability coverage. The media probe
+runs through production unchanged; only test-side fsync instrumentation uses
+the platform's descriptor-to-path API:
 
 * ``test_clip_recorder_finalizes_atomic_manifest_with_pre_and_post_window``
 * ``test_clip_recorder_fsyncs_media_and_manifest_before_staging_cleanup``
@@ -168,18 +161,25 @@ NOT asserted as passing behavior by any test here:
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import shutil
+import subprocess
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import NamedTuple
 
-import numpy as np
 import pytest
 
-from contracts.frame import Frame
+from worker.adapters.decode.cpu_av.models import CpuAvConfig
+from worker.adapters.decode.pyav_preserving import PyAvPreservingAdapter
 from worker.pipeline.output.evidence.clip_recorder import ClipRecorder, ClipRecorderConfig
+from worker.pipeline.output.evidence.clip_recorder_services import default_services
+from worker.pipeline.output.evidence.packet_repository import PacketRingRepository
+from worker.pipeline.output.evidence.packet_ring import PacketRingLimits
+from worker.types import BusinessEvent, FramePacket
 
 
 class DiskUsage(NamedTuple):
@@ -192,14 +192,19 @@ def _low_disk_usage(_path: Path) -> DiskUsage:
     return DiskUsage(total=100, used=10, free=90)
 
 
-def _frame(index: int, time_sec: float) -> Frame:
-    value = index % 255
-    return Frame(index, time_sec, np.full((16, 16, 3), value, dtype=np.uint8))
+def _event(identity: str, time_sec: float) -> BusinessEvent:
+    return BusinessEvent("fall", "fall.detected", identity, "cam-1", "facility-1", time_sec, 0.9)
 
 
-def test_retention_defaults_to_60_days(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def _path_of_fd(descriptor: int) -> Path:
+    """Resolve fsync instrumentation without replacing the production media probe."""
+    if Path("/proc/self/fd").is_dir():
+        return Path(os.readlink(f"/proc/self/fd/{descriptor}"))
+    raw: bytes = fcntl.fcntl(descriptor, fcntl.F_GETPATH, bytes(1024))
+    return Path(raw.rstrip(b"\x00").decode())
+
+
+def test_retention_defaults_to_60_days(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("CLIP_STORE_RETENTION_DAYS", raising=False)
     monkeypatch.delenv("CLIP_RETENTION_DAYS", raising=False)
 
@@ -244,9 +249,6 @@ def test_clip_recorder_start_sweeps_old_staging_directories(
     fresh_staging.mkdir(parents=True)
     old_time = datetime.now().timestamp() - 11
     os.utime(old_staging, (old_time, old_time))
-    monkeypatch.setattr(
-        "worker.pipeline.output.evidence.clip_recorder._resolve_encoder", lambda: "libx264"
-    )
     recorder = ClipRecorder(
         ClipRecorderConfig(store_dir=tmp_path, stale_staging_seconds=10.0),
         disk_usage_provider=_low_disk_usage,
@@ -256,12 +258,12 @@ def test_clip_recorder_start_sweeps_old_staging_directories(
     # When: the recorder starts.
     recorder.start()
     try:
-        # Then: only the stale directory is swept, and the encoder resolved
-        # for this run is recorded on stats.
+        # Then: only the stale directory is swept, and the source-packet path
+        # composed for this run is recorded on stats.
         assert not old_staging.exists()
         assert fresh_staging.exists()
         assert recorder.stats.stale_staging_cleaned == 1
-        assert recorder.stats.encoder == "libx264"
+        assert recorder.stats.encoder == "source-packet-remux"
     finally:
         recorder.stop()
 
@@ -336,40 +338,85 @@ EVENT_ONE = "00000000-0000-4000-8000-000000000001"
 EVENT_THREE = "00000000-0000-4000-8000-000000000003"
 
 
+def _source_backed_recorder(
+    root: Path,
+    *,
+    pre_event_seconds: float,
+    post_event_seconds: float,
+    on_clip_finalized: Callable[[str], None] | None = None,
+) -> tuple[ClipRecorder, FramePacket, PacketRingRepository]:
+    source = root / "source.mp4"
+    subprocess.run(
+        (
+            "ffmpeg",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=160x90:rate=30:duration=3",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=880:sample_rate=48000:duration=3",
+            "-c:v",
+            "libx264",
+            "-bf",
+            "2",
+            "-g",
+            "30",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            "-y",
+            str(source),
+        ),
+        check=True,
+        stdin=subprocess.DEVNULL,
+    )
+    repository = PacketRingRepository(
+        ("cam-1",),
+        per_camera_limits=PacketRingLimits(10_000, 16 * 1024 * 1024, 10.0),
+        global_max_bytes=16 * 1024 * 1024,
+    )
+    session = PyAvPreservingAdapter(repository, decode_backend="cpu").open(
+        CpuAvConfig("cam-1", str(source), open_timeout_ms=2_000, read_timeout_ms=2_000)
+    )
+    session.set_stream_identity("boot-1", 1)
+    assert session.wait_demux_complete(10.0)
+    trigger: FramePacket | None = None
+    while (packet := session.read()) is not None:
+        if trigger is not None:
+            trigger.release()
+        trigger = packet
+    session.close()
+    assert trigger is not None
+    config = ClipRecorderConfig(
+        store_dir=root,
+        pre_event_seconds=pre_event_seconds,
+        post_event_seconds=post_event_seconds,
+    )
+    recorder = ClipRecorder(
+        config,
+        services=default_services(config, repository),
+        disk_usage_provider=_low_disk_usage,
+        on_clip_finalized=on_clip_finalized,
+    )
+    return recorder, trigger, repository
+
+
 @_REQUIRES_FFMPEG
 def test_clip_recorder_finalizes_atomic_manifest_with_pre_and_post_window(
     tmp_path: Path,
 ) -> None:
-    """Ported unchanged in intent: pins this repo's macOS ``/proc`` floor.
+    """Exercise the real recorder, encoder, media probe, and publisher stack.
 
-    This exercises the real ``ClipRecordingCoordinator`` /
-    ``FFmpegSegmentEncoder`` / ``FFmpegConcatFinalizer`` / ``ClipPublisher``
-    stack end to end with the real ``ffmpeg``/``ffprobe`` binaries -- no
-    monkeypatching -- and asserts the full READY-manifest contract, exactly
-    as edge's original did. On a host with a working ``/proc`` (e.g. Linux
-    CI) this passes outright.
-
-    On this repo's sandboxed macOS host it fails, and the root cause is in
-    *production* code, not test instrumentation:
-    ``_probe_h264_video_only`` (``worker/pipeline/output/evidence/
-    evidence_media.py:66-74``) hands ffprobe the open media descriptor via
-    the hardcoded, TOCTOU-safe path ``f"/proc/self/fd/{descriptor}"``
-    (line 74) rather than the file's real path. macOS has no ``/proc``, so
-    ffprobe cannot open that path and exits nonzero, which
-    ``inspect_finalized_media`` surfaces as ``ClipEvidenceError``.
-    ``ClipActor._finalize`` (``clip_actor.py:212-218``) catches that
-    alongside ``OSError`` and only increments ``stats.failed_writes`` --
-    unlike edge's recorder, which still wrote an ``UNAVAILABLE`` manifest on
-    this same ffprobe failure, so no manifest is ever published here. That
-    makes the very first assertion below (``manifest_path.exists()``) the
-    one that fails on macOS, with ``AssertionError: assert False`` -- the
-    same ``/proc/self/fd``-rooted cause as edge's
-    ``AssertionError: assert 'UNAVAILABLE' == 'READY'``, just surfaced one
-    step earlier because the new code never gets far enough to write a
-    degraded manifest at all. This ``/proc/self/fd`` probing design is
-    carried forward unchanged from edge (not a new regression); it is a
-    pre-existing Linux-only assumption in the fd-based, symlink-race-safe
-    media inspection this repo's evidence pipeline relies on.
+    No production descriptor probing is replaced here: the test asserts the
+    complete READY manifest produced by the platform-selected open-fd route.
+    Each source packet releases its caller-owned lease after recorder admission;
+    the recorder owns and releases its retained queue leases.
     """
     notifications: list[str] = []
 
@@ -378,29 +425,21 @@ def test_clip_recorder_finalizes_atomic_manifest_with_pre_and_post_window(
         assert not (tmp_path / "clips" / ".staging" / clip_id).exists()
         notifications.append(clip_id)
 
-    recorder = ClipRecorder(
-        ClipRecorderConfig(
-            store_dir=tmp_path,
-            segment_seconds=2.0,
-            pre_event_seconds=10.0,
-            post_event_seconds=20.0,
-            fps=2.0,
-        ),
-        disk_usage_provider=_low_disk_usage,
+    recorder, trigger, repository = _source_backed_recorder(
+        tmp_path,
+        pre_event_seconds=2.0,
+        post_event_seconds=0.0,
         on_clip_finalized=finalized,
     )
     recorder.start()
     try:
-        clip_id: str | None = None
-        for index in range(69):
-            time_sec = index * 0.5
-            assert recorder.on_frame("cam-1", _frame(index, time_sec))
-            if time_sec == 12.0:
-                clip_id = recorder.on_event("cam-1", EVENT_ONE)
-                assert clip_id is not None
+        clip_id = recorder.on_event(trigger, _event(EVENT_ONE, trigger.pts or 0.0))
+        assert clip_id is not None
         assert recorder.flush()
     finally:
+        trigger.release()
         recorder.stop()
+        repository.close()
 
     assert clip_id is not None
     manifest_path = tmp_path / "clips" / clip_id / "manifest.json"
@@ -430,7 +469,7 @@ def test_clip_recorder_finalizes_atomic_manifest_with_pre_and_post_window(
     assert manifest["clip_end_at"].endswith("Z")
     assert manifest["finalized_at"].endswith("Z")
     assert manifest["started_at"].endswith("Z")
-    assert 29.0 <= manifest["duration_s"] <= 31.5
+    assert 1.0 <= manifest["duration_s"] <= 3.0
     assert recorder.stats.finalized_clips == 1
     assert notifications == [clip_id]
 
@@ -438,50 +477,17 @@ def test_clip_recorder_finalizes_atomic_manifest_with_pre_and_post_window(
 def test_clip_recorder_fsyncs_media_and_manifest_before_staging_cleanup(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Ported unchanged in intent: pins this repo's macOS ``/proc`` floor.
+    """Preserve media/thumbnail/manifest fsync ordering through cleanup.
 
-    Edge's original test intercepted ``os.fsync`` and used
-    ``os.readlink("/proc/self/fd/N")`` purely as test-only instrumentation
-    to identify *which* file/directory each fsync call targeted. The trace may
-    contain duplicate basenames from media inspection, so phase lookups anchor
-    to the relevant replace operations: media, thumbnail, manifest, and staging
-    cleanup. That instrumentation
-    technique ports unchanged -- the new code's own fsync calls
-    (``worker/pipeline/output/evidence/durability.py:8-21``'s
-    ``fsync_file``/``fsync_directory``, invoked from ``clip_publication.py``
-    and ``clip_identity.py``) still take a bare file descriptor, and
-    ``/proc/self/fd/N`` is still how the test resolves it back to a path --
-    and the ordering assertions below preserve edge's original durability
-    intent while covering the thumbnail publication phases.
-
-    On a host with a working ``/proc`` (e.g. Linux CI), every event is
-    recorded and the full ordering assertion passes. On this repo's
-    sandboxed macOS host, ``/proc`` does not exist at all, so the *very
-    first* fsync this test's wrapper intercepts -- not one of the
-    publication-time fsyncs the ordering assertion below targets, but the
-    earlier, synchronous ``fsync_directory(self._staging_root)`` that
-    ``ClipIdAllocator.reserve`` runs on every clip-id reservation
-    (``worker/pipeline/output/evidence/clip_identity.py:69``, called
-    directly from ``recorder.on_event()`` on the caller's own thread, not
-    the background actor) -- raises ``FileNotFoundError`` inside the test's
-    own wrapper. Because ``reserve`` does not catch that exception, it
-    propagates straight out of the ``recorder.on_event(...)`` call below
-    (index 2 in the loop) rather than being absorbed by
-    ``ClipActor._finalize``'s broad ``except (..., OSError)``
-    (``clip_actor.py:212-218``), which only guards the later
-    finalize/publish path. The test still fails on the identical
-    ``/proc/self/fd``-rooted cause edge's original hit, just surfaced at
-    reservation time instead of at the ordering-assertion lookup.
+    The wrapper observes real fsync calls and delegates each call unchanged.
+    Linux resolves descriptor paths through ``/proc/self/fd``; macOS test
+    instrumentation uses ``fcntl(F_GETPATH)``. This does not intercept or
+    replace the production ffprobe descriptor lane.
     """
-    recorder = ClipRecorder(
-        ClipRecorderConfig(
-            store_dir=tmp_path,
-            segment_seconds=2.0,
-            pre_event_seconds=0.0,
-            post_event_seconds=1.0,
-            fps=2.0,
-        ),
-        disk_usage_provider=_low_disk_usage,
+    recorder, trigger, repository = _source_backed_recorder(
+        tmp_path,
+        pre_event_seconds=2.0,
+        post_event_seconds=0.0,
     )
     events: list[tuple[str, str, str]] = []
     real_replace = os.replace
@@ -504,8 +510,7 @@ def test_clip_recorder_fsyncs_media_and_manifest_before_staging_cleanup(
         )
 
     def _record_fsync(descriptor: int) -> None:
-        target = Path(os.readlink(f"/proc/self/fd/{descriptor}")).name
-        events.append(("fsync", target, ""))
+        events.append(("fsync", _path_of_fd(descriptor).name, ""))
         real_fsync(descriptor)
 
     def _record_rmtree(path: str | os.PathLike[str]) -> None:
@@ -520,15 +525,14 @@ def test_clip_recorder_fsyncs_media_and_manifest_before_staging_cleanup(
         "worker.pipeline.output.evidence.clip_publication.shutil.rmtree", _record_rmtree
     )
     recorder.start()
-    clip_id: str | None = None
     try:
-        for index in range(8):
-            assert recorder.on_frame("cam-1", _frame(index, index * 0.5))
-            if index == 2:
-                clip_id = recorder.on_event("cam-1", EVENT_THREE)
+        clip_id = recorder.on_event(trigger, _event(EVENT_THREE, trigger.pts or 0.0))
+        assert clip_id is not None
         assert recorder.flush()
     finally:
+        trigger.release()
         recorder.stop()
+        repository.close()
 
     assert clip_id is not None
     clips_dir_fsync = events.index(("fsync", "clips", ""))

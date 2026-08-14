@@ -14,6 +14,8 @@ from uuid import UUID
 
 import pytest
 
+from shared.edge_db.compatibility import CURRENT_SCHEMA_RANGE
+from shared.edge_db.migrator import migrate_database
 from worker.pipeline.output.evidence import clip_consistency_apply as apply_module
 from worker.pipeline.output.evidence.clip_consistency_repair import repair_clip_consistency
 from worker.pipeline.output.evidence.clip_consistency_types import (
@@ -42,6 +44,19 @@ def _layout(tmp_path: Path) -> tuple[Path, Path, Path]:
     database = state / "worker-state.sqlite3"
     with EvidenceOutbox.open(database):
         pass
+    return database, clips, maintenance
+
+
+def _edge_layout(tmp_path: Path) -> tuple[Path, Path, Path]:
+    """Central edge.sqlite3 layout used by the newer runtime architecture."""
+    state = tmp_path / "edge-state"
+    clips = tmp_path / "clip-store"
+    maintenance = tmp_path / "maintenance"
+    state.mkdir(mode=0o700)
+    (clips / "clips" / ".staging").mkdir(parents=True)
+    maintenance.mkdir(mode=0o700)
+    database = state / "edge.sqlite3"
+    migrate_database(database)
     return database, clips, maintenance
 
 
@@ -250,6 +265,33 @@ def test_manifest_authority_repairs_only_relations_and_same_id_staging(
         _request(database, clip_store, maintenance, ffprobe_bin=str(ffprobe))
     )
     assert second.counters.changes == 0
+
+
+def test_central_edge_sqlite_accepts_relation_repair_against_shared_tables(
+    tmp_path: Path,
+) -> None:
+    database, clip_store, maintenance = _edge_layout(tmp_path)
+    _unavailable(clip_store, "clip-a", EVENTS[:2])
+    _seed(
+        database,
+        clips=(("clip-a", "UNAVAILABLE"),),
+        relations=(("clip-a", EVENTS[1], 0),),
+    )
+
+    dry = repair_clip_consistency(_request(database, clip_store, maintenance))
+    assert dry.schema_version == CURRENT_SCHEMA_RANGE.maximum
+    assert dry.counters.sql_relations_deleted == 1
+    assert dry.counters.sql_relations_inserted == 2
+
+    applied = repair_clip_consistency(
+        _request(database, clip_store, maintenance, apply=True)
+    )
+    assert applied.state == "DONE"
+    assert applied.schema_version == CURRENT_SCHEMA_RANGE.maximum
+    assert _relations(database) == [
+        ("clip-a", EVENTS[0], 0),
+        ("clip-a", EVENTS[1], 1),
+    ]
 
 
 def test_wrong_ordinals_report_tuple_mismatch_separately_from_sql_mutations(

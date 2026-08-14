@@ -66,9 +66,6 @@ def test_second_recorder_refuses_before_stale_evidence_sweep(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # Given: a first recorder owns the store, then stale-looking staging appears.
-    monkeypatch.setattr(
-        "worker.pipeline.output.evidence.clip_recorder._resolve_encoder", lambda: "libx264"
-    )
     config = ClipRecorderConfig(store_dir=tmp_path, stale_staging_seconds=0.0)
     first = ClipRecorder(config)
     first.start()

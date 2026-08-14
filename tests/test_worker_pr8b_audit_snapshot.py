@@ -11,14 +11,14 @@ change):
 - The four `CameraWorker._attach_alert_metadata` tests (audit dict attach,
   snapshot bytes attach, audit-without-snapshot-renderer, non-alert-untouched)
   were IMPOSSIBLE to port at first: worker/pipeline/output/event_sink.py's
-  `EvidenceEventSink.emit()` built a bare `EventPayload` and never called
+  the event sink built a bare `EventPayload` and never called
   `audit_metadata_provider`/`encode_jpeg_bounded`/`SnapshotStore.store()`.
   Closed under todo 20 by `worker/pipeline/output/evidence_attacher.py`'s
   `AlertEvidenceAttacher` (composed by `CameraPipelinePump`, injected by
-  `worker/runtime/worker.py`) plus `EvidenceEventSink.emit()` now persisting
-  `event.snapshot_jpeg` through `SnapshotStore` when present. Ported below
-  directly against `AlertEvidenceAttacher.attach` (the audit/snapshot
-  attachment unit) and `EvidenceEventSink.emit` (the snapshot-storage unit),
+  `worker/runtime/worker.py`) plus `EvidenceEventSink.emit_for_frame()` now
+  persisting `event.snapshot_jpeg` through `SnapshotStore` when present. Ported
+  below directly against `AlertEvidenceAttacher.attach` (the audit/snapshot
+  attachment unit) and `EvidenceEventSink.emit_for_frame` (the snapshot-storage unit),
   mirroring edge/runtime/camera_worker.py:289-336's semantics.
 - The two `_RelayClient.emit()` payload-shape tests are superseded by
   tests/test_evidence_stager.py (DurableEvidenceStager._canonical_payload
@@ -30,6 +30,7 @@ change):
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -39,10 +40,10 @@ import cv2
 import numpy as np
 import pytest
 
-from contracts.event import EventPayload
 from contracts.frame import Frame
 from contracts.observation import FrameObservation
 from worker.pipeline.output.event_sink import EvidenceEventSink
+from worker.pipeline.output.evidence.event_payload import WorkerEventPayload
 from worker.pipeline.output.evidence.snapshot_store import SnapshotStore
 from worker.pipeline.output.evidence_attacher import AlertEvidenceAttacher
 from worker.pipeline.output.overlay import MAX_SNAPSHOT_BYTES, OverlayRenderer
@@ -136,39 +137,72 @@ def test_alert_evidence_attacher_attaches_audit_and_snapshot_for_alert_events(
     assert attached.snapshot_jpeg == b"jpeg-bytes"
 
 
+def test_alert_evidence_attacher_adds_runtime_manifest_to_admitted_event_audit() -> None:
+    runtime_manifest_sha256 = "b" * 64
+    attacher = AlertEvidenceAttacher(
+        domain_audit={"fall": {"clock_source": "edge_wall_clock"}},
+        runtime_manifest_sha256=runtime_manifest_sha256,
+    )
+    packet = _packet(np.zeros((64, 64, 3), dtype=np.uint8))
+
+    attached = attacher.attach(_event("fall", "tick"), packet, FrameObservation())
+
+    assert attached.audit == {
+        "clock_source": "edge_wall_clock",
+        "runtime_manifest_sha256": runtime_manifest_sha256,
+    }
+
+
 def test_alert_evidence_attacher_output_stores_the_rendered_snapshot_bytes(
     tmp_path: Path,
 ) -> None:
     """Mirrors edge's `test_camera_worker_stores_the_rendered_snapshot_bytes`: the
-    attacher produces `snapshot_jpeg` bytes, and `EvidenceEventSink.emit` (the
-    consumption side, worker/pipeline/output/event_sink.py) persists them
+    attacher produces `snapshot_jpeg` bytes, and `EvidenceEventSink.emit_for_frame`
+    (the consumption side, worker/pipeline/output/event_sink.py) persists them
     through `SnapshotStore` and adds the `snapshot` record onto the payload.
     """
     attacher = AlertEvidenceAttacher(
         domain_audit={"fall": {"clock_source": "edge_wall_clock"}},
         overlay_renderer=_StubSnapshotRenderer(),
     )
-    attached = attacher.attach(
-        _event("fall", "tick"), _packet(np.zeros((64, 64, 3), dtype=np.uint8)), FrameObservation()
-    )
+    packet = _packet(np.zeros((64, 64, 3), dtype=np.uint8))
+    attached = attacher.attach(_event("fall", "tick"), packet, FrameObservation())
 
     stager = _RecordingStager()
+    recorder = _RecordingRecorder(clip_id=None)
     sink = EvidenceEventSink(
         stager=stager,
-        recorder=_RecordingRecorder(clip_id=None),
+        recorder=recorder,
         snapshot_store=SnapshotStore(tmp_path),
         now=lambda: datetime(2026, 7, 31, 12, 0, tzinfo=UTC),
     )
 
-    sink.emit(attached)
+    try:
+        sink.emit_for_frame(attached, packet)
 
-    payload = stager.staged[0]
-    snapshot = payload["snapshot"]
-    assert isinstance(snapshot, dict)
-    path = tmp_path / str(snapshot["path"])
-    assert path.read_bytes() == b"jpeg-bytes"
-    assert snapshot["snapshot_id"] == payload["edge_event_id"]
-    assert payload["snapshot_jpeg"] == b"jpeg-bytes"
+        payload = stager.staged[0]
+        snapshot = payload["snapshot"]
+        assert isinstance(snapshot, dict)
+        snapshot_key = hashlib.sha256(b"event-123").hexdigest()
+        camera_key = hashlib.sha256(b"camera-1").hexdigest()[:16]
+        expected_path = f"snapshots/{camera_key}/2026-07-31/{snapshot_key}.jpg"
+        assert snapshot == {
+            "snapshot_id": "event-123",
+            "path": expected_path,
+            "sha256": hashlib.sha256(b"jpeg-bytes").hexdigest(),
+            "size_bytes": len(b"jpeg-bytes"),
+            "mime_type": "image/jpeg",
+            "captured_at": "2026-07-31T12:00:00Z",
+            "camera_id": "camera-1",
+            "edge_event_id": "event-123",
+        }
+        assert (tmp_path / expected_path).read_bytes() == b"jpeg-bytes"
+        assert snapshot["snapshot_id"] == payload["edge_event_id"]
+        assert payload["snapshot_jpeg"] == b"jpeg-bytes"
+        assert recorder.calls == [("camera-1", attached, True)]
+        assert stager.completions == [("event-123", None)]
+    finally:
+        packet.release()
 
 
 def test_alert_evidence_attacher_attaches_audit_without_snapshot_renderer() -> None:
@@ -208,10 +242,10 @@ def test_alert_evidence_attacher_leaves_non_alert_event_unaffected() -> None:
 
 @dataclass(slots=True)
 class _RecordingStager:
-    staged: list[EventPayload] = field(default_factory=list)
+    staged: list[WorkerEventPayload] = field(default_factory=list)
     completions: list[tuple[str, str | None]] = field(default_factory=list)
 
-    def stage(self, event: EventPayload) -> None:
+    def stage(self, event: WorkerEventPayload) -> None:
         self.staged.append(event)
 
     def complete(self, edge_event_id: str, clip_id: str | None) -> None:
@@ -221,15 +255,14 @@ class _RecordingStager:
 @dataclass(slots=True)
 class _RecordingRecorder:
     clip_id: str | None
-    calls: list[tuple[str, str, str | None, bool]] = field(default_factory=list)
+    calls: list[tuple[str, BusinessEvent, bool]] = field(default_factory=list)
 
     def on_event(
         self,
-        camera_id: str,
-        event_ref: str,
-        event_type: str | None = None,
+        trigger_packet: FramePacket,
+        event: BusinessEvent,
         *,
         allow_new_clip: bool = True,
     ) -> str | None:
-        self.calls.append((camera_id, event_ref, event_type, allow_new_clip))
+        self.calls.append((trigger_packet.camera_id, event, allow_new_clip))
         return self.clip_id

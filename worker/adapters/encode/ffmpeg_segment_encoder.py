@@ -236,7 +236,7 @@ class FFmpegSegmentEncoder:
             packet_geometry = EncoderGeometry(packet.width, packet.height, geometry.fps)
             if packet_geometry != geometry:
                 self._recreate_session_process(session, packet_geometry)
-            image = packet.frame.image
+            image = packet.borrow_host_frame().image
             if image.ndim != 3 or image.shape != (packet.height, packet.width, 3):
                 raise EncoderWriteError("frame image does not match packet geometry")
             try:
@@ -244,8 +244,7 @@ class FFmpegSegmentEncoder:
             except EncoderWriteError:
                 self._fail_session(session)
                 raise
-            event_time_sec = packet.pts if packet.pts is not None else packet.frame.time_sec
-            session.index.observe_frame(event_time_sec, session.geometry.fps)
+            session.index.observe_frame(packet, session.geometry.fps)
             self._refresh_index(session)
 
     def _recreate_session_process(

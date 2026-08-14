@@ -9,7 +9,6 @@ from worker.pipeline.output.evidence.clip_consistency_types import (
     RepairCounters,
     RepairReceipt,
 )
-from worker.pipeline.output.evidence.evidence_outbox_schema import SCHEMA_VERSION
 
 RECEIPT_VERSION = 2
 
@@ -37,7 +36,7 @@ def journal_receipt(mode: str, journal: ApplyJournal) -> RepairReceipt:
         RECEIPT_VERSION,
         mode,
         journal.state,
-        SCHEMA_VERSION,
+        journal.schema_version,
         journal.counters,
         journal.backup_receipt_path,
         journal.journal_path,

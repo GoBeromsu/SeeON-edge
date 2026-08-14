@@ -124,10 +124,14 @@ _RESULT_MERGERS: dict[str, ResultMerger] = {
 }
 
 
+def result_merger_names() -> frozenset[str]:
+    return frozenset(_RESULT_MERGERS)
+
+
 def merge_module_results(results: Sequence[ModuleResult]) -> MergedOutputs:
     merged = MergedOutputs()
     for module_result in results:
-        merger = _RESULT_MERGERS.get(module_result.module_name)
+        merger = _RESULT_MERGERS.get(module_result.output_adapter or module_result.module_name)
         if merger is not None:
             merged = merger(module_result.result, merged)
     return merged
@@ -222,4 +226,5 @@ __all__ = [
     "RunnerResultShapeError",
     "authoritative_boxes",
     "merge_module_results",
+    "result_merger_names",
 ]

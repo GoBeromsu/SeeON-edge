@@ -74,11 +74,17 @@ class EvidenceRetention:
         *,
         is_held: Callable[[str], bool],
         disk_usage_provider: Callable[[Path], DiskUsage],
+        begin_purge: Callable[[str], bool] | None = None,
+        complete_purge: Callable[[str], None] | None = None,
+        fail_purge: Callable[[str, str], None] | None = None,
     ) -> None:
         self._store_dir = store_dir
         self._clips_dir = store_dir / "clips"
         self._is_held = is_held
         self._disk_usage_provider = disk_usage_provider
+        self._begin_purge = begin_purge
+        self._complete_purge = complete_purge
+        self._fail_purge = fail_purge
 
     def is_held(self, clip_id: str) -> bool:
         return self._is_held(clip_id)
@@ -89,15 +95,37 @@ class EvidenceRetention:
         verification = self._verify_candidate(candidate)
         if verification is not None:
             return verification
+        if self._begin_purge is not None:
+            try:
+                if not self._begin_purge(candidate.clip_id):
+                    return PurgeResult.HELD
+            except Exception:  # noqa: BLE001 - retention must fail closed at the DB boundary
+                return PurgeResult.VERIFICATION_FAILED
         try:
             shutil.rmtree(candidate.clip_dir)
         except FileNotFoundError:
+            self._record_failure(candidate.clip_id, "MISSING_DURING_DELETE")
             return PurgeResult.MISSING
         except OSError:
+            self._record_failure(candidate.clip_id, "DELETE_FAILED")
             return PurgeResult.DELETE_FAILED
         if os.path.lexists(candidate.clip_dir):
+            self._record_failure(candidate.clip_id, "DELETE_NOT_DURABLE")
             return PurgeResult.VERIFICATION_FAILED
+        if self._complete_purge is not None:
+            try:
+                self._complete_purge(candidate.clip_id)
+            except Exception:  # noqa: BLE001 - pending tombstone completes on restart
+                return PurgeResult.VERIFICATION_FAILED
         return PurgeResult.PURGED
+
+    def _record_failure(self, clip_id: str, reason: str) -> None:
+        if self._fail_purge is None:
+            return
+        try:
+            self._fail_purge(clip_id, reason)
+        except Exception:  # noqa: BLE001 - preserve the original purge failure result
+            return
 
     def rotate(
         self,

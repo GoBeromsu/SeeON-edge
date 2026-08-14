@@ -7,6 +7,7 @@ import pytest
 
 from worker.adapters.encode import (
     ClipRemuxError,
+    CrossEpochSegmentError,
     CrossGenerationSegmentError,
     FFmpegConcatFinalizer,
     Segment,
@@ -71,6 +72,63 @@ def test_finalize_remuxes_with_stream_copy_and_faststart(tmp_path: Path) -> None
     assert artifact.segment_count == 2
     assert artifact.generation == 1
     assert artifact.duration_s == 4.0
+
+
+def test_finalize_derives_media_origin_from_selected_segment_metadata(
+    tmp_path: Path,
+) -> None:
+    runner = _RunnerSpy()
+    finalizer = FFmpegConcatFinalizer(output_dir=tmp_path / "clips", runner=runner)
+    segments = tuple(
+        Segment(
+            path=segment.path,
+            generation=segment.generation,
+            start_time_sec=segment.start_time_sec + 2.0,
+            end_time_sec=segment.end_time_sec + 2.0,
+            worker_boot_id="boot-1",
+            camera_id="cam-1",
+            stream_epoch=4,
+            source_origin_pts_sec=100.0,
+        )
+        for segment in _segments(tmp_path)
+    )
+
+    artifact = finalizer.finalize(segments, _event())
+
+    assert artifact.worker_boot_id == "boot-1"
+    assert artifact.camera_id == "cam-1"
+    assert artifact.stream_epoch == 4
+    assert artifact.media_origin_pts_sec == 102.0
+
+
+def test_finalize_refuses_segments_from_two_stream_epochs(tmp_path: Path) -> None:
+    finalizer = FFmpegConcatFinalizer(output_dir=tmp_path / "clips", runner=_RunnerSpy())
+    segments = _segments(tmp_path)
+    mixed = (
+        Segment(
+            path=segments[0].path,
+            generation=1,
+            start_time_sec=0.0,
+            end_time_sec=2.0,
+            worker_boot_id="boot-1",
+            camera_id="cam-1",
+            stream_epoch=1,
+            source_origin_pts_sec=10.0,
+        ),
+        Segment(
+            path=segments[1].path,
+            generation=1,
+            start_time_sec=2.0,
+            end_time_sec=4.0,
+            worker_boot_id="boot-1",
+            camera_id="cam-1",
+            stream_epoch=2,
+            source_origin_pts_sec=0.0,
+        ),
+    )
+
+    with pytest.raises(CrossEpochSegmentError):
+        finalizer.finalize(mixed, _event())
 
 
 def test_finalize_never_starts_an_encoder_or_decodes_frames(tmp_path: Path) -> None:

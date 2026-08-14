@@ -27,7 +27,6 @@ from worker.pipeline.output.evidence.clip_consistency_types import (
     BackupReceipt,
     ClipConsistencyError,
 )
-from worker.pipeline.output.evidence.evidence_outbox_schema import SCHEMA_VERSION
 
 
 def create_verified_backup(
@@ -36,6 +35,7 @@ def create_verified_backup(
     *,
     maintenance_root: Path,
     expected_uid: int,
+    schema_version: int,
     fault_hook: FaultHook | None = None,
 ) -> BackupReceipt:
     backup_root = ensure_secure_subdirectory(
@@ -79,7 +79,7 @@ def create_verified_backup(
         )
         receipt = BackupReceipt(
             format_version=RECEIPT_VERSION,
-            schema_version=SCHEMA_VERSION,
+            schema_version=schema_version,
             owner_uid=expected_uid,
             source_path=identity.source_path,
             source_mode=identity.source_mode,
@@ -125,6 +125,7 @@ def ensure_prebackup(
     receipt_path: Path | None,
     maintenance_root: Path,
     expected_uid: int,
+    schema_version: int,
     hook: FaultHook | None = None,
 ) -> BackupReceipt:
     if receipt_path is None:
@@ -133,6 +134,7 @@ def ensure_prebackup(
             snapshot,
             maintenance_root=maintenance_root,
             expected_uid=expected_uid,
+            schema_version=schema_version,
             fault_hook=hook,
         )
     receipt = verify_backup_receipt_for_resume(

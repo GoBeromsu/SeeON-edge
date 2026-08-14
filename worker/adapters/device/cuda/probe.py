@@ -1,6 +1,6 @@
 """Real torch/CUDA capability probe for the ``cuda`` device policy.
 
-``WorkerRuntime._create_fall_model`` and ``compose_yolo_extractors``
+``WorkerRuntime._create_fall_model`` and registry-based shared composition
 (``worker/runtime/worker.py``) construct every model backend with
 ``device=boot.device`` -- when the resolved profile is ``cuda`` that is the
 literal string ``"cuda"`` passed straight into ``torch``-backed adapters

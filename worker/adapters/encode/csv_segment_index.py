@@ -5,6 +5,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import final
 
+from worker.adapters.encode.adapter_errors import CrossEpochFrameError
+from worker.types import FramePacket
+
 
 @dataclass(frozen=True, slots=True)
 class Segment:
@@ -12,6 +15,16 @@ class Segment:
     generation: int
     start_time_sec: float
     end_time_sec: float
+    worker_boot_id: str = ""
+    camera_id: str = ""
+    stream_epoch: int = 0
+    source_origin_pts_sec: float | None = None
+
+    @property
+    def media_origin_pts_sec(self) -> float | None:
+        if self.source_origin_pts_sec is None:
+            return None
+        return self.source_origin_pts_sec + self.start_time_sec
 
 
 @final
@@ -35,6 +48,9 @@ class CsvSegmentIndex:
         self._segments_by_path: dict[Path, Segment] = {}
         self._origin_time_sec: float | None = None
         self._frame_count: int = 0
+        self._worker_boot_id = ""
+        self._camera_id = ""
+        self._stream_epoch = 0
 
     @property
     def list_path(self) -> Path:
@@ -45,6 +61,18 @@ class CsvSegmentIndex:
         return self._generation
 
     @property
+    def worker_boot_id(self) -> str:
+        return self._worker_boot_id
+
+    @property
+    def camera_id(self) -> str:
+        return self._camera_id
+
+    @property
+    def stream_epoch(self) -> int:
+        return self._stream_epoch
+
+    @property
     def origin_time_sec(self) -> float | None:
         """Event-clock value that corresponds to this generation's local 0.
 
@@ -52,21 +80,27 @@ class CsvSegmentIndex:
         """
         return self._origin_time_sec
 
-    def observe_frame(self, event_time_sec: float, fps: float) -> None:
-        """Record one more frame written into this generation.
+    def observe_frame(self, frame: FramePacket | float, fps: float) -> None:
+        """Record a frame without coercing distinct stream epochs together.
 
-        FFmpeg assigns this generation-local clock to each frame as
-        ``frame_index / fps`` (constant frame rate from a raw pipe input),
-        so re-deriving the origin -- ``event_time_sec - frame_index / fps``
-        -- on *every* frame keeps the mapping accurate even when the event
-        clock itself resets independently (an RTSP reconnect restarts the
-        decode session's clock without starting a new encoder generation):
-        the very next frame after such a reset recomputes the origin from
-        its own (small) event time and the (unaffected, still-growing)
-        frame count, so the offset self-corrects with no explicit
-        reconnect detection needed.
+        Numeric input is retained for legacy callers. Production supplies a
+        ``FramePacket`` so the generation is anchored once to its first frame
+        and a reconnect is rejected rather than silently re-basing its PTS.
         """
-        self._origin_time_sec = event_time_sec - (self._frame_count / fps)
+        if isinstance(frame, FramePacket):
+            if self._frame_count == 0:
+                self._worker_boot_id = frame.worker_boot_id
+                self._camera_id = frame.camera_id
+                self._stream_epoch = frame.stream_epoch
+                self._origin_time_sec = frame.frame.time_sec if frame.pts is None else frame.pts
+            elif (
+                frame.worker_boot_id != self._worker_boot_id
+                or frame.camera_id != self._camera_id
+                or frame.stream_epoch != self._stream_epoch
+            ):
+                raise CrossEpochFrameError(self._stream_epoch, frame.stream_epoch)
+        else:
+            self._origin_time_sec = frame - (self._frame_count / fps)
         self._frame_count += 1
 
     def refresh(self) -> tuple[Segment, ...]:
@@ -94,6 +128,10 @@ class CsvSegmentIndex:
                 generation=self._generation,
                 start_time_sec=start_time_sec,
                 end_time_sec=end_time_sec,
+                worker_boot_id=self._worker_boot_id,
+                camera_id=self._camera_id,
+                stream_epoch=self._stream_epoch,
+                source_origin_pts_sec=self._origin_time_sec,
             )
             self._segments_by_path[path] = segment
             discovered.append(segment)

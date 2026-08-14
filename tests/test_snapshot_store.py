@@ -12,9 +12,9 @@ import pytest
 from worker.pipeline.output.evidence.snapshot_store import SnapshotConflictError, SnapshotStore
 
 # This file's use of the fd table is *instrumentation only* -- it resolves a
-# descriptor back to a path to assert fsync/replace ordering, and counts open
-# descriptors to prove none leak. ``snapshot_store.py`` itself never touches
-# ``/proc``, so there is no reason for these tests to be Linux-only.
+# descriptor back to a path to assert fsync/replace ordering. ``snapshot_store.py``
+# itself never touches ``/proc``, so there is no reason for these tests to be
+# Linux-only.
 #
 # ``/proc/self/fd/N`` is a symlink on Linux, so ``os.readlink`` resolves it.
 # macOS has no ``/proc``; its ``/dev/fd/N`` is a character device, not a
@@ -29,6 +29,7 @@ from worker.pipeline.output.evidence.snapshot_store import SnapshotConflictError
 # Linux-only runtime dependency and its tests pin that floor deliberately.
 
 _FD_DIR = Path("/proc/self/fd") if Path("/proc/self/fd").exists() else Path("/dev/fd")
+_DescriptorIdentity = tuple[int, int, int]
 
 
 def _path_of_fd(descriptor: int) -> str:
@@ -37,10 +38,6 @@ def _path_of_fd(descriptor: int) -> str:
         return os.readlink(f"/proc/self/fd/{descriptor}")
     raw: bytes = fcntl.fcntl(descriptor, fcntl.F_GETPATH, bytes(1024))
     return raw.rstrip(b"\x00").decode()
-
-
-def _open_fd_count() -> int:
-    return len(list(_FD_DIR.iterdir()))
 
 
 def _store(store: SnapshotStore, **overrides: object) -> object:
@@ -94,9 +91,10 @@ def test_snapshot_store_fsyncs_each_file_before_replace_and_directory_after(
         for index, (operation, source, destination) in enumerate(calls)
         if operation == "replace" and destination is not None
     ]
-    assert len(replacements) == 2
+    assert len(replacements) == 4
     for index, source, destination in replacements:
-        assert ("fsync", source, None) in calls[:index]
+        if source.endswith(".tmp"):
+            assert ("fsync", source, None) in calls[:index]
         assert ("fsync", str(Path(destination).parent), None) in calls[index + 1 :]
 
 
@@ -195,21 +193,63 @@ def test_snapshot_store_retries_post_replace_directory_fsync(
     assert failed
 
 
+@pytest.mark.parametrize("case", range(20))
 def test_snapshot_store_does_not_leak_descriptors_when_directory_fsync_fails(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case: int
 ) -> None:
+    owned_descriptors: dict[int, _DescriptorIdentity] = {}
+    opened: set[_DescriptorIdentity] = set()
+    closed: set[_DescriptorIdentity] = set()
+    real_open = os.open
+    real_close = os.close
+    real_open_store_root = SnapshotStore._open_store_root
+
+    def identity(descriptor: int) -> _DescriptorIdentity:
+        descriptor_stat = os.fstat(descriptor)
+        return descriptor, descriptor_stat.st_dev, descriptor_stat.st_ino
+
+    def record_store_root(self: SnapshotStore) -> int:
+        descriptor = real_open_store_root(self)
+        resource = identity(descriptor)
+        owned_descriptors[descriptor] = resource
+        opened.add(resource)
+        return descriptor
+
+    def record_open(
+        path: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        descriptor = real_open(path, flags, mode, dir_fd=dir_fd)
+        if dir_fd in owned_descriptors:
+            resource = identity(descriptor)
+            owned_descriptors[descriptor] = resource
+            opened.add(resource)
+        return descriptor
+
+    def record_close(descriptor: int) -> None:
+        resource = owned_descriptors.pop(descriptor, None)
+        if resource is not None:
+            assert identity(descriptor) == resource
+        real_close(descriptor)
+        if resource is not None:
+            closed.add(resource)
+
     def fail_fsync(_descriptor: int) -> None:
         raise OSError("forced directory fsync failure")
 
+    monkeypatch.setattr(SnapshotStore, "_open_store_root", record_store_root)
+    monkeypatch.setattr("worker.pipeline.output.evidence.snapshot_files.os.open", record_open)
+    monkeypatch.setattr("worker.pipeline.output.evidence.snapshot_files.os.close", record_close)
     monkeypatch.setattr(SnapshotStore, "_fsync_directory", staticmethod(fail_fsync))
-    before = _open_fd_count()
 
-    for index in range(20):
-        with pytest.raises(OSError, match="forced directory fsync failure"):
-            _store(SnapshotStore(tmp_path / str(index)))
+    with pytest.raises(OSError, match="forced directory fsync failure"):
+        _store(SnapshotStore(tmp_path / str(case)))
 
-    after = _open_fd_count()
-    assert after == before
+    assert opened
+    assert closed == opened
 
 
 def test_snapshot_store_tolerates_concurrent_shared_directory_creation(
@@ -428,12 +468,12 @@ def test_snapshot_store_rejects_symlinked_temporary_file_without_outside_writes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     store = SnapshotStore(tmp_path)
-    relative = store._relative_path("camera-1", "2026-07-28T12:00:00Z", "event-1")
+    identity_key = hashlib.sha256(b"event-1").hexdigest()
     outside = tmp_path.parent / f"{tmp_path.name}-temporary-outside"
     outside.mkdir()
     target = outside / "must-not-be-written"
-    destination_directory = tmp_path / relative.parent
-    destination_directory.mkdir(parents=True)
+    staging_directory = tmp_path / ".snapshot-staging"
+    staging_directory.mkdir(parents=True)
 
     class KnownUuid:
         hex = "known"
@@ -441,7 +481,7 @@ def test_snapshot_store_rejects_symlinked_temporary_file_without_outside_writes(
     monkeypatch.setattr(
         "worker.pipeline.output.evidence.snapshot_files.uuid4", lambda: KnownUuid()
     )
-    (destination_directory / f".{relative.name}.known.tmp").symlink_to(target)
+    (staging_directory / f".{identity_key}.json.known.tmp").symlink_to(target)
 
     with pytest.raises(FileExistsError):
         _store(store)

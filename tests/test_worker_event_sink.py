@@ -1,20 +1,27 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 
-from contracts.event import EventPayload
+import numpy as np
+import pytest
+
+from contracts.frame import Frame
 from worker.interfaces.output import EventSink
+from worker.pipeline.output.evidence.event_payload import WorkerEventPayload
+from worker.types import FramePacket
 from worker.types.business_event import BusinessEvent
+
+RUNTIME_MANIFEST_SHA256 = "b" * 64
 
 
 @dataclass(slots=True)
 class _RecordingStager:
-    staged: list[EventPayload] = field(default_factory=list)
+    staged: list[WorkerEventPayload] = field(default_factory=list)
     completions: list[tuple[str, str | None]] = field(default_factory=list)
 
-    def stage(self, event: EventPayload) -> None:
+    def stage(self, event: WorkerEventPayload) -> None:
         self.staged.append(event)
 
     def complete(self, edge_event_id: str, clip_id: str | None) -> None:
@@ -24,17 +31,16 @@ class _RecordingStager:
 @dataclass(slots=True)
 class _RecordingRecorder:
     clip_id: str | None
-    calls: list[tuple[str, str, str | None, bool]] = field(default_factory=list)
+    calls: list[tuple[str, BusinessEvent, bool]] = field(default_factory=list)
 
     def on_event(
         self,
-        camera_id: str,
-        event_ref: str,
-        event_type: str | None = None,
+        trigger_packet: FramePacket,
+        event: BusinessEvent,
         *,
         allow_new_clip: bool = True,
     ) -> str | None:
-        self.calls.append((camera_id, event_ref, event_type, allow_new_clip))
+        self.calls.append((trigger_packet.camera_id, event, allow_new_clip))
         return self.clip_id
 
 
@@ -48,6 +54,27 @@ def _event() -> BusinessEvent:
         time_sec=12.5,
         probability=0.91,
         person_id=7,
+        audit={
+            "clock_source": "edge_wall_clock",
+            "model_version": "fall-model-v1",
+            "detector_version": "detector-v1",
+            "operating_threshold": 0.73,
+            "runtime_manifest_sha256": RUNTIME_MANIFEST_SHA256,
+        },
+    )
+
+
+def _trigger_packet() -> FramePacket:
+    return FramePacket(
+        camera_id="camera-1",
+        frame=Frame(4, 12.5, np.zeros((2, 2, 3), dtype=np.uint8)),
+        pts=12.5,
+        seq=4,
+        width=2,
+        height=2,
+        decode_time_ms=0.1,
+        worker_boot_id="boot-1",
+        stream_epoch=3,
     )
 
 
@@ -64,7 +91,7 @@ def test_event_sink_stages_then_binds_the_admitted_business_event() -> None:
     )
 
     # When: the decision pipeline emits an admitted immutable event.
-    sink.emit(_event())
+    sink.emit_for_frame(_event(), _trigger_packet())
 
     # Then: its canonical relay payload is durable before its clip relation completes.
     assert stager.staged == [
@@ -81,11 +108,37 @@ def test_event_sink_stages_then_binds_the_admitted_business_event() -> None:
                 "time_sec": 12.5,
                 "person_id": 7,
             },
+            "audit": {
+                "clock_source": "edge_wall_clock",
+                "model_version": "fall-model-v1",
+                "detector_version": "detector-v1",
+                "operating_threshold": 0.73,
+                "runtime_manifest_sha256": RUNTIME_MANIFEST_SHA256,
+            },
         }
     ]
-    assert recorder.calls == [("camera-1", "event-123", "fall_detected", True)]
+    assert recorder.calls == [("camera-1", _event(), True)]
     assert stager.completions == [("event-123", "clip-123")]
     assert isinstance(sink, EventSink)
+
+
+def test_event_sink_rejects_invalid_runtime_manifest_before_any_side_effect() -> None:
+    from worker.pipeline.output.event_sink import EvidenceEventSink
+
+    stager = _RecordingStager()
+    recorder = _RecordingRecorder(clip_id="clip-123")
+    sink = EvidenceEventSink(stager=stager, recorder=recorder)
+    invalid = replace(
+        _event(),
+        audit={"runtime_manifest_sha256": "B" * 64},
+    )
+
+    with pytest.raises(ValueError, match="runtime_manifest_sha256"):
+        sink.emit_for_frame(invalid, _trigger_packet())
+
+    assert stager.staged == []
+    assert stager.completions == []
+    assert recorder.calls == []
 
 
 def test_event_sink_completes_without_clip_when_recording_is_unavailable() -> None:
@@ -100,7 +153,7 @@ def test_event_sink_completes_without_clip_when_recording_is_unavailable() -> No
     )
 
     # When: the event is emitted.
-    sink.emit(_event())
+    sink.emit_for_frame(_event(), _trigger_packet())
 
     # Then: durable delivery remains ready rather than being dropped.
     assert stager.completions == [("event-123", None)]
