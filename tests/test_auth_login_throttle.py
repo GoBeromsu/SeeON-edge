@@ -17,6 +17,21 @@ def _client(tmp_path):
     return TestClient(app)
 
 
+def test_auth_204_routes_declare_no_response_model() -> None:
+    # Regression: with `from __future__ import annotations`, a bare `-> None`
+    # return hint is a string; on FastAPI >=0.115 that made 204 endpoints trip
+    # "Status code 204 must not have a response body" at import. Pinning
+    # response_model=None keeps the router importable across the supported floor.
+    no_content_routes = [
+        route
+        for route in auth_router.router.routes
+        if getattr(route, "status_code", None) == 204
+    ]
+    assert no_content_routes
+    for route in no_content_routes:
+        assert route.response_model is None
+
+
 def test_login_throttle_returns_429_after_bounded_failures(tmp_path, monkeypatch) -> None:
     # Deterministic window: inject fixed monotonic stamps via record/allow path.
     throttle = auth_router._LoginThrottle()

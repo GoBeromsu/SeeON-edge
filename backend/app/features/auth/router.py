@@ -114,7 +114,7 @@ def _client_key(request: Request, username: str) -> str:
     return f"{client}\0{username.strip().lower()}"
 
 
-@router.post("/session", status_code=status.HTTP_204_NO_CONTENT)
+@router.post("/session", status_code=status.HTTP_204_NO_CONTENT, response_model=None)
 def login(payload: DashboardLoginRequest, request: Request, response: Response) -> None:
     key = _client_key(request, payload.username)
     if not _LOGIN_THROTTLE.allow(key):
@@ -135,18 +135,18 @@ def login(payload: DashboardLoginRequest, request: Request, response: Response) 
     _set_session_cookie(response, request, sessions, token)
 
 
-@router.get("/session", status_code=status.HTTP_204_NO_CONTENT)
+@router.get("/session", status_code=status.HTTP_204_NO_CONTENT, response_model=None)
 def session(request: Request) -> None:
     authorize_dashboard(request)
 
 
-@router.delete("/session", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/session", status_code=status.HTTP_204_NO_CONTENT, response_model=None)
 def logout(request: Request, response: Response) -> None:
     dashboard_sessions(request).revoke(request.cookies.get(DASHBOARD_SESSION_COOKIE))
     response.delete_cookie(DASHBOARD_SESSION_COOKIE, path="/", samesite="strict")
 
 
-@router.put("/credentials", status_code=status.HTTP_204_NO_CONTENT)
+@router.put("/credentials", status_code=status.HTTP_204_NO_CONTENT, response_model=None)
 def update_credentials(
     payload: DashboardCredentialsUpdateRequest, request: Request, response: Response
 ) -> None:
