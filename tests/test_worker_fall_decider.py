@@ -3,9 +3,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Literal
 
-import numpy as np
-from numpy.typing import NDArray
-
 from contracts.observation import (
     BedRegionCacheState,
     BedRegionDebugSnapshot,
@@ -13,7 +10,7 @@ from contracts.observation import (
 )
 from worker.domains.fall import FallEventLatch
 from worker.interfaces.decision import Decider
-from worker.types import BusinessEvent, DecisionInput
+from worker.types import BusinessEvent, DecisionInput, FallModelInput
 
 
 @dataclass(frozen=True, slots=True)
@@ -28,10 +25,10 @@ class _Model:
     probabilities: tuple[float, ...]
     metadata: _Metadata = field(default_factory=_Metadata)
     operating_threshold: float = 0.5
-    inputs: list[NDArray[np.float32]] = field(default_factory=list)
+    inputs: list[FallModelInput] = field(default_factory=list)
 
-    def predict(self, features: NDArray[np.float32]) -> float:
-        self.inputs.append(features.copy())
+    def predict(self, features: FallModelInput) -> float:
+        self.inputs.append(features)
         index = min(len(self.inputs) - 1, len(self.probabilities) - 1)
         return self.probabilities[index]
 
@@ -41,8 +38,10 @@ class _CoordinateModel:
     metadata: _Metadata = field(default_factory=_Metadata)
     operating_threshold: float = 0.5
 
-    def predict(self, features: NDArray[np.float32]) -> float:
-        return 0.9 if features[0, 0] >= 0.5 else 0.1
+    def predict(self, features: FallModelInput) -> float:
+        first_row = features[0]
+        first_value = first_row[0] if isinstance(first_row, tuple) else first_row
+        return 0.9 if first_value >= 0.5 else 0.1
 
 
 def _input(

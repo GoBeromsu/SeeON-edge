@@ -1,0 +1,358 @@
+{
+  "schema_version": 1,
+  "scope": "compose.edge.yaml and .env.edge.prod.example authority inventory",
+  "variables": [
+    {
+      "name": "ML_API_IMAGE",
+      "category": "deployment artifact",
+      "authority": "deployment env",
+      "behavior": "required digest-pinned ml-api image",
+      "compose": true,
+      "example": true
+    },
+    {
+      "name": "ML_WORKER_IMAGE",
+      "category": "deployment artifact",
+      "authority": "deployment env",
+      "behavior": "required digest-pinned ml-worker image",
+      "compose": true,
+      "example": true
+    },
+    {
+      "name": "ML_WORKER_PROFILE",
+      "category": "deployment artifact",
+      "authority": "deployment env",
+      "behavior": "required canonical profile or deterministic legacy alias; NVIDIA profiles require compose.edge.nvidia.yaml and non-NVIDIA profiles reject it",
+      "todo7_status": "implemented",
+      "canonical_choices": [
+        "cpu-host",
+        "nvidia-host-bridge",
+        "intel-vaapi-host",
+        "apple-mps-host",
+        "nvidia-device-experimental"
+      ],
+      "legacy_aliases": {
+        "cpu": "cpu-host",
+        "cuda": "nvidia-host-bridge",
+        "igpu": "intel-vaapi-host",
+        "mps": "apple-mps-host"
+      },
+      "compose": true,
+      "example": true,
+      "service_environment": true
+    },
+    {
+      "name": "CLIP_STORE_HOST_DIR",
+      "category": "deployment artifact",
+      "authority": "deployment env",
+      "behavior": "required host bind root; container path is fixed",
+      "compose": true,
+      "example": true
+    },
+    {
+      "name": "API_BACKEND_BASE_URL",
+      "category": "deployment artifact",
+      "authority": "deployment env",
+      "behavior": "single public backend base URL; event/config endpoints derive from it",
+      "compose": true,
+      "example": true,
+      "service_environment": true
+    },
+    {
+      "name": "API_BACKEND_INGEST_TIMEOUT_SEC",
+      "category": "deployment artifact",
+      "authority": "deployment env",
+      "behavior": "public ingest timeout; typed default 10 seconds",
+      "compose": true,
+      "example": true,
+      "service_environment": true
+    },
+    {
+      "name": "API_DASHBOARD_USERNAME",
+      "category": "secret/bootstrap",
+      "authority": "deployment env then persisted dashboard credential",
+      "behavior": "deployment-unique bootstrap username; preflight rejects known admin/admin pair; no runtime default",
+      "compose": true,
+      "example": true,
+      "service_environment": true
+    },
+    {
+      "name": "API_DASHBOARD_PASSWORD",
+      "category": "secret/bootstrap",
+      "authority": "deployment env then persisted dashboard credential",
+      "behavior": "deployment-unique bootstrap password; preflight rejects known admin/admin pair; corrupt store fails closed",
+      "compose": true,
+      "example": true,
+      "service_environment": true
+    },
+    {
+      "name": "API_EDGE_RELAY_TOKEN",
+      "category": "secret/bootstrap",
+      "authority": "deployment env",
+      "behavior": "single internal relay secret projected to API_EDGE_RELAY_TOKEN and RELAY_TOKEN",
+      "compose": true,
+      "example": true,
+      "service_environment": true
+    },
+    {
+      "name": "RELAY_TOKEN",
+      "category": "secret/bootstrap",
+      "authority": "API_EDGE_RELAY_TOKEN projection",
+      "behavior": "compose-internal name for the paired relay secret",
+      "service_environment": true
+    },
+    {
+      "name": "NVIDIA_DRIVER_CAPABILITIES",
+      "category": "fixed internal topology",
+      "authority": "compose.edge.nvidia.yaml constant",
+      "behavior": "fixed compute,utility,video capability set present only for explicit NVIDIA topology",
+      "overlay_service_environment": true
+    },
+    {
+      "name": "ML_SERVING_PORT",
+      "category": "fixed internal topology",
+      "authority": "baked compose port 8000",
+      "behavior": "retired; deployment injection is rejected"
+    },
+    {
+      "name": "ML_WORKER_DEV_MJPEG",
+      "category": "fixed internal topology",
+      "authority": "baked pulled-worker config",
+      "behavior": "retired; worker startup rejects injection"
+    },
+    {
+      "name": "ML_WORKER_DEV_MJPEG_PORT",
+      "category": "fixed internal topology",
+      "authority": "baked port 8090",
+      "behavior": "retired; worker startup rejects injection"
+    },
+    {
+      "name": "ML_WORKER_DEV_MJPEG_HOST",
+      "category": "fixed internal topology",
+      "authority": "baked bind 0.0.0.0",
+      "behavior": "retired; worker startup rejects injection"
+    },
+    {
+      "name": "RELAY_URL",
+      "category": "legacy compatibility",
+      "authority": "baked http://ml-api:8000",
+      "behavior": "retired; worker startup rejects injection unconditionally"
+    },
+    {
+      "name": "ML_WORKER_SYSTEM_TEST_GATE",
+      "category": "dead",
+      "authority": "none; the SYSTEM_TEST CLI action and its relay routes are removed",
+      "behavior": "retired one-shot operator gate; no runtime surface reads it"
+    },
+    {
+      "name": "ML_API_WORKER_STREAM_ORIGIN",
+      "category": "fixed internal topology",
+      "authority": "baked backend setting http://ml-worker:8090",
+      "behavior": "retired; backend startup rejects injection"
+    },
+    {
+      "name": "ML_API_WORKER_PROBE_ORIGIN",
+      "category": "fixed internal topology",
+      "authority": "baked backend setting http://ml-worker:8090",
+      "behavior": "retired; backend startup rejects injection"
+    },
+    {
+      "name": "API_CONNECTION_SETTINGS_PATH",
+      "category": "fixed internal topology",
+      "authority": "baked runtime state path",
+      "behavior": "retired; backend startup rejects injection"
+    },
+    {
+      "name": "API_LABEL_STORE",
+      "category": "fixed internal topology",
+      "authority": "baked runtime state path",
+      "behavior": "retired; backend startup rejects injection"
+    },
+    {
+      "name": "CLIP_STORE_DIR",
+      "category": "fixed internal topology",
+      "authority": "baked /var/lib/clip-store",
+      "behavior": "retired; runtime startup rejects injection"
+    },
+    {
+      "name": "ML_MODELS_DIR",
+      "category": "fixed internal topology",
+      "authority": "fixed ./models to /app/models mount",
+      "behavior": "retired compose interpolation"
+    },
+    {
+      "name": "ML_API_DETECTION_TZ",
+      "category": "mutable policy",
+      "authority": "versioned DB/worker config detection window tz",
+      "behavior": "retired; backend startup rejects injection"
+    },
+    {
+      "name": "ML_DEFAULT_CAMERA_FPS",
+      "category": "mutable policy",
+      "authority": "camera registry/versioned worker config",
+      "behavior": "retired; backend startup rejects injection"
+    },
+    {
+      "name": "ML_DEFAULT_FRAME_STRIDE",
+      "category": "mutable policy",
+      "authority": "camera registry/versioned worker config",
+      "behavior": "retired; backend startup rejects injection"
+    },
+    {
+      "name": "ML_API_EVENT_CLIP_EXPORT_ENABLED",
+      "category": "mutable policy",
+      "authority": "versioned clip config",
+      "behavior": "retired; backend startup rejects injection"
+    },
+    {
+      "name": "ML_WORKER_EVENT_CLIP_EXPORT_ENABLED",
+      "category": "mutable policy",
+      "authority": "versioned clip config",
+      "behavior": "retired; worker startup rejects injection"
+    },
+    {
+      "name": "ML_WORKER_CLIP_RECORDING_ENABLED",
+      "category": "mutable policy",
+      "authority": "versioned clip config",
+      "behavior": "retired; worker startup rejects injection"
+    },
+    {
+      "name": "ML_WORKER_FALL_MODEL_ARTIFACT_DIR",
+      "category": "mutable policy",
+      "authority": "versioned model config with fixed /app/models root",
+      "behavior": "retired; worker startup rejects injection"
+    },
+    {
+      "name": "ML_WORKER_FALL_MODEL_WINDOW",
+      "category": "mutable policy",
+      "authority": "versioned model config/artifact manifest",
+      "behavior": "retired; worker startup rejects injection"
+    },
+    {
+      "name": "ML_WORKER_FALL_MODEL_STRIDE",
+      "category": "mutable policy",
+      "authority": "versioned model config/artifact manifest",
+      "behavior": "retired; worker startup rejects injection"
+    },
+    {
+      "name": "ML_WORKER_FALL_MODEL_OPERATING_THRESHOLD",
+      "category": "mutable policy",
+      "authority": "versioned policy boundary; detailed numeric policy is Todo 9",
+      "behavior": "retired; worker startup rejects injection"
+    },
+    {
+      "name": "ML_WORKER_FALL_MODEL_SCHEMA_VERSION",
+      "category": "mutable policy",
+      "authority": "versioned model config/artifact manifest",
+      "behavior": "retired; worker startup rejects injection"
+    },
+    {
+      "name": "ML_WORKER_FALL_MODEL_PREPROCESSING_IDENTITY",
+      "category": "mutable policy",
+      "authority": "versioned model config/artifact manifest",
+      "behavior": "retired; worker startup rejects injection"
+    },
+    {
+      "name": "ML_WORKER_FALL_MODEL_TYPE",
+      "category": "mutable policy",
+      "authority": "versioned model config",
+      "behavior": "retired; worker startup rejects injection"
+    },
+    {
+      "name": "ML_WORKER_FALL_MODEL_WEIGHTS",
+      "category": "mutable policy",
+      "authority": "versioned model config",
+      "behavior": "retired; worker startup rejects injection"
+    },
+    {
+      "name": "ML_WORKER_FALL_MODEL_ARCHITECTURE",
+      "category": "mutable policy",
+      "authority": "versioned model config",
+      "behavior": "retired; worker startup rejects injection"
+    },
+    {
+      "name": "API_ALLOW_LEGACY_DASHBOARD_AUTH",
+      "category": "legacy compatibility",
+      "authority": "bounded compatibility path through 2026-09-30",
+      "behavior": "removed from compose/example; accepted only for test/rollback clients until the documented deadline"
+    },
+    {
+      "name": "API_BACKEND_EVENTS_URL",
+      "category": "legacy compatibility",
+      "authority": "API_BACKEND_BASE_URL",
+      "behavior": "retired; backend startup rejects injection; migrate the common origin to API_BACKEND_BASE_URL"
+    },
+    {
+      "name": "API_BACKEND_CONFIG_URL",
+      "category": "legacy compatibility",
+      "authority": "API_BACKEND_BASE_URL",
+      "behavior": "retired; backend startup rejects injection; migrate the common origin to API_BACKEND_BASE_URL"
+    },
+    {
+      "name": "API_FACILITY_ID",
+      "category": "dead",
+      "authority": "connection settings DB enrollment",
+      "behavior": "retired identity key; backend startup rejects injection"
+    },
+    {
+      "name": "EDGE_FACILITY_TOKEN",
+      "category": "dead",
+      "authority": "connection settings DB enrollment",
+      "behavior": "retired token key; backend startup rejects injection"
+    },
+    {
+      "name": "API_FACILITY_TOKEN",
+      "category": "dead",
+      "authority": "connection settings DB enrollment",
+      "behavior": "retired token alias; backend startup rejects injection"
+    },
+    {
+      "name": "API_BACKEND_FACILITY_TOKEN",
+      "category": "dead",
+      "authority": "connection settings DB enrollment",
+      "behavior": "retired token alias; backend startup rejects injection"
+    },
+    {
+      "name": "API_EDGE_FACILITY_TOKEN",
+      "category": "dead",
+      "authority": "connection settings DB enrollment",
+      "behavior": "retired token alias; backend startup rejects injection"
+    },
+    {
+      "name": "API_CAMERA_INVENTORY",
+      "category": "dead",
+      "authority": "camera_registry DB/dashboard",
+      "behavior": "retired roster key; backend startup rejects injection"
+    },
+    {
+      "name": "EDGE_CAMERA_CONFIG",
+      "category": "dead",
+      "authority": "camera_registry DB/dashboard",
+      "behavior": "retired static roster key; worker startup rejects injection"
+    },
+    {
+      "name": "EDGE_CAMERA_CONFIG_FILE",
+      "category": "dead",
+      "authority": "camera_registry DB/dashboard",
+      "behavior": "retired static roster key; worker startup rejects injection"
+    },
+    {
+      "name": "ML_RTSP_ALLOW_PRIVATE_DESTINATIONS",
+      "category": "deployment artifact",
+      "authority": "deployment env",
+      "behavior": "0|1; facility LAN RFC1918/CGNAT cameras require 1; projected to ml-api and ml-worker",
+      "compose": true,
+      "example": true,
+      "service_environment": true
+    },
+    {
+      "name": "ML_RTSP_ALLOW_LOCAL_DESTINATIONS",
+      "category": "deployment artifact",
+      "authority": "deployment env",
+      "behavior": "0|1; loopback/link-local fixture contract only; production must stay 0; projected to ml-api and ml-worker",
+      "compose": true,
+      "example": true,
+      "service_environment": true
+    }
+  ]
+}

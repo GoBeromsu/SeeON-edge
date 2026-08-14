@@ -23,6 +23,7 @@ from worker.adapters.model.yolo_api import (
 PERSON_WEIGHTS_DIR: Final = Path(__file__).resolve().parents[3] / "models" / "person"
 PERSON_MODEL_FILENAME: Final = "yolo26n.pt"
 PERSON_MODEL_PATH: Final = str(PERSON_WEIGHTS_DIR / PERSON_MODEL_FILENAME)
+PERSON_PREPROCESSING_IDENTITY: Final = "rgb24-to-person-boxes.v1"
 PERSON_MODEL_CONFIDENCE: Final = 0.25
 COCO_PERSON_CLASS_ID: Final = 0
 
@@ -40,6 +41,7 @@ class YoloPersonRunner:
         warmup_frame: WarmupFrameSpec = DEFAULT_WARMUP_FRAME,
         model: YoloModel | None = None,
     ) -> None:
+        self.preprocessing_identity = PERSON_PREPROCESSING_IDENTITY
         self._model_path: Path = Path(model_path)
         self._artifact_digest: str | None = (
             artifact_digest(self._model_path) if self._model_path.is_file() else None
@@ -60,8 +62,8 @@ class YoloPersonRunner:
             raise YoloOutputError(task="person", detail=str(exc)) from exc
         return person_result(boxes)
 
-    def run(self, frame: Image) -> PersonRunnerResult:
-        return self.predict(frame)
+    def run(self, image: Image) -> PersonRunnerResult:
+        return self.predict(image)
 
     def warmup(self) -> None:
         _ = self.run(synthetic_rgb_frame(self._warmup_frame))

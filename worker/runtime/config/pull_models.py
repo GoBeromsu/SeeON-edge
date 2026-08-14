@@ -20,6 +20,12 @@ from contracts.worker_config import (
     PulledWorkerConfig,
     detection_window_validation_error,
 )
+from shared.detection_policies import (
+    PolicyBundle,
+    PolicyDocumentError,
+    default_policy_bundle,
+    parse_policy_bundle,
+)
 from worker.runtime.config.camera_models import CameraRuntimeConfig, RelayConfig
 from worker.runtime.config.domain_models import (
     KNOWN_DOMAIN_NAMES,
@@ -134,10 +140,25 @@ class BackendWorkerConfigPayload(BaseModel):
     # traversal) is dropped in ``resolved_clip_store_subdir`` -- falling back
     # to the store root -- rather than rejecting the whole payload.
     clip_store_subdir: object = None
+    # Closed versioned numeric policy bundle. Unlike legacy windows/toggles,
+    # this is one fail-closed unit: partial application would change detection
+    # semantics differently across modules/cameras.
+    detection_policies: object = None
     # Persisted ml-api runtime policy. Missing fields from old payloads and
     # last-known-good rows are deliberately OFF at version zero.
     clip_export_enabled: StrictBool = False
     clip_export_version: StrictInt = Field(default=0, ge=0)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _reject_unimplemented_policy_payload(cls, data: object) -> object:
+        if isinstance(data, dict):
+            fields = sorted({"models", "clip"}.intersection(data))
+            if fields:
+                raise ConfigValidationError(
+                    "worker config policy field(s) not accepted before Todo 9: " + ", ".join(fields)
+                )
+        return data
 
     @model_validator(mode="after")
     def _require_version(self) -> BackendWorkerConfigPayload:
@@ -256,8 +277,22 @@ class BackendWorkerConfigPayload(BaseModel):
             cameras.append(camera)
         return tuple(cameras)
 
+    @property
+    def resolved_detection_policies(self) -> PolicyBundle:
+        if self.detection_policies is None:
+            return default_policy_bundle(
+                tuple(camera.camera_id for camera in self.resolved_cameras)
+            )
+        try:
+            return parse_policy_bundle(self.detection_policies)
+        except PolicyDocumentError as error:
+            raise WorkerConfigError(f"detection policy refused: {error}") from error
+
     def to_pulled_config(self) -> PulledWorkerConfig:
         detection_windows = self.resolved_detection_windows
+        # Restart polling parses policies too. A higher revision with malformed
+        # semantics must not stop the running LKG worker at the next poll.
+        _ = self.resolved_detection_policies
         return PulledWorkerConfig(
             config_version=self.directive.version,
             restart_epoch=self.directive.generation,
@@ -329,8 +364,10 @@ class BackendWorkerConfigPayload(BaseModel):
         # for yet -- and must boot with an empty usable roster rather than
         # reject the pull.
         if self.cameras and not resolved_cameras:
-            raise WorkerConfigError("worker config declared cameras but none of them parsed")
-        detection_windows = {
+            raise WorkerConfigError(
+                "worker config declared cameras but none of them parsed"
+            )
+        detection_windows: dict[str, NightWindowConfig | None] = {
             domain: NightWindowConfig(start=window.start, end=window.end, tz=window.tz)
             for domain, window in self.resolved_detection_windows.items()
         }
@@ -393,11 +430,17 @@ class BackendWorkerConfigPayload(BaseModel):
             base_clip if subdir is None else base_clip.model_copy(update={"store_subdir": subdir})
         )
         return WorkerConfig(
+            version=self.directive.version,
             relay=RelayConfig.model_validate({"url": relay_url, "token": token}),
             models=models if models is not None else WorkerModelsConfig(),
             domains=domains_config,
+            detection_policies=self.resolved_detection_policies,
             clip=resolved_clip,
-            dev_mjpeg=dev_mjpeg if dev_mjpeg is not None else DevMjpegConfig(),
+            dev_mjpeg=(
+                dev_mjpeg
+                if dev_mjpeg is not None
+                else DevMjpegConfig(enabled=True, host="0.0.0.0", port=8090)
+            ),
             clip_export_enabled=self.clip_export_enabled,
             clip_export_version=self.clip_export_version,
             cameras=cameras,

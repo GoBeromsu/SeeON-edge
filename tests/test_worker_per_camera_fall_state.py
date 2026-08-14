@@ -46,10 +46,13 @@ from typing import Literal, final
 import pytest
 
 from contracts.observation import BedRegionCacheState, BedRegionDebugSnapshot, FrameObservation
+from contracts.runner import Image, RunnerResult
+from worker.domains.registry import DETECTION_MODULE_REGISTRY
 from worker.pipeline.bus import BoundedFrameBus
 from worker.pipeline.decision import EventAggregator, IncidentManager
 from worker.pipeline.ingest.lifecycle import IngestReporter
 from worker.pipeline.output.event_sink import EvidenceEventSink
+from worker.pipeline.output.evidence.evidence_stager import DurableEvidenceStager
 from worker.runtime.config import CameraRuntimeConfig, WorkerConfig
 from worker.runtime.lease import GpuLease
 from worker.runtime.profile.registry import VerifyResult
@@ -64,15 +67,29 @@ class _FallMetadata:
     mode: Literal["sequence"] = "sequence"
 
 
+def _compiled_identity(task: str) -> tuple[str, str]:
+    component_id = "fall-classifier" if task == "fall" else task
+    module_id = "bed_exit" if component_id in {"person", "bed"} else "fall"
+    binding = next(
+        binding
+        for binding in DETECTION_MODULE_REGISTRY.get(module_id).shared_bindings
+        if binding.component_id == component_id
+    )
+    assert binding.artifact_digest is not None
+    assert binding.preprocessing_identity is not None
+    return binding.artifact_digest, binding.preprocessing_identity
+
+
 @final
 class _FakeRunner:
     def __init__(self, task: str) -> None:
         self.task = task
         self.metadata = _FallMetadata()
+        self.artifact_digest, self.preprocessing_identity = _compiled_identity(task)
         self.operating_threshold = 0.5
         self.warmup_count = 0
 
-    def __call__(self, _image: object) -> object:
+    def __call__(self, _image: Image) -> RunnerResult:
         raise AssertionError("composition tests must not run model inference")
 
     def predict(self, _features: object) -> float:
@@ -87,7 +104,7 @@ class _FakeServingClient:
     def __init__(self) -> None:
         self.created: list[tuple[str, _FakeRunner]] = []
 
-    def create(self, task: str, **_options: object) -> _FakeRunner:
+    def create(self, task: str, **_options: str | int | float | bool | None) -> _FakeRunner:
         runner = _FakeRunner(task)
         self.created.append((task, runner))
         return runner
@@ -180,6 +197,7 @@ def test_worker_wires_a_distinct_durable_stager_per_camera(tmp_path: Path) -> No
         acquire_lease=lambda: GpuLease.acquire(tmp_path),
         decode_probe=lambda _decode: VerifyResult(True, "cpu", "decode", "available"),
         state_dir=tmp_path,
+        clip_store_dir=tmp_path / "clip-store",
     )
 
     runtime.run()
@@ -190,11 +208,13 @@ def test_worker_wires_a_distinct_durable_stager_per_camera(tmp_path: Path) -> No
     assert isinstance(sink_b, EvidenceEventSink)
     assert sink_a is not sink_b
     assert sink_a.stager is not sink_b.stager
-    assert sink_a.stager.camera_id == "camera-a"  # type: ignore[attr-defined]
-    assert sink_b.stager.camera_id == "camera-b"  # type: ignore[attr-defined]
-    assert sink_a.stager.facility_id == "facility-a"  # type: ignore[attr-defined]
+    assert isinstance(sink_a.stager, DurableEvidenceStager)
+    assert isinstance(sink_b.stager, DurableEvidenceStager)
+    assert sink_a.stager.camera_id == "camera-a"
+    assert sink_b.stager.camera_id == "camera-b"
+    assert sink_a.stager.facility_id == "facility-a"
     # Both cameras durably stage into the same process-wide outbox database.
-    assert sink_a.stager.database_path == sink_b.stager.database_path  # type: ignore[attr-defined]
+    assert sink_a.stager.database_path == sink_b.stager.database_path
 
 
 @dataclass(slots=True)

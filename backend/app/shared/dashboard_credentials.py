@@ -3,19 +3,7 @@
 Separate from the in-memory ``DashboardSessionStore`` in ``dashboard_auth.py``:
 this module only knows how to durably store and verify one username/password
 pair. ``dashboard_auth.py`` decides *when* to consult it (persisted row wins
-over env vars, which win over the built-in ``admin``/``admin`` default).
-
-Storage lives in the single-row ``credentials`` table of the shared
-``catalog.sqlite3`` database (see ``backend/app/features/clips/catalog.py``),
-alongside the ``camera_registry`` and ``runtime_latency`` tables. This module
-cannot import ``CatalogStore`` to bootstrap that table -- the import-linter
-contract "backend base (core/shared) does not import upper layers"
-(``pyproject.toml``) forbids ``backend.app.shared`` from importing
-``backend.app.features`` -- so it opens and migrates its own single table via
-an idempotent ``CREATE TABLE IF NOT EXISTS`` (identical statement text to
-``catalog.py``'s ``_V3_TABLE_STATEMENTS``), independent of whichever store
-opens the database file first, and never touches ``PRAGMA user_version``
-(that stays exclusively ``CatalogStore``'s responsibility).
+over a fully-set env bootstrap pair). There is no built-in password default.
 """
 
 from __future__ import annotations
@@ -31,7 +19,7 @@ from pathlib import Path
 from threading import Lock
 
 from backend.app.shared.sqlite_bootstrap import connect_catalog_store
-from backend.app.shared.state_dir import resolve_state_dir
+from shared.edge_db import EDGE_DATABASE_PATH
 
 _CREATE_CREDENTIALS_TABLE = (
     "CREATE TABLE IF NOT EXISTS credentials (id INTEGER PRIMARY KEY CHECK (id = 1), "
@@ -73,14 +61,22 @@ class PersistedDashboardCredentials:
         return hmac.compare_digest(candidate, self.password_hash)
 
 
+class DashboardCredentialsStoreError(RuntimeError):
+    """Persisted credential state exists but cannot be read safely.
+
+    Callers must fail closed: never fall back to env or any default pair after
+    a rotation-capable store has become unreadable or corrupt.
+    """
+
+
 class DashboardCredentialsStore:
     """SQLite-backed persistence for dashboard login credentials.
 
     Reads and writes the single-row ``credentials`` table (``id = 1``) in the
-    catalog database. A missing table row, an unreadable/corrupt database, or
-    any other read-time failure is logged to stderr and treated as "no
-    persisted credentials" -- it must never crash boot or brick login (the
-    operator can always fall back to env vars or the built-in default).
+    catalog database. A missing table row is \"no persisted credentials\" (env
+    bootstrap may still apply). An unreadable or corrupt database raises
+    ``DashboardCredentialsStoreError`` so auth fails closed instead of
+    silently falling back to env/default after rotation.
     """
 
     def __init__(self, path: str | Path) -> None:
@@ -90,7 +86,7 @@ class DashboardCredentialsStore:
 
     @classmethod
     def from_env(cls) -> DashboardCredentialsStore:
-        return cls(resolve_state_dir("ml-api") / "catalog.sqlite3")
+        return cls(EDGE_DATABASE_PATH)
 
     def load(self) -> PersistedDashboardCredentials | None:
         with self._lock:
@@ -121,13 +117,12 @@ class DashboardCredentialsStore:
                 "SELECT username, algorithm, salt, password_hash, updated_at "
                 "FROM credentials WHERE id = 1"
             ).fetchone()
-        except (OSError, sqlite3.Error) as exc:  # noqa: BLE001 - never brick login on a bad db
-            print(
-                f"dashboard credentials store unreadable at {self.path}, "
-                f"falling back to env/default: {exc!r}",
-                file=sys.stderr,
+        except (OSError, sqlite3.Error) as exc:
+            message = (
+                f"dashboard credentials store unreadable at {self.path}: {exc!r}"
             )
-            return None
+            print(message, file=sys.stderr)
+            raise DashboardCredentialsStoreError(message) from exc
         if row is None:
             return None
         username, algorithm, salt, password_hash, updated_at = row
@@ -160,5 +155,6 @@ class DashboardCredentialsStore:
 
 __all__ = [
     "DashboardCredentialsStore",
+    "DashboardCredentialsStoreError",
     "PersistedDashboardCredentials",
 ]

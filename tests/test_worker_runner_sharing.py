@@ -12,21 +12,16 @@ from numpy.typing import NDArray
 import worker.runtime.worker as worker_module
 from contracts.runner import Image, RunnerResult
 from shared.events.evidence_http_transport import HttpResult
+from worker.domains.fall import FallEventLatch
+from worker.domains.module_definition import ComponentBinding
 from worker.pipeline.bus import BoundedFrameBus
 from worker.pipeline.ingest.lifecycle import IngestReporter
 from worker.runtime.config import CameraRuntimeConfig, WorkerConfig
 from worker.runtime.lease import GpuLease
-from worker.runtime.model_composition import PRODUCTION_EXTRACTOR_NAMES
 from worker.runtime.profile.registry import VerifyResult
 from worker.runtime.worker import WorkerRuntime
 
 ServingOption = str | int | float | bool | None
-
-
-def test_production_extractor_names_intentionally_includes_person() -> None:
-    # No config toggle exists to omit "person": it is unconditionally
-    # provisioned alongside "pose" and "bed" for every profile.
-    assert PRODUCTION_EXTRACTOR_NAMES == ("pose", "person", "bed")
 
 
 @dataclass(frozen=True, slots=True)
@@ -39,9 +34,12 @@ class _FallMetadata:
 @final
 class _FakeRunner:
     def __init__(self, task: str) -> None:
+        binding = _compiled_binding_for_task(task)
         self.task = task
         self.metadata = _FallMetadata()
         self.operating_threshold = 0.5
+        self.artifact_digest = binding.artifact_digest
+        self.preprocessing_identity = binding.preprocessing_identity
 
     def __call__(self, _image: Image) -> RunnerResult:
         raise AssertionError("runner-sharing tests must not run model inference")
@@ -51,6 +49,16 @@ class _FakeRunner:
 
     def warmup(self) -> None:
         return None
+
+
+def _compiled_binding_for_task(task: str) -> ComponentBinding:
+    component_id = "fall-classifier" if task == "fall" else task
+    return next(
+        binding
+        for definition in worker_module.DETECTION_MODULE_REGISTRY.definitions
+        for binding in definition.shared_bindings
+        if binding.component_id == component_id
+    )
 
 
 @final
@@ -161,6 +169,8 @@ def _runtime(
         pump_factory=_pump_factory,
         acquire_lease=lambda: GpuLease.acquire(state_dir),
         decode_probe=lambda _decode: VerifyResult(True, "cpu", "decode", "available"),
+        state_dir=state_dir,
+        clip_store_dir=state_dir / "clip-store",
     )
 
 
@@ -208,4 +218,5 @@ def test_pose_person_bed_and_fall_runners_are_created_once_and_shared_across_fou
             for left, right in zip(camera.analytics.extractors, shared_extractors, strict=True)
         )
         fall, _bed_exit = camera.decision.deciders
+        assert isinstance(fall, FallEventLatch)
         assert fall.classifier.model is runtime.fall_model

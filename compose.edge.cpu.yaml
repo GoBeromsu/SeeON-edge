@@ -2,9 +2,8 @@
 #
 #   docker compose -f compose.edge.yaml -f compose.edge.cpu.yaml up -d
 #
-# compose.edge.yaml 의 ml-worker 는 NVIDIA GPU 를 무조건 예약한다. 드라이버가
-# 없거나 고장난 호스트에서는 그 예약 때문에 컨테이너 생성 자체가 실패하므로,
-# 여기서 deploy 블록을 통째로 지운다. 워커 런타임은 CPU 를 정식 지원한다
+# compose.edge.yaml 은 이제 GPU 중립이다. 이 호환 오버레이도 deploy 블록을
+# 비워 두며, 워커 런타임은 CPU 를 정식 지원한다
 # (ML_WORKER_PROFILE=cpu; worker/runtime/worker.py 의 _verify_cpu 는 CUDA
 # 프로브를 조회하지 않는다).
 #
@@ -13,11 +12,8 @@
 # 그리고 카메라별 decode_backend 는 cpu 또는 opencv 로 둔다 — nvdec 는 GPU 를
 # 요구하므로 이 경로에서는 쓸 수 없다.
 #
-# GPU 가 살아 있는 호스트에서는 이 파일을 얹지 않는다. 그때는
-# compose.edge.yaml 단독이 곧 GPU 경로다.
+# NVIDIA 호스트에서는 이 파일 대신 compose.edge.nvidia.yaml 을 얹는다.
 services:
   ml-worker:
+    # Base compose is host-only; no NVIDIA reservation or capability env exists.
     deploy: !reset null
-    environment:
-      # GPU 예약이 없으면 NVIDIA 드라이버 capability 도 의미가 없다.
-      NVIDIA_DRIVER_CAPABILITIES: ""

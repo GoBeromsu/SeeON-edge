@@ -21,10 +21,12 @@ from typing import Any
 import pytest
 import yaml
 from edge_worker_fixtures import edge_config_payload
+from pydantic import ValidationError
 
 import worker.__main__ as worker_main
 from contracts.worker_config import PulledWorkerConfig
-from worker.runtime.config import RestartDirective, WorkerConfigPoll
+from worker.runtime.config import RestartDirective, WorkerConfig, WorkerConfigPoll
+from worker.runtime.config.loader import load_worker_config as production_load_worker_config
 from worker.runtime.worker import WorkerRuntime
 
 
@@ -76,6 +78,14 @@ def _isolate_from_default_ingest_composition(monkeypatch: pytest.MonkeyPatch) ->
         real_init(self, *args, **kwargs)
 
     monkeypatch.setattr(WorkerRuntime, "__init__", _init_with_fake_loop_factory)
+
+    def load_fixture_config(path: str | Path) -> WorkerConfig:
+        try:
+            return WorkerConfig.model_validate(yaml.safe_load(Path(path).read_text()))
+        except (OSError, UnicodeError, yaml.YAMLError, ValidationError, TypeError, ValueError):
+            return production_load_worker_config(path)
+
+    monkeypatch.setattr(worker_main, "load_worker_config", load_fixture_config)
 
 
 # --- argparse surface -------------------------------------------------
@@ -226,6 +236,41 @@ def test_check_config_ignores_heartbeat_on_start_flag(
 # --- real WorkerRuntime construction: proves no TypeError ---------------
 
 
+def test_build_revision_environment_is_resolved_before_runtime_construction(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    config_path = _write_config(tmp_path)
+    raw_revision = "1" * 40
+    resolved_revision = "2" * 40
+    monkeypatch.setenv("ML_WORKER_BUILD_REVISION", raw_revision)
+    resolver_calls: list[str | None] = []
+    constructor_revisions: list[str | None] = []
+
+    class _FakeRuntime:
+        def run(self) -> None:
+            pass
+
+        def stop(self) -> None:
+            pass
+
+    def _resolve(raw: str | None) -> str:
+        resolver_calls.append(raw)
+        return resolved_revision
+
+    def _construct(_config: WorkerConfig, **kwargs: object) -> _FakeRuntime:
+        revision = kwargs.get("build_revision")
+        assert revision is None or isinstance(revision, str)
+        constructor_revisions.append(revision)
+        return _FakeRuntime()
+
+    monkeypatch.setattr(worker_main, "resolve_worker_build_revision", _resolve)
+    monkeypatch.setattr(worker_main, "WorkerRuntime", _construct)
+
+    assert worker_main.main(["--config", str(config_path)]) == 0
+    assert resolver_calls == [raw_revision]
+    assert constructor_revisions == [resolved_revision]
+
+
 def test_real_workerruntime_constructs_with_fake_collaborators_without_typeerror(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -305,7 +350,6 @@ def test_restart_check_wired_from_config_relay_settings(
     assert relay_token == "relay-token-1"
     assert boot_directive == RestartDirective(generation=0, version=0)
     assert callable(pull_config)
-    assert getattr(pull_config, "__name__", "") == "_pull_and_apply_runtime_settings"
     assert constructed[0]._restart_check is sentinel_check  # noqa: SLF001
 
     live_update = WorkerConfigPoll(
@@ -328,7 +372,7 @@ def test_restart_check_wired_from_config_relay_settings(
     assert constructed[0]._clip_export_policy.enabled() is True  # noqa: SLF001
 
 
-def test_restart_check_relay_env_vars_override_config(
+def test_restart_check_rejects_retired_relay_url_override(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     config_path = _write_config(tmp_path)
@@ -345,8 +389,8 @@ def test_restart_check_relay_env_vars_override_config(
     monkeypatch.setattr(worker_main, "make_restart_check", _fake_make_restart_check)
     monkeypatch.setattr(WorkerRuntime, "run", lambda self: None)
 
-    assert worker_main.main(["--config", str(config_path)]) == 0
-    assert calls == [("http://relay.test", "relay-token")]
+    assert worker_main.main(["--config", str(config_path)]) == 2
+    assert calls == []
 
 
 # --- --max-frames-per-camera passthrough ----------------------------------

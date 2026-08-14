@@ -1,4 +1,4 @@
-"""Typed contracts for schema-9 clip consistency maintenance."""
+"""Typed contracts for clip consistency maintenance."""
 
 from __future__ import annotations
 

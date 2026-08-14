@@ -68,6 +68,14 @@ class FFmpegEncoderSession:
         return self._state.index
 
     @property
+    def worker_boot_id(self) -> str:
+        return self._state.index.worker_boot_id
+
+    @property
+    def stream_epoch(self) -> int:
+        return self._state.index.stream_epoch
+
+    @property
     def origin_time_sec(self) -> float | None:
         return self._state.index.origin_time_sec
 

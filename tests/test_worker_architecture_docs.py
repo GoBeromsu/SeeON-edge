@@ -393,24 +393,39 @@ def test_architecture_records_raw_frame_fanout_limits() -> None:
     assert "`DecisionInput` carries exactly the seven" in text
 
 
-def test_architecture_records_adr_0001_as_an_open_follow_up() -> None:
-    text = _read(ARCHITECTURE)
-    assert "ADR-0001 source-packet preservation is NOT complete" in text
-    assert "eldercare-fall-ml-v2/issues/2" in text
-    assert "does **not** satisfy that requirement" in text
-    assert "decoded-frame" in text
-
-
-def test_rollback_runbook_uses_digest_rollback_and_preserves_volumes() -> None:
+def test_rollback_runbook_matches_central_database_lifecycle_contract() -> None:
     text = _read(ROLLBACK_RUNBOOK)
-    assert "ML_WORKER_IMAGE" in text
-    assert "not a source revert" in text
-    assert "compose.edge.yaml" in text
-    assert ".env.edge.prod.example" in text
-    for volume in ("ml-worker-state", "ml-api-state", "clip-store"):
-        assert volume in text
+    commands = "\n".join(re.findall(r"```sh\n(.*?)```", text, flags=re.DOTALL))
+
+    assert "/var/lib/seeon-state/edge.sqlite3" in text
+    assert "edge-state" in text
+    assert "edge-db-migrator" in text
+    assert "EDGE_DB_IMPORT_OK" in text
+    assert "central cutover traffic boundary" in text
+    assert "Before central cutover traffic" in text
+    assert "After central cutover traffic" in text
+    assert "image digests" in text
+    assert "mutable image tag" in text
+    assert "binary-only rollback" in text
+    assert "current `edge.sqlite3` schema" in text
+    for legacy in (
+        "catalog.sqlite3",
+        "connection-settings.sqlite3",
+        "worker-state.sqlite3",
+        "ml-api-state",
+        "ml-worker-state",
+    ):
+        assert legacy in text
+
+    migrator = "$DC up --pull always --no-deps edge-db-migrator"
+    api = "$DC up -d --wait ml-api"
+    worker = "$DC up -d --wait ml-worker"
+    assert migrator in commands
+    assert api in commands
+    assert worker in commands
+    assert commands.index(migrator) < commands.index(api) < commands.index(worker)
     assert "down -v" in text
-    assert "--no-deps ml-worker" in text
+    assert "delete `edge-state`" in text
 
 
 @pytest.mark.parametrize(

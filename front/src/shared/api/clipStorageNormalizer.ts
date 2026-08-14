@@ -3,12 +3,20 @@ import type { ClipStorageBrowseEntry, ClipStorageBrowseResult, ClipStorageInfo }
 
 export function normalizeClipStorageInfo(value: unknown): ClipStorageInfo {
   const record = isRecord(value) ? value : null;
-  if (!record || typeof record.root !== 'string' || typeof record.selected_path !== 'string') {
+  const mountLabel =
+    record && typeof record.mount_label === 'string'
+      ? record.mount_label
+      : record && typeof record.root === 'string'
+        ? // Legacy absolute-root responses are accepted only as an opaque label
+          // (basename) so older backends do not break the UI mid-rollout.
+          record.root.split(/[/\\]/).filter(Boolean).at(-1) ?? 'clip-store'
+        : null;
+  if (!record || !mountLabel || typeof record.selected_path !== 'string') {
     throw new Error('Invalid clip storage response');
   }
 
   return {
-    root: record.root,
+    mount_label: mountLabel,
     selected_path: record.selected_path,
     total_bytes: pickNonNegativeNumber(record, ['total_bytes']),
     used_bytes: pickNonNegativeNumber(record, ['used_bytes']),

@@ -22,6 +22,10 @@ from dataclasses import dataclass, replace
 from typing import Any, Final, Protocol
 
 from contracts.observation import FrameObservation
+from worker.pipeline.output.evidence.evidence_metadata import (
+    RUNTIME_MANIFEST_SHA256_KEY,
+    validate_runtime_manifest_sha256,
+)
 from worker.types import BusinessEvent, FramePacket
 
 LOGGER: Final = logging.getLogger(__name__)
@@ -54,6 +58,10 @@ class AlertEvidenceAttacher:
     domain_audit: Mapping[str, Mapping[str, object]]
     overlay_renderer: SnapshotRenderer | None = None
     debug_snapshots_provider: Callable[[int], tuple[Any, ...]] | None = None
+    runtime_manifest_sha256: str | None = None
+
+    def __post_init__(self) -> None:
+        validate_runtime_manifest_sha256(self.runtime_manifest_sha256)
 
     def attach(
         self,
@@ -61,7 +69,10 @@ class AlertEvidenceAttacher:
         packet: FramePacket,
         observation: FrameObservation,
     ) -> BusinessEvent:
-        audit = self.domain_audit.get(event.domain)
+        audit = dict(event.audit or {})
+        audit.update(self.domain_audit.get(event.domain, {}))
+        if self.runtime_manifest_sha256 is not None:
+            audit[RUNTIME_MANIFEST_SHA256_KEY] = self.runtime_manifest_sha256
         if not audit:
             return event
         try:

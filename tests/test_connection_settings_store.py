@@ -5,6 +5,8 @@ from pathlib import Path
 
 import pytest
 
+from backend.app.core.config import reject_retired_backend_environment
+from backend.app.features.connection import store as connection_store_module
 from backend.app.features.connection.store import (
     API_BACKEND_BASE_URL_ENV,
     API_CONNECTION_SETTINGS_PATH_ENV,
@@ -17,6 +19,9 @@ from backend.app.lifespan import (
     API_BACKEND_EVENTS_URL_ENV,
     EDGE_FACILITY_TOKEN_ENV,
 )
+from shared.edge_db import EDGE_DATABASE_PATH
+
+_production_from_env = ConnectionSettingsStore.from_env
 
 
 @pytest.fixture(autouse=True)
@@ -38,20 +43,28 @@ def _store(tmp_path: Path) -> ConnectionSettingsStore:
 
 
 class TestFromEnv:
-    def test_default_path_matches_expected_sqlite_location(self) -> None:
-        assert DEFAULT_CONNECTION_SETTINGS_PATH == "/var/lib/ml-api/connection-settings.sqlite3"
+    def test_default_path_is_the_central_edge_database(self) -> None:
+        assert DEFAULT_CONNECTION_SETTINGS_PATH == str(EDGE_DATABASE_PATH)
+        assert Path(DEFAULT_CONNECTION_SETTINGS_PATH).name == "edge.sqlite3"
 
-    def test_from_env_uses_default_path_when_unset(self) -> None:
-        store = ConnectionSettingsStore.from_env()
-        assert store.path == Path(DEFAULT_CONNECTION_SETTINGS_PATH)
+    def test_from_env_uses_the_isolated_central_path(self) -> None:
+        store = _production_from_env()
 
-    def test_from_env_honors_override(
+        assert store.path == connection_store_module.EDGE_DATABASE_PATH
+        assert store.path.name == "edge.sqlite3"
+
+    def test_retired_path_override_is_rejected_without_recreating_legacy_db(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        override = tmp_path / "custom" / "settings.sqlite3"
+        override = tmp_path / "custom" / "connection-settings.sqlite3"
         monkeypatch.setenv(API_CONNECTION_SETTINGS_PATH_ENV, str(override))
-        store = ConnectionSettingsStore.from_env()
-        assert store.path == override
+
+        with pytest.raises(ValueError, match=API_CONNECTION_SETTINGS_PATH_ENV):
+            reject_retired_backend_environment({API_CONNECTION_SETTINGS_PATH_ENV: str(override)})
+
+        store = _production_from_env()
+        assert store.path == connection_store_module.EDGE_DATABASE_PATH
+        assert not override.exists()
 
 
 class TestLoadPrecedence:
@@ -65,27 +78,30 @@ class TestLoadPrecedence:
             updated_at=None,
         )
 
-    def test_only_url_env_seeds_when_no_row(
+    def test_retired_url_and_identity_env_do_not_seed_when_no_row(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.setenv(API_BACKEND_EVENTS_URL_ENV, "https://backend.example/events")
-        monkeypatch.setenv(API_BACKEND_CONFIG_URL_ENV, "https://backend.example/ml-config")
-        monkeypatch.setenv("API_FACILITY_ID", "facility-42")
-        monkeypatch.setenv("EDGE_FACILITY_TOKEN", "supersecrettoken")
+        retired = {
+            API_BACKEND_EVENTS_URL_ENV: "https://backend.example/events",
+            API_BACKEND_CONFIG_URL_ENV: "https://backend.example/ml-config",
+            "API_FACILITY_ID": "facility-42",
+            "EDGE_FACILITY_TOKEN": "supersecrettoken",
+        }
+        for name, value in retired.items():
+            monkeypatch.setenv(name, value)
+
+        with pytest.raises(ValueError, match="retired edge environment key"):
+            reject_retired_backend_environment(retired)
 
         settings = _store(tmp_path).load()
 
-        assert settings.events_url == "https://backend.example/events"
-        assert settings.config_url == "https://backend.example/ml-config"
-        # facility_id is DB-only; env API_FACILITY_ID must not seed.
+        assert settings.events_url is None
+        assert settings.config_url is None
         assert settings.facility_id is None
-        # facility_token is also DB-only now (see store.py: the former
-        # EDGE_FACILITY_TOKEN env gap-fill was removed -- a token in the
-        # environment/compose/Git is exactly what deployment rules forbid).
         assert settings.facility_token is None
         assert settings.updated_at is None
 
-    def test_saved_row_wins_over_env(
+    def test_legacy_saved_row_remains_readable_despite_retired_env(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setenv(API_BACKEND_EVENTS_URL_ENV, "https://env.example/events")
@@ -154,16 +170,20 @@ class TestLoadBaseUrlPrecedence:
         assert settings.events_url == "https://backend.example/api/v1/events"
         assert settings.config_url == "https://backend.example/api/v1/ml-config"
 
-    def test_specific_env_var_overrides_base_derivation_per_field(
+    def test_retired_specific_env_cannot_override_base_derivation(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setenv(API_BACKEND_BASE_URL_ENV, "https://backend.example")
         monkeypatch.setenv(API_BACKEND_EVENTS_URL_ENV, "https://override.example/events")
 
+        with pytest.raises(ValueError, match=API_BACKEND_EVENTS_URL_ENV):
+            reject_retired_backend_environment(
+                {API_BACKEND_EVENTS_URL_ENV: "https://override.example/events"}
+            )
+
         settings = _store(tmp_path).load()
 
-        assert settings.events_url == "https://override.example/events"
-        # config_url has no specific override set, so it still falls back to base.
+        assert settings.events_url == "https://backend.example/api/v1/events"
         assert settings.config_url == "https://backend.example/api/v1/ml-config"
 
     def test_base_url_trailing_slash_is_normalized(
@@ -176,17 +196,21 @@ class TestLoadBaseUrlPrecedence:
         assert settings.events_url == "https://backend.example/api/v1/events"
         assert settings.config_url == "https://backend.example/api/v1/ml-config"
 
-    def test_saved_row_still_wins_over_base_url(
+    def test_base_url_wins_over_legacy_saved_urls(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setenv(API_BACKEND_BASE_URL_ENV, "https://backend.example")
         store = _store(tmp_path)
 
-        _ = store.save({"events_url": "https://saved.example/events"})
+        _ = store.save(
+            {
+                "events_url": "https://saved.example/events",
+                "config_url": "https://saved.example/ml-config",
+            }
+        )
         settings = store.load()
 
-        assert settings.events_url == "https://saved.example/events"
-        # config_url was never saved, so it still falls back to the base var.
+        assert settings.events_url == "https://backend.example/api/v1/events"
         assert settings.config_url == "https://backend.example/api/v1/ml-config"
 
 
@@ -283,16 +307,20 @@ class TestApiPrefixNormalization:
 
         assert settings.events_url == "https://backend.example/api/v1/events"
 
-    def test_explicit_urls_are_left_alone(
+    def test_retired_explicit_url_does_not_bypass_normalization(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # 운영자가 직접 지정한 URL에는 손대지 않는다.
         monkeypatch.setenv(API_BACKEND_BASE_URL_ENV, "https://backend.example")
         monkeypatch.setenv(API_BACKEND_EVENTS_URL_ENV, "https://custom.example/v1/events")
 
+        with pytest.raises(ValueError, match=API_BACKEND_EVENTS_URL_ENV):
+            reject_retired_backend_environment(
+                {API_BACKEND_EVENTS_URL_ENV: "https://custom.example/v1/events"}
+            )
+
         settings = _store(tmp_path).load()
 
-        assert settings.events_url == "https://custom.example/v1/events"
+        assert settings.events_url == "https://backend.example/api/v1/events"
 
     def test_empty_base_stays_none(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -304,31 +332,18 @@ class TestApiPrefixNormalization:
         assert settings.events_url is None
 
 
-def test_compose_edge_puts_settings_db_inside_the_persisted_volume() -> None:
-    """연결 설정이 컨테이너 재생성에도 살아남는지 배포 파일에서 고정한다.
-
-    ``DEFAULT_CONNECTION_SETTINGS_PATH``는 ``/var/lib/ml-api/``인데
-    ``compose.edge.yaml``의 ml-api 볼륨은 ``/root/.local/state/ml-api``에
-    마운트된다. 기본값을 그대로 쓰면 sqlite가 볼륨 밖에 생겨,
-    기사님이 대시보드에서 저장한 이벤트 URL/시설 토큰이 컨테이너를
-    다시 만들 때 사라진다. 읽기 실패는 조용히 빈 값으로 떨어지므로
-    (``store.py``의 ``connection settings store unreadable`` 경고)
-    현장에서는 "설정이 왜 초기화됐지"로만 보인다.
-    """
+def test_compose_edge_persists_only_the_central_connection_database() -> None:
+    """The runtime mounts edge.sqlite3 and never recreates the retired store."""
     compose_path = Path(__file__).resolve().parents[1] / "compose.edge.yaml"
     compose = compose_path.read_text()
 
     mount_line = next(
-        line for line in compose.splitlines() if "ml-api-state:" in line and ":/" in line
+        line
+        for line in compose.splitlines()
+        if "edge-state:" in line and f":{EDGE_DATABASE_PATH.parent}" in line
     )
-    container_dir = mount_line.split(":", 1)[1].strip()
+    container_dir = Path(mount_line.split(":", 1)[1].strip())
 
-    setting_line = next(
-        line for line in compose.splitlines() if "API_CONNECTION_SETTINGS_PATH:" in line
-    )
-    settings_path = setting_line.split(":", 1)[1].strip()
-
-    assert settings_path.startswith(f"{container_dir}/"), (
-        f"connection settings db {settings_path!r} must live inside the persisted "
-        f"volume mount {container_dir!r}"
-    )
+    assert Path(DEFAULT_CONNECTION_SETTINGS_PATH) == container_dir / "edge.sqlite3"
+    assert f"{API_CONNECTION_SETTINGS_PATH_ENV}:" not in compose
+    assert "connection-settings.sqlite3" not in compose

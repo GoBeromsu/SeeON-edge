@@ -19,12 +19,14 @@ from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import Enum, auto
+from fractions import Fraction
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 from backend.app.features.clips.store import ClipManifest, is_valid_clip_id
-from backend.app.shared.state_dir import resolve_state_dir
+from shared.edge_db import EDGE_DATABASE_PATH
+from shared.edge_db.connection import RuntimeActor, open_runtime_database
 
 if TYPE_CHECKING:
     from fastapi import FastAPI
@@ -49,6 +51,7 @@ _UNAVAILABLE_REASON_CODES = {
     "INTERRUPTED_FINALIZE",
     "MISSING",
     "CORRUPT",
+    "STREAM_EPOCH_MISMATCH",
 }
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _MANIFEST_FIELDS = {
@@ -64,6 +67,7 @@ _MANIFEST_FIELDS = {
     "size_bytes",
     "mime_type",
     "codec",
+    "audio_codec",
     "duration_ms",
     "state_version",
     "reason_code",
@@ -76,6 +80,13 @@ _MANIFEST_FIELDS = {
     "finalized",
     "video_available",
     "video_error",
+    "runtime_manifest_sha256",
+    "decision_trace_id",
+    "recovery_state",
+    "source_media",
+    "source_error_reason",
+    "truncation_reasons",
+    "time_origin",
 }
 
 _TABLE_KEYS = {
@@ -112,7 +123,7 @@ _TABLE_COLUMNS = {
     "cameras": ("label", "decode_backend"),
     "audit": ("occurred_at", "action"),
 }
-_CREATE_STATEMENTS = (
+_CATALOG_TABLE_STATEMENTS = (
     (
         "CREATE TABLE clips (clip_id TEXT PRIMARY KEY, camera_id TEXT, event_type TEXT, "
         "state TEXT, started_at TEXT, path TEXT, sha256 TEXT, size_bytes INTEGER, "
@@ -174,7 +185,7 @@ _V3_TABLE_STATEMENTS = (
         "payload_json TEXT NOT NULL) STRICT"
     ),
 )
-_CREATE_STATEMENTS = (*_CREATE_STATEMENTS, *_V3_TABLE_STATEMENTS)
+_CREATE_STATEMENTS = (*_CATALOG_TABLE_STATEMENTS, *_V3_TABLE_STATEMENTS)
 _INDEX_STATEMENTS = (
     "CREATE INDEX IF NOT EXISTS clips_camera_started_at_idx ON clips(camera_id, started_at)",
     "CREATE INDEX IF NOT EXISTS clips_event_type_idx ON clips(event_type)",
@@ -187,7 +198,7 @@ _INDEX_STATEMENTS = (
 
 
 def _catalog_path() -> Path:
-    return resolve_state_dir("ml-api") / "catalog.sqlite3"
+    return EDGE_DATABASE_PATH
 
 
 def get_catalog_store(app: FastAPI) -> CatalogStore | None:
@@ -271,10 +282,17 @@ def _strict_manifest_from_payload(payload: dict[str, Any], path: Path) -> ClipMa
         raise ValueError(f"unsupported manifest schema: {path}")
     if payload.get("finalized") is not True or payload.get("state_version") != 2:
         raise ValueError(f"manifest is not finalized: {path}")
+    runtime_manifest_sha256 = payload.get("runtime_manifest_sha256")
+    if runtime_manifest_sha256 is not None and (
+        not isinstance(runtime_manifest_sha256, str)
+        or _SHA256_RE.fullmatch(runtime_manifest_sha256) is None
+    ):
+        raise ValueError(f"invalid runtime manifest identity: {path}")
 
     state = payload.get("state")
     if state not in _MANIFEST_STATES:
         raise ValueError(f"invalid manifest state: {path}")
+    _validate_source_remux_metadata(payload, path, state)
     clip_id, camera_id, event_ref = _manifest_identity(payload, path)
     event_refs = payload.get("event_refs")
     if not isinstance(event_refs, list) or not event_refs:
@@ -310,11 +328,13 @@ def _strict_manifest_from_payload(payload: dict[str, Any], path: Path) -> ClipMa
     event_type = payload.get("event_type")
     if event_type is not None and (not isinstance(event_type, str) or not event_type.strip()):
         raise ValueError(f"invalid manifest event_type: {path}")
-    codec = payload.get("codec")
-    if state == "READY" and (not isinstance(codec, str) or not codec.strip()):
-        raise ValueError(f"invalid manifest codec: {path}")
-    if state == "UNAVAILABLE":
-        codec = payload.get("encoder") if isinstance(payload.get("encoder"), str) else ""
+    if state == "READY":
+        codec = payload.get("codec")
+        if not isinstance(codec, str) or not codec.strip():
+            raise ValueError(f"invalid manifest codec: {path}")
+    else:
+        encoder = payload.get("encoder")
+        codec = encoder if isinstance(encoder, str) else ""
     return ClipManifest(
         clip_id=clip_id,
         camera_id=camera_id,
@@ -330,6 +350,79 @@ def _strict_manifest_from_payload(payload: dict[str, Any], path: Path) -> ClipMa
         else None,
         finalized=True,
     )
+
+
+def _validate_source_remux_metadata(
+    payload: dict[str, Any],
+    path: Path,
+    state: str,
+) -> None:
+    recovery_state = payload.get("recovery_state")
+    expected_recovery_state = "MEDIA_VERIFIED" if state == "READY" else "UNAVAILABLE"
+    if recovery_state is not None and recovery_state != expected_recovery_state:
+        raise ValueError(f"invalid manifest recovery state: {path}")
+    for field in ("audio_codec", "source_error_reason"):
+        value = payload.get(field)
+        if value is not None and (not isinstance(value, str) or not value.strip()):
+            raise ValueError(f"invalid manifest {field}: {path}")
+    decision_trace_id = payload.get("decision_trace_id")
+    if decision_trace_id is not None and (
+        not isinstance(decision_trace_id, str) or _SHA256_RE.fullmatch(decision_trace_id) is None
+    ):
+        raise ValueError(f"invalid manifest decision trace identity: {path}")
+    source_media = payload.get("source_media")
+    if source_media is not None:
+        if not isinstance(source_media, dict):
+            raise ValueError(f"invalid manifest source media: {path}")
+        _validate_source_media_translation(source_media, path)
+    time_origin = payload.get("time_origin")
+    if time_origin is not None and not isinstance(time_origin, dict):
+        raise ValueError(f"invalid manifest time origin: {path}")
+    truncations = payload.get("truncation_reasons")
+    if truncations is not None and (
+        not isinstance(truncations, list)
+        or any(not isinstance(value, str) or not value for value in truncations)
+        or len(set(truncations)) != len(truncations)
+    ):
+        raise ValueError(f"invalid manifest truncation reasons: {path}")
+
+
+def _validate_source_media_translation(
+    source_media: dict[str, Any],
+    path: Path,
+) -> None:
+    raw_translation = source_media.get("timestamp_translation_seconds")
+    streams = source_media.get("streams")
+    if not isinstance(raw_translation, str) or not isinstance(streams, list) or not streams:
+        raise ValueError(f"invalid remux timestamp translation: {path}")
+    try:
+        translation = Fraction(raw_translation)
+    except (ValueError, ZeroDivisionError) as exc:
+        raise ValueError(f"invalid remux timestamp translation: {path}") from exc
+    if raw_translation != f"{translation.numerator}/{translation.denominator}":
+        raise ValueError(f"noncanonical remux timestamp translation: {path}")
+    for stream in streams:
+        if not isinstance(stream, dict):
+            raise TypeError(f"invalid remux stream facts: {path}")
+        raw_time_base = stream.get("time_base")
+        packet_count = stream.get("packet_count")
+        ticks = stream.get("timestamp_translation_ticks")
+        if (
+            not isinstance(raw_time_base, str)
+            or isinstance(packet_count, bool)
+            or not isinstance(packet_count, int)
+            or packet_count < 0
+            or isinstance(ticks, bool)
+            or not isinstance(ticks, int | None)
+            or (packet_count == 0) != (ticks is None)
+        ):
+            raise TypeError(f"invalid remux stream translation: {path}")
+        try:
+            time_base = Fraction(raw_time_base)
+        except (ValueError, ZeroDivisionError) as exc:
+            raise ValueError(f"invalid remux stream time base: {path}") from exc
+        if time_base <= 0 or (ticks is not None and ticks * time_base != translation):
+            raise ValueError(f"nonuniform remux timestamp translation: {path}")
 
 
 def _manifest_identity(payload: dict[str, Any], path: Path) -> tuple[str, str, str]:
@@ -525,6 +618,8 @@ class CatalogStore:
 
     @staticmethod
     def _connect(path: Path) -> sqlite3.Connection:
+        if path.name == "edge.sqlite3":
+            return open_runtime_database(path, actor=RuntimeActor.API, check_same_thread=False)
         connection = sqlite3.connect(
             path, timeout=5.0, isolation_level=None, check_same_thread=False
         )
@@ -545,7 +640,8 @@ class CatalogStore:
         with ExitStack() as cleanup:
             connection = cls._connect(path)
             cleanup.callback(connection.close)
-            cls._migrate(connection)
+            if path.name != "edge.sqlite3":
+                cls._migrate(connection)
             os.chmod(path, 0o600)
             store = cls(path, connection)
             _ = cleanup.pop_all()

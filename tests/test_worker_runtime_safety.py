@@ -291,6 +291,7 @@ def test_watchdog_detects_a_genuinely_hanging_extractor_inside_the_real_composit
 
         import worker.runtime.worker as worker_module
         from contracts.frame import Frame
+        from worker.domains.registry import DETECTION_MODULE_REGISTRY
         from worker.runtime.config import WorkerConfig
         from worker.runtime.lease import GpuLease
         from worker.runtime.profile.registry import VerifyResult
@@ -307,6 +308,17 @@ def test_watchdog_detects_a_genuinely_hanging_extractor_inside_the_real_composit
             mode = "sequence"
 
 
+        def _compiled_identity(task):
+            component_id = "fall-classifier" if task == "fall" else task
+            binding = next(
+                binding
+                for definition in DETECTION_MODULE_REGISTRY.definitions
+                for binding in definition.shared_bindings
+                if binding.component_id == component_id
+            )
+            return binding.artifact_digest, binding.preprocessing_identity
+
+
         class _FakeRunner:
             \"\"\"Stands in for pose/person/bed/fall's shared runner. Only
             ``.warmup()`` is ever exercised by this test: the hanging pose
@@ -317,6 +329,7 @@ def test_watchdog_detects_a_genuinely_hanging_extractor_inside_the_real_composit
             def __init__(self, task):
                 self.task = task
                 self.metadata = _FallMetadata()
+                self.artifact_digest, self.preprocessing_identity = _compiled_identity(task)
                 self.operating_threshold = 0.5
 
             def __call__(self, image):
@@ -333,6 +346,9 @@ def test_watchdog_detects_a_genuinely_hanging_extractor_inside_the_real_composit
             \"\"\"The genuinely blocking forward pass: a real ``time.sleep``,
             never a call to ``watchdog.check()`` -- only the watchdog's own
             monitor thread, on its own timer, can ever detect this.\"\"\"
+
+            def __init__(self):
+                self.artifact_digest, self.preprocessing_identity = _compiled_identity("pose")
 
             def __call__(self, image):
                 time.sleep(30)
@@ -437,6 +453,7 @@ def test_watchdog_detects_a_genuinely_hanging_extractor_inside_the_real_composit
             acquire_lease=lambda: GpuLease.acquire(STATE_DIR),
             decode_probe=lambda _decode: VerifyResult(True, "cpu", "decode", "available"),
             state_dir=STATE_DIR,
+            clip_store_dir=STATE_DIR / "clip-store",
         )
         # No `hard_exit=` override (stays the real `os._exit`) and no
         # `pump_factory=` override (stays `_default_pump_factory`, so the real

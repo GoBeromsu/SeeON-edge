@@ -56,9 +56,19 @@ class CameraRuntimeConfig(BaseModel):
             raise ConfigValidationError("bed_zone_polygon must have at least 3 points")
         return value
 
-    @field_validator("camera_id", "facility_id")
+    @field_validator("camera_id")
     @classmethod
-    def _strip_required_text(cls, value: str) -> str:
+    def _require_opaque_camera_id(cls, value: str) -> str:
+        """Reject unresolved/log-unsafe input, but never canonicalize an opaque DB key."""
+        if not value.strip():
+            raise ConfigValidationError("camera_id must not be blank")
+        if any(character in value for character in ("\x00", "\n", "\r")):
+            raise ConfigValidationError("camera_id contains unsafe control characters")
+        return value
+
+    @field_validator("facility_id")
+    @classmethod
+    def _strip_facility_id(cls, value: str) -> str:
         stripped = value.strip()
         if not stripped:
             raise ConfigValidationError("must not be blank")

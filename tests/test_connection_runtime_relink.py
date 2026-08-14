@@ -4,13 +4,13 @@ clients from ConnectionSettingsStore without a process restart (story G002).
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import pytest
 from fastapi.testclient import TestClient
 
 from backend.app import lifespan as lifespan_module
+from backend.app.features.connection import store as connection_store_module
 from backend.app.features.connection.store import (
+    API_BACKEND_BASE_URL_ENV,
     API_CONNECTION_SETTINGS_PATH_ENV,
     ConnectionSettingsStore,
 )
@@ -38,15 +38,24 @@ def clear_env(monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv(name, raising=False)
 
 
-def _settings_store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> ConnectionSettingsStore:
-    monkeypatch.setenv(API_CONNECTION_SETTINGS_PATH_ENV, str(tmp_path / "connection_settings.json"))
-    return ConnectionSettingsStore.from_env()
+def _settings_store(monkeypatch: pytest.MonkeyPatch) -> ConnectionSettingsStore:
+    monkeypatch.setenv(API_BACKEND_BASE_URL_ENV, "http://backend.example")
+    central_database = connection_store_module.EDGE_DATABASE_PATH
+    monkeypatch.setattr(
+        ConnectionSettingsStore,
+        "from_env",
+        classmethod(lambda cls: cls(central_database)),
+    )
+    store = ConnectionSettingsStore.from_env()
+    assert store.path == central_database
+    assert store.path.name == "edge.sqlite3"
+    return store
 
 
 def test_boot_time_fixture_injection_still_survives_boot(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    store = _settings_store(tmp_path, monkeypatch)
+    store = _settings_store(monkeypatch)
     store.save({"events_url": "http://backend.example/api/v1/edge/events"})
 
     sentinel = object()
@@ -61,9 +70,9 @@ def test_boot_time_fixture_injection_still_survives_boot(
 
 
 def test_complete_enrollment_restores_one_generation_bundle_on_restart(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    store = _settings_store(tmp_path, monkeypatch)
+    store = _settings_store(monkeypatch)
     store.save(
         {
             "events_url": "http://backend.example/api/v1/events",
@@ -76,9 +85,6 @@ def test_complete_enrollment_restores_one_generation_bundle_on_restart(
             "enrollment_generation": 4,
         }
     )
-    monkeypatch.setenv("API_FACILITY_ID", "env-must-not-win")
-    monkeypatch.setenv("EDGE_FACILITY_TOKEN", "env-token-must-not-win")
-
     app = create_app()
     with TestClient(app):
         bundle = app.state.backend_client_bundle
@@ -90,9 +96,9 @@ def test_complete_enrollment_restores_one_generation_bundle_on_restart(
 
 
 def test_relink_publishes_a_whole_new_generation_bundle(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    store = _settings_store(tmp_path, monkeypatch)
+    store = _settings_store(monkeypatch)
     app = create_app(lifespan=no_lifespan)
     for generation, token in ((1, "token-one"), (2, "token-two")):
         store.save(
@@ -118,9 +124,9 @@ def test_relink_publishes_a_whole_new_generation_bundle(
 
 
 def test_config_refresh_discards_result_when_relink_changes_generation(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    store = _settings_store(tmp_path, monkeypatch)
+    store = _settings_store(monkeypatch)
     app = create_app(lifespan=no_lifespan)
 
     def save_generation(generation: int, token: str) -> None:
@@ -157,13 +163,10 @@ def test_config_refresh_discards_result_when_relink_changes_generation(
 
 
 def test_corrupt_enrollment_store_fails_closed_despite_identity_env(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    path = tmp_path / "connection_settings.sqlite3"
-    path.write_bytes(b"not-a-sqlite-database")
-    monkeypatch.setenv(API_CONNECTION_SETTINGS_PATH_ENV, str(path))
-    monkeypatch.setenv("API_FACILITY_ID", "env-facility")
-    monkeypatch.setenv("EDGE_FACILITY_TOKEN", "env-token")
+    store = _settings_store(monkeypatch)
+    store.path.write_bytes(b"not-a-sqlite-database")
     app = create_app(lifespan=no_lifespan)
 
     apply_connection_settings(app)

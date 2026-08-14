@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+from datetime import UTC, datetime
 
 from worker.pipeline.output.evidence.evidence_outbox_types import (
     ClaimedClip,
@@ -12,6 +13,7 @@ from worker.pipeline.output.evidence.evidence_outbox_types import (
     EdgeEventId,
     EvidenceReasonCode,
 )
+from worker.pipeline.output.evidence.evidence_record_publish import mark_clip_published
 
 
 def claim_clip(connection: sqlite3.Connection, lease: ClaimLease) -> ClaimedClip | None:
@@ -64,7 +66,8 @@ def claim_clip(connection: sqlite3.Connection, lease: ClaimLease) -> ClaimedClip
             """
             SELECT local_state, state_version, media_relpath, sha256, size_bytes,
                    mime_type, codec, duration_ms, clip_start_at, clip_end_at,
-                   finalized_at, unavailable_reason, publish_attempt_count
+                   finalized_at, COALESCE(unavailable_reason_code, unavailable_reason),
+                   publish_attempt_count
             FROM evidence_clips WHERE clip_id = ?
             """,
             (clip_id,),
@@ -157,24 +160,39 @@ def acknowledge_clip(
     acknowledged_at: float,
     remote_state: str,
 ) -> bool:
-    result = connection.execute(
-        """
-        UPDATE evidence_clips
-        SET publish_state = 'PUBLISHED', remote_state = ?, backend_ack_at = ?,
-            publish_lease_owner = NULL, publish_lease_expires_at = NULL,
-            last_error_code = NULL
-        WHERE clip_id = ? AND publish_state = 'IN_FLIGHT'
-          AND publish_lease_owner = ? AND publish_lease_expires_at = ?
-        """,
-        (
-            remote_state,
-            acknowledged_at,
-            claim.clip_id,
-            claim.lease_owner,
-            claim.lease_expires_at,
-        ),
-    )
-    return result.rowcount == 1
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        result = connection.execute(
+            """
+            UPDATE evidence_clips
+            SET publish_state = 'PUBLISHED', remote_state = ?, backend_ack_at = ?,
+                publish_lease_owner = NULL, publish_lease_expires_at = NULL,
+                last_error_code = NULL
+            WHERE clip_id = ? AND publish_state = 'IN_FLIGHT'
+              AND publish_lease_owner = ? AND publish_lease_expires_at = ?
+            """,
+            (
+                remote_state,
+                acknowledged_at,
+                claim.clip_id,
+                claim.lease_owner,
+                claim.lease_expires_at,
+            ),
+        )
+        if result.rowcount == 1:
+            mark_clip_published(
+                connection,
+                str(claim.clip_id),
+                updated_at=datetime.fromtimestamp(acknowledged_at, UTC)
+                .isoformat()
+                .replace("+00:00", "Z"),
+            )
+        connection.commit()
+    except BaseException:
+        connection.rollback()
+        raise
+    else:
+        return result.rowcount == 1
 
 
 def mark_clip_failure(
@@ -206,7 +224,24 @@ def clip_publish_state(connection: sqlite3.Connection, clip_id: ClipId) -> str |
 
 
 def is_clip_held(connection: sqlite3.Connection, clip_id: ClipId) -> bool:
-    return clip_publish_state(connection, clip_id) != "PUBLISHED"
+    if clip_publish_state(connection, clip_id) != "PUBLISHED":
+        return True
+    has_central_records = (
+        connection.execute(
+            "SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'evidence_incidents'"
+        ).fetchone()
+        is not None
+    )
+    if not has_central_records:
+        return False
+    return (
+        connection.execute(
+            "SELECT 1 FROM evidence_incidents "
+            "WHERE primary_clip_id = ? AND lifecycle_state != 'COMPLETE' LIMIT 1",
+            (clip_id,),
+        ).fetchone()
+        is not None
+    )
 
 
 def release_compatibility(connection: sqlite3.Connection) -> None:
@@ -232,6 +267,7 @@ __all__ = [
     "clip_publish_state",
     "is_clip_held",
     "mark_clip_failure",
+    "release_clip_claim",
     "release_compatibility",
     "schedule_clip_retry",
 ]

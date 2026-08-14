@@ -97,6 +97,7 @@ describe('EventsPage refresh state', () => {
     const fetchMock = vi.fn((input: RequestInfo | URL) => {
       const url = String(input);
       if (url.includes('/cameras')) return Promise.resolve(jsonResponse(cameraRegistry));
+      if (url.includes('/incidents')) return Promise.resolve(jsonResponse({ incidents: [] }));
       clipsCallCount += 1;
       if (clipsCallCount === 1) return Promise.resolve(pagedResponse(clips, 0, clips.length));
       return poll.promise;
@@ -125,6 +126,7 @@ describe('EventsPage refresh state', () => {
     const fetchMock = vi.fn((input: RequestInfo | URL) => {
       const url = String(input);
       if (url.includes('/cameras')) return Promise.resolve(jsonResponse(cameraRegistry));
+      if (url.includes('/incidents')) return Promise.resolve(jsonResponse({ incidents: [] }));
       clipsCallCount += 1;
       if (clipsCallCount === 1) return Promise.resolve(pagedResponse(clips, 0, clips.length));
       return clipsCallCount === 2 ? failedPoll.promise : retry.promise;

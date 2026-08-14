@@ -1,12 +1,18 @@
 from __future__ import annotations
 
 import sys
+from types import MappingProxyType
 from typing import ClassVar, Final, TypeAlias
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
-from worker.domains.registry import DOMAIN_REGISTRY
+from worker.domains.module_compiler import CompiledDetectionModuleRegistry
+from worker.domains.registry import (
+    DETECTION_MODULE_REGISTRY,
+    DOMAIN_REGISTRY,
+    EXTERNAL_DOMAIN_MODULE_IDS,
+)
 from worker.runtime.config.errors import ConfigValidationError
 
 # Derived from the registry rather than hand-maintained, so this can never
@@ -14,6 +20,17 @@ from worker.runtime.config.errors import ConfigValidationError
 # to build -- see worker/domains/AGENTS.md and the module docstring below for
 # how a new registry entry is supposed to reach here without an edit.
 KNOWN_DOMAIN_NAMES: Final = frozenset(DOMAIN_REGISTRY)
+_LEGACY_CONFIG_FIELDS: Final = MappingProxyType(
+    {
+        "fall": "fall",
+        "bed_exit": "bed_exit",
+    }
+)
+_LEGACY_WINDOW_FIELDS: Final = MappingProxyType(
+    {
+        "bed_exit": "night_window",
+    }
+)
 
 
 class NightWindowConfig(BaseModel):
@@ -88,6 +105,9 @@ class DomainsConfig(BaseModel):
     model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True, extra="forbid")
 
     enabled: tuple[str, ...] | None = None
+    # Canonical qualified selection. When present it is the complete active
+    # module set and is checked against the injected compiled registry at boot.
+    versions: dict[str, int] | None = None
     fall: FallDomainConfig | None = None
     bed_exit: BedExitDomainConfig | None = None
     # Per-domain detection windows, keyed by domain name. Deliberately
@@ -113,24 +133,52 @@ class DomainsConfig(BaseModel):
             )
         return value
 
+    @field_validator("versions")
+    @classmethod
+    def _validate_versions(cls, value: dict[str, int] | None) -> dict[str, int] | None:
+        if value is None:
+            return None
+        if any(not module_id or version < 1 for module_id, version in value.items()):
+            raise ConfigValidationError(
+                "domains.versions requires non-empty ids and positive versions"
+            )
+        return value
+
     @model_validator(mode="after")
     def _reject_mixed_legacy_and_map(self) -> DomainsConfig:
         configured_names = KNOWN_DOMAIN_NAMES.intersection(self.model_fields_set)
+        if self.versions is not None and (self.enabled is not None or configured_names):
+            raise ConfigValidationError(
+                "domains.versions cannot be combined with legacy domain selection"
+            )
         if self.enabled is not None and configured_names:
             raise ConfigValidationError(
                 "domains.enabled cannot be combined with per-domain config"
             )
         return self
 
+    def selected_versions(
+        self,
+        registry: CompiledDetectionModuleRegistry = DETECTION_MODULE_REGISTRY,
+    ) -> MappingProxyType[str, int]:
+        if self.versions is not None:
+            selected = dict(self.versions)
+        else:
+            selected = {
+                EXTERNAL_DOMAIN_MODULE_IDS[name]: registry.latest_versions[
+                    EXTERNAL_DOMAIN_MODULE_IDS[name]
+                ]
+                for name in self.resolved_active_names()
+            }
+        for module_id, version in selected.items():
+            _ = registry.get(module_id, version)
+        return MappingProxyType(selected)
+
     def domain_config(self, name: str) -> DomainConfig | None:
-        configs: dict[str, DomainConfig | None] = {
-            "fall": self.fall,
-            "bed_exit": self.bed_exit,
-        }
-        try:
-            return configs[name]
-        except KeyError as error:
-            raise ConfigValidationError(f"unknown domain: {name}") from error
+        field = _LEGACY_CONFIG_FIELDS.get(name)
+        if field is None:
+            raise ConfigValidationError(f"unknown domain: {name}")
+        return getattr(self, field)
 
     def resolved_detection_window(self, name: str) -> NightWindowConfig | None:
         """Resolve domain ``name``'s detection window.
@@ -143,21 +191,33 @@ class DomainsConfig(BaseModel):
         """
         if self.detection_windows is not None and name in self.detection_windows:
             return self.detection_windows[name]
-        if name == "bed_exit" and self.bed_exit is not None:
-            return self.bed_exit.night_window
-        return None
+        alias = _LEGACY_WINDOW_FIELDS.get(name)
+        if alias is None:
+            return None
+        config = self.domain_config(name)
+        return None if config is None else getattr(config, alias)
 
     @property
     def enabled_domains(self) -> tuple[str, ...] | None:
+        if self.versions is not None:
+            return tuple(self.versions)
         if self.enabled is not None:
             return self.enabled
         configured = tuple(
             name
-            for name in ("fall", "bed_exit")
+            for name in _LEGACY_CONFIG_FIELDS
             if (config := self.domain_config(name)) is not None and config.enabled
         )
         configured_fields = KNOWN_DOMAIN_NAMES.intersection(self.model_fields_set)
         return configured if configured_fields else None
+
+    def resolved_active_names(self) -> tuple[str, ...]:
+        overrides = self.resolved_overrides()
+        return tuple(
+            name
+            for name, registration in DOMAIN_REGISTRY.items()
+            if overrides.get(name, registration.enabled)
+        )
 
     def resolved_overrides(self) -> dict[str, bool]:
         """The per-domain enable/disable overlay on top of the registry.
@@ -198,7 +258,7 @@ class DomainsConfig(BaseModel):
             listed = set(self.enabled)
             return {name: name in listed for name in KNOWN_DOMAIN_NAMES}
         overrides: dict[str, bool] = {}
-        for name in KNOWN_DOMAIN_NAMES:
+        for name in _LEGACY_CONFIG_FIELDS:
             config = self.domain_config(name)
             if config is not None:
                 overrides[name] = config.enabled

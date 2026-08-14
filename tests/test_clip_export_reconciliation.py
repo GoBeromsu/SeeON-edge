@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import shutil
 import subprocess
 from datetime import UTC, datetime, timedelta
@@ -14,6 +15,7 @@ from worker.pipeline.output.evidence.evidence_manifest import (
     ReadyClipManifest,
     UnavailableClipManifest,
     finalize_ready_manifest,
+    parse_manifest,
     unavailable_manifest,
     verify_ready_manifest,
 )
@@ -32,6 +34,7 @@ READY_CLIP_ID = ClipId("clip-ready")
 START = datetime(2026, 7, 16, 1, 2, 3, tzinfo=UTC)
 END = START + timedelta(seconds=1)
 FINALIZED = END + timedelta(milliseconds=250)
+RUNTIME_MANIFEST_SHA256 = "b" * 64
 
 
 def _event(edge_event_id: EdgeEventId, sequence: int) -> StagedEvent:
@@ -147,6 +150,52 @@ def test_unavailable_manifest_uses_canonical_milliseconds() -> None:
     assert manifest.finalized_at == "2026-07-16T01:02:04.250Z"
 
 
+@pytest.mark.parametrize("invalid", ("B" * 64, "b" * 63, "b" * 65))
+def test_manifest_parser_rejects_noncanonical_runtime_manifest_hash(
+    tmp_path: Path,
+    invalid: str,
+) -> None:
+    payload = unavailable_manifest(
+        clip_id=ClipId("clip-invalid-provenance"),
+        camera_id="camera-1",
+        event_refs=(EVENT_ONE,),
+        clip_start_at=START,
+        clip_end_at=END,
+        finalized_at=FINALIZED,
+        reason_code=EvidenceReasonCode.NO_FRAMES,
+    ).model_dump(mode="json")
+    payload["runtime_manifest_sha256"] = invalid
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ClipEvidenceError, match="manifest invalid"):
+        parse_manifest(manifest_path)
+
+
+def test_manifest_parser_accepts_shipped_v2_without_runtime_manifest_reference(
+    tmp_path: Path,
+) -> None:
+    legacy = unavailable_manifest(
+        clip_id=ClipId("clip-v2-without-runtime-manifest"),
+        camera_id="camera-1",
+        event_refs=(EVENT_ONE,),
+        clip_start_at=START,
+        clip_end_at=END,
+        finalized_at=FINALIZED,
+        reason_code=EvidenceReasonCode.NO_FRAMES,
+    )
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(
+        legacy.model_dump_json(exclude_none=True),
+        encoding="utf-8",
+    )
+
+    parsed = parse_manifest(manifest_path)
+
+    assert parsed.manifest_schema_version == 2
+    assert parsed.runtime_manifest_sha256 is None
+
+
 def test_unavailable_manifest_accepts_legacy_utc_precision() -> None:
     manifest = UnavailableClipManifest.model_validate(
         {
@@ -186,22 +235,26 @@ def test_verify_ready_manifest_refuses_immutable_byte_mismatch(
 
 @pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="ffmpeg unavailable")
 @pytest.mark.parametrize(
-    ("codec", "audio"),
-    (("mpeg4", False), ("libx264", True)),
+    ("codec", "audio", "expected_video", "expected_audio"),
+    (
+        ("mpeg4", False, "mpeg4", None),
+        ("libx264", True, "h264", "aac"),
+    ),
 )
-def test_finalize_ready_manifest_refuses_wrong_codec_or_audio(
+def test_finalize_ready_manifest_records_preserved_source_codecs_and_optional_audio(
     tmp_path: Path,
     codec: str,
     audio: bool,
+    expected_video: str,
+    expected_audio: str | None,
 ) -> None:
-    # Given: a non-contract MP4 with the wrong codec or an audio stream.
     video_path = tmp_path / "clip.mp4"
     _make_video(video_path, codec=codec, audio=audio)
 
-    # When/Then: finalization refuses to fabricate READY metadata.
-    with pytest.raises(ClipEvidenceError) as raised:
-        _ready_manifest(video_path)
-    assert raised.value.reason_code is EvidenceReasonCode.CORRUPT
+    manifest = _ready_manifest(video_path)
+
+    assert manifest.codec == expected_video
+    assert manifest.audio_codec == expected_audio
 
 
 @pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="ffmpeg unavailable")
@@ -216,7 +269,12 @@ def test_reconcile_repairs_manifest_relations_and_persists_verified_outcome(
     video_path = clip_dir / "clip.mp4"
     _make_video(video_path)
     manifest = _ready_manifest(video_path, clip_id)
-    (clip_dir / "manifest.json").write_text(manifest.model_dump_json(), encoding="utf-8")
+    payload = manifest.model_dump(mode="json")
+    payload["runtime_manifest_sha256"] = RUNTIME_MANIFEST_SHA256
+    manifest_bytes = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode()
+    manifest_path = clip_dir / "manifest.json"
+    manifest_path.write_bytes(manifest_bytes)
+    manifest_content_sha256 = hashlib.sha256(manifest_bytes).hexdigest()
     database = tmp_path / "evidence.sqlite3"
     with EvidenceOutbox.open(database) as outbox:
         outbox.stage(_event(EVENT_ONE, 1))
@@ -233,6 +291,8 @@ def test_reconcile_repairs_manifest_relations_and_persists_verified_outcome(
     assert outcome.local_state is ClipLocalState.VERIFIED
     assert outcome.sha256 == manifest.sha256
     assert references == (EVENT_ONE, EVENT_TWO)
+    assert parse_manifest(manifest_path).runtime_manifest_sha256 == RUNTIME_MANIFEST_SHA256
+    assert hashlib.sha256(manifest_path.read_bytes()).hexdigest() == manifest_content_sha256
 
 
 @pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="ffmpeg unavailable")
@@ -290,6 +350,39 @@ def test_reconcile_marks_malformed_manifest_corrupt_with_durable_relations(
     assert outcome is not None
     assert outcome.local_state is ClipLocalState.CORRUPT
     assert references == (EVENT_ONE,)
+
+
+def test_reconcile_preserves_shipped_v2_manifest_without_runtime_manifest_reference(
+    tmp_path: Path,
+) -> None:
+    store = tmp_path / "store"
+    clip_id = ClipId("clip-v2-without-runtime-manifest")
+    clip_dir = store / "clips" / clip_id
+    clip_dir.mkdir(parents=True)
+    manifest = unavailable_manifest(
+        clip_id=clip_id,
+        camera_id="camera-1",
+        event_refs=(EVENT_ONE,),
+        clip_start_at=START,
+        clip_end_at=END,
+        finalized_at=FINALIZED,
+        reason_code=EvidenceReasonCode.NO_FRAMES,
+    )
+    manifest_path = clip_dir / "manifest.json"
+    manifest_bytes = manifest.model_dump_json(exclude_none=True).encode()
+    manifest_path.write_bytes(manifest_bytes)
+    database = tmp_path / "evidence.sqlite3"
+    with EvidenceOutbox.open(database) as outbox:
+        outbox.stage(_event(EVENT_ONE, 1))
+
+        report = reconcile_event_evidence(store, outbox)
+        outcome = outbox.clip_outcome(clip_id)
+
+    assert report.unavailable == 1
+    assert outcome is not None
+    assert outcome.local_state is ClipLocalState.UNAVAILABLE
+    assert parse_manifest(manifest_path).runtime_manifest_sha256 is None
+    assert manifest_path.read_bytes() == manifest_bytes
 
 
 def test_reconcile_interrupted_staging_and_missing_artifact_to_unavailable(

@@ -44,13 +44,13 @@ const connectionView = {
 
 const statusSnapshot = {
   cameras: {},
-  runtime: { cameras: {}, worker: { alive: true, pid: 1, started_at_sec: 0 }, device: null, clip_recorder: null },
+  runtime: { cameras: {}, worker: { alive: true, pid: 1, started_at_sec: 0 }, device: null, clip_recorder: null, clip_export_applied: { enabled: null, version: null, freshness: 'unknown' } },
 };
 
 const runtimeSettings = { clip_export_enabled: false, version: 0 };
 
 const clipStorage = {
-  root: '/var/lib/clip-store',
+  mount_label: 'clip-store',
   selected_path: '',
   total_bytes: 10 * 1024 ** 3,
   used_bytes: 2 * 1024 ** 3,

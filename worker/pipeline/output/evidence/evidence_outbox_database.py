@@ -3,6 +3,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
+from shared.edge_db.connection import RuntimeActor, open_runtime_database
 from worker.pipeline.output.evidence.evidence_outbox_schema import MIGRATIONS, SCHEMA_VERSION
 from worker.pipeline.output.evidence.evidence_outbox_types import (
     DatabaseSettings,
@@ -21,6 +22,10 @@ def open_connection(path: Path, *, busy_timeout_ms: int = 5000) -> sqlite3.Conne
     pass ``busy_timeout_ms=0`` so a lock held by a concurrent writer surfaces
     immediately as ``sqlite3.OperationalError`` instead of being waited out.
     """
+    if path.name == "edge.sqlite3":
+        connection = open_runtime_database(path, actor=RuntimeActor.WORKER)
+        _validate_central_schema(connection)
+        return connection
     path.parent.mkdir(parents=True, exist_ok=True)
     connection = sqlite3.connect(path, timeout=busy_timeout_ms / 1000, isolation_level=None)
     version_row = connection.execute("PRAGMA user_version").fetchone()
@@ -37,6 +42,21 @@ def open_connection(path: Path, *, busy_timeout_ms: int = 5000) -> sqlite3.Conne
         connection.close()
         raise
     return connection
+
+
+def _validate_central_schema(connection: sqlite3.Connection) -> None:
+    required = {
+        "evidence_events": {"delivery_state"},
+        "evidence_clips": {"publish_state", "local_state"},
+        "config_current": {"config_version", "payload_json"},
+        "config_history": {"config_version", "payload_json"},
+        "faults": {"fault_time_iso", "exception_type"},
+    }
+    for table, columns in required.items():
+        found = {str(row[1]) for row in connection.execute(f"PRAGMA table_info({table})")}
+        if not columns <= found:
+            connection.close()
+            raise NewerSchemaVersionError(found=0, supported=SCHEMA_VERSION)
 
 
 def _enable_wal_and_migrate(connection: sqlite3.Connection, version: int) -> None:

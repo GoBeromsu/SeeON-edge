@@ -37,6 +37,7 @@ import worker.runtime.worker as worker_module
 from contracts.frame import Frame
 from contracts.runner import Image, RunnerResult
 from shared.events.evidence_http_transport import HttpResult
+from worker.domains.module_definition import ComponentBinding
 from worker.pipeline.analytics import CompositeExtractor
 from worker.pipeline.bus import BoundedFrameBus, Scheduler
 from worker.pipeline.camera_pipeline import CameraPipelinePump
@@ -63,9 +64,12 @@ class _FallMetadata:
 @final
 class _FakeRunner:
     def __init__(self, task: str) -> None:
+        binding = _compiled_binding_for_task(task)
         self.task = task
         self.metadata = _FallMetadata()
         self.operating_threshold = 0.5
+        self.artifact_digest = binding.artifact_digest
+        self.preprocessing_identity = binding.preprocessing_identity
 
     def __call__(self, _image: Image) -> RunnerResult:
         raise AssertionError("live view composition tests must not run model inference")
@@ -75,6 +79,16 @@ class _FakeRunner:
 
     def warmup(self) -> None:
         return None
+
+
+def _compiled_binding_for_task(task: str) -> ComponentBinding:
+    component_id = "fall-classifier" if task == "fall" else task
+    return next(
+        binding
+        for definition in worker_module.DETECTION_MODULE_REGISTRY.definitions
+        for binding in definition.shared_bindings
+        if binding.component_id == component_id
+    )
 
 
 @final
@@ -150,6 +164,8 @@ def _runtime(config: WorkerConfig, state_dir: Path, env: dict[str, str]) -> Work
         acquire_lease=lambda: GpuLease.acquire(state_dir),
         decode_probe=lambda _decode: VerifyResult(True, "cpu", "decode", "available"),
         hard_exit=lambda _code: None,
+        clip_store_dir=state_dir / "clip-store",
+        build_revision="1" * 40,
     )
 
 
@@ -182,10 +198,11 @@ def _running(runtime: WorkerRuntime, ready: Callable[[], bool]) -> Iterator[None
     assert not thread.is_alive(), "worker thread outlived stop()"
 
 
-def _get(port: int, path: str) -> tuple[int, bytes]:
+def _get(port: int, path: str, *, token: str | None = "relay-token") -> tuple[int, bytes]:
     connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
     try:
-        connection.request("GET", path)
+        headers = {} if token is None else {"X-Edge-Relay-Token": token}
+        connection.request("GET", path, headers=headers)
         response = connection.getresponse()
         return response.status, response.read()
     finally:
@@ -193,11 +210,20 @@ def _get(port: int, path: str) -> tuple[int, bytes]:
 
 
 def _post_probe(port: int, token: str | None) -> int:
-    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+    # Admission-only URL: DNS fails closed as unsupported without opening a
+    # decoder. Keep the client timeout tight so a hung handler fails the test
+    # instead of waiting on real RTSP.
+    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=2)
     try:
-        headers = {} if token is None else {"X-Edge-Relay-Token": token}
+        headers = {"Content-Type": "application/json"}
+        if token is not None:
+            headers["X-Edge-Relay-Token"] = token
         connection.request(
-            "POST", "/probe", body=b'{"rtsp_url": "rtsp://x/y"}', headers=headers
+            "POST",
+            "/probe",
+            # Loopback is rejected by admission instantly (no DNS, no decoder).
+            body=b'{"rtsp_url": "rtsp://127.0.0.1/camera"}',
+            headers=headers,
         )
         return connection.getresponse().status
     finally:
@@ -243,6 +269,15 @@ def test_enabled_worker_binds_the_live_view_port_and_serves_its_cameras(
         port = server.port
         assert port > 0
 
+        # Auth gates first (security finding #3 + probe SecretStr unwrap).
+        # `relay.token` is a `SecretStr`; `_authorized_probe` compares raw
+        # strings -- forwarding the wrapper instead of its value would 403.
+        assert _post_probe(port, "wrong-token") == 403
+        assert _post_probe(port, None) == 403
+        assert _post_probe(port, "relay-token") != 403
+        assert _get(port, "/snapshot/camera-a", token=None)[0] == 403
+        assert _get(port, "/snapshot/camera-a", token="wrong-token")[0] == 403
+
         # Registered during camera activation: a configured camera is "known"
         # (503, awaiting its first frame) rather than unknown (404).
         assert _get(port, "/snapshot/camera-a")[0] == 503
@@ -256,14 +291,7 @@ def test_enabled_worker_binds_the_live_view_port_and_serves_its_cameras(
         status, body = _get(port, "/snapshot/camera-a")
         assert status == 200
         assert body == b"jpeg-bytes"
-
-        # The probe endpoint authenticates against the configured relay token.
-        # `relay.token` is a `SecretStr`, and `_authorized_probe` compares raw
-        # strings -- so forwarding the wrapper instead of its value would 403
-        # every legitimate probe the backend makes.
-        assert _post_probe(port, "relay-token") != 403
-        assert _post_probe(port, "wrong-token") == 403
-        assert _post_probe(port, None) == 403
+        assert b"relay-token" not in body
 
     # stop() must release the port, not leak a bound socket for the process's
     # remaining lifetime.
@@ -278,17 +306,15 @@ def test_enabled_worker_binds_the_live_view_port_and_serves_its_cameras(
     assert any("live view server bound" in record.message for record in caplog.records)
 
 
-def test_disabled_worker_composes_no_live_view_and_opens_no_port(
+def test_disabled_live_view_still_opens_production_derivative_control(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """Off by default: neither switch set means no tap and no socket.
+    """Disabling visual streaming does not disable derivative control.
 
-    Issue #113: ``_start_live_view_server`` used to return here with zero
-    logging, so an operator/monitor had no way to tell "off on purpose" apart
-    from "silently never got this far" -- which is exactly what made a
-    relay-pull-discarded ``dev_mjpeg`` config look identical to a boot hang.
+    The shared HTTP listener remains reachable for authenticated STILL/VIDEO
+    requests, while no camera is registered in the visual frame store.
     """
     _stub_heartbeat_transport(monkeypatch)
     runtime = _runtime(_config("camera-a"), tmp_path, {})
@@ -297,15 +323,16 @@ def test_disabled_worker_composes_no_live_view_and_opens_no_port(
     assert runtime._mjpeg_config.enabled is False  # noqa: SLF001
 
     with caplog.at_level("INFO", logger="worker.runtime.worker"):
-        with _running(runtime, lambda: len(runtime.cameras) == 1):
-            assert runtime._mjpeg_server is None  # noqa: SLF001
-            # Nothing was registered either: the store stays empty rather than
-            # accumulating cameras for a view that does not exist.
+        with _running(runtime, lambda: runtime._mjpeg_server is not None):  # noqa: SLF001
+            server = runtime._mjpeg_server  # noqa: SLF001
+            assert server is not None
+            port = server.port
             assert runtime._live_frames.is_known("camera-a") is False  # noqa: SLF001
+            with socket.create_connection(("127.0.0.1", port), timeout=2.0):
+                pass
 
-    assert any(
-        "live view server not started" in record.message for record in caplog.records
-    )
+    assert runtime._mjpeg_server is None  # noqa: SLF001
+    assert any("derivative control server bound" in record.message for record in caplog.records)
 
 
 def test_either_switch_alone_enables_the_live_view(tmp_path: Path) -> None:
@@ -379,7 +406,9 @@ def test_rtsp_probe_translates_probe_error_into_mjpeg_probe_error(
     monkeypatch.setattr(worker_module, "probe_first_frame", _raise_timeout)
 
     with pytest.raises(MjpegProbeError) as excinfo:
-        runtime._rtsp_probe("rtsp://example.test/camera-a")  # noqa: SLF001
+        # Public literal IP clears admission DNS pinning so the injected
+        # probe_first_frame path is what raises.
+        runtime._rtsp_probe("rtsp://8.8.8.8/camera-a")  # noqa: SLF001
     assert excinfo.value.error_class == "timeout"
 
 
@@ -404,7 +433,7 @@ def test_rtsp_probe_returns_the_probe_result_payload_on_success(
 
     monkeypatch.setattr(worker_module, "probe_first_frame", _succeed)
 
-    payload = runtime._rtsp_probe("rtsp://example.test/camera-a")  # noqa: SLF001
+    payload = runtime._rtsp_probe("rtsp://8.8.8.8/camera-a")  # noqa: SLF001
     assert payload == result.as_dict()
 
 

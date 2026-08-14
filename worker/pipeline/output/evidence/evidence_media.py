@@ -27,6 +27,8 @@ class MediaFacts:
     sha256: str
     size_bytes: int
     duration_ms: int
+    video_codec: str = "h264"
+    audio_codec: str | None = None
 
 
 def inspect_finalized_media(path: Path, *, ffprobe_bin: str = "ffprobe") -> MediaFacts:
@@ -57,13 +59,20 @@ def inspect_finalized_media(path: Path, *, ffprobe_bin: str = "ffprobe") -> Medi
         if measured != info.st_size:
             raise ClipEvidenceError(EvidenceReasonCode.CORRUPT, "media size changed while hashing")
         os.lseek(descriptor, 0, os.SEEK_SET)
-        duration_ms = _probe_h264_video_only(descriptor, ffprobe_bin)
+        duration_ms, video_codec, audio_codec = _probe_media(descriptor, ffprobe_bin)
     finally:
         os.close(descriptor)
-    return MediaFacts(digest.hexdigest(), measured, duration_ms)
+    return MediaFacts(
+        digest.hexdigest(),
+        measured,
+        duration_ms,
+        video_codec,
+        audio_codec,
+    )
 
 
-def _probe_h264_video_only(descriptor: int, ffprobe_bin: str) -> int:
+def _probe_media(descriptor: int, ffprobe_bin: str) -> tuple[int, str, str | None]:
+    descriptor_root = "/proc/self/fd" if os.path.isdir("/proc/self/fd") else "/dev/fd"
     command = [
         ffprobe_bin,
         "-v",
@@ -72,7 +81,7 @@ def _probe_h264_video_only(descriptor: int, ffprobe_bin: str) -> int:
         "stream=codec_type,codec_name,pix_fmt:format=duration",
         "-of",
         "json",
-        f"/proc/self/fd/{descriptor}",
+        f"{descriptor_root}/{descriptor}",
     ]
     try:
         completed = subprocess.run(
@@ -100,14 +109,17 @@ def _probe_h264_video_only(descriptor: int, ffprobe_bin: str) -> int:
         raise ClipEvidenceError(EvidenceReasonCode.CORRUPT, "ffprobe streams invalid")
     video_streams = [stream for stream in streams if stream.get("codec_type") == "video"]
     audio_streams = [stream for stream in streams if stream.get("codec_type") == "audio"]
-    if len(video_streams) != 1 or audio_streams:
+    if len(video_streams) != 1 or len(audio_streams) > 1:
         raise ClipEvidenceError(EvidenceReasonCode.CORRUPT, "media stream count invalid")
-    video = video_streams[0]
-    if video.get("codec_name") != "h264" or video.get("pix_fmt") != "yuv420p":
-        raise ClipEvidenceError(EvidenceReasonCode.CORRUPT, "media codec invalid")
+    video_codec = video_streams[0].get("codec_name")
+    audio_codec = audio_streams[0].get("codec_name") if audio_streams else None
+    if not isinstance(video_codec, str) or not video_codec:
+        raise ClipEvidenceError(EvidenceReasonCode.CORRUPT, "media video codec invalid")
+    if audio_codec is not None and (not isinstance(audio_codec, str) or not audio_codec):
+        raise ClipEvidenceError(EvidenceReasonCode.CORRUPT, "media audio codec invalid")
     if not 1 <= duration_ms <= 120_000:
         raise ClipEvidenceError(EvidenceReasonCode.CORRUPT, "media duration invalid")
-    return duration_ms
+    return duration_ms, video_codec, audio_codec
 
 
 def _has_faststart(descriptor: int, size_bytes: int) -> bool:

@@ -167,9 +167,10 @@ _SYNTHETIC_RTSP_FIXTURES = {
         "rtsp://admin:newpass@cam.local/stream",
     },
     Path("tests/test_camera_api.py"): {
-        # 10.0.0.9 는 사설(RFC 1918) 자리표시자 주소이고 operator:private 는
-        # 고정 더미 자격증명이다 -- 실제 카메라나 비밀이 아니다.
-        "rtsp://operator:private@10.0.0.9/live",
+        # camera.example 는 문서용(RFC 2606) 예약 도메인이고 operator:private 는
+        # 고정 더미 자격증명이다 -- 실제 카메라나 비밀이 아니다. 이 테스트는 이
+        # 자격증명이 토폴로지 응답에서 절대 새지 않음을 증명한다.
+        "rtsp://operator:private@camera.example/live",
     },
     Path("tests/test_camera_roster_sync.py"): {
         "rtsp://user:password@camera/private",
@@ -219,9 +220,36 @@ _SYNTHETIC_RTSP_FIXTURES = {
         "rtsp://***:***@host/stream"
         "?profile=%2A%2A%2A&username=%2A%2A%2A&secret=%2A%2A%2A",
     },
+    Path("tests/test_analysis_timeline.py"): {
+        # URL 모양이라는 이유만으로 컴포넌트 식별자에서 거부됨을 증명하는 픽스처.
+        # user:secret 는 고정 더미이고 자격증명 자체는 검증 대상이 아니다.
+        "rtsp://user:secret@camera/model",
+    },
+    Path("tests/test_edge_topology_contract.py"): {
+        # bed-exit e2e 스크립트가 BED_EXIT_RTSP_URL 을 dry-run 출력에서
+        # `rtsp://<redacted>` 로 마스킹함을 증명한다. camera-1.local 은
+        # 예약 .local 이고 camera-user:camera-secret 는 고정 더미다.
+        "rtsp://camera-user:camera-secret@camera-1.local/trackID=2",
+    },
+    Path("tests/test_rtsp_url_policy.py"): {
+        # camera.example/cam.example 는 문서용(RFC 2606) 예약 도메인이고
+        # user:pass 는 고정 더미 자격증명이다. 이 테스트들은 userinfo 가 핀 고정
+        # 과정에서 보존되고 정책이 URL 을 올바르게 허용/거부함을 증명한다.
+        "rtsp://user:pass@camera.example:8554/path?subtype=0",
+        "rtsp://user:pass@cam.example:8554/live?x=1",
+        # cam.example 이 8.8.8.8 로 핀 고정된 뒤의 pinned_url -- userinfo 보존 확인.
+        "rtsp://user:pass@8.8.8.8:8554/live?x=1",
+    },
+    Path("tests/test_runtime_manifest.py"): {
+        # camera.local 은 예약 .local 이고 admin:secret 는 고정 더미다. 이
+        # 테스트는 자격증명 URL 이 매니페스트 직렬화에 절대 포함되지 않음을 증명한다.
+        "rtsp://admin:secret@camera.local/live",
+    },
     Path("tests/test_worker_mjpeg_server.py"): {
-        "rtsp://user:secret@camera.local/trackID=2",
-        "rtsp://***:***@camera/track",
+        # 8.8.8.8 은 admission DNS 핀 고정이 성공하도록 쓰는 공개 IP 이고
+        # user:secret 는 고정 더미다. 이 테스트들은 probe URL/자격증명이 응답에
+        # 절대 새지 않음을 증명한다.
+        "rtsp://user:secret@8.8.8.8/trackID=2",
     },
     Path("tests/test_worker_nvdec_adapter.py"): {
         "rtsp://operator:s3cr3t@camera.local/live?token=plain",
@@ -780,11 +808,18 @@ def _assert_untrusted_ci_security(workflow: dict[str, object]) -> None:
             "d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86",
             "with": {"enable-cache": "false", "version": "0.11.27"},
         },
+        # fonts-noto-cjk provisions the same real CJK glyph file the runtime
+        # image installs (Dockerfile.edge). It is a plain distro apt package:
+        # it fetches no other repository, reads no secret, starts no container,
+        # and re-checks out nothing, so it stays admissible under this
+        # closed-world contract. Declared here because a step added to public
+        # CI must be listed, not inferred.
         {
-            "name": "Install FFmpeg test dependency",
+            "name": "Install FFmpeg and packaged CJK overlay font",
             "run": (
                 "sudo apt-get update && "
-                "sudo apt-get install -y --no-install-recommends ffmpeg"
+                "sudo apt-get install -y --no-install-recommends "
+                "ffmpeg fonts-noto-cjk"
             ),
         },
         {"run": "uv sync --frozen --group lint"},

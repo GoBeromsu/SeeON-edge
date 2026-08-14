@@ -220,6 +220,7 @@ __all__ = [
     "atomic_write_json",
     "checkpoint",
     "ensure_secure_subdirectory",
+    "fsync_directory",
     "read_strict_json",
     "reject_lexical_parent_components",
     "sha256_regular",

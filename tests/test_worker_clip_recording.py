@@ -57,6 +57,8 @@ class _FakeSession:
     closed: list[None] = field(default_factory=list)
     write_error: Exception | None = None
     select_error: Exception | None = None
+    worker_boot_id: str = ""
+    stream_epoch: int = 0
     origin_time_sec: float | None = None
 
     def write(self, packet: FramePacket) -> None:

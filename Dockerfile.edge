@@ -2,15 +2,21 @@
 
 FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim
 
-ARG SOURCE_REVISION=0000000000000000000000000000000000000000
-RUN if [ "${#SOURCE_REVISION}" -ne 40 ] || printf '%s' "$SOURCE_REVISION" | grep -Eq '[^0123456789abcdef]'; then \
-      printf '%s\n' 'SOURCE_REVISION must be exactly 40 lowercase hexadecimal characters' >&2; \
+ARG SOURCE_REVISION
+RUN if [ "$SOURCE_REVISION" = "0000000000000000000000000000000000000000" ] \
+      || [ "${#SOURCE_REVISION}" -ne 40 ] \
+      || printf '%s' "$SOURCE_REVISION" | grep -Eq '[^0123456789abcdef]'; then \
+      printf '%s\n' 'SOURCE_REVISION must be a non-zero 40-character lowercase hexadecimal revision' >&2; \
       exit 1; \
-    fi
+    fi; \
+    install -d -m 0755 /opt/seeon; \
+    printf '%s\n' "$SOURCE_REVISION" > /opt/seeon/ml-worker-image-revision; \
+    chmod 0444 /opt/seeon/ml-worker-image-revision
 LABEL org.opencontainers.image.revision="${SOURCE_REVISION}" \
       org.opencontainers.image.source="SeniorAILab/eldercare-fall-ml-v2"
 
-ENV UV_LINK_MODE=copy \
+ENV ML_WORKER_BUILD_REVISION="${SOURCE_REVISION}" \
+    UV_LINK_MODE=copy \
     UV_PYTHON_DOWNLOADS=never \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -22,9 +28,10 @@ WORKDIR /app
 # edge GPU, libx264 fallback). --no-install-recommends keeps the image lean; the
 # version probe fails the build early if the binary is missing.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ffmpeg \
+    && apt-get install -y --no-install-recommends ffmpeg fonts-noto-cjk \
     && rm -rf /var/lib/apt/lists/* \
-    && ffmpeg -version
+    && ffmpeg -version \
+    && test -f /usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc
 
 # Intel VAAPI runtime for the `igpu` profile (decode-only; see
 # worker/adapters/decode/vaapi/). `intel-media-va-driver-non-free` is the

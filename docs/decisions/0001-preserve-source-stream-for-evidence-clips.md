@@ -55,9 +55,10 @@ stream while evidence storage retains the source packet cadence and encoding.
 - Redaction, overlays, resizing, and image enhancement require a separate transformed artifact.
 - ML inference still incurs decode cost; this decision removes evidence re-encoding, not inference decode.
 
-## Current Implementation Gap
+## Implementation Status
 
-The current worker decodes RTSP frames and the clip recorder encodes those frames with `libx264`. Matching
-the configured camera FPS prevents the known slow-playback defect, but it is not source-stream preservation.
-The packet-copy/remux evidence path is follow-up implementation work. Until it lands, runtime and QA reports
-must describe clips as re-encoded derivatives rather than original-stream evidence.
+The worker now demuxes source video and optional audio packets into bounded camera-local rings while decoded
+frames continue to feed analysis and snapshots. Primary clean clips select one reconnect epoch and codec
+configuration at a decodable keyframe, then stream-copy the original packet payloads into MP4. Missing
+history/future packets are recorded as truncation; missing keyframes, discontinuities, mixed configurations,
+or remux verification failures fail closed without re-encoding.

@@ -4,7 +4,6 @@ import hashlib
 import json
 import os
 import threading
-from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -20,8 +19,12 @@ from pydantic import (
     field_validator,
 )
 from pydantic_core import PydanticCustomError
+from typing_extensions import override
 
-from contracts.event import EventPayload, MutableEventPayload
+from worker.pipeline.output.evidence.event_payload import (
+    MutableWorkerEventPayload,
+    WorkerEventPayload,
+)
 
 
 @dataclass(slots=True)
@@ -29,6 +32,7 @@ class EventIdentityStoreError(Exception):
     path: Path
     detail: str
 
+    @override
     def __str__(self) -> str:
         return f"event identity store {self.path}: {self.detail}"
 
@@ -71,10 +75,10 @@ class EventIdentityStore:
 
     def enrich(
         self,
-        event: EventPayload,
+        event: WorkerEventPayload,
         facility_id: str,
         camera_id: str,
-    ) -> MutableEventPayload:
+    ) -> MutableWorkerEventPayload:
         source_key = _source_key(event, facility_id, camera_id)
         with self._lock:
             persisted = None if source_key is None else self._by_source_key.get(source_key)
@@ -88,10 +92,41 @@ class EventIdentityStore:
                 if source_key is not None:
                     self._by_source_key[source_key] = persisted
         identity = persisted.as_identity()
-        enriched: MutableEventPayload = {
-            key: dict(value) if isinstance(value, Mapping) else value
-            for key, value in event.items()
-        }
+        enriched: MutableWorkerEventPayload = {}
+        if "event_type" in event:
+            enriched["event_type"] = event["event_type"]
+        if "probability" in event:
+            enriched["probability"] = event["probability"]
+        if "confidence" in event:
+            enriched["confidence"] = event["confidence"]
+        if "camera_id" in event:
+            enriched["camera_id"] = event["camera_id"]
+        if "facility_id" in event:
+            enriched["facility_id"] = event["facility_id"]
+        if "domain" in event:
+            enriched["domain"] = event["domain"]
+        if "identity" in event:
+            enriched["identity"] = event["identity"]
+        if "time_sec" in event:
+            enriched["time_sec"] = event["time_sec"]
+        if "person_id" in event:
+            enriched["person_id"] = event["person_id"]
+        if "bed_id" in event:
+            enriched["bed_id"] = event["bed_id"]
+        if "idempotency_key" in event:
+            enriched["idempotency_key"] = event["idempotency_key"]
+        if "event_id" in event:
+            enriched["event_id"] = event["event_id"]
+        if "clip_id" in event:
+            enriched["clip_id"] = event["clip_id"]
+        if "evidence" in event:
+            enriched["evidence"] = dict(event["evidence"])
+        if "audit" in event:
+            enriched["audit"] = dict(event["audit"])
+        if "snapshot_jpeg" in event:
+            enriched["snapshot_jpeg"] = event["snapshot_jpeg"]
+        if "snapshot" in event:
+            enriched["snapshot"] = dict(event["snapshot"])
         enriched["edge_event_id"] = identity.edge_event_id
         enriched["detected_at"] = identity.detected_at
         return enriched
@@ -139,7 +174,7 @@ def event_identity_path(camera_id: str, state_dir: Path) -> Path:
     return state_dir / "event-identities" / f"{camera_digest}.jsonl"
 
 
-def _source_key(event: EventPayload, facility_id: str, camera_id: str) -> str | None:
+def _source_key(event: WorkerEventPayload, facility_id: str, camera_id: str) -> str | None:
     source_name = "idempotency_key"
     source_value = event.get(source_name)
     if source_value is None or str(source_value) == "":

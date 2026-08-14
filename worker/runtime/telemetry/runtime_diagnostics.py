@@ -22,6 +22,7 @@ from worker.runtime.telemetry.models import (
     BusMetricsSource,
     BusSubscriptionSnapshot,
     CameraDiagnosticsSnapshot,
+    DeviceResidencyDiagnostics,
     EncoderLifecycleSnapshot,
     InvalidStageTimingError,
     RuntimeDiagnosticsSnapshot,
@@ -66,6 +67,7 @@ class WorkerDiagnostics:
         self._buses: dict[str, tuple[BusMetricsSource, tuple[str, ...]]] = {}
         self._bed_region_by_camera: dict[str, BedRegionDiagnostics] = {}
         self._bed_exit_scoring_by_camera: dict[str, BedExitScoringDiagnostics] = {}
+        self._device_residency_by_camera: dict[str, DeviceResidencyDiagnostics] = {}
         self._encoder = EncoderLifecycleSnapshot()
         self._clip_recorder = ClipRecorderStatus()
         self._clip_export = RelayClipExportPayload(enabled=False, version=0)
@@ -232,6 +234,27 @@ class WorkerDiagnostics:
         with self._lock:
             return dict(self._bed_exit_scoring_by_camera)
 
+    def record_device_residency(
+        self, camera_id: str, diagnostics: DeviceResidencyDiagnostics
+    ) -> None:
+        """Refresh one camera's device-resident pipeline counters (Todo 17).
+
+        Only ever called for a camera running the opt-in
+        ``nvidia-device-experimental`` profile -- same overwrite-in-place,
+        emission-on-``log_snapshot``-cadence convention as
+        ``record_bed_region``/``record_bed_exit_scoring`` above.
+        """
+        with self._lock:
+            self._device_residency_by_camera[camera_id] = diagnostics
+
+    def device_residency_selection(self, camera_id: str) -> DeviceResidencyDiagnostics | None:
+        with self._lock:
+            return self._device_residency_by_camera.get(camera_id)
+
+    def device_residency_snapshot(self) -> Mapping[str, DeviceResidencyDiagnostics]:
+        with self._lock:
+            return dict(self._device_residency_by_camera)
+
     def update_measured_fps(self, camera_id: str, measured_fps: float | None) -> None:
         with self._lock:
             self._measured_fps_by_camera[camera_id] = (self._clock(), measured_fps)
@@ -275,6 +298,7 @@ class WorkerDiagnostics:
             encode_by_camera = dict(self._encode_by_camera)
             bed_region_by_camera = dict(self._bed_region_by_camera)
             bed_exit_scoring_by_camera = dict(self._bed_exit_scoring_by_camera)
+            device_residency_by_camera = dict(self._device_residency_by_camera)
             camera_ids = (
                 set(self._decode_by_camera)
                 | set(stage_timings)
@@ -283,6 +307,7 @@ class WorkerDiagnostics:
                 | set(encode_by_camera)
                 | set(bed_region_by_camera)
                 | set(bed_exit_scoring_by_camera)
+                | set(device_residency_by_camera)
             )
         cameras = tuple(
             CameraDiagnosticsSnapshot(
@@ -295,6 +320,7 @@ class WorkerDiagnostics:
                 encode=encode_by_camera.get(camera_id),
                 bed_region=bed_region_by_camera.get(camera_id),
                 bed_exit_scoring=bed_exit_scoring_by_camera.get(camera_id),
+                device_residency=device_residency_by_camera.get(camera_id),
             )
             for camera_id in sorted(camera_ids)
         )
@@ -386,6 +412,7 @@ __all__ = [
     "BusSubscriptionSnapshot",
     "CameraDiagnosticsSnapshot",
     "ClipRecorderStatus",
+    "DeviceResidencyDiagnostics",
     "EncodeSelection",
     "EncoderLifecycleSnapshot",
     "RelayCameraPayload",

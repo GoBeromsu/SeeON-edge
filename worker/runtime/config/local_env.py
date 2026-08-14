@@ -56,6 +56,41 @@ ML_WORKER_FALL_MODEL_PREPROCESSING_IDENTITY_ENV: Final = (
 )
 ML_WORKER_CLIP_RECORDING_ENABLED_ENV: Final = "ML_WORKER_CLIP_RECORDING_ENABLED"
 
+_RETIRED_WORKER_ENV: Final = frozenset(
+    {
+        ML_WORKER_CLIP_RECORDING_ENABLED_ENV,
+        ML_WORKER_FALL_MODEL_ARCHITECTURE_ENV,
+        ML_WORKER_FALL_MODEL_ARTIFACT_DIR_ENV,
+        ML_WORKER_FALL_MODEL_OPERATING_THRESHOLD_ENV,
+        ML_WORKER_FALL_MODEL_PREPROCESSING_IDENTITY_ENV,
+        ML_WORKER_FALL_MODEL_SCHEMA_VERSION_ENV,
+        ML_WORKER_FALL_MODEL_STRIDE_ENV,
+        ML_WORKER_FALL_MODEL_TYPE_ENV,
+        ML_WORKER_FALL_MODEL_WEIGHTS_ENV,
+        ML_WORKER_FALL_MODEL_WINDOW_ENV,
+        "CLIP_STORE_DIR",
+        "EDGE_CAMERA_CONFIG",
+        "EDGE_CAMERA_CONFIG_FILE",
+        "ML_WORKER_DEV_MJPEG",
+        "ML_WORKER_DEV_MJPEG_HOST",
+        "ML_WORKER_DEV_MJPEG_PORT",
+        "ML_WORKER_EVENT_CLIP_EXPORT_ENABLED",
+        "RELAY_URL",
+    }
+)
+
+
+def reject_retired_worker_environment(environ: Mapping[str, str]) -> None:
+    """Reject removed worker authorities instead of silently overriding config."""
+    present = sorted(_RETIRED_WORKER_ENV.intersection(environ))
+    if present:
+        raise WorkerConfigError(
+            "retired edge environment key(s): "
+            + ", ".join(present)
+            + "; use the versioned worker config authority"
+        )
+
+
 _TRUTHY: Final = frozenset({"1", "true", "yes", "on"})
 _FALSY: Final = frozenset({"0", "false", "no", "off"})
 _DEFAULT_TYPE: Final = "lstm"
@@ -433,6 +468,7 @@ __all__ = [
     "ML_WORKER_FALL_MODEL_TYPE_ENV",
     "ML_WORKER_FALL_MODEL_WEIGHTS_ENV",
     "ML_WORKER_FALL_MODEL_WINDOW_ENV",
+    "reject_retired_worker_environment",
     "clip_recording_config_from_environment",
     "fall_model_config_from_environment",
     "resolve_local_overrides",

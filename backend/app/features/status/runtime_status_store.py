@@ -27,10 +27,12 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from time import time
-from typing import Any
+from typing import TypeAlias
+
+from pydantic import TypeAdapter, ValidationError
 
 from backend.app.shared.sqlite_bootstrap import connect_catalog_store
-from backend.app.shared.state_dir import resolve_state_dir
+from shared.edge_db import EDGE_DATABASE_PATH
 
 DEFAULT_RUNTIME_STATUS_STALE_AFTER_SEC: float = 15.0
 logger = logging.getLogger(__name__)
@@ -39,6 +41,10 @@ _CREATE_RUNTIME_LATENCY_TABLE = (
     "CREATE TABLE IF NOT EXISTS runtime_latency (facility_id TEXT PRIMARY KEY, "
     "payload_json TEXT NOT NULL) STRICT"
 )
+
+JsonObject: TypeAlias = dict[str, object]
+LatencyRow: TypeAlias = tuple[str, str]
+_LATENCY_ROW = TypeAdapter(LatencyRow)
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,11 +60,11 @@ class RuntimeStatusSnapshot:
     generation: int
     seq: int
     received_at: float
-    cameras: tuple[dict[str, Any], ...]
-    clip_recorder: dict[str, Any]
-    clip_export: dict[str, Any] | None
-    gpu: dict[str, Any] | None
-    worker: dict[str, Any] | None
+    cameras: tuple[JsonObject, ...]
+    clip_recorder: JsonObject
+    clip_export: JsonObject | None
+    gpu: JsonObject | None
+    worker: JsonObject | None
 
 
 @dataclass(slots=True)
@@ -68,10 +74,8 @@ class RuntimeStatusStore:
     stale_after_sec: float = DEFAULT_RUNTIME_STATUS_STALE_AFTER_SEC
     _snapshots: dict[str, RuntimeStatusSnapshot] = field(default_factory=dict)
     _latest_generation: dict[str, int] = field(default_factory=dict)
-    _latency_by_facility: dict[str, dict[str, Any]] = field(default_factory=dict)
-    latency_state_path: Path = field(
-        default_factory=lambda: resolve_state_dir("ml-api") / "catalog.sqlite3"
-    )
+    _latency_by_facility: dict[str, JsonObject] = field(default_factory=dict)
+    latency_state_path: Path = field(default_factory=lambda: EDGE_DATABASE_PATH)
     _lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
     _latency_loaded: bool = field(default=False, init=False, repr=False)
     _latency_load_error: str | None = field(default=None, init=False, repr=False)
@@ -89,21 +93,26 @@ class RuntimeStatusStore:
         sequence numbers may repeat for retry delivery, but may not go backwards.
         """
         facility_id = str(payload["facility_id"])
-        requested_generation = payload.get("generation")
-        seq = int(payload["seq"])
-        cameras = payload["cameras"]
-        clip_recorder = payload["clip_recorder"]
-        clip_export = payload.get("clip_export")
-        gpu = payload.get("gpu")
-        worker = payload.get("worker")
-        if not isinstance(cameras, list) or not isinstance(clip_recorder, dict):
+        seq = _require_int(payload["seq"], field="seq")
+        cameras_raw = payload["cameras"]
+        clip_recorder_raw = payload["clip_recorder"]
+        clip_export_raw = payload.get("clip_export")
+        gpu_raw = payload.get("gpu")
+        worker_raw = payload.get("worker")
+        if not isinstance(cameras_raw, list) or not isinstance(clip_recorder_raw, dict):
             raise TypeError("runtime status payload has invalid telemetry fields")
-        if clip_export is not None and not isinstance(clip_export, dict):
+        if clip_export_raw is not None and not isinstance(clip_export_raw, dict):
             raise TypeError("runtime status payload has invalid clip_export")
-        if gpu is not None and not isinstance(gpu, dict):
+        if gpu_raw is not None and not isinstance(gpu_raw, dict):
             raise TypeError("runtime status payload has invalid gpu")
-        if worker is not None and not isinstance(worker, dict):
+        if worker_raw is not None and not isinstance(worker_raw, dict):
             raise TypeError("runtime status payload has invalid worker")
+        cameras = _object_dicts(cameras_raw)
+        clip_recorder = _object_dict(clip_recorder_raw)
+        clip_export = None if clip_export_raw is None else _object_dict(clip_export_raw)
+        gpu = None if gpu_raw is None else _object_dict(gpu_raw)
+        worker = None if worker_raw is None else _object_dict(worker_raw)
+        requested_generation = _optional_int(payload.get("generation"), field="generation")
         stamped = time() if received_at is None else received_at
         with self._lock:
             previous = self._snapshots.get(facility_id)
@@ -112,7 +121,7 @@ class RuntimeStatusStore:
             if requested_generation is None:
                 generation = latest_generation + 1
             else:
-                generation = int(requested_generation)
+                generation = requested_generation
                 if generation < latest_generation:
                     return RuntimeStatusRecordResult(False, latest_generation, "old_generation")
 
@@ -133,11 +142,11 @@ class RuntimeStatusStore:
             self._latest_generation[facility_id] = max(latest_generation, generation)
             return RuntimeStatusRecordResult(True, generation)
 
-    def snapshot(self, *, now: float | None = None) -> dict[str, Any]:
+    def snapshot(self, *, now: float | None = None) -> dict[str, object]:
         """Return API-stamped, facility-keyed telemetry with derived staleness."""
         current = time() if now is None else now
         with self._lock:
-            facilities = {
+            facilities: dict[str, JsonObject] = {
                 facility_id: {
                     "facility_id": status.facility_id,
                     "generation": status.generation,
@@ -178,17 +187,17 @@ class RuntimeStatusStore:
                 }
                 self._persist_latency()
                 return
-            samples = int(previous.get("first_attempt_samples", 0)) + 1
-            max_sec = max(float(previous.get("max_sec", elapsed)), elapsed)
+            samples = _as_int(previous.get("first_attempt_samples"), default=0) + 1
+            max_sec = max(_as_float(previous.get("max_sec"), default=elapsed), elapsed)
             self._latency_by_facility[facility_id] = {
                 **previous,
                 "first_attempt_samples": samples,
                 "max_sec": max_sec,
-                "since_sec": float(previous.get("since_sec", stamped)),
+                "since_sec": _as_float(previous.get("since_sec"), default=stamped),
             }
             self._persist_latency()
 
-    def _latency_for_facility(self, facility_id: str) -> dict[str, Any] | None:
+    def _latency_for_facility(self, facility_id: str) -> JsonObject | None:
         if not self._load_latency():
             return {"state": "unknown", "reason": self._latency_load_error}
         latency = self._latency_by_facility.get(facility_id)
@@ -212,14 +221,13 @@ class RuntimeStatusStore:
         except (OSError, sqlite3.Error) as exc:
             self._latency_load_error = exc.__class__.__name__
             return False
-        latency_by_facility: dict[str, dict[str, Any]] = {}
-        for facility_id, encoded in rows:
-            try:
-                item = json.loads(encoded)
-            except (json.JSONDecodeError, TypeError, ValueError):
+        latency_by_facility: dict[str, JsonObject] = {}
+        for row in rows:
+            parsed = _parse_latency_row(row)
+            if parsed is None:
                 continue
-            if isinstance(facility_id, str) and isinstance(item, dict):
-                latency_by_facility[facility_id] = item
+            facility_id, item = parsed
+            latency_by_facility[facility_id] = item
         self._latency_by_facility = latency_by_facility
         self._latency_loaded = True
         return True
@@ -256,12 +264,88 @@ class RuntimeStatusStore:
 
 def get_runtime_status_store(app: object) -> RuntimeStatusStore:
     """Return the app-owned runtime store, creating it for no-lifespan tests."""
-    state = app.state  # type: ignore[attr-defined]
+    state = getattr(app, "state", None)
+    if state is None:
+        raise TypeError("app has no state")
     store = getattr(state, "runtime_status_store", None)
     if not isinstance(store, RuntimeStatusStore):
         store = RuntimeStatusStore()
-        state.runtime_status_store = store
+        _assign_state_attr(state, "runtime_status_store", store)
     return store
+
+
+def _assign_state_attr(state: object, name: str, value: object) -> None:
+    """Write a dynamic app.state attribute without untyped attribute access."""
+    inner = getattr(state, "_state", None)
+    if isinstance(inner, dict):
+        inner[name] = value
+        return
+    namespace = getattr(state, "__dict__", None)
+    if isinstance(namespace, dict):
+        namespace[name] = value
+        return
+    raise TypeError(f"app state cannot store {name!r}")
+
+
+def _parse_latency_row(row: object) -> tuple[str, JsonObject] | None:
+    try:
+        facility_id, encoded = _LATENCY_ROW.validate_python(row)
+    except ValidationError:
+        return None
+    try:
+        item = json.loads(encoded)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return None
+    if not isinstance(item, dict):
+        return None
+    return facility_id, {str(key): value for key, value in item.items()}
+
+
+def _require_int(value: object, *, field: str) -> int:
+    parsed = _optional_int(value, field=field)
+    if parsed is None:
+        raise TypeError(f"runtime status payload has invalid {field}")
+    return parsed
+
+
+def _optional_int(value: object, *, field: str) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        raise TypeError(f"runtime status payload has invalid {field}")
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        try:
+            return int(value)
+        except ValueError as exc:
+            raise TypeError(f"runtime status payload has invalid {field}") from exc
+    raise TypeError(f"runtime status payload has invalid {field}")
+
+
+def _object_dicts(values: list[object]) -> list[JsonObject]:
+    cameras: list[JsonObject] = []
+    for item in values:
+        if not isinstance(item, dict):
+            raise TypeError("runtime status payload has invalid telemetry fields")
+        cameras.append(_object_dict(item))
+    return cameras
+
+
+def _object_dict(value: Mapping[object, object]) -> JsonObject:
+    return {str(field_key): field_value for field_key, field_value in value.items()}
+
+
+def _as_int(value: object, *, default: int) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        return default
+    return value
+
+
+def _as_float(value: object, *, default: float) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return default
+    return float(value)
 
 
 __all__ = [

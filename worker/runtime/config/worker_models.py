@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import os
 from collections import Counter
+from collections.abc import Mapping
 from pathlib import Path
 from typing import ClassVar, Final, Literal, TypeAlias
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from typing_extensions import override
 
+from shared.detection_policies import PolicyBundle, default_policy_bundle
 from worker.domains.registry import DOMAIN_REGISTRY
 from worker.runtime.config.camera_models import CameraRuntimeConfig, RelayConfig
 from worker.runtime.config.domain_models import DomainsConfig
@@ -117,6 +119,10 @@ class ClipRecordingConfig(BaseModel):
     model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True, extra="forbid")
 
     enabled: bool = True
+    # Legacy field retained for older local YAML/tests. Live clip export is
+    # owned by WorkerConfig.clip_export_* + LiveClipExportPolicy; event delivery
+    # is always composed when relay credentials are valid.
+    delivery_enabled: bool = True
     # Backend-selected clip storage location, relative to the fixed
     # ``CLIP_STORE_DIR`` volume (see ``worker.runtime.worker
     # ._resolved_clip_store_dir``); ``None`` keeps clips at the store root.
@@ -148,6 +154,7 @@ class WorkerConfig(BaseModel):
     runtime: WorkerRuntimeConfig = Field(default_factory=WorkerRuntimeConfig)
     models: WorkerModelsConfig = Field(default_factory=WorkerModelsConfig)
     domains: DomainsConfig = Field(default_factory=DomainsConfig)
+    detection_policies: PolicyBundle = Field(default_factory=default_policy_bundle)
     dev_mjpeg: DevMjpegConfig = Field(default_factory=DevMjpegConfig)
     clip: ClipRecordingConfig = Field(default_factory=ClipRecordingConfig)
     clip_export_enabled: bool = False
@@ -197,6 +204,10 @@ class WorkerConfig(BaseModel):
             raise WorkerConfigError("duplicate camera_id: " + ", ".join(duplicate_ids))
 
     @property
+    def selected_module_versions(self) -> Mapping[str, int]:
+        return self.domains.selected_versions()
+
+    @property
     def enabled_domains(self) -> tuple[str, ...]:
         """Active domain names: the registry's own defaults, overlaid by
         whatever per-domain overrides ``self.domains`` carries (see
@@ -213,6 +224,8 @@ class WorkerConfig(BaseModel):
         fail-open sentinel to fall back to; config that names no override
         for a domain simply defers to the registry, unconditionally.
         """
+        if self.domains.versions is not None:
+            return tuple(self.domains.versions)
         overrides = self.domains.resolved_overrides()
         return tuple(
             name

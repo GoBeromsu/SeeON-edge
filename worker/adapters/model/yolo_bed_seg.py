@@ -31,6 +31,7 @@ BED_NMS_IOU_THRESHOLD: Final = 0.5
 BED_MERGE_IOU_THRESHOLD: Final = 0.5
 BED_MASK_MAX_POINTS: Final = 48
 BED_MODEL_PATH: Final = str(bed_seg_weight_path())
+BED_PREPROCESSING_IDENTITY: Final = "rgb24-to-bed-regions.v1"
 
 BedBox: TypeAlias = tuple[int, int, int, int, float]
 BedPolygon: TypeAlias = tuple[tuple[int, int], ...]
@@ -49,6 +50,7 @@ class YoloBedSegRunner:
         warmup_frame: WarmupFrameSpec = DEFAULT_WARMUP_FRAME,
         model: YoloModel | None = None,
     ) -> None:
+        self.preprocessing_identity = BED_PREPROCESSING_IDENTITY
         self._model_path: Path = Path(model_path)
         self._artifact_digest: str | None = (
             artifact_digest(self._model_path) if self._model_path.is_file() else None
@@ -79,8 +81,8 @@ class YoloBedSegRunner:
             raise YoloOutputError(task="bed", detail=str(exc)) from exc
         return bed_result(boxes)
 
-    def run(self, frame: Image) -> BedRunnerResult:
-        return self.detect_beds(frame)
+    def run(self, image: Image) -> BedRunnerResult:
+        return self.detect_beds(image)
 
     def warmup(self) -> None:
         _ = self.run(synthetic_rgb_frame(self._warmup_frame))

@@ -23,11 +23,14 @@ from numpy.typing import NDArray
 import worker.runtime.worker as worker_module
 from contracts.runner import Image, RunnerResult
 from shared.events.evidence_http_transport import HttpResult
+from worker.domains.module_definition import ComponentBinding
 from worker.pipeline.ingest.lifecycle import IngestReporter
 from worker.runtime.config import CameraRuntimeConfig, WorkerConfig
 from worker.runtime.lease import GpuLease
 from worker.runtime.profile.registry import VerifyResult
 from worker.runtime.worker import WorkerRuntime
+
+_TEST_BUILD_REVISION = "1" * 40
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,9 +50,12 @@ class _FakeRunner:
     """
 
     def __init__(self, task: str) -> None:
+        binding = _compiled_binding_for_task(task)
         self.task = task
         self.metadata = _FallMetadata()
         self.operating_threshold = 0.5
+        self.artifact_digest = binding.artifact_digest
+        self.preprocessing_identity = binding.preprocessing_identity
         self.warmup_count = 0
 
     def __call__(self, _image: Image) -> RunnerResult:
@@ -60,6 +66,16 @@ class _FakeRunner:
 
     def warmup(self) -> None:
         self.warmup_count += 1
+
+
+def _compiled_binding_for_task(task: str) -> ComponentBinding:
+    component_id = "fall-classifier" if task == "fall" else task
+    return next(
+        binding
+        for definition in worker_module.DETECTION_MODULE_REGISTRY.definitions
+        for binding in definition.shared_bindings
+        if binding.component_id == component_id
+    )
 
 
 @final
@@ -162,6 +178,7 @@ def _runtime(
     return WorkerRuntime(
         config,
         env={"ML_WORKER_PROFILE": "cpu"},
+        build_revision=_TEST_BUILD_REVISION,
         serving_client=_FakeServingClient(),
         loop_factory=_InstantLoopFactory(),
         pump_factory=pump_factory,  # type: ignore[arg-type]
@@ -169,6 +186,7 @@ def _runtime(
         decode_probe=lambda _decode: VerifyResult(True, "cpu", "decode", "available"),
         hard_exit=lambda _code: None,
         max_frames_per_camera=max_frames_per_camera,
+        clip_store_dir=state_dir / "clip-store",
     )
 
 

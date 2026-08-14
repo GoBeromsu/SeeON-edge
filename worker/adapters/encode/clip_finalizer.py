@@ -6,7 +6,11 @@ from contextlib import suppress
 from pathlib import Path
 from typing import Protocol, final
 
-from worker.adapters.encode.adapter_errors import ClipRemuxError, CrossGenerationSegmentError
+from worker.adapters.encode.adapter_errors import (
+    ClipRemuxError,
+    CrossEpochSegmentError,
+    CrossGenerationSegmentError,
+)
 from worker.adapters.encode.csv_segment_index import Segment
 from worker.adapters.encode.models import ClipArtifact
 from worker.types import BusinessEvent
@@ -61,6 +65,14 @@ class FFmpegConcatFinalizer:
         generations = tuple(sorted({segment.generation for segment in segments}))
         if len(generations) != 1:
             raise CrossGenerationSegmentError(generations)
+        stream_identities = {
+            (segment.worker_boot_id, segment.camera_id, segment.stream_epoch)
+            for segment in segments
+        }
+        if len(stream_identities) != 1:
+            raise CrossEpochSegmentError(
+                tuple(sorted({segment.stream_epoch for segment in segments}))
+            )
 
         try:
             self._output_dir.mkdir(parents=True, exist_ok=True)
@@ -106,11 +118,16 @@ class FFmpegConcatFinalizer:
             max(0.0, segment.end_time_sec - segment.start_time_sec)
             for segment in segments
         )
+        first_segment = segments[0]
         return ClipArtifact(
             path=output_path,
             generation=generations[0],
             segment_count=len(segments),
             duration_s=duration_s,
+            worker_boot_id=first_segment.worker_boot_id,
+            camera_id=first_segment.camera_id,
+            stream_epoch=first_segment.stream_epoch,
+            media_origin_pts_sec=first_segment.media_origin_pts_sec,
         )
 
 

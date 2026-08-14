@@ -14,6 +14,8 @@ from worker.pipeline.output._mjpeg_http import (
     BedZoneNotFoundError,
     BedZonePayload,
     BedZoneRecognizer,
+    ClipDeletionControl,
+    DerivativeControl,
     MjpegProbe,
     MjpegProbeError,
     MjpegProbePayload,
@@ -43,6 +45,8 @@ class MjpegServer:
         config: MjpegServerConfig,
         probe: MjpegProbe | None = None,
         bed_zone_recognizer: BedZoneRecognizer | None = None,
+        derivative_control: DerivativeControl | None = None,
+        clip_deletion_control: ClipDeletionControl | None = None,
         *,
         bed_zone_frame_timeout_s: float = BED_ZONE_FRAME_TIMEOUT_SECONDS,
     ) -> None:
@@ -58,6 +62,8 @@ class MjpegServer:
             probe_token=self.probe_token,
             probe=self.probe,
             bed_zone_recognizer=self.bed_zone_recognizer,
+            derivative_control=derivative_control,
+            clip_deletion_control=clip_deletion_control,
             bed_zone_frame_timeout_s=bed_zone_frame_timeout_s,
         )
         self.port = int(self._server.server_port)
@@ -85,7 +91,14 @@ class MjpegServer:
 
 
 MjpegServerFactory = Callable[
-    [LatestFrameStore, MjpegServerConfig, MjpegProbe | None, BedZoneRecognizer | None],
+    [
+        LatestFrameStore,
+        MjpegServerConfig,
+        MjpegProbe | None,
+        BedZoneRecognizer | None,
+        DerivativeControl | None,
+        ClipDeletionControl | None,
+    ],
     MjpegServer,
 ]
 
@@ -127,13 +140,22 @@ def start_optional_mjpeg_server(
     *,
     probe: MjpegProbe | None = None,
     bed_zone_recognizer: BedZoneRecognizer | None = None,
+    derivative_control: DerivativeControl | None = None,
+    clip_deletion_control: ClipDeletionControl | None = None,
     factory: MjpegServerFactory = MjpegServer,
 ) -> MjpegServer | None:
     resolved = dev_mjpeg_config() if config is None else config
     if not resolved.enabled:
         return None
     try:
-        server = factory(store, resolved, probe, bed_zone_recognizer)
+        server = factory(
+            store,
+            resolved,
+            probe,
+            bed_zone_recognizer,
+            derivative_control,
+            clip_deletion_control,
+        )
     except OSError:
         return None
     try:
@@ -152,6 +174,8 @@ __all__ = [
     "BedZoneNotFoundError",
     "BedZonePayload",
     "BedZoneRecognizer",
+    "ClipDeletionControl",
+    "DerivativeControl",
     "MjpegProbe",
     "MjpegProbeError",
     "MjpegProbePayload",

@@ -1,5 +1,7 @@
 from worker.adapters.encode.adapter_errors import (
     ClipRemuxError,
+    CrossEpochFrameError,
+    CrossEpochSegmentError,
     CrossGenerationSegmentError,
     EncoderPolicyError,
     EncoderStartError,
@@ -25,6 +27,8 @@ from worker.adapters.encode.thumbnail import FFmpegThumbnailGenerator
 __all__ = [
     "ClipArtifact",
     "ClipRemuxError",
+    "CrossEpochFrameError",
+    "CrossEpochSegmentError",
     "CrossGenerationSegmentError",
     "EncodePolicy",
     "EncoderGeometry",

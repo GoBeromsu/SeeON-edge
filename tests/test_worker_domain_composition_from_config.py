@@ -27,8 +27,8 @@ test predates that change and still wants to exercise real decider wiring
 without a real LSTM artifact on disk, so the autouse
 ``_fall_model_via_serving_client`` fixture below monkeypatches
 ``_create_fall_model`` back to ``self._serving.create("fall")`` -- the same
-DI seam ``compose_yolo_extractors`` uses for pose/person/bed -- scoped to
-this test module only. Real LSTM weight loading is therefore avoidable
+test-only serving seam used for pose/person/bed -- scoped to this test module
+only. Real LSTM weight loading is therefore avoidable
 entirely: this file drives a full, valid
 ``WorkerConfig`` (``domains.enabled = ["fall", "bed_exit"]``, one camera)
 through the real ``WorkerRuntime.run()`` -> ``_build_decider`` path with a
@@ -61,7 +61,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, final
 
+import numpy as np
 import pytest
+from numpy.typing import NDArray
 
 import worker.runtime.worker as worker_module
 from contracts.observation import (
@@ -70,9 +72,11 @@ from contracts.observation import (
     BoundingBox,
     FrameObservation,
 )
+from contracts.runner import Image, RunnerResult
 from shared.events.evidence_http_transport import HttpResult
 from worker.domains.bed_exit import BedExitMonitor
 from worker.domains.fall import FallEventLatch
+from worker.domains.registry import DETECTION_MODULE_REGISTRY
 from worker.pipeline.bus import BoundedFrameBus
 from worker.pipeline.ingest.lifecycle import IngestReporter
 from worker.runtime.config import CameraRuntimeConfig, WorkerConfig
@@ -81,12 +85,27 @@ from worker.runtime.profile.registry import VerifyResult
 from worker.runtime.worker import WorkerRuntime
 from worker.types import BusinessEvent, DecisionInput
 
+ServingOption = str | int | float | bool | None
+
 
 @dataclass(frozen=True, slots=True)
 class _FallMetadata:
     window: int = 2
     stride: int = 1
     mode: Literal["sequence"] = "sequence"
+
+
+def _compiled_identity(task: str) -> tuple[str, str]:
+    component_id = "fall-classifier" if task == "fall" else task
+    module_id = "bed_exit" if component_id in {"person", "bed"} else "fall"
+    binding = next(
+        binding
+        for binding in DETECTION_MODULE_REGISTRY.get(module_id).shared_bindings
+        if binding.component_id == component_id
+    )
+    assert binding.artifact_digest is not None
+    assert binding.preprocessing_identity is not None
+    return binding.artifact_digest, binding.preprocessing_identity
 
 
 @final
@@ -100,13 +119,14 @@ class _FakeRunner:
     def __init__(self, task: str) -> None:
         self.task = task
         self.metadata = _FallMetadata()
+        self.artifact_digest, self.preprocessing_identity = _compiled_identity(task)
         self.operating_threshold = 0.5
         self.warmup_count = 0
 
-    def __call__(self, _image: object) -> object:
+    def __call__(self, _image: Image) -> RunnerResult:
         raise AssertionError("composition tests must not run model inference")
 
-    def predict(self, _features: object) -> float:
+    def predict(self, _features: NDArray[np.float32]) -> float:
         return 0.99 if self.task == "fall" else 0.0
 
     def warmup(self) -> None:
@@ -118,7 +138,7 @@ class _FakeServingClient:
     def __init__(self) -> None:
         self.created: list[tuple[str, _FakeRunner]] = []
 
-    def create(self, task: str, **_options: object) -> _FakeRunner:
+    def create(self, task: str, **_options: ServingOption) -> _FakeRunner:
         runner = _FakeRunner(task)
         self.created.append((task, runner))
         return runner
@@ -219,7 +239,23 @@ def _build_runtime(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> WorkerRun
         acquire_lease=lambda: GpuLease.acquire(tmp_path),
         decode_probe=lambda _decode: VerifyResult(True, "cpu", "decode", "available"),
         state_dir=tmp_path,
+        clip_store_dir=tmp_path / "clip-store",
     )
+
+
+def test_worker_activation_uses_the_injected_clip_store(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    runtime = _build_runtime(monkeypatch, tmp_path)
+
+    runtime.run()
+
+    clip_store_dir = tmp_path / "clip-store"
+    evidence_runtime = runtime._evidence_export_runtime  # noqa: SLF001
+    assert evidence_runtime is not None
+    assert evidence_runtime.store_dir == clip_store_dir
+    assert runtime._snapshot_store.store_dir == clip_store_dir  # noqa: SLF001
+    assert clip_store_dir.is_dir()
 
 
 def _fall_frame(time_sec: float, frame_index: int) -> DecisionInput:

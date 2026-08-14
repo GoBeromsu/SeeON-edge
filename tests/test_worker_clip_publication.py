@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -15,6 +16,7 @@ from worker.pipeline.output.evidence.clip_identity import ClipIdAllocator
 from worker.pipeline.output.evidence.clip_publication import (
     ClipPublicationMetadata,
     ClipPublisher,
+    ClipTimeOrigin,
     PublicationStage,
 )
 from worker.pipeline.output.evidence.evidence_media import MediaFacts
@@ -23,6 +25,7 @@ from worker.pipeline.output.evidence.evidence_outbox_types import EdgeEventId, E
 EVENT_ONE = EdgeEventId("00000000-0000-4000-8000-000000000001")
 EVENT_TWO = EdgeEventId("00000000-0000-4000-8000-000000000002")
 START = datetime(2026, 7, 16, 1, 2, 3, tzinfo=UTC)
+RUNTIME_MANIFEST_SHA256 = "b" * 64
 
 
 def _metadata() -> ClipPublicationMetadata:
@@ -36,6 +39,7 @@ def _metadata() -> ClipPublicationMetadata:
         started_at=START,
         duration_s=1.0,
         encoder="libx264",
+        runtime_manifest_sha256=RUNTIME_MANIFEST_SHA256,
     )
 
 
@@ -106,8 +110,132 @@ def test_publication_retry_recovers_each_durability_boundary_with_same_clip_id(
     assert payload["event_refs"] == [EVENT_ONE, EVENT_TWO]
     assert payload["state"] == "READY"
     assert payload["path"] == "clips/stable-clip-id/clip.mp4"
+    assert payload["runtime_manifest_sha256"] == RUNTIME_MANIFEST_SHA256
     assert records[0].manifest.clip_id == "stable-clip-id"
+    assert records[0].payload["runtime_manifest_sha256"] == RUNTIME_MANIFEST_SHA256
     assert not reservation.staging_dir.exists()
+
+
+def test_strict_manifest_accepts_exact_remux_translation_and_rejects_nonuniform_ticks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reservation = ClipIdAllocator(
+        tmp_path,
+        id_factory=lambda _camera: "translation-clip",
+    ).reserve("camera-1")
+    artifact = reservation.staging_dir / "clip.mp4"
+    artifact.write_bytes(b"source-packets")
+    monkeypatch.setattr(
+        "worker.pipeline.output.evidence.evidence_manifest.inspect_finalized_media",
+        lambda _path, **_kwargs: MediaFacts("a" * 64, len(b"source-packets"), 1000),
+    )
+    metadata = replace(
+        _metadata(),
+        source_media={
+            "configuration_id": "configuration-1",
+            "timestamp_translation_seconds": "-1/1536",
+            "streams": [
+                {
+                    "index": 0,
+                    "time_base": "1/15360",
+                    "packet_count": 25,
+                    "timestamp_translation_ticks": -10,
+                },
+                {
+                    "index": 1,
+                    "time_base": "1/48000",
+                    "packet_count": 0,
+                    "timestamp_translation_ticks": None,
+                },
+            ],
+        },
+    )
+    published = ClipPublisher(tmp_path).publish_ready(reservation, artifact, metadata)
+
+    records = strict_manifest_records(ClipStore(tmp_path))
+    assert records[0].payload["source_media"] == metadata.source_media
+
+    payload = json.loads(published.manifest_path.read_text(encoding="utf-8"))
+    payload["source_media"]["streams"][0]["timestamp_translation_ticks"] = -11
+    published.manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(ValueError, match="nonuniform remux timestamp translation"):
+        strict_manifest_records(ClipStore(tmp_path))
+
+
+@pytest.mark.parametrize("invalid", ("A" * 64, "a" * 63, "a" * 65))
+def test_publication_metadata_rejects_noncanonical_runtime_manifest_hash(
+    invalid: str,
+) -> None:
+    with pytest.raises(ValueError, match="runtime_manifest_sha256"):
+        replace(_metadata(), runtime_manifest_sha256=invalid)
+
+
+def test_publication_omits_runtime_manifest_when_explicitly_absent(tmp_path: Path) -> None:
+    reservation = ClipIdAllocator(
+        tmp_path,
+        id_factory=lambda _camera: "legacy-no-runtime-manifest",
+    ).reserve("camera-1")
+
+    published = ClipPublisher(tmp_path).publish_unavailable(
+        reservation,
+        replace(_metadata(), runtime_manifest_sha256=None),
+        EvidenceReasonCode.ENCODER_FAILED,
+    )
+    payload = json.loads(published.manifest_path.read_text(encoding="utf-8"))
+
+    assert "runtime_manifest_sha256" not in payload
+
+
+def test_publication_records_deterministic_event_pts_to_media_time_mapping(
+    tmp_path: Path,
+) -> None:
+    reservation = ClipIdAllocator(
+        tmp_path,
+        id_factory=lambda _camera: "time-origin-clip",
+    ).reserve("camera-1")
+    metadata = _metadata()
+    metadata = ClipPublicationMetadata(
+        camera_id=metadata.camera_id,
+        event_refs=metadata.event_refs,
+        event_type=metadata.event_type,
+        clip_start_at=metadata.clip_start_at,
+        clip_end_at=metadata.clip_end_at,
+        finalized_at=metadata.finalized_at,
+        started_at=metadata.started_at,
+        duration_s=metadata.duration_s,
+        encoder=metadata.encoder,
+        runtime_manifest_sha256=metadata.runtime_manifest_sha256,
+        time_origin=ClipTimeOrigin(
+            worker_boot_id="boot-1",
+            camera_id="camera-1",
+            stream_epoch=4,
+            generation=7,
+            media_origin_pts_sec=40.0,
+            event_pts_sec=42.25,
+            requested_start_pts_sec=12.25,
+            requested_end_pts_sec=72.25,
+        ),
+    )
+
+    published = ClipPublisher(tmp_path).publish_unavailable(
+        reservation,
+        metadata,
+        EvidenceReasonCode.ENCODER_FAILED,
+    )
+    payload = json.loads(published.manifest_path.read_text(encoding="utf-8"))
+
+    assert payload["time_origin"] == {
+        "camera_id": "camera-1",
+        "event_media_time_ms": 2250.0,
+        "event_pts_sec": 42.25,
+        "generation": 7,
+        "media_origin_pts_sec": 40.0,
+        "requested_end_pts_sec": 72.25,
+        "requested_start_pts_sec": 12.25,
+        "stream_epoch": 4,
+        "worker_boot_id": "boot-1",
+    }
 
 
 def test_unavailable_publication_persists_reason_without_video(tmp_path: Path) -> None:

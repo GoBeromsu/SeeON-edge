@@ -569,7 +569,7 @@ def test_authorize_worker_accepts_non_ascii_relay_token_without_crashing() -> No
     assert exc_info.value.status_code == 403
 
 
-def test_worker_config_emits_default_camera_fps_when_configured(
+def test_worker_config_ignores_retired_default_camera_fps(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("ML_DEFAULT_CAMERA_FPS", "15")
@@ -593,11 +593,11 @@ def test_worker_config_emits_default_camera_fps_when_configured(
 
     assert worker_config.status_code == 200
     camera = worker_config.json()["cameras"][0]
-    assert camera["fps"] == 15.0
+    assert "fps" not in camera
     assert camera["camera_id"] == "camera-1"
 
 
-def test_worker_config_emits_default_frame_stride_when_configured(
+def test_worker_config_ignores_retired_default_frame_stride(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("ML_DEFAULT_FRAME_STRIDE", "3")
@@ -621,7 +621,7 @@ def test_worker_config_emits_default_frame_stride_when_configured(
 
     assert worker_config.status_code == 200
     camera = worker_config.json()["cameras"][0]
-    assert camera["frame_stride"] == 3
+    assert "frame_stride" not in camera
     assert camera["camera_id"] == "camera-1"
 
 
@@ -1106,7 +1106,7 @@ def test_create_camera_rejects_invalid_decode_backend(
     assert created.status_code == 400
 
 
-def test_worker_config_emits_default_decode_backend_when_configured(
+def test_worker_config_ignores_retired_default_decode_backend(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("ML_DEFAULT_DECODE_BACKEND", "cpu")
@@ -1130,7 +1130,7 @@ def test_worker_config_emits_default_decode_backend_when_configured(
 
     assert worker_config.status_code == 200
     camera = worker_config.json()["cameras"][0]
-    assert camera["decode_backend"] == "cpu"
+    assert "decode_backend" not in camera
     assert camera["camera_id"] == "camera-1"
 
 

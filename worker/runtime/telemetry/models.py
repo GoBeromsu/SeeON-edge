@@ -65,6 +65,34 @@ class StageTimingSnapshot:
 
 
 @dataclass(frozen=True, slots=True)
+class DeviceResidencyDiagnostics:
+    """One camera's experimental NVIDIA device-resident pipeline counters (Todo 17).
+
+    Local-only, same convention as ``bed_region``/``bed_exit_scoring`` below:
+    only ever populated for a camera running the opt-in
+    ``nvidia-device-experimental`` profile, never crosses the relay boundary,
+    and holds only bounded counters/timings -- never a device pointer, a
+    tensor, or any RTSP/path value.
+    """
+
+    residency_path: str
+    h2d_transfers: int
+    h2d_bytes: int
+    d2h_transfers: int
+    d2h_bytes: int
+    pool_capacity: int
+    pool_outstanding: int
+    pool_high_watermark: int
+    pool_exhaustion_events: int
+    decode_time_ms_total: float
+    decode_samples: int
+    inference_time_ms_total: float
+    inference_samples: int
+    unavailable_reason: str | None
+    updated_at_sec: float
+
+
+@dataclass(frozen=True, slots=True)
 class BusSubscriptionSnapshot:
     """Local queue counters for one named bus subscription."""
 
@@ -105,6 +133,9 @@ class CameraDiagnosticsSnapshot:
     bed_region: BedRegionDiagnostics | None = None
     # Local-only, same reasoning as `bed_region` above (#238).
     bed_exit_scoring: BedExitScoringDiagnostics | None = None
+    # Local-only (Todo 17): populated only for a camera running the opt-in
+    # nvidia-device-experimental profile.
+    device_residency: DeviceResidencyDiagnostics | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -154,6 +185,7 @@ __all__ = [
     "BusMetricsSource",
     "BusSubscriptionSnapshot",
     "CameraDiagnosticsSnapshot",
+    "DeviceResidencyDiagnostics",
     "EncoderLifecycleSnapshot",
     "InvalidStageTimingError",
     "RuntimeDiagnosticsSnapshot",

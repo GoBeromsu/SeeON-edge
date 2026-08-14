@@ -78,15 +78,16 @@ def test_media_probe_uses_same_open_inode_when_path_is_swapped(
     media.write_bytes(original_bytes)
     replacement.write_bytes(replacement_bytes)
     observed_probe_bytes: list[bytes] = []
+    descriptor_root = "/proc/self/fd" if Path("/proc/self/fd").is_dir() else "/dev/fd"
 
     def _swap_during_probe(
         command: list[str],
         **kwargs: object,
     ) -> subprocess.CompletedProcess[str]:
         probe_target = command[-1]
-        observed_probe_bytes.append(Path(probe_target).read_bytes())
         os.replace(replacement, media)
-        assert probe_target.startswith("/proc/self/fd/")
+        observed_probe_bytes.append(Path(probe_target).read_bytes())
+        assert probe_target.startswith(f"{descriptor_root}/")
         descriptor = int(probe_target.rsplit("/", maxsplit=1)[1])
         assert kwargs.get("pass_fds") == (descriptor,)
         stdout = json.dumps(

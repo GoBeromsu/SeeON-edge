@@ -103,4 +103,42 @@ describe('CameraTable', () => {
     expect(onRequestDelete).toHaveBeenCalledWith(onlineCamera);
     act(() => root.unmount());
   });
+
+  it('constrains long masked RTSPS urls and keeps row actions discoverable without relying on horizontal page scroll', () => {
+    const longUrlCamera: Camera = {
+      ...onlineCamera,
+      id: 'cam-long',
+      label: 'qa-cam-public',
+      // Realistic live QA pressure: long public RTSPS path (credentials already masked).
+      rtsp_url_masked: 'rtsps://redacted-camera:322/Streaming/Channels/101',
+      floor_name: null,
+    };
+    const { host, root } = render([longUrlCamera]);
+
+    const table = host.querySelector('table');
+    expect(table?.className.split(/\s+/)).toEqual(expect.arrayContaining(['w-full', 'table-fixed']));
+
+    const url = Array.from(host.querySelectorAll('td .font-mono')).find((node) =>
+      node.textContent === longUrlCamera.rtsp_url_masked,
+    );
+    expect(url).toBeTruthy();
+    expect(url?.className.split(/\s+/)).toEqual(expect.arrayContaining(['break-all']));
+
+    const cameraCell = host.querySelector('tbody tr td');
+    expect(cameraCell?.className.split(/\s+/)).toEqual(expect.arrayContaining(['min-w-0']));
+
+    const floorCell = host.querySelector('tbody tr td:nth-child(2)');
+    const statusCell = host.querySelector('tbody tr td:nth-child(3)');
+    const actionsCell = host.querySelector('tbody tr td:nth-child(4)');
+    expect(floorCell?.className).toMatch(/whitespace-nowrap/);
+    expect(statusCell?.className).toMatch(/whitespace-nowrap/);
+    expect(actionsCell?.className).toMatch(/whitespace-nowrap/);
+
+    const actionButtons = Array.from(actionsCell?.querySelectorAll('button') ?? []).map((btn) => btn.textContent);
+    expect(actionButtons).toEqual(['수정', '삭제']);
+    // Masked credential safety: never surface a raw userinfo segment.
+    expect(host.textContent).not.toMatch(/rtsps:\/\/[^/\s]+:[^@\s]+@/i);
+
+    act(() => root.unmount());
+  });
 });

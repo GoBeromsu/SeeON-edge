@@ -15,6 +15,7 @@ from worker.pipeline.output.evidence.evidence_retention import (
     DiskUsage,
     EvidenceRetention,
     PurgeCandidate,
+    PurgeResult,
 )
 
 
@@ -26,6 +27,10 @@ class ClipMaintenance:
         *,
         is_clip_held: Callable[[str], bool],
         disk_usage_provider: Callable[[Path], DiskUsage],
+        begin_clip_purge: Callable[[str], bool] | None = None,
+        complete_clip_purge: Callable[[str], None] | None = None,
+        fail_clip_purge: Callable[[str, str], None] | None = None,
+        operator_delete_preflight: Callable[[str], PurgeResult | None] | None = None,
     ) -> None:
         self._config = config
         self._stats = stats
@@ -33,7 +38,11 @@ class ClipMaintenance:
             config.store_dir,
             is_held=is_clip_held,
             disk_usage_provider=disk_usage_provider,
+            begin_purge=begin_clip_purge,
+            complete_purge=complete_clip_purge,
+            fail_purge=fail_clip_purge,
         )
+        self._operator_delete_preflight = operator_delete_preflight
         self._last_rotate_monotonic: float | None = None
 
     def sweep_stale_staging(self) -> None:
@@ -51,6 +60,38 @@ class ClipMaintenance:
             except OSError:
                 continue
         self._stats.stale_staging_cleaned += cleaned
+
+    def purge_clip(self, clip_id: str) -> PurgeResult:
+        """Delete one specific finalized primary clip on operator request.
+
+        Reuses ``EvidenceRetention.purge`` unchanged: the same manifest/
+        containment/symlink verification, hold check, and begin/complete/fail
+        DB hooks that automatic age/pressure ``rotate()`` already relies on.
+        ``finalized_at`` is irrelevant here -- ``purge()`` never reads it, only
+        ``rotate()``'s own cutoff filter does -- so ``time.time()`` is a fine
+        placeholder.
+
+        Unlike ``rotate()`` -- whose candidates only ever come from
+        enumerating real ``clips/*/manifest.json`` directories -- this method
+        builds a path directly from an operator-supplied ``clip_id``, so it
+        has to reject a traversal/escape attempt (``".."``, ``"../x"``,
+        ``"a/b"``) itself, before ever constructing a ``PurgeCandidate``
+        ``EvidenceRetention``'s own containment check would otherwise trust.
+        """
+        clips_dir = self._config.store_dir / "clips"
+        clip_dir = clips_dir / clip_id
+        if clip_id in {"", ".", ".."} or clip_dir.parent != clips_dir:
+            return PurgeResult.UNVERIFIABLE
+        if self._operator_delete_preflight is not None:
+            result = self._operator_delete_preflight(clip_id)
+            if result is not None:
+                return result
+        candidate = PurgeCandidate(
+            clip_id=clip_id,
+            clip_dir=clip_dir,
+            finalized_at=datetime.now(UTC),
+        )
+        return self._retention.purge(candidate)
 
     def rotate(self, *, force: bool = False) -> None:
         now_monotonic = time.monotonic()

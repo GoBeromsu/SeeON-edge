@@ -28,11 +28,14 @@ from numpy.typing import NDArray
 
 import worker.runtime.worker as worker_module
 from contracts.runner import Image, RunnerResult
+from worker.domains.registry import DETECTION_MODULE_REGISTRY
 from worker.pipeline.ingest.lifecycle import IngestSupervisor
 from worker.runtime.config import WorkerConfig
 from worker.runtime.lease import GpuLease
 from worker.runtime.profile.registry import VerifyResult
 from worker.runtime.worker import WorkerRuntime
+
+_TEST_BUILD_REVISION = "1" * 40
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,6 +43,19 @@ class _FallMetadata:
     window: int = 2
     stride: int = 1
     mode: Literal["sequence"] = "sequence"
+
+
+def _compiled_identity(task: str) -> tuple[str, str]:
+    component_id = "fall-classifier" if task == "fall" else task
+    binding = next(
+        binding
+        for definition in DETECTION_MODULE_REGISTRY.definitions
+        for binding in definition.shared_bindings
+        if binding.component_id == component_id
+    )
+    assert binding.artifact_digest is not None
+    assert binding.preprocessing_identity is not None
+    return binding.artifact_digest, binding.preprocessing_identity
 
 
 @final
@@ -53,6 +69,7 @@ class _FakeRunner:
     def __init__(self, task: str) -> None:
         self.task = task
         self.metadata = _FallMetadata()
+        self.artifact_digest, self.preprocessing_identity = _compiled_identity(task)
         self.operating_threshold = 0.5
         self.warmup_count = 0
 
@@ -114,11 +131,13 @@ def _runtime(state_dir: Path, *, restart_check: object = None) -> WorkerRuntime:
     return WorkerRuntime(
         _zero_camera_config(),
         env={"ML_WORKER_PROFILE": "cpu"},
+        build_revision=_TEST_BUILD_REVISION,
         serving_client=_FakeServingClient(),
         acquire_lease=lambda: GpuLease.acquire(state_dir),
         decode_probe=lambda _decode: VerifyResult(True, "cpu", "decode", "available"),
         hard_exit=lambda _code: None,
         restart_check=restart_check,  # type: ignore[arg-type]
+        clip_store_dir=state_dir / "clip-store",
     )
 
 

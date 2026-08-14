@@ -13,9 +13,10 @@ bus is built, and ``stage_timing_recorder=self.diagnostics`` passed into the
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
-from typing import final
+from typing import Literal, final
 
 import numpy as np
 import pytest
@@ -23,17 +24,31 @@ from numpy.typing import NDArray
 
 import worker.runtime.worker as worker_module
 from contracts.runner import Image
+from worker.domains.module_definition import ComponentBinding
 from worker.pipeline.bus import BoundedFrameBus
 from worker.runtime.config import WorkerConfig
 from worker.runtime.lease import GpuLease
-from worker.runtime.profile.registry import VerifyResult
+from worker.runtime.profile.boot import BootContext
+from worker.runtime.profile.registry import PROFILE_REGISTRY, VerifyResult
 from worker.runtime.worker import WorkerRuntime
+
+
+@dataclass(frozen=True, slots=True)
+class _FallMetadata:
+    window: int = 2
+    stride: int = 1
+    mode: Literal["sequence"] = "sequence"
 
 
 @final
 class _FakeRunner:
     def __init__(self, task: str) -> None:
+        binding = _compiled_binding_for_task(task)
         self.task = task
+        self.metadata = _FallMetadata()
+        self.operating_threshold = 0.5
+        self.artifact_digest = binding.artifact_digest
+        self.preprocessing_identity = binding.preprocessing_identity
 
     def __call__(self, _image: Image) -> object:
         raise AssertionError("composition tests must not run model inference")
@@ -43,6 +58,16 @@ class _FakeRunner:
 
     def warmup(self) -> None:
         return None
+
+
+def _compiled_binding_for_task(task: str) -> ComponentBinding:
+    component_id = "fall-classifier" if task == "fall" else task
+    return next(
+        binding
+        for definition in worker_module.DETECTION_MODULE_REGISTRY.definitions
+        for binding in definition.shared_bindings
+        if binding.component_id == component_id
+    )
 
 
 @final
@@ -78,34 +103,28 @@ def _runtime(config: WorkerConfig, state_dir: Path) -> WorkerRuntime:
         acquire_lease=lambda: GpuLease.acquire(state_dir),
         decode_probe=lambda _decode: VerifyResult(True, "cpu", "decode", "available"),
         hard_exit=lambda _code: None,
+        state_dir=state_dir,
+        clip_store_dir=state_dir / "clip-store",
     )
 
 
-def _build_camera_best_effort(
-    runtime: WorkerRuntime,
-    extractors: tuple[object, ...] = (
-        SimpleNamespace(module_name="pose"),
-        SimpleNamespace(module_name="bed"),
-    ),
-) -> None:
-    """Drive ``_build_camera`` far enough to build the bus and analytics.
+@pytest.fixture(autouse=True)
+def _fall_model_via_serving_client(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _fall_via_serving(self: WorkerRuntime, _device: str) -> object:
+        return self._serving.create("fall")  # noqa: SLF001
 
-    ``_build_camera`` needs a fall model and decision-stage wiring this test
-    does not care about; a sentinel fall model is enough to clear the guard,
-    and any failure past the bus/analytics construction is irrelevant here.
-    The default fixture supplies "pose"/"bed" sentinel extractors -- the
-    observations the default-enabled domains (fall, bed_exit) require -- so
-    ``_build_camera``'s fail-closed missing-extractor check (issue #47)
-    doesn't short-circuit before the seams under test even run.
-    """
-    runtime.fall_model = object()  # type: ignore[assignment]
-    try:
-        _ = runtime._build_camera(  # noqa: SLF001
-            runtime.config.cameras[0],
-            SimpleNamespace(extractors=extractors),  # type: ignore[arg-type]
-        )
-    except Exception as exc:  # noqa: BLE001 - only the wiring up to here matters
-        _ = repr(exc)
+    monkeypatch.setattr(WorkerRuntime, "_create_fall_model", _fall_via_serving)
+
+
+def _build_camera_through_preflight(runtime: WorkerRuntime) -> None:
+    """Build through the same global graph and camera preflight as activation."""
+    profile = PROFILE_REGISTRY["cpu"]
+    boot = BootContext(profile, profile.device, profile.decode, profile.encode)
+    _ = runtime._initialize_models(boot)  # noqa: SLF001
+    _ = runtime._warm_models()  # noqa: SLF001
+    camera = runtime.config.cameras[0]
+    plan = runtime._preflight_camera_graph(camera)  # noqa: SLF001
+    _ = runtime._build_camera(camera, runtime.shared_yolo, plan)  # noqa: SLF001
 
 
 def test_build_camera_registers_the_bus_with_diagnostics(
@@ -122,7 +141,7 @@ def test_build_camera_registers_the_bus_with_diagnostics(
     monkeypatch.setattr(worker_module, "BoundedFrameBus", _capturing_bus)
 
     runtime = _runtime(_config("camera-a"), tmp_path)
-    _build_camera_best_effort(runtime)
+    _build_camera_through_preflight(runtime)
 
     assert captured, "composition never constructed a frame bus"
     (camera,) = runtime.diagnostics.snapshot().cameras
@@ -144,7 +163,7 @@ def test_build_camera_wires_the_composite_extractor_to_record_stage_timings(
     monkeypatch.setattr(worker_module, "CompositeExtractor", _capturing_composite_extractor)
 
     runtime = _runtime(_config("camera-a"), tmp_path)
-    _build_camera_best_effort(runtime)
+    _build_camera_through_preflight(runtime)
 
     assert captured_kwargs, "composition never constructed a CompositeExtractor"
     assert captured_kwargs[0]["stage_timing_recorder"] is runtime.diagnostics

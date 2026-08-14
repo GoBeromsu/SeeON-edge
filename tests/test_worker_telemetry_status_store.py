@@ -5,6 +5,7 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 
 from worker.pipeline.ingest.lifecycle import IngestEvent
+from worker.runtime.telemetry.runtime_diagnostics import WorkerDiagnostics
 from worker.runtime.telemetry.status_store import (
     CameraStatus,
     IngestStatusReporter,
@@ -57,6 +58,24 @@ def test_status_updates_are_thread_safe_and_camera_scoped() -> None:
     snapshot = store.snapshot()
     assert tuple(record.camera_id for record in snapshot.cameras) == tuple(sorted(camera_ids))
     assert all(record.error_category == "decode" for record in snapshot.cameras)
+
+
+def test_camera_status_and_runtime_wire_preserve_opaque_identity_bytes() -> None:
+    camera_id = " \u2007camera/\u1100\u1161/e\u0301 "
+    store = StatusStore()
+    reporter = IngestStatusReporter(store, {camera_id: "facility-1"})
+    diagnostics = WorkerDiagnostics(status_store=store)
+
+    reporter.mark_ready(camera_id)
+    diagnostics.register_decode(camera_id, "opencv")
+
+    record = store.get_status(camera_id)
+    assert record is not None
+    assert record.camera_id.encode("utf-8") == camera_id.encode("utf-8")
+    assert store.get_status(camera_id.strip()) is None
+    payload = diagnostics.to_payloads({camera_id: "facility-1"}, None, 1)[0]
+    wire_camera_id = payload["cameras"][0]["camera_id"]
+    assert wire_camera_id.encode("utf-8") == camera_id.encode("utf-8")
 
 
 def test_ingest_reporter_preserves_source_and_processing_failure_categories() -> None:

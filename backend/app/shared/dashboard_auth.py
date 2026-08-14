@@ -14,6 +14,7 @@ from fastapi import HTTPException, Request, status
 
 from backend.app.shared.dashboard_credentials import (
     DashboardCredentialsStore,
+    DashboardCredentialsStoreError,
     PersistedDashboardCredentials,
 )
 
@@ -24,12 +25,13 @@ API_EDGE_RELAY_TOKEN_ENV = "API_EDGE_RELAY_TOKEN"
 DASHBOARD_SESSION_COOKIE = "ml_dashboard_session"
 DASHBOARD_SESSION_TTL_SECONDS = 12 * 60 * 60
 
-# Zero-config installer default: an edge box with no env vars and no persisted
-# credentials file accepts this pair so the installer never has to touch a
-# config file before logging in. Changeable from the dashboard settings; the
-# change persists to disk and wins over this default forever after.
+# Known insecure pair. Never used as a runtime authority fallback. Preflight
+# rejects this pair in deployment env files; tests may still set it explicitly
+# via API_DASHBOARD_* env fixtures for disposable bootstrap ergonomics.
 DEFAULT_DASHBOARD_USERNAME = "admin"
 DEFAULT_DASHBOARD_PASSWORD = "admin"
+KNOWN_DEFAULT_DASHBOARD_USERNAME = DEFAULT_DASHBOARD_USERNAME
+KNOWN_DEFAULT_DASHBOARD_PASSWORD = DEFAULT_DASHBOARD_PASSWORD
 
 _SESSION_STORE_INIT_LOCK = threading.Lock()
 
@@ -153,7 +155,15 @@ def dashboard_credentials_store(request: Request) -> DashboardCredentialsStore:
 
 def _resolve_credentials(request: Request) -> DashboardCredentials:
     store = dashboard_credentials_store(request)
-    persisted = store.load()
+    try:
+        persisted = store.load()
+    except DashboardCredentialsStoreError as exc:
+        # Fail closed: a corrupt/unreadable store after rotation must not
+        # resurrect env or known-default credentials.
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="dashboard credentials store is unreadable",
+        ) from exc
     if persisted is not None:
         return HashedDashboardCredentials(persisted)
 
@@ -165,26 +175,26 @@ def _resolve_credentials(request: Request) -> DashboardCredentials:
         getattr(request.app.state, "dashboard_password", "")
         or os.environ.get(API_DASHBOARD_PASSWORD_ENV, "")
     )
-    if username or password:
-        if not username or not password:
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="dashboard credentials are incompletely configured",
-            )
-        return PlaintextDashboardCredentials(username=username, password=password)
-    return PlaintextDashboardCredentials(
-        username=DEFAULT_DASHBOARD_USERNAME, password=DEFAULT_DASHBOARD_PASSWORD
-    )
+    if not username and not password:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="dashboard credentials are not configured",
+        )
+    if not username or not password:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="dashboard credentials are incompletely configured",
+        )
+    return PlaintextDashboardCredentials(username=username, password=password)
 
 
 def dashboard_sessions(request: Request) -> DashboardSessionStore:
     """Return the app-wide dashboard session store, resolving credentials once.
 
-    Resolution order (highest wins): a persisted credentials file, then a
-    fully-set env var pair (``API_DASHBOARD_USERNAME``/``_PASSWORD``, or the
-    matching ``app.state`` attributes tests inject), then the built-in
-    ``admin``/``admin`` default. This never returns ``None`` -- dashboard auth
-    is always configured, even on a fresh edge box with zero setup.
+    Resolution order (highest wins): a persisted credentials row, then a
+    fully-set deployment bootstrap pair (``API_DASHBOARD_USERNAME``/``_PASSWORD``
+    or matching ``app.state`` attributes). There is no built-in password
+    default — missing or corrupt authority fails closed with HTTP 503.
     """
 
     existing = getattr(request.app.state, "dashboard_sessions", None)
@@ -293,6 +303,8 @@ __all__ = [
     "DASHBOARD_SESSION_TTL_SECONDS",
     "DEFAULT_DASHBOARD_PASSWORD",
     "DEFAULT_DASHBOARD_USERNAME",
+    "KNOWN_DEFAULT_DASHBOARD_PASSWORD",
+    "KNOWN_DEFAULT_DASHBOARD_USERNAME",
     "DashboardCredentials",
     "DashboardSessionStore",
     "HashedDashboardCredentials",

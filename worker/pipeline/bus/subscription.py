@@ -1,9 +1,4 @@
-"""Internal per-name bounded subscription backing BoundedFrameBus.
-
-Not part of the public frame-bus surface; consumers only see the
-``FrameSubscription`` shape (``capacity``, ``latest_only``, ``take``,
-``close``) exposed through ``BoundedFrameBus``.
-"""
+"""Internal lease-owning bounded subscription backing ``BoundedFrameBus``."""
 
 from __future__ import annotations
 
@@ -16,25 +11,7 @@ from worker.types import FramePacket
 
 
 class BoundedSubscription:
-    """One capacity-bounded, thread-safe fan-out queue for a single subscriber.
-
-    ``latest_only`` subscriptions evict the oldest queued packet to make room
-    for the newest one (drop-oldest). FIFO subscriptions (``latest_only=False``,
-    e.g. evidence) drop the incoming packet instead once full (drop-newest),
-    preserving already-queued order.
-    """
-
-    __slots__ = (
-        "capacity",
-        "latest_only",
-        "_clock",
-        "_condition",
-        "_queue",
-        "_published",
-        "_taken",
-        "_dropped",
-        "_closed",
-    )
+    """A queue owns every accepted packet until take, eviction, or close."""
 
     def __init__(
         self,
@@ -43,6 +20,8 @@ class BoundedSubscription:
         latest_only: bool,
         clock: Callable[[], float],
     ) -> None:
+        if capacity <= 0:
+            raise ValueError("subscription capacity must be positive")
         self.capacity = capacity
         self.latest_only = latest_only
         self._clock = clock
@@ -54,18 +33,32 @@ class BoundedSubscription:
         self._closed = False
 
     def publish(self, packet: FramePacket) -> None:
-        with self._condition:
-            self._published += 1
-            if len(self._queue) >= self.capacity:
-                self._dropped += 1
-                if self.latest_only:
-                    self._queue.popleft()
-                    self._queue.append((packet, self._clock()))
-                # FIFO (evidence-style) subscriptions drop the incoming
-                # packet and keep the already-queued order untouched.
-            else:
-                self._queue.append((packet, self._clock()))
-            self._condition.notify_all()
+        release_after: FramePacket | None = None
+        queued = False
+        try:
+            with self._condition:
+                self._published += 1
+                if self._closed:
+                    self._dropped += 1
+                    release_after = packet
+                elif len(self._queue) >= self.capacity and not self.latest_only:
+                    self._dropped += 1
+                    release_after = packet
+                else:
+                    published_at = self._clock()
+                    if len(self._queue) >= self.capacity:
+                        self._dropped += 1
+                        evicted, _evicted_at = self._queue.popleft()
+                        release_after = evicted
+                    self._queue.append((packet, published_at))
+                    queued = True
+                    self._condition.notify_all()
+        except Exception:
+            if not queued and not packet.released:
+                packet.release()
+            raise
+        if release_after is not None:
+            release_after.release()
 
     def take(self, *, timeout_sec: float | None = None) -> FramePacket | None:
         with self._condition:
@@ -82,8 +75,14 @@ class BoundedSubscription:
 
     def close(self) -> None:
         with self._condition:
+            if self._closed:
+                return
             self._closed = True
+            queued = tuple(packet for packet, _published_at in self._queue)
+            self._queue.clear()
             self._condition.notify_all()
+        for packet in queued:
+            packet.release()
 
     def metrics(self) -> BusMetricsSnapshot:
         with self._condition:

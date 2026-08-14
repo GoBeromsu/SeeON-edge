@@ -2,9 +2,15 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable, Iterator
+from dataclasses import replace
 from typing import Generic, TypeVar
+from uuid import uuid4
 
-from worker.interfaces.decode import DecodeAdapter, DecodeSession
+from worker.interfaces.decode import (
+    DecodeAdapter,
+    DecodeSession,
+    StreamIdentityDecodeSession,
+)
 from worker.types import FramePacket
 
 _DecodeConfigT = TypeVar("_DecodeConfigT")
@@ -12,6 +18,7 @@ _LivenessCallback = Callable[[str], None]
 _OpenFailureCallback = Callable[[str], None]
 _StopPredicate = Callable[[], bool]
 _DEFAULT_PROCESSED_FPS = 5.0
+_PROCESS_BOOT_ID = uuid4().hex
 
 
 class RTSPSource(Generic[_DecodeConfigT]):
@@ -30,6 +37,7 @@ class RTSPSource(Generic[_DecodeConfigT]):
         clock: Callable[[], float] = time.monotonic,
         pace_wait: Callable[[float], bool] | None = None,
         on_open_failure: _OpenFailureCallback | None = None,
+        worker_boot_id: str = _PROCESS_BOOT_ID,
     ) -> None:
         if target_fps <= 0:
             raise ValueError("target_fps must be > 0")
@@ -51,6 +59,8 @@ class RTSPSource(Generic[_DecodeConfigT]):
         self._clock = clock
         self._pace_wait = pace_wait
         self._on_open_failure = on_open_failure
+        self._worker_boot_id = worker_boot_id
+        self._next_stream_epoch = 1
         self._on_reconnecting: _LivenessCallback | None = None
         self._on_recovered: _LivenessCallback | None = None
 
@@ -71,11 +81,19 @@ class RTSPSource(Generic[_DecodeConfigT]):
         consecutive_failures = 0
         reconnects = 0
         reconnecting = False
+        session_epoch: int | None = None
         try:
             while not self._stop_is_requested():
                 if session is None:
                     try:
                         session = self._decoder.open(self._config)
+                        session_epoch = self._next_stream_epoch
+                        self._next_stream_epoch += 1
+                        if isinstance(session, StreamIdentityDecodeSession):
+                            session.set_stream_identity(
+                                self._worker_boot_id,
+                                session_epoch,
+                            )
                     except (OSError, RuntimeError):
                         self._notify_open_failure("spawn_failed")
                         if not reconnecting:
@@ -97,6 +115,7 @@ class RTSPSource(Generic[_DecodeConfigT]):
                             self._notify_reconnecting("read_failure")
                         session.close()
                         session = None
+                        session_epoch = None
                         if self._reconnect_budget_exhausted(reconnects):
                             break
                         reconnects += 1
@@ -105,6 +124,13 @@ class RTSPSource(Generic[_DecodeConfigT]):
                     continue
 
                 consecutive_failures = 0
+                if session_epoch is None:  # pragma: no cover - open assigns every session
+                    raise RuntimeError("decode session epoch was not assigned")
+                packet = replace(
+                    packet,
+                    worker_boot_id=self._worker_boot_id,
+                    stream_epoch=session_epoch,
+                )
                 if reconnecting:
                     reconnecting = False
                     self._notify_recovered("read_recovered")
@@ -118,10 +144,7 @@ class RTSPSource(Generic[_DecodeConfigT]):
                 session.close()
 
     def _reconnect_budget_exhausted(self, reconnects: int) -> bool:
-        return (
-            self._max_total_reconnects is not None
-            and reconnects >= self._max_total_reconnects
-        )
+        return self._max_total_reconnects is not None and reconnects >= self._max_total_reconnects
 
     def _backoff_delay(self, reconnects: int) -> float:
         if reconnects <= 0:

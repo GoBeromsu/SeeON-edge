@@ -26,11 +26,13 @@ from worker.pipeline.output.evidence.clip_consistency_io import (
     validate_regular,
     validate_under_root,
 )
+from worker.pipeline.output.evidence.clip_consistency_schema import (
+    is_supported_schema_version,
+)
 from worker.pipeline.output.evidence.clip_consistency_types import (
     BackupReceipt,
     ClipConsistencyError,
 )
-from worker.pipeline.output.evidence.evidence_outbox_schema import SCHEMA_VERSION
 
 RECEIPT_VERSION = 3
 _RECEIPT_KEYS = frozenset(BackupReceipt.__dataclass_fields__)
@@ -131,7 +133,7 @@ def parse_backup_receipt(
     )
     if (
         receipt.format_version != RECEIPT_VERSION
-        or receipt.schema_version != SCHEMA_VERSION
+        or not is_supported_schema_version(receipt.schema_version)
         or receipt.owner_uid != expected_uid
         or receipt.receipt_path != str(path.resolve(strict=True))
         or not _valid_receipt_facts(receipt)

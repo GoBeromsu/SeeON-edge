@@ -1,23 +1,26 @@
 from __future__ import annotations
 
+import json
 import os
+import re
 import subprocess
 from pathlib import Path
 from typing import Final, TypeAlias
 
 import yaml
 
-from worker.domains import DOMAIN_REGISTRY
-from worker.runtime.config import load_worker_config
+from backend.app.core.config import Settings
+from worker.runtime.config.pull_models import BackendWorkerConfigPayload
 
 REPO_ROOT: Final = Path(__file__).resolve().parents[1]
 EDGE_COMPOSE_FILE: Final = "compose.edge.yaml"
 EDGE_IMAGES_WORKFLOW: Final = ".github/workflows/edge-images.yml"
 EDGE_PREFLIGHT_SCRIPT: Final = "scripts/edge-preflight/check-nvidia-runtime.sh"
-EDGE_SERVICES: Final = {
+EDGE_RUNTIME_SERVICES: Final = {
     "ml-api": "Dockerfile.backend",
     "ml-worker": "Dockerfile.edge",
 }
+EDGE_SERVICES: Final = {"edge-db-migrator", *EDGE_RUNTIME_SERVICES}
 ComposeValue: TypeAlias = (
     str | int | float | bool | None | list["ComposeValue"] | dict[str, "ComposeValue"]
 )
@@ -89,18 +92,40 @@ def test_edge_worker_runtime_status_environment_contract() -> None:
     services = _compose_services(EDGE_COMPOSE_FILE)
     worker_environment = _mapping_field(services["ml-worker"], "environment")
 
-    assert {
-        "RELAY_URL",
+    # Explicit allowlist only: relay secret, profile, and RTSP destination policy.
+    # Live clip export is a dashboard runtime setting and must never appear here.
+    assert set(worker_environment) == {
         "RELAY_TOKEN",
         "ML_WORKER_PROFILE",
-    } <= set(worker_environment)
+        "ML_RTSP_ALLOW_PRIVATE_DESTINATIONS",
+        "ML_RTSP_ALLOW_LOCAL_DESTINATIONS",
+    }
+    assert worker_environment["ML_RTSP_ALLOW_PRIVATE_DESTINATIONS"] == (
+        "${ML_RTSP_ALLOW_PRIVATE_DESTINATIONS:-0}"
+    )
+    assert worker_environment["ML_RTSP_ALLOW_LOCAL_DESTINATIONS"] == (
+        "${ML_RTSP_ALLOW_LOCAL_DESTINATIONS:-0}"
+    )
+    assert not any("EVENT_CLIP_EXPORT" in key for key in worker_environment)
     assert "API_FACILITY_ID" not in worker_environment
 
 
-def test_edge_compose_contains_exactly_ml_edge_api_and_worker() -> None:
+def test_edge_compose_contains_migrator_api_and_worker() -> None:
     services = _compose_services(EDGE_COMPOSE_FILE)
 
-    assert set(services) == set(EDGE_SERVICES), sorted(services)
+    assert set(services) == EDGE_SERVICES, sorted(services)
+
+
+def test_edge_db_migrator_owns_schema_lifecycle_before_runtime_start() -> None:
+    services = _compose_services(EDGE_COMPOSE_FILE)
+    migrator = services["edge-db-migrator"]
+    api_depends_on = _mapping_field(services["ml-api"], "depends_on")
+    worker_depends_on = _mapping_field(services["ml-worker"], "depends_on")
+
+    assert migrator["restart"] == "no"
+    assert migrator["command"] == ["python", "-m", "shared.edge_db.importer"]
+    assert api_depends_on == {"edge-db-migrator": {"condition": "service_completed_successfully"}}
+    assert worker_depends_on == {"ml-api": {"condition": "service_healthy"}}
 
 
 def test_edge_services_pin_release_images_with_dockerfiles_for_build() -> None:
@@ -111,7 +136,7 @@ def test_edge_services_pin_release_images_with_dockerfiles_for_build() -> None:
     }
 
     failures: list[str] = []
-    for service_name, expected_dockerfile in EDGE_SERVICES.items():
+    for service_name, expected_dockerfile in EDGE_RUNTIME_SERVICES.items():
         service = services[service_name]
         image = str(service.get("image", ""))
         if expected_image_env[service_name] not in image:
@@ -126,6 +151,9 @@ def test_edge_services_pin_release_images_with_dockerfiles_for_build() -> None:
             failures.append(f"{expected_dockerfile} must exist for the release image build")
 
     assert not failures, "\n".join(failures)
+    migrator = services["edge-db-migrator"]
+    assert "ML_API_IMAGE" in str(migrator["image"])
+    assert migrator["pull_policy"] == "always"
 
 
 def test_edge_image_release_workflow_publishes_digest_env_artifact() -> None:
@@ -162,26 +190,36 @@ def test_edge_api_host_port_is_loopback_only() -> None:
     services = _compose_services(EDGE_COMPOSE_FILE)
     ports = _list_field(services["ml-api"], "ports")
 
-    assert ports == ["127.0.0.1:${ML_SERVING_PORT:-8000}:8000"]
+    assert ports == ["127.0.0.1:8000:8000"]
 
 
-def test_edge_api_persists_runtime_camera_registry_state() -> None:
+def test_edge_runtimes_share_one_central_state_volume() -> None:
     services = _compose_services(EDGE_COMPOSE_FILE)
-    api_volumes = _list_field(services["ml-api"], "volumes")
     compose = yaml.load(
         (REPO_ROOT / EDGE_COMPOSE_FILE).read_text(encoding="utf-8"),
         Loader=ComposeLoader,
     )
 
-    assert "ml-api-state:/root/.local/state/ml-api" in api_volumes
-    assert "ml-api-state" in compose.get("volumes", {})
+    for service_name in EDGE_SERVICES:
+        assert "edge-state:/var/lib/seeon-state" in _list_field(services[service_name], "volumes")
+    assert set(compose.get("volumes", {})) == {
+        "edge-state",
+        "ml-api-state",
+        "ml-worker-state",
+    }
+    for runtime_name in EDGE_RUNTIME_SERVICES:
+        runtime_volumes = _list_field(services[runtime_name], "volumes")
+        assert not any(
+            str(volume).startswith(("ml-api-state:", "ml-worker-state:"))
+            for volume in runtime_volumes
+        )
 
 
 def test_edge_service_builds_do_not_depend_on_dockerfile_targets() -> None:
     services = _compose_services(EDGE_COMPOSE_FILE)
 
     failures: list[str] = []
-    for service_name in EDGE_SERVICES:
+    for service_name in EDGE_RUNTIME_SERVICES:
         build = _mapping_field(services[service_name], "build")
         if "target" in build:
             failures.append(f"{service_name} build target is {build['target']!r}")
@@ -226,57 +264,72 @@ def test_rtsp_script_surface_uses_reusable_worker_names() -> None:
     assert "rtsp-loop-video.sh" not in e2e_source
 
 
-def test_real_rtsp_bedexit_script_generates_supported_production_config(tmp_path: Path) -> None:
-    artifact_dir = tmp_path / "models/fall/lstm-runtime"
-    artifact_dir.mkdir(parents=True)
-    (artifact_dir / "model.pt").write_bytes(b"placeholder")
-    (artifact_dir / "arch.json").write_text(
-        '{"hidden":4,"layers":1,"dropout":0.0}',
-        encoding="utf-8",
-    )
-    (artifact_dir / "metadata.yaml").write_text("type: lstm\n", encoding="utf-8")
-    config_path = tmp_path / "ml-worker.yaml"
+def test_real_rtsp_bedexit_script_uses_runtime_authorities_without_static_yaml(
+    tmp_path: Path,
+) -> None:
+    script = REPO_ROOT / "scripts/ml-worker-real-rtsp-bedexit-e2e.sh"
+    source = script.read_text(encoding="utf-8")
     environment = {
         **os.environ,
         "RELAY_URL": "http://127.0.0.1:8000",
-        "RELAY_TOKEN": "relay-token-1",
-        "ML_EDGE_E2E_RUNTIME_LSTM_DIR": str(artifact_dir),
+        "RELAY_TOKEN": "relay-secret-1",
+        "E2E_DASHBOARD_USERNAME": "operator-secret-name",
+        "E2E_DASHBOARD_PASSWORD": "dashboard-secret-1",
         "E2E_FACILITY_ID": "facility-1",
         "E2E_CAMERA_ID": "camera-1",
         "E2E_RESIDENT_ID": "resident-1",
-        "BED_EXIT_RTSP_URL": "rtsp://camera-1.local/trackID=2",
+        "BED_EXIT_RTSP_URL": "rtsp://camera-user:camera-secret@camera-1.local/trackID=2",
+        "EVIDENCE_DIR": str(tmp_path / "evidence"),
+        "ML_EDGE_E2E_TMP_ROOT": str(tmp_path / "runtime"),
     }
 
-    # Execute the script directly, the way an operator does, so its own shebang
-    # applies. Handing it to a bare `bash` would bypass the interpreter the
-    # script pins for itself: Homebrew bash 5.3.15 deadlocks on any heredoc
-    # body over PIPE_BUF (512 bytes), and this file has two -- it never execs
-    # the command and hangs with no output. See issue #9.
-    #
-    # `timeout` and `stdin` are belt-and-braces: a future regression must fail
-    # this test rather than hang the whole run, which is what happened before.
-    subprocess.run(
-        [
-            str(REPO_ROOT / "scripts/ml-worker-real-rtsp-bedexit-e2e.sh"),
-            "--render-config",
-            str(config_path),
-        ],
+    before = tuple(tmp_path.iterdir())
+    completed = subprocess.run(
+        [str(script), "--dry-run"],
         check=True,
         cwd=REPO_ROOT,
         env=environment,
         capture_output=True,
         text=True,
         stdin=subprocess.DEVNULL,
-        timeout=120,
+        timeout=30,
     )
 
-    payload = yaml.safe_load(config_path.read_text(encoding="utf-8"))
-    assert isinstance(payload, dict)
-    assert set(payload["domains"]) <= set(DOMAIN_REGISTRY)
+    assert tuple(tmp_path.iterdir()) == before
+    assert "/api/v1/cameras" in source
+    assert "/api/v1/detection-settings" in source
+    assert "/api/v1/relay/config" in source
+    assert "--config" not in source
+    assert "--render-config" not in source
+    assert not re.search(r"(?m)^\s*(?:cameras|models|domains|clip):\s*$", source)
+    assert "python -m worker" in source
 
-    config = load_worker_config(config_path)
+    assert json.loads(completed.stdout) == {
+        "mode": "dry-run",
+        "authority": {
+            "camera_registry": "http://127.0.0.1:8000/api/v1/cameras",
+            "detection_settings": "http://127.0.0.1:8000/api/v1/detection-settings",
+            "worker_config": "http://127.0.0.1:8000/api/v1/relay/config",
+        },
+        "worker_yaml": False,
+        "facility_id": "facility-1",
+        "camera_id": "camera-1",
+        "resident_id": "resident-1",
+        "rtsp_url": "rtsp://<redacted>",
+        "frames_per_pass": 3200,
+        "expected_detection_timezone": "Asia/Seoul",
+    }
 
-    assert config.enabled_domains == ("bed_exit",)
+    output = completed.stdout + completed.stderr
+    for secret in (
+        "relay-secret-1",
+        "operator-secret-name",
+        "dashboard-secret-1",
+        "camera-user",
+        "camera-secret",
+        "camera-1.local",
+    ):
+        assert secret not in output
 
 
 def test_repo_does_not_own_rtsp_generation_surface() -> None:
@@ -340,7 +393,7 @@ def test_edge_compose_keeps_backend_url_on_api_only() -> None:
     assert "API_ALLOW_LEGACY_DASHBOARD_AUTH" not in api_env
     assert "API_DASHBOARD_USERNAME" not in worker_env
     assert "API_DASHBOARD_PASSWORD" not in worker_env
-    assert worker_env["RELAY_URL"] == "http://ml-api:8000"
+    assert "RELAY_URL" not in worker_env
     assert "RELAY_TOKEN" in worker_env
     assert "API_BACKEND_EVENTS_URL" not in worker_env
     assert "API_BACKEND_BASE_URL" not in worker_env
@@ -349,28 +402,80 @@ def test_edge_compose_keeps_backend_url_on_api_only() -> None:
     assert "API_" + "INGEST_" + "SECRET" not in worker_env
 
 
-def test_edge_compose_wires_worker_overlay_stream_to_ml_api_only() -> None:
+def test_internal_origins_and_ports_are_baked_runtime_topology() -> None:
     services = _compose_services(EDGE_COMPOSE_FILE)
     api_env = _mapping_field(services["ml-api"], "environment")
     worker_env = _mapping_field(services["ml-worker"], "environment")
     worker_ports = _list_field(services["ml-worker"], "ports")
 
-    assert api_env["ML_API_WORKER_STREAM_ORIGIN"] == (
-        "http://ml-worker:${ML_WORKER_DEV_MJPEG_PORT:-8090}"
-    )
-    assert worker_env["ML_WORKER_DEV_MJPEG"] == "${ML_WORKER_DEV_MJPEG:-true}"
-    assert worker_env["ML_WORKER_DEV_MJPEG_HOST"] == "0.0.0.0"
-    assert worker_env["ML_WORKER_DEV_MJPEG_PORT"] == "${ML_WORKER_DEV_MJPEG_PORT:-8090}"
+    assert "ML_API_WORKER_STREAM_ORIGIN" not in api_env
+    assert "ML_API_WORKER_PROBE_ORIGIN" not in api_env
+    assert Settings.model_fields["worker_stream_origin"].default == "http://ml-worker:8090"
+    assert Settings.model_fields["worker_probe_origin"].default == "http://ml-worker:8090"
+    assert "RELAY_URL" not in worker_env
+    assert not {
+        "ML_WORKER_DEV_MJPEG",
+        "ML_WORKER_DEV_MJPEG_HOST",
+        "ML_WORKER_DEV_MJPEG_PORT",
+    }.intersection(worker_env)
     assert worker_ports == []
 
+    pulled = BackendWorkerConfigPayload.model_validate(
+        {"config_version": 1, "cameras": []}
+    ).to_worker_config("http://ml-api:8000", "relay-token")
+    assert pulled.relay.url == "http://ml-api:8000"
+    assert pulled.dev_mjpeg.enabled is True
+    assert pulled.dev_mjpeg.host == "0.0.0.0"
+    assert pulled.dev_mjpeg.port == 8090
 
-def test_edge_compose_wires_worker_probe_origin_to_ml_api_only() -> None:
+
+def test_cpu_intel_and_nvidia_overlays_keep_hardware_opt_in() -> None:
     services = _compose_services(EDGE_COMPOSE_FILE)
-    api_env = _mapping_field(services["ml-api"], "environment")
+    worker = services["ml-worker"]
+    assert "deploy" not in worker
+    assert "devices" not in worker
+    assert "NVIDIA_DRIVER_CAPABILITIES" not in _mapping_field(worker, "environment")
 
-    assert api_env["ML_API_WORKER_PROBE_ORIGIN"] == (
-        "http://ml-worker:${ML_WORKER_DEV_MJPEG_PORT:-8090}"
+    cpu_worker = _compose_services("compose.edge.cpu.yaml")["ml-worker"]
+    assert cpu_worker["deploy"] == "null"
+
+    intel_worker = _compose_services("compose.edge.igpu.yaml")["ml-worker"]
+    assert intel_worker["devices"] == ["/dev/dri:/dev/dri"]
+    assert _mapping_field(intel_worker, "environment") == {"LIBVA_DRIVER_NAME": "iHD"}
+
+    nvidia_worker = _compose_services("compose.edge.nvidia.yaml")["ml-worker"]
+    nvidia_deploy = _mapping_field(nvidia_worker, "deploy")
+    assert nvidia_deploy == {
+        "resources": {
+            "reservations": {
+                "devices": [{"driver": "nvidia", "count": "all", "capabilities": ["gpu"]}]
+            }
+        }
+    }
+    assert _mapping_field(nvidia_worker, "environment") == {
+        "NVIDIA_DRIVER_CAPABILITIES": "compute,utility,video"
+    }
+
+
+def test_edge_compose_exposes_no_static_roster_or_mutable_policy_authority() -> None:
+    services = _compose_services(EDGE_COMPOSE_FILE)
+    runtime_environment = {
+        key
+        for service_name in EDGE_RUNTIME_SERVICES
+        for key in _mapping_field(services[service_name], "environment")
+    }
+    worker_command = _list_field(services["ml-worker"], "command")
+    example = (REPO_ROOT / ".env.edge.prod.example").read_text(encoding="utf-8")
+
+    assert "--config" not in worker_command
+    assert not any(
+        marker in key
+        for key in runtime_environment
+        for marker in ("CAMERA_INVENTORY", "EVENT_CLIP_EXPORT", "MODEL_", "POLICY")
     )
+    assert "API_FACILITY_ID=" not in example
+    assert "EDGE_CAMERA_CONFIG=" not in example
+    assert "EVENT_CLIP_EXPORT_ENABLED=" not in example
 
 
 def test_clip_export_is_not_managed_by_topology_environment() -> None:

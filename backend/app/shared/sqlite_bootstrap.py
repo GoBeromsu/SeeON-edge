@@ -19,6 +19,8 @@ import sqlite3
 from collections.abc import Iterable
 from pathlib import Path
 
+from shared.edge_db.connection import RuntimeActor, open_runtime_database
+
 
 def connect_catalog_store(path: Path, create_statements: Iterable[str]) -> sqlite3.Connection:
     """Open ``path``, apply the standard catalog pragmas, and run bootstrap DDL.
@@ -27,6 +29,12 @@ def connect_catalog_store(path: Path, create_statements: Iterable[str]) -> sqlit
     idempotent ``CREATE TABLE IF NOT EXISTS`` statements owned by the caller).
     The database file is made best-effort ``0600`` afterward.
     """
+    if path.name == "edge.sqlite3":
+        connection = open_runtime_database(path, actor=RuntimeActor.API, check_same_thread=False)
+        for statement in create_statements:
+            if not statement.lstrip().upper().startswith(("CREATE", "ALTER", "DROP")):
+                connection.execute(statement)
+        return connection
     path.parent.mkdir(parents=True, exist_ok=True)
     connection = sqlite3.connect(path, timeout=5.0, isolation_level=None, check_same_thread=False)
     connection.execute("PRAGMA journal_mode = WAL")

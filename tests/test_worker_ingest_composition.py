@@ -55,7 +55,7 @@ def _config(*camera_ids: str) -> WorkerConfig:
                 {
                     "camera_id": camera_id,
                     "facility_id": f"facility-{camera_id.removeprefix('camera-')}",
-                    "rtsp_url": f"rtsp://example.test/{camera_id}",
+                    "rtsp_url": f"rtsp://8.8.8.8/{camera_id}",
                     "heartbeat_interval_sec": 30.0,
                 }
                 for camera_id in camera_ids
@@ -371,9 +371,7 @@ def test_compose_camera_ingest_loop_capture_policy_fps_is_independent_of_frame_s
     # frame_stride is set to must never change the CapturePolicy target_fps
     # that paces ingest (and therefore the live view, which is published for
     # every packet CameraPipelinePump takes off the bus, unconditionally).
-    camera = _camera("camera-a").model_copy(
-        update={"fps": 15.0, "frame_stride": frame_stride}
-    )
+    camera = _camera("camera-a").model_copy(update={"fps": 15.0, "frame_stride": frame_stride})
     registry = build_camera_source_registry((camera,))
 
     loop = compose_camera_ingest_loop(
@@ -417,6 +415,33 @@ def test_build_camera_source_registry_allowlists_only_the_configured_cameras() -
     assert resolved.record.trusted_live is True
     with pytest.raises(SourceRegistryError):
         registry.resolve(source_id="camera-not-configured")
+
+
+def test_camera_config_and_source_registry_preserve_opaque_identity_bytes() -> None:
+    camera_id = " \u2007camera/\u1100\u1161/e\u0301 "
+    camera = CameraRuntimeConfig(
+        camera_id=camera_id,
+        facility_id="facility-1",
+        rtsp_url="rtsp://8.8.8.8/stream",
+    )
+
+    registry = build_camera_source_registry((camera,))
+    resolved = registry.resolve(source_id=camera_id)
+
+    assert camera.camera_id.encode("utf-8") == camera_id.encode("utf-8")
+    assert resolved.record.source_id.encode("utf-8") == camera_id.encode("utf-8")
+    with pytest.raises(SourceRegistryError, match="unknown source id"):
+        registry.resolve(source_id=camera_id.strip())
+
+
+@pytest.mark.parametrize("camera_id", ["", " \t\u2007 ", "camera\x00id", "camera\nid"])
+def test_camera_config_rejects_empty_blank_or_unsafe_identity(camera_id: str) -> None:
+    with pytest.raises(ValueError, match="camera_id|blank|unsafe|length"):
+        CameraRuntimeConfig(
+            camera_id=camera_id,
+            facility_id="facility-1",
+            rtsp_url="rtsp://8.8.8.8/stream",
+        )
 
 
 # -- WorkerRuntime: the composition-root seam ----------------------------------

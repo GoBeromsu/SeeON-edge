@@ -11,19 +11,31 @@ from typing import Final, TypeAlias
 
 from pydantic import JsonValue
 
+from shared.edge_db import EDGE_DATABASE_PATH
+from shared.edge_db.compatibility import MigrationRequiredError
 from worker.pipeline.output.evidence.evidence_outbox_database import open_connection
 from worker.pipeline.output.evidence.evidence_outbox_types import NewerSchemaVersionError
 from worker.pipeline.output.evidence.outbox_transaction import ImmediateTransaction
 from worker.runtime.config.restart import RestartDirective
 from worker.runtime.state_dir import resolve_state_dir
 
-# open_connection can fail three ways that must all degrade the LKG to
+# open_connection can fail four ways that must all degrade the LKG to
 # "unavailable" rather than crash the worker: OSError (e.g. an unwritable/
 # uncreatable state dir -- `path.parent.mkdir(...)` is unguarded), sqlite3.Error
-# (PRAGMA/migration failure), and NewerSchemaVersionError (a plain Exception
+# (PRAGMA/migration failure), NewerSchemaVersionError (a plain Exception
 # subclass, not a sqlite3.Error -- raised when a downgraded worker binary opens
-# a database a newer binary already migrated past).
-_STORE_UNAVAILABLE_ERRORS: Final = (OSError, sqlite3.Error, NewerSchemaVersionError)
+# a database a newer binary already migrated past), and MigrationRequiredError
+# (an EdgeDatabaseError, not a sqlite3.Error -- raised by
+# shared.edge_db.open_runtime_database on the central edge.sqlite3 path when the
+# database is unprovisioned/missing on first boot, so an LKG read there means
+# "no last-known-good yet" rather than a fatal error; keeps `--check-config`'s
+# static, no-side-effect first-boot path exiting 0 without provisioning disk).
+_STORE_UNAVAILABLE_ERRORS: Final = (
+    OSError,
+    sqlite3.Error,
+    NewerSchemaVersionError,
+    MigrationRequiredError,
+)
 
 # Same DB file the evidence outbox opens (worker/runtime/worker.py's
 # `_evidence_outbox_path`, worker/pipeline/output/evidence/evidence_runtime.py) --
@@ -211,8 +223,9 @@ def _prune_config_history(connection: sqlite3.Connection, *, keep_last: int) -> 
 
 
 def _worker_state_db_path(state_dir: Path | None = None) -> Path:
-    resolved = state_dir if state_dir is not None else resolve_state_dir()
-    return resolved / WORKER_STATE_DB_FILENAME
+    if state_dir is None or state_dir == resolve_state_dir():
+        return EDGE_DATABASE_PATH
+    return state_dir / WORKER_STATE_DB_FILENAME
 
 
 def _registry_version(payload: JsonObject) -> int:

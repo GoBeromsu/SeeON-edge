@@ -21,9 +21,29 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import numpy as np
+import pytest
+
+from contracts.frame import Frame
+from worker.adapters.encode.adapter_errors import CrossEpochFrameError
 from worker.adapters.encode.csv_segment_index import CsvSegmentIndex
+from worker.types import FramePacket
 
 _FPS = 5.0
+
+
+def _packet(*, pts: float, seq: int, epoch: int) -> FramePacket:
+    return FramePacket(
+        camera_id="camera-1",
+        frame=Frame(seq, pts, np.zeros((2, 2, 3), dtype=np.uint8)),
+        pts=pts,
+        seq=seq,
+        width=2,
+        height=2,
+        decode_time_ms=0.1,
+        worker_boot_id="boot-1",
+        stream_epoch=epoch,
+    )
 
 
 def _write_csv(list_path: Path, rows: tuple[tuple[str, float, float], ...]) -> None:
@@ -139,6 +159,34 @@ def test_select_trims_a_partial_overlap_after_axis_conversion(tmp_path: Path) ->
         "seg-00000.mp4",
         "seg-00001.mp4",
     }
+
+
+def test_segment_metadata_derives_media_origin_from_the_first_same_epoch_frame(
+    tmp_path: Path,
+) -> None:
+    list_path = tmp_path / "segments.csv"
+    _write_csv(list_path, (("seg-00000.mp4", 2.0, 4.0),))
+    index = CsvSegmentIndex(list_path, generation=7)
+    index.observe_frame(_packet(pts=100.0, seq=0, epoch=3), _FPS)
+    index.refresh()
+
+    segment = index.completed()[0]
+
+    assert segment.worker_boot_id == "boot-1"
+    assert segment.camera_id == "camera-1"
+    assert segment.stream_epoch == 3
+    assert segment.source_origin_pts_sec == 100.0
+    assert segment.media_origin_pts_sec == 102.0
+
+
+def test_index_rejects_a_frame_from_another_stream_epoch(tmp_path: Path) -> None:
+    index = CsvSegmentIndex(tmp_path / "segments.csv", generation=7)
+    index.observe_frame(_packet(pts=10.0, seq=0, epoch=3), _FPS)
+
+    with pytest.raises(CrossEpochFrameError):
+        index.observe_frame(_packet(pts=0.0, seq=0, epoch=4), _FPS)
+
+    assert index.origin_time_sec == 10.0
 
 
 def test_origin_is_none_until_a_frame_is_observed(tmp_path: Path) -> None:

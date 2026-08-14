@@ -7,7 +7,7 @@ from collections.abc import Callable
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from socketserver import ThreadingMixIn
-from typing import Final, Literal, Required, TypedDict
+from typing import Final, Literal, Protocol, TypeAlias, TypedDict
 from urllib.parse import unquote, urlsplit
 
 import cv2
@@ -22,7 +22,6 @@ POLL_INTERVAL_SECONDS: Final = 0.05
 HEARTBEAT_INTERVAL_SECONDS: Final = 1.0
 MAX_PROBE_BODY_BYTES: Final = 8192
 MAX_POSE_BODY_BYTES: Final = 256
-_OVERLAY_MODES: Final[frozenset[str]] = frozenset({"none", "bedexit", "fall"})
 # Bounded wait for the first frame after a stream connects. Viewer gating
 # (#48) means encoding does not start until this connection's counter
 # increment makes `has_viewers` true, so the first frame is not already
@@ -39,7 +38,7 @@ OVERLAY_PREFIX: Final = "/overlay/"
 POSE_SUFFIX: Final = "/pose"
 BED_ZONE_SUFFIX: Final = "/bed-zone/recognize"
 
-ProbeErrorClass = Literal["auth", "timeout", "decode"]
+ProbeErrorClass = Literal["auth", "timeout", "decode", "unsupported"]
 
 
 class BedZonePayload(TypedDict):
@@ -60,12 +59,19 @@ class BedZoneNotFoundError(RuntimeError):
 BedZoneRecognizer = Callable[[Image], BedZonePayload]
 
 
-class MjpegProbePayload(TypedDict, total=False):
-    ok: Required[bool]
-    backend: str
-    width: int
-    height: int
-    error_class: ProbeErrorClass
+class DerivativeControl(Protocol):
+    def request(self, clip_id: str, kind: str) -> dict[str, object]: ...
+
+    def cancel(self, clip_id: str, kind: str) -> dict[str, object] | None: ...
+
+    def status(self, clip_id: str, kind: str) -> dict[str, object] | None: ...
+
+
+class ClipDeletionControl(Protocol):
+    def delete(self, clip_id: str) -> dict[str, object]: ...
+
+
+MjpegProbePayload: TypeAlias = dict[str, bool | str | int]
 
 
 MjpegProbe = Callable[[str], MjpegProbePayload]
@@ -95,6 +101,8 @@ def build_http_server(
     probe_token: str | None,
     probe: MjpegProbe,
     bed_zone_recognizer: BedZoneRecognizer | None = None,
+    derivative_control: DerivativeControl | None = None,
+    clip_deletion_control: ClipDeletionControl | None = None,
     bed_zone_frame_timeout_s: float = BED_ZONE_FRAME_TIMEOUT_SECONDS,
 ) -> HTTPServer:
     class Handler(BaseHTTPRequestHandler):
@@ -110,10 +118,18 @@ def build_http_server(
             if pose_camera_id is not None:
                 self._handle_get_pose(pose_camera_id)
                 return
+            derivative = _derivative_identity(path)
+            if derivative is not None:
+                self._handle_derivative("status", *derivative)
+                return
             self.send_error(HTTPStatus.NOT_FOUND)
 
         def do_POST(self) -> None:  # noqa: N802 - stdlib hook name
             path = urlsplit(self.path).path
+            derivative = _derivative_identity(path)
+            if derivative is not None:
+                self._handle_derivative("request", *derivative)
+                return
             if path != "/probe":
                 bed_zone_camera_id = _bed_zone_camera_id(path)
                 if bed_zone_camera_id is not None:
@@ -137,12 +153,74 @@ def build_http_server(
                 return
             payload: MjpegProbePayload
             try:
-                payload = _sanitize_probe_payload(probe(rtsp_url))
+                # Re-validate destination (including DNS answers) so forged
+                # internal callers cannot skip API admission and open an
+                # arbitrary RTSP target (SSRF). Pinning happens inside the
+                # worker probe/open path; this gate only admits.
+                from shared.rtsp_url_policy import assert_rtsp_endpoint_allowed
+
+                try:
+                    endpoint = assert_rtsp_endpoint_allowed(rtsp_url)
+                except ValueError:
+                    payload = {"ok": False, "error_class": "unsupported"}
+                else:
+                    payload = _sanitize_probe_payload(probe(endpoint.original_url))
             except MjpegProbeError as exc:
                 payload = {"ok": False, "error_class": exc.error_class}
             except (OSError, RuntimeError, TypeError, ValueError):
                 payload = {"ok": False, "error_class": "decode"}
             self._write_json(payload)
+
+        def do_DELETE(self) -> None:  # noqa: N802 - stdlib hook name
+            path = urlsplit(self.path).path
+            derivative = _derivative_identity(path)
+            if derivative is not None:
+                self._handle_derivative("cancel", *derivative)
+                return
+            clip_id = _clip_delete_identity(path)
+            if clip_id is not None:
+                self._handle_clip_delete(clip_id)
+                return
+            self.send_error(HTTPStatus.NOT_FOUND)
+
+        def _handle_clip_delete(self, clip_id: str) -> None:
+            if not _authorized_probe(self.headers.get("X-Edge-Relay-Token"), probe_token):
+                self.send_error(HTTPStatus.FORBIDDEN)
+                return
+            if clip_deletion_control is None:
+                self.send_error(HTTPStatus.SERVICE_UNAVAILABLE)
+                return
+            try:
+                payload = clip_deletion_control.delete(clip_id)
+            except (OSError, RuntimeError, TypeError, ValueError):
+                self.send_error(HTTPStatus.CONFLICT)
+                return
+            self._write_status_json(HTTPStatus.ACCEPTED, payload)
+
+        def _handle_derivative(self, action: str, clip_id: str, kind: str) -> None:
+            if not _authorized_probe(self.headers.get("X-Edge-Relay-Token"), probe_token):
+                self.send_error(HTTPStatus.FORBIDDEN)
+                return
+            if derivative_control is None:
+                self.send_error(HTTPStatus.SERVICE_UNAVAILABLE)
+                return
+            try:
+                if action == "request":
+                    payload = derivative_control.request(clip_id, kind)
+                    code = HTTPStatus.ACCEPTED
+                elif action == "cancel":
+                    payload = derivative_control.cancel(clip_id, kind)
+                    code = HTTPStatus.ACCEPTED
+                else:
+                    payload = derivative_control.status(clip_id, kind)
+                    code = HTTPStatus.OK
+            except (OSError, RuntimeError, TypeError, ValueError):
+                self.send_error(HTTPStatus.CONFLICT)
+                return
+            if payload is None:
+                self.send_error(HTTPStatus.NOT_FOUND)
+                return
+            self._write_status_json(code, payload)
 
         def _resolve_frame(self, camera_id: str) -> LatestFrame | None:
             if camera_id == "" or not store.is_known(camera_id):
@@ -155,6 +233,13 @@ def build_http_server(
             return frame
 
         def _handle_stream(self, camera_id: str) -> None:
+            # Same constant-time relay-token gate as /probe, derivative control,
+            # and clip delete (security finding #3). Auth runs before any
+            # viewer-counter side effect so a rejected caller never opens the
+            # encode gate.
+            if not _authorized_probe(self.headers.get("X-Edge-Relay-Token"), probe_token):
+                self.send_error(HTTPStatus.FORBIDDEN)
+                return
             # Viewer gating (#48): count this connection *before* waiting for
             # a frame so `has_viewers` opens the encode gate in time for the
             # pump to actually publish one -- and always uncount it, on every
@@ -204,6 +289,9 @@ def build_http_server(
                 store.mark_viewer_disconnected(camera_id)
 
         def _handle_snapshot(self, camera_id: str) -> None:
+            if not _authorized_probe(self.headers.get("X-Edge-Relay-Token"), probe_token):
+                self.send_error(HTTPStatus.FORBIDDEN)
+                return
             # Viewer gating (#48) means the cache can go stale with no stream
             # viewer connected; treat this request as a momentary viewer so
             # the next `publish()` encodes one fresh frame, while still
@@ -247,6 +335,9 @@ def build_http_server(
             self._write_mode_json(mode)
 
         def _handle_bed_zone_recognize(self, camera_id: str) -> None:
+            if not _authorized_probe(self.headers.get("X-Edge-Relay-Token"), probe_token):
+                self.send_error(HTTPStatus.FORBIDDEN)
+                return
             if camera_id == "" or not store.is_known(camera_id):
                 self.send_error(HTTPStatus.NOT_FOUND)
                 return
@@ -269,18 +360,18 @@ def build_http_server(
             if frame is None:
                 self.send_error(HTTPStatus.SERVICE_UNAVAILABLE)
                 return
-            image = cv2.imdecode(
-                np.frombuffer(frame.jpeg, dtype=np.uint8), cv2.IMREAD_COLOR
-            )
-            if image is None:
+            decoded = cv2.imdecode(np.frombuffer(frame.jpeg, dtype=np.uint8), cv2.IMREAD_COLOR)
+            if not isinstance(decoded, np.ndarray) or decoded.dtype != np.dtype(np.uint8):
+                self.send_error(HTTPStatus.SERVICE_UNAVAILABLE)
+                return
+            image = np.asarray(decoded, dtype=np.uint8)
+            if image.ndim != 3 or image.shape[0] <= 0 or image.shape[1] <= 0 or image.shape[2] != 3:
                 self.send_error(HTTPStatus.SERVICE_UNAVAILABLE)
                 return
             try:
                 payload = bed_zone_recognizer(image)
             except BedZoneNotFoundError:
-                self._write_status_json(
-                    HTTPStatus.NOT_FOUND, {"error_class": "bed_not_found"}
-                )
+                self._write_status_json(HTTPStatus.NOT_FOUND, {"error_class": "bed_not_found"})
                 return
             except (OSError, RuntimeError, TypeError, ValueError, cv2.error):
                 self.send_error(HTTPStatus.SERVICE_UNAVAILABLE)
@@ -288,9 +379,7 @@ def build_http_server(
             self._write_status_json(HTTPStatus.OK, payload)
 
         def _write_status_json(self, http_status: HTTPStatus, payload: object) -> None:
-            body = json.dumps(
-                payload, separators=(",", ":"), sort_keys=True
-            ).encode("utf-8")
+            body = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
             self.send_response(http_status)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
@@ -308,20 +397,20 @@ def build_http_server(
             if length <= 0 or length > MAX_POSE_BODY_BYTES:
                 return None
             try:
-                payload = json.loads(self.rfile.read(length).decode("utf-8"))
+                payload: object = json.loads(self.rfile.read(length).decode("utf-8"))
             except (UnicodeDecodeError, json.JSONDecodeError):
                 return None
-            if not isinstance(payload, dict) or set(payload) != {"mode"}:
+            if not isinstance(payload, dict) or len(payload) != 1:
                 return None
-            mode = payload.get("mode")
-            if isinstance(mode, str) and mode in _OVERLAY_MODES:
-                return mode  # type: ignore[return-value]
+            for key, value in payload.items():
+                if key != "mode":
+                    return None
+                mode_value: object = value
+                return _parse_overlay_mode(mode_value)
             return None
 
         def _write_mode_json(self, mode: OverlayMode) -> None:
-            body = json.dumps(
-                {"mode": mode}, separators=(",", ":")
-            ).encode("utf-8")
+            body = json.dumps({"mode": mode}, separators=(",", ":")).encode("utf-8")
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
@@ -364,9 +453,7 @@ def build_http_server(
         def _write_part(self, frame: LatestFrame) -> None:
             self.wfile.write(b"--" + BOUNDARY + b"\r\n")
             self.wfile.write(b"Content-Type: image/jpeg\r\n")
-            self.wfile.write(
-                f"Content-Length: {len(frame.jpeg)}\r\n\r\n".encode("ascii")
-            )
+            self.wfile.write(f"Content-Length: {len(frame.jpeg)}\r\n\r\n".encode("ascii"))
             self.wfile.write(frame.jpeg)
             self.wfile.write(b"\r\n")
 
@@ -374,6 +461,25 @@ def build_http_server(
             del format, args
 
     return _ThreadingHTTPServer((host, port), Handler)
+
+
+def _clip_delete_identity(path: str) -> str | None:
+    """Match ``/clips/{clip_id}`` (only) and return the decoded clip id."""
+    parts = path.split("/")
+    if len(parts) != 3 or parts[1] != "clips":
+        return None
+    clip_id = unquote(parts[2])
+    return clip_id or None
+
+
+def _derivative_identity(path: str) -> tuple[str, str] | None:
+    parts = path.split("/")
+    if len(parts) != 4 or parts[1] != "derivatives":
+        return None
+    clip_id, kind = unquote(parts[2]), parts[3].upper()
+    if not clip_id or kind not in {"STILL", "VIDEO"}:
+        return None
+    return clip_id, kind
 
 
 def _pose_camera_id(path: str) -> str | None:
@@ -422,11 +528,26 @@ def _authorized_pose(supplied: str | None, expected: str | None) -> bool:
     return _authorized_probe(supplied, expected)
 
 
+def _parse_overlay_mode(value: object) -> OverlayMode | None:
+    if not isinstance(value, str):
+        return None
+    if value == "none":
+        return "none"
+    if value == "bedexit":
+        return "bedexit"
+    if value == "fall":
+        return "fall"
+    return None
+
+
 def _sanitize_probe_payload(payload: MjpegProbePayload) -> MjpegProbePayload:
     if payload.get("ok") is not True:
+        error_class = payload.get("error_class")
         return {
             "ok": False,
-            "error_class": _normalize_error_class(payload.get("error_class")),
+            "error_class": _normalize_error_class(
+                error_class if isinstance(error_class, str) else None
+            ),
         }
     sanitized: MjpegProbePayload = {"ok": True}
     backend = payload.get("backend")
@@ -446,6 +567,8 @@ def _normalize_error_class(error_class: str | None) -> ProbeErrorClass:
         return "auth"
     if error_class == "timeout":
         return "timeout"
+    if error_class == "unsupported":
+        return "unsupported"
     return "decode"
 
 
@@ -454,6 +577,8 @@ __all__ = [
     "BedZoneNotFoundError",
     "BedZonePayload",
     "BedZoneRecognizer",
+    "ClipDeletionControl",
+    "DerivativeControl",
     "MjpegProbe",
     "MjpegProbeError",
     "MjpegProbePayload",

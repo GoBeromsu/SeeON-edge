@@ -3,8 +3,8 @@
 
 ``CameraWorker`` no longer exists: the new architecture splits its
 responsibilities across ``WorkerRuntime`` composition (``worker/runtime/
-worker.py``) and ``EvidenceEventSink.emit()`` (``worker/pipeline/output/
-event_sink.py``). Every edge test in the original
+worker.py``) and ``EvidenceEventSink.emit_for_frame()`` (``worker/pipeline/
+output/event_sink.py``). Every edge test in the original
 ``tests/test_camera_worker_clip_id.py`` is disposed of below with a citation
 to what now proves the same property; only ``_NullClipRecorder`` and the
 ``_CameraClipRecorderView``/``_default_clip_recorder`` fallback wiring are
@@ -22,22 +22,22 @@ Superseded (same property, different call site, cited by file:line):
   ``resolve()`` returns, and ``IncidentManager.admit()``
   (``worker/pipeline/decision/incident_manager.py:66-83``) only ever returns
   an event carrying the resolved identity -- there is no code path that
-  reaches ``EvidenceEventSink.emit()`` with an unpersisted identity. Proven
+  reaches ``EvidenceEventSink.emit_for_frame()`` with an unpersisted identity. Proven
   end-to-end, including the restart case, by
   ``tests/test_worker_incident_manager.py::
   test_persisted_source_identity_reuses_the_edge_event_id_after_restart``.
 
 * ``test_camera_worker_propagates_recorder_clip_id_on_event`` --
-  ``EvidenceEventSink.emit()`` (``worker/pipeline/output/event_sink.py:41-68``)
-  binds the recorder's returned clip id via ``stager.complete()``; proven by
+  ``EvidenceEventSink.emit_for_frame()`` binds the recorder's returned clip id
+  via ``stager.complete()``; proven by
   ``tests/test_worker_event_sink.py::
   test_event_sink_stages_then_binds_the_admitted_business_event`` (asserts
   ``recorder.calls`` and ``stager.completions`` bind the same clip id).
 
 * ``test_camera_worker_stages_before_recorder_and_skips_immediate_network``
   -- the stage-before-bind ordering is now unconditional statement order in
-  ``EvidenceEventSink.emit()`` (``event_sink.py:62-68``: ``stager.stage()``,
-  then ``recorder.on_event()``, then ``stager.complete()``); there is no
+  ``EvidenceEventSink.emit_for_frame()`` (``stager.stage()``, then
+  ``recorder.on_event()``, then ``stager.complete()``); there is no
   "immediate network" branch to skip since ``EvidenceEventSink`` only ever
   writes to the durable outbox, never delivers over the network itself
   (delivery is a separate ``EvidenceSender`` pulling from the outbox). Proven
@@ -71,8 +71,8 @@ NOT asserted as passing behavior by any test here:
   suppressed opening a *new* clip for events arriving within an interval of
   an already-active one (while still emitting the event itself). No
   equivalent exists in the new composition:
-  ``EvidenceEventSink.emit()`` (``event_sink.py:63-67``) always calls
-  ``self.recorder.on_event(event.camera_id, edge_event_id, event.event_type)``
+  ``EvidenceEventSink.emit_for_frame()`` always calls
+  ``self.recorder.on_event(trigger_packet, edge_event_id, event.event_type)``
   with the default ``allow_new_clip=True`` -- nothing in ``WorkerRuntime``,
   ``EventAggregator``, or ``IncidentManager`` computes an elapsed-time-based
   decision and threads an ``allow_new_clip=False`` override through. The
@@ -87,10 +87,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+import numpy as np
+
 import worker.runtime.worker as worker_module
+from contracts.frame import Frame
 from worker.pipeline.output.evidence.clip_recorder import ClipRecorder
 from worker.runtime.config import WorkerConfig
 from worker.runtime.worker import WorkerRuntime
+from worker.types import BusinessEvent, FramePacket
 
 
 class _FakeServingClient:
@@ -120,6 +124,32 @@ def _runtime(*camera_ids: str) -> WorkerRuntime:
     return WorkerRuntime(_config(*camera_ids), serving_client=_FakeServingClient())
 
 
+def _packet(camera_id: str = "camera-a") -> FramePacket:
+    return FramePacket(
+        camera_id=camera_id,
+        frame=Frame(1, 1.0, np.zeros((2, 2, 3), dtype=np.uint8)),
+        pts=1.0,
+        seq=1,
+        width=2,
+        height=2,
+        decode_time_ms=0.1,
+        worker_boot_id="boot-1",
+        stream_epoch=1,
+    )
+
+
+def _event(identity: str = "event-1") -> BusinessEvent:
+    return BusinessEvent(
+        "fall",
+        "fall_detected",
+        identity,
+        "camera-a",
+        "facility-a",
+        1.0,
+        0.9,
+    )
+
+
 def test_null_clip_recorder_always_reports_no_bound_clip() -> None:
     # Given: the interim/degraded recorder composition falls back to when the
     # shared ClipRecorder never started (see _compose_evidence_export's
@@ -129,10 +159,12 @@ def test_null_clip_recorder_always_reports_no_bound_clip() -> None:
 
     # When/Then: no event, regardless of the allow_new_clip request, ever
     # gets a bound clip id.
-    assert recorder.on_event("camera-a", "event-1", "fall_detected") is None
-    assert (
-        recorder.on_event("camera-a", "event-1", "fall_detected", allow_new_clip=False) is None
-    )
+    packet = _packet()
+    try:
+        assert recorder.on_event(packet, _event()) is None
+        assert recorder.on_event(packet, _event(), allow_new_clip=False) is None
+    finally:
+        packet.release()
 
 
 def test_default_clip_recorder_degrades_to_null_when_the_shared_recorder_never_started() -> None:
@@ -149,10 +181,14 @@ def test_default_clip_recorder_degrades_to_null_when_the_shared_recorder_never_s
     # Then: it degrades to the null recorder rather than failing camera
     # activation, matching the branch EvidenceEventSink already exercises.
     assert isinstance(recorder, worker_module._NullClipRecorder)  # noqa: SLF001
-    assert recorder.on_event("camera-a", "event-1") is None
+    packet = _packet()
+    try:
+        assert recorder.on_event(packet, _event()) is None
+    finally:
+        packet.release()
 
 
-def test_default_clip_recorder_view_forwards_the_callers_camera_id() -> None:
+def test_default_clip_recorder_view_forwards_the_trigger_packet() -> None:
     # Given: a runtime whose shared ClipRecorder has started (simulated here
     # by a fake standing in for the real worker.ClipRecorder actor, since
     # test_worker_evidence_export_composition.py already proves the real
@@ -160,17 +196,16 @@ def test_default_clip_recorder_view_forwards_the_callers_camera_id() -> None:
     # ClipRecorder instance).
     @dataclass(slots=True)
     class _FakeSharedRecorder:
-        calls: list[tuple[str, str, str | None, bool]] = field(default_factory=list)
+        calls: list[tuple[FramePacket, BusinessEvent, bool]] = field(default_factory=list)
 
         def on_event(
             self,
-            camera_id: str,
-            event_ref: str,
-            event_type: str | None = None,
+            trigger_packet: FramePacket,
+            event: BusinessEvent,
             *,
             allow_new_clip: bool = True,
         ) -> str | None:
-            self.calls.append((camera_id, event_ref, event_type, allow_new_clip))
+            self.calls.append((trigger_packet, event, allow_new_clip))
             return "clip-xyz"
 
     runtime = _runtime("camera-a")
@@ -183,14 +218,17 @@ def test_default_clip_recorder_view_forwards_the_callers_camera_id() -> None:
     view = runtime._default_clip_recorder(camera)  # noqa: SLF001
     assert isinstance(view, worker_module._CameraClipRecorderView)  # noqa: SLF001
     assert view.camera_id == "camera-a"
-    result = view.on_event("camera-a", "event-1", "fall_detected")
+    packet = _packet()
+    try:
+        event = _event()
+        result = view.on_event(packet, event)
 
-    # Then: the view is a thin per-camera identity over the one shared
-    # actor -- it delegates the caller-supplied camera_id straight through,
-    # and the shared recorder's own per-camera state keying (not the view)
-    # is what keeps camera state isolated.
-    assert result == "clip-xyz"
-    assert fake_recorder.calls == [("camera-a", "event-1", "fall_detected", True)]
+        # Then: the view delegates the authoritative triggering packet without
+        # reducing its boot/stream/frame identity back to a camera string.
+        assert result == "clip-xyz"
+        assert fake_recorder.calls == [(packet, event, True)]
+    finally:
+        packet.release()
 
 
 def test_default_clip_recorder_wraps_the_real_clip_recorder_type() -> None:

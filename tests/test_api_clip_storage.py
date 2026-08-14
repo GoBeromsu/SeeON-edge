@@ -38,7 +38,9 @@ def test_get_storage_reports_usage_and_defaults_selected_path_to_empty(clip_stor
 
     assert response.status_code == 200
     body = response.json()
-    assert body["root"] == str(clip_store_env)
+    assert body["mount_label"] == "clip-store"
+    assert "root" not in body
+    assert str(clip_store_env) not in response.text
     assert body["selected_path"] == ""
     assert isinstance(body["total_bytes"], int)
     assert isinstance(body["used_bytes"], int)
@@ -123,9 +125,7 @@ def test_browse_rejects_a_symlink_escape(clip_store_env, tmp_path) -> None:
     with TestClient(create_app(lifespan=no_lifespan)) as client:
         _login(client)
         root_listing = client.get("/api/v1/clips/storage/browse")
-        walk_into_link = client.get(
-            "/api/v1/clips/storage/browse", params={"path": "escape-link"}
-        )
+        walk_into_link = client.get("/api/v1/clips/storage/browse", params={"path": "escape-link"})
 
     # A symlink is filtered out of the directory listing (not reported as a
     # real directory)...
@@ -148,7 +148,9 @@ def test_put_location_persists_the_selection_and_returns_the_storage_shape(
 
     assert response.status_code == 200
     assert response.json()["selected_path"] == "backup"
-    assert response.json()["root"] == str(clip_store_env)
+    assert response.json()["mount_label"] == "clip-store"
+    assert "root" not in response.json()
+    assert str(clip_store_env) not in response.text
     assert get_response.json()["selected_path"] == "backup"
 
 

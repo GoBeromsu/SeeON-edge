@@ -1,12 +1,10 @@
 from __future__ import annotations
 
 import logging
+import math
+from dataclasses import dataclass
 from functools import lru_cache
 from typing import Final
-
-import cv2
-import numpy as np
-from numpy.typing import NDArray
 
 from contracts.observation import BoundingBox
 
@@ -14,16 +12,14 @@ LOGGER: Final = logging.getLogger(__name__)
 
 # Rasterized-mask cache for bed polygons (see `_bed_polygon_mask`). Bounded
 # so a long-running worker with many cameras/polygon updates cannot grow
-# this unboundedly; entries are cheap (one small uint8 array each) so a
-# generous size costs little.
+# this unboundedly; entries are cheap (one small per-row prefix-sum tuple
+# each) so a generous size costs little.
 _MASK_CACHE_SIZE: Final = 64
 
 
 def best_bed_id(containments: tuple[float, ...], min_containment: float) -> int | None:
     candidates = (
-        (ratio, bed_id)
-        for bed_id, ratio in enumerate(containments)
-        if ratio >= min_containment
+        (ratio, bed_id) for bed_id, ratio in enumerate(containments) if ratio >= min_containment
     )
     best = max(candidates, key=lambda item: (item[0], -item[1]), default=None)
     return None if best is None else best[1]
@@ -63,9 +59,22 @@ def _aabb_containment_ratio(person: BoundingBox, bed: BoundingBox, person_area: 
     return intersection / person_area
 
 
-# (mask, origin_x, origin_y): `mask[y - origin_y, x - origin_x]` is 1 iff
-# pixel (x, y) in the bed's own coordinate space is inside its polygon.
-_BedMask = tuple[NDArray[np.uint8], int, int]
+@dataclass(frozen=True, slots=True)
+class _BedMask:
+    """A rasterized bed polygon, local to its own AABB.
+
+    Pure-Python (no ndarray): `row_prefix_sums[y]` is a length-`width + 1`
+    tuple of cumulative filled-pixel counts for rasterized row `y`, so the
+    number of filled pixels in columns `[left, right)` of row `y` is
+    `row_prefix_sums[y][right] - row_prefix_sums[y][left]` -- an O(height)
+    replacement for what used to be a single vectorized ndarray-slice sum.
+    """
+
+    origin_x: int
+    origin_y: int
+    width: int
+    height: int
+    row_prefix_sums: tuple[tuple[int, ...], ...]
 
 
 @lru_cache(maxsize=_MASK_CACHE_SIZE)
@@ -80,13 +89,14 @@ def _bed_polygon_mask(polygon: tuple[tuple[int, int], ...]) -> _BedMask | None:
     trace-closure artifact, not a real self-crossing shape). A convex-only
     clip (e.g. Sutherland-Hodgman) is silently wrong for the non-convex
     majority; a general polygon-clipping algorithm correct for both
-    non-convexity and self-intersection
-    (Weiler-Atherton and friends) is a subtle-bug factory nobody here could
-    review with confidence. `cv2.fillPoly`'s scanline rasterizer handles
-    both cases correctly with no special-casing, using a dependency this
-    project already has (`opencv-python-headless`) -- adding an exact
-    polygon-intersection library (e.g. shapely) was judged not worth a new
-    dependency for this alone.
+    non-convexity and self-intersection (Weiler-Atherton and friends) is a
+    subtle-bug factory nobody here could review with confidence. A plain
+    scanline fill (edge-intersection per row, even-odd rule, pixel-center
+    sampling) handles both cases correctly with no special-casing and no
+    ndarray/OpenCV dependency, which `worker/domains` may not import
+    (architecture-audit H3): the domain layer stays numeric/hardware-
+    agnostic, independent of which inference/vision library an
+    infrastructure profile happens to ship.
 
     Deliberately permissive: a polygon that self-intersects still gets
     rasterized (a sane filled region, just not what shoelace-style analytic
@@ -124,20 +134,68 @@ def _bed_polygon_mask(polygon: tuple[tuple[int, int], ...]) -> _BedMask | None:
         )
         return None
 
-    mask: NDArray[np.uint8] = np.zeros((height, width), dtype=np.uint8)
-    shifted = np.array(
-        [[point[0] - origin_x, point[1] - origin_y] for point in polygon],
-        dtype=np.int32,
-    ).reshape((1, -1, 2))
-    cv2.fillPoly(mask, shifted, 1)
-    if not mask.any():
+    row_prefix_sums = _rasterize_rows(polygon, origin_x, origin_y, width, height)
+    if not any(row[-1] > 0 for row in row_prefix_sums):
         LOGGER.warning(
             "bed polygon rasterized to an empty mask; falling back to AABB "
             "containment for this bed region: %r",
             polygon,
         )
         return None
-    return mask, origin_x, origin_y
+    return _BedMask(origin_x, origin_y, width, height, row_prefix_sums)
+
+
+def _rasterize_rows(
+    polygon: tuple[tuple[int, int], ...],
+    origin_x: int,
+    origin_y: int,
+    width: int,
+    height: int,
+) -> tuple[tuple[int, ...], ...]:
+    """Scanline-fill `polygon` (local to its AABB) into per-row prefix sums.
+
+    Standard even-odd scanline polygon fill: for each integer row `y`,
+    intersect every non-horizontal edge against the pixel-center scanline
+    `y + 0.5`, sort the intersection x-coordinates, and fill columns between
+    each consecutive pair. Edge y-intervals are treated half-open
+    (`[low, high)`) so a shared vertex between two edges on the same
+    scanline is counted exactly once, matching the usual scan-conversion
+    convention.
+    """
+    shifted = tuple((point[0] - origin_x, point[1] - origin_y) for point in polygon)
+    edge_count = len(shifted)
+    edges = tuple(
+        (shifted[index], shifted[(index + 1) % edge_count]) for index in range(edge_count)
+    )
+    rows: list[tuple[int, ...]] = []
+    for y in range(height):
+        intersections: list[float] = []
+        for (x0, y0), (x1, y1) in edges:
+            if y0 == y1:
+                continue
+            low_y, high_y = (y0, y1) if y0 < y1 else (y1, y0)
+            if not (low_y <= y < high_y):
+                continue
+            t = (y - y0) / (y1 - y0)
+            intersections.append(x0 + t * (x1 - x0))
+        intersections.sort()
+        # `delta` is a difference array over filled columns: +1 at each
+        # fill-run's start, -1 at its end, so a running sum reconstructs
+        # which columns are filled without ever materializing a row buffer.
+        delta = [0] * (width + 1)
+        for pair_index in range(0, len(intersections) - 1, 2):
+            start_column = max(math.ceil(intersections[pair_index] - 0.5), 0)
+            end_column = min(math.ceil(intersections[pair_index + 1] - 0.5), width)
+            if end_column > start_column:
+                delta[start_column] += 1
+                delta[end_column] -= 1
+        cumulative = [0] * (width + 1)
+        running = 0
+        for column in range(width):
+            running += delta[column]
+            cumulative[column + 1] = cumulative[column] + (1 if running > 0 else 0)
+        rows.append(tuple(cumulative))
+    return tuple(rows)
 
 
 def _all_collinear(points: tuple[tuple[int, int], ...]) -> bool:
@@ -155,18 +213,17 @@ def _all_collinear(points: tuple[tuple[int, int], ...]) -> bool:
     )
 
 
-def _mask_containment_ratio(
-    person: BoundingBox, mask_info: _BedMask, person_area: int
-) -> float:
-    mask, origin_x, origin_y = mask_info
-    height, width = mask.shape
-    left = max(person.x1 - origin_x, 0)
-    top = max(person.y1 - origin_y, 0)
-    right = min(person.x2 - origin_x, width)
-    bottom = min(person.y2 - origin_y, height)
+def _mask_containment_ratio(person: BoundingBox, mask_info: _BedMask, person_area: int) -> float:
+    left = max(person.x1 - mask_info.origin_x, 0)
+    top = max(person.y1 - mask_info.origin_y, 0)
+    right = min(person.x2 - mask_info.origin_x, mask_info.width)
+    bottom = min(person.y2 - mask_info.origin_y, mask_info.height)
     if right <= left or bottom <= top:
         return 0.0
-    intersection = int(mask[top:bottom, left:right].sum())
+    intersection = sum(
+        mask_info.row_prefix_sums[row][right] - mask_info.row_prefix_sums[row][left]
+        for row in range(top, bottom)
+    )
     if intersection == 0:
         return 0.0
     return intersection / person_area

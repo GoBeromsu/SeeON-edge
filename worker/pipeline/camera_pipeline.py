@@ -25,6 +25,7 @@ from worker.interfaces.bus import FrameSubscription
 from worker.interfaces.output import EventSink
 from worker.pipeline.analytics import CompositeExtractor
 from worker.pipeline.decision import EventAggregator
+from worker.pipeline.trace import BoundedTraceWriter, TraceCapture
 from worker.types import BusinessEvent, FramePacket
 
 LOGGER: Final = logging.getLogger(__name__)
@@ -94,6 +95,8 @@ class CameraPipelinePump:
         max_frames: int | None = None,
         live_view: LiveViewPublisher | None = None,
         debug_snapshots_provider: Callable[[int], tuple[Any, ...]] | None = None,
+        trace_capture: TraceCapture | None = None,
+        trace_writer: BoundedTraceWriter | None = None,
     ) -> None:
         self._camera_id = camera_id
         self._subscription = subscription
@@ -106,6 +109,10 @@ class CameraPipelinePump:
         self._max_frames = max_frames
         self._live_view = live_view
         self._debug_snapshots_provider = debug_snapshots_provider
+        if (trace_capture is None) != (trace_writer is None):
+            raise ValueError("trace capture and writer must be composed together")
+        self._trace_capture = trace_capture
+        self._trace_writer = trace_writer
         self._fps_timestamps: deque[float] = deque()
         self._stop_event = threading.Event()
         self.failure_count = 0
@@ -127,6 +134,7 @@ class CameraPipelinePump:
             except Exception as error:  # noqa: BLE001 - per-camera boundary
                 self._record_failure(error)
             finally:
+                packet.release()
                 # `processed_count` (and therefore `--max-frames-per-camera`'s
                 # cap) counts frames *attempted*, not frames that succeeded --
                 # a failed `_pump_one` still advances it. This matches edge's
@@ -146,8 +154,26 @@ class CameraPipelinePump:
         self._record_measured_fps()
         result = self._analytics.process(packet)
         self._publish_live_view(packet, result.observation)
-        for event in self._decision.update(result.decision_input):
-            self._sink.emit(self._attach_evidence(event, packet, result.observation))
+        events = self._decision.update(result.decision_input)
+        if self._trace_capture is not None and self._trace_writer is not None:
+            traced = self._trace_capture.capture(
+                self._trace_writer,
+                packet,
+                result,
+                events,
+                require_persisted=bool(events),
+            )
+            if events:
+                if isinstance(traced, bool):  # pragma: no cover - capture contract
+                    raise RuntimeError("event trace capture returned no traced events")
+                events = traced
+        for event in events:
+            attached = self._attach_evidence(event, packet, result.observation)
+            emit_for_frame = getattr(self._sink, "emit_for_frame", None)
+            if emit_for_frame is None:
+                self._sink.emit(attached)
+            else:
+                emit_for_frame(attached, packet)
 
     def _publish_live_view(
         self, packet: FramePacket, observation: FrameObservation

@@ -5,23 +5,28 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Final, Literal, TypeAlias
 
+from worker.runtime.profile.descriptor import (
+    MemoryPathStep,
+    ProfileConverter,
+    ProfileStage,
+    RuntimeProfileDescriptor,
+    RuntimeProfileEdge,
+)
 from worker.runtime.profile.device import CudaProbeSource, probe_cuda
+from worker.types import FrameCapability, MemoryKind, PipelineProfile, PixelFormat
 
 DevicePolicy: TypeAlias = Literal["cuda", "mps", "cpu"]
 DecodePolicy: TypeAlias = Literal["nvdec", "opencv", "vaapi"]
 EncodePolicy: TypeAlias = Literal["h264_nvenc", "libx264"]
 MpsProbeSource: TypeAlias = Callable[[], bool]
+# `nvidia-device-experimental`'s own concrete-stage capability check --
+# distinct from `CudaProbeSource` (plain `torch.cuda` usability, shared by
+# the production `cuda`/`nvidia-host-bridge` verifier): this source answers
+# the Todo 17 question (device-resident pool, CUDA stream/event, DLPack) and
+# must never be satisfied by a host that only passes the plain CUDA check.
+DeviceResidentProbeSource: TypeAlias = Callable[[], "VerifyResult"]
 
 ML_WORKER_PROFILE_ENV: Final = "ML_WORKER_PROFILE"
-# Issue #133: the worker must boot with zero env vars. "cpu" is the only
-# profile in PROFILE_REGISTRY whose device verifier (`_verify_cpu`) always
-# succeeds with no injected capability probe -- "cuda"/"mps" fail closed
-# without one (`default_verifiers()` wires no probe source by default), so
-# defaulting to either would make an unconfigured boot device-dependent
-# (it would pass on a real GPU/Apple-Silicon host and fail everywhere else,
-# including CI). Real deployments still set ML_WORKER_PROFILE explicitly
-# per target (compose.edge.yaml); this default only governs the zero-config
-# local/dev/CI boot path.
 DEFAULT_PROFILE_NAME: Final = "cpu"
 
 
@@ -43,37 +48,336 @@ class VerifyResult:
 
 DeviceVerifier: TypeAlias = Callable[[], VerifyResult]
 DecodeProbe: TypeAlias = Callable[[str], VerifyResult]
-# Encode has only one non-trivial backend to preflight (h264_nvenc; libx264
-# ships with virtually every ffmpeg build), so unlike DecodeProbe this takes
-# no backend-name argument -- it always answers "is NVENC usable".
 EncodeProbe: TypeAlias = Callable[[], VerifyResult]
+
+
+_HOST_RGB = FrameCapability(MemoryKind.HOST, PixelFormat.RGB24)
+_CUDA_RGB = FrameCapability(MemoryKind.CUDA_DEVICE, PixelFormat.RGB24)
+_CUDA_NV12 = FrameCapability(MemoryKind.CUDA_DEVICE, PixelFormat.NV12)
+_VAAPI_NV12 = FrameCapability(MemoryKind.VAAPI_SURFACE, PixelFormat.NV12)
+_MPS_RGB = FrameCapability(MemoryKind.MPS_DEVICE, PixelFormat.RGB24)
 
 
 @dataclass(frozen=True, slots=True)
 class ProfileSpec:
+    """One canonical infrastructure profile plus its accepted legacy names."""
+
     name: str
+    accepted_names: tuple[str, ...]
     device: DevicePolicy
     decode: DecodePolicy
+    preprocess: str
+    inference: str
+    overlay: str
     encode: EncodePolicy
+    pipeline: PipelineProfile | None = None
+    decode_fallback: DecodePolicy | None = None
+    encode_fallback: EncodePolicy | None = None
+    concrete_stages_available: bool = True
+
+    def __post_init__(self) -> None:
+        if not self.accepted_names or self.accepted_names[0] != self.name:
+            raise ValueError("canonical profile name must be the first accepted name")
+        if len(self.accepted_names) != len(set(self.accepted_names)):
+            raise ValueError(f"profile {self.name!r} contains duplicate accepted names")
+
+    def with_pipeline(self, pipeline: PipelineProfile) -> ProfileSpec:
+        return ProfileSpec(
+            self.name,
+            self.accepted_names,
+            self.device,
+            self.decode,
+            self.preprocess,
+            self.inference,
+            self.overlay,
+            self.encode,
+            pipeline,
+            self.decode_fallback,
+            self.encode_fallback,
+            self.concrete_stages_available,
+        )
 
 
+_CPU_HOST = ProfileSpec(
+    "cpu-host",
+    ("cpu-host", "cpu"),
+    "cpu",
+    "opencv",
+    "numpy-rgb24",
+    "cpu",
+    "numpy-host",
+    "libx264",
+    None,
+)
+_NVIDIA_HOST_BRIDGE = ProfileSpec(
+    "nvidia-host-bridge",
+    ("nvidia-host-bridge", "cuda"),
+    "cuda",
+    "nvdec",
+    "cuda-tensor-upload",
+    "cuda",
+    "numpy-host",
+    "h264_nvenc",
+    None,
+    encode_fallback="libx264",
+)
+_INTEL_VAAPI_HOST = ProfileSpec(
+    "intel-vaapi-host",
+    ("intel-vaapi-host", "igpu"),
+    "cpu",
+    "vaapi",
+    "numpy-rgb24",
+    "cpu",
+    "numpy-host",
+    "libx264",
+    None,
+    decode_fallback="opencv",
+)
+_APPLE_MPS_HOST = ProfileSpec(
+    "apple-mps-host",
+    ("apple-mps-host", "mps"),
+    "mps",
+    "opencv",
+    "mps-tensor-upload",
+    "mps",
+    "numpy-host",
+    "libx264",
+    None,
+)
+_NVIDIA_DEVICE_EXPERIMENTAL = ProfileSpec(
+    "nvidia-device-experimental",
+    ("nvidia-device-experimental",),
+    "cuda",
+    "nvdec",
+    "cuda-nv12-to-rgb24",
+    "cuda",
+    "cuda-device",
+    "h264_nvenc",
+    None,
+    concrete_stages_available=False,
+)
+
+CANONICAL_PROFILE_REGISTRY: Final[Mapping[str, ProfileSpec]] = MappingProxyType(
+    {
+        spec.name: spec
+        for spec in (
+            _CPU_HOST,
+            _NVIDIA_HOST_BRIDGE,
+            _INTEL_VAAPI_HOST,
+            _APPLE_MPS_HOST,
+            _NVIDIA_DEVICE_EXPERIMENTAL,
+        )
+    }
+)
+PROFILE_ALIASES: Final[Mapping[str, str]] = MappingProxyType(
+    {
+        accepted: spec.name
+        for spec in CANONICAL_PROFILE_REGISTRY.values()
+        for accepted in spec.accepted_names
+        if accepted != spec.name
+    }
+)
 PROFILE_REGISTRY: Final[Mapping[str, ProfileSpec]] = MappingProxyType(
     {
-        "cuda": ProfileSpec("cuda", "cuda", "nvdec", "h264_nvenc"),
-        "mps": ProfileSpec("mps", "mps", "opencv", "libx264"),
-        "cpu": ProfileSpec("cpu", "cpu", "opencv", "libx264"),
-        # Intel iGPU RTSP decode via VAAPI (decode only -- inference stays on
-        # CPU here; OpenVINO GPU/NPU inference is a separate follow-up). Device
-        # stays "cpu" because torch has no XPU kernels on this repo's pinned
-        # cu130 index -- only the decode leg moves to the iGPU.
-        "igpu": ProfileSpec("igpu", "cpu", "vaapi", "libx264"),
+        accepted: spec
+        for spec in CANONICAL_PROFILE_REGISTRY.values()
+        for accepted in spec.accepted_names
     }
 )
 
 
 @dataclass(frozen=True, slots=True)
+class ProfileSelection:
+    requested_name: str
+    spec: ProfileSpec
+
+    @property
+    def canonical_name(self) -> str:
+        return self.spec.name
+
+
+@dataclass(frozen=True, slots=True)
 class BootDependencies:
     verifiers: Mapping[str, DeviceVerifier]
+
+
+def requested_profile_name(env: Mapping[str, str]) -> str:
+    raw = env.get(ML_WORKER_PROFILE_ENV)
+    return DEFAULT_PROFILE_NAME if raw is None or not raw.strip() else raw.strip()
+
+
+def select_profile(
+    env: Mapping[str, str],
+    registry: Mapping[str, ProfileSpec] = PROFILE_REGISTRY,
+) -> ProfileSelection:
+    requested = requested_profile_name(env)
+    try:
+        return ProfileSelection(requested, registry[requested])
+    except KeyError as error:
+        choices = "|".join(sorted(registry))
+        raise ProfileError(f"unknown ML_WORKER_PROFILE {requested!r}; set {choices}") from error
+
+
+def _edge(
+    source_stage: ProfileStage,
+    target_stage: ProfileStage,
+    source: FrameCapability,
+    target: FrameCapability,
+    converter_name: str | None = None,
+) -> RuntimeProfileEdge:
+    return RuntimeProfileEdge(source_stage, target_stage, source, target, converter_name)
+
+
+def _memory_path_for(
+    spec: ProfileSpec,
+    decode: DecodePolicy,
+    encode: EncodePolicy,
+) -> tuple[
+    tuple[MemoryPathStep, ...],
+    tuple[ProfileConverter, ...],
+    tuple[RuntimeProfileEdge, ...],
+]:
+    del decode  # All current production decode adapters emit host RGB24 packets.
+    if spec.name == "nvidia-host-bridge":
+        encode_capability = _CUDA_RGB if encode == "h264_nvenc" else _HOST_RGB
+        steps = (
+            MemoryPathStep("decode", MemoryKind.HOST, PixelFormat.RGB24),
+            MemoryPathStep("preprocess", MemoryKind.HOST, PixelFormat.RGB24),
+            MemoryPathStep("inference", MemoryKind.CUDA_DEVICE, PixelFormat.RGB24),
+            MemoryPathStep("overlay", MemoryKind.HOST, PixelFormat.RGB24),
+            MemoryPathStep("encode", encode_capability.memory_kind, PixelFormat.RGB24),
+        )
+        converters = [
+            ProfileConverter("cuda-inference-host-input-upload", _HOST_RGB, _CUDA_RGB, "h2d")
+        ]
+        encode_converter = None
+        if encode == "h264_nvenc":
+            encode_converter = "nvenc-host-input-upload"
+            converters.append(ProfileConverter(encode_converter, _HOST_RGB, _CUDA_RGB, "h2d"))
+        return (
+            steps,
+            tuple(converters),
+            (
+                _edge("decode", "preprocess", _HOST_RGB, _HOST_RGB),
+                _edge(
+                    "preprocess",
+                    "inference",
+                    _HOST_RGB,
+                    _CUDA_RGB,
+                    "cuda-inference-host-input-upload",
+                ),
+                _edge("decode", "overlay", _HOST_RGB, _HOST_RGB),
+                _edge("overlay", "encode", _HOST_RGB, encode_capability, encode_converter),
+            ),
+        )
+    if spec.name == "apple-mps-host":
+        return (
+            (
+                MemoryPathStep("decode", MemoryKind.HOST, PixelFormat.RGB24),
+                MemoryPathStep("preprocess", MemoryKind.HOST, PixelFormat.RGB24),
+                MemoryPathStep("inference", MemoryKind.MPS_DEVICE, PixelFormat.RGB24),
+                MemoryPathStep("overlay", MemoryKind.HOST, PixelFormat.RGB24),
+                MemoryPathStep("encode", MemoryKind.HOST, PixelFormat.RGB24),
+            ),
+            (ProfileConverter("mps-inference-host-input-upload", _HOST_RGB, _MPS_RGB, "h2d"),),
+            (
+                _edge("decode", "preprocess", _HOST_RGB, _HOST_RGB),
+                _edge(
+                    "preprocess",
+                    "inference",
+                    _HOST_RGB,
+                    _MPS_RGB,
+                    "mps-inference-host-input-upload",
+                ),
+                _edge("decode", "overlay", _HOST_RGB, _HOST_RGB),
+                _edge("overlay", "encode", _HOST_RGB, _HOST_RGB),
+            ),
+        )
+    if spec.name == "nvidia-device-experimental":
+        device_stages: tuple[tuple[ProfileStage, PixelFormat], ...] = (
+            ("decode", PixelFormat.NV12),
+            ("preprocess", PixelFormat.NV12),
+            ("inference", PixelFormat.RGB24),
+            ("overlay", PixelFormat.RGB24),
+            ("encode", PixelFormat.RGB24),
+        )
+        return (
+            tuple(
+                MemoryPathStep(stage, MemoryKind.CUDA_DEVICE, format_)
+                for stage, format_ in device_stages
+            ),
+            (ProfileConverter("cuda-nv12-to-rgb24", _CUDA_NV12, _CUDA_RGB, "none"),),
+            (
+                _edge("decode", "preprocess", _CUDA_NV12, _CUDA_NV12),
+                _edge(
+                    "preprocess",
+                    "inference",
+                    _CUDA_NV12,
+                    _CUDA_RGB,
+                    "cuda-nv12-to-rgb24",
+                ),
+                _edge("inference", "overlay", _CUDA_RGB, _CUDA_RGB),
+                _edge("overlay", "encode", _CUDA_RGB, _CUDA_RGB),
+            ),
+        )
+    host_stages: tuple[ProfileStage, ...] = (
+        "decode",
+        "preprocess",
+        "inference",
+        "overlay",
+        "encode",
+    )
+    return (
+        tuple(MemoryPathStep(stage, MemoryKind.HOST, PixelFormat.RGB24) for stage in host_stages),
+        (),
+        (
+            _edge("decode", "preprocess", _HOST_RGB, _HOST_RGB),
+            _edge("preprocess", "inference", _HOST_RGB, _HOST_RGB),
+            _edge("decode", "overlay", _HOST_RGB, _HOST_RGB),
+            _edge("overlay", "encode", _HOST_RGB, _HOST_RGB),
+        ),
+    )
+
+
+def runtime_descriptor_for(
+    spec: ProfileSpec,
+    *,
+    requested_profile: str,
+    effective_decode: DecodePolicy | None = None,
+    effective_encode: EncodePolicy | None = None,
+    degraded_reasons: tuple[str, ...] = (),
+) -> RuntimeProfileDescriptor:
+    decode = effective_decode or spec.decode
+    encode = effective_encode or spec.encode
+    requested_steps, requested_converters, _requested_edges = _memory_path_for(
+        spec, spec.decode, spec.encode
+    )
+    effective_steps, effective_converters, effective_edges = _memory_path_for(spec, decode, encode)
+
+    return RuntimeProfileDescriptor(
+        requested_profile=requested_profile,
+        canonical_profile=spec.name,
+        requested_decode_backend=spec.decode,
+        effective_decode_backend=decode,
+        requested_preprocess_backend=spec.preprocess,
+        effective_preprocess_backend=spec.preprocess,
+        requested_inference_backend=spec.inference,
+        effective_inference_backend=spec.inference,
+        requested_overlay_backend=spec.overlay,
+        effective_overlay_backend=spec.overlay,
+        requested_encode_backend=spec.encode,
+        effective_encode_backend=encode,
+        requested_memory_steps=requested_steps,
+        effective_memory_steps=effective_steps,
+        requested_converters=requested_converters,
+        effective_converters=effective_converters,
+        effective_edges=effective_edges,
+        degraded_reasons=degraded_reasons,
+        device_resident_after_decode=(
+            spec.name == "nvidia-device-experimental" and decode == "nvdec"
+        ),
+        concrete_stages_available=spec.concrete_stages_available,
+    )
 
 
 def _verify_cuda(source: CudaProbeSource | None) -> VerifyResult:
@@ -85,8 +389,12 @@ def _verify_mps(source: MpsProbeSource | None) -> VerifyResult:
     if source is None:
         return VerifyResult(False, "mps", "device", "MPS capability probe is not configured")
     available = source()
-    reason = "MPS is available" if available else "MPS is unavailable"
-    return VerifyResult(available, "mps", "device", reason)
+    return VerifyResult(
+        available,
+        "mps",
+        "device",
+        "MPS is available" if available else "MPS is unavailable",
+    )
 
 
 def _verify_cpu() -> VerifyResult:
@@ -94,34 +402,46 @@ def _verify_cpu() -> VerifyResult:
 
 
 def _verify_igpu_device() -> VerifyResult:
-    """Device check for the "igpu" profile, which always succeeds like ``_verify_cpu``.
-
-    ``verify_device_or_raise`` keys ``BootDependencies.verifiers`` by
-    ``spec.name`` (``"cuda"``, ``"mps"``, ``"cpu"`` today, all of which equal
-    their own ``spec.device``) -- the "igpu" profile's *name* is ``"igpu"``
-    but its *device* is ``"cpu"`` (only decode moves to the iGPU in this PR;
-    inference stays on CPU), so it needs its own registered verifier key
-    rather than reusing ``"cpu"``'s. Its actual capability check is identical
-    to ``_verify_cpu``'s (torch on CPU always succeeds) -- the real,
-    hardware-touching VAAPI capability check lives in ``DecodeProbe``
-    (``worker.adapters.decode.vaapi.probe.probe_vaapi_capability``, wired in
-    by ``worker/runtime/worker.py``), not here.
-    """
     return VerifyResult(True, "igpu", "device", "CPU is available (decode targets the iGPU)")
+
+
+def _verify_device_resident(source: DeviceResidentProbeSource | None) -> VerifyResult:
+    if source is None:
+        return VerifyResult(
+            False,
+            "nvidia-device-experimental",
+            "device",
+            "device-resident capability probe is not configured",
+        )
+    return source()
 
 
 def default_verifiers(
     *,
     cuda_source: CudaProbeSource | None = None,
     mps_source: MpsProbeSource | None = None,
+    device_resident_source: DeviceResidentProbeSource | None = None,
 ) -> Mapping[str, DeviceVerifier]:
-    """Build fail-closed device verifiers from injected capability probes."""
+    def cuda() -> VerifyResult:
+        return _verify_cuda(cuda_source)
+
+    def mps() -> VerifyResult:
+        return _verify_mps(mps_source)
+
+    def device_resident() -> VerifyResult:
+        return _verify_device_resident(device_resident_source)
+
     return MappingProxyType(
         {
-            "cuda": lambda: _verify_cuda(cuda_source),
-            "mps": lambda: _verify_mps(mps_source),
             "cpu": _verify_cpu,
+            "cpu-host": _verify_cpu,
+            "cuda": cuda,
+            "nvidia-host-bridge": cuda,
+            "nvidia-device-experimental": device_resident,
+            "mps": mps,
+            "apple-mps-host": mps,
             "igpu": _verify_igpu_device,
+            "intel-vaapi-host": _verify_igpu_device,
         }
     )
 
@@ -130,7 +450,6 @@ def default_decode_probe(
     decode: str,
     probes: Mapping[str, Callable[[], VerifyResult]] | None = None,
 ) -> VerifyResult:
-    """Run an injected decode probe, failing closed when one is unavailable."""
     if probes is None or decode not in probes:
         return VerifyResult(
             False,
@@ -142,38 +461,34 @@ def default_decode_probe(
 
 
 def default_encode_probe() -> VerifyResult:
-    """Fail-closed default NVENC probe, used when boot wiring injects none.
-
-    This package holds policy, not hardware access (worker/runtime/AGENTS.md):
-    the real ffmpeg-build probe (`worker.adapters.device.cuda.probe.probe_nvenc_capability`)
-    is only ever wired in by the composition root (`worker/runtime/worker.py`),
-    mirroring `default_decode_probe`'s injection pattern above. Failing closed
-    here is safe by construction because the caller
-    (`worker.runtime.profile.boot.resolve_encode_or_fallback`) never raises on
-    a failed probe -- it demotes to `libx264` with a WARNING instead of
-    aborting boot, unlike `preflight_decode_or_raise`.
-    """
     return VerifyResult(
         False, "cuda", "encode", "h264_nvenc capability probe is not configured"
     )
 
 
 __all__ = [
+    "CANONICAL_PROFILE_REGISTRY",
     "DEFAULT_PROFILE_NAME",
     "ML_WORKER_PROFILE_ENV",
+    "PROFILE_ALIASES",
     "PROFILE_REGISTRY",
     "BootDependencies",
     "DecodePolicy",
     "DecodeProbe",
     "DevicePolicy",
+    "DeviceResidentProbeSource",
     "DeviceVerifier",
     "EncodePolicy",
     "EncodeProbe",
     "ProfileError",
+    "ProfileSelection",
     "ProfileSpec",
     "ProfileVerifyError",
     "VerifyResult",
     "default_decode_probe",
     "default_encode_probe",
     "default_verifiers",
+    "requested_profile_name",
+    "runtime_descriptor_for",
+    "select_profile",
 ]

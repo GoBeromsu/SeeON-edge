@@ -61,6 +61,7 @@ from worker.runtime.config.local_env import (
     ML_WORKER_FALL_MODEL_WINDOW_ENV,
     clip_recording_config_from_environment,
     fall_model_config_from_environment,
+    reject_retired_worker_environment,
     resolve_local_overrides,
     worker_models_config_from_environment,
 )
@@ -147,6 +148,7 @@ __all__ = [
     "pull_worker_config",
     "pull_worker_config_poll",
     "resolve_config_path",
+    "reject_retired_worker_environment",
     "resolve_local_overrides",
     "resolve_runtime_config",
     "resolve_startup_config",

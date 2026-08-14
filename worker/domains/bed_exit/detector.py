@@ -15,7 +15,7 @@ from worker.domains.bed_exit.schema import (
     BedExitFrame,
     BedStatus,
 )
-from worker.types import BusinessEvent, DecisionInput
+from worker.types import BusinessEvent, DecisionInput, DecisionTraceSnapshot
 
 
 class BedExitScoringRecorder(Protocol):
@@ -85,6 +85,7 @@ class BedExitMonitor:
         self._assignments: dict[int, _Assignment] = {}
         self._latch: BedExitLatch = BedExitLatch()
         self.last_debug_snapshot: BedExitDebugSnapshot | None = None
+        self.last_trace_snapshots: tuple[DecisionTraceSnapshot, ...] = ()
         self._scoring_recorder = scoring_recorder
         # Cumulative-since-boot, matching `StageTimingAccumulator.max_sec` and
         # `BedRegionCacheCounterSnapshot`'s precedent elsewhere in this
@@ -98,12 +99,35 @@ class BedExitMonitor:
         self._grace_positive_transitions: int = 0
         self._assignments_made: int = 0
 
+    @property
+    def config(self) -> BedExitConfig:
+        return self._config
+
     def update_night_window(self, night_window: NightWindow | None) -> None:
         self._night_window = night_window
 
     def update(self, input_value: DecisionInput) -> tuple[BusinessEvent, ...]:
         observation = input_value.observation
         if not _bed_region_is_usable(input_value.bed_region.source) or not observation.bed_boxes:
+            reason = (
+                "bed-region-unavailable"
+                if not _bed_region_is_usable(input_value.bed_region.source)
+                else "bed-observation-missing"
+            )
+            self.last_trace_snapshots = (
+                DecisionTraceSnapshot(
+                    reason=reason,
+                    previous_state="unknown",
+                    current_state="no-decision",
+                    triggered=False,
+                    track_id=None,
+                    bed_id=None,
+                    missing_values={
+                        "containment_ratio": reason,
+                        "bed_id": reason,
+                    },
+                ),
+            )
             self.last_debug_snapshot = BedExitDebugSnapshot(
                 frame_index=input_value.frame_index,
                 person_boxes=observation.boxes,
@@ -150,6 +174,7 @@ class BedExitMonitor:
             person_ids = tuple(range(len(observation.boxes)))
             live_ids = set(person_ids)
         events: list[BedExitEvent] = []
+        traces: list[DecisionTraceSnapshot] = []
         occupied: dict[int, int] = {}
         exit_beds: set[int] = set()
 
@@ -183,9 +208,29 @@ class BedExitMonitor:
         # precision becomes the priority, #246 has the prepared remedy
         # (`>= 2`) and the caveat it requires first extending #218's
         # regression test past its current 1-frame script.
-        for stale_id in set(self._assignments) - live_ids:
+        for stale_id in sorted(set(self._assignments) - live_ids):
             assignment = self._assignments[stale_id]
-            if assignment.bed_id is not None and assignment.grace_frames > 0:
+            triggered = assignment.bed_id is not None and assignment.grace_frames > 0
+            traces.append(
+                DecisionTraceSnapshot(
+                    reason="stale-track-exit" if triggered else "stale-track-clear",
+                    previous_state=("live-grace" if assignment.grace_frames > 0 else "contained"),
+                    current_state="triggered" if triggered else "retired",
+                    triggered=triggered,
+                    track_id=stale_id,
+                    bed_id=assignment.bed_id,
+                    values={
+                        "grace_frames_before": assignment.grace_frames,
+                        "grace_threshold": self._config.grace_frames,
+                        "min_containment": self._config.min_containment,
+                    },
+                    missing_values={
+                        "containment_ratio": "track-no-longer-live",
+                    },
+                )
+            )
+            if triggered:
+                assert assignment.bed_id is not None
                 events.append(BedExitEvent(person_id=stale_id, bed_id=assignment.bed_id))
                 exit_beds.add(assignment.bed_id)
             del self._assignments[stale_id]
@@ -210,22 +255,90 @@ class BedExitMonitor:
                     self._assignments_made += 1
                 if assignment.bed_id is not None:
                     occupied[assignment.bed_id] = person_id
+                traces.append(
+                    DecisionTraceSnapshot(
+                        reason=(
+                            "assigned"
+                            if assignment.bed_id is not None
+                            else "assignment-hold"
+                            if candidate_bed_id is not None
+                            else "below-containment"
+                        ),
+                        previous_state="unassigned",
+                        current_state=(
+                            "contained" if assignment.bed_id is not None else "unassigned"
+                        ),
+                        triggered=False,
+                        track_id=person_id,
+                        bed_id=(
+                            assignment.bed_id if assignment.bed_id is not None else candidate_bed_id
+                        ),
+                        values={
+                            "containment_ratio": max(containments),
+                            "min_containment": self._config.min_containment,
+                            "candidate_frames": assignment.candidate_frames,
+                            "hold_frames_threshold": self._config.hold_frames,
+                        },
+                    )
+                )
                 continue
 
             own_bed_id = assignment.bed_id
             own_ratio = containments[own_bed_id] if own_bed_id < len(containments) else 0.0
             if own_ratio >= self._config.min_containment:
+                previous_grace = assignment.grace_frames
                 assignment.grace_frames = 0
                 occupied[own_bed_id] = person_id
+                traces.append(
+                    DecisionTraceSnapshot(
+                        reason="contained",
+                        previous_state="live-grace" if previous_grace > 0 else "contained",
+                        current_state="contained",
+                        triggered=False,
+                        track_id=person_id,
+                        bed_id=own_bed_id,
+                        values={
+                            "containment_ratio": own_ratio,
+                            "min_containment": self._config.min_containment,
+                            "grace_frames_before": previous_grace,
+                            "grace_frames_after": 0,
+                            "grace_threshold": self._config.grace_frames,
+                        },
+                    )
+                )
                 continue
             if any(
                 bed_id != own_bed_id and ratio >= self._config.min_containment
                 for bed_id, ratio in enumerate(containments)
             ):
+                previous_grace = assignment.grace_frames
                 assignment.grace_frames = 0
+                traces.append(
+                    DecisionTraceSnapshot(
+                        reason="contained-in-other-bed",
+                        previous_state="live-grace" if previous_grace > 0 else "contained",
+                        current_state="other-bed",
+                        triggered=False,
+                        track_id=person_id,
+                        bed_id=own_bed_id,
+                        values={
+                            "containment_ratio": own_ratio,
+                            "max_other_containment_ratio": max(
+                                ratio
+                                for bed_id, ratio in enumerate(containments)
+                                if bed_id != own_bed_id
+                            ),
+                            "min_containment": self._config.min_containment,
+                            "grace_frames_before": previous_grace,
+                            "grace_frames_after": 0,
+                            "grace_threshold": self._config.grace_frames,
+                        },
+                    )
+                )
                 continue
 
-            was_off_bed_start = assignment.grace_frames == 0
+            grace_before = assignment.grace_frames
+            was_off_bed_start = grace_before == 0
             assignment.grace_frames += 1
             if was_off_bed_start:
                 # #238 signal (c): counts each *entry* into the grace window
@@ -235,7 +348,25 @@ class BedExitMonitor:
                 # Deliberately a plain counter, not a set of track ids, to
                 # stay O(1) in memory for a full night across 13 cameras.
                 self._grace_positive_transitions += 1
-            if assignment.grace_frames > self._config.grace_frames:
+            triggered = assignment.grace_frames > self._config.grace_frames
+            traces.append(
+                DecisionTraceSnapshot(
+                    reason="live-grace-exit" if triggered else "live-grace",
+                    previous_state="contained" if grace_before == 0 else "live-grace",
+                    current_state="triggered" if triggered else "live-grace",
+                    triggered=triggered,
+                    track_id=person_id,
+                    bed_id=own_bed_id,
+                    values={
+                        "containment_ratio": own_ratio,
+                        "min_containment": self._config.min_containment,
+                        "grace_frames_before": grace_before,
+                        "grace_frames_after": assignment.grace_frames,
+                        "grace_threshold": self._config.grace_frames,
+                    },
+                )
+            )
+            if triggered:
                 events.append(BedExitEvent(person_id=person_id, bed_id=own_bed_id))
                 exit_beds.add(own_bed_id)
                 assignment.clear_after_exit()
@@ -255,6 +386,19 @@ class BedExitMonitor:
             )
             for bed_id, bed_box in enumerate(observation.bed_boxes)
         )
+        if not traces:
+            traces.append(
+                DecisionTraceSnapshot(
+                    reason="person-observation-missing",
+                    previous_state="unknown",
+                    current_state="no-decision",
+                    triggered=False,
+                    track_id=None,
+                    bed_id=None,
+                    missing_values={"containment_ratio": "no-observed-person"},
+                )
+            )
+        self.last_trace_snapshots = tuple(traces)
         return BedExitFrame(statuses=statuses, events=tuple(events))
 
     def _business_event(self, event: BedExitEvent, time_sec: float) -> BusinessEvent:

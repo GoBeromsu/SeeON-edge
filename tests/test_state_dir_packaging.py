@@ -1,11 +1,9 @@
-"""Static packaging contract: compose.edge.yaml volume mounts, Dockerfile.edge /
-Dockerfile.backend ``RUN mkdir -p`` lines, and the ml-worker/ml-api
-``resolve_state_dir`` resolvers must all agree on the same image-owned state
-directory (Pre-mortem Scenario 1: a mount/resolver drift makes every redeploy
-silently start from empty state).
+"""Static packaging contract for local runtime paths and central edge state.
 
-No live Docker required — everything here is parsed as text/YAML, so this file
-carries no ``real_stack`` marker and always runs in CI.
+The API and worker retain separate image-owned XDG state directories for
+non-database runtime files, but all persistent SQLite owners use the one
+``edge-state`` volume at ``/var/lib/seeon-state/edge.sqlite3``. The migrator
+alone also mounts the two released legacy volumes during one-time import.
 """
 
 from __future__ import annotations
@@ -15,6 +13,11 @@ from pathlib import Path
 
 import pytest
 import yaml
+
+from backend.app.features.cameras.store import CameraRegistryStore
+from shared.edge_db import EDGE_DATABASE_PATH, EDGE_STATE_DIRECTORY
+from worker.runtime.config.lkg_store import WorkerConfigLkgStore
+from worker.runtime.lease import GPU_LEASE_FILENAME
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -30,14 +33,11 @@ _ComposeLoader.add_constructor("!reset", lambda loader, node: None)
 
 EXPECTED_WORKER_STATE_DIR = "/root/.local/state/ml-worker"
 EXPECTED_API_STATE_DIR = "/root/.local/state/ml-api"
+EXPECTED_EDGE_STATE_DIR = "/var/lib/seeon-state"
+EXPECTED_EDGE_DATABASE = "/var/lib/seeon-state/edge.sqlite3"
 
 WORKER_RESOLVER_PATH = ROOT / "worker" / "runtime" / "state_dir.py"
 API_RESOLVER_PATH = ROOT / "backend" / "app" / "shared" / "state_dir.py"
-
-# The GPU lease is worker boot's first state-dir write (Pre-mortem Scenario 1a);
-# its filename constant already exists on `worker.runtime.lease` independently
-# of the new resolver, so this import is safe regardless of PR A's progress.
-from worker.runtime.lease import GPU_LEASE_FILENAME  # noqa: E402
 
 
 def _dockerfile_mkdir_p_args(dockerfile_name: str) -> list[str]:
@@ -56,11 +56,7 @@ def _dockerfile_mkdir_p_args(dockerfile_name: str) -> list[str]:
 
 
 def _compose_named_volume_target(compose: dict, service: str, volume_name: str) -> str:
-    """The container-path target of a named volume (e.g. ``ml-worker-state``)
-    mounted on ``service``. Deliberately matches only entries that start with
-    the exact named-volume source, since other volume entries in this compose
-    file use `${VAR:?message with spaces}` sources that are unsafe to
-    naively `.split(":")` in full."""
+    """Return the target for an exact named-volume source on ``service``."""
     entries = compose["services"][service]["volumes"]
     for entry in entries:
         if isinstance(entry, str) and entry.startswith(f"{volume_name}:"):
@@ -108,17 +104,30 @@ def test_dockerfiles_declare_no_volume_for_state_dir() -> None:
         )
 
 
-# --- compose attaches named volumes at the image-owned path ---------------
+# --- compose owns one central database volume -----------------------------
 
 
-def test_compose_worker_volume_mounts_at_worker_state_dir(compose: dict) -> None:
-    target = _compose_named_volume_target(compose, "ml-worker", "ml-worker-state")
-    assert target == EXPECTED_WORKER_STATE_DIR
+@pytest.mark.parametrize("service", ["edge-db-migrator", "ml-api", "ml-worker"])
+def test_compose_mounts_central_state_at_baked_path(compose: dict, service: str) -> None:
+    target = _compose_named_volume_target(compose, service, "edge-state")
+    assert target == EXPECTED_EDGE_STATE_DIR
 
 
-def test_compose_api_volume_mounts_at_api_state_dir(compose: dict) -> None:
-    target = _compose_named_volume_target(compose, "ml-api", "ml-api-state")
-    assert target == EXPECTED_API_STATE_DIR
+def test_only_migrator_mounts_released_legacy_state_volumes(compose: dict) -> None:
+    assert (
+        _compose_named_volume_target(compose, "edge-db-migrator", "ml-api-state")
+        == "/var/lib/legacy-api-state"
+    )
+    assert (
+        _compose_named_volume_target(compose, "edge-db-migrator", "ml-worker-state")
+        == "/var/lib/legacy-worker-state"
+    )
+
+    for service in ("ml-api", "ml-worker"):
+        volumes = compose["services"][service]["volumes"]
+        assert not any(
+            str(volume).startswith(("ml-api-state:", "ml-worker-state:")) for volume in volumes
+        )
 
 
 def test_compose_no_longer_sets_ml_worker_state_dir_env() -> None:
@@ -129,17 +138,12 @@ def test_compose_no_longer_sets_ml_worker_state_dir_env() -> None:
     )
 
 
-# --- three-way drift: compose target == Dockerfile mkdir == resolver output ---
+# --- image-owned local state paths remain stable --------------------------
 
 
 def test_worker_resolver_matches_dockerfile_and_compose(
     monkeypatch: pytest.MonkeyPatch, compose: dict
 ) -> None:
-    if not WORKER_RESOLVER_PATH.exists():
-        pytest.skip(
-            "worker/runtime/state_dir.py does not exist yet (concurrent lane in "
-            "progress) — rerun this test once PR A's resolver lands"
-        )
     from worker.runtime.state_dir import resolve_state_dir as worker_resolve_state_dir
 
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: Path("/root")))
@@ -147,17 +151,12 @@ def test_worker_resolver_matches_dockerfile_and_compose(
 
     assert str(resolved) == EXPECTED_WORKER_STATE_DIR
     assert str(resolved) in _dockerfile_mkdir_p_args("Dockerfile.edge")
-    assert _compose_named_volume_target(compose, "ml-worker", "ml-worker-state") == str(resolved)
+    assert _compose_named_volume_target(compose, "ml-worker", "edge-state") != str(resolved)
 
 
 def test_api_resolver_matches_dockerfile_and_compose(
     monkeypatch: pytest.MonkeyPatch, compose: dict
 ) -> None:
-    if not API_RESOLVER_PATH.exists():
-        pytest.skip(
-            "backend/app/shared/state_dir.py does not exist yet (concurrent lane "
-            "in progress) — rerun this test once PR A's resolver lands"
-        )
     from backend.app.shared.state_dir import resolve_state_dir as api_resolve_state_dir
 
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: Path("/root")))
@@ -165,15 +164,13 @@ def test_api_resolver_matches_dockerfile_and_compose(
 
     assert str(resolved) == EXPECTED_API_STATE_DIR
     assert str(resolved) in _dockerfile_mkdir_p_args("Dockerfile.backend")
-    assert _compose_named_volume_target(compose, "ml-api", "ml-api-state") == str(resolved)
+    assert _compose_named_volume_target(compose, "ml-api", "edge-state") != str(resolved)
 
 
 # --- resolvers must not read any override env var (env sprawl is the point) ---
 
 
 def test_worker_resolver_reads_no_environment_override() -> None:
-    if not WORKER_RESOLVER_PATH.exists():
-        pytest.skip("worker/runtime/state_dir.py does not exist yet (concurrent lane in progress)")
     source = WORKER_RESOLVER_PATH.read_text(encoding="utf-8")
     assert "os.environ" not in source and "getenv" not in source, (
         "worker/runtime/state_dir.py must not read any env var override — "
@@ -182,10 +179,6 @@ def test_worker_resolver_reads_no_environment_override() -> None:
 
 
 def test_api_resolver_reads_no_environment_override() -> None:
-    if not API_RESOLVER_PATH.exists():
-        pytest.skip(
-            "backend/app/shared/state_dir.py does not exist yet (concurrent lane in progress)"
-        )
     source = API_RESOLVER_PATH.read_text(encoding="utf-8")
     assert "os.environ" not in source and "getenv" not in source, (
         "backend/app/shared/state_dir.py must not read any env var override — "
@@ -193,27 +186,40 @@ def test_api_resolver_reads_no_environment_override() -> None:
     )
 
 
-# --- the GPU lease is worker boot's first state-dir write (Scenario 1a) ---
+# --- persistent database owners converge on the central path --------------
 
 
-def test_gpu_lease_write_dir_matches_mounted_worker_volume(
+def test_shared_edge_database_path_matches_compose_mount(compose: dict) -> None:
+    assert str(EDGE_STATE_DIRECTORY) == EXPECTED_EDGE_STATE_DIR
+    assert str(EDGE_DATABASE_PATH) == EXPECTED_EDGE_DATABASE
+    for service in ("ml-api", "ml-worker"):
+        assert _compose_named_volume_target(compose, service, "edge-state") == str(
+            EDGE_DATABASE_PATH.parent
+        )
+
+
+def test_worker_and_api_database_defaults_use_one_edge_database() -> None:
+    worker_path = WorkerConfigLkgStore().database_path
+    api_path = CameraRegistryStore.from_env().path
+
+    # tests/conftest.py redirects the production constant to an isolated file;
+    # equality across runtime consumers is the behavior under test here.
+    assert worker_path == api_path
+    assert worker_path.name == EDGE_DATABASE_PATH.name
+
+
+# --- the GPU lease remains in the worker-local state directory -------------
+
+
+def test_gpu_lease_uses_worker_local_state_not_central_database_volume(
     monkeypatch: pytest.MonkeyPatch, compose: dict
 ) -> None:
-    """`GpuLease.acquire()` runs before any other state-dir consumer in worker
-    boot. If its write directory isn't the mounted volume path, every redeploy
-    silently starts from empty state before any other fix in this plan even
-    gets a chance to matter."""
-    if not WORKER_RESOLVER_PATH.exists():
-        pytest.skip(
-            "worker/runtime/state_dir.py does not exist yet (concurrent lane in "
-            "progress) — rerun this test once PR A's resolver lands"
-        )
     from worker.runtime.state_dir import resolve_state_dir as worker_resolve_state_dir
 
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: Path("/root")))
     lease_path = worker_resolve_state_dir("ml-worker") / GPU_LEASE_FILENAME
 
     assert str(lease_path.parent) == EXPECTED_WORKER_STATE_DIR
-    assert _compose_named_volume_target(compose, "ml-worker", "ml-worker-state") == str(
+    assert _compose_named_volume_target(compose, "ml-worker", "edge-state") != str(
         lease_path.parent
     )

@@ -116,7 +116,10 @@ def test_enabled_domains_boot_floor_schedules_pose_and_bed_extractors() -> None:
     requires for fall (``pose``) and bed_exit (``pose``, ``bed``), not
     silently schedule nothing."""
     config = WorkerConfig(relay=_relay())
-    runtime = SimpleNamespace(config=config)
+    runtime = SimpleNamespace(
+        config=config,
+        _module_versions=config.selected_module_versions,
+    )
 
     domain_names = WorkerRuntime._active_domain_names(runtime)
     required = _required_extractor_names(domain_names)

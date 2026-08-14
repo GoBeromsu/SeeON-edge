@@ -2,18 +2,24 @@
 
 All tests are hardware-free — CUDA errors are injected via fakes.
 """
+
 from __future__ import annotations
 
+import multiprocessing
+import os
 import sqlite3
 import threading
 import time as time_module
 from dataclasses import dataclass
+from multiprocessing.connection import Connection
 from pathlib import Path
 from typing import final
 
 import numpy as np
 import pytest
 
+from shared.edge_db.connection import RuntimeActor, open_runtime_database
+from shared.edge_db.migrator import migrate_database
 from worker.adapters.model.errors import FatalAcceleratorError, ModelInputError
 from worker.adapters.model.yolo_api import (
     YoloPredictOptions,
@@ -220,6 +226,105 @@ def test_persist_first_fault_does_not_wait_out_a_concurrent_writer_lock(tmp_path
     assert elapsed < 1.0  # fails fast; must not wait out a multi-second timeout
 
 
+def _hold_edge_worker_write(database: str, channel: Connection) -> None:
+    """Child process: hold BEGIN IMMEDIATE until the parent signals release."""
+    connection = open_runtime_database(Path(database), actor=RuntimeActor.WORKER)
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        channel.send("LOCKED")
+        assert channel.recv() == "RELEASE"
+        connection.rollback()
+        channel.send("RELEASED")
+    finally:
+        connection.close()
+        channel.close()
+
+
+def test_persist_first_fault_writes_to_production_named_edge_sqlite(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Production path resolves EDGE_DATABASE_PATH (edge.sqlite3) and must
+    upsert the faults row through the central runtime writer ownership."""
+    import worker.runtime.faults.record as mod
+
+    mod._written = False  # noqa: SLF001
+
+    database_path = tmp_path / "edge-state" / "edge.sqlite3"
+    migrate_database(database_path)
+    monkeypatch.setattr(mod, "EDGE_DATABASE_PATH", database_path)
+
+    rec = _record(camera_id="cam-edge-1", exception_message="CUDA error: edge path")
+    wrote_first = persist_first_fault(rec)  # state_dir defaults -> EDGE_DATABASE_PATH
+    wrote_second = persist_first_fault(rec)
+
+    assert wrote_first is True
+    assert wrote_second is False
+
+    connection = sqlite3.connect(database_path)
+    try:
+        row = connection.execute(
+            "SELECT camera_id, exception_message, exit_code FROM faults WHERE id = 1"
+        ).fetchone()
+    finally:
+        connection.close()
+
+    assert row == ("cam-edge-1", "CUDA error: edge path", 4)
+
+
+def test_persist_first_fault_edge_sqlite_returns_immediately_under_held_write_lock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Production edge.sqlite3 must use BusyPolicy.ZERO_WAIT via
+    best_effort_zero_wait_write: under a real held SQLite write lock the
+    fatal path returns immediately (no default 5s bound), logs truthfully,
+    and leaves the faults table untouched. Synchronization uses pipe
+    barriers only -- no sleeps."""
+    import worker.runtime.faults.record as mod
+
+    mod._written = False  # noqa: SLF001
+
+    database_path = tmp_path / "edge-state" / "edge.sqlite3"
+    migrate_database(database_path)
+    monkeypatch.setattr(mod, "EDGE_DATABASE_PATH", database_path)
+
+    context = multiprocessing.get_context("spawn")
+    parent_channel, child_channel = context.Pipe()
+    holder = context.Process(
+        target=_hold_edge_worker_write,
+        args=(os.fspath(database_path), child_channel),
+    )
+    holder.start()
+    assert parent_channel.poll(10), "worker holder did not acquire the write lock"
+    assert parent_channel.recv() == "LOCKED"
+
+    try:
+        rec = _record()
+        started = time_module.monotonic()
+        with caplog.at_level("WARNING"):
+            written = persist_first_fault(rec)
+        elapsed = time_module.monotonic() - started
+    finally:
+        parent_channel.send("RELEASE")
+        assert parent_channel.poll(10), "worker holder did not release"
+        assert parent_channel.recv() == "RELEASED"
+        holder.join(10)
+
+    assert holder.exitcode == 0
+    assert written is False
+    assert elapsed < 1.0  # near-immediate; must never wait the default 5s bound
+    assert "first-fault record unavailable" in caplog.text
+    assert "zero-wait write failed" in caplog.text
+
+    connection = sqlite3.connect(database_path)
+    try:
+        assert connection.execute("SELECT count(*) FROM faults").fetchone() == (0,)
+    finally:
+        connection.close()
+
+
 def test_persist_first_fault_includes_frame_hash(tmp_path: Path) -> None:
     import worker.runtime.faults.record as mod
 
@@ -275,12 +380,8 @@ def test_fault_handler_is_idempotent(tmp_path: Path) -> None:
     mod._written = False  # noqa: SLF001
 
     rec = _record()
-    t1 = threading.Thread(
-        target=handler.handle, args=(FatalAcceleratorError("CUDA error"), rec)
-    )
-    t2 = threading.Thread(
-        target=handler.handle, args=(FatalAcceleratorError("CUDA error"), rec)
-    )
+    t1 = threading.Thread(target=handler.handle, args=(FatalAcceleratorError("CUDA error"), rec))
+    t2 = threading.Thread(target=handler.handle, args=(FatalAcceleratorError("CUDA error"), rec))
     t1.start()
     t2.start()
     t1.join()

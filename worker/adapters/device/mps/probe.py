@@ -1,6 +1,6 @@
 """Real torch/MPS capability probe for the ``mps`` device policy.
 
-``WorkerRuntime._create_fall_model`` and ``compose_yolo_extractors``
+``WorkerRuntime._create_fall_model`` and registry-based shared composition
 (``worker/runtime/worker.py``) construct every model backend with
 ``device=boot.device`` -- when the resolved profile is ``mps`` that is the
 literal string ``"mps"`` passed straight into ``torch``-backed adapters

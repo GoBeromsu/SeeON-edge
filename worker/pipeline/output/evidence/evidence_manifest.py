@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+import json
+import os
+import stat
 from datetime import datetime
 from pathlib import Path
 from typing import Final
 
 from pydantic import ValidationError
 
-from worker.pipeline.output.evidence.clip_consistency_io import read_strict_json
 from worker.pipeline.output.evidence.clip_consistency_types import ClipConsistencyError
 from worker.pipeline.output.evidence.evidence_media import (
     ClipEvidenceError,
@@ -40,6 +42,7 @@ def finalize_ready_manifest(
     clip_end_at: datetime,
     finalized_at: datetime,
     ffprobe_bin: str = "ffprobe",
+    runtime_manifest_sha256: str | None = None,
 ) -> ReadyClipManifest:
     """Describe verified derivative bytes without implying source preservation."""
     facts = inspect_finalized_media(video_path, ffprobe_bin=ffprobe_bin)
@@ -52,7 +55,10 @@ def finalize_ready_manifest(
         finalized_at=rfc3339_milliseconds(finalized_at),
         sha256=facts.sha256,
         size_bytes=facts.size_bytes,
+        codec=facts.video_codec,
+        audio_codec=facts.audio_codec,
         duration_ms=facts.duration_ms,
+        runtime_manifest_sha256=runtime_manifest_sha256,
     )
 
 
@@ -65,6 +71,7 @@ def unavailable_manifest(
     clip_end_at: datetime,
     finalized_at: datetime,
     reason_code: EvidenceReasonCode,
+    runtime_manifest_sha256: str | None = None,
 ) -> UnavailableClipManifest:
     return UnavailableClipManifest(
         clip_id=clip_id,
@@ -74,6 +81,7 @@ def unavailable_manifest(
         clip_end_at=rfc3339_milliseconds(clip_end_at),
         finalized_at=rfc3339_milliseconds(finalized_at),
         reason_code=reason_code,
+        runtime_manifest_sha256=runtime_manifest_sha256,
     )
 
 
@@ -91,22 +99,68 @@ def verify_ready_manifest(
 
 
 def parse_manifest(path: Path) -> ClipManifest:
+    manifest, _, _ = parse_manifest_content(path)
+    return manifest
+
+
+def parse_manifest_content(path: Path) -> tuple[ClipManifest, bytes, dict[str, object]]:
+    """Parse and retain the exact bounded manifest inode bytes used for validation."""
     try:
-        payload = read_strict_json(
-            path,
-            max_bytes=MAX_MANIFEST_BYTES,
-            error_code="manifest_invalid",
-        )
+        content = read_manifest_bytes(path)
+        payload = json.loads(content, object_pairs_hook=_unique_object)
+        if not isinstance(payload, dict):
+            raise ClipEvidenceError(EvidenceReasonCode.CORRUPT, "manifest state invalid")
         state = payload.get("state")
         match state:
             case "READY":
-                return ReadyClipManifest.model_validate(payload)
+                manifest: ClipManifest = ReadyClipManifest.model_validate(payload)
             case "UNAVAILABLE":
-                return UnavailableClipManifest.model_validate(payload)
+                manifest = UnavailableClipManifest.model_validate(payload)
             case _:
                 raise ClipEvidenceError(EvidenceReasonCode.CORRUPT, "manifest state invalid")
-    except (OSError, UnicodeDecodeError, ValidationError, ClipConsistencyError) as exc:
+        return manifest, content, payload  # noqa: TRY300 - one guarded parse boundary
+    except (
+        OSError,
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+        ValidationError,
+        ValueError,
+        ClipConsistencyError,
+    ) as exc:
         raise ClipEvidenceError(EvidenceReasonCode.CORRUPT, "manifest invalid") from exc
+
+
+def _unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate JSON key")
+        result[key] = value
+    return result
+
+
+def read_manifest_bytes(path: Path) -> bytes:
+    """Read one bounded immutable manifest inode without following links."""
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags)
+    try:
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode) or not 0 < info.st_size <= MAX_MANIFEST_BYTES:
+            raise OSError("manifest file shape invalid")
+        chunks: list[bytes] = []
+        remaining = MAX_MANIFEST_BYTES + 1
+        while remaining > 0:
+            chunk = os.read(descriptor, min(8192, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        payload = b"".join(chunks)
+        if len(payload) > MAX_MANIFEST_BYTES:
+            raise OSError("manifest exceeds size limit")
+        return payload
+    finally:
+        os.close(descriptor)
 
 
 __all__ = [
@@ -118,6 +172,8 @@ __all__ = [
     "UnavailableClipManifest",
     "finalize_ready_manifest",
     "parse_manifest",
+    "parse_manifest_content",
+    "read_manifest_bytes",
     "unavailable_manifest",
     "verify_ready_manifest",
 ]

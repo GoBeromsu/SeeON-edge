@@ -13,6 +13,7 @@ import logging
 import os
 import signal
 import sys
+from pathlib import Path
 from types import FrameType
 
 from pydantic import ValidationError
@@ -43,10 +44,12 @@ from worker.runtime.config import (
     load_worker_config_from_relay,
     make_restart_check,
     pull_worker_config_poll,
+    reject_retired_worker_environment,
     resolve_config_path,
     resolve_local_overrides,
     resolve_startup_config,
 )
+from worker.runtime.provenance.environment import resolve_worker_build_revision
 from worker.runtime.state_dir import resolve_state_dir
 from worker.runtime.worker import WorkerRuntime
 
@@ -59,6 +62,7 @@ GENERIC_RUNTIME_ERROR_EXIT_CODE = 1
 CONFIG_ERROR_EXIT_CODE = 2
 
 _HEARTBEAT_ON_START_TIMEOUT_SEC = 0.5
+_EDGE_RELAY_URL = "http://ml-api:8000"
 
 
 def _positive_int(raw: str) -> int:
@@ -116,8 +120,17 @@ def _build_parser() -> argparse.ArgumentParser:
         "--backfill-thumbnails",
         action="store_true",
         help=(
-            "Generate missing clip-local thumbnails under CLIP_STORE_DIR and exit; "
-            "returns nonzero while playable clips remain missing thumbnails"
+            "Generate missing clip-local thumbnails and exit; returns nonzero "
+            "while playable clips remain missing thumbnails"
+        ),
+    )
+    parser.add_argument(
+        "--clip-store-dir",
+        type=Path,
+        default=None,
+        help=(
+            "Portable clip-store root for --backfill-thumbnails only "
+            "(default: baked /var/lib/clip-store)"
         ),
     )
     return parser
@@ -194,10 +207,20 @@ def main(argv: list[str] | None = None) -> int:
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     )
 
+    if args.clip_store_dir is not None and not args.backfill_thumbnails:
+        LOGGER.error("--clip-store-dir requires --backfill-thumbnails")
+        return CONFIG_ERROR_EXIT_CODE
+
+    try:
+        reject_retired_worker_environment(os.environ)
+    except WorkerConfigError as exc:
+        LOGGER.error("worker configuration refused: %s", exc)  # noqa: TRY400
+        return CONFIG_ERROR_EXIT_CODE
+
     if args.backfill_thumbnails:
         try:
             report = backfill_thumbnails(
-                configured_store_dir(),
+                configured_store_dir(args.clip_store_dir),
                 FFmpegThumbnailGenerator(ffmpeg_bin=configured_ffmpeg_bin()),
             )
         except ClipStoreLockedError as exc:
@@ -248,7 +271,7 @@ def main(argv: list[str] | None = None) -> int:
             LOGGER.info("config validation passed (%d camera(s))", len(yaml_config.cameras))
             return CLEAN_SHUTDOWN_EXIT_CODE
 
-        relay_url = os.environ.get(RELAY_URL_ENV, yaml_config.relay.url)
+        relay_url = yaml_config.relay.url
         relay_token = (
             os.environ.get(RELAY_TOKEN_ENV, "").strip()
             or yaml_config.relay.token.get_secret_value()
@@ -268,7 +291,7 @@ def main(argv: list[str] | None = None) -> int:
             return CONFIG_ERROR_EXIT_CODE
         config = snapshot.config
     else:
-        relay_url = os.environ.get(RELAY_URL_ENV, "").strip()
+        relay_url = _EDGE_RELAY_URL
         relay_token = os.environ.get(RELAY_TOKEN_ENV, "").strip() or None
 
         if not relay_url:
@@ -295,34 +318,55 @@ def main(argv: list[str] | None = None) -> int:
             return CONFIG_ERROR_EXIT_CODE
 
         if args.check_config:
-            # Strictly static: RELAY_URL/RELAY_TOKEN presence and shape only.
-            # No network call and no LKG write -- `WorkerConfigLkgStore.load`
-            # is read-only, so reporting whether a cache exists is safe, but
-            # the live pull (and any `lkg_store.save`) is deferred to boot.
-            # `--check-config` must never mutate the resolved worker state
-            # directory (`worker/runtime/state_dir.py`, `~/.local/state/ml-worker`,
-            # no env override) (worker/runtime/AGENTS.md, "--check-config
-            # performs no model, camera, or relay side effect").
+            # Strictly static: the baked relay endpoint plus RELAY_TOKEN
+            # presence and shape only. RELAY_URL is retired (rejected above by
+            # `reject_retired_worker_environment`), so this reports the baked
+            # endpoint, not an env var. No network call and no LKG write --
+            # `WorkerConfigLkgStore.load` is read-only, so reporting whether a
+            # cache exists is safe, but the live pull (and any
+            # `lkg_store.save`) is deferred to boot. `--check-config` must
+            # never mutate the resolved worker state directory
+            # (`worker/runtime/state_dir.py`, `~/.local/state/ml-worker`, no
+            # env override) and must not touch the packaged model
+            # (`resolve_local_overrides`, below) (worker/runtime/AGENTS.md,
+            # "--check-config performs no model, camera, or relay side
+            # effect").
             stored = WorkerConfigLkgStore(state_dir=resolve_state_dir()).load()
             if stored is None:
                 LOGGER.info(
-                    "config validation passed (static check): %s/%s set; no "
-                    "last-known-good cache yet -- the live pull happens at boot",
-                    RELAY_URL_ENV,
+                    "config validation passed (static check): baked relay endpoint "
+                    "%s + %s set; no last-known-good cache yet -- the live pull "
+                    "happens at boot",
+                    relay_url,
                     RELAY_TOKEN_ENV,
                 )
             else:
                 LOGGER.info(
-                    "config validation passed (static check): %s/%s set; "
-                    "last-known-good cache present (registry_version=%d) -- "
-                    "the live pull still happens at boot",
-                    RELAY_URL_ENV,
+                    "config validation passed (static check): baked relay endpoint "
+                    "%s + %s set; last-known-good cache present (registry_version=%d) "
+                    "-- the live pull still happens at boot",
+                    relay_url,
                     RELAY_TOKEN_ENV,
                     stored.registry_version,
                 )
             return CLEAN_SHUTDOWN_EXIT_CODE
 
-        models, clip, dev_mjpeg = resolve_local_overrides(None, os.environ)
+        # `resolve_local_overrides` provisions the packaged default fall model
+        # (worker/runtime/config/local_env.py) and runs *before* the guarded
+        # relay pull. A missing/dangling packaged artifact -- the CI
+        # `Dockerfile.edge` image bakes empty model dirs; real edges mount the
+        # weights at runtime -- makes it raise `WorkerConfigError`, and a
+        # malformed manifest can surface `ValidationError`. Both are
+        # config/packaging faults, so they map to CONFIG_ERROR_EXIT_CODE with a
+        # logged message rather than escaping `main()` as a raw traceback that
+        # reports the generic runtime exit code and misrepresents the fault.
+        # This guard does not weaken the validation: a missing model still
+        # refuses to boot, fail-closed.
+        try:
+            models, clip, dev_mjpeg = resolve_local_overrides(None, os.environ)
+        except (WorkerConfigError, ValidationError):
+            LOGGER.exception("worker local model/clip configuration failed")
+            return CONFIG_ERROR_EXIT_CODE
         try:
             snapshot = load_worker_config_from_relay(
                 relay_url, relay_token, models=models, clip=clip, dev_mjpeg=dev_mjpeg
@@ -362,7 +406,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.heartbeat_on_start:
         _send_heartbeat_on_start(config)
 
-    relay_url = os.environ.get(RELAY_URL_ENV, config.relay.url)
+    relay_url = config.relay.url
     relay_token = (
         os.environ.get(RELAY_TOKEN_ENV, "").strip() or config.relay.token.get_secret_value()
     )
@@ -400,6 +444,8 @@ def main(argv: list[str] | None = None) -> int:
         clip_export_policy=clip_export_policy,
         max_frames_per_camera=args.max_frames_per_camera,
         state_dir=resolve_state_dir(),
+        restart_generation=snapshot.directive.generation,
+        build_revision=resolve_worker_build_revision(os.environ.get("ML_WORKER_BUILD_REVISION")),
     )
 
     def _handle_signal(signum: int, frame: FrameType | None) -> None:

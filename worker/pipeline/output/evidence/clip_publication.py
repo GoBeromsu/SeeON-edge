@@ -9,7 +9,7 @@ import shutil
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Final, TypeAlias, final
+from typing import Final, final
 
 from worker.adapters.encode.adapter_errors import ThumbnailGenerationError
 from worker.adapters.encode.thumbnail import THUMBNAIL_FILENAME, FFmpegThumbnailGenerator
@@ -18,6 +18,8 @@ from worker.pipeline.output.evidence.clip_identity import ClipReservation
 from worker.pipeline.output.evidence.clip_publication_types import (
     ClipPublicationConflictError,
     ClipPublicationMetadata,
+    ClipTimeOrigin,
+    JsonValue,
     PublicationBarrier,
     PublicationStage,
     PublishedClip,
@@ -31,9 +33,6 @@ from worker.pipeline.output.evidence.evidence_manifest import (
 )
 from worker.pipeline.output.evidence.evidence_outbox_types import EvidenceReasonCode
 
-JsonValue: TypeAlias = (
-    str | int | float | bool | None | list["JsonValue"] | dict[str, "JsonValue"]
-)
 LOGGER: Final = logging.getLogger(__name__)
 
 
@@ -92,6 +91,7 @@ class ClipPublisher:
             clip_end_at=metadata.clip_end_at,
             finalized_at=metadata.finalized_at,
             ffprobe_bin=self._ffprobe_bin,
+            runtime_manifest_sha256=metadata.runtime_manifest_sha256,
         )
         payload = _manifest_payload(
             manifest,
@@ -120,6 +120,7 @@ class ClipPublisher:
             clip_end_at=metadata.clip_end_at,
             finalized_at=metadata.finalized_at,
             reason_code=reason_code,
+            runtime_manifest_sha256=metadata.runtime_manifest_sha256,
         )
         payload = _manifest_payload(
             manifest,
@@ -218,7 +219,7 @@ def _manifest_payload(
     path: str | None,
     video_available: bool,
 ) -> dict[str, JsonValue]:
-    payload: dict[str, JsonValue] = manifest.model_dump(mode="json")
+    payload: dict[str, JsonValue] = manifest.model_dump(mode="json", exclude_none=True)
     payload.update(
         {
             "event_ref": str(metadata.event_refs[0]),
@@ -228,10 +229,34 @@ def _manifest_payload(
             "path": path,
             "finalized": True,
             "video_available": video_available,
+            "recovery_state": "MEDIA_VERIFIED" if video_available else "UNAVAILABLE",
         }
     )
+    if metadata.decision_trace_id is not None:
+        payload["decision_trace_id"] = metadata.decision_trace_id
     if metadata.event_type is not None:
         payload["event_type"] = metadata.event_type
+    if metadata.domain is not None:
+        payload["domain"] = metadata.domain
+    if metadata.source_media is not None:
+        payload["source_media"] = metadata.source_media
+    if metadata.source_error_reason is not None:
+        payload["source_error_reason"] = metadata.source_error_reason
+    if metadata.truncation_reasons:
+        payload["truncation_reasons"] = list(metadata.truncation_reasons)
+    if metadata.time_origin is not None:
+        origin = metadata.time_origin
+        payload["time_origin"] = {
+            "worker_boot_id": origin.worker_boot_id,
+            "camera_id": origin.camera_id,
+            "stream_epoch": origin.stream_epoch,
+            "generation": origin.generation,
+            "media_origin_pts_sec": origin.media_origin_pts_sec,
+            "event_pts_sec": origin.event_pts_sec,
+            "requested_start_pts_sec": origin.requested_start_pts_sec,
+            "requested_end_pts_sec": origin.requested_end_pts_sec,
+            "event_media_time_ms": origin.event_media_time_ms,
+        }
     return payload
 
 
@@ -243,6 +268,7 @@ __all__ = [
     "ClipPublicationConflictError",
     "ClipPublicationMetadata",
     "ClipPublisher",
+    "ClipTimeOrigin",
     "PublicationBarrier",
     "PublicationStage",
     "PublishedClip",

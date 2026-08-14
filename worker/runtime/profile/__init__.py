@@ -1,14 +1,24 @@
 from worker.runtime.profile.boot import (
     BootContext,
+    effective_decode_policy,
+    effective_encode_policy,
     preflight_decode_or_raise,
     reject_legacy_conflicts,
     resolve_boot_context,
     resolve_profile,
     verify_device_or_raise,
 )
+from worker.runtime.profile.descriptor import (
+    MemoryPathStep,
+    ProfileConverter,
+    RuntimeProfileDescriptor,
+    RuntimeProfileEdge,
+)
 from worker.runtime.profile.device import CudaProbe, CudaProbeSource, probe_cuda
 from worker.runtime.profile.registry import (
+    CANONICAL_PROFILE_REGISTRY,
     ML_WORKER_PROFILE_ENV,
+    PROFILE_ALIASES,
     PROFILE_REGISTRY,
     BootDependencies,
     DecodePolicy,
@@ -25,7 +35,9 @@ from worker.runtime.profile.registry import (
 )
 
 __all__ = [
+    "CANONICAL_PROFILE_REGISTRY",
     "ML_WORKER_PROFILE_ENV",
+    "PROFILE_ALIASES",
     "PROFILE_REGISTRY",
     "BootContext",
     "BootDependencies",
@@ -36,11 +48,17 @@ __all__ = [
     "DevicePolicy",
     "DeviceVerifier",
     "EncodePolicy",
+    "MemoryPathStep",
+    "ProfileConverter",
     "ProfileError",
     "ProfileSpec",
     "ProfileVerifyError",
+    "RuntimeProfileDescriptor",
+    "RuntimeProfileEdge",
     "VerifyResult",
     "default_decode_probe",
+    "effective_decode_policy",
+    "effective_encode_policy",
     "default_verifiers",
     "preflight_decode_or_raise",
     "probe_cuda",

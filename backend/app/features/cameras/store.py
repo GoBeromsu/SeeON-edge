@@ -31,10 +31,10 @@ from urllib.parse import parse_qsl, urlsplit, urlunsplit
 from backend.app.features.cameras.topology import CameraTopologyStore, RegistryTopologySnapshot
 from backend.app.features.cameras.topology_schema import TOPOLOGY_SCHEMA
 from backend.app.shared.sqlite_bootstrap import connect_catalog_store
-from backend.app.shared.state_dir import resolve_state_dir
+from shared.edge_db import EDGE_DATABASE_PATH
 
 CameraStatus = Literal["online", "offline", "starting", "unknown"]
-ProbeErrorClass = Literal["timeout", "decode", "auth"]
+ProbeErrorClass = Literal["timeout", "decode", "auth", "unsupported"]
 
 
 class CameraRegistryData(TypedDict):
@@ -158,7 +158,7 @@ class CameraRegistryStore:
 
     @classmethod
     def from_env(cls) -> CameraRegistryStore:
-        return cls(resolve_state_dir("ml-api") / "catalog.sqlite3")
+        return cls(EDGE_DATABASE_PATH)
 
     def snapshot(self) -> CameraRegistryData:
         with self._lock:
@@ -237,16 +237,16 @@ class CameraRegistryStore:
                             raise DuplicateCameraError(dict(duplicate))
                     updated = {**record, **updates}
                     if "edge_ref" in updates or "room_edge_ref" in updates:
+                        edge_ref = updated.get("edge_ref")
+                        room_edge_ref = updated.get("room_edge_ref")
                         self._topology.delete_camera(connection, camera_id)
                         self._topology.bind_camera(
                             connection,
                             camera_id=camera_id,
-                            edge_ref=updated.get("edge_ref")
-                            if isinstance(updated.get("edge_ref"), str)
-                            else None,
-                            room_edge_ref=updated.get("room_edge_ref")
-                            if isinstance(updated.get("room_edge_ref"), str)
-                            else None,
+                            edge_ref=edge_ref if isinstance(edge_ref, str) else None,
+                            room_edge_ref=(
+                                room_edge_ref if isinstance(room_edge_ref, str) else None
+                            ),
                         )
                     data["cameras"][index] = updated
                     data["registry_version"] += 1

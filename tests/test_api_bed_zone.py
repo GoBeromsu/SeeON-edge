@@ -78,6 +78,7 @@ def _http_error(code: int, payload: dict[str, object] | None = None) -> urllib.e
 
 @pytest.fixture(autouse=True)
 def bed_zone_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    monkeypatch.setenv("API_EDGE_RELAY_TOKEN", "relay-token")
     monkeypatch.setenv("ML_API_WORKER_STREAM_ORIGIN", "http://worker.local:8090")
     get_settings.cache_clear()
     yield
@@ -102,6 +103,7 @@ def test_recognize_success_persists_and_returns_the_polygon(
                 "url": request.full_url,
                 "method": request.get_method(),
                 "timeout": timeout,
+                "headers": dict(request.headers),
             }
         )
         return FakeUpstreamResponse(
@@ -120,11 +122,15 @@ def test_recognize_success_persists_and_returns_the_polygon(
     assert body["bed_zone"]["image_width"] == 640
     assert body["bed_zone"]["image_height"] == 480
     assert isinstance(body["bed_zone"]["recognized_at"], str) and body["bed_zone"]["recognized_at"]
+    # Relay token stays server-side; browser response must not disclose it.
+    assert "relay-token" not in response.text
+    assert "X-Edge-Relay-Token" not in response.headers
     assert calls == [
         {
             "url": "http://worker.local:8090/overlay/camera-1/bed-zone/recognize",
             "method": "POST",
             "timeout": 8.0,
+            "headers": {"X-edge-relay-token": "relay-token"},
         }
     ]
 

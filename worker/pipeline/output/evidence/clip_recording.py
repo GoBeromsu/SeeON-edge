@@ -9,6 +9,8 @@ from typing import Protocol
 
 from worker.adapters.encode.adapter_errors import (
     ClipRemuxError,
+    CrossEpochFrameError,
+    CrossEpochSegmentError,
     CrossGenerationSegmentError,
     EncoderPolicyError,
     EncoderStartError,
@@ -17,13 +19,14 @@ from worker.adapters.encode.adapter_errors import (
 from worker.adapters.encode.csv_segment_index import Segment
 from worker.adapters.encode.encoder_setup import parse_encode_policy
 from worker.adapters.encode.models import ClipArtifact, EncoderGeometry
-from worker.types import BusinessEvent, FramePacket
+from worker.types import BusinessEvent, FrameKey, FramePacket
 
 
 class ClipReasonCode(StrEnum):
     ENCODER_FAILED = "ENCODER_FAILED"
     REMUX_FAILED = "REMUX_FAILED"
     NO_SEGMENTS = "NO_SEGMENTS"
+    STREAM_EPOCH_MISMATCH = "STREAM_EPOCH_MISMATCH"
 
 
 @dataclass(frozen=True, slots=True)
@@ -36,6 +39,8 @@ class ClipReady:
 class ClipUnavailable:
     clip_id: str
     reason_code: ClipReasonCode
+    detail_reason: str | None = None
+    truncation_reasons: tuple[str, ...] = ()
 
 
 ClipOutcome = ClipReady | ClipUnavailable
@@ -106,6 +111,12 @@ class SegmentedEncoderSession(Protocol):
         start_time_sec: float,
         end_time_sec: float,
     ) -> tuple[Segment, ...]: ...
+
+    @property
+    def worker_boot_id(self) -> str: ...
+
+    @property
+    def stream_epoch(self) -> int: ...
 
     @property
     def origin_time_sec(self) -> float | None:
@@ -191,8 +202,19 @@ class ClipRecordingCoordinator:
         )
         try:
             session = self._encoder.open(packet.camera_id, self._profile, geometry)
+            if session.stream_epoch not in (
+                0,
+                packet.stream_epoch,
+            ) or session.worker_boot_id not in ("", packet.worker_boot_id):
+                session.close()
+                session = self._encoder.open(packet.camera_id, self._profile, geometry)
             session.write(packet)
-        except (EncoderStartError, EncoderWriteError, EncoderPolicyError):
+        except (
+            CrossEpochFrameError,
+            EncoderStartError,
+            EncoderWriteError,
+            EncoderPolicyError,
+        ):
             self._degraded.add(packet.camera_id)
             self._sessions.pop(packet.camera_id, None)
             return False
@@ -208,10 +230,16 @@ class ClipRecordingCoordinator:
         event_time_sec: float,
         event: BusinessEvent,
         output_dir: Path | None = None,
+        trigger_frame_key: FrameKey | None = None,
     ) -> ClipOutcome:
         session = self._sessions.get(camera_id)
         if session is None:
             return ClipUnavailable(clip_id, ClipReasonCode.ENCODER_FAILED)
+        if trigger_frame_key is not None and (
+            session.worker_boot_id != trigger_frame_key.worker_boot_id
+            or session.stream_epoch != trigger_frame_key.stream_epoch
+        ):
+            return ClipUnavailable(clip_id, ClipReasonCode.STREAM_EPOCH_MISMATCH)
 
         start_time_sec, end_time_sec = self._window.bounds(event_time_sec)
         try:
@@ -233,6 +261,8 @@ class ClipRecordingCoordinator:
             finalizer = self._finalizer_factory(output_dir)
         try:
             artifact = finalizer.finalize(segments, event)
+        except CrossEpochSegmentError:
+            return ClipUnavailable(clip_id, ClipReasonCode.STREAM_EPOCH_MISMATCH)
         except (ClipRemuxError, CrossGenerationSegmentError):
             return ClipUnavailable(clip_id, ClipReasonCode.REMUX_FAILED)
         origin = session.origin_time_sec

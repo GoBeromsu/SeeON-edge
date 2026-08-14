@@ -9,12 +9,17 @@ import json
 import logging
 import sqlite3
 from collections.abc import Callable
-from typing import Annotated, Any, Protocol
+from typing import Annotated, Any, NotRequired, Protocol, TypedDict
 
-from fastapi import APIRouter, Header, HTTPException, Request, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response, status
+from fastapi.routing import APIRoute
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from starlette.types import Message, Receive
 
-from backend.app.features.cameras.router import worker_config_snapshot
+from backend.app.features.cameras.router import (
+    acknowledge_applied_detection_policies,
+    worker_config_snapshot,
+)
 from backend.app.features.cameras.store import CameraRegistryStore
 from backend.app.features.clips.catalog import CatalogConflictError, get_catalog_store
 from backend.app.features.relay.auth import authorize_relay
@@ -31,7 +36,6 @@ from shared.events.evidence_export_contract import (
 
 RELAY_TOKEN_HEADER = "X-Edge-Relay-Token"
 
-router = APIRouter(prefix="/relay", tags=["relay"])
 logger = logging.getLogger(__name__)
 
 # Catalog records are an auxiliary index, not the alert delivery path. A typical
@@ -45,6 +49,148 @@ MAX_INLINE_SNAPSHOT_BASE64_CHARS = 4 * ((MAX_INLINE_SNAPSHOT_BYTES + 2) // 3)
 # Eight container levels supports structured detector output without accepting
 # arbitrarily recursive JSON from a trusted-but-fallible worker.
 MAX_CATALOG_PAYLOAD_DEPTH = 8
+# Bound the entire HTTP body before JSON parse / Pydantic validation. Alerts may
+# carry a ~200 KiB base64 snapshot plus envelope fields; 512 KiB leaves margin
+# without accepting multi-megabyte worker mistakes as DoS amplification.
+MAX_RELAY_REQUEST_BODY_BYTES = 512 * 1024
+MAX_RELAY_HEARTBEAT_BODY_BYTES = 4 * 1024
+MAX_RELAY_RUNTIME_STATUS_BODY_BYTES = 64 * 1024
+
+# Per-endpoint hard body caps, keyed by route path suffix. BoundedBodyRoute
+# consults this before any body byte is buffered.
+_MAX_BODY_BYTES_BY_SUFFIX: dict[str, int] = {
+    "/alerts": MAX_RELAY_REQUEST_BODY_BYTES,
+    "/heartbeat": MAX_RELAY_HEARTBEAT_BODY_BYTES,
+    "/runtime-status": MAX_RELAY_RUNTIME_STATUS_BODY_BYTES,
+}
+
+
+def _oversized_body_error(max_bytes: int) -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+        detail=f"request body exceeds maximum of {max_bytes} bytes",
+    )
+
+
+def _bounded_receive(receive: Receive, max_bytes: int) -> Receive:
+    """Wrap an ASGI ``receive`` so total body bytes can never exceed ``max_bytes``.
+
+    Counts each ``http.request`` chunk as it arrives and raises 413 the moment
+    the running total crosses the cap -- so a chunked / missing / lying
+    Content-Length body is rejected mid-stream, before Starlette ever finishes
+    buffering it for the Pydantic parse. This is the real bound; the
+    Content-Length header pre-check in the auth dependency is only a fast path
+    for honest oversized declarations.
+    """
+    total = 0
+
+    async def wrapped() -> Message:
+        nonlocal total
+        message = await receive()
+        if message["type"] == "http.request":
+            body = message.get("body", b"")
+            total += len(body)
+            if total > max_bytes:
+                raise _oversized_body_error(max_bytes)
+        return message
+
+    return wrapped
+
+
+class BoundedBodyRoute(APIRoute):
+    """Route class that caps request-body reads before FastAPI buffers them.
+
+    FastAPI reads the whole body (``await request.body()``) *before* it solves
+    route dependencies, so a dependency cannot bound the read. Wrapping
+    ``receive`` at the route boundary enforces the cap during that read instead,
+    independent of Content-Length. The auth dependency still runs first for the
+    401/403 decision on within-limit bodies (auth-before-parse is preserved).
+    """
+
+    def get_route_handler(self):  # noqa: ANN201 - matches APIRoute base signature
+        original = super().get_route_handler()
+        max_bytes = next(
+            (
+                limit
+                for suffix, limit in _MAX_BODY_BYTES_BY_SUFFIX.items()
+                if self.path.endswith(suffix)
+            ),
+            None,
+        )
+        if max_bytes is None:
+            return original
+
+        async def bounded_handler(request: Request) -> Response:
+            request._receive = _bounded_receive(request.receive, max_bytes)  # noqa: SLF001 - wrap ASGI receive at the route boundary
+            return await original(request)
+
+        return bounded_handler
+
+
+router = APIRouter(prefix="/relay", tags=["relay"], route_class=BoundedBodyRoute)
+
+
+def _reject_oversized_body(request: Request, *, max_bytes: int) -> None:
+    """Cheap Content-Length pre-check.
+
+    Rejects an *honest* oversized declaration. A missing or lying Content-Length
+    is caught by the BoundedBodyRoute streaming bound, so this is a fast-path
+    guard, not the authority on body size.
+    """
+    raw = request.headers.get("content-length")
+    if raw is None:
+        return
+    try:
+        length = int(raw)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="invalid Content-Length",
+        ) from exc
+    if length < 0 or length > max_bytes:
+        raise _oversized_body_error(max_bytes)
+
+
+def _authorize_relay_body(
+    request: Request,
+    *,
+    max_bytes: int,
+    relay_token: str | None,
+    authorization: str | None = None,
+) -> None:
+    """Auth + Content-Length guard before Pydantic parse (FastAPI dep order)."""
+
+    _reject_oversized_body(request, max_bytes=max_bytes)
+    authorize_relay(request, relay_token or _bearer_token(authorization))
+
+
+def require_relay_alert(
+    request: Request,
+    relay_token: Annotated[str | None, Header(alias=RELAY_TOKEN_HEADER)] = None,
+) -> None:
+    _authorize_relay_body(request, max_bytes=MAX_RELAY_REQUEST_BODY_BYTES, relay_token=relay_token)
+
+
+def require_relay_heartbeat(
+    request: Request,
+    relay_token: Annotated[str | None, Header(alias=RELAY_TOKEN_HEADER)] = None,
+) -> None:
+    _authorize_relay_body(
+        request, max_bytes=MAX_RELAY_HEARTBEAT_BODY_BYTES, relay_token=relay_token
+    )
+
+
+def require_relay_runtime_status(
+    request: Request,
+    relay_token: Annotated[str | None, Header(alias=RELAY_TOKEN_HEADER)] = None,
+    authorization: Annotated[str | None, Header()] = None,
+) -> None:
+    _authorize_relay_body(
+        request,
+        max_bytes=MAX_RELAY_RUNTIME_STATUS_BODY_BYTES,
+        relay_token=relay_token,
+        authorization=authorization,
+    )
 
 
 class RelayAuditEnvelope(BaseModel):
@@ -208,6 +354,15 @@ class RelayRuntimeStatusResponse(BaseModel):
     generation: int
 
 
+class _AlertKwargs(TypedDict):
+    event_type: AlertEventType
+    detected_at: str
+    probability: float
+    audit: NotRequired[dict[str, object]]
+    snapshot_bytes: NotRequired[bytes]
+    clip_id: NotRequired[str]
+
+
 class BackendIngestClient(Protocol):
     def send_alert(
         self,
@@ -259,9 +414,8 @@ def bump_restart(
 def relay_alert(
     payload: RelayAlertRequest,
     request: Request,
-    relay_token: Annotated[str | None, Header(alias=RELAY_TOKEN_HEADER)] = None,
+    _: Annotated[None, Depends(require_relay_alert)],
 ) -> dict[str, str]:
-    authorize_relay(request, relay_token)
     # Local catalog recording is edge-local audit trail, not backend egress --
     # it must not depend on registry binding or the backend call's outcome
     # (see #183, #202). Recording it up front means ml-api keeps its own
@@ -275,7 +429,7 @@ def relay_alert(
     if client is None:
         # Registry-bound local accept; cloud only when store built a client.
         return _alert_response({"status": "accepted"}, catalog_result)
-    alert_kwargs: dict[str, object] = {
+    alert_kwargs: _AlertKwargs = {
         "event_type": payload.event_type,
         "detected_at": payload.detected_at,
         "probability": payload.probability,
@@ -330,9 +484,8 @@ def relay_alert(
 def relay_heartbeat(
     payload: RelayHeartbeatRequest,
     request: Request,
-    relay_token: Annotated[str | None, Header(alias=RELAY_TOKEN_HEADER)] = None,
+    _: Annotated[None, Depends(require_relay_heartbeat)],
 ) -> dict[str, str]:
-    authorize_relay(request, relay_token)
     # Stamp local liveness right after auth, BEFORE camera binding, so /status
     # reflects edge-local truth even when the registry can't yet resolve this
     # camera -- not just when backend egress later fails (see #183, #202). A
@@ -343,6 +496,11 @@ def relay_heartbeat(
     get_heartbeat_store(request.app).record(
         payload.camera_id,
         payload.facility_id,
+        config_version=payload.config_version,
+    )
+    acknowledge_applied_detection_policies(
+        request,
+        facility_id=payload.facility_id,
         config_version=payload.config_version,
     )
     _clear_never_connected_on_first_heartbeat(request, payload.camera_id)
@@ -365,10 +523,8 @@ def relay_heartbeat(
 def relay_runtime_status(
     payload: RelayRuntimeStatusRequest,
     request: Request,
-    relay_token: Annotated[str | None, Header(alias=RELAY_TOKEN_HEADER)] = None,
-    authorization: Annotated[str | None, Header()] = None,
+    _: Annotated[None, Depends(require_relay_runtime_status)],
 ) -> RelayRuntimeStatusResponse:
-    authorize_relay(request, relay_token or _bearer_token(authorization))
     _runtime_status_facility_binding(request, payload.facility_id)
     _log_unresolved_runtime_status_cameras(request, payload)
     data = payload.model_dump()

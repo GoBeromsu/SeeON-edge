@@ -8,7 +8,7 @@ import re
 import stat
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Annotated, BinaryIO, Literal, Never, Protocol, cast
+from typing import Annotated, BinaryIO, Literal, Never, Protocol, runtime_checkable
 from uuid import UUID
 
 from fastapi import APIRouter, Header, HTTPException, Request, status
@@ -19,6 +19,7 @@ from backend.app.features.relay.auth import authorize_relay as _authorize
 from backend.app.features.relay.router import RELAY_TOKEN_HEADER, _camera_binding
 from backend.app.features.runtime_settings.store import get_runtime_settings_store
 from backend.app.shared.backend_client_bundle import backend_client_bundle
+from shared.events.evidence_export_client import ReadyClipRequest, UnavailableClipRequest
 from shared.events.evidence_export_contract import (
     BackendCapabilities,
     ClipReceipt,
@@ -90,16 +91,22 @@ class ClipReceiptResponse(BaseModel):
     size_bytes: int | None
 
 
+@runtime_checkable
 class BackendEvidenceClient(Protocol):
-    def for_camera(self, camera_id: str) -> BackendEvidenceClient: ...
-
     def probe_capabilities(self, camera_id: str) -> BackendCapabilities | DeliveryFailure: ...
 
     def publish_ready(
-        self, request: _ReadyRequest, media: BinaryIO
+        self, request: ReadyClipRequest, media: BinaryIO
     ) -> ClipReceipt | DeliveryFailure: ...
 
-    def report_unavailable(self, request: _UnavailableRequest) -> ClipReceipt | DeliveryFailure: ...
+    def report_unavailable(
+        self, request: UnavailableClipRequest
+    ) -> ClipReceipt | DeliveryFailure: ...
+
+
+@runtime_checkable
+class CameraScopedEvidenceClient(Protocol):
+    def for_camera(self, _camera_id: str) -> BackendEvidenceClient: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -261,19 +268,23 @@ def _enabled(request: Request) -> bool:
 
 def _backend_client(request: Request, camera_id: str) -> BackendEvidenceClient:
     bundle = backend_client_bundle(request.app)
-    client = (
-        bundle.evidence_client
-        if bundle is not None
-        else getattr(request.app.state, "backend_evidence_client", None)
+    if bundle is not None:
+        return _camera_client(bundle.evidence_client, camera_id)
+    return _camera_client(
+        getattr(request.app.state, "backend_evidence_client", None),
+        camera_id,
     )
-    if client is None:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="backend evidence export unavailable",
-        )
-    if hasattr(client, "for_camera"):
-        return cast(BackendEvidenceClient, client.for_camera(camera_id))
-    return cast(BackendEvidenceClient, client)
+
+
+def _camera_client(client: object, camera_id: str) -> BackendEvidenceClient:
+    if isinstance(client, CameraScopedEvidenceClient):
+        return client.for_camera(camera_id)
+    if isinstance(client, BackendEvidenceClient):
+        return client
+    raise HTTPException(
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        detail="backend evidence export unavailable",
+    )
 
 
 def _raise_failure(failure: DeliveryFailure) -> Never:

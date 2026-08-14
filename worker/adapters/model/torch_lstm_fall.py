@@ -28,6 +28,7 @@ from worker.adapters.model.lstm_manifest import (
     LstmMetadata,
     YamlValue,
 )
+from worker.types import FallModelInput
 
 StateDict: TypeAlias = Mapping[str, torch.Tensor]
 _TORCH_LOAD: Final[Callable[..., StateDict]] = torch.load
@@ -53,9 +54,9 @@ class _TensorModule(Protocol):
     def __call__(self, inputs: torch.Tensor) -> torch.Tensor: ...
 
 
-def _run_lstm(layer: _LstmLayer, inputs: torch.Tensor) -> tuple[
-    torch.Tensor, tuple[torch.Tensor, torch.Tensor]
-]:
+def _run_lstm(
+    layer: _LstmLayer, inputs: torch.Tensor
+) -> tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
     return layer(inputs)
 
 
@@ -88,9 +89,7 @@ class LstmFallRunner:
     name: Final = "fall-detector"
     version: Final = "lstm"
 
-    def __init__(
-        self, manifest: LstmFallManifest, module: nn.Module, device: str = "cpu"
-    ) -> None:
+    def __init__(self, manifest: LstmFallManifest, module: nn.Module, device: str = "cpu") -> None:
         self.manifest = manifest
         self.metadata = LstmMetadata(
             window=manifest.window,
@@ -151,9 +150,7 @@ class LstmFallRunner:
             manifest,
             artifact_digest=digest,
             operating_threshold=(
-                manifest.operating_threshold
-                if operating_threshold is None
-                else operating_threshold
+                manifest.operating_threshold if operating_threshold is None else operating_threshold
             ),
         )
         module = build_lstm_module_from_arch(resolved_manifest.architecture_path)
@@ -164,7 +161,7 @@ class LstmFallRunner:
             raise ModelLoadError(f"cannot load model.pt state_dict: {exc}") from exc
         return cls(resolved_manifest, module, device=device)
 
-    def predict(self, features: NDArray[np.float32]) -> float:
+    def predict(self, features: FallModelInput) -> float:
         sequence = np.asarray(features, dtype=np.float32)
         if sequence.shape != self.manifest.input_shape:
             message = (
@@ -191,7 +188,10 @@ class LstmFallRunner:
         return min(max(probability, 0.0), 1.0)
 
     def warmup(self) -> None:
-        _ = self.predict(np.zeros(self.manifest.input_shape, dtype=np.float32))
+        window, row_size = self.manifest.input_shape
+        zero_row = tuple(0.0 for _ in range(row_size))
+        zero_input: FallModelInput = tuple(zero_row for _ in range(window))
+        _ = self.predict(zero_input)
 
 
 def _validate_expected_identity(

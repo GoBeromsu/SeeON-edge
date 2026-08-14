@@ -14,6 +14,7 @@ import { EdgeSetupWizard } from '@/features/connection/EdgeSetupWizard';
 import { ProcessingStatusCard } from '@/features/settings/ProcessingStatusCard';
 import { ClipStorageCard } from '@/features/settings/ClipStorageCard';
 import { ClipExportSettingsCard } from '@/features/settings/ClipExportSettingsCard';
+import { PolicyEvidenceCard } from '@/features/settings/PolicyEvidenceCard';
 
 /** 설정 화면 — 카메라(좌) + 탐지 설정/서버 연결/처리 상태/클립 저장 공간(우) 7:5 2컬럼 (front/design-handoff/README.md §5). */
 export function SettingsPage(): JSX.Element {
@@ -38,6 +39,7 @@ export function SettingsPage(): JSX.Element {
 
         <div className="flex flex-col gap-5 lg:col-span-5">
           <DetectionSettingsCard resource={detectionResource} />
+          <PolicyEvidenceCard cameras={camerasResource.data} />
           <EdgeSetupWizard connectionResource={connectionResource} camerasResource={camerasResource} />
           <ProcessingStatusCard resource={statusResource} />
           <ClipExportSettingsCard resource={runtimeSettingsResource} />

@@ -9,6 +9,7 @@
 # uv run python scripts/verify_scope_fidelity.py --plan <plan> --evidence <evidence>
 from __future__ import annotations
 
+import ast
 import re
 import subprocess
 import sys
@@ -30,6 +31,9 @@ ROSTER_PATTERN: Final = (
     "environment camera roster",
 )
 NAME_ONLY_MARKER: Final = "scope-fidelity: name-only"
+ENVIRONMENT_CATEGORIES: Final = frozenset(
+    {"environment facility identity", "environment camera roster"}
+)
 OPS_PATTERNS: Final = (
     (
         re.compile(
@@ -72,26 +76,233 @@ def tracked_files(root: Path, paths: tuple[str, ...]) -> tuple[Path, ...]:
     return tuple(root / item for item in output.splitlines() if item)
 
 
+def _contains_raise(nodes: list[ast.stmt]) -> bool:
+    return any(isinstance(node, ast.Raise) for statement in nodes for node in ast.walk(statement))
+
+
+def _is_collection_declaration(value: ast.expr) -> bool:
+    if isinstance(value, (ast.List, ast.Set, ast.Tuple)):
+        return True
+    return (
+        isinstance(value, ast.Call)
+        and isinstance(value.func, ast.Name)
+        and value.func.id in {"frozenset", "set", "tuple"}
+        and len(value.args) == 1
+        and not value.keywords
+        and isinstance(value.args[0], (ast.List, ast.Set, ast.Tuple))
+    )
+
+
+def _assignment_parts(statement: ast.stmt) -> tuple[str, ast.expr] | None:
+    if isinstance(statement, ast.Assign) and len(statement.targets) == 1:
+        target = statement.targets[0]
+        if isinstance(target, ast.Name):
+            return target.id, statement.value
+    if (
+        isinstance(statement, ast.AnnAssign)
+        and isinstance(statement.target, ast.Name)
+        and statement.value is not None
+    ):
+        return statement.target.id, statement.value
+    return None
+
+
+def _is_membership_test(node: ast.AST, names: set[str]) -> bool:
+    return any(
+        isinstance(candidate, ast.Compare)
+        and isinstance(candidate.left, ast.Name)
+        and candidate.left.id in names
+        and any(isinstance(operator, (ast.In, ast.NotIn)) for operator in candidate.ops)
+        for candidate in ast.walk(node)
+    )
+
+
+def _loop_is_rejection(loop: ast.For | ast.AsyncFor) -> bool:
+    targets = {node.id for node in ast.walk(loop.target) if isinstance(node, ast.Name)}
+    guards = tuple(
+        node
+        for statement in loop.body
+        for node in ast.walk(statement)
+        if isinstance(node, ast.If)
+        and _is_membership_test(node.test, targets)
+        and _contains_raise(node.body)
+    )
+    if not guards:
+        return False
+
+    for statement in loop.body:
+        for reference in ast.walk(statement):
+            if not (
+                isinstance(reference, ast.Name)
+                and isinstance(reference.ctx, ast.Load)
+                and reference.id in targets
+            ):
+                continue
+            if any(reference in ast.walk(guard.test) for guard in guards):
+                continue
+            if any(
+                reference in ast.walk(raised)
+                for guard in guards
+                for raised in ast.walk(guard)
+                if isinstance(raised, ast.Raise)
+            ):
+                continue
+            return False
+    return True
+
+
+def _flows_to_raising_guard(
+    node: ast.AST,
+    parents: dict[ast.AST, ast.AST],
+    tree: ast.Module,
+) -> bool:
+    current = node
+    while current in parents:
+        parent = parents[current]
+        if isinstance(parent, ast.If) and any(current is item for item in ast.walk(parent.test)):
+            return _contains_raise(parent.body)
+        if isinstance(parent, (ast.Assign, ast.AnnAssign)):
+            parts = _assignment_parts(parent)
+            if parts is None:
+                return False
+            assigned_name, _ = parts
+            return any(
+                isinstance(candidate, ast.If)
+                and isinstance(candidate.test, ast.Name)
+                and candidate.test.id == assigned_name
+                and _contains_raise(candidate.body)
+                for candidate in ast.walk(tree)
+            )
+        current = parent
+    return False
+
+
+def _is_rejection_collection_use(
+    reference: ast.Name,
+    parents: dict[ast.AST, ast.AST],
+    tree: ast.Module,
+) -> bool:
+    parent = parents.get(reference)
+    if isinstance(parent, ast.Compare):
+        for operator, comparator in zip(parent.ops, parent.comparators, strict=True):
+            if comparator is reference and isinstance(operator, (ast.In, ast.NotIn)):
+                return _flows_to_raising_guard(parent, parents, tree)
+    if (
+        isinstance(parent, ast.Attribute)
+        and parent.value is reference
+        and parent.attr in {"intersection", "isdisjoint"}
+    ):
+        call = parents.get(parent)
+        return isinstance(call, ast.Call) and _flows_to_raising_guard(call, parents, tree)
+    if isinstance(parent, (ast.For, ast.AsyncFor)) and parent.iter is reference:
+        return _loop_is_rejection(parent)
+    return False
+
+
+def _docstring_nodes(tree: ast.Module) -> set[ast.Constant]:
+    docstrings: set[ast.Constant] = set()
+    for owner in ast.walk(tree):
+        if (
+            not isinstance(
+                owner,
+                (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef),
+            )
+            or not owner.body
+        ):
+            continue
+        first = owner.body[0]
+        if (
+            isinstance(first, ast.Expr)
+            and isinstance(first.value, ast.Constant)
+            and isinstance(first.value.value, str)
+        ):
+            docstrings.add(first.value)
+    return docstrings
+
+
+def _python_environment_findings(
+    relative: str,
+    text: str,
+    patterns: tuple[tuple[re.Pattern[str], str], ...],
+) -> tuple[Finding, ...]:
+    tree = ast.parse(text)
+    parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
+    docstrings = _docstring_nodes(tree)
+    matches = {
+        node: category
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Constant) and isinstance(node.value, str) and node not in docstrings
+        for pattern, category in patterns
+        if pattern.search(node.value)
+    }
+    safe_sources: set[ast.Constant] = set()
+    lines = text.splitlines()
+
+    for statement in tree.body:
+        parts = _assignment_parts(statement)
+        if parts is None:
+            continue
+        binding, value = parts
+        sources = {
+            node for node in ast.walk(value) if isinstance(node, ast.Constant) and node in matches
+        }
+        if not sources:
+            continue
+        references = tuple(
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load) and node.id == binding
+        )
+        if (
+            _is_collection_declaration(value)
+            and references
+            and all(
+                _is_rejection_collection_use(reference, parents, tree) for reference in references
+            )
+        ):
+            safe_sources.update(sources)
+            continue
+
+        marker_line = lines[statement.lineno - 1]
+        if (
+            NAME_ONLY_MARKER in marker_line
+            and isinstance(value, ast.Constant)
+            and value in sources
+            and not references
+        ):
+            safe_sources.update(sources)
+
+    findings = {
+        Finding(relative, source.lineno, category)
+        for source, category in matches.items()
+        if source not in safe_sources
+    }
+    return tuple(sorted(findings, key=lambda item: (item.line, item.category)))
+
+
 def scan_file(
     root: Path,
     path: Path,
     patterns: tuple[tuple[re.Pattern[str], str], ...],
 ) -> tuple[Finding, ...]:
-    findings: list[Finding] = []
     text = path.read_text(encoding="utf-8", errors="strict")
     relative = path.relative_to(root).as_posix()
+    if relative.endswith("verify_scope_fidelity.py"):
+        return ()
+
+    environment_patterns = tuple(item for item in patterns if item[1] in ENVIRONMENT_CATEGORIES)
+    findings = list(
+        _python_environment_findings(relative, text, environment_patterns)
+        if path.suffix == ".py" and environment_patterns
+        else ()
+    )
+    line_patterns = tuple(
+        item for item in patterns if path.suffix != ".py" or item[1] not in ENVIRONMENT_CATEGORIES
+    )
     for line_number, line in enumerate(text.splitlines(), start=1):
-        if relative.endswith("verify_scope_fidelity.py"):
+        if line.lstrip().startswith("#") or NAME_ONLY_MARKER in line:
             continue
-        if line.lstrip().startswith("#"):
-            continue
-        # Explicit, auditable escape for a *name-only* constant: a definition
-        # that merely spells the env key so tests and docs can assert it is not
-        # an admission authority. Legitimate only when no production code reads
-        # the variable -- the marker documents intent, it does not grant a read.
-        if NAME_ONLY_MARKER in line:
-            continue
-        for pattern, category in patterns:
+        for pattern, category in line_patterns:
             if pattern.search(line):
                 findings.append(Finding(relative, line_number, category))
     return tuple(findings)
@@ -143,8 +354,20 @@ def run_fixture() -> None:
         safe = root / "backend" / "app"
         safe.mkdir(parents=True)
         _ = (safe / "runtime.py").write_text(
-            '# Historical API_FACILITY_ID note is not executable residue.\n'
-            'endpoint = "/api/v1/connection/sync-cameras"\n',
+            "".join(
+                (
+                    "# Historical API_FACILITY_ID note is not executable residue.\n",
+                    'endpoint = "/api/v1/connection/sync-cameras"\n',
+                    "RETIRED_ENVIRONMENT_KEYS = frozenset(\n",
+                    '    {"API_FACILITY_ID", "EDGE_CAMERA_CONFIG_FILE"}\n',
+                    ")\n",
+                    "\n",
+                    "def reject_retired_environment(environ):\n",
+                    "    for key in RETIRED_ENVIRONMENT_KEYS:\n",
+                    "        if key in environ:\n",
+                    '            raise ValueError(f"retired key: {key}")\n',
+                )
+            ),
             encoding="utf-8",
         )
         _ = subprocess.run(["git", "-C", str(root), "add", "."], check=True)
@@ -152,6 +375,26 @@ def run_fixture() -> None:
             raise ScopeError("safe API-first fixture was rejected")
         cases = {
             "env.py": 'facility = os.environ["API_FACILITY_ID"]\n',
+            "getenv.py": 'facility = os.getenv("API_FACILITY_ID")\n',
+            "pydantic_alias.py": "".join(
+                (
+                    "facility_id: str | None = Field(\n",
+                    '    default=None, validation_alias="API_FACILITY_ID"\n',
+                    ")\n",
+                )
+            ),
+            "hidden_alias.py": "".join(
+                (
+                    'FACILITY_KEY = "API_FACILITY_ID"  # scope-fidelity: name-only\n',
+                    "facility = os.environ[FACILITY_KEY]\n",
+                )
+            ),
+            "denylist_config_read.py": "".join(
+                (
+                    'DENIED_KEYS = frozenset({"EDGE_CAMERA_CONFIG"})\n',
+                    "camera_config = os.environ[next(iter(DENIED_KEYS))]\n",
+                )
+            ),
             "sql.py": 'statement = "DELETE FROM spaces"\n',
             "host.py": 'command = "ssh jnu-oss"\n',
             "image.py": 'image = "worker:latest"\n',

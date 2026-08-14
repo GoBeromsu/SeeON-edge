@@ -66,6 +66,26 @@ def _flatten_runtime_cameras(facilities: dict[str, Any]) -> dict[str, Any]:
     return cameras
 
 
+def _clip_export_applied(facility: dict[str, Any] | None) -> dict[str, object]:
+    if facility is None:
+        return {"enabled": None, "version": None, "freshness": "unknown"}
+    applied = facility.get("clip_export")
+    if not isinstance(applied, dict):
+        return {"enabled": None, "version": None, "freshness": "unknown"}
+    worker = facility.get("worker")
+    if isinstance(worker, dict) and worker.get("alive") is False:
+        freshness = "offline"
+    elif facility.get("stale") is True:
+        freshness = "stale"
+    else:
+        freshness = "fresh"
+    return {
+        "enabled": applied.get("enabled"),
+        "version": applied.get("version"),
+        "freshness": freshness,
+    }
+
+
 def _primary_facility(facilities: dict[str, Any]) -> dict[str, Any] | None:
     """Pick the facility whose worker/device/clip_recorder diagnostics are
     exposed at the flat ``runtime.*`` level the front-end contract expects.

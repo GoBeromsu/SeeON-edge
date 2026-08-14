@@ -3,15 +3,18 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable
 from pathlib import Path
-from typing import Final, TypeAlias
+from typing import Final, TypeAlias, cast
 
+from shared.rtsp_url_policy import assert_rtsp_endpoint_allowed
 from worker.adapters.decode.cpu_av.adapter import CpuAvAdapter
 from worker.adapters.decode.cpu_av.models import CpuAvConfig
 from worker.adapters.decode.nvdec_cuvid.adapter import NvdecCuvidAdapter
 from worker.adapters.decode.nvdec_cuvid.models import NvdecCuvidConfig
+from worker.adapters.decode.pyav_preserving import PyAvPreservingAdapter
 from worker.adapters.decode.vaapi.adapter import VaapiAdapter
 from worker.adapters.decode.vaapi.models import VaapiConfig
 from worker.interfaces.decode import DecodeAdapter
+from worker.interfaces.source_packet import SourcePacketSink
 from worker.pipeline.bus.frame_bus import BoundedFrameBus
 from worker.pipeline.ingest.lifecycle import (
     CameraIngestLoop,
@@ -77,7 +80,10 @@ def resolve_decode_backend(decode: DecodePolicy, override: str | None) -> str:
 
 
 def decoder_for(
-    decode: DecodePolicy, override: str | None = None
+    decode: DecodePolicy,
+    override: str | None = None,
+    *,
+    packet_sink: SourcePacketSink | None = None,
 ) -> DecodeAdapter[DecodeConfig]:
     """Build the real decode adapter for a boot-resolved decode token.
 
@@ -85,12 +91,17 @@ def decoder_for(
     than silently falling back to a default backend.
     """
     resolved = resolve_decode_backend(decode, override)
+    if packet_sink is not None:
+        return cast(
+            "DecodeAdapter[DecodeConfig]",
+            PyAvPreservingAdapter(packet_sink, decode_backend=resolved),
+        )
     if resolved in ("opencv", "cpu"):
-        return CpuAvAdapter()
+        return cast("DecodeAdapter[DecodeConfig]", CpuAvAdapter())
     if resolved == "nvdec":
-        return NvdecCuvidAdapter()
+        return cast("DecodeAdapter[DecodeConfig]", NvdecCuvidAdapter())
     if resolved == "vaapi":
-        return VaapiAdapter()
+        return cast("DecodeAdapter[DecodeConfig]", VaapiAdapter())
     raise RuntimeError(f"unsupported decode policy: {resolved!r}")
 
 
@@ -101,24 +112,31 @@ def _decode_config_factory(
 
     def make(camera_id: str, resolved_source: ResolvedSource) -> DecodeConfig:
         del resolved_source  # the registry only gates which cameras may ingest
+        # Resolve every A/AAAA answer and pin an IP literal so the decoder
+        # cannot DNS-rebind past policy between check and connect.
+        try:
+            endpoint = assert_rtsp_endpoint_allowed(camera.inference_rtsp_url)
+        except ValueError as exc:
+            raise RuntimeError(f"RTSP destination rejected for camera {camera_id}: {exc}") from exc
+        pinned_url = endpoint.pinned_url
         if resolved in ("opencv", "cpu"):
             return CpuAvConfig(
                 camera_id=camera_id,
-                url=camera.inference_rtsp_url,
+                url=pinned_url,
                 open_timeout_ms=runtime.open_timeout_ms,
                 read_timeout_ms=runtime.read_timeout_ms,
             )
         if resolved == "nvdec":
             return NvdecCuvidConfig(
                 camera_id=camera_id,
-                url=camera.inference_rtsp_url,
+                url=pinned_url,
                 open_timeout_ms=runtime.open_timeout_ms,
                 read_timeout_ms=runtime.read_timeout_ms,
             )
         if resolved == "vaapi":
             return VaapiConfig(
                 camera_id=camera_id,
-                url=camera.inference_rtsp_url,
+                url=pinned_url,
                 open_timeout_ms=runtime.open_timeout_ms,
                 read_timeout_ms=runtime.read_timeout_ms,
             )
@@ -135,6 +153,7 @@ def compose_camera_ingest_loop(
     decode: DecodePolicy,
     registry: SourceRegistry,
     runtime: WorkerRuntimeConfig | None = None,
+    packet_sink: SourcePacketSink | None = None,
 ) -> CameraIngestLoop[DecodeConfig]:
     """Compose the real per-camera ingest loop for the boot-resolved decode profile.
 
@@ -148,7 +167,11 @@ def compose_camera_ingest_loop(
     effective_runtime = runtime if runtime is not None else WorkerRuntimeConfig()
     ports = CameraIngestPorts(
         registry=registry,
-        decoder=decoder_for(decode, camera.decode_backend),
+        decoder=decoder_for(
+            decode,
+            camera.decode_backend,
+            packet_sink=packet_sink,
+        ),
         bus=bus,
         reporter=reporter,
     )

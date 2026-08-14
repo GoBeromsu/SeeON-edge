@@ -12,6 +12,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from backend.app.features.cameras.store import CameraRegistryStore
+from backend.app.features.connection.store import ConnectionSettingsStore
 from backend.app.lifespan import BACKEND_CONFIG_SHUTDOWN_WAIT_SEC, refresh_backend_config
 from backend.app.main import create_app
 from contracts.worker_config import CONFIG_VERSION_KEY, RESTART_EPOCH_KEY, PulledNightWindow
@@ -49,6 +50,7 @@ def clear_env(monkeypatch: pytest.MonkeyPatch) -> None:
         "API_EDGE_RELAY_TOKEN",
         "API_CAMERA_INVENTORY",
         "API_FACILITY_ID",
+        "API_BACKEND_BASE_URL",
         "API_BACKEND_CONFIG_URL",
         "API_BACKEND_EVENTS_URL",
         "EDGE_FACILITY_TOKEN",
@@ -79,30 +81,15 @@ def _backend_config() -> dict[str, object]:
     }
 
 
-def _set_pull_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path | None = None) -> None:
+def _set_pull_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("API_EDGE_RELAY_TOKEN", "relay-token")
-    monkeypatch.setenv("API_BACKEND_CONFIG_URL", "http://backend:3000/api/v1/ml-config/")
-    # facility_id is DB-only; seed connection_settings so ml-config pull runs.
-    # A backend_client_bundle (and therefore refresh_backend_config) is only
-    # published once every enrollment field is present -- not just the
-    # ml-config pull's own config_url/facility_id/facility_token -- so a
-    # complete enrollment row is required here even though this module's
-    # tests only exercise the config-pull half of that bundle.
-    from backend.app.features.connection.store import (
-        API_CONNECTION_SETTINGS_PATH_ENV,
-        ConnectionSettingsStore,
-    )
-
-    path = (tmp_path or Path("/tmp")) / "connection-settings-pull.sqlite3"
-    if tmp_path is None:
-        import tempfile
-
-        path = Path(tempfile.mkdtemp()) / "connection-settings-pull.sqlite3"
-    monkeypatch.setenv(API_CONNECTION_SETTINGS_PATH_ENV, str(path))
-    ConnectionSettingsStore(path).save(
+    monkeypatch.setenv("API_BACKEND_BASE_URL", "http://backend:3000")
+    # Facility identity is DB-only. The suite fixture redirects from_env() to
+    # an isolated database, so seed a complete enrollment through that
+    # supported persistence seam while endpoints derive from the one public
+    # deployment base URL.
+    ConnectionSettingsStore.from_env().save(
         {
-            "events_url": "http://backend:3000/api/v1/events",
-            "config_url": "http://backend:3000/api/v1/ml-config/",
             "facility_code": "NH-7H2K9M4QXP",
             "client_installation_ref": "aa83ea3f-6e5f-4f45-a401-fb36c38835b6",
             "facility_id": "facility-pulled",
@@ -133,7 +120,6 @@ def _dashboard_camera_registry(tmp_path: Path) -> CameraRegistryStore:
 
 def test_backend_config_pull_applies_metadata_not_camera_roster(
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
 ) -> None:
     """ml-config pull keeps detection windows/config_version only.
 
@@ -146,7 +132,7 @@ def test_backend_config_pull_applies_metadata_not_camera_roster(
         captured.append((request.full_url, request.get_header("Authorization"), timeout))
         return FakeHTTPResponse(_backend_config())
 
-    _set_pull_env(monkeypatch, tmp_path)
+    _set_pull_env(monkeypatch)
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
 
     with TestClient(create_app()) as client:
@@ -155,7 +141,7 @@ def test_backend_config_pull_applies_metadata_not_camera_roster(
             (
                 "http://backend:3000/api/v1/ml-config/facility-pulled",
                 "Bearer facility-token",
-                0.5,
+                1.0,
             )
         ]
         assert app.state.config_version == 7
@@ -179,7 +165,9 @@ def test_backend_config_pull_applies_metadata_not_camera_roster(
         "config_version": 7,
         "restart_epoch": 0,
         "night_window": {"start": "21:00", "end": "06:00", "tz": "Asia/Seoul"},
-        "detection_windows": {"bed_exit": {"start": "21:00", "end": "06:00", "tz": "Asia/Seoul"}},
+        "detection_windows": {
+            "bed_exit": {"start": "21:00", "end": "06:00", "tz": "Asia/Seoul"}
+        },
     }
     assert relay_config.status_code == 503
 
@@ -334,24 +322,11 @@ def test_backend_config_pull_survives_invalid_window_and_never_populates_cameras
 
 def test_backend_config_pull_failure_does_not_create_inventory(
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
 ) -> None:
     def fake_urlopen(url: str, timeout: float) -> FakeHTTPResponse:
         raise TimeoutError("boom")
 
-    _set_pull_env(monkeypatch, tmp_path)
-    monkeypatch.setenv(
-        "API_CAMERA_INVENTORY",
-        json.dumps(
-            [
-                {
-                    "camera_id": "cam-env",
-                    "facility_id": "facility-env",
-                    "resident_id": "resident-env",
-                }
-            ]
-        ),
-    )
+    _set_pull_env(monkeypatch)
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
 
     with TestClient(create_app()) as client:
@@ -443,15 +418,12 @@ def test_heartbeat_config_version_surfaces_in_status_and_remains_optional(
 def test_config_returns_503_when_backend_config_unavailable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # Relay token + env inventory present, but NO backend pull configured, so
-    # app.state.pulled_config stays None. /config MUST signal UNAVAILABLE (503)
+    # Relay auth is configured, but no backend enrollment/config pull is
+    # available, so app.state.pulled_config stays None. /config MUST signal
+    # UNAVAILABLE (503)
     # rather than emit an empty 200 that the worker would persist as LKG,
     # clobbering a valid last-known-good config.
     monkeypatch.setenv("API_EDGE_RELAY_TOKEN", "relay-token")
-    monkeypatch.setenv(
-        "API_CAMERA_INVENTORY",
-        json.dumps([{"camera_id": "cam-1", "facility_id": "facility-1"}]),
-    )
 
     with TestClient(create_app()) as client:
         assert client.app.state.pulled_config is None
@@ -691,17 +663,7 @@ def test_successful_refresh_resumes_roster_sync_without_per_camera_mapping(
     canonical id resolution -- the worker-config projection falls back to the
     record's own local id while it is unmapped.
     """
-    from backend.app.features.cameras.store import CameraRegistryStore
-    from backend.app.features.connection.store import ConnectionSettingsStore
-
-    _set_pull_env(monkeypatch, tmp_path)
-    # Roster sync resolves its client off the connection store's events_url
-    # (via backend_client_bundle), same as ml-config pull. _set_pull_env only
-    # seeds config_url; seed events_url here too so a client is constructible
-    # (even though, per the docstring above, no call ends up going out).
-    ConnectionSettingsStore(tmp_path / "connection-settings-pull.sqlite3").save(
-        {"events_url": "http://backend/api/v1/events"}
-    )
+    _set_pull_env(monkeypatch)
 
     mapping_calls: list[dict[str, object]] = []
 

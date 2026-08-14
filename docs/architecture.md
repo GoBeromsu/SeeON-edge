@@ -11,6 +11,49 @@ Read the scoped `AGENTS.md` next to the code you are changing for the
 per-package import ceiling. Boundaries are enforced by import-linter
 (`uv run --group lint lint-imports`), not by convention.
 
+## Co-located persistence boundary
+
+The one supported edge deployment is one local Linux host, one Compose release
+unit, one API process, and one worker process. Those processes remain
+import-independent and HTTP remains their command/event notification boundary.
+They may share persistence through one local
+`/var/lib/seeon-state/edge.sqlite3`; this exception does not permit direct
+function calls, SQLite polling as IPC, NFS/NAS placement, multiple workers, or
+independently released API/worker schemas. The database, `edge.sqlite3-wal`, and
+`edge.sqlite3-shm` must stay together in the same private `0700` local directory;
+the database is `0600`.
+
+Only the one-shot `python -m shared.edge_db` migrator executes DDL or advances
+`PRAGMA user_version`. API and worker connections verify the machine-readable
+migration ledger and ownership map, enable foreign keys, use WAL with
+`synchronous=FULL` and a fixed 5000 ms busy timeout, and are guarded by a SQLite
+authorizer that rejects DDL and cross-family writes. Transactions are short:
+never hold one across encode, hash, fsync, HTTP, or other external work. Fatal
+fault persistence uses the explicit zero-wait best-effort connection path.
+
+| Table prefix | Sole writer |
+| --- | --- |
+| `schema_*` | one-shot migrator |
+| `control_*`, `qa_*` | API |
+| `runtime_*`, `evidence_*`, `derivative_*` | worker |
+
+Schema compatibility is an explicit inclusive range, not an optimistic open:
+
+| Database version relative to binary range | Runtime behavior |
+| --- | --- |
+| below minimum | refuse; migrator required |
+| minimum through maximum | open read/write with ownership guard, no DDL |
+| above maximum | refuse; binary is too old |
+
+The central database is forward-only and requires the complete cutover schema.
+Temporary SYSTEM_TEST operator-only rows and their `system_test_runs` mapping are
+retired on the same forward-only path as released main outbox schema 9: legacy
+worker snapshots may still contain them, but the central migrator and stopped-
+runtime importer purge operator-only events (and dependent central projections)
+while preserving ordinary evidence, clips, config/fault rows, and clip-deletion
+reasons. No runtime CLI flag, relay route, or sender API retains executable
+SYSTEM_TEST authority.
+
 ## Layers
 
 Flow is one-way. A layer may depend on the layer above it and on
@@ -457,14 +500,30 @@ latest-frame store landed in `worker/pipeline/output/live_view.py` as
 `LatestFrameStore` (a non-consuming latest-value store, not a queue). The rows
 above reflect the real locations.
 
-**ADR-0001 source-packet preservation is NOT complete.** It remains an open
-follow-up, tracked at
-<https://github.com/SeniorAILab/eldercare-fall-ml-v2/issues/2>, and no todo in
-this migration closes it. Stored clips are produced by re-encoding
-decoded-frame data through the segment encoder, so a clip is a decoded-frame
-derivative and does **not** satisfy that requirement — it is not the original
-source stream. Never describe worker clip output as original-stream or
-bit-exact evidence.
+**ADR-0001 source-packet preservation is complete for primary clean clips.**
+The worker keeps bounded encoded-packet history per camera and remuxes one
+keyframe-aligned stream epoch/configuration without transcoding. Decoded frames
+remain analysis and snapshot taps; transformed clips are separate derivatives
+and never replace the preserved clean clip.
+
+**Live overlays and annotated evidence share one canonical scene.**
+`worker/types/overlay_scene.py` owns the versioned, hardware-neutral primitives
+and explicit present/stale/missing/not-evaluated semantics.
+`OverlaySceneBuilder` creates those primitives from either frozen live
+observations or persisted analysis/decision traces; renderers do not run policy
+or inference. The OpenCV CPU still renderer and event-only FFmpeg CPU MP4 path
+consume that same scene contract with fixed colors, layout, transforms, and
+host-independent CJK raster cells.
+
+Annotated MP4s are bounded, content-addressed, immutable derivative media.
+Publication verifies the clean source identity, fsyncs and atomically renames
+media before a short central-DB linkage transaction, and startup reconciliation
+converges pending/mutated/orphan state without changing clean evidence. The
+authenticated clip artifact projection exposes clean/analysis/annotated state;
+an unavailable or invalid annotation falls back to descriptor-pinned clean
+playback. Queue count/source bytes, frame memory, scene count, duration, render
+time, output bytes, and aggregate derivative disk usage all have explicit
+limits. No continuous second encoder or second inference pass is involved.
 
 **Encoder-lifecycle work is risk reduction, not a GPU fix.** The per-camera
 encoder session, segment ring, and their instrumentation reduce the window in

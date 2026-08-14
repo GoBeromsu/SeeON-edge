@@ -19,7 +19,7 @@ from pathlib import Path
 from threading import Lock
 
 from backend.app.shared.sqlite_bootstrap import connect_catalog_store
-from backend.app.shared.state_dir import resolve_state_dir
+from shared.edge_db import EDGE_DATABASE_PATH
 
 _CREATE_CLIP_STORAGE_LOCATION_TABLE = (
     "CREATE TABLE IF NOT EXISTS clip_storage_location ("
@@ -36,7 +36,7 @@ class ClipStorageLocationStore:
 
     @classmethod
     def from_env(cls) -> ClipStorageLocationStore:
-        return cls(resolve_state_dir("ml-api") / "catalog.sqlite3")
+        return cls(EDGE_DATABASE_PATH)
 
     def get(self) -> str:
         """The selected relative subdirectory; ``""`` (mount root) when

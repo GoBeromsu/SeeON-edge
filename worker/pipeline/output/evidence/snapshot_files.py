@@ -68,6 +68,43 @@ class SnapshotFiles:
         finally:
             os.close(directory)
 
+    def _replace_atomic(self, source: Path, destination: Path) -> None:
+        source_relative = self._relative_to_root(source)
+        destination_relative = self._relative_to_root(destination)
+        source_directory = self._open_directory(source_relative.parent, create=False)
+        destination_directory = self._open_directory(destination_relative.parent, create=True)
+        try:
+            self._reject_symlink(source_directory, source_relative.name)
+            try:
+                self._reject_symlink(destination_directory, destination_relative.name)
+            except FileNotFoundError:
+                pass
+            os.replace(
+                source_relative.name,
+                destination_relative.name,
+                src_dir_fd=source_directory,
+                dst_dir_fd=destination_directory,
+            )
+            self._fsync_directory(destination_directory)
+            if source_directory != destination_directory:
+                self._fsync_directory(source_directory)
+        finally:
+            os.close(destination_directory)
+            os.close(source_directory)
+
+    def _unlink_file(self, relative: Path) -> bool:
+        directory = self._open_directory(relative.parent, create=True)
+        try:
+            try:
+                self._reject_symlink(directory, relative.name)
+                os.unlink(relative.name, dir_fd=directory)
+            except FileNotFoundError:
+                return False
+            self._fsync_directory(directory)
+            return True
+        finally:
+            os.close(directory)
+
     def _open_directory(self, relative: Path, *, create: bool) -> int:
         descriptor = self._open_store_root()
         descriptors = [descriptor]

@@ -45,8 +45,8 @@ domains:
 # running without clips and the degraded state surfaces through runtime
 # diagnostics (/status) instead of failing silently.
 #
-# Clip export is an independent persisted runtime setting in the Edge
-# dashboard. It defaults OFF and never disables event delivery.
+# Independent of the live dashboard clip-export setting,
+# which controls the export *sender* rather than whether a recorder exists.
 clip:
   enabled: true
 cameras:

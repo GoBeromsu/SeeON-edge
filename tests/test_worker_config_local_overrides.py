@@ -187,7 +187,9 @@ def test_pull_with_no_fall_config_resolves_packaged_default_lstm(
     # Same rationale as the `clip.enabled` assertion above: defers to the
     # model default rather than asserting a stale literal.
     assert snapshot.config.clip.enabled is ClipRecordingConfig().enabled
-    assert snapshot.config.dev_mjpeg.enabled is False
+    assert snapshot.config.dev_mjpeg.enabled is True
+    assert snapshot.config.dev_mjpeg.host == "0.0.0.0"
+    assert snapshot.config.dev_mjpeg.port == 8090
 
 
 def test_local_yaml_fall_config_wins_over_env_when_both_are_set(tmp_path: Path) -> None:

@@ -14,7 +14,7 @@ class FrameSubscription(Protocol):
 
 @runtime_checkable
 class FrameBus(Protocol):
-    """Fan immutable frame packets out to independently bounded subscribers."""
+    """Fan out packets; ``publish`` consumes the caller's lease handle."""
 
     def subscribe(
         self,

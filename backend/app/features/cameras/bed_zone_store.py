@@ -22,9 +22,12 @@ import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Lock
+from typing import TypeAlias
+
+from pydantic import TypeAdapter, ValidationError
 
 from backend.app.shared.sqlite_bootstrap import connect_catalog_store
-from backend.app.shared.state_dir import resolve_state_dir
+from shared.edge_db import EDGE_DATABASE_PATH
 
 _CREATE_BED_ZONE_TABLE = (
     "CREATE TABLE IF NOT EXISTS camera_bed_zone ("
@@ -60,7 +63,7 @@ class BedZoneStore:
 
     @classmethod
     def from_env(cls) -> BedZoneStore:
-        return cls(resolve_state_dir("ml-api") / "catalog.sqlite3")
+        return cls(EDGE_DATABASE_PATH)
 
     def get(self, camera_id: str) -> BedZone | None:
         with self._lock:
@@ -132,24 +135,59 @@ class BedZoneStore:
         return self._connection
 
 
-def _row_to_bed_zone(row: tuple[object, ...]) -> BedZone | None:
-    polygon_json, image_width, image_height, recognized_at = row
+BedZoneRow: TypeAlias = tuple[str, int, int, str]
+_BED_ZONE_ROW = TypeAdapter(BedZoneRow)
+
+
+def _row_to_bed_zone(row: object) -> BedZone | None:
+    try:
+        polygon_json, image_width, image_height, recognized_at = _BED_ZONE_ROW.validate_python(row)
+    except ValidationError:
+        return None
     try:
         raw_polygon = json.loads(polygon_json)
     except (json.JSONDecodeError, TypeError, ValueError):
         return None
     if not isinstance(raw_polygon, list):
         return None
-    try:
-        polygon = tuple((int(point[0]), int(point[1])) for point in raw_polygon)
-    except (TypeError, ValueError, IndexError):
+    polygon = _parse_polygon_points(raw_polygon)
+    if polygon is None:
         return None
     return BedZone(
         polygon=polygon,
-        image_width=int(image_width),
-        image_height=int(image_height),
-        recognized_at=str(recognized_at),
+        image_width=image_width,
+        image_height=image_height,
+        recognized_at=recognized_at,
     )
+
+
+def _parse_polygon_points(raw_polygon: list[object]) -> tuple[tuple[int, int], ...] | None:
+    points: list[tuple[int, int]] = []
+    for point in raw_polygon:
+        parsed = _parse_point(point)
+        if parsed is None:
+            return None
+        points.append(parsed)
+    return tuple(points)
+
+
+def _parse_point(point: object) -> tuple[int, int] | None:
+    if not isinstance(point, (list, tuple)) or len(point) < 2:
+        return None
+    x = _as_finite_int(point[0])
+    y = _as_finite_int(point[1])
+    if x is None or y is None:
+        return None
+    return x, y
+
+
+def _as_finite_int(value: object) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    as_int = int(value)
+    if float(value) != float(as_int):
+        return None
+    return as_int
 
 
 __all__ = ["BedZone", "BedZoneStore"]

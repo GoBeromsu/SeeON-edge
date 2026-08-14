@@ -26,6 +26,7 @@ PoseBoxes: TypeAlias = tuple[tuple[int, int, int, int, float], ...]
 POSE_MODEL_CONFIDENCE: Final = 0.05
 COCO_KEYPOINT_COUNT: Final = 17
 POSE_MODEL_PATH: Final = str(pose_weight_path("n"))
+POSE_PREPROCESSING_IDENTITY: Final = "rgb24-to-coco17.v1"
 
 
 @final
@@ -39,6 +40,7 @@ class YoloPoseRunner:
         warmup_frame: WarmupFrameSpec = DEFAULT_WARMUP_FRAME,
         model: YoloModel | None = None,
     ) -> None:
+        self.preprocessing_identity = POSE_PREPROCESSING_IDENTITY
         self._model_path: Path = Path(model_path)
         self._artifact_digest: str | None = (
             artifact_digest(self._model_path) if self._model_path.is_file() else None
@@ -58,8 +60,8 @@ class YoloPoseRunner:
         except (AttributeError, IndexError, OverflowError, TypeError, ValueError) as exc:
             raise YoloOutputError(task="pose", detail=str(exc)) from exc
 
-    def run(self, frame: Image) -> PoseRunnerResult:
-        return self.predict_full(frame)
+    def run(self, image: Image) -> PoseRunnerResult:
+        return self.predict_full(image)
 
     def warmup(self) -> None:
         _ = self.run(synthetic_rgb_frame(self._warmup_frame))

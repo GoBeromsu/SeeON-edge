@@ -10,7 +10,7 @@ from threading import Lock
 from fastapi import FastAPI
 
 from backend.app.shared.sqlite_bootstrap import connect_catalog_store
-from backend.app.shared.state_dir import resolve_state_dir
+from shared.edge_db import EDGE_DATABASE_PATH
 
 _CREATE_RUNTIME_SETTINGS_TABLE = (
     "CREATE TABLE IF NOT EXISTS runtime_settings ("
@@ -51,7 +51,7 @@ class RuntimeSettingsStore:
 
     @classmethod
     def from_env(cls) -> RuntimeSettingsStore:
-        return cls(resolve_state_dir("ml-api") / "catalog.sqlite3")
+        return cls(EDGE_DATABASE_PATH)
 
     def get(self) -> RuntimeSetting:
         with self._lock:

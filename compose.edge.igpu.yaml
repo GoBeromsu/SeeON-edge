@@ -2,10 +2,8 @@
 #
 #   docker compose -f compose.edge.yaml -f compose.edge.igpu.yaml up -d
 #
-# compose.edge.yaml 의 ml-worker 는 NVIDIA GPU 를 무조건 예약한다. Intel
-# iGPU 노드에는 NVIDIA 디바이스가 없으므로 그 예약 때문에 컨테이너 생성
-# 자체가 실패한다 — compose.edge.cpu.yaml 과 동일하게 deploy 블록을 통째로
-# 지운다.
+# compose.edge.yaml 은 GPU 중립이다. 이 오버레이는 Intel 장치만 추가하고
+# NVIDIA 예약은 만들지 않는다.
 #
 # 이 프로필은 RTSP 디코드만 Intel iGPU(VAAPI)로 오프로드한다. 추론은 이번
 # PR에서 여전히 CPU에서 돈다 — OpenVINO GPU/NPU 추론은 별도 후속 작업이다
@@ -37,9 +35,6 @@ services:
       - "104" # render (getent group render 로 호스트 실제 GID 확인)
       - "44" # video (getent group video 로 호스트 실제 GID 확인)
     environment:
-      # GPU 예약이 없으므로 NVIDIA 드라이버 capability 도 의미가 없다.
-      NVIDIA_DRIVER_CAPABILITIES: ""
-      ML_WORKER_PROFILE: igpu
       # ffmpeg/libva 가 iHD(Arrow Lake 포함 Gen9+) 드라이버를 명시적으로
       # 선택하도록 강제한다 — 미설정 시 libva 가 i965(구형, Arrow Lake
       # 미지원) 드라이버를 먼저 시도해 초기화가 실패할 수 있다.

@@ -10,6 +10,7 @@ import urllib.request
 
 import cv2
 import numpy as np
+import pytest
 
 from worker.pipeline.output.live_view import LatestFrameStore
 from worker.pipeline.output.mjpeg_server import (
@@ -28,6 +29,26 @@ from worker.pipeline.output.mjpeg_server import (
 # whatever is cached before invoking the injected recognizer, so it needs
 # bytes that actually round-trip.
 _REAL_JPEG = cv2.imencode(".jpg", np.zeros((16, 16, 3), dtype=np.uint8))[1].tobytes()
+_RELAY_TOKEN = "relay-token"
+_AUTH_HEADERS = {"X-Edge-Relay-Token": _RELAY_TOKEN}
+
+
+def _authed_get(url: str, *, timeout: float = 1) -> urllib.request.Request:
+    return urllib.request.Request(url, headers=_AUTH_HEADERS)
+
+
+def _assert_forbidden(request: urllib.request.Request) -> bytes:
+    try:
+        urllib.request.urlopen(request, timeout=1)
+    except urllib.error.HTTPError as exc:
+        assert exc.code == 403
+        body = exc.read()
+        # Credential non-disclosure: rejection body must never echo the token.
+        assert _RELAY_TOKEN.encode() not in body
+        assert b"relay-token" not in body
+        return body
+    raise AssertionError("expected 403 Forbidden")  # pragma: no cover
+
 
 # worker's MjpegServer takes an injected `probe` callable (worker/pipeline/
 # output/mjpeg_server.py:36-52) instead of owning an internal RTSP-probing
@@ -62,23 +83,25 @@ def test_mjpeg_server_unknown_empty_and_stream_response() -> None:
     store = LatestFrameStore()
     store.register_camera("empty")
     store.publish_jpeg("camera-a", b"\xff\xd8jpeg\xff\xd9", frame_index=1)
-    server = MjpegServer(store, MjpegServerConfig(port=0))
+    server = MjpegServer(store, MjpegServerConfig(port=0, probe_token=_RELAY_TOKEN))
     server.start()
     base = f"http://127.0.0.1:{server.port}"
     try:
         try:
-            urllib.request.urlopen(f"{base}/stream/missing", timeout=1)
+            urllib.request.urlopen(_authed_get(f"{base}/stream/missing"), timeout=1)
         except urllib.error.HTTPError as exc:
             assert exc.code == 404
         else:  # pragma: no cover
             raise AssertionError("unknown camera should 404")
         try:
-            urllib.request.urlopen(f"{base}/stream/empty", timeout=1)
+            urllib.request.urlopen(_authed_get(f"{base}/stream/empty"), timeout=1)
         except urllib.error.HTTPError as exc:
             assert exc.code == 503
         else:  # pragma: no cover
             raise AssertionError("empty camera should 503")
-        with urllib.request.urlopen(f"{base}/stream/camera-a", timeout=1) as response:
+        with urllib.request.urlopen(
+            _authed_get(f"{base}/stream/camera-a"), timeout=1
+        ) as response:
             body = response.read(64)
             assert response.status == 200
             assert b"multipart" in response.headers["Content-Type"].encode()
@@ -91,23 +114,25 @@ def test_snapshot_unknown_empty_and_happy_path() -> None:
     store = LatestFrameStore()
     store.register_camera("empty")
     store.publish_jpeg("camera-a", b"\xff\xd8jpeg\xff\xd9", frame_index=1)
-    server = MjpegServer(store, MjpegServerConfig(port=0))
+    server = MjpegServer(store, MjpegServerConfig(port=0, probe_token=_RELAY_TOKEN))
     server.start()
     base = f"http://127.0.0.1:{server.port}"
     try:
         try:
-            urllib.request.urlopen(f"{base}/snapshot/missing", timeout=1)
+            urllib.request.urlopen(_authed_get(f"{base}/snapshot/missing"), timeout=1)
         except urllib.error.HTTPError as exc:
             assert exc.code == 404
         else:  # pragma: no cover
             raise AssertionError("unknown camera should 404")
         try:
-            urllib.request.urlopen(f"{base}/snapshot/empty", timeout=1)
+            urllib.request.urlopen(_authed_get(f"{base}/snapshot/empty"), timeout=1)
         except urllib.error.HTTPError as exc:
             assert exc.code == 503
         else:  # pragma: no cover
             raise AssertionError("empty camera should 503")
-        with urllib.request.urlopen(f"{base}/snapshot/camera-a", timeout=1) as response:
+        with urllib.request.urlopen(
+            _authed_get(f"{base}/snapshot/camera-a"), timeout=1
+        ) as response:
             body = response.read()
             assert response.status == 200
             assert response.headers["Content-Type"] == "image/jpeg"
@@ -131,7 +156,11 @@ def test_mjpeg_server_probe_requires_token_and_returns_sanitized_result() -> Non
     )
     server.start()
     base = f"http://127.0.0.1:{server.port}"
-    body = json.dumps({"rtsp_url": "rtsp://user:secret@camera.local/trackID=2"}).encode()
+    # Public literal IP so admission DNS pinning succeeds without depending on
+    # local resolver / special-use hostnames; the injected probe is what the
+    # test actually exercises after the gate.
+    probe_url = "rtsp://user:secret@8.8.8.8/trackID=2"
+    body = json.dumps({"rtsp_url": probe_url}).encode()
     try:
         request = urllib.request.Request(f"{base}/probe", data=body, method="POST")
         try:
@@ -151,9 +180,9 @@ def test_mjpeg_server_probe_requires_token_and_returns_sanitized_result() -> Non
             payload = json.loads(response.read().decode("utf-8"))
 
         assert payload == {"backend": "opencv", "height": 360, "ok": True, "width": 640}
-        assert seen_urls == ["rtsp://user:secret@camera.local/trackID=2"]
+        assert seen_urls == [probe_url]
         assert "secret" not in json.dumps(payload)
-        assert "camera.local" not in json.dumps(payload)
+        assert "8.8.8.8" not in json.dumps(payload)
     finally:
         server.stop()
 
@@ -172,7 +201,8 @@ def test_mjpeg_server_probe_normalizes_auth_failure_without_leaking_url() -> Non
     )
     server.start()
     base = f"http://127.0.0.1:{server.port}"
-    body = json.dumps({"rtsp_url": "rtsp://user:secret@camera.local/trackID=2"}).encode()
+    probe_url = "rtsp://user:secret@8.8.8.8/trackID=2"
+    body = json.dumps({"rtsp_url": probe_url}).encode()
     try:
         request = urllib.request.Request(
             f"{base}/probe",
@@ -185,7 +215,7 @@ def test_mjpeg_server_probe_normalizes_auth_failure_without_leaking_url() -> Non
 
         assert payload == {"error_class": "auth", "ok": False}
         assert "secret" not in json.dumps(payload)
-        assert "camera.local" not in json.dumps(payload)
+        assert "8.8.8.8" not in json.dumps(payload)
     finally:
         server.stop()
 
@@ -194,7 +224,7 @@ def test_mjpeg_stream_emits_multiple_camera_keyed_non_consuming_parts() -> None:
     store = LatestFrameStore()
     store.publish_jpeg("camera-a", b"\xff\xd8camera-a-1\xff\xd9", frame_index=1)
     store.publish_jpeg("camera-b", b"\xff\xd8camera-b-1\xff\xd9", frame_index=1)
-    server = MjpegServer(store, MjpegServerConfig(port=0))
+    server = MjpegServer(store, MjpegServerConfig(port=0, probe_token=_RELAY_TOKEN))
     server.start()
     base = f"http://127.0.0.1:{server.port}"
 
@@ -207,7 +237,9 @@ def test_mjpeg_stream_emits_multiple_camera_keyed_non_consuming_parts() -> None:
 
     publisher = threading.Thread(target=publish_updates)
     try:
-        with urllib.request.urlopen(f"{base}/stream/camera-a", timeout=2) as response:
+        with urllib.request.urlopen(
+            _authed_get(f"{base}/stream/camera-a", timeout=2), timeout=2
+        ) as response:
             publisher.start()
             body = bytearray()
             deadline = time.monotonic() + 2.0
@@ -243,7 +275,7 @@ def test_stream_connect_and_disconnect_track_the_viewer_counter() -> None:
     """
     store = LatestFrameStore()
     store.publish_jpeg("camera-a", b"\xff\xd8jpeg\xff\xd9", frame_index=1)
-    server = MjpegServer(store, MjpegServerConfig(port=0))
+    server = MjpegServer(store, MjpegServerConfig(port=0, probe_token=_RELAY_TOKEN))
     server.start()
     try:
         assert store.has_viewers("camera-a") is False
@@ -252,15 +284,14 @@ def test_stream_connect_and_disconnect_track_the_viewer_counter() -> None:
             client.sendall(
                 b"GET /stream/camera-a HTTP/1.1\r\n"
                 b"Host: 127.0.0.1\r\n"
+                b"X-Edge-Relay-Token: relay-token\r\n"
                 b"Connection: keep-alive\r\n\r\n"
             )
             response_head = client.recv(4096)
             assert b"200" in response_head.split(b"\r\n", 1)[0]
             assert store.has_viewers("camera-a") is True
 
-            client.setsockopt(
-                socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0)
-            )
+            client.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
         finally:
             client.close()
 
@@ -429,11 +460,15 @@ def test_pose_unknown_camera_and_malformed_body_are_rejected() -> None:
         server.stop()
 
 
-def _post_bed_zone_recognize(base: str, camera_id: str) -> urllib.request.Request:
+def _post_bed_zone_recognize(
+    base: str, camera_id: str, *, token: str | None = _RELAY_TOKEN
+) -> urllib.request.Request:
+    headers = {} if token is None else {"X-Edge-Relay-Token": token}
     return urllib.request.Request(
         f"{base}/overlay/{camera_id}/bed-zone/recognize",
         data=b"",
         method="POST",
+        headers=headers,
     )
 
 
@@ -441,7 +476,7 @@ def test_bed_zone_recognize_unknown_camera_returns_404() -> None:
     store = LatestFrameStore()
     server = MjpegServer(
         store,
-        MjpegServerConfig(port=0),
+        MjpegServerConfig(port=0, probe_token=_RELAY_TOKEN),
         bed_zone_recognizer=lambda image: {
             "polygon": [[0, 0]],
             "image_width": 1,
@@ -464,7 +499,7 @@ def test_bed_zone_recognize_unknown_camera_returns_404() -> None:
 def test_bed_zone_recognize_without_recognizer_configured_returns_503() -> None:
     store = LatestFrameStore()
     store.register_camera("camera-a")
-    server = MjpegServer(store, MjpegServerConfig(port=0))
+    server = MjpegServer(store, MjpegServerConfig(port=0, probe_token=_RELAY_TOKEN))
     server.start()
     base = f"http://127.0.0.1:{server.port}"
     try:
@@ -482,14 +517,15 @@ def test_bed_zone_recognize_no_frame_available_returns_503() -> None:
     store = LatestFrameStore()
     store.register_camera("camera-a")
     recognizer_calls: list[object] = []
+
+    def recognizer(image: np.ndarray) -> BedZonePayload:
+        recognizer_calls.append(image)
+        return {"polygon": [[0, 0]], "image_width": 1, "image_height": 1}
+
     server = MjpegServer(
         store,
-        MjpegServerConfig(port=0),
-        bed_zone_recognizer=lambda image: recognizer_calls.append(image) or {  # type: ignore[func-returns-value]
-            "polygon": [[0, 0]],
-            "image_width": 1,
-            "image_height": 1,
-        },
+        MjpegServerConfig(port=0, probe_token=_RELAY_TOKEN),
+        bed_zone_recognizer=recognizer,
         bed_zone_frame_timeout_s=0.05,
     )
     server.start()
@@ -504,6 +540,50 @@ def test_bed_zone_recognize_no_frame_available_returns_503() -> None:
         assert recognizer_calls == []
     finally:
         server.stop()
+
+
+@pytest.mark.parametrize(
+    "decoded",
+    [
+        np.zeros((16, 16), dtype=np.uint8),
+        np.zeros((16, 16, 4), dtype=np.uint8),
+        np.zeros((16, 16, 3), dtype=np.float32),
+        np.zeros((0, 16, 3), dtype=np.uint8),
+    ],
+    ids=("two-dimensional", "four-channel", "wrong-dtype", "empty-height"),
+)
+def test_bed_zone_recognize_rejects_images_outside_the_image_contract(
+    monkeypatch: pytest.MonkeyPatch,
+    decoded: np.ndarray,
+) -> None:
+    store = LatestFrameStore()
+    store.publish_jpeg("camera-a", _REAL_JPEG, frame_index=1)
+    recognizer_calls: list[object] = []
+
+    def imdecode(_buffer: np.ndarray, _flags: int) -> np.ndarray:
+        return decoded
+
+    def recognizer(image: np.ndarray) -> BedZonePayload:
+        recognizer_calls.append(image)
+        return {"polygon": [[0, 0]], "image_width": 1, "image_height": 1}
+
+    monkeypatch.setattr(cv2, "imdecode", imdecode)
+    server = MjpegServer(
+        store,
+        MjpegServerConfig(port=0, probe_token=_RELAY_TOKEN),
+        bed_zone_recognizer=recognizer,
+        bed_zone_frame_timeout_s=0.05,
+    )
+    server.start()
+    base = f"http://127.0.0.1:{server.port}"
+    try:
+        with pytest.raises(urllib.error.HTTPError) as raised:
+            urllib.request.urlopen(_post_bed_zone_recognize(base, "camera-a"), timeout=1)
+    finally:
+        server.stop()
+
+    assert raised.value.code == 503
+    assert recognizer_calls == []
 
 
 def test_bed_zone_recognize_success_returns_polygon_and_dimensions() -> None:
@@ -521,7 +601,7 @@ def test_bed_zone_recognize_success_returns_polygon_and_dimensions() -> None:
 
     server = MjpegServer(
         store,
-        MjpegServerConfig(port=0),
+        MjpegServerConfig(port=0, probe_token=_RELAY_TOKEN),
         bed_zone_recognizer=recognizer,
         bed_zone_frame_timeout_s=0.05,
     )
@@ -539,7 +619,8 @@ def test_bed_zone_recognize_success_returns_polygon_and_dimensions() -> None:
             "image_height": 16,
         }
         assert len(seen_images) == 1
-        assert seen_images[0].shape[:2] == (16, 16)
+        assert seen_images[0].dtype == np.dtype(np.uint8)
+        assert seen_images[0].shape == (16, 16, 3)
     finally:
         server.stop()
 
@@ -554,7 +635,7 @@ def test_bed_zone_recognize_not_found_maps_to_structured_404() -> None:
 
     server = MjpegServer(
         store,
-        MjpegServerConfig(port=0),
+        MjpegServerConfig(port=0, probe_token=_RELAY_TOKEN),
         bed_zone_recognizer=recognizer,
         bed_zone_frame_timeout_s=0.05,
     )
@@ -583,7 +664,7 @@ def test_bed_zone_recognize_runner_failure_returns_503() -> None:
 
     server = MjpegServer(
         store,
-        MjpegServerConfig(port=0),
+        MjpegServerConfig(port=0, probe_token=_RELAY_TOKEN),
         bed_zone_recognizer=recognizer,
         bed_zone_frame_timeout_s=0.05,
     )
@@ -596,6 +677,104 @@ def test_bed_zone_recognize_runner_failure_returns_503() -> None:
             assert exc.code == 503
         else:  # pragma: no cover
             raise AssertionError("recognizer runtime error should 503")
+    finally:
+        server.stop()
+
+
+@pytest.mark.parametrize(
+    "path_builder",
+    [
+        lambda base: f"{base}/stream/camera-a",
+        lambda base: f"{base}/snapshot/camera-a",
+        lambda base: f"{base}/overlay/camera-a/bed-zone/recognize",
+    ],
+    ids=("stream", "snapshot", "bed-zone"),
+)
+def test_media_endpoints_require_relay_token_no_wrong_correct(
+    path_builder: object,
+) -> None:
+    """Security finding #3: stream/snapshot/bed-zone match probe/derivative/delete
+    constant-time relay-token auth (``_authorized_probe``).
+    """
+    store = LatestFrameStore()
+    store.publish_jpeg("camera-a", _REAL_JPEG, frame_index=1)
+
+    def recognizer(image: np.ndarray) -> BedZonePayload:
+        del image
+        return {
+            "polygon": [[0, 0], [1, 0], [1, 1]],
+            "image_width": 16,
+            "image_height": 16,
+        }
+
+    server = MjpegServer(
+        store,
+        MjpegServerConfig(port=0, probe_token=_RELAY_TOKEN),
+        bed_zone_recognizer=recognizer,
+        bed_zone_frame_timeout_s=0.05,
+    )
+    server.start()
+    base = f"http://127.0.0.1:{server.port}"
+    path = path_builder(base)  # type: ignore[operator]
+    is_post = path.endswith("/bed-zone/recognize")
+    method = "POST" if is_post else "GET"
+    body = b"" if is_post else None
+    try:
+        missing = urllib.request.Request(path, data=body, method=method)
+        _assert_forbidden(missing)
+
+        wrong = urllib.request.Request(
+            path,
+            data=body,
+            method=method,
+            headers={"X-Edge-Relay-Token": "wrong-token"},
+        )
+        _assert_forbidden(wrong)
+
+        correct = urllib.request.Request(
+            path,
+            data=body,
+            method=method,
+            headers=_AUTH_HEADERS,
+        )
+        with urllib.request.urlopen(correct, timeout=1) as response:
+            assert response.status == 200
+            body = response.read(64)
+            assert _RELAY_TOKEN.encode() not in body
+    finally:
+        server.stop()
+
+
+def test_media_endpoints_fail_closed_when_no_token_configured() -> None:
+    """Unlike pose (fail-open for standalone dev), media routes match probe:
+    missing configured token rejects every caller.
+    """
+    store = LatestFrameStore()
+    store.publish_jpeg("camera-a", _REAL_JPEG, frame_index=1)
+    server = MjpegServer(
+        store,
+        MjpegServerConfig(port=0),
+        bed_zone_recognizer=lambda image: {
+            "polygon": [[0, 0], [1, 0], [1, 1]],
+            "image_width": 16,
+            "image_height": 16,
+        },
+    )
+    server.start()
+    base = f"http://127.0.0.1:{server.port}"
+    try:
+        for path, method in (
+            (f"{base}/stream/camera-a", "GET"),
+            (f"{base}/snapshot/camera-a", "GET"),
+            (f"{base}/overlay/camera-a/bed-zone/recognize", "POST"),
+        ):
+            request = urllib.request.Request(
+                path,
+                data=b"" if method == "POST" else None,
+                method=method,
+                headers=_AUTH_HEADERS,
+            )
+            _assert_forbidden(request)
     finally:
         server.stop()
 

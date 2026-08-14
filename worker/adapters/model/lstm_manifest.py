@@ -60,10 +60,6 @@ class LstmFallManifest:
         metadata_path = root / "metadata.yaml"
         if not metadata_path.is_file():
             raise ModelLoadError(f"missing metadata.yaml at {metadata_path}")
-        if (root / "metadata.json").exists():
-            raise ModelLoadError(
-                "LSTM runtime requires metadata.yaml; metadata.json fallback is not supported"
-            )
         return cls.from_yaml(metadata_path)
 
     @classmethod

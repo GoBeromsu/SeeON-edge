@@ -60,8 +60,9 @@ class _Coordinator:
         event_time_sec: float,
         event: BusinessEvent,
         output_dir: Path | None = None,
+        trigger_frame_key: object | None = None,
     ) -> ClipOutcome:
-        del camera_id, event_time_sec, event, output_dir
+        del camera_id, event_time_sec, event, output_dir, trigger_frame_key
         return ClipUnavailable(clip_id, ClipReasonCode.ENCODER_FAILED)
 
     def close(self, camera_id: str) -> None:
@@ -111,6 +112,14 @@ def _frame(index: int, time_sec: float) -> Frame:
     )
 
 
+def _packet(index: int, time_sec: float, *, camera_id: str = "cam-1") -> FramePacket:
+    return FramePacket(camera_id, _frame(index, time_sec), time_sec, index, 8, 8, 0.1)
+
+
+def _event(identity: str, time_sec: float = 1.0) -> BusinessEvent:
+    return BusinessEvent("fall", "fall.detected", identity, "cam-1", "facility-1", time_sec, 0.9)
+
+
 def _recorder(
     tmp_path: Path,
     *,
@@ -148,8 +157,10 @@ def test_recorder_publishes_event_and_notifies_after_manifest_exists(
     )
     recorder.start()
     try:
-        assert recorder.on_frame("cam-1", _frame(1, 1.0))
-        clip_id = recorder.on_event("cam-1", "event-1", "fall.detected")
+        packet = _packet(1, 1.0)
+        assert recorder.on_frame(packet)
+        clip_id = recorder.on_event(packet, _event("event-1"))
+        packet.release()
         assert clip_id is not None
         assert recorder.flush()
     finally:
@@ -165,7 +176,9 @@ def test_stop_drains_an_accepted_event_before_releasing_store_lock(tmp_path: Pat
     recorder, coordinator, publisher = _recorder(tmp_path)
     recorder.start()
 
-    clip_id = recorder.on_event("cam-1", "event-1")
+    trigger = _packet(1, 1.0)
+    clip_id = recorder.on_event(trigger, _event("event-1"))
+    trigger.release()
     recorder.stop()
 
     assert clip_id is not None
@@ -176,8 +189,13 @@ def test_stop_drains_an_accepted_event_before_releasing_store_lock(tmp_path: Pat
 def test_bounded_queue_rejects_without_blocking(tmp_path: Path) -> None:
     recorder, _, _ = _recorder(tmp_path, max_queue_size=1)
 
-    assert recorder.on_frame("cam-1", _frame(1, 1.0))
-    assert recorder.on_frame("cam-1", _frame(2, 2.0)) is False
+    first = _packet(1, 1.0)
+    second = _packet(2, 2.0)
+    assert recorder.on_frame(first)
+    assert recorder.on_frame(second) is False
+    first.release()
+    second.release()
+    recorder.stop()
     assert recorder.dropped_frame_count == 1
 
 

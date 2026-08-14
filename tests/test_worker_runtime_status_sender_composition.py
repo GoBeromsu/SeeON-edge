@@ -40,6 +40,7 @@ import worker.runtime.telemetry.runtime_status_sender as runtime_status_sender_m
 import worker.runtime.worker as worker_module
 from contracts.runner import Image, RunnerResult
 from shared.events.evidence_http_transport import HttpResult
+from worker.domains.module_definition import ComponentBinding
 from worker.pipeline.ingest.lifecycle import IngestReporter
 from worker.pipeline.output.evidence.clip_recorder_models import ClipRecorderStats
 from worker.runtime.config import CameraRuntimeConfig, LiveClipExportPolicy, WorkerConfig
@@ -48,6 +49,8 @@ from worker.runtime.profile.registry import VerifyResult
 from worker.runtime.telemetry.runtime_diagnostics import WorkerDiagnostics
 from worker.runtime.telemetry.wire import ClipRecorderStatus
 from worker.runtime.worker import WorkerRuntime
+
+_TEST_BUILD_REVISION = "1" * 40
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,9 +63,12 @@ class _FallMetadata:
 @final
 class _FakeRunner:
     def __init__(self, task: str) -> None:
+        binding = _compiled_binding_for_task(task)
         self.task = task
         self.metadata = _FallMetadata()
         self.operating_threshold = 0.5
+        self.artifact_digest = binding.artifact_digest
+        self.preprocessing_identity = binding.preprocessing_identity
         self.warmup_count = 0
 
     def __call__(self, _image: Image) -> RunnerResult:
@@ -73,6 +79,16 @@ class _FakeRunner:
 
     def warmup(self) -> None:
         self.warmup_count += 1
+
+
+def _compiled_binding_for_task(task: str) -> ComponentBinding:
+    component_id = "fall-classifier" if task == "fall" else task
+    return next(
+        binding
+        for definition in worker_module.DETECTION_MODULE_REGISTRY.definitions
+        for binding in definition.shared_bindings
+        if binding.component_id == component_id
+    )
 
 
 @final
@@ -210,12 +226,14 @@ def _runtime(
     return WorkerRuntime(
         config,
         env={"ML_WORKER_PROFILE": "cpu"},
+        build_revision=_TEST_BUILD_REVISION,
         serving_client=_FakeServingClient(),
         loop_factory=loop_factory,  # type: ignore[arg-type]
         pump_factory=_pump_factory,
         acquire_lease=lambda: GpuLease.acquire(state_dir),
         decode_probe=lambda _decode: VerifyResult(True, "cpu", "decode", "available"),
         hard_exit=lambda _code: None,
+        clip_store_dir=state_dir / "clip-store",
     )
 
 
@@ -242,10 +260,6 @@ def test_runtime_status_sender_delivers_a_complete_facility_mapping_to_the_relay
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     _stub_heartbeat_transport(monkeypatch)
-    # Deliberately no CLIP_STORE_DIR: the default store dir is unwritable in
-    # this sandbox, so the real ClipRecorder fails to start and gap A's
-    # feeders never spin up -- keeping this test focused on gap B alone.
-
     delivered = threading.Event()
     posts: list[tuple[str, dict[str, str], bytes | None]] = []
 

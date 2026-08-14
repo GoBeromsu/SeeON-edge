@@ -4,7 +4,6 @@ import queue
 import shutil
 import threading
 
-from contracts.frame import Frame
 from worker.pipeline.output.evidence.clip_identity import (
     ClipIdAllocator,
     ClipIdCollisionError,
@@ -19,6 +18,9 @@ from worker.pipeline.output.evidence.clip_recorder_models import (
     RecorderMessage,
 )
 from worker.pipeline.output.evidence.durability import fsync_directory
+from worker.pipeline.output.evidence.evidence_metadata import (
+    runtime_manifest_sha256_from_audit,
+)
 from worker.pipeline.output.evidence.evidence_outbox_types import ClipId
 from worker.types import BusinessEvent, FramePacket
 
@@ -35,43 +37,37 @@ class ClipAdmission:
         self._allocator = ClipIdAllocator(config.store_dir)
         self._lock = threading.RLock()
         self._reservations_by_camera: dict[str, ClipReservation] = {}
-        self._latest_time_by_camera: dict[str, float] = {}
         self._accepting = True
 
     def set_accepting(self, accepting: bool) -> None:
         with self._lock:
             self._accepting = accepting
 
-    def accept_frame(self, camera_id: str, frame: Frame) -> bool:
-        height, width = frame.image.shape[:2]
-        packet = FramePacket(
-            camera_id,
-            frame,
-            frame.time_sec,
-            frame.index,
-            width,
-            height,
-            0.0,
-        )
+    def accept_frame(self, packet: FramePacket) -> bool:
         with self._lock:
             if not self._accepting:
                 return False
+            queued_packet = packet.retain()
             try:
-                self._queue.put_nowait(FrameMessage(packet))
+                self._queue.put_nowait(FrameMessage(queued_packet))
             except queue.Full:
+                queued_packet.release()
                 self._stats.dropped_frames += 1
                 return False
-            self._latest_time_by_camera[camera_id] = frame.time_sec
         return True
 
     def accept_event(
         self,
-        camera_id: str,
-        event_ref: str,
-        event_type: str | None,
+        trigger_packet: FramePacket,
+        event: BusinessEvent,
         *,
         allow_new_clip: bool,
     ) -> str | None:
+        camera_id = trigger_packet.camera_id
+        if event.camera_id != camera_id:
+            raise ValueError("event camera does not match trigger packet")
+        _ = runtime_manifest_sha256_from_audit(event.audit)
+        event_ref = str(event.identity)
         with self._lock:
             if not self._accepting:
                 return None
@@ -89,28 +85,20 @@ class ClipAdmission:
                     return None
                 self._stats.clip_id_collisions = self._allocator.collision_count
                 self._reservations_by_camera[camera_id] = reservation
-            time_sec = self._latest_time_by_camera.get(camera_id, 0.0)
-            resolved_type = event_type or "other"
-            event = BusinessEvent(
-                resolved_type.partition(".")[0],
-                resolved_type,
-                event_ref,
-                camera_id,
-                "",
-                time_sec,
-                1.0,
-            )
+            queued_trigger = trigger_packet.retain()
             try:
                 self._queue.put_nowait(
                     EventMessage(
                         reservation,
                         event_ref,
-                        event_type,
+                        event.event_type,
                         event,
+                        queued_trigger,
                         allow_new_clip,
                     )
                 )
             except queue.Full:
+                queued_trigger.release()
                 self._stats.dropped_events += 1
                 if created:
                     self.release(camera_id, reservation.clip_id)

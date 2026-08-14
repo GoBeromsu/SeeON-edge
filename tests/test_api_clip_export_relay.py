@@ -2,15 +2,17 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import FrozenInstanceError, dataclass, field
 from pathlib import Path
 from typing import BinaryIO
 
+import pytest
 from fastapi.testclient import TestClient
 
 from backend.app.features.cameras.store import CameraRegistryStore
 from backend.app.features.runtime_settings.store import RuntimeSettingsStore
 from backend.app.main import create_app, no_lifespan
+from shared.events.evidence_export_client import ReadyClipRequest, UnavailableClipRequest
 from shared.events.evidence_export_contract import BackendCapabilities, ClipReceipt, DeliveryFailure
 
 TOKEN = "relay-token"
@@ -26,23 +28,29 @@ class FakeBackendEvidenceClient:
     before_read: Callable[[], None] | None = None
     opened_media: BinaryIO | None = field(default=None, init=False)
     uploaded_bytes: bytes | None = field(default=None, init=False)
+    ready_request: ReadyClipRequest | None = field(default=None, init=False)
+    unavailable_request: UnavailableClipRequest | None = field(default=None, init=False)
 
-    def for_camera(self, _camera_id: str):
+    def for_camera(self, _camera_id: str) -> FakeBackendEvidenceClient:
         return self
 
-    def probe_capabilities(self, _camera_id: str):
+    def probe_capabilities(self, _camera_id: str) -> BackendCapabilities | DeliveryFailure:
         return self.capability_result
 
-    def publish_ready(self, request, media: BinaryIO):
+    def publish_ready(
+        self, request: ReadyClipRequest, media: BinaryIO
+    ) -> ClipReceipt | DeliveryFailure:
         self.ready_calls += 1
         assert request.clip_id == "clip-1"
+        self.ready_request = request
         self.opened_media = media
         if self.before_read is not None:
             self.before_read()
         self.uploaded_bytes = media.read()
         return self.clip_result
 
-    def report_unavailable(self, request):
+    def report_unavailable(self, request: UnavailableClipRequest) -> ClipReceipt | DeliveryFailure:
+        self.unavailable_request = request
         return self.clip_result
 
 
@@ -87,6 +95,21 @@ def _ready_payload() -> dict[str, object]:
         "clip_end_at": "2026-07-16T00:00:01Z",
         "finalized_at": "2026-07-16T00:00:02Z",
     }
+
+
+def _unavailable_payload() -> dict[str, object]:
+    return {
+        "state": "UNAVAILABLE",
+        "camera_id": "camera-1",
+        "facility_id": "facility-1",
+        "event_refs": [EVENT_ID],
+        "state_version": 3,
+        "reason": "CAPTURE_FAILED",
+    }
+
+
+def _set_attribute(target: object, name: str, value: object) -> None:
+    setattr(target, name, value)
 
 
 def test_capability_requires_auth_local_enablement_and_backend_proof(tmp_path: Path) -> None:
@@ -175,6 +198,73 @@ def test_ready_relay_resolves_owned_media_by_clip_id_and_returns_typed_receipt(
     assert backend.ready_calls == 1
     assert backend.uploaded_bytes == b"mp4x"
     assert backend.opened_media is not None and backend.opened_media.closed
+    ready_request = backend.ready_request
+    assert ready_request is not None
+    assert (
+        ready_request.clip_id,
+        ready_request.camera_id,
+        ready_request.event_refs,
+        ready_request.state_version,
+        ready_request.sha256,
+        ready_request.size_bytes,
+        ready_request.mime_type,
+        ready_request.codec,
+        ready_request.duration_ms,
+        ready_request.clip_start_at,
+        ready_request.clip_end_at,
+        ready_request.finalized_at,
+    ) == (
+        "clip-1",
+        "camera-1",
+        (EVENT_ID,),
+        2,
+        MEDIA_SHA256,
+        4,
+        "video/mp4",
+        "h264",
+        1000,
+        "2026-07-16T00:00:00Z",
+        "2026-07-16T00:00:01Z",
+        "2026-07-16T00:00:02Z",
+    )
+    with pytest.raises(FrozenInstanceError):
+        _set_attribute(ready_request, "camera_id", "camera-other")
+
+
+def test_unavailable_relay_passes_complete_immutable_state_request(tmp_path: Path) -> None:
+    # Given: capture failed before media publication, so no READY-only metadata exists.
+    backend = FakeBackendEvidenceClient(
+        clip_result=ClipReceipt("clip-1", "UNAVAILABLE", 3, None, None)
+    )
+    client = _client(tmp_path, backend, enabled=True)
+
+    # When: the worker reports the terminal unavailable state.
+    response = client.put(
+        "/api/v1/relay/clips/clip-1",
+        json=_unavailable_payload(),
+        headers={"X-Edge-Relay-Token": TOKEN},
+    )
+
+    # Then: the backend receives exactly the required unavailable fields as a frozen request.
+    assert response.status_code == 200
+    assert response.json() == {
+        "clip_id": "clip-1",
+        "state": "UNAVAILABLE",
+        "state_version": 3,
+        "sha256": None,
+        "size_bytes": None,
+    }
+    unavailable_request = backend.unavailable_request
+    assert unavailable_request is not None
+    assert (
+        unavailable_request.clip_id,
+        unavailable_request.camera_id,
+        unavailable_request.event_refs,
+        unavailable_request.state_version,
+        unavailable_request.reason,
+    ) == ("clip-1", "camera-1", (EVENT_ID,), 3, "CAPTURE_FAILED")
+    with pytest.raises(FrozenInstanceError):
+        _set_attribute(unavailable_request, "reason", "CORRUPT")
 
 
 def test_ready_relay_uploads_verified_descriptor_when_path_is_swapped(

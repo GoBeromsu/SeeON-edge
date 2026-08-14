@@ -79,7 +79,15 @@ def recognize_bed_zone(
     _authorize(request, authorization)
     settings = get_settings()
     upstream_url = _bed_zone_url(settings.worker_stream_origin, camera_id)
-    upstream_request = urllib.request.Request(upstream_url, data=b"", method="POST")
+    # Worker :8090 gates bed-zone recognition with the same relay token as
+    # /probe (security finding #3). Forward server-side only; the browser
+    # already proved a dashboard session via `_authorize` above.
+    upstream_request = urllib.request.Request(
+        upstream_url,
+        data=b"",
+        method="POST",
+        headers=_worker_relay_headers(request),
+    )
 
     try:
         upstream: _ReadableResponse = urllib.request.urlopen(
@@ -185,6 +193,27 @@ def _bearer_token(value: str | None) -> str | None:
     if value is None or not value.startswith("Bearer "):
         return None
     return value.removeprefix("Bearer ").strip() or None
+
+
+_RELAY_TOKEN_HEADER = "X-Edge-Relay-Token"
+
+
+def _relay_token(request: Request) -> str | None:
+    """Server-side worker relay token (``app.state.edge_relay_token`` only).
+
+    Mirrors ``streams_router._relay_token`` so bed-zone upstream calls carry
+    the same header as stream/snapshot/pose without importing that module's
+    private helpers.
+    """
+    expected = getattr(request.app.state, "edge_relay_token", None)
+    return expected if isinstance(expected, str) and expected else None
+
+
+def _worker_relay_headers(request: Request) -> dict[str, str]:
+    token = _relay_token(request)
+    if token is None:
+        return {}
+    return {_RELAY_TOKEN_HEADER: token}
 
 
 def _upstream_unavailable() -> HTTPException:

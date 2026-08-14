@@ -52,7 +52,9 @@ class ClipStorageBrowseResponse(BaseModel):
 class ClipStorageResponse(BaseModel):
     model_config: ClassVar[ConfigDict] = ConfigDict(extra="forbid")
 
-    root: str
+    # Stable operator-facing label for the configured mount — never an absolute
+    # host filesystem path (path disclosure hardening).
+    mount_label: str
     selected_path: str
     total_bytes: int | None
     used_bytes: int | None
@@ -85,9 +87,7 @@ def browse_clip_storage(
     try:
         names = _list_subdirectories(_configured_root(), segments)
     except FileNotFoundError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail="path not found"
-        ) from exc
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="path not found") from exc
     joined = "/".join(segments)
     parent = None if not segments else "/".join(segments[:-1])
     return {
@@ -113,9 +113,7 @@ def put_clip_storage_location(
         # symlink-free directory inside the store root.
         _list_subdirectories(_configured_root(), segments)
     except FileNotFoundError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail="path not found"
-        ) from exc
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="path not found") from exc
     selected = "/".join(segments)
     _location_store(request.app).put(selected)
     return _storage_snapshot(request.app)
@@ -124,11 +122,14 @@ def put_clip_storage_location(
 def _storage_snapshot(app: FastAPI) -> dict[str, object]:
     root = _configured_root()
     selected = _location_store(app).get()
+    # Capacity is measured against the real mount; the absolute path never leaves
+    # the process boundary toward the authenticated UI.
+    mount_label = "clip-store"
     try:
         usage = shutil.disk_usage(root)
     except OSError:
         return {
-            "root": str(root),
+            "mount_label": mount_label,
             "selected_path": selected,
             "total_bytes": None,
             "used_bytes": None,
@@ -137,7 +138,7 @@ def _storage_snapshot(app: FastAPI) -> dict[str, object]:
     used_bytes = usage.total - usage.free
     used_pct = (used_bytes / usage.total * 100.0) if usage.total else None
     return {
-        "root": str(root),
+        "mount_label": mount_label,
         "selected_path": selected,
         "total_bytes": usage.total,
         "used_bytes": used_bytes,
@@ -162,9 +163,7 @@ def _validate_relative_path(value: str) -> list[str]:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="invalid path")
     candidate = PurePosixPath(value)
     if candidate.is_absolute():
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST, detail="path must be relative"
-        )
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="path must be relative")
     segments = [part for part in candidate.parts if part not in ("", ".")]
     if any(segment == ".." for segment in segments):
         raise HTTPException(

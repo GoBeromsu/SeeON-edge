@@ -6,7 +6,6 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import assert_never, final
 
-from contracts.frame import Frame
 from worker.pipeline.output.evidence.clip_actor import (
     ClipActor,
     ClipActorDependencies,
@@ -26,18 +25,16 @@ from worker.pipeline.output.evidence.clip_recorder_models import (
     FrameMessage,
     RecorderMessage,
 )
-from worker.pipeline.output.evidence.clip_recorder_services import (
-    ClipRecorderServices,
-)
+from worker.pipeline.output.evidence.clip_recorder_services import ClipRecorderServices
 from worker.pipeline.output.evidence.clip_recorder_services import (
     default_services as _default_services,
 )
-from worker.pipeline.output.evidence.clip_recorder_services import (
-    resolve_encoder as _resolve_encoder,
-)
 from worker.pipeline.output.evidence.clip_store_lock import ClipStoreLock
 from worker.pipeline.output.evidence.evidence_outbox_types import ClipId
-from worker.pipeline.output.evidence.evidence_retention import DiskUsage
+from worker.pipeline.output.evidence.evidence_retention import DiskUsage, PurgeResult
+from worker.pipeline.output.evidence.packet_repository import PacketRingRepository
+from worker.pipeline.output.evidence.packet_ring import PacketRingLimits
+from worker.types import BusinessEvent, FramePacket
 
 
 @final
@@ -49,15 +46,17 @@ class ClipRecorder:
         *,
         disk_usage_provider: Callable[[Path], DiskUsage] | None = None,
         is_clip_held: Callable[[str], bool] | None = None,
+        begin_clip_purge: Callable[[str], bool] | None = None,
+        complete_clip_purge: Callable[[str], None] | None = None,
+        fail_clip_purge: Callable[[str, str], None] | None = None,
+        operator_delete_preflight: Callable[[str], PurgeResult | None] | None = None,
         startup_hook: Callable[[], None] | None = None,
         on_clip_finalized: Callable[[ClipId], None] | None = None,
     ) -> None:
         self.config = ClipRecorderConfig() if config is None else config
         self.stats = ClipRecorderStats()
         self._services = services
-        self._queue: queue.Queue[RecorderMessage] = queue.Queue(
-            maxsize=self.config.max_queue_size
-        )
+        self._queue: queue.Queue[RecorderMessage] = queue.Queue(maxsize=self.config.max_queue_size)
         self._thread: threading.Thread | None = None
         self._stop_event = threading.Event()
         self._store_lock: ClipStoreLock | None = None
@@ -69,12 +68,14 @@ class ClipRecorder:
         self._maintenance = ClipMaintenance(
             self.config,
             self.stats,
-            is_clip_held=(lambda _clip_id: True)
-            if is_clip_held is None
-            else is_clip_held,
+            is_clip_held=(lambda _clip_id: True) if is_clip_held is None else is_clip_held,
             disk_usage_provider=default_disk_usage
             if disk_usage_provider is None
             else disk_usage_provider,
+            begin_clip_purge=begin_clip_purge,
+            complete_clip_purge=complete_clip_purge,
+            fail_clip_purge=fail_clip_purge,
+            operator_delete_preflight=operator_delete_preflight,
         )
 
     @classmethod
@@ -82,11 +83,19 @@ class ClipRecorder:
         cls,
         *,
         is_clip_held: Callable[[str], bool] | None = None,
+        begin_clip_purge: Callable[[str], bool] | None = None,
+        complete_clip_purge: Callable[[str], None] | None = None,
+        fail_clip_purge: Callable[[str, str], None] | None = None,
+        operator_delete_preflight: Callable[[str], PurgeResult | None] | None = None,
         startup_hook: Callable[[], None] | None = None,
         on_clip_finalized: Callable[[ClipId], None] | None = None,
     ) -> ClipRecorder:
         return cls(
             is_clip_held=is_clip_held,
+            begin_clip_purge=begin_clip_purge,
+            complete_clip_purge=complete_clip_purge,
+            fail_clip_purge=fail_clip_purge,
+            operator_delete_preflight=operator_delete_preflight,
             startup_hook=startup_hook,
             on_clip_finalized=on_clip_finalized,
         )
@@ -108,7 +117,18 @@ class ClipRecorder:
             self._sweep_stale_staging()
             self._rotate(force=True)
             if self._services is None:
-                self._services = _default_services(self.config, _resolve_encoder())
+                repository = PacketRingRepository(
+                    (),
+                    per_camera_limits=PacketRingLimits(
+                        self.config.packet_ring_max_packets,
+                        self.config.packet_ring_max_bytes_per_camera,
+                        self.config.pre_event_seconds
+                        + self.config.post_event_seconds
+                        + self.config.finalize_grace_seconds,
+                    ),
+                    global_max_bytes=self.config.packet_ring_global_max_bytes,
+                )
+                self._services = _default_services(self.config, repository)
             for camera_id, fps in self._fps_by_camera.items():
                 self._services.coordinator.set_camera_fps(camera_id, fps)
             self.stats.encoder = self._services.encoder_name
@@ -146,6 +166,7 @@ class ClipRecorder:
         if self._thread is not None:
             self._thread.join(timeout=timeout)
         if self._thread is None or not self._thread.is_alive():
+            self._release_pending_messages()
             if self._store_lock is not None:
                 self._store_lock.close()
                 self._store_lock = None
@@ -162,26 +183,34 @@ class ClipRecorder:
     def rotate_once(self, *, timeout: float = 5.0) -> bool:
         return self.flush(timeout=timeout)
 
+    def delete_clip(self, clip_id: str) -> PurgeResult:
+        """Operator-requested deletion of one finalized primary clip.
+
+        Delegates straight to ``ClipMaintenance.purge_clip`` -- the same
+        held/verification/begin/complete/fail wiring this recorder already
+        passes to automatic ``rotate()`` -- so an operator delete and the
+        retention sweep can never disagree about what is safe to remove.
+        """
+        return self._maintenance.purge_clip(clip_id)
+
     def set_camera_fps(self, camera_id: str, fps: float) -> None:
         self._fps_by_camera[camera_id] = fps
         if self._services is not None:
             self._services.coordinator.set_camera_fps(camera_id, fps)
 
-    def on_frame(self, camera_id: str, frame: Frame) -> bool:
-        return self._admission.accept_frame(camera_id, frame)
+    def on_frame(self, packet: FramePacket) -> bool:
+        return self._admission.accept_frame(packet)
 
     def on_event(
         self,
-        camera_id: str,
-        event_ref: str,
-        event_type: str | None = None,
+        trigger_packet: FramePacket,
+        event: BusinessEvent,
         *,
         allow_new_clip: bool = True,
     ) -> str | None:
         return self._admission.accept_event(
-            camera_id,
-            event_ref,
-            event_type,
+            trigger_packet,
+            event,
             allow_new_clip=allow_new_clip,
         )
 
@@ -228,6 +257,10 @@ class ClipRecorder:
                         case unreachable:
                             assert_never(unreachable)
                 finally:
+                    if isinstance(message, FrameMessage):
+                        message.packet.release()
+                    elif isinstance(message, EventMessage):
+                        message.trigger_packet.release()
                     self._queue.task_done()
         finally:
             actor.shutdown()
@@ -240,11 +273,26 @@ class ClipRecorder:
         if self._actor is not None:
             self._actor.handle_event(message)
 
+    def _release_pending_messages(self) -> None:
+        while True:
+            try:
+                message = self._queue.get_nowait()
+            except queue.Empty:
+                return
+            try:
+                if isinstance(message, FrameMessage):
+                    message.packet.release()
+                elif isinstance(message, EventMessage):
+                    message.trigger_packet.release()
+            finally:
+                self._queue.task_done()
+
     def _sweep_stale_staging(self) -> None:
         self._maintenance.sweep_stale_staging()
 
     def _rotate(self, *, force: bool = False) -> None:
         self._maintenance.rotate(force=force)
+
 
 _ActiveClip = ActiveClip
 _EventMessage = EventMessage

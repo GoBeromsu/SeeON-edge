@@ -1,4 +1,4 @@
-"""Exact schema-9 validation and relation planning for clip repair."""
+"""Exact schema validation and relation planning for clip repair."""
 
 from __future__ import annotations
 
@@ -8,11 +8,14 @@ import sqlite3
 from dataclasses import dataclass
 
 from worker.pipeline.output.evidence.clip_consistency_schema import (
-    canonical_schema9_fingerprint,
+    canonical_evidence_relation_fingerprint,
+    canonical_worker_schema_fingerprint,
+    evidence_relation_fingerprint,
+    is_supported_schema_version,
+    is_worker_state_schema,
     schema_fingerprint,
 )
 from worker.pipeline.output.evidence.clip_consistency_types import ClipConsistencyError
-from worker.pipeline.output.evidence.evidence_outbox_schema import SCHEMA_VERSION
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,18 +52,28 @@ def validate_database(
     *,
     now: float,
     check_leases: bool = True,
-) -> None:
+) -> int:
+    """Validate schema authority and return the accepted user_version."""
     version_row = connection.execute("PRAGMA user_version").fetchone()
-    if version_row is None or int(version_row[0]) != SCHEMA_VERSION:
-        raise ClipConsistencyError("schema_drift", "database is not schema 9")
-    if schema_fingerprint(connection) != canonical_schema9_fingerprint():
-        raise ClipConsistencyError("schema_drift", "schema-9 fingerprint differs")
+    if version_row is None or not is_supported_schema_version(int(version_row[0])):
+        raise ClipConsistencyError("schema_drift", "database schema version is unsupported")
+    version = int(version_row[0])
+    if is_worker_state_schema(version):
+        if schema_fingerprint(connection) != canonical_worker_schema_fingerprint():
+            raise ClipConsistencyError(
+                "schema_drift", "worker-state schema fingerprint differs"
+            )
+    elif evidence_relation_fingerprint(connection) != canonical_evidence_relation_fingerprint():
+        raise ClipConsistencyError(
+            "schema_drift", "central evidence relation fingerprint differs"
+        )
     if connection.execute("PRAGMA integrity_check").fetchall() != [("ok",)]:
         raise ClipConsistencyError("integrity_drift", "database integrity check failed")
     if connection.execute("PRAGMA foreign_key_check").fetchall():
         raise ClipConsistencyError("foreign_key_drift", "database foreign keys are invalid")
     if check_leases:
         _reject_active_leases(connection, now)
+    return version
 
 
 def plan_relations(

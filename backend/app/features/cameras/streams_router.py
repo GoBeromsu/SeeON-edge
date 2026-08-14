@@ -86,7 +86,12 @@ async def camera_stream(
             pool=settings.worker_stream_timeout_s,
         )
     )
-    stream_ctx = client.stream("GET", upstream_url)
+    # Worker :8090 gates /stream with the same relay token as /probe
+    # (security finding #3). Forward server-side only -- never surface it to
+    # the browser (dashboard session already authenticated this request).
+    stream_ctx = client.stream(
+        "GET", upstream_url, headers=_worker_relay_headers(request)
+    )
     handed_off = False
     try:
         try:
@@ -137,7 +142,11 @@ def camera_snapshot(
     upstream_url = _snapshot_url(
         settings.worker_stream_origin, _worker_camera_id(request, camera_id)
     )
-    upstream_request = urllib.request.Request(upstream_url, method="GET")
+    upstream_request = urllib.request.Request(
+        upstream_url,
+        method="GET",
+        headers=_worker_relay_headers(request),
+    )
 
     try:
         upstream: _ReadableResponse = urllib.request.urlopen(
@@ -371,6 +380,10 @@ def _relay_token(request: Request) -> str | None:
     than importing the private helper from cameras/router.py) per issue #71's
     worker-side auth fix: the worker's pose GET/POST overlay routes now gate on
     this same token, so it must be forwarded on those upstream calls too.
+
+    Stream, snapshot, and bed-zone recognition on worker :8090 use the same
+    gate (security finding #3); this helper is the sole server-side source for
+    the header those proxies forward.
     """
     # `app.state.edge_relay_token`이 유일한 출처다. 부팅 때
     # `lifespan._configure_backend_ingest`가 `API_EDGE_RELAY_TOKEN`에서 한 번
@@ -379,6 +392,19 @@ def _relay_token(request: Request) -> str | None:
     # env가 조용히 덮어써서, 실제로 무엇이 유효한지 두 곳을 봐야 한다.
     expected = getattr(request.app.state, "edge_relay_token", None)
     return expected if isinstance(expected, str) and expected else None
+
+
+def _worker_relay_headers(request: Request) -> dict[str, str]:
+    """Headers the backend attaches when calling worker :8090 media routes.
+
+    Empty when no relay token is configured (upstream then fails closed with
+    403, which this proxy maps to 503). Never written into browser-facing
+    responses or query strings.
+    """
+    token = _relay_token(request)
+    if token is None:
+        return {}
+    return {_RELAY_TOKEN_HEADER: token}
 
 
 def _upstream_unavailable(status_code: int) -> HTTPException:

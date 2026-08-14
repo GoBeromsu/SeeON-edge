@@ -42,7 +42,7 @@ def test_camera_topology_api_binds_stable_refs_without_exposing_transport(
             "/api/v1/cameras",
             json={
                 "label": "Bed camera",
-                "rtsp_url": "rtsp://operator:private@10.0.0.9/live",
+                "rtsp_url": "rtsp://operator:private@camera.example/live",
                 "edge_ref": "camera-a",
                 "room_edge_ref": "room-a",
             },
@@ -65,7 +65,7 @@ def test_camera_topology_api_binds_stable_refs_without_exposing_transport(
     serialized = topology.text.lower()
     assert "rtsp" not in serialized
     assert "private" not in serialized
-    assert "10.0.0.9" not in serialized
+    assert "camera.example" not in serialized
 
 
 def test_camera_topology_api_returns_typed_conflict_without_partial_write(

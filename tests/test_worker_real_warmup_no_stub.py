@@ -18,18 +18,16 @@ machine without artifacts reports "skipped", never a false pass.
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+import sys
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 import torch
 import yaml
 
-from worker.adapters.model.in_process import InProcessServingClient
-from worker.adapters.model.registry import default_registry
 from worker.adapters.model.torch_lstm_fall import LstmFallRunner, build_lstm_module
-from worker.runtime.model_composition import compose_yolo_extractors
-from worker.runtime.worker import WorkerRuntime
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -48,96 +46,50 @@ def _require(task: str) -> Path:
     return artifact
 
 
+_REAL_WARMUP_TIMEOUT_SECONDS = 60.0
+_REAL_WARMUP_COMPLETED = "REAL_WARMUP_COMPLETED"
+_REAL_WARMUP_SCRIPT = f"""
+import sys
+
+from worker.adapters.model.in_process import InProcessServingClient
+from worker.adapters.model.registry import default_registry
+
+TASK = sys.argv[1]
+serving = InProcessServingClient(registry=default_registry())
+adapter = serving.create(TASK, device="cpu")
+adapter.warmup()
+print("{_REAL_WARMUP_COMPLETED}:" + TASK, flush=True)
+"""
+
+
+@pytest.mark.heavy
 @pytest.mark.parametrize("task", sorted(_TASK_ARTIFACTS))
 def test_real_warmup_runs_a_genuine_forward_through_the_production_serving_path(
     task: str,
 ) -> None:
     """Provision through the real serving client and run the real warmup.
 
-    A stubbed warmup cannot fail this: the adapter loads actual weights and
-    executes a real forward pass. If the artifact were missing or the model
-    unloadable, ``warmup()`` raises rather than quietly succeeding.
+    A stubbed warmup cannot fail this: a fresh interpreter loads the actual
+    artifact through ``default_registry()`` and executes a real CPU forward.
+    Process completion plus the sentinel is the deterministic completion
+    signal. The 60-second bound gives the measured 13-25 second cold pose
+    warmup finite headroom without making this local-artifact test part of the
+    default hardware-free CI suite.
     """
     _ = _require(task)
 
-    serving = InProcessServingClient(registry=default_registry())
-    adapter = serving.create(task, device="cpu")
-
-    # The real forward. No injected model, no patched loader.
-    adapter.warmup()
-
-
-def test_production_warm_models_warms_every_configured_task_for_real() -> None:
-    """Drive ``WorkerRuntime._warm_models()`` itself, not a hand-rolled copy.
-
-    An earlier version of this test iterated pose/person/bed/fall inside the
-    test body. That proved the adapters *can* warm, but it would still pass if
-    production stopped warming fall or the stage wiring were cut, because the
-    test controlled its own loop and then asserted on its own list. So this
-    calls the production method and asserts on what production returns.
-
-    ``_warm_models`` warms every extractor in ``shared_yolo`` plus
-    ``fall_model`` and reports ``("pose", "person", "bed", "fall")``. Both
-    collaborators are built the way production builds them:
-    ``compose_yolo_extractors`` over the real ``InProcessServingClient``, and
-    the real ``LstmFallRunner`` on the configured artifact directory. Nothing
-    is stubbed -- real weights, real forwards, real warmup helper.
-    """
-    for task in sorted(_TASK_ARTIFACTS):
-        _ = _require(task)
-    artifact_dir = REPO_ROOT / "models" / "fall" / "lstm"
-    if not (artifact_dir / "model.pt").is_file():
-        pytest.skip(f"fall LSTM artifacts are not present at {artifact_dir}")
-
-    serving = InProcessServingClient(registry=default_registry())
-
-    runtime = WorkerRuntime.__new__(WorkerRuntime)
-    # box_source="person": this smoke test wants every YOLO extractor
-    # (pose, person, bed) actually provisioned and warmed, not just the
-    # box_source="pose" default's subset.
-    runtime.shared_yolo = compose_yolo_extractors(serving, device="cpu", box_source="person")
-    # This artifact declares neither schema_version nor preprocessing_identity,
-    # so the manifest defaults apply. Passing None keeps this test about
-    # warmup rather than about the example config's pins, which are covered
-    # separately below.
-    fall = LstmFallRunner.from_artifact_dir(
-        str(artifact_dir),
-        device="cpu",
-        expected_schema_version=None,
-        expected_preprocessing_identity=None,
+    completed = subprocess.run(
+        [sys.executable, "-c", _REAL_WARMUP_SCRIPT, task],
+        cwd=REPO_ROOT,
+        env={**os.environ, "PYTHONPATH": str(REPO_ROOT)},
+        capture_output=True,
+        text=True,
+        timeout=_REAL_WARMUP_TIMEOUT_SECONDS,
+        check=False,
     )
 
-    # Observe that warmup is actually *invoked* on each model, not just that
-    # _warm_models reports it. The return tuple is a hard-coded literal, so
-    # asserting on it alone would still pass if the fall warmup call were
-    # deleted and the literal left untouched.
-    warmed_calls: list[str] = []
-
-    def _record(name: str, model: object) -> None:
-        real = model.warmup  # type: ignore[attr-defined]
-
-        def _counting() -> None:
-            warmed_calls.append(name)
-            real()
-
-        model.warmup = _counting  # type: ignore[attr-defined]
-
-    yolo_names = [e.module_name for e in runtime.shared_yolo.extractors]
-    for extractor in runtime.shared_yolo.extractors:
-        _record(extractor.module_name, extractor.runner)
-    _record("fall", fall)
-
-    runtime.fall_model = fall
-    runtime._boot = SimpleNamespace(device="cpu")  # type: ignore[assignment]  # noqa: SLF001
-
-    warmed = runtime._warm_models()  # noqa: SLF001
-
-    # Production's own report...
-    assert warmed == ("pose", "person", "bed", "fall")
-    # ...and proof each model's real warmup ran, fall included.
-    # Exact multiset, not just a count: a loose `len == 4` would still pass if
-    # one model were warmed twice and another skipped.
-    assert sorted(warmed_calls) == sorted([*yolo_names, "fall"])
+    assert completed.returncode == 0, completed.stderr
+    assert f"{_REAL_WARMUP_COMPLETED}:{task}" in completed.stdout
 
 
 def test_example_config_fall_contract_matches_the_local_artifact() -> None:

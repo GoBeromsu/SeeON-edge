@@ -7,14 +7,17 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import NamedTuple
 
+import numpy as np
 import pytest
 
+from contracts.frame import Frame
 from worker.pipeline.output.evidence.clip_recorder import ClipRecorder, ClipRecorderConfig
 from worker.pipeline.output.evidence.evidence_retention import (
     EvidenceRetention,
     PurgeCandidate,
     PurgeResult,
 )
+from worker.types import BusinessEvent, FramePacket
 
 
 class DiskUsage(NamedTuple):
@@ -242,12 +245,35 @@ def test_restart_reacquires_lock_and_preserves_pending_evidence(tmp_path: Path) 
         is_clip_held=lambda clip_id: clip_id == held.clip_id,
         disk_usage_provider=lambda _path: DiskUsage(100, 100, 0),
     )
+    trigger_packet = FramePacket(
+        "cam-1",
+        Frame(1, now.timestamp(), np.zeros((8, 8, 3), dtype=np.uint8)),
+        now.timestamp(),
+        1,
+        8,
+        8,
+        0.1,
+        worker_boot_id="restart-boot",
+        stream_epoch=1,
+    )
     second.start()
     try:
         assert second.rotate_once()
-        new_clip = second.on_event("cam-1", "event-new")
+        new_clip = second.on_event(
+            trigger_packet,
+            BusinessEvent(
+                "fall",
+                "fall.detected",
+                "event-new",
+                "cam-1",
+                "facility-1",
+                now.timestamp(),
+                0.9,
+            ),
+        )
     finally:
         second.stop()
+        trigger_packet.release()
 
     # Then: restart does not clear the hold, and pressure refuses new evidence.
     assert new_clip is None
@@ -263,9 +289,6 @@ def test_stale_staged_evidence_is_held_until_reconciliation_releases_it(
     old_time = datetime.now().timestamp() - 3600
     staging.chmod(0o700)
     os.utime(staging, (old_time, old_time))
-    monkeypatch.setattr(
-        "worker.pipeline.output.evidence.clip_recorder._resolve_encoder", lambda: "libx264"
-    )
     recorder = ClipRecorder(
         ClipRecorderConfig(store_dir=tmp_path, stale_staging_seconds=1.0),
         disk_usage_provider=lambda _path: DiskUsage(100, 10, 90),

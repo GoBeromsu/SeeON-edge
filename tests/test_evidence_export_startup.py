@@ -2,11 +2,19 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 import worker.pipeline.output.evidence.clip_recorder as recorder_module
+from contracts.frame import Frame
 from worker.pipeline.output.evidence.clip_recorder import ClipRecorder, ClipRecorderConfig
 from worker.pipeline.output.evidence.evidence_runtime import EvidenceExportRuntime
+from worker.types import BusinessEvent, FramePacket
+
+
+def _packet() -> FramePacket:
+    frame = Frame(1, 1.0, np.zeros((8, 8, 3), dtype=np.uint8))
+    return FramePacket("camera-1", frame, 1.0, 1, 8, 8, 0.1)
 
 
 class FakeLock:
@@ -41,10 +49,13 @@ def test_startup_initializes_evidence_under_one_lock_before_sweep_rotate_accept(
         "acquire",
         lambda _path: events.append("lock") or FakeLock(events),
     )
+    original_default_services = recorder_module._default_services  # noqa: SLF001
     monkeypatch.setattr(
         recorder_module,
-        "_resolve_encoder",
-        lambda: events.append("accept") or "libx264",
+        "_default_services",
+        lambda config, repository: (
+            events.append("accept") or original_default_services(config, repository)
+        ),
     )
     recorder = ClipRecorder(
         ClipRecorderConfig(store_dir=tmp_path),
@@ -109,7 +120,25 @@ def test_evidence_startup_failure_releases_lock_and_never_accepts_clip(
         recorder.start()
 
     # Then: the recorder remains fail-closed and releases the same lock.
-    assert recorder.on_event("camera-1", "event-1") is None
+    packet = _packet()
+    try:
+        assert (
+            recorder.on_event(
+                packet,
+                BusinessEvent(
+                    "fall",
+                    "fall.detected",
+                    "event-1",
+                    "camera-1",
+                    "facility-1",
+                    1.0,
+                    0.9,
+                ),
+            )
+            is None
+        )
+    finally:
+        packet.release()
     assert events == ["lock", "lock-close"]
 
 

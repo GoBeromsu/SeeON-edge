@@ -4,6 +4,7 @@ import pytest
 
 from worker.runtime.profile.boot import (
     resolve_boot_context,
+    resolve_capability_graph_or_raise,
     resolve_decode_or_fallback,
     resolve_encode_or_fallback,
     resolve_profile,
@@ -21,6 +22,44 @@ from worker.runtime.profile.registry import (
     default_encode_probe,
     default_verifiers,
 )
+from worker.types import (
+    ConverterCapabilities,
+    FrameCapability,
+    MemoryKind,
+    PipelineProfile,
+    PixelFormat,
+    StageCapabilities,
+)
+
+
+def test_profile_boot_rejects_mismatch_unless_named_converter_is_supplied() -> None:
+    host_rgb = FrameCapability(MemoryKind.HOST, PixelFormat.RGB24)
+    cuda_nv12 = FrameCapability(MemoryKind.CUDA_DEVICE, PixelFormat.NV12)
+    pipeline = PipelineProfile(
+        name="test-mismatch",
+        stages=(
+            StageCapabilities("decode", frozenset({cuda_nv12}), cuda_nv12),
+            StageCapabilities("inference", frozenset({host_rgb}), host_rgb),
+        ),
+    )
+    spec = PROFILE_REGISTRY["cpu"].with_pipeline(pipeline)
+
+    with pytest.raises(ProfileVerifyError, match="capability graph"):
+        resolve_capability_graph_or_raise(spec)
+
+    graph = resolve_capability_graph_or_raise(
+        spec,
+        converters=(
+            ConverterCapabilities(
+                "explicit-device-host-materializer",
+                cuda_nv12,
+                host_rgb,
+                True,
+            ),
+        ),
+    )
+    assert graph.converter_names == ("explicit-device-host-materializer",)
+    assert graph.full_frame_copy_count == 1
 
 
 def _result(profile: str, *, ok: bool = True, stage: str = "device") -> VerifyResult:
@@ -41,7 +80,8 @@ def test_resolve_profile_missing_env_defaults_to_cpu(env: dict[str, str]) -> Non
     ML_WORKER_PROFILE no longer refuses to boot -- it defaults to
     DEFAULT_PROFILE_NAME ("cpu")."""
     spec = resolve_profile(env)
-    assert spec.name == DEFAULT_PROFILE_NAME
+    assert DEFAULT_PROFILE_NAME == "cpu"
+    assert spec.name == "cpu-host"
     assert spec == PROFILE_REGISTRY[DEFAULT_PROFILE_NAME]
 
 
@@ -116,9 +156,9 @@ def test_resolve_boot_context_aggregates_multiple_gate_failures() -> None:
         )
 
     message = str(excinfo.value)
-    assert "2 boot gate(s) failed for profile 'cuda'" in message
+    assert "2 boot gate(s) failed for profile 'nvidia-host-bridge'" in message
     assert "device verification failed" in message
-    assert "conflicts with profile 'cuda' decode" in message
+    assert "conflicts with profile 'nvidia-host-bridge' decode" in message
 
 
 def test_legacy_decode_conflict_rejected() -> None:
@@ -141,7 +181,17 @@ def test_legacy_matching_allowed() -> None:
 
 
 def test_profile_registry_exact_keys() -> None:
-    assert set(PROFILE_REGISTRY) == {"cuda", "mps", "cpu", "igpu"}
+    assert set(PROFILE_REGISTRY) == {
+        "cpu-host",
+        "nvidia-host-bridge",
+        "intel-vaapi-host",
+        "apple-mps-host",
+        "nvidia-device-experimental",
+        "cuda",
+        "mps",
+        "cpu",
+        "igpu",
+    }
     assert PROFILE_REGISTRY["cuda"].device == "cuda"
     assert PROFILE_REGISTRY["cuda"].decode == "nvdec"
     assert PROFILE_REGISTRY["mps"].device == "mps"
@@ -407,6 +457,194 @@ def test_igpu_profile_falls_back_to_opencv_decode_instead_of_raising(
     assert any("falling back to opencv" in record.message for record in caplog.records)
 
 
+@pytest.mark.parametrize(
+    ("requested", "canonical"),
+    [
+        ("cpu", "cpu-host"),
+        ("cuda", "nvidia-host-bridge"),
+        ("igpu", "intel-vaapi-host"),
+        ("mps", "apple-mps-host"),
+        ("cpu-host", "cpu-host"),
+        ("nvidia-host-bridge", "nvidia-host-bridge"),
+        ("intel-vaapi-host", "intel-vaapi-host"),
+        ("apple-mps-host", "apple-mps-host"),
+    ],
+)
+def test_profile_aliases_resolve_to_canonical_specs(requested: str, canonical: str) -> None:
+    spec = resolve_profile({ML_WORKER_PROFILE_ENV: requested})
+
+    assert spec.name == canonical
+    assert requested in spec.accepted_names
+
+
+def test_cuda_alias_reports_truthful_host_bridge_runtime_path() -> None:
+    context = resolve_boot_context(
+        {ML_WORKER_PROFILE_ENV: "cuda"},
+        _deps("cuda"),
+        _decode_ok,
+        _nvenc_ok,
+    )
+
+    report = context.runtime_profile
+    assert context.requested_profile == "cuda"
+    assert context.canonical_profile == "nvidia-host-bridge"
+    assert context.profile.name == "nvidia-host-bridge"
+    assert report.requested_profile == "cuda"
+    assert report.canonical_profile == "nvidia-host-bridge"
+    assert report.requested_decode_backend == "nvdec"
+    assert report.effective_decode_backend == "nvdec"
+    assert report.requested_preprocess_backend == "cuda-tensor-upload"
+    assert report.effective_preprocess_backend == "cuda-tensor-upload"
+    assert report.requested_inference_backend == "cuda"
+    assert report.effective_inference_backend == "cuda"
+    assert report.requested_overlay_backend == "numpy-host"
+    assert report.effective_overlay_backend == "numpy-host"
+    assert report.requested_encode_backend == "h264_nvenc"
+    assert report.effective_encode_backend == "h264_nvenc"
+    assert report.memory_path == (
+        "host/rgb24",
+        "host/rgb24",
+        "cuda-device/rgb24",
+        "host/rgb24",
+        "cuda-device/rgb24",
+    )
+    assert report.converter_chain == (
+        "cuda-inference-host-input-upload",
+        "nvenc-host-input-upload",
+    )
+    assert report.device_resident_after_decode is False
+    assert report.full_frame_h2d_count == 2
+    assert report.full_frame_d2h_count == 0
+    assert context.capability_graph.converter_names == report.converter_chain
+    assert context.capability_graph.full_frame_copy_count == (
+        report.full_frame_h2d_count + report.full_frame_d2h_count
+    )
+    assert len(context.capability_graph.edges) == len(report.memory_steps) - 1
+    assert all(edge.validated for edge in context.capability_graph.edges)
+    assert report.degraded_reasons == ()
+
+
+def test_nvenc_declared_fallback_updates_effective_path_truth() -> None:
+    context = resolve_boot_context(
+        {ML_WORKER_PROFILE_ENV: "cuda"},
+        _deps("cuda"),
+        _decode_ok,
+        _nvenc_unavailable,
+    )
+
+    report = context.runtime_profile
+    assert report.requested_encode_backend == "h264_nvenc"
+    assert report.effective_encode_backend == "libx264"
+    assert report.converter_chain == ("cuda-inference-host-input-upload",)
+    assert report.full_frame_h2d_count == 1
+    assert report.full_frame_d2h_count == 0
+    assert context.capability_graph.converter_names == report.converter_chain
+    assert context.capability_graph.full_frame_copy_count == 1
+    assert report.degraded_reasons == ("nvenc_probe_failed",)
+
+
+def test_vaapi_profile_reports_host_download_and_fallback_truth() -> None:
+    accelerated = resolve_boot_context(
+        {ML_WORKER_PROFILE_ENV: "igpu"}, _deps("igpu"), _vaapi_ok
+    ).runtime_profile
+    degraded = resolve_boot_context(
+        {ML_WORKER_PROFILE_ENV: "igpu"}, _deps("igpu"), _vaapi_unavailable
+    ).runtime_profile
+
+    assert accelerated.canonical_profile == "intel-vaapi-host"
+    assert accelerated.memory_path[0:2] == ("host/rgb24", "host/rgb24")
+    assert accelerated.converter_chain == ()
+    assert accelerated.device_resident_after_decode is False
+    assert accelerated.full_frame_h2d_count == 0
+    assert accelerated.full_frame_d2h_count == 0
+    assert accelerated.degraded_reasons == ()
+
+    assert degraded.requested_decode_backend == "vaapi"
+    assert degraded.effective_decode_backend == "opencv"
+    assert degraded.memory_path[0:2] == ("host/rgb24", "host/rgb24")
+    assert degraded.converter_chain == ()
+    assert degraded.full_frame_d2h_count == 0
+    assert degraded.degraded_reasons == ("vaapi_probe_failed",)
+
+
+def test_experimental_profile_is_explicit_only_and_unconfigured_fails_closed() -> None:
+    spec = resolve_profile({ML_WORKER_PROFILE_ENV: "nvidia-device-experimental"})
+    assert spec.name == "nvidia-device-experimental"
+    assert spec.accepted_names == ("nvidia-device-experimental",)
+    assert all(
+        resolve_profile({ML_WORKER_PROFILE_ENV: alias}).name != spec.name
+        for alias in ("cpu", "cuda", "igpu", "mps")
+    )
+
+    # No verifier registered at all (BootDependencies({})): fails closed with
+    # "no verifier configured", never a silent pass.
+    with pytest.raises(ProfileVerifyError, match="no verifier configured"):
+        resolve_boot_context(
+            {ML_WORKER_PROFILE_ENV: "nvidia-device-experimental"},
+            BootDependencies({}),
+            _decode_ok,
+            _nvenc_ok,
+        )
+
+
+def test_experimental_profile_fails_closed_on_negative_device_resident_probe() -> None:
+    """Todo 17: the experimental profile's own concrete-stage verifier -- not
+    the plain `cuda` verifier `nvidia-host-bridge` shares -- gates this
+    profile. A host that fails the device-resident capability probe (e.g.
+    this repo's Apple Silicon dev/CI machines) must still boot-fail, with the
+    probe's own truthful reason surfaced."""
+    deps = BootDependencies(
+        default_verifiers(
+            device_resident_source=lambda: VerifyResult(
+                False,
+                "nvidia-device-experimental",
+                "device",
+                "no CUDA stream/event support on this host",
+            )
+        )
+    )
+    with pytest.raises(ProfileVerifyError, match="no CUDA stream/event support"):
+        resolve_boot_context(
+            {ML_WORKER_PROFILE_ENV: "nvidia-device-experimental"}, deps, _decode_ok, _nvenc_ok
+        )
+
+
+def test_experimental_profile_boots_once_device_resident_probe_is_positive() -> None:
+    """A truthful positive capability probe now boots the experimental
+    profile -- the old hardcoded \"selection-only until Todo 17\" refusal is
+    gone; this profile's boot outcome is entirely probe-driven, same as every
+    other profile."""
+    deps = BootDependencies(
+        default_verifiers(
+            device_resident_source=lambda: VerifyResult(
+                True, "nvidia-device-experimental", "device", "device-resident stages available"
+            )
+        )
+    )
+    context = resolve_boot_context(
+        {ML_WORKER_PROFILE_ENV: "nvidia-device-experimental"}, deps, _decode_ok, _nvenc_ok
+    )
+    assert context.canonical_profile == "nvidia-device-experimental"
+    assert context.runtime_profile.device_resident_after_decode is True
+
+
+def test_experimental_profile_positive_probe_never_satisfies_plain_cuda_profile() -> None:
+    """A `device_resident_source` configured true must never leak into the
+    production `cuda`/`nvidia-host-bridge` verifier -- they stay on
+    `cuda_source` only, so an experimental-only host capability can never
+    silently promote the production alias."""
+    deps = BootDependencies(
+        default_verifiers(
+            cuda_source=lambda: CudaProbe(available=False, reason="no plain cuda"),
+            device_resident_source=lambda: VerifyResult(
+                True, "nvidia-device-experimental", "device", "device-resident stages available"
+            ),
+        )
+    )
+    with pytest.raises(ProfileVerifyError):
+        resolve_boot_context({ML_WORKER_PROFILE_ENV: "cuda"}, deps, _decode_ok, _nvenc_ok)
+
+
 def test_igpu_profile_device_verify_false_still_reports_decode_gate() -> None:
     """Issue #79 (track 2) parity: igpu's device check failing must not skip
     running the (non-raising) decode resolution -- both are independent
@@ -417,7 +655,7 @@ def test_igpu_profile_device_verify_false_still_reports_decode_gate() -> None:
         decode_calls.append(decode)
         return _vaapi_ok(decode)
 
-    with pytest.raises(ProfileVerifyError, match="igpu"):
+    with pytest.raises(ProfileVerifyError, match="intel-vaapi-host"):
         resolve_boot_context(
             {ML_WORKER_PROFILE_ENV: "igpu"}, _deps("igpu", ok=False), decode_probe
         )

@@ -23,9 +23,9 @@ function usagePct(info: ClipStorageInfo): number {
   return 0;
 }
 
-/** Joins the CLIP_STORE_DIR mount root with the selected relative subdirectory ("" selects the mount root itself). */
+/** Operator-facing location label: mount label + optional relative subdirectory. */
 function displayPath(info: ClipStorageInfo): string {
-  return info.selected_path ? `${info.root}/${info.selected_path}` : info.root;
+  return info.selected_path ? `${info.mount_label}/${info.selected_path}` : info.mount_label;
 }
 
 /** 설정 페이지 "클립 저장 공간" 카드 (front/design-handoff/README.md §5). */
