@@ -60,7 +60,14 @@ function openEnrollment(host: HTMLElement): void {
 }
 
 beforeEach(() => {
-  vi.stubGlobal('crypto', { randomUUID: vi.fn(() => '78c1eaad-bd4b-44fc-88a1-401135d65a70') });
+  // Mirrors a plain-HTTP LAN dashboard: getRandomValues exists, randomUUID does
+  // not (it is secure-context only). The panel must still generate a ref.
+  vi.stubGlobal('crypto', {
+    getRandomValues: (bytes: Uint8Array) => {
+      for (let index = 0; index < bytes.length; index += 1) bytes[index] = (index * 37 + 11) & 0xff;
+      return bytes;
+    },
+  });
   vi.mocked(saveConnection).mockReset();
   vi.mocked(saveConnection).mockResolvedValue(enrolledView);
   vi.mocked(testConnection).mockReset();
@@ -103,7 +110,10 @@ describe('ConnectionSettingsPanel', () => {
     expect(saveConnection).toHaveBeenCalledWith({
       facility_code: 'NH-7H2K9M4QXP',
       facility_token: 'one-time-secret',
-      client_installation_ref: '78c1eaad-bd4b-44fc-88a1-401135d65a70',
+      // Exact value is generated; assert the provisioning contract instead of a constant.
+      client_installation_ref: expect.stringMatching(
+        /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+      ),
     });
     expect(host.querySelector('input[name="facility_id"]')).toBeNull();
     expect(host.textContent).not.toContain('one-time-secret');

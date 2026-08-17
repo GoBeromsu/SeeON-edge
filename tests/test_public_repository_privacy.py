@@ -116,6 +116,11 @@ _SYNTHETIC_RTSP_FIXTURES = {
     Path(".claude/skills/edge-bringup/scripts/rtsp_sweep.sh"): {
         "rtsp://${CAM_USER}:${CAM_PASSWORD}@${ip}:554/${TRACK}",
     },
+    Path("tests/test_alert_amplification_harness.py"): {
+        # 스캐너가 자격증명 포함 RTSP URL 을 거부하는지 증명하는 입력값이다.
+        # 실제 카메라가 아니라 거부되어야 하는 형태를 보여주는 합성 리터럴.
+        "rtsp://user:pass@camera/live",
+    },
     Path("front/src/features/camera-management/CameraManagementPage.test.tsx"): {
         "rtsp://user:***@redacted-camera/live",
     },

@@ -46,11 +46,13 @@ def _packaged_fall_identity() -> tuple[str, str]:
 _FALL_ARTIFACT_DIGEST, _FALL_PREPROCESSING_IDENTITY = _packaged_fall_identity()
 _ARTIFACTS = {
     "pose": "eb3bb8268828aeaf515cec23a4bfafd793944a86fe9af94ba7823609c14522a9",
-    "bed": "ab96d997347ecd772d54e2a36e760fb71354cba046369cedcd0595761b9a2d09",
+    "person": "9b09cc8bf347f0fc8a5f7657480587f25db09b34bf33b0652110fb03a8ad4fef",
+    "bed": "16b636f04e8fb6a325b3370f22dc5e5535ff473e384f4d041fd28d788f6ee9f5",
     "fall-classifier": _FALL_ARTIFACT_DIGEST,
 }
 _PREPROCESSING = {
     "pose": "rgb24-to-coco17.v1",
+    "person": "rgb24-to-person-boxes.v1",
     "bed": "rgb24-to-bed-regions.v1",
     "fall-classifier": _FALL_PREPROCESSING_IDENTITY,
 }

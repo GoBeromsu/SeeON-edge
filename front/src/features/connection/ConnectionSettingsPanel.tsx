@@ -2,6 +2,7 @@ import { FormEvent, useEffect, useRef, useState } from 'react';
 import { isDeviceStepComplete } from '@/features/connection/wizardSteps';
 import { saveConnection, testConnection, type ConnectionTestResult, type ConnectionView } from '@/shared/api/client';
 import { HttpError } from '@/shared/api/http';
+import { generateUuidV4 } from '@/shared/format/uuid';
 import {
   buildConnectionPayload,
   connectionFormFromView,
@@ -74,7 +75,10 @@ function EditIcon(): JSX.Element {
 
 export function ConnectionSettingsPanel({ resource }: Props): JSX.Element {
   const view = resource.data;
-  const generatedRef = useRef(crypto.randomUUID());
+  // Not crypto.randomUUID(): that API exists only in secure contexts, and this
+  // dashboard is reached over plain HTTP on the facility LAN, where it is
+  // undefined and would throw during render (taking the whole page down).
+  const generatedRef = useRef(generateUuidV4());
   const busyRef = useRef(false);
   const [editing, setEditing] = useState(false);
   const [form, setForm] = useState<ConnectionFormState>(() => connectionFormFromView(view ?? null, generatedRef.current));
