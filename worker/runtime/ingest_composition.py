@@ -91,6 +91,8 @@ def decoder_for(
     than silently falling back to a default backend.
     """
     resolved = resolve_decode_backend(decode, override)
+    if resolved not in ("opencv", "cpu", "nvdec", "vaapi"):
+        raise RuntimeError(f"unsupported decode policy: {resolved!r}")
     if packet_sink is not None:
         return cast(
             "DecodeAdapter[DecodeConfig]",
@@ -102,7 +104,7 @@ def decoder_for(
         return cast("DecodeAdapter[DecodeConfig]", NvdecCuvidAdapter())
     if resolved == "vaapi":
         return cast("DecodeAdapter[DecodeConfig]", VaapiAdapter())
-    raise RuntimeError(f"unsupported decode policy: {resolved!r}")
+    raise AssertionError(f"validated decode policy was not selected: {resolved!r}")
 
 
 def _decode_config_factory(
@@ -165,13 +167,15 @@ def compose_camera_ingest_loop(
     adapter/policy dataclass defaults via a fresh ``WorkerRuntimeConfig``.
     """
     effective_runtime = runtime if runtime is not None else WorkerRuntimeConfig()
+    resolved_backend = resolve_decode_backend(decode, camera.decode_backend)
+    decoder = decoder_for(
+        decode,
+        camera.decode_backend,
+        packet_sink=packet_sink,
+    )
     ports = CameraIngestPorts(
         registry=registry,
-        decoder=decoder_for(
-            decode,
-            camera.decode_backend,
-            packet_sink=packet_sink,
-        ),
+        decoder=decoder,
         bus=bus,
         reporter=reporter,
     )
@@ -180,6 +184,23 @@ def compose_camera_ingest_loop(
         source_id=camera.camera_id,
         make_decode_config=_decode_config_factory(decode, camera, effective_runtime),
         policy=CapturePolicy(target_fps=camera.fps, max_failures=effective_runtime.max_failures),
+    )
+    # The profile token, per-camera resolution, and concrete adapter must be
+    # visible in the rendered boot log. `extra` is retained for structured
+    # consumers, but the entrypoint formatter only renders `%(message)s`.
+    LOGGER.info(
+        "camera ingest decode selected: camera_id=%s requested_profile_decode=%s "
+        "resolved_backend=%s actual_adapter_class=%s",
+        camera.camera_id,
+        decode,
+        resolved_backend,
+        type(decoder).__name__,
+        extra={
+            "camera_id": camera.camera_id,
+            "requested_profile_decode": decode,
+            "resolved_backend": resolved_backend,
+            "actual_adapter_class": type(decoder).__name__,
+        },
     )
     # `camera.fps` paces both decode and the live-view tap (RTSPSource yields
     # at this rate; CameraPipelinePump publishes every yielded packet to the

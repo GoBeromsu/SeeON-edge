@@ -79,6 +79,17 @@ def log_snapshot(snapshot: RuntimeDiagnosticsSnapshot) -> None:
             }
             for metrics in camera.bus
         }
+        decode_backend = (
+            None
+            if camera.decode_backend is None
+            else {
+                "requested_profile_decode": (
+                    camera.decode_backend.requested_profile_decode
+                ),
+                "resolved_backend": camera.decode_backend.resolved_backend,
+                "actual_adapter_class": camera.decode_backend.actual_adapter_class,
+            }
+        )
         encode = (
             None
             if camera.encode is None
@@ -135,7 +146,8 @@ def log_snapshot(snapshot: RuntimeDiagnosticsSnapshot) -> None:
         LOGGER.info(
             "worker.runtime.telemetry camera_id=%s failure_category=%s "
             "stage_timings=%s bus=%s encoder=%s encode=%s bed_region=%s "
-            "bed_exit_scoring=%s",
+            "bed_exit_scoring=%s"
+            + (" decode_backend=%s" if decode_backend is not None else ""),
             camera.camera_id,
             camera.failure_category,
             stage_timings,
@@ -144,13 +156,14 @@ def log_snapshot(snapshot: RuntimeDiagnosticsSnapshot) -> None:
             encode,
             bed_region,
             bed_exit_scoring,
+            *((decode_backend,) if decode_backend is not None else ()),
             extra={
                 "camera_id": camera.camera_id,
                 "failure_category": camera.failure_category,
                 "stage_timings": stage_timings,
                 "bus": bus,
                 "encoder": snapshot.encoder,
-                "encode": encode,
+                "decode_backend": decode_backend,
                 "bed_region": bed_region,
                 "bed_exit_scoring": bed_exit_scoring,
             },

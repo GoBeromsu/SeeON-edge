@@ -54,6 +54,19 @@ class BedExitScoringDiagnostics:
 
 
 @dataclass(frozen=True, slots=True)
+class DecodeBackendObservability:
+    """One camera's boot-time requested-versus-actual decode selection.
+
+    This stays in the worker-local snapshot: the relay's ``decode`` payload
+    is a strict legacy wire contract and must not gain the concrete class.
+    """
+
+    requested_profile_decode: str
+    resolved_backend: str
+    actual_adapter_class: str
+
+
+@dataclass(frozen=True, slots=True)
 class StageTimingSnapshot:
     """Aggregated elapsed time for one camera pipeline stage."""
 
@@ -123,6 +136,9 @@ class CameraDiagnosticsSnapshot:
     failure_category: str | None
     stage_timings: tuple[StageTimingSnapshot, ...]
     bus: tuple[BusSubscriptionSnapshot, ...]
+    # Local-only: the strict relay decode payload must not expose an
+    # implementation class or profile-resolution detail.
+    decode_backend: DecodeBackendObservability | None = None
     # Local-only (#53): unlike decode's selection, which is also projected
     # onto the strict backend relay payload (RelayDecodePayload in
     # worker/runtime/telemetry/wire.py), this never crosses the relay
@@ -185,6 +201,7 @@ __all__ = [
     "BusMetricsSource",
     "BusSubscriptionSnapshot",
     "CameraDiagnosticsSnapshot",
+    "DecodeBackendObservability",
     "DeviceResidencyDiagnostics",
     "EncoderLifecycleSnapshot",
     "InvalidStageTimingError",

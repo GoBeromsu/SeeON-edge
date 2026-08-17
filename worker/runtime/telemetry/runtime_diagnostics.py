@@ -22,6 +22,7 @@ from worker.runtime.telemetry.models import (
     BusMetricsSource,
     BusSubscriptionSnapshot,
     CameraDiagnosticsSnapshot,
+    DecodeBackendObservability,
     DeviceResidencyDiagnostics,
     EncoderLifecycleSnapshot,
     InvalidStageTimingError,
@@ -61,6 +62,7 @@ class WorkerDiagnostics:
         self._clock = clock
         self._wall_clock = wall_clock
         self._decode_by_camera: dict[str, DecodeSelection] = {}
+        self._decode_backend_by_camera: dict[str, DecodeBackendObservability] = {}
         self._encode_by_camera: dict[str, EncodeSelection] = {}
         self._measured_fps_by_camera: dict[str, tuple[float, float | None]] = {}
         self._stage_timings: dict[str, dict[str, StageTimingAccumulator]] = {}
@@ -127,6 +129,31 @@ class WorkerDiagnostics:
     def decode_snapshot(self) -> Mapping[str, DecodeSelection]:
         with self._lock:
             return dict(self._decode_by_camera)
+
+    def record_decode_backend(
+        self,
+        camera_id: str,
+        *,
+        requested_profile_decode: str,
+        resolved_backend: str,
+        actual_adapter_class: str,
+    ) -> None:
+        """Record local-only boot selection details for one camera.
+
+        ``DecodeSelection`` remains the relay-compatible view. The profile
+        token and concrete adapter class are intentionally retained only in
+        the local runtime snapshot.
+        """
+        with self._lock:
+            self._decode_backend_by_camera[camera_id] = DecodeBackendObservability(
+                requested_profile_decode=requested_profile_decode,
+                resolved_backend=resolved_backend,
+                actual_adapter_class=actual_adapter_class,
+            )
+
+    def decode_backend_snapshot(self) -> Mapping[str, DecodeBackendObservability]:
+        with self._lock:
+            return dict(self._decode_backend_by_camera)
 
     def register_encode(self, camera_id: str, requested: str) -> None:
         self.update_encode(
@@ -295,12 +322,14 @@ class WorkerDiagnostics:
             }
             buses = dict(self._buses)
             encoder = self._encoder
+            decode_backend_by_camera = dict(self._decode_backend_by_camera)
             encode_by_camera = dict(self._encode_by_camera)
             bed_region_by_camera = dict(self._bed_region_by_camera)
             bed_exit_scoring_by_camera = dict(self._bed_exit_scoring_by_camera)
             device_residency_by_camera = dict(self._device_residency_by_camera)
             camera_ids = (
                 set(self._decode_by_camera)
+                | set(decode_backend_by_camera)
                 | set(stage_timings)
                 | set(buses)
                 | set(statuses)
@@ -317,6 +346,7 @@ class WorkerDiagnostics:
                 ),
                 stage_timings=stage_timings.get(camera_id, ()),
                 bus=bus_snapshot(buses.get(camera_id)),
+                decode_backend=decode_backend_by_camera.get(camera_id),
                 encode=encode_by_camera.get(camera_id),
                 bed_region=bed_region_by_camera.get(camera_id),
                 bed_exit_scoring=bed_exit_scoring_by_camera.get(camera_id),
@@ -412,6 +442,7 @@ __all__ = [
     "BusSubscriptionSnapshot",
     "CameraDiagnosticsSnapshot",
     "ClipRecorderStatus",
+    "DecodeBackendObservability",
     "DeviceResidencyDiagnostics",
     "EncodeSelection",
     "EncoderLifecycleSnapshot",

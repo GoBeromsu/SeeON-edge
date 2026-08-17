@@ -23,12 +23,20 @@ from worker.runtime.ingest_composition import (
 from worker.runtime.profile.boot import BootContext
 from worker.runtime.profile.registry import PROFILE_REGISTRY
 from worker.runtime.worker import WorkerRuntime
+from worker.types.source_packet import SourcePacket
 
 
 @final
 class _FakeServingClient:
     def create(self, task: str, **_options: object) -> object:
         raise AssertionError(f"ingest composition tests must not create a serving model: {task}")
+
+
+@final
+class _PacketSink:
+    def append(self, packet: SourcePacket) -> bool:
+        del packet
+        return True
 
 
 @final
@@ -121,6 +129,16 @@ def test_decoder_for_nvdec_token_constructs_only_the_nvdec_cuvid_adapter(
 
     assert result is sentinel
     assert calls == ["nvdec"]
+
+
+def test_decoder_for_nvdec_with_a_packet_sink_selects_the_tee_preserving_adapter() -> None:
+    # Todo 4 moved preservation + NVDEC to PyAvPreservingAdapter's demux-only
+    # NvdecPacketTeeSession branch. A sink-free NVDEC source above still uses
+    # NvdecCuvidAdapter; this deliberate distinction must not regress.
+    adapter = decoder_for("nvdec", packet_sink=_PacketSink())
+
+    assert type(adapter) is ingest_composition_module.PyAvPreservingAdapter
+    assert adapter._decode_backend == "nvdec"  # noqa: SLF001 - selection seam
 
 
 def test_decoder_for_vaapi_token_constructs_only_the_vaapi_adapter(
@@ -379,6 +397,34 @@ def test_compose_camera_ingest_loop_capture_policy_fps_is_independent_of_frame_s
     )
 
     assert loop._spec.policy.target_fps == 15.0  # noqa: SLF001
+
+
+def test_compose_camera_ingest_loop_logs_requested_and_actual_decode_backend(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    camera = _camera("camera-a")
+    registry = build_camera_source_registry((camera,))
+
+    with caplog.at_level("INFO", logger="worker.runtime.ingest_composition"):
+        compose_camera_ingest_loop(
+            camera,
+            BoundedFrameBus(),
+            _Reporter(),
+            decode="nvdec",
+            registry=registry,
+            packet_sink=_PacketSink(),
+        )
+
+    record = next(
+        record
+        for record in caplog.records
+        if record.getMessage().startswith("camera ingest decode selected:")
+    )
+    message = record.getMessage()
+    assert "camera_id=camera-a" in message
+    assert "requested_profile_decode=nvdec" in message
+    assert "resolved_backend=nvdec" in message
+    assert "actual_adapter_class=PyAvPreservingAdapter" in message
 
 
 def test_compose_camera_ingest_loop_logs_the_effective_pacing_fps(
