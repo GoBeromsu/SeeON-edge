@@ -23,6 +23,20 @@ class _ChunkStream:
 
 
 @final
+class _CaptureInput:
+    def __init__(self) -> None:
+        self.payload = bytearray()
+        self.closed = False
+
+    def write(self, payload: bytes | memoryview) -> int:
+        self.payload.extend(payload)
+        return len(payload)
+
+    def close(self) -> None:
+        self.closed = True
+
+
+@final
 class _BlockingStream:
     def __init__(self) -> None:
         self._closed = threading.Event()
@@ -45,6 +59,7 @@ class _Child:
         stdout: _ChunkStream | _BlockingStream,
         wait_outcomes: list[int | subprocess.TimeoutExpired] | None = None,
     ) -> None:
+        self.stdin = _CaptureInput()
         self.stdout = stdout
         self.returncode: int | None = None
         self._wait_outcomes = wait_outcomes or [0]
@@ -84,6 +99,7 @@ def test_decode_process_assembles_partial_chunks_through_bounded_queue() -> None
     assert child.kill_calls == 0
     assert child.stdout.closed is True
     assert process.reader_alive is False
+    assert child.stdin.closed is True
 
 
 def test_decode_process_read_timeout_reaps_hanging_child_and_reader() -> None:
@@ -101,6 +117,7 @@ def test_decode_process_read_timeout_reaps_hanging_child_and_reader() -> None:
     assert child.terminate_calls == 1
     assert child.stdout.closed is True
     assert process.reader_alive is False
+    assert child.stdin.closed is True
 
 
 def test_decode_process_escalates_to_kill_and_reaps_only_once() -> None:
@@ -121,3 +138,4 @@ def test_decode_process_escalates_to_kill_and_reaps_only_once() -> None:
     assert child.wait_calls == [0.01, None]
     assert child.stdout.closed is True
     assert process.reader_alive is False
+    assert child.stdin.closed is True

@@ -6,6 +6,7 @@ from worker.adapters.decode.nvdec_cuvid.adapter import (
     NvdecCuvidAdapter,
     NvdecCuvidSession,
     ffmpeg_decode_args,
+    ffmpeg_rtsp_decode_args,
 )
 from worker.adapters.decode.nvdec_cuvid.errors import (
     NvdecConfigError,
@@ -36,6 +37,7 @@ __all__ = [
     "UnsupportedCodecError",
     "cuvid_decoder_for",
     "ffmpeg_decode_args",
+    "ffmpeg_rtsp_decode_args",
     "ffprobe_args",
     "ffprobe_binary",
     "probe_nvdec_cuvid_capability",
