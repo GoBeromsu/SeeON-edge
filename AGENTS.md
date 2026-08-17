@@ -95,7 +95,7 @@ also a pre-commit hook and CI step); contract-symbol exports by `tests/test_cont
 - Architecture map: [`docs/architecture.md`](docs/architecture.md)
 - Decision records (explicit-only): [`docs/decisions/`](docs/decisions/) — index in [`docs/decisions/README.md`](docs/decisions/README.md)
 - Active plans: [`docs/exec-plan/active/`](docs/exec-plan/active/) · Research: [`docs/research/`](docs/research/) · Rules: [`docs/rules/`](docs/rules/)
-- Operator runbooks: [`docs/runbooks/`](docs/runbooks/) — 엣지 호스트에서 손으로 실행하는 절차. 현재 4건: `local-e2e-rtsp-source.md`(핀된 클립으로 로컬 RTSP 소스 구성), `worker-migration-rollback.md`(`ML_WORKER_IMAGE` digest 롤백), `driver-cuda-alignment.md`, `edge-image-publish.md`(엣지 이미지 발행 — `main` 병합만으로는 이미지가 생기지 않는다).
+- Operator runbooks: [`docs/runbooks/`](docs/runbooks/) — 엣지 호스트에서 손으로 실행하는 절차. 현재 5건: `local-e2e-rtsp-source.md`(핀된 클립으로 로컬 RTSP 소스 구성), `worker-migration-rollback.md`(`ML_WORKER_IMAGE` digest 롤백), `driver-cuda-alignment.md`, `edge-image-publish.md`(엣지 이미지 발행 — `main` 병합만으로는 이미지가 생기지 않는다), `edge-redeploy-identity-continuity.md`(재배포 시 카메라 Hub 매핑 보존 — 매핑을 잃으면 알림이 Hub 에 도달하지 않으면서 증상은 인증 오류처럼 보인다).
 
 ## CONVENTIONS
 
