@@ -1945,6 +1945,12 @@ class WorkerRuntime:
             packet_sink=self._packet_repository,
         )
         self._record_decode_selection(camera, resolved_backend)
+        self.diagnostics.record_decode_backend(
+            camera.camera_id,
+            requested_profile_decode=self._boot.decode,
+            resolved_backend=resolved_backend,
+            actual_adapter_class=type(loop.decode_adapter).__name__,
+        )
         return loop
 
     def _record_decode_selection(self, camera: CameraRuntimeConfig, resolved_backend: str) -> None:
