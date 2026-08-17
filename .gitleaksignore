@@ -22,5 +22,5 @@
 /repo/contracts/edge-provisioning-v1/contract-fixtures.json:generic-api-key:255
 /repo/contracts/edge-provisioning-v1/contract-fixtures.json:generic-api-key:321
 # Synthetic relay-token fixtures asserting API_EDGE_RELAY_TOKEN gate behavior.
-/repo/tests/test_compose_edge_profiles.py:generic-api-key:330
+/repo/tests/test_compose_edge_profiles.py:generic-api-key:331
 /repo/tests/test_compose_edge_profiles.py:generic-api-key:592

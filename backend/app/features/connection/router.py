@@ -1,15 +1,14 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
-from typing import Annotated
 
-from fastapi import APIRouter, BackgroundTasks, FastAPI, Header, Request
+from fastapi import APIRouter, BackgroundTasks, FastAPI, Request
 from fastapi.exceptions import HTTPException
 from pydantic import UUID4, BaseModel, ConfigDict, Field
 
 from backend.app.core.config import get_settings
 from backend.app.features.cameras.roster_sync import sync_camera_roster
-from backend.app.features.cameras.router import RELAY_TOKEN_HEADER, _authorize
+from backend.app.features.cameras.router import _authorize
 from backend.app.features.connection.enrollment import (
     EnrollmentCredentials,
     EnrollmentErrorClass,
@@ -100,12 +99,8 @@ class CameraRosterSyncResponse(BaseModel):
 
 
 @router.get("", response_model=ConnectionStatusResponse)
-def get_connection(
-    request: Request,
-    relay_token: Annotated[str | None, Header(alias=RELAY_TOKEN_HEADER)] = None,
-    authorization: Annotated[str | None, Header(alias="Authorization")] = None,
-) -> dict[str, object]:
-    _authorize(request, relay_token, authorization)
+def get_connection(request: Request) -> dict[str, object]:
+    _authorize(request)
     return _status_response(request.app)
 
 
@@ -114,10 +109,8 @@ def put_connection(
     payload: ConnectionEnrollmentRequest,
     request: Request,
     background_tasks: BackgroundTasks,
-    relay_token: Annotated[str | None, Header(alias=RELAY_TOKEN_HEADER)] = None,
-    authorization: Annotated[str | None, Header(alias="Authorization")] = None,
 ) -> dict[str, object]:
-    _authorize(request, relay_token, authorization)
+    _authorize(request)
     store = ConnectionSettingsStore.from_env()
     credentials = _credentials(payload)
     try:
@@ -151,10 +144,8 @@ def put_connection(
 def test_connection(
     payload: ConnectionEnrollmentRequest,
     request: Request,
-    relay_token: Annotated[str | None, Header(alias=RELAY_TOKEN_HEADER)] = None,
-    authorization: Annotated[str | None, Header(alias="Authorization")] = None,
 ) -> dict[str, object]:
-    _authorize(request, relay_token, authorization)
+    _authorize(request)
     try:
         verified = verify_enrollment(
             ConnectionSettingsStore.from_env().load().events_url,
@@ -178,12 +169,8 @@ def test_connection(
 
 
 @router.post("/sync-cameras", response_model=CameraRosterSyncResponse)
-def sync_cameras(
-    request: Request,
-    relay_token: Annotated[str | None, Header(alias=RELAY_TOKEN_HEADER)] = None,
-    authorization: Annotated[str | None, Header(alias="Authorization")] = None,
-) -> dict[str, object]:
-    _authorize(request, relay_token, authorization)
+def sync_cameras(request: Request) -> dict[str, object]:
+    _authorize(request)
     result = sync_camera_roster(request.app)
     return {
         "status": result.status,

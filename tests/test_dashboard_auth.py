@@ -81,19 +81,24 @@ def test_worker_config_keeps_dedicated_relay_auth_when_dashboard_sessions_are_en
         assert dashboard_route.status_code == 401
 
 
-def test_dashboard_routes_require_a_real_session_even_without_legacy_opt_in(
+def test_dashboard_routes_ignore_relay_credentials_even_with_legacy_opt_in(
     tmp_path, monkeypatch
 ) -> None:
-    monkeypatch.delenv("API_ALLOW_LEGACY_DASHBOARD_AUTH", raising=False)
+    monkeypatch.setenv("API_ALLOW_LEGACY_DASHBOARD_AUTH", "1")
     app = _app(tmp_path)
 
     with TestClient(app) as client:
-        response = client.get(
+        bearer_response = client.get(
             "/api/v1/cameras",
             headers={"Authorization": "Bearer worker-secret"},
         )
+        relay_header_response = client.get(
+            "/api/v1/cameras",
+            headers={"X-Edge-Relay-Token": "worker-secret"},
+        )
 
-    assert response.status_code == 401
+    assert bearer_response.status_code == 401
+    assert relay_header_response.status_code == 401
 
 
 def test_concurrent_first_logins_share_one_session_store(tmp_path) -> None:
@@ -138,9 +143,7 @@ def test_credentials_store_returns_none_on_zero_rows(tmp_path) -> None:
     assert persisted.verify_password("bootstrap-secret")
 
 
-def test_zero_config_edge_box_refuses_built_in_admin_default(
-    tmp_path, monkeypatch
-) -> None:
+def test_zero_config_edge_box_refuses_built_in_admin_default(tmp_path, monkeypatch) -> None:
     monkeypatch.delenv(API_DASHBOARD_USERNAME_ENV, raising=False)
     monkeypatch.delenv(API_DASHBOARD_PASSWORD_ENV, raising=False)
     app = _app(tmp_path)
@@ -383,9 +386,7 @@ def test_persisted_credentials_file_is_written_with_mode_0600(tmp_path) -> None:
     assert stat.S_IMODE(store_path.stat().st_mode) == 0o600
 
 
-def test_corrupt_credentials_store_fails_closed_without_env_fallback(
-    tmp_path, monkeypatch
-) -> None:
+def test_corrupt_credentials_store_fails_closed_without_env_fallback(tmp_path, monkeypatch) -> None:
     store_path = tmp_path / "catalog.sqlite3"
     store_path.write_bytes(b"not a sqlite database")
     monkeypatch.setenv(API_DASHBOARD_USERNAME_ENV, "operator")

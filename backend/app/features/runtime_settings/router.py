@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from typing import Annotated, ClassVar
+from typing import ClassVar
 
-from fastapi import APIRouter, Header, HTTPException, Request, status
+from fastapi import APIRouter, HTTPException, Request, status
 from pydantic import BaseModel, ConfigDict, Field
 
 from backend.app.features.runtime_settings.store import (
@@ -33,9 +33,8 @@ class RuntimeSettingsResponse(BaseModel):
 @router.get("", response_model=RuntimeSettingsResponse)
 def get_runtime_settings(
     request: Request,
-    authorization: Annotated[str | None, Header(alias="Authorization")] = None,
 ) -> dict[str, object]:
-    _authorize(request, authorization)
+    _authorize(request)
     return get_runtime_settings_store(request.app).get().as_dict()
 
 
@@ -43,9 +42,8 @@ def get_runtime_settings(
 def put_runtime_settings(
     payload: RuntimeSettingsUpdateRequest,
     request: Request,
-    authorization: Annotated[str | None, Header(alias="Authorization")] = None,
 ) -> dict[str, object]:
-    _authorize(request, authorization)
+    _authorize(request)
     try:
         setting = get_runtime_settings_store(request.app).set_clip_export_enabled(
             payload.clip_export_enabled,
@@ -62,14 +60,8 @@ def put_runtime_settings(
     return setting.as_dict()
 
 
-def _authorize(request: Request, authorization: str | None) -> None:
-    authorize_dashboard(request, legacy_token=_bearer_token(authorization))
-
-
-def _bearer_token(value: str | None) -> str | None:
-    if value is None or not value.startswith("Bearer "):
-        return None
-    return value.removeprefix("Bearer ").strip() or None
+def _authorize(request: Request) -> None:
+    authorize_dashboard(request)
 
 
 __all__ = ["RuntimeSettingsResponse", "router"]

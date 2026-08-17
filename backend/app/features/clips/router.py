@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Annotated, Literal, cast
 
-from fastapi import APIRouter, Header, HTTPException, Query, Request, status
+from fastapi import APIRouter, HTTPException, Query, Request, status
 from fastapi.responses import Response
 from pydantic import ValidationError
 
@@ -59,9 +59,8 @@ router = APIRouter(tags=["clips"])
 def list_clips(
     request: Request,
     filters: Annotated[ClipListQuery, Query()],
-    authorization: Annotated[str | None, Header(alias="Authorization")] = None,
 ) -> ListClipsResponse:
-    actor = _authorize(request, authorization)
+    actor = _authorize(request)
     if filters.limit is None:
         store = _clip_store(request)
         page = select_clip_page(store.list_manifests(), filters)
@@ -121,9 +120,8 @@ def list_clips(
 def get_clip_metadata(
     clip_id: str,
     request: Request,
-    authorization: Annotated[str | None, Header(alias="Authorization")] = None,
 ) -> ClipManifestResponse:
-    actor = _authorize(request, authorization)
+    actor = _authorize(request)
     store = _clip_store(request)
     located = _get_located_clip_or_404(request, clip_id)
     manifest = located.manifest
@@ -145,9 +143,8 @@ def get_clip_metadata(
 def clip_artifacts(
     clip_id: str,
     request: Request,
-    authorization: Annotated[str | None, Header(alias="Authorization")] = None,
 ) -> ClipArtifactViewsResponse:
-    actor = _authorize(request, authorization)
+    actor = _authorize(request)
     manifest = _get_located_clip_or_404(request, clip_id).manifest
     artifacts = _artifact_query(request).get(clip_id)
     clean_state = (
@@ -184,9 +181,8 @@ def request_clip_derivative(
     clip_id: str,
     kind: Literal["still", "video"],
     request: Request,
-    authorization: Annotated[str | None, Header(alias="Authorization")] = None,
 ) -> ClipDerivativeResponse:
-    actor = _authorize(request, authorization)
+    actor = _authorize(request)
     manifest = _get_located_clip_or_404(request, clip_id).manifest
     payload = control_derivative(request, clip_id, kind, "request")
     _ = _audit_store(request).append(
@@ -206,9 +202,8 @@ def get_clip_derivative(
     clip_id: str,
     kind: Literal["still", "video"],
     request: Request,
-    authorization: Annotated[str | None, Header(alias="Authorization")] = None,
 ) -> ClipDerivativeResponse:
-    actor = _authorize(request, authorization)
+    actor = _authorize(request)
     manifest = _get_located_clip_or_404(request, clip_id).manifest
     payload = control_derivative(request, clip_id, kind, "status")
     _ = _audit_store(request).append(
@@ -229,9 +224,8 @@ def cancel_clip_derivative(
     clip_id: str,
     kind: Literal["still", "video"],
     request: Request,
-    authorization: Annotated[str | None, Header(alias="Authorization")] = None,
 ) -> ClipDerivativeResponse:
-    actor = _authorize(request, authorization)
+    actor = _authorize(request)
     manifest = _get_located_clip_or_404(request, clip_id).manifest
     payload = control_derivative(request, clip_id, kind, "cancel")
     _ = _audit_store(request).append(
@@ -291,7 +285,6 @@ def delete_clip(
     clip_id: str,
     payload: DeleteClipRequest,
     request: Request,
-    authorization: Annotated[str | None, Header(alias="Authorization")] = None,
 ) -> DeleteClipResponse:
     """Operator-only, explicitly-confirmed primary clip deletion.
 
@@ -310,7 +303,7 @@ def delete_clip(
     authoritative owner and already reports a clip it has never heard of as
     the truthful, distinct ``MISSING`` status instead.
     """
-    actor = _authorize(request, authorization)
+    actor = _authorize(request)
     if not is_valid_clip_id(clip_id):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="clip not found")
     if payload.confirm_clip_id != clip_id:
@@ -360,9 +353,8 @@ def delete_clip(
 def clip_analysis(
     clip_id: str,
     request: Request,
-    authorization: Annotated[str | None, Header(alias="Authorization")] = None,
 ) -> ClipAnalysisResponse:
-    actor = _authorize(request, authorization)
+    actor = _authorize(request)
     manifest = _get_located_clip_or_404(request, clip_id).manifest
     artifacts = _artifact_query(request).get(clip_id)
     if artifacts is None or artifacts.analysis is None:
@@ -401,11 +393,9 @@ def clip_analysis(
 def clip_video(
     clip_id: str,
     request: Request,
-    authorization: Annotated[str | None, Header(alias="Authorization")] = None,
-    token: Annotated[str | None, Query()] = None,
     view: Annotated[Literal["clean", "annotated"], Query()] = "clean",
 ) -> Response:
-    actor = _authorize(request, authorization, query_token=token)
+    actor = _authorize(request)
     located = _get_located_clip_or_404(request, clip_id)
     manifest = located.manifest
     opened = None
@@ -452,9 +442,8 @@ def clip_video(
 def clip_thumbnail(
     clip_id: str,
     request: Request,
-    authorization: Annotated[str | None, Header(alias="Authorization")] = None,
 ) -> Response:
-    _ = _authorize(request, authorization)
+    _ = _authorize(request)
     store = _clip_store(request)
     located = _get_located_clip_or_404(request, clip_id)
     try:
@@ -476,9 +465,8 @@ def label_clip(
     clip_id: str,
     payload: LabelClipRequest,
     request: Request,
-    authorization: Annotated[str | None, Header(alias="Authorization")] = None,
 ) -> dict[str, object]:
-    actor = _authorize(request, authorization)
+    actor = _authorize(request)
     manifest = _get_located_clip_or_404(request, clip_id).manifest
     reviewer = payload.reviewer or actor
     record = LabelRecord(
@@ -507,9 +495,8 @@ def label_clip(
 @router.get("/audit", response_model=AuditResponse)
 def list_audit(
     request: Request,
-    authorization: Annotated[str | None, Header(alias="Authorization")] = None,
 ) -> dict[str, object]:
-    actor = _authorize(request, authorization)
+    actor = _authorize(request)
     store = _audit_store(request)
     # Snapshot entries before recording this view so the response reflects
     # the log state prior to this request, matching how "play"/"label" audit
@@ -581,23 +568,8 @@ def _backend_token(request: Request) -> str | None:
     return None if bundle is None else bundle.facility_token
 
 
-def _authorize(
-    request: Request,
-    authorization: str | None,
-    *,
-    query_token: str | None = None,
-) -> str:
-    supplied = _bearer_token(authorization) or query_token
-    actor = authorize_dashboard(request, legacy_token=supplied)
-    if actor != "legacy-dashboard":
-        return actor
-    return "operator" if query_token is not None else "bearer"
-
-
-def _bearer_token(value: str | None) -> str | None:
-    if value is None or not value.startswith("Bearer "):
-        return None
-    return value.removeprefix("Bearer ").strip() or None
+def _authorize(request: Request) -> str:
+    return authorize_dashboard(request)
 
 
 __all__ = ["router"]

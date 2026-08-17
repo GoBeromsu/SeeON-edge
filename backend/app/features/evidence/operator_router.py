@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Annotated, Literal
 
-from fastapi import APIRouter, Header, HTTPException, Query, Request, status
+from fastapi import APIRouter, HTTPException, Query, Request, status
 from pydantic import BaseModel, ConfigDict, Field
 
 from backend.app.features.evidence.record_store import (
@@ -43,9 +43,8 @@ class IncidentListQuery(BaseModel):
 def list_incidents(
     request: Request,
     filters: Annotated[IncidentListQuery, Query()],
-    authorization: Annotated[str | None, Header(alias="Authorization")] = None,
 ) -> dict[str, object]:
-    _authorize(request, authorization)
+    _authorize(request)
     try:
         incidents, next_cursor = _query(request).list(limit=filters.limit, cursor=filters.cursor)
     except ValueError as error:
@@ -64,9 +63,8 @@ def list_incidents(
 def get_incident(
     incident_id: str,
     request: Request,
-    authorization: Annotated[str | None, Header(alias="Authorization")] = None,
 ) -> dict[str, object]:
-    _authorize(request, authorization)
+    _authorize(request)
     summary = _query(request).get(incident_id)
     if summary is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="incident not found")
@@ -78,9 +76,8 @@ def review_incident(
     incident_id: str,
     payload: IncidentReviewRequest,
     request: Request,
-    authorization: Annotated[str | None, Header(alias="Authorization")] = None,
 ) -> dict[str, object]:
-    actor = _authorize(request, authorization)
+    actor = _authorize(request)
     summary = _query(request).get(incident_id)
     if summary is None or summary.primary_clip_id is None:
         raise HTTPException(
@@ -152,13 +149,8 @@ def _reviews(request: Request) -> CentralEvidenceReviewStore:
     return CentralEvidenceReviewStore(EDGE_DATABASE_PATH)
 
 
-def _authorize(request: Request, authorization: str | None) -> str:
-    token = (
-        None
-        if authorization is None or not authorization.startswith("Bearer ")
-        else authorization.removeprefix("Bearer ").strip()
-    )
-    return authorize_dashboard(request, legacy_token=token or None)
+def _authorize(request: Request) -> str:
+    return authorize_dashboard(request)
 
 
 __all__ = ["router"]

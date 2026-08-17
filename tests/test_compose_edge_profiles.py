@@ -201,6 +201,7 @@ def test_compose_bakes_internal_topology_and_has_no_policy_or_state_path_env() -
 
 def test_retired_backend_environment_is_rejected_explicitly() -> None:
     for key in (
+        "API_ALLOW_LEGACY_DASHBOARD_AUTH",
         "API_FACILITY_ID",
         "EDGE_FACILITY_TOKEN",
         "API_CAMERA_INVENTORY",
@@ -588,7 +589,5 @@ def test_preflight_rejects_too_short_relay_token(tmp_path: Path) -> None:
 def test_preflight_accepts_deployment_unique_relay_token(tmp_path: Path) -> None:
     # The disposable base already carries a valid unique token; an explicit
     # high-entropy value must also pass the whole gate chain.
-    result = _run_preflight(
-        tmp_path, "API_EDGE_RELAY_TOKEN=b4e1c9a72f0d5836a1c7e9d2f4b60853\n"
-    )
+    result = _run_preflight(tmp_path, "API_EDGE_RELAY_TOKEN=b4e1c9a72f0d5836a1c7e9d2f4b60853\n")
     assert result.returncode == 0, result.stderr

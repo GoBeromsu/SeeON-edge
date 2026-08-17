@@ -10,6 +10,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 _RETIRED_BACKEND_ENV: Final = frozenset(
     {
+        "API_ALLOW_LEGACY_DASHBOARD_AUTH",
         "API_BACKEND_CONFIG_URL",
         "API_BACKEND_EVENTS_URL",
         "API_CAMERA_INVENTORY",

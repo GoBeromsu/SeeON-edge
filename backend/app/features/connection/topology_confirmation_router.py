@@ -1,13 +1,13 @@
 from __future__ import annotations
 
-from typing import Annotated, assert_never
+from typing import assert_never
 
-from fastapi import APIRouter, Header, Request, status
+from fastapi import APIRouter, Request, status
 from fastapi.exceptions import HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 
 from backend.app.features.cameras.edge_topology_sync_state import TopologyPauseReason
-from backend.app.features.cameras.router import RELAY_TOKEN_HEADER, _authorize
+from backend.app.features.cameras.router import _authorize
 from backend.app.features.cameras.topology_client import (
     TopologyAccepted,
     TopologyPaused,
@@ -83,12 +83,8 @@ class TopologyConfirmResponse(BaseModel):
 
 
 @router.get("/topology-preview", response_model=TopologyPreviewResponse)
-def topology_preview(
-    request: Request,
-    relay_token: Annotated[str | None, Header(alias=RELAY_TOKEN_HEADER)] = None,
-    authorization: Annotated[str | None, Header(alias="Authorization")] = None,
-) -> TopologyPreviewResponse:
-    _authorize(request, relay_token, authorization)
+def topology_preview(request: Request) -> TopologyPreviewResponse:
+    _authorize(request)
     preview = topology_retry_coordinator(request.app).preview()
     if preview is None:
         return TopologyPreviewResponse(preview=None)
@@ -112,10 +108,8 @@ def topology_preview(
 def confirm_topology_preview(
     payload: TopologyConfirmRequest,
     request: Request,
-    relay_token: Annotated[str | None, Header(alias=RELAY_TOKEN_HEADER)] = None,
-    authorization: Annotated[str | None, Header(alias="Authorization")] = None,
 ) -> TopologyConfirmResponse:
-    _authorize(request, relay_token, authorization)
+    _authorize(request)
     outcome = topology_retry_coordinator(request.app).confirm(
         TopologyConfirmationCommand(
             payload.confirmation_id,

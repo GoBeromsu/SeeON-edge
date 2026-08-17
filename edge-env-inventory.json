@@ -273,8 +273,8 @@
     {
       "name": "API_ALLOW_LEGACY_DASHBOARD_AUTH",
       "category": "legacy compatibility",
-      "authority": "bounded compatibility path through 2026-09-30",
-      "behavior": "removed from compose/example; accepted only for test/rollback clients until the documented deadline"
+      "authority": "server-issued dashboard session cookie",
+      "behavior": "retired; backend startup rejects injection"
     },
     {
       "name": "API_BACKEND_EVENTS_URL",

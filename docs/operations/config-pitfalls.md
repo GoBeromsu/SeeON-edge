@@ -56,9 +56,10 @@ not warn-and-ignore or let them override DB/config. For the old
 origin to `API_BACKEND_BASE_URL` before upgrading. Divergent per-field origins
 are no longer supported.
 
-`API_ALLOW_LEGACY_DASHBOARD_AUTH` is the sole bounded compatibility exception:
-it is absent from compose/example and remains accepted only for rollback/test
-clients through **2026-09-30**. Remove those clients before that date.
+`API_ALLOW_LEGACY_DASHBOARD_AUTH` has been retired. Dashboard routes accept only
+the server-issued HttpOnly session cookie; worker relay credentials are never
+operator credentials. Backend startup rejects the retired variable; remove it
+from stale deployment environments before upgrading.
 
 The one-shot `SYSTEM_TEST` operator CLI action, its `ML_WORKER_SYSTEM_TEST_GATE`
 environment gate, and its dedicated relay HTTP routes are retired and removed;

@@ -7,10 +7,10 @@ import urllib.parse
 import urllib.request
 from collections.abc import AsyncIterator
 from contextlib import AbstractAsyncContextManager
-from typing import Annotated, Literal, Protocol, get_args
+from typing import Literal, Protocol, get_args
 
 import httpx
-from fastapi import APIRouter, Header, HTTPException, Query, Request, status
+from fastapi import APIRouter, HTTPException, Request, status
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, ConfigDict
 from starlette.background import BackgroundTask
@@ -65,14 +65,10 @@ class PoseOverlayResponse(BaseModel):
 async def camera_stream(
     camera_id: str,
     request: Request,
-    authorization: Annotated[str | None, Header(alias="Authorization")] = None,
-    token: Annotated[str | None, Query()] = None,
 ) -> StreamingResponse:
-    _authorize(request, authorization, query_token=token)
+    _authorize(request)
     settings = get_settings()
-    upstream_url = _stream_url(
-        settings.worker_stream_origin, _worker_camera_id(request, camera_id)
-    )
+    upstream_url = _stream_url(settings.worker_stream_origin, _worker_camera_id(request, camera_id))
 
     # MJPEG 스트림은 장시간 연결이고 worker가 1초 간격 하트비트 프레임을
     # 보내므로, 본문(read)에는 타임아웃을 걸지 않는다(read=None). 최초 응답
@@ -89,9 +85,7 @@ async def camera_stream(
     # Worker :8090 gates /stream with the same relay token as /probe
     # (security finding #3). Forward server-side only -- never surface it to
     # the browser (dashboard session already authenticated this request).
-    stream_ctx = client.stream(
-        "GET", upstream_url, headers=_worker_relay_headers(request)
-    )
+    stream_ctx = client.stream("GET", upstream_url, headers=_worker_relay_headers(request))
     handed_off = False
     try:
         try:
@@ -134,10 +128,8 @@ async def camera_stream(
 def camera_snapshot(
     camera_id: str,
     request: Request,
-    authorization: Annotated[str | None, Header(alias="Authorization")] = None,
-    token: Annotated[str | None, Query()] = None,
 ) -> Response:
-    _authorize(request, authorization, query_token=token)
+    _authorize(request)
     settings = get_settings()
     upstream_url = _snapshot_url(
         settings.worker_stream_origin, _worker_camera_id(request, camera_id)
@@ -176,14 +168,10 @@ def camera_snapshot(
 def camera_pose_get(
     camera_id: str,
     request: Request,
-    authorization: Annotated[str | None, Header(alias="Authorization")] = None,
-    token: Annotated[str | None, Query()] = None,
 ) -> PoseOverlayResponse:
-    _authorize(request, authorization, query_token=token)
+    _authorize(request)
     settings = get_settings()
-    upstream_url = _pose_url(
-        settings.worker_stream_origin, _worker_camera_id(request, camera_id)
-    )
+    upstream_url = _pose_url(settings.worker_stream_origin, _worker_camera_id(request, camera_id))
     return _pose_request(
         upstream_url, settings.worker_stream_timeout_s, relay_token=_relay_token(request)
     )
@@ -194,14 +182,10 @@ def camera_pose_set(
     camera_id: str,
     payload: PoseOverlayRequest,
     request: Request,
-    authorization: Annotated[str | None, Header(alias="Authorization")] = None,
-    token: Annotated[str | None, Query()] = None,
 ) -> PoseOverlayResponse:
-    _authorize(request, authorization, query_token=token)
+    _authorize(request)
     settings = get_settings()
-    upstream_url = _pose_url(
-        settings.worker_stream_origin, _worker_camera_id(request, camera_id)
-    )
+    upstream_url = _pose_url(settings.worker_stream_origin, _worker_camera_id(request, camera_id))
     body = json.dumps({"mode": payload.mode}).encode("utf-8")
     return _pose_request(
         upstream_url,
@@ -355,20 +339,8 @@ def _content_type(upstream: _ReadableResponse) -> str:
     return _DEFAULT_MEDIA_TYPE
 
 
-def _authorize(
-    request: Request,
-    authorization: str | None,
-    *,
-    query_token: str | None = None,
-) -> None:
-    supplied = _bearer_token(authorization) or query_token
-    authorize_dashboard(request, legacy_token=supplied)
-
-
-def _bearer_token(value: str | None) -> str | None:
-    if value is None or not value.startswith("Bearer "):
-        return None
-    return value.removeprefix("Bearer ").strip() or None
+def _authorize(request: Request) -> None:
+    authorize_dashboard(request)
 
 
 def _relay_token(request: Request) -> str | None:

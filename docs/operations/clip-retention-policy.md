@@ -62,7 +62,7 @@
 | 엔드포인트 | 액션(action) | clip_id | 액터 해석 |
 | --- | --- | --- | --- |
 | `GET /api/v1/clips` | `list` | `-` (특정 클립에 국한되지 않음, `AUDIT_NO_CLIP_ID` 상수) | `_authorize()`의 반환값 |
-| `GET /api/v1/clips/{clip_id}/video` | `play` | 실제 `clip_id` | `_authorize()`의 반환값 (쿼리 토큰 재생 시 `"operator"`) |
+| `GET /api/v1/clips/{clip_id}/video` | `play` | 실제 `clip_id` | 인증된 대시보드 세션 사용자명 |
 | `PUT /api/v1/clips/{clip_id}/label` | `label` | 실제 `clip_id` | 요청의 `reviewer` (없으면 인증된 액터로 대체) |
 | `GET /api/v1/audit` | `audit-view` | `-` (`AUDIT_NO_CLIP_ID`) | `_authorize()`의 반환값 |
 
@@ -134,29 +134,21 @@
 | `API_AUDIT_LOG_MAX_BYTES` | 10 MiB (`10485760`) | 없음(0 이하는 무시하고 기본값 사용) | 라이브 파일 회전 임계값 |
 | `API_AUDIT_ARCHIVE_RETENTION_DAYS` | 60일 | 60일 | 아카이브 보관 기간, 클립 보관 하한과 동일 |
 
-## 4. 레거시 액터 경로에 대한 노트 (죽은 코드)
+## 4. 감사 액터 인증 경계
 
-`#131`이 지적한 "레거시 액터가 일반 문자열로 뭉개진다"는 우려는 현재 코드에서는
-**발생하지 않는다** — 해당 경로가 죽은 코드이기 때문이다.
+클립 API는 서버가 발급한 HttpOnly 대시보드 세션 쿠키만 운영자 권한으로
+인정한다. 워커 relay 토큰은 `Authorization` 헤더, `X-Edge-Relay-Token`
+헤더, `token` 쿼리 중 어느 형태로 보내도 클립 목록·재생·라벨링·감사 로그
+열람 권한이 되지 않는다.
 
-- `backend/app/shared/dashboard_auth.py:241-252`의 `authorize_dashboard()`는
-  `dashboard_sessions(request)`가 항상 세션 스토어를 반환하는 한(영구 저장된
-  자격증명 파일 > 환경변수 > 내장 기본값 `admin`/`admin` 순으로 항상 해석됨)
-  실제 세션 액터를 반환하고 즉시 리턴한다.
-- 그 아래 `dashboard_auth.py:254-257`의 주석이 명시하듯, 레거시
-  워커-릴레이-토큰 우회 분기는 "실무에서는 도달 불가능(unreachable in
-  practice today)"하다 — `dashboard_sessions()`가 `None`을 반환하는 경우가
-  현재 없기 때문이다. 이 분기는 향후 내장 기본값을 옵트아웃할 수 있게 될 때를
-  대비해 남겨둔 것이다.
-- 마찬가지로 `backend/app/features/clips/router.py`의 `_authorize()`에서
-  `actor != "legacy-dashboard"`가 거짓이 되는 경우(즉 `"operator"`/`"bearer"`
-  제네릭 문자열로 대체되는 분기)도 위 이유로 현재는 도달하지 않는 죽은 코드다.
-- **결론**: 현재 배포 조건에서는 감사 로그의 `actor` 필드가 항상 실제 대시보드
-  세션 사용자명(또는 라벨링 시 명시적으로 지정된 `reviewer`)이며, 제네릭
-  `"operator"`/`"bearer"`/`"legacy-dashboard"` 값으로 뭉개지는 사례는 없다.
-  이 노트는 그 죽은 코드 경로를 "고쳐야 할 버그"로 오인해 재작업하지 않도록
-  기록해 둔 것이다 — 실제로 손볼 필요가 생기는 시점은 대시보드 세션 스토어
-  해석 자체가 옵트아웃 가능해지는 때뿐이다.
+`dashboard_sessions()`는 영구 저장된 자격증명을 우선 사용하고, 아직 회전하지
+않은 설치에서는 배포 시 명시한 `API_DASHBOARD_USERNAME` /
+`API_DASHBOARD_PASSWORD` 부트스트랩 쌍을 사용한다. 두 값이 없거나 불완전하거나
+저장소를 읽을 수 없으면 503으로 실패하며 내장 `admin`/`admin` 폴백은 없다.
+
+따라서 감사 로그의 `actor` 필드는 실제 대시보드 세션 사용자명(또는 라벨링 시
+명시적으로 지정된 `reviewer`)이다. 과거의 relay-token 호환 분기와
+`"operator"`/`"bearer"`/`"legacy-dashboard"` 제네릭 actor는 제거되었다.
 
 ## 관련 문서
 

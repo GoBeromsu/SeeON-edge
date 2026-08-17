@@ -24,11 +24,10 @@ from backend.app.main import LifespanFactory, create_app, no_lifespan
 AUTH = {"Authorization": "Bearer relay-token"}
 NO_LIFESPAN: LifespanFactory = no_lifespan
 
-# Dashboard auth now always resolves to a session store (persisted file > env
-# > the built-in admin/admin default, see backend/app/shared/dashboard_auth.py),
-# so a bare worker relay/bearer token or query token is never sufficient on
-# its own -- these tests log in as the zero-config default and rely on the
-# TestClient's cookie jar to carry the session across subsequent calls.
+# The suite explicitly supplies disposable admin/admin bootstrap credentials
+# in tests/conftest.py. A worker relay/bearer/query token is never sufficient
+# on its own; these tests log in and rely on TestClient's cookie jar to carry
+# the server-issued dashboard session.
 
 
 def _login(client: TestClient) -> None:
@@ -121,11 +120,7 @@ def _install_mock_transport(
 def test_stream_proxy_forwards_mjpeg_with_a_dashboard_session(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    body = (
-        b"--frame\r\n"
-        b"Content-Type: image/jpeg\r\n\r\n"
-        b"\xff\xd8camera-jpeg\xff\xd9\r\n"
-    )
+    body = b"--frame\r\nContent-Type: image/jpeg\r\n\r\n\xff\xd8camera-jpeg\xff\xd9\r\n"
     calls: list[StreamCall] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -221,9 +216,7 @@ def test_stream_proxy_resolves_dashboard_id_to_worker_id(
 def test_stream_proxy_requires_a_dashboard_session(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A worker relay bearer token or a query token is never a substitute for
-    a real dashboard session -- the legacy bypass is unreachable now that
-    dashboard auth always resolves (persisted file > env > built-in default)."""
+    """Worker relay credentials never substitute for a dashboard session."""
     calls: list[str] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -238,13 +231,15 @@ def test_stream_proxy_requires_a_dashboard_session(
 
     with TestClient(create_app(lifespan=NO_LIFESPAN)) as client:
         missing = client.get("/api/v1/streams/cam_sp_201")
-        wrong_query_token = client.get("/api/v1/streams/cam_sp_201", params={"token": "wrong"})
+        relay_query_token = client.get(
+            "/api/v1/streams/cam_sp_201", params={"token": "relay-token"}
+        )
         bearer_without_session = client.get("/api/v1/streams/cam_sp_201", headers=AUTH)
         _login(client)
         authorized = client.get("/api/v1/streams/cam_sp_201")
 
     assert missing.status_code == 401
-    assert wrong_query_token.status_code == 401
+    assert relay_query_token.status_code == 401
     assert bearer_without_session.status_code == 401
     assert authorized.status_code == 200
     assert calls == ["http://worker.local:8090/stream/cam_sp_201"]
@@ -381,9 +376,7 @@ def test_stream_proxy_closes_upstream_via_background_when_never_iterated(
     # 실제로 거치도록 라우트 함수를 직접 호출한다 -- 여기선 대시보드 세션
     # 검증이 관심사가 아니므로 _authorize만 이 모듈 안에서 no-op으로 바꾼다.
     monkeypatch.setattr(streams_router, "_authorize", lambda *args, **kwargs: None)
-    monkeypatch.setattr(
-        streams_router, "_worker_camera_id", lambda _request, camera_id: camera_id
-    )
+    monkeypatch.setattr(streams_router, "_worker_camera_id", lambda _request, camera_id: camera_id)
     # This closer-only scenario passes a bare object as Request; stub relay
     # headers so the media-auth forward path is not under test here.
     monkeypatch.setattr(streams_router, "_worker_relay_headers", lambda _request: {})
@@ -392,8 +385,6 @@ def test_stream_proxy_closes_upstream_via_background_when_never_iterated(
         response = await streams_router.camera_stream(
             "cam_sp_201",
             request=cast(Request, object()),
-            authorization=None,
-            token=None,
         )
 
         assert response.background is not None
@@ -465,17 +456,15 @@ def test_snapshot_proxy_requires_a_dashboard_session(
 
     with TestClient(create_app(lifespan=NO_LIFESPAN)) as client:
         missing = client.get("/api/v1/streams/cam_sp_201/snapshot")
-        wrong_query_token = client.get(
-            "/api/v1/streams/cam_sp_201/snapshot", params={"token": "wrong"}
+        relay_query_token = client.get(
+            "/api/v1/streams/cam_sp_201/snapshot", params={"token": "relay-token"}
         )
-        bearer_without_session = client.get(
-            "/api/v1/streams/cam_sp_201/snapshot", headers=AUTH
-        )
+        bearer_without_session = client.get("/api/v1/streams/cam_sp_201/snapshot", headers=AUTH)
         _login(client)
         authorized = client.get("/api/v1/streams/cam_sp_201/snapshot")
 
     assert missing.status_code == 401
-    assert wrong_query_token.status_code == 401
+    assert relay_query_token.status_code == 401
     assert bearer_without_session.status_code == 401
     assert authorized.status_code == 200
     assert calls == ["http://worker.local:8090/snapshot/cam_sp_201"]

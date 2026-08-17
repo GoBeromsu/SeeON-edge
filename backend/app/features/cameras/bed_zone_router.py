@@ -10,9 +10,9 @@ worker as the authoritative bed region (see
 ``cameras.router.worker_config_snapshot``).
 
 This is a dashboard-only action (an operator manually triggering
-recognition), so it uses the same lightweight bearer/session ``_authorize``
-shape as ``streams_router.py`` rather than the worker-relay-token-eligible
-auth used by the camera CRUD routes in ``cameras/router.py``.
+recognition), so it requires the same server-issued dashboard session as the
+camera CRUD routes. Only the server-side proxy forwards the worker relay token
+upstream; browser-supplied relay credentials are never operator authority.
 
 Response contract:
 - worker success -> 200 ``{"bed_zone": {...}}`` (and the polygon is persisted)
@@ -29,9 +29,9 @@ import json
 import urllib.error
 import urllib.parse
 import urllib.request
-from typing import Annotated, Protocol
+from typing import Protocol
 
-from fastapi import APIRouter, FastAPI, Header, HTTPException, Request, status
+from fastapi import APIRouter, FastAPI, HTTPException, Request, status
 from pydantic import BaseModel, ConfigDict, Field
 
 from backend.app.core.config import get_settings
@@ -74,9 +74,8 @@ class BedZoneRecognizeResponse(BaseModel):
 def recognize_bed_zone(
     camera_id: str,
     request: Request,
-    authorization: Annotated[str | None, Header(alias="Authorization")] = None,
 ) -> BedZoneRecognizeResponse:
-    _authorize(request, authorization)
+    _authorize(request)
     settings = get_settings()
     upstream_url = _bed_zone_url(settings.worker_stream_origin, camera_id)
     # Worker :8090 gates bed-zone recognition with the same relay token as
@@ -144,8 +143,10 @@ def _parse_worker_payload(raw: bytes) -> tuple[list[list[int]], int, int]:
     polygon = parsed.get("polygon")
     image_width = parsed.get("image_width")
     image_height = parsed.get("image_height")
-    if not _is_valid_polygon(polygon) or not _is_positive_int(image_width) or not _is_positive_int(
-        image_height
+    if (
+        not _is_valid_polygon(polygon)
+        or not _is_positive_int(image_width)
+        or not _is_positive_int(image_height)
     ):
         raise _upstream_unavailable()
     return polygon, image_width, image_height  # type: ignore[return-value]
@@ -185,14 +186,8 @@ def _bed_zone_url(origin: str, camera_id: str) -> str:
     return f"{base}/overlay/{encoded_camera_id}/bed-zone/recognize"
 
 
-def _authorize(request: Request, authorization: str | None) -> None:
-    authorize_dashboard(request, legacy_token=_bearer_token(authorization))
-
-
-def _bearer_token(value: str | None) -> str | None:
-    if value is None or not value.startswith("Bearer "):
-        return None
-    return value.removeprefix("Bearer ").strip() or None
+def _authorize(request: Request) -> None:
+    authorize_dashboard(request)
 
 
 _RELAY_TOKEN_HEADER = "X-Edge-Relay-Token"

@@ -24,7 +24,7 @@ import stat
 from pathlib import Path, PurePosixPath
 from typing import Annotated, ClassVar
 
-from fastapi import APIRouter, FastAPI, Header, HTTPException, Query, Request, status
+from fastapi import APIRouter, FastAPI, HTTPException, Query, Request, status
 from pydantic import BaseModel, ConfigDict
 
 from backend.app.features.clips.storage_location_store import ClipStorageLocationStore
@@ -70,9 +70,8 @@ class ClipStorageLocationRequest(BaseModel):
 @router.get("/clips/storage", response_model=ClipStorageResponse)
 def get_clip_storage(
     request: Request,
-    authorization: Annotated[str | None, Header(alias="Authorization")] = None,
 ) -> dict[str, object]:
-    _authorize(request, authorization)
+    _authorize(request)
     return _storage_snapshot(request.app)
 
 
@@ -80,9 +79,8 @@ def get_clip_storage(
 def browse_clip_storage(
     request: Request,
     path: Annotated[str, Query()] = "",
-    authorization: Annotated[str | None, Header(alias="Authorization")] = None,
 ) -> dict[str, object]:
-    _authorize(request, authorization)
+    _authorize(request)
     segments = _validate_relative_path(path)
     try:
         names = _list_subdirectories(_configured_root(), segments)
@@ -103,9 +101,8 @@ def browse_clip_storage(
 def put_clip_storage_location(
     payload: ClipStorageLocationRequest,
     request: Request,
-    authorization: Annotated[str | None, Header(alias="Authorization")] = None,
 ) -> dict[str, object]:
-    _authorize(request, authorization)
+    _authorize(request)
     segments = _validate_relative_path(payload.path)
     try:
         # Existence + directory-ness check only; the listing itself is
@@ -216,14 +213,8 @@ def _location_store(app: FastAPI) -> ClipStorageLocationStore:
     return store
 
 
-def _authorize(request: Request, authorization: str | None) -> None:
-    authorize_dashboard(request, legacy_token=_bearer_token(authorization))
-
-
-def _bearer_token(value: str | None) -> str | None:
-    if value is None or not value.startswith("Bearer "):
-        return None
-    return value.removeprefix("Bearer ").strip() or None
+def _authorize(request: Request) -> None:
+    authorize_dashboard(request)
 
 
 __all__ = ["router"]

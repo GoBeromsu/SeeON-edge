@@ -317,12 +317,8 @@ class WorkerConfigResponse(BaseModel):
 
 
 @router.get("", response_model=ListCamerasResponse)
-def list_cameras(
-    request: Request,
-    relay_token: Annotated[str | None, Header(alias=RELAY_TOKEN_HEADER)] = None,
-    authorization: Annotated[str | None, Header(alias="Authorization")] = None,
-) -> dict[str, object]:
-    _authorize(request, relay_token, authorization)
+def list_cameras(request: Request) -> dict[str, object]:
+    _authorize(request)
     heartbeats = get_heartbeat_store(request.app).snapshot()
     return _public_snapshot(
         request.app,
@@ -333,12 +329,8 @@ def list_cameras(
 
 
 @router.get("/topology", response_model=CameraTopologyResponse)
-def get_camera_topology(
-    request: Request,
-    relay_token: Annotated[str | None, Header(alias=RELAY_TOKEN_HEADER)] = None,
-    authorization: Annotated[str | None, Header(alias="Authorization")] = None,
-) -> dict[str, object]:
-    _authorize(request, relay_token, authorization)
+def get_camera_topology(request: Request) -> dict[str, object]:
+    _authorize(request)
     return _topology_response(_store(request.app).topology_snapshot())
 
 
@@ -347,10 +339,8 @@ def create_topology_floor(
     payload: CreateTopologyFloorRequest,
     request: Request,
     background_tasks: BackgroundTasks,
-    relay_token: Annotated[str | None, Header(alias=RELAY_TOKEN_HEADER)] = None,
-    authorization: Annotated[str | None, Header(alias="Authorization")] = None,
 ) -> dict[str, object]:
-    _authorize(request, relay_token, authorization)
+    _authorize(request)
     try:
         _store(request.app).create_floor(
             edge_ref=payload.edge_ref, name=payload.name, order_index=payload.order_index
@@ -368,7 +358,7 @@ def update_topology_floor(
     request: Request,
     background_tasks: BackgroundTasks,
 ) -> dict[str, object]:
-    _authorize(request, None, None)
+    _authorize(request)
     if not _store(request.app).update_floor(
         edge_ref, name=payload.name, order_index=payload.order_index
     ):
@@ -381,7 +371,7 @@ def update_topology_floor(
 def delete_topology_floor(
     edge_ref: str, request: Request, background_tasks: BackgroundTasks
 ) -> Response:
-    _authorize(request, None, None)
+    _authorize(request)
     try:
         changed = _store(request.app).delete_floor(edge_ref)
     except TopologyConflictError as error:
@@ -397,10 +387,8 @@ def create_topology_room(
     payload: CreateTopologyRoomRequest,
     request: Request,
     background_tasks: BackgroundTasks,
-    relay_token: Annotated[str | None, Header(alias=RELAY_TOKEN_HEADER)] = None,
-    authorization: Annotated[str | None, Header(alias="Authorization")] = None,
 ) -> dict[str, object]:
-    _authorize(request, relay_token, authorization)
+    _authorize(request)
     try:
         _store(request.app).create_room(
             edge_ref=payload.edge_ref,
@@ -421,7 +409,7 @@ def update_topology_room(
     request: Request,
     background_tasks: BackgroundTasks,
 ) -> dict[str, str]:
-    _authorize(request, None, None)
+    _authorize(request)
     if not _store(request.app).update_room(edge_ref, name=payload.name):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="room not found")
     background_tasks.add_task(_trigger_roster_sync, request.app)
@@ -432,7 +420,7 @@ def update_topology_room(
 def delete_topology_room(
     edge_ref: str, request: Request, background_tasks: BackgroundTasks
 ) -> Response:
-    _authorize(request, None, None)
+    _authorize(request)
     try:
         changed = _store(request.app).delete_room(edge_ref)
     except TopologyConflictError as error:
@@ -448,10 +436,8 @@ def create_camera(
     payload: CreateCameraRequest,
     request: Request,
     background_tasks: BackgroundTasks,
-    relay_token: Annotated[str | None, Header(alias=RELAY_TOKEN_HEADER)] = None,
-    authorization: Annotated[str | None, Header(alias="Authorization")] = None,
 ) -> dict[str, object]:
-    _authorize(request, relay_token, authorization)
+    _authorize(request)
     rtsp_url = _validated_rtsp_url(payload.rtsp_url)
     decode_backend = _normalize_decode_backend(payload.decode_backend)
     fps = _normalize_fps(payload.fps)
@@ -505,10 +491,8 @@ def test_camera(
     camera_id: str,
     request: Request,
     payload: TestCameraRequest | None = None,
-    relay_token: Annotated[str | None, Header(alias=RELAY_TOKEN_HEADER)] = None,
-    authorization: Annotated[str | None, Header(alias="Authorization")] = None,
 ) -> dict[str, object]:
-    _authorize(request, relay_token, authorization)
+    _authorize(request)
     record = _store(request.app).get(camera_id)
     if record is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="camera not found")
@@ -537,10 +521,8 @@ def update_camera(
     payload: UpdateCameraRequest,
     request: Request,
     background_tasks: BackgroundTasks,
-    relay_token: Annotated[str | None, Header(alias=RELAY_TOKEN_HEADER)] = None,
-    authorization: Annotated[str | None, Header(alias="Authorization")] = None,
 ) -> dict[str, object]:
-    _authorize(request, relay_token, authorization)
+    _authorize(request)
     current = _store(request.app).get(camera_id)
     if current is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="camera not found")
@@ -657,10 +639,8 @@ def delete_camera(
     camera_id: str,
     request: Request,
     background_tasks: BackgroundTasks,
-    relay_token: Annotated[str | None, Header(alias=RELAY_TOKEN_HEADER)] = None,
-    authorization: Annotated[str | None, Header(alias="Authorization")] = None,
 ) -> Response:
-    _authorize(request, relay_token, authorization)
+    _authorize(request)
     existing = _store(request.app).get(camera_id)
     if existing is None or not _store(request.app).delete(camera_id):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="camera not found")
@@ -1200,9 +1180,8 @@ def _lookup_bed_zone(
     return None
 
 
-def _authorize(request: Request, relay_token: str | None, authorization: str | None) -> None:
-    bearer = _bearer_token(authorization)
-    authorize_dashboard(request, legacy_token=relay_token or bearer)
+def _authorize(request: Request) -> None:
+    authorize_dashboard(request)
 
 
 def _authorize_worker(request: Request, relay_token: str | None) -> None:

@@ -20,8 +20,6 @@ from backend.app.shared.dashboard_credentials import (
 
 API_DASHBOARD_USERNAME_ENV = "API_DASHBOARD_USERNAME"
 API_DASHBOARD_PASSWORD_ENV = "API_DASHBOARD_PASSWORD"
-API_ALLOW_LEGACY_DASHBOARD_AUTH_ENV = "API_ALLOW_LEGACY_DASHBOARD_AUTH"
-API_EDGE_RELAY_TOKEN_ENV = "API_EDGE_RELAY_TOKEN"
 DASHBOARD_SESSION_COOKIE = "ml_dashboard_session"
 DASHBOARD_SESSION_TTL_SECONDS = 12 * 60 * 60
 
@@ -66,9 +64,7 @@ class PlaintextDashboardCredentials:
     password: str
 
     def verify(self, username: str, password: str) -> bool:
-        return _compare_str(username, self.username) and _compare_str(
-            password, self.password
-        )
+        return _compare_str(username, self.username) and _compare_str(password, self.password)
 
 
 @dataclass(frozen=True, slots=True)
@@ -242,61 +238,24 @@ def rotate_dashboard_credentials(
         if token is None:
             # Defensive: rotate_credentials() just persisted this exact pair,
             # so authenticate() against it must succeed.
-            raise RuntimeError(
-                "dashboard credential rotation produced an unauthenticated store"
-            )
+            raise RuntimeError("dashboard credential rotation produced an unauthenticated store")
         return token
 
 
-def authorize_dashboard(request: Request, *, legacy_token: str | None = None) -> str:
+def authorize_dashboard(request: Request) -> str:
     """Authorize only a server-validated dashboard session."""
 
     sessions = dashboard_sessions(request)
-    if sessions is not None:
-        actor = sessions.actor(request.cookies.get(DASHBOARD_SESSION_COOKIE))
-        if actor is None:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="dashboard session required",
-            )
-        return actor
-
-    # dashboard_sessions() always resolves to a store (persisted file > env >
-    # built-in default), so this branch is unreachable in practice today. Kept
-    # so a future opt-out of the built-in default doesn't require re-deriving
-    # the legacy worker-relay-token bypass from scratch.
-    allow_legacy = os.environ.get(API_ALLOW_LEGACY_DASHBOARD_AUTH_ENV, "").strip() == "1"
-    if not allow_legacy:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="dashboard authentication is not configured",
-        )
-    # `app.state.edge_relay_token`이 유일한 출처다. 부팅 때
-    # `lifespan._configure_backend_ingest`가 `API_EDGE_RELAY_TOKEN`에서 한 번
-    # 채운다(`lifespan.py:105`가 반드시 부른다). 여기서 env를 또 읽으면
-    # state에 `None`을 명시적으로 넣어 미설정을 재현하려는 경우까지
-    # env가 조용히 덮어써서, 실제로 무엇이 유효한지 두 곳을 봐야 한다.
-    expected = getattr(request.app.state, "edge_relay_token", None)
-    if not expected:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="legacy dashboard authentication is not configured",
-        )
-    if legacy_token is None:
+    actor = sessions.actor(request.cookies.get(DASHBOARD_SESSION_COOKIE))
+    if actor is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="dashboard credential required",
+            detail="dashboard session required",
         )
-    if not _compare_str(legacy_token, str(expected)):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="dashboard credential mismatch",
-        )
-    return "legacy-dashboard"
+    return actor
 
 
 __all__ = [
-    "API_ALLOW_LEGACY_DASHBOARD_AUTH_ENV",
     "API_DASHBOARD_PASSWORD_ENV",
     "API_DASHBOARD_USERNAME_ENV",
     "DASHBOARD_SESSION_COOKIE",
