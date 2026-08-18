@@ -1,102 +1,79 @@
-# WORKER INSTANCE KNOWLEDGE BASE
+# worker
 
-Own the deployable inference instance (`ml-worker` image): RTSP ingest and decode,
-a bounded frame bus, composable model extraction, numeric decision-making, and
-event/evidence egress to `ml-api` over one-way relay HTTP.
+RTSP inference client: ingest, bounded bus, extract, decide, evidence, one-way relay egress.
+Image `ml-worker`. Sole command: `python -m worker`.
 
-Canonical entrypoint, and the only supported one:
+## Layers
 
-```sh
-python -m worker
-```
-
-`worker/__main__.py` owns the CLI (argparse, exit codes) and constructs
-`WorkerRuntime` from `worker.runtime.worker` directly. Do not add a
-second entrypoint, a `worker.runtime.edge_worker` module, or an `edge` alias.
-
-Deployment identity is frozen: image `ml-worker`, `Dockerfile.edge`,
-`compose.edge.yaml`, `.env.edge.prod*`, dependency group `worker`, and the
-`ML_WORKER_*` / `WORKER_*` env prefixes. Renaming any of them breaks the edge
-host contract.
-
-## Layers (each with its own AGENTS.md)
+Run `uv run --group lint lint-imports`; a forbidden import means the design is wrong: add a Protocol in `interfaces/` and inject from `runtime/`.
 
 | Package | Role | May import |
 | --- | --- | --- |
-| `types/` | worker-internal envelopes (`FramePacket`, `ModuleResult`, `DecisionInput`, `BusinessEvent`) | stdlib, `contracts` |
-| `interfaces/` | one `typing.Protocol` per replaceable seam | stdlib, `contracts`, `worker.types` |
-| `adapters/` | concrete decode / model / encode implementations | stdlib, `contracts`, `worker.types`, `worker.interfaces` |
-| `pipeline/` | ingest, bus, perception, decision, output stages | everything except `worker.runtime` |
-| `domains/` | fall and bed-exit interpretation and latching | `contracts`, `worker.types`, `worker.interfaces`, `worker.pipeline.perception` |
-| `runtime/` | composition root: config, profile, bootstrap, supervisor, telemetry | everything |
+| `types/` | internal envelopes | stdlib, `contracts` |
+| `interfaces/` | one Protocol per seam | stdlib, `contracts`, `types` |
+| `adapters/` | decode, model, encode | stdlib, `contracts`, `types`, `interfaces` |
+| `pipeline/` | ingest, bus, perception, decision, output | everything except `runtime` |
+| `domains/` | fall and bed-exit | `contracts`, `types`, `interfaces`, `pipeline.perception` |
+| `runtime/` | composition root | everything |
 
-The ladder is `runtime → pipeline → domains → adapters → interfaces → types →
-contracts`, enforced by import-linter (`uv run --group lint lint-imports`), not by
-a hand-rolled walker.
+Order: `runtime -> pipeline -> domains -> adapters -> interfaces -> types -> contracts`.
+`contracts` contains cross-instance L0 data only. Worker-internal ports and envelopes live under `worker/`; never duplicate or shadow a vendored type, including `contracts/AGENTS.md`.
+Allowed: `contracts`, `shared.events`, local `worker.*`. Forbidden: `backend`.
 
-## Boundary with vendored `contracts`
+## FramePacket / DecisionInput
 
-`contracts` holds cross-instance L0 data only — the shapes `backend`, `worker`,
-and `shared` must all agree on. Worker-internal ports and envelopes live under
-`worker/`: `worker/types` owns `FramePacket`, `ModuleResult`, `DecisionInput`, and
-`BusinessEvent`; `worker/interfaces` owns the decode/bus/extract/decision/encode/
-output/serving Protocols. They import `contracts` and keep `Frame`,
-`RunnerResult`, `FrameObservation`, `BedRegionDebugSnapshot`, and `EventPayload`
-authoritative — never duplicate or shadow a vendored type.
+`FramePacket` is the only envelope that may carry an image. Four sinks: model extract, derivative evidence, overlay/MJPEG, alert snapshot. Publish immutable. Copy the image before draw or mutate.
+`DecisionInput` is numeric: `observation`, `frame_width`, `frame_height`, `live_track_ids`, `time_sec`, `frame_index`, `bed_region`. No array, no buffer, no frame handle.
+Domains take `DecisionInput` and return `BusinessEvent` tuples. A detector that needs pixels is a design error. Extract the number in `pipeline/perception` first.
 
-Do not add a worker-internal shape to `contracts`. That tree is ADR-0004 vendored
-byte-for-byte against `eldercare-dataset-ops`, and
-`tests/test_vendor_drift.py` compares **every** file under `contracts/`,
-including `contracts/AGENTS.md` — not only the `*.py` modules. Editing anything
-there, documentation included, breaks the drift firewall until the sibling repo is
-re-synced in the same change. State worker-scoped rules here instead.
+## Shared model vs per-camera state
 
-## Imports
+Shared once per process: models, extractors, profile/device, GPU lease, config/LKG, evidence outbox, clip-store lock.
+Per camera, never shared: tracker, `SceneState`, window buffer, fall latch, bed assignment plus grace/hold, `IncidentManager`, bus slot, encoder ring, ingest backoff.
+Hoisting a per-camera row leaks one resident into another. `tests/test_worker_per_camera_fall_state.py` asserts both halves.
 
-Allowed: `contracts`, `shared.events`, and local `worker.*` modules.
+## Sole CLI and composition root
 
-Forbidden (enforced by import-linter): `backend`. The worker and the backend are
-import-independent and communicate only over relay HTTP
-(`/api/v1/relay/{config,restart,alerts,heartbeat,runtime-status}`).
+`worker/__main__.py` owns argparse and exit codes. It constructs `WorkerRuntime` from `worker.runtime.worker` directly.
+Don't add `worker.runtime.edge_worker`, an `edge` alias, a console script, or a second `python -m` target.
+`runtime/` is the only package that may import everything. Nothing imports `runtime`. No business math and no model parsing live there.
+Seam defaults are `None`. Missing wiring refuses to start. Always-fail stubs belong in tests only.
+Exit codes: 0 clean, 1 generic, 2 config, 3 refuse-to-start, 4 fatal accelerator.
+`--check-config` has no model, camera, or relay side effect.
 
-## How to contribute
+## Hardware failure policy
 
-1. Read [`docs/architecture.md`](../docs/architecture.md) first. It holds the
-   five-layer diagram, the raw/numeric fan-out rules, the per-camera vs shared
-   state table, and the failure matrix.
-2. Read the `AGENTS.md` of the package you are changing. Each one states an
-   ownership rule that import-linter enforces.
-3. Put new code in the layer that owns the concern. If it needs an import the
-   layer forbids, the design is wrong — introduce a Protocol in `interfaces/` and
-   let `runtime/` inject the concrete object.
-4. New replaceable behavior arrives as a Protocol plus at least two
-   implementations, or one implementation plus a test double.
-5. Keep new pure-code modules at or below 250 logical LOC. Split by port or stage
-   rather than reproducing a monolith under a new name.
-6. Run the standing gates from the repository root:
+Global stages are fatal and start zero cameras: profile/device, decode capability, model backend, real warmup, GPU lease. Exit 3.
+`auto`, explicit blank, and unknown profiles fail loud; unset defaults to `cpu`. No silent CPU or OpenCV fallback. NVENC failure never starts `libx264`. `cpu` decode requires OpenCV `CAP_FFMPEG` in the videoio registry. Import success is not capability.
+Mid-run device loss writes one first-fault record under `ML_WORKER_STATE_DIR`, stops every camera, hard-exits 4. The CUDA context is never recreated in-process.
+Per-camera faults stay local. RTSP fail retries with backoff. Decode stall reopens the source. A full bus drops oldest. Extractor raise drops that frame. Clip encode fail still relays the alert. Relay POST lands in the durable outbox.
+Source open failure is camera `DEGRADED` plus `camera.offline`. A later processing failure is not offline. Keep the categories distinct.
+Missing evidence wiring or a locked local store refuses to start; remote delivery failures remain retryable. Two workers must not share one outbox.
+Primary clips remux source packets from camera-local rings. Decoded frames are analysis and snapshot taps. Never describe a re-encode as the preserved source clip.
 
-   ```bash
-   uv run pytest -q
-   uv run --group lint lint-imports
-   uvx ruff check .
-   ```
+## Package navigation
 
-## Gotchas
+Read the nearest `AGENTS.md` before changing that package.
 
-Model objects are shared once per task per process; every temporal thing
-(tracker, `SceneState`, fall windows and latch, bed assignments and grace/hold,
-`IncidentManager`, scheduler, encoder ring) is per camera and must never be
-shared. `tests/test_worker_per_camera_fall_state.py` guards both halves.
+| Path | Go here for |
+| --- | --- |
+| `types/` | `FramePacket`, `DecisionInput`, `ModuleResult`, `BusinessEvent` |
+| `interfaces/` | decode, bus, extract, decide, encode, output, serving |
+| `adapters/decode/` | `cpu_av`, `nvdec_cuvid` |
+| `adapters/model/` | registry, YOLO/LSTM, `in_process` serving |
+| `adapters/encode/` | per-camera FFmpeg segment muxer |
+| `pipeline/ingest/` | RTSP/file/webcam, reconnect |
+| `pipeline/bus/` | latest-only inference/live, FIFO evidence |
+| `pipeline/perception/` | tracker, `SceneState`, features, `DecisionInput` build |
+| `pipeline/inference_coordinator.py` | latest-only drain, every pose forward |
+| `pipeline/camera_pipeline.py` | per-camera wiring, no business math |
+| `pipeline/decision/` | `IncidentManager`, admission |
+| `pipeline/output/` | EventSink, evidence, overlay, MJPEG |
+| `domains/fall/` | window classifier, rising-edge latch |
+| `domains/bed_exit/` | assignment, grace/hold |
+| `runtime/worker.py` | composition root |
+| `runtime/bootstrap.py` | named stages |
+| `runtime/profile/` | `ML_WORKER_PROFILE` -> `(device, decode, encode)` |
 
-`FramePacket` is the only envelope allowed to carry an image. Raw frames reach
-model extraction, derivative evidence, overlay/MJPEG, and the alert snapshot —
-nothing else. The decision layer receives `DecisionInput` only.
-
-Global bootstrap stages (profile/device, decode capability, model backend, real
-warmup) are fatal and exit non-zero. Per-camera failures degrade only that
-camera. There is no silent CPU or OpenCV fallback, and `auto` is a loud failure.
-
-Primary clean clips use ADR-0001 source-packet stream-copy/remux through bounded
-camera-local packet rings. Decoded frames remain analysis/snapshot taps only;
-never add a silent re-encode fallback or describe a transformed derivative as
-the preserved source clip.
+New seam: Protocol plus two implementations, or one plus a test double.
+Keep new pure-code modules at or below 250 logical LOC. Split by port or stage.
