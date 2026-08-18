@@ -17,11 +17,12 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
-from collections.abc import Sequence
-from dataclasses import dataclass
+import threading
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass, field
 from pathlib import Path
 from statistics import median
-from time import monotonic
+from time import monotonic, sleep
 from typing import Any, final
 
 _NVIDIA_SMI_QUERY = "utilization.gpu,utilization.decoder,memory.used"
@@ -51,6 +52,7 @@ class CameraSample:
     failure_category: str | None
     pump_failures: int = 0
     pump_processed: int = 0
+    decode_backend: str | None = None
 
 
 @dataclass(slots=True)
@@ -59,6 +61,13 @@ class RunSample:
     cameras: tuple[CameraSample, ...]
     watchdog_margin_sec: float | None
     gpu: dict[str, float] | None
+    # Cross-camera coordinator telemetry (worker/pipeline/inference_coordinator.py):
+    # cumulative batch-size histogram plus the coordinator's own forward
+    # percentiles, both read straight off ``diagnostics.snapshot()``. Empty when
+    # no coordinator is registered (i.e. the pre-Wave-3 serialized topology).
+    batch_sizes: dict[int, int] = field(default_factory=dict)
+    coordinator_forward_p50_sec: float = 0.0
+    coordinator_forward_p95_sec: float = 0.0
 
 
 def sample_gpu() -> dict[str, float] | None:
@@ -109,6 +118,80 @@ def watchdog_margin_sec(watchdog: Any) -> float | None:
     return min(entry.deadline_at - now for entry in in_flight)
 
 
+@final
+class StallWatcher:
+    """Sub-second watcher for gaps in cross-camera inference progress.
+
+    The document's 2s sampling cadence cannot resolve the plan's "zero stalls
+    > 2s" gate -- two adjacent samples straddling a 3s freeze look identical to
+    two adjacent samples with steady progress. This polls the aggregate
+    ``inference.taken`` counter on its own thread at ``interval_sec`` and keeps
+    the longest wall-clock gap between two observed advances. It reads the same
+    live bus counters as the sampler; nothing here is synthesized.
+    """
+
+    def __init__(
+        self,
+        total_taken: Callable[[], int],
+        *,
+        interval_sec: float = 0.1,
+        stall_threshold_sec: float = 2.0,
+    ) -> None:
+        self._total_taken = total_taken
+        self._interval_sec = interval_sec
+        self._stall_threshold_sec = stall_threshold_sec
+        self._stop = threading.Event()
+        self._lock = threading.Lock()
+        self._max_gap_sec = 0.0
+        self._stalls: list[dict[str, float]] = []
+        self._observations = 0
+        self._thread = threading.Thread(
+            target=self._run, name="fanout-bench-stall-watcher", daemon=True
+        )
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        self._thread.join(timeout=10.0)
+
+    def _run(self) -> None:
+        last_value = self._total_taken()
+        last_advance_at = monotonic()
+        while not self._stop.is_set():
+            sleep(self._interval_sec)
+            now = monotonic()
+            value = self._total_taken()
+            with self._lock:
+                self._observations += 1
+            if value <= last_value:
+                continue
+            gap = now - last_advance_at
+            with self._lock:
+                self._max_gap_sec = max(self._max_gap_sec, gap)
+                if gap > self._stall_threshold_sec:
+                    self._stalls.append({"at_sec": now, "gap_sec": gap})
+            last_value, last_advance_at = value, now
+        # The tail: a freeze that never resolved before shutdown is still a stall.
+        trailing = monotonic() - last_advance_at
+        with self._lock:
+            self._max_gap_sec = max(self._max_gap_sec, trailing)
+            if trailing > self._stall_threshold_sec:
+                self._stalls.append({"at_sec": monotonic(), "gap_sec": trailing})
+
+    def report(self) -> dict[str, Any]:
+        with self._lock:
+            return {
+                "poll_interval_sec": self._interval_sec,
+                "threshold_sec": self._stall_threshold_sec,
+                "polls": self._observations,
+                "max_progress_gap_sec": self._max_gap_sec,
+                "stall_count": len(self._stalls),
+                "stalls": list(self._stalls),
+            }
+
+
 def take_sample(diagnostics: Any, watchdog: Any, pumps: Any = ()) -> RunSample:
     """One instant's reading of every observable counter.
 
@@ -136,6 +219,7 @@ def take_sample(diagnostics: Any, watchdog: Any, pumps: Any = ()) -> RunSample:
             failure_category=camera.failure_category,
             pump_failures=getattr(by_camera.get(camera.camera_id), "failure_count", 0),
             pump_processed=getattr(by_camera.get(camera.camera_id), "processed_count", 0),
+            decode_backend=_decode_backend_name(camera),
         )
         for camera in snapshot.cameras
     )
@@ -144,7 +228,43 @@ def take_sample(diagnostics: Any, watchdog: Any, pumps: Any = ()) -> RunSample:
         cameras=cameras,
         watchdog_margin_sec=watchdog_margin_sec(watchdog),
         gpu=sample_gpu(),
+        **_coordinator_fields(snapshot),
     )
+
+
+def _decode_backend_name(camera: Any) -> str | None:
+    """``requested -> resolved (adapter class)`` for one camera, or ``None``.
+
+    Requested and resolved are both kept: the plan's ADR-0002 guardrail is a
+    silent downgrade, which only shows up as a mismatch between the two.
+    """
+    backend = getattr(camera, "decode_backend", None)
+    if backend is None:
+        return None
+    requested = getattr(backend, "requested_profile_decode", None)
+    resolved = getattr(backend, "resolved_backend", None)
+    adapter = getattr(backend, "actual_adapter_class", None)
+    if requested is None and resolved is None:
+        return str(backend)
+    return f"{requested} -> {resolved} ({adapter})"
+
+
+def _coordinator_fields(snapshot: Any) -> dict[str, Any]:
+    """Read the coordinator's cumulative batch histogram off any camera view.
+
+    ``RuntimeDiagnostics.snapshot()`` copies the single coordinator's telemetry
+    onto every camera entry, so the first camera carrying a non-empty histogram
+    is the coordinator's own state, not a per-camera value.
+    """
+    for camera in getattr(snapshot, "cameras", ()):
+        sizes = getattr(camera, "batch_sizes", ())
+        if sizes:
+            return {
+                "batch_sizes": {int(size): int(count) for size, count in sizes},
+                "coordinator_forward_p50_sec": float(getattr(camera, "forward_p50_sec", 0.0)),
+                "coordinator_forward_p95_sec": float(getattr(camera, "forward_p95_sec", 0.0)),
+            }
+    return {}
 
 
 def _percentile(values: Sequence[float], fraction: float) -> float:
@@ -168,6 +288,7 @@ class RunMetrics:
         self.pose_latencies_ms: list[float] = []
         self.errors: list[str] = []
         self.notes: dict[str, Any] = {}
+        self.stalls: dict[str, Any] = {}
 
     def add(self, sample: RunSample) -> None:
         self._samples.append(sample)
@@ -244,8 +365,26 @@ class RunMetrics:
                 "failure_category": camera.failure_category,
                 "pump_failures": camera.pump_failures,
                 "pump_processed": camera.pump_processed,
+                "decode_backend": camera.decode_backend,
             }
         return result
+
+    def _batch_size_histogram(self) -> dict[str, int]:
+        """Batch sizes issued inside the measurement window (last minus first).
+
+        The coordinator's counter is cumulative from process start, so warmup
+        forwards (batch size 1, before every camera is publishing) would
+        otherwise be charged to the steady-state window.
+        """
+        if len(self._samples) < 2:
+            return {}
+        first, last = self._samples[0].batch_sizes, self._samples[-1].batch_sizes
+        delta = {
+            size: count - first.get(size, 0)
+            for size, count in last.items()
+            if count - first.get(size, 0) > 0
+        }
+        return {str(size): delta[size] for size in sorted(delta)}
 
     def document(self, *, header: dict[str, Any]) -> dict[str, Any]:
         cameras = self._per_camera()
@@ -261,6 +400,10 @@ class RunMetrics:
             if (value := camera["inference_admitted_fps"]) is not None
         ]
         latencies = list(self.pose_latencies_ms)
+        histogram = self._batch_size_histogram()
+        forwards = sum(histogram.values())
+        frames_in_batches = sum(int(size) * count for size, count in histogram.items())
+        last_sample = self._samples[-1] if self._samples else None
         return {
             **header,
             "samples": len(self._samples),
@@ -294,6 +437,57 @@ class RunMetrics:
                     for key in sorted(gpu_samples[0])
                 }
             ),
+            "batch": {
+                "histogram": histogram,
+                "forwards": forwards,
+                "frames": frames_in_batches,
+                "mean_batch_size": (None if forwards == 0 else frames_in_batches / forwards),
+                "max_batch_size": (
+                    None if not histogram else max(int(size) for size in histogram)
+                ),
+                "coordinator_forward_p50_ms": (
+                    None
+                    if last_sample is None
+                    else last_sample.coordinator_forward_p50_sec * 1000.0
+                ),
+                "coordinator_forward_p95_ms": (
+                    None
+                    if last_sample is None
+                    else last_sample.coordinator_forward_p95_sec * 1000.0
+                ),
+            },
+            "live_lane": {
+                "published": sum(
+                    camera["bus"].get("live", {}).get("published", 0)
+                    for camera in cameras.values()
+                ),
+                "taken": sum(
+                    camera["bus"].get("live", {}).get("taken", 0) for camera in cameras.values()
+                ),
+                "dropped": sum(
+                    camera["bus"].get("live", {}).get("dropped", 0)
+                    for camera in cameras.values()
+                ),
+            },
+            "evidence_lane": {
+                "published": sum(
+                    camera["bus"].get("evidence", {}).get("published", 0)
+                    for camera in cameras.values()
+                ),
+                "taken": sum(
+                    camera["bus"].get("evidence", {}).get("taken", 0)
+                    for camera in cameras.values()
+                ),
+                "dropped": sum(
+                    camera["bus"].get("evidence", {}).get("dropped", 0)
+                    for camera in cameras.values()
+                ),
+            },
+            "inference_dropped": sum(
+                camera["bus"].get("inference", {}).get("dropped", 0)
+                for camera in cameras.values()
+            ),
+            "stalls": dict(self.stalls) if self.stalls else None,
             "counters_advanced": self.counter_advanced(),
             "pump_failures": sum(camera["pump_failures"] for camera in cameras.values()),
             "errors": list(self.errors),
@@ -317,6 +511,7 @@ __all__ = [
     "CameraSample",
     "RunMetrics",
     "RunSample",
+    "StallWatcher",
     "sample_gpu",
     "take_sample",
     "watchdog_margin_sec",

@@ -17,6 +17,17 @@ Environment knobs (all bounded, all recorded into the JSON):
   BENCH_DURATION_SEC   measurement window per run              (default 60)
   BENCH_PROFILE        ML_WORKER_PROFILE for the run           (default nvidia-host-bridge)
   BENCH_OUTPUT_DIR     bench JSON destination directory
+  BENCH_LABEL          filename suffix, e.g. "soak" -> bench-13-soak.json
+  BENCH_VIEWERS        cameras to attach a real MJPEG viewer to (default 1, 0 disables)
+  BENCH_CAMERA_FPS     per-camera offered fps (default: the product's own 5.0)
+
+Todo 12 additions (all read from already-published worker telemetry, nothing
+new instrumented in product code): the coordinator's cross-camera batch-size
+histogram and forward percentiles (``diagnostics.snapshot()``), a sub-second
+stall watcher on aggregate inference progress (the 2s sampling cadence cannot
+resolve the plan's "no stall > 2s" gate), and a real HTTP viewer on the
+worker's own ``/stream/{camera}`` surface so "live lane consumed when a viewer
+is attached" is measured through the shipped path rather than asserted.
 """
 
 from __future__ import annotations
@@ -30,7 +41,9 @@ from time import monotonic, sleep
 from typing import Any, Final
 
 import pytest
+from e2e_worker_relay_fixtures import free_tcp_port
 from fanout_benchmark_harness import (
+    LiveViewViewer,
     StubRelay,
     TimingServingClient,
     WorkerRun,
@@ -38,7 +51,12 @@ from fanout_benchmark_harness import (
     build_recorded_clip,
     recorded_stream_fanout,
 )
-from fanout_benchmark_metrics import RunMetrics, take_sample, write_document
+from fanout_benchmark_metrics import (
+    RunMetrics,
+    StallWatcher,
+    take_sample,
+    write_document,
+)
 
 from shared.rtsp_url_policy import ALLOW_LOCAL_RTSP_ENV
 
@@ -111,14 +129,23 @@ def test_fanout_benchmark(
 
     duration_sec = float(os.environ.get("BENCH_DURATION_SEC", DEFAULT_DURATION_SEC))
     profile = os.environ.get("BENCH_PROFILE", DEFAULT_PROFILE)
+    viewer_count = int(os.environ.get("BENCH_VIEWERS", "1"))
+    label = os.environ.get("BENCH_LABEL", "")
+    camera_fps_raw = os.environ.get("BENCH_CAMERA_FPS")
+    camera_fps = None if camera_fps_raw is None else float(camera_fps_raw)
     metrics = RunMetrics()
     latencies: list[float] = []
+    viewers: list[LiveViewViewer] = []
 
     with recorded_stream_fanout(
         stream_count=stream_count, clip=recorded_clip, tmp_path=tmp_path
     ) as (_server, rtsp_urls):
         config = build_config(
-            relay_url=relay.base_url, rtsp_urls=rtsp_urls, models_dir=REPO_ROOT / "models"
+            relay_url=relay.base_url,
+            rtsp_urls=rtsp_urls,
+            models_dir=REPO_ROOT / "models",
+            live_view_port=(free_tcp_port() if viewer_count > 0 else None),
+            camera_fps=camera_fps,
         )
         serving = TimingServingClient(latencies)
         run = WorkerRun(
@@ -130,11 +157,15 @@ def test_fanout_benchmark(
         )
         try:
             run.wait_for_cameras(stream_count)
+            viewers = _attach_viewers(run, min(viewer_count, stream_count))
             _collect(run, metrics, duration_sec=duration_sec)
         finally:
+            for viewer in viewers:
+                viewer.stop()
             run.stop()
 
     metrics.pose_latencies_ms = latencies
+    metrics.notes["viewers"] = [viewer.report() for viewer in viewers]
     document = metrics.document(
         header={
             "stream_count": stream_count,
@@ -143,9 +174,12 @@ def test_fanout_benchmark(
             "sample_interval_sec": SAMPLE_INTERVAL_SEC,
             "source_nominal_fps": 15.0,
             "git_revision": _git_revision(),
+            "label": label or None,
+            "camera_fps": camera_fps,
         }
     )
-    path = write_document(_output_dir() / f"bench-{stream_count}.json", document)
+    suffix = f"-{label}" if label else ""
+    path = write_document(_output_dir() / f"bench-{stream_count}{suffix}.json", document)
 
     assert document["cameras"], f"no camera diagnostics recorded; see {path}"
     assert document["counters_advanced"], (
@@ -162,6 +196,22 @@ def test_fanout_benchmark(
     )
 
 
+def _attach_viewers(run: WorkerRun, count: int) -> list[LiveViewViewer]:
+    """Open ``count`` real MJPEG viewers, or none when the live view is off."""
+    if count <= 0:
+        return []
+    port = run.live_view_port()
+    if port is None:
+        return []
+    viewers = [
+        LiveViewViewer(port=port, camera_id=camera.scene_state.camera_id)
+        for camera in run.runtime.cameras[:count]
+    ]
+    for viewer in viewers:
+        viewer.start()
+    return viewers
+
+
 def _collect(run: WorkerRun, metrics: RunMetrics, *, duration_sec: float) -> None:
     """Sample counters for ``duration_sec``, recording a stall instead of hanging."""
     try:
@@ -170,11 +220,17 @@ def _collect(run: WorkerRun, metrics: RunMetrics, *, duration_sec: float) -> Non
         metrics.errors.append(f"inference_stall: {error}")
         metrics.notes["failure_signature"] = "no inference lane take within bounded window (#312)"
     pumps = tuple(camera.pump for camera in run.runtime.cameras)
+    watcher = StallWatcher(run.total_inference_taken)
+    watcher.start()
     deadline = monotonic() + duration_sec
     metrics.add(take_sample(run.runtime.diagnostics, run.runtime.watchdog, pumps))
-    while monotonic() < deadline:
-        sleep(min(SAMPLE_INTERVAL_SEC, max(0.0, deadline - monotonic())))
-        metrics.add(take_sample(run.runtime.diagnostics, run.runtime.watchdog, pumps))
+    try:
+        while monotonic() < deadline:
+            sleep(min(SAMPLE_INTERVAL_SEC, max(0.0, deadline - monotonic())))
+            metrics.add(take_sample(run.runtime.diagnostics, run.runtime.watchdog, pumps))
+    finally:
+        watcher.stop()
+    metrics.stalls = watcher.report()
     metrics.notes["cameras_activated"] = len(run.runtime.cameras)
     metrics.notes["watchdog_tripped"] = bool(
         run.runtime.watchdog is not None and run.runtime.watchdog.tripped

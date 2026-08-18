@@ -162,12 +162,22 @@ class StubRelay:
 
 @final
 class TimingServingClient:
-    """Real ``InProcessServingClient`` with a stopwatch around pose forwards."""
+    """Real ``InProcessServingClient`` with a stopwatch around pose forwards.
+
+    Exposes ``batch_serving_client`` because the composition root's
+    ``_batch_client_for`` (worker/runtime/model_composition.py) gates the whole
+    capability coordinator on the injected client being a ``BatchServingClient``
+    or a ``BatchServingProvider``. A wrapper without it silently downgrades
+    every camera to "camera pipeline requires the batched pose coordinator" --
+    i.e. the benchmark would measure the pre-fix topology while claiming to
+    measure the fix.
+    """
 
     def __init__(self, latencies_ms: list[float]) -> None:
         self._inner = InProcessServingClient()
         self._latencies_ms = latencies_ms
         self._lock = threading.Lock()
+        self._batch: _TimedBatchServingClient | None = None
 
     def create(self, task: str, **kwargs: Any) -> Any:
         runner = self._inner.create(task, **kwargs)
@@ -175,9 +185,46 @@ class TimingServingClient:
             return runner
         return _TimedRunner(runner, self._record)
 
+    @property
+    def batch_serving_client(self) -> _TimedBatchServingClient:
+        with self._lock:
+            if self._batch is None:
+                self._batch = _TimedBatchServingClient(
+                    self._inner.batch_serving_client, self._record
+                )
+            return self._batch
+
     def _record(self, elapsed_ms: float) -> None:
         with self._lock:
             self._latencies_ms.append(elapsed_ms)
+
+
+@final
+class _TimedBatchServingClient:
+    """Times each real batched pose forward, which is where the work now is.
+
+    One sample per ``infer_batch`` call, not per frame: the plan's p95 gate is
+    on the forward pass the watchdog guards, and a batch of 13 frames is one
+    forward. Per-frame attribution stays available through the coordinator's
+    own stage timings in the bench JSON.
+    """
+
+    def __init__(self, inner: Any, record: Callable[[float], None]) -> None:
+        self._inner = inner
+        self._record = record
+
+    def create(self, task: str, **kwargs: Any) -> Any:
+        return self._inner.create(task, **kwargs)
+
+    def infer_batch(self, task: str, frames: Sequence[Any], **kwargs: Any) -> Any:
+        started = perf_counter()
+        try:
+            return self._inner.infer_batch(task, frames, **kwargs)
+        finally:
+            self._record((perf_counter() - started) * 1000.0)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
 
 
 @final
@@ -223,6 +270,8 @@ def build_config(
     relay_url: str,
     rtsp_urls: Sequence[str],
     models_dir: Path,
+    live_view_port: int | None = None,
+    camera_fps: float | None = None,
 ) -> WorkerConfig:
     """N cameras, fall+bed_exit enabled, real fall artifact, clips off.
 
@@ -230,11 +279,17 @@ def build_config(
     decode/inference fan-out, and evidence-clip behavior under the new decode
     boundary is plan todo 11's subject, not this one's.
     """
+    dev_mjpeg = (
+        {}
+        if live_view_port is None
+        else {"dev_mjpeg": {"enabled": True, "host": "127.0.0.1", "port": live_view_port}}
+    )
     return WorkerConfig.model_validate(
         {
             "version": 1,
             "relay": {"url": relay_url, "token": RELAY_TOKEN},
             "clip": {"enabled": False},
+            **dev_mjpeg,
             "models": {"fall": _fall_model_config(models_dir)},
             "domains": {"fall": {"enabled": True}, "bed_exit": {"enabled": True}},
             "cameras": [
@@ -244,6 +299,14 @@ def build_config(
                     "rtsp_url": url,
                     "heartbeat_interval_sec": 30.0,
                     "frame_stride": 1,
+                    # Product default 5.0 unless the operator asks otherwise.
+                    # The only sanctioned use of an override is the headroom
+                    # check: ingest paces at `1/fps` measured AFTER each yield
+                    # (worker/pipeline/ingest/rtsp.py), so the admitted rate is
+                    # structurally just under `fps` and 13x5.0 is an unreachable
+                    # ceiling, not a serving limit. Raising the offered rate is
+                    # how that distinction is measured rather than argued.
+                    **({} if camera_fps is None else {"fps": camera_fps}),
                 }
                 for index, url in enumerate(rtsp_urls)
             ],
@@ -330,9 +393,98 @@ class WorkerRun:
             camera.bus.metrics("inference").taken > 0 for camera in self.runtime.cameras
         )
 
+    def total_inference_taken(self) -> int:
+        """Aggregate frames pulled off every camera's inference lane.
+
+        The stall watcher's progress signal: this is the one counter that only
+        moves when the coordinator actually drains and forwards work.
+        """
+        return sum(camera.bus.metrics("inference").taken for camera in self.runtime.cameras)
+
+    def live_view_port(self) -> int | None:
+        server = getattr(self.runtime, "_mjpeg_server", None)
+        return None if server is None else int(server.port)
+
     def stop(self, *, timeout: float = 60.0) -> None:
         self.runtime.stop()
         self.thread.join(timeout=timeout)
+
+
+@final
+class LiveViewViewer:
+    """One real HTTP client on ``/stream/{camera_id}``, i.e. an attached viewer.
+
+    Not a call to ``LatestFrameStore.mark_viewer_connected``: the plan's target
+    is "live lane consumed when a viewer is attached", and the only honest
+    evidence for that is the shipped viewer surface -- an open MJPEG connection
+    the worker's own HTTP handler counts. Frames read are counted so the
+    benchmark can show the viewer really received JPEGs, and a read timeout
+    keeps the reader thread bounded.
+    """
+
+    def __init__(self, *, port: int, camera_id: str, read_timeout_sec: float = 10.0) -> None:
+        self._url = f"http://127.0.0.1:{port}/stream/{camera_id}"
+        self._read_timeout_sec = read_timeout_sec
+        self.camera_id = camera_id
+        self.boundaries_seen = 0
+        self.bytes_read = 0
+        self.connects = 0
+        self.error: str | None = None
+        self._stop = threading.Event()
+        self._thread = threading.Thread(
+            target=self._run, name=f"fanout-bench-viewer-{camera_id}", daemon=True
+        )
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def _run(self) -> None:
+        # Reconnecting loop, not a single GET: `_handle_stream` answers 503 when
+        # no frame is cached within STREAM_FIRST_FRAME_TIMEOUT_SECONDS (0.5s) of
+        # the connect, and viewer gating means the first encode only happens
+        # *because* this connection exists -- so the first attempt legitimately
+        # loses that race. Reconnect until frames flow, then stream.
+        while not self._stop.is_set():
+            self._stream_once()
+            if not self._stop.is_set():
+                self._stop.wait(0.2)
+
+    def _stream_once(self) -> None:
+        import urllib.error
+        import urllib.request
+
+        request = urllib.request.Request(  # noqa: S310 - fixed loopback http URL
+            self._url, headers={"X-Edge-Relay-Token": RELAY_TOKEN}
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=self._read_timeout_sec) as response:
+                self.connects += 1
+                # A later successful connect retires the earlier 503 the
+                # viewer-gating race produces; a real failure re-sets it below.
+                self.error = None
+                while not self._stop.is_set():
+                    chunk = response.read(65536)
+                    if not chunk:
+                        return
+                    self.bytes_read += len(chunk)
+                    self.boundaries_seen += chunk.count(b"--frame")
+        except (urllib.error.URLError, OSError, ValueError) as error:
+            if not self._stop.is_set():
+                self.error = f"{type(error).__name__}: {error}"
+
+    def stop(self) -> None:
+        self._stop.set()
+        self._thread.join(timeout=5.0)
+
+    def report(self) -> dict[str, Any]:
+        return {
+            "camera_id": self.camera_id,
+            "url": self._url,
+            "bytes_read": self.bytes_read,
+            "mjpeg_parts_seen": self.boundaries_seen,
+            "connects": self.connects,
+            "error": self.error,
+        }
 
 
 @contextmanager
@@ -388,6 +540,7 @@ def _streams_ready(server: MediaMtxProcess, path_names: Sequence[str]) -> bool:
 __all__ = [
     "BOOT_TIMEOUT_SEC",
     "RELAY_TOKEN",
+    "LiveViewViewer",
     "RecordedStreamPublisher",
     "StubRelay",
     "TimingServingClient",
