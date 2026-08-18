@@ -191,7 +191,9 @@ def test_scheduler_gates_extraction_so_skipped_frames_never_reach_the_extractor(
     assert extractor.calls == [2]
 
 
-def test_one_camera_pump_failure_does_not_stop_the_other_camera_pump() -> None:
+def test_one_camera_pump_failure_does_not_stop_the_other_camera_pump(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     results_a = InferenceResultSlot()
     results_b = InferenceResultSlot()
     raising = _RaisingDecider()
@@ -214,7 +216,8 @@ def test_one_camera_pump_failure_does_not_stop_the_other_camera_pump() -> None:
     supervisor = IngestSupervisor([pump_a, pump_b])
     supervisor.start()
     try:
-        _deliver(results_a, _packet("camera-a", 1))
+        failed_packet = _packet("camera-a", 1)
+        _deliver(results_a, failed_packet)
         _deliver(results_b, _packet("camera-b", 1))
 
         assert _wait_for(lambda: len(sink_b.events) >= 1)
@@ -228,6 +231,13 @@ def test_one_camera_pump_failure_does_not_stop_the_other_camera_pump() -> None:
         supervisor.stop(join_timeout_sec=2.0)
 
     assert pump_a.failure_count == 2
+    assert failed_packet.released
+    failure_record = next(
+        record for record in caplog.records if record.name == "worker.pipeline.camera_pipeline"
+    )
+    assert "camera_id=camera-a" in failure_record.getMessage()
+    assert "error=RuntimeError" in failure_record.getMessage()
+    assert "decision stage exploded" not in failure_record.getMessage()
     assert raising.call_count == 2
     assert len(sink_b.events) == 1
     assert sink_a.events == []
