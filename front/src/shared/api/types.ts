@@ -93,6 +93,34 @@ export type RuntimeLatencyDiagnostics = {
   since_sec: number | null;
 };
 
+export type DetectionState = 'starting' | 'healthy' | 'blind' | 'unknown' | 'disabled';
+
+export type DetectionReason =
+  | 'pose_not_completing'
+  | 'decision_not_completing'
+  | 'no_completed_cycles'
+  | 'telemetry_stale'
+  | 'telemetry_missing'
+  | 'counter_reset';
+
+/** Todo 2 relay counters, present only when the backend still echoes the raw snapshot. */
+export type RuntimeDetectionRawCounters = {
+  expected: boolean;
+  inference_admitted: number;
+  inference_succeeded: number;
+  inference_overwritten: number;
+  decision_completed: number;
+};
+
+export type RuntimeDetectionDiagnostics = {
+  state: DetectionState;
+  reason: DetectionReason | null;
+  recent_success_rate: number | null;
+  last_completed_at_sec: number | null;
+  evaluation_window_sec: number;
+  timeout_sec: number;
+} & Partial<RuntimeDetectionRawCounters>;
+
 export type RuntimeCameraDiagnostics = {
   camera_id: string;
   decode: RuntimeDecodeDiagnostics;
@@ -100,6 +128,8 @@ export type RuntimeCameraDiagnostics = {
   latency: RuntimeLatencyDiagnostics | null;
   /** True once the reporting facility hasn't published within `stale_after_sec` — the worker may be dead while `measured_fps` still holds its last-known value (issue #160). */
   stale: boolean | null;
+  /** Always filled by the status normalizer; omitted only on hand-built fixtures. */
+  detection?: RuntimeDetectionDiagnostics;
 };
 
 /** Device-adaptive acceleration diagnostics (not CUDA-specific — backend may be any decode/inference device). */

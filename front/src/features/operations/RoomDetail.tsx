@@ -68,7 +68,11 @@ export function RoomDetail({ camera, onBack, onRetryConnection }: RoomDetailProp
           />
         </div>
         <div className="flex flex-col gap-4 lg:col-span-1">
-          <CameraInfoCard camera={camera} onManageConnection={() => setConnectionModalOpen(true)} />
+          <CameraInfoCard
+            camera={camera}
+            detection={diagnostics?.detection}
+            onManageConnection={() => setConnectionModalOpen(true)}
+          />
           <DetectionSettingsCard camera={camera} onOverlayModeChange={setOverlayMode} />
         </div>
       </div>
