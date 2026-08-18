@@ -30,6 +30,7 @@ uv sync
 uv run pytest -q
 uvx ruff check .
 uv run --group lint lint-imports   # architecture-boundary enforcement
+uv run --group lint mypy contracts shared   # type-boundary enforcement
 ```
 
 `pyproject.toml` keeps `requires-python = ">=3.11"` because that floor is the

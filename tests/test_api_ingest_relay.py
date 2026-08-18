@@ -508,9 +508,24 @@ def test_relay_alert_egresses_canonical_backend_id_for_mapped_local_camera(tmp_p
     assert fake.egress_camera_ids == ["backend-camera-1"]
 
 
-def test_relay_heartbeat_egresses_local_id_when_camera_is_unmapped(tmp_path) -> None:
-    """Unmapped cameras forward their local id; the authoritative backend may
-    reject it (loud failure), never a silently re-attributed identity."""
+def test_relay_heartbeat_never_egresses_local_id_when_camera_is_unmapped(tmp_path) -> None:
+    """An unmapped camera does NOT forward its local id to the Hub.
+
+    This test previously asserted the opposite, on the reasoning that forwarding
+    the local id would draw a loud rejection from the authoritative backend and
+    was preferable to a silently re-attributed identity. Issue #308 disproved the
+    premise in production: the Hub rejects the unissued id with
+    FACILITY_BINDING_MISMATCH, but that reaches the edge as an opaque relay 502
+    and was repeatedly misdiagnosed as an authentication failure. The failure was
+    not loud, it was misleading -- and every heartbeat for that camera 502'd.
+
+    The anti-pattern the original docstring guarded against is still prevented:
+    no identity is re-attributed. The id is simply not sent, and the reason is
+    named in a local warning. This also makes the one-shot route consistent with
+    the periodic tick in backend_heartbeat_relay, which already refuses to send
+    under an unmapped id rather than emit a guaranteed reject. Local liveness,
+    policy acknowledgement, and never_connected bookkeeping all still run.
+    """
     fake = FakeBackendIngestClient()
     app = _registry_app(fake, tmp_path, backend_camera_id=None)
 
@@ -522,7 +537,9 @@ def test_relay_heartbeat_egresses_local_id_when_camera_is_unmapped(tmp_path) -> 
         )
 
     assert response.status_code == 202
-    assert fake.egress_camera_ids == ["local-uuid-1"]
+    # No Hub egress at all, and specifically never under the local id.
+    assert fake.egress_camera_ids == []
+    assert fake.heartbeats == 0
 
 
 def test_relay_heartbeat_clears_never_connected_on_first_heartbeat(tmp_path) -> None:

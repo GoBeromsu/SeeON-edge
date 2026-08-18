@@ -13,7 +13,7 @@ import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import Final, Literal, TypeAlias, cast
+from typing import Final, Literal, TypeAlias
 
 PolicySource: TypeAlias = Literal["image-default", "facility-default", "camera-override"]
 
@@ -243,6 +243,23 @@ def make_effective_policy(
     )
 
 
+def _policy_source(value: object) -> PolicySource:
+    """Narrow an untyped document field to PolicySource, or reject it.
+
+    Returning each literal directly is what actually narrows the type. A set
+    membership test does not narrow, and a cast would only assert the narrowing
+    instead of establishing it -- mypy flagged that cast as redundant while the
+    value stayed a plain str at the call site.
+    """
+    if value == "image-default":
+        return "image-default"
+    if value == "facility-default":
+        return "facility-default"
+    if value == "camera-override":
+        return "camera-override"
+    raise PolicyDocumentError("effective policy source is unknown")
+
+
 def parse_effective_policy(
     value: object,
     *,
@@ -273,10 +290,7 @@ def parse_effective_policy(
         raise PolicyDocumentError("effective policy module version does not match selection")
     schema_id = _text(mapping["schema_id"], "schema_id")
     schema_version = _integer(mapping["schema_version"], "schema_version")
-    source_value = mapping["source"]
-    if source_value not in {"image-default", "facility-default", "camera-override"}:
-        raise PolicyDocumentError("effective policy source is unknown")
-    source = cast(PolicySource, source_value)
+    source = _policy_source(mapping["source"])
     facility_revision_id = _optional_revision(
         mapping["facility_revision_id"], "facility_revision_id"
     )

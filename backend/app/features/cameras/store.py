@@ -628,7 +628,12 @@ def registry_expected_cameras(
 ) -> dict[str, dict[str, str | None]]:
     """Build the camera-id index used by status/heartbeat enumeration.
 
-    Keys are the canonical worker-facing ids (backend_camera_id or local id).
+    INBOUND LOOKUP ONLY. Both the Hub-issued backend_camera_id and the local
+    registry id are indexed on purpose, because a worker may heartbeat under
+    either one; accepting both on the way in is deliberate tolerance. This index
+    must never be used to build an outbound payload -- emitting the local id
+    where a Hub-issued id belongs is what the Hub rejects with
+    FACILITY_BINDING_MISMATCH (issue #308).
     Values are thin binding dicts compatible with HeartbeatStore.snapshot.
     """
     if store is None:

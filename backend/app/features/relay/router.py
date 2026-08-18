@@ -127,6 +127,8 @@ class BoundedBodyRoute(APIRoute):
         return bounded_handler
 
 
+_LOGGER = logging.getLogger(__name__)
+
 router = APIRouter(prefix="/relay", tags=["relay"], route_class=BoundedBodyRoute)
 
 
@@ -424,7 +426,25 @@ def relay_alert(
     # leaving no local trace at all when _camera_binding() 403s below.
     catalog_result = _record_catalog(request, payload)
     binding = _camera_binding(request, payload.camera_id, payload.facility_id)
-    canonical_camera_id = str(binding.get("camera_id") or payload.camera_id)
+    # Only a Hub-issued id may address the upstream ingest API. The previous
+    # `or payload.camera_id` fallback sent the worker's edge-local id, which the
+    # Hub never issued and rejects with FACILITY_BINDING_MISMATCH; on the edge
+    # that surfaced as an opaque relay 502 and was repeatedly misdiagnosed as an
+    # auth failure (issue #308). This mirrors the periodic heartbeat relay, which
+    # already refuses to push under an unmapped id -- see
+    # backend_heartbeat_relay._canonical_backend_camera_id.
+    bound_camera_id = binding.get("backend_camera_id")
+    if not isinstance(bound_camera_id, str) or not bound_camera_id.strip():
+        # Coverage is untouched: the camera keeps streaming, and the local audit
+        # record was already written above. Only the guaranteed-reject upstream
+        # push is skipped, and the reason is named instead of arriving as a 502.
+        _LOGGER.warning(
+            "relay alert: skipping backend ingest, camera %s has no Hub mapping yet",
+            payload.camera_id,
+            extra={"local_camera_id": payload.camera_id},
+        )
+        return _alert_response({"status": "accepted"}, catalog_result)
+    canonical_camera_id = bound_camera_id
     client = _optional_backend_ingest_client(request, camera_id=canonical_camera_id)
     if client is None:
         # Registry-bound local accept; cloud only when store built a client.
@@ -505,10 +525,22 @@ def relay_heartbeat(
     )
     _clear_never_connected_on_first_heartbeat(request, payload.camera_id)
     binding = _camera_binding(request, payload.camera_id, payload.facility_id)
-    # Backend egress uses the canonical identity (explicit backend mapping when
-    # present); the backend only knows its own camera ids, not local registry ids.
-    canonical_camera_id = str(binding.get("camera_id") or payload.camera_id)
-    client = _optional_backend_ingest_client(request, camera_id=canonical_camera_id)
+    # Same Hub-boundary rule as relay_alert above: only a Hub-issued id may address
+    # the upstream ingest API. The backend only knows its own camera ids, and an id
+    # it never issued comes back as FACILITY_BINDING_MISMATCH, surfacing on the edge
+    # as an opaque 502 that reads like an auth failure (issue #308). All local
+    # bookkeeping above -- liveness, policy ack, never_connected -- has already run,
+    # so skipping the push costs no local state. This also matches the periodic tick
+    # in backend_heartbeat_relay, which likewise refuses to send under an unmapped id.
+    bound_camera_id = binding.get("backend_camera_id")
+    if not isinstance(bound_camera_id, str) or not bound_camera_id.strip():
+        _LOGGER.warning(
+            "relay heartbeat: skipping backend ingest, camera %s has no Hub mapping yet",
+            payload.camera_id,
+            extra={"local_camera_id": payload.camera_id},
+        )
+        return {"status": "accepted"}
+    client = _optional_backend_ingest_client(request, camera_id=bound_camera_id)
     if client is None:
         return {"status": "accepted"}
     if not client.send_heartbeat():
@@ -710,9 +742,18 @@ def _camera_binding_from_registry(
         if camera_id in {local_id, backend_id}:
             canonical_id = backend_id or local_id
             return {
+                # Keeps its local-id fallback on purpose: this field gates local
+                # ADMISSION, and a worker may legitimately report under either id.
                 "camera_id": str(canonical_id),
                 "facility_id": facility_id,
                 "resident_id": None,
+                # Hub-issued id only, None when unmapped. EGRESS must use this
+                # field, never camera_id above -- sending an id the Hub never
+                # issued comes back as FACILITY_BINDING_MISMATCH and reaches the
+                # edge as an opaque 502 (issue #308).
+                "backend_camera_id": (
+                    backend_id if isinstance(backend_id, str) and backend_id.strip() else None
+                ),
             }
     raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="unknown camera")
 

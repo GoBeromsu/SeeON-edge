@@ -89,7 +89,7 @@ def bounded_file_request(
     target = urllib.parse.urlunsplit(("", "", parsed.path, parsed.query, ""))
     try:
         media.seek(0)
-        _ = connection.request("PUT", target, body=media, headers=dict(headers))
+        connection.request("PUT", target, body=media, headers=dict(headers))
         response = connection.getresponse()
         return response.status, dict(response.headers), response.read(MAX_RESPONSE_BYTES + 1)
     except (TimeoutError, OSError, http.client.HTTPException) as exc:
@@ -240,7 +240,7 @@ def _clip_receipt(body: bytes) -> ClipReceipt | None:
         return None
     return ClipReceipt(
         clip_id,
-        cast(Literal["READY", "UNAVAILABLE", "EXPIRED"], state),
+        state,
         version,
         sha256,
         size_bytes,

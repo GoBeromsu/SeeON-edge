@@ -24,6 +24,7 @@ dependencies = [
 [dependency-groups]
 lint = [
     "import-linter>=2.13",
+    "mypy>=1.11",
     "ruff==0.16.0",
 ]
 test = [
@@ -80,6 +81,29 @@ torchvision = [{ index = "pytorch-cu130", marker = "sys_platform == 'linux'" }]
 # slim images are produced by Dockerfile.backend/edge via dependency-groups.
 [tool.uv.workspace]
 members = ["backend", "worker", "shared"]
+
+# Type-boundary enforcement (issue #308 follow-up). import-linter already gates
+# dependency direction in CI; nothing gated types, so a type rule was only ever a
+# comment. Scope is deliberately narrow: contracts/ is the shared edge<->Hub
+# surface and shared/ sits directly behind it, so those are where an unchecked
+# annotation costs the most.
+[tool.mypy]
+python_version = "3.11"
+ignore_missing_imports = true
+exclude = ["^\\.scratch/", "^\\.venv/"]
+
+# contracts/ is the edge<->Hub surface and is already strict-clean (19 files,
+# zero errors at --strict), so strict is locked in here to keep it that way.
+[[tool.mypy.overrides]]
+module = ["contracts.*"]
+strict = true
+
+# shared/ is strict with no exemptions. It started at 11 errors across
+# edge_ingest_client, evidence_http_transport, and detection_policies; all were
+# fixed rather than baselined, so there is nothing here to carve out.
+[[tool.mypy.overrides]]
+module = ["shared.*"]
+strict = true
 
 [tool.ruff]
 line-length = 100

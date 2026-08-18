@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import logging
 import urllib.error
 import urllib.request
 import uuid
@@ -92,6 +93,14 @@ class CameraResponse(BaseModel):
     space_id: str | None = None
     backend_camera_id: str | None = None
     mapping_pending: bool = False
+    # Explicit Hub-mapping state so an operator can distinguish "registered and
+    # waiting on Hub sync" (pending -- normal right after a technician adds a
+    # camera) from "no mapping and none in flight" (unmapped). Cameras in either
+    # state are deliberately omitted from worker-config, because emitting the
+    # edge-local id where a Hub-issued id belongs is what the Hub rejects with
+    # FACILITY_BINDING_MISMATCH (issue #308). This is an edge-local dashboard
+    # field only; the Hub provisioning contract in contracts/ is untouched.
+    mapping_state: Literal["mapped", "pending", "unmapped"] = "unmapped"
     status: Literal["online", "offline", "starting", "unknown"]
     decode_backend: str | None = None
     fps: float | None = None
@@ -666,6 +675,45 @@ def worker_config(
     return worker_config_snapshot(request)
 
 
+_LOGGER = logging.getLogger(__name__)
+
+
+def _mapping_state(record: dict[str, object]) -> str:
+    """Classify a registry record's Hub mapping into a three-way state.
+
+    ``mapped`` means the Hub issued a canonical id for this camera.
+    ``pending`` means the mapping call has not resolved yet (normal right after
+    registration, before topology sync lands).
+    ``unmapped`` means there is no mapping and none is in flight.
+
+    The edge-local primary key is never a substitute for the Hub-issued id:
+    the Hub rejects an id it never issued with FACILITY_BINDING_MISMATCH, which
+    surfaces on the edge as an opaque relay 502 and gets misread as an auth
+    failure. Absence is reported as absence instead (issue #308).
+    """
+    backend_camera_id = record.get("backend_camera_id")
+    if isinstance(backend_camera_id, str) and backend_camera_id.strip():
+        return "mapped"
+    if bool(record.get("mapping_pending", False)):
+        return "pending"
+    return "unmapped"
+
+
+def _hub_canonical_id(record: dict[str, object]) -> str | None:
+    """Return the Hub-issued canonical id, or None when the record is unmapped.
+
+    Callers that emit an outbound payload MUST treat None as "omit this camera".
+    Inbound lookup paths are free to accept either id (see the heartbeat index
+    in store.py and the offline probe in this module); accepting both on the way
+    in is deliberate tolerance, while emitting the local id on the way out is
+    the defect.
+    """
+    backend_camera_id = record.get("backend_camera_id")
+    if isinstance(backend_camera_id, str) and backend_camera_id.strip():
+        return backend_camera_id
+    return None
+
+
 def worker_config_snapshot(
     request: Request, *, require_available: bool = False
 ) -> dict[str, object]:
@@ -678,7 +726,25 @@ def worker_config_snapshot(
         rtsp_url = record.get("rtsp_url")
         if not isinstance(rtsp_url, str) or not rtsp_url.strip():
             continue
+        # DO NOT exclude unmapped cameras here. worker-config.cameras is the
+        # exact set the worker ingests (worker/runtime/worker.py:1978 feeds it to
+        # build_camera_source_registry), so dropping a camera stops fall
+        # detection for that room entirely. On a live nursing-home edge that is
+        # strictly worse than the issue #308 symptom it was meant to fix, where
+        # the camera is still watched and only the upstream submission is
+        # rejected. The Hub-boundary fix belongs at the relay/report path, not
+        # here -- tracked as a review blocker on this goal.
         canonical_id = str(record.get("backend_camera_id") or record.get("id", ""))
+        if _hub_canonical_id(record) is None:
+            _LOGGER.warning(
+                "worker-config emitting camera %s without a Hub mapping (state=%s)",
+                record.get("id"),
+                _mapping_state(record),
+                extra={
+                    "local_camera_id": record.get("id"),
+                    "mapping_state": _mapping_state(record),
+                },
+            )
         # No site facility stamp: worker defaults missing facility_id to the
         # local wire placeholder "local". space_id is optional registry metadata.
         camera: dict[str, object] = {
@@ -1057,6 +1123,7 @@ def _public_snapshot(
                     "space_id": backend_camera.space_id,
                     "backend_camera_id": backend_camera.camera_id,
                     "mapping_pending": False,
+                    "mapping_state": "mapped",
                     "created_at": backend_camera.created_at or camera["created_at"],
                     "space_name": backend_camera.space_name,
                     "floor_name": backend_camera.floor_name,
@@ -1066,6 +1133,11 @@ def _public_snapshot(
             camera.update(
                 {
                     "mapping_pending": bool(record.get("mapping_pending", False)),
+                    # Explicit three-way state so an operator can tell "waiting on
+                    # Hub sync" (pending, normal right after registration) apart
+                    # from "no mapping and none in flight" (unmapped). A camera in
+                    # either state is omitted from worker-config on purpose.
+                    "mapping_state": _mapping_state(record),
                     "space_name": None,
                     "floor_name": None,
                 }
@@ -1082,6 +1154,7 @@ def _public_snapshot(
                 "space_id": backend_camera.space_id,
                 "backend_camera_id": backend_camera.camera_id,
                 "mapping_pending": True,
+                "mapping_state": "mapped",
                 "status": "unknown",
                 "decode_backend": None,
                 "fps": None,

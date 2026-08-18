@@ -68,6 +68,12 @@ def _client(tmp_path: Path, backend: FakeBackendEvidenceClient, *, enabled: bool
         rtsp_url="rtsp://camera/1",
         space_id="facility-1",
         status="online",
+        # Hub-mapped, which is what every test in this module assumes: they are
+        # about media resolution, descriptor verification, and receipt typing, not
+        # about identity mapping. Clip export addresses the Hub, so an unmapped
+        # camera is refused up front (issue #308) -- that path is pinned separately
+        # by test_export_refused_when_camera_has_no_hub_mapping below.
+        backend_camera_id="cmsnvr-camera-1",
     )
     app.state.camera_registry = registry
     app.state.backend_evidence_client = backend
@@ -215,7 +221,10 @@ def test_ready_relay_resolves_owned_media_by_clip_id_and_returns_typed_receipt(
         ready_request.finalized_at,
     ) == (
         "clip-1",
-        "camera-1",
+        # Hub-issued id, not the edge-local registry id. The outbound clip request
+        # addresses the Hub, and an id the Hub never issued is rejected with
+        # FACILITY_BINDING_MISMATCH (issue #308).
+        "cmsnvr-camera-1",
         (EVENT_ID,),
         2,
         MEDIA_SHA256,
@@ -262,7 +271,7 @@ def test_unavailable_relay_passes_complete_immutable_state_request(tmp_path: Pat
         unavailable_request.event_refs,
         unavailable_request.state_version,
         unavailable_request.reason,
-    ) == ("clip-1", "camera-1", (EVENT_ID,), 3, "CAPTURE_FAILED")
+    ) == ("clip-1", "cmsnvr-camera-1", (EVENT_ID,), 3, "CAPTURE_FAILED")
     with pytest.raises(FrozenInstanceError):
         _set_attribute(unavailable_request, "reason", "CORRUPT")
 
@@ -343,3 +352,40 @@ def test_ready_relay_rejects_missing_media_without_backend_call(
     assert response.status_code == 404
     assert "clip-store" not in response.text
     assert backend.ready_calls == 0
+
+
+def test_export_refused_when_camera_has_no_hub_mapping(tmp_path: Path) -> None:
+    """A clip export for an unmapped camera is refused before any backend call.
+
+    Clip export exists to reach the Hub, so unlike the alert and heartbeat relays
+    there is no local-accept path to fall back to. Sending the edge-local id would
+    be rejected by the Hub with FACILITY_BINDING_MISMATCH, which reaches the edge
+    as an opaque 502 and reads like an authentication failure (issue #308). The
+    edge names the real reason instead, and never contacts the backend.
+    """
+    backend = FakeBackendEvidenceClient()
+    client = _client(tmp_path, backend, enabled=True)
+    # Same app the other tests use, but with the camera's Hub mapping removed, so
+    # only the mapping state differs from the passing cases above.
+    unmapped = CameraRegistryStore(tmp_path / "unmapped.sqlite3")
+    unmapped.create(
+        camera_id="camera-1",
+        label="Camera 1",
+        rtsp_url="rtsp://camera/1",
+        space_id="facility-1",
+        status="online",
+        backend_camera_id=None,
+    )
+    client.app.state.camera_registry = unmapped
+
+    response = client.put(
+        "/api/v1/relay/clips/clip-1",
+        json=_unavailable_payload(),
+        headers={"X-Edge-Relay-Token": TOKEN},
+    )
+
+    assert response.status_code == 409
+    assert "backend mapping" in response.json()["detail"]
+    # The decisive property: the backend was never addressed at all.
+    assert backend.ready_calls == 0
+    assert backend.unavailable_request is None

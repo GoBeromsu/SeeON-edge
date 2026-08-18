@@ -49,6 +49,20 @@ router = APIRouter(tags=["detection-settings"])
 _HHMM_RE = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
 
 
+def _backend_camera_id(record: object) -> str:
+    """Return the Hub-issued canonical id, or "" when the record is unmapped.
+
+    Never falls back to the edge-local registry id: the Hub rejects ids it did
+    not issue with FACILITY_BINDING_MISMATCH (issue #308).
+    """
+    if not isinstance(record, dict):
+        return ""
+    backend_camera_id = record.get("backend_camera_id")
+    if isinstance(backend_camera_id, str) and backend_camera_id.strip():
+        return backend_camera_id
+    return ""
+
+
 class DomainSettingPayload(BaseModel):
     model_config: ClassVar[ConfigDict] = ConfigDict(extra="forbid")
 
@@ -150,6 +164,11 @@ def get_detection_policies(
     registry = getattr(request.app.state, "camera_registry", None)
     if not isinstance(registry, CameraRegistryStore):
         registry = CameraRegistryStore.from_env()
+    # Kept as-is on purpose. Omitting unmapped cameras here drops them from the
+    # resolved policy bundle, which pairs with the worker-config projection that
+    # still serves them; a camera the worker watches but has no policy for is a
+    # second failure mode, not a fix. The issue #308 Hub-boundary fix belongs at
+    # the relay/report path -- tracked as a review blocker on this goal.
     camera_ids = tuple(
         PolicyCameraIdentity(str(record.get("backend_camera_id") or record["id"]))
         for record in registry.snapshot()["cameras"]
