@@ -11,19 +11,21 @@ import numpy as np
 import pytest
 
 from contracts.frame import Frame
-from contracts.observation import FrameObservation
+from contracts.observation import BedRegionCacheState, BedRegionDebugSnapshot, FrameObservation
 from contracts.runner import RunnerProtocol, RunnerResult, pose_result
+from worker.interfaces.output import EventSink
 from worker.pipeline.analytics import CompositeExtractor
 from worker.pipeline.analytics.composite import CompositeResult
 from worker.pipeline.bus import Scheduler
-from worker.pipeline.camera_pipeline import CameraPipelinePump
+from worker.pipeline.camera_pipeline import CameraPipelinePump, EvidenceAttacher
+from worker.pipeline.decision import EventAggregator, IncidentManager
 from worker.pipeline.inference_coordinator import (
     CapabilityInferenceCoordinator,
     InferenceResultSlot,
 )
 from worker.pipeline.perception import GreedyIouTracker, SceneState
 from worker.runtime.telemetry.runtime_diagnostics import WorkerDiagnostics
-from worker.types import FramePacket, ModuleResult
+from worker.types import BusinessEvent, DecisionInput, FramePacket, ModuleResult
 
 
 class _Clock:
@@ -365,3 +367,209 @@ def test_zero_ready_cycle_sleeps_once_instead_of_busy_spinning() -> None:
     coordinator.run()
 
     assert sleeps == [0.005]
+
+
+def _blank_decision_input() -> DecisionInput:
+    return DecisionInput(
+        observation=FrameObservation(),
+        frame_width=2,
+        frame_height=2,
+        live_track_ids=(),
+        time_sec=1.0,
+        frame_index=1,
+        bed_region=BedRegionDebugSnapshot(source=BedRegionCacheState.EMPTY),
+    )
+
+
+class _ZeroEventAnalytics:
+    def process(self, packet: FramePacket, *, prefetched_results: object) -> CompositeResult:
+        del packet, prefetched_results
+        return CompositeResult((), FrameObservation(), _blank_decision_input())
+
+
+def _blank_analytics(camera_id: str) -> CompositeExtractor:
+    return CompositeExtractor(
+        extractors=(),
+        scheduler=Scheduler({}),
+        tracker=GreedyIouTracker(),
+        scene_state=SceneState(camera_id),
+    )
+
+
+@final
+class _CountingZeroEventDecider:
+    def __init__(self) -> None:
+        self.calls: int = 0
+
+    def update(self, input_value: DecisionInput) -> tuple[BusinessEvent, ...]:
+        del input_value
+        self.calls += 1
+        return ()
+
+
+@final
+class _RaisingAnalytics(CompositeExtractor):
+    def process(
+        self, packet: FramePacket, *, prefetched_results: Sequence[ModuleResult] = ()
+    ) -> CompositeResult:
+        del packet, prefetched_results
+        raise RuntimeError("analytics exploded")
+
+
+def _raising_analytics(camera_id: str) -> CompositeExtractor:
+    return _RaisingAnalytics(
+        extractors=(),
+        scheduler=Scheduler({}),
+        tracker=GreedyIouTracker(),
+        scene_state=SceneState(camera_id),
+    )
+
+
+@final
+class _RaisingDecider:
+    def update(self, input_value: DecisionInput) -> tuple[BusinessEvent, ...]:
+        del input_value
+        raise RuntimeError("decision exploded")
+
+
+@final
+class _OneEventDecider:
+    def update(self, input_value: DecisionInput) -> tuple[BusinessEvent, ...]:
+        del input_value
+        return (
+            BusinessEvent(
+                domain="probe",
+                event_type="tick",
+                identity="frame-1",
+                camera_id="camera-a",
+                facility_id="facility-a",
+                time_sec=1.0,
+                probability=1.0,
+            ),
+        )
+
+
+@final
+class _RaisingAttacher:
+    def attach(
+        self,
+        event: BusinessEvent,
+        packet: FramePacket,
+        observation: FrameObservation,
+    ) -> BusinessEvent:
+        del event, packet, observation
+        raise RuntimeError("evidence attach exploded")
+
+
+@final
+class _RaisingSink:
+    def emit(self, event: BusinessEvent) -> None:
+        del event
+        raise RuntimeError("sink exploded")
+
+
+@final
+class _NoEventSink:
+    def emit(self, event: BusinessEvent) -> None:
+        del event
+        raise AssertionError("no events expected")
+
+
+def _zero_event_aggregator(decider: _CountingZeroEventDecider | None = None) -> EventAggregator:
+    return EventAggregator(
+        deciders=() if decider is None else (decider,),
+        incidents=IncidentManager(),
+    )
+
+
+def _one_event_aggregator() -> EventAggregator:
+    return EventAggregator(deciders=(_OneEventDecider(),), incidents=IncidentManager())
+
+
+def _raising_decision() -> EventAggregator:
+    return EventAggregator(deciders=(_RaisingDecider(),), incidents=IncidentManager())
+
+
+def _pump_one_frame(
+    *,
+    camera_id: str = "camera-a",
+    analytics: CompositeExtractor | None = None,
+    decision: EventAggregator | None = None,
+    sink: EventSink | None = None,
+    diagnostics: WorkerDiagnostics | None = None,
+    evidence_attacher: EvidenceAttacher | None = None,
+) -> CameraPipelinePump:
+    pump = CameraPipelinePump(
+        camera_id,
+        InferenceResultSlot(),
+        _blank_analytics(camera_id) if analytics is None else analytics,
+        _zero_event_aggregator() if decision is None else decision,
+        _NoEventSink() if sink is None else sink,
+        diagnostics=diagnostics,
+        evidence_attacher=evidence_attacher,
+    )
+    pump._pump_one(
+        _packet(camera_id, 1),
+        ModuleResult("pose", pose_result((), ()), 0.0, "pose"),
+    )
+    return pump
+
+
+def test_zero_event_decision_path_emits_nothing() -> None:
+    """Baseline: a completed no-event decision still emits nothing.
+
+    Recorded green before production edits. After the additive counter lands,
+    the unchanged contract is still: decision.update() ran once and the sink
+    was never invoked.
+    """
+    decider = _CountingZeroEventDecider()
+    _pump_one_frame(decision=_zero_event_aggregator(decider))
+    assert decider.calls == 1
+
+
+def test_zero_event_decision_records_one_detection_completion() -> None:
+    diagnostics = WorkerDiagnostics()
+    _pump_one_frame(diagnostics=diagnostics)
+    snapshot = diagnostics.snapshot().cameras
+    assert len(snapshot) == 1
+    assert snapshot[0].camera_id == "camera-a"
+    assert snapshot[0].decision_completed == 1
+
+
+def test_analytics_or_decision_error_records_zero_detection_completions() -> None:
+    analytics_diagnostics = WorkerDiagnostics()
+    with pytest.raises(RuntimeError, match="analytics exploded"):
+        _pump_one_frame(
+            analytics=_raising_analytics("camera-a"),
+            diagnostics=analytics_diagnostics,
+        )
+    assert analytics_diagnostics.snapshot().cameras == ()
+
+    decision_diagnostics = WorkerDiagnostics()
+    with pytest.raises(RuntimeError, match="decision exploded"):
+        _pump_one_frame(
+            decision=_raising_decision(),
+            diagnostics=decision_diagnostics,
+        )
+    assert decision_diagnostics.snapshot().cameras == ()
+
+
+def test_post_decision_evidence_or_sink_error_keeps_detection_completion() -> None:
+    attach_diagnostics = WorkerDiagnostics()
+    with pytest.raises(RuntimeError, match="evidence attach exploded"):
+        _pump_one_frame(
+            decision=_one_event_aggregator(),
+            diagnostics=attach_diagnostics,
+            evidence_attacher=_RaisingAttacher(),
+            sink=_NoEventSink(),
+        )
+    assert attach_diagnostics.snapshot().cameras[0].decision_completed == 1
+
+    sink_diagnostics = WorkerDiagnostics()
+    with pytest.raises(RuntimeError, match="sink exploded"):
+        _pump_one_frame(
+            decision=_one_event_aggregator(),
+            diagnostics=sink_diagnostics,
+            sink=_RaisingSink(),
+        )
+    assert sink_diagnostics.snapshot().cameras[0].decision_completed == 1

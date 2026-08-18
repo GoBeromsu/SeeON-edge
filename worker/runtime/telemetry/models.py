@@ -156,6 +156,10 @@ class CameraDiagnosticsSnapshot:
     # Local-only (Todo 17): populated only for a camera running the opt-in
     # nvidia-device-experimental profile.
     device_residency: DeviceResidencyDiagnostics | None = None
+    # Local-only (issue #330): monotonic per-camera count of successful
+    # decision.update() returns. Zero-event completions increment; later
+    # evidence/sink failures do not retract the increment.
+    decision_completed: int = 0
     inference: CameraInferenceTelemetry | None = None
     batch_sizes: tuple[tuple[int, int], ...] = ()
     forward_p50_sec: float = 0.0

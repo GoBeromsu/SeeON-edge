@@ -32,12 +32,23 @@ class RelayDecodePayload(TypedDict):
     updated_at_sec: float
 
 
+class RelayDetectionPayload(TypedDict):
+    """Optional per-camera detection counters on the runtime-status wire."""
+
+    expected: bool
+    inference_admitted: int
+    inference_succeeded: int
+    inference_overwritten: int
+    decision_completed: int
+
+
 class RelayCameraPayload(TypedDict):
     """Existing per-camera runtime-status wire fields."""
 
     camera_id: str
     decode: RelayDecodePayload
     measured_fps: NotRequired[float]
+    detection: NotRequired[RelayDetectionPayload]
 
 
 class RelayClipRecorderPayload(TypedDict):
@@ -93,10 +104,28 @@ class RelayRuntimeStatusPayload(TypedDict):
     worker: NotRequired[RelayWorkerPayload]
 
 
+def detection_payload(
+    *,
+    expected: bool,
+    inference_admitted: int,
+    inference_succeeded: int,
+    inference_overwritten: int,
+    decision_completed: int,
+) -> RelayDetectionPayload:
+    return RelayDetectionPayload(
+        expected=expected,
+        inference_admitted=inference_admitted,
+        inference_succeeded=inference_succeeded,
+        inference_overwritten=inference_overwritten,
+        decision_completed=decision_completed,
+    )
+
+
 def camera_payload(
     camera_id: str,
     selection: DecodeSelection,
     measured_fps: float | None,
+    detection: RelayDetectionPayload | None = None,
 ) -> RelayCameraPayload:
     payload = RelayCameraPayload(
         camera_id=camera_id,
@@ -110,6 +139,8 @@ def camera_payload(
     )
     if measured_fps is not None:
         payload["measured_fps"] = measured_fps
+    if detection is not None:
+        payload["detection"] = detection
     return payload
 
 
@@ -153,9 +184,11 @@ __all__ = [
     "RelayClipExportPayload",
     "RelayClipRecorderPayload",
     "RelayDecodePayload",
+    "RelayDetectionPayload",
     "RelayGpuPayload",
     "RelayRuntimeStatusPayload",
     "RelayWorkerPayload",
     "camera_payload",
+    "detection_payload",
     "facility_payload",
 ]

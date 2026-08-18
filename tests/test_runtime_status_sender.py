@@ -8,6 +8,10 @@ import pytest
 
 from contracts.decode_diagnostics import DecodeSelection
 from contracts.observation import BedRegionCacheState
+from worker.pipeline.inference_coordinator import (
+    CameraInferenceTelemetry,
+    InferenceTelemetrySnapshot,
+)
 from worker.pipeline.perception.scene_state import BedRegionCacheCounters
 from worker.runtime.telemetry.runtime_diagnostics import WorkerDiagnostics
 from worker.runtime.telemetry.runtime_status_sender import (
@@ -63,6 +67,19 @@ class _UnusedTransport:
         raise AssertionError("transport.send must not be called before start()")
 
 
+class _StaticInferenceSource:
+    def __init__(self, cameras: dict[str, CameraInferenceTelemetry]) -> None:
+        self._cameras = cameras
+
+    def snapshot(self) -> InferenceTelemetrySnapshot:
+        return InferenceTelemetrySnapshot(
+            cameras=self._cameras,
+            batch_sizes={},
+            forward_p50_sec=0.0,
+            forward_p95_sec=0.0,
+        )
+
+
 def _diagnostics() -> WorkerDiagnostics:
     diagnostics = WorkerDiagnostics()
     diagnostics.update_decode(
@@ -103,10 +120,47 @@ def test_sender_start_delivers_queued_snapshot_via_background_thread() -> None:
                 "last_reason": "spawn_failed",
                 "updated_at_sec": 1.0,
             },
+            "detection": {
+                "expected": False,
+                "inference_admitted": 0,
+                "inference_succeeded": 0,
+                "inference_overwritten": 0,
+                "decision_completed": 0,
+            },
         }
     ]
     assert sender.generation == 7
     assert sender.is_alive is False
+
+
+def test_sender_payload_projects_inference_and_decision_counters() -> None:
+    diagnostics = _diagnostics()
+    diagnostics.register_inference(
+        _StaticInferenceSource(
+            {
+                "camera-a": CameraInferenceTelemetry(
+                    admitted=5,
+                    overwritten=1,
+                    inferred=4,
+                    queue_age_sec=0.2,
+                )
+            }
+        )
+    )
+    diagnostics.record_detection_completed("camera-a")
+    diagnostics.record_detection_completed("camera-a")
+    transport = _RecordingTransport()
+    sender = RuntimeStatusSender(diagnostics, "facility-a", transport)
+
+    assert sender.publish_once() is True
+    detection = transport.payloads[0]["cameras"][0].get("detection")
+    assert detection == {
+        "expected": True,
+        "inference_admitted": 5,
+        "inference_succeeded": 4,
+        "inference_overwritten": 1,
+        "decision_completed": 2,
+    }
 
 
 def test_sender_retries_with_backoff_and_recovers() -> None:
