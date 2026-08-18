@@ -755,13 +755,15 @@ def worker_config_snapshot(
         space_id = record.get("space_id")
         if isinstance(space_id, str) and space_id.strip():
             camera["space_id"] = space_id
-        fps = record.get("fps") or _default_camera_fps()
+        # fps/frame_stride/decode_backend are per-camera registry values only.
+        # The facility-wide ML_DEFAULT_* environment fallbacks were retired
+        # (see core.config._RETIRED_BACKEND_ENV, which fails boot on them);
+        # the registry is the sole authority, so an unset value is simply
+        # omitted and the worker keeps its own default.
+        fps = record.get("fps")
         if fps is not None:
             camera["fps"] = fps
-        stride = _default_frame_stride()
-        if stride is not None:
-            camera["frame_stride"] = stride
-        decode_backend = record.get("decode_backend") or _default_decode_backend()
+        decode_backend = record.get("decode_backend")
         if decode_backend is not None:
             camera["decode_backend"] = decode_backend
         bed_zone = _lookup_bed_zone(bed_zones, canonical_id, record.get("id"))
@@ -1289,29 +1291,6 @@ def _bearer_token(value: str | None) -> str | None:
     return token or None
 
 
-def _default_camera_fps() -> float | None:
-    """Facility-wide processed FPS for live camera streams (worker default 5.0).
-
-    Set ML_DEFAULT_CAMERA_FPS to smooth the live MJPEG/overlay view (detection
-    runs at this rate). Unset -> worker keeps its 5.0 default. GPU headroom
-    permitting, 12-15 gives a noticeably smoother wall without corruption.
-    """
-    return None
-
-
-def _default_frame_stride() -> int | None:
-    """Facility-wide detection cadence divisor (worker default 1 -- every frame).
-
-    Set ML_DEFAULT_FRAME_STRIDE to decouple detection cadence from live view:
-    the worker still decodes/serves the live MJPEG view at fps (see
-    ML_DEFAULT_CAMERA_FPS), but only runs pose+person inference every Nth
-    decoded frame. Unset -> worker keeps its stride-1 default (detect every
-    frame). Lets deployments raise fps for a smoother live wall without
-    overloading inference-bound hardware.
-    """
-    return None
-
-
 def _normalize_floor(value: object) -> int | None:
     """Validate a user-set floor override (issue #155).
 
@@ -1370,16 +1349,6 @@ def _normalize_fps(value: object) -> float | None:
     if fps <= 0:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="invalid fps")
     return fps
-
-
-def _default_decode_backend() -> str | None:
-    """Facility-wide default decode backend (worker default: auto = NVDEC->CPU fallback).
-
-    Set ML_DEFAULT_DECODE_BACKEND to auto|nvdec|opencv|cpu to steer cameras that
-    do not set a per-camera decode_backend. Unset or invalid -> None (worker
-    keeps its own "auto" default).
-    """
-    return None
 
 
 def _validated_rtsp_url(rtsp_url: str) -> str:
