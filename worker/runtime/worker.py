@@ -1026,7 +1026,9 @@ class WorkerRuntime:
         )
         if self._mjpeg_server is None:
             LOGGER.warning(
-                "live view enabled but its server could not bind",
+                "live view enabled but its server could not bind: host=%s port=%d",
+                self._mjpeg_config.host,
+                self._mjpeg_config.port,
                 extra={
                     "host": self._mjpeg_config.host,
                     "port": self._mjpeg_config.port,
@@ -1035,8 +1037,10 @@ class WorkerRuntime:
         else:
             surface = "live view" if self._live_view is not None else "derivative control"
             LOGGER.info(
-                "%s server bound",
+                "%s server bound: host=%s port=%d",
                 surface,
+                self._mjpeg_config.host,
+                self._mjpeg_server.port,
                 extra={
                     "host": self._mjpeg_config.host,
                     "port": self._mjpeg_config.port,

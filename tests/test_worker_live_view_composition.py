@@ -27,7 +27,7 @@ from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, final
+from typing import Literal, cast, final
 
 import numpy as np
 import pytest
@@ -206,6 +206,18 @@ def _running(runtime: WorkerRuntime, ready: Callable[[], bool]) -> Iterator[None
     assert not thread.is_alive(), "worker thread outlived stop()"
 
 
+def _bound_endpoint(listener: socket.socket) -> tuple[str, int]:
+    raw_name = cast(object, listener.getsockname())
+    rendered = f"{raw_name!r}"
+    prefix = "('"
+    separator = "', "
+    if not (rendered.startswith(prefix) and separator in rendered and rendered.endswith(")")):
+        raise TypeError("socket endpoint must render as a host/port tuple")
+    remainder = rendered[len(prefix) : -1]
+    host_text, port_text = remainder.split(separator, 1)
+    return host_text, int(port_text)
+
+
 def _get(port: int, path: str, *, token: str | None = "relay-token") -> tuple[int, bytes]:
     connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
     try:
@@ -311,7 +323,14 @@ def test_enabled_worker_binds_the_live_view_port_and_serves_its_cameras(
     # Issue #113: a successful bind must also be logged -- the disabled path
     # gained a matching "not started" line, so the enabled+bound path must
     # not be the one left silent.
-    assert any("live view server bound" in record.message for record in caplog.records)
+    bound_records = [
+        record
+        for record in caplog.records
+        if "live view server bound" in record.message
+    ]
+    assert bound_records
+    assert any("host=127.0.0.1" in record.getMessage() for record in bound_records)
+    assert any(f"port={port}" in record.getMessage() for record in bound_records)
 
 
 def test_disabled_live_view_still_opens_production_derivative_control(
@@ -340,7 +359,56 @@ def test_disabled_live_view_still_opens_production_derivative_control(
                 pass
 
     assert runtime._mjpeg_server is None  # noqa: SLF001
-    assert any("derivative control server bound" in record.message for record in caplog.records)
+    bound_records = [
+        record for record in caplog.records if "derivative control server bound" in record.message
+    ]
+    assert bound_records
+    assert any("host=127.0.0.1" in record.getMessage() for record in bound_records)
+    assert any(f"port={port}" in record.getMessage() for record in bound_records)
+
+
+def test_occupied_live_view_port_logs_endpoint_and_preserves_socket(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    _stub_heartbeat_transport(monkeypatch)
+    occupied = socket.socket()
+    occupied.bind(("127.0.0.1", 0))
+    occupied.listen()
+    try:
+        host, port = _bound_endpoint(occupied)
+        runtime = _runtime(
+            _config("camera-a", dev_mjpeg={"enabled": True, "host": host, "port": port}),
+            tmp_path,
+            {},
+        )
+        caplog.set_level("WARNING", logger="worker.runtime.worker")
+        thread = threading.Thread(target=runtime.run, daemon=True)
+        thread.start()
+        try:
+            assert _wait_for(
+                lambda: any(
+                    "live view enabled but its server could not bind" in record.message
+                    for record in caplog.records
+                )
+            )
+            with socket.create_connection((host, port), timeout=2.0):
+                pass
+        finally:
+            runtime.stop()
+            thread.join(timeout=10)
+        assert not thread.is_alive()
+    finally:
+        occupied.close()
+
+    failures = [
+        record
+        for record in caplog.records
+        if "live view enabled but its server could not bind" in record.message
+    ]
+    assert failures
+    record = failures[-1]
+    assert f"host={host}" in record.getMessage()
+    assert f"port={port}" in record.getMessage()
 
 
 def test_either_switch_alone_enables_the_live_view(tmp_path: Path) -> None:
