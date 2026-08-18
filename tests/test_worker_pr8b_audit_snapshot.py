@@ -88,6 +88,18 @@ class _StubSnapshotRenderer:
         return b"jpeg-bytes"
 
 
+@final
+class _FailingSnapshotRenderer:
+    def encode_jpeg_bounded(
+        self,
+        packet: FramePacket,
+        observation: FrameObservation,
+        debug_snapshots: tuple[object, ...] = (),
+    ) -> bytes | None:
+        del packet, observation, debug_snapshots
+        raise RuntimeError("untrusted payload should not be logged")
+
+
 def test_overlay_renderer_encode_jpeg_bounded_returns_size_limited_bytes() -> None:
     jpeg = OverlayRenderer().encode_jpeg_bounded(
         _packet(np.zeros((480, 640, 3), dtype=np.uint8)),
@@ -135,6 +147,26 @@ def test_alert_evidence_attacher_attaches_audit_and_snapshot_for_alert_events(
 
     assert attached.audit == audit
     assert attached.snapshot_jpeg == b"jpeg-bytes"
+
+
+def test_alert_evidence_attacher_fail_open_warning_identifies_event(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    attacher = AlertEvidenceAttacher(
+        domain_audit={"fall": {"clock_source": "edge_wall_clock"}},
+        overlay_renderer=_FailingSnapshotRenderer(),
+    )
+    packet = _packet(np.zeros((64, 64, 3), dtype=np.uint8))
+    event = _event("fall", "tick")
+
+    with caplog.at_level("WARNING"):
+        attached = attacher.attach(event, packet, FrameObservation())
+
+    assert attached is event
+    record = caplog.records[-1]
+    assert "camera_id=camera-1" in record.getMessage()
+    assert "domain=fall" in record.getMessage()
+    assert "untrusted payload" not in record.getMessage()
 
 
 def test_alert_evidence_attacher_adds_runtime_manifest_to_admitted_event_audit() -> None:
