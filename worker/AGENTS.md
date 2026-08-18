@@ -1,7 +1,8 @@
 # worker
 
 RTSP inference client: ingest, bounded bus, extract, decide, evidence, one-way relay egress.
-Image `ml-worker`. Sole command: `python -m worker`.
+Image `ml-worker`. Sole production command: `python -m worker`.
+Offline QA/replay uses `python -m worker.replay`; never wire it into production startup.
 
 ## Layers
 
@@ -51,6 +52,7 @@ Read the nearest `AGENTS.md` before changing that package.
 | `runtime/worker.py` | composition root |
 | `runtime/bootstrap.py` | named stages |
 | `runtime/profile/` | `ML_WORKER_PROFILE` -> `(device, decode, encode)` |
+| `replay/` | offline QA/replay CLI and deterministic reruns |
 
 New seam: Protocol plus two implementations, or one plus a test double.
 Keep new pure-code modules at or below 250 logical LOC. Split by port or stage.
