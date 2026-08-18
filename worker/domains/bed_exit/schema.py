@@ -7,7 +7,7 @@ from contracts.observation import BedRegionDebugSnapshot, BoundingBox
 from shared.detection_policies import BED_EXIT_POLICY_V1_DEFAULT
 from worker.domains.bed_exit.night_window import NightWindow
 
-BedOccupancy = Literal["empty", "occupied", "exit"]
+BedOccupancy = Literal["empty", "occupied", "exit", "covered", "unknown"]
 
 
 class _BedExitConfigurationError(ValueError):
@@ -60,6 +60,8 @@ class BedExitDebugSnapshot:
     statuses: tuple[BedStatus, ...]
     events: tuple[BedExitEvent, ...] = field(default_factory=tuple)
     bed_region: BedRegionDebugSnapshot | None = None
+    stale: bool = False
+    observation_age_sec: float | None = None
 
 
 __all__ = [

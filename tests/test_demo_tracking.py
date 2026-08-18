@@ -118,20 +118,23 @@ class TestGreedyIouTracker:
         b = _box(0, 0, 100, 100)
         (orig_id,) = tracker.update((b,))
 
-        # Miss max_misses+1 frames to trigger eviction (misses > max_misses).
-        tracker.update(())  # misses=1
-        tracker.update(())  # misses=2
-        tracker.update(())  # misses=3 > 2 → evicted
+        # Three observed-empty frames trigger eviction (misses > max_misses).
+        tracker.observe(())  # misses=1
+        tracker.observe(())  # misses=2
+        tracker.observe(())  # misses=3 > 2 → evicted
+        assert tracker.live_ids == frozenset()
 
         (new_id,) = tracker.update((b,))
         assert new_id != orig_id
+        assert tracker.live_ids == frozenset({new_id})
 
     def test_evicted_id_not_in_live_ids(self) -> None:
         """live_ids does not contain evicted track ids."""
         tracker = GreedyIouTracker(max_misses=1)
         (tid,) = tracker.update((_box(0, 0, 100, 100),))
-        tracker.update(())  # misses=1
-        tracker.update(())  # misses=2 > 1 → evicted
+        tracker.observe(())  # misses=1
+        tracker.observe(())  # misses=2 > 1 → evicted
+        assert tracker.live_ids == frozenset()
         assert tid not in tracker.live_ids
 
     def test_two_crossing_people_keep_distinct_ids(self) -> None:
