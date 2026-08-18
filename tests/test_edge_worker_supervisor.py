@@ -36,6 +36,7 @@ import pytest
 
 import worker.runtime.worker as worker_module
 from contracts.frame import Frame
+from contracts.runner import pose_result
 from shared.events.evidence_http_transport import HttpResult
 from worker.pipeline.analytics import CompositeExtractor
 from worker.pipeline.bus import BoundedFrameBus, Scheduler
@@ -45,7 +46,7 @@ from worker.pipeline.perception import GreedyIouTracker, SceneState
 from worker.runtime.config import CameraRuntimeConfig, WorkerConfig
 from worker.runtime.telemetry.runtime_diagnostics import WorkerDiagnostics
 from worker.runtime.worker import HeartbeatReporter
-from worker.types import BusinessEvent, FramePacket
+from worker.types import BusinessEvent, FramePacket, ModuleResult
 
 
 def _config() -> tuple[WorkerConfig, CameraRuntimeConfig]:
@@ -169,8 +170,9 @@ def test_camera_pipeline_pump_updates_measured_fps_after_two_processed_frames() 
         diagnostics=diagnostics,
     )
 
-    pump._pump_one(_packet("camera-1", 0))
-    pump._pump_one(_packet("camera-1", 1))
+    pose = ModuleResult("pose", pose_result((), ()), 0.0, "pose")
+    pump._pump_one(_packet("camera-1", 0), pose)
+    pump._pump_one(_packet("camera-1", 1), pose)
 
     camera = diagnostics.to_payload("facility-1", None, 1)["cameras"][0]
     assert camera["measured_fps"] is not None

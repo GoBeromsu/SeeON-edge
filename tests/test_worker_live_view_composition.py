@@ -23,7 +23,7 @@ import http.client
 import socket
 import threading
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -35,13 +35,14 @@ from numpy.typing import NDArray
 
 import worker.runtime.worker as worker_module
 from contracts.frame import Frame
-from contracts.runner import Image, RunnerResult
+from contracts.runner import Image, RunnerResult, pose_result
 from shared.events.evidence_http_transport import HttpResult
 from worker.domains.module_definition import ComponentBinding
 from worker.pipeline.analytics import CompositeExtractor
 from worker.pipeline.bus import BoundedFrameBus, Scheduler
 from worker.pipeline.camera_pipeline import CameraPipelinePump
 from worker.pipeline.decision import EventAggregator, IncidentManager
+from worker.pipeline.inference_coordinator import CoordinatedInference, InferenceResultSlot
 from worker.pipeline.ingest.lifecycle import IngestReporter
 from worker.pipeline.ingest.probe import RTSPProbeError, RTSPProbeResult
 from worker.pipeline.output.live_view import LatestFrameStore, LiveViewSubscriber
@@ -51,7 +52,7 @@ from worker.runtime.config import CameraRuntimeConfig, WorkerConfig
 from worker.runtime.lease import GpuLease
 from worker.runtime.profile.registry import VerifyResult
 from worker.runtime.worker import WorkerRuntime
-from worker.types import BusinessEvent, DecisionInput, FramePacket
+from worker.types import BusinessEvent, DecisionInput, FramePacket, ModuleResult
 
 
 @dataclass(frozen=True, slots=True)
@@ -95,6 +96,12 @@ def _compiled_binding_for_task(task: str) -> ComponentBinding:
 class _FakeServingClient:
     def create(self, task: str, **_options: object) -> _FakeRunner:
         return _FakeRunner(task)
+
+    def infer_batch(
+        self, task: str, frames: Sequence[FramePacket], **_options: object
+    ) -> tuple[RunnerResult, ...]:
+        assert task == "pose"
+        return tuple(pose_result((), ()) for _frame in frames)
 
 
 @final
@@ -500,9 +507,17 @@ def _pump(
     *,
     debug_snapshots_provider: Callable[[int], tuple[object, ...]] | None = None,
 ) -> CameraPipelinePump:
+    packet = bus.inference.take(timeout_sec=0)
+    assert packet is not None
+    results = InferenceResultSlot()
+    results.publish(
+        CoordinatedInference(
+            packet, ModuleResult("pose", pose_result((), ()), 0.0, "pose")
+        )
+    )
     return CameraPipelinePump(
         "camera-a",
-        bus.inference,
+        results,
         _blank_analytics("camera-a"),
         EventAggregator(deciders=(_NoDecider(),), incidents=IncidentManager()),
         _NullSink(),

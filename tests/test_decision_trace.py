@@ -14,6 +14,7 @@ from contracts.observation import (
     BoundingBox,
     FrameObservation,
 )
+from contracts.runner import pose_result
 from shared.detection_policies import FallPolicyV1, make_effective_policy
 from shared.edge_db.migrator import migrate_database
 from worker.domains.bed_exit import BedExitConfig, BedExitMonitor
@@ -28,7 +29,7 @@ from worker.pipeline.trace import (
     TraceIdentity,
     TraceRetentionPolicy,
 )
-from worker.types import DecisionInput, FramePacket
+from worker.types import DecisionInput, FramePacket, ModuleResult
 
 RUNTIME_MANIFEST_SHA256 = "a" * 64
 COMPONENT_SHA256 = "b" * 64
@@ -204,7 +205,7 @@ def test_real_camera_pump_captures_before_emitting_the_admitted_event(
     result = CompositeResult((), decision_input.observation, decision_input)
 
     class _Analytics:
-        def process(self, _packet: FramePacket) -> CompositeResult:
+        def process(self, _packet: FramePacket, **_kwargs: object) -> CompositeResult:
             return result
 
     class _Sink:
@@ -235,7 +236,9 @@ def test_real_camera_pump_captures_before_emitting_the_admitted_event(
         trace_writer=writer,
     )
     try:
-        pump._pump_one(_packet())  # noqa: SLF001
+        pump._pump_one(  # noqa: SLF001
+            _packet(), ModuleResult("pose", pose_result((), ()), 0.0, "pose")
+        )
     finally:
         writer.stop()
 

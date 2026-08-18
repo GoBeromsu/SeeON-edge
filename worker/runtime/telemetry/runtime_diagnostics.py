@@ -25,6 +25,7 @@ from worker.runtime.telemetry.models import (
     DecodeBackendObservability,
     DeviceResidencyDiagnostics,
     EncoderLifecycleSnapshot,
+    InferenceMetricsSource,
     InvalidStageTimingError,
     RuntimeDiagnosticsSnapshot,
     StageTimingSnapshot,
@@ -67,6 +68,7 @@ class WorkerDiagnostics:
         self._measured_fps_by_camera: dict[str, tuple[float, float | None]] = {}
         self._stage_timings: dict[str, dict[str, StageTimingAccumulator]] = {}
         self._buses: dict[str, tuple[BusMetricsSource, tuple[str, ...]]] = {}
+        self._inference: InferenceMetricsSource | None = None
         self._bed_region_by_camera: dict[str, BedRegionDiagnostics] = {}
         self._bed_exit_scoring_by_camera: dict[str, BedExitScoringDiagnostics] = {}
         self._device_residency_by_camera: dict[str, DeviceResidencyDiagnostics] = {}
@@ -302,6 +304,10 @@ class WorkerDiagnostics:
         with self._lock:
             self._buses[camera_id] = (bus, subscriptions)
 
+    def register_inference(self, source: InferenceMetricsSource) -> None:
+        with self._lock:
+            self._inference = source
+
     def update_encoder_lifecycle(self, snapshot: EncoderLifecycleSnapshot) -> None:
         with self._lock:
             self._encoder = EncoderLifecycleSnapshot(
@@ -321,6 +327,7 @@ class WorkerDiagnostics:
                 for camera_id, stages in self._stage_timings.items()
             }
             buses = dict(self._buses)
+            inference = None if self._inference is None else self._inference.snapshot()
             encoder = self._encoder
             decode_backend_by_camera = dict(self._decode_backend_by_camera)
             encode_by_camera = dict(self._encode_by_camera)
@@ -337,6 +344,7 @@ class WorkerDiagnostics:
                 | set(bed_region_by_camera)
                 | set(bed_exit_scoring_by_camera)
                 | set(device_residency_by_camera)
+                | (set() if inference is None else set(inference.cameras))
             )
         cameras = tuple(
             CameraDiagnosticsSnapshot(
@@ -351,6 +359,18 @@ class WorkerDiagnostics:
                 bed_region=bed_region_by_camera.get(camera_id),
                 bed_exit_scoring=bed_exit_scoring_by_camera.get(camera_id),
                 device_residency=device_residency_by_camera.get(camera_id),
+                inference=(
+                    None if inference is None else inference.cameras.get(camera_id)
+                ),
+                batch_sizes=(
+                    () if inference is None else tuple(inference.batch_sizes.items())
+                ),
+                forward_p50_sec=(
+                    0.0 if inference is None else inference.forward_p50_sec
+                ),
+                forward_p95_sec=(
+                    0.0 if inference is None else inference.forward_p95_sec
+                ),
             )
             for camera_id in sorted(camera_ids)
         )

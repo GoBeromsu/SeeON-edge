@@ -1,4 +1,4 @@
-"""Per-camera consume loop: ``bus.inference`` -> analytics -> decision -> output.
+"""Per-camera result loop: coordinated pose -> analytics -> decision -> output.
 
 Pure wiring stage. Business math stays where it already lives -- extraction
 and tracking in ``analytics`` (:class:`CompositeExtractor`, itself gated by
@@ -21,12 +21,12 @@ from typing import Any, Final, Protocol, final
 
 from contracts.observation import FrameObservation
 from worker.adapters.model.errors import FatalAcceleratorError
-from worker.interfaces.bus import FrameSubscription
 from worker.interfaces.output import EventSink
 from worker.pipeline.analytics import CompositeExtractor
 from worker.pipeline.decision import EventAggregator
+from worker.pipeline.inference_coordinator import InferenceResultSlot
 from worker.pipeline.trace import BoundedTraceWriter, TraceCapture
-from worker.types import BusinessEvent, FramePacket
+from worker.types import BusinessEvent, FramePacket, ModuleResult
 
 LOGGER: Final = logging.getLogger(__name__)
 DEFAULT_POLL_TIMEOUT_SEC: Final = 0.5
@@ -72,9 +72,11 @@ class LiveViewPublisher(Protocol):
 
 @final
 class CameraPipelinePump:
-    """Drive one camera's inference subscription through decision to output.
+    """Drive one camera's bounded inference-result slot to output.
 
-    ``analytics.process`` already gates extraction by the camera's
+    The shared coordinator owns pose inference; this pump remains the sole
+    owner of per-camera analytics, tracker, scene, and domain mutation.
+    ``analytics.process`` gates remaining extraction by the camera's
     ``Scheduler`` (only due modules run; every packet still advances the
     tracker/scene state). This loop forwards every packet taken from
     ``subscription`` through it, then through ``decision.update``, emitting
@@ -84,7 +86,7 @@ class CameraPipelinePump:
     def __init__(
         self,
         camera_id: str,
-        subscription: FrameSubscription,
+        results: InferenceResultSlot,
         analytics: CompositeExtractor,
         decision: EventAggregator,
         sink: EventSink,
@@ -99,7 +101,7 @@ class CameraPipelinePump:
         trace_writer: BoundedTraceWriter | None = None,
     ) -> None:
         self._camera_id = camera_id
-        self._subscription = subscription
+        self._results = results
         self._analytics = analytics
         self._decision = decision
         self._sink = sink
@@ -124,11 +126,12 @@ class CameraPipelinePump:
 
     def run(self) -> None:
         while not self._stop_event.is_set() and not self._frames_exhausted():
-            packet = self._subscription.take(timeout_sec=self._poll_timeout_sec)
-            if packet is None:
+            coordinated = self._results.take(timeout_sec=self._poll_timeout_sec)
+            if coordinated is None:
                 continue
+            packet = coordinated.packet
             try:
-                self._pump_one(packet)
+                self._pump_one(packet, coordinated.pose)
             except FatalAcceleratorError:
                 raise
             except Exception as error:  # noqa: BLE001 - per-camera boundary
@@ -150,9 +153,9 @@ class CameraPipelinePump:
     def _frames_exhausted(self) -> bool:
         return self._max_frames is not None and self.processed_count >= self._max_frames
 
-    def _pump_one(self, packet: FramePacket) -> None:
+    def _pump_one(self, packet: FramePacket, pose: ModuleResult) -> None:
         self._record_measured_fps()
-        result = self._analytics.process(packet)
+        result = self._analytics.process(packet, prefetched_results=(pose,))
         self._publish_live_view(packet, result.observation)
         events = self._decision.update(result.decision_input)
         if self._trace_capture is not None and self._trace_writer is not None:

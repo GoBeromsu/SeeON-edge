@@ -1,26 +1,9 @@
 """serving seam batch-input evolution contract (ADR-0002, acceptance 5).
 
-The seam defines a typed batched-inference swap point (BatchServingClient) for
-50-camera scale; the in-process client stays single-frame (ServingClient) and
-does NOT implement the batch contract yet (batching backend deferred).
-
-The edge original's other three tests are superseded, not ported — all three
-protocol-satisfaction/subset checks are covered by
-tests/test_worker_model_serving.py:99-102
-(test_batch_serving_client_remains_a_pure_deferred_protocol), which asserts
-issubclass(BatchServingClient, ServingClient), that BatchServingClient is
-still a pure Protocol (``_is_protocol`` is True), and that "infer_batch" is
-its own attribute (a stricter check than the edge original's
-``hasattr(BatchServingClient, "infer_batch")``); and by
-tests/test_worker_model_serving.py:56-61
-(test_in_process_client_satisfies_only_the_single_item_protocol), which
-asserts isinstance(InProcessServingClient(...), ServingClient) and
-not isinstance(InProcessServingClient(...), BatchServingClient).
-
-Only the fourth edge test survives: it exercises an independent, non-registry
-fake client, proving BatchServingClient's runtime_checkable Protocol accepts
-any structurally-matching object rather than only worker's own classes — a
-distinct guarantee neither superseding test makes.
+The seam defines a structural batched-inference swap point
+(``BatchServingClient``). The independent fake below proves the runtime
+protocol accepts any matching implementation; production-client behavior is
+covered in ``test_serving_batch_client.py``.
 
 Added for the multi-stream serving work: the ``infer_batch`` RESULT-ORDER
 contract (results[i] belongs to frames[i]). The protocol's return type
@@ -32,6 +15,8 @@ another. See the ``_FakeBatchedPoseClient`` docstring for the shuffle proof.
 from __future__ import annotations
 
 from collections.abc import Sequence
+from contextlib import nullcontext
+from time import monotonic
 from typing import final
 
 import numpy as np
@@ -39,6 +24,11 @@ import numpy as np
 from contracts.frame import Frame
 from contracts.runner import PoseRunnerResult, RunnerProtocol, RunnerResult, pose_result
 from worker.interfaces.serving import BatchServingClient
+from worker.pipeline.bus.subscription import BoundedSubscription
+from worker.pipeline.inference_coordinator import (
+    CapabilityInferenceCoordinator,
+    InferenceResultSlot,
+)
 from worker.types import FramePacket
 
 _ServingOption = str | int | float | bool | None
@@ -144,6 +134,39 @@ def test_infer_batch_result_order_round_trips_camera_id_and_seq() -> None:
     assert tuple(_decode_identity(result) for result in results) == tuple(
         (packet.camera_id, packet.seq) for packet in frames
     )
+
+
+def test_result_order_contract_holds_through_the_real_coordinator_handoff() -> None:
+    client = _FakeBatchedPoseClient()
+    frames = tuple(_packet(f"camera-{index}", seq=100 + index) for index in range(1, 14))
+
+    class _Watchdog:
+        def guard(self, **_kwargs):  # noqa: ANN003, ANN201
+            return nullcontext(1)
+
+    coordinator = CapabilityInferenceCoordinator(client, _Watchdog())  # type: ignore[arg-type]
+    lanes: list[tuple[BoundedSubscription, InferenceResultSlot]] = []
+    try:
+        for frame in frames:
+            source = BoundedSubscription(capacity=1, latest_only=True, clock=monotonic)
+            results = InferenceResultSlot()
+            source.publish(frame)
+            coordinator.register(frame.camera_id, source, results)
+            lanes.append((source, results))
+
+        assert coordinator.run_cycle() == 13
+        delivered = tuple(results.take(timeout_sec=0) for _source, results in lanes)
+        assert all(value is not None for value in delivered)
+        assert tuple(
+            _decode_identity(value.pose.result)  # type: ignore[union-attr]
+            for value in delivered
+            if value is not None
+        ) == tuple((frame.camera_id, frame.seq) for frame in frames)
+        for value in delivered:
+            if value is not None:
+                value.packet.release()
+    finally:
+        coordinator.stop()
 
 
 def test_infer_batch_result_order_is_positional_not_sorted_by_camera_or_seq() -> None:

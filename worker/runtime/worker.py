@@ -66,6 +66,10 @@ from worker.pipeline.bus import BoundedFrameBus, Scheduler
 from worker.pipeline.camera_pipeline import CameraPipelinePump
 from worker.pipeline.decision import EventAggregator, IncidentManager
 from worker.pipeline.decision.event_identity import event_identity_path
+from worker.pipeline.inference_coordinator import (
+    CapabilityInferenceCoordinator,
+    InferenceResultSlot,
+)
 from worker.pipeline.ingest.probe import RTSPProbeError, probe_first_frame
 from worker.pipeline.ingest.registry import SourceRegistry
 from worker.pipeline.output.event_sink import EventClipRecorder, EvidenceEventSink
@@ -287,6 +291,7 @@ class CameraRuntimeContext:
     ingest_loop: _RunnableIngest
     pump: _RunnableIngest
     clip_frame_feeder: ClipFrameFeeder | None = None
+    inference_results: InferenceResultSlot | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -796,6 +801,7 @@ class WorkerRuntime:
         self._warmed_component_ids: frozenset[str] = frozenset()
         self.fault_handler: FaultHandler | None = None
         self.watchdog: InferenceWatchdog | None = None
+        self.inference_coordinator: CapabilityInferenceCoordinator | None = None
         self.cameras: tuple[CameraRuntimeContext, ...] = ()
         self._clip_recorder: ClipRecorder | None = None
         self._packet_repository: PacketRingRepository | None = None
@@ -845,6 +851,7 @@ class WorkerRuntime:
         )
         self._mjpeg_server: MjpegServer | None = None
         self._camera_debug_snapshots: dict[str, Callable[[int], tuple[Any, ...]]] = {}
+        self._camera_inference_results: dict[str, InferenceResultSlot] = {}
 
     def _resolve_mjpeg_config(self) -> MjpegServerConfig:
         """Settle the live view's two switches into one answer.
@@ -1341,12 +1348,23 @@ class WorkerRuntime:
             )
             contexts.extend(built)
         self.cameras = tuple(contexts)
+        coordinator = self._compose_inference_coordinator(graph, watchdog, contexts)
+        self.inference_coordinator = coordinator
         loops = tuple(
             _FaultAwareLoop(item.ingest_loop, handler, boot.profile.name) for item in contexts
         ) + tuple(
             _FaultAwareLoop(item.pump, handler, boot.profile.name, stage="camera_pipeline_pump")
             for item in contexts
         )
+        if coordinator is not None:
+            loops += (
+                _FaultAwareLoop(
+                    coordinator,
+                    handler,
+                    boot.profile.name,
+                    stage="capability_inference_coordinator",
+                ),
+            )
         for loop in loops:
             handler.register_loop(loop)
         # Feeders run independently of the supervisor (see
@@ -1367,6 +1385,34 @@ class WorkerRuntime:
         watchdog.start()
         self._supervisor.start()
         return tuple(outcomes)
+
+    def _compose_inference_coordinator(
+        self,
+        graph: SharedComponentGraph,
+        watchdog: InferenceWatchdog,
+        contexts: Sequence[CameraRuntimeContext],
+    ) -> CapabilityInferenceCoordinator | None:
+        client = graph.batch_serving_client
+        pose = graph.components.get("pose")
+        if client is None or not isinstance(pose, NamedExtractor) or not contexts:
+            return None
+        boot = self._boot
+        if boot is None:
+            raise RuntimeError("inference coordinator requires initialized boot context")
+        coordinator = CapabilityInferenceCoordinator(
+            client,
+            watchdog,
+            stage_timing_recorder=self.diagnostics,
+            pose_output_adapter=pose.output_adapter,
+            pose_device=boot.device,
+        )
+        for context in contexts:
+            results = context.inference_results
+            if results is None:
+                raise RuntimeError("batched pose camera has no result handoff")
+            coordinator.register(context.scene_state.camera_id, context.bus.inference, results)
+        self.diagnostics.register_inference(coordinator)
+        return coordinator
 
     def _apply_runtime_manifest(
         self,
@@ -1466,7 +1512,11 @@ class WorkerRuntime:
         tracker = resolved_plan.tracker
         persisted_bed_regions = _persisted_bed_regions(camera)
         if graph is not None:
-            extractors = graph.extractors
+            extractors = (
+                tuple(item for item in graph.extractors if item.module_name != "pose")
+                if graph.batch_serving_client is not None
+                else graph.extractors
+            )
         elif yolo is not None:
             extractors = yolo.extractors
         else:
@@ -1514,6 +1564,13 @@ class WorkerRuntime:
         heartbeat = HeartbeatReporter(self.config, camera)
         loop = self._loop_factory(camera, bus, heartbeat)
         sink = self._sink_factory(camera)
+        inference_results = (
+            InferenceResultSlot()
+            if graph is not None and graph.batch_serving_client is not None
+            else None
+        )
+        if inference_results is not None:
+            self._camera_inference_results[camera.camera_id] = inference_results
         pump = self._pump_factory(camera, bus, analytics, decision, sink)
         clip_frame_feeder = self._build_clip_frame_feeder(camera.camera_id, bus)
         return CameraRuntimeContext(
@@ -1527,6 +1584,7 @@ class WorkerRuntime:
             loop,
             pump,
             clip_frame_feeder,
+            inference_results,
         )
 
     def _build_clip_frame_feeder(
@@ -1551,9 +1609,12 @@ class WorkerRuntime:
         decision: EventAggregator,
         sink: EventSink,
     ) -> CameraPipelinePump:
+        results = self._camera_inference_results.get(camera.camera_id)
+        if results is None:
+            raise RuntimeError("camera pipeline requires the batched pose coordinator")
         return CameraPipelinePump(
             camera.camera_id,
-            bus.inference,
+            results,
             analytics,
             decision,
             sink,

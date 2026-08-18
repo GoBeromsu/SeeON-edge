@@ -7,6 +7,10 @@ from typing import Protocol, final
 
 from contracts.encode_diagnostics import EncodeSelection
 from contracts.observation import BedRegionCacheState
+from worker.pipeline.inference_coordinator import (
+    CameraInferenceTelemetry,
+    InferenceTelemetrySnapshot,
+)
 from worker.pipeline.perception.scene_state import BedRegionCacheCounterSnapshot
 
 
@@ -152,6 +156,10 @@ class CameraDiagnosticsSnapshot:
     # Local-only (Todo 17): populated only for a camera running the opt-in
     # nvidia-device-experimental profile.
     device_residency: DeviceResidencyDiagnostics | None = None
+    inference: CameraInferenceTelemetry | None = None
+    batch_sizes: tuple[tuple[int, int], ...] = ()
+    forward_p50_sec: float = 0.0
+    forward_p95_sec: float = 0.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -176,6 +184,12 @@ class SubscriptionMetrics(Protocol):
 
     @property
     def queue_age_sec(self) -> float: ...
+
+
+class InferenceMetricsSource(Protocol):
+    """Structural view of the pipeline coordinator's local snapshot."""
+
+    def snapshot(self) -> InferenceTelemetrySnapshot: ...
 
 
 class BusMetricsSource(Protocol):
@@ -204,6 +218,7 @@ __all__ = [
     "DecodeBackendObservability",
     "DeviceResidencyDiagnostics",
     "EncoderLifecycleSnapshot",
+    "InferenceMetricsSource",
     "InvalidStageTimingError",
     "RuntimeDiagnosticsSnapshot",
     "StageTimingSnapshot",
