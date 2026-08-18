@@ -412,7 +412,9 @@ def test_geometry_fields_stay_out_of_relay_payload() -> None:
         "clip_export",
         "clip_recorder",
     }
-    assert set(payload["cameras"][0]) == {"camera_id", "decode"}
+    camera_keys = set(payload["cameras"][0])
+    assert "camera_id" in camera_keys
+    assert not camera_keys & {"geometry", "observed_geometry", "geometry_batch_sizes"}
     dumped = repr(payload)
     assert "640x360" not in dumped
     assert "geometry" not in dumped

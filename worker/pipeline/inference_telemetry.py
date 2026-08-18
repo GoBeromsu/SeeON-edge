@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import threading
 from collections import Counter, deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from math import ceil
 from typing import Final, TypeAlias, final
 
@@ -19,7 +19,7 @@ class CameraInferenceTelemetry:
     overwritten: int
     inferred: int
     queue_age_sec: float
-    observed_geometry: FrameGeometry | None
+    observed_geometry: FrameGeometry | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -28,7 +28,7 @@ class InferenceTelemetrySnapshot:
     batch_sizes: dict[int, int]
     forward_p50_sec: float
     forward_p95_sec: float
-    geometry_batch_sizes: dict[FrameGeometry, dict[int, int]]
+    geometry_batch_sizes: dict[FrameGeometry, dict[int, int]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
