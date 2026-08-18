@@ -220,3 +220,48 @@ def test_pose_person_bed_and_fall_runners_are_created_once_and_shared_across_fou
         fall, _bed_exit = camera.decision.deciders
         assert isinstance(fall, FallEventLatch)
         assert fall.classifier.model is runtime.fall_model
+
+
+def test_thirteen_cameras_hold_exactly_one_pooled_runner_per_shared_identity(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Precondition for one batched inference lane per capability.
+
+    The Wave-3 coordinator issues ONE batched pose forward for all cameras.
+    That is only sound while every camera's pose extractor is literally the
+    same pooled runner object, keyed by ``SharedComponentIdentity``: one
+    identity -> one runner -> one model instance -> one batch. The 4-camera
+    test above pins object sharing; this pins the pool's key discipline at
+    the production camera count (13, issue #312) -- distinct identities, and
+    a runner count that equals the identity count, never the camera count.
+    """
+    _stub_heartbeat_transport(monkeypatch)
+    serving = _RecordingServingClient()
+    camera_ids = tuple(f"camera-{index}" for index in range(1, 14))
+    runtime = _runtime(_config(*camera_ids), serving, _LoopFactory(), tmp_path)
+
+    runtime.run()
+
+    assert len(runtime.cameras) == 13
+    # One create() per shared component, never per camera.
+    assert [task for task, _options in serving.create_calls] == ["pose", "bed", "fall"]
+
+    pool_identities = runtime._shared_component_pool.identities  # noqa: SLF001
+    assert len(set(pool_identities)) == len(pool_identities)
+    assert {identity.component_id for identity in pool_identities} == {
+        "pose",
+        "bed",
+        "fall-classifier",
+    }
+
+    runners_by_component: dict[str, set[int]] = {}
+    for camera in runtime.cameras:
+        for extractor in camera.analytics.extractors:
+            runners_by_component.setdefault(extractor.module_name, set()).add(id(extractor.runner))
+    assert {name: len(ids) for name, ids in runners_by_component.items()} == {"pose": 1, "bed": 1}
+
+    # Per-camera temporal state stays private even while runners are shared.
+    trackers = [id(camera.analytics.tracker) for camera in runtime.cameras]
+    scene_states = [id(camera.analytics.scene_state) for camera in runtime.cameras]
+    assert len(set(trackers)) == len(runtime.cameras)
+    assert len(set(scene_states)) == len(runtime.cameras)

@@ -248,6 +248,58 @@ def test_catalog_qualifies_production_modules_components_and_model_bindings() ->
     assert fall_pose == bed_exit_pose
 
 
+def test_pose_binding_identity_is_byte_identical_across_fall_v1_and_bed_exit_v1() -> None:
+    """Cross-camera batched pose (nvidia-multistream-serving) rests on this.
+
+    A single inference owner may batch every camera's pose frames into ONE
+    forward only because fall.v1 and bed_exit.v1 declare the SAME pose
+    component: same artifact, same preprocessing, same serving task. If the
+    two modules ever diverge on any identity field, ``SharedComponentPool``
+    correctly produces two runners and one batched pose lane becomes wrong,
+    not merely slower. The equality above compares whole bindings; this pins
+    the individual fields so a failure names which one drifted, and pins the
+    derived ``SharedComponentIdentity`` that the pool actually keys on.
+    """
+    fall_pose = next(
+        binding
+        for binding in DETECTION_MODULE_REGISTRY.get("fall", 1).shared_bindings
+        if binding.component_id == "pose"
+    )
+    bed_exit_pose = next(
+        binding
+        for binding in DETECTION_MODULE_REGISTRY.get("bed_exit", 1).shared_bindings
+        if binding.component_id == "pose"
+    )
+
+    identity_fields = (
+        "component_id",
+        "model_family",
+        "provisioner",
+        "serving_task",
+        "artifact_digest",
+        "preprocessing_identity",
+    )
+    assert {field_name: getattr(fall_pose, field_name) for field_name in identity_fields} == {
+        field_name: getattr(bed_exit_pose, field_name) for field_name in identity_fields
+    }
+    assert fall_pose.serving_task == "pose"
+    assert fall_pose.provisioner == "serving-client"
+
+    runtime, device = "onnxruntime", "cuda:0"
+    assert fall_pose.identity(runtime=runtime, device=device) == bed_exit_pose.identity(
+        runtime=runtime, device=device
+    )
+    assert (
+        len(
+            {
+                fall_pose.identity(runtime=runtime, device=device),
+                bed_exit_pose.identity(runtime=runtime, device=device),
+            }
+        )
+        == 1
+    )
+
+
 def test_catalog_order_and_projected_identity_are_deterministic() -> None:
     first = _compile(DETECTION_MODULE_DEFINITIONS)
     second = _compile(tuple(replace(definition) for definition in DETECTION_MODULE_DEFINITIONS))
