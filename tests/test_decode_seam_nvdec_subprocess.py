@@ -388,7 +388,7 @@ def test_short_frame_fails_closed_and_closes_the_session() -> None:
 
 
 def test_stdout_reader_returns_within_bound_when_child_never_writes() -> None:
-    """SEAM B10: a silent child cannot hang the caller or its reader thread."""
+    """SEAM B10: a silent child cannot hang the caller or kill the decoder."""
     child = _SilentChild()
     process = FFmpegDecodeProcess(child, frame_size=6)
     completed = threading.Event()
@@ -405,8 +405,12 @@ def test_stdout_reader_returns_within_bound_when_child_never_writes() -> None:
     reader.join(timeout=1.0)
     assert not reader.is_alive()
     assert observed == [None]
-    assert child.stdin.closed
-    assert child.stdout.closed
+    assert child.stdin.closed is False
+    assert child.stdout.closed is False
+    assert process.reader_alive is True
+    assert process.failure_returncode is None
+    assert bytes(process._pending) == b""
+    assert process.reap(1.0) == 0
 
 
 def test_stdout_reader_reassembles_frames_across_arbitrary_chunk_boundaries() -> None:

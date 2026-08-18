@@ -197,10 +197,12 @@ class FFmpegDecodeProcess:
         return payload
 
     def _finish_read(self, timeout_sec: float, *, timed_out: bool) -> bytes | None:
+        if timed_out:
+            return None
         partial = bytes(self._pending)
         self._pending.clear()
         returncode = self.reap(timeout_sec=min(timeout_sec, _QUEUE_PUT_TIMEOUT_SEC))
-        if not timed_out and returncode not in (None, 0):
+        if returncode not in (None, 0):
             self._failure_returncode = returncode
         return partial or None
 
