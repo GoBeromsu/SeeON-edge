@@ -2,6 +2,7 @@
 
 import importlib
 import ipaddress
+import os
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -179,3 +180,28 @@ def stub_rtsp_hostname_resolution(monkeypatch: pytest.MonkeyPatch) -> Iterator[N
 
     monkeypatch.setattr(rtsp_url_policy, "resolve_host_a_aaaa", _stub)
     yield
+
+
+@pytest.fixture(autouse=True)
+def _deterministic_file_modes() -> Iterator[None]:
+    """Pin the process umask so filesystem modes do not depend on the host.
+
+    The clip-consistency validators reject a clip store or clip directory that is
+    group- or world-writable (`validate_directory`, forbidden 0o022). Directories
+    created in fixtures with a bare `mkdir()` inherit the developer's umask, so
+    the same commit passed under `umask 0022` and failed 84 tests under
+    `umask 0002`. That is the "Local Hero" anti-pattern: the outcome was decided
+    by the machine, not the code.
+
+    Note that `mkdir(parents=True, mode=...)` does not help on its own -- the mode
+    applies only to the leaf, and the parents still take the umask.
+
+    Pinning it here keeps the suite hermetic. Tests that specifically exercise
+    insecure permissions still set their own modes explicitly with `chmod`, which
+    is unaffected by the umask.
+    """
+    previous = os.umask(0o022)
+    try:
+        yield
+    finally:
+        os.umask(previous)

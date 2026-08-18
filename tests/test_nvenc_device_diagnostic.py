@@ -10,6 +10,11 @@ from __future__ import annotations
 
 import pytest
 
+from worker.adapters.decode.nvdec_device.capability import DeviceResidentCapability
+from worker.adapters.device.cuda.probe import CudaCapability, NvencCapability
+from worker.adapters.device.nvml.probe import NvmlGpuStatus
+from worker.adapters.encode.nvenc_device import diagnostic
+from worker.adapters.encode.nvenc_device.capability import DeviceInputNvencCapability
 from worker.adapters.encode.nvenc_device.diagnostic import (
     BAD_PRESSURE_DID_NOT_FAIL_EXIT_CODE,
     PROBE_UNAVAILABLE_EXIT_CODE,
@@ -41,21 +46,84 @@ def test_default_action_and_explicit_probe_flag_agree() -> None:
     assert main([]) == main(["--probe"])
 
 
-def test_probe_path_is_truthful_and_unavailable_on_this_non_nvidia_host(
-    capsys: pytest.CaptureFixture[str],
+def _capability(*, available: bool, reason: str) -> DeviceInputNvencCapability:
+    return DeviceInputNvencCapability(
+        available=available,
+        reason=reason,
+        device_resident=DeviceResidentCapability(
+            available=available,
+            reason=reason,
+            cuda=CudaCapability(available=available, reason=reason),
+            nvml=NvmlGpuStatus(nvml_available=available, reason=reason),
+            stream_event_supported=available,
+            dlpack_supported=available,
+        ),
+        nvenc=NvencCapability(available, reason),
+    )
+
+
+def test_probe_reports_unavailable_capability_with_the_probe_exit_code(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
+    """The negative path, proven by injection rather than by the host.
+
+    This previously asserted that *this machine* has no NVIDIA hardware, which
+    the module docstring even stated as a premise. That premise stopped being
+    true and the test inverted (tests/AGENTS.md, Local Hero). Injecting the
+    capability keeps the coverage and works on any host.
+    """
+    reason = "probe-negative-sentinel"
+    monkeypatch.setattr(
+        diagnostic,
+        "probe_device_input_nvenc_capability",
+        lambda: _capability(available=False, reason=reason),
+    )
+
     exit_code = run_probe()
 
     out = capsys.readouterr().out
     assert exit_code == PROBE_UNAVAILABLE_EXIT_CODE
     assert "available: False" in out
-    assert "reason:" in out
-    assert "device_resident.available" in out
-    assert "nvenc.available" in out
+    # The exact reason must survive to the operator, not merely the label.
+    assert f"reason: {reason}" in out
+    assert f"device_resident.available: False ({reason})" in out
+    assert f"nvenc.available: False ({reason})" in out
 
 
-def test_cli_probe_flag_matches_direct_call_exit_code() -> None:
-    assert main(["--probe"]) == PROBE_UNAVAILABLE_EXIT_CODE
+def test_probe_reports_available_capability_with_a_zero_exit_code(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The positive path, which nothing covered before.
+
+    The old host-dependent test could only ever exercise one branch, and on the
+    repo's assumed hardware that branch was always the negative one.
+    """
+    reason = "probe-positive-sentinel"
+    monkeypatch.setattr(
+        diagnostic,
+        "probe_device_input_nvenc_capability",
+        lambda: _capability(available=True, reason=reason),
+    )
+
+    exit_code = run_probe()
+
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "available: True" in out
+    assert f"reason: {reason}" in out
+
+
+def test_cli_probe_flag_dispatches_to_run_probe(monkeypatch: pytest.MonkeyPatch) -> None:
+    """--probe routes to run_probe and returns its value verbatim.
+
+    Comparing main(["--probe"]) against run_probe() would pass even if both were
+    wrong in the same way, and both depended on the host. A sentinel proves the
+    routing itself.
+    """
+    sentinel = 77
+    monkeypatch.setattr(diagnostic, "run_probe", lambda: sentinel)
+
+    assert main(["--probe"]) == sentinel
 
 
 def test_fake_smoke_test_happy_path_passes(capsys: pytest.CaptureFixture[str]) -> None:

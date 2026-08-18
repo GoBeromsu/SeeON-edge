@@ -39,7 +39,13 @@ def _layout(tmp_path: Path) -> tuple[Path, Path, Path]:
     clips = tmp_path / "clip-store"
     maintenance = tmp_path / "maintenance"
     state.mkdir(mode=0o700)
-    (clips / "clips" / ".staging").mkdir(parents=True)
+    # mkdir(parents=True, mode=...) applies the mode only to the leaf, so the
+    # clip store root and its clips/ level would otherwise inherit the host
+    # umask and fail validate_directory (forbidden 0o022). Create each level
+    # explicitly so this fixture does not depend on the developer's umask.
+    clips.mkdir(mode=0o755)
+    (clips / "clips").mkdir(mode=0o755)
+    (clips / "clips" / ".staging").mkdir(mode=0o755)
     maintenance.mkdir(mode=0o700)
     database = state / "worker-state.sqlite3"
     with EvidenceOutbox.open(database):
@@ -53,7 +59,13 @@ def _edge_layout(tmp_path: Path) -> tuple[Path, Path, Path]:
     clips = tmp_path / "clip-store"
     maintenance = tmp_path / "maintenance"
     state.mkdir(mode=0o700)
-    (clips / "clips" / ".staging").mkdir(parents=True)
+    # mkdir(parents=True, mode=...) applies the mode only to the leaf, so the
+    # clip store root and its clips/ level would otherwise inherit the host
+    # umask and fail validate_directory (forbidden 0o022). Create each level
+    # explicitly so this fixture does not depend on the developer's umask.
+    clips.mkdir(mode=0o755)
+    (clips / "clips").mkdir(mode=0o755)
+    (clips / "clips" / ".staging").mkdir(mode=0o755)
     maintenance.mkdir(mode=0o700)
     database = state / "edge.sqlite3"
     migrate_database(database)
@@ -88,7 +100,7 @@ def _seed(
 
 def _unavailable(clip_store: Path, clip_id: str, refs: tuple[str, ...]) -> Path:
     final = clip_store / "clips" / clip_id
-    final.mkdir()
+    final.mkdir(mode=0o755)
     manifest = UnavailableClipManifest(
         clip_id=clip_id,
         camera_id="camera-a",
@@ -105,7 +117,7 @@ def _unavailable(clip_store: Path, clip_id: str, refs: tuple[str, ...]) -> Path:
 
 def _ready(clip_store: Path, clip_id: str, refs: tuple[str, ...], ffprobe: Path) -> Path:
     final = clip_store / "clips" / clip_id
-    final.mkdir()
+    final.mkdir(mode=0o755)
     media = b"\x00\x00\x00\x08moov\x00\x00\x00\x09mdatx"
     (final / "clip.mp4").write_bytes(media)
     manifest = ReadyClipManifest(
@@ -341,7 +353,7 @@ def test_malformed_corrupt_and_symlinked_finals_are_refused(
     database, clip_store, maintenance = _layout(tmp_path)
     _seed(database, clips=(("clip-bad", "CORRUPT"),))
     final = clip_store / "clips/clip-bad"
-    final.mkdir()
+    final.mkdir(mode=0o755)
     if fault == "malformed":
         (final / "manifest.json").write_text("{broken", encoding="utf-8")
     elif fault == "corrupt-ready":

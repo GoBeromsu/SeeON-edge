@@ -154,17 +154,21 @@ def test_nvml_gpu_status_driver_version_none_when_driver_version_query_fails() -
     assert status.device_name == "Tesla T4"
 
 
-def test_probe_nvml_gpu_status_against_real_pynvml_is_honest_on_this_dev_machine() -> None:
-    """No fakes: exercises the real ``import pynvml`` default on this host.
+def test_probe_nvml_gpu_status_against_real_pynvml_always_states_a_reason() -> None:
+    """실제 ``import pynvml`` 기본 경로를 이 호스트에 대고 그대로 실행한다.
 
-    This repo's macOS CI/dev machines have no NVML shared library installed,
-    so the real probe must report ``nvml_available=False`` here -- a ``True``
-    result on this host would be a false positive. Real-hardware verification
-    on a Linux+NVIDIA host is deferred to the #128 hardware session.
+    호스트에 GPU 가 있는지는 단언하지 않는다. 그건 코드가 아니라 실행 머신의
+    성질이고, 그렇게 쓴 테스트가 nvidia 프로파일 전환만으로 무더기로 뒤집혔다
+    (tests/AGENTS.md 의 Local Hero 항목 참조). 검증하는 것은 어느 호스트에서든
+    성립하는 계약 하나다: 프로브는 자기 판단의 사유를 반드시 댄다.
+
+    available 값과 metadata 필드는 단언하지 않는다. available=True 여도
+    metadata 가 None 일 수 있고(같은 파일의 가짜 주입 테스트가 그 계약을 고정한다),
+    device_count/arch_list 는 게이트가 아니라 프로브가 보고하려는 진단값이다.
+    음성 경로는 같은 파일의 가짜 주입 테스트가 덮는다.
     """
     pytest.importorskip("pynvml")
 
     status = probe_nvml_gpu_status()
 
-    assert status.nvml_available is False
     assert status.reason
