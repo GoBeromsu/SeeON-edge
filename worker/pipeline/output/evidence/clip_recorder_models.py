@@ -15,7 +15,7 @@ from worker.pipeline.output.evidence.clip_config import (
     configured_store_dir,
 )
 from worker.pipeline.output.evidence.clip_identity import ClipReservation
-from worker.types import BusinessEvent, FrameKey, FramePacket
+from worker.types import CURRENT_TEMPORAL_PROFILE, BusinessEvent, FrameKey, FramePacket
 
 
 @dataclass(frozen=True, slots=True)
@@ -24,7 +24,7 @@ class ClipRecorderConfig:
     segment_seconds: float = 2.0
     pre_event_seconds: float = 30.0
     post_event_seconds: float = 30.0
-    fps: float = 5.0
+    fps: float = CURRENT_TEMPORAL_PROFILE.target_fps
     retention_days: int = field(default_factory=configured_retention_days)
     disk_high_watermark: float = field(default_factory=configured_disk_high_watermark)
     max_queue_size: int = 128

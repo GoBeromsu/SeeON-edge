@@ -21,6 +21,11 @@ from worker.types.frame_memory import (
 )
 from worker.types.frame_packet import FrameKey, FramePacket
 from worker.types.module_result import ModuleResult
+from worker.types.temporal_profile import (
+    CURRENT_TEMPORAL_PROFILE,
+    TemporalProfile,
+    TemporalProfileError,
+)
 from worker.types.trace import DecisionTraceSnapshot, NumericTraceValue
 
 __all__ = [
@@ -43,4 +48,7 @@ __all__ = [
     "PipelineProfile",
     "PixelFormat",
     "StageCapabilities",
+    "CURRENT_TEMPORAL_PROFILE",
+    "TemporalProfile",
+    "TemporalProfileError",
 ]

@@ -159,7 +159,13 @@ from worker.runtime.telemetry.wire import (
     RelayWorkerPayload,
 )
 from worker.runtime.watchdog import InferenceWatchdog
-from worker.types import BusinessEvent, DecisionInput, FramePacket
+from worker.types import (
+    CURRENT_TEMPORAL_PROFILE,
+    BusinessEvent,
+    DecisionInput,
+    FramePacket,
+    TemporalProfile,
+)
 
 LOGGER: Final = logging.getLogger(__name__)
 HEARTBEAT_TIMEOUT_SEC: Final = 0.5
@@ -740,8 +746,10 @@ class WorkerRuntime:
         restart_generation: int = 0,
         build_revision: str | None = None,
         environment_facts_factory: EnvironmentFactsFactory = collect_runtime_environment_facts,
+        temporal_profile: TemporalProfile = CURRENT_TEMPORAL_PROFILE,
     ) -> None:
         self.config = config
+        self.temporal_profile = temporal_profile
         self._module_registry = module_registry or DETECTION_MODULE_REGISTRY
         self._module_versions = config.domains.selected_versions(self._module_registry)
         self._restart_generation = restart_generation
@@ -2146,6 +2154,7 @@ class WorkerRuntime:
             output_adapter_ids=result_merger_names(),
             camera_frame_stride=camera.frame_stride,
             flags=flags,
+            temporal_profile=self.temporal_profile,
         )
         camera_components: Mapping[str, object] = MappingProxyType(
             {} if tracker is None else {"person-tracker": tracker}

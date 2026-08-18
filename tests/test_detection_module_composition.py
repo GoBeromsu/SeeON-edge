@@ -43,7 +43,7 @@ from worker.pipeline.perception import GreedyIouTracker, SceneState
 from worker.runtime.model_composition import SharedComponentPool
 from worker.runtime.profile.registry import PROFILE_REGISTRY, runtime_descriptor_for
 from worker.runtime.worker import WorkerRuntime
-from worker.types import DecisionInput, FramePacket
+from worker.types import CURRENT_TEMPORAL_PROFILE, DecisionInput, FramePacket
 
 _PACKAGED_FALL_METADATA = (
     Path(__file__).resolve().parents[1] / "models" / "fall" / "lstm" / "metadata.yaml"
@@ -284,6 +284,7 @@ def test_compiled_modules_are_profile_independent() -> None:
             output_adapter_ids=result_merger_names(),
             camera_frame_stride=5,
             flags={"person-box-source": True, "persisted-bed-region": False},
+            temporal_profile=CURRENT_TEMPORAL_PROFILE,
         )
 
         assert activation.qualified_ids == identities
@@ -311,6 +312,7 @@ def test_activation_fails_closed_for_unavailable_runtime_dependencies() -> None:
             output_adapter_ids=outputs,
             camera_frame_stride=5,
             flags=flags,
+            temporal_profile=CURRENT_TEMPORAL_PROFILE,
         )
 
     with pytest.raises(DetectionModuleActivationError, match="observation channel"):
@@ -346,6 +348,7 @@ def test_activation_fails_closed_for_unavailable_runtime_dependencies() -> None:
             output_adapter_ids=result_merger_names(),
             camera_frame_stride=5,
             flags=flags,
+            temporal_profile=CURRENT_TEMPORAL_PROFILE,
         )
 
 

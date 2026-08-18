@@ -323,7 +323,7 @@ _BED_EXIT_V1 = DetectionModuleDefinition(
     schedule_rules=(
         ScheduleRule("pose", "camera-frame-stride"),
         ScheduleRule("person", "camera-frame-stride"),
-        ScheduleRule("bed", "fixed", interval=30, skip_when_flag="persisted-bed-region"),
+        ScheduleRule("bed", "temporal-profile", skip_when_flag="persisted-bed-region"),
     ),
     policy_schema=PolicySchemaIdentity("bed_exit.policy", 1),
     camera_state_factory=_bed_exit_state,

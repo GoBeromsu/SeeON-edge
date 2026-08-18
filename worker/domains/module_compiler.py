@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
+from typing import TYPE_CHECKING
 
 from shared.detection_policies import (
     LATEST_POLICY_VERSIONS,
@@ -17,6 +18,9 @@ from worker.domains.module_definition import (
     DetectionModuleCompilationError,
     DetectionModuleDefinition,
 )
+
+if TYPE_CHECKING:
+    from worker.types import TemporalProfile
 
 ModuleVersionSelection = Mapping[str, int]
 
@@ -107,6 +111,7 @@ class CompiledDetectionModuleRegistry:
         output_adapter_ids: Iterable[str],
         camera_frame_stride: int,
         flags: Mapping[str, bool],
+        temporal_profile: TemporalProfile,
     ) -> DetectionModuleActivation:
         if (module_versions is None) == (module_ids is None):
             raise DetectionModuleActivationError(
@@ -166,7 +171,7 @@ class CompiledDetectionModuleRegistry:
                     continue
                 if rule.skip_when_flag is not None and flags.get(rule.skip_when_flag, False):
                     continue
-                interval = rule.resolve(camera_frame_stride)
+                interval = rule.resolve(camera_frame_stride, temporal_profile)
                 previous = schedule.setdefault(rule.component_id, interval)
                 if previous != interval:
                     raise DetectionModuleActivationError(

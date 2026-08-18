@@ -13,7 +13,9 @@ is forbidden. Relay HTTP only.
 
 - `worker.py`: `WorkerRuntime`. Shared component graph once, then per-camera
   ingest, tracker, `SceneState`, scheduler, domain deciders, bus, pump. Wires
-  evidence, MJPEG, coordinator, watchdog, shutdown.
+  evidence, MJPEG, coordinator, watchdog, shutdown. `TemporalProfile` is the
+  fps contract; `_preflight_camera_graph` passes it into registry activation
+  so `Scheduler(dict(resolved_plan.schedule))` is computed, not hardcoded.
 - `bootstrap.py`: `gpu_lease -> profile/device -> decode_capability ->
   model_backend_init -> real_warmup -> camera_activation`. Mutable
   `BootstrapContext` owns the lease.

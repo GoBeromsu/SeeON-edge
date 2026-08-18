@@ -6,6 +6,7 @@ from urllib.parse import urlsplit, urlunsplit
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
 
 from worker.runtime.config.errors import ConfigValidationError
+from worker.types import CURRENT_TEMPORAL_PROFILE
 
 SUPPORTED_DECODE_BACKENDS: Final = frozenset({"auto", "nvdec", "opencv", "cpu"})
 
@@ -32,7 +33,7 @@ class CameraRuntimeConfig(BaseModel):
     resident_id: str | None = None
     rtsp_url: str | None = Field(default=None, min_length=1)
     streams: CameraStreamsConfig | None = None
-    fps: float = Field(default=5.0, gt=0)
+    fps: float = Field(default=CURRENT_TEMPORAL_PROFILE.target_fps, gt=0)
     heartbeat_interval_sec: float = Field(default=30.0, gt=0)
     frame_stride: int = Field(default=1, gt=0)
     label: str | None = None

@@ -204,13 +204,12 @@ def compose_camera_ingest_loop(
     )
     # `camera.fps` paces both decode and the live-view tap (RTSPSource yields
     # at this rate; CameraPipelinePump publishes every yielded packet to the
-    # live view unconditionally). It silently falls back to a hardcoded 5.0
-    # whenever nothing sets it (no per-camera value from the backend registry,
-    # no ML_DEFAULT_CAMERA_FPS), which previously had zero log trace -- a
-    # camera pacing at 5fps against a 15fps source looked externally
-    # indistinguishable from a frame_stride bug (5 == 15/3), which is exactly
-    # the false lead this line exists to close off. `frame_stride` never
-    # reaches this policy -- it only gates the extractor Scheduler.
+    # live view unconditionally). When the relay omits a per-camera fps the
+    # value is TemporalProfile.target_fps, which previously had zero log
+    # trace -- a camera pacing at 5fps against a 15fps source looked
+    # externally indistinguishable from a frame_stride bug (5 == 15/3), which
+    # is exactly the false lead this line exists to close off. `frame_stride`
+    # never reaches this policy -- it only gates the extractor Scheduler.
     LOGGER.info(
         "camera ingest paced: camera_id=%s target_fps=%s frame_stride=%s "
         "(frame_stride does not affect this rate)",

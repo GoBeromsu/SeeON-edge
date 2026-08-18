@@ -20,7 +20,7 @@ from worker.pipeline.perception import (
     build_frame_observation,
 )
 from worker.pipeline.perception.scene_state import BedRegionCacheCounterSnapshot
-from worker.types import DecisionInput, FramePacket, ModuleResult
+from worker.types import CURRENT_TEMPORAL_PROFILE, DecisionInput, FramePacket, ModuleResult
 
 
 @dataclass(frozen=True, slots=True)
@@ -167,7 +167,9 @@ class CompositeExtractor:
                 frame_index=packet.frame.index,
                 scene_state=self.scene_state,
                 bed_scheduled="bed" in scheduled_names,
-                bed_interval=self.scheduler.task_intervals.get("bed", 30),
+                bed_interval=self.scheduler.task_intervals.get(
+                    "bed", CURRENT_TEMPORAL_PROFILE.decision_interval_frames("bed")
+                ),
             )
             final_observation = decision_input.observation
             _ = self.scene_state.observe(final_observation, track_ids=track_ids)
