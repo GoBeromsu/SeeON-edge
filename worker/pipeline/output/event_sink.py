@@ -107,7 +107,13 @@ class EvidenceEventSink:
                     )
                 except SnapshotCapacityError as error:
                     LOGGER.warning(
-                        "snapshot dropped by event sink backpressure",
+                        (
+                            "snapshot dropped by event sink backpressure: "
+                            "camera_id=%s edge_event_id=%s reason=%s"
+                        ),
+                        event.camera_id,
+                        edge_event_id,
+                        error.reason,
                         extra={
                             "camera_id": event.camera_id,
                             "edge_event_id": edge_event_id,
@@ -127,7 +133,12 @@ class EvidenceEventSink:
                 snapshot_store.commit(staged_snapshot)
             except Exception:  # noqa: BLE001 - durable transition resumes at startup
                 LOGGER.exception(
-                    "snapshot publication remains staged for reconciliation",
+                    (
+                        "snapshot publication remains staged for reconciliation: "
+                        "camera_id=%s edge_event_id=%s"
+                    ),
+                    event.camera_id,
+                    edge_event_id,
                     extra={"camera_id": event.camera_id, "edge_event_id": edge_event_id},
                 )
         clip_id = self.recorder.on_event(trigger_packet, event)
