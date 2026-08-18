@@ -10,6 +10,7 @@ from typing import final
 from contracts.decode_diagnostics import DECODE_FALLBACK_REASONS, DecodeSelection
 from contracts.encode_diagnostics import ENCODE_FALLBACK_REASONS, EncodeSelection
 from contracts.observation import BedRegionCacheState
+from worker.pipeline.inference_coordinator import CameraInferenceTelemetry
 from worker.pipeline.perception.scene_state import BedRegionCacheCounterSnapshot
 from worker.runtime.telemetry.local_metrics import (
     StageTimingAccumulator,
@@ -38,10 +39,12 @@ from worker.runtime.telemetry.wire import (
     RelayClipExportPayload,
     RelayClipRecorderPayload,
     RelayDecodePayload,
+    RelayDetectionPayload,
     RelayGpuPayload,
     RelayRuntimeStatusPayload,
     RelayWorkerPayload,
     camera_payload,
+    detection_payload,
     facility_payload,
 )
 
@@ -72,6 +75,7 @@ class WorkerDiagnostics:
         self._bed_region_by_camera: dict[str, BedRegionDiagnostics] = {}
         self._bed_exit_scoring_by_camera: dict[str, BedExitScoringDiagnostics] = {}
         self._device_residency_by_camera: dict[str, DeviceResidencyDiagnostics] = {}
+        self._decision_completed_by_camera: dict[str, int] = {}
         self._encoder = EncoderLifecycleSnapshot()
         self._clip_recorder = ClipRecorderStatus()
         self._clip_export = RelayClipExportPayload(enabled=False, version=0)
@@ -288,6 +292,12 @@ class WorkerDiagnostics:
         with self._lock:
             self._measured_fps_by_camera[camera_id] = (self._clock(), measured_fps)
 
+    def record_detection_completed(self, camera_id: str) -> None:
+        with self._lock:
+            self._decision_completed_by_camera[camera_id] = (
+                self._decision_completed_by_camera.get(camera_id, 0) + 1
+            )
+
     def record_stage_timing(self, camera_id: str, stage: str, elapsed_sec: float) -> None:
         if elapsed_sec < 0:
             raise InvalidStageTimingError(elapsed_sec)
@@ -334,6 +344,7 @@ class WorkerDiagnostics:
             bed_region_by_camera = dict(self._bed_region_by_camera)
             bed_exit_scoring_by_camera = dict(self._bed_exit_scoring_by_camera)
             device_residency_by_camera = dict(self._device_residency_by_camera)
+            decision_completed_by_camera = dict(self._decision_completed_by_camera)
             camera_ids = (
                 set(self._decode_by_camera)
                 | set(decode_backend_by_camera)
@@ -344,6 +355,7 @@ class WorkerDiagnostics:
                 | set(bed_region_by_camera)
                 | set(bed_exit_scoring_by_camera)
                 | set(device_residency_by_camera)
+                | set(decision_completed_by_camera)
                 | (set() if inference is None else set(inference.cameras))
             )
         cameras = tuple(
@@ -359,6 +371,7 @@ class WorkerDiagnostics:
                 bed_region=bed_region_by_camera.get(camera_id),
                 bed_exit_scoring=bed_exit_scoring_by_camera.get(camera_id),
                 device_residency=device_residency_by_camera.get(camera_id),
+                decision_completed=decision_completed_by_camera.get(camera_id, 0),
                 inference=(
                     None if inference is None else inference.cameras.get(camera_id)
                 ),
@@ -385,9 +398,22 @@ class WorkerDiagnostics:
         generation: int | None,
         seq: int,
     ) -> RelayRuntimeStatusPayload:
-        selections, measured_fps, clip_recorder, clip_export, gpu, worker = self._wire_inputs()
+        (
+            selections,
+            measured_fps,
+            detections,
+            clip_recorder,
+            clip_export,
+            gpu,
+            worker,
+        ) = self._wire_inputs()
         cameras = [
-            camera_payload(camera_id, selection, measured_fps.get(camera_id))
+            camera_payload(
+                camera_id,
+                selection,
+                measured_fps.get(camera_id),
+                detections[camera_id],
+            )
             for camera_id, selection in sorted(selections.items())
         ]
         return facility_payload(
@@ -407,7 +433,15 @@ class WorkerDiagnostics:
         generation: int | None,
         seq: int,
     ) -> list[RelayRuntimeStatusPayload]:
-        selections, measured_fps, clip_recorder, clip_export, gpu, worker = self._wire_inputs()
+        (
+            selections,
+            measured_fps,
+            detections,
+            clip_recorder,
+            clip_export,
+            gpu,
+            worker,
+        ) = self._wire_inputs()
         cameras_by_facility: dict[str, list[RelayCameraPayload]] = {
             facility_id: [] for facility_id in set(camera_facilities.values())
         }
@@ -415,7 +449,12 @@ class WorkerDiagnostics:
             facility_id = camera_facilities.get(camera_id)
             if facility_id is not None:
                 cameras_by_facility[facility_id].append(
-                    camera_payload(camera_id, selection, measured_fps.get(camera_id))
+                    camera_payload(
+                        camera_id,
+                        selection,
+                        measured_fps.get(camera_id),
+                        detections[camera_id],
+                    )
                 )
         return [
             facility_payload(
@@ -436,6 +475,7 @@ class WorkerDiagnostics:
     ) -> tuple[
         dict[str, DecodeSelection],
         dict[str, float | None],
+        dict[str, RelayDetectionPayload],
         ClipRecorderStatus,
         RelayClipExportPayload,
         RelayGpuPayload | None,
@@ -448,11 +488,42 @@ class WorkerDiagnostics:
                 for camera_id, (updated_at, measured) in self._measured_fps_by_camera.items()
                 if self._clock() - updated_at <= MEASURED_FPS_MAX_AGE_SEC
             }
+            inference = None if self._inference is None else self._inference.snapshot()
+            decision_completed_by_camera = dict(self._decision_completed_by_camera)
             clip_recorder = self._clip_recorder
             clip_export = self._clip_export.copy()
             gpu = None if self._gpu is None else self._gpu.copy()
             worker = None if self._worker is None else self._worker.copy()
-        return selections, measured_fps, clip_recorder, clip_export, gpu, worker
+        inference_cameras = {} if inference is None else inference.cameras
+        detections = {
+            camera_id: _detection_for_camera(
+                inference_cameras.get(camera_id),
+                decision_completed_by_camera.get(camera_id, 0),
+            )
+            for camera_id in selections
+        }
+        return selections, measured_fps, detections, clip_recorder, clip_export, gpu, worker
+
+
+def _detection_for_camera(
+    inference: CameraInferenceTelemetry | None,
+    decision_completed: int,
+) -> RelayDetectionPayload:
+    if inference is None:
+        return detection_payload(
+            expected=False,
+            inference_admitted=0,
+            inference_succeeded=0,
+            inference_overwritten=0,
+            decision_completed=0,
+        )
+    return detection_payload(
+        expected=True,
+        inference_admitted=inference.admitted,
+        inference_succeeded=inference.inferred,
+        inference_overwritten=inference.overwritten,
+        decision_completed=decision_completed,
+    )
 
 
 __all__ = [
@@ -470,6 +541,7 @@ __all__ = [
     "RelayClipExportPayload",
     "RelayClipRecorderPayload",
     "RelayDecodePayload",
+    "RelayDetectionPayload",
     "RelayGpuPayload",
     "RelayRuntimeStatusPayload",
     "RelayWorkerPayload",

@@ -375,6 +375,13 @@ def test_runtime_status_payload_reports_registered_cameras_and_worker_status(
     assert [camera["camera_id"] for camera in payload["cameras"]] == ["camera-a"]
     assert payload["cameras"][0]["decode"]["requested"] == "auto"
     assert payload["cameras"][0]["decode"]["selected"] is None
+    assert payload["cameras"][0]["detection"] == {
+        "expected": False,
+        "inference_admitted": 0,
+        "inference_succeeded": 0,
+        "inference_overwritten": 0,
+        "decision_completed": 0,
+    }
     assert payload["worker"]["alive"] is True
     assert isinstance(payload["worker"]["pid"], int)
     assert isinstance(payload["worker"]["started_at_sec"], float)

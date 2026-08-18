@@ -37,10 +37,12 @@ class MeasuredFpsSink(Protocol):
     """Structural seam so this module never imports `worker.runtime` back.
 
     `worker.runtime.telemetry.runtime_diagnostics.WorkerDiagnostics` already
-    satisfies this; any other object with the same method works too.
+    satisfies this; any other object with the same methods works too.
     """
 
     def update_measured_fps(self, camera_id: str, measured_fps: float | None) -> None: ...
+
+    def record_detection_completed(self, camera_id: str) -> None: ...
 
 
 class EvidenceAttacher(Protocol):
@@ -160,6 +162,8 @@ class CameraPipelinePump:
         result = self._analytics.process(packet, prefetched_results=(pose,))
         self._record_observation(packet, result.observation)
         events = self._decision.update(result.decision_input)
+        if self._diagnostics is not None:
+            self._diagnostics.record_detection_completed(self._camera_id)
         if self._trace_capture is not None and self._trace_writer is not None:
             traced = self._trace_capture.capture(
                 self._trace_writer,

@@ -119,7 +119,14 @@ def test_local_metric_is_excluded_from_frozen_wire_payload() -> None:
         "clip_export",
         "clip_recorder",
     }
-    assert set(payload["cameras"][0]) == {"camera_id", "decode"}
+    assert set(payload["cameras"][0]) == {"camera_id", "decode", "detection"}
+    assert payload["cameras"][0].get("detection") == {
+        "expected": False,
+        "inference_admitted": 0,
+        "inference_succeeded": 0,
+        "inference_overwritten": 0,
+        "decision_completed": 0,
+    }
     assert "local_metric_must_not_leak" not in repr(payload)
 
 
@@ -141,7 +148,14 @@ def test_bed_region_is_excluded_from_frozen_wire_payload() -> None:
     payload = diagnostics.to_payload("facility-1", None, 1)
 
     # Then
-    assert set(payload["cameras"][0]) == {"camera_id", "decode"}
+    assert set(payload["cameras"][0]) == {"camera_id", "decode", "detection"}
+    assert payload["cameras"][0].get("detection") == {
+        "expected": False,
+        "inference_admitted": 0,
+        "inference_succeeded": 0,
+        "inference_overwritten": 0,
+        "decision_completed": 0,
+    }
     assert "bed_region" not in repr(payload)
 
 
