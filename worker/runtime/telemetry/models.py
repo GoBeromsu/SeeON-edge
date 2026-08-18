@@ -7,7 +7,7 @@ from typing import Protocol, final
 
 from contracts.encode_diagnostics import EncodeSelection
 from contracts.observation import BedRegionCacheState
-from worker.pipeline.inference_coordinator import (
+from worker.pipeline.inference_telemetry import (
     CameraInferenceTelemetry,
     InferenceTelemetrySnapshot,
 )
@@ -133,6 +133,14 @@ class EncoderLifecycleSnapshot:
 
 
 @dataclass(frozen=True, slots=True)
+class GeometryBatchHistogram:
+    """Physical model-call counts for one observed frame (width, height)."""
+
+    geometry: tuple[int, int]
+    batch_sizes: tuple[tuple[int, int], ...]
+
+
+@dataclass(frozen=True, slots=True)
 class CameraDiagnosticsSnapshot:
     """Rich local diagnostics for one camera."""
 
@@ -162,6 +170,9 @@ class CameraDiagnosticsSnapshot:
     decision_completed: int = 0
     inference: CameraInferenceTelemetry | None = None
     batch_sizes: tuple[tuple[int, int], ...] = ()
+    # Local-only (issue #328): physical model-call histogram partitioned by
+    # observed frame geometry. Never a health/failure classification.
+    geometry_batch_sizes: tuple[GeometryBatchHistogram, ...] = ()
     forward_p50_sec: float = 0.0
     forward_p95_sec: float = 0.0
 
@@ -222,6 +233,7 @@ __all__ = [
     "DecodeBackendObservability",
     "DeviceResidencyDiagnostics",
     "EncoderLifecycleSnapshot",
+    "GeometryBatchHistogram",
     "InferenceMetricsSource",
     "InvalidStageTimingError",
     "RuntimeDiagnosticsSnapshot",

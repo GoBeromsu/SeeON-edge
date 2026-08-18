@@ -135,6 +135,15 @@ def log_snapshot(snapshot: RuntimeDiagnosticsSnapshot) -> None:
                 "updated_at_sec": camera.bed_exit_scoring.updated_at_sec,
             }
         )
+        observed = (
+            None
+            if camera.inference is None or camera.inference.observed_geometry is None
+            else f"{camera.inference.observed_geometry[0]}x{camera.inference.observed_geometry[1]}"
+        )
+        geometry_batch_sizes = {
+            f"{histogram.geometry[0]}x{histogram.geometry[1]}": dict(histogram.batch_sizes)
+            for histogram in camera.geometry_batch_sizes
+        }
         inference = (
             None
             if camera.inference is None
@@ -143,7 +152,9 @@ def log_snapshot(snapshot: RuntimeDiagnosticsSnapshot) -> None:
                 "overwritten": camera.inference.overwritten,
                 "inferred": camera.inference.inferred,
                 "queue_age_sec": camera.inference.queue_age_sec,
+                "observed_geometry": observed,
                 "batch_sizes": dict(camera.batch_sizes),
+                "geometry_batch_sizes": geometry_batch_sizes,
                 "forward_p50_sec": camera.forward_p50_sec,
                 "forward_p95_sec": camera.forward_p95_sec,
             }

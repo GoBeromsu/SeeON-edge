@@ -9,6 +9,10 @@ import pytest
 
 from contracts.decode_diagnostics import DecodeSelection
 from contracts.observation import BedRegionCacheState
+from worker.pipeline.inference_coordinator import (
+    CameraInferenceTelemetry,
+    InferenceTelemetrySnapshot,
+)
 from worker.pipeline.perception.scene_state import BedRegionCacheCounters
 from worker.runtime.telemetry.runtime_diagnostics import (
     EncoderLifecycleSnapshot,
@@ -300,3 +304,135 @@ def test_structured_log_bed_region_never_carries_a_url_ip_or_credential_shaped_v
         "scheduled_empty",
     }
     assert all(isinstance(value, int) for value in bed_region["counters"].values())
+
+
+def _mixed_geometry_inference() -> InferenceTelemetrySnapshot:
+    return InferenceTelemetrySnapshot(
+        cameras={
+            "camera-a": CameraInferenceTelemetry(
+                admitted=1,
+                overwritten=0,
+                inferred=1,
+                queue_age_sec=0.1,
+                observed_geometry=(640, 360),
+            ),
+            "camera-b": CameraInferenceTelemetry(
+                admitted=1,
+                overwritten=0,
+                inferred=1,
+                queue_age_sec=0.2,
+                observed_geometry=(640, 480),
+            ),
+        },
+        batch_sizes={1: 2},
+        forward_p50_sec=0.02,
+        forward_p95_sec=0.02,
+        geometry_batch_sizes={(640, 360): {1: 1}, (640, 480): {1: 1}},
+    )
+
+
+class _InferenceSource:
+    def __init__(self, snapshot: InferenceTelemetrySnapshot) -> None:
+        self._snapshot = snapshot
+
+    def snapshot(self) -> InferenceTelemetrySnapshot:
+        return self._snapshot
+
+
+def test_diagnostics_snapshot_carries_local_geometry_fields() -> None:
+    # Given
+    diagnostics = WorkerDiagnostics()
+    diagnostics.register_inference(_InferenceSource(_mixed_geometry_inference()))
+    # When
+    snapshot = diagnostics.snapshot()
+    # Then
+    cameras = {camera.camera_id: camera for camera in snapshot.cameras}
+    assert cameras["camera-a"].inference is not None
+    assert cameras["camera-b"].inference is not None
+    assert cameras["camera-a"].inference.observed_geometry == (640, 360)
+    assert cameras["camera-b"].inference.observed_geometry == (640, 480)
+    assert cameras["camera-a"].failure_category is None
+    assert cameras["camera-b"].failure_category is None
+    histograms = {
+        item.geometry: dict(item.batch_sizes)
+        for item in cameras["camera-a"].geometry_batch_sizes
+    }
+    assert histograms == {(640, 360): {1: 1}, (640, 480): {1: 1}}
+    assert cameras["camera-a"].geometry_batch_sizes == cameras["camera-b"].geometry_batch_sizes
+
+
+def test_stable_mixed_geometries_are_not_a_health_failure() -> None:
+    # Given
+    diagnostics = WorkerDiagnostics()
+    diagnostics.register_inference(_InferenceSource(_mixed_geometry_inference()))
+    # When
+    snapshot = diagnostics.snapshot()
+    # Then
+    assert all(camera.failure_category is None for camera in snapshot.cameras)
+    assert {camera.inference.observed_geometry for camera in snapshot.cameras} == {
+        (640, 360),
+        (640, 480),
+    }
+
+
+def test_log_snapshot_renders_geometry_key_distribution_in_message(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Given
+    formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+    diagnostics = WorkerDiagnostics()
+    diagnostics.register_inference(_InferenceSource(_mixed_geometry_inference()))
+    # When
+    with caplog.at_level(logging.INFO):
+        diagnostics.log_snapshot()
+    rendered = formatter.format(caplog.records[-1])
+    message = caplog.records[-1].getMessage()
+    # Then
+    assert "640x360" in message
+    assert "640x480" in message
+    assert "geometry_batch_sizes" in message
+    assert "640x360" in rendered
+    assert "640x480" in rendered
+    assert "geometry_batch_sizes" in rendered
+
+
+def test_geometry_fields_stay_out_of_relay_payload() -> None:
+    # Given
+    diagnostics = WorkerDiagnostics()
+    diagnostics.update_decode("camera-a", _selection())
+    diagnostics.register_inference(_InferenceSource(_mixed_geometry_inference()))
+    # When
+    payload = diagnostics.to_payload("facility-1", None, 1)
+    # Then
+    assert set(payload) == {
+        "facility_id",
+        "generation",
+        "seq",
+        "cameras",
+        "clip_export",
+        "clip_recorder",
+    }
+    assert set(payload["cameras"][0]) == {"camera_id", "decode"}
+    dumped = repr(payload)
+    assert "640x360" not in dumped
+    assert "geometry" not in dumped
+    assert "observed_geometry" not in dumped
+
+
+def test_geometry_log_excludes_rtsp_credentials_and_frame_payload(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Given
+    diagnostics = WorkerDiagnostics()
+    diagnostics.register_inference(_InferenceSource(_mixed_geometry_inference()))
+    # When
+    with caplog.at_level(logging.INFO):
+        diagnostics.log_snapshot()
+    message = caplog.records[-1].getMessage()
+    extras = vars(caplog.records[-1])
+    # Then
+    dumped = message + repr(extras.get("inference"))
+    assert "rtsp://" not in dumped
+    assert "password" not in dumped
+    assert "array(" not in dumped
+    assert "uint8" not in dumped
