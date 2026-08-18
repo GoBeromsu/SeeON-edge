@@ -7,18 +7,18 @@ Image `ml-worker`. Sole command: `python -m worker`.
 
 Run `uv run --group lint lint-imports`; a forbidden import means the design is wrong: add a Protocol in `interfaces/` and inject from `runtime/`.
 
-| Package | Role | May import |
+| Package | Role | Worker-layer ceiling |
 | --- | --- | --- |
-| `types/` | internal envelopes | stdlib, `contracts` |
-| `interfaces/` | one Protocol per seam | stdlib, `contracts`, `types` |
-| `adapters/` | decode, model, encode | stdlib, `contracts`, `types`, `interfaces` |
+| `types/` | internal envelopes | no other `worker` layer |
+| `interfaces/` | one Protocol per seam | `types` |
+| `adapters/` | decode, model, encode | `types`, `interfaces` |
 | `pipeline/` | ingest, bus, perception, decision, output | everything except `runtime` |
-| `domains/` | fall and bed-exit | `contracts`, `types`, `interfaces`, `pipeline.perception` |
+| `domains/` | fall and bed-exit | `types`, `interfaces`, `pipeline.perception` |
 | `runtime/` | composition root | everything |
 
 Order: `runtime -> pipeline -> domains -> adapters -> interfaces -> types -> contracts`.
 `contracts` contains cross-instance L0 data only. Worker-internal ports and envelopes live under `worker/`; never duplicate or shadow a vendored type, including `contracts/AGENTS.md`.
-Allowed: `contracts`, `shared.events`, local `worker.*`. Forbidden: `backend`.
+Shared leaves are scope-owned: `detection_policies`, runtime `edge_db` APIs, `events`, and `rtsp_url_policy`. Worker never imports `backend` or edge-database DDL modules.
 
 ## Data and lifetime boundaries
 
