@@ -79,10 +79,11 @@ class DecoderInputQueue:
             ) from error
         returncode = getattr(self._process, "failure_returncode", None)
         if returncode is not None:
-            raise NvdecUnavailableError(
-                "ffmpeg decoder exited before a complete frame was available",
-                returncode=returncode,
-            )
+            detail = getattr(self._process, "failure_detail", None)
+            reason = "ffmpeg decoder exited before a complete frame was available"
+            if isinstance(detail, str) and detail:
+                reason = f"{reason}: {detail}"
+            raise NvdecUnavailableError(reason, returncode=returncode)
 
     def pop_timing(self) -> SourcePacket:
         with self._lock:
