@@ -1,68 +1,49 @@
-# worker/pipeline — the five stages
+# worker/pipeline
 
-Own the staged data path: ingest, frame bus, perception/analytics, decision
-aggregation, and output. Stages hold per-camera state and call ports; they do not
-own process lifecycle.
+Staged data path: ingest, bus, perception/analytics, decision, output.
+Stages hold per-camera state and call ports. Process lifecycle stays in runtime.
 
 ## Ownership rule
 
-**`worker.pipeline` must not import `worker.runtime`.** The runtime composes and
-injects; a stage that imports the composition root creates a cycle and makes the
-stage untestable in isolation. Take config values, adapters, clocks, and sinks as
-arguments.
+`worker.pipeline` must not import `worker.runtime`. Runtime composes and injects.
+`perception/` is stricter: pure numeric math. Forbidden: `backend`,
+`shared.events`, `worker.adapters`, `worker.pipeline.{bus,ingest,decision,output}`,
+`worker.domains`, `worker.runtime`. Feature math needs no camera, model, or filesystem.
 
-`worker.pipeline.perception` is stricter still: it stays **pure numeric math**
-and must not import `backend`, `shared.events`, `worker.adapters`,
-`worker.pipeline.{bus,ingest,decision,output}`, `worker.domains`, or
-`worker.runtime`. This keeps observation building and feature math testable
-without a camera, a model, or a filesystem.
+## Five-stage ownership
 
-Enforced by import-linter contracts *"worker runtime is the sole composition
-root"* and *"worker perception features stay pure"*.
+- `ingest/`: registry, descriptor checks, capture loop, reconnect, pacing, RTSP credential masking. `DecodeAdapter` port only. Open or iterate failure is camera `DEGRADED` plus `camera.offline`. Later processing failure is not offline.
+- `bus/`: named bounded subscriptions, `scheduler.py`, publish/take/drop counters, queue age.
+- `perception/` + `analytics/`: observation builder, greedy tracker, `SceneState`, window buffer, `DecisionInput`, `features/`. `CompositeExtractor` owns one camera's tracker/scene and reuses shared named extractors. Scheduler picks due modules; every packet still coasts or advances tracker/scene.
+- `decision/`: `IncidentManager` (cooldown, admission, persisted identity, enrichment) and `EventAggregator`.
+- `output/`: `EventSink`, evidence (encoder, finalizer, manifests, outbox, retention, reconciliation), overlay, live view, snapshot store. Clip, snapshot, and relay side effects run after admission, here only.
+- `camera_pipeline.py`: per-camera wiring. No business math.
+- `inference_coordinator.py`: shared pose owner between `bus.inference` and the pump. Not a sixth stage.
 
-## Local Ownership
+## Bounded bus, coordinator, leases
 
-- `ingest/`: source registry and descriptor validation, per-camera capture loop,
-  reconnect, pacing, RTSP credential masking. Imports the `DecodeAdapter` port,
-  never a concrete decoder.
-- `bus/`: named bounded per-camera subscriptions — `inference` latest-only
-  capacity 1, `live` latest-only capacity 1, `evidence` bounded FIFO (default
-  128) — plus `latest_frame.py` and `scheduler.py`. Publish/take/drop counters and
-  queue age live here.
-- `perception/`: observation builder, greedy tracker, `SceneState`, window
-  buffer, `DecisionInput` construction, and `features/` (geometry, pose
-  normalization, window features).
-- `decision/`: `incident_manager.py` — cooldown keys, event admission, persisted
-  event identity, camera/facility/time enrichment.
-- `output/`: `EventSink` relay egress, `evidence/` (segment encoder use, clip
-  finalizer, manifests, outbox, retention, reconciliation), `overlay.py`,
-  `live_view.py`, `snapshot_store.py`.
-- `camera_pipeline.py`: per-camera orchestration only — wiring, no business math.
+No unbounded queue. A full subscription drops by its documented policy and increments its drop counter once. `inference` and `live`: latest-only, capacity 1; new publish evicts the queued packet and releases its lease. `evidence`: FIFO, default 128; a full queue rejects the incoming packet and releases it. Close drains every queued lease. `BoundedFrameBus.publish` precharges one child lease per subscription, then releases the publisher handle. Packets stay immutable on the bus. Copy the image before draw or mutate.
 
-## Conventions
+Who takes what: coordinator drains `bus.inference` at timeout 0; `LiveViewPump` drains `bus.live` on its own thread; evidence/clip feeder drains `bus.evidence`; `CameraPipelinePump` takes `InferenceResultSlot`, never the inference bus.
 
-- `FramePacket` is published immutably. Any consumer that draws or mutates copies
-  the image first.
-- Raw frames go only to model extraction, derivative evidence, overlay/live view,
-  and the alert snapshot. The decision stage receives `DecisionInput`.
-- No unbounded queue anywhere. A full subscription drops by its documented policy
-  and increments its counter exactly once.
-- Source construction or iteration failure means camera `DEGRADED` plus
-  `camera.offline`. A later processing failure is **not** an offline source
-  failure — keep the categories distinct.
-- Clip/snapshot/relay side effects happen after event admission, in `output/`
-  only.
-- Keep new pure-code modules at or below 250 logical LOC; split by stage rather
-  than recreating a monolith.
+`CapabilityInferenceCoordinator` owns every pose forward. It drains one latest frame per ready camera, batches up to 16, and publishes `CoordinatedInference` into a capacity-1 `InferenceResultSlot` per camera. The slot owns the queued packet lease. Overwrite or close releases the replaced packet. A failed forward releases every selected packet before re-raise. `stop()` drains leftover inference subscriptions and closes every result slot. After that handoff, `CameraPipelinePump` is the sole owner of per-camera analytics, tracker, scene, and domain mutation. Pose is never forwarded from a per-camera loop.
+
+A queue owns every accepted packet until take, eviction, or close. After `take()`, the taker owns the lease and must release it. Keep these paths balanced: publish fanout, latest-only eviction, FIFO reject, subscription close, coordinator forward failure, `stop()` drain, result-slot overwrite/close, `CameraPipelinePump.run` `finally`, `LiveViewPump` after each live frame, evidence clip admission drops. Don't publish a released packet or take and forget.
+
+## Pixel / numeric, per-camera, output
+
+Pixels stop at model extract, derivative evidence, overlay/live view, and the alert snapshot. Decision sees `DecisionInput` only: observation, frame size, live track ids, time, frame index, bed region. No array, no buffer, no frame handle. Need a pixel-derived number? Extract it in `perception/` first.
+
+Pipeline-owned per camera: tracker, `SceneState`, window buffer, scheduler, `IncidentManager`, bus slot, encoder ring, ingest backoff, result slot, live observation cache row. Shared once: model objects, named extractors, serving client, coordinator. Don't hoist a per-camera row to save memory.
+
+`AlertEvidenceAttacher` adds audit and a bounded JPEG after admission. Attachment failure must not block the alert. `EvidenceEventSink.emit_for_frame` stages the event with its trigger packet. Legacy event-only `emit` is rejected. `LiveViewPump` is a tap, not a stage. It draws the latest cached observation against `bus.live`. Stale pose is dropped, not drawn as current. Zero viewers means no JPEG encode. Primary clips remux source packets from camera-local rings. Decoded frames are analysis and snapshot taps.
 
 ## Focused Tests
 
-- `tests/test_pipeline_bootstrap.py`
-- `tests/test_import_dependency_ladder.py`
-- Boundary enforced by import-linter (`uv run --group lint lint-imports`)
+- `tests/test_worker_frame_bus.py`, `tests/test_frame_lease.py`, `tests/test_capability_inference_coordinator.py`
+- `tests/test_worker_camera_pipeline_pump.py`, `tests/test_perception_observation_builder.py`
+- `tests/test_worker_incident_manager.py`, `tests/test_live_view_pump.py`
+- `tests/test_pipeline_bootstrap.py`, `tests/test_import_dependency_ladder.py`
+- Boundary: `uv run --group lint lint-imports`
 
-## Change Boundary
-
-Per-camera state stays per camera. Never hoist a tracker, `SceneState`, window
-buffer, scheduler, `IncidentManager`, or encoder ring into module or process
-scope to "save memory" — only model objects are shared.
+Keep new pure-code modules at or below 250 logical LOC. Split by stage, not into a new monolith. Preserve lease balance and per-camera isolation whenever a consumer or handoff changes shape.
