@@ -184,7 +184,14 @@ class BedExitMonitor:
                 self._assignments_made,
             )
         event_time = 0.0 if input_value.time_sec is None else input_value.time_sec
-        onset_events = self._latch.update(frame.events, event_time)
+        # Gate before the latch consumes an onset. A daytime exit fed into
+        # BedExitLatch advances event_count and can hold (person_id, bed_id)
+        # in `_active_exits`, swallowing the same pair once the window opens.
+        # Feed ``()`` outside the window so freshness still updates and no
+        # onset is recorded. Snapshot still uses the real frame so the overlay
+        # renders `bed:exit` (docs/runbooks/post-redeploy-event-readout.md ④).
+        in_window = self._night_window is None or self._night_window.contains(self._clock())
+        onset_events = self._latch.update(frame.events if in_window else (), event_time)
         freshness = self._latch.status_snapshot
         self.last_debug_snapshot = BedExitDebugSnapshot(
             frame_index=input_value.frame_index,
@@ -196,7 +203,7 @@ class BedExitMonitor:
             stale=freshness.stale,
             observation_age_sec=freshness.observation_age_sec,
         )
-        if self._night_window is not None and not self._night_window.contains(self._clock()):
+        if not in_window:
             return ()
         return tuple(self._business_event(event, event_time) for event in onset_events)
 
