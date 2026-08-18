@@ -908,8 +908,10 @@ def _resolved_tz(live_pulled: PulledWorkerConfig | None, domain: str) -> str:
     No facility-timezone setting exists anywhere else in this codebase, so
     this reuses whatever tz the live externally-pulled window for the same
     domain (or, for bed_exit, the deprecated night_window alias) is already
-    using when one is available, and otherwise falls back to
-    ``ML_API_DETECTION_TZ`` (default ``"UTC"``).
+    using when one is available, and otherwise falls back to a fixed
+    ``"UTC"``. The former ``ML_API_DETECTION_TZ`` override is retired
+    (``core.config._RETIRED_BACKEND_ENV`` fails boot on it), so there is no
+    environment knob here.
     """
     if live_pulled is not None:
         window = live_pulled.detection_windows.get(domain)
@@ -1376,8 +1378,10 @@ def _probe_rtsp_url(request: Request, rtsp_url: str) -> ProbeResult:
     settings = get_settings()
     origin = settings.worker_probe_origin.strip().rstrip("/")
     if not origin:
-        # ML_API_WORKER_PROBE_ORIGIN 자체가 미설정 -- worker에 요청을 보낼
-        # 주소가 없다. worker가 살아서 "디코드 실패"라고 답한 것과 전혀
+        # worker probe origin(Settings.worker_probe_origin)이 비어 있다 --
+        # worker에 요청을 보낼 주소가 없다. 옛 ML_API_WORKER_PROBE_ORIGIN
+        # 환경변수는 폐기되어(core.config._RETIRED_BACKEND_ENV) 더는 이 값을
+        # 주입하지 못한다. worker가 살아서 "디코드 실패"라고 답한 것과 전혀
         # 다른 상황이므로 error_class를 채우지 않는다 (이슈 #151).
         return ProbeResult(ok=False, probe_unavailable=True)
     token = _expected_relay_token(request)
