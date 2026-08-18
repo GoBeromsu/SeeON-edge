@@ -149,7 +149,7 @@ class YoloModel(Protocol):
     def predict(
         self,
         *,
-        source: Image,
+        source: Image | Sequence[Image],
         conf: float,
         verbose: bool,
         device: str,
@@ -175,7 +175,7 @@ class _UltralyticsModel:
     def predict(
         self,
         *,
-        source: Image,
+        source: Image | Sequence[Image],
         conf: float,
         verbose: bool,
         device: str,
@@ -298,7 +298,7 @@ def predict_one(
             device=options.device,
         )
     except (OSError, RuntimeError, TypeError, ValueError) as exc:
-        _classify_or_reraise(exc, task=options.task, camera_id=camera_id)
+        classify_forward_error(exc, task=options.task, camera_id=camera_id)
     if len(results) != 1:
         raise YoloOutputError(
             task=options.task,
@@ -316,6 +316,11 @@ _CUDA_KEYWORDS: tuple[str, ...] = (
     "cuLaunch",
     "cuDNN",
 )
+
+
+def classify_forward_error(exc: Exception, *, task: str, camera_id: str) -> None:
+    """Public batch-adapter entry point for existing forward classification."""
+    _classify_or_reraise(exc, task=task, camera_id=camera_id)
 
 
 def _classify_or_reraise(exc: Exception, *, task: str, camera_id: str) -> None:
@@ -348,6 +353,7 @@ __all__ = [
     "YoloResult",
     "YoloTask",
     "YoloTensor",
+    "classify_forward_error",
     "load_yolo_model",
     "predict_one",
     "to_float_array",

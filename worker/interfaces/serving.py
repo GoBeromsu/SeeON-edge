@@ -16,7 +16,7 @@ class ServingClient(Protocol):
 
 @runtime_checkable
 class BatchServingClient(ServingClient, Protocol):
-    """Typed deferred seam for future cross-camera batched inference."""
+    """Serving seam for positional cross-camera batched inference."""
 
     def infer_batch(
         self,
@@ -26,4 +26,12 @@ class BatchServingClient(ServingClient, Protocol):
     ) -> tuple[RunnerResult, ...]: ...
 
 
-__all__ = ["BatchServingClient", "ServingClient"]
+@runtime_checkable
+class BatchServingProvider(Protocol):
+    """Single-frame client able to expose a model-sharing batch view."""
+
+    @property
+    def batch_serving_client(self) -> BatchServingClient: ...
+
+
+__all__ = ["BatchServingClient", "BatchServingProvider", "ServingClient"]

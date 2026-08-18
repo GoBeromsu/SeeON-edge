@@ -16,7 +16,11 @@ from worker.domains.module_definition import (
     DetectionModuleActivationError,
     SharedComponentIdentity,
 )
-from worker.interfaces.serving import ServingClient
+from worker.interfaces.serving import (
+    BatchServingClient,
+    BatchServingProvider,
+    ServingClient,
+)
 from worker.pipeline.analytics import Clock, NamedExtractor
 
 SharedProvisioner = Callable[[ComponentBinding, str], object]
@@ -35,6 +39,7 @@ class SharedComponentGraph:
     components: Mapping[str, object]
     extractors: tuple[NamedExtractor, ...]
     identities: tuple[SharedComponentIdentity, ...]
+    batch_serving_client: BatchServingClient | None
 
 
 class SharedComponentPool:
@@ -149,7 +154,16 @@ def compose_shared_components(
         MappingProxyType(components),
         tuple(extractors),
         tuple(identities),
+        _batch_client_for(serving_client),
     )
+
+
+def _batch_client_for(serving_client: ServingClient) -> BatchServingClient | None:
+    if isinstance(serving_client, BatchServingClient):
+        return serving_client
+    if isinstance(serving_client, BatchServingProvider):
+        return serving_client.batch_serving_client
+    return None
 
 
 def _serving_task(binding: ComponentBinding) -> str:
