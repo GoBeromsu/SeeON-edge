@@ -32,6 +32,20 @@ class DecisionTraceReason(StrEnum):
     LIVE_GRACE_EXIT = "live-grace-exit"
     LIVE_GRACE = "live-grace"
     PERSON_OBSERVATION_MISSING = "person-observation-missing"
+    IN_BED_HOLD = "in-bed-hold"
+    SITTING_UP_HOLD = "sitting-up-hold"
+    EDGE_SITTING_HOLD = "edge-sitting-hold"
+    OUT_OF_BED_HOLD = "out-of-bed-hold"
+    UNCERTAIN_HOLD = "uncertain-hold"
+    ABSENT_HOLD = "absent-hold"
+    ENTERED_IN_BED = "entered-in-bed"
+    ENTERED_SITTING_UP = "entered-sitting-up"
+    ENTERED_EDGE_SITTING = "entered-edge-sitting"
+    ENTERED_OUT_OF_BED = "entered-out-of-bed"
+    ENTERED_UNCERTAIN = "entered-uncertain"
+    ENTERED_ABSENT = "entered-absent"
+    POSE_UNAVAILABLE = "pose-unavailable"
+    BED_POLYGON_INVALID = "bed-polygon-invalid"
 
 
 class DecisionTraceState(StrEnum):
@@ -48,6 +62,12 @@ class DecisionTraceState(StrEnum):
     RETIRED = "retired"
     UNASSIGNED = "unassigned"
     OTHER_BED = "other-bed"
+    IN_BED = "in-bed"
+    SITTING_UP = "sitting-up"
+    EDGE_SITTING = "edge-sitting"
+    OUT_OF_BED = "out-of-bed"
+    UNCERTAIN = "uncertain"
+    ABSENT = "absent"
 
 
 class DecisionTraceValueName(StrEnum):
@@ -66,6 +86,15 @@ class DecisionTraceValueName(StrEnum):
     GRACE_THRESHOLD = "grace_threshold"
     BED_ID = "bed_id"
     DECISION_STATE = "decision_state"
+    TORSO_IN_FRAC = "torso_in_frac"
+    LOWER_IN_FRAC = "lower_in_frac"
+    KEYPOINT_IN_FRAC = "keypoint_in_frac"
+    HIP_DEPTH = "hip_depth"
+    TORSO_ANGLE = "torso_angle"
+    CENTROID_DISPLACEMENT = "centroid_displacement"
+    OBSERVABILITY = "observability"
+    DWELL_FRAMES = "dwell_frames"
+    DWELL_THRESHOLD = "dwell_threshold"
 
 
 class DecisionTraceMissingReason(StrEnum):
@@ -79,6 +108,8 @@ class DecisionTraceMissingReason(StrEnum):
     BED_OBSERVATION_MISSING = "bed-observation-missing"
     TRACK_NO_LONGER_LIVE = "track-no-longer-live"
     NO_OBSERVED_PERSON = "no-observed-person"
+    POSE_UNAVAILABLE = "pose-unavailable"
+    BED_POLYGON_INVALID = "bed-polygon-invalid"
 
 
 @overload
