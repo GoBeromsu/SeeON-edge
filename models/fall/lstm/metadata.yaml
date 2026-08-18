@@ -23,6 +23,7 @@ architecture: arch.json
 metadata: metadata.yaml
 window: 30
 stride: 5
+training_fps: 30  # owner-declared 2026-08-18 (pipeline rate; not recorded in upstream provenance, which documented LE2I nominal 25fps as a fallback only). Edge admits pose at 5fps -> 30-frame window ~1s (train) vs ~6s (admission); temporal-scale gap accepted by owner, not a deploy blocker.
 input_shape: [30, 51]
 # From upstream lstm/metadata.json's operating_threshold (dataset le2i,
 # version poc) -- not a placeholder.

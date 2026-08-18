@@ -1,28 +1,10 @@
-"""Pin what actually happens to ``SourcePacketRing`` across a stream-epoch reset.
+"""Pin the explicit ``SourcePacketRing`` epoch boundary added by Wave 2.
 
-Discovered empirically and documented here as CURRENT behavior (plan todo 3
-QA scenario: "assert the ring rolls its epoch, or document current behavior
-precisely if it does not"). The finding is: **the ring does not roll**.
-
-Three facts these tests pin, all reproduced from real objects:
-
-1. ``SourcePacketRing`` holds no epoch state whatsoever. A new epoch's packets
-   are simply appended after the old epoch's; nothing is purged, no metric
-   moves, and stale-epoch packets stay selectable forever.
-2. Epoch isolation is enforced only at ``select()`` time, by filtering entries
-   on ``packet.epoch`` equality -- never at ``append()`` time.
-3. ``arrival_index`` restarts at 0 for each session, and the duration trim
-   (``_over_limit``) compares raw per-epoch PTS across the whole deque. Because
-   a new epoch's PTS restarts near 0, the computed span goes negative right
-   after a reset and the duration limit stops evicting until the new epoch
-   catches up. Count and byte limits keep working.
-
-Wave 2 (plan todo 4) is required to "roll the packet-ring epoch" on
-SPS/PPS/extradata change -- these tests record exactly what "roll" must be
-built on top of, so a regression against today's guarantees is visible.
-
-Hermetic and CI-safe: media is synthesized in-process by PyAV (no ffmpeg
-binary, no RTSP, no GPU).
+The pre-refactor seam tests proved that ``select()`` was the ring's only epoch
+boundary: stale packets remained resident and duration trimming went dormant
+when PTS restarted. The NVDEC packet tee now calls ``roll_epoch()`` before a
+reconnected/configuration-reset stream can append. These tests pin the new
+surface without changing CPU/VAAPI preserving-session behavior.
 """
 
 from __future__ import annotations
@@ -33,6 +15,7 @@ from typing import final
 
 import av
 import numpy as np
+import pytest
 
 from worker.adapters.decode.cpu_av.models import CpuAvConfig
 from worker.adapters.decode.pyav_preserving import PyAvPreservingAdapter
@@ -41,6 +24,8 @@ from worker.pipeline.output.evidence.packet_ring import (
     SourcePacketRing,
 )
 from worker.types.source_packet import (
+    PacketSelectionError,
+    PacketTruncationReason,
     SourcePacket,
     SourceStreamConfiguration,
     SourceStreamDescriptor,
@@ -123,14 +108,8 @@ def _packet(
     )
 
 
-def test_epoch_reset_with_new_sps_does_not_roll_or_purge_the_ring(tmp_path: Path) -> None:
-    """SEAM C1 (CURRENT BEHAVIOR, empirically discovered): a real stream reset --
-    new session, new epoch, genuinely different SPS/extradata -- leaves every
-    old-epoch packet resident in the ring. No purge, no eviction, no metric.
-
-    Wave 2's "roll the packet-ring epoch" therefore ADDS behavior; it must not
-    assume the ring already discards prior-epoch packets."""
-    # Given
+def test_epoch_reset_with_new_sps_rolls_and_purges_the_ring(tmp_path: Path) -> None:
+    """C1: a reconnect with genuinely different SPS/PPS starts clean history."""
     first = tmp_path / "epoch-1.mp4"
     second = tmp_path / "epoch-2.mp4"
     _encode(first, width=64, height=48)
@@ -138,177 +117,146 @@ def test_epoch_reset_with_new_sps_does_not_roll_or_purge_the_ring(tmp_path: Path
     observed = _RecordingSink()
     _demux_into(observed, first, 1)
     _demux_into(observed, second, 2)
-    old_extradata = observed.packets[0].stream.extradata
-    new_extradata = observed.packets[-1].stream.extradata
-    assert old_extradata != new_extradata  # a genuine SPS/PPS change
-    ring = SourcePacketRing("camera-1", PacketRingLimits(1_000, 8 * 1024 * 1024, 60.0))
+    assert observed.packets[0].stream.extradata != observed.packets[-1].stream.extradata
 
-    # When
+    ring = SourcePacketRing("camera-1", PacketRingLimits(1_000, 8 * 1024 * 1024, 60.0))
+    first_epoch = StreamEpoch("boot-1", "camera-1", 1)
+    second_epoch = StreamEpoch("boot-1", "camera-1", 2)
+    ring.roll_epoch(first_epoch)
     _demux_into(ring, first, 1)
-    epoch_one = ring.snapshot()
+    old_payloads = tuple(packet.payload for packet in ring.snapshot())
+
+    ring.roll_epoch(second_epoch)
     _demux_into(ring, second, 2)
 
-    # Then
     snapshot = ring.snapshot()
-    assert tuple(packet.payload for packet in snapshot[: len(epoch_one)]) == tuple(
-        packet.payload for packet in epoch_one
-    )
-    assert sorted({packet.epoch.stream_epoch for packet in snapshot}) == [1, 2]
-    assert len({packet.configuration.configuration_id for packet in snapshot}) == 2
-    assert ring.metrics.evicted_packets == 0
+    assert snapshot
+    assert ring.active_epoch == second_epoch
+    assert {packet.epoch for packet in snapshot} == {second_epoch}
+    assert tuple(packet.payload for packet in snapshot) != old_payloads
     assert ring.metrics.dropped_packets == 0
-    assert ring.metrics.accepted_packets == len(snapshot)
 
 
-def test_select_is_the_only_epoch_boundary_and_stale_epochs_stay_selectable(
-    tmp_path: Path,
-) -> None:
-    """SEAM C2 (CURRENT BEHAVIOR): epoch isolation lives entirely in ``select()``.
-    A selection never mixes epochs, but a selection against the OLD epoch still
-    succeeds after the reset -- stale packets are readable, not discarded."""
-    # Given
+def test_select_rejects_a_stale_epoch_after_roll(tmp_path: Path) -> None:
+    """C2: old-epoch packets cannot become new evidence after a reconnect."""
     first = tmp_path / "epoch-1.mp4"
     second = tmp_path / "epoch-2.mp4"
     _encode(first, width=64, height=48)
     _encode(second, width=80, height=64)
     ring = SourcePacketRing("camera-1", PacketRingLimits(1_000, 8 * 1024 * 1024, 60.0))
+    old_epoch = StreamEpoch("boot-1", "camera-1", 1)
+    new_epoch = StreamEpoch("boot-1", "camera-1", 2)
+    ring.roll_epoch(old_epoch)
     _demux_into(ring, first, 1)
+    old_trigger = max(packet.presentation_time for packet in ring.snapshot())
+    ring.roll_epoch(new_epoch)
     _demux_into(ring, second, 2)
-    snapshot = ring.snapshot()
-    old_packets = tuple(packet for packet in snapshot if packet.epoch.stream_epoch == 1)
-    new_packets = tuple(packet for packet in snapshot if packet.epoch.stream_epoch == 2)
 
-    # When
+    with pytest.raises(PacketSelectionError) as raised:
+        ring.select(
+            trigger_epoch=old_epoch,
+            trigger_pts=old_trigger,
+            pre_seconds=Fraction(10),
+            post_seconds=Fraction(0),
+        )
+    assert raised.value.reason is PacketTruncationReason.KEYFRAME_UNAVAILABLE
+
+    current_packets = ring.snapshot()
     with ring.select(
-        trigger_epoch=StreamEpoch("boot-1", "camera-1", 1),
-        trigger_pts=max(packet.presentation_time for packet in old_packets),
-        pre_seconds=Fraction(10),
-        post_seconds=Fraction(0),
-    ) as stale:
-        stale_payloads = tuple(packet.payload for packet in stale.packets)
-        stale_epochs = {packet.epoch.stream_epoch for packet in stale.packets}
-    with ring.select(
-        trigger_epoch=StreamEpoch("boot-1", "camera-1", 2),
-        trigger_pts=max(packet.presentation_time for packet in new_packets),
+        trigger_epoch=new_epoch,
+        trigger_pts=max(packet.presentation_time for packet in current_packets),
         pre_seconds=Fraction(10),
         post_seconds=Fraction(0),
     ) as current:
-        current_payloads = tuple(packet.payload for packet in current.packets)
-        current_epochs = {packet.epoch.stream_epoch for packet in current.packets}
-
-    # Then
-    assert stale_epochs == {1}
-    assert current_epochs == {2}
-    assert stale_payloads == tuple(packet.payload for packet in old_packets)
-    assert current_payloads == tuple(packet.payload for packet in new_packets)
-    assert set(stale_payloads).isdisjoint(set(current_payloads))
+        assert {packet.epoch for packet in current.packets} == {new_epoch}
 
 
-def test_arrival_index_restarts_per_epoch_so_indexes_collide_inside_one_ring(
+def test_epoch_roll_hides_leased_history_but_keeps_it_inside_memory_budget() -> None:
+    """A pre-roll selection stays valid without making stale history selectable."""
+    configuration = _configuration(b"sps-old")
+    ring = SourcePacketRing("camera-1", PacketRingLimits(100, 10_000, 60.0))
+    old_epoch = StreamEpoch("boot-1", "camera-1", 1)
+    new_epoch = StreamEpoch("boot-1", "camera-1", 2)
+    ring.roll_epoch(old_epoch)
+    assert ring.append(_packet(0, epoch=1, configuration=configuration, keyframe=True))
+    assert ring.append(_packet(1, epoch=1, configuration=configuration, keyframe=False))
+    selection = ring.select(
+        trigger_epoch=old_epoch,
+        trigger_pts=Fraction(1),
+        pre_seconds=Fraction(1),
+        post_seconds=Fraction(0),
+    )
+
+    ring.roll_epoch(new_epoch)
+
+    assert ring.snapshot() == ()
+    assert ring.total_bytes == 20
+    assert tuple(packet.epoch for packet in selection.packets) == (old_epoch, old_epoch)
+    with pytest.raises(PacketSelectionError):
+        ring.select(
+            trigger_epoch=old_epoch,
+            trigger_pts=Fraction(1),
+            pre_seconds=Fraction(1),
+            post_seconds=Fraction(0),
+        )
+    selection.close()
+    assert ring.total_bytes == 0
+
+
+def test_arrival_index_restarts_per_epoch_without_resident_collisions(
     tmp_path: Path,
 ) -> None:
-    """SEAM C3 (CURRENT BEHAVIOR): ``arrival_index`` is session-scoped, not
-    ring-scoped. Two epochs in one ring carry the same indexes; ``select()`` is
-    only correct because it filters by epoch BEFORE comparing arrival indexes.
-    Wave 2 must keep that ordering or the interval math silently mixes epochs."""
-    # Given
+    """C3: session-local indexes still restart, but rolled history cannot collide."""
     first = tmp_path / "epoch-1.mp4"
     second = tmp_path / "epoch-2.mp4"
     _encode(first, width=64, height=48)
     _encode(second, width=80, height=64)
     ring = SourcePacketRing("camera-1", PacketRingLimits(1_000, 8 * 1024 * 1024, 60.0))
-
-    # When
+    ring.roll_epoch(StreamEpoch("boot-1", "camera-1", 1))
     _demux_into(ring, first, 1)
+    assert ring.snapshot()[0].arrival_index == 0
+
+    ring.roll_epoch(StreamEpoch("boot-1", "camera-1", 2))
     _demux_into(ring, second, 2)
 
-    # Then
     snapshot = ring.snapshot()
-    epoch_one = [packet.arrival_index for packet in snapshot if packet.epoch.stream_epoch == 1]
-    epoch_two = [packet.arrival_index for packet in snapshot if packet.epoch.stream_epoch == 2]
-    assert epoch_one == list(range(len(epoch_one)))
-    assert epoch_two == list(range(len(epoch_two)))
-    assert set(epoch_one) & set(epoch_two)
+    assert snapshot[0].arrival_index == 0
+    assert [packet.arrival_index for packet in snapshot] == list(range(len(snapshot)))
+    assert {packet.epoch.stream_epoch for packet in snapshot} == {2}
 
 
-def test_duration_trim_goes_dormant_after_pts_restart_while_count_limit_holds() -> None:
-    """SEAM C4 (CURRENT BEHAVIOR, the sharpest edge found): the duration limit is
-    computed as ``video_times[-1] - video_times[0]`` over the whole deque. After
-    an epoch reset the newest PTS is SMALLER than the oldest retained PTS, the
-    span goes negative, and duration-based eviction stops -- old-epoch packets
-    are pinned past the configured window. Only the count/byte caps still bound
-    the ring. Constructed packets are used here so the PTS restart is exact."""
-    # Given
+def test_duration_trim_stays_active_after_pts_restart_when_epoch_is_rolled() -> None:
+    """C4: purging before a PTS restart keeps duration trimming meaningful."""
     old = _configuration(b"sps-old")
     new = _configuration(b"sps-new")
     ring = SourcePacketRing("camera-1", PacketRingLimits(100, 10_000, 2.0))
+    ring.roll_epoch(StreamEpoch("boot-1", "camera-1", 1))
     for second in range(10):
-        assert ring.append(_packet(second, epoch=1, configuration=old, keyframe=second % 4 == 0))
-    before = ring.snapshot()
+        assert ring.append(_packet(second, epoch=1, configuration=old, keyframe=True))
+    assert [float(packet.presentation_time) for packet in ring.snapshot()] == [7.0, 8.0, 9.0]
 
-    # When
+    ring.roll_epoch(StreamEpoch("boot-1", "camera-1", 2))
     for second in range(6):
-        assert ring.append(_packet(second, epoch=2, configuration=new, keyframe=second % 4 == 0))
-    after = ring.snapshot()
+        assert ring.append(_packet(second, epoch=2, configuration=new, keyframe=True))
 
-    # Then
-    assert [float(packet.presentation_time) for packet in before] == [7.0, 8.0, 9.0]
-    assert [
-        (packet.epoch.stream_epoch, float(packet.presentation_time)) for packet in after
-    ] == [
-        (1, 7.0),
-        (1, 8.0),
-        (1, 9.0),
-        (2, 0.0),
-        (2, 1.0),
-        (2, 2.0),
-        (2, 3.0),
-        (2, 4.0),
-        (2, 5.0),
-    ]
-    assert ring.metrics.evicted_packets == 7  # all seven evictions happened pre-reset
-
-    # And the count cap is the bound that actually flushes the old epoch: FIFO
-    # count pressure pushes stale-epoch packets out one at a time, and the
-    # duration trim resumes only once the deque is entirely the new epoch.
-    capped = SourcePacketRing("camera-1", PacketRingLimits(4, 10_000, 2.0))
-    for second in range(6):
-        assert capped.append(_packet(second, epoch=1, configuration=old, keyframe=True))
     assert [
         (packet.epoch.stream_epoch, float(packet.presentation_time))
-        for packet in capped.snapshot()
-    ] == [(1, 3.0), (1, 4.0), (1, 5.0)]
-    observed: list[list[tuple[int, float]]] = []
-    for second in range(6):
-        assert capped.append(_packet(second, epoch=2, configuration=new, keyframe=True))
-        observed.append(
-            [
-                (packet.epoch.stream_epoch, float(packet.presentation_time))
-                for packet in capped.snapshot()
-            ]
-        )
-    assert observed == [
-        [(1, 3.0), (1, 4.0), (1, 5.0), (2, 0.0)],
-        [(1, 4.0), (1, 5.0), (2, 0.0), (2, 1.0)],
-        [(1, 5.0), (2, 0.0), (2, 1.0), (2, 2.0)],
-        [(2, 1.0), (2, 2.0), (2, 3.0)],
-        [(2, 2.0), (2, 3.0), (2, 4.0)],
-        [(2, 3.0), (2, 4.0), (2, 5.0)],
-    ]
-    assert {packet.epoch.stream_epoch for packet in capped.snapshot()} == {2}
+        for packet in ring.snapshot()
+    ] == [(2, 3.0), (2, 4.0), (2, 5.0)]
 
 
-def test_append_never_inspects_epoch_only_camera_identity() -> None:
-    """SEAM C5 (CURRENT BEHAVIOR): ``append`` validates the camera and the byte
-    budget, nothing else. An out-of-order (older) epoch is accepted after a
-    newer one; only a foreign camera is refused."""
-    # Given
+def test_append_rejects_stale_epoch_after_roll_and_foreign_camera_always() -> None:
+    """C5: once activated, a ring refuses late writes from superseded demuxers."""
     configuration = _configuration(b"sps-1")
     ring = SourcePacketRing("camera-1", PacketRingLimits(100, 10_000, 60.0))
+    active = StreamEpoch("boot-1", "camera-1", 5)
+    ring.roll_epoch(active)
 
-    # When
     assert ring.append(_packet(0, epoch=5, configuration=configuration, keyframe=True))
-    assert ring.append(_packet(1, epoch=2, configuration=configuration, keyframe=True))
+    assert not ring.append(_packet(1, epoch=2, configuration=configuration, keyframe=True))
+    assert [packet.epoch for packet in ring.snapshot()] == [active]
+    assert ring.metrics.dropped_packets == 1
+
     foreign = SourcePacket(
         epoch=StreamEpoch("boot-1", "camera-2", 1),
         configuration=configuration,
@@ -320,12 +268,5 @@ def test_append_never_inspects_epoch_only_camera_identity() -> None:
         payload=b"y" * 10,
         arrival_index=0,
     )
-
-    # Then
-    assert [packet.epoch.stream_epoch for packet in ring.snapshot()] == [5, 2]
-    try:
-        _ = ring.append(foreign)
-    except ValueError as error:
-        assert "packet camera does not match its ring" in str(error)
-    else:  # pragma: no cover - documents the refusal contract
-        raise AssertionError("ring accepted a packet from a foreign camera")
+    with pytest.raises(ValueError, match="packet camera does not match its ring"):
+        ring.append(foreign)

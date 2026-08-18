@@ -256,6 +256,9 @@ _SYNTHETIC_RTSP_FIXTURES = {
         # 절대 새지 않음을 증명한다.
         "rtsp://user:secret@8.8.8.8/trackID=2",
     },
+    Path("tests/test_decode_seam_nvdec_subprocess.py"): {
+        "rtsp://operator:s3cr3t@camera.local/live?token=plain",
+    },
     Path("tests/test_worker_nvdec_adapter.py"): {
         "rtsp://operator:s3cr3t@camera.local/live?token=plain",
         "rtsp://***:***@camera.local/live?token=%2A%2A%2A",

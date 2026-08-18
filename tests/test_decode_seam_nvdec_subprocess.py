@@ -14,6 +14,7 @@ no RTSP), so this stays CI-safe and is deliberately not ``real_stack``.
 
 from __future__ import annotations
 
+import threading
 from typing import final
 
 import pytest
@@ -22,6 +23,7 @@ from worker.adapters.decode.nvdec_cuvid.adapter import (
     NvdecCuvidAdapter,
     NvdecCuvidSession,
     ffmpeg_decode_args,
+    ffmpeg_rtsp_decode_args,
 )
 from worker.adapters.decode.nvdec_cuvid.errors import (
     NvdecReadError,
@@ -52,6 +54,12 @@ class _FakeDecoderProcess:
         self._payloads = payloads
         self.reap_calls = 0
 
+    def write_packet(self, payload: bytes) -> None:
+        del payload
+
+    def close_input(self) -> None:
+        return None
+
     def read_frame(self, timeout_sec: float) -> bytes | None:
         del timeout_sec
         return self._payloads.pop(0) if self._payloads else None
@@ -79,8 +87,23 @@ class _ChunkStream:
 
 
 @final
+class _CaptureInput:
+    def __init__(self) -> None:
+        self.payload = bytearray()
+        self.closed = False
+
+    def write(self, payload: bytes | memoryview) -> int:
+        self.payload.extend(payload)
+        return len(payload)
+
+    def close(self) -> None:
+        self.closed = True
+
+
+@final
 class _ChunkChild:
     def __init__(self, stdout: _ChunkStream) -> None:
+        self.stdin = _CaptureInput()
         self.stdout = stdout
         self.returncode: int | None = None
 
@@ -94,6 +117,42 @@ class _ChunkChild:
         del timeout
         self.returncode = 0 if self.returncode is None else self.returncode
         return self.returncode
+
+
+@final
+class _BlockingStream:
+    def __init__(self) -> None:
+        self._released = threading.Event()
+        self.closed = False
+
+    def read(self, size: int = -1) -> bytes:
+        del size
+        self._released.wait()
+        return b""
+
+    def close(self) -> None:
+        self.closed = True
+        self._released.set()
+
+
+@final
+class _SilentChild:
+    def __init__(self) -> None:
+        self.stdin = _CaptureInput()
+        self.stdout = _BlockingStream()
+        self.returncode: int | None = None
+
+    def terminate(self) -> None:
+        self.returncode = 0
+        self.stdout.close()
+
+    def kill(self) -> None:
+        self.returncode = -9
+        self.stdout.close()
+
+    def wait(self, timeout: float | None = None) -> int:
+        del timeout
+        return 0 if self.returncode is None else self.returncode
 
 
 def _probe_runner(codec_name: str = "h264", *, width: int = 2, height: int = 1):
@@ -117,17 +176,14 @@ def test_ffmpeg_decode_argv_is_pinned_position_by_position() -> None:
     # Then
     assert argv == (
         "ffmpeg",
-        "-nostdin",
         "-loglevel",
         "error",
-        "-rtsp_transport",
-        "tcp",
         "-hwaccel",
         "cuda",
         "-c:v",
         "h264_cuvid",
         "-i",
-        "rtsp://camera.local/live",
+        "pipe:0",
         "-an",
         "-f",
         "rawvideo",
@@ -142,10 +198,11 @@ def test_ffmpeg_decode_argv_is_pinned_position_by_position() -> None:
     assert argv[argv.index("-f") + 1] == "rawvideo"
     assert argv[argv.index("-pix_fmt") + 1] == "rgb24"
     assert argv[-1] == "pipe:1"
-    # The input source is the RTSP URL TODAY. Wave 2 switches this to a stdin
-    # pipe; this assertion is the tripwire that says the change was deliberate.
-    assert argv[argv.index("-i") + 1] == _CONFIG.url
-    assert "-nostdin" in argv
+    # Wave 2 deliberately moved the decoder input behind the parent's single
+    # demux session. The decode child must never open a second RTSP session.
+    assert argv[argv.index("-i") + 1] == "pipe:0"
+    assert "-nostdin" not in argv
+    assert "-rtsp_transport" not in argv
 
 
 def test_ffmpeg_decode_argv_honours_a_custom_binary_and_decoder() -> None:
@@ -163,7 +220,14 @@ def test_ffmpeg_decode_argv_honours_a_custom_binary_and_decoder() -> None:
     # Then
     assert argv[0] == "/opt/ffmpeg/bin/ffmpeg"
     assert argv[argv.index("-c:v") + 1] == "hevc_cuvid"
-    assert argv[argv.index("-i") + 1] == "rtsp://camera.local/second"
+    assert argv[argv.index("-i") + 1] == "pipe:0"
+
+    # The sink-free NVDEC adapter still owns its RTSP input directly. Its
+    # explicit builder preserves that separate, pre-existing contract.
+    rtsp_argv = ffmpeg_rtsp_decode_args(config, "hevc_cuvid")
+    assert rtsp_argv[rtsp_argv.index("-i") + 1] == "rtsp://camera.local/second"
+    assert "-nostdin" in rtsp_argv
+    assert "-rtsp_transport" in rtsp_argv
 
 
 @pytest.mark.parametrize(
@@ -294,7 +358,7 @@ def test_adapter_spawns_with_probed_frame_size_and_frames_real_rgb_bytes() -> No
     assert isinstance(adapter, DecodeAdapter)
     assert isinstance(session, NvdecCuvidSession)
     assert isinstance(session, DecodeSession)
-    assert spawned == [(ffmpeg_decode_args(_CONFIG, "h264_cuvid"), 6)]
+    assert spawned == [(ffmpeg_rtsp_decode_args(_CONFIG, "h264_cuvid"), 6)]
     assert first is not None and second is not None
     assert first.frame.image.tolist() == [[[255, 0, 0], [0, 255, 0]]]
     assert second.frame.image.tolist() == [[[0, 0, 255], [255, 255, 255]]]
@@ -323,8 +387,30 @@ def test_short_frame_fails_closed_and_closes_the_session() -> None:
     assert process.reap_calls == 1
 
 
+def test_stdout_reader_returns_within_bound_when_child_never_writes() -> None:
+    """SEAM B10: a silent child cannot hang the caller or its reader thread."""
+    child = _SilentChild()
+    process = FFmpegDecodeProcess(child, frame_size=6)
+    completed = threading.Event()
+    observed: list[bytes | None] = []
+
+    def read() -> None:
+        observed.append(process.read_frame(0.05))
+        completed.set()
+
+    reader = threading.Thread(target=read, daemon=True)
+    reader.start()
+
+    assert completed.wait(1.0)
+    reader.join(timeout=1.0)
+    assert not reader.is_alive()
+    assert observed == [None]
+    assert child.stdin.closed
+    assert child.stdout.closed
+
+
 def test_stdout_reader_reassembles_frames_across_arbitrary_chunk_boundaries() -> None:
-    """SEAM B10: ``FFmpegDecodeProcess`` framing over a real byte pipe -- chunk
+    """SEAM B11: ``FFmpegDecodeProcess`` framing over a real byte pipe -- chunk
     boundaries never align with frame boundaries on a real pipe, so frames are
     reassembled from the byte stream, in order, with no loss."""
     # Given
@@ -336,11 +422,16 @@ def test_stdout_reader_reassembles_frames_across_arbitrary_chunk_boundaries() ->
     process = FFmpegDecodeProcess(child, frame_size)
 
     # When
+    process.write_packet(b"packet-one")
+    process.write_packet(b"-packet-two")
+    process.close_input()
     read = [process.read_frame(2.0) for _ in range(4)]
     trailing = process.read_frame(0.2)
     returncode = process.reap(1.0)
 
     # Then
+    assert bytes(child.stdin.payload) == b"packet-one-packet-two"
+    assert child.stdin.closed
     assert read == frames
     assert trailing is None
     assert returncode == 0

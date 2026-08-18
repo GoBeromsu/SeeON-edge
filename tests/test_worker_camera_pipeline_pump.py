@@ -18,11 +18,13 @@ import numpy as np
 import pytest
 
 from contracts.frame import Frame
+from contracts.runner import pose_result
 from worker.adapters.model.errors import FatalAcceleratorError
 from worker.pipeline.analytics import CompositeExtractor
-from worker.pipeline.bus import BoundedFrameBus, Scheduler
+from worker.pipeline.bus import Scheduler
 from worker.pipeline.camera_pipeline import CameraPipelinePump
 from worker.pipeline.decision import EventAggregator, IncidentManager
+from worker.pipeline.inference_coordinator import CoordinatedInference, InferenceResultSlot
 from worker.pipeline.ingest.lifecycle import IngestSupervisor
 from worker.pipeline.perception import GreedyIouTracker, SceneState
 from worker.types import BusinessEvent, DecisionInput, FramePacket, ModuleResult
@@ -32,6 +34,15 @@ def _packet(camera_id: str, seq: int) -> FramePacket:
     image = np.full((2, 3, 3), seq, dtype=np.uint8)
     frame = Frame(index=seq, time_sec=seq / 5.0, image=image)
     return FramePacket(camera_id, frame, seq / 5.0, seq, 3, 2, 0.25)
+
+
+def _deliver(results: InferenceResultSlot, packet: FramePacket) -> None:
+    results.publish(
+        CoordinatedInference(
+            packet,
+            ModuleResult("pose", pose_result((), ()), 0.0, "pose"),
+        )
+    )
 
 
 def _blank_analytics(
@@ -123,26 +134,21 @@ class _RecordingSink:
             self.on_emit(event)
 
 
-def test_pump_forwards_an_admitted_event_from_the_bus_to_the_sink_via_real_emit() -> None:
-    """End-to-end: bus.publish -> take -> analytics.process -> decision.update -> sink.emit."""
-    bus = BoundedFrameBus()
-    extractor = _RecordingExtractor("pose")
-    analytics = _blank_analytics(
-        "camera-a", extractors=(extractor,), task_intervals={"pose": 1}
-    )
+def test_pump_forwards_a_coordinated_result_to_the_sink_via_real_emit() -> None:
+    results = InferenceResultSlot()
+    analytics = _blank_analytics("camera-a", task_intervals={"pose": 1})
     decision = EventAggregator(
         deciders=(_FrameEchoDecider("camera-a"),), incidents=IncidentManager()
     )
     sink = _RecordingSink()
     pump = CameraPipelinePump(
-        "camera-a", bus.inference, analytics, decision, sink, poll_timeout_sec=0.02
+        "camera-a", results, analytics, decision, sink, poll_timeout_sec=0.02
     )
     sink.on_emit = lambda _event: pump.stop()
 
-    bus.publish(_packet("camera-a", 1))
+    _deliver(results, _packet("camera-a", 1))
     pump.run()
 
-    assert extractor.calls == [1]
     assert len(sink.events) == 1
     admitted = sink.events[0]
     assert admitted.domain == "probe"
@@ -155,7 +161,7 @@ def test_pump_forwards_an_admitted_event_from_the_bus_to_the_sink_via_real_emit(
 
 def test_scheduler_gates_extraction_so_skipped_frames_never_reach_the_extractor() -> None:
     """analytics.process only calls extractors for modules the scheduler marks due."""
-    bus = BoundedFrameBus()
+    results = InferenceResultSlot()
     extractor = _RecordingExtractor("probe")
     # interval 2: frame 1 is skipped (1 % 2 != 0), frame 2 is due (2 % 2 == 0).
     analytics = _blank_analytics(
@@ -166,17 +172,17 @@ def test_scheduler_gates_extraction_so_skipped_frames_never_reach_the_extractor(
     )
     sink = _RecordingSink()
     pump = CameraPipelinePump(
-        "camera-a", bus.inference, analytics, decision, sink, poll_timeout_sec=0.02
+        "camera-a", results, analytics, decision, sink, poll_timeout_sec=0.02
     )
 
     def _on_emit(_event: BusinessEvent) -> None:
         if len(sink.events) == 1:
-            bus.publish(_packet("camera-a", 2))
+            _deliver(results, _packet("camera-a", 2))
         else:
             pump.stop()
 
     sink.on_emit = _on_emit
-    bus.publish(_packet("camera-a", 1))
+    _deliver(results, _packet("camera-a", 1))
     pump.run()
 
     # Decision still runs on every frame (identity/track state must advance regardless),
@@ -186,13 +192,13 @@ def test_scheduler_gates_extraction_so_skipped_frames_never_reach_the_extractor(
 
 
 def test_one_camera_pump_failure_does_not_stop_the_other_camera_pump() -> None:
-    bus_a = BoundedFrameBus()
-    bus_b = BoundedFrameBus()
+    results_a = InferenceResultSlot()
+    results_b = InferenceResultSlot()
     raising = _RaisingDecider()
     sink_a = _RecordingSink()
     decision_a = EventAggregator(deciders=(raising,), incidents=IncidentManager())
     pump_a = CameraPipelinePump(
-        "camera-a", bus_a.inference, _blank_analytics("camera-a"), decision_a, sink_a,
+        "camera-a", results_a, _blank_analytics("camera-a"), decision_a, sink_a,
         poll_timeout_sec=0.02,
     )
 
@@ -201,22 +207,22 @@ def test_one_camera_pump_failure_does_not_stop_the_other_camera_pump() -> None:
         deciders=(_FrameEchoDecider("camera-b"),), incidents=IncidentManager()
     )
     pump_b = CameraPipelinePump(
-        "camera-b", bus_b.inference, _blank_analytics("camera-b"), decision_b, sink_b,
+        "camera-b", results_b, _blank_analytics("camera-b"), decision_b, sink_b,
         poll_timeout_sec=0.02,
     )
 
     supervisor = IngestSupervisor([pump_a, pump_b])
     supervisor.start()
     try:
-        bus_a.publish(_packet("camera-a", 1))
-        bus_b.publish(_packet("camera-b", 1))
+        _deliver(results_a, _packet("camera-a", 1))
+        _deliver(results_b, _packet("camera-b", 1))
 
         assert _wait_for(lambda: len(sink_b.events) >= 1)
         assert _wait_for(lambda: pump_a.failure_count >= 1)
 
         # Publish a second frame to camera-a: if the exception had killed the
         # thread instead of being isolated, this would never be processed.
-        bus_a.publish(_packet("camera-a", 2))
+        _deliver(results_a, _packet("camera-a", 2))
         assert _wait_for(lambda: pump_a.failure_count >= 2)
     finally:
         supervisor.stop(join_timeout_sec=2.0)
@@ -228,72 +234,55 @@ def test_one_camera_pump_failure_does_not_stop_the_other_camera_pump() -> None:
 
 
 def test_fatal_accelerator_error_propagates_out_of_run_instead_of_being_swallowed() -> None:
-    bus = BoundedFrameBus()
+    results = InferenceResultSlot()
     decision = EventAggregator(deciders=(_FatalDecider(),), incidents=IncidentManager())
     sink = _RecordingSink()
     pump = CameraPipelinePump(
-        "camera-a", bus.inference, _blank_analytics("camera-a"), decision, sink,
+        "camera-a", results, _blank_analytics("camera-a"), decision, sink,
         poll_timeout_sec=0.02,
     )
 
-    bus.publish(_packet("camera-a", 1))
+    _deliver(results, _packet("camera-a", 1))
 
     with pytest.raises(FatalAcceleratorError):
         pump.run()
 
 
 def test_pump_self_terminates_once_max_frames_processed() -> None:
-    """Without ``max_frames``, ``run()`` only returns via ``stop()``; with it,
-    ``run()`` must return on its own once every scheduled frame has been
-    processed -- the per-pump half of the ``--max-frames-per-camera``
-    bounded-run contract (the other half is the supervisor's completion
-    watcher waiting for every camera's pump to reach this point)."""
-    bus = BoundedFrameBus()
+    results = InferenceResultSlot()
     decision = EventAggregator(deciders=(), incidents=IncidentManager())
     sink = _RecordingSink()
     pump = CameraPipelinePump(
-        "camera-a", bus.inference, _blank_analytics("camera-a"), decision, sink,
+        "camera-a", results, _blank_analytics("camera-a"), decision, sink,
         poll_timeout_sec=0.02, max_frames=2,
     )
 
-    # `bus.inference` is capacity-1/latest-only (drop-oldest): publishing both
-    # packets up front before anything drains the first would silently lose
-    # it, so the second publish is gated on the pump having already taken the
-    # first one off the queue.
     thread = threading.Thread(target=pump.run, daemon=True)
     thread.start()
-    bus.publish(_packet("camera-a", 1))
+    _deliver(results, _packet("camera-a", 1))
     assert _wait_for(lambda: pump.processed_count >= 1)
-    bus.publish(_packet("camera-a", 2))
+    _deliver(results, _packet("camera-a", 2))
     thread.join(timeout=2.0)
 
-    assert not thread.is_alive()  # must return on its own; still alive means the cap was ignored
+    assert not thread.is_alive()
     assert pump.processed_count == 2
 
 
 def test_pump_without_max_frames_keeps_polling_past_what_a_cap_would_have_stopped() -> None:
-    """Omitting ``max_frames`` (the default) preserves today's run-until-``stop()``
-    behavior: processing continues past any frame count until told to stop."""
-    bus = BoundedFrameBus()
+    results = InferenceResultSlot()
     decision = EventAggregator(deciders=(), incidents=IncidentManager())
     sink = _RecordingSink()
     pump = CameraPipelinePump(
-        "camera-a", bus.inference, _blank_analytics("camera-a"), decision, sink,
+        "camera-a", results, _blank_analytics("camera-a"), decision, sink,
         poll_timeout_sec=0.02,
     )
-    # run() would otherwise block forever with no cap and no external stop(),
-    # so drive it from a background thread; each publish is gated on the
-    # previous one having already been taken, since `bus.inference` is
-    # capacity-1/latest-only (drop-oldest) and would silently lose packets
-    # published before the prior one is drained.
     thread = threading.Thread(target=pump.run, daemon=True)
     thread.start()
-    bus.publish(_packet("camera-a", 1))
-    assert _wait_for(lambda: pump.processed_count >= 1)
-    bus.publish(_packet("camera-a", 2))
-    assert _wait_for(lambda: pump.processed_count >= 2)
-    bus.publish(_packet("camera-a", 3))
-    assert _wait_for(lambda: pump.processed_count >= 3)
+    for frame_index in (1, 2, 3):
+        _deliver(results, _packet("camera-a", frame_index))
+        assert _wait_for(
+            lambda frame_index=frame_index: pump.processed_count >= frame_index
+        )
     pump.stop()
     thread.join(timeout=2.0)
 
@@ -302,11 +291,11 @@ def test_pump_without_max_frames_keeps_polling_past_what_a_cap_would_have_stoppe
 
 
 def test_supervisor_stop_joins_real_pump_threads() -> None:
-    bus = BoundedFrameBus()
+    results = InferenceResultSlot()
     decision = EventAggregator(deciders=(), incidents=IncidentManager())
     sink = _RecordingSink()
     pump = CameraPipelinePump(
-        "camera-a", bus.inference, _blank_analytics("camera-a"), decision, sink,
+        "camera-a", results, _blank_analytics("camera-a"), decision, sink,
         poll_timeout_sec=0.02,
     )
     supervisor = IngestSupervisor([pump])

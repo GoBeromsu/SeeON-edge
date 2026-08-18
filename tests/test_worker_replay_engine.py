@@ -17,6 +17,7 @@ from worker.pipeline.analytics import CompositeExtractor, NamedExtractor
 from worker.pipeline.bus import Scheduler
 from worker.pipeline.camera_pipeline import CameraPipelinePump
 from worker.pipeline.decision import EventAggregator, IncidentManager
+from worker.pipeline.inference_coordinator import CoordinatedInference
 from worker.pipeline.output.event_sink import EvidenceEventSink
 from worker.pipeline.output.evidence.evidence_stager import DurableEvidenceStager
 from worker.pipeline.output.evidence_attacher import AlertEvidenceAttacher
@@ -38,7 +39,7 @@ from worker.replay.engine import (
 )
 from worker.runtime.provenance import AppliedRuntimeManifestStore
 from worker.runtime.provenance.models import AppliedRuntimeManifest
-from worker.types import FallModelInput, FramePacket
+from worker.types import FallModelInput, FramePacket, ModuleResult
 
 CAMERA_ID = "camera-replay"
 FACILITY_ID = "facility-replay"
@@ -188,7 +189,10 @@ def _capture_real_frames(
         for seq, box in enumerate(boxes, start=1):
             pump = CameraPipelinePump(
                 CAMERA_ID,
-                _SinglePacketSubscription(_packet(seq, float(seq))),
+                _SinglePacketSubscription(
+                    _packet(seq, float(seq)),
+                    _PoseRunner(box).run(np.zeros((1, 1, 3), dtype=np.uint8)),
+                ),
                 _analytics(box),
                 EventAggregator(
                     (detector,),
@@ -209,13 +213,18 @@ def _capture_real_frames(
 
 
 class _SinglePacketSubscription:
-    def __init__(self, packet: FramePacket) -> None:
+    def __init__(self, packet: FramePacket, result: RunnerResult) -> None:
         self._packet: FramePacket | None = packet
+        self._result = result
 
-    def take(self, *, timeout_sec: float | None = None) -> FramePacket | None:
+    def take(self, *, timeout_sec: float | None = None) -> CoordinatedInference | None:
         del timeout_sec
         packet, self._packet = self._packet, None
-        return packet
+        if packet is None:
+            return None
+        return CoordinatedInference(
+            packet, ModuleResult("pose", self._result, 0.0, "pose")
+        )
 
     def close(self) -> None:
         self._packet = None
@@ -489,7 +498,10 @@ def _capture_bed_exit_frames(
         for seq, person_box in enumerate(person_boxes, start=1):
             pump = CameraPipelinePump(
                 BED_CAMERA_ID,
-                _SinglePacketSubscription(_bed_packet(seq, float(seq))),
+                _SinglePacketSubscription(
+                    _bed_packet(seq, float(seq)),
+                    _PoseRunner(person_box).run(np.zeros((1, 1, 3), dtype=np.uint8)),
+                ),
                 _bed_analytics(person_box, bed_box),
                 EventAggregator(
                     (detector,),

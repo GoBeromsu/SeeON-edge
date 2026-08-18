@@ -24,6 +24,12 @@ class LatestFrame:
     seq: int
     frame_index: int
     content_type: str = "image/jpeg"
+    # Age of the cached observation drawn on this frame (`LiveViewPump`).
+    # `None` means "no observation has ever been cached for this camera";
+    # `overlay_stale` marks a frame published deliberately WITHOUT a skeleton
+    # because the newest observation was older than the pump's threshold.
+    observation_age_sec: float | None = None
+    overlay_stale: bool = False
 
 
 class LatestFrameStore:
@@ -91,11 +97,15 @@ class LatestFrameStore:
         *,
         frame_index: int,
         seq: int | None = None,
+        observation_age_sec: float | None = None,
+        overlay_stale: bool = False,
     ) -> None:
         latest = LatestFrame(
             jpeg=bytes(jpeg),
             seq=frame_index if seq is None else seq,
             frame_index=frame_index,
+            observation_age_sec=observation_age_sec,
+            overlay_stale=overlay_stale,
         )
         with self._condition:
             self._known_camera_ids.add(camera_id)
@@ -181,7 +191,19 @@ class LiveViewSubscriber:
         packet: FramePacket,
         observation: FrameObservation,
         debug_snapshots: tuple[BedExitDebugSnapshot, ...] = (),
+        *,
+        observation_age_sec: float | None = None,
+        overlay_stale: bool = False,
     ) -> bool:
+        """Encode one frame for viewers, tagged with its overlay's age.
+
+        ``observation_age_sec``/``overlay_stale`` come from ``LiveViewPump``:
+        the frame is current, the overlay on it may not be. A frame whose
+        newest cached observation was too old to draw arrives here already
+        stripped of its skeleton and flagged, so the store never lets a viewer
+        read an old pose as a present one. An empty-but-fresh observation
+        (nobody in the room) is NOT stale and is not flagged.
+        """
         camera_id = packet.camera_id
         # Confirmed product decision (#48): no viewers means no encoding at
         # all, not merely no transmission. A pending snapshot demand (see
@@ -199,6 +221,8 @@ class LiveViewSubscriber:
             jpeg,
             seq=packet.seq,
             frame_index=packet.frame.index,
+            observation_age_sec=observation_age_sec,
+            overlay_stale=overlay_stale,
         )
         return True
 

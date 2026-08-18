@@ -1,10 +1,9 @@
-"""Pin the ``decoder_for`` packet-sink selection branch Wave 2 will rewire.
+"""Pin the final ``decoder_for`` packet-sink selection matrix.
 
-``worker/runtime/ingest_composition.py`` currently routes EVERY backend to
-``PyAvPreservingAdapter`` whenever a packet sink is present -- including
-``nvdec``, which is exactly the in-process decode path plan todo 4 deletes and
-todo 5 re-points at the new tee adapter. The matrix below is the "before"
-picture; todo 5 flips the nvdec+sink cell and must leave the others alone.
+``nvdec`` + a packet sink deliberately selects ``PyAvPreservingAdapter``: its
+NVDEC branch opens the demux-only ``NvdecPacketTeeSession`` added in todo 4.
+CPU and VAAPI retain the same preserving adapter, whose sessions decode in
+PyAV. Without a sink, each token keeps its direct decoder selection.
 
 Assertions are on real constructed adapter objects, not on mock call counts.
 CI-safe: no camera is opened, no subprocess is spawned.
@@ -12,14 +11,20 @@ CI-safe: no camera is opened, no subprocess is spawned.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import final
 
+import av
+import numpy as np
 import pytest
 
 from worker.adapters.decode.cpu_av import CpuAvAdapter
 from worker.adapters.decode.nvdec_cuvid import NvdecCuvidAdapter
+from worker.adapters.decode.nvdec_cuvid.models import NvdecCuvidConfig
+from worker.adapters.decode.pyav_nvdec import NvdecPacketTeeSession
 from worker.adapters.decode.pyav_preserving import PyAvPreservingAdapter
 from worker.adapters.decode.vaapi import VaapiAdapter
+from worker.pipeline.output.evidence.packet_ring import PacketRingLimits, SourcePacketRing
 from worker.runtime.ingest_composition import decoder_for, resolve_decode_backend
 from worker.types.source_packet import SourcePacket
 
@@ -34,22 +39,74 @@ class _Sink:
         return True
 
 
-@pytest.mark.parametrize("decode", ["opencv", "cpu", "nvdec", "vaapi"])
-def test_every_backend_with_a_packet_sink_selects_the_preserving_adapter_today(
+@final
+class _FakeDecoderProcess:
+    def write_packet(self, payload: bytes) -> None:
+        del payload
+
+    def close_input(self) -> None:
+        return None
+
+    def read_frame(self, timeout_sec: float) -> bytes | None:
+        del timeout_sec
+        return None
+
+    def reap(self, timeout_sec: float) -> int | None:
+        del timeout_sec
+        return 0
+
+
+def _fake_process_spawner(
+    _args: tuple[str, ...], _frame_size: int
+) -> _FakeDecoderProcess:
+    return _FakeDecoderProcess()
+
+
+def _encode_source(path: Path) -> None:
+    output = av.open(str(path), mode="w", format="mp4")
+    stream = output.add_stream("libx264", rate=1)
+    stream.width = 2
+    stream.height = 2
+    stream.pix_fmt = "yuv420p"
+    image = np.zeros((2, 2, 3), dtype=np.uint8)
+    for packet in stream.encode(av.VideoFrame.from_ndarray(image, format="rgb24")):
+        output.mux(packet)
+    for packet in stream.encode():
+        output.mux(packet)
+    output.close()
+
+
+@pytest.mark.parametrize("decode", ["opencv", "cpu", "vaapi"])
+def test_cpu_and_vaapi_with_a_packet_sink_keep_the_preserving_adapter(
     decode: str,
 ) -> None:
-    """SEAM D1 (CURRENT BEHAVIOR): a packet sink short-circuits backend
-    selection -- all four tokens produce ``PyAvPreservingAdapter``, carrying the
-    backend token forward as its hwaccel choice. Todo 5 changes ONLY the nvdec
-    cell of this matrix."""
-    # Given
-    sink = _Sink()
+    """SEAM D1: non-NVDEC preserving behavior remains unchanged."""
+    adapter = decoder_for(decode, packet_sink=_Sink())  # type: ignore[arg-type]
 
-    # When
-    adapter = decoder_for(decode, packet_sink=sink)  # type: ignore[arg-type]
+    assert type(adapter) is PyAvPreservingAdapter
 
-    # Then
-    assert isinstance(adapter, PyAvPreservingAdapter)
+
+def test_nvdec_with_a_packet_sink_selects_the_tee_based_preserving_adapter() -> None:
+    """SEAM D1: the preserving adapter's NVDEC branch opens
+    ``NvdecPacketTeeSession`` rather than restoring in-process PyAV decode."""
+    adapter = decoder_for("nvdec", packet_sink=_Sink())  # type: ignore[arg-type]
+
+    assert type(adapter) is PyAvPreservingAdapter
+    assert adapter._decode_backend == "nvdec"  # noqa: SLF001 - selection seam
+
+
+def test_nvdec_packet_sink_opens_a_tee_session(tmp_path: Path) -> None:
+    source = tmp_path / "source.mp4"
+    _encode_source(source)
+    sink = SourcePacketRing("camera-a", PacketRingLimits(1, 1_024, 1.0))
+    adapter = decoder_for("nvdec", packet_sink=sink)
+    adapter._process_spawner = _fake_process_spawner  # noqa: SLF001 - test injection
+
+    session = adapter.open(NvdecCuvidConfig(camera_id="camera-a", url=str(source)))
+    try:
+        assert isinstance(session, NvdecPacketTeeSession)
+    finally:
+        session.close()
 
 
 @pytest.mark.parametrize(
@@ -71,18 +128,14 @@ def test_without_a_packet_sink_each_token_selects_its_own_adapter(
 
 
 def test_unknown_token_fails_closed_with_and_without_a_packet_sink() -> None:
-    """SEAM D3: ADR-0002 fail-closed. An unrecognized token raises; with a sink
-    present it raises from the preserving adapter's own backend validation at
-    open time rather than at selection time -- pinned so todo 5 does not turn
-    either into a silent fallback."""
-    # Given
+    """SEAM D3: ADR-0002 fail-closed. An unrecognized token must raise before
+    adapter construction, whether or not packet preservation is requested."""
     sink = _Sink()
 
-    # When / Then
     with pytest.raises(RuntimeError, match="unsupported decode policy"):
         _ = decoder_for("mystery")  # type: ignore[arg-type]
-    sink_adapter = decoder_for("mystery", packet_sink=sink)  # type: ignore[arg-type]
-    assert isinstance(sink_adapter, PyAvPreservingAdapter)
+    with pytest.raises(RuntimeError, match="unsupported decode policy"):
+        _ = decoder_for("mystery", packet_sink=sink)  # type: ignore[arg-type]
 
 
 def test_nvdec_override_on_a_non_nvdec_profile_still_raises_with_a_sink() -> None:

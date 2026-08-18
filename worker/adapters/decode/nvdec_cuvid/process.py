@@ -9,6 +9,7 @@ from typing import IO, Final, Protocol, final
 
 from worker.adapters.decode.nvdec_cuvid.errors import (
     NvdecConfigError,
+    NvdecUnavailableError,
     sanitized_nvdec_error,
 )
 
@@ -23,7 +24,16 @@ class ReadablePipe(Protocol):
     def close(self) -> None: ...
 
 
+class WritablePipe(Protocol):
+    def write(self, payload: bytes | memoryview) -> int: ...
+
+    def close(self) -> None: ...
+
+
 class DecoderChild(Protocol):
+    @property
+    def stdin(self) -> WritablePipe | None: ...
+
     @property
     def stdout(self) -> ReadablePipe | None: ...
 
@@ -38,6 +48,10 @@ class DecoderChild(Protocol):
 
 
 class DecoderProcess(Protocol):
+    def write_packet(self, payload: bytes) -> None: ...
+
+    def close_input(self) -> None: ...
+
     def read_frame(self, timeout_sec: float) -> bytes | None: ...
 
     def reap(self, timeout_sec: float) -> int | None: ...
@@ -60,11 +74,27 @@ class _PopenReadablePipe:
 
 
 @final
+class _PopenWritablePipe:
+    def __init__(self, stream: IO[bytes]) -> None:
+        self._stream = stream
+
+    def write(self, payload: bytes | memoryview) -> int:
+        return self._stream.write(payload)
+
+    def close(self) -> None:
+        self._stream.close()
+
+
+@final
 class _PopenDecoderChild:
     def __init__(self, child: subprocess.Popen[bytes]) -> None:
         self._child = child
-        stream = child.stdout
-        self._stdout = None if stream is None else _PopenReadablePipe(stream)
+        self._stdin = None if child.stdin is None else _PopenWritablePipe(child.stdin)
+        self._stdout = None if child.stdout is None else _PopenReadablePipe(child.stdout)
+
+    @property
+    def stdin(self) -> WritablePipe | None:
+        return self._stdin
 
     @property
     def stdout(self) -> ReadablePipe | None:
@@ -86,13 +116,15 @@ class _PopenDecoderChild:
 
 @final
 class FFmpegDecodeProcess:
-    """Own one mutable decoder child and its bounded stdout reader."""
+    """Own one decoder child, its packet input, and bounded stdout reader."""
 
     def __init__(self, child: DecoderChild, frame_size: int) -> None:
         if frame_size <= 0:
             raise NvdecConfigError("frame size must be positive")
         self._child: DecoderChild | None = child
+        self._input = child.stdin
         self._returncode: int | None = None
+        self._failure_returncode: int | None = None
         self._frame_size = frame_size
         self._chunks: queue.Queue[bytes | None] = queue.Queue(
             maxsize=_READ_QUEUE_CAPACITY
@@ -116,6 +148,33 @@ class FFmpegDecodeProcess:
     def reader_alive(self) -> bool:
         return self._reader_thread.is_alive()
 
+    @property
+    def failure_returncode(self) -> int | None:
+        return self._failure_returncode
+
+    def write_packet(self, payload: bytes) -> None:
+        if not payload:
+            raise NvdecConfigError("compressed packet must not be empty")
+        stream = self._input
+        if stream is None:
+            raise NvdecUnavailableError("ffmpeg decoder input is closed")
+        remaining = memoryview(payload)
+        try:
+            while remaining:
+                written = stream.write(remaining)
+                if written <= 0:
+                    _raise_zero_byte_write()
+                remaining = remaining[written:]
+        except (BrokenPipeError, OSError, ValueError) as error:
+            raise sanitized_nvdec_error("ffmpeg packet write failed", error) from None
+
+    def close_input(self) -> None:
+        stream = self._input
+        self._input = None
+        if stream is not None:
+            with suppress(OSError, ValueError):
+                stream.close()
+
     def read_frame(self, timeout_sec: float) -> bytes | None:
         if timeout_sec <= 0:
             raise NvdecConfigError("read timeout must be positive")
@@ -125,20 +184,25 @@ class FFmpegDecodeProcess:
         while len(self._pending) < self._frame_size:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                _ = self.reap(timeout_sec=min(timeout_sec, _QUEUE_PUT_TIMEOUT_SEC))
-                return None
+                return self._finish_read(timeout_sec, timed_out=True)
             try:
                 chunk = self._chunks.get(timeout=remaining)
             except queue.Empty:
-                _ = self.reap(timeout_sec=min(timeout_sec, _QUEUE_PUT_TIMEOUT_SEC))
-                return None
+                return self._finish_read(timeout_sec, timed_out=True)
             if chunk is None:
-                _ = self.reap(timeout_sec=min(timeout_sec, _QUEUE_PUT_TIMEOUT_SEC))
-                return None
+                return self._finish_read(timeout_sec, timed_out=False)
             self._pending.extend(chunk)
         payload = bytes(self._pending[: self._frame_size])
         del self._pending[: self._frame_size]
         return payload
+
+    def _finish_read(self, timeout_sec: float, *, timed_out: bool) -> bytes | None:
+        partial = bytes(self._pending)
+        self._pending.clear()
+        returncode = self.reap(timeout_sec=min(timeout_sec, _QUEUE_PUT_TIMEOUT_SEC))
+        if not timed_out and returncode not in (None, 0):
+            self._failure_returncode = returncode
+        return partial or None
 
     def reap(self, timeout_sec: float) -> int | None:
         if timeout_sec <= 0:
@@ -162,6 +226,7 @@ class FFmpegDecodeProcess:
                     returncode = child.returncode
             except OSError:
                 returncode = child.returncode
+            self.close_input()
             stream = child.stdout
             if stream is not None:
                 with suppress(OSError, ValueError):
@@ -195,11 +260,15 @@ class FFmpegDecodeProcess:
             return
 
 
+def _raise_zero_byte_write() -> None:
+    raise BrokenPipeError("ffmpeg decoder accepted zero packet bytes")
+
+
 def spawn_decoder_process(args: tuple[str, ...], frame_size: int) -> DecoderProcess:
     try:
         child = subprocess.Popen(
             args,
-            stdin=subprocess.DEVNULL,
+            stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             bufsize=0,
@@ -215,5 +284,6 @@ __all__ = [
     "FFmpegDecodeProcess",
     "ProcessSpawner",
     "ReadablePipe",
+    "WritablePipe",
     "spawn_decoder_process",
 ]

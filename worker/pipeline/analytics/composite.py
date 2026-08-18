@@ -5,7 +5,11 @@ from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from typing import Protocol
 
-from contracts.observation import BedRegionCacheState, FrameObservation
+from contracts.observation import (
+    BedRegionCacheState,
+    BedRegionDebugSnapshot,
+    FrameObservation,
+)
 from worker.pipeline.analytics.merge import authoritative_boxes, merge_module_results
 from worker.pipeline.analytics.models import NamedExtractor, ensure_unique_module_names
 from worker.pipeline.bus import Scheduler
@@ -125,34 +129,63 @@ class CompositeExtractor:
             )
         return result
 
-    def process(self, packet: FramePacket) -> CompositeResult:
-        """Run due modules and emit one tracked, image-free decision input."""
+    def process(
+        self,
+        packet: FramePacket,
+        *,
+        prefetched_results: Sequence[ModuleResult] = (),
+    ) -> CompositeResult:
+        """Merge coordinator-owned results with due per-camera extractors."""
         scheduled_names = self.scheduler.tasks_for_frame(packet.frame.index)
-        module_results = tuple(
+        prefetched = tuple(
+            result for result in prefetched_results if result.module_name in scheduled_names
+        )
+        prefetched_names = {result.module_name for result in prefetched}
+        module_results = prefetched + tuple(
             self._extract(extractor, packet)
             for name in scheduled_names
-            if (extractor := self._extractors_by_name.get(name)) is not None
+            if name not in prefetched_names
+            and (extractor := self._extractors_by_name.get(name)) is not None
         )
+        pose_observed = any(result.module_name == "pose" for result in module_results)
         merged = merge_module_results(module_results)
-        track_ids = self.tracker.update(authoritative_boxes(merged))
-        observation = build_frame_observation(
-            detections=merged.detections,
-            raw_boxes=merged.raw_boxes,
-            poses=merged.poses,
-            bed_boxes=merged.bed_boxes,
-            track_ids=track_ids,
-        )
-        decision_input = build_decision_input(
-            observation,
-            frame_width=packet.width,
-            frame_height=packet.height,
-            live_track_ids=tuple(sorted(self.tracker.live_ids)),
-            time_sec=packet.frame.time_sec,
-            frame_index=packet.frame.index,
-            scene_state=self.scene_state,
-            bed_scheduled="bed" in scheduled_names,
-            bed_interval=self.scheduler.task_intervals.get("bed", 30),
-        )
+        if pose_observed:
+            track_ids = self.tracker.observe(authoritative_boxes(merged))
+            observation = build_frame_observation(
+                detections=merged.detections,
+                raw_boxes=merged.raw_boxes,
+                poses=merged.poses,
+                bed_boxes=merged.bed_boxes,
+                track_ids=track_ids,
+            )
+            decision_input = build_decision_input(
+                observation,
+                frame_width=packet.width,
+                frame_height=packet.height,
+                live_track_ids=tuple(sorted(self.tracker.live_ids)),
+                time_sec=packet.frame.time_sec,
+                frame_index=packet.frame.index,
+                scene_state=self.scene_state,
+                bed_scheduled="bed" in scheduled_names,
+                bed_interval=self.scheduler.task_intervals.get("bed", 30),
+            )
+            final_observation = decision_input.observation
+            _ = self.scene_state.observe(final_observation, track_ids=track_ids)
+        else:
+            self.tracker.coast()
+            final_observation = self.scene_state.coast() or FrameObservation()
+            decision_input = DecisionInput(
+                observation=final_observation,
+                frame_width=packet.width,
+                frame_height=packet.height,
+                live_track_ids=tuple(sorted(self.tracker.live_ids)),
+                time_sec=packet.frame.time_sec,
+                frame_index=packet.frame.index,
+                bed_region=BedRegionDebugSnapshot(
+                    source=self.scene_state.bed_region_freshness,
+                    empty_cycles=self.scene_state.scheduled_empty_bed_cycles,
+                ),
+            )
         if self._bed_region_recorder is not None:
             # `decision_input.bed_region.source` (a `BedRegionDebugSnapshot`)
             # is this frame's actual resolved state, not
@@ -177,8 +210,6 @@ class CompositeExtractor:
                 decision_input.bed_region.source,
                 self.scene_state.bed_region_counters.snapshot(),
             )
-        final_observation = decision_input.observation
-        _ = self.scene_state.update(final_observation, track_ids=track_ids)
         return CompositeResult(
             module_results=module_results,
             observation=final_observation,

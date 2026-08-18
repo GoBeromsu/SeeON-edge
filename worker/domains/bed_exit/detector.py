@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from datetime import datetime
+from time import monotonic
 from typing import Protocol
 
 from contracts.observation import BedRegionCacheState
@@ -15,6 +16,7 @@ from worker.domains.bed_exit.schema import (
     BedExitFrame,
     BedStatus,
 )
+from worker.domains.staleness import DEFAULT_STALE_AFTER_SEC
 from worker.types import BusinessEvent, DecisionInput, DecisionTraceSnapshot
 
 
@@ -78,12 +80,17 @@ class BedExitMonitor:
         config: BedExitConfig,
         clock: Callable[[], datetime],
         scoring_recorder: BedExitScoringRecorder | None = None,
+        staleness_clock: Callable[[], float] = monotonic,
+        stale_after_sec: float = DEFAULT_STALE_AFTER_SEC,
     ) -> None:
         self._config: BedExitConfig = config
         self._clock: Callable[[], datetime] = clock
         self._night_window: NightWindow | None = config.night_window
         self._assignments: dict[int, _Assignment] = {}
-        self._latch: BedExitLatch = BedExitLatch()
+        self._latch = BedExitLatch(
+            clock=staleness_clock,
+            stale_after_sec=stale_after_sec,
+        )
         self.last_debug_snapshot: BedExitDebugSnapshot | None = None
         self.last_trace_snapshots: tuple[DecisionTraceSnapshot, ...] = ()
         self._scoring_recorder = scoring_recorder
@@ -105,6 +112,32 @@ class BedExitMonitor:
 
     def update_night_window(self, night_window: NightWindow | None) -> None:
         self._night_window = night_window
+
+    def coast(self, *, frame_index: int | None = None) -> tuple[BusinessEvent, ...]:
+        """Hold assignment/latch state when no person inference was made."""
+        _ = self._latch.coast()
+        freshness = self._latch.status_snapshot
+        previous = self.last_debug_snapshot
+        statuses = () if previous is None else tuple(
+            BedStatus(
+                bed_id=status.bed_id,
+                box=status.box,
+                occupancy="covered",
+                person_id=status.person_id,
+            )
+            for status in previous.statuses
+        )
+        self.last_debug_snapshot = BedExitDebugSnapshot(
+            frame_index=frame_index,
+            person_boxes=() if previous is None else previous.person_boxes,
+            bed_boxes=() if previous is None else previous.bed_boxes,
+            statuses=statuses,
+            events=(),
+            bed_region=None if previous is None else previous.bed_region,
+            stale=freshness.stale,
+            observation_age_sec=freshness.observation_age_sec,
+        )
+        return ()
 
     def update(self, input_value: DecisionInput) -> tuple[BusinessEvent, ...]:
         observation = input_value.observation
@@ -150,6 +183,9 @@ class BedExitMonitor:
                 self._grace_positive_transitions,
                 self._assignments_made,
             )
+        event_time = 0.0 if input_value.time_sec is None else input_value.time_sec
+        onset_events = self._latch.update(frame.events, event_time)
+        freshness = self._latch.status_snapshot
         self.last_debug_snapshot = BedExitDebugSnapshot(
             frame_index=input_value.frame_index,
             person_boxes=observation.boxes,
@@ -157,9 +193,9 @@ class BedExitMonitor:
             statuses=frame.statuses,
             events=frame.events,
             bed_region=input_value.bed_region,
+            stale=freshness.stale,
+            observation_age_sec=freshness.observation_age_sec,
         )
-        event_time = 0.0 if input_value.time_sec is None else input_value.time_sec
-        onset_events = self._latch.update(frame.events, event_time)
         if self._night_window is not None and not self._night_window.contains(self._clock()):
             return ()
         return tuple(self._business_event(event, event_time) for event in onset_events)

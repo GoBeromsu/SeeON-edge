@@ -22,8 +22,10 @@ from worker.runtime.telemetry.models import (
     BusMetricsSource,
     BusSubscriptionSnapshot,
     CameraDiagnosticsSnapshot,
+    DecodeBackendObservability,
     DeviceResidencyDiagnostics,
     EncoderLifecycleSnapshot,
+    InferenceMetricsSource,
     InvalidStageTimingError,
     RuntimeDiagnosticsSnapshot,
     StageTimingSnapshot,
@@ -61,10 +63,12 @@ class WorkerDiagnostics:
         self._clock = clock
         self._wall_clock = wall_clock
         self._decode_by_camera: dict[str, DecodeSelection] = {}
+        self._decode_backend_by_camera: dict[str, DecodeBackendObservability] = {}
         self._encode_by_camera: dict[str, EncodeSelection] = {}
         self._measured_fps_by_camera: dict[str, tuple[float, float | None]] = {}
         self._stage_timings: dict[str, dict[str, StageTimingAccumulator]] = {}
         self._buses: dict[str, tuple[BusMetricsSource, tuple[str, ...]]] = {}
+        self._inference: InferenceMetricsSource | None = None
         self._bed_region_by_camera: dict[str, BedRegionDiagnostics] = {}
         self._bed_exit_scoring_by_camera: dict[str, BedExitScoringDiagnostics] = {}
         self._device_residency_by_camera: dict[str, DeviceResidencyDiagnostics] = {}
@@ -127,6 +131,31 @@ class WorkerDiagnostics:
     def decode_snapshot(self) -> Mapping[str, DecodeSelection]:
         with self._lock:
             return dict(self._decode_by_camera)
+
+    def record_decode_backend(
+        self,
+        camera_id: str,
+        *,
+        requested_profile_decode: str,
+        resolved_backend: str,
+        actual_adapter_class: str,
+    ) -> None:
+        """Record local-only boot selection details for one camera.
+
+        ``DecodeSelection`` remains the relay-compatible view. The profile
+        token and concrete adapter class are intentionally retained only in
+        the local runtime snapshot.
+        """
+        with self._lock:
+            self._decode_backend_by_camera[camera_id] = DecodeBackendObservability(
+                requested_profile_decode=requested_profile_decode,
+                resolved_backend=resolved_backend,
+                actual_adapter_class=actual_adapter_class,
+            )
+
+    def decode_backend_snapshot(self) -> Mapping[str, DecodeBackendObservability]:
+        with self._lock:
+            return dict(self._decode_backend_by_camera)
 
     def register_encode(self, camera_id: str, requested: str) -> None:
         self.update_encode(
@@ -275,6 +304,10 @@ class WorkerDiagnostics:
         with self._lock:
             self._buses[camera_id] = (bus, subscriptions)
 
+    def register_inference(self, source: InferenceMetricsSource) -> None:
+        with self._lock:
+            self._inference = source
+
     def update_encoder_lifecycle(self, snapshot: EncoderLifecycleSnapshot) -> None:
         with self._lock:
             self._encoder = EncoderLifecycleSnapshot(
@@ -294,13 +327,16 @@ class WorkerDiagnostics:
                 for camera_id, stages in self._stage_timings.items()
             }
             buses = dict(self._buses)
+            inference = None if self._inference is None else self._inference.snapshot()
             encoder = self._encoder
+            decode_backend_by_camera = dict(self._decode_backend_by_camera)
             encode_by_camera = dict(self._encode_by_camera)
             bed_region_by_camera = dict(self._bed_region_by_camera)
             bed_exit_scoring_by_camera = dict(self._bed_exit_scoring_by_camera)
             device_residency_by_camera = dict(self._device_residency_by_camera)
             camera_ids = (
                 set(self._decode_by_camera)
+                | set(decode_backend_by_camera)
                 | set(stage_timings)
                 | set(buses)
                 | set(statuses)
@@ -308,6 +344,7 @@ class WorkerDiagnostics:
                 | set(bed_region_by_camera)
                 | set(bed_exit_scoring_by_camera)
                 | set(device_residency_by_camera)
+                | (set() if inference is None else set(inference.cameras))
             )
         cameras = tuple(
             CameraDiagnosticsSnapshot(
@@ -317,10 +354,23 @@ class WorkerDiagnostics:
                 ),
                 stage_timings=stage_timings.get(camera_id, ()),
                 bus=bus_snapshot(buses.get(camera_id)),
+                decode_backend=decode_backend_by_camera.get(camera_id),
                 encode=encode_by_camera.get(camera_id),
                 bed_region=bed_region_by_camera.get(camera_id),
                 bed_exit_scoring=bed_exit_scoring_by_camera.get(camera_id),
                 device_residency=device_residency_by_camera.get(camera_id),
+                inference=(
+                    None if inference is None else inference.cameras.get(camera_id)
+                ),
+                batch_sizes=(
+                    () if inference is None else tuple(inference.batch_sizes.items())
+                ),
+                forward_p50_sec=(
+                    0.0 if inference is None else inference.forward_p50_sec
+                ),
+                forward_p95_sec=(
+                    0.0 if inference is None else inference.forward_p95_sec
+                ),
             )
             for camera_id in sorted(camera_ids)
         )
@@ -412,6 +462,7 @@ __all__ = [
     "BusSubscriptionSnapshot",
     "CameraDiagnosticsSnapshot",
     "ClipRecorderStatus",
+    "DecodeBackendObservability",
     "DeviceResidencyDiagnostics",
     "EncodeSelection",
     "EncoderLifecycleSnapshot",

@@ -3,6 +3,7 @@
 from worker.runtime.telemetry.models import (
     BusSubscriptionSnapshot,
     CameraDiagnosticsSnapshot,
+    DecodeBackendObservability,
     EncoderLifecycleSnapshot,
     RuntimeDiagnosticsSnapshot,
     StageTimingSnapshot,
@@ -32,6 +33,7 @@ __all__ = [
     "CameraStatus",
     "CameraStatusRecord",
     "ClipRecorderStatus",
+    "DecodeBackendObservability",
     "EncoderLifecycleSnapshot",
     "IngestStatusReporter",
     "OpsEvent",

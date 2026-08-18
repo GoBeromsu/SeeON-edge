@@ -79,12 +79,25 @@ class SceneState:
         *,
         track_ids: tuple[int, ...] = (),
     ) -> FrameObservation:
-        """Store one observation without discarding an existing non-empty bed cache."""
+        """Compatibility alias for an actual inference observation."""
+        return self.observe(observation, track_ids=track_ids)
+
+    def observe(
+        self,
+        observation: FrameObservation,
+        *,
+        track_ids: tuple[int, ...] = (),
+    ) -> FrameObservation:
+        """Store one inferred observation without discarding the bed cache."""
         self.latest_observation = observation
         self.track_ids = track_ids
         if observation.bed_boxes:
             self.bed_regions = observation.bed_boxes
         return observation
+
+    def coast(self) -> FrameObservation | None:
+        """Return the last inferred scene without advancing it as empty."""
+        return self.latest_observation
 
     def resolve_bed_regions(
         self,

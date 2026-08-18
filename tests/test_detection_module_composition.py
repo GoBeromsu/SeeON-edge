@@ -502,104 +502,54 @@ def _pose_composite(runner: _PoseRunner) -> CompositeExtractor:
 
 
 def test_characterization_empty_tracker_update_ages_and_expires_live_tracks() -> None:
-    """PRE-FIX CHARACTERIZATION (todo 9 will update this test).
-
-    ``GreedyIouTracker.update(())`` is what ``CompositeExtractor.process()``
-    feeds a non-inferred frame (merged boxes are empty because no extractor
-    ran). Empirically -- not by assumption -- every live track takes a miss,
-    is dropped once misses exceed ``max_misses``, and a later re-detection of
-    the SAME person gets a brand-new track id. At 5fps admission over a 15fps
-    source that is two phantom misses per real observation.
-    """
+    """POST-FIX: update(()) coasts; observe(()) is an actual negative."""
     tracker = GreedyIouTracker(max_misses=3)
     box = _tracked_box()
 
     assert tracker.update((box,)) == (0,)
+    for _ in range(10):
+        assert tracker.update(()) == ()
     assert tracker.live_ids == frozenset({0})
+    assert tracker.update((box,)) == (0,)
 
-    # Three non-inferred frames: the id survives, but only on borrowed time.
-    survived = [tracker.update(()) or tracker.live_ids for _ in range(3)]
-    assert survived == [frozenset({0})] * 3
-
-    # The fourth non-inferred frame expires a track that was never actually
-    # observed to be gone.
-    assert tracker.update(()) == ()
+    for _ in range(4):
+        assert tracker.observe(()) == ()
     assert tracker.live_ids == frozenset()
-
-    # Same person, new identity -- every temporal consumer keyed on track id
-    # (fall window, bed assignment) starts over.
-    assert tracker.update((box,)) == (1,)
+    assert tracker.observe((box,)) == (1,)
 
 
 def test_characterization_non_inferred_frame_advances_scene_state_as_empty() -> None:
-    """PRE-FIX CHARACTERIZATION (todo 9 will update this test).
+    """POST-FIX: SceneState.coast retains the last inferred observation."""
+    scene = SceneState("camera-sampling")
+    observed = FrameObservation(detections=((_tracked_box(),), ()), track_ids=(0,))
 
-    With pose scheduled every 5th frame, frames 1..4 run no extractor at all,
-    yet ``process()`` still merges (nothing), still calls ``tracker.update``
-    with an empty tuple, and still writes an EMPTY observation into
-    ``SceneState`` -- so ``latest_observation`` reports "no person" on a frame
-    where nobody looked for one.
-    """
-    runner = _PoseRunner(_tracked_box())
-    composite = _pose_composite(runner)
-
-    inferred = composite.process(_frame_packet(0))
-    assert runner.calls == 1
-    assert inferred.observation.boxes == (_tracked_box(),)
-    assert inferred.observation.track_ids == (0,)
-
-    skipped = [composite.process(_frame_packet(index)) for index in (1, 2, 3, 4)]
-
-    assert runner.calls == 1
-    assert all(result.module_results == () for result in skipped)
-    assert all(result.observation.boxes == () for result in skipped)
-    assert composite.scene_state.latest_observation is not None
-    assert composite.scene_state.latest_observation.boxes == ()
-    assert composite.scene_state.track_ids == ()
-    assert composite.tracker.live_ids == frozenset()
+    assert scene.observe(observed, track_ids=(0,)) is observed
+    for _ in range(4):
+        assert scene.coast() is observed
+    assert scene.latest_observation is observed
+    assert scene.track_ids == (0,)
 
 
-@pytest.mark.xfail(strict=True, reason="todo 9: a non-inferred frame must be semantically neutral")
 def test_non_inferred_frame_does_not_age_tracks_or_advance_scene_state_as_empty() -> None:
-    """NEW BEHAVIOR SPEC (strict xfail until todo 9 lands).
+    """The explicit perception coast API is neutral until todo 8 wires it."""
+    tracker = GreedyIouTracker(max_misses=3)
+    scene = SceneState("camera-sampling")
+    box = _tracked_box()
+    observation = FrameObservation(detections=((box,), ()), track_ids=(0,))
 
-    Absence of inference is not absence of observation. Across a full
-    non-inferred stretch the track id must survive unchanged and the scene's
-    latest observation must still describe the last frame that actually
-    carried inference -- not an empty one manufactured by the scheduler.
-    """
-    runner = _PoseRunner(_tracked_box())
-    composite = _pose_composite(runner)
+    assert tracker.observe((box,)) == (0,)
+    _ = scene.observe(observation, track_ids=(0,))
+    for _ in range(15):
+        tracker.coast()
+        assert scene.coast() is observation
 
-    first = composite.process(_frame_packet(0))
-    assert first.observation.track_ids == (0,)
-
-    for index in (1, 2, 3, 4):
-        _ = composite.process(_frame_packet(index))
-
-    assert composite.tracker.live_ids == frozenset({0})
-    assert composite.scene_state.latest_observation is not None
-    assert composite.scene_state.latest_observation.boxes == (_tracked_box(),)
-    assert composite.scene_state.track_ids == (0,)
-
-    # The next inferred frame re-observes the SAME person under the SAME id.
-    assert composite.process(_frame_packet(5)).observation.track_ids == (0,)
+    assert tracker.live_ids == frozenset({0})
+    assert scene.track_ids == (0,)
+    assert tracker.observe((box,)) == (0,)
 
 
-@pytest.mark.xfail(
-    strict=True, reason="todo 9: missing person evidence must be COVERED/UNKNOWN, never EMPTY"
-)
 def test_bed_exit_missing_person_evidence_is_never_reported_as_empty() -> None:
-    """NEW BEHAVIOR SPEC (strict xfail until todo 9 lands).
-
-    ``BedOccupancy`` is ``Literal["empty", "occupied", "exit"]`` today: there
-    is no third value for "the bed's occupancy is unknown this frame because
-    the person channel carried no inference". So a frame with beds and no
-    person observation reports the bed EMPTY -- indistinguishable from an
-    observed departure. Todo 9 adds the covered/unknown value; until then
-    this asserts only the invariant that survives the enum change: a frame
-    that carried no person evidence must not claim the bed is empty.
-    """
+    """A person-inference gap reports COVERED and cannot claim EMPTY."""
     bed = BoundingBox(x1=0, y1=0, x2=100, y2=100, confidence=0.9)
     monitor = BedExitMonitor(
         config=BedExitConfig(
@@ -628,7 +578,8 @@ def test_bed_exit_missing_person_evidence_is_never_reported_as_empty() -> None:
     assert occupied is not None
     assert tuple(status.occupancy for status in occupied.statuses) == ("occupied",)
 
-    _ = monitor.update(decision((), 1))
+    _ = monitor.coast(frame_index=1)
     unobserved = monitor.last_debug_snapshot
     assert unobserved is not None
-    assert tuple(status.occupancy for status in unobserved.statuses) != ("empty",)
+    assert tuple(status.occupancy for status in unobserved.statuses) == ("covered",)
+    assert unobserved.events == ()

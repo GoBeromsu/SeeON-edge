@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import Callable
+from dataclasses import dataclass
+from time import monotonic
 from typing import ClassVar
 
 from contracts.observation import FrameObservation
@@ -9,7 +12,15 @@ from worker.domains.fall.classifier import (
     FallWindowClassifier,
 )
 from worker.domains.fall.schema import FallEvent
+from worker.domains.staleness import DEFAULT_STALE_AFTER_SEC, ObservationFreshness
 from worker.types import BusinessEvent, DecisionInput, DecisionTraceSnapshot
+
+
+@dataclass(frozen=True, slots=True)
+class FallLatchStatus:
+    is_fall: bool
+    stale: bool
+    observation_age_sec: float | None
 
 
 class FallEventLatch:
@@ -28,6 +39,8 @@ class FallEventLatch:
         camera_id: str,
         facility_id: str,
         operating_threshold: float = FALL_POLICY_V1_DEFAULT.operating_threshold,
+        clock: Callable[[], float] = monotonic,
+        stale_after_sec: float = DEFAULT_STALE_AFTER_SEC,
     ) -> None:
         self.classifier = FallWindowClassifier(model, operating_threshold)
         self.camera_id = camera_id
@@ -35,7 +48,20 @@ class FallEventLatch:
         self.event_count = 0
         self.first_event_sec = None
         self._previous_fall = False
+        self._freshness = ObservationFreshness(
+            clock=clock,
+            stale_after_sec=stale_after_sec,
+        )
         self.last_trace_snapshots: tuple[DecisionTraceSnapshot, ...] = ()
+
+    @property
+    def status_snapshot(self) -> FallLatchStatus:
+        freshness = self._freshness.snapshot()
+        return FallLatchStatus(
+            is_fall=self._previous_fall,
+            stale=freshness.stale,
+            observation_age_sec=freshness.observation_age_sec,
+        )
 
     def update(self, input_value: DecisionInput) -> tuple[BusinessEvent, ...]:
         observation = self.classifier.classify(input_value)
@@ -90,7 +116,12 @@ class FallEventLatch:
             ),
         )
 
+    def coast(self) -> tuple[BusinessEvent, ...]:
+        """Emit nothing and hold the last-known fall state during a gap."""
+        return ()
+
     def update_signal(self, is_fall: bool, time_sec: float | None = None) -> bool:
+        self._freshness.observe()
         onset_sec = 0.0 if time_sec is None else time_sec
         onset = is_fall and not self._previous_fall
         if onset:
@@ -135,4 +166,4 @@ def _fall_probability_and_track(
     return max(pairs, key=lambda item: (item[0], -item[1]))
 
 
-__all__ = ["FallEventLatch"]
+__all__ = ["FallEventLatch", "FallLatchStatus"]
