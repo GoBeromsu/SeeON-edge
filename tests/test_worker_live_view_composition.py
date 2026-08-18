@@ -46,6 +46,7 @@ from worker.pipeline.inference_coordinator import CoordinatedInference, Inferenc
 from worker.pipeline.ingest.lifecycle import IngestReporter
 from worker.pipeline.ingest.probe import RTSPProbeError, RTSPProbeResult
 from worker.pipeline.output.live_view import LatestFrameStore, LiveViewSubscriber
+from worker.pipeline.output.live_view_pump import LatestObservationStore, LiveViewPump
 from worker.pipeline.output.mjpeg_server import MjpegProbeError
 from worker.pipeline.perception import GreedyIouTracker, SceneState
 from worker.runtime.config import CameraRuntimeConfig, WorkerConfig
@@ -444,14 +445,16 @@ def test_rtsp_probe_returns_the_probe_result_payload_on_success(
     assert payload == result.as_dict()
 
 
-def test_enabled_worker_hands_every_pump_the_live_view_tap(
+def test_enabled_worker_gives_every_camera_a_live_bus_consumer(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """The default pump factory must pass the tap through.
+    """The live lane must have a real consumer, and the pump must feed it.
 
-    Composing a server and a store while building pumps that never publish
-    would leave the port open and permanently frameless -- a different shape
-    of the same "ported but unwired" bug.
+    Composing a server and a store while nothing drains ``bus.live`` would
+    leave the port open and permanently frameless -- a different shape of the
+    same "ported but unwired" bug. The pipeline pump no longer publishes the
+    preview itself (that put it behind pose); it records the observation the
+    live pump overlays.
     """
     _stub_heartbeat_transport(monkeypatch)
     runtime = _runtime(
@@ -459,16 +462,57 @@ def test_enabled_worker_hands_every_pump_the_live_view_tap(
         tmp_path,
         {"ML_WORKER_DEV_MJPEG": "true", "ML_WORKER_DEV_MJPEG_PORT": "0"},
     )
-    with _running(runtime, lambda: len(runtime.cameras) == 2):
+    # Wait on the live pump threads, not on camera count: activation registers
+    # the cameras, but `run()` starts these threads a few statements later.
+    with _running(
+        runtime,
+        lambda: len(runtime._live_view_pump_threads) == 2,  # noqa: SLF001
+    ):
+        assert {pump.camera_id for pump in runtime._live_view_pumps} == {  # noqa: SLF001
+            "camera-a",
+            "camera-b",
+        }
+        assert {thread.name for thread in runtime._live_view_pump_threads} == {  # noqa: SLF001
+            "live-view-pump-camera-a",
+            "live-view-pump-camera-b",
+        }
+        assert all(
+            thread.is_alive()
+            for thread in runtime._live_view_pump_threads  # noqa: SLF001
+        )
         for context in runtime.cameras:
             pump = context.pump
             assert isinstance(pump, CameraPipelinePump)
-            assert pump._live_view is runtime._live_view  # noqa: SLF001
+            assert context.live_view_pump is not None
+            assert (
+                pump._observation_recorder  # noqa: SLF001
+                is runtime._live_observations  # noqa: SLF001
+            )
             # Each camera gets its own collector, not a shared or missing one.
             assert (
                 pump._debug_snapshots_provider  # noqa: SLF001
                 is runtime._camera_debug_snapshots[pump.camera_id]  # noqa: SLF001
             )
+    assert not any(
+        thread.is_alive() for thread in runtime._live_view_pump_threads  # noqa: SLF001
+    )
+
+
+def test_disabled_live_view_composes_no_live_bus_consumer(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """With the viewer off there is nothing to drain the lane for."""
+    _stub_heartbeat_transport(monkeypatch)
+    runtime = _runtime(_config("camera-a"), tmp_path, {})
+
+    with _running(runtime, lambda: len(runtime.cameras) == 1):
+        assert runtime._live_view is None  # noqa: SLF001
+        assert runtime._live_view_pumps == ()  # noqa: SLF001
+        context = runtime.cameras[0]
+        assert context.live_view_pump is None
+        pump = context.pump
+        assert isinstance(pump, CameraPipelinePump)
+        assert pump._observation_recorder is None  # noqa: SLF001
 
 
 # --- the tap itself, against real collaborators -------------------------------
@@ -502,7 +546,7 @@ class _NullSink:
 
 
 def _pump(
-    live_view: object | None,
+    observation_recorder: object | None,
     bus: BoundedFrameBus,
     *,
     debug_snapshots_provider: Callable[[int], tuple[object, ...]] | None = None,
@@ -523,26 +567,36 @@ def _pump(
         _NullSink(),
         poll_timeout_sec=0.02,
         max_frames=1,
-        live_view=live_view,  # type: ignore[arg-type]
+        observation_recorder=observation_recorder,  # type: ignore[arg-type]
         debug_snapshots_provider=debug_snapshots_provider,  # type: ignore[arg-type]
     )
 
 
-def test_pump_publishes_each_frame_into_the_live_view_store() -> None:
-    """Real pump, real ``LiveViewSubscriber``, real ``LatestFrameStore``."""
+def test_pipeline_pump_and_live_pump_together_fill_the_live_view_store() -> None:
+    """Real pipeline pump, real ``LiveViewPump``, real store -- end to end.
+
+    The pipeline pump only caches its observation; the live pump is what takes
+    the frame off ``bus.live`` and encodes it.
+    """
     store = LatestFrameStore()
     # Viewer gating (#48): publish() is a no-op with zero viewers, so this
     # regression check for "still works with viewers" needs one connected.
     store.mark_viewer_connected("camera-a")
+    observations = LatestObservationStore()
     bus = BoundedFrameBus()
     bus.publish(_packet("camera-a", 3))
 
-    _pump(LiveViewSubscriber(store), bus).run()
+    _pump(observations, bus).run()
+    live_pump = LiveViewPump("camera-a", bus.live, LiveViewSubscriber(store), observations)
+    assert live_pump.run_once()
 
+    assert observations.latest("camera-a") is not None
     latest = store.get_latest("camera-a")
     assert latest is not None
     assert latest.frame_index == 3
     assert latest.jpeg.startswith(b"\xff\xd8")  # a real JPEG, actually encoded
+    assert latest.overlay_stale is False
+    assert bus.metrics("live").taken == 1
 
 
 def test_pump_passes_the_frame_index_to_the_debug_snapshot_collector() -> None:
@@ -550,15 +604,17 @@ def test_pump_passes_the_frame_index_to_the_debug_snapshot_collector() -> None:
     seen: list[int] = []
 
     @final
-    class _RecordingLiveView:
-        def publish(
+    class _RecordingRecorder:
+        def record(
             self,
-            _packet: FramePacket,
+            _camera_id: str,
             _observation: object,
             debug_snapshots: tuple[object, ...] = (),
-        ) -> bool:
+            *,
+            frame_index: int,
+        ) -> None:
             assert debug_snapshots == ("snapshot-7",)
-            return True
+            assert frame_index == 7
 
     bus = BoundedFrameBus()
     bus.publish(_packet("camera-a", 7))
@@ -567,31 +623,33 @@ def test_pump_passes_the_frame_index_to_the_debug_snapshot_collector() -> None:
         seen.append(frame_index)
         return ("snapshot-7",)
 
-    _pump(_RecordingLiveView(), bus, debug_snapshots_provider=provider).run()
+    _pump(_RecordingRecorder(), bus, debug_snapshots_provider=provider).run()
 
     assert seen == [7]
 
 
-def test_a_failing_live_view_never_stops_detection() -> None:
+def test_a_failing_observation_recorder_never_stops_detection() -> None:
     """A cosmetic view is a tap, not a stage.
 
-    An exploding renderer must not be counted as a pipeline failure, and must
+    An exploding recorder must not be counted as a pipeline failure, and must
     not prevent the frame from being processed.
     """
 
     @final
-    class _ExplodingLiveView:
-        def publish(
+    class _ExplodingRecorder:
+        def record(
             self,
-            _packet: FramePacket,
+            _camera_id: str,
             _observation: object,
             _debug_snapshots: tuple[object, ...] = (),
-        ) -> bool:
-            raise RuntimeError("overlay renderer exploded")
+            *,
+            frame_index: int,
+        ) -> None:
+            raise RuntimeError("observation cache exploded")
 
     bus = BoundedFrameBus()
     bus.publish(_packet("camera-a", 1))
-    pump = _pump(_ExplodingLiveView(), bus)
+    pump = _pump(_ExplodingRecorder(), bus)
 
     pump.run()
 

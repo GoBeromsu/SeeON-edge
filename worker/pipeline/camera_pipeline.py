@@ -54,20 +54,22 @@ class EvidenceAttacher(Protocol):
     ) -> BusinessEvent: ...
 
 
-class LiveViewPublisher(Protocol):
-    """Structural seam matched by `LiveViewSubscriber` (worker.pipeline.output).
+class ObservationRecorder(Protocol):
+    """Structural seam matched by `LatestObservationStore` (worker.pipeline.output).
 
     Deliberately a Protocol, like `EvidenceAttacher` above: this module stays
-    import-free of `worker.pipeline.output` so the live view is a tap that can
-    be absent, not a stage this loop depends on.
+    import-free of `worker.pipeline.output` so the live view stays a consumer
+    of what this loop already computed, not a stage this loop waits on.
     """
 
-    def publish(
+    def record(
         self,
-        packet: FramePacket,
+        camera_id: str,
         observation: FrameObservation,
         debug_snapshots: tuple[Any, ...] = (),
-    ) -> bool: ...
+        *,
+        frame_index: int,
+    ) -> None: ...
 
 
 @final
@@ -95,7 +97,7 @@ class CameraPipelinePump:
         evidence_attacher: EvidenceAttacher | None = None,
         diagnostics: MeasuredFpsSink | None = None,
         max_frames: int | None = None,
-        live_view: LiveViewPublisher | None = None,
+        observation_recorder: ObservationRecorder | None = None,
         debug_snapshots_provider: Callable[[int], tuple[Any, ...]] | None = None,
         trace_capture: TraceCapture | None = None,
         trace_writer: BoundedTraceWriter | None = None,
@@ -109,7 +111,7 @@ class CameraPipelinePump:
         self._evidence_attacher = evidence_attacher
         self._diagnostics = diagnostics
         self._max_frames = max_frames
-        self._live_view = live_view
+        self._observation_recorder = observation_recorder
         self._debug_snapshots_provider = debug_snapshots_provider
         if (trace_capture is None) != (trace_writer is None):
             raise ValueError("trace capture and writer must be composed together")
@@ -156,7 +158,7 @@ class CameraPipelinePump:
     def _pump_one(self, packet: FramePacket, pose: ModuleResult) -> None:
         self._record_measured_fps()
         result = self._analytics.process(packet, prefetched_results=(pose,))
-        self._publish_live_view(packet, result.observation)
+        self._record_observation(packet, result.observation)
         events = self._decision.update(result.decision_input)
         if self._trace_capture is not None and self._trace_writer is not None:
             traced = self._trace_capture.capture(
@@ -178,28 +180,36 @@ class CameraPipelinePump:
             else:
                 emit_for_frame(attached, packet)
 
-    def _publish_live_view(
+    def _record_observation(
         self, packet: FramePacket, observation: FrameObservation
     ) -> None:
-        """Mirror edge's per-frame overlay publication (edge/runtime/edge_worker.py).
+        """Cache this frame's observation for the live-view pump (todo 10).
 
-        A cosmetic operator view must never decide whether detection runs, so
-        this is a tap and not a stage: it is skipped entirely when no live view
-        is composed, and any failure inside it is logged and swallowed rather
-        than surfaced to ``run``'s per-frame failure counter. It publishes
-        before ``decision.update`` so a decision-stage error still leaves the
-        operator with a current frame.
+        The preview used to be *published* from here, after ``analytics``,
+        which put every operator frame behind a pose forward. Now this loop
+        only records what it already computed -- a dict write, no encode, no
+        second inference -- and ``LiveViewPump`` (draining ``bus.live`` on its
+        own thread) decides when to draw it and whether it is still fresh.
+        Still a tap, not a stage: absent when nothing consumes it, and any
+        failure is logged and swallowed rather than counted as a pipeline
+        failure.
         """
-        live_view = self._live_view
-        if live_view is None:
+        recorder = self._observation_recorder
+        if recorder is None:
             return
         provider = self._debug_snapshots_provider
         try:
             snapshots = () if provider is None else provider(packet.frame.index)
-            _ = live_view.publish(packet, observation, snapshots)
+            recorder.record(
+                self._camera_id,
+                observation,
+                snapshots,
+                frame_index=packet.frame.index,
+            )
         except Exception:  # noqa: BLE001 - a debug view must not stop detection
             LOGGER.warning(
-                "live view publish failed",
+                "live view observation record failed: camera_id=%s",
+                self._camera_id,
                 extra={"camera_id": self._camera_id},
                 exc_info=True,
             )

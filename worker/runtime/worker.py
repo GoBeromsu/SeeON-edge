@@ -89,6 +89,7 @@ from worker.pipeline.output.evidence.packet_ring import PacketRingLimits
 from worker.pipeline.output.evidence.snapshot_store import SnapshotStore
 from worker.pipeline.output.evidence_attacher import AlertEvidenceAttacher
 from worker.pipeline.output.live_view import LatestFrameStore, LiveViewSubscriber
+from worker.pipeline.output.live_view_pump import LatestObservationStore, LiveViewPump
 from worker.pipeline.output.mjpeg_server import (
     BedZoneNotFoundError,
     BedZonePayload,
@@ -292,6 +293,7 @@ class CameraRuntimeContext:
     pump: _RunnableIngest
     clip_frame_feeder: ClipFrameFeeder | None = None
     inference_results: InferenceResultSlot | None = None
+    live_view_pump: LiveViewPump | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -833,13 +835,22 @@ class WorkerRuntime:
         self._overlay_renderer = OverlayRenderer(mode="bedexit")
         self._snapshot_store = SnapshotStore(self._resolved_clip_store_dir())
         self._camera_evidence_attachers: dict[str, AlertEvidenceAttacher] = {}
-        # #15: `mjpeg_server.py` was ported without a call site, so `:8090`
-        # never opened and the dashboard's camera view stayed dead even though
-        # `compose.edge.yaml` enables the switch and the backend proxies
-        # `/api/v1/streams/{id}` there. Resolve the switch once, here, so the
-        # per-camera pumps built during `_activate` can be handed the tap.
+        # #15 (resolved): `mjpeg_server.py` had been ported without a call
+        # site, so `:8090` never opened and the dashboard's camera view stayed
+        # dead even though `compose.edge.yaml` enables the switch and the
+        # backend proxies `/api/v1/streams/{id}` there. The dev MJPEG server
+        # IS the sanctioned viewer and is really started by
+        # `_start_live_view_server` below (real bind, covered by
+        # tests/test_worker_live_view_composition.py). The switch is resolved
+        # once here so the per-camera live-view pumps built during `_activate`
+        # can be handed the tap.
         self._mjpeg_config = self._resolve_mjpeg_config()
         self._live_frames = LatestFrameStore()
+        # Written by each camera's pipeline pump right after `analytics.process`
+        # (a dict write, never a model call) and read by that camera's
+        # `LiveViewPump`: the preview overlays the LATEST cached observation
+        # instead of waiting for the current frame's pose forward.
+        self._live_observations = LatestObservationStore()
         # #40: the live view gets its own per-camera pose-overlay renderer
         # (LiveViewSubscriber's default, keyed off `self._live_frames`) rather
         # than sharing `self._overlay_renderer` -- that instance stays a
@@ -850,6 +861,8 @@ class WorkerRuntime:
             LiveViewSubscriber(self._live_frames) if self._mjpeg_config.enabled else None
         )
         self._mjpeg_server: MjpegServer | None = None
+        self._live_view_pumps: tuple[LiveViewPump, ...] = ()
+        self._live_view_pump_threads: tuple[threading.Thread, ...] = ()
         self._camera_debug_snapshots: dict[str, Callable[[int], tuple[Any, ...]]] = {}
         self._camera_inference_results: dict[str, InferenceResultSlot] = {}
 
@@ -911,6 +924,7 @@ class WorkerRuntime:
             self._start_derivative_runtime()
             self._start_runtime_status_sender()
             self._start_clip_frame_feeders()
+            self._start_live_view_pumps()
             self._start_live_view_server()
             if self._supervisor is not None:
                 # 판정 기준은 **설정된 로스터**(`config.cameras`)이지 활성화에
@@ -954,6 +968,11 @@ class WorkerRuntime:
         if self._mjpeg_server is not None:
             self._mjpeg_server.stop()
             self._mjpeg_server = None
+        for live_pump in self._live_view_pumps:
+            live_pump.stop()
+        for live_thread in self._live_view_pump_threads:
+            live_thread.join(timeout=5.0)
+        self._live_view_pump_threads = ()
         if self._derivative_runtime is not None:
             self._derivative_runtime.stop()
             self._derivative_runtime = None
@@ -1232,6 +1251,31 @@ class WorkerRuntime:
             threads.append(thread)
         self._clip_frame_feeder_threads = tuple(threads)
 
+    def _start_live_view_pumps(self) -> None:
+        """Run each camera's ``bus.live`` consumer on its own thread.
+
+        Deliberately outside ``IngestSupervisor`` for the same reason as the
+        clip frame feeders: these loops never complete, so folding them into
+        the supervisor would make ``join()`` -- and any bounded
+        ``--max-frames-per-camera`` run -- hang. Reaped by name in ``stop()``.
+        """
+        threads = []
+        for live_pump in self._live_view_pumps:
+            thread = threading.Thread(
+                target=live_pump.run,
+                name=f"live-view-pump-{live_pump.camera_id}",
+                daemon=True,
+            )
+            thread.start()
+            threads.append(thread)
+        self._live_view_pump_threads = tuple(threads)
+        if threads:
+            LOGGER.info(
+                "live view pumps started: cameras=%d",
+                len(threads),
+                extra={"cameras": len(threads)},
+            )
+
     def _initialize_models(self, boot: BootContext) -> SharedComponentGraph:
         self._boot = boot
         self.fault_handler = FaultHandler(
@@ -1376,6 +1420,14 @@ class WorkerRuntime:
         )
         for feeder in self._clip_frame_feeders:
             handler.register_loop(feeder)
+        # Same shape as the feeders above: a cosmetic tap runs beside the
+        # pipeline, never inside `IngestSupervisor`'s completion accounting
+        # (a live pump never finishes, so joining it would hang bounded runs).
+        self._live_view_pumps = tuple(
+            item.live_view_pump for item in contexts if item.live_view_pump is not None
+        )
+        for live_pump in self._live_view_pumps:
+            handler.register_loop(live_pump)
         completion_check = (
             None if self._max_frames_per_camera is None else self._max_frames_completion_check
         )
@@ -1573,6 +1625,7 @@ class WorkerRuntime:
             self._camera_inference_results[camera.camera_id] = inference_results
         pump = self._pump_factory(camera, bus, analytics, decision, sink)
         clip_frame_feeder = self._build_clip_frame_feeder(camera.camera_id, bus)
+        live_view_pump = self._build_live_view_pump(camera.camera_id, bus)
         return CameraRuntimeContext(
             bus,
             tracker,
@@ -1585,7 +1638,25 @@ class WorkerRuntime:
             pump,
             clip_frame_feeder,
             inference_results,
+            live_view_pump,
         )
+
+    def _build_live_view_pump(
+        self, camera_id: str, bus: BoundedFrameBus
+    ) -> LiveViewPump | None:
+        """Give ``bus.live`` its consumer (todo 10).
+
+        Ingest has always fanned every decoded frame into the latest-only
+        ``live`` lane and nothing drained it; preview was published from the
+        pipeline pump *after* pose, so it inherited every inference stall.
+        One pump per camera drains that lane directly and overlays the newest
+        cached observation. ``None`` when the live view is off -- draining a
+        lane whose only consumer is a disabled viewer would be pure waste,
+        and the lane's latest-only eviction keeps it bounded either way.
+        """
+        if self._live_view is None:
+            return None
+        return LiveViewPump(camera_id, bus.live, self._live_view, self._live_observations)
 
     def _build_clip_frame_feeder(
         self, camera_id: str, bus: BoundedFrameBus
@@ -1621,7 +1692,9 @@ class WorkerRuntime:
             evidence_attacher=self._camera_evidence_attachers.get(camera.camera_id),
             diagnostics=self.diagnostics,
             max_frames=self._max_frames_per_camera,
-            live_view=self._live_view,
+            observation_recorder=(
+                None if self._live_view is None else self._live_observations
+            ),
             debug_snapshots_provider=self._camera_debug_snapshots.get(camera.camera_id),
             trace_capture=self._camera_trace_captures.get(camera.camera_id),
             trace_writer=self._trace_writer,
