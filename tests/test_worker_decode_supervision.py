@@ -393,6 +393,345 @@ def test_decode_respawn_logs_the_camera_id_in_the_rendered_message(
     assert all("camera_id=camera-a" in record.getMessage() for record in respawn_records)
 
 
+def test_current_respawn_logs_keep_status_extra_and_existing_message_fields(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Baseline: wrappers/status/extra stay put; detail is still absent."""
+    # Given
+    clock = _FakeClock()
+    dead = _Session([_DeadDecoderError("ffmpeg decoder exited")], clock)
+    healthy = _Session([_packet("camera-a", 1)], clock)
+    adapter = _Adapter([dead, healthy])
+    bus, reporter = _FakeBus(), _Reporter()
+    loop = _loop("camera-a", adapter, bus, reporter, clock)
+    bus.on_publish = lambda _packet: loop.stop()
+
+    # When
+    with caplog.at_level("WARNING", logger="worker.pipeline.ingest.lifecycle"):
+        loop.run()
+
+    # Then: status category remains the exception type, extra fields stay mapped.
+    assert reporter.categories["camera-a"] == "_DeadDecoderError"
+    offline = [event for event in reporter.events if event.event_type == "camera.offline"]
+    assert offline and offline[0].category == "_DeadDecoderError"
+    respawn_records = [
+        record for record in caplog.records if "camera decode respawn:" in record.getMessage()
+    ]
+    assert len(respawn_records) == 1
+    message = respawn_records[0].getMessage()
+    assert "camera_id=camera-a" in message
+    assert "attempt=1/3" in message
+    assert "reason=_DeadDecoderError" in message
+    assert "backoff=0.5s" in message
+    assert "detail=unavailable" in message
+    assert "ffmpeg decoder exited" not in message
+
+
+def test_current_exhausted_logs_keep_status_extra_and_existing_message_fields(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Baseline: budget-exhausted status/extra stay put; detail is still absent."""
+    # Given
+    clock = _FakeClock()
+    sessions = [
+        _Session([_DeadDecoderError("ffmpeg decoder exited")], clock) for _ in range(4)
+    ]
+    adapter = _Adapter(list(sessions))
+    bus, reporter = _FakeBus(), _Reporter()
+    loop = _loop("camera-a", adapter, bus, reporter, clock, max_respawns=3)
+
+    # When
+    with caplog.at_level("ERROR", logger="worker.pipeline.ingest.lifecycle"):
+        loop.run()
+
+    # Then
+    assert reporter.states == {"camera-a": "degraded"}
+    assert reporter.categories["camera-a"] == "_DeadDecoderError"
+    exhausted_records = [
+        record
+        for record in caplog.records
+        if "respawn budget exhausted" in record.getMessage()
+    ]
+    assert len(exhausted_records) == 1
+    message = exhausted_records[0].getMessage()
+    assert "camera_id=camera-a" in message
+    assert "attempts=3" in message
+    assert "reason=_DeadDecoderError" in message
+    assert "DEGRADED" in message
+    assert "detail=unavailable" in message
+    assert "ffmpeg decoder exited" not in message
+    assert reporter.events[0].category == "_DeadDecoderError"
+
+
+def test_respawn_and_exhausted_messages_render_safe_chained_detail(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Visible detail comes from the first safe_log_detail in the cause chain."""
+    from worker.adapters.decode.nvdec_cuvid.errors import NvdecUnavailableError
+
+    class _NonStringSafe(RuntimeError):
+        safe_log_detail: int = 123
+
+    class _BlankSafe(RuntimeError):
+        safe_log_detail: str = "   "
+
+    root = NvdecUnavailableError("cuvid decode failed: codec not supported", returncode=69)
+    mid = _BlankSafe("ignored")
+    mid.__cause__ = root
+    wrapper = RuntimeError("packet-preserving NVDEC decode failed (NvdecUnavailableError)")
+    wrapper.__cause__ = mid
+    unsafe = _NonStringSafe("outer")
+    unsafe.__cause__ = wrapper
+
+    clock = _FakeClock()
+    dead = _Session([unsafe], clock)
+    healthy = _Session([_packet("camera-a", 1)], clock)
+    adapter = _Adapter([dead, healthy])
+    bus, reporter = _FakeBus(), _Reporter()
+    loop = _loop("camera-a", adapter, bus, reporter, clock)
+    bus.on_publish = lambda _packet: loop.stop()
+
+    with caplog.at_level("WARNING", logger="worker.pipeline.ingest.lifecycle"):
+        loop.run()
+
+    respawn_records = [
+        record for record in caplog.records if "camera decode respawn:" in record.getMessage()
+    ]
+    assert respawn_records
+    message = respawn_records[0].getMessage()
+    assert "camera_id=camera-a" in message
+    assert "attempt=1/3" in message
+    assert "reason=_NonStringSafe" in message
+    assert "detail=NvdecUnavailableError: cuvid decode failed: codec not supported" in message
+    assert reporter.categories["camera-a"] == "_NonStringSafe"
+
+    clock = _FakeClock()
+    adapter = _Adapter([_Session([unsafe], clock) for _ in range(4)])
+    bus, reporter = _FakeBus(), _Reporter()
+    loop = _loop("camera-a", adapter, bus, reporter, clock, max_respawns=3)
+    with caplog.at_level("ERROR", logger="worker.pipeline.ingest.lifecycle"):
+        loop.run()
+    exhausted = [
+        record for record in caplog.records if "respawn budget exhausted" in record.getMessage()
+    ]
+    assert exhausted
+    exhausted_message = exhausted[-1].getMessage()
+    assert "camera_id=camera-a" in exhausted_message
+    assert "attempts=3" in exhausted_message
+    assert "reason=_NonStringSafe" in exhausted_message
+    assert "DEGRADED" in exhausted_message
+    assert (
+        "detail=NvdecUnavailableError: cuvid decode failed: codec not supported"
+        in exhausted_message
+    )
+    assert reporter.categories["camera-a"] == "_NonStringSafe"
+
+
+def test_cycle_and_arbitrary_exception_strings_never_become_detail(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Four-link cycle-safe walk must ignore raw exception text."""
+    first = RuntimeError("rtsp://admin:secret@camera/token=abc")
+    second = RuntimeError("outer")
+    first.__cause__ = second
+    second.__cause__ = first
+
+    clock = _FakeClock()
+    dead = _Session([first], clock)
+    healthy = _Session([_packet("camera-a", 1)], clock)
+    adapter = _Adapter([dead, healthy])
+    bus, reporter = _FakeBus(), _Reporter()
+    loop = _loop("camera-a", adapter, bus, reporter, clock)
+    bus.on_publish = lambda _packet: loop.stop()
+
+    with caplog.at_level("WARNING", logger="worker.pipeline.ingest.lifecycle"):
+        loop.run()
+
+    respawn_records = [
+        record for record in caplog.records if "camera decode respawn:" in record.getMessage()
+    ]
+    assert respawn_records
+    message = respawn_records[0].getMessage()
+    assert "detail=unavailable" in message
+    assert "secret" not in message
+    assert "abc" not in message
+    assert reporter.categories["camera-a"] == "RuntimeError"
+
+
+def test_raising_safe_log_detail_falls_back_to_unavailable(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A raising safe_log_detail property must not abort the walk."""
+    from worker.adapters.decode.nvdec_cuvid.errors import NvdecUnavailableError
+
+    class _RaisingSafe(RuntimeError):
+        @property
+        def safe_log_detail(self) -> str:
+            raise RuntimeError("safe_log_detail boom")
+
+    root = NvdecUnavailableError("cuvid decode failed: codec not supported")
+    wrapper = _RaisingSafe("outer")
+    wrapper.__cause__ = root
+
+    clock = _FakeClock()
+    dead = _Session([wrapper], clock)
+    healthy = _Session([_packet("camera-a", 1)], clock)
+    adapter = _Adapter([dead, healthy])
+    bus, reporter = _FakeBus(), _Reporter()
+    loop = _loop("camera-a", adapter, bus, reporter, clock)
+    bus.on_publish = lambda _packet: loop.stop()
+
+    with caplog.at_level("WARNING", logger="worker.pipeline.ingest.lifecycle"):
+        loop.run()
+
+    respawn_records = [
+        record for record in caplog.records if "camera decode respawn:" in record.getMessage()
+    ]
+    assert respawn_records
+    message = respawn_records[0].getMessage()
+    assert (
+        "detail=NvdecUnavailableError: cuvid decode failed: codec not supported"
+        in message
+    )
+    assert "safe_log_detail boom" not in message
+    assert reporter.categories["camera-a"] == "_RaisingSafe"
+
+    only_raiser = _RaisingSafe("solo")
+    clock = _FakeClock()
+    adapter = _Adapter(
+        [_Session([only_raiser], clock), _Session([_packet("camera-a", 2)], clock)]
+    )
+    bus, reporter = _FakeBus(), _Reporter()
+    loop = _loop("camera-a", adapter, bus, reporter, clock)
+    bus.on_publish = lambda _packet: loop.stop()
+    with caplog.at_level("WARNING", logger="worker.pipeline.ingest.lifecycle"):
+        loop.run()
+    fallback = [
+        record for record in caplog.records if "camera decode respawn:" in record.getMessage()
+    ][-1].getMessage()
+    assert "detail=unavailable" in fallback
+
+
+def test_oserror_from_safe_log_detail_does_not_abort_supervision(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """OSError from safe_log_detail must stay inside the logging walk."""
+    from worker.adapters.decode.nvdec_cuvid.errors import NvdecUnavailableError
+
+    class _OSErrorSafe(RuntimeError):
+        @property
+        def safe_log_detail(self) -> str:
+            raise OSError("safe_log_detail oserror")
+
+    root = NvdecUnavailableError("cuvid decode failed: codec not supported")
+    wrapper = _OSErrorSafe("outer")
+    wrapper.__cause__ = root
+    clock = _FakeClock()
+    adapter = _Adapter(
+        [_Session([wrapper], clock), _Session([_packet("camera-a", 1)], clock)]
+    )
+    bus, reporter = _FakeBus(), _Reporter()
+    loop = _loop("camera-a", adapter, bus, reporter, clock)
+    bus.on_publish = lambda _packet: loop.stop()
+    with caplog.at_level("WARNING", logger="worker.pipeline.ingest.lifecycle"):
+        loop.run()
+    message = [
+        record.getMessage()
+        for record in caplog.records
+        if "camera decode respawn:" in record.getMessage()
+    ][0]
+    assert "detail=NvdecUnavailableError: cuvid decode failed: codec not supported" in message
+    assert "safe_log_detail oserror" not in message
+    assert reporter.categories["camera-a"] == "_OSErrorSafe"
+
+
+def test_custom_exception_from_safe_log_detail_does_not_abort_supervision(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A custom Exception subclass from safe_log_detail must not escape."""
+
+    class _DetailBoom(Exception):
+        pass
+
+    class _CustomSafe(RuntimeError):
+        @property
+        def safe_log_detail(self) -> str:
+            raise _DetailBoom("safe_log_detail custom")
+
+    only_raiser = _CustomSafe("solo")
+    clock = _FakeClock()
+    adapter = _Adapter(
+        [_Session([only_raiser], clock), _Session([_packet("camera-a", 2)], clock)]
+    )
+    bus, reporter = _FakeBus(), _Reporter()
+    loop = _loop("camera-a", adapter, bus, reporter, clock)
+    bus.on_publish = lambda _packet: loop.stop()
+    with caplog.at_level("WARNING", logger="worker.pipeline.ingest.lifecycle"):
+        loop.run()
+    message = [
+        record.getMessage()
+        for record in caplog.records
+        if "camera decode respawn:" in record.getMessage()
+    ][-1]
+    assert "detail=unavailable" in message
+    assert "safe_log_detail custom" not in message
+    assert reporter.categories["camera-a"] == "_CustomSafe"
+
+
+def test_safe_detail_is_found_four_cause_links_below_the_wrapper(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Inspect the exception four __cause__ links below the logged wrapper."""
+    from worker.adapters.decode.nvdec_cuvid.errors import NvdecUnavailableError
+
+    root = NvdecUnavailableError("cuvid four links down")
+    link3 = RuntimeError("link-3")
+    link3.__cause__ = root
+    link2 = RuntimeError("link-2")
+    link2.__cause__ = link3
+    link1 = RuntimeError("link-1")
+    link1.__cause__ = link2
+    wrapper = RuntimeError("wrapper")
+    wrapper.__cause__ = link1
+
+    clock = _FakeClock()
+    dead = _Session([wrapper], clock)
+    healthy = _Session([_packet("camera-a", 1)], clock)
+    adapter = _Adapter([dead, healthy])
+    bus, reporter = _FakeBus(), _Reporter()
+    loop = _loop("camera-a", adapter, bus, reporter, clock)
+    bus.on_publish = lambda _packet: loop.stop()
+
+    with caplog.at_level("WARNING", logger="worker.pipeline.ingest.lifecycle"):
+        loop.run()
+
+    message = [
+        record.getMessage()
+        for record in caplog.records
+        if "camera decode respawn:" in record.getMessage()
+    ][0]
+    assert "detail=NvdecUnavailableError: cuvid four links down" in message
+    assert reporter.categories["camera-a"] == "RuntimeError"
+
+    beyond = RuntimeError("beyond")
+    beyond.__cause__ = wrapper
+    clock = _FakeClock()
+    adapter = _Adapter(
+        [_Session([beyond], clock), _Session([_packet("camera-a", 3)], clock)]
+    )
+    bus, reporter = _FakeBus(), _Reporter()
+    loop = _loop("camera-a", adapter, bus, reporter, clock)
+    bus.on_publish = lambda _packet: loop.stop()
+    with caplog.at_level("WARNING", logger="worker.pipeline.ingest.lifecycle"):
+        loop.run()
+    beyond_message = [
+        record.getMessage()
+        for record in caplog.records
+        if "camera decode respawn:" in record.getMessage()
+    ][-1]
+    assert "detail=unavailable" in beyond_message
+
+
 # --- bounded backoff, permanent death ----------------------------------------
 
 
