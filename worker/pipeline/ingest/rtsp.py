@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import time
 from collections.abc import Callable, Iterator
 from dataclasses import replace
@@ -19,6 +20,7 @@ _OpenFailureCallback = Callable[[str], None]
 _StopPredicate = Callable[[], bool]
 _DEFAULT_PROCESSED_FPS = 5.0
 _PROCESS_BOOT_ID = uuid4().hex
+LOGGER = logging.getLogger(__name__)
 
 
 class RTSPSource(Generic[_DecodeConfigT]):
@@ -113,9 +115,10 @@ class RTSPSource(Generic[_DecodeConfigT]):
                         if not reconnecting:
                             reconnecting = True
                             self._notify_reconnecting("read_failure")
-                        session.close()
+                        session_to_close = session
                         session = None
                         session_epoch = None
+                        self._close_session(session_to_close)
                         if self._reconnect_budget_exhausted(reconnects):
                             break
                         reconnects += 1
@@ -141,7 +144,20 @@ class RTSPSource(Generic[_DecodeConfigT]):
                     break
         finally:
             if session is not None:
-                session.close()
+                session_to_close = session
+                session = None
+                self._close_session(session_to_close)
+
+    def _close_session(self, session: DecodeSession) -> None:
+        try:
+            session.close()
+        except OSError as error:
+            camera_id = getattr(self._config, "camera_id", "<unknown>")
+            LOGGER.warning(
+                "camera ingest session close failed: camera_id=%s error_class=%s",
+                camera_id,
+                type(error).__name__,
+            )
 
     def _reconnect_budget_exhausted(self, reconnects: int) -> bool:
         return self._max_total_reconnects is not None and reconnects >= self._max_total_reconnects

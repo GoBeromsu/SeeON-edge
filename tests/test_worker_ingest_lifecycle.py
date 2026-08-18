@@ -4,18 +4,21 @@ import threading
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import final
+from typing import Final, final
 
 import numpy as np
 import pytest
 
 from contracts.frame import Frame
 from worker.interfaces.bus import FrameBus, FrameSubscription
+from worker.interfaces.decode import DecodeSession
 from worker.pipeline.ingest.lifecycle import (
+    DECODE_SILENCE_DEADLINE_SEC,
     CameraIngestLoop,
     CameraIngestPorts,
     CameraIngestSpec,
     CapturePolicy,
+    DecodeSupervisionPolicy,
     IngestEvent,
     IngestSupervisor,
 )
@@ -47,11 +50,11 @@ class _Session:
 
 @final
 class _Adapter:
-    def __init__(self, outcomes: list[_Session | Exception]) -> None:
+    def __init__(self, outcomes: list[DecodeSession | Exception]) -> None:
         self._outcomes = outcomes
         self.configs: list[_DecodeConfig] = []
 
-    def open(self, config: _DecodeConfig) -> _Session:
+    def open(self, config: _DecodeConfig) -> DecodeSession:
         self.configs.append(config)
         outcome = self._outcomes.pop(0)
         if isinstance(outcome, Exception):
@@ -698,3 +701,233 @@ def test_zero_loops_wait_until_stopped_unblocks_when_restart_check_fires() -> No
     supervisor.wait_until_stopped()
 
     assert len(calls) >= 1
+
+
+# --- issue #325: composed sustained NVDEC silence recovery --------------------
+
+_READ_TIMEOUT_INTERVAL_SEC: Final = 5.0
+
+
+@final
+class _FakeClock:
+    """Monotonic clock advanced only by scripted reads or respawn waits."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+        self.waits: list[float] = []
+
+    def __call__(self) -> float:
+        return self.now
+
+    def wait(self, delay_sec: float) -> bool:
+        self.waits.append(delay_sec)
+        self.now += delay_sec
+        return False
+
+
+@final
+class _TimeoutCadenceSession:
+    """Each read costs exactly one decoder read-timeout and returns None."""
+
+    def __init__(self, clock: _FakeClock, *, timeout_sec: float) -> None:
+        self._clock = clock
+        self._timeout_sec = timeout_sec
+        self.close_count = 0
+        self.read_count = 0
+
+    def read(self) -> FramePacket | None:
+        self.read_count += 1
+        self._clock.now += self._timeout_sec
+        return None
+
+    def close(self) -> None:
+        self.close_count += 1
+
+
+@final
+class _SignalingReporter:
+    """Subscribe-before-run reporter: state changes flip events, never sleeps."""
+
+    def __init__(self) -> None:
+        self.states: dict[str, str] = {}
+        self.categories: dict[str, str] = {}
+        self.events: list[IngestEvent] = []
+        self.ready_calls: list[str] = []
+        self.degraded = threading.Event()
+        self.ready = threading.Event()
+        self._lock = threading.Lock()
+
+    def mark_starting(self, camera_id: str) -> None:
+        with self._lock:
+            self.states[camera_id] = "starting"
+
+    def mark_ready(self, camera_id: str) -> None:
+        with self._lock:
+            self.states[camera_id] = "ready"
+            self.ready_calls.append(camera_id)
+        self.ready.set()
+
+    def mark_degraded(self, camera_id: str, *, category: str) -> None:
+        with self._lock:
+            self.states[camera_id] = "degraded"
+            self.categories[camera_id] = category
+        self.degraded.set()
+
+    def emit(self, event: IngestEvent) -> None:
+        with self._lock:
+            self.events.append(event)
+
+
+def _silence_loop(
+    camera_id: str,
+    adapter: _Adapter,
+    bus: _FakeBus,
+    reporter: _SignalingReporter,
+    clock: _FakeClock,
+    *,
+    max_respawns: int,
+) -> CameraIngestLoop[_DecodeConfig]:
+    spec = CameraIngestSpec(
+        camera_id=camera_id,
+        source_id=camera_id,
+        make_decode_config=_decode_config,
+        policy=CapturePolicy(
+            max_failures=30,
+            max_total_reconnects=0,
+            target_fps=1000.0,
+        ),
+        decode_supervision=DecodeSupervisionPolicy(max_respawns=max_respawns),
+    )
+    return CameraIngestLoop(
+        spec,
+        CameraIngestPorts(_registry(camera_id), adapter, bus, reporter),
+        clock=clock,
+        respawn_wait=clock.wait,
+    )
+
+
+def test_sustained_nvdec_silence_respawns_once_and_publishes_replacement(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Composed path: per-timeout Nones accumulate to the 10s silence deadline.
+
+    After checkbox 3 a live NVDEC read timeout returns None without killing the
+    child, so ``_SilenceWatchingSession`` must keep ``_last_frame_at`` and raise
+    only once the existing deadline is reached. That exception -- not an inner
+    ``read_failure`` reconnect -- is what respawns the camera loop.
+    """
+    # Given: a session that returns None once per read-timeout interval, then a
+    # healthy replacement. Reporter and bus signals are subscribed first.
+    clock = _FakeClock()
+    camera_id = "camera-202"
+    first = _TimeoutCadenceSession(clock, timeout_sec=_READ_TIMEOUT_INTERVAL_SEC)
+    replacement = _packet(camera_id, 11)
+    second = _Session([replacement])
+    adapter = _Adapter([first, second])
+    bus = _FakeBus()
+    reporter = _SignalingReporter()
+    published = threading.Event()
+    silent_reads = int(DECODE_SILENCE_DEADLINE_SEC // _READ_TIMEOUT_INTERVAL_SEC)
+    loop = _silence_loop(camera_id, adapter, bus, reporter, clock, max_respawns=1)
+
+    def on_publish(_packet: FramePacket) -> None:
+        published.set()
+        loop.stop()
+
+    bus.on_publish = on_publish
+
+    errors: list[BaseException] = []
+
+    def run_loop() -> None:
+        try:
+            loop.run()
+        except BaseException as exc:  # noqa: BLE001  # noqa: BROAD_EXCEPT_OK - capture for assertion
+            errors.append(exc)
+
+    # When: the loop runs after those subscriptions, driven only by the fake clock.
+    with caplog.at_level("WARNING", logger="worker.pipeline.ingest.lifecycle"):
+        thread = threading.Thread(target=run_loop, name=f"test-ingest-{camera_id}")
+        thread.start()
+        try:
+            assert reporter.degraded.wait(timeout=2.0), "silence deadline never degraded the camera"
+            assert published.wait(timeout=2.0), "replacement packet was not published"
+        finally:
+            loop.stop()
+            thread.join(timeout=2.0)
+
+    # Then: one loop-level respawn, no inner read_failure busy-spin, current epoch.
+    assert not thread.is_alive(), "ingest loop did not exit after replacement publish"
+    assert not errors, f"ingest loop raised: {errors!r}"
+    assert first.read_count == silent_reads
+    assert first.close_count == 1
+    assert second.close_count == 1
+    assert len(adapter.configs) == 2
+    _assert_published_packets(bus.packets, [replacement])
+    assert bus.packets[0].stream_epoch == 1
+    assert reporter.states == {camera_id: "ready"}
+    assert reporter.categories[camera_id] == "DecodeStalledError"
+    assert reporter.ready_calls == [camera_id]
+    assert reporter.ready.is_set()
+    assert [event.event_type for event in reporter.events] == [
+        "camera.offline",
+        "camera.recovered",
+    ]
+    assert reporter.events[0].category == "DecodeStalledError"
+    assert reporter.events[1].detail == "decode_respawned"
+    assert all("read_failure" not in event.detail for event in reporter.events)
+    assert all(event.category != "rtsp_reconnecting" for event in reporter.events)
+    respawn_records = [
+        record for record in caplog.records if "decode respawn" in record.getMessage()
+    ]
+    assert respawn_records, "expected a decode respawn warning"
+    assert all(f"camera_id={camera_id}" in record.getMessage() for record in respawn_records)
+    assert not any("read_failure" in record.getMessage() for record in caplog.records)
+
+
+def test_silent_replacement_exhausts_respawn_budget_and_stays_degraded(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Failure twin: the replacement stays silent and the loop ends DEGRADED."""
+    # Given: both the original and replacement sessions only return timeout Nones.
+    clock = _FakeClock()
+    camera_id = "camera-202"
+    first = _TimeoutCadenceSession(clock, timeout_sec=_READ_TIMEOUT_INTERVAL_SEC)
+    second = _TimeoutCadenceSession(clock, timeout_sec=_READ_TIMEOUT_INTERVAL_SEC)
+    adapter = _Adapter([first, second])
+    bus = _FakeBus()
+    reporter = _SignalingReporter()
+    loop = _silence_loop(camera_id, adapter, bus, reporter, clock, max_respawns=1)
+    finished = threading.Event()
+
+    def run_loop() -> None:
+        try:
+            loop.run()
+        finally:
+            finished.set()
+
+    # When: signals are subscribed before the thread starts; no wall-clock wait.
+    with caplog.at_level("ERROR", logger="worker.pipeline.ingest.lifecycle"):
+        thread = threading.Thread(target=run_loop, name=f"test-ingest-{camera_id}-twin")
+        thread.start()
+        try:
+            assert finished.wait(timeout=2.0), "silent replacement hung the ingest loop"
+        finally:
+            loop.stop()
+            thread.join(timeout=2.0)
+
+    # Then: existing respawn budget terminates DEGRADED without a hang or spin.
+    assert not thread.is_alive()
+    assert len(adapter.configs) == 2
+    assert first.close_count == second.close_count == 1
+    assert bus.packets == []
+    assert reporter.states == {camera_id: "degraded"}
+    assert reporter.categories[camera_id] == "DecodeStalledError"
+    assert [event.event_type for event in reporter.events] == ["camera.offline"]
+    assert all(event.category != "rtsp_reconnecting" for event in reporter.events)
+    exhausted = [
+        record
+        for record in caplog.records
+        if "respawn budget exhausted" in record.getMessage()
+    ]
+    assert exhausted, "expected the existing respawn-budget termination log"
+    assert all(f"camera_id={camera_id}" in record.getMessage() for record in exhausted)
