@@ -24,15 +24,6 @@ Allowed: `contracts`, `shared.events`, local `worker.*`. Forbidden: `backend`.
 
 `types/AGENTS.md` owns the pixel/numeric envelope contract. `runtime/AGENTS.md` owns process-shared versus per-camera allocation. Keep both boundaries intact; details stay in those scoped guides.
 
-## Sole CLI and composition root
-
-`worker/__main__.py` owns argparse and exit codes. It constructs `WorkerRuntime` from `worker.runtime.worker` directly.
-Don't add `worker.runtime.edge_worker`, an `edge` alias, a console script, or a second `python -m` target.
-`runtime/` is the only package that may import everything. Nothing imports `runtime`. No business math and no model parsing live there.
-Seam defaults are `None`. Missing wiring refuses to start. Always-fail stubs belong in tests only.
-Exit codes: 0 clean, 1 generic, 2 config, 3 refuse-to-start, 4 fatal accelerator.
-`--check-config` has no model, camera, or relay side effect.
-
 ## Hardware failure policy
 
 `runtime/AGENTS.md` owns boot exit codes, profile defaults, fault persistence, camera-local degradation, and lifecycle. `adapters/AGENTS.md` owns explicit backend fallback. `pipeline/AGENTS.md` owns queue overflow, and `pipeline/output/evidence/AGENTS.md` owns delivery durability. Read those scoped guides before changing failure behavior.

@@ -2,7 +2,7 @@
 
 Durable clip, snapshot, and relay-outbox path after admission. Pixels stop here as remuxed source packets, JPEG snapshots, and derivative files. Decision never writes this tree.
 
-`worker.pipeline` must not import `worker.runtime`. Runtime injects the store dir, outbox DB, lock, and sender. Missing production wiring or a locked store refuses to start; remote delivery failures stay classified and retryable. Two workers must not share one outbox.
+`worker.pipeline` must not import `worker.runtime`. Runtime injects the store dir, outbox DB, lock, and sender. Missing production wiring or a locked store refuses to start. Remote failures do not block startup: retryable classes retry, compatibility failures reprobe, and payload-invalid failures become permanent. Two workers must not share one outbox.
 
 ## Packet FIFO and feed
 
