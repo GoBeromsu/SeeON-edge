@@ -36,7 +36,7 @@ A queue owns every accepted `FramePacket` until take, reject, or close. After ta
 
 ## SQLite vs files
 
-SQLite (`worker-state.sqlite3` or central `edge.sqlite3`) owns delivery, claims, retention intent, and incident lifecycle. Files own immutable bytes: `clips/<id>/clip.mp4`, `thumbnail.jpg`, `manifest.json`, staged snapshots, `derivatives/<incident>/<sha256>.mp4`. Media never lives in the row. Path is not identity. Hash and size are. WAL plus `synchronous=FULL` on the worker-state file. Writes go through `ImmediateTransaction`.
+Production delivery, claims, retention intent, and incident lifecycle live in central `edge.sqlite3`; `worker-state.sqlite3` is legacy/test compatibility, not a co-equal production store. Runtime connections and writer ownership come from `shared.edge_db`. Existing evidence modules retain `ImmediateTransaction` only for compatibility; do not extend that helper or add another database. New central-state work follows `shared/edge_db/AGENTS.md`. Files own immutable bytes: `clips/<id>/clip.mp4`, `thumbnail.jpg`, `manifest.json`, staged snapshots, `derivatives/<incident>/<sha256>.mp4`. Media never lives in rows. Path is not identity; hash and size are.
 
 ## Focused Tests
 

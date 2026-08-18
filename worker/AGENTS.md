@@ -20,17 +20,9 @@ Order: `runtime -> pipeline -> domains -> adapters -> interfaces -> types -> con
 `contracts` contains cross-instance L0 data only. Worker-internal ports and envelopes live under `worker/`; never duplicate or shadow a vendored type, including `contracts/AGENTS.md`.
 Allowed: `contracts`, `shared.events`, local `worker.*`. Forbidden: `backend`.
 
-## FramePacket / DecisionInput
+## Data and lifetime boundaries
 
-`FramePacket` is the only envelope that may carry an image. Four sinks: model extract, derivative evidence, overlay/MJPEG, alert snapshot. Publish immutable. Copy the image before draw or mutate.
-`DecisionInput` is numeric: `observation`, `frame_width`, `frame_height`, `live_track_ids`, `time_sec`, `frame_index`, `bed_region`. No array, no buffer, no frame handle.
-Domains take `DecisionInput` and return `BusinessEvent` tuples. A detector that needs pixels is a design error. Extract the number in `pipeline/perception` first.
-
-## Shared model vs per-camera state
-
-Shared once per process: models, extractors, profile/device, GPU lease, config/LKG, evidence outbox, clip-store lock.
-Per camera, never shared: tracker, `SceneState`, window buffer, fall latch, bed assignment plus grace/hold, `IncidentManager`, bus slot, encoder ring, ingest backoff.
-Hoisting a per-camera row leaks one resident into another. `tests/test_worker_per_camera_fall_state.py` asserts both halves.
+`types/AGENTS.md` owns the pixel/numeric envelope contract. `runtime/AGENTS.md` owns process-shared versus per-camera allocation. Keep both boundaries intact; details stay in those scoped guides.
 
 ## Sole CLI and composition root
 
@@ -43,13 +35,7 @@ Exit codes: 0 clean, 1 generic, 2 config, 3 refuse-to-start, 4 fatal accelerator
 
 ## Hardware failure policy
 
-Global stages are fatal and start zero cameras: profile/device, decode capability, model backend, real warmup, GPU lease. Exit 3.
-`auto`, explicit blank, and unknown profiles fail loud; unset defaults to `cpu`. No silent CPU or OpenCV fallback. NVENC failure never starts `libx264`. `cpu` decode requires OpenCV `CAP_FFMPEG` in the videoio registry. Import success is not capability.
-Mid-run device loss writes one first-fault record under `ML_WORKER_STATE_DIR`, stops every camera, hard-exits 4. The CUDA context is never recreated in-process.
-Per-camera faults stay local. RTSP fail retries with backoff. Decode stall reopens the source. A full bus drops oldest. Extractor raise drops that frame. Clip encode fail still relays the alert. Relay POST lands in the durable outbox.
-Source open failure is camera `DEGRADED` plus `camera.offline`. A later processing failure is not offline. Keep the categories distinct.
-Missing evidence wiring or a locked local store refuses to start; remote delivery failures remain retryable. Two workers must not share one outbox.
-Primary clips remux source packets from camera-local rings. Decoded frames are analysis and snapshot taps. Never describe a re-encode as the preserved source clip.
+`runtime/AGENTS.md` owns boot exit codes, profile defaults, fault persistence, camera-local degradation, and lifecycle. `adapters/AGENTS.md` owns explicit backend fallback. `pipeline/AGENTS.md` owns queue overflow, and `pipeline/output/evidence/AGENTS.md` owns delivery durability. Read those scoped guides before changing failure behavior.
 
 ## Package navigation
 

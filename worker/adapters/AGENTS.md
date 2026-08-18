@@ -1,7 +1,7 @@
 # worker/adapters: concrete port implementations
 
-Own vendor code behind `worker/interfaces`. OpenCV, FFmpeg, CUDA,
-Ultralytics, sklearn, and torch appear here only.
+Own replaceable vendor-backed implementations behind `worker/interfaces`.
+Source/live-view helpers and runtime provenance remain in their owning scopes.
 
 ## Ownership rule
 
@@ -17,11 +17,8 @@ runtime" and "worker runtime is the sole composition root".
 
 ## Local ownership
 
-- `decode/cpu_av/`: OpenCV `CAP_FFMPEG` RTSP. `cpu-host` / `apple-mps-host`. Never a CUDA fallback.
-- `decode/nvdec_cuvid/`: fail-loud NVDEC/CUVID. FFprobe, CUVID codec, bounded queue, child reap.
-- `decode/vaapi/`: iGPU ffmpeg subprocess. OpenCV demotion is a runtime profile decision, not an adapter probe.
-- `decode/pyav_*.py`: packet-preserving demux / NVDEC tee. Remux path only.
-- `decode/nvdec_device/`, `encode/nvenc_device/`: experimental device-resident pool and device-input encoder. Only `nvidia-device-experimental`. Production profiles never construct them.
+- `decode/`: concrete CPU, VAAPI, NVDEC/CUVID, PyAV, and experimental device-resident backends. Backend-specific ownership, packet, epoch, and cleanup rules live in `decode/AGENTS.md`.
+- `encode/nvenc_device/`: experimental device-input encoder. Only `nvidia-device-experimental`; production profiles never construct it.
 - `model/`: `ModelRegistry` (pose/person/bed), fall-family registry, YOLO and LSTM runners, required warmup, `InProcessServingClient`.
 - `encode/`: `FFmpegSegmentEncoder` (one long-lived muxer per camera), concat finalizer, thumbnail.
 - `device/`: honest probes. `cuda/` / `mps/` answer whether this process can build `device="cuda"` / `device="mps"`. `nvml/` fills GPU telemetry. Import success is not capability.

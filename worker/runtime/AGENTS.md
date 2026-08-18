@@ -37,10 +37,11 @@ Lease is released before exit. `run_camera_stage` degrades only that camera.
 `FatalAcceleratorError` still re-raises: GPU context is process-wide. RTSP
 fail retries with backoff. Decode stall reopens the source. Source open
 failure is camera `DEGRADED` plus `camera.offline`. Later processing failure
-is not offline. Locked clip store or broken evidence delivery refuses to
-start. Two workers must not share one outbox. NVENC may demote to `libx264`
-once at boot, logged. VAAPI may demote to `opencv` the same way. NVDEC and
-OpenCV decode stay fail-fast. Mid-run device loss writes one first-fault
+is not offline. Missing evidence wiring or a locked local store refuses to
+start; remote delivery failures remain retryable. Two workers must not share
+one outbox. NVENC may demote to `libx264` during preflight and once per camera
+after session-open failure, logged. VAAPI may demote to `opencv` at boot.
+NVDEC and OpenCV decode stay fail-fast. Mid-run device loss writes one first-fault
 record, stops every camera, hard-exits 4. CUDA context is never recreated
 in-process. Worker never queries Xid state. Zero configured cameras is a
 valid boot.

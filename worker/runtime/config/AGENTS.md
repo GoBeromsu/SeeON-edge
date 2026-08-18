@@ -43,7 +43,7 @@ If the pull supplied any window info (non-empty `detection_windows` or `night_wi
 An omitted domain is ALWAYS, 24/7. YAML windows apply only when the pull said nothing.
 Degenerate start==end is invalid. Per-domain bad windows fail open to ALWAYS.
 
-Retired env: `RELAY_URL`, `EDGE_CAMERA_CONFIG`, `EDGE_CAMERA_CONFIG_FILE`, `CLIP_STORE_DIR`,
+Retired env: `RELAY_URL`, both legacy Edge camera-config keys, `CLIP_STORE_DIR`,
 `ML_WORKER_FALL_MODEL_*`, `ML_WORKER_CLIP_*`, `ML_WORKER_DEV_MJPEG*`, `ML_WORKER_EVENT_CLIP_EXPORT_ENABLED`.
 Present keys refuse boot.
 
