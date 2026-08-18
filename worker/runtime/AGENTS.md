@@ -61,8 +61,8 @@ an argument and let `_unavailable_probe` ship a dead feature while boot
 succeeds. Root anti-pattern "조립 루트 스텁 배선". `serving_client` has no
 default. Fall model must be explicit.
 
-`python -m worker` is the only entry. `worker/__main__.py` owns argparse and
-exit codes and constructs `WorkerRuntime` from `worker.runtime.worker`
+`worker/__main__.py` owns argparse and exit codes and constructs
+`WorkerRuntime` from `worker.runtime.worker`
 directly. Don't add `worker.runtime.edge_worker` or an `edge` alias. Keep
 `--config`, `--check-config`, `--heartbeat-on-start`,
 `--max-frames-per-camera`, `--backfill-thumbnails`, and signal shutdown.
