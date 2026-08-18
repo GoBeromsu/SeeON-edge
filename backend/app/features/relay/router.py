@@ -288,12 +288,31 @@ class RelayDecodeDiagnostics(BaseModel):
         return value
 
 
+class RelayDetectionStatus(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    expected: bool = Field()
+    inference_admitted: int = Field(ge=0)
+    inference_succeeded: int = Field(ge=0)
+    inference_overwritten: int = Field(ge=0)
+    decision_completed: int = Field(ge=0)
+
+    @model_validator(mode="after")
+    def counters_are_ordered(self) -> RelayDetectionStatus:
+        if self.inference_succeeded > self.inference_admitted:
+            raise ValueError("inference_succeeded cannot exceed inference_admitted")
+        if self.decision_completed > self.inference_succeeded:
+            raise ValueError("decision_completed cannot exceed inference_succeeded")
+        return self
+
+
 class RelayRuntimeStatusCamera(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     camera_id: str = Field(min_length=1)
     decode: RelayDecodeDiagnostics
     measured_fps: float | None = Field(default=None, ge=0.0)
+    detection: RelayDetectionStatus | None = Field(default=None)
 
 
 class RelayGpuStatus(BaseModel):

@@ -31,6 +31,12 @@ from typing import TypeAlias
 
 from pydantic import TypeAdapter, ValidationError
 
+from backend.app.features.status.detection_health import (
+    DetectionHealth,
+    accept_detection_sample,
+    detection_health_fields,
+    parse_detection_counters,
+)
 from backend.app.shared.sqlite_bootstrap import connect_catalog_store
 from shared.edge_db import EDGE_DATABASE_PATH
 
@@ -75,6 +81,7 @@ class RuntimeStatusStore:
     _snapshots: dict[str, RuntimeStatusSnapshot] = field(default_factory=dict)
     _latest_generation: dict[str, int] = field(default_factory=dict)
     _latency_by_facility: dict[str, JsonObject] = field(default_factory=dict)
+    _detection_health: dict[tuple[str, str], DetectionHealth] = field(default_factory=dict)
     latency_state_path: Path = field(default_factory=lambda: EDGE_DATABASE_PATH)
     _lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
     _latency_loaded: bool = field(default=False, init=False, repr=False)
@@ -140,32 +147,110 @@ class RuntimeStatusStore:
                 worker=deepcopy(worker),
             )
             self._latest_generation[facility_id] = max(latest_generation, generation)
+            self._accept_detection_samples(facility_id, cameras, accepted_at=stamped)
             return RuntimeStatusRecordResult(True, generation)
 
     def snapshot(self, *, now: float | None = None) -> dict[str, object]:
         """Return API-stamped, facility-keyed telemetry with derived staleness."""
         current = time() if now is None else now
         with self._lock:
-            facilities: dict[str, JsonObject] = {
-                facility_id: {
+            self._prune_detection_health()
+            facilities: dict[str, JsonObject] = {}
+            for facility_id, status in sorted(self._snapshots.items()):
+                stale = current - status.received_at > self.stale_after_sec
+                facilities[facility_id] = {
                     "facility_id": status.facility_id,
                     "generation": status.generation,
                     "seq": status.seq,
                     "received_at": status.received_at,
-                    "stale": current - status.received_at > self.stale_after_sec,
-                    "cameras": deepcopy(list(status.cameras)),
+                    "stale": stale,
+                    "cameras": self._cameras_with_detection_health(
+                        facility_id,
+                        status.cameras,
+                        now=current,
+                        stale=stale,
+                    ),
                     "clip_recorder": deepcopy(status.clip_recorder),
                     "clip_export": deepcopy(status.clip_export),
                     "gpu": deepcopy(status.gpu),
                     "worker": deepcopy(status.worker),
                     "latency": deepcopy(self._latency_for_facility(facility_id)),
                 }
-                for facility_id, status in sorted(self._snapshots.items())
-            }
         return {
             "facilities": facilities,
             "stale_after_sec": self.stale_after_sec,
         }
+
+    def _accept_detection_samples(
+        self,
+        facility_id: str,
+        cameras: list[JsonObject],
+        *,
+        accepted_at: float,
+    ) -> None:
+        active: set[tuple[str, str]] = set()
+        for camera in cameras:
+            camera_id = camera.get("camera_id")
+            if not isinstance(camera_id, str) or not camera_id:
+                continue
+            key = (facility_id, camera_id)
+            counters = parse_detection_counters(camera.get("detection"))
+            if counters is None:
+                _ = self._detection_health.pop(key, None)
+                continue
+            active.add(key)
+            self._detection_health[key] = accept_detection_sample(
+                self._detection_health.get(key),
+                counters,
+                accepted_at=accepted_at,
+            )
+        for key in tuple(self._detection_health):
+            if key[0] == facility_id and key not in active:
+                del self._detection_health[key]
+
+    def _prune_detection_health(self) -> None:
+        active = {
+            (facility_id, camera_id)
+            for facility_id, status in self._snapshots.items()
+            for camera in status.cameras
+            if isinstance((camera_id := camera.get("camera_id")), str)
+            and parse_detection_counters(camera.get("detection")) is not None
+        }
+        for key in tuple(self._detection_health):
+            if key not in active:
+                del self._detection_health[key]
+
+    def _cameras_with_detection_health(
+        self,
+        facility_id: str,
+        cameras: tuple[JsonObject, ...],
+        *,
+        now: float,
+        stale: bool,
+    ) -> list[JsonObject]:
+        projected: list[JsonObject] = []
+        for camera in cameras:
+            row = deepcopy(camera)
+            camera_id = row.get("camera_id")
+            raw_detection = row.get("detection")
+            missing = parse_detection_counters(raw_detection) is None
+            health = (
+                self._detection_health.get((facility_id, camera_id))
+                if isinstance(camera_id, str)
+                else None
+            )
+            derived = detection_health_fields(
+                health,
+                now=now,
+                stale=stale,
+                missing=missing,
+            )
+            if isinstance(raw_detection, dict):
+                row["detection"] = {**raw_detection, **derived}
+            else:
+                row["detection"] = derived
+            projected.append(row)
+        return projected
 
     def record_latency(
         self, facility_id: str, detected_at: str, *, received_at: float | None = None
