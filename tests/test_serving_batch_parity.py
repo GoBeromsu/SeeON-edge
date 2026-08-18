@@ -19,7 +19,10 @@ The fixed corpus repeats a packaged real image with people across 8 rows and
 from __future__ import annotations
 
 from collections.abc import Sequence
+from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Final
 
 import cv2
 import numpy as np
@@ -28,8 +31,12 @@ from ultralytics import ASSETS
 
 from contracts.frame import Frame
 from contracts.runner import Image, PoseRunnerResult
-from worker.adapters.model.in_process import InProcessServingClient
+from worker.adapters.model.in_process import InProcessBatchServingClient, InProcessServingClient
 from worker.adapters.model.registry import default_registry
+from worker.pipeline.inference_coordinator import (
+    CapabilityInferenceCoordinator,
+    InferenceResultSlot,
+)
 from worker.types import FramePacket
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -37,6 +44,14 @@ _POSE_WEIGHTS = REPO_ROOT / "models" / "pose" / "yolo26n-pose.pt"
 _FRAME_HEIGHT = 640
 _FRAME_WIDTH = 640
 _ASSET_FRAME = Path(ASSETS) / "bus.jpg"
+_MIXED_ROW_GEOMETRIES: Final = (
+    (640, 360),
+    (640, 480),
+    (1920, 1080),
+    (640, 360),
+    (640, 480),
+    (1920, 1080),
+)
 
 
 def _require_weights() -> None:
@@ -140,3 +155,118 @@ def test_batched_pose_matches_single_frame_pose_on_cuda_parity() -> None:
     _require_weights()
     _require_cuda()
     _run_parity("cuda")
+
+
+@dataclass(frozen=True, slots=True)
+class _LaneMetrics:
+    published: int
+    taken: int
+    dropped: int
+    queue_age_sec: float
+
+
+@dataclass(slots=True)
+class _ReadyLane:
+    """Latest-only lane drain; mutation is the coordinator take contract."""
+
+    packet: FramePacket | None = None
+    published: int = 0
+    taken: int = 0
+    dropped: int = 0
+
+    def publish(self, packet: FramePacket) -> None:
+        if self.packet is not None:
+            self.packet.release()
+            self.dropped += 1
+        self.packet = packet
+        self.published += 1
+
+    def take(self, *, timeout_sec: float | None = None) -> FramePacket | None:
+        del timeout_sec
+        packet, self.packet = self.packet, None
+        if packet is not None:
+            self.taken += 1
+        return packet
+
+    def metrics(self) -> _LaneMetrics:
+        return _LaneMetrics(self.published, self.taken, self.dropped, 0.0)
+
+
+class _ParityWatchdog:
+    @contextmanager
+    def guard(self, **_kwargs: object):
+        yield 0
+
+
+def _mixed_geometry_corpus() -> tuple[FramePacket, ...]:
+    """Interleaved 640x360, 640x480, and 1920x1080 rows on distinct cameras."""
+    source = cv2.imread(str(_ASSET_FRAME), cv2.IMREAD_COLOR)
+    assert source is not None, f"fixed parity asset is missing: {_ASSET_FRAME}"
+    packets: list[FramePacket] = []
+    for index, (width, height) in enumerate(_MIXED_ROW_GEOMETRIES):
+        image: Image = cv2.resize(source, (width, height))
+        packets.append(
+            FramePacket(
+                camera_id=f"camera-{index + 1}",
+                frame=Frame(index=index, time_sec=float(index), image=image),
+                pts=float(index),
+                seq=200 + index,
+                width=width,
+                height=height,
+                decode_time_ms=0.0,
+            )
+        )
+    return tuple(packets)
+
+
+def _coordinator_batch(
+    client: InProcessBatchServingClient,
+    frames: Sequence[FramePacket],
+    device: str,
+) -> list[PoseRunnerResult]:
+    coordinator = CapabilityInferenceCoordinator(client, _ParityWatchdog(), pose_device=device)
+    lanes: list[tuple[_ReadyLane, InferenceResultSlot]] = []
+    try:
+        for packet in frames:
+            source = _ReadyLane()
+            results = InferenceResultSlot()
+            source.publish(packet)
+            coordinator.register(packet.camera_id, source, results)
+            lanes.append((source, results))
+        assert coordinator.run_cycle() == len(frames)
+        batched: list[PoseRunnerResult] = []
+        for packet, (_source, results) in zip(frames, lanes, strict=True):
+            delivered = results.take(timeout_sec=0)
+            assert delivered is not None
+            assert delivered.packet.camera_id == packet.camera_id
+            result = delivered.pose.result
+            assert isinstance(result, PoseRunnerResult)
+            batched.append(result)
+            delivered.packet.release()
+        return batched
+    finally:
+        coordinator.stop()
+
+
+def _run_geometry_partitioned_parity(device: str) -> None:
+    serving = InProcessServingClient(default_registry())
+    client = serving.batch_serving_client
+    runner = client.create("pose", device=device)
+    frames = _mixed_geometry_corpus()
+    single = [runner.run(packet.borrow_host_frame().image) for packet in frames]
+    batched = _coordinator_batch(client, frames, device)
+    assert all(isinstance(result, PoseRunnerResult) for result in single)
+    assert all(isinstance(result, PoseRunnerResult) for result in batched)
+    _assert_pose_parity(single, batched, frames)
+
+
+def test_geometry_partitioned_coordinator_pose_matches_single_frame_on_cpu() -> None:
+    _require_weights()
+    _run_geometry_partitioned_parity("cpu")
+
+
+@pytest.mark.real_stack
+def test_geometry_partitioned_coordinator_pose_matches_single_frame_on_cuda() -> None:
+    _require_weights()
+    _require_cuda()
+    _run_geometry_partitioned_parity("cuda")
