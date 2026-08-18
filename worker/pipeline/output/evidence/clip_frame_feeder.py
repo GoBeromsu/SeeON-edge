@@ -72,7 +72,9 @@ class ClipFrameFeeder:
         except Exception as error:  # noqa: BLE001 - per-camera boundary, mirrors CameraPipelinePump
             self.failure_count += 1
             LOGGER.warning(
-                "clip frame feeder failed to admit a frame",
+                "clip frame feeder failed to admit a frame: camera_id=%s error=%s",
+                self._camera_id,
+                type(error).__name__,
                 extra={"camera_id": self._camera_id, "error": type(error).__name__},
             )
             return
