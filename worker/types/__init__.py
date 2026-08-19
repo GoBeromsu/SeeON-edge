@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+from worker.types.bed_pose_features import (
+    EMPTY_FRAME_BED_POSE_FEATURES,
+    BedPoseFeatures,
+    FrameBedPoseFeatures,
+)
 from worker.types.business_event import BusinessEvent
 from worker.types.capabilities import (
     ConverterCapabilities,
@@ -29,12 +34,15 @@ from worker.types.temporal_profile import (
 from worker.types.trace import DecisionTraceSnapshot, NumericTraceValue
 
 __all__ = [
+    "BedPoseFeatures",
     "BusinessEvent",
     "ConverterCapabilities",
     "CopyMetrics",
     "CopyMetricsSnapshot",
     "DecisionInput",
+    "EMPTY_FRAME_BED_POSE_FEATURES",
     "FallModelInput",
+    "FrameBedPoseFeatures",
     "FrameCapability",
     "FrameDescriptor",
     "FrameKey",

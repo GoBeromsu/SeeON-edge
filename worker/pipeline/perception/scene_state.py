@@ -60,6 +60,11 @@ class SceneState:
     # Set once at camera-build time from `CameraRuntimeConfig.bed_zone_polygon`
     # -- never mutated per-frame.
     persisted_bed_regions: tuple[BoundingBox, ...] = field(default_factory=tuple)
+    # Source image size of ``persisted_bed_regions`` polygons. Poses arrive in
+    # frame_width x frame_height; these are not guaranteed to match. None means
+    # the stored polygon is already in frame space (live segmentation).
+    bed_zone_image_width: int | None = None
+    bed_zone_image_height: int | None = None
 
     def reset_bed_cache(self, _reason: str) -> None:
         self.bed_regions = ()

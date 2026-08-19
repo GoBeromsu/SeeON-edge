@@ -103,6 +103,16 @@ class TemporalProfile:
             intervals[domain] = self.decision_interval_frames(domain)
         return intervals
 
+    def frames_for_seconds(self, seconds: float) -> int:
+        """Convert a dwell/hysteresis duration into whole frames at ingest fps.
+
+        Seconds are the durable unit for bed-exit dwell policy; the frame count
+        is derived, so a future ingest-fps change re-denominates dwell windows
+        automatically instead of silently changing how long they last.
+        """
+        numeric = _require_positive_finite("seconds", seconds)
+        return max(1, round(numeric * self.ingest_fps))
+
 
 CURRENT_TEMPORAL_PROFILE: Final = TemporalProfile(ingest_fps=_CURRENT_INGEST_FPS)
 

@@ -13,6 +13,12 @@ from worker.domains.bed_exit.schema import (
     BedOccupancy,
     BedStatus,
 )
+from worker.domains.bed_exit.state_machine import (
+    BedExitState,
+    BedExitStateDecision,
+    BedExitStateMachine,
+    classify_posture,
+)
 
 __all__ = [
     "BedExitConfig",
@@ -22,8 +28,12 @@ __all__ = [
     "BedExitLatch",
     "BedExitLatchStatus",
     "BedExitMonitor",
+    "BedExitState",
+    "BedExitStateDecision",
+    "BedExitStateMachine",
     "BedOccupancy",
     "BedExitScoringRecorder",
     "BedStatus",
     "NightWindow",
+    "classify_posture",
 ]

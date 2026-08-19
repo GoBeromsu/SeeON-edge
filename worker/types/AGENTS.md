@@ -27,9 +27,10 @@ handles stay `object`.
 - `module_result.py`: `ModuleResult(module_name, result, elapsed_ms,
   output_adapter?)` wraps `contracts.runner.RunnerResult`. `module_name` is
   component identity, not merger routing.
-- `decision_input.py`: `DecisionInput` has exactly seven fields:
+- `decision_input.py`: `DecisionInput` fields start with the original seven:
   `observation`, `frame_width`, `frame_height`, `live_track_ids`, `time_sec`,
-  `frame_index`, `bed_region`. Numeric only. Never an image, buffer, or frame
+  `frame_index`, `bed_region`. `bed_pose_features` is additive with a default
+  empty `FrameBedPoseFeatures`. Numeric only. Never an image, buffer, or frame
   handle.
 - `temporal_profile.py`: `TemporalProfile` owns ingest fps, pose fps, and
   per-domain decision Hz. Pipeline defaults and the composition-root schedule
