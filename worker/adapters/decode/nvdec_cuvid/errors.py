@@ -14,6 +14,10 @@ class NvdecUnavailableError(RuntimeError):
         self.returncode = returncode
         super().__init__(reason)
 
+    @property
+    def safe_log_detail(self) -> str:
+        return self.reason
+
 
 @final
 class NvdecConfigError(NvdecUnavailableError):

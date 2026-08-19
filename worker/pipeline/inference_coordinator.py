@@ -4,17 +4,20 @@ from __future__ import annotations
 
 import logging
 import threading
-from collections import Counter, deque
 from collections.abc import Callable, Sequence
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
-from math import ceil
 from time import monotonic
 from typing import Final, Protocol, final
 
 from contracts.runner import RunnerResult
 from worker.adapters.model.errors import FatalAcceleratorError
 from worker.interfaces.serving import BatchServingClient
+from worker.pipeline.inference_telemetry import (
+    CameraInferenceTelemetry,
+    InferenceGeometryTelemetry,
+    InferenceTelemetrySnapshot,
+)
 from worker.types import FramePacket, ModuleResult
 
 LOGGER: Final = logging.getLogger(__name__)
@@ -61,15 +64,15 @@ class InferenceResultSlot:
         self._closed = False
 
     def publish(self, value: CoordinatedInference) -> None:
-        replaced: CoordinatedInference | None = None
         with self._condition:
             if self._closed:
-                replaced = value
-            else:
-                replaced, self._value = self._value, value
-                self._condition.notify()
-        if replaced is not None:
-            replaced.packet.release()
+                value.packet.release()
+                return
+            replaced, self._value = self._value, None
+            if replaced is not None:
+                replaced.packet.release()
+            self._value = value
+            self._condition.notify()
 
     def take(self, *, timeout_sec: float | None = None) -> CoordinatedInference | None:
         with self._condition:
@@ -90,22 +93,6 @@ class InferenceResultSlot:
             self._condition.notify_all()
         if value is not None:
             value.packet.release()
-
-
-@dataclass(frozen=True, slots=True)
-class CameraInferenceTelemetry:
-    admitted: int
-    overwritten: int
-    inferred: int
-    queue_age_sec: float
-
-
-@dataclass(frozen=True, slots=True)
-class InferenceTelemetrySnapshot:
-    cameras: dict[str, CameraInferenceTelemetry]
-    batch_sizes: dict[int, int]
-    forward_p50_sec: float
-    forward_p95_sec: float
 
 
 @dataclass(slots=True)
@@ -148,10 +135,9 @@ class CapabilityInferenceCoordinator:
         self._pose_output_adapter = pose_output_adapter
         self._pose_device = pose_device
         self._lanes: list[_CameraLane] = []
-        self._batch_sizes: Counter[int] = Counter()
-        self._forward_times: deque[float] = deque(maxlen=1024)
+        self._cursor = 0
+        self._telemetry = InferenceGeometryTelemetry()
         self._stop_event = threading.Event()
-        self._lock = threading.Lock()
 
     def register(
         self, camera_id: str, subscription: InferenceSubscription, results: InferenceResultSlot
@@ -161,10 +147,13 @@ class CapabilityInferenceCoordinator:
         self._lanes.append(_CameraLane(camera_id, subscription, results))
 
     def run_cycle(self) -> int:
+        lanes = tuple(self._lanes)
         selected: list[tuple[_CameraLane, FramePacket]] = []
-        for lane in self._lanes:
-            if len(selected) >= self._max_batch_size:
-                break
+        start = self._cursor % len(lanes) if lanes else 0
+        scanned = 0
+        while scanned < len(lanes) and len(selected) < self._max_batch_size:
+            lane = lanes[(start + scanned) % len(lanes)]
+            scanned += 1
             metrics = lane.subscription.metrics()
             packet = lane.subscription.take(timeout_sec=0)
             if packet is None:
@@ -174,54 +163,64 @@ class CapabilityInferenceCoordinator:
             selected.append((lane, packet))
         if not selected:
             return 0
-        frames = tuple(packet for _lane, packet in selected)
-        started_at = self._clock()
+        self._cursor = (start + scanned) % len(lanes)
+        buckets: dict[tuple[int, int], list[tuple[_CameraLane, FramePacket]]] = {}
+        for lane, packet in selected:
+            self._telemetry.observe_geometry(
+                camera_id=lane.camera_id, geometry=(packet.width, packet.height)
+            )
+            buckets.setdefault((packet.height, packet.width), []).append((lane, packet))
+        pending = {id(packet): packet for _lane, packet in selected}
+        published = 0
         try:
-            outputs = self._forward(selected, frames)
-        except Exception:
-            for _lane, packet in selected:
+            for geometry, items in buckets.items():
+                started_at = self._clock()
+                try:
+                    outputs = self._forward(tuple(packet for _lane, packet in items))
+                    elapsed = max(0.0, self._clock() - started_at)
+                    for (lane, packet), output in zip(items, outputs, strict=True):
+                        pose = ModuleResult(
+                            "pose", output, elapsed * 1000.0, self._pose_output_adapter
+                        )
+                        lane.results.publish(CoordinatedInference(packet, pose))
+                        del pending[id(packet)]
+                        lane.inferred += 1
+                        if (recorder := self._stage_timing_recorder) is not None:
+                            recorder.record_stage_timing(lane.camera_id, "pose", elapsed)
+                        published += 1
+                    self._telemetry.record_physical_batch(
+                        geometry=(items[0][1].width, items[0][1].height),
+                        batch_size=len(items),
+                        elapsed_sec=elapsed,
+                    )
+                except FatalAcceleratorError:
+                    raise
+                except Exception as error:  # noqa: BLE001 - work-item boundary
+                    for _lane, packet in items:
+                        leftover = pending.pop(id(packet), None)
+                        leftover.release() if leftover is not None else None
+                    cameras = ",".join(lane.camera_id for lane, _packet in items)
+                    LOGGER.exception(
+                        "pose work item failed: error=%s geometry=%sx%s cameras=%s",
+                        type(error).__name__, *geometry, cameras,
+                    )
+        except FatalAcceleratorError:
+            for packet in pending.values():
                 packet.release()
             raise
-        elapsed = max(0.0, self._clock() - started_at)
-        with self._lock:
-            self._batch_sizes[len(selected)] += 1
-            self._forward_times.append(elapsed)
-        for (lane, packet), output in zip(selected, outputs, strict=True):
-            lane.inferred += 1
-            if self._stage_timing_recorder is not None:
-                self._stage_timing_recorder.record_stage_timing(
-                    lane.camera_id, "pose", elapsed
-                )
-            lane.results.publish(
-                CoordinatedInference(
-                    packet,
-                    ModuleResult(
-                        module_name="pose",
-                        result=output,
-                        elapsed_ms=elapsed * 1000.0,
-                        output_adapter=self._pose_output_adapter,
-                    ),
-                )
-            )
-        return len(selected)
+        return published
 
-    def _forward(
-        self,
-        selected: Sequence[tuple[_CameraLane, FramePacket]],
-        frames: Sequence[FramePacket],
-    ) -> tuple[RunnerResult, ...]:
+    def _forward(self, frames: Sequence[FramePacket]) -> tuple[RunnerResult, ...]:
         options = {} if self._pose_device is None else {"device": self._pose_device}
         with self._watchdog.guard(
-            camera_id=",".join(lane.camera_id for lane, _packet in selected),
+            camera_id=",".join(frame.camera_id for frame in frames),
             task="pose",
             frame_index=max(packet.frame.index for packet in frames),
             deadline_sec=INFERENCE_DEADLINE_SEC,
         ):
             outputs = self._client.infer_batch("pose", frames, **options)
         if len(outputs) != len(frames):
-            raise ValueError(
-                f"pose batch returned {len(outputs)} results for {len(frames)} frames"
-            )
+            raise ValueError(f"pose batch returned {len(outputs)} results for {len(frames)} frames")
         return outputs
 
     def run(self) -> None:
@@ -244,34 +243,24 @@ class CapabilityInferenceCoordinator:
             lane.results.close()
 
     def snapshot(self) -> InferenceTelemetrySnapshot:
-        with self._lock:
-            times = tuple(self._forward_times)
-            sizes = dict(sorted(self._batch_sizes.items()))
+        counters = self._telemetry.counters()
         cameras = {
             lane.camera_id: CameraInferenceTelemetry(
                 admitted=lane.admitted,
                 overwritten=int(getattr(lane.subscription.metrics(), "dropped", 0)),
                 inferred=lane.inferred,
                 queue_age_sec=lane.last_queue_age_sec,
+                observed_geometry=counters.observed_geometries.get(lane.camera_id),
             )
             for lane in self._lanes
         }
         return InferenceTelemetrySnapshot(
-            cameras=cameras,
-            batch_sizes=sizes,
-            forward_p50_sec=_percentile(times, 0.50),
-            forward_p95_sec=_percentile(times, 0.95),
+            cameras, counters.batch_sizes, counters.forward_p50_sec,
+            counters.forward_p95_sec, counters.geometry_batch_sizes,
         )
 
     def _wait(self, timeout_sec: float) -> None:
         self._stop_event.wait(timeout_sec)
-
-
-def _percentile(values: Sequence[float], quantile: float) -> float:
-    if not values:
-        return 0.0
-    ordered = sorted(values)
-    return ordered[max(0, ceil(len(ordered) * quantile) - 1)]
 
 
 __all__ = [

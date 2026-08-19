@@ -22,11 +22,13 @@ No worker product code is modified or monkeypatched.
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 import threading
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
+from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from time import monotonic, perf_counter
@@ -45,6 +47,58 @@ RECORDED_CLIP_SECONDS: Final = 20
 RECORDED_CLIP_FPS: Final = 15
 RECORDED_CLIP_SIZE: Final = "640x480"
 BOOT_TIMEOUT_SEC: Final = 180.0
+_GEOMETRY_TOKEN: Final = re.compile(r"^([1-9][0-9]*)x([1-9][0-9]*)$")
+
+
+@dataclass(frozen=True, slots=True)
+class BenchGeometry:
+    """One camera's requested publisher geometry, encoded as ``WIDTHxHEIGHT``."""
+
+    width: int
+    height: int
+
+    @property
+    def token(self) -> str:
+        return f"{self.width}x{self.height}"
+
+
+@dataclass(frozen=True, slots=True)
+class BenchHarnessConfigError(Exception):
+    """Raised when a benchmark environment knob is malformed."""
+
+    message: str
+
+    def __str__(self) -> str:
+        return self.message
+
+
+def parse_geometry_plan(raw: str | None, stream_count: int) -> tuple[BenchGeometry, ...] | None:
+    """Parse ``BENCH_GEOMETRIES`` or return ``None`` when the knob is absent.
+
+    Absent or blank input keeps the historical single-clip default. A present
+    value is a closed parse: every token must be a positive ``WxH`` pair and
+    the token count must equal ``stream_count``. This function never starts a
+    process.
+    """
+    if raw is None:
+        return None
+    stripped = raw.strip()
+    if stripped == "":
+        return None
+    tokens = [token.strip() for token in stripped.split(",")]
+    if len(tokens) != stream_count:
+        raise BenchHarnessConfigError(
+            f"BENCH_GEOMETRIES has {len(tokens)} token(s) but BENCH_STREAMS is {stream_count}"
+        )
+    parsed: list[BenchGeometry] = []
+    for token in tokens:
+        parsed_token = _GEOMETRY_TOKEN.fullmatch(token)
+        if parsed_token is None:
+            raise BenchHarnessConfigError(f"invalid BENCH_GEOMETRIES token: {token!r}")
+        parsed.append(
+            BenchGeometry(width=int(parsed_token.group(1)), height=int(parsed_token.group(2)))
+        )
+    return tuple(parsed)
 
 
 def require_tool(name: str) -> str:
@@ -58,6 +112,11 @@ def require_tool(name: str) -> str:
 
 
 def build_recorded_clip(path: Path) -> Path:
+    """Render one deterministic H.264 clip at the harness default geometry."""
+    return render_recorded_clip(path, RECORDED_CLIP_SIZE)
+
+
+def render_recorded_clip(path: Path, size: str) -> Path:
     """Render one deterministic H.264 clip the publishers loop over.
 
     A generated file rather than a pinned release clip: the benchmark must be
@@ -72,7 +131,7 @@ def build_recorded_clip(path: Path) -> Path:
         require_tool("ffmpeg"),
         "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
         "-f", "lavfi",
-        "-i", f"testsrc=size={RECORDED_CLIP_SIZE}:rate={RECORDED_CLIP_FPS}",
+        "-i", f"testsrc=size={size}:rate={RECORDED_CLIP_FPS}",
         "-t", str(RECORDED_CLIP_SECONDS),
         "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency",
         "-g", str(RECORDED_CLIP_FPS), "-keyint_min", str(RECORDED_CLIP_FPS),
@@ -85,6 +144,20 @@ def build_recorded_clip(path: Path) -> Path:
     if completed.returncode != 0 or not path.exists():
         raise RuntimeError(f"recorded clip render failed: {completed.stderr.strip()[:400]}")
     return path
+
+
+def recorded_clips_for_plan(directory: Path, plan: tuple[BenchGeometry, ...]) -> tuple[Path, ...]:
+    """Render one clip per distinct geometry and return the per-camera sequence."""
+    rendered: dict[str, Path] = {}
+    clips: list[Path] = []
+    for geometry in plan:
+        token = geometry.token
+        existing = rendered.get(token)
+        if existing is None:
+            existing = render_recorded_clip(directory / f"recorded-{token}.mp4", token)
+            rendered[token] = existing
+        clips.append(existing)
+    return tuple(clips)
 
 
 @final
@@ -491,13 +564,30 @@ class LiveViewViewer:
 def recorded_stream_fanout(
     *, stream_count: int, clip: Path, tmp_path: Path
 ) -> Iterator[tuple[MediaMtxProcess, tuple[str, ...]]]:
-    """One mediamtx serving ``stream_count`` looping recorded paths."""
+    """One mediamtx serving ``stream_count`` looping copies of one recorded clip."""
+    with _publish_recorded_streams((clip,) * stream_count, tmp_path) as ready:
+        yield ready
+
+
+@contextmanager
+def recorded_streams_for_clips(
+    *, clips: Sequence[Path], tmp_path: Path
+) -> Iterator[tuple[MediaMtxProcess, tuple[str, ...]]]:
+    """One mediamtx serving one looping recorded clip per camera."""
+    with _publish_recorded_streams(tuple(clips), tmp_path) as ready:
+        yield ready
+
+
+@contextmanager
+def _publish_recorded_streams(
+    clips: Sequence[Path], tmp_path: Path
+) -> Iterator[tuple[MediaMtxProcess, tuple[str, ...]]]:
     del tmp_path
-    path_names = tuple(f"bench{index + 1:02d}" for index in range(stream_count))
+    path_names = tuple(f"bench{index + 1:02d}" for index in range(len(clips)))
     server = MediaMtxProcess(rtsp_port=free_tcp_port(), path_names=path_names)
     publishers: list[RecordedStreamPublisher] = []
     try:
-        for name in path_names:
+        for name, clip in zip(path_names, clips, strict=True):
             publishers.append(RecordedStreamPublisher(clip=clip, url=server.rtsp_url(name)))
         deadline = monotonic() + 30.0
         while monotonic() < deadline:
@@ -540,6 +630,8 @@ def _streams_ready(server: MediaMtxProcess, path_names: Sequence[str]) -> bool:
 __all__ = [
     "BOOT_TIMEOUT_SEC",
     "RELAY_TOKEN",
+    "BenchGeometry",
+    "BenchHarnessConfigError",
     "LiveViewViewer",
     "RecordedStreamPublisher",
     "StubRelay",
@@ -547,6 +639,10 @@ __all__ = [
     "WorkerRun",
     "build_config",
     "build_recorded_clip",
+    "parse_geometry_plan",
+    "recorded_clips_for_plan",
     "recorded_stream_fanout",
+    "recorded_streams_for_clips",
+    "render_recorded_clip",
     "require_tool",
 ]

@@ -328,7 +328,9 @@ class SnapshotStore(SnapshotFiles):
         self._refresh_pending_stats()
         if discarded or corrupt:
             LOGGER.warning(
-                "snapshot staging reconciliation removed artifacts",
+                "snapshot staging reconciliation removed artifacts: discarded=%d corrupt=%d",
+                discarded,
+                corrupt,
                 extra={"discarded": discarded, "corrupt": corrupt},
             )
         return SnapshotDiscardReport(discarded=discarded, corrupt=corrupt)
@@ -427,7 +429,9 @@ class SnapshotStore(SnapshotFiles):
                 self.stats.dropped_capacity += 1
                 self._refresh_pending_stats(pending)
                 LOGGER.warning(
-                    "snapshot dropped by bounded admission",
+                    "snapshot dropped by bounded admission: camera_id=%s reason=%s",
+                    incoming.camera_id,
+                    reason,
                     extra={"reason": reason, "camera_id": incoming.camera_id},
                 )
                 raise SnapshotCapacityError(reason)

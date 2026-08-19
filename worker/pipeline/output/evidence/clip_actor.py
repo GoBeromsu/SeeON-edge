@@ -245,7 +245,9 @@ class ClipActor:
         ):
             self._stats.failed_writes += 1
             LOGGER.warning(
-                "clip finalize failed",
+                "clip finalize failed: camera_id=%s clip_id=%s",
+                camera_id,
+                str(active.reservation.clip_id),
                 extra={
                     "camera_id": camera_id,
                     "clip_id": str(active.reservation.clip_id),

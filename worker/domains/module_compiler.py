@@ -17,6 +17,7 @@ from worker.domains.module_definition import (
     DetectionModuleCompilationError,
     DetectionModuleDefinition,
 )
+from worker.types import TemporalProfile
 
 ModuleVersionSelection = Mapping[str, int]
 
@@ -107,6 +108,7 @@ class CompiledDetectionModuleRegistry:
         output_adapter_ids: Iterable[str],
         camera_frame_stride: int,
         flags: Mapping[str, bool],
+        temporal_profile: TemporalProfile,
     ) -> DetectionModuleActivation:
         if (module_versions is None) == (module_ids is None):
             raise DetectionModuleActivationError(
@@ -166,7 +168,7 @@ class CompiledDetectionModuleRegistry:
                     continue
                 if rule.skip_when_flag is not None and flags.get(rule.skip_when_flag, False):
                     continue
-                interval = rule.resolve(camera_frame_stride)
+                interval = rule.resolve(camera_frame_stride, temporal_profile)
                 previous = schedule.setdefault(rule.component_id, interval)
                 if previous != interval:
                     raise DetectionModuleActivationError(
@@ -180,6 +182,7 @@ def compile_detection_module_registry(
     *,
     available_observation_channels: Iterable[str],
     output_adapter_ids: Iterable[str],
+    temporal_profile: TemporalProfile,
 ) -> CompiledDetectionModuleRegistry:
     frozen = tuple(definitions)
     channels = frozenset(available_observation_channels)
@@ -189,7 +192,7 @@ def compile_detection_module_registry(
     event_owner: dict[str, str] = {}
     shared_bindings: dict[tuple[str, str], ComponentBinding] = {}
     for definition in frozen:
-        _validate_definition(definition, channels, outputs)
+        _validate_definition(definition, channels, outputs, temporal_profile)
         qualified = (definition.module_id, definition.version)
         if qualified in by_qualified:
             raise DetectionModuleCompilationError(
@@ -230,6 +233,7 @@ def _validate_definition(
     definition: DetectionModuleDefinition,
     channels: frozenset[str],
     outputs: frozenset[str],
+    temporal_profile: TemporalProfile,
 ) -> None:
     if not definition.module_id or definition.version < 1:
         raise DetectionModuleCompilationError("module id/version must be valid")
@@ -308,7 +312,7 @@ def _validate_definition(
             raise DetectionModuleCompilationError(
                 f"schedule rule {rule.component_id!r} does not target an extractor"
             )
-        if rule.resolve(1) <= 0:
+        if rule.resolve(1, temporal_profile) <= 0:
             raise DetectionModuleCompilationError("schedule intervals must be positive")
 
 

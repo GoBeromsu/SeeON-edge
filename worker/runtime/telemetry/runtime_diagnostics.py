@@ -26,6 +26,7 @@ from worker.runtime.telemetry.models import (
     DecodeBackendObservability,
     DeviceResidencyDiagnostics,
     EncoderLifecycleSnapshot,
+    GeometryBatchHistogram,
     InferenceMetricsSource,
     InvalidStageTimingError,
     RuntimeDiagnosticsSnapshot,
@@ -377,6 +378,18 @@ class WorkerDiagnostics:
                 ),
                 batch_sizes=(
                     () if inference is None else tuple(inference.batch_sizes.items())
+                ),
+                geometry_batch_sizes=(
+                    ()
+                    if inference is None
+                    else tuple(
+                        GeometryBatchHistogram(
+                            geometry, tuple(sorted(sizes.items()))
+                        )
+                        for geometry, sizes in sorted(
+                            inference.geometry_batch_sizes.items()
+                        )
+                    )
                 ),
                 forward_p50_sec=(
                     0.0 if inference is None else inference.forward_p50_sec

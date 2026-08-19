@@ -32,6 +32,12 @@ handles stay `object`.
   `frame_index`, `bed_region`. `bed_pose_features` is additive with a default
   empty `FrameBedPoseFeatures`. Numeric only. Never an image, buffer, or frame
   handle.
+- `temporal_profile.py`: `TemporalProfile` owns ingest fps, pose fps, and
+  per-domain decision Hz. Pipeline defaults and the composition-root schedule
+  compute from it. `CURRENT_TEMPORAL_PROFILE` is today's 15fps identity
+  (bed every 90 frames, i.e. 1/6 Hz and 6.0s wall clock). Raising
+  `_CURRENT_INGEST_FPS` must re-denominate `_CURRENT_BED_INTERVAL_FRAMES` in
+  the same edit: the Hz is the invariant, the frame count is derived.
 - `business_event.py`: `BusinessEvent(domain, event_type, identity,
   camera_id, facility_id, time_sec, probability, person_id?, bed_id?, audit?,
   snapshot_jpeg?)`. Domains emit these. Pipeline admits, records, and relays

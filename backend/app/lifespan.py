@@ -61,7 +61,10 @@ EDGE_FACILITY_TOKEN_ENV = "EDGE_FACILITY_TOKEN"  # scope-fidelity: name-only
 # Retained as a name-only constant for tests/docs that assert the env key is
 # no longer an admission authority. Production code must not read this env.
 API_FACILITY_ID_ENV = "API_FACILITY_ID"  # scope-fidelity: name-only
-API_BACKEND_CONFIG_URL_ENV = "API_BACKEND_CONFIG_URL"
+# Same name-only retention as the two constants above: the retired ml-config
+# URL is asserted by tests/docs as no longer being an authority, and no
+# production code reads it.
+API_BACKEND_CONFIG_URL_ENV = "API_BACKEND_CONFIG_URL"  # scope-fidelity: name-only
 API_BACKEND_INGEST_TIMEOUT_SEC_ENV = "API_BACKEND_INGEST_TIMEOUT_SEC"
 API_HEARTBEAT_STALE_AFTER_SEC_ENV = "API_HEARTBEAT_STALE_AFTER_SEC"
 API_BACKEND_CONFIG_REFRESH_SEC_ENV = "API_BACKEND_CONFIG_REFRESH_SEC"

@@ -43,7 +43,7 @@ from worker.pipeline.perception import GreedyIouTracker, SceneState
 from worker.runtime.model_composition import SharedComponentPool
 from worker.runtime.profile.registry import PROFILE_REGISTRY, runtime_descriptor_for
 from worker.runtime.worker import WorkerRuntime
-from worker.types import DecisionInput, FramePacket
+from worker.types import CURRENT_TEMPORAL_PROFILE, DecisionInput, FramePacket
 
 _PACKAGED_FALL_METADATA = (
     Path(__file__).resolve().parents[1] / "models" / "fall" / "lstm" / "metadata.yaml"
@@ -284,10 +284,11 @@ def test_compiled_modules_are_profile_independent() -> None:
             output_adapter_ids=result_merger_names(),
             camera_frame_stride=5,
             flags={"person-box-source": True, "persisted-bed-region": False},
+            temporal_profile=CURRENT_TEMPORAL_PROFILE,
         )
 
         assert activation.qualified_ids == identities
-        assert activation.schedule == {"pose": 5, "person": 5, "bed": 30}
+        assert activation.schedule == {"pose": 5, "person": 5, "bed": 90}
         assert descriptor.canonical_profile == profile_name
 
 
@@ -311,6 +312,7 @@ def test_activation_fails_closed_for_unavailable_runtime_dependencies() -> None:
             output_adapter_ids=outputs,
             camera_frame_stride=5,
             flags=flags,
+            temporal_profile=CURRENT_TEMPORAL_PROFILE,
         )
 
     with pytest.raises(DetectionModuleActivationError, match="observation channel"):
@@ -336,6 +338,7 @@ def test_activation_fails_closed_for_unavailable_runtime_dependencies() -> None:
         (fall, conflicting_bed_exit),
         available_observation_channels=AVAILABLE_OBSERVATION_CHANNELS,
         output_adapter_ids=result_merger_names(),
+        temporal_profile=CURRENT_TEMPORAL_PROFILE,
     )
     with pytest.raises(DetectionModuleActivationError, match="schedule conflict"):
         _ = conflicting_registry.activation(
@@ -346,6 +349,7 @@ def test_activation_fails_closed_for_unavailable_runtime_dependencies() -> None:
             output_adapter_ids=result_merger_names(),
             camera_frame_stride=5,
             flags=flags,
+            temporal_profile=CURRENT_TEMPORAL_PROFILE,
         )
 
 
@@ -419,6 +423,7 @@ def test_compiler_fails_closed_for_incomplete_or_conflicting_definitions() -> No
                 (broken_fall, valid_bed_exit),
                 available_observation_channels=AVAILABLE_OBSERVATION_CHANNELS,
                 output_adapter_ids=result_merger_names(),
+                temporal_profile=CURRENT_TEMPORAL_PROFILE,
             )
 
     with pytest.raises(DetectionModuleCompilationError, match="binding"):
@@ -434,6 +439,7 @@ def test_compiler_fails_closed_for_incomplete_or_conflicting_definitions() -> No
             ),
             available_observation_channels=AVAILABLE_OBSERVATION_CHANNELS,
             output_adapter_ids=result_merger_names(),
+            temporal_profile=CURRENT_TEMPORAL_PROFILE,
         )
 
 

@@ -89,7 +89,9 @@ class AlertEvidenceAttacher:
             return replace(event, audit=audit, snapshot_jpeg=snapshot_jpeg)
         except Exception:  # noqa: BLE001 - audit/snapshot must not block alert emit
             LOGGER.warning(
-                "failed to attach audit/snapshot metadata to event",
+                "failed to attach audit/snapshot metadata to event: camera_id=%s domain=%s",
+                event.camera_id,
+                event.domain,
                 extra={"camera_id": event.camera_id, "domain": event.domain},
             )
             return event

@@ -15,6 +15,7 @@ distribution -- and this benchmark's #312 gate is p95, not the mean.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import threading
@@ -23,11 +24,16 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from statistics import median
 from time import monotonic, sleep
-from typing import Any, final
+from typing import Any, Final, final
 
 _NVIDIA_SMI_QUERY = "utilization.gpu,utilization.decoder,memory.used"
 _NVIDIA_SMI_TIMEOUT_SEC = 5.0
 _LANES = ("inference", "live", "evidence")
+# A silent latest-only drop that stays under this fraction of admitted frames
+# is treated as jitter, not saturation. Anything above it cannot be ACHIEVABLE.
+_ACHIEVABLE_OVERWRITE_FRACTION: Final = 0.01
+_ACHIEVABLE_FPS_FRACTION: Final = 0.90
+_MARGINAL_FPS_FRACTION: Final = 0.80
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,6 +59,10 @@ class CameraSample:
     pump_failures: int = 0
     pump_processed: int = 0
     decode_backend: str | None = None
+    # Coordinator latest-only overwrite count for this camera. Distinct from
+    # the bus ``dropped`` counter: the coordinator reads the same field but
+    # this is the value the capacity verdict must cite (todo 13).
+    overwritten: int = 0
 
 
 @dataclass(slots=True)
@@ -68,6 +78,7 @@ class RunSample:
     batch_sizes: dict[int, int] = field(default_factory=dict)
     coordinator_forward_p50_sec: float = 0.0
     coordinator_forward_p95_sec: float = 0.0
+    loadavg: tuple[float, float, float] | None = None
 
 
 def sample_gpu() -> dict[str, float] | None:
@@ -220,6 +231,7 @@ def take_sample(diagnostics: Any, watchdog: Any, pumps: Any = ()) -> RunSample:
             pump_failures=getattr(by_camera.get(camera.camera_id), "failure_count", 0),
             pump_processed=getattr(by_camera.get(camera.camera_id), "processed_count", 0),
             decode_backend=_decode_backend_name(camera),
+            overwritten=_coordinator_overwritten(camera),
         )
         for camera in snapshot.cameras
     )
@@ -228,6 +240,7 @@ def take_sample(diagnostics: Any, watchdog: Any, pumps: Any = ()) -> RunSample:
         cameras=cameras,
         watchdog_margin_sec=watchdog_margin_sec(watchdog),
         gpu=sample_gpu(),
+        loadavg=_sample_loadavg(),
         **_coordinator_fields(snapshot),
     )
 
@@ -247,6 +260,27 @@ def _decode_backend_name(camera: Any) -> str | None:
     if requested is None and resolved is None:
         return str(backend)
     return f"{requested} -> {resolved} ({adapter})"
+
+
+def _coordinator_overwritten(camera: Any) -> int:
+    """Read ``CameraInferenceTelemetry.overwritten`` off one diagnostics camera.
+
+    The coordinator publishes this as the latest-only drop count. A missing
+    ``inference`` object (pre-coordinator topology) is reported as 0, never as
+    a fabricated healthy-looking None that a verdict could misread.
+    """
+    inference = getattr(camera, "inference", None)
+    if inference is None:
+        return 0
+    return int(getattr(inference, "overwritten", 0))
+
+
+def _sample_loadavg() -> tuple[float, float, float] | None:
+    try:
+        one, five, fifteen = os.getloadavg()
+    except OSError:
+        return None
+    return (float(one), float(five), float(fifteen))
 
 
 def _coordinator_fields(snapshot: Any) -> dict[str, Any]:
@@ -366,6 +400,8 @@ class RunMetrics:
                 "pump_failures": camera.pump_failures,
                 "pump_processed": camera.pump_processed,
                 "decode_backend": camera.decode_backend,
+                "overwritten": camera.overwritten - earlier.overwritten,
+                "overwritten_cumulative": camera.overwritten,
             }
         return result
 
@@ -487,12 +523,117 @@ class RunMetrics:
                 camera["bus"].get("inference", {}).get("dropped", 0)
                 for camera in cameras.values()
             ),
+            "overwritten": sum(int(camera.get("overwritten", 0)) for camera in cameras.values()),
+            "overwritten_by_camera": {
+                camera_id: int(camera.get("overwritten", 0))
+                for camera_id, camera in cameras.items()
+            },
+            "loadavg": (
+                None
+                if last_sample is None or last_sample.loadavg is None
+                else {
+                    "1m": last_sample.loadavg[0],
+                    "5m": last_sample.loadavg[1],
+                    "15m": last_sample.loadavg[2],
+                }
+            ),
+            "capacity": capacity_verdict(
+                cameras,
+                target_fps=_offered_fps(header),
+            ),
             "stalls": dict(self.stalls) if self.stalls else None,
             "counters_advanced": self.counter_advanced(),
             "pump_failures": sum(camera["pump_failures"] for camera in cameras.values()),
             "errors": list(self.errors),
             "notes": dict(self.notes),
         }
+
+
+def _offered_fps(header: dict[str, Any]) -> float | None:
+    """Prefer the operator-declared offered rate over the recorded-clip fps."""
+    for key in ("offered_fps", "camera_fps"):
+        value = header.get(key)
+        if value is not None:
+            return float(value)
+    return None
+
+
+def capacity_verdict(
+    cameras: dict[str, dict[str, Any]],
+    *,
+    target_fps: float | None,
+    overwrite_fraction_limit: float = _ACHIEVABLE_OVERWRITE_FRACTION,
+    achievable_fps_fraction: float = _ACHIEVABLE_FPS_FRACTION,
+    marginal_fps_fraction: float = _MARGINAL_FPS_FRACTION,
+) -> dict[str, Any]:
+    """Classify a measured fan-out as ACHIEVABLE, MARGINAL, or NOT.
+
+    The gate that prevents a silent latest-only drop from looking healthy is
+    ``overwritten``: a camera can keep publishing at the offered rate while
+    the coordinator overwrites unread frames. Bus ``dropped`` alone is not
+    enough -- that is why this function reads the coordinator field.
+    """
+    if not cameras or target_fps is None or float(target_fps) <= 0:
+        return {
+            "verdict": "NOT",
+            "reason": "no cameras or no target fps to judge",
+            "min_admitted_fps": None,
+            "max_admitted_fps": None,
+            "overwritten_total": 0,
+            "overwrite_fraction": None,
+        }
+    admitted = [
+        float(value)
+        for camera in cameras.values()
+        if (value := camera.get("inference_admitted_fps")) is not None
+    ]
+    overwritten_total = sum(int(camera.get("overwritten", 0)) for camera in cameras.values())
+    published_total = sum(
+        int(camera.get("bus", {}).get("inference", {}).get("published", 0))
+        for camera in cameras.values()
+    )
+    # Coordinator overwritten is the latest-only drop count. Denominator is
+    # frames the ingest path offered (published), not taken+overwritten: the
+    # two counters can overlap and would understate the drop rate.
+    offered = published_total if published_total > 0 else overwritten_total
+    overwrite_fraction = None if offered <= 0 else overwritten_total / offered
+    min_fps = min(admitted) if admitted else 0.0
+    max_fps = max(admitted) if admitted else 0.0
+    target = float(target_fps)
+    if overwrite_fraction is not None and overwrite_fraction > overwrite_fraction_limit:
+        verdict = "NOT"
+        reason = (
+            f"coordinator overwritten {overwritten_total} frames "
+            f"({overwrite_fraction:.1%} of offered) exceeds "
+            f"{overwrite_fraction_limit:.0%} drop budget"
+        )
+    elif min_fps >= target * achievable_fps_fraction:
+        verdict = "ACHIEVABLE"
+        reason = (
+            f"every camera admitted >= {achievable_fps_fraction:.0%} of "
+            f"{target:g} fps (min {min_fps:.2f}) with overwritten={overwritten_total}"
+        )
+    elif min_fps >= target * marginal_fps_fraction:
+        verdict = "MARGINAL"
+        reason = (
+            f"slowest camera admitted {min_fps:.2f} fps "
+            f"({min_fps / target:.0%} of {target:g}); overwritten={overwritten_total}"
+        )
+    else:
+        verdict = "NOT"
+        reason = (
+            f"slowest camera admitted {min_fps:.2f} fps "
+            f"({0.0 if target == 0 else min_fps / target:.0%} of {target:g}); "
+            f"overwritten={overwritten_total}"
+        )
+    return {
+        "verdict": verdict,
+        "reason": reason,
+        "min_admitted_fps": min_fps,
+        "max_admitted_fps": max_fps,
+        "overwritten_total": overwritten_total,
+        "overwrite_fraction": overwrite_fraction,
+    }
 
 
 def write_document(path: Path, document: dict[str, Any]) -> Path:
@@ -513,6 +654,7 @@ __all__ = [
     "RunSample",
     "StallWatcher",
     "sample_gpu",
+    "capacity_verdict",
     "take_sample",
     "watchdog_margin_sec",
     "write_document",

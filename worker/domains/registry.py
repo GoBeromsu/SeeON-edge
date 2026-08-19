@@ -39,6 +39,7 @@ from worker.domains.module_definition import (
 from worker.interfaces.decision import Decider
 from worker.pipeline.analytics.merge import result_merger_names
 from worker.pipeline.perception import GreedyIouTracker
+from worker.types import CURRENT_TEMPORAL_PROFILE
 
 AVAILABLE_OBSERVATION_CHANNELS = frozenset({"person_boxes", "poses", "track_ids", "bed_regions"})
 # person/bed identities are the official ultralytics/assets release v8.4.0
@@ -323,7 +324,7 @@ _BED_EXIT_V1 = DetectionModuleDefinition(
     schedule_rules=(
         ScheduleRule("pose", "camera-frame-stride"),
         ScheduleRule("person", "camera-frame-stride"),
-        ScheduleRule("bed", "fixed", interval=30, skip_when_flag="persisted-bed-region"),
+        ScheduleRule("bed", "temporal-profile", skip_when_flag="persisted-bed-region"),
     ),
     policy_schema=PolicySchemaIdentity("bed_exit.policy", 1),
     camera_state_factory=_bed_exit_state,
@@ -344,6 +345,7 @@ DETECTION_MODULE_REGISTRY = compile_detection_module_registry(
     DETECTION_MODULE_DEFINITIONS,
     available_observation_channels=AVAILABLE_OBSERVATION_CHANNELS,
     output_adapter_ids=result_merger_names(),
+    temporal_profile=CURRENT_TEMPORAL_PROFILE,
 )
 # Temporary source-compatible view while external callers move to the compiled registry.
 DOMAIN_REGISTRY: Mapping[str, DomainRegistration] = MappingProxyType(

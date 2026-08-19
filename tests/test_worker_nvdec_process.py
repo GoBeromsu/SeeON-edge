@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import subprocess
+import sys
 import threading
 import time
 from typing import final
@@ -9,7 +10,10 @@ import pytest
 
 from worker.adapters.decode.nvdec_cuvid.errors import NvdecUnavailableError
 from worker.adapters.decode.nvdec_cuvid.input_queue import DecoderInputQueue
-from worker.adapters.decode.nvdec_cuvid.process import FFmpegDecodeProcess
+from worker.adapters.decode.nvdec_cuvid.process import (
+    FFmpegDecodeProcess,
+    spawn_decoder_process,
+)
 
 
 @final
@@ -44,10 +48,12 @@ class _CaptureInput:
 class _BlockingStream:
     def __init__(self) -> None:
         self._closed = threading.Event()
+        self.read_entered = threading.Event()
         self.closed = False
 
     def read(self, size: int = -1) -> bytes:
         del size
+        self.read_entered.set()
         _ = self._closed.wait()
         return b""
 
@@ -89,11 +95,13 @@ class _EventGatedStream:
 class _Child:
     def __init__(
         self,
-        stdout: _ChunkStream | _BlockingStream,
+        stdout: _ChunkStream | _BlockingStream | _EventGatedStream,
         wait_outcomes: list[int | subprocess.TimeoutExpired] | None = None,
+        stderr: _ChunkStream | _BlockingStream | None = None,
     ) -> None:
         self.stdin = _CaptureInput()
         self.stdout = stdout
+        self.stderr = stderr
         self.returncode: int | None = None
         self._wait_outcomes = wait_outcomes or [0]
         self.terminate_calls = 0
@@ -237,3 +245,216 @@ def test_decode_process_escalates_to_kill_and_reaps_only_once() -> None:
     assert child.stdout.closed is True
     assert process.reader_alive is False
     assert child.stdin.closed is True
+
+
+def test_nonzero_exit_preserves_returncode_and_has_no_failure_detail() -> None:
+    """Baseline: a dead child already exposes its returncode, but no stderr detail."""
+    # Given
+    child = _Child(_ChunkStream([b""]), wait_outcomes=[69])
+    process = FFmpegDecodeProcess(child, frame_size=1)
+
+    # When
+    payload = process.read_frame(timeout_sec=0.1)
+
+    # Then
+    assert payload is None
+    assert process.failure_returncode == 69
+    assert getattr(process, "failure_detail", None) is None
+
+
+def test_clean_exit_exposes_no_failure_returncode_or_detail() -> None:
+    """Baseline: a clean child exit is not a failure and carries no detail."""
+    # Given
+    child = _Child(
+        _ChunkStream([b""]),
+        wait_outcomes=[0],
+        stderr=_ChunkStream([b"should not become failure detail\n"]),
+    )
+    process = FFmpegDecodeProcess(child, frame_size=1)
+
+    # When
+    payload = process.read_frame(timeout_sec=0.1)
+    returncode = process.reap(timeout_sec=0.1)
+
+    # Then
+    assert payload is None
+    assert returncode == 0
+    assert process.failure_returncode is None
+    assert process.failure_detail is None
+    assert child.stderr is not None
+    assert child.stderr.closed is True
+    assert process.stderr_drain_started is True
+    assert process.stderr_drain_alive is False
+
+
+def test_nonzero_child_exposes_returncode_and_final_safe_stderr_line() -> None:
+    """A dead decoder must surface its exit code and last useful stderr line."""
+    # Given
+    child = _Child(
+        _ChunkStream([b""]),
+        wait_outcomes=[69],
+        stderr=_ChunkStream(
+            [b"ignored earlier warning\n", b"cuvid decode failed: codec not supported\n"]
+        ),
+    )
+    process = FFmpegDecodeProcess(child, frame_size=1)
+
+    # When
+    payload = process.read_frame(timeout_sec=0.1)
+
+    # Then
+    assert payload is None
+    assert process.failure_returncode == 69
+    assert process.failure_detail == "cuvid decode failed: codec not supported"
+    assert child.stdout.closed is True
+    assert child.stderr is not None
+    assert child.stderr.closed is True
+    assert process.reader_alive is False
+    assert process.stderr_drain_started is True
+    assert process.stderr_drain_alive is False
+
+
+def test_stderr_tail_is_bounded_redacted_and_truncated() -> None:
+    """Keep only an 8 KiB tail, one safe line, and at most 512 rendered chars."""
+    # Given: more than 8 KiB of noise, then one long credential-bearing line.
+    diagnostic = "cuvid-diagnostic"
+    last_line = (
+        ("N" * 600)
+        + f" {diagnostic} rtsp://admin:secret@camera/token=abc"
+    ).encode()
+    stderr = _ChunkStream([b"n" * 9000 + b"\n", last_line + b"\n"])
+    child = _Child(_ChunkStream([b""]), wait_outcomes=[1], stderr=stderr)
+    process = FFmpegDecodeProcess(child, frame_size=1)
+
+    # When
+    _ = process.read_frame(timeout_sec=0.1)
+    detail = process.failure_detail
+
+    # Then
+    assert detail is not None
+    assert detail.startswith("[truncated] ")
+    assert len(detail) <= 512
+    assert diagnostic in detail
+    assert "secret" not in detail
+    assert "abc" not in detail
+    assert "admin" not in detail
+    assert "\n" not in detail
+    assert "\r" not in detail
+    assert len(process.retained_stderr) <= 8192
+
+
+def test_unicode_c1_control_is_removed_from_safe_stderr_line() -> None:
+    """UTF-8 C1 controls such as U+009B must not survive sanitization."""
+    # Given: CSI-style C1 (U+009B) encoded as UTF-8 C2 9B, plus a diagnostic token.
+    child = _Child(
+        _ChunkStream([b""]),
+        wait_outcomes=[1],
+        stderr=_ChunkStream([b"cuvid error\xc2\x9b31mINJECT\n"]),
+    )
+    process = FFmpegDecodeProcess(child, frame_size=1)
+
+    # When
+    _ = process.read_frame(timeout_sec=0.1)
+    detail = process.failure_detail
+
+    # Then
+    assert detail is not None
+    assert "cuvid error" in detail
+    assert "INJECT" in detail
+    assert "\x9b" not in detail
+    assert "\u009b" not in detail
+
+
+def test_malformed_stderr_controls_and_repeated_reap_stay_safe() -> None:
+    """Control bytes become spaces; a second reap keeps the first safe detail."""
+    # Given
+    child = _Child(
+        _ChunkStream([b""]),
+        wait_outcomes=[2],
+        stderr=_ChunkStream([b"cuvid\x00failed\x07now\xff\n"]),
+    )
+    process = FFmpegDecodeProcess(child, frame_size=1)
+
+    # When
+    _ = process.read_frame(timeout_sec=0.1)
+    first = process.failure_detail
+    second_returncode = process.reap(timeout_sec=0.1)
+
+    # Then
+    assert first is not None
+    assert "cuvid" in first
+    assert "failed" in first
+    assert "now" in first
+    assert "\x00" not in first
+    assert "\x07" not in first
+    assert second_returncode == 2
+    assert process.failure_detail == first
+    assert child.terminate_calls == 1
+
+
+def test_spawned_nonzero_child_exposes_safe_stderr_and_closes_streams() -> None:
+    """The real PIPE drain must keep a failed child's last line."""
+    # Given
+    script = (
+        "import sys\n"
+        "sys.stderr.buffer.write(b'noise\\ncuvid error: decoder not found\\n')\n"
+        "sys.stderr.buffer.flush()\n"
+        "sys.exit(69)\n"
+    )
+    process = spawn_decoder_process((sys.executable, "-c", script), frame_size=4)
+    assert isinstance(process, FFmpegDecodeProcess)
+
+    # When
+    payload = process.read_frame(timeout_sec=2.0)
+    _ = process.reap(timeout_sec=0.5)
+
+    # Then
+    assert payload is None
+    assert process.failure_returncode == 69
+    assert process.failure_detail is not None
+    assert "cuvid error: decoder not found" in process.failure_detail
+    assert process.reader_alive is False
+    assert process.stderr_drain_started is True
+    assert process.stderr_drain_alive is False
+
+
+def test_stderr_retention_keeps_strict_8192_byte_tail_across_3000_byte_chunks() -> None:
+    """Retention must equal the final 8192 bytes, not a whole-chunk drop."""
+    # Given: legal 3000-byte chunks whose join is 9000 bytes.
+    chunks = [b"a" * 3000, b"b" * 3000, b"c" * 3000]
+    payload = b"".join(chunks)
+    child = _Child(
+        _ChunkStream([b""]),
+        wait_outcomes=[1],
+        stderr=_ChunkStream(list(chunks)),
+    )
+    process = FFmpegDecodeProcess(child, frame_size=1)
+    assert process.join_stderr_drain(1.0) is True
+
+    # When
+    retained = process.retained_stderr
+
+    # Then
+    assert retained == payload[-8192:]
+    assert len(retained) == 8192
+    _ = process.reap(timeout_sec=0.1)
+
+
+def test_reap_unblocks_blocked_stderr_drain_and_joins_before_return() -> None:
+    """Close the blocked pipe first, then join; reap must not leave the drain up."""
+    # Given
+    stderr = _BlockingStream()
+    child = _Child(_ChunkStream([b""]), wait_outcomes=[7], stderr=stderr)
+    process = FFmpegDecodeProcess(child, frame_size=1)
+    assert process.stderr_drain_started is True
+    assert stderr.read_entered.wait(1.0)
+    assert process.stderr_drain_alive is True
+
+    # When
+    returncode = process.reap(timeout_sec=0.1)
+
+    # Then: stream close and drain death are the deterministic outcomes.
+    assert returncode == 7
+    assert stderr.closed is True
+    assert process.stderr_drain_alive is False
+    assert process.join_stderr_drain(2.0) is True

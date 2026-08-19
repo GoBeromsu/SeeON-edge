@@ -1,13 +1,19 @@
 name: Edge ML Images
 
 on:
+  # (#365) Publishing is release-driven. There is deliberately NO `push:
+  # branches: [main]` trigger: the edge unit pins locally-built images
+  # (`ML_WORKER_IMAGE=local/fall-ml-worker:<sha>` in .env.edge.prod), so a
+  # publish on every main push burned ~9.77GB of build and GHCR storage for
+  # an artifact nothing ever pulled. Use a published release for the normal
+  # path, or workflow_dispatch to publish an arbitrary ref on demand.
+  #
+  # This does NOT reduce per-commit verification: edge-worker-image.yml still
+  # builds Dockerfile.edge on every PR and push to main and runs the boot
+  # smoke test, which is what actually catches a broken image (see the httpx
+  # incident in #195 - the image built fine and died at boot).
   release:
     types: [published]
-  # main always has a published image, independent of release cadence
-  # (#195): edge-worker-image.yml only builds+boot-tests Dockerfile.edge on
-  # PR/push, it never publishes to GHCR.
-  push:
-    branches: [main]
   workflow_dispatch:
     inputs:
       ref:
@@ -26,7 +32,7 @@ permissions:
 jobs:
   publish:
     name: Publish edge ML image refs
-    if: github.event_name == 'workflow_dispatch' || github.event_name == 'push' || github.event.release.prerelease == false
+    if: github.event_name == 'workflow_dispatch' || github.event.release.prerelease == false
     runs-on: ubuntu-latest
     env:
       DEPLOY_REF: ${{ github.event.release.tag_name || inputs.ref || github.sha }}

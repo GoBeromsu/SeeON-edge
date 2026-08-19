@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import sqlite3
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -196,6 +197,7 @@ def test_snapshot_stage_is_idempotent_and_rejects_identity_rebinding(tmp_path: P
 
 def test_snapshot_stage_backpressure_is_global_and_per_camera_observable(
     tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     store = SnapshotStore(
         tmp_path,
@@ -210,7 +212,7 @@ def test_snapshot_stage_backpressure_is_global_and_per_camera_observable(
             max_pending_age=timedelta(days=1),
         ),
     )
-    store.stage(
+    first = store.stage(
         b"one",
         snapshot_id="event-1",
         captured_at="2026-08-13T12:00:00Z",
@@ -218,18 +220,34 @@ def test_snapshot_stage_backpressure_is_global_and_per_camera_observable(
         edge_event_id="event-1",
     )
 
-    with pytest.raises(SnapshotCapacityError, match="per-camera pending"):
-        store.stage(
-            b"two",
-            snapshot_id="event-2",
-            captured_at="2026-08-13T12:00:01Z",
-            camera_id="camera-1",
-            edge_event_id="event-2",
-        )
+    with caplog.at_level(
+        logging.WARNING, logger="worker.pipeline.output.evidence.snapshot_store"
+    ):
+        with pytest.raises(SnapshotCapacityError, match="per-camera pending") as raised:
+            store.stage(
+                b"two",
+                snapshot_id="event-2",
+                captured_at="2026-08-13T12:00:01Z",
+                camera_id="camera-1",
+                edge_event_id="event-2",
+            )
 
+    assert raised.value.reason == "per-camera pending files"
     assert store.stats.dropped_capacity == 1
     assert store.stats.pending_files == 1
     assert store.stats.pending_bytes == 3
+    assert store.staged_records() == (first,)
+    assert list((tmp_path / ".snapshot-staging").glob("*.jpg")) == [
+        tmp_path / ".snapshot-staging" / f"{hashlib.sha256(b'event-1').hexdigest()}.jpg"
+    ]
+    [record] = [
+        item
+        for item in caplog.records
+        if "snapshot dropped by bounded admission" in item.getMessage()
+    ]
+    message = record.getMessage()
+    assert "camera_id=camera-1" in message
+    assert "reason=per-camera pending files" in message
 
 
 def test_restart_reconcile_attaches_staged_snapshot_after_full_hash_validation(
@@ -509,6 +527,7 @@ def test_restart_completes_snapshot_retention_after_delete_before_db_commit(
 
 def test_reconcile_purges_one_hundred_old_unreferenced_staged_snapshots(
     tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     store = SnapshotStore(tmp_path)
     old = NOW - timedelta(days=2)
@@ -522,8 +541,85 @@ def test_reconcile_purges_one_hundred_old_unreferenced_staged_snapshots(
             edge_event_id=f"event-{index}",
         )
 
-    report = store.discard_unreferenced_staging(set(), now=NOW)
+    with caplog.at_level(
+        logging.WARNING, logger="worker.pipeline.output.evidence.snapshot_store"
+    ):
+        report = store.discard_unreferenced_staging(set(), now=NOW)
 
     assert report.discarded == 100
+    assert report.corrupt == 0
     assert list((tmp_path / ".snapshot-staging").glob("*")) == []
     assert store.stats.discarded_unreferenced == 100
+    assert store.stats.quarantined_corrupt == 0
+    [record] = [
+        item
+        for item in caplog.records
+        if "snapshot staging reconciliation removed artifacts" in item.getMessage()
+    ]
+    message = record.getMessage()
+    assert "discarded=100" in message
+    assert "corrupt=0" in message
+    assert "camera_id=" not in message
+
+
+def test_reconcile_logs_corrupt_and_unreferenced_counts_without_touching_others(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    store = SnapshotStore(tmp_path)
+    referenced = store.stage(
+        b"keep-me",
+        snapshot_id="keep-event",
+        captured_at="2026-08-13T12:00:00Z",
+        camera_id="camera-keep",
+        edge_event_id="keep-event",
+    )
+    discarded = store.stage(
+        b"drop-me",
+        snapshot_id="drop-event",
+        captured_at="2026-08-13T12:00:01Z",
+        camera_id="camera-drop",
+        edge_event_id="drop-event",
+    )
+    assert discarded.snapshot_id == "drop-event"
+    staging = tmp_path / ".snapshot-staging"
+    corrupt_metadata = staging / "deadbeef.json"
+    corrupt_written = corrupt_metadata.write_text("{not-json", encoding="utf-8")
+    assert corrupt_written > 0
+    orphan_blob = staging / "orphan.jpg"
+    orphan_written = orphan_blob.write_bytes(b"orphan-bytes")
+    assert orphan_written == len(b"orphan-bytes")
+    unrelated = tmp_path / "unrelated.jpg"
+    unrelated_written = unrelated.write_bytes(b"do-not-touch")
+    assert unrelated_written == len(b"do-not-touch")
+    keep_blob = staging / f"{hashlib.sha256(b'keep-event').hexdigest()}.jpg"
+    drop_metadata = staging / f"{hashlib.sha256(b'drop-event').hexdigest()}.json"
+    drop_blob = staging / f"{hashlib.sha256(b'drop-event').hexdigest()}.jpg"
+
+    with caplog.at_level(
+        logging.WARNING, logger="worker.pipeline.output.evidence.snapshot_store"
+    ):
+        report = store.discard_unreferenced_staging({"keep-event"}, now=NOW)
+
+    assert report.discarded == 1
+    assert report.corrupt == 2
+    assert store.stats.discarded_unreferenced == 1
+    assert store.stats.quarantined_corrupt == 2
+    assert store.staged_records() == (referenced,)
+    assert keep_blob.exists()
+    assert keep_blob.read_bytes() == b"keep-me"
+    assert unrelated.exists()
+    assert unrelated.read_bytes() == b"do-not-touch"
+    assert not drop_metadata.exists()
+    assert not drop_blob.exists()
+    assert not corrupt_metadata.exists()
+    assert not orphan_blob.exists()
+    [record] = [
+        item
+        for item in caplog.records
+        if "snapshot staging reconciliation removed artifacts" in item.getMessage()
+    ]
+    message = record.getMessage()
+    assert "discarded=1" in message
+    assert "corrupt=2" in message
+    assert "camera_id=" not in message

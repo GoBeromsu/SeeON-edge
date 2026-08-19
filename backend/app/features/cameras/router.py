@@ -103,7 +103,6 @@ class CameraResponse(BaseModel):
     mapping_state: Literal["mapped", "pending", "unmapped"] = "unmapped"
     status: Literal["online", "offline", "starting", "unknown"]
     decode_backend: str | None = None
-    fps: float | None = None
     created_at: str | None = None
     space_name: str | None = None
     # Space-sync-owned floor name (external roster pull, read-only from here --
@@ -153,7 +152,6 @@ class CreateCameraRequest(BaseModel):
     rtsp_url: str = Field(min_length=1)
     space_id: str | None = None
     decode_backend: str | None = None
-    fps: float | None = None
     floor: int | None = None
     edge_ref: str | None = Field(default=None, min_length=1, max_length=64)
     room_edge_ref: str | None = Field(default=None, min_length=1, max_length=64)
@@ -172,7 +170,6 @@ class UpdateCameraRequest(BaseModel):
     rtsp_url: str | None = Field(default=None, min_length=1)
     space_id: str | None = None
     decode_backend: str | None = None
-    fps: float | None = None
     floor: int | None = None
     edge_ref: str | None = Field(default=None, min_length=1, max_length=64)
     room_edge_ref: str | None = Field(default=None, min_length=1, max_length=64)
@@ -284,7 +281,6 @@ class WorkerCameraConfig(BaseModel):
     facility_id: str | None = Field(default=None, min_length=1)
     space_id: str | None = Field(default=None, min_length=1)
     rtsp_url: str = Field(min_length=1)
-    fps: float | None = Field(default=None, gt=0)
     frame_stride: int | None = Field(default=None, gt=0)
     decode_backend: str | None = Field(default=None)
     domains: list[str] | None = None
@@ -449,7 +445,6 @@ def create_camera(
     _authorize(request)
     rtsp_url = _validated_rtsp_url(payload.rtsp_url)
     decode_backend = _normalize_decode_backend(payload.decode_backend)
-    fps = _normalize_fps(payload.fps)
     floor = _normalize_floor(payload.floor)
     # 등록은 저장이다. probe는 상태 표시(online/offline, never_connected)에만
     # 쓰고 등록을 막지 않는다.
@@ -475,7 +470,6 @@ def create_camera(
             backend_camera_id=None,
             mapping_pending=False,
             decode_backend=decode_backend,
-            fps=fps,
             floor=floor,
             last_probed_at=now,
             last_ok_at=now if probe.ok else None,
@@ -554,8 +548,6 @@ def update_camera(
         updates["space_id"] = payload.space_id
     if "decode_backend" in payload.model_fields_set:
         updates["decode_backend"] = _normalize_decode_backend(payload.decode_backend)
-    if "fps" in payload.model_fields_set:
-        updates["fps"] = _normalize_fps(payload.fps)
     if "floor" in payload.model_fields_set:
         updates["floor"] = _normalize_floor(payload.floor)
     if "edge_ref" in payload.model_fields_set:
@@ -755,13 +747,16 @@ def worker_config_snapshot(
         space_id = record.get("space_id")
         if isinstance(space_id, str) and space_id.strip():
             camera["space_id"] = space_id
-        fps = record.get("fps") or _default_camera_fps()
-        if fps is not None:
-            camera["fps"] = fps
-        stride = _default_frame_stride()
-        if stride is not None:
-            camera["frame_stride"] = stride
-        decode_backend = record.get("decode_backend") or _default_decode_backend()
+        # frame_stride/decode_backend are per-camera registry values only.
+        # The facility-wide ML_DEFAULT_* environment fallbacks were retired
+        # (see core.config._RETIRED_BACKEND_ENV, which fails boot on them);
+        # the registry is the sole authority, so an unset value is simply
+        # omitted and the worker keeps its own default.
+        #
+        # fps is deliberately NOT emitted: the worker's TemporalProfile owns
+        # ingest pacing (design B), so a relay-declared per-camera fps was a
+        # dead control that saved successfully and changed nothing.
+        decode_backend = record.get("decode_backend")
         if decode_backend is not None:
             camera["decode_backend"] = decode_backend
         bed_zone = _lookup_bed_zone(bed_zones, canonical_id, record.get("id"))
@@ -906,8 +901,10 @@ def _resolved_tz(live_pulled: PulledWorkerConfig | None, domain: str) -> str:
     No facility-timezone setting exists anywhere else in this codebase, so
     this reuses whatever tz the live externally-pulled window for the same
     domain (or, for bed_exit, the deprecated night_window alias) is already
-    using when one is available, and otherwise falls back to
-    ``ML_API_DETECTION_TZ`` (default ``"UTC"``).
+    using when one is available, and otherwise falls back to a fixed
+    ``"UTC"``. The former ``ML_API_DETECTION_TZ`` override is retired
+    (``core.config._RETIRED_BACKEND_ENV`` fails boot on it), so there is no
+    environment knob here.
     """
     if live_pulled is not None:
         window = live_pulled.detection_windows.get(domain)
@@ -1157,7 +1154,6 @@ def _public_snapshot(
                 "mapping_state": "mapped",
                 "status": "unknown",
                 "decode_backend": None,
-                "fps": None,
                 "created_at": backend_camera.created_at,
                 "space_name": backend_camera.space_name,
                 "floor_name": backend_camera.floor_name,
@@ -1289,29 +1285,6 @@ def _bearer_token(value: str | None) -> str | None:
     return token or None
 
 
-def _default_camera_fps() -> float | None:
-    """Facility-wide processed FPS for live camera streams (worker default 5.0).
-
-    Set ML_DEFAULT_CAMERA_FPS to smooth the live MJPEG/overlay view (detection
-    runs at this rate). Unset -> worker keeps its 5.0 default. GPU headroom
-    permitting, 12-15 gives a noticeably smoother wall without corruption.
-    """
-    return None
-
-
-def _default_frame_stride() -> int | None:
-    """Facility-wide detection cadence divisor (worker default 1 -- every frame).
-
-    Set ML_DEFAULT_FRAME_STRIDE to decouple detection cadence from live view:
-    the worker still decodes/serves the live MJPEG view at fps (see
-    ML_DEFAULT_CAMERA_FPS), but only runs pose+person inference every Nth
-    decoded frame. Unset -> worker keeps its stride-1 default (detect every
-    frame). Lets deployments raise fps for a smoother live wall without
-    overloading inference-bound hardware.
-    """
-    return None
-
-
 def _normalize_floor(value: object) -> int | None:
     """Validate a user-set floor override (issue #155).
 
@@ -1355,33 +1328,6 @@ def _normalize_decode_backend(value: object) -> str | None:
     return normalized
 
 
-def _normalize_fps(value: object) -> float | None:
-    """Validate a per-camera processed-fps override.
-
-    None passes through untouched (not set / clear). A number must be > 0,
-    mirroring the worker's CameraRuntimeConfig.fps validator (Field(gt=0));
-    anything else is a 400, matching _normalize_decode_backend's shape.
-    """
-    if value is None:
-        return None
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="invalid fps")
-    fps = float(value)
-    if fps <= 0:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="invalid fps")
-    return fps
-
-
-def _default_decode_backend() -> str | None:
-    """Facility-wide default decode backend (worker default: auto = NVDEC->CPU fallback).
-
-    Set ML_DEFAULT_DECODE_BACKEND to auto|nvdec|opencv|cpu to steer cameras that
-    do not set a per-camera decode_backend. Unset or invalid -> None (worker
-    keeps its own "auto" default).
-    """
-    return None
-
-
 def _validated_rtsp_url(rtsp_url: str) -> str:
     """Admit only policy-allowed RTSP destinations before store or probe.
 
@@ -1407,8 +1353,10 @@ def _probe_rtsp_url(request: Request, rtsp_url: str) -> ProbeResult:
     settings = get_settings()
     origin = settings.worker_probe_origin.strip().rstrip("/")
     if not origin:
-        # ML_API_WORKER_PROBE_ORIGIN 자체가 미설정 -- worker에 요청을 보낼
-        # 주소가 없다. worker가 살아서 "디코드 실패"라고 답한 것과 전혀
+        # worker probe origin(Settings.worker_probe_origin)이 비어 있다 --
+        # worker에 요청을 보낼 주소가 없다. 옛 ML_API_WORKER_PROBE_ORIGIN
+        # 환경변수는 폐기되어(core.config._RETIRED_BACKEND_ENV) 더는 이 값을
+        # 주입하지 못한다. worker가 살아서 "디코드 실패"라고 답한 것과 전혀
         # 다른 상황이므로 error_class를 채우지 않는다 (이슈 #151).
         return ProbeResult(ok=False, probe_unavailable=True)
     token = _expected_relay_token(request)

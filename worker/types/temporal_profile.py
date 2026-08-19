@@ -1,11 +1,17 @@
 """Explicit owner of ingest fps and per-domain decision rates.
 
 Pipeline defaults and the composition-root schedule must compute from this
-object. The current production identity is ``ingest_fps=5.0``: target fps
-5.0, pose every ingested frame, bed every 30 frames (1/6 Hz).
+object. The current production identity is ``ingest_fps=15.0``: target fps
+15.0, pose every ingested frame, bed every 90 frames (1/6 Hz).
 
-This lane consumes the profile as the seconds-to-frames owner for bed-exit
-dwell. Runtime schedule wiring (todo 2 / todo 13) is not this module's job.
+Design B (todo 13): TemporalProfile is authoritative for ingest fps.
+A relay-declared ``CameraRuntimeConfig.fps`` is a recorded hint and is
+never the CapturePolicy owner. Rejected design A (relay as per-camera
+override) because raising this profile for a 15fps measurement would
+then leave relay-configured cameras at their declared rate and the
+capacity run would measure nothing. Pose extractor cadence remains
+``camera.frame_stride`` until a later todo re-denominates it from
+``pose_fps``; that split is explicit, not a silent fallback.
 """
 
 from __future__ import annotations
@@ -21,10 +27,13 @@ class TemporalProfileError(ValueError):
     """Closed config error for a malformed temporal profile."""
 
 
-# Identity of today's shipped cadence. Later work may raise ingest_fps; the
-# bed decision rate stays 1/6 Hz until that work re-denominates policy.
-_CURRENT_INGEST_FPS: Final = 5.0
-_CURRENT_BED_INTERVAL_FRAMES: Final = 30
+# Identity of today's shipped cadence. Raising ingest_fps re-denominates the
+# bed interval in the same edit so the bed decision rate stays 1/6 Hz: the
+# frame count is the derived value, the Hz is the invariant. 90 frames at
+# 15fps is the same 6 seconds of wall clock as 30 frames at 5fps, so bed-exit
+# decision cadence is unchanged by this raise.
+_CURRENT_INGEST_FPS: Final = 15.0
+_CURRENT_BED_INTERVAL_FRAMES: Final = 90
 _CURRENT_BED_DECISION_HZ: Final = _CURRENT_INGEST_FPS / _CURRENT_BED_INTERVAL_FRAMES
 
 
@@ -95,7 +104,12 @@ class TemporalProfile:
         return intervals
 
     def frames_for_seconds(self, seconds: float) -> int:
-        """Convert a dwell/hysteresis duration into whole frames at ingest fps."""
+        """Convert a dwell/hysteresis duration into whole frames at ingest fps.
+
+        Seconds are the durable unit for bed-exit dwell policy; the frame count
+        is derived, so a future ingest-fps change re-denominates dwell windows
+        automatically instead of silently changing how long they last.
+        """
         numeric = _require_positive_finite("seconds", seconds)
         return max(1, round(numeric * self.ingest_fps))
 

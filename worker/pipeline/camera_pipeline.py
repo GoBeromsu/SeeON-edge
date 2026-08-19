@@ -246,7 +246,9 @@ class CameraPipelinePump:
     def _record_failure(self, error: Exception) -> None:
         self.failure_count += 1
         LOGGER.warning(
-            "camera pipeline pump failed processing a frame",
+            "camera pipeline pump failed processing a frame: camera_id=%s error=%s",
+            self._camera_id,
+            type(error).__name__,
             extra={"camera_id": self._camera_id, "error": type(error).__name__},
         )
 

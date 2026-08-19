@@ -51,6 +51,10 @@ CI runs `uv run pytest -q -m "not real_stack and not heavy and not integration"`
 ```bash
 uv run pytest -m real_stack -k fanout_benchmark
 BENCH_STREAMS=1,2,4,8,13 uv run pytest -m real_stack -k fanout_benchmark
+# 13 cameras at 15fps (todo 13). TemporalProfile is not on origin/main yet
+# (PR #356); BENCH_CAMERA_FPS is the fps owner until that contract lands.
+BENCH_STREAMS=13 BENCH_CAMERA_FPS=15 BENCH_DURATION_SEC=300 BENCH_VIEWERS=0 \
+  BENCH_LABEL=13x15 uv run pytest -m real_stack -k 'test_fanout_benchmark['
 ```
 
 ## Commands

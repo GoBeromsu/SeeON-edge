@@ -159,7 +159,13 @@ from worker.runtime.telemetry.wire import (
     RelayWorkerPayload,
 )
 from worker.runtime.watchdog import InferenceWatchdog
-from worker.types import BusinessEvent, DecisionInput, FramePacket
+from worker.types import (
+    CURRENT_TEMPORAL_PROFILE,
+    BusinessEvent,
+    DecisionInput,
+    FramePacket,
+    TemporalProfile,
+)
 
 LOGGER: Final = logging.getLogger(__name__)
 HEARTBEAT_TIMEOUT_SEC: Final = 0.5
@@ -740,8 +746,10 @@ class WorkerRuntime:
         restart_generation: int = 0,
         build_revision: str | None = None,
         environment_facts_factory: EnvironmentFactsFactory = collect_runtime_environment_facts,
+        temporal_profile: TemporalProfile = CURRENT_TEMPORAL_PROFILE,
     ) -> None:
         self.config = config
+        self.temporal_profile = temporal_profile
         self._module_registry = module_registry or DETECTION_MODULE_REGISTRY
         self._module_versions = config.domains.selected_versions(self._module_registry)
         self._restart_generation = restart_generation
@@ -1026,7 +1034,9 @@ class WorkerRuntime:
         )
         if self._mjpeg_server is None:
             LOGGER.warning(
-                "live view enabled but its server could not bind",
+                "live view enabled but its server could not bind: host=%s port=%d",
+                self._mjpeg_config.host,
+                self._mjpeg_config.port,
                 extra={
                     "host": self._mjpeg_config.host,
                     "port": self._mjpeg_config.port,
@@ -1035,8 +1045,10 @@ class WorkerRuntime:
         else:
             surface = "live view" if self._live_view is not None else "derivative control"
             LOGGER.info(
-                "%s server bound",
+                "%s server bound: host=%s port=%d",
                 surface,
+                self._mjpeg_config.host,
+                self._mjpeg_server.port,
                 extra={
                     "host": self._mjpeg_config.host,
                     "port": self._mjpeg_config.port,
@@ -1481,7 +1493,7 @@ class WorkerRuntime:
             build_applied_camera_state(
                 camera_id=camera.camera_id,
                 effective_decode_backend=resolve_decode_backend(boot.decode, camera.decode_backend),
-                ingest_target_fps=camera.fps,
+                ingest_target_fps=self.temporal_profile.target_fps,
                 module_qualified_ids=tuple(
                     definition.qualified_id
                     for definition in plans[camera.camera_id].definitions.values()
@@ -2079,6 +2091,7 @@ class WorkerRuntime:
             registry=self._ingest_source_registry(),
             runtime=self.config.runtime,
             packet_sink=self._packet_repository,
+            temporal_profile=self.temporal_profile,
         )
         self._record_decode_selection(camera, resolved_backend)
         self.diagnostics.record_decode_backend(
@@ -2144,6 +2157,7 @@ class WorkerRuntime:
             output_adapter_ids=result_merger_names(),
             camera_frame_stride=camera.frame_stride,
             flags=flags,
+            temporal_profile=self.temporal_profile,
         )
         camera_components: Mapping[str, object] = MappingProxyType(
             {} if tracker is None else {"person-tracker": tracker}

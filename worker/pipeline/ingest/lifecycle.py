@@ -3,7 +3,8 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Generator, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Final, Generic, Protocol, TypeVar, final
 
@@ -13,7 +14,7 @@ from worker.interfaces.decode import DecodeAdapter, DecodeSession
 from worker.pipeline.ingest.registry import ResolvedSource, SourceRegistry
 from worker.pipeline.ingest.rtsp import RTSPSource
 from worker.pipeline.ingest.rtsp_url import mask_rtsp_url
-from worker.types import FramePacket
+from worker.types import CURRENT_TEMPORAL_PROFILE, FramePacket
 
 LOGGER: Final = logging.getLogger(__name__)
 
@@ -36,7 +37,7 @@ class CapturePolicy:
     reconnect_initial_backoff_sec: float = 0.25
     reconnect_max_backoff_sec: float = 5.0
     max_total_reconnects: int | None = None
-    target_fps: float = 5.0
+    target_fps: float = CURRENT_TEMPORAL_PROFILE.target_fps
 
 
 @dataclass(frozen=True, slots=True)
@@ -359,12 +360,13 @@ class CameraIngestLoop(Generic[_DecodeConfigT]):
         """
         category = type(error).__name__
         LOGGER.warning(
-            "camera decode respawn: camera_id=%s attempt=%d/%d reason=%s backoff=%.1fs",
+            "camera decode respawn: camera_id=%s attempt=%d/%d reason=%s backoff=%.1fs detail=%s",
             self.camera_id,
             attempt,
             self._spec.decode_supervision.max_respawns,
             category,
             delay_sec,
+            _visible_decode_detail(error),
             extra={
                 "camera_id": self.camera_id,
                 "attempt": attempt,
@@ -376,11 +378,12 @@ class CameraIngestLoop(Generic[_DecodeConfigT]):
     def _record_respawn_exhausted(self, error: Exception, respawns: int) -> None:
         """Leave a permanently dead camera loudly DEGRADED, not silently gone."""
         LOGGER.error(
-            "camera decode respawn budget exhausted: camera_id=%s attempts=%d reason=%s; "
+            "camera decode respawn budget exhausted: camera_id=%s attempts=%d reason=%s detail=%s; "
             "camera stays DEGRADED",
             self.camera_id,
             respawns,
             type(error).__name__,
+            _visible_decode_detail(error),
             extra={
                 "camera_id": self.camera_id,
                 "attempts": respawns,
@@ -540,6 +543,43 @@ def _respawn_backoff(respawns: int) -> float:
         DECODE_RESPAWN_INITIAL_BACKOFF_SEC * (2.0 ** min(respawns, 32)),
         DECODE_RESPAWN_BACKOFF_CAP_SEC,
     )
+
+
+_SAFE_DETAIL_CAUSE_LINKS: Final = 4
+
+
+@contextmanager
+def _logging_boundary() -> Generator[None]:
+    """Contain ordinary property failures on the decode-detail log path."""
+    try:
+        yield
+    except BaseException as error:
+        if not isinstance(error, Exception):
+            raise
+
+
+def _safe_log_detail_of(error: BaseException) -> object:
+    detail: object = None
+    with _logging_boundary():
+        detail = getattr(error, "safe_log_detail", None)
+    return detail
+
+
+def _visible_decode_detail(error: BaseException) -> str:
+    seen: set[int] = set()
+    current: BaseException | None = error
+    for _ in range(_SAFE_DETAIL_CAUSE_LINKS + 1):
+        if current is None:
+            break
+        marker = id(current)
+        if marker in seen:
+            break
+        seen.add(marker)
+        detail = _safe_log_detail_of(current)
+        if isinstance(detail, str) and detail.strip():
+            return f"{type(current).__name__}: {detail}"
+        current = current.__cause__
+    return "unavailable"
 
 
 __all__ = [

@@ -91,7 +91,7 @@ def test_camera_runtime_config_defaults_to_opencv_decode_backend() -> None:
     config = CameraRuntimeConfig(**_camera())
 
     assert config.decode_backend is None
-    assert config.fps == 5.0
+    assert config.fps == 15.0
     assert config.inference_rtsp_url == "rtsp://camera.local/trackID=2"
     assert config.main_rtsp_url is None
 

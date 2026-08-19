@@ -16,6 +16,7 @@ import worker.adapters.decode.pyav_preserving as preserving_module
 from contracts.frame import Frame
 from worker.adapters.decode.nvdec_cuvid.input_queue import DecoderInputQueue
 from worker.adapters.decode.nvdec_cuvid.models import NvdecCuvidConfig
+from worker.adapters.decode.pyav_demux import PyAvPacketDemuxer
 from worker.adapters.decode.pyav_preserving import PyAvPreservingAdapter
 from worker.pipeline.ingest.rtsp import RTSPSource
 from worker.pipeline.output.evidence.packet_ring import (
@@ -552,3 +553,100 @@ def test_transient_decode_silence_returns_none_within_read_boundary(
     assert session.read() is None
     assert spawner.processes[0].read_timeouts == [pytest.approx(0.125)]
     session.close()
+
+
+def test_current_wrappers_keep_generic_runtimeerror_and_cause_chain(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Baseline: both wrappers stay generic RuntimeError with raise-from."""
+    from worker.adapters.decode.nvdec_cuvid.errors import NvdecUnavailableError
+
+    # Given
+    cause = NvdecUnavailableError("cuvid decode failed", returncode=69)
+    process = _RejectingProcess(cause)
+    decoder_input = DecoderInputQueue(process)
+
+    # When / Then: input-queue wrapper
+    try:
+        assert decoder_input.offer(_source_packet(0))
+        decoder_input.join(5.0)
+        with pytest.raises(
+            RuntimeError,
+            match=r"packet-preserving NVDEC decode failed \(NvdecUnavailableError\)",
+        ) as raised:
+            decoder_input.raise_if_failed()
+        assert type(raised.value) is RuntimeError
+        assert raised.value.__cause__ is cause
+        assert "cuvid decode failed" not in str(raised.value)
+    finally:
+        decoder_input.abort()
+        decoder_input.join(2.0)
+
+    # And: session demux wrapper keeps the same contract via the public adapter.
+    source = tmp_path / "demux-wrapper.mp4"
+    _encode(source)
+    def failing_run(self: object, *args: object, **kwargs: object) -> None:
+        del self, args, kwargs
+        raise OSError("broken pipe")
+
+    monkeypatch.setattr(PyAvPacketDemuxer, "run", failing_run)
+    session = PyAvPreservingAdapter(
+        _ring(),
+        decode_backend="nvdec",
+        process_spawner=lambda _args, _frame_size: _FakeDecoderProcess(),
+    ).open(_config(source))
+    session.set_stream_identity("boot-1", 1)
+    assert session.wait_demux_complete(10)
+    with pytest.raises(
+        RuntimeError,
+        match=r"packet-preserving NVDEC decode failed \(OSError\)",
+    ) as demuxed:
+        _ = session.read()
+    assert type(demuxed.value) is RuntimeError
+    assert isinstance(demuxed.value.__cause__, OSError)
+    assert "broken pipe" not in str(demuxed.value)
+    session.close()
+
+
+def test_raise_if_failed_stores_safe_process_detail_on_nvdec_reason() -> None:
+    """The wrapper stays generic; the chained NVDEC reason carries the safe line."""
+    from worker.adapters.decode.nvdec_cuvid.errors import NvdecUnavailableError
+
+    @final
+    class _ExitedProcess:
+        failure_returncode = 69
+        failure_detail = "cuvid decode failed"
+
+        def write_packet(self, payload: bytes) -> None:
+            del payload
+
+        def close_input(self) -> None:
+            return
+
+        def read_frame(self, timeout_sec: float) -> bytes | None:
+            del timeout_sec
+            return None
+
+        def reap(self, timeout_sec: float) -> int | None:
+            del timeout_sec
+            return 69
+
+    decoder_input = DecoderInputQueue(_ExitedProcess())
+    try:
+        with pytest.raises(NvdecUnavailableError) as raised:
+            decoder_input.raise_if_failed()
+        assert type(raised.value) is NvdecUnavailableError
+        assert raised.value.returncode == 69
+        assert "cuvid decode failed" in raised.value.reason
+        assert raised.value.safe_log_detail == raised.value.reason
+        wrapper = RuntimeError(
+            f"packet-preserving NVDEC decode failed ({type(raised.value).__name__})"
+        )
+        wrapper.__cause__ = raised.value
+        assert type(wrapper) is RuntimeError
+        assert wrapper.__cause__ is raised.value
+        assert "cuvid decode failed" not in str(wrapper)
+    finally:
+        decoder_input.abort()
+        decoder_input.join(2.0)
