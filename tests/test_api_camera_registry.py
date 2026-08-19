@@ -597,6 +597,90 @@ def test_worker_config_ignores_retired_default_camera_fps(
     assert camera["camera_id"] == "camera-1"
 
 
+def test_public_camera_tolerates_legacy_stored_fps_residue() -> None:
+    """Rows written before the fps control was removed still carry the key.
+
+    fps was never a schema column; it lived inside the cameras_json blob, so
+    removing the control leaves stray ``fps`` keys on every previously-saved
+    camera rather than migrating them away. The read path must ignore that
+    residue instead of tripping on it, and must not resurrect it in the public
+    payload. Verified against production shape: all 13 live cameras carry
+    ``fps: 15.0`` in their stored blob at the time of removal.
+    """
+    legacy_record = {
+        "id": "camera-1",
+        "label": "Lobby",
+        "rtsp_url": "rtsp://camera/stream",
+        "space_id": "space-1",
+        "status": "online",
+        "decode_backend": None,
+        "floor": None,
+        # Residue from the removed per-camera fps control.
+        "fps": 15.0,
+    }
+
+    public = public_camera(legacy_record)
+
+    assert "fps" not in public
+    assert public["id"] == "camera-1"
+    assert public["label"] == "Lobby"
+    assert public["status"] == "online"
+
+
+def test_camera_fps_is_rejected_and_never_reaches_the_worker(tmp_path) -> None:
+    """The per-camera fps control is gone, not merely ignored.
+
+    After design B the worker's TemporalProfile owns ingest pacing and a
+    relay-declared per-camera fps never paced anything. Leaving the field
+    accepted would keep a dead control that saves successfully on the
+    dashboard and changes nothing, so both create and patch must now reject
+    it outright rather than silently absorb it.
+    """
+    app = create_app(lifespan=no_lifespan)
+    app.state.edge_relay_token = "relay-token"
+    store = app.state.camera_registry = CameraRegistryStore(tmp_path / "catalog.sqlite3")
+    store.create(
+        camera_id="camera-1",
+        label="Lobby",
+        rtsp_url="rtsp://camera/stream",
+        space_id="space-1",
+        status="online",
+    )
+
+    with TestClient(app) as client:
+        _login(client)
+
+        patched = client.patch(
+            "/api/v1/cameras/camera-1",
+            headers=AUTH,
+            json={"fps": 12},
+        )
+        assert patched.status_code == 422
+
+        created = client.post(
+            "/api/v1/cameras",
+            headers=AUTH,
+            json={
+                "label": "Hall",
+                "rtsp_url": "rtsp://camera/hall",
+                "fps": 12,
+            },
+        )
+        assert created.status_code == 422
+
+        listed = client.get("/api/v1/cameras", headers=AUTH)
+        worker_config = client.get(
+            "/api/v1/cameras/worker-config",
+            headers={"X-Edge-Relay-Token": "relay-token"},
+        )
+
+    assert listed.status_code == 200
+    assert all("fps" not in camera for camera in listed.json()["cameras"])
+
+    assert worker_config.status_code == 200
+    assert all("fps" not in camera for camera in worker_config.json()["cameras"])
+
+
 def test_worker_config_ignores_retired_default_frame_stride(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -767,7 +851,6 @@ def test_example_camera_registry_seed_is_loadable_and_sanitized() -> None:
         "mapping_pending": False,
         "status": "unknown",
         "decode_backend": None,
-        "fps": None,
         "floor": None,
         "created_at": "2026-01-01T00:00:00.000Z",
         "never_connected": None,
@@ -1162,140 +1245,6 @@ def test_worker_config_prefers_record_decode_backend_over_env_default(
     assert camera["decode_backend"] == "nvdec"
 
 
-def test_patch_camera_sets_fps_override_and_worker_config_emits_it(tmp_path) -> None:
-    app = create_app(lifespan=no_lifespan)
-    app.state.edge_relay_token = "relay-token"
-    store = app.state.camera_registry = CameraRegistryStore(tmp_path / "catalog.sqlite3")
-    store.create(
-        camera_id="camera-1",
-        label="Lobby",
-        rtsp_url="rtsp://camera/stream",
-        space_id="space-1",
-        status="online",
-    )
-
-    with TestClient(app) as client:
-        _login(client)
-        patched = client.patch(
-            "/api/v1/cameras/camera-1",
-            headers=AUTH,
-            json={"fps": 12},
-        )
-        assert patched.status_code == 200
-        assert patched.json()["fps"] == 12.0
-
-        worker_config = client.get(
-            "/api/v1/cameras/worker-config",
-            headers={"X-Edge-Relay-Token": "relay-token"},
-        )
-
-    assert worker_config.status_code == 200
-    camera = worker_config.json()["cameras"][0]
-    assert camera["fps"] == 12.0
-    assert camera["camera_id"] == "camera-1"
-
-
-def test_patch_camera_clears_fps_override_with_explicit_null(tmp_path) -> None:
-    app = create_app(lifespan=no_lifespan)
-    app.state.edge_relay_token = "relay-token"
-    store = app.state.camera_registry = CameraRegistryStore(tmp_path / "catalog.sqlite3")
-    store.create(
-        camera_id="camera-1",
-        label="Lobby",
-        rtsp_url="rtsp://camera/stream",
-        space_id="space-1",
-        status="online",
-        fps=12.0,
-    )
-
-    with TestClient(app) as client:
-        _login(client)
-        patched = client.patch(
-            "/api/v1/cameras/camera-1",
-            headers=AUTH,
-            json={"fps": None},
-        )
-
-    assert patched.status_code == 200
-    assert patched.json()["fps"] is None
-    assert store.get("camera-1")["fps"] is None
-
-
-def test_patch_camera_rejects_invalid_fps(tmp_path) -> None:
-    app = create_app(lifespan=no_lifespan)
-    app.state.edge_relay_token = "relay-token"
-    store = app.state.camera_registry = CameraRegistryStore(tmp_path / "catalog.sqlite3")
-    store.create(
-        camera_id="camera-1",
-        label="Lobby",
-        rtsp_url="rtsp://camera/stream",
-        space_id="space-1",
-        status="online",
-    )
-
-    with TestClient(app) as client:
-        _login(client)
-        patched = client.patch(
-            "/api/v1/cameras/camera-1",
-            headers=AUTH,
-            json={"fps": 0},
-        )
-
-    assert patched.status_code == 400
-
-
-def test_create_camera_rejects_invalid_fps(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
-    def fake_urlopen(request, timeout: float) -> FakeHTTPResponse:
-        return FakeHTTPResponse({"ok": False, "error_class": "timeout"})
-
-    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
-    app = create_app(lifespan=no_lifespan)
-    app.state.edge_relay_token = "relay-token"
-    app.state.camera_registry = CameraRegistryStore(tmp_path / "catalog.sqlite3")
-
-    with TestClient(app) as client:
-        _login(client)
-        created = client.post(
-            "/api/v1/cameras",
-            headers=AUTH,
-            json={
-                "label": "Lobby",
-                "rtsp_url": "rtsp://camera.local/live",
-                "fps": -1,
-            },
-        )
-
-    assert created.status_code == 400
-
-
-def test_worker_config_prefers_record_fps_over_env_default(
-    tmp_path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setenv("ML_DEFAULT_CAMERA_FPS", "8")
-    app = create_app(lifespan=no_lifespan)
-    app.state.edge_relay_token = "relay-token"
-    store = app.state.camera_registry = CameraRegistryStore(tmp_path / "catalog.sqlite3")
-    store.create(
-        camera_id="camera-1",
-        label="Lobby",
-        rtsp_url="rtsp://camera/stream",
-        space_id="space-1",
-        status="online",
-        fps=20.0,
-    )
-
-    with TestClient(app) as client:
-        _login(client)
-        worker_config = client.get(
-            "/api/v1/cameras/worker-config",
-            headers={"X-Edge-Relay-Token": "relay-token"},
-        )
-
-    assert worker_config.status_code == 200
-    camera = worker_config.json()["cameras"][0]
-    assert camera["fps"] == 20.0
-
-
 def test_create_camera_sets_floor(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
     def fake_urlopen(request, timeout: float) -> FakeHTTPResponse:
         return FakeHTTPResponse({"ok": False, "error_class": "timeout"})
@@ -1512,7 +1461,6 @@ def test_list_cameras_includes_backend_only_roster_camera(tmp_path) -> None:
             "mapping_state": "mapped",
             "status": "unknown",
             "decode_backend": None,
-            "fps": None,
             "floor": None,
             "created_at": "2026-07-10T00:00:00.000Z",
             "space_name": "101호",
@@ -1566,7 +1514,6 @@ def test_list_cameras_includes_backend_only_roster_camera_without_created_at(tmp
             "mapping_state": "mapped",
             "status": "unknown",
             "decode_backend": None,
-            "fps": None,
             "floor": None,
             "created_at": None,
             "space_name": "101호",
