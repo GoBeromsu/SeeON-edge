@@ -75,12 +75,16 @@ _MIN_OBSERVABILITY: Final = 0.35
 
 # Posture bands. Built on lower_in_frac + hip_depth + torso_in_frac.
 # torso_angle is NEVER a gate -- see module docstring.
+# Deep-inside split between measured IN_BED (+0.257) and SITTING_UP (+0.236).
+# Without torso_angle the plan's IN_BED/SITTING_UP bands overlap; this is the
+# only axis that still separates the two measured postures.
+_IN_BED_HIP_DEPTH_MIN: Final = 0.24
 _IN_BED_TORSO_MIN: Final = 0.80
-_IN_BED_HIP_DEPTH_MIN: Final = 0.05
 _IN_BED_LOWER_MIN: Final = 0.50
 
-_SITTING_UP_TORSO_MIN: Final = 0.70
-_SITTING_UP_HIP_DEPTH_MIN: Final = 0.03
+# E2 sitting-up shares EDGE's torso=0.55 / hip_depth=0.0 and differs only by
+# lower_in_frac=0.80, so the sitting-up floor is the EDGE torso floor, not 0.70.
+_SITTING_UP_TORSO_MIN: Final = 0.50
 _SITTING_UP_LOWER_MIN: Final = 0.50
 
 _EDGE_TORSO_MIN: Final = 0.50
@@ -208,13 +212,17 @@ class BedExitStateMachine:
         track = self._tracks.get(track_id)
         return BedExitState.ABSENT if track is None else track.state
 
+    def known_track_ids(self) -> tuple[int, ...]:
+        return tuple(self._tracks)
+
     def observe(self, features: BedPoseFeatures) -> BedExitStateDecision | None:
         """Advance one live track. ``None`` means no state decision."""
+        if not features.bed_polygon_valid:
+            # All-zeros trap (i): do not invent EDGE_SITTING from hip_depth=0,
+            # and do not register the track. No state decision.
+            return None
         track = self._tracks.setdefault(features.track_id, _TrackState())
         previous = track.state
-        if not features.bed_polygon_valid:
-            # All-zeros trap (i): do not invent EDGE_SITTING from hip_depth=0.
-            return None
 
         instant = _classify(features)
         threshold = self._dwell_threshold(previous, instant)
@@ -370,35 +378,23 @@ def _classify(features: BedPoseFeatures) -> _Instant:
     hip = features.hip_depth
     keypoints = features.keypoint_in_frac
 
-    # EDGE first among the posture bands: rim-perched hips sit inside the
-    # mattress (hip_depth ~ +0.043) with legs off (lower ~ 0). If IN_BED
-    # were tried first, a torso=1.0 / hip=+0.043 pose with legs off would
-    # miss IN_BED (hip_depth < +0.05) and fall through; EDGE is the
-    # intended home for that geometry.
+    # EDGE first: rim-perched hips (hip_depth ~ +0.043) with legs off
+    # (lower ~ 0). Todo 6's mid-mattress "EDGE" fixture (hip=+0.233)
+    # fails |hip| <= 0.08 and must NOT land here.
     if (
         torso >= _EDGE_TORSO_MIN
         and abs(hip) <= _EDGE_HIP_DEPTH_ABS_MAX
         and lower <= _EDGE_LOWER_MAX
     ):
         return _Instant.EDGE_SITTING
-    if torso >= _IN_BED_TORSO_MIN and hip >= _IN_BED_HIP_DEPTH_MIN and lower >= _IN_BED_LOWER_MIN:
-        # SITTING_UP and IN_BED share torso/lower ~ 1.0. Discriminator is
-        # hip_depth: IN_BED measured +0.257, SITTING_UP +0.236. Both sit
-        # well above +0.05. Treat any deep-inside, high-lower pose as
-        # IN_BED; SITTING_UP is the shallower remaining high-lower band.
-        if hip >= 0.24:
-            return _Instant.IN_BED
-        return _Instant.SITTING_UP
-    if (
-        torso >= _SITTING_UP_TORSO_MIN
-        and hip >= _SITTING_UP_HIP_DEPTH_MIN
-        and lower >= _SITTING_UP_LOWER_MIN
-    ):
-        return _Instant.SITTING_UP
     if torso <= _OUT_TORSO_MAX and hip <= _OUT_HIP_DEPTH_MAX and keypoints <= _OUT_KEYPOINT_MAX:
         return _Instant.OUT_OF_BED
-    # Hysteresis leftovers (e.g. mid-transition) stay unresolved so the
-    # committed state holds rather than flipping on a single noisy frame.
+    if torso >= _IN_BED_TORSO_MIN and hip >= _IN_BED_HIP_DEPTH_MIN and lower >= _IN_BED_LOWER_MIN:
+        return _Instant.IN_BED
+    if torso >= _SITTING_UP_TORSO_MIN and lower >= _SITTING_UP_LOWER_MIN:
+        return _Instant.SITTING_UP
+    # Hysteresis leftovers (e.g. mid-transition, or mid-mattress legs-off)
+    # stay unresolved so the committed state holds.
     return _Instant.UNRESOLVED
 
 
