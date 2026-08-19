@@ -18,12 +18,14 @@ from worker.runtime.config.camera_models import CameraRuntimeConfig
 from worker.types import CURRENT_TEMPORAL_PROFILE, TemporalProfile, TemporalProfileError
 
 
-def test_current_5fps_derived_values_match_production_literals() -> None:
+def test_current_15fps_derived_values_match_production_literals() -> None:
     """Pin today's derived production constants.
 
     target_fps, pose interval, bed interval, and frame_interval_sec are the
-    values a 5fps worker actually ships. The TemporalProfile refactor is
-    identity-preserving only if this test still passes unchanged.
+    values a 15fps worker actually ships. The identity moved 5.0 -> 15.0 when
+    the profile was raised; the bed interval moved 30 -> 90 in the same edit
+    so the bed decision rate stayed 1/6 Hz (6.0s wall clock) rather than
+    tripling to 1/2 Hz.
     """
     policy = CapturePolicy()
     camera = CameraRuntimeConfig(
@@ -34,12 +36,11 @@ def test_current_5fps_derived_values_match_production_literals() -> None:
     scheduler = Scheduler()
     source = RTSPSource(object(), object())
 
-    assert policy.target_fps == 5.0
-    assert camera.fps == 5.0
+    assert policy.target_fps == 15.0
+    assert camera.fps == 15.0
     assert scheduler.task_intervals["pose"] == 1
-    assert scheduler.task_intervals["bed"] == 30
-    assert source._frame_interval_sec == 0.2  # noqa: SLF001
-    assert source._frame_interval_sec == 1.0 / 5.0  # noqa: SLF001
+    assert scheduler.task_intervals["bed"] == 90
+    assert source._frame_interval_sec == pytest.approx(1.0 / 15.0)  # noqa: SLF001
 
 
 def test_temporal_profile_at_5fps_computes_current_derived_constants() -> None:
@@ -64,8 +65,8 @@ def test_temporal_profile_at_5fps_computes_current_derived_constants() -> None:
     assert policy.target_fps == 5.0
     assert scheduler.task_intervals == {"pose": 1, "bed": 30}
     assert source._frame_interval_sec == 0.2  # noqa: SLF001
-    assert CURRENT_TEMPORAL_PROFILE.ingest_fps == 5.0
-    assert CURRENT_TEMPORAL_PROFILE.task_intervals() == {"pose": 1, "bed": 30}
+    assert CURRENT_TEMPORAL_PROFILE.ingest_fps == 15.0
+    assert CURRENT_TEMPORAL_PROFILE.task_intervals() == {"pose": 1, "bed": 90}
 
 
 @pytest.mark.parametrize("ingest_fps", [0, -1.0, nan, inf, True, "5"])
@@ -88,9 +89,29 @@ def test_schedule_rule_resolve_requires_an_explicit_temporal_profile() -> None:
 
     with pytest.raises(TypeError):
         bed.resolve(1)  # type: ignore[call-arg]
-    assert bed.resolve(1, CURRENT_TEMPORAL_PROFILE) == 30
+    assert bed.resolve(1, CURRENT_TEMPORAL_PROFILE) == 90
     assert bed.resolve(1, fifteen) == 90
     assert fifteen.decision_interval_frames("bed") == 90
+
+
+def test_raising_ingest_fps_preserves_the_bed_decision_wall_clock() -> None:
+    """The bed Hz is the invariant; the frame count is the derived value.
+
+    Raising ingest fps must re-denominate the bed interval in the same edit.
+    If a future raise changes only ``_CURRENT_INGEST_FPS`` and leaves the
+    frame count alone, the decision rate silently multiplies and bed-exit
+    behaviour changes. This pins the wall clock instead of the frame count so
+    that regression fails loudly here.
+    """
+    assert CURRENT_TEMPORAL_PROFILE.decision_hz["bed"] == pytest.approx(1.0 / 6.0)
+
+    bed_frames = CURRENT_TEMPORAL_PROFILE.decision_interval_frames("bed")
+    wall_clock_sec = bed_frames / CURRENT_TEMPORAL_PROFILE.ingest_fps
+    assert wall_clock_sec == pytest.approx(6.0)
+
+    legacy = TemporalProfile(ingest_fps=5.0)
+    legacy_wall_clock = legacy.decision_interval_frames("bed") / legacy.ingest_fps
+    assert legacy_wall_clock == pytest.approx(wall_clock_sec)
 
 
 def test_compile_time_and_activation_bed_interval_agree_at_15fps() -> None:

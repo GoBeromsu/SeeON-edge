@@ -1,8 +1,8 @@
 """Explicit owner of ingest fps and per-domain decision rates.
 
 Pipeline defaults and the composition-root schedule must compute from this
-object. The current production identity is ``ingest_fps=5.0``: target fps
-5.0, pose every ingested frame, bed every 30 frames (1/6 Hz).
+object. The current production identity is ``ingest_fps=15.0``: target fps
+15.0, pose every ingested frame, bed every 90 frames (1/6 Hz).
 
 Design B (todo 13): TemporalProfile is authoritative for ingest fps.
 A relay-declared ``CameraRuntimeConfig.fps`` is a recorded hint and is
@@ -27,10 +27,13 @@ class TemporalProfileError(ValueError):
     """Closed config error for a malformed temporal profile."""
 
 
-# Identity of today's shipped cadence. Later work may raise ingest_fps; the
-# bed decision rate stays 1/6 Hz until that work re-denominates policy.
-_CURRENT_INGEST_FPS: Final = 5.0
-_CURRENT_BED_INTERVAL_FRAMES: Final = 30
+# Identity of today's shipped cadence. Raising ingest_fps re-denominates the
+# bed interval in the same edit so the bed decision rate stays 1/6 Hz: the
+# frame count is the derived value, the Hz is the invariant. 90 frames at
+# 15fps is the same 6 seconds of wall clock as 30 frames at 5fps, so bed-exit
+# decision cadence is unchanged by this raise.
+_CURRENT_INGEST_FPS: Final = 15.0
+_CURRENT_BED_INTERVAL_FRAMES: Final = 90
 _CURRENT_BED_DECISION_HZ: Final = _CURRENT_INGEST_FPS / _CURRENT_BED_INTERVAL_FRAMES
 
 
