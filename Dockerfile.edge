@@ -2,21 +2,7 @@
 
 FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim
 
-ARG SOURCE_REVISION
-RUN if [ "$SOURCE_REVISION" = "0000000000000000000000000000000000000000" ] \
-      || [ "${#SOURCE_REVISION}" -ne 40 ] \
-      || printf '%s' "$SOURCE_REVISION" | grep -Eq '[^0123456789abcdef]'; then \
-      printf '%s\n' 'SOURCE_REVISION must be a non-zero 40-character lowercase hexadecimal revision' >&2; \
-      exit 1; \
-    fi; \
-    install -d -m 0755 /opt/seeon; \
-    printf '%s\n' "$SOURCE_REVISION" > /opt/seeon/ml-worker-image-revision; \
-    chmod 0444 /opt/seeon/ml-worker-image-revision
-LABEL org.opencontainers.image.revision="${SOURCE_REVISION}" \
-      org.opencontainers.image.source="SeniorAILab/eldercare-fall-ml-v2"
-
-ENV ML_WORKER_BUILD_REVISION="${SOURCE_REVISION}" \
-    UV_LINK_MODE=copy \
+ENV UV_LINK_MODE=copy \
     UV_PYTHON_DOWNLOADS=never \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -88,5 +74,19 @@ RUN mkdir -p /app/models/fall/lstm-runtime /app/models/pose /app/models/bed
 # volume sprawl and derived-image RUN neutralization — compose.edge.yaml
 # attaches a named volume at this same path instead.
 RUN mkdir -p /root/.local/state/ml-worker
+
+ARG SOURCE_REVISION
+RUN if [ "$SOURCE_REVISION" = "0000000000000000000000000000000000000000" ] \
+      || [ "${#SOURCE_REVISION}" -ne 40 ] \
+      || printf '%s' "$SOURCE_REVISION" | grep -Eq '[^0123456789abcdef]'; then \
+      printf '%s\n' 'SOURCE_REVISION must be a non-zero 40-character lowercase hexadecimal revision' >&2; \
+      exit 1; \
+    fi; \
+    install -d -m 0755 /opt/seeon; \
+    printf '%s\n' "$SOURCE_REVISION" > /opt/seeon/ml-worker-image-revision; \
+    chmod 0444 /opt/seeon/ml-worker-image-revision
+LABEL org.opencontainers.image.revision="${SOURCE_REVISION}" \
+      org.opencontainers.image.source="SeniorAILab/eldercare-fall-ml-v2"
+ENV ML_WORKER_BUILD_REVISION="${SOURCE_REVISION}"
 
 CMD ["python", "-m", "worker"]
