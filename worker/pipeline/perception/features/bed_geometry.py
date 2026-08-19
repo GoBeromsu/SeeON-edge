@@ -355,7 +355,11 @@ def _points_inside(points: NDArray[np.float64], polygon: NDArray[np.float64]) ->
     return np.asarray(crosses.sum(axis=1) % 2 == 1)
 
 
-def _min_edge_distance(x_coordinate: float, y_coordinate: float, polygon: NDArray[np.float64]) -> float:
+def _min_edge_distance(
+    x_coordinate: float,
+    y_coordinate: float,
+    polygon: NDArray[np.float64],
+) -> float:
     point = np.asarray((x_coordinate, y_coordinate), dtype=np.float64)
     starts = polygon
     ends = np.roll(polygon, -1, axis=0)

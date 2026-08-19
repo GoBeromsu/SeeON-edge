@@ -19,6 +19,7 @@ from worker.pipeline.perception import (
     build_decision_input,
     build_frame_observation,
 )
+from worker.pipeline.perception.decision_input import bed_pose_features_for
 from worker.pipeline.perception.scene_state import BedRegionCacheCounterSnapshot
 from worker.types import DecisionInput, FramePacket, ModuleResult
 
@@ -184,6 +185,12 @@ class CompositeExtractor:
                 bed_region=BedRegionDebugSnapshot(
                     source=self.scene_state.bed_region_freshness,
                     empty_cycles=self.scene_state.scheduled_empty_bed_cycles,
+                ),
+                bed_pose_features=bed_pose_features_for(
+                    final_observation,
+                    frame_width=packet.width,
+                    frame_height=packet.height,
+                    scene_state=self.scene_state,
                 ),
             )
         if self._bed_region_recorder is not None:

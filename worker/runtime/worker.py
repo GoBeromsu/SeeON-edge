@@ -1576,6 +1576,8 @@ class WorkerRuntime:
         scene = SceneState(
             camera.camera_id,
             persisted_bed_regions=persisted_bed_regions,
+            bed_zone_image_width=camera.bed_zone_image_width,
+            bed_zone_image_height=camera.bed_zone_image_height,
         )
         scheduler = Scheduler(dict(resolved_plan.schedule))
         analytics = CompositeExtractor(

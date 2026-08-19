@@ -8,8 +8,6 @@ sites must still build with the original seven arguments.
 from __future__ import annotations
 
 import math
-import subprocess
-import sys
 from dataclasses import fields
 from pathlib import Path
 
@@ -189,10 +187,11 @@ _IN_BED_POINTS: dict[int, tuple[float, float]] = {
     15: (740.0, 760.0),
     16: (860.0, 760.0),
 }
-# Torso still on the mattress; knees and ankles on the floor below the bed.
+# Hips still on the mattress; shoulders above the headboard and legs on the
+# floor. torso_in_frac and lower_in_frac both drop versus IN_BED.
 _EDGE_SITTING_POINTS: dict[int, tuple[float, float]] = {
-    5: (700.0, 360.0),
-    6: (900.0, 360.0),
+    5: (700.0, 220.0),
+    6: (900.0, 220.0),
     11: (720.0, 520.0),
     12: (880.0, 520.0),
     13: (730.0, 920.0),
@@ -255,8 +254,9 @@ def test_in_bed_and_edge_sitting_separate_on_lower_body() -> None:
     assert edge.bed_polygon_valid is True
     assert in_bed.torso_in_frac == pytest.approx(1.0)
     assert in_bed.lower_in_frac == pytest.approx(1.0)
-    assert edge.torso_in_frac == pytest.approx(1.0)
+    assert edge.torso_in_frac == pytest.approx(0.5)
     assert edge.lower_in_frac == pytest.approx(0.0)
+    assert in_bed.torso_in_frac > edge.torso_in_frac
     assert in_bed.lower_in_frac > edge.lower_in_frac
     assert out.torso_in_frac == pytest.approx(0.0)
     assert out.lower_in_frac == pytest.approx(0.0)
@@ -374,3 +374,54 @@ def test_compute_frame_skips_untracked_poses() -> None:
     assert len(frame.items) == 1
     assert frame.items[0].track_id == 3
     assert frame.items[0].torso_in_frac == pytest.approx(1.0)
+
+
+def test_seven_arg_construction_defaults_empty_bed_pose_features() -> None:
+    decision_input = _seven_arg_decision_input()
+    assert decision_input.bed_pose_features.items == ()
+
+
+def test_build_decision_input_populates_bed_pose_features() -> None:
+    observation = FrameObservation(
+        poses=(_pose(_IN_BED_POINTS, scale=2.0),),
+        regions=((_bed_box(),), ()),
+        track_ids=(4,),
+    )
+    scene = SceneState(
+        camera_id="cam-wire",
+        persisted_bed_regions=(_bed_box(),),
+        bed_zone_image_width=_FRAME_W,
+        bed_zone_image_height=_FRAME_H,
+    )
+    decision_input = build_decision_input(
+        observation,
+        frame_width=_POSE_W,
+        frame_height=_POSE_H,
+        live_track_ids=(4,),
+        time_sec=1.0,
+        frame_index=1,
+        scene_state=scene,
+        bed_scheduled=False,
+        bed_interval=30,
+    )
+    matched = _features_for(_IN_BED_POINTS)
+    scaled = decision_input.bed_pose_features.items[0]
+    assert scaled.track_id == 4
+    assert scaled.torso_in_frac == pytest.approx(matched.torso_in_frac)
+    assert scaled.lower_in_frac == pytest.approx(matched.lower_in_frac)
+    assert scaled.hip_depth == pytest.approx(matched.hip_depth, abs=1e-6)
+
+
+def test_domains_have_no_direct_numpy_import() -> None:
+    """The scalar contract exists so domains never import numpy themselves.
+
+    ``import worker.domains.bed_exit`` still pulls numpy transitively through
+    ``contracts.observation``; that is pre-existing and not this boundary.
+    """
+    offenders: list[str] = []
+    for path in (_REPO_ROOT / "worker" / "domains").rglob("*.py"):
+        for line_no, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+            stripped = line.lstrip()
+            if stripped.startswith("import numpy") or stripped.startswith("from numpy"):
+                offenders.append(f"{path.relative_to(_REPO_ROOT)}:{line_no}:{line.rstrip()}")
+    assert offenders == []
