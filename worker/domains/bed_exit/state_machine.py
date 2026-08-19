@@ -234,10 +234,15 @@ class BedExitStateMachine:
         if committed is BedExitState.IN_BED:
             # A confirmed return to bed arms a fresh exit; rising-edge only.
             track.fired = False
+        live_exit = previous in (
+            BedExitState.EDGE_SITTING,
+            BedExitState.SITTING_UP,
+            BedExitState.IN_BED,
+        )
         would_trigger = (
             entered
             and committed is BedExitState.OUT_OF_BED
-            and previous in (BedExitState.EDGE_SITTING, BedExitState.SITTING_UP, BedExitState.IN_BED)
+            and live_exit
             and not track.fired
         )
         if would_trigger:
