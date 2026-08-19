@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import threading
 from typing import final
 
@@ -105,18 +106,24 @@ def test_poll_timeout_does_not_count_as_a_feed_or_stop_the_loop() -> None:
     assert not thread.is_alive()
 
 
-def test_a_raising_recorder_is_isolated_and_the_loop_continues() -> None:
+def test_a_raising_recorder_is_isolated_and_the_loop_continues(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     bus = BoundedFrameBus()
     recorder = _RaisingOnFirstCallRecorder()
     feeder = ClipFrameFeeder("cam-a", bus.evidence, recorder, poll_timeout_sec=0.02)
     thread = threading.Thread(target=feeder.run, daemon=True)
     thread.start()
 
-    bus.publish(_packet("cam-a", 1))
-    assert recorder.raised.wait(2.0)
-    second = _packet("cam-a", 2)
-    bus.publish(second)
-    assert recorder.called.wait(2.0)
+    first = _packet("cam-a", 1)
+    with caplog.at_level(
+        logging.WARNING, logger="worker.pipeline.output.evidence.clip_frame_feeder"
+    ):
+        bus.publish(first)
+        assert recorder.raised.wait(2.0)
+        second = _packet("cam-a", 2)
+        bus.publish(second)
+        assert recorder.called.wait(2.0)
 
     feeder.stop()
     thread.join(timeout=2.0)
@@ -125,6 +132,16 @@ def test_a_raising_recorder_is_isolated_and_the_loop_continues() -> None:
     assert feeder.failure_count == 1
     assert feeder.fed_count == 1
     assert recorder.calls == [second]
+    assert first.released
+    record = next(
+        item
+        for item in caplog.records
+        if "clip frame feeder failed to admit a frame" in item.getMessage()
+    )
+    message = record.getMessage()
+    assert "camera_id=cam-a" in message
+    assert "error=RuntimeError" in message
+    assert "recorder admission exploded" not in message
 
 
 def test_stop_terminates_the_loop_and_run_returns() -> None:

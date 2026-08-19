@@ -1,5 +1,12 @@
-import type { Camera } from '@/shared/api/client';
+import type { Camera, RuntimeDetectionDiagnostics } from '@/shared/api/client';
 import { statusBadgeClassName } from '@/shared/ui/StatusBadge';
+import {
+  blindGuidanceFor,
+  detectionLabel,
+  detectionStateOf,
+  DetectionStateIcon,
+  detectionVariant,
+} from '@/features/operations/detectionStatus';
 
 /** 파싱 못 하는 값은 시각을 지어내지 않고 그대로 모른다고 말한다. */
 function formatConnectedAt(value: string): string {
@@ -11,10 +18,16 @@ function formatConnectedAt(value: string): string {
 
 type CameraInfoCardProps = {
   camera: Camera;
+  /** 없으면(구형 워커/미보고) 지어내지 않고 '확인 불가'로 남긴다. */
+  detection?: RuntimeDetectionDiagnostics;
   onManageConnection: () => void;
 };
 
-export function CameraInfoCard({ camera, onManageConnection }: CameraInfoCardProps): JSX.Element {
+export function CameraInfoCard({ camera, detection, onManageConnection }: CameraInfoCardProps): JSX.Element {
+  const state = detectionStateOf(detection);
+  const blind = state === 'blind';
+  const guidance = blind ? blindGuidanceFor(detection?.reason) : null;
+
   return (
     <article className="rounded-card border border-border bg-card p-4">
       <div className="mb-3 flex items-center justify-between gap-3">
@@ -48,6 +61,26 @@ export function CameraInfoCard({ camera, onManageConnection }: CameraInfoCardPro
               <span className="text-xs text-muted-foreground">방을 지정하면 전송됩니다.</span>
             </div>
           )}
+        </dd>
+        <dt className="text-muted-foreground">감지 상태</dt>
+        <dd
+          data-testid="detection-status"
+          data-detection-state={state}
+          data-detection-reason={detection?.reason ?? undefined}
+          role={blind ? 'alert' : 'status'}
+          className="min-w-0 text-foreground"
+        >
+          <div className="flex flex-col items-start gap-1">
+            <span className={`${statusBadgeClassName(detectionVariant(state))} max-w-full whitespace-normal break-keep text-left`}>
+              <DetectionStateIcon blind={blind} />
+              {detectionLabel(state)}
+            </span>
+            {guidance ? (
+              <span data-testid="detection-guidance" className="break-keep text-xs text-status-rejectedFg">
+                {guidance}
+              </span>
+            ) : null}
+          </div>
         </dd>
         {/* 한 번도 붙은 적 없는 카메라와 붙었다가 끊긴 카메라는 기사에게
             완전히 다른 상황이다. 둘 다 '오프라인'으로만 보이면 설정 오류를

@@ -18,14 +18,23 @@ class _DecodeConfig:
 
 
 class _Session:
-    def __init__(self, packets: list[FramePacket | None]) -> None:
+    def __init__(
+        self,
+        packets: list[FramePacket | None],
+        close_error: OSError | None = None,
+    ) -> None:
         self._packets = packets
+        self._close_error = close_error
         self.closed = False
+        self.close_count = 0
 
     def read(self) -> FramePacket | None:
         return self._packets.pop(0) if self._packets else None
 
     def close(self) -> None:
+        self.close_count += 1
+        if self._close_error is not None:
+            raise self._close_error
         self.closed = True
 
 
@@ -97,6 +106,55 @@ def test_rtsp_source_reconnects_after_read_failure_and_reports_recovery() -> Non
     assert second.closed is True
     assert sleeps == [0.25]
     assert liveness == [("degraded", "read_failure"), ("ready", "read_recovered")]
+
+
+def test_rtsp_source_continues_after_reconnect_close_failure() -> None:
+    config = _DecodeConfig("rtsp://camera/live")
+    first = _Session([None], close_error=OSError("close failed"))
+    replacement = _Session([_packet(0), None])
+    adapter = _Adapter([first, replacement])
+    waits: list[float] = []
+
+    packets = list(
+        RTSPSource(
+            config,
+            adapter,
+            max_failures=1,
+            max_total_reconnects=1,
+            backoff_wait=lambda delay: waits.append(delay) or False,
+            pace_wait=lambda _delay: True,
+        )
+    )
+
+    assert [packet.stream_epoch for packet in packets] == [2]
+    assert first.close_count == 1
+    assert adapter.configs == [config, config]
+    assert waits == [0.25]
+
+
+def test_rtsp_source_stops_after_close_and_replacement_open_fail_once() -> None:
+    config = _DecodeConfig("rtsp://camera/live")
+    first = _Session([None], close_error=OSError("close failed"))
+    adapter = _Adapter([first, OSError("replacement unavailable")])
+    failures: list[str] = []
+    waits: list[float] = []
+
+    packets = list(
+        RTSPSource(
+            config,
+            adapter,
+            max_failures=1,
+            max_total_reconnects=1,
+            backoff_wait=lambda delay: waits.append(delay) or False,
+            on_open_failure=failures.append,
+            pace_wait=lambda _delay: True,
+        )
+    )
+
+    assert packets == []
+    assert first.close_count == 1
+    assert failures == ["spawn_failed"]
+    assert waits == [0.25]
 
 
 def test_rtsp_source_retries_external_open_failure_but_propagates_programming_error() -> None:

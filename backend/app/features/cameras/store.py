@@ -175,7 +175,6 @@ class CameraRegistryStore:
         backend_camera_id: str | None = None,
         mapping_pending: bool = False,
         decode_backend: str | None = None,
-        fps: float | None = None,
         floor: int | None = None,
         last_probed_at: str | None = None,
         last_ok_at: str | None = None,
@@ -201,7 +200,6 @@ class CameraRegistryStore:
                     "mapping_pending": mapping_pending,
                     "status": status,
                     "decode_backend": decode_backend,
-                    "fps": fps,
                     "floor": floor,
                     "created_at": utc_now_iso(),
                     "last_probed_at": last_probed_at,
@@ -480,7 +478,6 @@ def public_camera(record: dict[str, object]) -> dict[str, object]:
         "mapping_pending": _optional_bool(record.get("mapping_pending")),
         "status": _status(record.get("status")),
         "decode_backend": _optional_str(record.get("decode_backend")),
-        "fps": _optional_float(record.get("fps")),
         # User-set floor override (issue #85, integer since issue #155): distinct
         # from the space-sync-owned "floor_name" merged in later by
         # _public_snapshot from the external roster pull. Kept in a separate key
@@ -603,12 +600,6 @@ def _optional_bool(value: object) -> bool | None:
     return value if isinstance(value, bool) else None
 
 
-def _optional_float(value: object) -> float | None:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return None
-    return float(value)
-
-
 def _status(value: object) -> CameraStatus:
     if value == "online":
         return "online"
@@ -628,7 +619,12 @@ def registry_expected_cameras(
 ) -> dict[str, dict[str, str | None]]:
     """Build the camera-id index used by status/heartbeat enumeration.
 
-    Keys are the canonical worker-facing ids (backend_camera_id or local id).
+    INBOUND LOOKUP ONLY. Both the Hub-issued backend_camera_id and the local
+    registry id are indexed on purpose, because a worker may heartbeat under
+    either one; accepting both on the way in is deliberate tolerance. This index
+    must never be used to build an outbound payload -- emitting the local id
+    where a Hub-issued id belongs is what the Hub rejects with
+    FACILITY_BINDING_MISMATCH (issue #308).
     Values are thin binding dicts compatible with HeartbeatStore.snapshot.
     """
     if store is None:

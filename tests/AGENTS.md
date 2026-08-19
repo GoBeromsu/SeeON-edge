@@ -1,94 +1,82 @@
-# TESTS KNOWLEDGE BASE
+# tests
 
-Own pytest coverage for the ML uv project, including dependency-boundary guards and fixtures.
+Flat pytest tree. Contracts, slice coverage, and boundary guards live here as
+`test_*.py` beside shared helpers. No nested suite dirs.
 
-## Local Ownership
+## Ownership
 
-- `test_contract_symbol_exports.py`: contract-symbol export checks (runner/tracker/worker_config). Import boundaries are enforced by import-linter (`uv run --group lint lint-imports`), not a pytest walker.
-- `edge_worker_fixtures.py`, `demo_app_control_helpers.py`, `e2e_worker_relay_fixtures.py`: shared test helpers.
-- `test_*`: package-specific and cross-boundary tests.
-- `test_e2e_night_bed_exit_relay.py`: real-stack E2E (marked `real_stack`) -- synthetic RTSP via `mediamtx` + `ffmpeg` into the real worker/backend composition. Deselected in CI (`-m "not real_stack and not heavy and not integration"`) and skipped locally when `mediamtx` is not on PATH; see "Real-stack E2E" below.
+- `conftest.py`: autouse hermetic isolation.
+- `edge_worker_fixtures.py`: typed worker config payloads.
+- `e2e_worker_relay_fixtures.py`: MediaMTX, ffmpeg, in-process backend, scripted serving, `wait_until`.
+- `fanout_benchmark_harness.py` + `fanout_benchmark_metrics.py`: recorded-stream fan-out. Product code stays unpatched.
+- `clip_listing_reader_concurrency_fixtures.py`: listing-reader concurrency.
+- `test_contract_symbol_exports.py`: contracts keep exporting runner, tracker, and worker_config symbols. Import direction is `lint-imports`, not a walker.
+- `test_*.py`: named after the slice or seam under test.
 
-## Imports
+Allowed: the package under test, pytest, local helpers. Forbidden as default inputs: private artifacts, cameras, live network, uncommitted local files.
 
-Allowed: any production package needed by the test under coverage, pytest helpers, and local fixtures.
+## Hermetic fixtures
 
-Forbidden: importing private generated data/model artifacts as required test inputs, relying on camera hardware, network services, or uncommitted local files for default tests.
+`conftest.py` pins the host so a fail means code, not the machine.
+
+- Central `edge.sqlite3` is a per-test tmp file. `EDGE_DATABASE_PATH` is monkeypatched on every module that reads it.
+- Dashboard bootstrap is explicit `API_DASHBOARD_*`. Unconfigured-path tests must `delenv`.
+- `API_BACKEND_ALLOW_INSECURE_HTTP=1` is a fixture opt-in. HTTPS-policy tests unset it.
+- `DashboardCredentialsStore.from_env` and `ConnectionSettingsStore.from_env` resolve under `tmp_path`. Never `~/.local/state/ml-api` or `/var/lib/ml-api`.
+- `Path.home()` redirects to `tmp_path`. Don't rewrite `HOME`.
+- RTSP DNS is stubbed. Real `getaddrinfo` lives in `test_rtsp_url_policy.py`.
+- Process umask is `0o022`. Insecure-mode tests `chmod` the path. `mkdir(..., mode=...)` sets the leaf only. Create each parent with an explicit mode when a validator walks the tree.
+
+## Naming and async
+
+Keep the tree flat. Name `test_<capability>.py` after the slice or seam (`test_api_clips.py`, `test_capability_inference_coordinator.py`). Don't add `unit/`, `e2e/`, or package-mirroring folders.
+
+Async tests must not pass by sleep. Subscribe to the event or state, act, then await with a bound timeout. `wait_until(predicate, timeout=..., what=...)` is the shared helper. A bare `time.sleep` is not an assertion.
+
+## Markers
+
+CI runs `uv run pytest -q -m "not real_stack and not heavy and not integration"`. `test_public_repository_privacy.py` pins that filter. Don't widen timeouts to hide load flakiness.
+
+- default: hermetic, hardware-free. `uv run pytest -q tests/test_<file>.py`
+- `real_stack`: real composition plus `mediamtx`/`ffmpeg` on PATH. Skip if missing, don't error. `uv run pytest -m real_stack`
+- `integration`: live enrolled ml-api. Needs explicit `CLOUD_EDGE_*`. Writes the catalog it is pointed at. Never a production volume. `uv run pytest -m integration`
+- `heavy`: real interpreter subprocess whose exit is a wall-clock watchdog or hard-exit path. Idle-host correct, CI-load flaky. `uv run pytest -q -m heavy`
+
+`real_stack` is RTSP tooling, not "any live service". `integration` is a live enrolled API, not RTSP. `heavy` is subprocess deadline supervision, not "slow".
+
+## Fan-out benchmark
+
+`test_fanout_benchmark.py` is `real_stack` and operator-gated. A local `mediamtx` serves N looping recorded streams. A real `WorkerRuntime` loads `models/`. Output is `bench-<N>.json` under `BENCH_OUTPUT_DIR` (default `.omo/evidence/bench`). N is in `{1,2,4,8,13}`. `BENCH_STREAMS` selects which run (default `1,2`). Leave extra N unset so a bare suite doesn't burn minutes. Other knobs: `BENCH_DURATION_SEC`, `BENCH_PROFILE`, `BENCH_LABEL`, `BENCH_VIEWERS`, `BENCH_CAMERA_FPS`. Timing and relay stubs wrap test-side only.
+
+```bash
+uv run pytest -m real_stack -k fanout_benchmark
+BENCH_STREAMS=1,2,4,8,13 uv run pytest -m real_stack -k fanout_benchmark
+# 13 cameras at 15fps (todo 13). TemporalProfile is not on origin/main yet
+# (PR #356); BENCH_CAMERA_FPS is the fps owner until that contract lands.
+BENCH_STREAMS=13 BENCH_CAMERA_FPS=15 BENCH_DURATION_SEC=300 BENCH_VIEWERS=0 \
+  BENCH_LABEL=13x15 uv run pytest -m real_stack -k 'test_fanout_benchmark['
+```
 
 ## Commands
 
 ```bash
+uv run pytest -q tests/test_<file>.py
+uv run pytest -q -m "not real_stack and not heavy and not integration"
+uv run pytest -m real_stack
+uv run pytest -m integration
+uv run pytest -q -m heavy
 uv run --group lint lint-imports
 ```
 
-## Real-stack E2E
+Need `mediamtx` on PATH for `real_stack`. A missing tool skips. After an import boundary change, update `[tool.importlinter]` and the matching AGENTS files in the same commit.
 
-`test_e2e_night_bed_exit_relay.py` is marked `real_stack` and requires the `mediamtx`
-RTSP server binary (plus `ffmpeg`, already a default dev dependency) on PATH. CI
-deselects it (`uv run pytest -q -m "not real_stack and not heavy and not integration"`) rather than fetching an
-external binary, per `tests/test_public_repository_privacy.py`'s untrusted-CI
-contract -- it runs locally only. To run it:
+## Anti-patterns
 
-```bash
-# install mediamtx and put it on PATH, e.g.:
-#   brew install mediamtx           # macOS
-#   see https://github.com/bluenviron/mediamtx for other platforms
-uv run pytest -m real_stack
-```
-
-Without `mediamtx` on PATH, the tests are skipped (not errored) with an explicit reason.
-
-## Live-stack integration (`integration`)
-
-`test_cloud_edge_provisioning_integration.py` is marked `integration` and drives a
-**running, already-enrolled ml-api** — it is not a mock-backed test. CI deselects it
-(the `not integration` above); the marker always said so in `pyproject.toml`, but the
-CI argument only started honouring it once the test began failing on `main` with
-`RuntimeError: CLOUD_EDGE_ML_URL is required`. Unlike `real_stack` it needs no RTSP
-tooling, so `real_stack` would be the wrong marker for it.
-
-It fails loudly rather than skipping, because every one of its inputs is a deliberate
-pointer at live state that must not be guessed. Run it against a real Edge:
-
-```bash
-CLOUD_EDGE_ML_URL=http://<edge-host>:8000 \
-CLOUD_EDGE_RELAY_TOKEN=... \
-CLOUD_EDGE_ML_CATALOG_PATH=/var/lib/ml-api/catalog.sqlite3 \
-CLOUD_EDGE_PRE_V1_BACKUP_PATH=... \
-CLOUD_EDGE_SECRET_HANDOFF_PATH=... \
-uv run pytest -m integration
-```
-
-It writes to the catalog sqlite file it is pointed at, so never aim it at a production
-volume.
-
-## Gotchas
-
-Keep boundary tests small and explicit. When import policy changes, update the `[tool.importlinter]` contracts in `pyproject.toml` and the relevant AGENTS files in the same change.
-## Test Boundary
-
-- Keep default tests deterministic and hardware-free.
-- Exercise both allowed and forbidden imports when changing the dependency ladder.
-- Use package-focused tests before the full suite.
-
-## `heavy` — CI에서 돌리지 않는 테스트
-
-`heavy`로 표시한 테스트는 **실제 인터프리터 서브프로세스를 띄우고, 그
-프로세스가 벽시계 감시(워치독 deadline, hard-exit 경로)로 끝나기를
-기다린다.** 한가한 호스트에서는 정확하지만 부하가 걸린 CI 러너에서는
-**프로세스 기동만으로 deadline을 넘겨** 깨진다.
-
-실제로 겪었다 — 전체 스위트가 112초에서 318초로 늘어난 실행에서
-`test_watchdog_subprocess_hard_exits_with_fatal_accelerator_code`만
-`TimeoutExpired`로 두 번 연속 실패했다. 로컬에서는 2.1초에 통과한다.
-
-그래서 CI는 `-m "not real_stack and not heavy and not integration"`로 제외한다. 타임아웃 여유를
-늘리는 것으로 덮지 않는다 — 그러면 CI 시간만 늘고 같은 종류의 불안정이
-남는다.
-
-`worker/runtime/`(워치독, 폴트 핸들러, 가속기 경로)을 건드리면 **로컬에서
-직접 돌린다.**
-
-```bash
-uv run pytest -q -m heavy
-```
+- Local Hero: outcome decided by umask, GPU, PATH, locale, timezone, or core count. Assert code invariants. Guard or skip on missing env. Never assert "this machine has no GPU".
+- Host-state probes named `*_on_this_dev_machine`. If `available=True`, assert the honest-probe contract (reason present, metadata rules), not the inventory.
+- Required inputs from uncommitted weights, live cameras, or the developer's `catalog.sqlite3`.
+- Sleep-as-assert, unbounded polls, or "wait a bit and hope".
+- Nested test packages that fake a scope the tree doesn't have.
+- Baking always-fail stubs into runtime so the suite boots. Stubs stay here.
+- Stretching CI deadlines so `heavy` looks green.
+- Aiming `CLOUD_EDGE_ML_CATALOG_PATH` at a production sqlite.

@@ -52,6 +52,7 @@ class LstmFallManifest:
     operating_threshold: float
     schema_version: int
     preprocessing_identity: str
+    training_fps: float | None = None
     artifact_digest: str | None = None
 
     @classmethod
@@ -110,6 +111,7 @@ class LstmFallManifest:
             window=_positive_int(raw["window"], "window"),
             stride=_positive_int(raw["stride"], "stride"),
             input_shape=_parse_input_shape(raw["input_shape"]),
+            training_fps=_optional_positive_float(raw.get("training_fps"), "training_fps"),
             operating_threshold=_threshold(raw["operating_threshold"]),
             schema_version=schema_version,
             preprocessing_identity=_preprocessing_identity(raw, schema_version),
@@ -212,6 +214,17 @@ def _positive_int(value: YamlValue, field_name: str) -> int:
     if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
         raise ModelLoadError(f"{field_name} must be a positive integer")
     return value
+
+
+def _optional_positive_float(value: YamlValue, field_name: str) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ModelLoadError(f"{field_name} must be numeric")
+    parsed = float(value)
+    if not math.isfinite(parsed) or parsed <= 0:
+        raise ModelLoadError(f"{field_name} must be finite and positive")
+    return parsed
 
 
 def _required_string(value: YamlValue, field_name: str) -> str:

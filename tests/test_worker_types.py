@@ -22,6 +22,7 @@ from contracts.runner import DetectionRunnerResult, RunnerResult
 from worker.types import (
     BusinessEvent,
     DecisionInput,
+    FrameBedPoseFeatures,
     FrameKey,
     FrameLease,
     FramePacket,
@@ -54,6 +55,7 @@ _EXPECTED_FIELDS = {
         "time_sec",
         "frame_index",
         "bed_region",
+        "bed_pose_features",
     ),
     BusinessEvent: (
         "domain",
@@ -145,6 +147,7 @@ def test_worker_envelopes_have_exact_fields_and_authoritative_types() -> None:
     assert get_type_hints(ModuleResult)["output_adapter"] == str | None
     assert get_type_hints(DecisionInput)["observation"] is FrameObservation
     assert get_type_hints(DecisionInput)["bed_region"] is BedRegionDebugSnapshot
+    assert get_type_hints(DecisionInput)["bed_pose_features"] is FrameBedPoseFeatures
 
 
 def test_frame_key_includes_boot_camera_epoch_sequence_and_pts() -> None:

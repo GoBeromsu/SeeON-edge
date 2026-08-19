@@ -31,7 +31,13 @@ def _fixture(tmp_path: Path) -> tuple[Path, Path, Path, Path, Path]:
     clip_store = tmp_path / "clips-root"
     maintenance = tmp_path / "maintenance"
     state_dir.mkdir(mode=0o700)
-    (clip_store / "clips" / ".staging").mkdir(parents=True)
+    # mkdir(parents=True, mode=...) applies the mode only to the leaf, so the
+    # clip store root and its clips/ level would otherwise inherit the host
+    # umask and fail validate_directory (forbidden 0o022). Create each level
+    # explicitly so this fixture does not depend on the developer's umask.
+    clip_store.mkdir(mode=0o755)
+    (clip_store / "clips").mkdir(mode=0o755)
+    (clip_store / "clips" / ".staging").mkdir(mode=0o755)
     maintenance.mkdir(mode=0o700)
     database = state_dir / "worker-state.sqlite3"
     with EvidenceOutbox.open(database):
@@ -50,7 +56,7 @@ def _fixture(tmp_path: Path) -> tuple[Path, Path, Path, Path, Path]:
             "INSERT INTO evidence_clips (clip_id, local_state) VALUES ('clip-a', 'UNAVAILABLE')"
         )
     final = clip_store / "clips" / "clip-a"
-    final.mkdir()
+    final.mkdir(mode=0o755)
     (final / "manifest.json").write_text(
         json.dumps(
             {

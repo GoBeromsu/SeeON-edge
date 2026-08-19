@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from typing import final
 
 from worker.pipeline.output.evidence.packet_ring import PacketRingLimits, SourcePacketRing
-from worker.types.source_packet import SourcePacket
+from worker.types.source_packet import SourcePacket, StreamEpoch
 
 
 @dataclass(slots=True)
@@ -46,6 +46,8 @@ class PacketRingRepository:
             if ring is None:
                 self.metrics.unknown_camera_drops += 1
                 return False
+            if ring.active_epoch is not None and packet.epoch != ring.active_epoch:
+                return ring.append(packet)
             if packet.size_bytes > self._global_max_bytes:
                 self._record_global_drop(packet)
                 return False
@@ -57,6 +59,12 @@ class PacketRingRepository:
                 self.metrics.global_evicted_packets += 1
                 self.metrics.global_evicted_bytes += removed.size_bytes
             return ring.append(packet)
+
+    def roll_epoch(self, epoch: StreamEpoch) -> None:
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("cannot roll a closed packet repository")
+            self.ring(epoch.camera_id).roll_epoch(epoch)
 
     def ring(self, camera_id: str) -> SourcePacketRing:
         try:

@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from fractions import Fraction
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 from contracts.frame import Frame
+from worker.adapters.encode.adapter_errors import EncoderPolicyError
 from worker.adapters.encode.models import ClipArtifact, RemuxStreamFact
 from worker.pipeline.output.evidence.clip_actor import ClipActor, ClipActorDependencies
 from worker.pipeline.output.evidence.clip_identity import ClipReservation
@@ -156,14 +159,68 @@ class _Publisher:
         self.unavailable.append((reservation, metadata, reason_code))
 
 
+@dataclass(slots=True)
+class _FailThenSucceedCoordinator:
+    artifact: ClipArtifact
+    attempts: int = 0
+    sealed: list[str] = field(default_factory=list)
+    closed: list[str] = field(default_factory=list)
+    trigger_frame_keys: list[FrameKey | None] = field(default_factory=list)
+
+    def write(self, packet: FramePacket) -> bool:
+        del packet
+        return True
+
+    def seal(self, camera_id: str) -> bool:
+        self.sealed.append(camera_id)
+        return True
+
+    def finalize(
+        self,
+        *,
+        camera_id: str,
+        clip_id: str,
+        event_time_sec: float,
+        event: BusinessEvent,
+        output_dir: Path | None = None,
+        trigger_frame_key: FrameKey | None = None,
+    ) -> ClipOutcome:
+        del camera_id, event_time_sec, event, output_dir
+        self.trigger_frame_keys.append(trigger_frame_key)
+        self.attempts += 1
+        if self.attempts == 1:
+            raise EncoderPolicyError("untrusted finalize payload must not be logged")
+        return ClipReady(clip_id, self.artifact)
+
+    def close(self, camera_id: str) -> None:
+        self.closed.append(camera_id)
+
+    def close_all(self) -> None:
+        return
+
+
 def _actor(
     tmp_path: Path,
     outcome: ClipOutcome,
-) -> tuple[ClipActor, ClipRecorderStats, _Coordinator, _Publisher, list[ClipId]]:
+    *,
+    coordinator: _Coordinator | _FailThenSucceedCoordinator | None = None,
+    publisher: _Publisher | None = None,
+    close: Callable[[str, ClipId], None] | None = None,
+    release: Callable[[str, ClipId], None] | None = None,
+    cancel: Callable[[ClipReservation], None] | None = None,
+    finalized: Callable[[ClipId], None] | None = None,
+) -> tuple[
+    ClipActor,
+    ClipRecorderStats,
+    _Coordinator | _FailThenSucceedCoordinator,
+    _Publisher,
+    list[ClipId],
+]:
     stats = ClipRecorderStats()
-    coordinator = _Coordinator(outcome)
-    publisher = _Publisher()
-    finalized: list[ClipId] = []
+    coordinator = _Coordinator(outcome) if coordinator is None else coordinator
+    publisher = _Publisher() if publisher is None else publisher
+    finalized_clips: list[ClipId] = []
+    finalized_hook = finalized_clips.append if finalized is None else finalized
     actor = ClipActor(
         ClipRecorderConfig(
             store_dir=tmp_path,
@@ -175,12 +232,13 @@ def _actor(
         ClipActorDependencies(
             coordinator=coordinator,
             publisher=publisher,
-            close=lambda _camera_id, _clip_id: None,
-            release=lambda _camera_id, _clip_id: None,
-            finalized=finalized.append,
+            close=(lambda _camera_id, _clip_id: None) if close is None else close,
+            release=(lambda _camera_id, _clip_id: None) if release is None else release,
+            finalized=finalized_hook,
+            cancel=cancel,
         ),
     )
-    return actor, stats, coordinator, publisher, finalized
+    return actor, stats, coordinator, publisher, finalized_clips
 
 
 def test_actor_passes_the_trigger_frame_key_to_clip_finalization(tmp_path: Path) -> None:
@@ -413,3 +471,58 @@ def test_expiry_forces_finalize_when_stream_time_stalls(
 
     assert stats.forced_finalized == 1
     assert stats.active_clips == 0
+
+
+def test_finalize_failure_renders_camera_and_clip_identity(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    failed = _reservation(tmp_path, "clip-fail")
+    healthy = _reservation(tmp_path, "clip-ok")
+    released: list[tuple[str, ClipId]] = []
+    cancelled: list[ClipReservation] = []
+    finalized: list[ClipId] = []
+    artifact = ClipArtifact(healthy.staging_dir / "clip.mp4", 1, 2, 3.0)
+    coordinator = _FailThenSucceedCoordinator(artifact)
+    publisher = _Publisher()
+    actor, stats, _, _, _ = _actor(
+        tmp_path,
+        ClipReady("clip-ok", artifact),
+        coordinator=coordinator,
+        publisher=publisher,
+        release=lambda camera_id, clip_id: released.append((camera_id, clip_id)),
+        cancel=cancelled.append,
+        finalized=finalized.append,
+    )
+
+    with caplog.at_level("WARNING", logger="worker.pipeline.output.evidence.clip_actor"):
+        actor.handle_event(_event_message(failed, "event-fail"))
+        actor.flush()
+
+    record = next(
+        item for item in caplog.records if "clip finalize failed" in item.getMessage()
+    )
+    message = record.getMessage()
+    assert "camera_id=cam-1" in message
+    assert "clip_id=clip-fail" in message
+    assert record.exc_info is not None
+    assert record.exc_info[0] is EncoderPolicyError
+    assert "untrusted finalize payload" not in message
+    assert stats.failed_writes == 1
+    assert stats.finalized_clips == 0
+    assert stats.active_clips == 0
+    assert cancelled == [failed]
+    assert released == [("cam-1", ClipId("clip-fail"))]
+    assert coordinator.closed == ["cam-1"]
+    assert finalized == []
+    assert publisher.ready == []
+
+    actor.handle_event(_event_message(healthy, "event-ok"))
+    actor.flush()
+
+    assert stats.finalized_clips == 1
+    assert stats.failed_writes == 1
+    assert publisher.ready[0][0] == healthy
+    assert cancelled == [failed]
+    assert released == [("cam-1", ClipId("clip-fail")), ("cam-1", ClipId("clip-ok"))]
+    assert finalized == [ClipId("clip-ok")]

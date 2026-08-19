@@ -38,7 +38,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Final, Literal, final
+from typing import Final, Literal, cast, final
 from zoneinfo import ZoneInfo
 
 import numpy as np
@@ -67,6 +67,7 @@ from worker.pipeline.output.evidence.clip_recorder_models import ClipRecorderCon
 from worker.runtime.config import WorkerConfig
 from worker.runtime.lease import GpuLease
 from worker.runtime.worker import CameraRuntimeContext, WorkerRuntime
+from worker.types import FramePacket
 
 # --------------------------------------------------------------------------
 # generic polling / networking helpers
@@ -605,7 +606,17 @@ class ScriptedFallModel:
 
 @final
 class ScriptedServingClient:
-    """Dispatches by task name; one instance is scoped to a single camera run."""
+    """Dispatches by task name; one instance is scoped to a single camera run.
+
+    Exposes ``batch_serving_client`` for the same reason the fan-out
+    benchmark harness does: the composition root's ``_batch_client_for``
+    (worker/runtime/model_composition.py) only builds the batched pose
+    coordinator when the injected serving client satisfies
+    ``BatchServingClient`` or ``BatchServingProvider``. Without it every
+    camera fails activation with "camera pipeline requires the batched pose
+    coordinator" and this harness would stop exercising the shipped topology
+    altogether.
+    """
 
     def __init__(
         self,
@@ -618,12 +629,48 @@ class ScriptedServingClient:
         self._runners: dict[str, object] = {"pose": pose, "bed": bed, "fall": fall}
         if person is not None:
             self._runners["person"] = person
+        self._batch = _ScriptedBatchServingClient(self)
 
     def create(self, task: str, **_options: str | int | float | bool | None) -> object:
         try:
             return self._runners[task]
         except KeyError as error:
             raise AssertionError(f"unexpected serving task requested: {task!r}") from error
+
+    @property
+    def batch_serving_client(self) -> _ScriptedBatchServingClient:
+        return self._batch
+
+
+@final
+class _ScriptedBatchServingClient:
+    """Batch facade driving the *same* scripted runner, one frame at a time.
+
+    The scripted pose runners are deliberately stateful sequences (see
+    ``ScriptedBedExitPoseRunner``'s ``_HoldingIndex``): the walk out of the
+    bed region only happens because successive calls advance the script.
+    So this fans the batch across the runner in positional order and returns
+    ``results[i]`` for ``frames[i]`` -- the ordering contract
+    ``BatchedInferenceCoordinator._forward`` zips against -- rather than
+    fabricating a result or collapsing the batch to one call. It stays a
+    real dispatch to the scripted model, just as the in-process client's
+    batch view stays a real forward through the shared runner.
+    """
+
+    def __init__(self, serving_client: ScriptedServingClient) -> None:
+        self._serving_client = serving_client
+
+    def create(self, task: str, **options: str | int | float | bool | None) -> object:
+        return self._serving_client.create(task, **options)
+
+    def infer_batch(
+        self,
+        task: str,
+        frames: Sequence[FramePacket],
+        **options: str | int | float | bool | None,
+    ) -> tuple[RunnerResult, ...]:
+        runner = cast(Callable[[Image], RunnerResult], self.create(task, **options))
+        return tuple(runner(packet.borrow_host_frame().image) for packet in frames)
 
 
 def bed_exit_serving_client() -> ScriptedServingClient:

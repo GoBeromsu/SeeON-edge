@@ -329,6 +329,15 @@ describe('clip list contract normalization', () => {
 });
 
 describe('status normalization', () => {
+  const unknownDetection = {
+    state: 'unknown',
+    reason: null,
+    recent_success_rate: null,
+    last_completed_at_sec: null,
+    evaluation_window_sec: 0,
+    timeout_sec: 0,
+  } as const;
+
   it('accepts the backend status envelope when both collections are explicitly empty', () => {
     expect(normalizeStatusSnapshot({ cameras: {}, runtime: { cameras: {} } })).toEqual({
       cameras: {},
@@ -398,6 +407,7 @@ describe('status normalization', () => {
             decode: { requested: 'auto', selected: 'nvdec', fallback_count: 1, last_reason: 'open_failed', updated_at_sec: 1_720_000_000 },
             latency: { first_attempt_samples: 3, max_sec: 0.75, since_sec: 1_720_000_000 },
             stale: true,
+            detection: unknownDetection,
           },
         },
         worker: { alive: true, pid: 1234, started_at_sec: 1_719_999_000 },
@@ -451,6 +461,175 @@ describe('status normalization', () => {
         stale_after_sec: null,
       },
     });
+  });
+
+  function statusWithDetection(detection: unknown) {
+    return {
+      cameras: {},
+      runtime: {
+        cameras: {
+          'cam-1': {
+            camera_id: 'cam-1',
+            detection,
+          },
+        },
+      },
+    };
+  }
+
+  function parsedDetection(payload: unknown) {
+    return normalizeStatusSnapshot(payload).runtime.cameras['cam-1']?.detection;
+  }
+
+  it('normalizes an old runtime camera payload that omits detection without throwing', () => {
+    const snapshot = normalizeStatusSnapshot({
+      cameras: {},
+      runtime: { cameras: { 'cam-1': { camera_id: 'cam-1', measured_fps: 12.4 } } },
+    });
+    expect(snapshot.runtime.cameras['cam-1']?.camera_id).toBe('cam-1');
+    const detection = snapshot.runtime.cameras['cam-1']?.detection;
+    if (detection !== undefined) {
+      expect(detection.state).toBe('unknown');
+      expect(detection.state).not.toBe('healthy');
+    }
+  });
+
+  it.each([
+    ['starting', { state: 'starting', reason: null, recent_success_rate: null, last_completed_at_sec: null, evaluation_window_sec: 10, timeout_sec: 120 }],
+    ['healthy', { state: 'healthy', reason: null, recent_success_rate: 1, last_completed_at_sec: 1_720_000_000, evaluation_window_sec: 10, timeout_sec: 120 }],
+    ['blind', { state: 'blind', reason: 'pose_not_completing', recent_success_rate: 0, last_completed_at_sec: null, evaluation_window_sec: 10, timeout_sec: 120 }],
+    ['unknown', { state: 'unknown', reason: 'telemetry_stale', recent_success_rate: null, last_completed_at_sec: 1_720_000_010, evaluation_window_sec: 10, timeout_sec: 120 }],
+    ['disabled', { state: 'disabled', reason: null, recent_success_rate: null, last_completed_at_sec: null, evaluation_window_sec: 10, timeout_sec: 120 }],
+  ])('round-trips a valid %s detection state exactly', (_label, detection) => {
+    expect(parsedDetection(statusWithDetection(detection))).toEqual(detection);
+  });
+
+  it.each([
+    ['pose_not_completing'],
+    ['decision_not_completing'],
+    ['no_completed_cycles'],
+    ['telemetry_stale'],
+    ['telemetry_missing'],
+    ['counter_reset'],
+  ] as const)('round-trips detection reason %s exactly', (reason) => {
+    const detection = {
+      state: reason === 'counter_reset' ? 'starting' : reason.startsWith('telemetry') ? 'unknown' : 'blind',
+      reason,
+      recent_success_rate: null,
+      last_completed_at_sec: null,
+      evaluation_window_sec: 10,
+      timeout_sec: 120,
+    };
+    expect(parsedDetection(statusWithDetection(detection))).toEqual(detection);
+  });
+
+  it('round-trips Todo 2 raw counters when they accompany a valid derived detection object', () => {
+    const detection = {
+      state: 'healthy',
+      reason: null,
+      recent_success_rate: 0.8,
+      last_completed_at_sec: 1_720_000_000.5,
+      evaluation_window_sec: 10,
+      timeout_sec: 120,
+      expected: true,
+      inference_admitted: 10,
+      inference_succeeded: 8,
+      inference_overwritten: 1,
+      decision_completed: 8,
+    };
+    expect(parsedDetection(statusWithDetection(detection))).toEqual(detection);
+  });
+
+  it('normalizes a missing detection field to the canonical unknown object', () => {
+    expect(parsedDetection({
+      cameras: {},
+      runtime: { cameras: { 'cam-1': { camera_id: 'cam-1', measured_fps: 30 } } },
+    })).toEqual(unknownDetection);
+  });
+
+  it.each([
+    ['null', null],
+    ['array', []],
+    ['string', 'healthy'],
+    ['number', 1],
+    ['boolean', true],
+  ])('normalizes a malformed %s detection value to the canonical unknown object', (_label, detection) => {
+    expect(parsedDetection(statusWithDetection(detection))).toEqual(unknownDetection);
+  });
+
+  it('normalizes a future unknown state to the canonical unknown object and never becomes healthy', () => {
+    expect(parsedDetection(statusWithDetection({
+      state: 'degraded',
+      reason: null,
+      recent_success_rate: 1,
+      last_completed_at_sec: 1_720_000_000,
+      evaluation_window_sec: 10,
+      timeout_sec: 120,
+    }))).toEqual(unknownDetection);
+  });
+
+  it('normalizes a future unknown reason to the canonical unknown object and never becomes healthy', () => {
+    expect(parsedDetection(statusWithDetection({
+      state: 'healthy',
+      reason: 'model_crashed',
+      recent_success_rate: 1,
+      last_completed_at_sec: 1_720_000_000,
+      evaluation_window_sec: 10,
+      timeout_sec: 120,
+    }))).toEqual(unknownDetection);
+  });
+
+  it.each([
+    ['NaN recent_success_rate', { recent_success_rate: Number.NaN }],
+    ['Infinity recent_success_rate', { recent_success_rate: Number.POSITIVE_INFINITY }],
+    ['negative recent_success_rate', { recent_success_rate: -0.1 }],
+    ['NaN last_completed_at_sec', { last_completed_at_sec: Number.NaN }],
+    ['Infinity last_completed_at_sec', { last_completed_at_sec: Number.POSITIVE_INFINITY }],
+    ['negative last_completed_at_sec', { last_completed_at_sec: -1 }],
+    ['NaN evaluation_window_sec', { evaluation_window_sec: Number.NaN }],
+    ['Infinity evaluation_window_sec', { evaluation_window_sec: Number.POSITIVE_INFINITY }],
+    ['negative evaluation_window_sec', { evaluation_window_sec: -10 }],
+    ['NaN timeout_sec', { timeout_sec: Number.NaN }],
+    ['Infinity timeout_sec', { timeout_sec: Number.POSITIVE_INFINITY }],
+    ['negative timeout_sec', { timeout_sec: -120 }],
+  ])('normalizes %s to the canonical unknown object', (_label, override) => {
+    expect(parsedDetection(statusWithDetection({
+      state: 'healthy',
+      reason: null,
+      recent_success_rate: 1,
+      last_completed_at_sec: 1_720_000_000,
+      evaluation_window_sec: 10,
+      timeout_sec: 120,
+      ...override,
+    }))).toEqual(unknownDetection);
+  });
+
+  it('does not infer healthy from connection, FPS, events, or snapshots when detection is omitted', () => {
+    const detection = parsedDetection({
+      cameras: {
+        'cam-1': { camera_id: 'cam-1', status: 'online', last_heartbeat_at: 1_720_000_000, age_sec: 1 },
+      },
+      runtime: {
+        cameras: {
+          'cam-1': {
+            camera_id: 'cam-1',
+            measured_fps: 30,
+            events: 12,
+            snapshot_available: true,
+          },
+        },
+      },
+    });
+    expect(detection).toEqual(unknownDetection);
+    expect(detection?.state).not.toBe('healthy');
+  });
+
+  it('never throws when detection is omitted or malformed', () => {
+    expect(() => parsedDetection({
+      cameras: {},
+      runtime: { cameras: { 'cam-1': { camera_id: 'cam-1' } } },
+    })).not.toThrow();
+    expect(() => parsedDetection(statusWithDetection('nope'))).not.toThrow();
   });
 });
 

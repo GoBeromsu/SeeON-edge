@@ -11,10 +11,11 @@ from typing import Literal, TypeAlias
 from shared.detection_policies import EffectivePolicy
 from worker.domains.base import DomainAuditSnapshot
 from worker.interfaces.decision import Decider
+from worker.types import TemporalProfile
 
 ObservationChannel: TypeAlias = str
 ComponentKind: TypeAlias = Literal["extractor", "model", "state", "rule"]
-IntervalSource: TypeAlias = Literal["camera-frame-stride", "fixed"]
+IntervalSource: TypeAlias = Literal["camera-frame-stride", "fixed", "temporal-profile"]
 WindowMode: TypeAlias = Literal["external", "internal"]
 
 
@@ -105,9 +106,15 @@ class ScheduleRule:
     interval: int | None = None
     skip_when_flag: str | None = None
 
-    def resolve(self, camera_frame_stride: int) -> int:
+    def resolve(self, camera_frame_stride: int, temporal_profile: TemporalProfile) -> int:
+        # temporal_profile is required: compile-time validation and live
+        # activation must name the same owner. A missing argument used to
+        # fall through to CURRENT_TEMPORAL_PROFILE, so a 15fps activation
+        # still validated CURRENT's 30-frame bed interval.
         if self.interval_source == "camera-frame-stride":
             return camera_frame_stride
+        if self.interval_source == "temporal-profile":
+            return temporal_profile.decision_interval_frames(self.component_id)
         if self.interval is None:
             raise DetectionModuleCompilationError(
                 f"fixed schedule for {self.component_id!r} is missing an interval"

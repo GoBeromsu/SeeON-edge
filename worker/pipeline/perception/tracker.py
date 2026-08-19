@@ -35,7 +35,20 @@ class GreedyIouTracker:
         return frozenset(track.track_id for track in self._tracks)
 
     def update(self, boxes: tuple[BoundingBox, ...]) -> tuple[int, ...]:
-        """Return one track ID for each incoming box at the same tuple index."""
+        """Track detections, treating an empty tuple as no observation.
+
+        Call :meth:`observe` when inference explicitly observed an empty scene;
+        call :meth:`coast` when no inference result exists for the frame.
+        ``update(())`` remains the neutral compatibility surface so callers
+        cannot manufacture misses from an absent result.
+        """
+        if not boxes:
+            self.coast()
+            return ()
+        return self.observe(boxes)
+
+    def observe(self, boxes: tuple[BoundingBox, ...]) -> tuple[int, ...]:
+        """Apply one actual inference observation, including an empty one."""
         existing = list(self._tracks)
         matches = greedy_match(
             tuple(track.last_box for track in existing),
@@ -74,6 +87,9 @@ class GreedyIouTracker:
 
         self._tracks = surviving_tracks + new_tracks
         return tuple(box_to_track_id[box_index] for box_index in range(len(boxes)))
+
+    def coast(self) -> None:
+        """Preserve all tracks when this frame carried no inference result."""
 
 
 __all__ = ["GreedyIouTracker", "iou"]

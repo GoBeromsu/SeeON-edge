@@ -14,7 +14,7 @@ def test_default_task_intervals_preserve_legacy_insertion_order() -> None:
     scheduler = Scheduler()
 
     # Then the legacy defaults and their insertion order are preserved.
-    assert list(scheduler.task_intervals.items()) == [("pose", 1), ("bed", 30)]
+    assert list(scheduler.task_intervals.items()) == [("pose", 1), ("bed", 90)]
 
 
 def test_default_scheduler_returns_due_tasks_in_mapping_order() -> None:
@@ -29,7 +29,7 @@ def test_default_scheduler_returns_due_tasks_in_mapping_order() -> None:
     assert scheduler.tasks_for_frame(1) == ("pose",)
 
     # When the bed interval elapses, the same order is retained.
-    assert scheduler.tasks_for_frame(30) == ("pose", "bed")
+    assert scheduler.tasks_for_frame(90) == ("pose", "bed")
 
 
 def test_tasks_run_exactly_at_positive_interval_boundaries() -> None:

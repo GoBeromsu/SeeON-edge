@@ -34,7 +34,19 @@ class _FrozenWireTransport:
             "worker",
         }
         assert all(
-            set(camera) <= {"camera_id", "decode", "measured_fps"} for camera in payload["cameras"]
+            set(camera) <= {"camera_id", "decode", "measured_fps", "detection"}
+            for camera in payload["cameras"]
+        )
+        assert all(
+            camera.get("detection")
+            == {
+                "expected": False,
+                "inference_admitted": 0,
+                "inference_succeeded": 0,
+                "inference_overwritten": 0,
+                "decision_completed": 0,
+            }
+            for camera in payload["cameras"]
         )
         self.payloads.append(payload)
         return self.generations.pop(0)

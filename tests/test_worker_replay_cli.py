@@ -20,6 +20,7 @@ from worker.pipeline.analytics import CompositeExtractor, NamedExtractor
 from worker.pipeline.bus import Scheduler
 from worker.pipeline.camera_pipeline import CameraPipelinePump
 from worker.pipeline.decision import EventAggregator, IncidentManager
+from worker.pipeline.inference_coordinator import CoordinatedInference
 from worker.pipeline.output.event_sink import EvidenceEventSink
 from worker.pipeline.output.evidence.evidence_stager import DurableEvidenceStager
 from worker.pipeline.output.evidence_attacher import AlertEvidenceAttacher
@@ -33,7 +34,7 @@ from worker.pipeline.trace import (
 from worker.replay import cli as replay_cli
 from worker.runtime.provenance import AppliedRuntimeManifestStore
 from worker.runtime.provenance.models import AppliedRuntimeManifest
-from worker.types import FramePacket
+from worker.types import FramePacket, ModuleResult
 
 CAMERA_ID = "camera-cli"
 FACILITY_ID = "facility-cli"
@@ -71,10 +72,15 @@ class _SinglePacketSubscription:
     def __init__(self, packet: FramePacket) -> None:
         self._packet: FramePacket | None = packet
 
-    def take(self, *, timeout_sec: float | None = None) -> FramePacket | None:
+    def take(self, *, timeout_sec: float | None = None) -> CoordinatedInference | None:
         del timeout_sec
         packet, self._packet = self._packet, None
-        return packet
+        if packet is None:
+            return None
+        return CoordinatedInference(
+            packet,
+            ModuleResult("pose", _PoseRunner().run(packet.frame.image), 0.0, "pose"),
+        )
 
     def close(self) -> None:
         self._packet = None

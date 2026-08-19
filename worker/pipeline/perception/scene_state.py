@@ -60,6 +60,11 @@ class SceneState:
     # Set once at camera-build time from `CameraRuntimeConfig.bed_zone_polygon`
     # -- never mutated per-frame.
     persisted_bed_regions: tuple[BoundingBox, ...] = field(default_factory=tuple)
+    # Source image size of ``persisted_bed_regions`` polygons. Poses arrive in
+    # frame_width x frame_height; these are not guaranteed to match. None means
+    # the stored polygon is already in frame space (live segmentation).
+    bed_zone_image_width: int | None = None
+    bed_zone_image_height: int | None = None
 
     def reset_bed_cache(self, _reason: str) -> None:
         self.bed_regions = ()
@@ -79,12 +84,25 @@ class SceneState:
         *,
         track_ids: tuple[int, ...] = (),
     ) -> FrameObservation:
-        """Store one observation without discarding an existing non-empty bed cache."""
+        """Compatibility alias for an actual inference observation."""
+        return self.observe(observation, track_ids=track_ids)
+
+    def observe(
+        self,
+        observation: FrameObservation,
+        *,
+        track_ids: tuple[int, ...] = (),
+    ) -> FrameObservation:
+        """Store one inferred observation without discarding the bed cache."""
         self.latest_observation = observation
         self.track_ids = track_ids
         if observation.bed_boxes:
             self.bed_regions = observation.bed_boxes
         return observation
+
+    def coast(self) -> FrameObservation | None:
+        """Return the last inferred scene without advancing it as empty."""
+        return self.latest_observation
 
     def resolve_bed_regions(
         self,

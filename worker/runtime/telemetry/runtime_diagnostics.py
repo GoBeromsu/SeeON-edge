@@ -10,6 +10,7 @@ from typing import final
 from contracts.decode_diagnostics import DECODE_FALLBACK_REASONS, DecodeSelection
 from contracts.encode_diagnostics import ENCODE_FALLBACK_REASONS, EncodeSelection
 from contracts.observation import BedRegionCacheState
+from worker.pipeline.inference_coordinator import CameraInferenceTelemetry
 from worker.pipeline.perception.scene_state import BedRegionCacheCounterSnapshot
 from worker.runtime.telemetry.local_metrics import (
     StageTimingAccumulator,
@@ -22,8 +23,11 @@ from worker.runtime.telemetry.models import (
     BusMetricsSource,
     BusSubscriptionSnapshot,
     CameraDiagnosticsSnapshot,
+    DecodeBackendObservability,
     DeviceResidencyDiagnostics,
     EncoderLifecycleSnapshot,
+    GeometryBatchHistogram,
+    InferenceMetricsSource,
     InvalidStageTimingError,
     RuntimeDiagnosticsSnapshot,
     StageTimingSnapshot,
@@ -36,10 +40,12 @@ from worker.runtime.telemetry.wire import (
     RelayClipExportPayload,
     RelayClipRecorderPayload,
     RelayDecodePayload,
+    RelayDetectionPayload,
     RelayGpuPayload,
     RelayRuntimeStatusPayload,
     RelayWorkerPayload,
     camera_payload,
+    detection_payload,
     facility_payload,
 )
 
@@ -61,13 +67,16 @@ class WorkerDiagnostics:
         self._clock = clock
         self._wall_clock = wall_clock
         self._decode_by_camera: dict[str, DecodeSelection] = {}
+        self._decode_backend_by_camera: dict[str, DecodeBackendObservability] = {}
         self._encode_by_camera: dict[str, EncodeSelection] = {}
         self._measured_fps_by_camera: dict[str, tuple[float, float | None]] = {}
         self._stage_timings: dict[str, dict[str, StageTimingAccumulator]] = {}
         self._buses: dict[str, tuple[BusMetricsSource, tuple[str, ...]]] = {}
+        self._inference: InferenceMetricsSource | None = None
         self._bed_region_by_camera: dict[str, BedRegionDiagnostics] = {}
         self._bed_exit_scoring_by_camera: dict[str, BedExitScoringDiagnostics] = {}
         self._device_residency_by_camera: dict[str, DeviceResidencyDiagnostics] = {}
+        self._decision_completed_by_camera: dict[str, int] = {}
         self._encoder = EncoderLifecycleSnapshot()
         self._clip_recorder = ClipRecorderStatus()
         self._clip_export = RelayClipExportPayload(enabled=False, version=0)
@@ -127,6 +136,31 @@ class WorkerDiagnostics:
     def decode_snapshot(self) -> Mapping[str, DecodeSelection]:
         with self._lock:
             return dict(self._decode_by_camera)
+
+    def record_decode_backend(
+        self,
+        camera_id: str,
+        *,
+        requested_profile_decode: str,
+        resolved_backend: str,
+        actual_adapter_class: str,
+    ) -> None:
+        """Record local-only boot selection details for one camera.
+
+        ``DecodeSelection`` remains the relay-compatible view. The profile
+        token and concrete adapter class are intentionally retained only in
+        the local runtime snapshot.
+        """
+        with self._lock:
+            self._decode_backend_by_camera[camera_id] = DecodeBackendObservability(
+                requested_profile_decode=requested_profile_decode,
+                resolved_backend=resolved_backend,
+                actual_adapter_class=actual_adapter_class,
+            )
+
+    def decode_backend_snapshot(self) -> Mapping[str, DecodeBackendObservability]:
+        with self._lock:
+            return dict(self._decode_backend_by_camera)
 
     def register_encode(self, camera_id: str, requested: str) -> None:
         self.update_encode(
@@ -259,6 +293,12 @@ class WorkerDiagnostics:
         with self._lock:
             self._measured_fps_by_camera[camera_id] = (self._clock(), measured_fps)
 
+    def record_detection_completed(self, camera_id: str) -> None:
+        with self._lock:
+            self._decision_completed_by_camera[camera_id] = (
+                self._decision_completed_by_camera.get(camera_id, 0) + 1
+            )
+
     def record_stage_timing(self, camera_id: str, stage: str, elapsed_sec: float) -> None:
         if elapsed_sec < 0:
             raise InvalidStageTimingError(elapsed_sec)
@@ -274,6 +314,10 @@ class WorkerDiagnostics:
     ) -> None:
         with self._lock:
             self._buses[camera_id] = (bus, subscriptions)
+
+    def register_inference(self, source: InferenceMetricsSource) -> None:
+        with self._lock:
+            self._inference = source
 
     def update_encoder_lifecycle(self, snapshot: EncoderLifecycleSnapshot) -> None:
         with self._lock:
@@ -294,13 +338,17 @@ class WorkerDiagnostics:
                 for camera_id, stages in self._stage_timings.items()
             }
             buses = dict(self._buses)
+            inference = None if self._inference is None else self._inference.snapshot()
             encoder = self._encoder
+            decode_backend_by_camera = dict(self._decode_backend_by_camera)
             encode_by_camera = dict(self._encode_by_camera)
             bed_region_by_camera = dict(self._bed_region_by_camera)
             bed_exit_scoring_by_camera = dict(self._bed_exit_scoring_by_camera)
             device_residency_by_camera = dict(self._device_residency_by_camera)
+            decision_completed_by_camera = dict(self._decision_completed_by_camera)
             camera_ids = (
                 set(self._decode_by_camera)
+                | set(decode_backend_by_camera)
                 | set(stage_timings)
                 | set(buses)
                 | set(statuses)
@@ -308,6 +356,8 @@ class WorkerDiagnostics:
                 | set(bed_region_by_camera)
                 | set(bed_exit_scoring_by_camera)
                 | set(device_residency_by_camera)
+                | set(decision_completed_by_camera)
+                | (set() if inference is None else set(inference.cameras))
             )
         cameras = tuple(
             CameraDiagnosticsSnapshot(
@@ -317,10 +367,36 @@ class WorkerDiagnostics:
                 ),
                 stage_timings=stage_timings.get(camera_id, ()),
                 bus=bus_snapshot(buses.get(camera_id)),
+                decode_backend=decode_backend_by_camera.get(camera_id),
                 encode=encode_by_camera.get(camera_id),
                 bed_region=bed_region_by_camera.get(camera_id),
                 bed_exit_scoring=bed_exit_scoring_by_camera.get(camera_id),
                 device_residency=device_residency_by_camera.get(camera_id),
+                decision_completed=decision_completed_by_camera.get(camera_id, 0),
+                inference=(
+                    None if inference is None else inference.cameras.get(camera_id)
+                ),
+                batch_sizes=(
+                    () if inference is None else tuple(inference.batch_sizes.items())
+                ),
+                geometry_batch_sizes=(
+                    ()
+                    if inference is None
+                    else tuple(
+                        GeometryBatchHistogram(
+                            geometry, tuple(sorted(sizes.items()))
+                        )
+                        for geometry, sizes in sorted(
+                            inference.geometry_batch_sizes.items()
+                        )
+                    )
+                ),
+                forward_p50_sec=(
+                    0.0 if inference is None else inference.forward_p50_sec
+                ),
+                forward_p95_sec=(
+                    0.0 if inference is None else inference.forward_p95_sec
+                ),
             )
             for camera_id in sorted(camera_ids)
         )
@@ -335,9 +411,22 @@ class WorkerDiagnostics:
         generation: int | None,
         seq: int,
     ) -> RelayRuntimeStatusPayload:
-        selections, measured_fps, clip_recorder, clip_export, gpu, worker = self._wire_inputs()
+        (
+            selections,
+            measured_fps,
+            detections,
+            clip_recorder,
+            clip_export,
+            gpu,
+            worker,
+        ) = self._wire_inputs()
         cameras = [
-            camera_payload(camera_id, selection, measured_fps.get(camera_id))
+            camera_payload(
+                camera_id,
+                selection,
+                measured_fps.get(camera_id),
+                detections[camera_id],
+            )
             for camera_id, selection in sorted(selections.items())
         ]
         return facility_payload(
@@ -357,7 +446,15 @@ class WorkerDiagnostics:
         generation: int | None,
         seq: int,
     ) -> list[RelayRuntimeStatusPayload]:
-        selections, measured_fps, clip_recorder, clip_export, gpu, worker = self._wire_inputs()
+        (
+            selections,
+            measured_fps,
+            detections,
+            clip_recorder,
+            clip_export,
+            gpu,
+            worker,
+        ) = self._wire_inputs()
         cameras_by_facility: dict[str, list[RelayCameraPayload]] = {
             facility_id: [] for facility_id in set(camera_facilities.values())
         }
@@ -365,7 +462,12 @@ class WorkerDiagnostics:
             facility_id = camera_facilities.get(camera_id)
             if facility_id is not None:
                 cameras_by_facility[facility_id].append(
-                    camera_payload(camera_id, selection, measured_fps.get(camera_id))
+                    camera_payload(
+                        camera_id,
+                        selection,
+                        measured_fps.get(camera_id),
+                        detections[camera_id],
+                    )
                 )
         return [
             facility_payload(
@@ -386,6 +488,7 @@ class WorkerDiagnostics:
     ) -> tuple[
         dict[str, DecodeSelection],
         dict[str, float | None],
+        dict[str, RelayDetectionPayload],
         ClipRecorderStatus,
         RelayClipExportPayload,
         RelayGpuPayload | None,
@@ -398,11 +501,42 @@ class WorkerDiagnostics:
                 for camera_id, (updated_at, measured) in self._measured_fps_by_camera.items()
                 if self._clock() - updated_at <= MEASURED_FPS_MAX_AGE_SEC
             }
+            inference = None if self._inference is None else self._inference.snapshot()
+            decision_completed_by_camera = dict(self._decision_completed_by_camera)
             clip_recorder = self._clip_recorder
             clip_export = self._clip_export.copy()
             gpu = None if self._gpu is None else self._gpu.copy()
             worker = None if self._worker is None else self._worker.copy()
-        return selections, measured_fps, clip_recorder, clip_export, gpu, worker
+        inference_cameras = {} if inference is None else inference.cameras
+        detections = {
+            camera_id: _detection_for_camera(
+                inference_cameras.get(camera_id),
+                decision_completed_by_camera.get(camera_id, 0),
+            )
+            for camera_id in selections
+        }
+        return selections, measured_fps, detections, clip_recorder, clip_export, gpu, worker
+
+
+def _detection_for_camera(
+    inference: CameraInferenceTelemetry | None,
+    decision_completed: int,
+) -> RelayDetectionPayload:
+    if inference is None:
+        return detection_payload(
+            expected=False,
+            inference_admitted=0,
+            inference_succeeded=0,
+            inference_overwritten=0,
+            decision_completed=0,
+        )
+    return detection_payload(
+        expected=True,
+        inference_admitted=inference.admitted,
+        inference_succeeded=inference.inferred,
+        inference_overwritten=inference.overwritten,
+        decision_completed=decision_completed,
+    )
 
 
 __all__ = [
@@ -412,6 +546,7 @@ __all__ = [
     "BusSubscriptionSnapshot",
     "CameraDiagnosticsSnapshot",
     "ClipRecorderStatus",
+    "DecodeBackendObservability",
     "DeviceResidencyDiagnostics",
     "EncodeSelection",
     "EncoderLifecycleSnapshot",
@@ -419,6 +554,7 @@ __all__ = [
     "RelayClipExportPayload",
     "RelayClipRecorderPayload",
     "RelayDecodePayload",
+    "RelayDetectionPayload",
     "RelayGpuPayload",
     "RelayRuntimeStatusPayload",
     "RelayWorkerPayload",

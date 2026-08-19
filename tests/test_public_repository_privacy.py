@@ -121,6 +121,15 @@ _SYNTHETIC_RTSP_FIXTURES = {
         # 실제 카메라가 아니라 거부되어야 하는 형태를 보여주는 합성 리터럴.
         "rtsp://user:pass@camera/live",
     },
+    # 이슈 #325: ffmpeg stderr 진단을 로그로 올릴 때 자격증명이 절대 렌더링되지
+    # 않는지 증명하는 합성 입력이다. 실제 카메라가 아니라, 마스킹되어야 하는
+    # 형태 그 자체가 테스트 대상이다.
+    Path("tests/test_worker_nvdec_process.py"): {
+        "rtsp://admin:secret@camera/token=abc",
+    },
+    Path("tests/test_worker_decode_supervision.py"): {
+        "rtsp://admin:secret@camera/token=abc",
+    },
     Path("front/src/features/camera-management/CameraManagementPage.test.tsx"): {
         "rtsp://user:***@redacted-camera/live",
     },
@@ -255,6 +264,9 @@ _SYNTHETIC_RTSP_FIXTURES = {
         # user:secret 는 고정 더미다. 이 테스트들은 probe URL/자격증명이 응답에
         # 절대 새지 않음을 증명한다.
         "rtsp://user:secret@8.8.8.8/trackID=2",
+    },
+    Path("tests/test_decode_seam_nvdec_subprocess.py"): {
+        "rtsp://operator:s3cr3t@camera.local/live?token=plain",
     },
     Path("tests/test_worker_nvdec_adapter.py"): {
         "rtsp://operator:s3cr3t@camera.local/live?token=plain",

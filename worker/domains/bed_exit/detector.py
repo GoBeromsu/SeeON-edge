@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from datetime import datetime
+from time import monotonic
 from typing import Protocol
 
 from contracts.observation import BedRegionCacheState
@@ -15,7 +16,17 @@ from worker.domains.bed_exit.schema import (
     BedExitFrame,
     BedStatus,
 )
-from worker.types import BusinessEvent, DecisionInput, DecisionTraceSnapshot
+from worker.domains.bed_exit.state_machine import (
+    BedExitStateDecision,
+    BedExitStateMachine,
+)
+from worker.domains.staleness import DEFAULT_STALE_AFTER_SEC
+from worker.types import (
+    BusinessEvent,
+    DecisionInput,
+    DecisionTraceSnapshot,
+    TemporalProfile,
+)
 
 
 class BedExitScoringRecorder(Protocol):
@@ -78,14 +89,23 @@ class BedExitMonitor:
         config: BedExitConfig,
         clock: Callable[[], datetime],
         scoring_recorder: BedExitScoringRecorder | None = None,
+        staleness_clock: Callable[[], float] = monotonic,
+        stale_after_sec: float = DEFAULT_STALE_AFTER_SEC,
+        temporal_profile: TemporalProfile | None = None,
     ) -> None:
         self._config: BedExitConfig = config
         self._clock: Callable[[], datetime] = clock
         self._night_window: NightWindow | None = config.night_window
         self._assignments: dict[int, _Assignment] = {}
-        self._latch: BedExitLatch = BedExitLatch()
+        self._latch = BedExitLatch(
+            clock=staleness_clock,
+            stale_after_sec=stale_after_sec,
+        )
+        self._state_machine = BedExitStateMachine(temporal_profile=temporal_profile)
         self.last_debug_snapshot: BedExitDebugSnapshot | None = None
         self.last_trace_snapshots: tuple[DecisionTraceSnapshot, ...] = ()
+        self.last_shadow_trace_snapshots: tuple[DecisionTraceSnapshot, ...] = ()
+        self.last_shadow_decisions: tuple[BedExitStateDecision, ...] = ()
         self._scoring_recorder = scoring_recorder
         # Cumulative-since-boot, matching `StageTimingAccumulator.max_sec` and
         # `BedRegionCacheCounterSnapshot`'s precedent elsewhere in this
@@ -105,6 +125,37 @@ class BedExitMonitor:
 
     def update_night_window(self, night_window: NightWindow | None) -> None:
         self._night_window = night_window
+
+    @property
+    def state_machine(self) -> BedExitStateMachine:
+        return self._state_machine
+
+    def coast(self, *, frame_index: int | None = None) -> tuple[BusinessEvent, ...]:
+        """Hold assignment/latch/shadow-machine state when no person inference was made."""
+        _ = self._latch.coast()
+        _ = self._state_machine.coast()
+        freshness = self._latch.status_snapshot
+        previous = self.last_debug_snapshot
+        statuses = () if previous is None else tuple(
+            BedStatus(
+                bed_id=status.bed_id,
+                box=status.box,
+                occupancy="covered",
+                person_id=status.person_id,
+            )
+            for status in previous.statuses
+        )
+        self.last_debug_snapshot = BedExitDebugSnapshot(
+            frame_index=frame_index,
+            person_boxes=() if previous is None else previous.person_boxes,
+            bed_boxes=() if previous is None else previous.bed_boxes,
+            statuses=statuses,
+            events=(),
+            bed_region=None if previous is None else previous.bed_region,
+            stale=freshness.stale,
+            observation_age_sec=freshness.observation_age_sec,
+        )
+        return ()
 
     def update(self, input_value: DecisionInput) -> tuple[BusinessEvent, ...]:
         observation = input_value.observation
@@ -128,6 +179,8 @@ class BedExitMonitor:
                     },
                 ),
             )
+            self.last_shadow_trace_snapshots = ()
+            self.last_shadow_decisions = ()
             self.last_debug_snapshot = BedExitDebugSnapshot(
                 frame_index=input_value.frame_index,
                 person_boxes=observation.boxes,
@@ -150,6 +203,16 @@ class BedExitMonitor:
                 self._grace_positive_transitions,
                 self._assignments_made,
             )
+        event_time = 0.0 if input_value.time_sec is None else input_value.time_sec
+        # Gate before the latch consumes an onset. A daytime exit fed into
+        # BedExitLatch advances event_count and can hold (person_id, bed_id)
+        # in `_active_exits`, swallowing the same pair once the window opens.
+        # Feed ``()`` outside the window so freshness still updates and no
+        # onset is recorded. Snapshot still uses the real frame so the overlay
+        # renders `bed:exit` (docs/runbooks/post-redeploy-event-readout.md ④).
+        in_window = self._night_window is None or self._night_window.contains(self._clock())
+        onset_events = self._latch.update(frame.events if in_window else (), event_time)
+        freshness = self._latch.status_snapshot
         self.last_debug_snapshot = BedExitDebugSnapshot(
             frame_index=input_value.frame_index,
             person_boxes=observation.boxes,
@@ -157,10 +220,10 @@ class BedExitMonitor:
             statuses=frame.statuses,
             events=frame.events,
             bed_region=input_value.bed_region,
+            stale=freshness.stale,
+            observation_age_sec=freshness.observation_age_sec,
         )
-        event_time = 0.0 if input_value.time_sec is None else input_value.time_sec
-        onset_events = self._latch.update(frame.events, event_time)
-        if self._night_window is not None and not self._night_window.contains(self._clock()):
+        if not in_window:
             return ()
         return tuple(self._business_event(event, event_time) for event in onset_events)
 
@@ -398,8 +461,52 @@ class BedExitMonitor:
                     missing_values={"containment_ratio": "no-observed-person"},
                 )
             )
-        self.last_trace_snapshots = tuple(traces)
+        shadow_traces = self._record_shadow(input_value, live_ids)
+        # Legacy snapshots stay first so existing [0] assertions keep working.
+        # Shadow snapshots are appended, never replace the containment path,
+        # and never carry triggered=True in this todo.
+        self.last_trace_snapshots = tuple(traces) + shadow_traces
         return BedExitFrame(statuses=statuses, events=tuple(events))
+
+    def _record_shadow(
+        self, input_value: DecisionInput, live_ids: set[int]
+    ) -> tuple[DecisionTraceSnapshot, ...]:
+        decisions: list[BedExitStateDecision] = []
+        extra: list[DecisionTraceSnapshot] = []
+        by_track = {item.track_id: item for item in input_value.bed_pose_features.items}
+        for stale_id in sorted(set(self._state_machine.known_track_ids()) - live_ids):
+            decision = self._state_machine.mark_absent(stale_id)
+            if decision is not None:
+                decisions.append(decision)
+        for track_id in sorted(live_ids):
+            features = by_track.get(track_id)
+            if features is None:
+                continue
+            if not features.bed_polygon_valid:
+                previous = self._state_machine.track_state(track_id)
+                extra.append(
+                    DecisionTraceSnapshot(
+                        reason="bed-polygon-invalid",
+                        previous_state=previous.value,
+                        current_state="no-decision",
+                        triggered=False,
+                        track_id=track_id,
+                        bed_id=features.bed_id,
+                        missing_values={
+                            "torso_in_frac": "bed-polygon-invalid",
+                            "lower_in_frac": "bed-polygon-invalid",
+                            "hip_depth": "bed-polygon-invalid",
+                        },
+                    )
+                )
+                continue
+            decision = self._state_machine.observe(features)
+            if decision is not None:
+                decisions.append(decision)
+        self.last_shadow_decisions = tuple(decisions)
+        snapshots = tuple(item.snapshot for item in decisions) + tuple(extra)
+        self.last_shadow_trace_snapshots = snapshots
+        return snapshots
 
     def _business_event(self, event: BedExitEvent, time_sec: float) -> BusinessEvent:
         return BusinessEvent(

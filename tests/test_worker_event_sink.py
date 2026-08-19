@@ -1,15 +1,23 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field, replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import numpy as np
 import pytest
 
+from contracts.event import EventEvidence
 from contracts.frame import Frame
 from worker.interfaces.output import EventSink
+from worker.pipeline.output.event_sink import EvidenceEventSink
 from worker.pipeline.output.evidence.event_payload import WorkerEventPayload
+from worker.pipeline.output.evidence.snapshot_store import (
+    SnapshotLimits,
+    SnapshotStore,
+    StoredSnapshot,
+)
 from worker.types import FramePacket
 from worker.types.business_event import BusinessEvent
 
@@ -20,9 +28,13 @@ RUNTIME_MANIFEST_SHA256 = "b" * 64
 class _RecordingStager:
     staged: list[WorkerEventPayload] = field(default_factory=list)
     completions: list[tuple[str, str | None]] = field(default_factory=list)
+    attached: list[tuple[str, EventEvidence]] = field(default_factory=list)
 
     def stage(self, event: WorkerEventPayload) -> None:
         self.staged.append(event)
+
+    def attach_snapshot(self, edge_event_id: str, snapshot: EventEvidence) -> None:
+        self.attached.append((edge_event_id, snapshot))
 
     def complete(self, edge_event_id: str, clip_id: str | None) -> None:
         self.completions.append((edge_event_id, clip_id))
@@ -120,6 +132,85 @@ def test_event_sink_stages_then_binds_the_admitted_business_event() -> None:
     assert recorder.calls == [("camera-1", _event(), True)]
     assert stager.completions == [("event-123", "clip-123")]
     assert isinstance(sink, EventSink)
+
+
+def test_event_sink_renders_backpressure_identity(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    store = SnapshotStore(
+        tmp_path,
+        limits=SnapshotLimits(
+            max_pending_global=2,
+            max_pending_per_camera=1,
+            max_files_global=10,
+            max_files_per_camera=10,
+            max_bytes_global=1024,
+            max_bytes_per_camera=1024,
+            max_age=timedelta(days=60),
+            max_pending_age=timedelta(days=1),
+        ),
+    )
+    first = store.stage(
+        b"keep",
+        snapshot_id="event-keep",
+        captured_at="2026-07-31T12:00:00Z",
+        camera_id="camera-1",
+        edge_event_id="event-keep",
+    )
+    event = replace(_event(), snapshot_jpeg=b"jpeg")
+    sink = EvidenceEventSink(
+        stager=_RecordingStager(),
+        recorder=_RecordingRecorder(clip_id=None),
+        snapshot_store=store,
+    )
+
+    with caplog.at_level(logging.WARNING):
+        sink.emit_for_frame(event, _trigger_packet())
+
+    message = caplog.records[-1].getMessage()
+    assert "camera_id=camera-1" in message
+    assert "edge_event_id=event-123" in message
+    assert "reason=per-camera pending files" in message
+    assert store.staged_records() == (first,)
+    assert store.stats.dropped_capacity == 1
+
+
+def test_event_sink_renders_publication_identity_and_preserves_reconciliation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    store = SnapshotStore(tmp_path)
+    committed: list[StoredSnapshot] = []
+
+    def fail_publish(self: SnapshotStore, snapshot: StoredSnapshot) -> None:
+        del self, snapshot
+        raise OSError("publish failed")
+
+    def refuse_commit(self: SnapshotStore, snapshot: StoredSnapshot) -> None:
+        del self
+        committed.append(snapshot)
+        raise AssertionError("commit must wait for publication")
+
+    monkeypatch.setattr(SnapshotStore, "publish", fail_publish)
+    monkeypatch.setattr(SnapshotStore, "commit", refuse_commit)
+    sink = EvidenceEventSink(
+        stager=_RecordingStager(),
+        recorder=_RecordingRecorder(clip_id=None),
+        snapshot_store=store,
+    )
+
+    with caplog.at_level(logging.ERROR):
+        sink.emit_for_frame(replace(_event(), snapshot_jpeg=b"jpeg"), _trigger_packet())
+
+    message = caplog.records[-1].getMessage()
+    assert "camera_id=camera-1" in message
+    assert "edge_event_id=event-123" in message
+    assert caplog.records[-1].exc_info is not None
+    assert committed == []
+    assert store.stats.staged == 1
+    assert store.stats.published == 0
 
 
 def test_event_sink_rejects_invalid_runtime_manifest_before_any_side_effect() -> None:

@@ -1,65 +1,64 @@
-# worker/domains — event interpretation
+# worker/domains: event interpretation
 
-Own the interpretation of numeric observations into business events, plus the
-`DOMAIN_REGISTRY`. Fall and bed-exit are the enabled domains.
+Own fall and bed-exit judgment. Numeric observations become typed `BusinessEvent` values. `DOMAIN_REGISTRY` is the only public extension surface.
 
 ## Ownership rule
 
-**`worker.domains` must not import `worker.pipeline.ingest`,
-`worker.pipeline.output`, or `worker.runtime`.** A domain never opens a stream,
-never sends a relay request, never writes a clip, and never learns how it was
-scheduled. It receives `DecisionInput` and returns `BusinessEvent` values; the
-pipeline decides what to do with them.
+**`worker.domains` must not import `worker.pipeline.ingest`, `worker.pipeline.output`, or `worker.runtime`.**
+A domain never opens a stream, never sends a relay request, never writes a clip, and never learns how it was scheduled.
+It receives `DecisionInput` and returns `BusinessEvent` values. The pipeline decides delivery.
 
-Allowed: `contracts`, `worker.types`, `worker.interfaces`, and
-`worker.pipeline.perception` (numeric feature math and observation types).
+Allowed: `contracts`, `shared.detection_policies`, `worker.types`, `worker.interfaces`, `worker.pipeline.perception`.
+Forbidden I/O and composition: ingest, output, runtime. Import-linter contracts *"worker domains do not depend on ingest, output, or runtime"* and *"worker runtime is the sole composition root"* enforce this.
 
-Enforced by import-linter contracts *"worker domains do not depend on ingest,
-output, or runtime"* and *"worker runtime is the sole composition root"*.
+## Local ownership
 
-## Local Ownership
+- `base.py`: `Decider` alias, `DomainDetector`, audit snapshot types.
+- `registry.py` / `__init__.py`: `DetectionModuleDefinition`, `DOMAIN_REGISTRY`, enabled-domain helpers.
+- `fall/`: window classifier, per-track pose buffers, probability, rising-edge latch.
+- `bed_exit/`: sticky own-bed assignment, containment, grace/hold counters, night window, debug snapshot.
 
-- `base.py`: the `Decider` implementation base and `DomainDetector` surface.
-- `__init__.py`: `DomainRegistration`, enabled-domain helpers, `DOMAIN_REGISTRY`.
-- `fall/`: window classifier, per-track windows, probability, rising-edge latch.
-- `bed_exit/`: sticky own-bed assignment, containment, grace/hold counters, night
-  window, debug snapshot.
+## Numeric input
 
-## Conventions
+`DecisionInput` is numeric: observation, frame size, live track ids, time, frame index, bed region.
+No array, no buffer, no frame handle. A detector that needs pixels is a design error.
+Extract the number in `worker/pipeline/perception` and add it to the observation first.
 
-- `Decider.update(DecisionInput) -> tuple[BusinessEvent, ...]`. Return typed
-  events, never a dict and never a raw frame.
-- No image access. If a decision needs pixel-derived information, extract it in
-  `worker/pipeline/perception` and add it to the observation.
-- Rising-edge only: repeated positive frames emit one event. Latching is onset
-  semantics; downstream delivery is not a domain concern.
-- Time comes from an injected, timezone-aware clock, so night-window and
-  cross-midnight behavior is testable without wall time.
-- Per camera: classifier buffers, per-track windows, probability, latch, bed
-  assignments, grace/hold counters. Shared: the model object only.
+## Per-camera temporal state
 
-## Registry Rule
+Classifier buffers, per-track windows, fall probability, fall latch, bed assignments, and grace/hold counters stay per camera.
+The fall model object is shared once per process. Hoisting a per-camera row leaks one resident into another.
+`coast()` holds last-known state across a missing person inference. It emits nothing.
 
-- Add an enabled detector through `DOMAIN_REGISTRY` with its input view, event
-  types, debug adapter, and audit metadata provider. The registry derives
-  production domain configuration and the relay event allowlist — do not build a
-  parallel allowlist.
-- **Registry-only scope, stated precisely.** A judgment module that consumes the
-  existing `DecisionInput` is fully registry-only: register it, enable it in
-  `domains.enabled`, and its events reach the relay with no runtime, config, or
-  relay edits.
-- **Not registry-only:** a domain needing a new model or runner still requires
-  runtime and config changes, because fall-model provisioning assumes a single
-  fall model. Generalising model provisioning is deliberately out of scope — do
-  not describe the registry as covering it.
+## Explicit policies
 
-## Focused Tests
+Fall uses `FallPolicyV1.operating_threshold`. Bed-exit uses `BedExitPolicyV1.min_containment`, `hold_frames`, `grace_frames`.
+Policies are typed and versioned in `shared.detection_policies`. Unknown documents don't degrade into defaults.
+Night-window and cross-midnight behavior take an injected, timezone-aware clock. Don't read wall time.
+
+## Events
+
+`Decider.update(DecisionInput) -> tuple[BusinessEvent, ...]`. Return typed events, never a dict and never a raw frame.
+Fall emits `event_type="fall"`. Bed-exit emits `event_type="bed-exit"`.
+Rising-edge only: repeated positive frames emit one onset. Downstream delivery is not a domain concern.
+Keep event schema changes additive.
+
+## Registry-driven extension
+
+Register an enabled detector through `DOMAIN_REGISTRY` with its input view, event types, debug adapter, and audit metadata provider.
+The registry derives production domain configuration and the relay event allowlist. Don't build a parallel allowlist.
+Registry-only scope, stated precisely. A judgment module that consumes the existing `DecisionInput` is fully registry-only: register it, enable it through `domains.<name>.enabled`, and its events reach the relay with no runtime, config, or relay edits.
+New model or runner work is not registry-only. Fall-model provisioning still assumes a single fall model. Don't describe the registry as covering that.
+
+## Focused tests
 
 - `tests/test_domains_fall.py`, `tests/test_domains_bed_exit.py`
-- `tests/test_domain_registry_scaffolds_disabled.py`
-- Boundary enforced by import-linter (`uv run --group lint lint-imports`)
+- `tests/test_domain_registry_scaffolds_disabled.py`, `tests/test_worker_domain_registry.py`
+- `tests/test_worker_per_camera_fall_state.py`
+- `tests/test_worker_domains_bed_exit.py` plus assignment, geometry, and time siblings
+- Boundary: `uv run --group lint lint-imports`
 
-## Change Boundary
+## Change boundary
 
-Keep event schema changes additive. Cover hold, grace, and containment thresholds
-together, and prove per-camera isolation whenever detector state changes shape.
+Cover hold, grace, and containment thresholds together.
+Prove per-camera isolation whenever detector state changes shape.

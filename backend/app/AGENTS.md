@@ -1,62 +1,72 @@
-# BACKEND INSTANCE KNOWLEDGE BASE
+# BACKEND APP KNOWLEDGE BASE
 
-Own the FastAPI backend instance (`ml-api` image): app factory, lifespan boot,
-the edge→backend `/api/v1/relay/*` gateway, backend Event API egress, gateway
-metadata, and a relay-heartbeat-derived `/status`. The backend is the edge node's
-single no-HMAC Event API gateway; it does not assemble live camera loops and
-shares no in-memory state with the edge worker.
+Own `create_app`, lifespan, and `features/*`. Thin ml-api gateway: worker relay
+in, Event API out, dashboard HTTP in between. No camera loops. No shared memory
+with the worker.
 
-## Vertical-slice 2-depth ownership
+## create_app / lifespan
 
-- `main.py` — `create_app`, `/api/v1` router registration.
-- `lifespan.py` — thin-gateway boot and `app.state` assembly.
-- `core/` — settings/config.
-- `features/<slice>/` — one capability per slice, each with `router.py` +
-  `store.py` (+ schemas): `auth`, `cameras`, `clips`, `evidence`, `relay`, `status`
-  (status owns the relay-heartbeat + runtime-status stores; clips owns clip
-  store + label audit). `routes/` keeps app-level `health` + `models`.
-- `shared/` — cross-cutting infra only (e.g. `backend_mapping`, dashboard sessions); never feature state.
+- `create_app()` seeds `app.state.edge_relay_token` from `API_EDGE_RELAY_TOKEN`, mounts unversioned `probe_router`, then registers product routers under `Settings.api_v1_prefix` (`/api/v1`). Front dist mounts at `/` from `API_FRONT_DIST` when that dir exists.
+- Auth reads only `app.state.edge_relay_token`. Handlers never re-read env. Lifespan seeding is `hasattr`-guarded so the factory (and tests) win. `no_lifespan` is the test hook.
+- `lifespan.py` rejects retired env keys, resolves the ml-api state dir, then assembles `heartbeat_store`, `runtime_status_store`, `camera_registry`, and the connection-derived ingest / evidence / mapper bundle.
+- Config refresh and heartbeat relay each get a dedicated 1-worker executor. `API_BACKEND_HEARTBEAT_RELAY_SEC=0` kills the relay loop.
+- `maintain_clip_listing` starts before readiness. Shutdown closes listing, cancels both loops, then `catalog_store.close()`.
+- Lifespan does not build detectors or RTSP. Pulled ml-config `cameras` are not admission; the dashboard registry is the camera SSOT.
 
-Store ownership: `camera_registry`→cameras, `clip_store`→clips,
-`runtime_status_store`+`heartbeat_store`→status; the relay slice consumes them via
-FastAPI deps.
+## Feature slices
 
-## Imports
+One capability per `features/<slice>/`. The slice owns its router and store. Extra routers stay in the same slice.
 
-Allowed: `contracts`, `shared.events.edge_ingest_client`, local `backend.app.*`,
-FastAPI/Pydantic.
+- `auth`: dashboard session + credential rotation (`shared/dashboard_auth.py`).
+- `cameras`: registry, topology, bed zones, worker-config, MJPEG proxy. Owns `camera_registry`, `bed_zone_store`.
+- `clips`: listing, media, labels, audit, storage, catalog. Owns `clip_store`, `clip_label_store`, `clip_audit_log`, `catalog_store`, `clip_storage_location_store`.
+- `connection`: enrollment, Hub URL, roster sync, topology confirm. Owns `ConnectionSettingsStore`.
+- `detection_settings`: settings + policy apply/rollback. Owns `detection_settings_store`, `detection_policy_store`.
+- `evidence`: worker clip ingest under `/relay` plus operator incidents.
+- `relay`: `/relay/{config,restart,alerts,heartbeat,runtime-status}`. No store; consumes cameras / status / clips via deps.
+- `runtime_settings`: operator knobs. Owns `RuntimeSettingsStore`.
+- `status`: `/status` and `/system` from relay-derived liveness. Owns `heartbeat_store`, `runtime_status_store`.
+- `qa`: `QaStore` only (`qa_*` tables). No router in `create_app`.
+- `routes/`: app-level health + models. See `routes/AGENTS.md`.
+- `core/` is `Settings` (`ML_API_`). `shared/` is infra (mapping, sessions, sqlite bootstrap, state dir), never feature state.
 
-Forbidden (enforced by import-linter): `edge`; and base layers (`core`/`shared`)
-must not import the upper feature/route/app layers.
+## Wire models
 
-## FastAPI / wire-schema convention
+HTTP schemas are Pydantic `BaseModel`, never `dataclass`. They live in the slice or a slice `schemas.py`. Keep them out of `contracts`.
 
-- HTTP wire schemas are Pydantic `BaseModel` (never `dataclass`) and live in the
-  backend layer (the slice, or a shared `schemas.py` once reused). Never put wire
-  schemas in `contracts`; L0 stays framework-free.
-- Naming: request = `<Action>Request`, response = `<Action>Response`; a trivial ack
-  may return a typed `dict[str, str]`.
-- Strictness: request models set `model_config = ConfigDict(extra="forbid")` and
-  validate every field with `Field(...)`; routes declare `response_model=...`.
-  Header/Query deps use `typing.Annotated` (Ruff `FAST`).
-- Settings: `pydantic_settings.BaseSettings` + `SettingsConfigDict(env_prefix="ML_API_", extra="ignore")`.
-- Routers: one `APIRouter(prefix=..., tags=[...])` per slice with thin handlers;
-  product routes under `/api/v1`, health probes unversioned; end with `__all__ = ["router"]`.
-- Injected collaborators are `typing.Protocol` bound in `lifespan.py`.
+- Requests `<Action>Request`, responses `<Action>Response`. A trivial ack may return `dict[str, str]`.
+- `model_config = ConfigDict(extra="forbid")`. Every field uses `Field(...)`. Routes declare `response_model=...`. Header/Query deps are `Annotated`.
+- Settings: `BaseSettings` + `SettingsConfigDict(env_prefix="ML_API_", extra="ignore")`.
+- One `APIRouter(prefix=..., tags=[...])` per slice. Thin handlers. Product routes under `/api/v1`. `/health/live` and `/health/ready` stay unversioned. End with `__all__ = ["router"]`.
+- Injected collaborators are `typing.Protocol`s bound in `lifespan.py`.
 
-## Focused Tests
+## Store ownership
 
-- `tests/test_serving_api.py`, `tests/test_serving_health.py`,
-  `tests/test_serving_status.py`, `tests/test_serving_models.py`
-- `tests/test_serving_boundary_contract.py`, `tests/test_api_ingest_relay.py`,
-  `tests/test_api_heartbeat_store.py`
-- Boundary enforced by import-linter (`uv run --group lint lint-imports`)
+`app.state` is the injection board. The owning slice constructs the store (`from_env()` or lifespan) and exposes a getter. Other slices depend; they do not build a second copy.
 
-## Gotchas
+- cameras: `camera_registry`, `bed_zone_store`
+- clips: `clip_store`, `clip_label_store`, `clip_audit_log`, `catalog_store`, `clip_storage_location_store`
+- status: `heartbeat_store`, `runtime_status_store`
+- detection_settings: `detection_settings_store`, `detection_policy_store`
 
-`lifespan.py` boots a thin gateway (config, Event API gateway, heartbeat store,
-readiness) — it does NOT assemble camera loops, domain detectors, or edge runtime
-state. `/api/v1/relay/heartbeat` stamps local `received_at` after auth + camera
-binding and before backend egress so `/api/v1/status` reflects edge-local truth
-even when backend egress fails. Keep handlers thin; product routes stay under
-`/api/v1`, `/health/live` and `/health/ready` unversioned.
+Connection and runtime settings load through their slice `from_env()` helpers. API writes `control_*` / `qa_*` as `RuntimeActor.API`. Do not open worker table families. `shared/sqlite_bootstrap.py` may connect; it must not import feature stores.
+
+## Focused tests
+
+- Factory: `tests/test_serving_health.py`, `tests/test_serving_status.py`, `tests/test_serving_models.py`, `tests/test_serving_boundary_contract.py`
+- Relay: `tests/test_api_ingest_relay.py`, `tests/test_relay_body_auth_ordering.py`, `tests/test_api_heartbeat_store.py`, `tests/test_api_runtime_status.py`, `tests/test_backend_heartbeat_relay.py`, `tests/test_ml_api_config_pull.py`
+- Slices: `tests/test_api_*.py`, `tests/test_connection_*.py`, `tests/test_auth_login_throttle.py`, `tests/test_dashboard_auth.py`
+- Import direction: `uv run --group lint lint-imports`
+
+## Anti-patterns
+
+- Do not assemble camera loops, detectors, or worker runtime in `lifespan.py`.
+- Do not seed cameras from env, YAML, or a pulled backend roster.
+- Do not re-read `API_EDGE_RELAY_TOKEN`. `app.state` is the only source.
+- Hub ingest needs a Hub-issued `backend_camera_id`. Skip egress until that mapping exists; keep the local catalog / heartbeat write anyway.
+- Stamp `/relay/heartbeat` `received_at` after auth, before binding and before egress. Local liveness is edge truth even when registry or Hub fails.
+- Wire models stay out of `contracts`. Feature state stays out of `shared/`.
+- `core/` and `shared/` cannot import `features`, `routes`, `main`, or `lifespan`. `worker` is import-forbidden. Relay HTTP only.
+- Retired env keys fail boot via `reject_retired_backend_environment`.
+- Config-refresh and heartbeat-relay keep separate executors.
+- Relay bodies stay inside the per-route caps on `BoundedBodyRoute`.

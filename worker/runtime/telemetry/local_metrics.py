@@ -79,6 +79,17 @@ def log_snapshot(snapshot: RuntimeDiagnosticsSnapshot) -> None:
             }
             for metrics in camera.bus
         }
+        decode_backend = (
+            None
+            if camera.decode_backend is None
+            else {
+                "requested_profile_decode": (
+                    camera.decode_backend.requested_profile_decode
+                ),
+                "resolved_backend": camera.decode_backend.resolved_backend,
+                "actual_adapter_class": camera.decode_backend.actual_adapter_class,
+            }
+        )
         encode = (
             None
             if camera.encode is None
@@ -124,6 +135,30 @@ def log_snapshot(snapshot: RuntimeDiagnosticsSnapshot) -> None:
                 "updated_at_sec": camera.bed_exit_scoring.updated_at_sec,
             }
         )
+        observed = (
+            None
+            if camera.inference is None or camera.inference.observed_geometry is None
+            else f"{camera.inference.observed_geometry[0]}x{camera.inference.observed_geometry[1]}"
+        )
+        geometry_batch_sizes = {
+            f"{histogram.geometry[0]}x{histogram.geometry[1]}": dict(histogram.batch_sizes)
+            for histogram in camera.geometry_batch_sizes
+        }
+        inference = (
+            None
+            if camera.inference is None
+            else {
+                "admitted": camera.inference.admitted,
+                "overwritten": camera.inference.overwritten,
+                "inferred": camera.inference.inferred,
+                "queue_age_sec": camera.inference.queue_age_sec,
+                "observed_geometry": observed,
+                "batch_sizes": dict(camera.batch_sizes),
+                "geometry_batch_sizes": geometry_batch_sizes,
+                "forward_p50_sec": camera.forward_p50_sec,
+                "forward_p95_sec": camera.forward_p95_sec,
+            }
+        )
         # The entrypoint's `logging.basicConfig(format=...)`
         # (worker/__main__.py) never references `extra` keys, so anything
         # passed only via `extra=` is silently absent from the rendered log
@@ -135,7 +170,8 @@ def log_snapshot(snapshot: RuntimeDiagnosticsSnapshot) -> None:
         LOGGER.info(
             "worker.runtime.telemetry camera_id=%s failure_category=%s "
             "stage_timings=%s bus=%s encoder=%s encode=%s bed_region=%s "
-            "bed_exit_scoring=%s",
+            "bed_exit_scoring=%s inference=%s"
+            + (" decode_backend=%s" if decode_backend is not None else ""),
             camera.camera_id,
             camera.failure_category,
             stage_timings,
@@ -144,15 +180,18 @@ def log_snapshot(snapshot: RuntimeDiagnosticsSnapshot) -> None:
             encode,
             bed_region,
             bed_exit_scoring,
+            inference,
+            *((decode_backend,) if decode_backend is not None else ()),
             extra={
                 "camera_id": camera.camera_id,
                 "failure_category": camera.failure_category,
                 "stage_timings": stage_timings,
                 "bus": bus,
                 "encoder": snapshot.encoder,
-                "encode": encode,
+                "decode_backend": decode_backend,
                 "bed_region": bed_region,
                 "bed_exit_scoring": bed_exit_scoring,
+                "inference": inference,
             },
         )
 

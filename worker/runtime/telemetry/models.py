@@ -7,6 +7,10 @@ from typing import Protocol, final
 
 from contracts.encode_diagnostics import EncodeSelection
 from contracts.observation import BedRegionCacheState
+from worker.pipeline.inference_telemetry import (
+    CameraInferenceTelemetry,
+    InferenceTelemetrySnapshot,
+)
 from worker.pipeline.perception.scene_state import BedRegionCacheCounterSnapshot
 
 
@@ -51,6 +55,19 @@ class BedExitScoringDiagnostics:
     grace_positive_transitions: int
     assignments_made: int
     updated_at_sec: float
+
+
+@dataclass(frozen=True, slots=True)
+class DecodeBackendObservability:
+    """One camera's boot-time requested-versus-actual decode selection.
+
+    This stays in the worker-local snapshot: the relay's ``decode`` payload
+    is a strict legacy wire contract and must not gain the concrete class.
+    """
+
+    requested_profile_decode: str
+    resolved_backend: str
+    actual_adapter_class: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -116,6 +133,14 @@ class EncoderLifecycleSnapshot:
 
 
 @dataclass(frozen=True, slots=True)
+class GeometryBatchHistogram:
+    """Physical model-call counts for one observed frame (width, height)."""
+
+    geometry: tuple[int, int]
+    batch_sizes: tuple[tuple[int, int], ...]
+
+
+@dataclass(frozen=True, slots=True)
 class CameraDiagnosticsSnapshot:
     """Rich local diagnostics for one camera."""
 
@@ -123,6 +148,9 @@ class CameraDiagnosticsSnapshot:
     failure_category: str | None
     stage_timings: tuple[StageTimingSnapshot, ...]
     bus: tuple[BusSubscriptionSnapshot, ...]
+    # Local-only: the strict relay decode payload must not expose an
+    # implementation class or profile-resolution detail.
+    decode_backend: DecodeBackendObservability | None = None
     # Local-only (#53): unlike decode's selection, which is also projected
     # onto the strict backend relay payload (RelayDecodePayload in
     # worker/runtime/telemetry/wire.py), this never crosses the relay
@@ -136,6 +164,17 @@ class CameraDiagnosticsSnapshot:
     # Local-only (Todo 17): populated only for a camera running the opt-in
     # nvidia-device-experimental profile.
     device_residency: DeviceResidencyDiagnostics | None = None
+    # Local-only (issue #330): monotonic per-camera count of successful
+    # decision.update() returns. Zero-event completions increment; later
+    # evidence/sink failures do not retract the increment.
+    decision_completed: int = 0
+    inference: CameraInferenceTelemetry | None = None
+    batch_sizes: tuple[tuple[int, int], ...] = ()
+    # Local-only (issue #328): physical model-call histogram partitioned by
+    # observed frame geometry. Never a health/failure classification.
+    geometry_batch_sizes: tuple[GeometryBatchHistogram, ...] = ()
+    forward_p50_sec: float = 0.0
+    forward_p95_sec: float = 0.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -162,6 +201,12 @@ class SubscriptionMetrics(Protocol):
     def queue_age_sec(self) -> float: ...
 
 
+class InferenceMetricsSource(Protocol):
+    """Structural view of the pipeline coordinator's local snapshot."""
+
+    def snapshot(self) -> InferenceTelemetrySnapshot: ...
+
+
 class BusMetricsSource(Protocol):
     """Source of consistent metrics for a named bus subscription."""
 
@@ -185,8 +230,11 @@ __all__ = [
     "BusMetricsSource",
     "BusSubscriptionSnapshot",
     "CameraDiagnosticsSnapshot",
+    "DecodeBackendObservability",
     "DeviceResidencyDiagnostics",
     "EncoderLifecycleSnapshot",
+    "GeometryBatchHistogram",
+    "InferenceMetricsSource",
     "InvalidStageTimingError",
     "RuntimeDiagnosticsSnapshot",
     "StageTimingSnapshot",

@@ -39,6 +39,7 @@ class PacketRingMetrics:
     evicted_bytes: int = 0
     lease_backpressure_drops: int = 0
     active_leases: int = 0
+    epoch_rolls: int = 0
 
 
 @dataclass(slots=True)
@@ -99,14 +100,21 @@ class SourcePacketRing:
         self.limits = limits
         self.metrics = PacketRingMetrics()
         self._entries: deque[_Entry] = deque()
+        self._retired_entries: deque[_Entry] = deque()
         self._total_bytes = 0
+        self._active_epoch: StreamEpoch | None = None
         self._closed = False
         self._lock = threading.RLock()
 
     @property
+    def active_epoch(self) -> StreamEpoch | None:
+        with self._lock:
+            return self._active_epoch
+
+    @property
     def packet_count(self) -> int:
         with self._lock:
-            return len(self._entries)
+            return len(self._entries) + len(self._retired_entries)
 
     @property
     def total_bytes(self) -> int:
@@ -117,11 +125,45 @@ class SourcePacketRing:
         with self._lock:
             return tuple(entry.packet for entry in self._entries)
 
+    def roll_epoch(self, epoch: StreamEpoch) -> None:
+        if epoch.camera_id != self.camera_id:
+            raise ValueError("stream epoch camera does not match its ring")
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("cannot roll a closed packet ring")
+            current = self._active_epoch
+            if (
+                current is not None
+                and current.worker_boot_id == epoch.worker_boot_id
+                and epoch.stream_epoch < current.stream_epoch
+            ):
+                raise ValueError("packet ring epoch cannot move backwards")
+            removed_packets = len(self._entries)
+            removed_bytes = sum(entry.packet.size_bytes for entry in self._entries)
+            self._retired_entries.extend(
+                entry for entry in self._entries if entry.lease_count > 0
+            )
+            self._entries.clear()
+            self._total_bytes = sum(
+                entry.packet.size_bytes for entry in self._retired_entries
+            )
+            self._active_epoch = epoch
+            self.metrics.epoch_rolls += 1
+            self.metrics.evicted_packets += removed_packets
+            self.metrics.evicted_bytes += removed_bytes
+
     def append(self, packet: SourcePacket) -> bool:
         if packet.epoch.camera_id != self.camera_id:
             raise ValueError("packet camera does not match its ring")
         with self._lock:
-            if self._closed or packet.size_bytes > self.limits.max_bytes:
+            if (
+                self._closed
+                or packet.size_bytes > self.limits.max_bytes
+                or (
+                    self._active_epoch is not None
+                    and packet.epoch != self._active_epoch
+                )
+            ):
                 self._drop(packet, lease_pressure=False)
                 return False
             entry = _Entry(packet)
@@ -156,6 +198,11 @@ class SourcePacketRing:
                 raise PacketSelectionError(
                     PacketTruncationReason.KEYFRAME_UNAVAILABLE,
                     "trigger camera does not match packet ring",
+                )
+            if self._active_epoch is not None and trigger_epoch != self._active_epoch:
+                raise PacketSelectionError(
+                    PacketTruncationReason.KEYFRAME_UNAVAILABLE,
+                    "trigger stream epoch is no longer active",
                 )
             epoch_entries = tuple(
                 entry for entry in self._entries if entry.packet.epoch == trigger_epoch
@@ -278,9 +325,13 @@ class SourcePacketRing:
     def close(self) -> None:
         with self._lock:
             self._closed = True
-            retained = deque(entry for entry in self._entries if entry.lease_count > 0)
-            self._entries = retained
-            self._total_bytes = sum(entry.packet.size_bytes for entry in retained)
+            self._retired_entries.extend(
+                entry for entry in self._entries if entry.lease_count > 0
+            )
+            self._entries.clear()
+            self._total_bytes = sum(
+                entry.packet.size_bytes for entry in self._retired_entries
+            )
 
     def _release(self, entries: tuple[_Entry, ...]) -> None:
         with self._lock:
@@ -289,12 +340,20 @@ class SourcePacketRing:
                     raise RuntimeError("packet selection lease was released twice")
                 entry.lease_count -= 1
             self.metrics.active_leases -= 1
-            if self._closed:
-                self._entries.clear()
-                self._total_bytes = 0
+            released_retired_bytes = sum(
+                entry.packet.size_bytes
+                for entry in self._retired_entries
+                if entry.lease_count == 0
+            )
+            self._retired_entries = deque(
+                entry for entry in self._retired_entries if entry.lease_count > 0
+            )
+            self._total_bytes -= released_retired_bytes
 
     def _trim_to_limits(self) -> bool:
         while self._over_limit():
+            if len(self._entries) == 1 and self._retired_entries:
+                return False
             oldest = self._entries[0]
             if oldest.lease_count:
                 return False
@@ -305,7 +364,7 @@ class SourcePacketRing:
         return True
 
     def _over_limit(self) -> bool:
-        if len(self._entries) > self.limits.max_packets:
+        if len(self._entries) + len(self._retired_entries) > self.limits.max_packets:
             return True
         if self._total_bytes > self.limits.max_bytes:
             return True

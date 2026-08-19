@@ -11,7 +11,7 @@ import urllib.request
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Final, Literal, Protocol
+from typing import Final, Literal, Protocol, TypedDict
 
 from contracts.event import EventPayload
 from contracts.relay import AlertEventType, EventApiPayload
@@ -85,7 +85,10 @@ class EdgeIngestClient:
         ).as_dict()
         if clip_id is not None and clip_id.strip() != "":
             payload["clip_id"] = clip_id
-        response = self._post_json(self.events_url, payload)
+        # dict is invariant in its value type, so RelayAlertPayload
+        # (dict[str, str | int | float]) is not a dict[str, object]. Widen
+        # explicitly at the boundary rather than loosening _post_json.
+        response = self._post_json(self.events_url, dict(payload))
         if response is None:
             self._increment_failure()
             return False
@@ -188,7 +191,11 @@ class EdgeIngestClient:
                 response.read()
         except urllib.error.HTTPError as exc:
             self._increment_failure()
-            error_class = "auth" if exc.code in (401, 403) else "unreachable"
+            # Annotated so the ternary keeps the Literal type instead of widening
+            # to str, which is what IngestSendResult.error_class requires.
+            error_class: Literal["auth", "unreachable"] = (
+                "auth" if exc.code in (401, 403) else "unreachable"
+            )
             return IngestSendResult(ok=False, error_class=error_class)
         except urllib.error.URLError as exc:
             self._increment_failure()
@@ -289,20 +296,41 @@ def _event_clip_id(event: EventPayload) -> str | None:
     return None
 
 
-def _audit_payload_fields(audit: dict[str, object] | None) -> dict[str, object]:
+class _AuditPayloadFields(TypedDict, total=False):
+    """The optional EventApiPayload audit fields, typed so ** unpacking checks.
+
+    A plain dict[str, object] cannot be verified against EventApiPayload's
+    int/str/float parameters, which is what mypy was reporting; each value is
+    narrowed here instead of being asserted at the call site.
+    """
+
+    config_version: int
+    model_version: str
+    detector_version: str
+    operating_threshold: float
+    clock_source: str
+
+
+def _audit_payload_fields(audit: dict[str, object] | None) -> _AuditPayloadFields:
+    fields: _AuditPayloadFields = {}
     if audit is None:
-        return {}
-    return {
-        key: audit[key]
-        for key in (
-            "config_version",
-            "model_version",
-            "detector_version",
-            "operating_threshold",
-            "clock_source",
-        )
-        if audit.get(key) is not None
-    }
+        return fields
+    config_version = audit.get("config_version")
+    if isinstance(config_version, int):
+        fields["config_version"] = config_version
+    model_version = audit.get("model_version")
+    if isinstance(model_version, str):
+        fields["model_version"] = model_version
+    detector_version = audit.get("detector_version")
+    if isinstance(detector_version, str):
+        fields["detector_version"] = detector_version
+    operating_threshold = audit.get("operating_threshold")
+    if isinstance(operating_threshold, int | float):
+        fields["operating_threshold"] = float(operating_threshold)
+    clock_source = audit.get("clock_source")
+    if isinstance(clock_source, str):
+        fields["clock_source"] = clock_source
+    return fields
 
 
 __all__ = ["DEFAULT_TIMEOUT_SEC", "EdgeIngestClient", "IngestSendResult", "_utc_iso_timestamp"]
