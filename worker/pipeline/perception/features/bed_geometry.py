@@ -23,8 +23,8 @@ from numpy.typing import NDArray
 from contracts.model import DEFAULT_FALL_CONFIDENCE_THRESHOLD
 from contracts.observation import BoundingBox, FrameObservation
 from worker.types.bed_pose_features import (
-    BedPoseFeatures,
     EMPTY_FRAME_BED_POSE_FEATURES,
+    BedPoseFeatures,
     FrameBedPoseFeatures,
 )
 

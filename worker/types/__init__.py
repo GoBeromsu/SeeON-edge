@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 from worker.types.bed_pose_features import (
-    BedPoseFeatures,
     EMPTY_FRAME_BED_POSE_FEATURES,
+    BedPoseFeatures,
     FrameBedPoseFeatures,
 )
 from worker.types.business_event import BusinessEvent
