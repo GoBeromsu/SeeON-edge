@@ -1493,7 +1493,7 @@ class WorkerRuntime:
             build_applied_camera_state(
                 camera_id=camera.camera_id,
                 effective_decode_backend=resolve_decode_backend(boot.decode, camera.decode_backend),
-                ingest_target_fps=camera.fps,
+                ingest_target_fps=self.temporal_profile.target_fps,
                 module_qualified_ids=tuple(
                     definition.qualified_id
                     for definition in plans[camera.camera_id].definitions.values()
@@ -2089,6 +2089,7 @@ class WorkerRuntime:
             registry=self._ingest_source_registry(),
             runtime=self.config.runtime,
             packet_sink=self._packet_repository,
+            temporal_profile=self.temporal_profile,
         )
         self._record_decode_selection(camera, resolved_backend)
         self.diagnostics.record_decode_backend(

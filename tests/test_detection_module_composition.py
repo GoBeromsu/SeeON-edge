@@ -338,6 +338,7 @@ def test_activation_fails_closed_for_unavailable_runtime_dependencies() -> None:
         (fall, conflicting_bed_exit),
         available_observation_channels=AVAILABLE_OBSERVATION_CHANNELS,
         output_adapter_ids=result_merger_names(),
+        temporal_profile=CURRENT_TEMPORAL_PROFILE,
     )
     with pytest.raises(DetectionModuleActivationError, match="schedule conflict"):
         _ = conflicting_registry.activation(
@@ -422,6 +423,7 @@ def test_compiler_fails_closed_for_incomplete_or_conflicting_definitions() -> No
                 (broken_fall, valid_bed_exit),
                 available_observation_channels=AVAILABLE_OBSERVATION_CHANNELS,
                 output_adapter_ids=result_merger_names(),
+                temporal_profile=CURRENT_TEMPORAL_PROFILE,
             )
 
     with pytest.raises(DetectionModuleCompilationError, match="binding"):
@@ -437,6 +439,7 @@ def test_compiler_fails_closed_for_incomplete_or_conflicting_definitions() -> No
             ),
             available_observation_channels=AVAILABLE_OBSERVATION_CHANNELS,
             output_adapter_ids=result_merger_names(),
+            temporal_profile=CURRENT_TEMPORAL_PROFILE,
         )
 
 

@@ -77,3 +77,127 @@ def test_temporal_profile_rejects_malformed_ingest_fps(ingest_fps: object) -> No
 def test_temporal_profile_rejects_nonpositive_decision_hz() -> None:
     with pytest.raises(TemporalProfileError, match="decision_hz"):
         TemporalProfile(ingest_fps=5.0, decision_hz={"bed": 0.0})
+
+
+def test_schedule_rule_resolve_requires_an_explicit_temporal_profile() -> None:
+    """The implicit CURRENT fallback is gone: resolve() names its owner."""
+    from worker.domains.module_definition import ScheduleRule
+
+    bed = ScheduleRule("bed", "temporal-profile")
+    fifteen = TemporalProfile(ingest_fps=15.0)
+
+    with pytest.raises(TypeError):
+        bed.resolve(1)  # type: ignore[call-arg]
+    assert bed.resolve(1, CURRENT_TEMPORAL_PROFILE) == 30
+    assert bed.resolve(1, fifteen) == 90
+    assert fifteen.decision_interval_frames("bed") == 90
+
+
+def test_compile_time_and_activation_bed_interval_agree_at_15fps() -> None:
+    """Compile-time validation and live activation must see the same bed interval.
+
+    Before the implicit-fallback fix, compile calls ``rule.resolve(1)`` and
+    gets CURRENT's 30 while activation with an injected 15fps profile gets 90.
+    """
+    from worker.domains.module_compiler import compile_detection_module_registry
+    from worker.domains.registry import (
+        AVAILABLE_OBSERVATION_CHANNELS,
+        DETECTION_MODULE_DEFINITIONS,
+        DETECTION_MODULE_REGISTRY,
+    )
+    from worker.pipeline.analytics.merge import result_merger_names
+
+    profile = TemporalProfile(ingest_fps=15.0)
+    bed_rule = next(
+        rule
+        for definition in DETECTION_MODULE_DEFINITIONS
+        for rule in definition.schedule_rules
+        if rule.component_id == "bed"
+    )
+    # Pre-fix compile-time call was ``rule.resolve(1)``. That form must not
+    # exist: if the optional CURRENT fallback returns, this test fails and
+    # the 30-vs-90 split is back.
+    with pytest.raises(TypeError):
+        bed_rule.resolve(1)  # type: ignore[call-arg]
+    compiled = compile_detection_module_registry(
+        DETECTION_MODULE_DEFINITIONS,
+        available_observation_channels=AVAILABLE_OBSERVATION_CHANNELS,
+        output_adapter_ids=result_merger_names(),
+        temporal_profile=profile,
+    )
+    flags = {"person-box-source": True, "persisted-bed-region": False}
+    components = compiled.shared_component_ids(("fall", "bed_exit"), flags=flags)
+    activation = compiled.activation(
+        module_ids=("fall", "bed_exit"),
+        available_observation_channels=AVAILABLE_OBSERVATION_CHANNELS,
+        available_component_ids=components,
+        warmed_component_ids=components,
+        output_adapter_ids=result_merger_names(),
+        camera_frame_stride=1,
+        flags=flags,
+        temporal_profile=profile,
+    )
+    compile_time_bed = bed_rule.resolve(1, profile)
+    assert compile_time_bed == activation.schedule["bed"]
+    assert activation.schedule["bed"] == 90
+    # Production registry stays on the 5fps identity; this test must not
+    # mutate the process-wide compiled graph.
+    assert DETECTION_MODULE_REGISTRY is not compiled
+
+
+def test_temporal_profile_governs_ingest_over_relay_declared_fps() -> None:
+    """Design B: TemporalProfile is the ingest-fps owner.
+
+    A relay-style CameraRuntimeConfig.fps is a declared hint. Effective
+    CapturePolicy.target_fps comes from the injected profile, so raising
+    the profile for a measurement run actually raises fps.
+    """
+    from worker.pipeline.bus import BoundedFrameBus
+    from worker.runtime.ingest_composition import (
+        build_camera_source_registry,
+        compose_camera_ingest_loop,
+    )
+
+    camera = CameraRuntimeConfig(
+        camera_id="camera-a",
+        facility_id="facility-a",
+        rtsp_url="rtsp://192.0.2.1/camera-a",
+        fps=15.0,
+    )
+    registry = build_camera_source_registry((camera,))
+    five = TemporalProfile(ingest_fps=5.0)
+    fifteen = TemporalProfile(ingest_fps=15.0)
+    clamped = compose_camera_ingest_loop(
+        camera,
+        BoundedFrameBus(),
+        _IngestReporter(),
+        decode="opencv",
+        registry=registry,
+        temporal_profile=five,
+    )
+    raised = compose_camera_ingest_loop(
+        camera.model_copy(update={"fps": 5.0}),
+        BoundedFrameBus(),
+        _IngestReporter(),
+        decode="opencv",
+        registry=registry,
+        temporal_profile=fifteen,
+    )
+
+    assert camera.fps == 15.0
+    assert clamped._spec.policy.target_fps == 5.0  # noqa: SLF001
+    assert raised._spec.policy.target_fps == 15.0  # noqa: SLF001
+
+
+class _IngestReporter:
+    def mark_starting(self, camera_id: str) -> None:
+        del camera_id
+
+    def mark_ready(self, camera_id: str) -> None:
+        del camera_id
+
+    def mark_degraded(self, camera_id: str, *, category: str) -> None:
+        del camera_id, category
+
+    def emit(self, event: object) -> None:
+        del event

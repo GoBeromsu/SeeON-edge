@@ -33,6 +33,8 @@ class CameraRuntimeConfig(BaseModel):
     resident_id: str | None = None
     rtsp_url: str | None = Field(default=None, min_length=1)
     streams: CameraStreamsConfig | None = None
+    # Declared/relay hint only. CapturePolicy.target_fps is owned by the
+    # TemporalProfile passed to compose_camera_ingest_loop, not this field.
     fps: float = Field(default=CURRENT_TEMPORAL_PROFILE.target_fps, gt=0)
     heartbeat_interval_sec: float = Field(default=30.0, gt=0)
     frame_stride: int = Field(default=1, gt=0)

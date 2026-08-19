@@ -153,6 +153,7 @@ def _registry(
         definitions,
         available_observation_channels=AVAILABLE_OBSERVATION_CHANNELS,
         output_adapter_ids=result_merger_names(),
+        temporal_profile=CURRENT_TEMPORAL_PROFILE,
     )
 
 

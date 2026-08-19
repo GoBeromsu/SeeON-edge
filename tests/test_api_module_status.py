@@ -25,6 +25,7 @@ from worker.runtime.provenance.manifest import (
     build_applied_camera_state,
     build_applied_runtime_manifest,
 )
+from worker.types import CURRENT_TEMPORAL_PROFILE
 
 _CAMERA_ID = "camera/module-status"
 _BUILD_REVISION = "1" * 40
@@ -80,6 +81,7 @@ def _compiled_with(*, module_change: bool = False, model_change: bool = False):
         definitions,
         available_observation_channels=AVAILABLE_OBSERVATION_CHANNELS,
         output_adapter_ids=result_merger_names(),
+        temporal_profile=CURRENT_TEMPORAL_PROFILE,
     )
 
 

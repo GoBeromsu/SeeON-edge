@@ -502,6 +502,11 @@ def _validation_error_reason(exc: ValidationError) -> str:
 def _runtime_camera(payload: _CameraPayload) -> CameraRuntimeConfig:
     if payload.rtsp_url is None:
         raise WorkerConfigError("worker camera is missing an RTSP URL")
+    # payload.fps is a declared hint stored on the camera record. It does
+    # not own ingest pacing: CapturePolicy.target_fps is taken from the
+    # TemporalProfile passed at compose time. When the relay omits fps we
+    # still fill the field with CURRENT so existing camera-record readers
+    # keep a positive value; the profile remains the effective owner.
     return CameraRuntimeConfig(
         camera_id=payload.camera_id,
         facility_id=payload.resolved_facility_id,

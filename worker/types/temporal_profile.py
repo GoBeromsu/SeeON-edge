@@ -1,8 +1,17 @@
-"""Explicit owner of ingest fps, pose fps, and per-domain decision rates.
+"""Explicit owner of ingest fps and per-domain decision rates.
 
 Pipeline defaults and the composition-root schedule must compute from this
 object. The current production identity is ``ingest_fps=5.0``: target fps
 5.0, pose every ingested frame, bed every 30 frames (1/6 Hz).
+
+Design B (todo 13): TemporalProfile is authoritative for ingest fps.
+A relay-declared ``CameraRuntimeConfig.fps`` is a recorded hint and is
+never the CapturePolicy owner. Rejected design A (relay as per-camera
+override) because raising this profile for a 15fps measurement would
+then leave relay-configured cameras at their declared rate and the
+capacity run would measure nothing. Pose extractor cadence remains
+``camera.frame_stride`` until a later todo re-denominates it from
+``pose_fps``; that split is explicit, not a silent fallback.
 """
 
 from __future__ import annotations

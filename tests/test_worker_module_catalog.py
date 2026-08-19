@@ -26,6 +26,7 @@ from worker.runtime.provenance.manifest import (
     build_applied_runtime_manifest,
 )
 from worker.runtime.provenance.models import AppliedRuntimeManifest, JsonValue, canonical_json
+from worker.types import CURRENT_TEMPORAL_PROFILE
 
 _CAMERA_ID = "camera:module-catalog/a"
 _BUILD_REVISION = "1" * 40
@@ -39,6 +40,7 @@ def _compile(
         definitions,
         available_observation_channels=AVAILABLE_OBSERVATION_CHANNELS,
         output_adapter_ids=result_merger_names(),
+        temporal_profile=CURRENT_TEMPORAL_PROFILE,
     )
 
 

@@ -5,7 +5,6 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import TYPE_CHECKING
 
 from shared.detection_policies import (
     LATEST_POLICY_VERSIONS,
@@ -18,9 +17,7 @@ from worker.domains.module_definition import (
     DetectionModuleCompilationError,
     DetectionModuleDefinition,
 )
-
-if TYPE_CHECKING:
-    from worker.types import TemporalProfile
+from worker.types import TemporalProfile
 
 ModuleVersionSelection = Mapping[str, int]
 
@@ -185,6 +182,7 @@ def compile_detection_module_registry(
     *,
     available_observation_channels: Iterable[str],
     output_adapter_ids: Iterable[str],
+    temporal_profile: TemporalProfile,
 ) -> CompiledDetectionModuleRegistry:
     frozen = tuple(definitions)
     channels = frozenset(available_observation_channels)
@@ -194,7 +192,7 @@ def compile_detection_module_registry(
     event_owner: dict[str, str] = {}
     shared_bindings: dict[tuple[str, str], ComponentBinding] = {}
     for definition in frozen:
-        _validate_definition(definition, channels, outputs)
+        _validate_definition(definition, channels, outputs, temporal_profile)
         qualified = (definition.module_id, definition.version)
         if qualified in by_qualified:
             raise DetectionModuleCompilationError(
@@ -235,6 +233,7 @@ def _validate_definition(
     definition: DetectionModuleDefinition,
     channels: frozenset[str],
     outputs: frozenset[str],
+    temporal_profile: TemporalProfile,
 ) -> None:
     if not definition.module_id or definition.version < 1:
         raise DetectionModuleCompilationError("module id/version must be valid")
@@ -313,7 +312,7 @@ def _validate_definition(
             raise DetectionModuleCompilationError(
                 f"schedule rule {rule.component_id!r} does not target an extractor"
             )
-        if rule.resolve(1) <= 0:
+        if rule.resolve(1, temporal_profile) <= 0:
             raise DetectionModuleCompilationError("schedule intervals must be positive")
 
 
