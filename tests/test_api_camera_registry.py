@@ -597,6 +597,36 @@ def test_worker_config_ignores_retired_default_camera_fps(
     assert camera["camera_id"] == "camera-1"
 
 
+def test_public_camera_tolerates_legacy_stored_fps_residue() -> None:
+    """Rows written before the fps control was removed still carry the key.
+
+    fps was never a schema column; it lived inside the cameras_json blob, so
+    removing the control leaves stray ``fps`` keys on every previously-saved
+    camera rather than migrating them away. The read path must ignore that
+    residue instead of tripping on it, and must not resurrect it in the public
+    payload. Verified against production shape: all 13 live cameras carry
+    ``fps: 15.0`` in their stored blob at the time of removal.
+    """
+    legacy_record = {
+        "id": "camera-1",
+        "label": "Lobby",
+        "rtsp_url": "rtsp://camera/stream",
+        "space_id": "space-1",
+        "status": "online",
+        "decode_backend": None,
+        "floor": None,
+        # Residue from the removed per-camera fps control.
+        "fps": 15.0,
+    }
+
+    public = public_camera(legacy_record)
+
+    assert "fps" not in public
+    assert public["id"] == "camera-1"
+    assert public["label"] == "Lobby"
+    assert public["status"] == "online"
+
+
 def test_camera_fps_is_rejected_and_never_reaches_the_worker(tmp_path) -> None:
     """The per-camera fps control is gone, not merely ignored.
 
