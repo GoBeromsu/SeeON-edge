@@ -103,7 +103,6 @@ class CameraResponse(BaseModel):
     mapping_state: Literal["mapped", "pending", "unmapped"] = "unmapped"
     status: Literal["online", "offline", "starting", "unknown"]
     decode_backend: str | None = None
-    fps: float | None = None
     created_at: str | None = None
     space_name: str | None = None
     # Space-sync-owned floor name (external roster pull, read-only from here --
@@ -153,7 +152,6 @@ class CreateCameraRequest(BaseModel):
     rtsp_url: str = Field(min_length=1)
     space_id: str | None = None
     decode_backend: str | None = None
-    fps: float | None = None
     floor: int | None = None
     edge_ref: str | None = Field(default=None, min_length=1, max_length=64)
     room_edge_ref: str | None = Field(default=None, min_length=1, max_length=64)
@@ -172,7 +170,6 @@ class UpdateCameraRequest(BaseModel):
     rtsp_url: str | None = Field(default=None, min_length=1)
     space_id: str | None = None
     decode_backend: str | None = None
-    fps: float | None = None
     floor: int | None = None
     edge_ref: str | None = Field(default=None, min_length=1, max_length=64)
     room_edge_ref: str | None = Field(default=None, min_length=1, max_length=64)
@@ -284,7 +281,6 @@ class WorkerCameraConfig(BaseModel):
     facility_id: str | None = Field(default=None, min_length=1)
     space_id: str | None = Field(default=None, min_length=1)
     rtsp_url: str = Field(min_length=1)
-    fps: float | None = Field(default=None, gt=0)
     frame_stride: int | None = Field(default=None, gt=0)
     decode_backend: str | None = Field(default=None)
     domains: list[str] | None = None
@@ -449,7 +445,6 @@ def create_camera(
     _authorize(request)
     rtsp_url = _validated_rtsp_url(payload.rtsp_url)
     decode_backend = _normalize_decode_backend(payload.decode_backend)
-    fps = _normalize_fps(payload.fps)
     floor = _normalize_floor(payload.floor)
     # 등록은 저장이다. probe는 상태 표시(online/offline, never_connected)에만
     # 쓰고 등록을 막지 않는다.
@@ -475,7 +470,6 @@ def create_camera(
             backend_camera_id=None,
             mapping_pending=False,
             decode_backend=decode_backend,
-            fps=fps,
             floor=floor,
             last_probed_at=now,
             last_ok_at=now if probe.ok else None,
@@ -554,8 +548,6 @@ def update_camera(
         updates["space_id"] = payload.space_id
     if "decode_backend" in payload.model_fields_set:
         updates["decode_backend"] = _normalize_decode_backend(payload.decode_backend)
-    if "fps" in payload.model_fields_set:
-        updates["fps"] = _normalize_fps(payload.fps)
     if "floor" in payload.model_fields_set:
         updates["floor"] = _normalize_floor(payload.floor)
     if "edge_ref" in payload.model_fields_set:
@@ -755,14 +747,15 @@ def worker_config_snapshot(
         space_id = record.get("space_id")
         if isinstance(space_id, str) and space_id.strip():
             camera["space_id"] = space_id
-        # fps/frame_stride/decode_backend are per-camera registry values only.
+        # frame_stride/decode_backend are per-camera registry values only.
         # The facility-wide ML_DEFAULT_* environment fallbacks were retired
         # (see core.config._RETIRED_BACKEND_ENV, which fails boot on them);
         # the registry is the sole authority, so an unset value is simply
         # omitted and the worker keeps its own default.
-        fps = record.get("fps")
-        if fps is not None:
-            camera["fps"] = fps
+        #
+        # fps is deliberately NOT emitted: the worker's TemporalProfile owns
+        # ingest pacing (design B), so a relay-declared per-camera fps was a
+        # dead control that saved successfully and changed nothing.
         decode_backend = record.get("decode_backend")
         if decode_backend is not None:
             camera["decode_backend"] = decode_backend
@@ -1161,7 +1154,6 @@ def _public_snapshot(
                 "mapping_state": "mapped",
                 "status": "unknown",
                 "decode_backend": None,
-                "fps": None,
                 "created_at": backend_camera.created_at,
                 "space_name": backend_camera.space_name,
                 "floor_name": backend_camera.floor_name,
@@ -1334,23 +1326,6 @@ def _normalize_decode_backend(value: object) -> str | None:
             status_code=status.HTTP_400_BAD_REQUEST, detail="invalid decode_backend"
         )
     return normalized
-
-
-def _normalize_fps(value: object) -> float | None:
-    """Validate a per-camera processed-fps override.
-
-    None passes through untouched (not set / clear). A number must be > 0,
-    mirroring the worker's CameraRuntimeConfig.fps validator (Field(gt=0));
-    anything else is a 400, matching _normalize_decode_backend's shape.
-    """
-    if value is None:
-        return None
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="invalid fps")
-    fps = float(value)
-    if fps <= 0:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="invalid fps")
-    return fps
 
 
 def _validated_rtsp_url(rtsp_url: str) -> str:
