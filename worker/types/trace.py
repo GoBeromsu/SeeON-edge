@@ -92,6 +92,8 @@ class DecisionTraceValueName(StrEnum):
     HIP_DEPTH = "hip_depth"
     TORSO_ANGLE = "torso_angle"
     CENTROID_DISPLACEMENT = "centroid_displacement"
+    HIP_X_REL = "hip_x_rel"
+    HIP_Y_REL = "hip_y_rel"
     OBSERVABILITY = "observability"
     DWELL_FRAMES = "dwell_frames"
     DWELL_THRESHOLD = "dwell_threshold"
