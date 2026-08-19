@@ -20,7 +20,12 @@ Environment knobs (all bounded, all recorded into the JSON):
   BENCH_OUTPUT_DIR     bench JSON destination directory
   BENCH_LABEL          filename suffix, e.g. "soak" -> bench-13-soak.json
   BENCH_VIEWERS        cameras to attach a real MJPEG viewer to (default 1, 0 disables)
-  BENCH_CAMERA_FPS     per-camera offered fps (default: the product's own 5.0)
+  BENCH_CAMERA_FPS     per-camera offered fps (default: the product's own 5.0).
+                       TemporalProfile is not on origin/main yet (PR #356); this
+                       is the fps owner for a 15fps capacity run until that
+                       contract lands. 13 cameras at 15fps:
+                       BENCH_STREAMS=13 BENCH_CAMERA_FPS=15 BENCH_DURATION_SEC=300
+                       BENCH_VIEWERS=0 uv run pytest -m real_stack -k 'test_fanout_benchmark['
 
 Todo 12 additions (all read from already-published worker telemetry, nothing
 new instrumented in product code): the coordinator's cross-camera batch-size
@@ -60,8 +65,12 @@ from fanout_benchmark_harness import (
     recorded_streams_for_clips,
 )
 from fanout_benchmark_metrics import (
+    BusLaneCounters,
+    CameraSample,
     RunMetrics,
+    RunSample,
     StallWatcher,
+    capacity_verdict,
     take_sample,
     write_document,
 )
@@ -205,6 +214,10 @@ def test_fanout_benchmark(
             "git_revision": _git_revision(),
             "label": label or None,
             "camera_fps": camera_fps,
+            # Product default is 5.0 when the operator does not override.
+            # Do not fall through to source_nominal_fps (the clip rate):
+            # that would judge a 5fps ingest run against a 15fps target.
+            "offered_fps": 5.0 if camera_fps is None else camera_fps,
         }
     )
     suffix = f"-{label}" if label else ""
@@ -332,11 +345,14 @@ def test_bench_document_schema_is_complete() -> None:
     assert set(document) >= {
         "aggregate_inference_fps",
         "cameras",
+        "capacity",
         "counters_advanced",
         "errors",
         "gpu",
         "max_inference_frame_age_sec",
         "notes",
+        "overwritten",
+        "overwritten_by_camera",
         "pose_stage_latency_ms",
         "profile",
         "pump_failures",
@@ -429,6 +445,125 @@ def test_mixed_facility_assertion_fails_when_a_camera_does_not_advance_pose() ->
     document["cameras"]["bench-cam-13"]["pose_inferences"] = 0
     with pytest.raises(AssertionError, match="did not advance pose"):
         assert_mixed_facility(document, frozenset({"640x360", "1920x1080"}), 13)
+
+
+def test_capacity_verdict_catches_silent_overwrites() -> None:
+    """A healthy-looking fps with coordinator drops is NOT achievable.
+
+    The classic misleading-success failure: latest-only slots overwrite unread
+    frames, admitted fps stays near the target, and a naive fps-only report
+    would call the run a success. The verdict must fail on ``overwritten``.
+    """
+    # Given 13 cameras admitting ~15 fps while the coordinator overwrote 20%
+    cameras = {
+        f"bench-cam-{index:02d}": {
+            "inference_admitted_fps": 14.8,
+            "overwritten": 300,
+            "bus": {"inference": {"published": 1500, "taken": 1200, "dropped": 300}},
+        }
+        for index in range(1, 14)
+    }
+    # When the capacity gate reads coordinator overwritten, not just fps
+    result = capacity_verdict(cameras, target_fps=15.0)
+    # Then the run cannot be reported as ACHIEVABLE
+    assert result["verdict"] == "NOT"
+    assert result["overwritten_total"] == 3900
+    assert result["overwrite_fraction"] == pytest.approx(0.2)
+    assert "overwritten" in result["reason"]
+
+
+def test_capacity_verdict_is_achievable_when_overwrites_stay_near_zero() -> None:
+    # Given 13 cameras at the target with a handful of latest-only jitter drops
+    cameras = {
+        f"bench-cam-{index:02d}": {
+            "inference_admitted_fps": 14.7,
+            "overwritten": 2,
+            "bus": {"inference": {"published": 1472, "taken": 1470, "dropped": 2}},
+        }
+        for index in range(1, 14)
+    }
+    # When / Then
+    result = capacity_verdict(cameras, target_fps=15.0)
+    assert result["verdict"] == "ACHIEVABLE"
+    assert result["overwritten_total"] == 26
+
+
+def test_take_sample_reads_coordinator_overwritten() -> None:
+    """Sampling must surface coordinator overwritten, not invent a zero."""
+    from types import SimpleNamespace
+
+    # Given a diagnostics snapshot whose coordinator already recorded drops
+    snapshot = SimpleNamespace(
+        cameras=(
+            SimpleNamespace(
+                camera_id="bench-cam-01",
+                bus=(
+                    SimpleNamespace(
+                        name="inference",
+                        published=10,
+                        taken=8,
+                        dropped=2,
+                        queue_age_sec=0.01,
+                    ),
+                ),
+                stage_timings=(SimpleNamespace(stage="pose", samples=8),),
+                failure_category=None,
+                decode_backend=None,
+                inference=SimpleNamespace(overwritten=7, admitted=8, inferred=8),
+                batch_sizes=((13, 4),),
+                forward_p50_sec=0.01,
+                forward_p95_sec=0.02,
+            ),
+        )
+    )
+    # When the harness samples that snapshot
+    sample = take_sample(SimpleNamespace(snapshot=lambda: snapshot), watchdog=None)
+    # Then overwritten is the coordinator field, not the bus dropped count alone
+    assert sample.cameras[0].overwritten == 7
+    assert sample.coordinator_forward_p95_sec == pytest.approx(0.02)
+    assert sample.batch_sizes == {13: 4}
+
+
+def test_document_reports_overwritten_so_a_drop_cannot_look_healthy() -> None:
+    metrics = RunMetrics()
+    first = _sample_with_overwritten(overwritten=10, published=100, taken=90)
+    last = _sample_with_overwritten(overwritten=40, published=250, taken=220)
+    last.at_sec = first.at_sec + 10.0
+    metrics.add(first)
+    metrics.add(last)
+    document = metrics.document(header={"stream_count": 1, "profile": "cpu", "camera_fps": 15.0})
+    assert document["overwritten"] == 30
+    assert document["overwritten_by_camera"] == {"bench-cam-01": 30}
+    assert document["cameras"]["bench-cam-01"]["overwritten"] == 30
+    assert document["capacity"]["overwritten_total"] == 30
+    assert document["capacity"]["verdict"] in {"ACHIEVABLE", "MARGINAL", "NOT"}
+    # 30 overwrites on 130 taken is 18.75% -- the drop catch must fire
+    assert document["capacity"]["verdict"] == "NOT"
+
+
+def _sample_with_overwritten(*, overwritten: int, published: int, taken: int) -> RunSample:
+    return RunSample(
+        at_sec=1000.0,
+        cameras=(
+            CameraSample(
+                camera_id="bench-cam-01",
+                at_sec=1000.0,
+                lanes={
+                    "inference": BusLaneCounters(
+                        published=published, taken=taken, dropped=overwritten
+                    )
+                },
+                inference_queue_age_sec=0.0,
+                pose_samples=taken,
+                failure_category=None,
+                overwritten=overwritten,
+            ),
+        ),
+        watchdog_margin_sec=None,
+        gpu=None,
+        batch_sizes={13: 1},
+        coordinator_forward_p95_sec=0.02,
+    )
 
 
 def test_bench_document_overwrite_replaces_previous_bytes(tmp_path: Path) -> None:
