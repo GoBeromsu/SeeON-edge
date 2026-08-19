@@ -288,7 +288,7 @@ def test_compiled_modules_are_profile_independent() -> None:
         )
 
         assert activation.qualified_ids == identities
-        assert activation.schedule == {"pose": 5, "person": 5, "bed": 30}
+        assert activation.schedule == {"pose": 5, "person": 5, "bed": 90}
         assert descriptor.canonical_profile == profile_name
 
 
