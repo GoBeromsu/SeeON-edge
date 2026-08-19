@@ -2,13 +2,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from worker.types import CURRENT_TEMPORAL_PROFILE
+
 
 @dataclass(frozen=True, slots=True)
 class Scheduler:
     """Deterministic per-frame task scheduler."""
 
     task_intervals: dict[str, int] = field(
-        default_factory=lambda: {"pose": 1, "bed": 30}
+        default_factory=CURRENT_TEMPORAL_PROFILE.task_intervals
     )
 
     def tasks_for_frame(self, frame_index: int) -> tuple[str, ...]:

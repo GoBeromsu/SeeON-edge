@@ -31,6 +31,9 @@ handles stay `object`.
   `observation`, `frame_width`, `frame_height`, `live_track_ids`, `time_sec`,
   `frame_index`, `bed_region`. Numeric only. Never an image, buffer, or frame
   handle.
+- `temporal_profile.py`: `TemporalProfile` owns ingest fps, pose fps, and
+  per-domain decision Hz. Pipeline defaults and the composition-root schedule
+  compute from it. `CURRENT_TEMPORAL_PROFILE` is today's 5fps identity.
 - `business_event.py`: `BusinessEvent(domain, event_type, identity,
   camera_id, facility_id, time_sec, probability, person_id?, bed_id?, audit?,
   snapshot_jpeg?)`. Domains emit these. Pipeline admits, records, and relays

@@ -12,13 +12,12 @@ from worker.interfaces.decode import (
     DecodeSession,
     StreamIdentityDecodeSession,
 )
-from worker.types import FramePacket
+from worker.types import CURRENT_TEMPORAL_PROFILE, FramePacket
 
 _DecodeConfigT = TypeVar("_DecodeConfigT")
 _LivenessCallback = Callable[[str], None]
 _OpenFailureCallback = Callable[[str], None]
 _StopPredicate = Callable[[], bool]
-_DEFAULT_PROCESSED_FPS = 5.0
 _PROCESS_BOOT_ID = uuid4().hex
 LOGGER = logging.getLogger(__name__)
 
@@ -35,7 +34,7 @@ class RTSPSource(Generic[_DecodeConfigT]):
         sleep: Callable[[float], None] = time.sleep,
         backoff_wait: Callable[[float], bool] | None = None,
         stop_requested: _StopPredicate | None = None,
-        target_fps: float = _DEFAULT_PROCESSED_FPS,
+        target_fps: float = CURRENT_TEMPORAL_PROFILE.target_fps,
         clock: Callable[[], float] = time.monotonic,
         pace_wait: Callable[[float], bool] | None = None,
         on_open_failure: _OpenFailureCallback | None = None,

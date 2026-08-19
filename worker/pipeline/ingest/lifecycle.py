@@ -14,7 +14,7 @@ from worker.interfaces.decode import DecodeAdapter, DecodeSession
 from worker.pipeline.ingest.registry import ResolvedSource, SourceRegistry
 from worker.pipeline.ingest.rtsp import RTSPSource
 from worker.pipeline.ingest.rtsp_url import mask_rtsp_url
-from worker.types import FramePacket
+from worker.types import CURRENT_TEMPORAL_PROFILE, FramePacket
 
 LOGGER: Final = logging.getLogger(__name__)
 
@@ -37,7 +37,7 @@ class CapturePolicy:
     reconnect_initial_backoff_sec: float = 0.25
     reconnect_max_backoff_sec: float = 5.0
     max_total_reconnects: int | None = None
-    target_fps: float = 5.0
+    target_fps: float = CURRENT_TEMPORAL_PROFILE.target_fps
 
 
 @dataclass(frozen=True, slots=True)

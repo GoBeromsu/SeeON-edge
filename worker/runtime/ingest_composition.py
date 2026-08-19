@@ -26,6 +26,7 @@ from worker.pipeline.ingest.lifecycle import (
 from worker.pipeline.ingest.registry import ResolvedSource, SourceRecord, SourceRegistry
 from worker.runtime.config import CameraRuntimeConfig, WorkerRuntimeConfig
 from worker.runtime.profile.registry import DecodePolicy
+from worker.types import TemporalProfile
 
 LOGGER: Final = logging.getLogger(__name__)
 
@@ -156,6 +157,7 @@ def compose_camera_ingest_loop(
     registry: SourceRegistry,
     runtime: WorkerRuntimeConfig | None = None,
     packet_sink: SourcePacketSink | None = None,
+    temporal_profile: TemporalProfile,
 ) -> CameraIngestLoop[DecodeConfig]:
     """Compose the real per-camera ingest loop for the boot-resolved decode profile.
 
@@ -183,7 +185,10 @@ def compose_camera_ingest_loop(
         camera_id=camera.camera_id,
         source_id=camera.camera_id,
         make_decode_config=_decode_config_factory(decode, camera, effective_runtime),
-        policy=CapturePolicy(target_fps=camera.fps, max_failures=effective_runtime.max_failures),
+        policy=CapturePolicy(
+            target_fps=temporal_profile.target_fps,
+            max_failures=effective_runtime.max_failures,
+        ),
     )
     # The profile token, per-camera resolution, and concrete adapter must be
     # visible in the rendered boot log. `extra` is retained for structured
@@ -202,24 +207,21 @@ def compose_camera_ingest_loop(
             "actual_adapter_class": type(decoder).__name__,
         },
     )
-    # `camera.fps` paces both decode and the live-view tap (RTSPSource yields
-    # at this rate; CameraPipelinePump publishes every yielded packet to the
-    # live view unconditionally). It silently falls back to a hardcoded 5.0
-    # whenever nothing sets it (no per-camera value from the backend registry,
-    # no ML_DEFAULT_CAMERA_FPS), which previously had zero log trace -- a
-    # camera pacing at 5fps against a 15fps source looked externally
-    # indistinguishable from a frame_stride bug (5 == 15/3), which is exactly
-    # the false lead this line exists to close off. `frame_stride` never
-    # reaches this policy -- it only gates the extractor Scheduler.
+    # TemporalProfile owns ingest fps. camera.fps is the relay-declared hint
+    # and is logged so a mismatch is visible, but it never paces CapturePolicy.
+    # frame_stride still only gates the extractor Scheduler.
     LOGGER.info(
-        "camera ingest paced: camera_id=%s target_fps=%s frame_stride=%s "
-        "(frame_stride does not affect this rate)",
+        "camera ingest paced: camera_id=%s target_fps=%s declared_camera_fps=%s "
+        "frame_stride=%s (frame_stride does not affect this rate; "
+        "declared_camera_fps does not override TemporalProfile)",
         camera.camera_id,
+        temporal_profile.target_fps,
         camera.fps,
         camera.frame_stride,
         extra={
             "camera_id": camera.camera_id,
-            "target_fps": camera.fps,
+            "target_fps": temporal_profile.target_fps,
+            "declared_camera_fps": camera.fps,
             "frame_stride": camera.frame_stride,
         },
     )

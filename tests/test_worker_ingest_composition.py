@@ -23,6 +23,7 @@ from worker.runtime.ingest_composition import (
 from worker.runtime.profile.boot import BootContext
 from worker.runtime.profile.registry import PROFILE_REGISTRY
 from worker.runtime.worker import WorkerRuntime
+from worker.types import CURRENT_TEMPORAL_PROFILE, TemporalProfile
 from worker.types.source_packet import SourcePacket
 
 
@@ -74,6 +75,11 @@ def _config(*camera_ids: str) -> WorkerConfig:
 
 def _camera(camera_id: str = "camera-a") -> CameraRuntimeConfig:
     return _config(camera_id).cameras[0]
+
+
+def _compose(*args: object, **kwargs: object):
+    kwargs.setdefault("temporal_profile", CURRENT_TEMPORAL_PROFILE)
+    return compose_camera_ingest_loop(*args, **kwargs)  # type: ignore[arg-type]
 
 
 def _boot_context_for(profile_name: str) -> BootContext:
@@ -247,7 +253,7 @@ def test_compose_camera_ingest_loop_wires_the_cpu_av_adapter_and_its_config(
     camera = _camera("camera-a")
     registry = build_camera_source_registry((camera,))
 
-    loop = compose_camera_ingest_loop(
+    loop = _compose(
         camera, BoundedFrameBus(), _Reporter(), decode="opencv", registry=registry
     )
 
@@ -267,7 +273,7 @@ def test_compose_camera_ingest_loop_wires_the_nvdec_cuvid_adapter_and_its_config
     camera = _camera("camera-b")
     registry = build_camera_source_registry((camera,))
 
-    loop = compose_camera_ingest_loop(
+    loop = _compose(
         camera, BoundedFrameBus(), _Reporter(), decode="nvdec", registry=registry
     )
 
@@ -285,7 +291,7 @@ def test_compose_camera_ingest_loop_wires_the_vaapi_adapter_and_its_config(
     camera = _camera("camera-c")
     registry = build_camera_source_registry((camera,))
 
-    loop = compose_camera_ingest_loop(
+    loop = _compose(
         camera, BoundedFrameBus(), _Reporter(), decode="vaapi", registry=registry
     )
 
@@ -309,7 +315,7 @@ def test_compose_camera_ingest_loop_honors_a_per_camera_decode_backend_override(
     camera = _camera("camera-a").model_copy(update={"decode_backend": "opencv"})
     registry = build_camera_source_registry((camera,))
 
-    loop = compose_camera_ingest_loop(
+    loop = _compose(
         camera, BoundedFrameBus(), _Reporter(), decode="nvdec", registry=registry
     )
 
@@ -325,7 +331,7 @@ def test_compose_camera_ingest_loop_rejects_an_incompatible_decode_backend_overr
     registry = build_camera_source_registry((camera,))
 
     with pytest.raises(RuntimeError, match="nvdec"):
-        compose_camera_ingest_loop(
+        _compose(
             camera, BoundedFrameBus(), _Reporter(), decode="opencv", registry=registry
         )
 
@@ -343,7 +349,7 @@ def test_compose_camera_ingest_loop_threads_runtime_config_into_capture_policy_a
     registry = build_camera_source_registry((camera,))
     runtime = WorkerRuntimeConfig(max_failures=7, open_timeout_ms=1234, read_timeout_ms=2345)
 
-    loop = compose_camera_ingest_loop(
+    loop = _compose(
         camera,
         BoundedFrameBus(),
         _Reporter(),
@@ -365,7 +371,7 @@ def test_compose_camera_ingest_loop_without_runtime_falls_back_to_dataclass_defa
     camera = _camera("camera-a")
     registry = build_camera_source_registry((camera,))
 
-    loop = compose_camera_ingest_loop(
+    loop = _compose(
         camera, BoundedFrameBus(), _Reporter(), decode="opencv", registry=registry
     )
 
@@ -391,12 +397,18 @@ def test_compose_camera_ingest_loop_capture_policy_fps_is_independent_of_frame_s
     # every packet CameraPipelinePump takes off the bus, unconditionally).
     camera = _camera("camera-a").model_copy(update={"fps": 15.0, "frame_stride": frame_stride})
     registry = build_camera_source_registry((camera,))
+    profile = TemporalProfile(ingest_fps=5.0)
 
-    loop = compose_camera_ingest_loop(
-        camera, BoundedFrameBus(), _Reporter(), decode="opencv", registry=registry
+    loop = _compose(
+        camera,
+        BoundedFrameBus(),
+        _Reporter(),
+        decode="opencv",
+        registry=registry,
+        temporal_profile=profile,
     )
 
-    assert loop._spec.policy.target_fps == 15.0  # noqa: SLF001
+    assert loop._spec.policy.target_fps == profile.target_fps  # noqa: SLF001
 
 
 def test_compose_camera_ingest_loop_logs_requested_and_actual_decode_backend(
@@ -406,7 +418,7 @@ def test_compose_camera_ingest_loop_logs_requested_and_actual_decode_backend(
     registry = build_camera_source_registry((camera,))
 
     with caplog.at_level("INFO", logger="worker.runtime.ingest_composition"):
-        compose_camera_ingest_loop(
+        _compose(
             camera,
             BoundedFrameBus(),
             _Reporter(),
@@ -438,10 +450,16 @@ def test_compose_camera_ingest_loop_logs_the_effective_pacing_fps(
     # stays too, for structured consumers, but is not what this asserts.
     camera = _camera("camera-a").model_copy(update={"fps": 15.0, "frame_stride": 3})
     registry = build_camera_source_registry((camera,))
+    profile = TemporalProfile(ingest_fps=5.0)
 
     with caplog.at_level("INFO", logger="worker.runtime.ingest_composition"):
-        compose_camera_ingest_loop(
-            camera, BoundedFrameBus(), _Reporter(), decode="opencv", registry=registry
+        _compose(
+            camera,
+            BoundedFrameBus(),
+            _Reporter(),
+            decode="opencv",
+            registry=registry,
+            temporal_profile=profile,
         )
 
     records = [r for r in caplog.records if r.name == "worker.runtime.ingest_composition"]
@@ -449,7 +467,8 @@ def test_compose_camera_ingest_loop_logs_the_effective_pacing_fps(
     for record in records:
         record.message = record.getMessage()
     assert any("camera_id=camera-a" in r.message for r in records)
-    assert any("target_fps=15.0" in r.message for r in records)
+    assert any("target_fps=5.0" in r.message for r in records)
+    assert any("declared_camera_fps=15.0" in r.message for r in records)
     assert any("frame_stride=3" in r.message for r in records)
 
 

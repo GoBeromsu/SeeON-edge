@@ -38,7 +38,7 @@ from worker.runtime.model_composition import SharedComponentPool, compose_shared
 from worker.runtime.profile.boot import BootContext
 from worker.runtime.profile.registry import PROFILE_REGISTRY
 from worker.runtime.worker import WorkerRuntime
-from worker.types import BusinessEvent, DecisionInput, FramePacket
+from worker.types import CURRENT_TEMPORAL_PROFILE, BusinessEvent, DecisionInput, FramePacket
 
 ServingOption = str | int | float | bool | None
 
@@ -153,6 +153,7 @@ def _registry(
         definitions,
         available_observation_channels=AVAILABLE_OBSERVATION_CHANNELS,
         output_adapter_ids=result_merger_names(),
+        temporal_profile=CURRENT_TEMPORAL_PROFILE,
     )
 
 
@@ -289,6 +290,7 @@ def test_activation_rejects_distinct_active_writers_to_one_output_adapter() -> N
             output_adapter_ids=result_merger_names(),
             camera_frame_stride=1,
             flags={},
+            temporal_profile=CURRENT_TEMPORAL_PROFILE,
         )
 
 
