@@ -22,6 +22,7 @@ from contracts.observation import (
 )
 from worker.pipeline.perception.decision_input import build_decision_input
 from worker.pipeline.perception.scene_state import SceneState
+from worker.types.bed_pose_features import BedPoseFeatures, FrameBedPoseFeatures
 from worker.types.decision_input import DecisionInput
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -96,3 +97,42 @@ def test_build_decision_input_does_not_require_a_new_argument() -> None:
     assert decision_input.frame_height == 480
     assert decision_input.live_track_ids == ()
     assert decision_input.observation.bed_boxes == ()
+
+
+def test_bed_pose_features_is_a_plain_scalar_contract() -> None:
+    """Domain-facing fields stay stdlib scalars; numpy never crosses this type."""
+    names = tuple(item.name for item in fields(BedPoseFeatures))
+    assert names == (
+        "track_id",
+        "bed_id",
+        "torso_in_frac",
+        "lower_in_frac",
+        "keypoint_in_frac",
+        "hip_depth",
+        "torso_angle",
+        "centroid_displacement",
+        "hip_x_rel",
+        "hip_y_rel",
+        "observability",
+        "bed_polygon_valid",
+    )
+    features = BedPoseFeatures(
+        track_id=7,
+        bed_id=0,
+        torso_in_frac=0.9,
+        lower_in_frac=0.8,
+        keypoint_in_frac=0.85,
+        hip_depth=0.1,
+        torso_angle=0.2,
+        centroid_displacement=0.0,
+        hip_x_rel=0.5,
+        hip_y_rel=0.5,
+        observability=1.0,
+        bed_polygon_valid=True,
+    )
+    assert features.track_id == 7
+    assert features.bed_id == 0
+    assert features.bed_polygon_valid is True
+    frame = FrameBedPoseFeatures(items=(features,))
+    assert frame.items == (features,)
+    assert FrameBedPoseFeatures().items == ()
