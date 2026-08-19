@@ -196,7 +196,9 @@ def _scaled_usable_polygon(
     return scaled
 
 
-def _polygon_vertices(box: BoundingBox) -> NDArray[np.float64] | None:
+def _polygon_vertices(box: object) -> NDArray[np.float64] | None:
+    if not isinstance(box, BoundingBox):
+        return None
     if box.polygon is not None:
         if len(box.polygon) < 3:
             return None

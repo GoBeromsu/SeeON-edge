@@ -337,6 +337,17 @@ def test_no_bed_boxes_is_an_invalid_polygon_state() -> None:
     assert features.torso_angle > 0.0
 
 
+def test_non_bounding_box_bed_region_is_unusable_not_a_crash() -> None:
+    features = compute_bed_pose_features(
+        track_id=1,
+        pose=_pose(_IN_BED_POINTS),
+        bed_boxes=((1.0, 2.0, 3.0, 4.0),),  # type: ignore[arg-type]
+        frame_width=_FRAME_W,
+        frame_height=_FRAME_H,
+    )
+    _assert_bed_relative_zero(features)
+
+
 def test_torso_angle_is_near_zero_when_lying_and_near_pi_over_two_when_upright() -> None:
     # Ceiling-view person along the bed's long (x) axis: shoulders share an x,
     # hips share a further-right x. Midpoint-to-midpoint is image-horizontal.
