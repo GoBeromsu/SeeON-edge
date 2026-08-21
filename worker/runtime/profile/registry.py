@@ -12,18 +12,17 @@ from worker.runtime.profile.descriptor import (
     RuntimeProfileDescriptor,
     RuntimeProfileEdge,
 )
-from worker.runtime.profile.device import CudaProbeSource, probe_cuda
+from worker.runtime.profile.device import CudaProbeSource
 from worker.types import FrameCapability, MemoryKind, PipelineProfile, PixelFormat
 
 DevicePolicy: TypeAlias = Literal["cuda", "mps", "cpu"]
 DecodePolicy: TypeAlias = Literal["nvdec", "opencv", "vaapi"]
 EncodePolicy: TypeAlias = Literal["h264_nvenc", "libx264"]
 MpsProbeSource: TypeAlias = Callable[[], bool]
-# `nvidia-device-experimental`'s own concrete-stage capability check --
-# distinct from `CudaProbeSource` (plain `torch.cuda` usability, shared by
-# the production `cuda`/`nvidia-host-bridge` verifier): this source answers
-# the Todo 17 question (device-resident pool, CUDA stream/event, DLPack) and
-# must never be satisfied by a host that only passes the plain CUDA check.
+# `nvidia`'s own concrete-stage capability check -- distinct from
+# `CudaProbeSource` (plain `torch.cuda` usability): this source answers
+# whether NVDEC, NVML identity, CUDA stream/event, and DLPack are present
+# and must never be satisfied by a host that only passes the plain CUDA check.
 DeviceResidentProbeSource: TypeAlias = Callable[[], "VerifyResult"]
 
 ML_WORKER_PROFILE_ENV: Final = "ML_WORKER_PROFILE"
@@ -54,7 +53,6 @@ EncodeProbe: TypeAlias = Callable[[], VerifyResult]
 _HOST_RGB = FrameCapability(MemoryKind.HOST, PixelFormat.RGB24)
 _CUDA_RGB = FrameCapability(MemoryKind.CUDA_DEVICE, PixelFormat.RGB24)
 _CUDA_NV12 = FrameCapability(MemoryKind.CUDA_DEVICE, PixelFormat.NV12)
-_VAAPI_NV12 = FrameCapability(MemoryKind.VAAPI_SURFACE, PixelFormat.NV12)
 _MPS_RGB = FrameCapability(MemoryKind.MPS_DEVICE, PixelFormat.RGB24)
 
 
@@ -109,17 +107,17 @@ _CPU_HOST = ProfileSpec(
     "libx264",
     None,
 )
-_NVIDIA_HOST_BRIDGE = ProfileSpec(
-    "nvidia-host-bridge",
-    ("nvidia-host-bridge", "cuda"),
+_NVIDIA = ProfileSpec(
+    "nvidia",
+    ("nvidia",),
     "cuda",
     "nvdec",
-    "cuda-tensor-upload",
-    "cuda",
-    "numpy-host",
+    "cuda-nv12-to-rgb24",
+    "tensorrt",
+    "cuda-device",
     "h264_nvenc",
     None,
-    encode_fallback="libx264",
+    concrete_stages_available=False,
 )
 _INTEL_VAAPI_HOST = ProfileSpec(
     "intel-vaapi-host",
@@ -144,28 +142,14 @@ _APPLE_MPS_HOST = ProfileSpec(
     "libx264",
     None,
 )
-_NVIDIA_DEVICE_EXPERIMENTAL = ProfileSpec(
-    "nvidia-device-experimental",
-    ("nvidia-device-experimental",),
-    "cuda",
-    "nvdec",
-    "cuda-nv12-to-rgb24",
-    "cuda",
-    "cuda-device",
-    "h264_nvenc",
-    None,
-    concrete_stages_available=False,
-)
-
 CANONICAL_PROFILE_REGISTRY: Final[Mapping[str, ProfileSpec]] = MappingProxyType(
     {
         spec.name: spec
         for spec in (
             _CPU_HOST,
-            _NVIDIA_HOST_BRIDGE,
             _INTEL_VAAPI_HOST,
             _APPLE_MPS_HOST,
-            _NVIDIA_DEVICE_EXPERIMENTAL,
+            _NVIDIA,
         )
     }
 )
@@ -237,39 +221,7 @@ def _memory_path_for(
     tuple[ProfileConverter, ...],
     tuple[RuntimeProfileEdge, ...],
 ]:
-    del decode  # All current production decode adapters emit host RGB24 packets.
-    if spec.name == "nvidia-host-bridge":
-        encode_capability = _CUDA_RGB if encode == "h264_nvenc" else _HOST_RGB
-        steps = (
-            MemoryPathStep("decode", MemoryKind.HOST, PixelFormat.RGB24),
-            MemoryPathStep("preprocess", MemoryKind.HOST, PixelFormat.RGB24),
-            MemoryPathStep("inference", MemoryKind.CUDA_DEVICE, PixelFormat.RGB24),
-            MemoryPathStep("overlay", MemoryKind.HOST, PixelFormat.RGB24),
-            MemoryPathStep("encode", encode_capability.memory_kind, PixelFormat.RGB24),
-        )
-        converters = [
-            ProfileConverter("cuda-inference-host-input-upload", _HOST_RGB, _CUDA_RGB, "h2d")
-        ]
-        encode_converter = None
-        if encode == "h264_nvenc":
-            encode_converter = "nvenc-host-input-upload"
-            converters.append(ProfileConverter(encode_converter, _HOST_RGB, _CUDA_RGB, "h2d"))
-        return (
-            steps,
-            tuple(converters),
-            (
-                _edge("decode", "preprocess", _HOST_RGB, _HOST_RGB),
-                _edge(
-                    "preprocess",
-                    "inference",
-                    _HOST_RGB,
-                    _CUDA_RGB,
-                    "cuda-inference-host-input-upload",
-                ),
-                _edge("decode", "overlay", _HOST_RGB, _HOST_RGB),
-                _edge("overlay", "encode", _HOST_RGB, encode_capability, encode_converter),
-            ),
-        )
+    del decode, encode  # Device vs host path is selected by spec.name, not these.
     if spec.name == "apple-mps-host":
         return (
             (
@@ -293,7 +245,7 @@ def _memory_path_for(
                 _edge("overlay", "encode", _HOST_RGB, _HOST_RGB),
             ),
         )
-    if spec.name == "nvidia-device-experimental":
+    if spec.name == "nvidia":
         device_stages: tuple[tuple[ProfileStage, PixelFormat], ...] = (
             ("decode", PixelFormat.NV12),
             ("preprocess", PixelFormat.NV12),
@@ -374,15 +326,10 @@ def runtime_descriptor_for(
         effective_edges=effective_edges,
         degraded_reasons=degraded_reasons,
         device_resident_after_decode=(
-            spec.name == "nvidia-device-experimental" and decode == "nvdec"
+            spec.name == "nvidia" and decode == "nvdec"
         ),
         concrete_stages_available=spec.concrete_stages_available,
     )
-
-
-def _verify_cuda(source: CudaProbeSource | None) -> VerifyResult:
-    result = probe_cuda(source)
-    return VerifyResult(result.available, "cuda", "device", result.reason)
 
 
 def _verify_mps(source: MpsProbeSource | None) -> VerifyResult:
@@ -409,7 +356,7 @@ def _verify_device_resident(source: DeviceResidentProbeSource | None) -> VerifyR
     if source is None:
         return VerifyResult(
             False,
-            "nvidia-device-experimental",
+            "nvidia",
             "device",
             "device-resident capability probe is not configured",
         )
@@ -422,8 +369,7 @@ def default_verifiers(
     mps_source: MpsProbeSource | None = None,
     device_resident_source: DeviceResidentProbeSource | None = None,
 ) -> Mapping[str, DeviceVerifier]:
-    def cuda() -> VerifyResult:
-        return _verify_cuda(cuda_source)
+    del cuda_source  # Plain CUDA no longer gates a public profile.
 
     def mps() -> VerifyResult:
         return _verify_mps(mps_source)
@@ -435,9 +381,7 @@ def default_verifiers(
         {
             "cpu": _verify_cpu,
             "cpu-host": _verify_cpu,
-            "cuda": cuda,
-            "nvidia-host-bridge": cuda,
-            "nvidia-device-experimental": device_resident,
+            "nvidia": device_resident,
             "mps": mps,
             "apple-mps-host": mps,
             "igpu": _verify_igpu_device,

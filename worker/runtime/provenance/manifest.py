@@ -112,7 +112,7 @@ def build_applied_runtime_manifest(
     identities = _verified_component_identities(definitions, component_identities, boot)
     selected_qualified_ids = tuple(definition.qualified_id for definition in definitions)
     profile = boot.runtime_profile
-    facts = environment.validated(nvidia=profile.canonical_profile.startswith("nvidia-"))
+    facts = environment.validated(nvidia=profile.canonical_profile == "nvidia")
     content: dict[str, JsonValue] = {
         "manifest_schema_version": MANIFEST_SCHEMA_VERSION,
         "build": {

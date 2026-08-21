@@ -11,7 +11,7 @@ Constructor argument. Vendor kits live here: OpenCV, PyAV, ffmpeg.
 - `vaapi/`: iGPU ffmpeg child, host rgb24. OpenCV demotion is a runtime profile call, not an adapter probe.
 - `nvdec_cuvid/`: fail-loud NVDEC/CUVID. FFprobe, `*_cuvid` codec, bounded stdout queue, child reap.
 - `pyav_*.py`: packet-preserving demux and NVDEC tee. Remux path only.
-- `nvdec_device/`: experimental device-resident pool. Only `nvidia-device-experimental`. Production profiles never construct it.
+- `nvdec_device/`: device-resident pool. Only the unified `nvidia` profile. Host-only profiles never construct it.
 
 ## Port and backend selection
 

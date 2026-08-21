@@ -142,7 +142,7 @@ def _manifest(
         config_version=9,
         restart_generation=3,
         detector_version="worker-domain-detectors-v1",
-        environment=facts or _facts(nvidia=profile_name.startswith("nvidia-")),
+        environment=facts or _facts(nvidia=profile_name == "nvidia"),
         edge_database_schema_version=5,
     )
 
@@ -152,7 +152,7 @@ def test_runtime_manifest_identity_tracks_effective_module_profile_model_and_pol
     equivalent = _manifest(reverse_identities=True)
     module_changed = _manifest(registry=_compiled_with(module_change=True))
     model_changed = _manifest(registry=_compiled_with(model_change=True))
-    profile_changed = _manifest(profile_name="nvidia-host-bridge")
+    profile_changed = _manifest(profile_name="nvidia")
     policy_changed = _manifest(threshold=0.72)
 
     assert equivalent.sha256 == baseline.sha256

@@ -1,15 +1,15 @@
-"""Real capability probe for the experimental `nvidia-device-experimental` profile.
+"""Real capability probe gating the unified `nvidia` profile.
 
 This answers a strictly narrower question than
 ``worker.adapters.device.cuda.probe.probe_cuda_capability``: not merely "can
-this process construct a ``device='cuda'`` model" (the production
-``nvidia-host-bridge``/``cuda`` gate), but "can this process additionally hold
-NVDEC-decoded frames device-resident, move them through a bounded pool with
-CUDA-event-ordered lifetime, and hand them to an in-process CUDA inference
-runtime without a full-frame host round-trip". Todo 7 (`worker/runtime/profile/
-registry.py`) deliberately marks this profile's concrete stages
-``concrete_stages_available=False`` until this probe exists; nothing here
-weakens the plain ``cuda`` verifier used by production profiles.
+this process construct a ``device='cuda'`` model", but "can this process
+additionally hold NVDEC-decoded frames device-resident, move them through a
+bounded pool with CUDA-event-ordered lifetime, and hand them to an in-process
+CUDA inference runtime without a full-frame host round-trip". Since the NVIDIA
+profiles were unified, this probe is the only device gate for ``nvidia``:
+plain ``torch.cuda`` usability no longer admits any public profile. Todo 7
+(`worker/runtime/profile/registry.py`) still marks the profile's concrete
+stages ``concrete_stages_available=False`` until those stages ship.
 
 Every check below reads only ``torch``'s own documented public API
 (``torch.cuda.is_available``, ``torch.cuda.Stream``, ``torch.cuda.Event``,

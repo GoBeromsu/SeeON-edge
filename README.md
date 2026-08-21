@@ -145,8 +145,7 @@ scripts/edge-preflight/check-env.sh .env.edge.prod
 ```
 
 Then start the edge-only stack from this repository root with the same profile
-topology: base Compose only for CPU/MPS, the NVIDIA overlay for
-`nvidia-host-bridge` / `nvidia-device-experimental` (or legacy `cuda`), or the
+topology: base Compose only for CPU/MPS, the NVIDIA overlay for `nvidia`, or the
 Intel overlay for `intel-vaapi-host` (or legacy `igpu`).
 
 ```bash

@@ -40,6 +40,7 @@ _PROHIBITED_SUFFIXES = {
     ".ndjson",
     ".lz4",
     ".onnx",
+    ".engine",
     ".parquet",
     ".pdf",
     ".png",
@@ -495,6 +496,7 @@ PUBLIC_SAFE_STRUCTURED_FIXTURES = frozenset(
         # tracked, carved out of the blanket `models/` ignore.
         Path("models/fall/lstm/arch.json"),
         Path("models/fall/lstm/metadata.yaml"),
+        Path("models/pose/metadata.yaml"),
     }
 )
 

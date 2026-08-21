@@ -271,12 +271,12 @@ class WorkerDiagnostics:
     def record_device_residency(
         self, camera_id: str, diagnostics: DeviceResidencyDiagnostics
     ) -> None:
-        """Refresh one camera's device-resident pipeline counters (Todo 17).
+        """Refresh one camera's device-resident pipeline counters.
 
-        Only ever called for a camera running the opt-in
-        ``nvidia-device-experimental`` profile -- same overwrite-in-place,
-        emission-on-``log_snapshot``-cadence convention as
-        ``record_bed_region``/``record_bed_exit_scoring`` above.
+        Only ever called for a camera running the canonical ``nvidia``
+        profile -- same overwrite-in-place, emission-on-``log_snapshot``-
+        cadence convention as ``record_bed_region``/
+        ``record_bed_exit_scoring`` above.
         """
         with self._lock:
             self._device_residency_by_camera[camera_id] = diagnostics

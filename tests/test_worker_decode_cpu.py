@@ -425,13 +425,11 @@ def test_profile_policy_selects_cpu_decode_only_for_cpu_and_mps() -> None:
     assert decode_by_profile == {
         "cpu-host": "opencv",
         "cpu": "opencv",
-        "nvidia-host-bridge": "nvdec",
-        "cuda": "nvdec",
+        "nvidia": "nvdec",
         "intel-vaapi-host": "vaapi",
         "igpu": "vaapi",
         "apple-mps-host": "opencv",
         "mps": "opencv",
-        "nvidia-device-experimental": "nvdec",
     }
 
 

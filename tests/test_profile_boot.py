@@ -90,18 +90,21 @@ def test_resolve_profile_unknown_raises() -> None:
         resolve_profile({ML_WORKER_PROFILE_ENV: "tpu"})
 
 
-def test_cuda_profile_verify_true() -> None:
+def test_nvidia_profile_verify_true() -> None:
     context = resolve_boot_context(
-        {ML_WORKER_PROFILE_ENV: "cuda"}, _deps("cuda"), _decode_ok
+        {ML_WORKER_PROFILE_ENV: "nvidia"}, _deps("nvidia"), _decode_ok
     )
 
     assert context.device == "cuda"
     assert context.decode == "nvdec"
+    assert context.canonical_profile == "nvidia"
 
 
-def test_cuda_profile_verify_false() -> None:
+def test_nvidia_profile_verify_false() -> None:
     with pytest.raises(ProfileVerifyError):
-        resolve_boot_context({ML_WORKER_PROFILE_ENV: "cuda"}, _deps("cuda", ok=False), _decode_ok)
+        resolve_boot_context(
+            {ML_WORKER_PROFILE_ENV: "nvidia"}, _deps("nvidia", ok=False), _decode_ok
+        )
 
 
 def test_mps_profile_verify_true() -> None:
@@ -139,7 +142,7 @@ def test_decode_preflight_incompat_raises() -> None:
         return VerifyResult(False, "cuda", "decode", "NVDEC unavailable")
 
     with pytest.raises(ProfileVerifyError):
-        resolve_boot_context({ML_WORKER_PROFILE_ENV: "cuda"}, _deps("cuda"), decode_probe)
+        resolve_boot_context({ML_WORKER_PROFILE_ENV: "nvidia"}, _deps("nvidia"), decode_probe)
 
 
 def test_resolve_boot_context_aggregates_multiple_gate_failures() -> None:
@@ -150,15 +153,15 @@ def test_resolve_boot_context_aggregates_multiple_gate_failures() -> None:
 
     with pytest.raises(ProfileVerifyError) as excinfo:
         resolve_boot_context(
-            {ML_WORKER_PROFILE_ENV: "cuda", "ML_RTSP_BACKEND": "opencv"},
-            _deps("cuda", ok=False),
+            {ML_WORKER_PROFILE_ENV: "nvidia", "ML_RTSP_BACKEND": "opencv"},
+            _deps("nvidia", ok=False),
             _decode_ok,
         )
 
     message = str(excinfo.value)
-    assert "2 boot gate(s) failed for profile 'nvidia-host-bridge'" in message
+    assert "2 boot gate(s) failed for profile 'nvidia'" in message
     assert "device verification failed" in message
-    assert "conflicts with profile 'nvidia-host-bridge' decode" in message
+    assert "conflicts with profile 'nvidia' decode" in message
 
 
 def test_legacy_decode_conflict_rejected() -> None:
@@ -183,17 +186,15 @@ def test_legacy_matching_allowed() -> None:
 def test_profile_registry_exact_keys() -> None:
     assert set(PROFILE_REGISTRY) == {
         "cpu-host",
-        "nvidia-host-bridge",
         "intel-vaapi-host",
         "apple-mps-host",
-        "nvidia-device-experimental",
-        "cuda",
+        "nvidia",
         "mps",
         "cpu",
         "igpu",
     }
-    assert PROFILE_REGISTRY["cuda"].device == "cuda"
-    assert PROFILE_REGISTRY["cuda"].decode == "nvdec"
+    assert PROFILE_REGISTRY["nvidia"].device == "cuda"
+    assert PROFILE_REGISTRY["nvidia"].decode == "nvdec"
     assert PROFILE_REGISTRY["mps"].device == "mps"
     assert PROFILE_REGISTRY["mps"].decode == "opencv"
     assert PROFILE_REGISTRY["cpu"].device == "cpu"
@@ -208,12 +209,19 @@ def _cuda_available() -> CudaProbe:
     return CudaProbe(available=True, reason="cuda available")
 
 
-def test_cuda_device_verify_uses_injected_probe_source() -> None:
-    deps = BootDependencies(default_verifiers(cuda_source=_cuda_available))
+def test_nvidia_device_verify_uses_injected_resident_probe() -> None:
+    deps = BootDependencies(
+        default_verifiers(
+            device_resident_source=lambda: VerifyResult(
+                True, "nvidia", "device", "device-resident stages available"
+            )
+        )
+    )
 
-    context = resolve_boot_context({ML_WORKER_PROFILE_ENV: "cuda"}, deps, _decode_ok)
+    context = resolve_boot_context({ML_WORKER_PROFILE_ENV: "nvidia"}, deps, _decode_ok)
 
     assert context.device == "cuda"
+    assert context.canonical_profile == "nvidia"
 
 
 def test_default_decode_probe_fails_closed_without_injected_probes() -> None:
@@ -242,11 +250,17 @@ def test_default_decode_probe_uses_injected_probe_when_configured() -> None:
     assert result.reason == "nvdec available"
 
 
-def test_cuda_profile_fails_closed_when_no_decode_probe_configured() -> None:
-    deps = BootDependencies(default_verifiers(cuda_source=_cuda_available))
+def test_nvidia_profile_fails_closed_when_no_decode_probe_configured() -> None:
+    deps = BootDependencies(
+        default_verifiers(
+            device_resident_source=lambda: VerifyResult(
+                True, "nvidia", "device", "device-resident stages available"
+            )
+        )
+    )
 
     with pytest.raises(ProfileVerifyError, match="nvdec capability probe is not configured"):
-        resolve_boot_context({ML_WORKER_PROFILE_ENV: "cuda"}, deps)
+        resolve_boot_context({ML_WORKER_PROFILE_ENV: "nvidia"}, deps)
 
 
 def _nvenc_ok() -> VerifyResult:
@@ -258,7 +272,7 @@ def _nvenc_unavailable() -> VerifyResult:
 
 
 def test_resolve_encode_or_fallback_keeps_nvenc_when_probe_succeeds() -> None:
-    selection = resolve_encode_or_fallback(PROFILE_REGISTRY["cuda"], _nvenc_ok)
+    selection = resolve_encode_or_fallback(PROFILE_REGISTRY["nvidia"], _nvenc_ok)
 
     assert selection.requested == "h264_nvenc"
     assert selection.selected == "h264_nvenc"
@@ -266,29 +280,16 @@ def test_resolve_encode_or_fallback_keeps_nvenc_when_probe_succeeds() -> None:
     assert selection.last_reason is None
 
 
-def test_resolve_encode_or_fallback_never_raises_and_falls_back_to_libx264(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """#53: unlike decode's fail-fast preflight, a failed nvenc probe must
-    never abort boot -- it degrades to libx264 with a loud WARNING instead."""
-    with caplog.at_level("WARNING"):
-        selection = resolve_encode_or_fallback(PROFILE_REGISTRY["cuda"], _nvenc_unavailable)
+def test_resolve_encode_or_fallback_never_probes_nvidia_without_declared_fallback() -> None:
+    def unexpected_probe() -> VerifyResult:
+        raise AssertionError("nvidia must not silently fall back from NVENC")
+
+    selection = resolve_encode_or_fallback(PROFILE_REGISTRY["nvidia"], unexpected_probe)
 
     assert selection.requested == "h264_nvenc"
-    assert selection.selected == "libx264"
-    assert selection.fallback_count == 1
-    assert selection.last_reason == "nvenc_probe_failed"
-    assert any("libx264" in record.message for record in caplog.records)
-
-
-def test_resolve_encode_or_fallback_swallows_probe_exceptions() -> None:
-    def raising_probe() -> VerifyResult:
-        raise RuntimeError("ffmpeg exploded")
-
-    selection = resolve_encode_or_fallback(PROFILE_REGISTRY["cuda"], raising_probe)
-
-    assert selection.selected == "libx264"
-    assert selection.fallback_count == 1
+    assert selection.selected == "h264_nvenc"
+    assert selection.fallback_count == 0
+    assert selection.last_reason is None
 
 
 def test_resolve_encode_or_fallback_never_probes_non_nvenc_profiles() -> None:
@@ -311,28 +312,10 @@ def test_default_encode_probe_fails_closed_without_injected_probe() -> None:
     assert result.reason == "h264_nvenc capability probe is not configured"
 
 
-def test_resolve_boot_context_carries_encode_selection_and_falls_back(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    with caplog.at_level("WARNING"):
-        context = resolve_boot_context(
-            {ML_WORKER_PROFILE_ENV: "cuda"},
-            _deps("cuda"),
-            _decode_ok,
-            _nvenc_unavailable,
-        )
-
-    assert context.encode == "libx264"
-    assert context.encode_selection is not None
-    assert context.encode_selection.requested == "h264_nvenc"
-    assert context.encode_selection.selected == "libx264"
-    assert context.encode_selection.fallback_count == 1
-
-
 def test_resolve_boot_context_keeps_nvenc_when_probe_succeeds() -> None:
     context = resolve_boot_context(
-        {ML_WORKER_PROFILE_ENV: "cuda"},
-        _deps("cuda"),
+        {ML_WORKER_PROFILE_ENV: "nvidia"},
+        _deps("nvidia"),
         _decode_ok,
         _nvenc_ok,
     )
@@ -410,7 +393,7 @@ def test_resolve_decode_or_fallback_never_probes_non_vaapi_profiles() -> None:
         del decode
         raise AssertionError("non-vaapi profiles must never be probed here")
 
-    for profile_name in ("cuda", "mps", "cpu"):
+    for profile_name in ("nvidia", "mps", "cpu"):
         selection = resolve_decode_or_fallback(PROFILE_REGISTRY[profile_name], unexpected_probe)
         requested = PROFILE_REGISTRY[profile_name].decode
         assert selection.requested == requested
@@ -461,13 +444,12 @@ def test_igpu_profile_falls_back_to_opencv_decode_instead_of_raising(
     ("requested", "canonical"),
     [
         ("cpu", "cpu-host"),
-        ("cuda", "nvidia-host-bridge"),
         ("igpu", "intel-vaapi-host"),
         ("mps", "apple-mps-host"),
         ("cpu-host", "cpu-host"),
-        ("nvidia-host-bridge", "nvidia-host-bridge"),
         ("intel-vaapi-host", "intel-vaapi-host"),
         ("apple-mps-host", "apple-mps-host"),
+        ("nvidia", "nvidia"),
     ],
 )
 def test_profile_aliases_resolve_to_canonical_specs(requested: str, canonical: str) -> None:
@@ -477,70 +459,52 @@ def test_profile_aliases_resolve_to_canonical_specs(requested: str, canonical: s
     assert requested in spec.accepted_names
 
 
-def test_cuda_alias_reports_truthful_host_bridge_runtime_path() -> None:
+def test_nvidia_reports_device_resident_runtime_path() -> None:
     context = resolve_boot_context(
-        {ML_WORKER_PROFILE_ENV: "cuda"},
-        _deps("cuda"),
+        {ML_WORKER_PROFILE_ENV: "nvidia"},
+        _deps("nvidia"),
         _decode_ok,
         _nvenc_ok,
     )
 
     report = context.runtime_profile
-    assert context.requested_profile == "cuda"
-    assert context.canonical_profile == "nvidia-host-bridge"
-    assert context.profile.name == "nvidia-host-bridge"
-    assert report.requested_profile == "cuda"
-    assert report.canonical_profile == "nvidia-host-bridge"
+    assert context.requested_profile == "nvidia"
+    assert context.canonical_profile == "nvidia"
+    assert context.profile.name == "nvidia"
+    assert report.requested_profile == "nvidia"
+    assert report.canonical_profile == "nvidia"
     assert report.requested_decode_backend == "nvdec"
     assert report.effective_decode_backend == "nvdec"
-    assert report.requested_preprocess_backend == "cuda-tensor-upload"
-    assert report.effective_preprocess_backend == "cuda-tensor-upload"
-    assert report.requested_inference_backend == "cuda"
-    assert report.effective_inference_backend == "cuda"
-    assert report.requested_overlay_backend == "numpy-host"
-    assert report.effective_overlay_backend == "numpy-host"
+    assert report.requested_preprocess_backend == "cuda-nv12-to-rgb24"
+    assert report.effective_preprocess_backend == "cuda-nv12-to-rgb24"
+    assert report.requested_inference_backend == "tensorrt"
+    assert report.effective_inference_backend == "tensorrt"
+    assert report.requested_overlay_backend == "cuda-device"
+    assert report.effective_overlay_backend == "cuda-device"
     assert report.requested_encode_backend == "h264_nvenc"
     assert report.effective_encode_backend == "h264_nvenc"
     assert report.memory_path == (
-        "host/rgb24",
-        "host/rgb24",
+        "cuda-device/nv12",
+        "cuda-device/nv12",
         "cuda-device/rgb24",
-        "host/rgb24",
+        "cuda-device/rgb24",
         "cuda-device/rgb24",
     )
-    assert report.converter_chain == (
-        "cuda-inference-host-input-upload",
-        "nvenc-host-input-upload",
-    )
-    assert report.device_resident_after_decode is False
-    assert report.full_frame_h2d_count == 2
+    assert report.converter_chain == ("cuda-nv12-to-rgb24",)
+    assert report.device_resident_after_decode is True
+    assert report.concrete_stages_available is False
+    assert report.full_frame_h2d_count == 0
     assert report.full_frame_d2h_count == 0
     assert context.capability_graph.converter_names == report.converter_chain
-    assert context.capability_graph.full_frame_copy_count == (
-        report.full_frame_h2d_count + report.full_frame_d2h_count
-    )
-    assert len(context.capability_graph.edges) == len(report.memory_steps) - 1
+    assert context.capability_graph.full_frame_copy_count == 0
     assert all(edge.validated for edge in context.capability_graph.edges)
     assert report.degraded_reasons == ()
 
 
-def test_nvenc_declared_fallback_updates_effective_path_truth() -> None:
-    context = resolve_boot_context(
-        {ML_WORKER_PROFILE_ENV: "cuda"},
-        _deps("cuda"),
-        _decode_ok,
-        _nvenc_unavailable,
-    )
-
-    report = context.runtime_profile
-    assert report.requested_encode_backend == "h264_nvenc"
-    assert report.effective_encode_backend == "libx264"
-    assert report.converter_chain == ("cuda-inference-host-input-upload",)
-    assert report.full_frame_h2d_count == 1
-    assert report.full_frame_d2h_count == 0
-    assert context.capability_graph.converter_names == report.converter_chain
-    assert context.capability_graph.full_frame_copy_count == 1
-    assert report.degraded_reasons == ("nvenc_probe_failed",)
+def test_old_nvidia_names_are_rejected_rather_than_aliased() -> None:
+    for rejected in ("cuda", "nvidia-host-bridge", "nvidia-device-experimental"):
+        with pytest.raises(ProfileError, match="unknown ML_WORKER_PROFILE"):
+            resolve_profile({ML_WORKER_PROFILE_ENV: rejected})
 
 
 def test_vaapi_profile_reports_host_download_and_fallback_truth() -> None:
@@ -567,37 +531,30 @@ def test_vaapi_profile_reports_host_download_and_fallback_truth() -> None:
     assert degraded.degraded_reasons == ("vaapi_probe_failed",)
 
 
-def test_experimental_profile_is_explicit_only_and_unconfigured_fails_closed() -> None:
-    spec = resolve_profile({ML_WORKER_PROFILE_ENV: "nvidia-device-experimental"})
-    assert spec.name == "nvidia-device-experimental"
-    assert spec.accepted_names == ("nvidia-device-experimental",)
+def test_nvidia_profile_unconfigured_verifier_fails_closed() -> None:
+    spec = resolve_profile({ML_WORKER_PROFILE_ENV: "nvidia"})
+    assert spec.name == "nvidia"
+    assert spec.accepted_names == ("nvidia",)
     assert all(
         resolve_profile({ML_WORKER_PROFILE_ENV: alias}).name != spec.name
-        for alias in ("cpu", "cuda", "igpu", "mps")
+        for alias in ("cpu", "igpu", "mps")
     )
 
-    # No verifier registered at all (BootDependencies({})): fails closed with
-    # "no verifier configured", never a silent pass.
     with pytest.raises(ProfileVerifyError, match="no verifier configured"):
         resolve_boot_context(
-            {ML_WORKER_PROFILE_ENV: "nvidia-device-experimental"},
+            {ML_WORKER_PROFILE_ENV: "nvidia"},
             BootDependencies({}),
             _decode_ok,
             _nvenc_ok,
         )
 
 
-def test_experimental_profile_fails_closed_on_negative_device_resident_probe() -> None:
-    """Todo 17: the experimental profile's own concrete-stage verifier -- not
-    the plain `cuda` verifier `nvidia-host-bridge` shares -- gates this
-    profile. A host that fails the device-resident capability probe (e.g.
-    this repo's Apple Silicon dev/CI machines) must still boot-fail, with the
-    probe's own truthful reason surfaced."""
+def test_nvidia_profile_fails_closed_on_negative_device_resident_probe() -> None:
     deps = BootDependencies(
         default_verifiers(
             device_resident_source=lambda: VerifyResult(
                 False,
-                "nvidia-device-experimental",
+                "nvidia",
                 "device",
                 "no CUDA stream/event support on this host",
             )
@@ -605,44 +562,30 @@ def test_experimental_profile_fails_closed_on_negative_device_resident_probe() -
     )
     with pytest.raises(ProfileVerifyError, match="no CUDA stream/event support"):
         resolve_boot_context(
-            {ML_WORKER_PROFILE_ENV: "nvidia-device-experimental"}, deps, _decode_ok, _nvenc_ok
+            {ML_WORKER_PROFILE_ENV: "nvidia"}, deps, _decode_ok, _nvenc_ok
         )
 
 
-def test_experimental_profile_boots_once_device_resident_probe_is_positive() -> None:
-    """A truthful positive capability probe now boots the experimental
-    profile -- the old hardcoded \"selection-only until Todo 17\" refusal is
-    gone; this profile's boot outcome is entirely probe-driven, same as every
-    other profile."""
+def test_nvidia_profile_boots_once_device_resident_probe_is_positive() -> None:
     deps = BootDependencies(
         default_verifiers(
             device_resident_source=lambda: VerifyResult(
-                True, "nvidia-device-experimental", "device", "device-resident stages available"
+                True, "nvidia", "device", "device-resident stages available"
             )
         )
     )
     context = resolve_boot_context(
-        {ML_WORKER_PROFILE_ENV: "nvidia-device-experimental"}, deps, _decode_ok, _nvenc_ok
+        {ML_WORKER_PROFILE_ENV: "nvidia"}, deps, _decode_ok, _nvenc_ok
     )
-    assert context.canonical_profile == "nvidia-device-experimental"
+    assert context.canonical_profile == "nvidia"
     assert context.runtime_profile.device_resident_after_decode is True
+    assert context.runtime_profile.concrete_stages_available is False
 
 
-def test_experimental_profile_positive_probe_never_satisfies_plain_cuda_profile() -> None:
-    """A `device_resident_source` configured true must never leak into the
-    production `cuda`/`nvidia-host-bridge` verifier -- they stay on
-    `cuda_source` only, so an experimental-only host capability can never
-    silently promote the production alias."""
-    deps = BootDependencies(
-        default_verifiers(
-            cuda_source=lambda: CudaProbe(available=False, reason="no plain cuda"),
-            device_resident_source=lambda: VerifyResult(
-                True, "nvidia-device-experimental", "device", "device-resident stages available"
-            ),
-        )
-    )
-    with pytest.raises(ProfileVerifyError):
-        resolve_boot_context({ML_WORKER_PROFILE_ENV: "cuda"}, deps, _decode_ok, _nvenc_ok)
+def test_nvidia_plain_cuda_probe_never_satisfies_device_resident_gate() -> None:
+    deps = BootDependencies(default_verifiers(cuda_source=_cuda_available))
+    with pytest.raises(ProfileVerifyError, match="device-resident capability probe"):
+        resolve_boot_context({ML_WORKER_PROFILE_ENV: "nvidia"}, deps, _decode_ok, _nvenc_ok)
 
 
 def test_igpu_profile_device_verify_false_still_reports_decode_gate() -> None:

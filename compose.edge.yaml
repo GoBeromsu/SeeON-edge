@@ -94,7 +94,7 @@ services:
       # RTSP destination policy flags cross the deployment boundary. Live clip
       # export is a dashboard runtime setting and is never projected here.
       RELAY_TOKEN: ${API_EDGE_RELAY_TOKEN:?edge worker requires a deployment-unique relay token}
-      ML_WORKER_PROFILE: ${ML_WORKER_PROFILE:?set cpu-host|nvidia-host-bridge|intel-vaapi-host|apple-mps-host|nvidia-device-experimental (legacy cpu|cuda|igpu|mps accepted)}
+      ML_WORKER_PROFILE: ${ML_WORKER_PROFILE:?set cpu-host|nvidia|intel-vaapi-host|apple-mps-host (legacy cpu|igpu|mps accepted)}
       # Same RTSP destination policy as ml-api (worker probe path).
       ML_RTSP_ALLOW_PRIVATE_DESTINATIONS: ${ML_RTSP_ALLOW_PRIVATE_DESTINATIONS:-0}
       ML_RTSP_ALLOW_LOCAL_DESTINATIONS: ${ML_RTSP_ALLOW_LOCAL_DESTINATIONS:-0}

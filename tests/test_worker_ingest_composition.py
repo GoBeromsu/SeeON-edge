@@ -544,7 +544,7 @@ def test_default_loop_factory_selects_the_nvdec_cuvid_adapter_for_the_nvdec_prof
     monkeypatch.setattr(ingest_composition_module, "CpuAvAdapter", _forbid("CpuAvAdapter"))
     config = _config("camera-a")
     runtime = WorkerRuntime(config, serving_client=_FakeServingClient())
-    runtime._boot = _boot_context_for("cuda")  # noqa: SLF001
+    runtime._boot = _boot_context_for("nvidia")  # noqa: SLF001
 
     loop = runtime._default_loop_factory(config.cameras[0], BoundedFrameBus(), _Reporter())
 

@@ -1,13 +1,12 @@
-"""Experimental NVIDIA device-resident analysis prototype (Todo 17).
+"""NVIDIA device-resident analysis pool.
 
-Backs the ``nvidia-device-experimental`` profile
-(``worker/runtime/profile/registry.py``) only. No production profile
-(``cpu-host``, ``nvidia-host-bridge``, ``intel-vaapi-host``,
-``apple-mps-host``) constructs anything from this package -- see
-``worker/runtime/profile/boot.py:verify_device_or_raise``, which gates this
-profile's concrete stages behind ``probe_device_resident_capability`` and
-still fails closed on any host that cannot prove real NVDEC/CUDA-stream/
-DLPack support.
+Backs the unified ``nvidia`` profile
+(``worker/runtime/profile/registry.py``) only. The host-only profiles
+(``cpu-host``, ``intel-vaapi-host``, ``apple-mps-host``) construct nothing
+from this package -- see ``worker/runtime/profile/boot.py:verify_device_or_raise``,
+which gates this profile's concrete stages behind
+``probe_device_resident_capability`` and still fails closed on any host that
+cannot prove real NVDEC/CUDA-stream/DLPack support.
 """
 
 from __future__ import annotations

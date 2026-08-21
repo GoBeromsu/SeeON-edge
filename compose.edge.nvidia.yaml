@@ -1,5 +1,5 @@
-# NVIDIA infrastructure overlay. Required for ML_WORKER_PROFILE cuda,
-# nvidia-host-bridge, or the explicit nvidia-device-experimental descriptor.
+# NVIDIA infrastructure overlay. Required for the unified
+# ML_WORKER_PROFILE=nvidia profile.
 services:
   ml-worker:
     deploy:

@@ -172,7 +172,7 @@ def _manifest(
         config_version=42,
         restart_generation=7,
         detector_version="worker-domain-detectors-v1",
-        environment=facts or _facts(nvidia=profile == "cuda"),
+        environment=facts or _facts(nvidia=profile == "nvidia"),
         edge_database_schema_version=5,
     )
 
@@ -376,7 +376,7 @@ def test_persisted_bed_zone_requires_source_dimensions() -> None:
 def test_cpu_and_nvidia_preserve_semantics_but_record_execution_difference() -> None:
     cpu = _manifest()
     nvidia = _manifest(
-        profile="cuda",
+        profile="nvidia",
         identities=_identities(runtime="cuda", device="cuda"),
         facts=_facts(nvidia=True),
     )
@@ -402,9 +402,12 @@ def test_cpu_and_nvidia_preserve_semantics_but_record_execution_difference() -> 
             key: value for key, value in nvidia_camera.items() if key != "effective_decode_backend"
         }
     assert cpu_content["profile"]["canonical"] == "cpu-host"
-    assert nvidia_content["profile"]["canonical"] == "nvidia-host-bridge"
-    assert nvidia_content["profile"]["device_resident_after_decode"] is False
-    assert nvidia_content["profile"]["full_frame_copy_counts"] == {"d2h": 0, "h2d": 2}
+    assert nvidia_content["profile"]["canonical"] == "nvidia"
+    # The unified `nvidia` profile keeps frames on the device after nvdec, so the
+    # host-bridge era's two H2D full-frame uploads (inference input + nvenc input)
+    # are gone from the recorded memory path.
+    assert nvidia_content["profile"]["device_resident_after_decode"] is True
+    assert nvidia_content["profile"]["full_frame_copy_counts"] == {"d2h": 0, "h2d": 0}
 
 
 def test_policy_content_change_changes_only_applied_identity() -> None:
@@ -454,7 +457,7 @@ def test_secret_url_and_absolute_path_are_never_serialized() -> None:
 def test_nvidia_manifest_requires_verified_driver_and_runtime_facts() -> None:
     with pytest.raises(AppliedRuntimeManifestError, match="NVIDIA applied identity"):
         _manifest(
-            profile="cuda",
+            profile="nvidia",
             identities=_identities(runtime="cuda", device="cuda"),
             facts=_facts(),
         )

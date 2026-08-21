@@ -1,10 +1,10 @@
 """Experimental CUDA overlay + device-input NVENC prototype (Todo 18).
 
-Backs the ``nvidia-device-experimental`` profile
+Backs the unified ``nvidia`` profile
 (``worker/runtime/profile/registry.py``) only, same as
-``worker.adapters.decode.nvdec_device`` (Todo 17). No production profile
-(``cpu-host``, ``nvidia-host-bridge``, ``intel-vaapi-host``,
-``apple-mps-host``) constructs anything from this package.
+``worker.adapters.decode.nvdec_device`` (Todo 17). The host-only profiles
+(``cpu-host``, ``intel-vaapi-host``, ``apple-mps-host``) construct nothing
+from this package.
 
 - ``renderer``: ``CudaOverlaySceneRenderer`` -- consumes the identical
   ``worker.pipeline.output.overlay_scene.OverlaySceneBuilder`` scene the CPU

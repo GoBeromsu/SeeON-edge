@@ -83,13 +83,13 @@ class StageTimingSnapshot:
 
 @dataclass(frozen=True, slots=True)
 class DeviceResidencyDiagnostics:
-    """One camera's experimental NVIDIA device-resident pipeline counters (Todo 17).
+    """One camera's NVIDIA device-resident pipeline counters.
 
     Local-only, same convention as ``bed_region``/``bed_exit_scoring`` below:
-    only ever populated for a camera running the opt-in
-    ``nvidia-device-experimental`` profile, never crosses the relay boundary,
-    and holds only bounded counters/timings -- never a device pointer, a
-    tensor, or any RTSP/path value.
+    only ever populated for a camera running the canonical ``nvidia``
+    profile, never crosses the relay boundary, and holds only bounded
+    counters/timings -- never a device pointer, a tensor, or any RTSP/path
+    value.
     """
 
     residency_path: str
@@ -161,8 +161,7 @@ class CameraDiagnosticsSnapshot:
     bed_region: BedRegionDiagnostics | None = None
     # Local-only, same reasoning as `bed_region` above (#238).
     bed_exit_scoring: BedExitScoringDiagnostics | None = None
-    # Local-only (Todo 17): populated only for a camera running the opt-in
-    # nvidia-device-experimental profile.
+    # Local-only: populated only for a camera running the canonical nvidia profile.
     device_residency: DeviceResidencyDiagnostics | None = None
     # Local-only (issue #330): monotonic per-camera count of successful
     # decision.update() returns. Zero-event completions increment; later

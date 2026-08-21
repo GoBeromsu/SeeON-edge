@@ -236,9 +236,9 @@ def test_cuda_profile_still_runs_decode_preflight_when_device_check_fails() -> N
     decode_calls: list[str] = []
     dependencies = BootDependencies(
         {
-            "cuda": lambda: VerifyResult(
+            "nvidia": lambda: VerifyResult(
                 ok=False,
-                profile="cuda",
+                profile="nvidia",
                 stage="device",
                 reason="CUDA unavailable",
             )
@@ -252,7 +252,7 @@ def test_cuda_profile_still_runs_decode_preflight_when_device_check_fails() -> N
     # When / Then
     with pytest.raises(ProfileVerifyError, match="CUDA unavailable"):
         _ = resolve_boot_context(
-            {"ML_WORKER_PROFILE": "cuda"},
+            {"ML_WORKER_PROFILE": "nvidia"},
             dependencies,
             decode_probe,
         )

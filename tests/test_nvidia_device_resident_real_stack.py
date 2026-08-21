@@ -1,11 +1,11 @@
-"""Real-stack: ``nvidia-device-experimental`` capability probe on real NVIDIA hardware.
+"""Real-stack: unified ``nvidia`` capability probe on real NVIDIA hardware.
 
 Unlike ``test_nvidia_device_resident_prototype.py`` (fakes only, deterministic,
 runs everywhere including this repo's Apple Silicon dev/CI hosts), this
 exercises the real ``torch``/``pynvml`` calls wired into
 ``probe_device_resident_capability`` end to end -- the same path
 ``production_boot_dependencies`` takes when
-``ML_WORKER_PROFILE=nvidia-device-experimental`` is set (see
+``ML_WORKER_PROFILE=nvidia`` is set (see
 ``worker/runtime/worker.py:_production_device_resident_source``).
 
 Marked ``real_stack`` (see ``tests/AGENTS.md``) and deselected in CI via
@@ -45,21 +45,21 @@ def test_device_resident_capability_probe_on_real_nvidia_hardware() -> None:
     assert capability.dlpack_supported is True
 
 
-def test_nvidia_device_experimental_profile_boots_on_real_nvidia_hardware() -> None:
+def test_nvidia_profile_boots_on_real_nvidia_hardware() -> None:
     """End-to-end: the same boot gate `WorkerRuntime` calls, on real hardware.
 
-    Never touches the production `cuda`/`nvidia-host-bridge` verifier -- only
-    proves this experimental profile's own concrete-stage gate resolves true
-    when real device-resident capability is present.
+    After the NVIDIA profile unification this device-resident gate is the only
+    gate for ``nvidia``; it must resolve true when real device-resident
+    capability is present.
     """
     pytest.importorskip("torch")
     nvml_status = probe_nvml_gpu_status()
     if not nvml_status.nvml_available:
         pytest.skip(f"requires real NVIDIA hardware (NVML unavailable: {nvml_status.reason})")
 
-    spec = resolve_profile({"ML_WORKER_PROFILE": "nvidia-device-experimental"})
+    spec = resolve_profile({"ML_WORKER_PROFILE": "nvidia"})
 
     result = verify_device_or_raise(spec, production_boot_dependencies())
 
     assert result.ok is True
-    assert result.profile == "nvidia-device-experimental"
+    assert result.profile == "nvidia"

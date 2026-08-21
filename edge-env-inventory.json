@@ -26,14 +26,12 @@
       "todo7_status": "implemented",
       "canonical_choices": [
         "cpu-host",
-        "nvidia-host-bridge",
+        "nvidia",
         "intel-vaapi-host",
-        "apple-mps-host",
-        "nvidia-device-experimental"
+        "apple-mps-host"
       ],
       "legacy_aliases": {
         "cpu": "cpu-host",
-        "cuda": "nvidia-host-bridge",
         "igpu": "intel-vaapi-host",
         "mps": "apple-mps-host"
       },

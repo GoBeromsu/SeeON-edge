@@ -159,7 +159,7 @@ def test_compose_profile_topology_is_nvidia_opt_in() -> None:
     assert "driver: nvidia" in nvidia_text
     assert "NVIDIA_DRIVER_CAPABILITIES: compute,utility,video" in nvidia_text
     assert "cpu-host" in (ROOT / ".env.edge.prod.example").read_text(encoding="utf-8")
-    assert "nvidia-device-experimental" in nvidia_text
+    assert "ML_WORKER_PROFILE=nvidia" in nvidia_text
 
 
 def test_inventory_records_completed_profile_canonicalization() -> None:
@@ -169,10 +169,9 @@ def test_inventory_records_completed_profile_canonicalization() -> None:
     assert profile_entry["todo7_status"] == "implemented"
     assert profile_entry["canonical_choices"] == [
         "cpu-host",
-        "nvidia-host-bridge",
+        "nvidia",
         "intel-vaapi-host",
         "apple-mps-host",
-        "nvidia-device-experimental",
     ]
 
 
@@ -429,9 +428,7 @@ def test_preflight_rejects_retired_alias_policy_and_internal_keys(tmp_path: Path
         ("apple-mps-host", None),
         ("igpu", "compose.edge.igpu.yaml"),
         ("intel-vaapi-host", "compose.edge.igpu.yaml"),
-        ("cuda", "compose.edge.nvidia.yaml"),
-        ("nvidia-host-bridge", "compose.edge.nvidia.yaml"),
-        ("nvidia-device-experimental", "compose.edge.nvidia.yaml"),
+        ("nvidia", "compose.edge.nvidia.yaml"),
     ],
 )
 def test_preflight_selects_only_the_profile_compatible_overlay(
@@ -492,7 +489,7 @@ def test_preflight_rejects_equals_attached_nvidia_overlay_for_cpu_profile(
 
 @pytest.mark.parametrize(
     "profile",
-    ["cuda", "nvidia-host-bridge", "nvidia-device-experimental"],
+    ["nvidia"],
 )
 @pytest.mark.parametrize(
     "compose_arg",

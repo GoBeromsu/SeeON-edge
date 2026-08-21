@@ -94,7 +94,7 @@ def test_real_warmup_synchronizes_cuda_after_every_configured_forward(tmp_path: 
     tasks = ("pose", "person", "bed", "lstm")
     stages = bootstrap.named_stages(
         context,
-        {"ML_WORKER_PROFILE": "cuda"},
+        {"ML_WORKER_PROFILE": "nvidia"},
         initializers={task: _initializer(task, calls) for task in tasks},
         warmups={
             task: lambda runner, task=task: warmup_to_ready(
@@ -499,7 +499,7 @@ def _successful_decode(_decode: str) -> VerifyResult:
 
 def _cuda_dependencies() -> bootstrap.BootDependencies:
     return bootstrap.BootDependencies(
-        {"cuda": lambda: VerifyResult(True, "cuda", "device", "available")}
+        {"nvidia": lambda: VerifyResult(True, "nvidia", "device", "available")}
     )
 
 

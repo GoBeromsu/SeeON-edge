@@ -99,13 +99,11 @@ def test_every_profile_encode_policy_is_an_accepted_encoder() -> None:
     assert resolved == {
         "cpu-host": "libx264",
         "cpu": "libx264",
-        "nvidia-host-bridge": "h264_nvenc",
-        "cuda": "h264_nvenc",
+        "nvidia": "h264_nvenc",
         "intel-vaapi-host": "libx264",
         "igpu": "libx264",
         "apple-mps-host": "libx264",
         "mps": "libx264",
-        "nvidia-device-experimental": "h264_nvenc",
     }
 
 

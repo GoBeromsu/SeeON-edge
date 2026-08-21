@@ -615,22 +615,19 @@ def _production_mps_source() -> bool:
 
 
 def _production_device_resident_source() -> VerifyResult:
-    """Todo 17's own concrete-stage verifier for `nvidia-device-experimental`.
+    """Strict device-resident verifier for the canonical `nvidia` profile.
 
     Wraps ``probe_device_resident_capability``
     (``worker.adapters.decode.nvdec_device.capability``): a strictly
     narrower, distinct check than ``_production_cuda_source`` above --
     it additionally requires NVML device identity, real
     ``torch.cuda.Stream``/``torch.cuda.Event`` construction, and DLPack
-    support before this experimental profile's boot gate can pass. A host
-    that only satisfies the plain-CUDA check (e.g. `nvidia-host-bridge`
-    already boots there) still fails this one closed with the probe's own
-    truthful reason -- see ``DeviceResidentCapability``.
+    support before this profile's boot gate can pass. A host that only
+    satisfies the plain-CUDA check still fails this one closed with the
+    probe's own truthful reason -- see ``DeviceResidentCapability``.
     """
     capability = probe_device_resident_capability()
-    return VerifyResult(
-        capability.available, "nvidia-device-experimental", "device", capability.reason
-    )
+    return VerifyResult(capability.available, "nvidia", "device", capability.reason)
 
 
 def production_boot_dependencies() -> bootstrap.BootDependencies:

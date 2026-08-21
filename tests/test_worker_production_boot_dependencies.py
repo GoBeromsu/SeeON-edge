@@ -47,45 +47,20 @@ def _config() -> WorkerConfig:
     )
 
 
-def test_production_boot_dependencies_cuda_true_when_capability_true(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    # Given
-    monkeypatch.setattr(
-        worker_module,
-        "probe_cuda_capability",
-        lambda: CudaCapability(True, "cuda available", device_count=1, arch_list=("sm_90",)),
-    )
+def test_production_boot_dependencies_expose_no_plain_cuda_verifier() -> None:
+    """Plain CUDA no longer gates a public profile after the nvidia unification.
 
-    # When
-    result = production_boot_dependencies().verifiers["cuda"]()
+    The single `nvidia` profile is gated by the device-resident probe, so a
+    bare `cuda`/`nvidia-host-bridge` verifier key must not survive: leaving one
+    wired would let a host that only passes `torch.cuda.is_available()` boot a
+    profile whose descriptor promises device-resident concrete stages.
+    """
+    verifiers = production_boot_dependencies().verifiers
 
-    # Then
-    assert result.ok is True
-    assert result.profile == "cuda"
-    assert result.stage == "device"
-    assert result.reason == "cuda available"
-
-
-def test_production_boot_dependencies_cuda_false_fails_closed_without_cuda(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    # Given -- the real signal on this repo's macOS dev machines: no CUDA device
-    monkeypatch.setattr(
-        worker_module,
-        "probe_cuda_capability",
-        lambda: CudaCapability(
-            False, "torch.cuda.is_available() is False and no CUDA devices are visible"
-        ),
-    )
-
-    # When
-    result = production_boot_dependencies().verifiers["cuda"]()
-
-    # Then
-    assert result.ok is False
-    assert result.profile == "cuda"
-    assert result.reason == "torch.cuda.is_available() is False and no CUDA devices are visible"
+    assert "cuda" not in verifiers
+    assert "nvidia-host-bridge" not in verifiers
+    assert "nvidia-device-experimental" not in verifiers
+    assert "nvidia" in verifiers
 
 
 def test_production_boot_dependencies_cpu_always_available() -> None:
@@ -156,11 +131,11 @@ def test_production_boot_dependencies_device_resident_true_when_capability_true(
     )
 
     # When
-    result = production_boot_dependencies().verifiers["nvidia-device-experimental"]()
+    result = production_boot_dependencies().verifiers["nvidia"]()
 
     # Then
     assert result.ok is True
-    assert result.profile == "nvidia-device-experimental"
+    assert result.profile == "nvidia"
     assert result.stage == "device"
     assert result.reason == "device-resident concrete stages are available"
 
@@ -186,48 +161,52 @@ def test_production_boot_dependencies_device_resident_false_fails_closed_without
     )
 
     # When
-    result = production_boot_dependencies().verifiers["nvidia-device-experimental"]()
+    result = production_boot_dependencies().verifiers["nvidia"]()
 
     # Then
     assert result.ok is False
-    assert result.profile == "nvidia-device-experimental"
+    assert result.profile == "nvidia"
     assert "cuda capability unavailable" in result.reason
 
 
-def test_production_boot_dependencies_device_resident_never_satisfies_plain_cuda(
+def test_production_boot_dependencies_nvidia_fails_closed_on_plain_cuda_only_host(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A positive device-resident probe must never leak into the production
-    `cuda`/`nvidia-host-bridge` verifier -- they stay wired to
-    `probe_cuda_capability` only."""
+    """A host that only passes plain CUDA must not satisfy the `nvidia` gate.
+
+    After unification there is a single NVIDIA profile whose descriptor claims
+    device-resident concrete stages, so its verifier must consult the
+    device-resident probe -- never `probe_cuda_capability` alone.
+    """
     monkeypatch.setattr(
         worker_module,
         "probe_device_resident_capability",
         lambda: DeviceResidentCapability(
-            available=True,
-            reason="device-resident concrete stages are available",
+            available=False,
+            reason="nvml device identity unavailable: no nvml",
             cuda=CudaCapability(True, "cuda available", device_count=1, arch_list=("sm_90",)),
-            nvml=NvmlGpuStatus(True, "ok"),
-            stream_event_supported=True,
-            dlpack_supported=True,
+            nvml=NvmlGpuStatus(False, "no nvml"),
+            stream_event_supported=False,
+            dlpack_supported=False,
         ),
     )
     monkeypatch.setattr(
         worker_module,
         "probe_cuda_capability",
-        lambda: CudaCapability(False, "no cuda"),
+        lambda: CudaCapability(True, "cuda available", device_count=1, arch_list=("sm_90",)),
     )
 
-    result = production_boot_dependencies().verifiers["cuda"]()
+    result = production_boot_dependencies().verifiers["nvidia"]()
 
     assert result.ok is False
-    assert result.profile == "cuda"
+    assert result.profile == "nvidia"
+    assert "nvml device identity unavailable" in result.reason
 
 
 def test_worker_runtime_defaults_boot_dependencies_to_production_dependencies(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """WorkerRuntime must wire the real cuda verifier itself when none is injected.
+    """WorkerRuntime must wire the real nvidia verifier itself when none is injected.
 
     Every test elsewhere in this suite injects a stub ``boot_dependencies`` on
     purpose; this test is the one place that must *not*, to prove the
@@ -236,8 +215,15 @@ def test_worker_runtime_defaults_boot_dependencies_to_production_dependencies(
     """
     monkeypatch.setattr(
         worker_module,
-        "probe_cuda_capability",
-        lambda: CudaCapability(True, "cuda available", device_count=1, arch_list=("sm_90",)),
+        "probe_device_resident_capability",
+        lambda: DeviceResidentCapability(
+            available=True,
+            reason="device-resident concrete stages are available",
+            cuda=CudaCapability(True, "cuda available", device_count=1, arch_list=("sm_90",)),
+            nvml=NvmlGpuStatus(True, "ok", driver_version="580.1", device_name="RTX 5070 Ti"),
+            stream_event_supported=True,
+            dlpack_supported=True,
+        ),
     )
 
     runtime = WorkerRuntime(
@@ -246,6 +232,6 @@ def test_worker_runtime_defaults_boot_dependencies_to_production_dependencies(
         acquire_lease=lambda: GpuLease.acquire(tmp_path),
     )
 
-    result = runtime._boot_dependencies.verifiers["cuda"]()  # noqa: SLF001
+    result = runtime._boot_dependencies.verifiers["nvidia"]()  # noqa: SLF001
     assert result.ok is True
-    assert result.reason == "cuda available"
+    assert result.reason == "device-resident concrete stages are available"

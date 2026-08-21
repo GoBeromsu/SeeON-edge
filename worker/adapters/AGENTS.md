@@ -18,7 +18,7 @@ runtime" and "worker runtime is the sole composition root".
 ## Local ownership
 
 - `decode/`: concrete CPU, VAAPI, NVDEC/CUVID, PyAV, and experimental device-resident backends. Backend-specific ownership, packet, epoch, and cleanup rules live in `decode/AGENTS.md`.
-- `encode/nvenc_device/`: experimental device-input encoder. Only `nvidia-device-experimental`; production profiles never construct it.
+- `encode/nvenc_device/`: device-input encoder. Only the unified `nvidia` profile; host-only profiles never construct it.
 - `model/`: `ModelRegistry` (pose/person/bed), fall-family registry, YOLO and LSTM runners, required warmup, `InProcessServingClient`.
 - `encode/`: `FFmpegSegmentEncoder` (one long-lived muxer per camera), concat finalizer, thumbnail.
 - `device/`: honest probes. `cuda/` / `mps/` answer whether this process can build `device="cuda"` / `device="mps"`. `nvml/` fills GPU telemetry. Import success is not capability.

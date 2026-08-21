@@ -105,7 +105,7 @@ def collect_runtime_environment_facts(
     """Read an allow-listed software/driver identity; never enumerate environment values."""
     import torch
 
-    nvidia = boot.runtime_profile.canonical_profile.startswith("nvidia-")
+    nvidia = boot.runtime_profile.canonical_profile == "nvidia"
     accelerator_runtime: str | None = None
     driver_version: str | None = None
     device_name: str | None = None

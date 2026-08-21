@@ -83,7 +83,7 @@ def _boot(profile_name: str) -> BootContext:
 
 
 def _environment(profile_name: str) -> RuntimeEnvironmentFacts:
-    nvidia = profile_name == "nvidia-host-bridge"
+    nvidia = profile_name == "nvidia"
     return RuntimeEnvironmentFacts(
         worker_build_revision=_BUILD_REVISION,
         os_name="Linux",
@@ -343,7 +343,7 @@ def test_manifest_identity_changes_iff_effective_catalog_or_runtime_state_change
         "component": _manifest(registry=_registry_with(component_change=True)),
         "model": _manifest(registry=_registry_with(model_change=True)),
         "policy": _manifest(fall_threshold=0.72),
-        "profile": _manifest(profile_name="nvidia-host-bridge"),
+        "profile": _manifest(profile_name="nvidia"),
     }
 
     assert equivalent.sha256 == baseline.sha256
@@ -383,7 +383,7 @@ def test_module_definitions_are_profile_independent_and_emit_no_secrets_or_local
     )
 
     cpu_content = json.loads(_manifest().canonical_json)
-    nvidia_content = json.loads(_manifest(profile_name="nvidia-host-bridge").canonical_json)
+    nvidia_content = json.loads(_manifest(profile_name="nvidia").canonical_json)
     assert cpu_content["modules"] == nvidia_content["modules"]
     assert cpu_content["profile"] != nvidia_content["profile"]
 

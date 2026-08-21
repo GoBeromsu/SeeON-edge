@@ -126,7 +126,7 @@ done
 
 set -- -f compose.edge.yaml "$@"
 case "$profile" in
-  cuda|nvidia-host-bridge|nvidia-device-experimental)
+  nvidia)
     if [ "$nvidia_overlay_supplied" -eq 0 ]; then
       set -- "$@" -f compose.edge.nvidia.yaml
     fi

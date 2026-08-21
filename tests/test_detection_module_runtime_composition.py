@@ -296,7 +296,7 @@ def test_activation_rejects_distinct_active_writers_to_one_output_adapter() -> N
 
 @pytest.mark.parametrize(
     ("profile_name", "device"),
-    (("cpu-host", "cpu"), ("nvidia-host-bridge", "cuda")),
+    (("cpu-host", "cpu"), ("nvidia", "cuda")),
 )
 def test_worker_runtime_preflights_third_module_without_name_dispatch(
     tmp_path: Path,

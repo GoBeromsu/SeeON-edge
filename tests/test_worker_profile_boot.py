@@ -3,11 +3,11 @@ from __future__ import annotations
 import pytest
 
 from worker.runtime.profile.boot import BootContext, reject_legacy_conflicts
-from worker.runtime.profile.device import CudaProbe
 from worker.runtime.profile.registry import (
     ML_WORKER_PROFILE_ENV,
     PROFILE_REGISTRY,
     ProfileVerifyError,
+    VerifyResult,
     default_verifiers,
 )
 
@@ -25,24 +25,26 @@ def test_default_verifiers_cpu_always_available() -> None:
     assert result.reason == "CPU is available"
 
 
-def test_default_verifiers_cuda_without_source_fails_closed() -> None:
-    result = default_verifiers()["cuda"]()
+def test_default_verifiers_nvidia_without_resident_source_fails_closed() -> None:
+    result = default_verifiers()["nvidia"]()
 
     assert not result.ok
-    assert result.profile == "cuda"
+    assert result.profile == "nvidia"
     assert result.stage == "device"
-    assert result.reason == "CUDA capability probe is not configured"
+    assert result.reason == "device-resident capability probe is not configured"
 
 
-def test_default_verifiers_cuda_forwards_injected_probe_reason() -> None:
+def test_default_verifiers_nvidia_forwards_injected_resident_reason() -> None:
     verifiers = default_verifiers(
-        cuda_source=lambda: CudaProbe(available=True, reason="2 devices detected")
+        device_resident_source=lambda: VerifyResult(
+            True, "nvidia", "device", "device-resident stages available"
+        )
     )
 
-    result = verifiers["cuda"]()
+    result = verifiers["nvidia"]()
 
     assert result.ok
-    assert result.reason == "2 devices detected"
+    assert result.reason == "device-resident stages available"
 
 
 def test_default_verifiers_mps_without_source_fails_closed() -> None:
@@ -82,16 +84,20 @@ def test_reject_legacy_conflicts_allows_auto() -> None:
 
 
 def test_reject_legacy_conflicts_allows_matching_backend() -> None:
-    result = reject_legacy_conflicts(PROFILE_REGISTRY["cuda"], {"ML_RTSP_BACKEND": "nvdec"})
+    result = reject_legacy_conflicts(PROFILE_REGISTRY["nvidia"], {"ML_RTSP_BACKEND": "nvdec"})
     assert result is None
 
 
 def test_boot_context_carries_resolved_profile_fields() -> None:
-    spec = PROFILE_REGISTRY["cuda"]
+    spec = PROFILE_REGISTRY["nvidia"]
 
     context = BootContext(profile=spec, device=spec.device, decode=spec.decode, encode=spec.encode)
 
     assert context.profile is spec
+    assert context.canonical_profile == "nvidia"
     assert context.device == "cuda"
     assert context.decode == "nvdec"
     assert context.encode == "h264_nvenc"
+    assert context.runtime_profile.canonical_profile == "nvidia"
+    assert context.runtime_profile.requested_inference_backend == "tensorrt"
+    assert context.runtime_profile.device_resident_after_decode is True

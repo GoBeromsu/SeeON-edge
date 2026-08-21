@@ -131,7 +131,7 @@ def test_composed_coordinator_removes_pose_and_reuses_the_cuda_runner(
         clip_store_dir=tmp_path / "clips",
     )
     monkeypatch.setattr(WorkerRuntime, "_create_fall_model", lambda *_args: _FallModel())
-    profile = PROFILE_REGISTRY["nvidia-host-bridge"]
+    profile = PROFILE_REGISTRY["nvidia"]
     boot = BootContext(profile, profile.device, profile.decode, profile.encode)
     graph = runtime._initialize_models(boot)  # noqa: SLF001
     runtime._warmed_component_ids = frozenset(graph.components)  # noqa: SLF001

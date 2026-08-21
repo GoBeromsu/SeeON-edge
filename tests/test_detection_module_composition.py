@@ -269,7 +269,7 @@ def test_runtime_decider_composition_has_no_domain_name_branch() -> None:
 def test_compiled_modules_are_profile_independent() -> None:
     identities = DETECTION_MODULE_REGISTRY.qualified_ids
 
-    for profile_name in ("cpu-host", "nvidia-host-bridge"):
+    for profile_name in ("cpu-host", "nvidia"):
         spec = PROFILE_REGISTRY[profile_name]
         descriptor = runtime_descriptor_for(spec, requested_profile=profile_name)
         activation = DETECTION_MODULE_REGISTRY.activation(
