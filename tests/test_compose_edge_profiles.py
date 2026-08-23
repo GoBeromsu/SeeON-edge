@@ -327,7 +327,7 @@ _BASE_PREFLIGHT_ENV = "\n".join(
         "API_BACKEND_BASE_URL=https://hub.example.com",
         "API_DASHBOARD_USERNAME=site-ops",
         "API_DASHBOARD_PASSWORD=disposable-bootstrap-9f3a",
-        "API_EDGE_RELAY_TOKEN=disposable-relay-7c1e5b9a2f4d8e6b",
+        "API_EDGE_RELAY_TOKEN=disposable-relay-7c1e5b9a2f4d8e6b",  # gitleaks:allow
         "ML_RTSP_ALLOW_PRIVATE_DESTINATIONS=1",
         "ML_RTSP_ALLOW_LOCAL_DESTINATIONS=0",
         "",
@@ -586,5 +586,8 @@ def test_preflight_rejects_too_short_relay_token(tmp_path: Path) -> None:
 def test_preflight_accepts_deployment_unique_relay_token(tmp_path: Path) -> None:
     # The disposable base already carries a valid unique token; an explicit
     # high-entropy value must also pass the whole gate chain.
-    result = _run_preflight(tmp_path, "API_EDGE_RELAY_TOKEN=b4e1c9a72f0d5836a1c7e9d2f4b60853\n")
+    result = _run_preflight(
+        tmp_path,
+        "API_EDGE_RELAY_TOKEN=b4e1c9a72f0d5836a1c7e9d2f4b60853\n",  # gitleaks:allow
+    )
     assert result.returncode == 0, result.stderr
