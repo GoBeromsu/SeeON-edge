@@ -29,12 +29,18 @@ class _RecordingStager:
     staged: list[WorkerEventPayload] = field(default_factory=list)
     completions: list[tuple[str, str | None]] = field(default_factory=list)
     attached: list[tuple[str, EventEvidence]] = field(default_factory=list)
+    dispositions: list[tuple[str, str, str, str]] = field(default_factory=list)
 
     def stage(self, event: WorkerEventPayload) -> None:
         self.staged.append(event)
 
     def attach_snapshot(self, edge_event_id: str, snapshot: EventEvidence) -> None:
         self.attached.append((edge_event_id, snapshot))
+
+    def record_snapshot_disposition(
+        self, edge_event_id: str, snapshot_id: str, disposition: str, reason: str
+    ) -> None:
+        self.dispositions.append((edge_event_id, snapshot_id, disposition, reason))
 
     def complete(self, edge_event_id: str, clip_id: str | None) -> None:
         self.completions.append((edge_event_id, clip_id))

@@ -1,115 +1,110 @@
 from __future__ import annotations
 
-import sqlite3
+import hashlib
 from pathlib import Path
-from types import SimpleNamespace
-from typing import cast
 
-import pytest
-
-from shared.edge_db.migrator import migrate_database
 from worker.pipeline.output.annotated_derivative import (
     AnnotatedDerivativeJob,
+    DerivativeArtifact,
     DerivativeKind,
 )
-from worker.pipeline.output.evidence.derivative_job_store import DerivativeJobStore
+from worker.pipeline.trace.models import DetailUnavailableReason
+from worker.runtime.derivative_runtime import (
+    DerivativeCommand,
+    DerivativeCommandExecutor,
+    DerivativeOutcome,
+)
+from worker.types.overlay_scene import (
+    CoordinateTransform,
+    ObservationSemantics,
+    OverlayScene,
+    SceneFrameIdentity,
+    SceneValue,
+)
 
 
-def _job() -> AnnotatedDerivativeJob:
-    # Store transitions only read incident_id/kind; avoid full scene construction.
-    return cast(
-        AnnotatedDerivativeJob,
-        cast(
-            object,
-            SimpleNamespace(
-                incident_id="incident-a",
-                derivative_kind=DerivativeKind.STILL,
-            ),
+class _Renderer:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def render(
+        self, job: AnnotatedDerivativeJob, destination: Path, *, cancelled: object = None
+    ) -> DerivativeArtifact:
+        del cancelled
+        self.calls += 1
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(b"derivative")
+        return DerivativeArtifact.from_path(
+            destination,
+            mime_type=job.derivative_kind.mime_type,
+            width=1,
+            height=1,
+            start_time_ms=0,
+            end_time_ms=0,
+            render_backend="test",
+            render_version="test",
+            scene_id=job.scenes[0].scene_id,
+        )
+
+
+def _job(tmp_path: Path) -> AnnotatedDerivativeJob:
+    source = tmp_path / "primary.mp4"
+    source.write_bytes(b"primary")
+    scene = OverlayScene(
+        "scene",
+        SceneFrameIdentity(
+            "boot",
+            "camera",
+            1,
+            1,
+            SceneValue(0.0, ObservationSemantics.PRESENT),
+            SceneValue(0.0, ObservationSemantics.PRESENT),
+            "config",
         ),
+        (1, 1),
+        "source-pixels",
+        CoordinateTransform(1, 1, 1, 1, 1.0, 1.0, 0.0, 0.0),
+        (),
+        (),
+        (),
+        (),
+        (),
+    )
+    return AnnotatedDerivativeJob(
+        "incident",
+        "clip",
+        source,
+        hashlib.sha256(b"primary").hexdigest(),
+        "a" * 64,
+        "b" * 64,
+        (scene,),
+        len(b"primary"),
+        derivative_kind=DerivativeKind.STILL,
     )
 
 
-def _insert_running(database: Path, *, cancel_requested: int = 0) -> None:
-    with sqlite3.connect(database) as connection:
-        connection.execute(
-            "INSERT INTO derivative_jobs "
-            "(incident_id,derivative_kind,request_id,state,attempt_count,cancel_requested,"
-            "revision,created_at,updated_at) VALUES "
-            "('incident-a','STILL',?,'RUNNING',1,?,1,'now','now')",
-            ("a" * 64, cancel_requested),
-        )
-        connection.commit()
+def test_same_command_returns_identical_receipt_without_double_production(tmp_path: Path) -> None:
+    renderer = _Renderer()
+    executor = DerivativeCommandExecutor(tmp_path / "store", still_renderer=renderer)
+    command = DerivativeCommand(_job(tmp_path))
+
+    first = executor.execute(command)
+    second = executor.execute(command)
+
+    assert first == second
+    assert first.outcome is DerivativeOutcome.AVAILABLE
+    assert renderer.calls == 1
+    assert len(tuple((tmp_path / "store" / "derivatives" / "objects").glob("*.jpg"))) == 1
 
 
-@pytest.mark.parametrize(
-    ("attempt_count", "revision", "field_name"),
-    (
-        ("malformed", 1, "attempt_count"),
-        (0, "malformed", "revision"),
-    ),
-)
-def test_job_store_rejects_malformed_integer_rows(
-    tmp_path: Path,
-    attempt_count: object,
-    revision: object,
-    field_name: str,
-) -> None:
-    database = tmp_path / "edge.sqlite3"
-    migrate_database(database)
-    with sqlite3.connect(database) as connection:
-        connection.execute("PRAGMA writable_schema = ON")
-        row = connection.execute(
-            "SELECT sql FROM sqlite_schema WHERE name = 'derivative_jobs'"
-        ).fetchone()
-        assert row is not None
-        schema = str(row[0])
-        assert ") STRICT" in schema
-        connection.execute(
-            "UPDATE sqlite_schema SET sql = ? WHERE name = 'derivative_jobs'",
-            (schema.replace(") STRICT", ")"),),
-        )
-        connection.execute("PRAGMA writable_schema = OFF")
-    with sqlite3.connect(database) as connection:
-        connection.execute(
-            "INSERT INTO derivative_jobs "
-            "(incident_id,derivative_kind,request_id,state,attempt_count,cancel_requested,"
-            "revision,created_at,updated_at) VALUES "
-            "('incident-a','STILL',?,'PENDING',?,0,?,'now','now')",
-            ("a" * 64, attempt_count, revision),
-        )
+def test_trace_detail_loss_is_an_explicit_typed_unavailable_receipt(tmp_path: Path) -> None:
+    renderer = _Renderer()
+    command = DerivativeCommand(_job(tmp_path), DetailUnavailableReason.RETENTION_BOUND)
 
-    with pytest.raises(TypeError, match=field_name):
-        DerivativeJobStore(database).get("incident-a", DerivativeKind.STILL)
+    receipt = DerivativeCommandExecutor(tmp_path / "store", still_renderer=renderer).execute(
+        command
+    )
 
-
-def test_mark_interrupted_returns_pending_without_clearing_uncancelled_flag(
-    tmp_path: Path,
-) -> None:
-    database = tmp_path / "edge.sqlite3"
-    migrate_database(database)
-    _insert_running(database, cancel_requested=0)
-    store = DerivativeJobStore(database)
-
-    assert store.mark_interrupted(_job(), updated_at="later") is True
-    record = store.get("incident-a", DerivativeKind.STILL)
-    assert record is not None
-    assert record.state.value == "PENDING"
-    assert not record.cancel_requested
-
-
-def test_mark_interrupted_refuses_when_cancel_requested(tmp_path: Path) -> None:
-    database = tmp_path / "edge.sqlite3"
-    migrate_database(database)
-    _insert_running(database, cancel_requested=1)
-    store = DerivativeJobStore(database)
-
-    assert store.mark_interrupted(_job(), updated_at="later") is False
-    record = store.get("incident-a", DerivativeKind.STILL)
-    assert record is not None
-    assert record.state.value == "RUNNING"
-    assert record.cancel_requested
-    assert store.mark_cancelled(_job(), updated_at="later") is True
-    cancelled = store.get("incident-a", DerivativeKind.STILL)
-    assert cancelled is not None
-    assert cancelled.state.value == "CANCELLED"
-    assert cancelled.cancel_requested
+    assert receipt.outcome is DerivativeOutcome.UNAVAILABLE
+    assert receipt.reason == DetailUnavailableReason.RETENTION_BOUND.value
+    assert renderer.calls == 0

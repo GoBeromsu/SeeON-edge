@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -7,10 +8,20 @@ from typing import BinaryIO
 
 import pytest
 from fastapi.testclient import TestClient
+from receipt_helpers import MediaReceiptStore, add_accepted_media_receipts
 
 from backend.app.features.clips.descriptor_files import OpenedRegularFile
 from backend.app.features.clips.store import ClipStore, LocatedClip
-from backend.app.main import create_app, no_lifespan
+from backend.app.features.evidence.receipt_store import ArtifactReceipt
+from backend.app.main import create_app as _create_app
+from backend.app.main import no_lifespan
+
+
+def create_app(*, lifespan):
+    app = _create_app(lifespan=lifespan)
+    add_accepted_media_receipts(app)
+    return app
+
 
 VIDEO = b"0123456789"
 
@@ -238,3 +249,71 @@ def test_nested_relative_video_path_cannot_escape_physical_store(
 
     assert response.status_code == 400
     assert response.json()["detail"] == "manifest path escapes clip store"
+
+
+def test_local_evidence_plays_when_no_backend_receipt_exists(clip_env: Path) -> None:
+    """An operator must be able to watch what this box recorded.
+
+    A receipt is only committed after a successful upstream export, which needs
+    clip export enabled (Hub-owned config, off by default) and a Hub-issued
+    camera id. Refusing playback until one exists made every clip on this
+    deployment permanently unplayable: verified HEVC on disk, thumbnail and
+    manifest present, listed as video_available, and the browser answering
+    "영상을 재생하지 못했습니다" every time.
+    """
+    clip_id = "clip-no-receipt"
+    _write_clip(clip_env, Path(), clip_id, f"clips/{clip_id}/clip.mp4")
+
+    with TestClient(create_app(lifespan=no_lifespan)) as client:
+        _login(client)
+        # A deployment where no receipt was ever committed, because clip
+        # export never ran. The suite otherwise injects accepted receipts for
+        # every clip, which is exactly why this regression reached production
+        # unnoticed.
+        client.app.state.artifact_receipt_store = MediaReceiptStore()
+        response = client.get(f"/api/v1/clips/{clip_id}/video")
+
+    assert response.status_code == 200
+    assert response.content == VIDEO
+
+
+def test_a_receipt_that_was_refused_still_blocks_playback(clip_env: Path) -> None:
+    """Dropping the existence requirement must not admit a refused artifact."""
+    clip_id = "clip-refused-receipt"
+    video = _write_clip(clip_env, Path(), clip_id, f"clips/{clip_id}/clip.mp4")
+    content = video.read_bytes()
+
+    with TestClient(create_app(lifespan=no_lifespan)) as client:
+        _login(client)
+        store = MediaReceiptStore()
+        store.commit(
+            ArtifactReceipt(
+                clip_id,
+                hashlib.sha256(content).hexdigest(),
+                len(content),
+                accepted=False,
+            )
+        )
+        client.app.state.artifact_receipt_store = store
+        response = client.get(f"/api/v1/clips/{clip_id}/video")
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "clip video receipt not accepted"
+
+
+def test_bytes_that_disagree_with_their_receipt_are_still_refused(clip_env: Path) -> None:
+    """The integrity guarantee is the part worth keeping, and it stays strict."""
+    clip_id = "clip-tampered"
+    _write_clip(clip_env, Path(), clip_id, f"clips/{clip_id}/clip.mp4")
+
+    with TestClient(create_app(lifespan=no_lifespan)) as client:
+        _login(client)
+        store = MediaReceiptStore()
+        store.commit(
+            ArtifactReceipt(clip_id, hashlib.sha256(b"different footage").hexdigest(), len(VIDEO))
+        )
+        client.app.state.artifact_receipt_store = store
+        response = client.get(f"/api/v1/clips/{clip_id}/video")
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "clip video receipt verification failed"

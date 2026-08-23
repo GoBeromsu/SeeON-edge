@@ -2,7 +2,7 @@
 
 RTSP inference client: ingest, bounded bus, extract, decide, evidence, one-way relay egress.
 Image `ml-worker`. Sole production command: `python -m worker`.
-Offline QA/replay uses `python -m worker.replay`; never wire it into production startup.
+Replay is backend-owned; the production worker has no replay CLI.
 
 ## Layers
 
@@ -19,7 +19,8 @@ Run `uv run --group lint lint-imports`; a forbidden import means the design is w
 
 Order: `runtime -> pipeline -> domains -> adapters -> interfaces -> types -> contracts`.
 `contracts` contains cross-instance L0 data only. Worker-internal ports and envelopes live under `worker/`; never duplicate or shadow a vendored type, including `contracts/AGENTS.md`.
-Shared leaves are scope-owned: `detection_policies`, runtime `edge_db` APIs, `events`, and `rtsp_url_policy`. Worker never imports `backend` or edge-database DDL modules.
+Shared leaves are scope-owned: `detection_policies`, `events`, and
+`rtsp_url_policy`. Worker never imports `backend` or database modules.
 
 ## Data and lifetime boundaries
 
@@ -52,7 +53,6 @@ Read the nearest `AGENTS.md` before changing that package.
 | `runtime/worker.py` | composition root |
 | `runtime/bootstrap.py` | named stages |
 | `runtime/profile/` | `ML_WORKER_PROFILE` -> `(device, decode, encode)` |
-| `replay/` | offline QA/replay CLI and deterministic reruns |
 
 New seam: Protocol plus two implementations, or one plus a test double.
 Keep new pure-code modules at or below 250 logical LOC. Split by port or stage.

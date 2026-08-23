@@ -27,6 +27,7 @@ from worker.pipeline.decision import EventAggregator, IncidentManager
 from worker.pipeline.inference_coordinator import CoordinatedInference, InferenceResultSlot
 from worker.pipeline.ingest.lifecycle import IngestSupervisor
 from worker.pipeline.perception import GreedyIouTracker, SceneState
+from worker.pipeline.trace.models import TracePersistenceError
 from worker.types import BusinessEvent, DecisionInput, FramePacket, ModuleResult
 
 
@@ -320,3 +321,248 @@ def test_supervisor_stop_joins_real_pump_threads() -> None:
     supervisor.stop(join_timeout_sec=2.0)
 
     assert not started_thread.is_alive()
+
+
+class _FailingTraceCapture:
+    """Every trace attempt fails, the way a stopped or full writer does."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def capture(self, *_args: object, **_kwargs: object) -> object:
+        self.calls += 1
+        raise TracePersistenceError("admitted event trace could not be persisted")
+
+
+def test_a_failing_trace_capture_does_not_stop_the_event_reaching_the_sink() -> None:
+    """Detection must survive any analysis-tracing failure.
+
+    Emission used to be conditional on QA trace persistence: `capture` raised
+    `TracePersistenceError` and that propagated out of the pump, so a writer
+    that was not yet started, a full handoff queue, or a failing trace store
+    silently stopped a resident's fall event from reaching anyone.
+
+    The decision basis an admitted event needs travels in its delivery-queue
+    envelope, not in this cache, so a trace failure may cost the trace pointer
+    and nothing else.
+    """
+    results = InferenceResultSlot()
+    analytics = _blank_analytics("camera-a", task_intervals={"pose": 1})
+    decision = EventAggregator(
+        deciders=(_FrameEchoDecider("camera-a"),), incidents=IncidentManager()
+    )
+    sink = _RecordingSink()
+    capture = _FailingTraceCapture()
+    pump = CameraPipelinePump(
+        "camera-a",
+        results,
+        analytics,
+        decision,
+        sink,
+        poll_timeout_sec=0.02,
+        trace_capture=capture,
+        trace_writer=object(),
+    )
+    sink.on_emit = lambda _event: pump.stop()
+
+    _deliver(results, _packet("camera-a", 1))
+    pump.run()
+
+    assert capture.calls >= 1, "the failing capture was never exercised"
+    assert len(sink.events) == 1, (
+        "the event never reached the sink; an analysis-tracing failure "
+        "suppressed a resident alert"
+    )
+
+
+class _ExplodingDiagnostics:
+    """Telemetry that fails the way a broken counter or full buffer does."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def record_measured_fps(self, *_args: object, **_kwargs: object) -> None:
+        return None
+
+    def record_detection_completed(self, *_args: object, **_kwargs: object) -> None:
+        self.calls += 1
+        raise RuntimeError("diagnostics sink unavailable")
+
+
+def test_failing_diagnostics_do_not_stop_the_event_reaching_the_sink() -> None:
+    """Telemetry is reporting; it must never suppress a resident alert.
+
+    `record_detection_completed` sat unguarded on the frame path ahead of the
+    emission loop, so a raising telemetry sink meant the events computed from
+    that frame were never emitted. This is the fourth auxiliary capability in
+    this runtime found holding that power, after trace capture failing camera
+    startup, trace publication killing the writer thread, and the trace
+    persistence coupling itself.
+    """
+    results = InferenceResultSlot()
+    analytics = _blank_analytics("camera-a", task_intervals={"pose": 1})
+    decision = EventAggregator(
+        deciders=(_FrameEchoDecider("camera-a"),), incidents=IncidentManager()
+    )
+    sink = _RecordingSink()
+    diagnostics = _ExplodingDiagnostics()
+    pump = CameraPipelinePump(
+        "camera-a",
+        results,
+        analytics,
+        decision,
+        sink,
+        poll_timeout_sec=0.02,
+        diagnostics=diagnostics,
+    )
+    sink.on_emit = lambda _event: pump.stop()
+
+    _deliver(results, _packet("camera-a", 1))
+    pump.run()
+
+    assert diagnostics.calls >= 1, "the failing telemetry was never exercised"
+    assert len(sink.events) == 1, (
+        "the event never reached the sink; a telemetry failure suppressed a "
+        "resident alert"
+    )
+
+
+@final
+class _FallDecider:
+    """Emits a fall every frame.
+
+    A fall's cooldown key is (camera_id, domain, event_type) with no identity,
+    so every frame collapses onto the same key. That is precisely the shape in
+    which a consumed-but-unstaged decision is unrecoverable.
+    """
+
+    def __init__(self, camera_id: str) -> None:
+        self._camera_id = camera_id
+
+    def update(self, input_value: DecisionInput) -> tuple[BusinessEvent, ...]:
+        return (
+            BusinessEvent(
+                domain="fall",
+                event_type="fall.detected",
+                identity=f"frame-{input_value.frame_index}",
+                camera_id=self._camera_id,
+                facility_id=f"facility-{self._camera_id}",
+                time_sec=input_value.time_sec or 0.0,
+                probability=0.99,
+            ),
+        )
+
+def test_a_transient_staging_failure_does_not_destroy_the_fall() -> None:
+    """A decision must not stay consumed unless its envelope is durable.
+
+    The sink deliberately refuses to proceed when a decision envelope cannot be
+    admitted, so nothing is left half-written. But admission happens *after* the
+    decider consumed the rising edge and set its cooldown, so a single transient
+    failure meant the next frame produced nothing at all: the fall was lost for
+    good even though staging would have succeeded a frame later.
+    """
+    results = InferenceResultSlot()
+    analytics = _blank_analytics("camera-a", task_intervals={"pose": 1})
+    decision = EventAggregator(
+        deciders=(_FallDecider("camera-a"),),
+        incidents=IncidentManager(cooldown_sec=300.0),
+    )
+    sink = _RecordingSink()
+    failures: list[int] = []
+    original_emit = sink.emit
+
+    def _flaky_emit(event: object) -> None:
+        if not failures:
+            failures.append(1)
+            # The slot is free now that this frame was consumed, so the next
+            # frame can be delivered from here without deadlocking the
+            # capacity-one handoff.
+            _deliver(results, _packet("camera-a", 2))
+            raise RuntimeError("event delivery admission failed: ENTRY_CAPACITY")
+        original_emit(event)
+
+    sink.emit = _flaky_emit  # type: ignore[method-assign]
+    pump = CameraPipelinePump(
+        "camera-a",
+        results,
+        analytics,
+        decision,
+        sink,
+        poll_timeout_sec=0.02,
+        max_frames=2,
+    )
+
+    _deliver(results, _packet("camera-a", 1))
+    pump.run()
+
+    assert failures, "the transient staging failure never happened"
+    assert len(sink.events) == 1, (
+        "the second frame produced no event; a transient staging failure "
+        "permanently destroyed the resident's fall"
+    )
+
+
+@final
+class _StableBedExitDecider:
+    """Emits a bed exit whose cooldown key is stable across frames."""
+
+    def __init__(self, camera_id: str) -> None:
+        self._camera_id = camera_id
+
+    def update(self, input_value: DecisionInput) -> tuple[BusinessEvent, ...]:
+        return (
+            BusinessEvent(
+                domain="bed_exit",
+                event_type="bed.exit",
+                identity=f"frame-{input_value.frame_index}",
+                camera_id=self._camera_id,
+                facility_id=f"facility-{self._camera_id}",
+                time_sec=input_value.time_sec or 0.0,
+                probability=0.9,
+                bed_id=7,
+            ),
+        )
+
+
+def test_an_event_behind_a_failure_is_released_too() -> None:
+    """The suffix of the emission loop was admitted but never attempted.
+
+    The aggregator admits the whole tuple before the loop begins. When an
+    earlier event raises, the ones behind it are never tried at all, yet their
+    cooldowns are already spent -- so the next frame reports nothing for them
+    and they are lost without ever having been attempted once.
+    """
+    results = InferenceResultSlot()
+    analytics = _blank_analytics("camera-a", task_intervals={"pose": 1})
+    decision = EventAggregator(
+        deciders=(_FallDecider("camera-a"), _StableBedExitDecider("camera-a")),
+        incidents=IncidentManager(cooldown_sec=300.0),
+    )
+    sink = _RecordingSink()
+    failures: list[int] = []
+    original_emit = sink.emit
+
+    def _flaky_emit(event: object) -> None:
+        # "fall" sorts before "bed_exit"? No: bed_exit < fall alphabetically, so
+        # the bed exit is first. Fail on whichever arrives first, leaving the
+        # second admitted but unattempted.
+        if not failures:
+            failures.append(1)
+            _deliver(results, _packet("camera-a", 2))
+            raise RuntimeError("event delivery admission failed: ENTRY_CAPACITY")
+        original_emit(event)
+
+    sink.emit = _flaky_emit  # type: ignore[method-assign]
+    pump = CameraPipelinePump(
+        "camera-a", results, analytics, decision, sink, poll_timeout_sec=0.02, max_frames=2
+    )
+
+    _deliver(results, _packet("camera-a", 1))
+    pump.run()
+
+    assert failures, "the staging failure never happened"
+    kinds = {event.domain for event in sink.events}
+    assert {"fall", "bed_exit"}.issubset(kinds), (
+        f"only {sorted(kinds)} were emitted on the second frame; an event behind "
+        f"the failure stayed consumed and was never attempted at all"
+    )

@@ -213,8 +213,8 @@ def test_worker_wires_a_distinct_durable_stager_per_camera(tmp_path: Path) -> No
     assert sink_a.stager.camera_id == "camera-a"
     assert sink_b.stager.camera_id == "camera-b"
     assert sink_a.stager.facility_id == "facility-a"
-    # Both cameras durably stage into the same process-wide outbox database.
-    assert sink_a.stager.database_path == sink_b.stager.database_path
+    # Both cameras publish through the process-wide delivery queue.
+    assert sink_a.stager.queue_directory == sink_b.stager.queue_directory
 
 
 @dataclass(slots=True)

@@ -1,7 +1,7 @@
 # worker/runtime/config: versioned worker config
 
 Own load, pull, LKG, restart identity, and typed models. YAML is a developer hatch.
-Production authority is the relay pull plus numeric policies from central `edge.sqlite3`.
+Production authority is the backend relay pull plus numeric policies.
 No env roster.
 
 `--config` is the only local path. `resolve_config_path` reads no env, so a roster cannot arrive through compose or Git.

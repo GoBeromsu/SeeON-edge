@@ -58,7 +58,10 @@ docker compose -f compose.edge.yaml -f compose.edge.<profile>.yaml up -d --pull 
 
 ### 3. 순서를 지킨다
 
-`edge-db-migrator` → `ml-api`(healthy) → `ml-worker`. compose 의존성이 이를 강제한다.
+`edge-filesystem-inventory` → `edge-db-migrator` → `ml-api`(healthy) →
+`ml-worker`. compose 의존성이 이를 강제한다. inventory 는 schema 17 이전에만
+worker delivery queue 와 clip staging 을 비운 상태인지 확인하며, schema 17 이후에는
+대기 envelope 를 backend 가 drain 할 수 있도록 통과한다.
 
 워커가 떠 있는 상태로 migrator 를 돌리면 다음으로 실패한다.
 
@@ -68,21 +71,19 @@ EDGE_DB_IMPORT_FAILED: edge deployment lock is held by a running runtime
 
 이는 정상 동작이다. 워커를 먼저 정지한 뒤 다시 올린다.
 
-### 4. 워커 설정 캐시가 낡았을 때만 비운다
+### 4. 워커 설정 캐시가 낡았을 때만 다시 가져온다
 
 레지스트리를 복원했는데 워커가 예전 카메라 ID 를 계속 쓰면 last-known-good 이
-남아 있는 것이다.
+남아 있는 것이다. 워커는 데이터베이스를 갖지 않는다. `ml-worker` 를 재시작해서
+백엔드의 `worker-config` 를 다시 가져오게 한다. 정상 pull 이 성공하면 검증된
+bounded cache가 새 payload로 교체된다.
 
 ```bash
-docker compose ... exec -T ml-worker python -c "
-import sqlite3
-c=sqlite3.connect('/var/lib/seeon-state/edge.sqlite3')
-for t in ('config_current','config_history'): c.execute(f'DELETE FROM {t}')
-c.commit()"
 docker compose ... restart ml-worker
 ```
 
-컨테이너가 실행 중일 때만 유효하다. 정지 상태에서는 `exec` 가 동작하지 않는다.
+재시작 뒤에는 아래 검증 절차의 heartbeat와 `worker-config` camera ID를 확인한다.
+캐시 파일을 직접 수정하거나 SQLite를 열어 복구하지 않는다.
 
 ## 검증
 

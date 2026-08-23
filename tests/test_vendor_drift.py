@@ -1,4 +1,4 @@
-"""Vendor drift firewall (ADR-0004), fall-ai side.
+"""Vendor drift firewall (ADR-0006), fall-ai side.
 
 this repository stays canonical for ``contracts``; eldercare-dataset-ops keeps
 a vendored copy. (``features`` moved into ``edge/features/`` in the 3-instance
@@ -119,5 +119,5 @@ def test_vendor_package_matches_dataset_ops(package: str) -> None:
     )
     assert not mismatched, (
         f"dataset-ops's ml/{package}/ has drifted from this repo's canonical copy "
-        f"(re-sync dataset-ops from fall-ai, ADR-0004): {mismatched}"
+        f"(re-sync dataset-ops from fall-ai, ADR-0006): {mismatched}"
     )

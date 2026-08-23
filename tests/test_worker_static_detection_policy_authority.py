@@ -17,7 +17,7 @@ from worker.runtime.worker import WorkerRuntime
 
 _RETIRED_POLICY_ERROR = (
     "static detection_policies authority is retired; numeric detection policies "
-    "must be pulled from central edge.sqlite3 via the versioned worker config"
+    "must be pulled from the central service via the versioned worker config"
 )
 
 

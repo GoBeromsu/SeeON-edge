@@ -4,17 +4,18 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
 from types import MappingProxyType
-from typing import Literal, final
+from typing import Literal, cast, final
 
 import numpy as np
 import pytest
 from numpy.typing import NDArray
 
 import worker.runtime.worker as worker_module
-from contracts.observation import BoundingBox
+from contracts.observation import BoundingBox, FrameObservation
 from contracts.runner import Image, RunnerResult
 from shared.events.evidence_http_transport import HttpResult
 from worker.adapters.model.errors import FatalAcceleratorError
+from worker.domains import DETECTION_MODULE_REGISTRY
 from worker.domains.bed_exit import BedExitMonitor
 from worker.domains.fall import FallEventLatch
 from worker.domains.module_definition import ComponentBinding, ScheduleRule
@@ -26,6 +27,7 @@ from worker.runtime.faults.record import FirstFaultRecord
 from worker.runtime.lease import GpuLease
 from worker.runtime.profile.registry import VerifyResult
 from worker.runtime.worker import WorkerRuntime
+from worker.types import BusinessEvent, FramePacket
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,7 +62,7 @@ def _compiled_binding_for_task(task: str) -> ComponentBinding:
     component_id = "fall-classifier" if task == "fall" else task
     return next(
         binding
-        for definition in worker_module.DETECTION_MODULE_REGISTRY.definitions
+        for definition in DETECTION_MODULE_REGISTRY.definitions
         for binding in definition.shared_bindings
         if binding.component_id == component_id
     )
@@ -467,7 +469,7 @@ def test_bed_exit_disabled_excludes_bed_from_intervals(
 
 
 def _registry_with_ghost_bed_exit() -> object:
-    registry = worker_module.DETECTION_MODULE_REGISTRY
+    registry = DETECTION_MODULE_REGISTRY
     bed_exit = registry.get("bed_exit")
     ghost_bed_exit = replace(
         bed_exit,
@@ -625,6 +627,7 @@ def _runtime(
         hard_exit=hard_exit,
         state_dir=state_dir,
         clip_store_dir=state_dir / "clip-store",
+        build_revision="a" * 40,
     )
 
 
@@ -643,4 +646,157 @@ def _config(*camera_ids: str) -> WorkerConfig:
                 for camera_id in camera_ids
             ],
         }
+    )
+
+
+def test_absent_trace_provenance_degrades_capture_not_the_camera(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Analysis-trace capture is auxiliary and must never fail a camera.
+
+    A trace-publishing slice raised when runtime provenance was not yet applied.
+    Because that raise happened inside the per-camera stage, `run_camera_stage`
+    degraded the camera, and every camera went down together: no heartbeat, no
+    runners, no detection. An optional QA capability must not be able to take
+    fall detection offline, so the camera must still come up and heartbeat with
+    capture simply absent.
+    """
+    requests: list[tuple[str, str, bytes | None]] = []
+
+    def bounded_request(
+        url: str,
+        method: str,
+        _headers: dict[str, str],
+        data: bytes | None,
+        _timeout: float,
+        _on_response: Callable[[int], None] | None = None,
+    ) -> HttpResult:
+        requests.append((url, method, data))
+        return 204, {}, b""
+
+    monkeypatch.setattr(worker_module, "bounded_request", bounded_request)
+    serving = _FakeServingClient()
+    runtime = _runtime(_config("camera-a"), serving, _LoopFactory(serving), tmp_path)
+
+    def fail_manifest(**_kwargs: object) -> object:
+        raise RuntimeError("injected manifest composition failure")
+
+    monkeypatch.setattr(worker_module, "build_applied_runtime_manifest", fail_manifest)
+
+    runtime.run()
+
+    assert runtime._runtime_manifest is None  # noqa: SLF001 - composition outcome
+    assert runtime.cameras
+    assert runtime._camera_trace_captures == {}  # noqa: SLF001 - tracing degraded only
+    assert requests == [
+        (
+            "http://relay.test/api/v1/relay/heartbeat",
+            "POST",
+            b'{"camera_id":"camera-a","facility_id":"facility-a","config_version":7}',
+        )
+    ], "the camera did not come up, so an auxiliary capability took detection down"
+
+
+def test_runtime_manifest_is_applied_to_emitted_event_provenance(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _stub_heartbeat_transport(monkeypatch)
+    serving = _FakeServingClient()
+    runtime = _runtime(_config("camera-a"), serving, _LoopFactory(serving), tmp_path)
+
+    runtime.run()
+
+    manifest = runtime._runtime_manifest  # noqa: SLF001 - composition outcome
+    assert manifest is not None
+    attacher = replace(
+        runtime._camera_evidence_attachers["camera-a"],  # noqa: SLF001
+        overlay_renderer=None,
+    )
+    emitted = attacher.attach(
+        BusinessEvent("fall", "fall.detected", "event-1", "camera-a", "facility-a", 1.0, 0.9),
+        cast(FramePacket, None),  # no renderer reads the packet in this composition test
+        cast(
+            FrameObservation, None
+        ),  # no renderer reads the observation in this composition test
+    )
+    assert emitted.audit is not None
+    assert emitted.audit["runtime_manifest_sha256"] == manifest.sha256
+
+
+def test_applied_manifest_makes_the_trace_producer_live(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A composed manifest must actually switch the analysis-trace producer on.
+
+    `_runtime_manifest` was initialised to None and never assigned, so
+    `_build_trace_capture` always returned None, capture and writer were never
+    composed, and `AnalysisTraceSender.send` was unreachable on a live frame.
+    The tables it feeds therefore stayed empty in production and the replay
+    command refused forever -- a consumer wired to a producer that never ran.
+    """
+    _stub_heartbeat_transport(monkeypatch)
+    serving = _FakeServingClient()
+    runtime = _runtime(_config("camera-a"), serving, _LoopFactory(serving), tmp_path)
+
+    runtime.run()
+
+    assert runtime._runtime_manifest is not None, (  # noqa: SLF001
+        "no manifest was applied, so trace capture degrades and the producer is inert"
+    )
+    # The writer is created at the top of run() and cleared on shutdown, so
+    # after run() returns only the per-camera captures remain observable. Their
+    # presence is the necessary condition: a camera with no capture never
+    # reaches the publisher at all.
+    assert runtime._camera_trace_captures.get("camera-a") is not None, (  # noqa: SLF001
+        "the camera has no trace capture, so its frames never reach the publisher"
+    )
+
+
+def test_a_captured_frame_actually_reaches_the_trace_publisher(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Composition is necessary but not sufficient; the frame must arrive.
+
+    Two slices in this effort shipped a consumer whose producer never ran. The
+    composed capture proves the wiring exists; this proves a frame submitted
+    through the real writer reaches the publisher callable that posts to the
+    backend relay route.
+    """
+    published: list[tuple[object, ...]] = []
+
+    def _capture_publisher(frames: tuple[object, ...], truncation: object) -> None:
+        published.append(frames)
+
+    from worker.pipeline.trace import AnalysisTrace, OptionalNumber, TraceFrame
+    from worker.pipeline.trace.writer import BoundedTraceWriter
+
+    writer = BoundedTraceWriter(tmp_path / "runtime-analysis", publisher=_capture_publisher)
+    writer.start()
+    try:
+        frame = TraceFrame(
+            AnalysisTrace(
+                trace_id="analysis-1",
+                frame_key=("boot-a", "camera-a", 1, 1),
+                pts=OptionalNumber(1.0),
+                source_time=OptionalNumber(1.0),
+                frame_width=4,
+                frame_height=4,
+                bed_region_provenance="fresh",
+                persons=(),
+                beds=(),
+                components=(),
+            ),
+            (),
+        )
+        assert writer.submit(frame, require_persisted=True)
+    finally:
+        writer.stop()
+
+    assert published, (
+        "no frame reached the publisher, so runtime_analysis_* stays empty in "
+        "production and the replay command has nothing to recover"
     )

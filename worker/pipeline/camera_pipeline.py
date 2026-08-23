@@ -105,6 +105,8 @@ class CameraPipelinePump:
         trace_writer: BoundedTraceWriter | None = None,
     ) -> None:
         self._camera_id = camera_id
+        self._untraced_events = 0
+        self._telemetry_failures = 0
         self._results = results
         self._analytics = analytics
         self._decision = decision
@@ -157,32 +159,102 @@ class CameraPipelinePump:
     def _frames_exhausted(self) -> bool:
         return self._max_frames is not None and self.processed_count >= self._max_frames
 
+    def _observe(self, what: str, record: Callable[[], None]) -> None:
+        """Run a telemetry callback that must never affect detection.
+
+        Measured-fps sampling, observation recording and the detection-completed
+        counter are all reporting. They sat unguarded on the frame path ahead of
+        the emission loop, so any one of them raising meant the events computed
+        from that frame were never emitted at all. Three other auxiliary
+        capabilities in this runtime have already been found holding that same
+        power over a resident alert; these are the same shape.
+        """
+        try:
+            record()
+        except Exception:  # noqa: BLE001 - telemetry never blocks detection
+            self._telemetry_failures += 1
+            LOGGER.warning(
+                "camera %s telemetry callback %r failed; detection continues "
+                "(telemetry_failures=%d)",
+                self._camera_id,
+                what,
+                self._telemetry_failures,
+                exc_info=True,
+            )
+
     def _pump_one(self, packet: FramePacket, pose: ModuleResult) -> None:
-        self._record_measured_fps()
+        self._observe("measured-fps", self._record_measured_fps)
         result = self._analytics.process(packet, prefetched_results=(pose,))
-        self._record_observation(packet, result.observation)
+        self._observe(
+            "observation", lambda: self._record_observation(packet, result.observation)
+        )
         events = self._decision.update(result.decision_input)
         if self._diagnostics is not None:
-            self._diagnostics.record_detection_completed(self._camera_id)
-        if self._trace_capture is not None and self._trace_writer is not None:
-            traced = self._trace_capture.capture(
-                self._trace_writer,
-                packet,
-                result,
-                events,
-                require_persisted=bool(events),
+            diagnostics = self._diagnostics
+            self._observe(
+                "detection-completed",
+                lambda: diagnostics.record_detection_completed(self._camera_id),
             )
-            if events:
-                if isinstance(traced, bool):  # pragma: no cover - capture contract
-                    raise RuntimeError("event trace capture returned no traced events")
-                events = traced
-        for event in events:
+        if self._trace_capture is not None and self._trace_writer is not None:
+            # Analysis tracing is auxiliary. The decision basis an admitted event
+            # needs travels in its delivery-queue EVENT envelope, exactly as
+            # worker/pipeline/trace/store.py states: that cache exists only for
+            # best-effort annotated derivatives while the process is alive.
+            #
+            # Emission was nonetheless conditional on it. A writer not yet
+            # started, a full handoff queue, or a failing trace store raised
+            # TracePersistenceError out of this method, and the resident's fall
+            # event was never emitted at all. A QA capability must not be able to
+            # do that, so a trace failure now costs the trace pointer and nothing
+            # more.
+            try:
+                traced = self._trace_capture.capture(
+                    self._trace_writer,
+                    packet,
+                    result,
+                    events,
+                    require_persisted=bool(events),
+                )
+                if events and not isinstance(traced, bool):
+                    events = traced
+            except Exception:  # noqa: BLE001 - tracing never blocks detection
+                self._untraced_events += len(events)
+                LOGGER.warning(
+                    "camera %s emitting %d event(s) without an analysis trace: trace "
+                    "capture failed, so QA replay will have no timeline for them "
+                    "(untraced_events=%d)",
+                    self._camera_id,
+                    len(events),
+                    self._untraced_events,
+                    exc_info=True,
+                )
+        for position, event in enumerate(events):
             attached = self._attach_evidence(event, packet, result.observation)
             emit_for_frame = getattr(self._sink, "emit_for_frame", None)
-            if emit_for_frame is None:
-                self._sink.emit(attached)
-            else:
-                emit_for_frame(attached, packet)
+            try:
+                if emit_for_frame is None:
+                    self._sink.emit(attached)
+                else:
+                    emit_for_frame(attached, packet)
+            except Exception:
+                # The sink deliberately refuses to proceed when a decision
+                # envelope cannot be admitted durably, so nothing is left
+                # half-written. But admission happens AFTER the decider has
+                # consumed the rising edge and set its cooldown, so without
+                # this the next frame produces nothing and the fall is lost
+                # for good -- a transient fault permanently destroying a
+                # resident event. Re-open the decision so a later frame can
+                # emit it again.
+                release = getattr(self._decision, "release", None)
+                if release is not None:
+                    # This event AND every one after it. The aggregator admitted
+                    # the whole tuple before the loop began, so the ones behind
+                    # this failure had their cooldowns consumed and will now
+                    # never be attempted at all -- a fall sitting after a
+                    # bed-exit that raised is lost without ever being tried.
+                    for pending in events[position:]:
+                        release(pending)
+                raise
 
     def _record_observation(
         self, packet: FramePacket, observation: FrameObservation

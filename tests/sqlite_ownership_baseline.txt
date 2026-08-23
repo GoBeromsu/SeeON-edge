@@ -1,0 +1,3 @@
+# Explicit SQLite-reach baseline for the inference-runtime slot (ADR 0005).
+# Ratchet: entries may be REMOVED as the boundary work lands, never added.
+# Schema 17 leaves no permitted SQLite reach in the slot.

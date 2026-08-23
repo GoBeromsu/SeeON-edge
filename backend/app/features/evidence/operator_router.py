@@ -8,6 +8,7 @@ from typing import Annotated, Literal
 from fastapi import APIRouter, HTTPException, Query, Request, status
 from pydantic import BaseModel, ConfigDict, Field
 
+from backend.app.edge_db import EDGE_DATABASE_PATH
 from backend.app.features.evidence.record_store import (
     CentralEvidenceQuery,
     CentralEvidenceReviewStore,
@@ -16,7 +17,6 @@ from backend.app.features.evidence.record_store import (
     ReviewDisposition,
 )
 from backend.app.shared.dashboard_auth import authorize_dashboard
-from shared.edge_db import EDGE_DATABASE_PATH
 
 router = APIRouter(tags=["evidence"])
 

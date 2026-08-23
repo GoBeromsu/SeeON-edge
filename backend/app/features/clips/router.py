@@ -49,6 +49,11 @@ from backend.app.features.clips.store import (
     LabelStore,
     LocatedClip,
 )
+from backend.app.features.evidence.receipt_store import (
+    ArtifactReceiptStore,
+    ArtifactReceiptVerificationError,
+    verify_artifact,
+)
 from backend.app.shared.backend_client_bundle import backend_client_bundle
 from backend.app.shared.dashboard_auth import authorize_dashboard
 
@@ -420,6 +425,37 @@ def clip_video(
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="clip video not found",
+            ) from exc
+    if actual_view == "clean":
+        receipt_store = getattr(request.app.state, "artifact_receipt_store", None)
+        receipt = (
+            receipt_store.get(manifest.clip_id)
+            if isinstance(receipt_store, ArtifactReceiptStore)
+            else None
+        )
+        # A receipt is proof the served bytes are the recorded ones, so when one
+        # exists it is enforced below without exception. Its ABSENCE is not
+        # evidence of tampering: a receipt is only committed after a successful
+        # upstream export, which needs clip export enabled (Hub-owned config,
+        # off by default) and a Hub-issued camera id. Requiring one before an
+        # operator may review local footage made every clip on this deployment
+        # permanently unplayable -- verified media on disk, thumbnail and all,
+        # answering "영상을 재생하지 못했습니다" forever. Evidence a carer cannot
+        # watch is evidence the system did not capture.
+        if receipt is not None and not receipt.accepted:
+            opened.handle.close()
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="clip video receipt not accepted",
+            )
+        try:
+            if receipt is not None:
+                verify_artifact(opened.path, receipt)
+        except ArtifactReceiptVerificationError as exc:
+            opened.handle.close()
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="clip video receipt verification failed",
             ) from exc
     _ = _audit_store(request).append(
         actor=actor,

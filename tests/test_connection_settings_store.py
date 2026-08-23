@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from backend.app.core.config import reject_retired_backend_environment
+from backend.app.edge_db import EDGE_DATABASE_PATH
 from backend.app.features.connection import store as connection_store_module
 from backend.app.features.connection.store import (
     API_BACKEND_BASE_URL_ENV,
@@ -19,7 +20,6 @@ from backend.app.lifespan import (
     API_BACKEND_EVENTS_URL_ENV,
     EDGE_FACILITY_TOKEN_ENV,
 )
-from shared.edge_db import EDGE_DATABASE_PATH
 
 _production_from_env = ConnectionSettingsStore.from_env
 
@@ -337,12 +337,29 @@ def test_compose_edge_persists_only_the_central_connection_database() -> None:
     compose_path = Path(__file__).resolve().parents[1] / "compose.edge.yaml"
     compose = compose_path.read_text()
 
-    mount_line = next(
+    # Every service mounting edge-state must agree on the container path, and a
+    # mount may carry an access-mode suffix (`:ro`/`:rw`) that is not part of it.
+    # Selected by the volume alone, deliberately: filtering on the expected path
+    # would hide a service that mounts edge-state somewhere else, which is the
+    # disagreement this test exists to catch.
+    mount_lines = [
         line
         for line in compose.splitlines()
-        if "edge-state:" in line and f":{EDGE_DATABASE_PATH.parent}" in line
+        if line.strip().startswith("- edge-state:")
+    ]
+    assert mount_lines, "no service mounts edge-state"
+
+    container_dirs = set()
+    for line in mount_lines:
+        target = line.split("edge-state:", 1)[1].strip()
+        for mode in (":ro", ":rw"):
+            target = target.removesuffix(mode)
+        container_dirs.add(Path(target))
+
+    assert len(container_dirs) == 1, (
+        f"services disagree on where edge-state is mounted: {sorted(container_dirs)}"
     )
-    container_dir = Path(mount_line.split(":", 1)[1].strip())
+    container_dir = container_dirs.pop()
 
     assert Path(DEFAULT_CONNECTION_SETTINGS_PATH) == container_dir / "edge.sqlite3"
     assert f"{API_CONNECTION_SETTINGS_PATH_ENV}:" not in compose

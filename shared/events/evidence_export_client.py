@@ -30,6 +30,7 @@ from shared.events.evidence_http_transport import (
     parse_capabilities,
     parse_clip_result,
     parse_event_result,
+    parse_json_object,
 )
 from shared.events.relay_failure_log import RelayFailureLog
 
@@ -151,6 +152,14 @@ def _clips_failure_log() -> RelayFailureLog:
     return RelayFailureLog(LOGGER, channel="relay clip delivery", method="PUT")
 
 
+def _snapshot_attachment_failure_log() -> RelayFailureLog:
+    return RelayFailureLog(LOGGER, channel="relay snapshot attachment delivery", method="POST")
+
+
+def _snapshot_disposition_failure_log() -> RelayFailureLog:
+    return RelayFailureLog(LOGGER, channel="relay snapshot disposition delivery", method="POST")
+
+
 @dataclass(frozen=True, slots=True)
 class RelayEvidenceClient:
     base_url: str
@@ -164,6 +173,12 @@ class RelayEvidenceClient:
     )
     _clips_failures: RelayFailureLog = field(
         init=False, repr=False, compare=False, default_factory=_clips_failure_log
+    )
+    _snapshot_attachment_failures: RelayFailureLog = field(
+        init=False, repr=False, compare=False, default_factory=_snapshot_attachment_failure_log
+    )
+    _snapshot_disposition_failures: RelayFailureLog = field(
+        init=False, repr=False, compare=False, default_factory=_snapshot_disposition_failure_log
     )
 
     def __post_init__(self) -> None:
@@ -249,6 +264,42 @@ class RelayEvidenceClient:
             self._clips_failures.record_failure(parsed, path=path)
         else:
             self._clips_failures.record_success(path=path)
+        return parsed
+
+    def send_snapshot_attachment(
+        self, payload: Mapping[str, PayloadValue]
+    ) -> None | DeliveryFailure:
+        path = "api/v1/relay/snapshot-attachments"
+        result = bounded_request(
+            join_http_url(self.base_url, path),
+            "POST",
+            {"Content-Type": "application/json", **self._headers()},
+            encode_json(payload),
+            self.timeout_sec,
+        )
+        parsed = _parse_relay_acceptance(result)
+        if isinstance(parsed, DeliveryFailure):
+            self._snapshot_attachment_failures.record_failure(parsed, path=path)
+        else:
+            self._snapshot_attachment_failures.record_success(path=path)
+        return parsed
+
+    def send_snapshot_disposition(
+        self, payload: Mapping[str, PayloadValue]
+    ) -> None | DeliveryFailure:
+        path = "api/v1/relay/snapshot-dispositions"
+        result = bounded_request(
+            join_http_url(self.base_url, path),
+            "POST",
+            {"Content-Type": "application/json", **self._headers()},
+            encode_json(payload),
+            self.timeout_sec,
+        )
+        parsed = _parse_relay_acceptance(result)
+        if isinstance(parsed, DeliveryFailure):
+            self._snapshot_disposition_failures.record_failure(parsed, path=path)
+        else:
+            self._snapshot_disposition_failures.record_success(path=path)
         return parsed
 
     def _headers(self) -> dict[str, str]:
@@ -378,6 +429,19 @@ def _local_event_identity(payload_json: str) -> tuple[str, str] | None:
 
 def _backend_reason(claim: ClaimedClipRequest) -> str:
     return "CORRUPT" if str(claim.unavailable_reason) == "CORRUPT" else "CAPTURE_FAILED"
+
+
+def _parse_relay_acceptance(
+    result: tuple[int, Mapping[str, str], bytes] | DeliveryFailure,
+) -> None | DeliveryFailure:
+    if isinstance(result, DeliveryFailure):
+        return result
+    status, headers, body = result
+    if not 200 <= status < 300:
+        return classify_http_failure(status, headers)
+    if parse_json_object(body).get("status") != "accepted":
+        return DeliveryFailure(DeliveryDisposition.RETRY, "MALFORMED_RECEIPT")
+    return None
 
 
 __all__ = ["BackendEvidenceClient", "RelayEvidenceClient"]

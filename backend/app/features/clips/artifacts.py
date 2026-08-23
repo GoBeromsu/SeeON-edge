@@ -7,12 +7,12 @@ import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 
+from backend.app.edge_db import EDGE_DATABASE_PATH
+from backend.app.edge_db.connection import RuntimeActor, open_runtime_database
 from backend.app.features.clips.descriptor_files import (
     OpenedRegularFile,
     open_contained_regular_file,
 )
-from shared.edge_db import EDGE_DATABASE_PATH
-from shared.edge_db.connection import RuntimeActor, open_runtime_database
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 

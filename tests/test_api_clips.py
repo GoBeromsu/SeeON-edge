@@ -6,6 +6,7 @@ from typing import Self, TypedDict
 
 import pytest
 from fastapi.testclient import TestClient
+from receipt_helpers import add_accepted_media_receipts
 
 from backend.app.features.clips.audit_log import AUDIT_NO_CLIP_ID
 from backend.app.features.connection.store import (
@@ -13,7 +14,15 @@ from backend.app.features.connection.store import (
     ConnectionSettingsStore,
 )
 from backend.app.lifespan import apply_connection_settings
-from backend.app.main import create_app, no_lifespan
+from backend.app.main import create_app as _create_app
+from backend.app.main import no_lifespan
+
+
+def create_app(*, lifespan):
+    app = _create_app(lifespan=lifespan)
+    add_accepted_media_receipts(app)
+    return app
+
 
 # Dashboard auth now always resolves to a session store (persisted file > env
 # > the built-in admin/admin default, see backend/app/shared/dashboard_auth.py),

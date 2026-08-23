@@ -7,8 +7,13 @@ from pathlib import Path
 
 import pytest
 
-from shared.edge_db.importer import LegacyDatabasePaths, import_legacy_databases
-from shared.edge_db.migrator import migrate_database
+from backend.app.edge_db.importer import (
+    ImportProgress,
+    LegacyDatabasePaths,
+    import_legacy_databases,
+)
+from backend.app.edge_db.migrator import migrate_database
+from backend.app.edge_db.schema import SchemaV17MigrationError
 
 
 def _catalog(path: Path) -> None:
@@ -119,7 +124,7 @@ def _connection(path: Path) -> None:
     connection.close()
 
 
-def _worker(path: Path, *, version: int) -> None:
+def _worker(path: Path, *, version: int, event_state: str = "ACKED") -> None:
     connection = sqlite3.connect(path)
     connection.executescript(
         """
@@ -172,16 +177,18 @@ def _worker(path: Path, *, version: int) -> None:
         "edge_event_id,detected_at,payload_json,state,queued_at,next_attempt_at,attempt_count,"
         "lease_owner,lease_expires_at,delivery_state,backend_event_id,last_error_code"
     )
+    lease_owner = "worker:legacy" if event_state == "IN_FLIGHT" else None
+    lease_expires_at = 10.0 if event_state == "IN_FLIGHT" else None
     ordinary: tuple[object, ...] = (
         "event:ordinary/%2F",
         "detected",
         '{"camera_id":"camera:opaque","event_type":"fall"}',
-        "READY",
+        event_state,
         1.0,
         1.0,
         0,
-        None,
-        None,
+        lease_owner,
+        lease_expires_at,
         "PENDING",
         None,
         None,
@@ -231,7 +238,9 @@ def _worker(path: Path, *, version: int) -> None:
     connection.close()
 
 
-def _paths(tmp_path: Path, *, worker_version: int = 8) -> LegacyDatabasePaths:
+def _paths(
+    tmp_path: Path, *, worker_version: int = 8, event_state: str = "ACKED"
+) -> LegacyDatabasePaths:
     catalog = tmp_path / "api" / "catalog.sqlite3"
     connection = tmp_path / "api" / "connection-settings.sqlite3"
     worker = tmp_path / "worker" / "worker-state.sqlite3"
@@ -239,7 +248,7 @@ def _paths(tmp_path: Path, *, worker_version: int = 8) -> LegacyDatabasePaths:
         path.parent.mkdir(parents=True, exist_ok=True)
     _catalog(catalog)
     _connection(connection)
-    _worker(worker, version=worker_version)
+    _worker(worker, version=worker_version, event_state=event_state)
     return LegacyDatabasePaths(catalog=catalog, connection=connection, worker=worker)
 
 
@@ -330,6 +339,20 @@ def test_import_preserves_owned_data_and_forward_migrates_outbox(
     assert all(hashlib.sha256(path.read_bytes()).hexdigest() in path.name for path in backups)
 
 
+@pytest.mark.parametrize("event_state", ["READY", "STAGED", "IN_FLIGHT"])
+def test_import_refuses_undelivered_legacy_evidence_before_schema17(
+    tmp_path: Path, event_state: str
+) -> None:
+    sources = _paths(tmp_path, event_state=event_state)
+    target = tmp_path / "edge-state" / "edge.sqlite3"
+
+    with pytest.raises(SchemaV17MigrationError, match="EDGE_DB_DRAIN_INCOMPLETE"):
+        import_legacy_databases(target, sources)
+
+    with sqlite3.connect(target) as database:
+        assert database.execute("PRAGMA user_version").fetchone() == (16,)
+
+
 def test_every_receipt_barrier_is_resumable_without_duplication(tmp_path: Path) -> None:
     sources = _paths(tmp_path)
     probe_target = tmp_path / "probe" / "edge.sqlite3"
@@ -339,7 +362,7 @@ def test_every_receipt_barrier_is_resumable_without_duplication(tmp_path: Path) 
     )
     assert barriers
 
-    def interrupt_at(receipt_number: int):
+    def interrupt_at(receipt_number: int) -> ImportProgress:
         seen = 0
 
         def interrupt(_source: str, _barrier: str) -> None:

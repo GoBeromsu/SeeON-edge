@@ -8,7 +8,7 @@ import hashlib
 import json
 import logging
 import sqlite3
-from collections.abc import Callable
+from collections.abc import Callable, Coroutine
 from typing import Annotated, Any, NotRequired, Protocol, TypedDict
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response, status
@@ -16,23 +16,35 @@ from fastapi.routing import APIRoute
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from starlette.types import Message, Receive
 
+from backend.app.edge_db import EDGE_DATABASE_PATH
 from backend.app.features.cameras.router import (
     acknowledge_applied_detection_policies,
     worker_config_snapshot,
 )
 from backend.app.features.cameras.store import CameraRegistryStore
 from backend.app.features.clips.catalog import CatalogConflictError, get_catalog_store
+from backend.app.features.evidence.relay_projection import (
+    RelayEvent,
+    RelayEvidenceProjection,
+    RelayEvidenceProjectionConflict,
+    RelayEvidenceProjectionError,
+    RelayEvidenceProjectionMissingEvent,
+)
+from backend.app.features.qa.runtime_trace_store import RuntimeAnalysisStore, RuntimeTraceConflict
 from backend.app.features.relay.auth import authorize_relay
 from backend.app.features.status.heartbeat_store import get_heartbeat_store
 from backend.app.features.status.runtime_status_store import get_runtime_status_store
 from contracts import AlertEventType
 from contracts.decode_diagnostics import DECODE_BACKENDS, DECODE_FALLBACK_REASONS
 from contracts.worker_config import RESTART_EPOCH_KEY
+from shared.events import envelope_limits
 from shared.events.evidence_export_contract import (
     DeliveryDisposition,
     DeliveryFailure,
     EventReceipt,
 )
+from shared.events.replay_wire import MAX_REPLAY_BODY_BYTES as _REPLAY_BODY_LIMIT
+from shared.events.replay_wire import ReplayWireError, decode_replay_trace
 
 RELAY_TOKEN_HEADER = "X-Edge-Relay-Token"
 
@@ -55,6 +67,16 @@ MAX_CATALOG_PAYLOAD_DEPTH = 8
 MAX_RELAY_REQUEST_BODY_BYTES = 512 * 1024
 MAX_RELAY_HEARTBEAT_BODY_BYTES = 4 * 1024
 MAX_RELAY_RUNTIME_STATUS_BODY_BYTES = 64 * 1024
+# Analysis frames are image-free but may contain a full pose/keypoint timeline.
+# The worker sends at most this many frames per request; this is deliberately
+# aligned with its trace writer batch bound rather than relying on a proxy's
+# incidental request limit.
+MAX_RELAY_ANALYSIS_TRACE_FRAMES = 16
+# Derived, not chosen: see shared/events/replay_wire.py. Worker and backend
+# read the same value so the two ends cannot drift apart.
+MAX_RELAY_ANALYSIS_TRACE_BODY_BYTES = _REPLAY_BODY_LIMIT
+MAX_RELAY_SNAPSHOT_ATTACHMENT_BODY_BYTES = 8 * 1024
+MAX_RELAY_SNAPSHOT_DISPOSITION_BODY_BYTES = 8 * 1024
 
 # Per-endpoint hard body caps, keyed by route path suffix. BoundedBodyRoute
 # consults this before any body byte is buffered.
@@ -62,6 +84,9 @@ _MAX_BODY_BYTES_BY_SUFFIX: dict[str, int] = {
     "/alerts": MAX_RELAY_REQUEST_BODY_BYTES,
     "/heartbeat": MAX_RELAY_HEARTBEAT_BODY_BYTES,
     "/runtime-status": MAX_RELAY_RUNTIME_STATUS_BODY_BYTES,
+    "/analysis-traces": MAX_RELAY_ANALYSIS_TRACE_BODY_BYTES,
+    "/snapshot-attachments": MAX_RELAY_SNAPSHOT_ATTACHMENT_BODY_BYTES,
+    "/snapshot-dispositions": MAX_RELAY_SNAPSHOT_DISPOSITION_BODY_BYTES,
 }
 
 
@@ -107,7 +132,7 @@ class BoundedBodyRoute(APIRoute):
     401/403 decision on within-limit bodies (auth-before-parse is preserved).
     """
 
-    def get_route_handler(self):  # noqa: ANN201 - matches APIRoute base signature
+    def get_route_handler(self) -> Callable[[Request], Coroutine[Any, Any, Response]]:
         original = super().get_route_handler()
         max_bytes = next(
             (
@@ -195,6 +220,37 @@ def require_relay_runtime_status(
     )
 
 
+def require_relay_analysis_trace(
+    request: Request,
+    relay_token: Annotated[str | None, Header(alias=RELAY_TOKEN_HEADER)] = None,
+    authorization: Annotated[str | None, Header()] = None,
+) -> None:
+    _authorize_relay_body(
+        request,
+        max_bytes=MAX_RELAY_ANALYSIS_TRACE_BODY_BYTES,
+        relay_token=relay_token,
+        authorization=authorization,
+    )
+
+
+def require_relay_snapshot_attachment(
+    request: Request,
+    relay_token: Annotated[str | None, Header(alias=RELAY_TOKEN_HEADER)] = None,
+) -> None:
+    _authorize_relay_body(
+        request, max_bytes=MAX_RELAY_SNAPSHOT_ATTACHMENT_BODY_BYTES, relay_token=relay_token
+    )
+
+
+def require_relay_snapshot_disposition(
+    request: Request,
+    relay_token: Annotated[str | None, Header(alias=RELAY_TOKEN_HEADER)] = None,
+) -> None:
+    _authorize_relay_body(
+        request, max_bytes=MAX_RELAY_SNAPSHOT_DISPOSITION_BODY_BYTES, relay_token=relay_token
+    )
+
+
 class RelayAuditEnvelope(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -203,6 +259,45 @@ class RelayAuditEnvelope(BaseModel):
     detector_version: str | None = None
     operating_threshold: float | None = None
     clock_source: str | None = None
+    runtime_manifest_sha256: str | None = None
+    """Digest of the runtime manifest that produced this event.
+
+    The worker has always emitted this, but the envelope never declared it and
+    ``extra="forbid"`` turned that omission into a permanent HTTP 422. Because
+    the outbox treats 422 as non-retryable, every affected event was rejected
+    for good rather than retried -- 41 bed-exit events were stranded this way in
+    production before the field was declared here.
+    """
+    decision_trace_id: str | None = None
+    """Pointer to the decision trace this event was derived from.
+
+    Attached by ``TraceCapture._attach_trace``. This is the third field found to
+    be emitted by the worker and undeclared here, after ``runtime_manifest_sha256``
+    and a truncation marker, each producing the same permanent 422 and the same
+    silent deletion by the outbox. It is declared rather than stripped because it
+    is the only link from a delivered event back to the basis for the decision.
+
+    The recurrence is the point: the guard against it is no longer a hand-written
+    key list, which is exactly what let this one through, but a test that derives
+    the emitted keys from the producer itself.
+    """
+
+
+class RelayAnalysisTraceRequest(BaseModel):
+    """Closed shared replay envelope received from the inference runtime."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    camera_id: str = Field(...)
+    frames: list[dict[str, object]] = Field(...)
+    truncation: dict[str, object] = Field(...)
+
+
+class RelayAnalysisTraceResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    accepted: bool = Field(...)
+    frame_count: int = Field(...)
 
 
 class RelaySnapshotMetadata(BaseModel):
@@ -216,6 +311,40 @@ class RelaySnapshotMetadata(BaseModel):
     captured_at: str = Field(min_length=1)
     camera_id: str = Field(min_length=1)
     edge_event_id: str | None = None
+
+
+class RelaySnapshotAttachmentRequest(BaseModel):
+    """An immutable snapshot reference; snapshot bytes never cross this route."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    edge_event_id: str = Field(min_length=1, max_length=envelope_limits.EDGE_EVENT_ID_MAX_CHARS)
+    snapshot_id: str = Field(min_length=1, max_length=envelope_limits.SNAPSHOT_ID_MAX_CHARS)
+    sha256: str = Field(
+        min_length=envelope_limits.SHA256_MAX_CHARS,
+        max_length=envelope_limits.SHA256_MAX_CHARS,
+        pattern=r"^[0-9a-f]{64}$",
+    )
+    media_reference: str = Field(
+        min_length=1, max_length=envelope_limits.MEDIA_REFERENCE_MAX_CHARS
+    )
+    size_bytes: int = Field(ge=0, le=envelope_limits.SNAPSHOT_SIZE_BYTES_MAX)
+    mime_type: str = Field(min_length=1, max_length=envelope_limits.MIME_TYPE_MAX_CHARS)
+    audit: RelayAuditEnvelope | None = None
+
+
+class RelaySnapshotDispositionRequest(BaseModel):
+    """A terminal, explicit statement that a snapshot cannot be delivered."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    edge_event_id: str = Field(min_length=1, max_length=envelope_limits.EDGE_EVENT_ID_MAX_CHARS)
+    snapshot_id: str = Field(min_length=1, max_length=envelope_limits.SNAPSHOT_ID_MAX_CHARS)
+    disposition: str = Field(
+        min_length=1, max_length=envelope_limits.DISPOSITION_MAX_CHARS
+    )
+    reason: str = Field(min_length=1, max_length=envelope_limits.DISPOSITION_REASON_MAX_CHARS)
+    audit: RelayAuditEnvelope | None = None
 
 
 class RelayAlertRequest(BaseModel):
@@ -355,6 +484,22 @@ class RelayClipRecorderStatus(BaseModel):
     encoder: str | None = Field(default=None)
 
 
+class RelayDeliveryQueueStatus(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    accepted_count: int = Field(ge=0)
+    accepted_bytes: int = Field(ge=0)
+    max_accepted_entries: int = Field(gt=0)
+    max_accepted_bytes: int = Field(gt=0)
+    by_kind: dict[str, int] = Field()
+    # Evidence the backend refused or that exhausted delivery. Retained on disk,
+    # not delivered, and needing operator action -- a deployment cannot act on
+    # what it never reports. Defaulted so a worker predating this field is not
+    # answered 422, which is how 41 real events were destroyed here.
+    dead_lettered_count: int = Field(default=0, ge=0)
+    dead_lettered_bytes: int = Field(default=0, ge=0)
+
+
 class RelayRuntimeStatusRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -366,6 +511,7 @@ class RelayRuntimeStatusRequest(BaseModel):
     clip_export: RelayClipExportStatus | None = Field(default=None)
     gpu: RelayGpuStatus | None = Field(default=None)
     worker: RelayWorkerStatus | None = Field(default=None)
+    delivery_queue: RelayDeliveryQueueStatus | None = Field(default=None)
 
 
 class RelayRuntimeStatusResponse(BaseModel):
@@ -444,6 +590,7 @@ def relay_alert(
     # resolved or the backend can't be reached, instead of the attempt
     # leaving no local trace at all when _camera_binding() 403s below.
     catalog_result = _record_catalog(request, payload)
+    _project_relay_event(request, payload)
     binding = _camera_binding(request, payload.camera_id, payload.facility_id)
     # Only a Hub-issued id may address the upstream ingest API. The previous
     # `or payload.camera_id` fallback sent the worker's edge-local id, which the
@@ -519,6 +666,171 @@ def relay_alert(
     return _alert_response({"status": "accepted"}, catalog_result)
 
 
+@router.post("/snapshot-attachments", status_code=status.HTTP_202_ACCEPTED)
+def relay_snapshot_attachment(
+    payload: RelaySnapshotAttachmentRequest,
+    request: Request,
+    _: Annotated[None, Depends(require_relay_snapshot_attachment)],
+) -> dict[str, str]:
+    """Record one immutable media reference without accepting media bytes."""
+
+    store = get_catalog_store(request.app)
+    if store is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="snapshot attachment storage unavailable",
+        )
+    try:
+        store.record(
+            "snapshots",
+            _snapshot_delivery_key(payload.edge_event_id, payload.snapshot_id),
+            payload.model_dump(exclude_none=True),
+        )
+    except CatalogConflictError as error:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="snapshot attachment conflicts with existing content identity",
+        ) from error
+    except (OSError, sqlite3.Error) as error:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="snapshot attachment storage unavailable",
+        ) from error
+    _project_snapshot_attachment(request, payload)
+    return {"status": "accepted"}
+
+
+@router.post("/snapshot-dispositions", status_code=status.HTTP_202_ACCEPTED)
+def relay_snapshot_disposition(
+    payload: RelaySnapshotDispositionRequest,
+    request: Request,
+    _: Annotated[None, Depends(require_relay_snapshot_disposition)],
+) -> dict[str, str]:
+    """Durably record an unavailable or failed snapshot without touching its event."""
+
+    store = get_catalog_store(request.app)
+    if store is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="snapshot disposition storage unavailable",
+        )
+    key = _snapshot_delivery_key(payload.edge_event_id, payload.snapshot_id)
+    record = {
+        "action": "snapshot_disposition",
+        **payload.model_dump(exclude_none=True),
+    }
+    try:
+        store.record("audit", key, record)
+    except CatalogConflictError as error:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="snapshot disposition conflicts with existing terminal outcome",
+        ) from error
+    except (OSError, sqlite3.Error) as error:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="snapshot disposition storage unavailable",
+        ) from error
+    _project_snapshot_disposition(request, payload)
+    return {"status": "accepted"}
+
+
+def _snapshot_delivery_key(edge_event_id: str, snapshot_id: str) -> str:
+    return hashlib.sha256(f"{edge_event_id}\0{snapshot_id}".encode()).hexdigest()
+
+
+def _relay_evidence_projection(request: Request) -> RelayEvidenceProjection | None:
+    projection = getattr(request.app.state, "relay_evidence_projection", None)
+    if isinstance(projection, RelayEvidenceProjection):
+        return projection
+    if not EDGE_DATABASE_PATH.is_file():
+        return None
+    return RelayEvidenceProjection(EDGE_DATABASE_PATH)
+
+
+def _project_relay_event(request: Request, payload: RelayAlertRequest) -> None:
+    if payload.edge_event_id is None:
+        return
+    try:
+        projection = _relay_evidence_projection(request)
+        if projection is None:
+            return
+        projection.project_event(
+            RelayEvent(
+                edge_event_id=payload.edge_event_id,
+                event_type=str(payload.event_type),
+                probability=payload.probability,
+                detected_at=payload.detected_at,
+                camera_id=payload.camera_id,
+                facility_id=payload.facility_id,
+                resident_id=payload.resident_id,
+                evidence=payload.evidence,
+                audit=None
+                if payload.audit is None
+                else payload.audit.model_dump(exclude_none=True),
+            )
+        )
+    except (OSError, sqlite3.Error) as error:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="central evidence projection unavailable",
+        ) from error
+
+
+def _project_snapshot_attachment(
+    request: Request, payload: RelaySnapshotAttachmentRequest
+) -> None:
+    try:
+        projection = _relay_evidence_projection(request)
+        if projection is None:
+            return
+        projection.attach_snapshot(
+            edge_event_id=payload.edge_event_id,
+            snapshot_id=payload.snapshot_id,
+            sha256=payload.sha256,
+            media_reference=payload.media_reference,
+            size_bytes=payload.size_bytes,
+            mime_type=payload.mime_type,
+        )
+    except RelayEvidenceProjectionMissingEvent as error:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+    except RelayEvidenceProjectionConflict as error:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+    except RelayEvidenceProjectionError as error:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(error)
+        ) from error
+    except (OSError, sqlite3.Error) as error:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="central evidence projection unavailable",
+        ) from error
+
+
+def _project_snapshot_disposition(
+    request: Request, payload: RelaySnapshotDispositionRequest
+) -> None:
+    try:
+        projection = _relay_evidence_projection(request)
+        if projection is None:
+            return
+        projection.record_snapshot_disposition(
+            edge_event_id=payload.edge_event_id,
+            snapshot_id=payload.snapshot_id,
+            disposition=payload.disposition,
+            reason=payload.reason,
+        )
+    except RelayEvidenceProjectionMissingEvent as error:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+    except RelayEvidenceProjectionConflict as error:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+    except (OSError, sqlite3.Error) as error:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="central evidence projection unavailable",
+        ) from error
+
+
 @router.post("/heartbeat", status_code=status.HTTP_202_ACCEPTED)
 def relay_heartbeat(
     payload: RelayHeartbeatRequest,
@@ -585,6 +897,31 @@ def relay_runtime_status(
     if not result.accepted:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=result.reason)
     return RelayRuntimeStatusResponse(accepted=True, generation=result.generation)
+
+
+@router.post("/analysis-traces", response_model=RelayAnalysisTraceResponse)
+def relay_analysis_trace(
+    payload: RelayAnalysisTraceRequest,
+    _: Annotated[None, Depends(require_relay_analysis_trace)],
+) -> RelayAnalysisTraceResponse:
+    if len(payload.frames) > MAX_RELAY_ANALYSIS_TRACE_FRAMES:
+        raise HTTPException(
+            status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+            detail=(
+                "analysis trace transfer exceeds maximum of "
+                f"{MAX_RELAY_ANALYSIS_TRACE_FRAMES} frames"
+            ),
+        )
+    try:
+        trace = decode_replay_trace(payload.model_dump())
+        RuntimeAnalysisStore(EDGE_DATABASE_PATH).ingest(trace)
+    except RuntimeTraceConflict as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    except ReplayWireError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)
+        ) from exc
+    return RelayAnalysisTraceResponse(accepted=True, frame_count=len(trace.frames))
 
 
 def _record_catalog(request: Request, payload: RelayAlertRequest) -> str | None:
@@ -817,11 +1154,15 @@ def _optional_backend_ingest_client(
 
     Missing client means unconfigured cloud path: local accept still OK.
     """
-    client = getattr(request.app.state, "backend_ingest_client", None)
+    client: BackendIngestClient | None = getattr(
+        request.app.state, "backend_ingest_client", None
+    )
     if client is None:
         return None
-    if hasattr(client, "for_camera"):
-        return client.for_camera(camera_id)
+    for_camera = getattr(client, "for_camera", None)
+    if for_camera is not None:
+        scoped: BackendIngestClient = for_camera(camera_id)
+        return scoped
     return client
 
 

@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Final, TypeAlias, cast
 from uuid import uuid4
 
-from shared.edge_db.connection import RuntimeActor, open_runtime_database
+from backend.app.edge_db.connection import RuntimeActor, open_runtime_database
 
 ConnectionValue: TypeAlias = str | int | None
 ConnectionData: TypeAlias = dict[str, ConnectionValue]

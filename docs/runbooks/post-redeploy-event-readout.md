@@ -153,19 +153,10 @@ head `5e8fd29`, `6f35357` 위로 리베이스돼 있어 머지되면 같은 방�
 
 ### A-2. fall 이벤트의 `audit` 블록 — #217 threshold가 적용됐는지 확인
 
-이벤트는 로그가 아니라 **워커 상태 볼륨의 SQLite**에 남는다:
-`ml-worker-state` 네임드 볼륨, `ML_WORKER_STATE_DIR` 아래
-`worker-state.sqlite3`, `evidence_events` 테이블.
-
-```sh
-$DC exec ml-worker sqlite3 "$ML_WORKER_STATE_DIR/worker-state.sqlite3" \
-  "SELECT edge_event_id, detected_at, delivery_state, \
-          json_extract(payload_json,'\$.event_type') AS event_type, \
-          json_extract(payload_json,'\$.audit') AS audit \
-   FROM evidence_events \
-   WHERE detected_at > '<재시작 UTC 타임스탬프>' \
-   ORDER BY detected_at;"
-```
+이벤트 판독은 **백엔드의 Evidence API 또는 대시보드**에서 한다. 워커 상태 볼륨에는
+SQLite가 없으며, 워커에게 데이터베이스 조회를 시키지 않는다. 대시보드의 incident
+목록은 `GET /api/v1/incidents` 백엔드 API를 사용하며 `edge_event_id`,
+`detected_at`, `event_type`, `event_delivery_state`를 제공한다.
 
 **`edge_event_id`가 아니라 `detected_at`으로 "재시작 이후"를 판단한다.**
 `edge_event_id`(fall 이벤트의 경우 `FallEventLatch.event_count`, 프로세스 재시작마다
@@ -173,29 +164,20 @@ $DC exec ml-worker sqlite3 "$ML_WORKER_STATE_DIR/worker-state.sqlite3" \
 재시작 이후 발생했다"의 증거가 못 된다. `detected_at`은 실제 UTC 벽시계
 타임스탬프다.
 
-`audit.operating_threshold`가 기대한 값(env로 재정의한 값, `.env.edge.prod`의
-`ML_FALL_OPERATING_THRESHOLD` 등)과 일치하면 #217 fix가 살아있는 것이다.
-일치하지 않으면 — 0-1에서 확인했듯 #217은 이미 main에 있으므로, 이미지가
-기대한 커밋을 안 담고 있거나(0-1로 돌아가서 재확인) 아니면 env 자체가 잘못
-설정된 것이다.
+incident 상세에서 정책 식별자와 전달 상태를 확인한다. 이 API가 제공하지 않는
+per-event audit threshold 값은 추측하지 않는다; 필요한 경우에는 백엔드 운영
+담당자에게 해당 incident의 서버 측 기록을 요청한다.
 
 ### A-3. 실제 bed_exit 이벤트
 
-같은 테이블, `event_type='bed-exit'` 필터:
-
-```sh
-$DC exec ml-worker sqlite3 "$ML_WORKER_STATE_DIR/worker-state.sqlite3" \
-  "SELECT edge_event_id, detected_at, delivery_state, last_error_code, attempt_count \
-   FROM evidence_events \
-   WHERE json_extract(payload_json,'\$.event_type')='bed-exit' \
-   ORDER BY detected_at DESC LIMIT 50;"
-```
+대시보드 incident 목록에서 `event_type`이 `bed-exit`인 행을 확인한다. 자동화된
+점검은 인증된 백엔드 API `GET /api/v1/incidents`를 호출해 같은 필드를 읽어야 하며,
+워커 컨테이너나 worker-local-state를 조회하지 않는다.
 
 한 건이라도 있으면 B절은 필요 없다 — 파이프라인 전체(스코어링 → grace_frames →
 night window → 스테이징 → 릴레이)가 최소 한 번은 끝까지 살아있었다는 뜻이다.
-`delivery_state != 'ACKED'`인 행이 있으면 발화는 됐지만 backend까지 확인응답을
-못 받은 것 — 이건 릴레이 전송 문제고, C절이 아니라 `last_error_code`로 바로
-좁혀진다(재시도는 자동이고 최대 백오프 300초, 유실은 없다 — 아래 참고).
+`event_delivery_state`가 정상 완료가 아니면 발화 뒤 백엔드 전달 단계가 완료되지
+않은 것이다. 해당 incident ID와 백엔드 로그를 함께 확인한다.
 
 ## B. bed_exit 0건일 때 — 판단 트리
 

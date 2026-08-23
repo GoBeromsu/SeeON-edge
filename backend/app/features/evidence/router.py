@@ -16,6 +16,14 @@ from fastapi import APIRouter, Header, HTTPException, Request, status
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from backend.app.features.clips.store import CLIP_STORE_DIR_ENV, DEFAULT_CLIP_STORE_DIR
+from backend.app.features.evidence.receipt_store import (
+    ArtifactReceipt,
+    ArtifactReceiptConflictError,
+    ArtifactReceiptPersistenceError,
+    ArtifactReceiptStore,
+    ArtifactReceiptVerificationError,
+    CatalogArtifactReceiptStore,
+)
 from backend.app.features.relay.auth import authorize_relay as _authorize
 from backend.app.features.relay.router import RELAY_TOKEN_HEADER, _camera_binding
 from backend.app.features.runtime_settings.store import get_runtime_settings_store
@@ -182,31 +190,43 @@ def export_clip(
     if not _enabled(request) or CLIP_ID_PATTERN.fullmatch(clip_id) is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="clip export unavailable")
     binding = _camera_binding(request, payload.camera_id, payload.facility_id)
-    # Third Hub egress path, same rule as relay_alert and relay_heartbeat: only a
-    # Hub-issued id may address the upstream API. Unlike those two there is no
-    # local-accept path here -- a clip export exists to reach the Hub -- so refuse
-    # with a named reason instead of round-tripping a fabricated id that the Hub is
-    # guaranteed to reject with FACILITY_BINDING_MISMATCH, which reaches the edge as
-    # an opaque 502 and reads like an auth failure (issue #308).
     bound_camera_id = binding.get("backend_camera_id")
     if not isinstance(bound_camera_id, str) or not bound_camera_id.strip():
-        _LOGGER.warning(
-            "clip export refused: camera %s has no Hub mapping yet (clip %s)",
-            payload.camera_id,
-            clip_id,
-            extra={"local_camera_id": payload.camera_id, "clip_id": clip_id},
-        )
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="camera has no backend mapping; clip export cannot address the backend",
         )
-    camera_id = bound_camera_id
-    client = _backend_client(request, camera_id)
+    client = _backend_client(request, bound_camera_id)
     if isinstance(payload, ReadyClipPayload):
-        media = _verified_media(request, clip_id, payload)
+        try:
+            media = _verified_media(request, clip_id, payload)
+        except ArtifactReceiptVerificationError as exc:
+            raise HTTPException(
+                status_code=(
+                    status.HTTP_404_NOT_FOUND
+                    if str(exc) == "artifact is unavailable"
+                    else status.HTTP_409_CONFLICT
+                ),
+                detail="clip media unavailable"
+                if str(exc) == "artifact is unavailable"
+                else "clip media mismatch",
+            ) from exc
+        try:
+            _ = _receipt_store(request).commit(
+                ArtifactReceipt(clip_id, payload.sha256, payload.size_bytes)
+            )
+        except ArtifactReceiptConflictError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT, detail="artifact receipt conflicts"
+            ) from exc
+        except ArtifactReceiptPersistenceError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="artifact receipt persistence unavailable",
+            ) from exc
         request_payload = _ReadyRequest(
             clip_id=clip_id,
-            camera_id=camera_id,
+            camera_id=bound_camera_id,
             event_refs=tuple(payload.event_refs),
             state_version=payload.state_version,
             sha256=payload.sha256,
@@ -224,7 +244,7 @@ def export_clip(
         result = client.report_unavailable(
             _UnavailableRequest(
                 clip_id=clip_id,
-                camera_id=camera_id,
+                camera_id=bound_camera_id,
                 event_refs=tuple(payload.event_refs),
                 state_version=payload.state_version,
                 reason=payload.reason,
@@ -263,15 +283,12 @@ def _verified_media(request: Request, clip_id: str, payload: ReadyClipPayload) -
         )
         file_stat = os.fstat(media_fd)
     except OSError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="clip media unavailable",
-        ) from exc
+        raise ArtifactReceiptVerificationError("artifact is unavailable") from exc
     finally:
         for directory_fd in reversed(directory_fds):
             os.close(directory_fd)
     if media_fd is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="clip media unavailable")
+        raise ArtifactReceiptVerificationError("artifact is unavailable")
     handle = os.fdopen(media_fd, "rb", closefd=True)
     mismatch = not stat.S_ISREG(file_stat.st_mode) or file_stat.st_size != payload.size_bytes
     try:
@@ -283,21 +300,23 @@ def _verified_media(request: Request, clip_id: str, payload: ReadyClipPayload) -
             handle.seek(0)
     except OSError as exc:
         handle.close()
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="clip media mismatch",
-        ) from exc
+        raise ArtifactReceiptVerificationError("artifact cannot be verified") from exc
     if mismatch:
         handle.close()
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="clip media mismatch",
-        )
+        raise ArtifactReceiptVerificationError("artifact does not match receipt")
     return handle
 
 
 def _enabled(request: Request) -> bool:
     return get_runtime_settings_store(request.app).get().clip_export_enabled
+
+
+def _receipt_store(request: Request) -> ArtifactReceiptStore:
+    store = getattr(request.app.state, "artifact_receipt_store", None)
+    if not isinstance(store, ArtifactReceiptStore):
+        store = CatalogArtifactReceiptStore.from_app(request.app)
+        request.app.state.artifact_receipt_store = store
+    return store
 
 
 def _backend_client(request: Request, camera_id: str) -> BackendEvidenceClient:

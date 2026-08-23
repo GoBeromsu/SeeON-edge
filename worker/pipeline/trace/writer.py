@@ -1,22 +1,31 @@
 from __future__ import annotations
 
+import logging
 import queue
-import sqlite3
 import threading
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
+from typing import Final
 
 from worker.pipeline.trace.models import (
     RecoveredCameraTrace,
     TraceContractError,
     TraceFrame,
     TracePersistenceError,
+    TraceTruncation,
     TraceWriterStats,
     trace_frame_row_count,
     trace_frame_size_bytes,
 )
 from worker.pipeline.trace.store import TraceStore
+
+LOGGER: Final = logging.getLogger(__name__)
+
+#: Bound on frames held for republication while the relay is unreachable.
+#: Sized to one retention window so it cannot outgrow what recovery returns.
+_MAX_UNPUBLISHED_FRAMES: Final = 3_000
 
 
 @dataclass(frozen=True, slots=True)
@@ -117,6 +126,7 @@ class _Lifecycle(StrEnum):
 
 
 _QueueItem = _WriteRequest | _Barrier | _Stop
+TracePublisher = Callable[[tuple[TraceFrame, ...], Mapping[str, TraceTruncation]], None]
 
 
 class BoundedTraceWriter:
@@ -126,9 +136,11 @@ class BoundedTraceWriter:
         self,
         database_path: Path,
         policy: TraceRetentionPolicy = DEFAULT_TRACE_RETENTION_POLICY,
+        publisher: TracePublisher | None = None,
     ) -> None:
         self.database_path = database_path
         self.policy = policy
+        self._publisher = publisher
         self._store = TraceStore(database_path)
         self._queue: queue.Queue[_QueueItem] = queue.Queue(policy.max_pending_frames + 1)
         self._lock = threading.Lock()
@@ -142,6 +154,9 @@ class BoundedTraceWriter:
         self._handoff_dropped = 0
         self._persisted = 0
         self._failed_batches = 0
+        self._publication_failures = 0
+        self._unpublished: list[TraceFrame] = []
+        self._unpublished_shed = 0
         self._persistence_failed_frames = 0
         self._unobserved_failed_frames = 0
         self._retry_attempts = 0
@@ -163,9 +178,12 @@ class BoundedTraceWriter:
             name="bounded-analysis-trace-writer",
             daemon=True,
         )
-        self._thread = thread
         self._state = _Lifecycle.RUNNING
+        # Published only once started: the stop path joins whatever is in
+        # ``self._thread``, and a visible but unstarted thread raises
+        # ``RuntimeError: cannot join thread before it is started``.
         thread.start()
+        self._thread = thread
 
     def submit(self, frame: TraceFrame, *, require_persisted: bool = False) -> bool:
         try:
@@ -288,12 +306,34 @@ class BoundedTraceWriter:
                 retry_attempts=self._retry_attempts,
                 rejected_frames=self._rejected_frames,
                 duplicate_frames=self._duplicate_frames,
+                publication_failures=self._publication_failures,
+                unpublished_shed_frames=self._unpublished_shed,
             )
 
     def recover_camera(self, camera_id: str) -> RecoveredCameraTrace:
         return self._store.recover_camera(camera_id)
 
     def _run(self) -> None:
+        """Drain the write queue forever.
+
+        This loop must not be allowed to end on an exception. If the thread
+        dies, every later ``submit(require_persisted=True)`` fails, and because
+        an admitted event requires persistence before it is emitted, a dead
+        auxiliary writer would silently suppress resident alerts. Any unexpected
+        failure is therefore logged and the loop continues.
+        """
+        while True:
+            try:
+                if self._drain_once():
+                    return
+            except Exception:  # noqa: BLE001 - a QA writer must never die
+                LOGGER.exception(
+                    "analysis-trace writer iteration failed; continuing so that "
+                    "detection is never blocked by trace persistence"
+                )
+
+    def _drain_once(self) -> bool:
+        """Handle one queue item. Returns True when the writer should stop."""
         while True:
             item = self._queue.get()
             requests: list[_WriteRequest] = []
@@ -326,7 +366,7 @@ class BoundedTraceWriter:
                     control.error = self._terminal_error
                 control.completed.set()
             elif isinstance(control, _Stop):
-                return
+                return True
 
     def _persist(self, requests: list[_WriteRequest]) -> BaseException | None:
         with self._lock:
@@ -335,7 +375,7 @@ class BoundedTraceWriter:
         if not requests and not dropped and not previously_failed:
             return None
         error: BaseException | None = None
-        for attempt in range(self.policy.max_persistence_attempts):
+        for _attempt in range(self.policy.max_persistence_attempts):
             try:
                 persisted = self._store.persist_batch(
                     [request.frame for request in requests],
@@ -351,8 +391,7 @@ class BoundedTraceWriter:
             except BaseException as caught:  # noqa: BLE001 - delivered to exact submitter
                 error = caught
                 if (
-                    attempt + 1 < self.policy.max_persistence_attempts
-                    and isinstance(caught, sqlite3.OperationalError)
+                    _attempt + 1 < self.policy.max_persistence_attempts
                     and any(token in str(caught).lower() for token in ("busy", "locked"))
                 ):
                     with self._lock:
@@ -364,6 +403,52 @@ class BoundedTraceWriter:
                 self._duplicate_frames += len(requests) - persisted
                 self._subtract_counts(self._dropped_by_camera, dropped)
                 self._subtract_counts(self._failed_by_camera, previously_failed)
+            if persisted and self._publisher is not None:
+                # Best effort, and deliberately so. Publication ships analysis
+                # traces to the backend for QA replay; it has no bearing on
+                # whether a fall was detected. This call was previously outside
+                # the exception handling above, so a relay outage or a non-2xx
+                # response propagated out of _persist, killed the writer thread,
+                # and every later submit(require_persisted=True) then failed --
+                # which suppressed the resident alert itself. A QA telemetry
+                # failure must never be able to do that.
+                try:
+                    # Frames whose previous publication failed are re-sent with
+                    # this batch. They persisted locally, only their delivery
+                    # failed, and backend ingest is byte-identical idempotent
+                    # with a typed conflict, so re-sending is safe. Without this
+                    # the backend's copy is permanently and silently less
+                    # complete than the worker's, with nothing recording the
+                    # difference.
+                    with self._lock:
+                        pending = tuple(self._unpublished)
+                        self._unpublished = []
+                    frames = pending + tuple(request.frame for request in requests)
+                    truncation = {
+                        camera_id: self._store.recover_camera(camera_id).truncation
+                        for camera_id in {frame.analysis.frame_key[1] for frame in frames}
+                    }
+                    self._publisher(frames, truncation)
+                except Exception:  # noqa: BLE001 - auxiliary path, never fatal
+                    with self._lock:
+                        self._publication_failures += 1
+                        # Bounded: a relay that stays down must not grow this
+                        # without limit. Oldest are shed first so the retained
+                        # tail is the most recent, and the shed count is kept so
+                        # the loss is observable rather than silent.
+                        retained = (self._unpublished + list(frames))[
+                            -_MAX_UNPUBLISHED_FRAMES:
+                        ]
+                        self._unpublished_shed += (
+                            len(self._unpublished) + len(frames) - len(retained)
+                        )
+                        self._unpublished = retained
+                    LOGGER.warning(
+                        "analysis-trace publication failed; traces stay local and "
+                        "detection is unaffected (failures=%d)",
+                        self._publication_failures,
+                        exc_info=True,
+                    )
             return None
         with self._lock:
             self._failed_batches += 1

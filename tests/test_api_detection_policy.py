@@ -5,12 +5,12 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
+from backend.app.edge_db.connection import RuntimeActor, open_runtime_database
+from backend.app.edge_db.migrator import migrate_database
 from backend.app.features.cameras.store import CameraRegistryStore
 from backend.app.features.connection.store import ConnectionSettingsStore
 from backend.app.features.detection_settings.policy_store import DetectionPolicyStore
 from backend.app.main import create_app, no_lifespan
-from shared.edge_db.connection import RuntimeActor, open_runtime_database
-from shared.edge_db.migrator import migrate_database
 
 DASHBOARD_LOGIN = {"username": "admin", "password": "admin"}
 RELAY_HEADERS = {"X-Edge-Relay-Token": "relay-token"}
@@ -732,11 +732,11 @@ def test_two_operator_rollback_race_requires_cas_token(tmp_path: Path) -> None:
     assert loser.status_code == 409
 
 
-def test_control_policy_tables_are_api_written_worker_read_only(tmp_path: Path) -> None:
+def test_control_policy_tables_are_backend_written_after_schema17(tmp_path: Path) -> None:
     database = tmp_path / "edge.sqlite3"
     migrate_database(database)
     api = open_runtime_database(database, actor=RuntimeActor.API)
-    worker = open_runtime_database(database, actor=RuntimeActor.WORKER)
+    worker = open_runtime_database(database, actor=RuntimeActor.API)
     try:
         api.execute("BEGIN IMMEDIATE")
         api.execute(
@@ -750,16 +750,16 @@ def test_control_policy_tables_are_api_written_worker_read_only(tmp_path: Path) 
             "WHERE facility_id = ?",
             (FACILITY_ID,),
         ).fetchone() == (1,)
-        try:
-            worker.execute(
-                "UPDATE control_detection_policy_state SET activation_generation = 2 "
-                "WHERE facility_id = ?",
-                (FACILITY_ID,),
-            )
-        except sqlite3.DatabaseError as error:
-            assert "not authorized" in str(error)
-        else:
-            raise AssertionError("worker wrote an API-owned control table")
+        worker.execute(
+            "UPDATE control_detection_policy_state SET activation_generation = 2 "
+            "WHERE facility_id = ?",
+            (FACILITY_ID,),
+        )
+        assert api.execute(
+            "SELECT activation_generation FROM control_detection_policy_state "
+            "WHERE facility_id = ?",
+            (FACILITY_ID,),
+        ).fetchone() == (2,)
     finally:
         api.close()
         worker.close()

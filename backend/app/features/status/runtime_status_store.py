@@ -31,6 +31,7 @@ from typing import TypeAlias
 
 from pydantic import TypeAdapter, ValidationError
 
+from backend.app.edge_db import EDGE_DATABASE_PATH
 from backend.app.features.status.detection_health import (
     DetectionHealth,
     accept_detection_sample,
@@ -38,7 +39,6 @@ from backend.app.features.status.detection_health import (
     parse_detection_counters,
 )
 from backend.app.shared.sqlite_bootstrap import connect_catalog_store
-from shared.edge_db import EDGE_DATABASE_PATH
 
 DEFAULT_RUNTIME_STATUS_STALE_AFTER_SEC: float = 15.0
 logger = logging.getLogger(__name__)
@@ -50,7 +50,7 @@ _CREATE_RUNTIME_LATENCY_TABLE = (
 
 JsonObject: TypeAlias = dict[str, object]
 LatencyRow: TypeAlias = tuple[str, str]
-_LATENCY_ROW = TypeAdapter(LatencyRow)
+_LATENCY_ROW: TypeAdapter[LatencyRow] = TypeAdapter(LatencyRow)
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,6 +71,7 @@ class RuntimeStatusSnapshot:
     clip_export: JsonObject | None
     gpu: JsonObject | None
     worker: JsonObject | None
+    delivery_queue: JsonObject | None
 
 
 @dataclass(slots=True)
@@ -106,6 +107,7 @@ class RuntimeStatusStore:
         clip_export_raw = payload.get("clip_export")
         gpu_raw = payload.get("gpu")
         worker_raw = payload.get("worker")
+        delivery_queue_raw = payload.get("delivery_queue")
         if not isinstance(cameras_raw, list) or not isinstance(clip_recorder_raw, dict):
             raise TypeError("runtime status payload has invalid telemetry fields")
         if clip_export_raw is not None and not isinstance(clip_export_raw, dict):
@@ -114,11 +116,16 @@ class RuntimeStatusStore:
             raise TypeError("runtime status payload has invalid gpu")
         if worker_raw is not None and not isinstance(worker_raw, dict):
             raise TypeError("runtime status payload has invalid worker")
+        if delivery_queue_raw is not None and not isinstance(delivery_queue_raw, dict):
+            raise TypeError("runtime status payload has invalid delivery_queue")
         cameras = _object_dicts(cameras_raw)
         clip_recorder = _object_dict(clip_recorder_raw)
         clip_export = None if clip_export_raw is None else _object_dict(clip_export_raw)
         gpu = None if gpu_raw is None else _object_dict(gpu_raw)
         worker = None if worker_raw is None else _object_dict(worker_raw)
+        delivery_queue = (
+            None if delivery_queue_raw is None else _object_dict(delivery_queue_raw)
+        )
         requested_generation = _optional_int(payload.get("generation"), field="generation")
         stamped = time() if received_at is None else received_at
         with self._lock:
@@ -145,6 +152,7 @@ class RuntimeStatusStore:
                 clip_export=deepcopy(clip_export),
                 gpu=deepcopy(gpu),
                 worker=deepcopy(worker),
+                delivery_queue=deepcopy(delivery_queue),
             )
             self._latest_generation[facility_id] = max(latest_generation, generation)
             self._accept_detection_samples(facility_id, cameras, accepted_at=stamped)
@@ -174,6 +182,7 @@ class RuntimeStatusStore:
                     "clip_export": deepcopy(status.clip_export),
                     "gpu": deepcopy(status.gpu),
                     "worker": deepcopy(status.worker),
+                    "delivery_queue": deepcopy(status.delivery_queue),
                     "latency": deepcopy(self._latency_for_facility(facility_id)),
                 }
         return {

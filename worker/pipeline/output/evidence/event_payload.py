@@ -1,6 +1,6 @@
 """Worker-local staging envelope for an admitted event carrying snapshot bytes.
 
-``contracts.event.EventPayload`` is the vendored, ADR-0004 byte-identical L0
+``contracts.event.EventPayload`` is the vendored, ADR-0006 byte-identical L0
 shape shared with the backend and dataset-ops; it stays a plain ``Mapping``
 alias over scalars and nested scalar evidence, with no ``bytes`` member, so it
 can cross the shared relay boundary without ever carrying raw media.

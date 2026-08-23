@@ -133,6 +133,19 @@ def _build_parser() -> argparse.ArgumentParser:
             "(default: baked /var/lib/clip-store)"
         ),
     )
+    parser.add_argument(
+        "--state-dir",
+        type=Path,
+        default=None,
+        help=(
+            "Runtime-slot state root holding the durable delivery queue and "
+            "GPU lease. Containers MUST pass the mounted volume path: the "
+            "default resolves under the user's home, which inside a container "
+            "is the writable layer, so every pending evidence envelope would be "
+            "destroyed when the container is replaced "
+            "(default: ~/.local/state/ml-worker)"
+        ),
+    )
     return parser
 
 
@@ -201,6 +214,11 @@ def main(argv: list[str] | None = None) -> int:
       4 - fatal accelerator fault (worker/runtime/faults/handler.py, hard exit)
     """
     args = _build_parser().parse_args(argv)
+    # Resolved once so --check-config inspects exactly the directory the
+    # runtime will use. A container that passes --state-dir but whose
+    # diagnostics read the home default would report on a directory nothing
+    # writes to.
+    state_dir = args.state_dir if args.state_dir is not None else resolve_state_dir()
 
     logging.basicConfig(
         level=logging.INFO,
@@ -331,7 +349,7 @@ def main(argv: list[str] | None = None) -> int:
             # (`resolve_local_overrides`, below) (worker/runtime/AGENTS.md,
             # "--check-config performs no model, camera, or relay side
             # effect").
-            stored = WorkerConfigLkgStore(state_dir=resolve_state_dir()).load()
+            stored = WorkerConfigLkgStore(state_dir=state_dir).load()
             if stored is None:
                 LOGGER.info(
                     "config validation passed (static check): baked relay endpoint "
@@ -443,7 +461,7 @@ def main(argv: list[str] | None = None) -> int:
         restart_check=restart_check,
         clip_export_policy=clip_export_policy,
         max_frames_per_camera=args.max_frames_per_camera,
-        state_dir=resolve_state_dir(),
+        state_dir=state_dir,
         restart_generation=snapshot.directive.generation,
         build_revision=resolve_worker_build_revision(os.environ.get("ML_WORKER_BUILD_REVISION")),
     )

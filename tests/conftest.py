@@ -8,9 +8,9 @@ from pathlib import Path
 
 import pytest
 
+from backend.app.edge_db.migrator import migrate_database
 from backend.app.features.connection.store import ConnectionSettingsStore
 from backend.app.shared.dashboard_credentials import DashboardCredentialsStore
-from shared.edge_db.migrator import migrate_database
 
 
 @pytest.fixture(autouse=True)

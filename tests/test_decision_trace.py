@@ -4,9 +4,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import numpy as np
-import pytest
 
-from contracts.event import EventPayload
+from backend.app.edge_db.migrator import migrate_database
 from contracts.frame import Frame
 from contracts.observation import (
     BedRegionCacheState,
@@ -16,7 +15,7 @@ from contracts.observation import (
 )
 from contracts.runner import pose_result
 from shared.detection_policies import FallPolicyV1, make_effective_policy
-from shared.edge_db.migrator import migrate_database
+from shared.events.delivery_queue import DeliveryQueue, EventEntry
 from worker.domains.bed_exit import BedExitConfig, BedExitMonitor
 from worker.domains.fall import FallEventLatch
 from worker.pipeline.analytics.composite import CompositeResult
@@ -249,46 +248,16 @@ def test_real_camera_pump_captures_before_emitting_the_admitted_event(
     assert writer.recover_camera("camera-a").decisions[0].trace_id == trace_id
 
 
-def test_admitted_event_trace_reference_is_transactional_and_orphans_fail_closed(
+def test_admitted_event_decision_basis_is_atomic_in_delivery_queue(
     tmp_path: Path,
 ) -> None:
-    database = tmp_path / "edge.sqlite3"
-    migrate_database(database)
-    from worker.runtime.provenance import AppliedRuntimeManifestStore
-    from worker.runtime.provenance.models import AppliedRuntimeManifest
-
-    # Minimal valid manifest contents are inserted directly through the worker-owned seam.
-    manifest = AppliedRuntimeManifest(
-        schema_version=1,
-        canonical_json='{"cameras":[{"camera_id":"camera-a"}],"manifest_schema_version":1}',
-        sha256=RUNTIME_MANIFEST_SHA256,
-    )
-    AppliedRuntimeManifestStore(database).persist(
-        manifest,
-        boot_instance_id="boot-a",
-        applied_at="2026-08-13T00:00:00Z",
-    )
-
-    orphan: EventPayload = {
-        "edge_event_id": "event-orphan",
-        "event_type": "fall",
-        "probability": 0.8,
-        "detected_at": "2026-08-13T00:00:01Z",
-        "audit": {
-            "runtime_manifest_sha256": RUNTIME_MANIFEST_SHA256,
-            "decision_trace_id": "d" * 64,
-        },
-    }
-    with pytest.raises(ValueError, match="decision trace reference"):
-        _stager(database).stage(orphan)
-
     detector = FallEventLatch(
         _FallModel(), camera_id="camera-a", facility_id="facility-a", operating_threshold=0.7
     )
     decision_input = _input(BoundingBox(10, 10, 70, 90, 0.9), frame_index=1)
     events = detector.update(decision_input)
     result = CompositeResult((), decision_input.observation, decision_input)
-    writer = BoundedTraceWriter(database, TraceRetentionPolicy.testing())
+    writer = BoundedTraceWriter(tmp_path / "detail-cache", TraceRetentionPolicy.testing())
     writer.start()
     try:
         traced_events = _trace_capture(detector).capture(
@@ -302,35 +271,23 @@ def test_admitted_event_trace_reference_is_transactional_and_orphans_fail_closed
     trace_id = audit["decision_trace_id"]
     assert isinstance(trace_id, str)
 
-    payload: EventPayload = {
-        "edge_event_id": "event-valid",
-        "event_type": "fall",
-        "probability": 0.8,
-        "detected_at": "2026-08-13T00:00:01Z",
-        "audit": {
-            "runtime_manifest_sha256": RUNTIME_MANIFEST_SHA256,
-            "decision_trace_id": trace_id,
-        },
-    }
-    stager = _stager(database)
-    stager.stage(payload)
-    stager.complete("event-valid", "clip-valid")
-
-    import sqlite3
-
-    connection = sqlite3.connect(database)
-    try:
-        assert connection.execute(
-            "SELECT decision_trace_id FROM evidence_event_trace_refs "
-            "WHERE edge_event_id='event-valid'"
-        ).fetchone() == (trace_id,)
-        assert connection.execute(
-            "SELECT trace.decision_trace_id FROM clip_events AS link "
-            "JOIN evidence_event_trace_refs AS trace USING(edge_event_id) "
-            "WHERE link.clip_id='clip-valid'"
-        ).fetchone() == (trace_id,)
-    finally:
-        connection.close()
+    decision = writer.recover_camera("camera-a").decisions[0]
+    assert decision.trace_id == trace_id
+    queue = DeliveryQueue(tmp_path / "delivery")
+    entry = EventEntry(
+        edge_event_id="event-valid",
+        event_type="fall",
+        detected_at="2026-08-13T00:00:01Z",
+        camera_id="camera-a",
+        facility_id="facility-a",
+        decision_trace=decision.trace_id.encode(),
+        values=b'{"fall_probability":0.8}',
+    )
+    assert queue.try_admit(entry).accepted
+    queued = next(queue.entries())
+    assert queued["edge_event_id"] == "event-valid"
+    assert queued["decision_trace_b64"]
+    assert queued["values_b64"]
 
 
 def test_numeric_decision_trace_is_hardware_neutral_for_equal_inputs() -> None:

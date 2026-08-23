@@ -3,9 +3,9 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-from shared.edge_db.compatibility import CURRENT_SCHEMA_RANGE
-from shared.edge_db.migrator import migrate_database
-from shared.edge_db.schema import MIGRATIONS, SCHEMA_VERSION
+from backend.app.edge_db.compatibility import CURRENT_SCHEMA_RANGE
+from backend.app.edge_db.migrator import migrate_database
+from backend.app.edge_db.schema import MIGRATIONS, SCHEMA_VERSION
 
 
 def test_forward_migration_preserves_old_component_rows_and_admits_truthful_states(

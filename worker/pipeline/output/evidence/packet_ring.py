@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import math
 import threading
 from collections import deque
@@ -15,6 +16,7 @@ from worker.types.source_packet import (
     StreamEpoch,
 )
 
+_LOGGER = logging.getLogger(__name__)
 
 @dataclass(frozen=True, slots=True)
 class PacketRingLimits:
@@ -381,8 +383,28 @@ class SourcePacketRing:
     def _drop(self, packet: SourcePacket, *, lease_pressure: bool) -> None:
         self.metrics.dropped_packets += 1
         self.metrics.dropped_bytes += packet.size_bytes
-        if lease_pressure:
-            self.metrics.lease_backpressure_drops += 1
+        if not lease_pressure:
+            return
+        self.metrics.lease_backpressure_drops += 1
+        # A lease-pressure drop punches a hole into a clip window that is still
+        # being recorded: select() has pinned the window, so the ring cannot trim
+        # and discards the arriving packet instead. Downstream this surfaces only
+        # as "remuxed packet duration changed", because MP4 stretches the
+        # pre-gap packet's stts duration to the next survivor. The counter for
+        # this existed but was never reported anywhere, which is why the
+        # condition stayed invisible while clips silently failed to finalize.
+        # Throttled to powers of two, mirroring the demuxer's drop log.
+        count = self.metrics.lease_backpressure_drops
+        if count & (count - 1) == 0:
+            _LOGGER.warning(
+                "packet ring dropped an arriving packet under lease backpressure: "
+                "camera_id=%s lease_backpressure_drops=%s active_leases=%s; "
+                "the in-flight clip window will be discontiguous",
+                self.camera_id,
+                count,
+                self.metrics.active_leases,
+                extra={"camera_id": self.camera_id, "lease_backpressure_drops": count},
+            )
 
 
 def _safe_pts(packet: SourcePacket) -> Fraction:

@@ -28,10 +28,10 @@ from threading import Lock
 from typing import Literal, TypedDict
 from urllib.parse import parse_qsl, urlsplit, urlunsplit
 
+from backend.app.edge_db import EDGE_DATABASE_PATH
 from backend.app.features.cameras.topology import CameraTopologyStore, RegistryTopologySnapshot
 from backend.app.features.cameras.topology_schema import TOPOLOGY_SCHEMA
 from backend.app.shared.sqlite_bootstrap import connect_catalog_store
-from shared.edge_db import EDGE_DATABASE_PATH
 
 CameraStatus = Literal["online", "offline", "starting", "unknown"]
 ProbeErrorClass = Literal["timeout", "decode", "auth", "unsupported"]

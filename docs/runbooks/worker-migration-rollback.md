@@ -1,9 +1,10 @@
 # Migrate or roll back edge state safely
 
 The current edge release has one writable SQLite database:
-`/var/lib/seeon-state/edge.sqlite3` in the `edge-state` volume. API and worker
-remain separate HTTP-connected runtimes, but both validate that central schema
-and write only their owned table families. They never execute DDL.
+`/var/lib/seeon-state/edge.sqlite3` in the `edge-state` volume. The backend API
+is its sole application writer; the worker has no database mount and interacts
+with the backend only over HTTP. The worker never opens, validates, migrates, or
+repairs this database.
 
 The stopped-runtime `edge-db-migrator` is the only DDL owner. It checkpoints,
 backs up, integrity-checks, and imports the released `catalog.sqlite3`,
@@ -65,17 +66,17 @@ $DC up -d --wait ml-worker
 
 Compose enforces `edge-db-migrator` completed successfully -> `ml-api` healthy ->
 `ml-worker`. Do not start either runtime around the dependency gates. Record
-the first successful API or worker write to `edge.sqlite3` as the **central cutover traffic boundary**. From that point, legacy snapshots are stale.
+the first successful API write to `edge.sqlite3` as the **central cutover traffic boundary**. From that point, legacy snapshots are stale.
 
 ## Rollback decision
 
 ### Before central cutover traffic
 
-If the migrator or readiness checks fail before any API or worker process writes
+If the migrator or readiness checks fail before the API writes
 central state, a rollback to the untouched legacy volumes is permitted. Decide
 compatibility separately for `catalog.sqlite3`,
-`connection-settings.sqlite3`, and `worker-state.sqlite3`; every previous binary
-must support the exact schema of the database it will open. Restore the sealed
+`connection-settings.sqlite3`, and `worker-state.sqlite3`; retain their recorded
+schemas with the sealed deployment artifact. Restore the sealed
 previous Compose artifact and recorded image digests, remount the untouched
 legacy volumes, and start the previous API before the previous worker.
 
@@ -94,7 +95,7 @@ A binary-only rollback must not restore database bytes.
 For a central-compatible binary rollback:
 
 1. stop new work and drain relay/evidence queues
-2. verify both previous images support the current `edge.sqlite3` schema
+2. verify the previous API image supports the current `edge.sqlite3` schema
 3. restore the recorded immutable image digests
 4. recreate `ml-api` and wait for `/health/ready`
 5. recreate `ml-worker` only after the API is healthy

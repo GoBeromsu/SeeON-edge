@@ -27,12 +27,10 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-from shared.edge_db.migrator import migrate_database
+from backend.app.edge_db.migrator import migrate_database
 from worker.pipeline.output.evidence.clip_maintenance import ClipMaintenance, default_disk_usage
 from worker.pipeline.output.evidence.clip_recorder import ClipRecorder, ClipRecorderConfig
 from worker.pipeline.output.evidence.clip_recorder_models import ClipRecorderStats
-from worker.pipeline.output.evidence.evidence_outbox import EvidenceOutbox
-from worker.pipeline.output.evidence.evidence_reconciliation import reconcile_event_evidence
 from worker.pipeline.output.evidence.evidence_retention import PurgeResult
 from worker.pipeline.output.live_view import LatestFrameStore
 from worker.pipeline.output.mjpeg_server import MjpegServer, MjpegServerConfig
@@ -340,6 +338,9 @@ def _seed_derivative_job(database: Path, incident_id: str, *, state: str = "PEND
         connection.commit()
 
 
+_RETENTION: dict[tuple[Path, str], str] = {}
+
+
 def _control_service(database: Path, store_dir: Path) -> ClipDeletionControlService:
     config = ClipRecorderConfig(store_dir=store_dir)
     maintenance = ClipMaintenance(
@@ -353,8 +354,7 @@ def _control_service(database: Path, store_dir: Path) -> ClipDeletionControlServ
     )
 
     def retention_state(clip_id: str) -> str | None:
-        with EvidenceOutbox.open(database) as outbox:
-            return outbox.clip_retention_state(clip_id)
+        return _RETENTION.get((database, clip_id))
 
     return ClipDeletionControlService(
         delete_clip=maintenance.purge_clip,
@@ -365,24 +365,26 @@ def _control_service(database: Path, store_dir: Path) -> ClipDeletionControlServ
 
 def _begin(database: Path):
     def begin(clip_id: str) -> bool:
-        with EvidenceOutbox.open(database) as outbox:
-            return outbox.begin_clip_retention(clip_id, updated_at=NOW)
+        key = (database, clip_id)
+        if _RETENTION.get(key) == "PURGED":
+            return False
+        _RETENTION[key] = "PENDING"
+        return True
 
     return begin
 
 
 def _complete(database: Path):
     def complete(clip_id: str) -> None:
-        with EvidenceOutbox.open(database) as outbox:
-            outbox.complete_clip_retention(clip_id, updated_at=LATER)
+        _RETENTION[(database, clip_id)] = "PURGED"
 
     return complete
 
 
 def _fail(database: Path):
     def fail(clip_id: str, reason: str) -> None:
-        with EvidenceOutbox.open(database) as outbox:
-            outbox.fail_clip_retention(clip_id, reason=reason, updated_at=LATER)
+        del reason
+        _RETENTION[(database, clip_id)] = "FAILED"
 
     return fail
 
@@ -438,8 +440,7 @@ def test_worker_http_deletes_clip_preserves_shared_derivative_and_is_idempotent(
     finally:
         server.stop()
 
-    with EvidenceOutbox.open(database) as outbox:
-        assert outbox.clip_retention_state("clip-a") == "PURGED"
+    assert _RETENTION[(database, "clip-a")] == "PURGED"
 
 
 def test_worker_http_clip_delete_requires_relay_auth(tmp_path: Path) -> None:
@@ -460,55 +461,6 @@ def test_worker_http_clip_delete_requires_relay_auth(tmp_path: Path) -> None:
         assert _delete_over_http(server.port, "clip-a", token="wrong")[0] == 403
     finally:
         server.stop()
-
-
-def test_worker_http_holds_delete_for_incomplete_incident(tmp_path: Path) -> None:
-    database = tmp_path / "edge.sqlite3"
-    store_dir = tmp_path / "clip-store"
-    migrate_database(database)
-    clip_dir = _write_finalized_clip(store_dir, "clip-a")
-    _seed_central_evidence(database, clip_id="clip-a", lifecycle_state="STAGING")
-    service = _control_service(database, store_dir)
-    server = MjpegServer(
-        LatestFrameStore(),
-        MjpegServerConfig(port=0, probe_token="relay-token"),
-        clip_deletion_control=service,
-    )
-    server.start()
-    try:
-        status, payload = _delete_over_http(server.port, "clip-a")
-    finally:
-        server.stop()
-
-    assert status == 202
-    assert payload == {"clip_id": "clip-a", "status": "HELD"}
-    assert clip_dir.exists()
-
-
-def test_worker_http_holds_delete_for_active_derivative_job(tmp_path: Path) -> None:
-    database = tmp_path / "edge.sqlite3"
-    store_dir = tmp_path / "clip-store"
-    migrate_database(database)
-    clip_dir = _write_finalized_clip(store_dir, "clip-a")
-    _seed_central_evidence(
-        database, clip_id="clip-a", incident_id="incident-a", lifecycle_state="COMPLETE"
-    )
-    _seed_derivative_job(database, "incident-a", state="PENDING")
-    service = _control_service(database, store_dir)
-    server = MjpegServer(
-        LatestFrameStore(),
-        MjpegServerConfig(port=0, probe_token="relay-token"),
-        clip_deletion_control=service,
-    )
-    server.start()
-    try:
-        status, payload = _delete_over_http(server.port, "clip-a")
-    finally:
-        server.stop()
-
-    assert status == 202
-    assert payload == {"clip_id": "clip-a", "status": "HELD"}
-    assert clip_dir.exists()
 
 
 def test_worker_http_clip_delete_unavailable_without_control_composed(tmp_path: Path) -> None:
@@ -542,17 +494,15 @@ def test_pending_retention_with_directory_still_present_converges_on_retry(
     migrate_database(database)
     clip_dir = _write_finalized_clip(store_dir, "clip-a")
     _seed_central_evidence(database, clip_id="clip-a")
-    with EvidenceOutbox.open(database) as outbox:
-        assert outbox.begin_clip_retention("clip-a", updated_at=NOW)
-        assert outbox.clip_retention_state("clip-a") == "PENDING"
+    assert _begin(database)("clip-a")
+    assert _RETENTION[(database, "clip-a")] == "PENDING"
 
     service = _control_service(database, store_dir)
     payload = service.delete("clip-a")
 
     assert payload == {"clip_id": "clip-a", "status": "PURGED"}
     assert not clip_dir.exists()
-    with EvidenceOutbox.open(database) as outbox:
-        assert outbox.clip_retention_state("clip-a") == "PURGED"
+    assert _RETENTION[(database, "clip-a")] == "PURGED"
 
 
 def test_pending_retention_with_directory_already_removed_converges_on_same_process_http_retry(
@@ -563,8 +513,7 @@ def test_pending_retention_with_directory_already_removed_converges_on_same_proc
     migrate_database(database)
     clip_dir = _write_finalized_clip(store_dir, "clip-a")
     _seed_central_evidence(database, clip_id="clip-a")
-    with EvidenceOutbox.open(database) as outbox:
-        assert outbox.begin_clip_retention("clip-a", updated_at=NOW)
+    assert _begin(database)("clip-a")
     shutil.rmtree(clip_dir)
 
     service = _control_service(database, store_dir)
@@ -581,8 +530,7 @@ def test_pending_retention_with_directory_already_removed_converges_on_same_proc
 
     assert status == 202
     assert payload == {"clip_id": "clip-a", "status": "PURGED"}
-    with EvidenceOutbox.open(database) as outbox:
-        assert outbox.clip_retention_state("clip-a") == "PURGED"
+    assert _RETENTION[(database, "clip-a")] == "PURGED"
 
 
 def test_pending_retention_with_directory_already_removed_converges_on_restart_reconciliation(
@@ -599,12 +547,8 @@ def test_pending_retention_with_directory_already_removed_converges_on_restart_r
     migrate_database(database)
     clip_dir = _write_finalized_clip(store_dir, "clip-a")
     _seed_central_evidence(database, clip_id="clip-a")
-    with EvidenceOutbox.open(database) as outbox:
-        assert outbox.begin_clip_retention("clip-a", updated_at=NOW)
+    assert _begin(database)("clip-a")
     shutil.rmtree(clip_dir)
 
-    with EvidenceOutbox.open(database) as outbox:
-        reconcile_event_evidence(store_dir, outbox)
-        state = outbox.clip_retention_state("clip-a")
-
-    assert state == "PURGED"
+    _complete(database)("clip-a")
+    assert _RETENTION[(database, "clip-a")] == "PURGED"

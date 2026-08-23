@@ -1,11 +1,12 @@
 # SHARED KNOWLEDGE BASE
 
-Backend and worker common library. Wire, SQLite, versioned detection
-policies, RTSP admission. Not a runtime.
+Backend and worker common library. Wire, versioned detection policies, RTSP
+admission. Not a runtime, and not a database owner: the edge SQLite package
+lives at `backend/app/edge_db` under backend ownership (ADR-0005), and nothing
+here may import `sqlite3`.
 
 ## Package map
 - `events/`: backend↔worker egress. Read `events/AGENTS.md`.
-- `edge_db/`: one local `edge.sqlite3`. Read `edge_db/AGENTS.md`.
 - `detection_policies.py`: closed typed policy parser and bundle.
 - `rtsp_url_policy.py`: RTSP/RTSPS destination admission and IP pin.
 - `pyproject.toml`: `eldercare-shared`. Empty deps.
@@ -37,7 +38,8 @@ answer. Open `pinned_url` so the decoder cannot re-resolve past the gate.
 for QA only. Metadata and link-local stay denied under PRIVATE-only.
 
 ## Where to look / tests
-Event wire: `events/`. SQLite: `edge_db/`. Types live in this file. Rows live in
+Event wire: `events/`. SQLite: `backend/app/edge_db/`, which the backend owns.
+Types live in this file. Rows live in
 `backend/app/features/detection_settings/`. Worker pull:
 `worker/runtime/config/pull_models.py`. Camera admit:
 `backend/app/features/cameras/router.py`. Worker open:

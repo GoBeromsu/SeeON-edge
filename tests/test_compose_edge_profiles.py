@@ -30,6 +30,9 @@ EXTERNAL_COMPOSE_KEYS = {
     "API_DASHBOARD_USERNAME",
     "API_EDGE_RELAY_TOKEN",
     "CLIP_STORE_HOST_DIR",
+    # Required, never defaulted: it selects which edge-state volume the stack
+    # binds, and this host carries several similarly named ones.
+    "COMPOSE_PROJECT_NAME",
     "ML_API_IMAGE",
     "ML_RTSP_ALLOW_LOCAL_DESTINATIONS",
     "ML_RTSP_ALLOW_PRIVATE_DESTINATIONS",

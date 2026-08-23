@@ -5,6 +5,7 @@ import json
 import math
 import re
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import Final, TypeAlias
 
 from worker.types import DecisionTraceSnapshot
@@ -20,6 +21,12 @@ class TraceContractError(ValueError):
 
 class TracePersistenceError(RuntimeError):
     pass
+
+
+class DetailUnavailableReason(StrEnum):
+    BOUNDED_HANDOFF_CAPACITY = "bounded-handoff-capacity"
+    DETAIL_CACHE_WRITE_FAILED = "detail-cache-write-failed"
+    RETENTION_BOUND = "retention-bound"
 
 
 @dataclass(frozen=True, slots=True)
@@ -119,6 +126,7 @@ class TraceTruncation:
     retention_blocked_frames: int = 0
     oldest_retained_key: TraceFrameKey | None = None
     newest_retained_key: TraceFrameKey | None = None
+    detail_unavailable_reason: DetailUnavailableReason | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -137,6 +145,13 @@ class TraceWriterStats:
     retry_attempts: int = 0
     rejected_frames: int = 0
     duplicate_frames: int = 0
+    #: Publication attempts that failed. Traces stay local; QA replay
+    #: simply has less to work with, and detection is unaffected.
+    publication_failures: int = 0
+    #: Frames dropped from the bounded republication buffer while the
+    #: relay was unreachable. Without this the loss is invisible: the
+    #: backend's copy is quietly less complete than the worker's.
+    unpublished_shed_frames: int = 0
 
 
 def trace_frame_row_count(frame: TraceFrame) -> int:
@@ -259,6 +274,7 @@ def content_id(value: object) -> str:
 __all__ = [
     "AnalysisTrace",
     "DecisionTrace",
+    "DetailUnavailableReason",
     "OptionalNumber",
     "RecoveredCameraTrace",
     "TraceBed",

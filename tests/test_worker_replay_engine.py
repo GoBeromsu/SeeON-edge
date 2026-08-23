@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import hashlib
-import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -11,7 +9,6 @@ import numpy as np
 from contracts.frame import Frame
 from contracts.runner import Image, RunnerResult, pose_result
 from shared.detection_policies import BedExitPolicyV1, FallPolicyV1, make_effective_policy
-from shared.edge_db.migrator import migrate_database
 from worker.domains.fall import FallModelProtocol
 from worker.pipeline.analytics import CompositeExtractor, NamedExtractor
 from worker.pipeline.bus import Scheduler
@@ -35,9 +32,7 @@ from worker.replay.engine import (
     ReplayConfigurationError,
     assess_reproducibility,
     replay_camera,
-    replay_recovered,
 )
-from worker.runtime.provenance import AppliedRuntimeManifestStore
 from worker.runtime.provenance.models import AppliedRuntimeManifest
 from worker.types import FallModelInput, FramePacket, ModuleResult
 
@@ -116,14 +111,10 @@ def _analytics(box: tuple[int, int, int, int, float]) -> CompositeExtractor:
     )
 
 
-def _seed_runtime_manifest(database: Path) -> AppliedRuntimeManifest:
-    manifest = AppliedRuntimeManifest.from_content(
-        {"manifest_schema_version": 1, "cameras": [{"camera_id": CAMERA_ID}]}
+def _runtime_manifest(camera_id: str) -> AppliedRuntimeManifest:
+    return AppliedRuntimeManifest.from_content(
+        {"manifest_schema_version": 1, "cameras": [{"camera_id": camera_id}]}
     )
-    AppliedRuntimeManifestStore(database).persist(
-        manifest, boot_instance_id=BOOT_ID, applied_at="2026-08-13T00:00:00Z"
-    )
-    return manifest
 
 
 def _capture_real_frames(
@@ -132,7 +123,7 @@ def _capture_real_frames(
     """Drive the real camera pipeline once per box to persist analysis traces."""
     from worker.domains.fall import FallEventLatch
 
-    manifest = _seed_runtime_manifest(database)
+    manifest = _runtime_manifest(CAMERA_ID)
     policy = make_effective_policy(
         module_id="fall",
         module_version=1,
@@ -173,7 +164,7 @@ def _capture_real_frames(
 
     sink = EvidenceEventSink(
         stager=DurableEvidenceStager(
-            database_path=database,
+            queue_directory=database.parent / "delivery-queue",
             camera_id=CAMERA_ID,
             facility_id=FACILITY_ID,
             resident_id=None,
@@ -236,7 +227,6 @@ def _boxes() -> list[tuple[int, int, int, int, float]]:
 
 def test_replay_reproduces_identical_events_against_the_same_model(tmp_path: Path) -> None:
     database = tmp_path / "edge.sqlite3"
-    migrate_database(database)
     _capture_real_frames(database, fall_model=_FallModel(), boxes=_boxes())
 
     recovered = TraceStore(database).recover_camera(CAMERA_ID)
@@ -275,7 +265,6 @@ def test_replay_reproduces_identical_events_against_the_same_model(tmp_path: Pat
 
 def test_replay_threshold_change_produces_structured_mismatch(tmp_path: Path) -> None:
     database = tmp_path / "edge.sqlite3"
-    migrate_database(database)
     _capture_real_frames(database, fall_model=_FallModel(), boxes=_boxes())
     recovered = TraceStore(database).recover_camera(CAMERA_ID)
 
@@ -326,7 +315,6 @@ def test_replay_threshold_change_produces_structured_mismatch(tmp_path: Path) ->
 
 def test_replay_rejects_policy_schema_mismatch(tmp_path: Path) -> None:
     database = tmp_path / "edge.sqlite3"
-    migrate_database(database)
     _capture_real_frames(database, fall_model=_FallModel(), boxes=_boxes())
     recovered = TraceStore(database).recover_camera(CAMERA_ID)
 
@@ -353,7 +341,6 @@ def test_replay_rejects_policy_schema_mismatch(tmp_path: Path) -> None:
 
 def test_replay_requires_fall_model_for_fall_module(tmp_path: Path) -> None:
     database = tmp_path / "edge.sqlite3"
-    migrate_database(database)
     _capture_real_frames(database, fall_model=_FallModel(), boxes=_boxes())
     recovered = TraceStore(database).recover_camera(CAMERA_ID)
     policy = make_effective_policy(
@@ -432,12 +419,7 @@ def _capture_bed_exit_frames(
 
     from worker.domains.bed_exit import BedExitConfig, BedExitMonitor
 
-    manifest = AppliedRuntimeManifest.from_content(
-        {"manifest_schema_version": 1, "cameras": [{"camera_id": BED_CAMERA_ID}]}
-    )
-    AppliedRuntimeManifestStore(database).persist(
-        manifest, boot_instance_id=BED_BOOT_ID, applied_at="2026-08-13T00:00:00Z"
-    )
+    manifest = _runtime_manifest(BED_CAMERA_ID)
     policy = make_effective_policy(
         module_id="bed_exit",
         module_version=1,
@@ -482,7 +464,7 @@ def _capture_bed_exit_frames(
 
     sink = EvidenceEventSink(
         stager=DurableEvidenceStager(
-            database_path=database,
+            queue_directory=database.parent / "delivery-queue",
             camera_id=BED_CAMERA_ID,
             facility_id=FACILITY_ID,
             resident_id=None,
@@ -525,7 +507,6 @@ def test_replay_bed_exit_containment_change_produces_structured_mismatch(
     tmp_path: Path,
 ) -> None:
     database = tmp_path / "edge.sqlite3"
-    migrate_database(database)
     bed_box = (0, 0, 100, 100, 0.9)
     # Person overlaps the bed by half its area for the first two frames, then
     # moves fully outside the bed for the remaining frames (a genuine exit).
@@ -592,160 +573,8 @@ def test_replay_bed_exit_containment_change_produces_structured_mismatch(
     assert compare_runs(baseline, repeat).identical is True
 
 
-def _trace_id(label: str) -> str:
-    return hashlib.sha256(label.encode()).hexdigest()
-
-
-def _insert_analysis_frame(
-    database: Path,
-    *,
-    boot_id: str,
-    camera_id: str,
-    epoch: int,
-    seq: int,
-    source_time: float,
-    applied_at: str | None,
-) -> str:
-    """Insert one minimal analysis row (and optional boot chronology)."""
-    trace_id = _trace_id(f"{boot_id}:{camera_id}:{epoch}:{seq}:{source_time}")
-    connection = sqlite3.connect(database)
-    try:
-        if applied_at is not None:
-            manifest = "d" * 64
-            connection.execute(
-                "INSERT OR IGNORE INTO runtime_manifest_contents VALUES (?, 1, '{}', ?)",
-                (manifest, applied_at),
-            )
-            connection.execute(
-                "INSERT OR IGNORE INTO runtime_manifest_boots VALUES (?, ?, ?)",
-                (boot_id, manifest, applied_at),
-            )
-            connection.execute(
-                "INSERT OR IGNORE INTO runtime_manifest_cameras VALUES (?, ?, ?, ?)",
-                (boot_id, camera_id, manifest, applied_at),
-            )
-        connection.execute(
-            """
-            INSERT INTO runtime_analysis_traces (
-                trace_id, trace_schema_version, worker_boot_id, camera_id,
-                stream_epoch, frame_seq, pts, pts_missing_reason,
-                source_time_sec, source_time_missing_reason, frame_width,
-                frame_height, bed_region_provenance, storage_bytes
-            ) VALUES (?, 1, ?, ?, ?, ?, NULL, 'not-available', ?, NULL, 180, 120, 'empty', 64)
-            """,
-            (trace_id, boot_id, camera_id, epoch, seq, source_time),
-        )
-        connection.commit()
-    finally:
-        connection.close()
-    return trace_id
-
-
-def test_recover_camera_orders_by_boot_chronology_not_interleaved_source_time(
-    tmp_path: Path,
-) -> None:
-    """Stream-relative source_time must never interleave distinct boots."""
-    database = tmp_path / "edge.sqlite3"
-    migrate_database(database)
-    camera_id = "camera-multiboot"
-    # Later boot has smaller source_time values (stream clocks restart).
-    _insert_analysis_frame(
-        database,
-        boot_id="boot-early",
-        camera_id=camera_id,
-        epoch=1,
-        seq=10,
-        source_time=100.0,
-        applied_at="2026-08-13T10:00:00Z",
-    )
-    _insert_analysis_frame(
-        database,
-        boot_id="boot-early",
-        camera_id=camera_id,
-        epoch=1,
-        seq=11,
-        source_time=101.0,
-        applied_at="2026-08-13T10:00:00Z",
-    )
-    _insert_analysis_frame(
-        database,
-        boot_id="boot-late",
-        camera_id=camera_id,
-        epoch=1,
-        seq=1,
-        source_time=1.0,
-        applied_at="2026-08-13T12:00:00Z",
-    )
-    _insert_analysis_frame(
-        database,
-        boot_id="boot-late",
-        camera_id=camera_id,
-        epoch=1,
-        seq=2,
-        source_time=2.0,
-        applied_at="2026-08-13T12:00:00Z",
-    )
-
-    recovered = TraceStore(database).recover_camera(camera_id)
-    boots = [frame.frame_key[0] for frame in recovered.frames]
-    seqs = [frame.frame_key[3] for frame in recovered.frames]
-    assert boots == ["boot-early", "boot-early", "boot-late", "boot-late"]
-    assert seqs == [10, 11, 1, 2]
-
-
-def test_replay_recreates_camera_local_state_at_each_boot_boundary(tmp_path: Path) -> None:
-    """A fall latch armed in boot A must not fire onset again after boot B cold start."""
-    database = tmp_path / "edge.sqlite3"
-    migrate_database(database)
-
-    # Capture three frames under boot A (latches fall on first high score).
-    _capture_real_frames(database, fall_model=_FallModel(), boxes=_boxes())
-
-    # Append a second boot's frames with overlapping stream-relative times that would
-    # interleave under the old source_time primary order.
-    for seq, source_time in ((1, 0.5), (2, 1.5), (3, 2.5)):
-        _insert_analysis_frame(
-            database,
-            boot_id="boot-second",
-            camera_id=CAMERA_ID,
-            epoch=1,
-            seq=seq,
-            source_time=source_time,
-            applied_at="2026-08-14T00:00:00Z",
-        )
-    # First boot's applied_at is 2026-08-13 from _seed_runtime_manifest.
-
-    recovered = TraceStore(database).recover_camera(CAMERA_ID)
-    assert [frame.frame_key[0] for frame in recovered.frames[:3]] == [BOOT_ID] * 3
-    assert [frame.frame_key[0] for frame in recovered.frames[3:]] == ["boot-second"] * 3
-
-    policy = make_effective_policy(
-        module_id="fall",
-        module_version=1,
-        values=FallPolicyV1(operating_threshold=0.7),
-        source="image-default",
-        facility_revision_id=None,
-        camera_revision_id=None,
-    )
-    run = replay_camera(
-        camera_id=CAMERA_ID,
-        analyses=recovered.frames,
-        module_id="fall",
-        policy=policy,
-        fall_model=_FallModel(),
-        truncation=recovered.truncation,
-    )
-    assert run.boot_ids == (BOOT_ID, "boot-second")
-    # Boot A produces the original single onset. Boot B has empty persons so no
-    # additional events, and state is cold (not carrying boot A's latched fall).
-    assert run.event_count == 1
-    onset_boots = {frame.frame_key[0] for frame in run.frames if frame.events}
-    assert onset_boots == {BOOT_ID}
-
-
 def test_truncation_marks_run_non_reproducible(tmp_path: Path) -> None:
     database = tmp_path / "edge.sqlite3"
-    migrate_database(database)
     _capture_real_frames(database, fall_model=_FallModel(), boxes=_boxes())
     recovered = TraceStore(database).recover_camera(CAMERA_ID)
     truncated = TraceTruncation(
@@ -784,49 +613,4 @@ def test_truncation_marks_run_non_reproducible(tmp_path: Path) -> None:
     assert clean[0] is True
 
 
-def test_replay_recovered_propagates_truncation_from_store(tmp_path: Path) -> None:
-    database = tmp_path / "edge.sqlite3"
-    migrate_database(database)
-    _capture_real_frames(database, fall_model=_FallModel(), boxes=_boxes())
-    store = TraceStore(database)
-    # Force a cursor that reports pruned frames so recovery surfaces truncation.
-    connection = sqlite3.connect(database)
-    try:
-        connection.execute(
-            """
-            INSERT INTO runtime_trace_cursors (
-                camera_id, handoff_dropped_frames, pruned_frames,
-                oldest_retained_seq, newest_retained_seq, updated_at_source_sec,
-                persistence_failed_frames, retention_blocked_frames,
-                oldest_retained_boot_id, oldest_retained_stream_epoch,
-                oldest_retained_trace_id, newest_retained_boot_id,
-                newest_retained_stream_epoch, newest_retained_trace_id
-            ) VALUES (?, 0, 4, 1, 3, 3.0, 0, 0, ?, 3, ?, ?, 3, ?)
-            ON CONFLICT(camera_id) DO UPDATE SET pruned_frames = 4
-            """,
-            (CAMERA_ID, BOOT_ID, "a" * 64, BOOT_ID, "b" * 64),
-        )
-        connection.commit()
-    finally:
-        connection.close()
 
-    recovered = store.recover_camera(CAMERA_ID)
-    assert recovered.truncation.pruned_frames >= 4
-    policy = make_effective_policy(
-        module_id="fall",
-        module_version=1,
-        values=FallPolicyV1(operating_threshold=0.7),
-        source="image-default",
-        facility_revision_id=None,
-        camera_revision_id=None,
-    )
-    run = replay_recovered(
-        camera_id=CAMERA_ID,
-        recovered=recovered,
-        module_id="fall",
-        policy=policy,
-        fall_model=_FallModel(),
-    )
-    assert run.reproducible is False
-    assert run.non_reproducible_reason is not None
-    assert "pruned_frames" in run.non_reproducible_reason

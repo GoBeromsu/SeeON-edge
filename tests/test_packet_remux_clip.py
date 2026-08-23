@@ -295,3 +295,126 @@ def test_missing_identity_or_corrupt_remux_fails_closed_without_reencode(tmp_pat
     assert failed.reason_code is ClipReasonCode.REMUX_FAILED
     assert failed.detail_reason == "SOURCE_PACKET_REMUX_FAILED"
     assert not (tmp_path / "clip.mp4").exists()
+
+
+def test_jittery_container_durations_do_not_destroy_a_faithful_clip() -> None:
+    """MP4 recomputes duration from PTS; that is not corruption.
+
+    Measured on this deployment's live RTSP cameras at time_base 1/90000: the
+    depacketizer declares a nominal 3000 ticks on every packet (an exact
+    1/30s) while the muxer writes the true inter-frame delta -- 2880, 2970,
+    3060 -- because the stream jitters. Comparing source duration against
+    remuxed duration therefore failed on every packet of every clip, and 100%
+    of the video evidence this system recorded was written off as
+    REMUX_FAILED and deleted, with every payload byte identical and every PTS
+    preserved exactly.
+    """
+    packets = (_packet(1000, keyframe=True), _packet(2000))
+    jittery = (
+        replace(_muxed_fact(packets[0], translation=-10), duration=38),
+        replace(_muxed_fact(packets[1], translation=-10), duration=43),
+    )
+
+    translations, _ = packet_remuxer._verify_packet_facts(  # noqa: SLF001
+        packets,
+        jittery,
+        packets[0].configuration,
+    )
+
+    assert translations == {0: -10}
+
+
+def test_the_timeline_authority_still_fails_closed() -> None:
+    """Dropping the duration comparison must not loosen the timeline itself.
+
+    PTS carries the guarantee duration never did: a packet whose presentation
+    instant moved relative to its neighbours is a real alteration and must
+    still be refused, jittery durations or not.
+    """
+    packets = (_packet(1000, keyframe=True), _packet(2000))
+    drifted = (
+        replace(_muxed_fact(packets[0], translation=-10), duration=38),
+        replace(_muxed_fact(packets[1], translation=-11), duration=43),
+    )
+
+    with pytest.raises(ValueError, match="drift nonuniformly"):
+        packet_remuxer._verify_packet_facts(  # noqa: SLF001
+            packets,
+            drifted,
+            packets[0].configuration,
+        )
+
+
+def test_annexb_payloads_are_reframed_for_the_mp4_sample_description() -> None:
+    """RTSP Annex-B must become length-prefixed or nothing decodes.
+
+    The live cameras deliver HEVC as Annex-B. The mux template's extradata is
+    hvcC, so the MOV muxer wrote those start-code bytes through untouched and
+    every clip this system ever recorded failed to decode a single frame with
+    "Invalid NAL unit size (19922944 > 798)" -- 19922944 being 01 30 00 00, the
+    four bytes that follow a 00 00 00 01 misread as a length of 1.
+    """
+    payload = b"\x00\x00\x00\x01\x46\x01\x10" + b"\x00\x00\x01\x40\x01\x0c"
+    reframed = packet_remuxer._annexb_to_length_prefixed(payload)  # noqa: SLF001
+
+    assert reframed == (
+        (3).to_bytes(4, "big") + b"\x46\x01\x10" + (3).to_bytes(4, "big") + b"\x40\x01\x0c"
+    )
+
+
+def test_a_stream_that_is_already_length_prefixed_stays_a_byte_true_copy() -> None:
+    """Only Annex-B is reframed; a conforming source must not be touched."""
+    payload = (4).to_bytes(4, "big") + b"\x26\x01\xaf\x0e"
+
+    assert packet_remuxer._annexb_to_length_prefixed(payload) is None  # noqa: SLF001
+
+
+def test_emulation_prevention_bytes_are_not_mistaken_for_start_codes() -> None:
+    """00 00 03 inside a NAL is escaping, not a boundary; splitting there corrupts it."""
+    payload = b"\x00\x00\x00\x01\x26\x01\x00\x00\x03\x01\xff"
+    reframed = packet_remuxer._annexb_to_length_prefixed(payload)  # noqa: SLF001
+
+    assert reframed == (7).to_bytes(4, "big") + b"\x26\x01\x00\x00\x03\x01\xff"
+
+
+def test_interior_packet_loss_is_reported_not_used_to_destroy_the_clip() -> None:
+    """One dropped frame must not cost sixty seconds of footage.
+
+    When the ring evicts a packet from inside the selected window, the survivors
+    keep their exact PTS and the container stretches a duration across the hole.
+    Refusing the remux there wrote off the entire clip -- on this deployment
+    that was 4 of 6 recorded clips. ADR-0001 forbids losing evidence silently,
+    not publishing evidence with a declared gap, so the gap is recorded and the
+    footage survives.
+    """
+    packets = (_packet(1000, keyframe=True), _packet(2000))
+    stretched = (
+        replace(_muxed_fact(packets[0]), duration=packets[0].duration * 2),
+        _muxed_fact(packets[1]),
+    )
+    sink: set[int] = set()
+
+    packet_remuxer._verify_packet_facts(  # noqa: SLF001
+        packets,
+        stretched,
+        packets[0].configuration,
+        interior_loss=sink,
+    )
+
+    assert sink == {0}
+
+
+def test_without_a_sink_interior_loss_still_fails_closed() -> None:
+    """A caller that cannot record the gap must still refuse it."""
+    packets = (_packet(1000, keyframe=True), _packet(2000))
+    stretched = (
+        replace(_muxed_fact(packets[0]), duration=packets[0].duration * 2),
+        _muxed_fact(packets[1]),
+    )
+
+    with pytest.raises(ValueError, match="stretched across missing packets"):
+        packet_remuxer._verify_packet_facts(  # noqa: SLF001
+            packets,
+            stretched,
+            packets[0].configuration,
+        )

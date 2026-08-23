@@ -65,8 +65,10 @@ jobs:
             eldercare-fall-ml-worker:ci \
             python -m worker --check-config
 
-      - name: Packaged clip consistency maintenance CLI smoke
-        run: |
-          docker run --rm \
-            eldercare-fall-ml-worker:ci \
-            python scripts/repair_clip_consistency.py --help
+      # The packaged clip-consistency CLI smoke was removed with the CLI. Clip
+      # consistency repair is backend-owned now (ADR 0005: the inference-runtime
+      # slot holds no database), so it ships as scripts/ops/repair-clip-consistency.py
+      # against backend/app/features/clips/consistency_ops.py and is covered by
+      # tests/test_backend_clip_consistency_ops.py -- real behavior coverage
+      # rather than a --help smoke. Smoking it from the worker image would test
+      # an image that no longer contains it.

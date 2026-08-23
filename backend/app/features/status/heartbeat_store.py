@@ -23,7 +23,7 @@ from typing import TypeAlias
 
 from pydantic import TypeAdapter, ValidationError
 
-from shared.edge_db.connection import RuntimeActor, open_runtime_database
+from backend.app.edge_db.connection import RuntimeActor, open_runtime_database
 
 # Default staleness window = heartbeat_interval (30s) x3. Configurable per-app.
 DEFAULT_STALE_AFTER_SEC: float = 90.0

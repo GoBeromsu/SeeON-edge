@@ -10,6 +10,7 @@ from time import perf_counter
 import pytest
 from fastapi.testclient import TestClient
 
+from backend.app.edge_db.migrator import migrate_database
 from backend.app.features.clips import listing_repository
 from backend.app.features.clips.listing_index import (
     ClipListingIndex,
@@ -18,7 +19,6 @@ from backend.app.features.clips.listing_index import (
 from backend.app.features.clips.schemas import ClipListQuery
 from backend.app.features.clips.store import ClipStore
 from backend.app.main import create_app, no_lifespan
-from shared.edge_db.migrator import migrate_database
 
 
 def _write_manifest(

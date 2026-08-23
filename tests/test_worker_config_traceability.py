@@ -36,20 +36,13 @@ Open-question verification (plan §5 PR C, "verify handoff open questions"):
 
 from __future__ import annotations
 
-import json
-import sqlite3
 from pathlib import Path
 
-from worker.pipeline.output.evidence.evidence_outbox import (
-    ClaimLease,
-    EdgeEventId,
-    EvidenceOutbox,
+from worker.runtime.config.lkg_store import (
+    CONFIG_HISTORY_RETENTION_COUNT,
+    WorkerConfigLkgStore,
 )
-from worker.pipeline.output.evidence.evidence_stager import DurableEvidenceStager
-from worker.runtime.config.lkg_store import CONFIG_HISTORY_RETENTION_COUNT, WorkerConfigLkgStore
 from worker.runtime.config.restart import RestartDirective
-
-EVENT_ID = EdgeEventId("00000000-0000-4000-8000-000000000002")
 
 
 def _config_payload(config_version: int) -> dict[str, object]:
@@ -61,84 +54,28 @@ def _config_payload(config_version: int) -> dict[str, object]:
     }
 
 
-def _event() -> dict[str, object]:
-    return {
-        "edge_event_id": EVENT_ID,
-        "event_type": "fall",
-        "probability": 0.9,
-        "detected_at": "2026-08-02T00:00:00Z",
-        "camera_id": "camera-1",
-        "facility_id": "facility-1",
-        "audit": {"model_version": "model-1"},
-    }
-
-
-def test_audit_config_version_is_locally_joinable_against_config_history(
+def test_config_revision_is_durable_and_contains_the_resolved_payload(
     tmp_path: Path,
 ) -> None:
     database = tmp_path / "worker-state.sqlite3"
-
     config_store = WorkerConfigLkgStore(database)
     assert config_store.save(
         _config_payload(config_version=7), RestartDirective(generation=1, version=7)
     )
-
-    stager = DurableEvidenceStager(
-        database,
-        camera_id="camera-1",
-        facility_id="facility-1",
-        resident_id=None,
-        config_version=7,
-        clock=lambda: 100.0,
-    )
-    stager.stage(_event())
-
-    connection = sqlite3.connect(database)
-    try:
-        row = connection.execute(
-            """
-            SELECT config_history.config_version, config_history.payload_json
-            FROM evidence_events
-            JOIN config_history
-              ON config_history.config_version = CAST(
-                     json_extract(evidence_events.payload_json, '$.audit.config_version')
-                     AS INTEGER
-                 )
-            WHERE evidence_events.edge_event_id = ?
-            """,
-            (str(EVENT_ID),),
-        ).fetchone()
-    finally:
-        connection.close()
-
-    assert row is not None
-    joined_config_version, payload_json = row
-    assert joined_config_version == 7
-    assert json.loads(payload_json)["config_version"] == 7
+    revisions = tuple((config_store.database_path / "revisions").glob("*.json"))
+    assert len(revisions) == 1
+    assert '"config_version":7' in revisions[0].read_text()
 
 
-def test_config_history_retains_unacked_reference_beyond_retention_window(
+def test_config_revisions_are_bounded_beyond_retention_window(
     tmp_path: Path,
 ) -> None:
-    """Retention policy: "unacked event + last N". A config_history row still
-    referenced by an evidence_events row that hasn't reached
-    delivery_state='ACKED' must survive pruning even after
-    CONFIG_HISTORY_RETENTION_COUNT newer configs have been saved."""
+    """The worker cache retains only its fixed bounded window."""
     database = tmp_path / "worker-state.sqlite3"
     config_store = WorkerConfigLkgStore(database)
     assert config_store.save(
         _config_payload(config_version=1), RestartDirective(generation=1, version=1)
     )
-
-    stager = DurableEvidenceStager(
-        database,
-        camera_id="camera-1",
-        facility_id="facility-1",
-        resident_id=None,
-        config_version=1,
-        clock=lambda: 100.0,
-    )
-    stager.stage(_event())  # stays delivery_state='PENDING' -- never claimed/acked
 
     for version in range(2, CONFIG_HISTORY_RETENTION_COUNT + 5):
         assert config_store.save(
@@ -146,54 +83,36 @@ def test_config_history_retains_unacked_reference_beyond_retention_window(
             RestartDirective(generation=1, version=version),
         )
 
-    remaining = _history_versions(database)
-    assert 1 in remaining, "unacked reference must survive pruning"
-
-
-def test_config_history_prunes_acked_reference_beyond_retention_window(
-    tmp_path: Path,
-) -> None:
-    database = tmp_path / "worker-state.sqlite3"
-    config_store = WorkerConfigLkgStore(database)
-    assert config_store.save(
-        _config_payload(config_version=1), RestartDirective(generation=1, version=1)
-    )
-
-    stager = DurableEvidenceStager(
-        database,
-        camera_id="camera-1",
-        facility_id="facility-1",
-        resident_id=None,
-        config_version=1,
-        clock=lambda: 100.0,
-    )
-    stager.stage(_event())
-    stager.complete(EVENT_ID, None)
-    with EvidenceOutbox.open(database) as outbox:
-        claim = outbox.claim(ClaimLease("sender", 100.0, 10.0))
-        assert claim is not None
-        assert outbox.acknowledge(claim)
-
-    for version in range(2, CONFIG_HISTORY_RETENTION_COUNT + 5):
-        assert config_store.save(
-            _config_payload(config_version=version),
-            RestartDirective(generation=1, version=version),
-        )
-
-    remaining = _history_versions(database)
-    assert 1 not in remaining, "acked + outside the retention window must be pruned"
+    remaining = _revision_versions(config_store)
+    assert 1 not in remaining
     assert len(remaining) == CONFIG_HISTORY_RETENTION_COUNT
 
 
-def _history_versions(database: Path) -> set[int]:
-    connection = sqlite3.connect(database)
-    try:
-        return {
-            int(row[0])
-            for row in connection.execute("SELECT config_version FROM config_history").fetchall()
-        }
-    finally:
-        connection.close()
+def test_config_revisions_keep_the_newest_versions(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "worker-state.sqlite3"
+    config_store = WorkerConfigLkgStore(database)
+    assert config_store.save(
+        _config_payload(config_version=1), RestartDirective(generation=1, version=1)
+    )
+
+    for version in range(2, CONFIG_HISTORY_RETENTION_COUNT + 5):
+        assert config_store.save(
+            _config_payload(config_version=version),
+            RestartDirective(generation=1, version=version),
+        )
+
+    remaining = _revision_versions(config_store)
+    assert 1 not in remaining
+    assert len(remaining) == CONFIG_HISTORY_RETENTION_COUNT
+
+
+def _revision_versions(store: WorkerConfigLkgStore) -> set[int]:
+    return {
+        int(path.read_text().split('"config_version":', 1)[1].split(",", 1)[0])
+        for path in (store.database_path / "revisions").glob("*.json")
+    }
 
 
 def test_worker_and_compose_have_no_facility_identity_env_contract() -> None:

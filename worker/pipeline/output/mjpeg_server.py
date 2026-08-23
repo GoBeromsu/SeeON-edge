@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from http.server import HTTPServer
 from typing import Final
 
+from worker.domains.fall import FallModelProtocol
 from worker.pipeline.output._mjpeg_http import (
     BED_ZONE_FRAME_TIMEOUT_SECONDS,
     BedZoneNotFoundError,
@@ -47,6 +48,7 @@ class MjpegServer:
         bed_zone_recognizer: BedZoneRecognizer | None = None,
         derivative_control: DerivativeControl | None = None,
         clip_deletion_control: ClipDeletionControl | None = None,
+        replay_fall_model: FallModelProtocol | None = None,
         *,
         bed_zone_frame_timeout_s: float = BED_ZONE_FRAME_TIMEOUT_SECONDS,
     ) -> None:
@@ -64,30 +66,39 @@ class MjpegServer:
             bed_zone_recognizer=self.bed_zone_recognizer,
             derivative_control=derivative_control,
             clip_deletion_control=clip_deletion_control,
+            replay_fall_model=replay_fall_model,
             bed_zone_frame_timeout_s=bed_zone_frame_timeout_s,
         )
         self.port = int(self._server.server_port)
         self._thread: threading.Thread | None = None
         self._is_open = True
+        self._lifecycle_lock = threading.Lock()
 
     def start(self) -> None:
-        if self._thread is not None or not self._is_open:
-            return
-        self._thread = threading.Thread(
-            target=self._server.serve_forever,
-            daemon=True,
-        )
-        self._thread.start()
+        with self._lifecycle_lock:
+            if self._thread is not None or not self._is_open:
+                return
+            thread = threading.Thread(
+                target=self._server.serve_forever,
+                daemon=True,
+            )
+            thread.start()
+            self._thread = thread
 
     def stop(self) -> None:
-        thread = self._thread
+        with self._lifecycle_lock:
+            thread = self._thread
+            is_open = self._is_open
+            if is_open:
+                self._is_open = False
         if thread is not None:
             self._server.shutdown()
             thread.join(timeout=2)
-            self._thread = None
-        if self._is_open:
+        with self._lifecycle_lock:
+            if self._thread is thread:
+                self._thread = None
+        if is_open:
             self._server.server_close()
-            self._is_open = False
 
 
 MjpegServerFactory = Callable[
@@ -98,6 +109,7 @@ MjpegServerFactory = Callable[
         BedZoneRecognizer | None,
         DerivativeControl | None,
         ClipDeletionControl | None,
+        FallModelProtocol | None,
     ],
     MjpegServer,
 ]
@@ -142,6 +154,7 @@ def start_optional_mjpeg_server(
     bed_zone_recognizer: BedZoneRecognizer | None = None,
     derivative_control: DerivativeControl | None = None,
     clip_deletion_control: ClipDeletionControl | None = None,
+    replay_fall_model: FallModelProtocol | None = None,
     factory: MjpegServerFactory = MjpegServer,
 ) -> MjpegServer | None:
     resolved = dev_mjpeg_config() if config is None else config
@@ -155,6 +168,7 @@ def start_optional_mjpeg_server(
             bed_zone_recognizer,
             derivative_control,
             clip_deletion_control,
+            replay_fall_model,
         )
     except OSError:
         return None

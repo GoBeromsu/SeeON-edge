@@ -157,3 +157,40 @@ def test_dead_observed_track_cannot_emit_after_identity_reuse() -> None:
 
     # Then
     assert dead_track == reused_identity == ()
+
+
+def test_an_unstaged_stale_track_exit_can_be_reported_again() -> None:
+    """A track that vanished mid-exit fires from the stale path, which DELETES
+    the assignment rather than clearing its bed.
+
+    A release that only handled the cleared-bed case returned early here, so the
+    onset stayed consumed. The resident is already gone from the frame, so no
+    later frame can re-derive the exit -- the alert was lost outright. This is
+    the third distinct piece of consumed owner state in this domain, after the
+    latch record and the cleared bed.
+    """
+    from worker.pipeline.decision.event_aggregator import EventAggregator
+    from worker.pipeline.decision.incident_manager import IncidentManager
+
+    monitor = _monitor(camera_id="camera-lost-mid-exit", hold_frames=1, grace_frames=2)
+    aggregator = EventAggregator(
+        deciders=(monitor,), incidents=IncidentManager(cooldown_sec=300.0)
+    )
+    aggregator.update(_input(IN_BED, (BED,), 0))
+    aggregator.update(_input(OUTSIDE_BED, (BED,), 1))
+
+    exited = aggregator.update(_input(OUTSIDE_BED, (BED,), 2, live_track_ids=()))
+    assert len(exited) == 1, "the stale-track exit was never reported"
+    assert PERSON_ID not in monitor._assignments, (  # noqa: SLF001
+        "fixture assumption broken: the stale path should have deleted the assignment"
+    )
+
+    # The envelope failed to reach durable storage.
+    aggregator.release(exited[0])
+
+    repeated = aggregator.update(_input(OUTSIDE_BED, (BED,), 3, live_track_ids=()))
+
+    assert len(repeated) == 1, (
+        "the stale-track exit stayed consumed; a transient staging failure "
+        "destroyed it and no later frame can re-derive it"
+    )

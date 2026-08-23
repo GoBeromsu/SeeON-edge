@@ -4,11 +4,11 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
+from backend.app.edge_db.migrator import migrate_database
 from backend.app.features.cameras.store import CameraRegistryStore
 from backend.app.features.connection.store import ConnectionSettingsStore
 from backend.app.features.detection_settings.policy_store import DetectionPolicyStore
 from backend.app.main import create_app, no_lifespan
-from shared.edge_db.migrator import migrate_database
 from worker.runtime.config.restart import RestartDirective, RestartDirectiveTracker
 
 _FACILITY_ID = "facility/restart-acceptance"

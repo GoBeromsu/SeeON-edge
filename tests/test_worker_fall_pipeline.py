@@ -1,9 +1,6 @@
 from __future__ import annotations
 
-import json
-import sqlite3
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
 
@@ -12,15 +9,13 @@ import numpy as np
 from contracts.frame import Frame
 from contracts.runner import Image, RunnerResult, pose_result
 from shared.detection_policies import FallPolicyV1, make_effective_policy
-from shared.edge_db.migrator import migrate_database
+from shared.events.delivery_queue import DeliveryQueue, EventEntry
 from worker.domains.fall import FallEventLatch
 from worker.pipeline.analytics import CompositeExtractor, NamedExtractor
 from worker.pipeline.bus import Scheduler
 from worker.pipeline.camera_pipeline import CameraPipelinePump
 from worker.pipeline.decision import EventAggregator, IncidentManager
 from worker.pipeline.inference_coordinator import CoordinatedInference
-from worker.pipeline.output.event_sink import EvidenceEventSink
-from worker.pipeline.output.evidence.evidence_stager import DurableEvidenceStager
 from worker.pipeline.output.evidence_attacher import AlertEvidenceAttacher
 from worker.pipeline.perception import GreedyIouTracker, SceneState
 from worker.pipeline.trace import (
@@ -29,7 +24,6 @@ from worker.pipeline.trace import (
     TraceIdentity,
     TraceRetentionPolicy,
 )
-from worker.runtime.provenance import AppliedRuntimeManifestStore
 from worker.runtime.provenance.models import AppliedRuntimeManifest
 from worker.types import BusinessEvent, FallModelInput, FramePacket, ModuleResult
 
@@ -84,20 +78,12 @@ class _SinglePacketSubscription:
         self._packet = None
 
 
-class _RecordingClipRecorder:
+class _RecordingSink:
     def __init__(self) -> None:
-        self.calls: list[tuple[FramePacket, BusinessEvent]] = []
+        self.events: list[BusinessEvent] = []
 
-    def on_event(
-        self,
-        trigger_packet: FramePacket,
-        event: BusinessEvent,
-        *,
-        allow_new_clip: bool = True,
-    ) -> str | None:
-        assert allow_new_clip is True
-        self.calls.append((trigger_packet, event))
-        return "clip-fall-pipeline"
+    def emit(self, event: BusinessEvent) -> None:
+        self.events.append(event)
 
 
 def _packet() -> FramePacket:
@@ -131,28 +117,14 @@ def _analytics() -> CompositeExtractor:
     )
 
 
-def _seed_runtime_manifest(database: Path) -> AppliedRuntimeManifest:
-    manifest = AppliedRuntimeManifest.from_content(
-        {
-            "manifest_schema_version": 1,
-            "cameras": [{"camera_id": CAMERA_ID}],
-        }
-    )
-    AppliedRuntimeManifestStore(database).persist(
-        manifest,
-        boot_instance_id=BOOT_ID,
-        applied_at="2026-08-13T00:00:00Z",
-    )
-    return manifest
-
-
-def test_fall_observation_persists_decision_trace_and_binds_event_to_clip(
+def test_fall_observation_keeps_decision_basis_when_detail_is_droppable(
     tmp_path: Path,
 ) -> None:
-    """Exercise the real observation -> fall decision -> evidence transaction path."""
-    database = tmp_path / "edge.sqlite3"
-    migrate_database(database)
-    manifest = _seed_runtime_manifest(database)
+    """Exercise the resident-safety path without a local SQLite evidence transaction."""
+    detail_cache = tmp_path / "detail-cache"
+    manifest = AppliedRuntimeManifest.from_content(
+        {"manifest_schema_version": 1, "cameras": [{"camera_id": CAMERA_ID}]}
+    )
     policy = make_effective_policy(
         module_id="fall",
         module_version=1,
@@ -182,21 +154,8 @@ def test_fall_observation_persists_decision_trace_and_binds_event_to_clip(
             ),
         )
     )
-    writer = BoundedTraceWriter(database, TraceRetentionPolicy.testing())
-    recorder = _RecordingClipRecorder()
-    sink = EvidenceEventSink(
-        stager=DurableEvidenceStager(
-            database_path=database,
-            camera_id=CAMERA_ID,
-            facility_id=FACILITY_ID,
-            resident_id=None,
-            config_version=1,
-            clock=lambda: 12.5,
-            runtime_manifest_sha256=manifest.sha256,
-        ),
-        recorder=recorder,
-        now=lambda: datetime(2026, 8, 13, 12, 0, tzinfo=UTC),
-    )
+    writer = BoundedTraceWriter(detail_cache, TraceRetentionPolicy.testing())
+    sink = _RecordingSink()
     pump = CameraPipelinePump(
         CAMERA_ID,
         _SinglePacketSubscription(_packet()),
@@ -224,9 +183,8 @@ def test_fall_observation_persists_decision_trace_and_binds_event_to_clip(
 
     assert pump.failure_count == 0
     assert pump.processed_count == 1
-    assert len(recorder.calls) == 1
-    trigger_packet, event = recorder.calls[0]
-    assert trigger_packet.frame_key.seq == 7
+    assert len(sink.events) == 1
+    event = sink.events[0]
     assert event.domain == "fall"
     assert event.probability == 0.82
     assert event.audit is not None
@@ -261,22 +219,20 @@ def test_fall_observation_persists_decision_trace_and_binds_event_to_clip(
         "window_frames": 1,
     }
 
-    with sqlite3.connect(database) as connection:
-        row = connection.execute(
-            """
-            SELECT event.edge_event_id, event.state, link.clip_id, ref.decision_trace_id,
-                   event.payload_json
-            FROM evidence_events AS event
-            JOIN evidence_event_trace_refs AS ref USING (edge_event_id)
-            JOIN clip_events AS link USING (edge_event_id)
-            """
-        ).fetchone()
-    assert row is not None
-    edge_event_id, state, clip_id, persisted_trace_id, payload_json = row
-    assert edge_event_id == str(event.identity)
-    assert state == "READY"
-    assert clip_id == "clip-fall-pipeline"
-    assert persisted_trace_id == trace_id
-    payload = json.loads(payload_json)
-    assert payload["audit"]["decision_trace_id"] == trace_id
-    assert payload["audit"]["runtime_manifest_sha256"] == manifest.sha256
+    queue = DeliveryQueue(tmp_path / "delivery")
+    result = queue.try_admit(
+        EventEntry(
+            edge_event_id=str(event.identity),
+            event_type=event.event_type,
+            detected_at="2026-08-13T00:00:12Z",
+            camera_id=event.camera_id,
+            facility_id=event.facility_id,
+            decision_trace=trace_id.encode(),
+            values=b'{"fall_probability":0.82,"operating_threshold":0.7,"window_frames":1}',
+        )
+    )
+    assert result.accepted
+    queued = next(queue.entries())
+    assert queued["edge_event_id"] == str(event.identity)
+    assert queued["decision_trace_b64"]
+    assert queued["values_b64"]

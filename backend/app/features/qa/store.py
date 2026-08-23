@@ -17,7 +17,7 @@ from enum import StrEnum
 from pathlib import Path
 from secrets import token_hex
 
-from shared.edge_db.connection import RuntimeActor, open_runtime_database, write_transaction
+from backend.app.edge_db.connection import RuntimeActor, open_runtime_database, write_transaction
 
 
 class QaLabelDisposition(StrEnum):

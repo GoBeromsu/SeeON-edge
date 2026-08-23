@@ -29,6 +29,14 @@ class SegmentEncoderConfig:
     store_dir: Path
     segment_seconds: float = 2.0
     ffmpeg_bin: str = "ffmpeg"
+    allow_runtime_encode_fallback: bool = False
+    """Permit demoting a failed ``h264_nvenc`` session open to CPU ``libx264``.
+
+    Defaults to ``False`` so an NVENC failure fails loud and closed, per ADR 0002.
+    ADR 0003 prohibits *implicit* fallback and permits *explicit* fallback, so a
+    deployment that consciously accepts CPU encode cost opts in here rather than
+    inheriting the demotion automatically.
+    """
 
     def __post_init__(self) -> None:
         if not math.isfinite(self.segment_seconds) or self.segment_seconds <= 0:

@@ -1,7 +1,7 @@
 [project]
 name = "ml"
 version = "0.1.0"
-description = "Fall/bed-exit ML: FastAPI backend + edge inference worker + React front. Training in eldercare-dataset-ops (ADR-0004)."
+description = "Fall/bed-exit ML: FastAPI backend + edge inference worker + React front. Training in eldercare-dataset-ops."
 readme = "README.md"
 license = "AGPL-3.0-only"
 requires-python = ">=3.11"
@@ -76,7 +76,7 @@ torchvision = [{ index = "pytorch-cu130", marker = "sys_platform == 'linux'" }]
 # uv workspace (F1: each instance is an independent build unit with its own
 # pyproject). Members are package=false: they declare each instance's
 # dependency contract and share one lockfile. `contracts` stays
-# path-importable (contracts is vendored ADR-0004 and cannot carry a pyproject,
+# path-importable (contracts is vendored ADR-0006 and cannot carry a pyproject,
 # so `uv sync --package` build-isolation is intentionally not used); per-instance
 # slim images are produced by Dockerfile.backend/edge via dependency-groups.
 [tool.uv.workspace]
@@ -152,13 +152,13 @@ modules = ["backend", "worker"]
 name = "runtime packages cannot import edge database DDL"
 type = "forbidden"
 source_modules = ["backend", "worker"]
-forbidden_modules = ["shared.edge_db.migrator", "shared.edge_db.schema"]
+forbidden_modules = ["backend.app.edge_db.migrator", "backend.app.edge_db.schema"]
 
 [[tool.importlinter.contracts]]
 name = "contracts is a leaf (imports nothing internal)"
 type = "forbidden"
 source_modules = ["contracts"]
-forbidden_modules = ["backend", "shared.events", "shared.edge_db", "worker"]
+forbidden_modules = ["backend", "shared.events", "backend.app.edge_db", "worker"]
 
 [[tool.importlinter.contracts]]
 # Stage 2b: 2-depth ownership inside backend — base (core/shared) must not import

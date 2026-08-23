@@ -9,8 +9,8 @@ from threading import Lock
 
 from fastapi import FastAPI
 
+from backend.app.edge_db import EDGE_DATABASE_PATH
 from backend.app.shared.sqlite_bootstrap import connect_catalog_store
-from shared.edge_db import EDGE_DATABASE_PATH
 
 _CREATE_RUNTIME_SETTINGS_TABLE = (
     "CREATE TABLE IF NOT EXISTS runtime_settings ("

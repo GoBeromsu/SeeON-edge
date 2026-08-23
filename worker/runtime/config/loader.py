@@ -41,7 +41,7 @@ def load_worker_config(path: str | Path) -> WorkerConfig:
         if "detection_policies" in raw:
             raise WorkerConfigError(
                 "static detection_policies authority is retired; numeric detection "
-                "policies must be pulled from central edge.sqlite3 via the versioned "
+                "policies must be pulled from the central service via the versioned "
                 "worker config"
             )
         for field in ("models", "domains", "clip"):

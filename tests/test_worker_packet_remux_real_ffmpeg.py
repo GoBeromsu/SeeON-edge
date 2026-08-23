@@ -20,6 +20,7 @@ from worker.adapters.decode.cpu_av.models import CpuAvConfig
 from worker.adapters.decode.nvdec_cuvid.models import NvdecCuvidConfig
 from worker.adapters.decode.pyav_nvdec import NvdecPacketTeeSession
 from worker.adapters.decode.pyav_preserving import PyAvPreservingAdapter
+from worker.adapters.encode import packet_remuxer
 from worker.adapters.encode.packet_remuxer import REMUX_METHOD, PyAvPacketRemuxer
 from worker.pipeline.output.evidence.clip_recorder import ClipRecorder
 from worker.pipeline.output.evidence.clip_recorder_models import ClipRecorderConfig
@@ -134,6 +135,17 @@ def _generate_vfr_no_audio_source(path: Path) -> None:
     )
 
 
+def _as_muxed(payload: bytes) -> bytes:
+    """The bytes an MP4 sample description must carry for this payload.
+
+    An RTSP source arrives in Annex-B framing; MP4 requires length-prefixed
+    NAL units, so the remuxer reframes it. The media is unchanged -- only the
+    unit separators are -- and these tests still compare every byte.
+    """
+    reframed = packet_remuxer._annexb_to_length_prefixed(payload)  # noqa: SLF001
+    return payload if reframed is None else reframed
+
+
 def test_real_vfr_b_frames_allow_only_measured_uniform_mp4_timestamp_translation(
     tmp_path: Path,
 ) -> None:
@@ -174,7 +186,7 @@ def test_real_vfr_b_frames_allow_only_measured_uniform_mp4_timestamp_translation
         )
         assert (actual[0].pts, actual[0].dts) == (17_910, 15_350)
         assert tuple(bytes(packet) for packet in actual) == tuple(
-            packet.payload for packet in selected
+            _as_muxed(packet.payload) for packet in selected
         )
         assert tuple(packet.duration for packet in actual) == tuple(
             packet.duration for packet in selected
@@ -266,7 +278,16 @@ def test_real_source_packets_stream_copy_with_exact_stream_and_timestamp_identit
         assert tuple(_time_base(stream.time_base) for stream in streams) == tuple(
             stream.time_base for stream in selection.configuration.streams
         )
-        assert actual == expected
+        # Stream identity, timestamps and durations must match exactly.
+        assert tuple(row[:4] for row in actual) == tuple(row[:4] for row in expected)
+        # Keyframes may only be gained, never lost. Once the NAL units are
+        # framed the way an MP4 sample description requires, the container
+        # parses their types instead of trusting the demuxer's packet flag --
+        # and it finds IDRs the flag missed (measured here: a packet flagged
+        # False whose payload began 00 00 01 45, NAL type 5). A clip that is
+        # more seekable than its source metadata claimed is the good direction;
+        # a lost keyframe is the one that breaks seeking.
+        assert all(muxed[4] for muxed, source in zip(actual, expected, strict=True) if source[4])
     finally:
         clip.close()
     assert artifact.remux_method == "pyav-packet-stream-copy"
@@ -530,9 +551,7 @@ def _produce_real_event_clip(tmp_path: Path) -> _ProducedClip:
         per_camera_limits=PacketRingLimits(
             config.packet_ring_max_packets,
             config.packet_ring_max_bytes_per_camera,
-            config.pre_event_seconds
-            + config.post_event_seconds
-            + config.finalize_grace_seconds,
+            config.pre_event_seconds + config.post_event_seconds + config.finalize_grace_seconds,
         ),
         global_max_bytes=config.packet_ring_global_max_bytes,
     )
@@ -574,15 +593,12 @@ def _produce_real_event_clip(tmp_path: Path) -> _ProducedClip:
                 if not packets:
                     continue
                 if stream_start is None:
-                    stream_start = float(
-                        min(packet.presentation_time for packet in packets)
-                    )
+                    stream_start = float(min(packet.presentation_time for packet in packets))
                 keyframes_before_window = tuple(
                     packet
                     for packet in packets
                     if packet.is_keyframe
-                    and float(packet.presentation_time)
-                    <= trigger_pts - config.pre_event_seconds
+                    and float(packet.presentation_time) <= trigger_pts - config.pre_event_seconds
                 )
                 if (
                     trigger_pts - stream_start >= config.pre_event_seconds + 0.5
@@ -590,9 +606,13 @@ def _produce_real_event_clip(tmp_path: Path) -> _ProducedClip:
                 ):
                     break
             _wait_for(
-                lambda: bool(_video_packets(repository))
-                and float(max(packet.presentation_time for packet in _video_packets(repository)))
-                >= trigger_pts + config.post_event_seconds + 0.5,
+                lambda: (
+                    bool(_video_packets(repository))
+                    and float(
+                        max(packet.presentation_time for packet in _video_packets(repository))
+                    )
+                    >= trigger_pts + config.post_event_seconds + 0.5
+                ),
                 timeout=60.0,
                 what="the packet ring to cover the post-event window",
             )
@@ -624,9 +644,7 @@ def _produce_real_event_clip(tmp_path: Path) -> _ProducedClip:
             clip_id = recorder.on_event(trigger, _evidence_event(trigger_pts))
             assert clip_id is not None
             assert recorder.flush(timeout=60.0)
-            observed.update(
-                {packet.arrival_index: packet for packet in _video_packets(repository)}
-            )
+            observed.update({packet.arrival_index: packet for packet in _video_packets(repository)})
             ring_packets = tuple(observed[index] for index in sorted(observed))
         finally:
             recorder.stop(timeout=60.0)
@@ -696,9 +714,7 @@ def test_real_nvdec_boundary_event_produces_a_stream_copied_primary_clip(
     # exact uniform tick offset (the source PTS does not start at zero); ADR-
     # 0001 permits only that, it must be identical for every packet, and the
     # manifest must declare it. Nothing else about the timestamps may move.
-    translation_ticks = manifest["source_media"]["streams"][0][
-        "timestamp_translation_ticks"
-    ]
+    translation_ticks = manifest["source_media"]["streams"][0]["timestamp_translation_ticks"]
     ring_timestamps = tuple(
         (packet.pts, packet.dts) for packet in ring_packets if packet.pts is not None
     )
@@ -724,7 +740,7 @@ def test_real_nvdec_boundary_event_produces_a_stream_copied_primary_clip(
         )
     finally:
         muxed.close()
-    ring_payloads = tuple(packet.payload for packet in ring_packets)
+    ring_payloads = tuple(_as_muxed(packet.payload) for packet in ring_packets)
     assert muxed_payloads == ring_payloads[start : start + len(muxed_payloads)]
 
     # And the manifest tells the same story.
@@ -772,36 +788,12 @@ def test_real_nvdec_boundary_clip_decodes_every_packet_it_carries(
     )
     packet_count = _probe_video_stream(produced.clip_path).nb_packets
     print(
-        f"EVIDENCE_CLIP_DECODABILITY packets={packet_count} "
-        f"decoded_frames={decoded_frames}",
+        f"EVIDENCE_CLIP_DECODABILITY packets={packet_count} decoded_frames={decoded_frames}",
         flush=True,
     )
     assert decoded_frames == packet_count
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "PRE-EXISTING ADR-0001 GAP (not a decode-boundary regression): an RTSP "
-        "source delivers H.264 in Annex-B framing, so its stream descriptor "
-        "carries Annex-B extradata while the PyAV-built mux template capsule "
-        "carries length-prefixed AVCC extradata. That difference puts the "
-        "video stream into PyAvPacketRemuxer._verify's "
-        "'container_normalized_streams' escape hatch, which then skips BOTH "
-        "the per-packet payload check and the keyframe-identity check for "
-        "that stream. The published clip consequently reports zero keyframes "
-        "at the packet level (the source window contains several), which "
-        "breaks seeking and any downstream keyframe reasoning, and the "
-        "remuxer's strongest byte-level guarantee silently does not apply on "
-        "exactly the source type production uses. The clip still decodes "
-        "(libavcodec auto-detects Annex-B) and the payload bytes are in fact "
-        "preserved -- verified independently in "
-        "test_real_nvdec_boundary_event_produces_a_stream_copied_primary_clip "
-        "-- so this is a verification-coverage and container-metadata defect, "
-        "not data loss. Reproduces identically on the in-process cpu backend. "
-        "Owner: the remuxer/ADR-0001 lane, not todo 11."
-    ),
-)
 def test_real_nvdec_boundary_clip_preserves_keyframe_identity(tmp_path: Path) -> None:
     """Keyframes in the selected window must stay keyframes in the clip."""
     # Given / When: one real event-driven clip off the production boundary.
@@ -817,8 +809,7 @@ def test_real_nvdec_boundary_clip_preserves_keyframe_identity(tmp_path: Path) ->
     )["packets"]
     muxed_keyframes = sum(1 for packet in flags if "K" in packet["flags"])
     print(
-        f"EVIDENCE_CLIP_KEYFRAMES muxed_keyframes={muxed_keyframes} "
-        f"packets={len(flags)}",
+        f"EVIDENCE_CLIP_KEYFRAMES muxed_keyframes={muxed_keyframes} packets={len(flags)}",
         flush=True,
     )
     assert muxed_keyframes > 0
@@ -865,9 +856,11 @@ def test_real_nvdec_boundary_clip_owes_nothing_to_the_decoded_frame_lane(
             # anchored on the ring's OWN head at this moment, so it can only
             # finish after 3 further source-seconds actually arrived.
             _wait_for(
-                lambda: bool(_video_packets(repository))
-                and max(packet.presentation_time for packet in _video_packets(repository))
-                >= baseline_latest + 3,
+                lambda: (
+                    bool(_video_packets(repository))
+                    and max(packet.presentation_time for packet in _video_packets(repository))
+                    >= baseline_latest + 3
+                ),
                 timeout=60.0,
                 what="the abandoned-frame-lane ring to advance 3 source seconds",
             )
@@ -887,7 +880,7 @@ def test_real_nvdec_boundary_clip_owes_nothing_to_the_decoded_frame_lane(
                     selection.configuration,
                     tmp_path / "abandoned-lane-clip.mp4",
                 )
-                selected_payloads = tuple(packet.payload for packet in selection.packets)
+                selected_payloads = tuple(_as_muxed(packet.payload) for packet in selection.packets)
                 truncations = selection.truncations
         finally:
             session.close()

@@ -27,3 +27,9 @@ def test_backend_image_declares_frontend_build_arguments() -> None:
     dockerfile = (ROOT / "Dockerfile.backend").read_text(encoding="utf-8")
     assert "ARG VITE_ML_API_BASE_URL=/api/v1" in dockerfile
     assert "VITE_ML_API_RELAY_TOKEN" not in dockerfile
+
+
+def test_backend_image_includes_the_legacy_evidence_drain_script() -> None:
+    dockerfile = (ROOT / "Dockerfile.backend").read_text(encoding="utf-8")
+
+    assert "COPY scripts/ops ./scripts/ops" in dockerfile

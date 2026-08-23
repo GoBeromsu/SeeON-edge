@@ -110,14 +110,27 @@ class FFmpegSegmentEncoder:
         geometry: EncoderGeometry,
         generation: int,
     ) -> SessionGeneration:
-        """Spawn a camera's encoder session, demoting nvenc to libx264 on failure.
+        """Spawn a camera's encoder session, honoring the explicit encode policy.
 
-        #53's sanctioned exception to #43's "no implicit fallback" rule: NVENC
-        and libx264 both produce the same H.264 content, so trading GPU for
-        CPU encode cost after a failed session open never changes what a clip
-        records. The fallback is still loud (WARNING log + `EncodeSelection`
-        exposed via local diagnostics) and happens at most once per camera --
-        `self._encode_override` makes the demotion persistent.
+        NVENC and libx264 both produce the same H.264 content, so trading GPU
+        for CPU encode cost after a failed session open never changes what a
+        clip records. That makes CPU demotion a legitimate *option*, but ADR
+        0002 requires fail-loud behavior absent an explicit exception and ADR
+        0003 permits only *explicit* fallback. The demotion is therefore gated
+        behind ``SegmentEncoderConfig.allow_runtime_encode_fallback``, which
+        defaults to ``False``:
+
+        - **Default.** A failed NVENC open records the failure exactly once and
+          re-raises. No CPU retry, no persistent override.
+        - **Opted in.** Today's behavior is preserved unchanged: demote to
+          libx264, loudly (WARNING log plus ``EncodeSelection`` in local
+          diagnostics), at most once per camera, with ``self._encode_override``
+          making the demotion persistent.
+
+        No production composition root constructs ``FFmpegSegmentEncoder``
+        today, so gating this changes no current runtime behavior. It closes the
+        ADR 0002/0003 compliance gap in the adapter's own source so a future
+        caller cannot silently inherit an ungated implicit fallback.
         """
         effective_encoder = self._encode_override.get(camera, requested_encoder)
         if effective_encoder != "h264_nvenc":
@@ -150,6 +163,14 @@ class FFmpegSegmentEncoder:
                 record_failure_on_error=False,
             )
         except EncoderStartError as error:
+            if not self.config.allow_runtime_encode_fallback:
+                # The first attempt passes record_failure_on_error=False in
+                # anticipation of a retry that does not happen on this path.
+                # Record it exactly once here so the fail-closed branch leaves
+                # the same failure state as the opted-in both-fail branch:
+                # metrics.failures incremented by one, camera unavailable.
+                self._record_start_failure(camera)
+                raise
             self._downgrade_to_libx264(camera, error.reason)
             return self._spawn(
                 SessionRequest(

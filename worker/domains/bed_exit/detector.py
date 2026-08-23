@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from datetime import datetime
 from time import monotonic
@@ -27,6 +28,8 @@ from worker.types import (
     DecisionTraceSnapshot,
     TemporalProfile,
 )
+
+_LOGGER = logging.getLogger(__name__)
 
 
 class BedExitScoringRecorder(Protocol):
@@ -157,6 +160,47 @@ class BedExitMonitor:
         )
         return ()
 
+
+
+    def release_onset(self, event: object | None = None) -> None:
+        """Re-open a bed-exit onset whose envelope was never made durable.
+
+        Two pieces of owner state consumed that onset. The latch recorded the
+        (person, bed) pair, and -- the one that actually matters -- the exit
+        cleared this person's bed assignment, so a later frame no longer counts
+        them as having been in that bed and can never re-derive the exit.
+
+        I previously concluded bed exit was unrecoverable and deleted this. That
+        was wrong: I had inspected the latch, which does clear itself, and not
+        the assignment, which does not. Restoring the assignment lets the next
+        frame report the same exit.
+        """
+        # Fail closed on ownership, like the fall latch: act only on an event
+        # this monitor produced.
+        if getattr(event, "domain", None) != "bed_exit":
+            return
+        if getattr(event, "camera_id", None) != self._config.camera_id:
+            return
+        person_id = getattr(event, "person_id", None)
+        bed_id = getattr(event, "bed_id", None)
+        if person_id is None or bed_id is None:
+            return
+        assignment = self._assignments.get(person_id)
+        if assignment is None:
+            # A track that vanished mid-exit fires from the stale path, which
+            # DELETES the assignment rather than clearing its bed. Returning
+            # here left that onset unrecoverable: the resident is gone from the
+            # frame, so no later frame can re-derive the exit, and the alert was
+            # lost outright. Recreate the assignment so the next stale sweep
+            # reports it again.
+            assignment = _Assignment()
+            assignment.grace_frames = 1
+            self._assignments[person_id] = assignment
+        elif assignment.bed_id is not None:
+            return
+        assignment.bed_id = bed_id
+        self._latch.release_onset(person_id, bed_id)
+
     def update(self, input_value: DecisionInput) -> tuple[BusinessEvent, ...]:
         observation = input_value.observation
         if not _bed_region_is_usable(input_value.bed_region.source) or not observation.bed_boxes:
@@ -197,12 +241,23 @@ class BedExitMonitor:
             # overwrites an in-memory value on the existing per-frame call
             # path -- no new thread, timer, or per-frame I/O. Actual emission
             # is on `log_snapshot()`'s ~5s `RuntimeStatusSender` cadence.
-            self._scoring_recorder.record_bed_exit_scoring(
-                self._config.camera_id,
-                self._max_containment_observed,
-                self._grace_positive_transitions,
-                self._assignments_made,
-            )
+            # Telemetry, never detection. This call sits directly before the
+            # onset latch, so a raising recorder discarded the bed-exit event
+            # itself. Five other auxiliary capabilities in this runtime were
+            # found holding that same power over a resident alert.
+            try:
+                self._scoring_recorder.record_bed_exit_scoring(
+                    self._config.camera_id,
+                    self._max_containment_observed,
+                    self._grace_positive_transitions,
+                    self._assignments_made,
+                )
+            except Exception:  # noqa: BLE001 - telemetry never blocks detection
+                _LOGGER.warning(
+                    "bed-exit scoring recorder failed for camera %s; detection continues",
+                    self._config.camera_id,
+                    exc_info=True,
+                )
         event_time = 0.0 if input_value.time_sec is None else input_value.time_sec
         # Gate before the latch consumes an onset. A daytime exit fed into
         # BedExitLatch advances event_count and can hold (person_id, bed_id)
@@ -461,7 +516,21 @@ class BedExitMonitor:
                     missing_values={"containment_ratio": "no-observed-person"},
                 )
             )
-        shadow_traces = self._record_shadow(input_value, live_ids)
+        # The shadow path is explicitly non-authoritative: it never replaces the
+        # containment decision and never carries triggered=True. It nonetheless
+        # sat between the events being computed and the return that delivers
+        # them, so a shadow failure discarded a real bed-exit event. A capability
+        # that cannot decide anything must not be able to destroy a decision.
+        try:
+            shadow_traces = self._record_shadow(input_value, live_ids)
+        except Exception:  # noqa: BLE001 - shadow evaluation never blocks detection
+            shadow_traces = ()
+            _LOGGER.warning(
+                "shadow bed-exit evaluation failed for camera %s; the legacy "
+                "decision and its events are unaffected",
+                self._config.camera_id,
+                exc_info=True,
+            )
         # Legacy snapshots stay first so existing [0] assertions keep working.
         # Shadow snapshots are appended, never replace the containment path,
         # and never carry triggered=True in this todo.

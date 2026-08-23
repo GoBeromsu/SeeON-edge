@@ -67,7 +67,10 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 COPY contracts ./contracts
 COPY shared ./shared
 COPY worker ./worker
-COPY scripts/repair_clip_consistency.py ./scripts/repair_clip_consistency.py
+# No operational SQLite CLI ships in this image. ADR 0005 gives the
+# inference-runtime slot no database, so clip-consistency repair is
+# backend-owned (scripts/ops/repair-clip-consistency.py against
+# backend/app/features/clips/consistency_ops.py).
 RUN mkdir -p /app/models/fall/lstm-runtime /app/models/pose /app/models/bed
 # State dir is image-owned (matches worker/runtime/state_dir.py's resolver for
 # the root container user); deliberately no VOLUME here to avoid anonymous-

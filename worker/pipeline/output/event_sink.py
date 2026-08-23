@@ -35,6 +35,14 @@ class EvidenceStager(Protocol):
         snapshot: EventEvidence,
     ) -> None: ...
 
+    def record_snapshot_disposition(
+        self,
+        edge_event_id: str,
+        snapshot_id: str,
+        disposition: str,
+        reason: str,
+    ) -> None: ...
+
     def complete(self, edge_event_id: str, clip_id: str | None) -> None: ...
 
 
@@ -90,12 +98,20 @@ class EvidenceEventSink:
         }
         if audit is not None:
             payload["audit"] = audit
+        # This is deliberately before every optional media operation. The
+        # detector has no durable replay above this call, so failure to admit
+        # its decision envelope must stop processing rather than leave media
+        # or a missing alert behind.
+        self.stager.stage(payload)
+        snapshot_id = edge_event_id
         staged_snapshot: StoredSnapshot | None = None
         snapshot_payload: dict[str, EventScalar] | None = None
         snapshot_store = self.snapshot_store
         if event.snapshot_jpeg is not None:
             if snapshot_store is None:
-                payload["snapshot_jpeg"] = event.snapshot_jpeg
+                self._record_snapshot_disposition(
+                    edge_event_id, snapshot_id, "UNAVAILABLE", "snapshot_store_unconfigured"
+                )
             else:
                 try:
                     staged_snapshot = snapshot_store.stage(
@@ -120,11 +136,20 @@ class EvidenceEventSink:
                             "reason": error.reason,
                         },
                     )
+                    self._record_snapshot_disposition(
+                        edge_event_id, snapshot_id, "UNAVAILABLE", "stage_capacity"
+                    )
+                except Exception:  # noqa: BLE001 - optional media must not affect the event
+                    LOGGER.exception(
+                        "snapshot staging failed: camera_id=%s edge_event_id=%s",
+                        event.camera_id,
+                        edge_event_id,
+                    )
+                    self._record_snapshot_disposition(
+                        edge_event_id, snapshot_id, "UNAVAILABLE", "stage_failed"
+                    )
                 else:
-                    payload["snapshot_jpeg"] = event.snapshot_jpeg
                     snapshot_payload = _snapshot_payload(staged_snapshot)
-                    payload["snapshot"] = snapshot_payload
-        self.stager.stage(payload)
         if staged_snapshot is not None and snapshot_payload is not None:
             assert snapshot_store is not None
             try:
@@ -141,8 +166,27 @@ class EvidenceEventSink:
                     edge_event_id,
                     extra={"camera_id": event.camera_id, "edge_event_id": edge_event_id},
                 )
+                self._record_snapshot_disposition(
+                    edge_event_id, snapshot_id, "UNAVAILABLE", "publish_or_attachment_failed"
+                )
+        elif event.snapshot_jpeg is None:
+            self._record_snapshot_disposition(
+                edge_event_id, snapshot_id, "UNAVAILABLE", "snapshot_not_provided"
+            )
         clip_id = self.recorder.on_event(trigger_packet, event)
         self.stager.complete(edge_event_id, clip_id)
+
+    def _record_snapshot_disposition(
+        self, edge_event_id: str, snapshot_id: str, disposition: str, reason: str
+    ) -> None:
+        try:
+            self.stager.record_snapshot_disposition(
+                edge_event_id, snapshot_id, disposition, reason
+            )
+        except Exception:  # noqa: BLE001 - event remains authoritative
+            LOGGER.exception(
+                "snapshot disposition admission failed: edge_event_id=%s", edge_event_id
+            )
 
 
 def _snapshot_payload(snapshot: StoredSnapshot) -> dict[str, EventScalar]:

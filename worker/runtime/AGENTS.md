@@ -23,7 +23,7 @@ is forbidden. Relay HTTP only.
 - `ingest_composition.py`: profile decode token plus optional camera override. Unknown token or `nvdec` without an nvdec profile raises.
 - `profile/`: `ML_WORKER_PROFILE` to `(device, decode, encode)`. Unset or blank becomes `cpu`. Unknown names fail closed.
 - `config/`: models, resolver, relay pull, LKG, restart epoch. YAML is a developer hatch. No env roster.
-- `provenance/`: applied runtime manifest in `edge.sqlite3`.
+- `provenance/`: applied runtime manifest delivered through the backend relay.
 - `telemetry/`: `StatusStore`, `WorkerDiagnostics`, `RuntimeStatusSender`. Local snapshot can grow. Relay wire stays frozen.
 - `faults/`: one first-fault record, stop every loop, `os._exit(4)`.
 - `lease.py`: advisory flock at `~/.local/state/ml-worker/.gpu.lease`. Acquire before CUDA, NVDEC, or model construction. No env override.

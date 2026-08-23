@@ -11,21 +11,20 @@ from pathlib import Path
 
 import pytest
 
+from shared.events.delivery_queue import DeliveryQueue, EventEntry
 from worker.pipeline.output.evidence.evidence_manifest import (
     MAX_MANIFEST_BYTES,
     ClipEvidenceError,
     parse_manifest,
 )
-from worker.pipeline.output.evidence.evidence_media import inspect_finalized_media
-from worker.pipeline.output.evidence.evidence_outbox import (
-    ClipId,
-    ClipLocalState,
-    EdgeEventId,
-    EvidenceOutbox,
-    EvidenceReasonCode,
-    StagedEvent,
+from worker.pipeline.output.evidence.evidence_media import (
+    _media_length_ms,
+    inspect_finalized_media,
 )
-from worker.pipeline.output.evidence.evidence_reconciliation import reconcile_event_evidence
+from worker.pipeline.output.evidence.evidence_outbox import (
+    EdgeEventId,
+    EvidenceReasonCode,
+)
 
 EVENT_ONE = EdgeEventId("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
 EVENT_TWO = EdgeEventId("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb")
@@ -167,40 +166,21 @@ def test_parse_manifest_rejects_noncanonical_or_duplicate_event_refs(
     assert raised.value.reason_code is EvidenceReasonCode.CORRUPT
 
 
-def test_reconciliation_rolls_back_all_new_relations_when_one_ref_is_missing(
-    tmp_path: Path,
-) -> None:
-    # Given: a valid manifest names one staged event followed by one missing event.
-    store = tmp_path / "store"
-    clip_id = ClipId("clip-trust")
-    clip_dir = store / "clips" / clip_id
-    clip_dir.mkdir(parents=True)
-    (clip_dir / "manifest.json").write_text(
-        json.dumps(_manifest_payload("UNAVAILABLE", [EVENT_ONE, EVENT_TWO])),
-        encoding="utf-8",
+def test_conflicting_event_admission_preserves_the_original_durable_fact(tmp_path: Path) -> None:
+    queue = DeliveryQueue(tmp_path)
+    original = EventEntry(
+        str(EVENT_ONE), "fall", "2026-07-16T01:02:03Z", "camera-a", "facility-a", b"{}", b"{}"
     )
-    database = tmp_path / "evidence.sqlite3"
-    with EvidenceOutbox.open(database) as outbox:
-        outbox.stage(
-            StagedEvent(
-                edge_event_id=EVENT_ONE,
-                detected_at="2026-07-16T01:02:03Z",
-                payload_json="{}",
-                queued_at=1.0,
-            )
-        )
+    conflict = EventEntry(
+        str(EVENT_ONE), "fall", "2026-07-16T01:02:04Z", "camera-a", "facility-a", b"{}", b"{}"
+    )
+    assert queue.try_admit(original).accepted
+    refused = queue.try_admit(conflict)
 
-        # When: boot reconciliation reaches the missing second relation.
-        report = reconcile_event_evidence(store, outbox)
-        outcome = outbox.clip_outcome(clip_id)
-        relations = outbox.ordered_event_ids(clip_id)
-
-    # Then: the first relation rolled back, while the terminal failure is durable.
-    assert report.corrupt == 1
-    assert relations == ()
-    assert outcome is not None
-    assert outcome.local_state is ClipLocalState.CORRUPT
-    assert outcome.unavailable_reason is EvidenceReasonCode.CORRUPT
+    assert not refused.accepted
+    assert tuple(queue.entries()) == (
+        next(DeliveryQueue(tmp_path).entries()),
+    )
 
 
 @contextlib.contextmanager
@@ -234,3 +214,42 @@ def test_evidence_error_survives_contextlib_reraise_with_message_intact() -> Non
     assert captured.value.reason_code is EvidenceReasonCode.FINALIZE_FAILED
     assert captured.value.detail == "ffprobe unavailable"
     assert str(captured.value) == "FINALIZE_FAILED: ffprobe unavailable"
+
+
+def test_a_clip_whose_timeline_starts_late_is_not_called_corrupt() -> None:
+    """Container duration is measured from zero; a clip's length is not.
+
+    These are the exact numbers ffprobe returned for a real clip on this
+    deployment: the camera's uptime origin puts the first sample 8236.957s into
+    the timeline, so ``format.duration`` reads 8270.974s while the footage runs
+    34.016s. Measured against the 120-second ceiling, that marked every clip
+    the system produced CORRUPT, which suppressed the manifest, which kept
+    every playable clip out of the catalogue -- the operator saw nothing while
+    good footage sat on disk.
+    """
+    payload = {
+        "streams": [{"codec_type": "video", "codec_name": "hevc", "duration": "34.016000"}],
+        "format": {"duration": "8270.974000", "start_time": "8236.957000"},
+    }
+
+    assert _media_length_ms(payload, payload["streams"]) == 34_016
+
+
+def test_the_length_survives_a_container_that_reports_no_stream_duration() -> None:
+    """Some containers omit stream duration; the origin must still be removed."""
+    payload = {
+        "streams": [{"codec_type": "video", "codec_name": "hevc"}],
+        "format": {"duration": "8270.974000", "start_time": "8236.957000"},
+    }
+
+    assert _media_length_ms(payload, payload["streams"]) == 34_017
+
+
+def test_a_zero_origin_container_keeps_its_own_duration() -> None:
+    """The ordinary case must not be distorted by the origin correction."""
+    payload = {
+        "streams": [{"codec_type": "video", "codec_name": "h264"}],
+        "format": {"duration": "34.000000", "start_time": "0.000000"},
+    }
+
+    assert _media_length_ms(payload, payload["streams"]) == 34_000

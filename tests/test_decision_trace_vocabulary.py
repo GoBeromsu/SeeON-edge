@@ -9,6 +9,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from backend.app.edge_db.migrator import migrate_database
 from contracts.frame import Frame
 from contracts.observation import (
     BedRegionCacheState,
@@ -16,7 +17,6 @@ from contracts.observation import (
     BoundingBox,
     FrameObservation,
 )
-from shared.edge_db.migrator import migrate_database
 from worker.pipeline.analytics.composite import CompositeResult
 from worker.pipeline.trace import (
     BoundedTraceWriter,

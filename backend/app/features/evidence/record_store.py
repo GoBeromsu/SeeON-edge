@@ -8,8 +8,8 @@ from datetime import datetime
 from pathlib import Path
 from secrets import token_hex
 
-from shared.edge_db.connection import RuntimeActor, open_runtime_database, write_transaction
-from shared.edge_db.reviews import EvidenceReview, ReviewDisposition
+from backend.app.edge_db.connection import RuntimeActor, open_runtime_database, write_transaction
+from backend.app.edge_db.reviews import EvidenceReview, ReviewDisposition
 
 
 @dataclass(frozen=True, slots=True)

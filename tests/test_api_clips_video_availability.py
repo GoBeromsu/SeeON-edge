@@ -6,9 +6,18 @@ import json
 
 import pytest
 from fastapi.testclient import TestClient
+from receipt_helpers import add_accepted_media_receipts
 
 from backend.app.features.clips.media_response import media_type as _media_type
-from backend.app.main import create_app, no_lifespan
+from backend.app.main import create_app as _create_app
+from backend.app.main import no_lifespan
+
+
+def create_app(*, lifespan):
+    app = _create_app(lifespan=lifespan)
+    add_accepted_media_receipts(app)
+    return app
+
 
 # Dashboard auth now always resolves to a session store (persisted file > env
 # > the built-in admin/admin default, see backend/app/shared/dashboard_auth.py),

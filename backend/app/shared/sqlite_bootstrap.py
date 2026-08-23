@@ -19,7 +19,7 @@ import sqlite3
 from collections.abc import Iterable
 from pathlib import Path
 
-from shared.edge_db.connection import RuntimeActor, open_runtime_database
+from backend.app.edge_db.connection import RuntimeActor, open_runtime_database
 
 
 def connect_catalog_store(path: Path, create_statements: Iterable[str]) -> sqlite3.Connection:

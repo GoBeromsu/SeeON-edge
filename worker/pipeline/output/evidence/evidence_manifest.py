@@ -11,7 +11,6 @@ from typing import Final
 
 from pydantic import ValidationError
 
-from worker.pipeline.output.evidence.clip_consistency_types import ClipConsistencyError
 from worker.pipeline.output.evidence.evidence_media import (
     ClipEvidenceError,
     inspect_finalized_media,
@@ -125,7 +124,6 @@ def parse_manifest_content(path: Path) -> tuple[ClipManifest, bytes, dict[str, o
         json.JSONDecodeError,
         ValidationError,
         ValueError,
-        ClipConsistencyError,
     ) as exc:
         raise ClipEvidenceError(EvidenceReasonCode.CORRUPT, "manifest invalid") from exc
 

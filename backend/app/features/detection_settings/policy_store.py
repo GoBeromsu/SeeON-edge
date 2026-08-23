@@ -10,6 +10,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal, cast
 
+from backend.app.edge_db import EDGE_DATABASE_PATH
+from backend.app.edge_db.connection import RuntimeActor, open_runtime_database, write_transaction
 from shared.detection_policies import (
     LATEST_POLICY_VERSIONS,
     EffectivePolicy,
@@ -22,8 +24,6 @@ from shared.detection_policies import (
     policy_definition,
     policy_values_dict,
 )
-from shared.edge_db import EDGE_DATABASE_PATH
-from shared.edge_db.connection import RuntimeActor, open_runtime_database, write_transaction
 
 ActivationStatus = Literal["pending", "applied", "failed"]
 

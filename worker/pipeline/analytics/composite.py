@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from collections.abc import Sequence
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
@@ -22,6 +23,8 @@ from worker.pipeline.perception import (
 from worker.pipeline.perception.decision_input import bed_pose_features_for
 from worker.pipeline.perception.scene_state import BedRegionCacheCounterSnapshot
 from worker.types import CURRENT_TEMPORAL_PROFILE, DecisionInput, FramePacket, ModuleResult
+
+_LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -125,9 +128,19 @@ class CompositeExtractor:
             ):
                 result = extractor.extract(packet)
         if self._stage_timing_recorder is not None:
-            self._stage_timing_recorder.record_stage_timing(
-                self.scene_state.camera_id, result.module_name, result.elapsed_ms / 1000.0
-            )
+            # Telemetry is reporting, never detection. Unguarded it sat directly
+            # on the extraction path, so a raising recorder discarded the result
+            # of a frame that may have carried a fall.
+            try:
+                self._stage_timing_recorder.record_stage_timing(
+                    self.scene_state.camera_id, result.module_name, result.elapsed_ms / 1000.0
+                )
+            except Exception:  # noqa: BLE001 - telemetry never blocks detection
+                _LOGGER.warning(
+                    "stage-timing recorder failed for camera %s; detection continues",
+                    self.scene_state.camera_id,
+                    exc_info=True,
+                )
         return result
 
     def process(
@@ -214,11 +227,18 @@ class CompositeExtractor:
             # call, so doing it every frame does not reproduce the
             # "per-frame logging across 13 cameras" outage the issue warns
             # against; the recorder decides its own emission cadence.
-            self._bed_region_recorder.record_bed_region(
-                self.scene_state.camera_id,
-                decision_input.bed_region.source,
-                self.scene_state.bed_region_counters.snapshot(),
-            )
+            try:
+                self._bed_region_recorder.record_bed_region(
+                    self.scene_state.camera_id,
+                    decision_input.bed_region.source,
+                    self.scene_state.bed_region_counters.snapshot(),
+                )
+            except Exception:  # noqa: BLE001 - telemetry never blocks detection
+                _LOGGER.warning(
+                    "bed-region recorder failed for camera %s; detection continues",
+                    self.scene_state.camera_id,
+                    exc_info=True,
+                )
         return CompositeResult(
             module_results=module_results,
             observation=final_observation,

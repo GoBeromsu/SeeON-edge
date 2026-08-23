@@ -91,6 +91,18 @@ class RelayWorkerPayload(TypedDict):
     profile_boot_error: str | None
 
 
+class RelayDeliveryQueuePayload(TypedDict):
+    """Filesystem-derived durable-delivery capacity telemetry."""
+
+    accepted_count: int
+    accepted_bytes: int
+    max_accepted_entries: int
+    max_accepted_bytes: int
+    by_kind: dict[str, int]
+    dead_lettered_count: int
+    dead_lettered_bytes: int
+
+
 class RelayRuntimeStatusPayload(TypedDict):
     """Closed runtime-status request shape accepted by the backend."""
 
@@ -102,6 +114,7 @@ class RelayRuntimeStatusPayload(TypedDict):
     clip_export: RelayClipExportPayload
     gpu: NotRequired[RelayGpuPayload]
     worker: NotRequired[RelayWorkerPayload]
+    delivery_queue: NotRequired[RelayDeliveryQueuePayload]
 
 
 def detection_payload(
@@ -153,6 +166,7 @@ def facility_payload(
     clip_export: RelayClipExportPayload,
     gpu: RelayGpuPayload | None,
     worker: RelayWorkerPayload | None,
+    delivery_queue: RelayDeliveryQueuePayload | None = None,
 ) -> RelayRuntimeStatusPayload:
     payload = RelayRuntimeStatusPayload(
         facility_id=facility_id,
@@ -175,6 +189,8 @@ def facility_payload(
         payload["gpu"] = gpu
     if worker is not None:
         payload["worker"] = worker
+    if delivery_queue is not None:
+        payload["delivery_queue"] = delivery_queue
     return payload
 
 
@@ -184,6 +200,7 @@ __all__ = [
     "RelayClipExportPayload",
     "RelayClipRecorderPayload",
     "RelayDecodePayload",
+    "RelayDeliveryQueuePayload",
     "RelayDetectionPayload",
     "RelayGpuPayload",
     "RelayRuntimeStatusPayload",

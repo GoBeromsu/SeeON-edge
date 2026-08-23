@@ -2,6 +2,7 @@ from worker.pipeline.trace.capture import TraceCapture, TraceIdentity
 from worker.pipeline.trace.models import (
     AnalysisTrace,
     DecisionTrace,
+    DetailUnavailableReason,
     OptionalNumber,
     RecoveredCameraTrace,
     TraceContractError,
@@ -21,6 +22,7 @@ __all__ = [
     "BoundedTraceWriter",
     "DEFAULT_TRACE_RETENTION_POLICY",
     "DecisionTrace",
+    "DetailUnavailableReason",
     "OptionalNumber",
     "RecoveredCameraTrace",
     "TraceCapture",

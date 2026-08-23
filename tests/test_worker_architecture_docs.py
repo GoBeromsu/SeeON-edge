@@ -465,7 +465,7 @@ def test_scoped_agents_files_declare_their_import_ceiling() -> None:
 def test_worker_docs_scope_internal_vocabulary_against_vendored_contracts() -> None:
     """The worker/contracts split is documented by a NON-vendored owner.
 
-    ``contracts/`` is ADR-0004 vendored byte-for-byte and
+    ``contracts/`` is ADR-0006 vendored byte-for-byte and
     ``tests/test_vendor_drift.py`` snapshots every file beneath it, including
     ``contracts/AGENTS.md``. The clarification therefore lives in
     ``worker/AGENTS.md`` and ``docs/architecture.md``.

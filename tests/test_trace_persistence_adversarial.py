@@ -8,8 +8,8 @@ from pathlib import Path
 
 import pytest
 
-from shared.edge_db.migrator import migrate_database
-from worker.pipeline.output.evidence.evidence_stager import DurableEvidenceStager
+from backend.app.edge_db.migrator import migrate_database
+from shared.events.delivery_queue import DeliveryQueue, EventEntry
 from worker.pipeline.trace import (
     AnalysisTrace,
     BoundedTraceWriter,
@@ -110,30 +110,6 @@ def _policy(**changes: object) -> TraceRetentionPolicy:
     values.update(changes)
     return replace(TraceRetentionPolicy.testing(), **values)
 
-
-def _event(decision_trace_id: str) -> dict[str, object]:
-    return {
-        "edge_event_id": "event-a",
-        "event_type": "fall",
-        "probability": 0.9,
-        "detected_at": "2026-08-13T00:00:01Z",
-        "audit": {
-            "runtime_manifest_sha256": _MANIFEST,
-            "decision_trace_id": decision_trace_id,
-        },
-    }
-
-
-def _stager(database: Path) -> DurableEvidenceStager:
-    return DurableEvidenceStager(
-        database,
-        "camera-a",
-        "facility-a",
-        None,
-        1,
-        lambda: 1.0,
-        _MANIFEST,
-    )
 
 
 def test_sqlite_contention_waits_without_losing_accepted_event_trace(tmp_path: Path) -> None:
@@ -245,60 +221,78 @@ def test_per_frame_person_row_and_byte_bounds_reject_observably(tmp_path: Path) 
     assert writer.stats().rejected_frames == 2
 
 
-def test_event_link_keeps_analysis_and_clip_has_direct_transactional_trace_ref(
+def test_event_decision_basis_survives_detail_retention_atomically(
     tmp_path: Path,
 ) -> None:
-    database = tmp_path / "edge.sqlite3"
-    _seed(database, ("boot-a", "camera-a"))
-    writer = BoundedTraceWriter(database, _policy(max_frames_per_camera=1, max_total_frames=1))
+    writer = BoundedTraceWriter(
+        tmp_path / "detail-cache", _policy(max_frames_per_camera=1, max_total_frames=1)
+    )
     event_frame = _frame(1, triggered=True)
     writer.start()
     try:
         assert writer.submit(event_frame, require_persisted=True)
-        _stager(database).stage(_event(event_frame.decisions[0].trace_id))
-        _stager(database).complete("event-a", "clip-a")
+        decision = event_frame.decisions[0]
+        queue = DeliveryQueue(tmp_path / "delivery")
+        assert queue.try_admit(
+            EventEntry(
+                edge_event_id="event-a",
+                event_type="fall",
+                detected_at="2026-08-13T00:00:01Z",
+                camera_id="camera-a",
+                facility_id="facility-a",
+                decision_trace=decision.trace_id.encode(),
+                values=b'{"fall_probability":0.9}',
+            )
+        ).accepted
         assert writer.submit(_frame(2, source_time=2.0), require_persisted=True)
     finally:
         writer.stop()
 
     recovered = writer.recover_camera("camera-a")
-    assert event_frame.analysis.trace_id in {frame.trace_id for frame in recovered.frames}
+    assert event_frame.analysis.trace_id not in {frame.trace_id for frame in recovered.frames}
     assert recovered.truncation.pruned_frames >= 1
-    with sqlite3.connect(database) as connection:
-        assert connection.execute(
-            "SELECT clip_id, edge_event_id, decision_trace_id FROM evidence_clip_trace_refs"
-        ).fetchall() == [("clip-a", "event-a", event_frame.decisions[0].trace_id)]
+    entry = next(queue.entries())
+    assert entry["edge_event_id"] == "event-a"
+    assert entry["decision_trace_b64"]
+    assert entry["values_b64"]
 
 
-def test_clip_trace_binding_rolls_back_without_a_resolving_event_trace(tmp_path: Path) -> None:
-    database = tmp_path / "edge.sqlite3"
-    _seed(database, ("boot-a", "camera-a"))
-    no_trace = {
-        "edge_event_id": "event-a",
-        "event_type": "fall",
-        "probability": 0.9,
-        "detected_at": "2026-08-13T00:00:01Z",
-    }
-    _stager(database).stage(no_trace)
+def test_delivery_queue_refuses_conflicting_event_basis(tmp_path: Path) -> None:
+    queue = DeliveryQueue(tmp_path / "delivery")
+    first = EventEntry(
+        edge_event_id="event-a",
+        event_type="fall",
+        detected_at="2026-08-13T00:00:01Z",
+        camera_id="camera-a",
+        facility_id="facility-a",
+        decision_trace=b'{"reason":"fall-onset"}',
+        values=b'{"fall_probability":0.9}',
+    )
+    assert queue.try_admit(first).accepted
+    conflicting = EventEntry(
+        edge_event_id="event-a",
+        event_type="fall",
+        detected_at="2026-08-13T00:00:01Z",
+        camera_id="camera-a",
+        facility_id="facility-a",
+        decision_trace=b'{"reason":"fall-onset"}',
+        values=b'{"fall_probability":0.8}',
+    )
+    result = queue.try_admit(conflicting)
+    assert not result.accepted
+    assert result.fault is not None
 
-    with pytest.raises(ValueError, match="clip requires a decision trace"):
-        _stager(database).complete("event-a", "clip-a")
-    with sqlite3.connect(database) as connection:
-        assert connection.execute("SELECT count(*) FROM evidence_clips").fetchone() == (0,)
-        assert connection.execute("SELECT state FROM evidence_events").fetchone() == ("STAGED",)
 
-
-def test_trace_camera_must_match_boot_manifest_camera_set(tmp_path: Path) -> None:
-    database = tmp_path / "edge.sqlite3"
-    _seed(database, ("boot-a", "camera-a"))
-    writer = BoundedTraceWriter(database, _policy())
+def test_detail_cache_is_camera_local_without_runtime_database(tmp_path: Path) -> None:
+    writer = BoundedTraceWriter(tmp_path / "detail-cache", _policy())
     writer.start()
     try:
-        with pytest.raises(TracePersistenceError, match="camera.*runtime manifest"):
-            writer.submit(_frame(1, camera_id="camera-b"), require_persisted=True)
+        assert writer.submit(_frame(1, camera_id="camera-b"), require_persisted=True)
     finally:
         writer.stop()
-    assert writer.recover_camera("camera-b").frames == ()
+    assert [frame.frame_key[1] for frame in writer.recover_camera("camera-b").frames] == [
+        "camera-b"
+    ]
 
 
 def test_duplicate_submission_counts_only_the_exact_insert(tmp_path: Path) -> None:
@@ -330,9 +324,8 @@ def test_stop_drains_accepted_work_and_rejects_every_later_submission(tmp_path: 
     assert writer.stats().rejected_frames == 1
 
 
-def test_provenance_history_is_bounded_without_deleting_trace_references(tmp_path: Path) -> None:
+def test_provenance_history_is_published_for_backend_retention(tmp_path: Path) -> None:
     database = tmp_path / "edge.sqlite3"
-    migrate_database(database)
     store = AppliedRuntimeManifestStore(
         database,
         ProvenanceRetentionPolicy(max_boots=2, max_boots_per_camera=1),
@@ -344,13 +337,7 @@ def test_provenance_history_is_bounded_without_deleting_trace_references(tmp_pat
             applied_at=f"2026-08-13T00:00:0{index}Z",
         )
 
-    with sqlite3.connect(database) as connection:
-        assert connection.execute("SELECT count(*) FROM runtime_manifest_boots").fetchone() == (1,)
-        boot = connection.execute("SELECT boot_instance_id FROM runtime_manifest_boots").fetchone()
-        assert boot == ("boot-2",)
-        assert connection.execute(
-            "SELECT pruned_boots, pruned_camera_bindings "
-            "FROM runtime_provenance_retention WHERE id=1"
-        ).fetchone() == (2, 2)
-        contents = connection.execute("SELECT count(*) FROM runtime_manifest_contents").fetchone()
-        assert contents == (1,)
+    entries = tuple(DeliveryQueue(tmp_path / "delivery-queue").entries())
+    assert len(entries) == 3
+    assert {entry["event_type"] for entry in entries} == {"runtime.manifest"}
+    assert all(entry["values_b64"] for entry in entries)

@@ -8,6 +8,11 @@ from threading import Barrier
 import pytest
 from fastapi.testclient import TestClient
 
+from backend.app.edge_db.connection import RuntimeActor, open_runtime_database
+from backend.app.edge_db.importer import LegacyDatabasePaths, import_legacy_databases
+from backend.app.edge_db.legacy_clip_recovery import LegacyClipRecovery
+from backend.app.edge_db.migrator import migrate_database
+from backend.app.edge_db.schema import MIGRATIONS, SchemaV17MigrationError
 from backend.app.features.evidence.record_store import (
     CentralEvidenceQuery,
     CentralEvidenceReviewStore,
@@ -15,11 +20,6 @@ from backend.app.features.evidence.record_store import (
     ReviewDisposition,
 )
 from backend.app.main import create_app, no_lifespan
-from shared.edge_db.connection import RuntimeActor, open_runtime_database
-from shared.edge_db.importer import LegacyDatabasePaths, import_legacy_databases
-from shared.edge_db.migrator import migrate_database
-from shared.edge_db.schema import MIGRATIONS
-from worker.pipeline.output.evidence.evidence_records import EvidenceRecordStore
 
 INCIDENT_ID = "incident:opaque/review"
 EVENT_ID = "event:opaque/review"
@@ -223,12 +223,10 @@ def test_review_relation_is_projected_by_worker_and_backend_and_survives_tombsto
         )
         connection.commit()
 
-    worker_record = EvidenceRecordStore(database).get(INCIDENT_ID)
     backend_record = CentralEvidenceQuery(database).get(INCIDENT_ID)
-    assert worker_record is not None and worker_record.review is not None
     assert backend_record is not None and backend_record.review is not None
-    assert worker_record.review.review_id == review.review_id
-    assert worker_record.review.version == 1
+    assert backend_record.review.review_id == review.review_id
+    assert backend_record.review.version == 1
     assert backend_record.review.disposition is ReviewDisposition.FALSE_POSITIVE
     assert backend_record.review.notes == "No resident identifiers."
     assert backend_record.retention_state == "PURGED"
@@ -281,7 +279,14 @@ def test_v9_migration_promotes_legitimate_label_and_classifies_every_orphan(
     with sqlite3.connect(database) as connection:
         connection.execute("PRAGMA foreign_keys = ON")
         _insert_incident_relation(connection)
-        connection.execute("INSERT INTO evidence_clips (clip_id) VALUES ('clip:no-incident')")
+        # An explicit terminal local_state, for the same reason this fixture
+        # ACKs its events below: the scenario under test is orphan
+        # classification, not an unfinalized recording, and the schema-17 drain
+        # gate refuses to migrate while any clip is still AWAITING_FINALIZE.
+        connection.execute(
+            "INSERT INTO evidence_clips (clip_id, local_state) "
+            "VALUES ('clip:no-incident', 'VERIFIED')"
+        )
         labels = (
             (CLIP_ID, "TRUE_POSITIVE", "legacy:operator", REVIEWED_AT),
             ("clip:no-incident", "FALSE_POSITIVE", "legacy:operator", REVIEWED_AT),
@@ -296,6 +301,9 @@ def test_v9_migration_promotes_legitimate_label_and_classifies_every_orphan(
             )
         connection.commit()
 
+    with sqlite3.connect(database) as connection:
+        connection.execute("UPDATE evidence_events SET state = 'ACKED'")
+        connection.commit()
     migrate_database(database)
 
     with sqlite3.connect(database) as connection:
@@ -339,12 +347,27 @@ def test_imported_legacy_label_without_central_incident_is_explicitly_classified
         connection.execute("INSERT INTO evidence_clips VALUES (?)", (CLIP_ID,))
 
     target = tmp_path / "edge" / "edge.sqlite3"
+    # The import refuses while the imported clip is still unfinalized, which is
+    # correct: an AWAITING_FINALIZE clip is unresolved evidence and the runbook
+    # requires clip recovery before the ownership cutover. Follow that sequence
+    # rather than asserting a migration an operator could not perform.
+    with pytest.raises(SchemaV17MigrationError, match="EDGE_DB_DRAIN_INCOMPLETE"):
+        import_legacy_databases(
+            target,
+            LegacyDatabasePaths(catalog, missing_connection, worker),
+        )
+
+    store = tmp_path / "clip-store"
+    (store / "clips" / ".staging").mkdir(parents=True)
+    LegacyClipRecovery(target, store).run()
+
     import_legacy_databases(
         target,
         LegacyDatabasePaths(catalog, missing_connection, worker),
     )
 
     with sqlite3.connect(target) as connection:
+        assert connection.execute("PRAGMA user_version").fetchone() == (17,)
         assert connection.execute(
             "SELECT classification FROM control_legacy_label_migrations WHERE source_clip_id = ?",
             (CLIP_ID,),

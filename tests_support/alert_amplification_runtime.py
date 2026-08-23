@@ -16,6 +16,7 @@ from fastapi.testclient import TestClient
 
 from backend.app.features.cameras.store import CameraRegistryStore
 from backend.app.features.clips.catalog import CatalogStore
+from backend.app.features.evidence.relay_projection import RelayEvidenceProjection
 from backend.app.main import create_app, no_lifespan
 from shared.events.edge_ingest_client import EdgeIngestClient
 from tests_support.local_backend_fixture import LocalBackendFixture
@@ -66,7 +67,7 @@ class ServedFixture:
         self._thread.join(timeout=10)
 
 
-def relay_client(origin: str, tmp_path: Path) -> TestClient:
+def relay_client(origin: str, tmp_path: Path, *, database: Path | None = None) -> TestClient:
     """Real ml-api app wired to a real EdgeIngestClient against ``origin``."""
 
     app = create_app(lifespan=no_lifespan)
@@ -82,6 +83,8 @@ def relay_client(origin: str, tmp_path: Path) -> TestClient:
     )
     app.state.camera_registry = registry
     app.state.catalog_store = CatalogStore.open(tmp_path / "relay-catalog.sqlite3")
+    if database is not None:
+        app.state.relay_evidence_projection = RelayEvidenceProjection(database)
     # Loopback http needs no insecure opt-in under the product's own hub policy.
     app.state.backend_ingest_client = EdgeIngestClient(
         events_url=f"{origin}/api/v1/events",

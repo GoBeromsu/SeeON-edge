@@ -28,12 +28,12 @@ import shared.events.evidence_export_client as evidence_export_client_module
 import worker.runtime.worker as worker_module
 from contracts.frame import Frame
 from contracts.runner import Image, RunnerResult
+from shared.events.delivery_queue import DeliveryQueue, EventEntry
 from shared.events.evidence_http_transport import HttpResult
 from worker.domains.module_definition import ComponentBinding
 from worker.pipeline.bus import BoundedFrameBus
 from worker.pipeline.ingest.lifecycle import IngestReporter
-from worker.pipeline.output.evidence.evidence_outbox import EvidenceOutbox
-from worker.pipeline.output.evidence.evidence_outbox_types import EdgeEventId, StagedEvent
+from worker.pipeline.output.evidence.evidence_outbox_types import EdgeEventId
 from worker.runtime.config import CameraRuntimeConfig, WorkerConfig
 from worker.runtime.lease import GpuLease
 from worker.runtime.profile.boot import BootContext
@@ -305,7 +305,7 @@ def _config_without_clip_section(*camera_ids: str) -> WorkerConfig:
 _EDGE_EVENT_ID = EdgeEventId("11111111-1111-4111-8111-111111111111")
 
 
-def _stage_one_admitted_event(outbox_path: Path) -> str:
+def _stage_one_admitted_event(queue_directory: Path) -> str:
     payload_json = json.dumps(
         {
             "edge_event_id": _EDGE_EVENT_ID,
@@ -319,27 +319,23 @@ def _stage_one_admitted_event(outbox_path: Path) -> str:
         separators=(",", ":"),
         sort_keys=True,
     )
-    with EvidenceOutbox.open(outbox_path) as outbox:
-        outbox.stage(
-            StagedEvent(
-                edge_event_id=_EDGE_EVENT_ID,
-                detected_at="2026-08-01T00:00:00Z",
-                payload_json=payload_json,
-                queued_at=1.0,
-            )
+    admitted = DeliveryQueue(queue_directory).try_admit(
+        EventEntry(
+            edge_event_id=_EDGE_EVENT_ID,
+            event_type="fall_detected",
+            detected_at="2026-08-01T00:00:00Z",
+            camera_id="camera-a",
+            facility_id="facility-a",
+            decision_trace=b"{}",
+            values=payload_json.encode("ascii"),
         )
-        # Mirrors EvidenceEventSink.emit(): stage() alone leaves the row in
-        # the non-claimable STAGED state; complete() (here: no clip bound)
-        # transitions it to READY, the only state EvidenceSender.claim() polls.
-        outbox.mark_ready(_EDGE_EVENT_ID)
+    )
+    assert admitted.accepted
     return payload_json
 
 
 def _outbox_path(tmp_path: Path) -> Path:
-    # Matches the default `_evidence_outbox_path(state_dir)` filename -- the
-    # composition root always threads `state_dir=tmp_path` into `WorkerRuntime`
-    # (via `_runtime`), so this is where the real outbox lands.
-    return tmp_path / "worker-state.sqlite3"
+    return tmp_path / "delivery-queue"
 
 
 def _fake_capabilities_response() -> HttpResult:

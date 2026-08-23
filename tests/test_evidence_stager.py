@@ -4,12 +4,8 @@ import base64
 import json
 from pathlib import Path
 
-from worker.pipeline.output.evidence.evidence_outbox import (
-    ClaimLease,
-    ClipId,
-    EdgeEventId,
-    EvidenceOutbox,
-)
+from shared.events.delivery_queue import DeliveryQueue
+from worker.pipeline.output.evidence.evidence_outbox_types import EdgeEventId
 from worker.pipeline.output.evidence.evidence_stager import DurableEvidenceStager
 
 EVENT_ID = EdgeEventId("00000000-0000-4000-8000-000000000001")
@@ -39,9 +35,9 @@ def _event() -> dict[str, object]:
 
 
 def test_stager_commits_canonical_relay_payload_before_clip_binding(tmp_path: Path) -> None:
-    database = tmp_path / "evidence.sqlite3"
+    queue_directory = tmp_path / "delivery-queue"
     stager = DurableEvidenceStager(
-        database,
+        queue_directory,
         camera_id="camera-1",
         facility_id="facility-1",
         resident_id="resident-1",
@@ -50,43 +46,25 @@ def test_stager_commits_canonical_relay_payload_before_clip_binding(tmp_path: Pa
     )
 
     stager.stage(_event())
-    stager.complete(EVENT_ID, ClipId("clip-1"))
+    stager.complete(EVENT_ID, "clip-1")
 
-    with EvidenceOutbox.open(database) as outbox:
-        claim = outbox.claim(ClaimLease("sender", 100.0, 10.0))
-        assert outbox.ordered_event_ids(ClipId("clip-1")) == (EVENT_ID,)
-    assert claim is not None
-    payload = json.loads(claim.payload_json)
+    entries = tuple(DeliveryQueue(queue_directory).entries())
+    assert len(entries) == 1
+    entry = entries[0]
+    assert entry["kind"] == "EVENT"
+    assert entry["edge_event_id"] == EVENT_ID
+    payload = json.loads(base64.b64decode(str(entry["values_b64"])))
+    trace = json.loads(base64.b64decode(str(entry["decision_trace_b64"])))
     assert payload == {
-        "audit": {"config_version": 7, "model_version": "model-1"},
         "camera_id": "camera-1",
         "detected_at": "2026-07-16T00:00:00Z",
         "edge_event_id": EVENT_ID,
         "event_type": "fall",
-        "evidence": {
-            "camera_id": "camera-1",
-            "detected_at": "2026-07-16T00:00:00Z",
-            "edge_event_id": EVENT_ID,
-            "event_type": "fall",
-            "facility_id": "facility-1",
-            "probability": 0.93,
-        },
         "facility_id": "facility-1",
         "probability": 0.93,
         "resident_id": "resident-1",
-        "snapshot": {
-            "camera_id": "camera-1",
-            "captured_at": "2026-07-16T00:00:00Z",
-            "edge_event_id": EVENT_ID,
-            "mime_type": "image/jpeg",
-            "path": "snapshots/camera/2026-07-16/event-1.jpg",
-            "sha256": "abc123",
-            "size_bytes": 10,
-            "snapshot_id": "event-1",
-        },
-        "snapshot_jpeg_base64": base64.b64encode(b"jpeg-bytes").decode("ascii"),
     }
-    assert str(database) not in claim.payload_json
+    assert trace == {"config_version": 7, "model_version": "model-1"}
 
 
 def _envelope_less_event() -> dict[str, object]:
@@ -111,9 +89,9 @@ def test_stager_commits_envelope_less_payload_without_audit_or_snapshot_keys(
     of them either (residual coverage closed under todo 20 -- previously only
     inferred by inspection of the `isinstance` guards, not asserted).
     """
-    database = tmp_path / "evidence.sqlite3"
+    queue_directory = tmp_path / "delivery-queue"
     stager = DurableEvidenceStager(
-        database,
+        queue_directory,
         camera_id="camera-1",
         facility_id="facility-1",
         resident_id=None,
@@ -124,22 +102,17 @@ def test_stager_commits_envelope_less_payload_without_audit_or_snapshot_keys(
     stager.stage(_envelope_less_event())
     stager.complete(EVENT_ID, None)
 
-    with EvidenceOutbox.open(database) as outbox:
-        claim = outbox.claim(ClaimLease("sender", 100.0, 10.0))
-    assert claim is not None
-    payload = json.loads(claim.payload_json)
+    entry = next(DeliveryQueue(queue_directory).entries())
+    payload = json.loads(base64.b64decode(str(entry["values_b64"])))
     assert "audit" not in payload
     assert "snapshot_jpeg_base64" not in payload
     assert "snapshot" not in payload
-    assert "audit" not in payload["evidence"]
-    assert "snapshot_jpeg" not in payload["evidence"]
-    assert "snapshot" not in payload["evidence"]
 
 
 def test_stager_makes_event_without_clip_sendable(tmp_path: Path) -> None:
-    database = tmp_path / "evidence.sqlite3"
+    queue_directory = tmp_path / "delivery-queue"
     stager = DurableEvidenceStager(
-        database,
+        queue_directory,
         camera_id="camera-1",
         facility_id="facility-1",
         resident_id=None,
@@ -149,7 +122,5 @@ def test_stager_makes_event_without_clip_sendable(tmp_path: Path) -> None:
     stager.stage(_event())
     stager.complete(EVENT_ID, None)
 
-    with EvidenceOutbox.open(database) as outbox:
-        claim = outbox.claim(ClaimLease("sender", 100.0, 10.0))
-    assert claim is not None
-    assert claim.edge_event_id == EVENT_ID
+    entry = next(DeliveryQueue(queue_directory).entries())
+    assert entry["edge_event_id"] == EVENT_ID

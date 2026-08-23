@@ -14,14 +14,33 @@ import cv2
 import numpy as np
 
 from contracts.runner import Image
+from shared.detection_policies import parse_effective_policy
+from shared.events.replay_wire import MAX_REPLAY_BODY_BYTES as _REPLAY_BODY_LIMIT
+from shared.events.replay_wire import ReplayWireError, decode_replay_trace
+from worker.domains.fall import FallModelProtocol
 from worker.pipeline.output.live_view import LatestFrame, LatestFrameStore
 from worker.pipeline.output.overlay import OverlayMode
+from worker.pipeline.trace.models import (
+    AnalysisTrace,
+    OptionalNumber,
+    RecoveredCameraTrace,
+    TraceBed,
+    TraceComponent,
+    TraceKeypoint,
+    TracePerson,
+    TraceTruncation,
+)
+from worker.replay.engine import ReplayConfigurationError, ReplayRun, replay_recovered
 
 BOUNDARY: Final = b"frame"
 POLL_INTERVAL_SECONDS: Final = 0.05
 HEARTBEAT_INTERVAL_SECONDS: Final = 1.0
 MAX_PROBE_BODY_BYTES: Final = 8192
 MAX_POSE_BODY_BYTES: Final = 256
+# Derived from the trace retention bound in shared/events/replay_wire.py so a
+# full retained timeline can actually be transferred. A bare constant here
+# refused exactly the long windows replay exists for.
+MAX_REPLAY_BODY_BYTES: Final = _REPLAY_BODY_LIMIT
 # Bounded wait for the first frame after a stream connects. Viewer gating
 # (#48) means encoding does not start until this connection's counter
 # increment makes `has_viewers` true, so the first frame is not already
@@ -103,6 +122,7 @@ def build_http_server(
     bed_zone_recognizer: BedZoneRecognizer | None = None,
     derivative_control: DerivativeControl | None = None,
     clip_deletion_control: ClipDeletionControl | None = None,
+    replay_fall_model: FallModelProtocol | None = None,
     bed_zone_frame_timeout_s: float = BED_ZONE_FRAME_TIMEOUT_SECONDS,
 ) -> HTTPServer:
     class Handler(BaseHTTPRequestHandler):
@@ -129,6 +149,9 @@ def build_http_server(
             derivative = _derivative_identity(path)
             if derivative is not None:
                 self._handle_derivative("request", *derivative)
+                return
+            if path == "/replay":
+                self._handle_replay()
                 return
             if path != "/probe":
                 bed_zone_camera_id = _bed_zone_camera_id(path)
@@ -171,6 +194,36 @@ def build_http_server(
                 payload = {"ok": False, "error_class": "decode"}
             self._write_json(payload)
 
+        def _handle_replay(self) -> None:
+            if not _authorized_probe(self.headers.get("X-Edge-Relay-Token"), probe_token):
+                self.send_error(HTTPStatus.FORBIDDEN)
+                return
+            request = self._read_replay_body()
+            if request is None:
+                self.send_error(HTTPStatus.BAD_REQUEST)
+                return
+            try:
+                trace = decode_replay_trace(request["trace"])
+                recovered = _recovered_trace(trace.frames, trace.truncation)
+                policy = parse_effective_policy(request["policy"])
+                result = replay_recovered(
+                    camera_id=trace.camera_id,
+                    recovered=recovered,
+                    module_id=_replay_module_id(request),
+                    policy=policy,
+                    fall_model=replay_fall_model,
+                )
+            except ReplayWireError:
+                self.send_error(HTTPStatus.BAD_REQUEST)
+                return
+            except (ReplayConfigurationError, TypeError, ValueError) as error:
+                self._write_status_json(
+                    HTTPStatus.UNPROCESSABLE_ENTITY,
+                    {"status": "refused", "detail": str(error)},
+                )
+                return
+            self._write_status_json(HTTPStatus.OK, _replay_run_payload(result, trace.truncation))
+
         def do_DELETE(self) -> None:  # noqa: N802 - stdlib hook name
             path = urlsplit(self.path).path
             derivative = _derivative_identity(path)
@@ -205,6 +258,7 @@ def build_http_server(
                 self.send_error(HTTPStatus.SERVICE_UNAVAILABLE)
                 return
             try:
+                payload: dict[str, object] | None
                 if action == "request":
                     payload = derivative_control.request(clip_id, kind)
                     code = HTTPStatus.ACCEPTED
@@ -409,6 +463,24 @@ def build_http_server(
                 return _parse_overlay_mode(mode_value)
             return None
 
+        def _read_replay_body(self) -> dict[str, object] | None:
+            raw_length = self.headers.get("Content-Length")
+            if raw_length is None:
+                return None
+            try:
+                length = int(raw_length)
+            except ValueError:
+                return None
+            if length <= 0 or length > MAX_REPLAY_BODY_BYTES:
+                return None
+            try:
+                payload: object = json.loads(self.rfile.read(length).decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                return None
+            if not isinstance(payload, dict) or set(payload) != {"trace", "module_id", "policy"}:
+                return None
+            return payload
+
         def _write_mode_json(self, mode: OverlayMode) -> None:
             body = json.dumps({"mode": mode}, separators=(",", ":")).encode("utf-8")
             self.send_response(HTTPStatus.OK)
@@ -570,6 +642,247 @@ def _normalize_error_class(error_class: str | None) -> ProbeErrorClass:
     if error_class == "unsupported":
         return "unsupported"
     return "decode"
+
+
+def _recovered_trace(
+    frames: tuple[dict[str, object], ...], truncation: dict[str, object]
+) -> RecoveredCameraTrace:
+    return RecoveredCameraTrace(
+        frames=tuple(_analysis_trace(frame) for frame in frames),
+        decisions=(),
+        truncation=TraceTruncation(
+            handoff_dropped_frames=_integer(truncation, "handoff_dropped_frames"),
+            pruned_frames=_integer(truncation, "pruned_frames"),
+            persistence_failed_frames=_integer(truncation, "persistence_failed_frames"),
+            retention_blocked_frames=_integer(truncation, "retention_blocked_frames"),
+            oldest_retained_seq=_nullable_integer(truncation, "oldest_retained_seq"),
+            newest_retained_seq=_nullable_integer(truncation, "newest_retained_seq"),
+            oldest_retained_key=_trace_key(truncation.get("oldest_retained_key")),
+            newest_retained_key=_trace_key(truncation.get("newest_retained_key")),
+            detail_unavailable_reason=None,
+        ),
+    )
+
+
+def _analysis_trace(frame: dict[str, object]) -> AnalysisTrace:
+    required = {
+        "trace_id", "frame_key", "pts", "source_time", "frame_width", "frame_height",
+        "bed_region_provenance", "persons", "beds", "components", "schema_version",
+    }
+    if set(frame) != required:
+        raise ReplayWireError("analysis frame has undeclared or missing fields")
+    persons = _objects(frame["persons"], "persons")
+    beds = _objects(frame["beds"], "beds")
+    components = _objects(frame["components"], "components")
+    return AnalysisTrace(
+        trace_id=_text(frame, "trace_id"),
+        frame_key=_required_trace_key(frame["frame_key"]),
+        pts=_optional_number(frame["pts"], "pts"),
+        source_time=_optional_number(frame["source_time"], "source_time"),
+        frame_width=_integer(frame, "frame_width"),
+        frame_height=_integer(frame, "frame_height"),
+        bed_region_provenance=_text(frame, "bed_region_provenance"),
+        persons=tuple(_trace_person(person) for person in persons),
+        beds=tuple(_trace_bed(bed) for bed in beds),
+        components=tuple(_trace_component(component) for component in components),
+        schema_version=_integer(frame, "schema_version"),
+    )
+
+
+def _trace_person(value: dict[str, object]) -> TracePerson:
+    if set(value) != {"ordinal", "track_id", "box", "confidence", "keypoints"}:
+        raise ReplayWireError("person has undeclared or missing fields")
+    return TracePerson(
+        ordinal=_integer(value, "ordinal"),
+        track_id=_optional_number(value["track_id"], "track_id"),
+        box=_box(value["box"], "person box"),
+        confidence=_number(value, "confidence"),
+        keypoints=tuple(
+            _trace_keypoint(item) for item in _objects(value["keypoints"], "keypoints")
+        ),
+    )
+
+
+def _trace_keypoint(value: dict[str, object]) -> TraceKeypoint:
+    if set(value) != {"index", "x", "y", "confidence"}:
+        raise ReplayWireError("keypoint has undeclared or missing fields")
+    return TraceKeypoint(
+        index=_integer(value, "index"),
+        x=_integer(value, "x"),
+        y=_integer(value, "y"),
+        confidence=_number(value, "confidence"),
+    )
+
+
+def _trace_bed(value: dict[str, object]) -> TraceBed:
+    if set(value) != {"ordinal", "box", "confidence", "provenance", "polygon"}:
+        raise ReplayWireError("bed has undeclared or missing fields")
+    polygon = value["polygon"]
+    if not isinstance(polygon, list):
+        raise ReplayWireError("bed polygon must be a list")
+    return TraceBed(
+        ordinal=_integer(value, "ordinal"),
+        box=_box(value["box"], "bed box"),
+        confidence=_number(value, "confidence"),
+        provenance=_text(value, "provenance"),
+        polygon=tuple(_point(point) for point in polygon),
+    )
+
+
+def _trace_component(value: dict[str, object]) -> TraceComponent:
+    if set(value) != {"ordinal", "qualified_id", "observation_state"}:
+        raise ReplayWireError("component has undeclared or missing fields")
+    return TraceComponent(
+        ordinal=_integer(value, "ordinal"),
+        qualified_id=_text(value, "qualified_id"),
+        observation_state=_text(value, "observation_state"),
+    )
+
+
+def _objects(value: object, name: str) -> list[dict[str, object]]:
+    if not isinstance(value, list) or not all(isinstance(item, dict) for item in value):
+        raise ReplayWireError(f"{name} must be a list of objects")
+    return value
+
+
+def _optional_number(value: object, name: str) -> OptionalNumber:
+    if not isinstance(value, dict) or set(value) != {"value", "missing_reason"}:
+        raise ReplayWireError(f"{name} must carry value and missing_reason")
+    present, missing = value["value"], value["missing_reason"]
+    if present is not None and (isinstance(present, bool) or not isinstance(present, int | float)):
+        raise ReplayWireError(f"{name} value must be numeric")
+    if missing is not None and not isinstance(missing, str):
+        raise ReplayWireError(f"{name} missing_reason must be text")
+    return OptionalNumber(present, missing)
+
+
+def _trace_key(value: object, *, required: bool = False) -> tuple[str, str, int, int] | None:
+    if value is None and not required:
+        return None
+    if (
+        not isinstance(value, list)
+        or len(value) != 4
+        or not isinstance(value[0], str)
+        or not isinstance(value[1], str)
+        or isinstance(value[2], bool)
+        or not isinstance(value[2], int)
+        or isinstance(value[3], bool)
+        or not isinstance(value[3], int)
+    ):
+        raise ReplayWireError("frame key is invalid")
+    return value[0], value[1], value[2], value[3]
+
+
+def _required_trace_key(value: object) -> tuple[str, str, int, int]:
+    key = _trace_key(value, required=True)
+    if key is None:
+        raise ReplayWireError("frame key is required")
+    return key
+
+
+def _box(value: object, name: str) -> tuple[int, int, int, int]:
+    if not isinstance(value, list) or len(value) != 4 or any(
+        isinstance(item, bool) or not isinstance(item, int) for item in value
+    ):
+        raise ReplayWireError(f"{name} is invalid")
+    return value[0], value[1], value[2], value[3]
+
+
+def _point(value: object) -> tuple[int, int]:
+    if (
+        not isinstance(value, list)
+        or len(value) != 2
+        or any(isinstance(item, bool) or not isinstance(item, int) for item in value)
+    ):
+        raise ReplayWireError("bed polygon point is invalid")
+    return value[0], value[1]
+
+
+def _integer(value: dict[str, object], name: str) -> int:
+    item = value.get(name)
+    if isinstance(item, bool) or not isinstance(item, int):
+        raise ReplayWireError(f"{name} must be an integer")
+    return item
+
+
+def _nullable_integer(value: dict[str, object], name: str) -> int | None:
+    item = value.get(name)
+    if item is None:
+        return None
+    if isinstance(item, bool) or not isinstance(item, int):
+        raise ReplayWireError(f"{name} must be an integer or null")
+    return item
+
+
+def _number(value: dict[str, object], name: str) -> float:
+    item = value.get(name)
+    if isinstance(item, bool) or not isinstance(item, int | float):
+        raise ReplayWireError(f"{name} must be numeric")
+    return float(item)
+
+
+def _text(value: dict[str, object], name: str) -> str:
+    item = value.get(name)
+    if not isinstance(item, str):
+        raise ReplayWireError(f"{name} must be text")
+    return item
+
+
+def _replay_module_id(request: dict[str, object]) -> str:
+    module_id = request["module_id"]
+    if not isinstance(module_id, str) or not module_id:
+        raise ReplayWireError("module_id is required")
+    return module_id
+
+
+def _replay_run_payload(run: ReplayRun, truncation: dict[str, object]) -> dict[str, object]:
+    return {
+        "camera_id": run.camera_id,
+        "module_qualified_id": run.module_qualified_id,
+        "policy_qualified_id": run.policy_qualified_id,
+        "effective_policy_id": run.effective_policy_id,
+        "event_count": run.event_count,
+        "reproducible": run.reproducible,
+        "non_reproducible_reason": run.non_reproducible_reason,
+        "boot_ids": list(run.boot_ids),
+        "truncation": truncation,
+        "frames": [
+            {
+                "frame_key": list(frame.frame_key),
+                "analysis_trace_id": frame.analysis_trace_id,
+                "events": [
+                    {
+                        "domain": event.domain,
+                        "event_type": event.event_type,
+                        "identity": event.identity,
+                        "camera_id": event.camera_id,
+                        "facility_id": event.facility_id,
+                        "time_sec": event.time_sec,
+                        "probability": event.probability,
+                        "person_id": event.person_id,
+                        "bed_id": event.bed_id,
+                        "audit": dict(event.audit) if event.audit is not None else None,
+                        "snapshot_jpeg": None,
+                    }
+                    for event in frame.events
+                ],
+                "snapshots": [
+                    {
+                        "reason": snapshot.reason,
+                        "previous_state": snapshot.previous_state,
+                        "current_state": snapshot.current_state,
+                        "triggered": snapshot.triggered,
+                        "track_id": snapshot.track_id,
+                        "bed_id": snapshot.bed_id,
+                        "values": dict(snapshot.values),
+                        "missing_values": dict(snapshot.missing_values),
+                    }
+                    for snapshot in frame.snapshots
+                ],
+            }
+            for frame in run.frames
+        ],
+    }
 
 
 __all__ = [

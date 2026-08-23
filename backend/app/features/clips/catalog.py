@@ -24,9 +24,9 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
+from backend.app.edge_db import EDGE_DATABASE_PATH
+from backend.app.edge_db.connection import RuntimeActor, open_runtime_database
 from backend.app.features.clips.store import ClipManifest, is_valid_clip_id
-from shared.edge_db import EDGE_DATABASE_PATH
-from shared.edge_db.connection import RuntimeActor, open_runtime_database
 
 if TYPE_CHECKING:
     from fastapi import FastAPI
@@ -812,6 +812,79 @@ class CatalogStore:
     def records(self, table: str) -> list[dict[str, Any]]:
         with self._serialized_operation():
             return [record.payload for record in self._records_with_columns_unlocked(table)]
+
+    def commit_artifact_receipt(
+        self, clip_id: str, sha256: str, size_bytes: int
+    ) -> tuple[str, int, bool]:
+        """Durably accept a locally verified primary artifact.
+
+        The existing API-owned ``clips`` catalog is the receipt projection:
+        content identity remains immutable while the explicit acceptance marker
+        is added atomically only after the backend has verified local bytes.
+        """
+        with self._serialized_operation():
+            connection = self._connection
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                row = connection.execute(
+                    "SELECT payload_json FROM clips WHERE clip_id = ?", (clip_id,)
+                ).fetchone()
+                if row is None:
+                    payload: dict[str, Any] = {
+                        "clip_id": clip_id,
+                        "sha256": sha256,
+                        "size_bytes": size_bytes,
+                        "state": "READY",
+                        "backend_receipt_accepted": True,
+                    }
+                    connection.execute(
+                        "INSERT INTO clips (clip_id, state, sha256, size_bytes, payload_json) "
+                        "VALUES (?, ?, ?, ?, ?)",
+                        (
+                            clip_id,
+                            "READY",
+                            sha256,
+                            size_bytes,
+                            json.dumps(payload, sort_keys=True, separators=(",", ":")),
+                        ),
+                    )
+                else:
+                    payload = json.loads(str(row[0]))
+                    if (
+                        not isinstance(payload, dict)
+                        or payload.get("sha256") != sha256
+                        or payload.get("size_bytes") != size_bytes
+                    ):
+                        _raise_conflict("clips", clip_id)
+                    if payload.get("backend_receipt_accepted") is not True:
+                        payload["backend_receipt_accepted"] = True
+                        connection.execute(
+                            "UPDATE clips SET payload_json = ? WHERE clip_id = ?",
+                            (json.dumps(payload, sort_keys=True, separators=(",", ":")), clip_id),
+                        )
+                connection.execute("COMMIT")
+                return sha256, size_bytes, True  # noqa: TRY300
+            except Exception:
+                if connection.in_transaction:
+                    connection.execute("ROLLBACK")
+                raise
+
+    def artifact_receipt(self, clip_id: str) -> tuple[str, int, bool] | None:
+        with self._serialized_operation():
+            row = self._connection.execute(
+                "SELECT sha256, size_bytes, payload_json FROM clips WHERE clip_id = ?", (clip_id,)
+            ).fetchone()
+            if row is None:
+                return None
+            payload = json.loads(str(row[2]))
+            if (
+                not isinstance(payload, dict)
+                or not isinstance(row[0], str)
+                or isinstance(row[1], bool)
+                or not isinstance(row[1], int)
+            ):
+                return None
+            return row[0], row[1], payload.get("backend_receipt_accepted") is True
 
     def integrity_check(self) -> str:
         with self._serialized_operation():

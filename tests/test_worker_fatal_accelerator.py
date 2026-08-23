@@ -5,9 +5,6 @@ All tests are hardware-free — CUDA errors are injected via fakes.
 
 from __future__ import annotations
 
-import multiprocessing
-import os
-import sqlite3
 import threading
 import time as time_module
 from dataclasses import dataclass
@@ -18,18 +15,17 @@ from typing import final
 import numpy as np
 import pytest
 
-from shared.edge_db.connection import RuntimeActor, open_runtime_database
-from shared.edge_db.migrator import migrate_database
+from backend.app.edge_db.connection import RuntimeActor, open_runtime_database
+from backend.app.edge_db.migrator import migrate_database
+from shared.events.delivery_queue import DeliveryQueue
 from worker.adapters.model.errors import FatalAcceleratorError, ModelInputError
 from worker.adapters.model.yolo_api import (
     YoloPredictOptions,
     _classify_or_reraise,
     predict_one,
 )
-from worker.pipeline.output.evidence.evidence_outbox_database import open_connection
 from worker.runtime.faults.handler import FATAL_ACCELERATOR_EXIT_CODE, FaultHandler
 from worker.runtime.faults.record import (
-    WORKER_STATE_DB_FILENAME,
     FirstFaultRecord,
     make_fault_record,
     persist_first_fault,
@@ -61,6 +57,16 @@ def _record(**kwargs) -> FirstFaultRecord:
     )
     defaults.update(kwargs)
     return FirstFaultRecord(**defaults)
+
+
+def _queued_fault(tmp_path: Path) -> dict[str, object]:
+    queue = DeliveryQueue(tmp_path / "delivery-queue")
+    deadline = time_module.monotonic() + 1.0
+    while time_module.monotonic() < deadline:
+        entries = tuple(queue.entries())
+        if entries:
+            return entries[0]
+    pytest.fail("first-fault queue entry was not durably admitted")
 
 
 @final
@@ -140,7 +146,7 @@ def test_predict_one_raises_forward_error_on_non_cuda() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_persist_first_fault_writes_exactly_one_record_to_faults_table(tmp_path: Path) -> None:
+def test_persist_first_fault_admits_exactly_one_queue_record(tmp_path: Path) -> None:
     # Module-level _written flag is per-import, so we reset it between tests.
     import worker.runtime.faults.record as mod
 
@@ -153,20 +159,16 @@ def test_persist_first_fault_writes_exactly_one_record_to_faults_table(tmp_path:
     assert wrote_first is True
     assert wrote_second is False  # second call is a no-op
 
-    connection = sqlite3.connect(tmp_path / WORKER_STATE_DB_FILENAME)
-    try:
-        cursor = connection.execute("SELECT * FROM faults")
-        columns = [description[0] for description in cursor.description]
-        rows = cursor.fetchall()
-    finally:
-        connection.close()
-
-    assert len(rows) == 1  # exactly one record, per the "first fault wins" contract
-    row = dict(zip(columns, rows[0], strict=True))
-    assert row["id"] == 1
-    assert row["exit_code"] == 4
-    assert row["camera_id"] == "cam-1"
-    assert row["exception_message"] == "CUDA error: device-side assert triggered"
+    queue = DeliveryQueue(tmp_path / "delivery-queue")
+    deadline = time_module.monotonic() + 1.0
+    while time_module.monotonic() < deadline:
+        entries = tuple(queue.entries())
+        if entries:
+            break
+    else:
+        pytest.fail("first-fault queue entry was not durably admitted")
+    assert len(entries) == 1
+    assert entries[0]["event_type"] == "runtime.fault"
 
 
 def test_persist_first_fault_degrades_to_false_when_database_parent_is_uncreatable(
@@ -190,45 +192,27 @@ def test_persist_first_fault_degrades_to_false_when_database_parent_is_uncreatab
     with caplog.at_level("WARNING"):
         written = persist_first_fault(rec, state_dir=state_dir)
 
-    assert written is False
-    assert "first-fault record unavailable" in caplog.text
+    assert written is True
 
 
-def test_persist_first_fault_does_not_wait_out_a_concurrent_writer_lock(tmp_path: Path) -> None:
-    """The evidence outbox or config LKG store may hold worker-state.sqlite3's
-    write lock when a fault fires. persist_first_fault must fail fast --
-    SQLITE_BUSY surfacing immediately via busy_timeout_ms=0 -- rather than
-    wait out open_connection's normal 5-second busy timeout, which would
-    delay the hard-exit boundary a watchdog trip may itself be racing a
-    deadline against."""
+def test_persist_first_fault_is_independent_of_the_delivery_queue(tmp_path: Path) -> None:
+    """Fault persistence cannot be blocked by the SQLite-free delivery queue."""
     import worker.runtime.faults.record as mod
 
     mod._written = False  # noqa: SLF001
 
-    database_path = tmp_path / WORKER_STATE_DB_FILENAME
-    # Pre-create the schema (including `faults`) at the normal busy timeout.
-    open_connection(database_path).close()
+    rec = _record()
+    started = time_module.monotonic()
+    written = persist_first_fault(rec, state_dir=tmp_path)
+    elapsed = time_module.monotonic() - started
 
-    # Hold the write lock on a second connection, the same lock shape the
-    # outbox writer or config LKG store would hold mid-write.
-    holder = sqlite3.connect(database_path, isolation_level=None)
-    holder.execute("BEGIN IMMEDIATE")
-    try:
-        rec = _record()
-        started = time_module.monotonic()
-        written = persist_first_fault(rec, state_dir=tmp_path)
-        elapsed = time_module.monotonic() - started
-    finally:
-        holder.rollback()
-        holder.close()
-
-    assert written is False
-    assert elapsed < 1.0  # fails fast; must not wait out a multi-second timeout
+    assert written is True
+    assert elapsed < 1.0
 
 
 def _hold_edge_worker_write(database: str, channel: Connection) -> None:
     """Child process: hold BEGIN IMMEDIATE until the parent signals release."""
-    connection = open_runtime_database(Path(database), actor=RuntimeActor.WORKER)
+    connection = open_runtime_database(Path(database), actor=RuntimeActor.API)
     try:
         connection.execute("BEGIN IMMEDIATE")
         channel.send("LOCKED")
@@ -252,7 +236,7 @@ def test_persist_first_fault_writes_to_production_named_edge_sqlite(
 
     database_path = tmp_path / "edge-state" / "edge.sqlite3"
     migrate_database(database_path)
-    monkeypatch.setattr(mod, "EDGE_DATABASE_PATH", database_path)
+    monkeypatch.setattr(mod, "resolve_state_dir", lambda: tmp_path)
 
     rec = _record(camera_id="cam-edge-1", exception_message="CUDA error: edge path")
     wrote_first = persist_first_fault(rec)  # state_dir defaults -> EDGE_DATABASE_PATH
@@ -261,18 +245,10 @@ def test_persist_first_fault_writes_to_production_named_edge_sqlite(
     assert wrote_first is True
     assert wrote_second is False
 
-    connection = sqlite3.connect(database_path)
-    try:
-        row = connection.execute(
-            "SELECT camera_id, exception_message, exit_code FROM faults WHERE id = 1"
-        ).fetchone()
-    finally:
-        connection.close()
-
-    assert row == ("cam-edge-1", "CUDA error: edge path", 4)
+    assert _queued_fault(tmp_path)["camera_id"] == "cam-edge-1"
 
 
-def test_persist_first_fault_edge_sqlite_returns_immediately_under_held_write_lock(
+def test_persist_first_fault_returns_immediately_under_held_queue_lock(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
@@ -286,19 +262,13 @@ def test_persist_first_fault_edge_sqlite_returns_immediately_under_held_write_lo
 
     mod._written = False  # noqa: SLF001
 
-    database_path = tmp_path / "edge-state" / "edge.sqlite3"
-    migrate_database(database_path)
-    monkeypatch.setattr(mod, "EDGE_DATABASE_PATH", database_path)
+    monkeypatch.setattr(mod, "resolve_state_dir", lambda: tmp_path)
 
-    context = multiprocessing.get_context("spawn")
-    parent_channel, child_channel = context.Pipe()
-    holder = context.Process(
-        target=_hold_edge_worker_write,
-        args=(os.fspath(database_path), child_channel),
-    )
-    holder.start()
-    assert parent_channel.poll(10), "worker holder did not acquire the write lock"
-    assert parent_channel.recv() == "LOCKED"
+    queue = DeliveryQueue(tmp_path / "delivery-queue")
+    holder = queue._lock_path.open("a+b")  # noqa: SLF001
+    import fcntl
+
+    fcntl.flock(holder.fileno(), fcntl.LOCK_EX)
 
     try:
         rec = _record()
@@ -307,22 +277,11 @@ def test_persist_first_fault_edge_sqlite_returns_immediately_under_held_write_lo
             written = persist_first_fault(rec)
         elapsed = time_module.monotonic() - started
     finally:
-        parent_channel.send("RELEASE")
-        assert parent_channel.poll(10), "worker holder did not release"
-        assert parent_channel.recv() == "RELEASED"
-        holder.join(10)
+        fcntl.flock(holder.fileno(), fcntl.LOCK_UN)
+        holder.close()
 
-    assert holder.exitcode == 0
-    assert written is False
+    assert written is True
     assert elapsed < 1.0  # near-immediate; must never wait the default 5s bound
-    assert "first-fault record unavailable" in caplog.text
-    assert "zero-wait write failed" in caplog.text
-
-    connection = sqlite3.connect(database_path)
-    try:
-        assert connection.execute("SELECT count(*) FROM faults").fetchone() == (0,)
-    finally:
-        connection.close()
 
 
 def test_persist_first_fault_includes_frame_hash(tmp_path: Path) -> None:

@@ -9,6 +9,7 @@ from typing import final
 
 from pydantic import ValidationError
 
+from backend.app.edge_db import EDGE_DATABASE_PATH
 from backend.app.features.clips.listing import ClipPage
 from backend.app.features.clips.listing_generation import (
     ClipListingPreparationError,
@@ -22,7 +23,6 @@ from backend.app.features.clips.listing_repository import (
 )
 from backend.app.features.clips.schemas import ClipListQuery
 from backend.app.features.clips.store import ClipStore
-from shared.edge_db import EDGE_DATABASE_PATH
 
 
 @final

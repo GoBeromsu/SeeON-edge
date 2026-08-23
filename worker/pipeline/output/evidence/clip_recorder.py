@@ -58,6 +58,7 @@ class ClipRecorder:
         self._services = services
         self._queue: queue.Queue[RecorderMessage] = queue.Queue(maxsize=self.config.max_queue_size)
         self._thread: threading.Thread | None = None
+        self._lifecycle_lock = threading.Lock()
         self._stop_event = threading.Event()
         self._store_lock: ClipStoreLock | None = None
         self._actor: ClipActor | None = None
@@ -101,75 +102,80 @@ class ClipRecorder:
         )
 
     def start(self) -> None:
-        if self._thread is not None and self._thread.is_alive():
-            return
-        self._admission.set_accepting(False)
-        store_lock = ClipStoreLock.acquire(self.config.store_dir)
-        retained = False
-        try:
-            if self._startup_hook is not None:
-                self._startup_hook()
-            (self.config.store_dir / "segments").mkdir(parents=True, exist_ok=True)
-            (self.config.store_dir / "clips" / ".staging").mkdir(
-                parents=True,
-                exist_ok=True,
-            )
-            self._sweep_stale_staging()
-            self._rotate(force=True)
-            if self._services is None:
-                repository = PacketRingRepository(
-                    (),
-                    per_camera_limits=PacketRingLimits(
-                        self.config.packet_ring_max_packets,
-                        self.config.packet_ring_max_bytes_per_camera,
-                        self.config.pre_event_seconds
-                        + self.config.post_event_seconds
-                        + self.config.finalize_grace_seconds,
-                    ),
-                    global_max_bytes=self.config.packet_ring_global_max_bytes,
+        with self._lifecycle_lock:
+            if self._thread is not None and self._thread.is_alive():
+                return
+            self._admission.set_accepting(False)
+            store_lock = ClipStoreLock.acquire(self.config.store_dir)
+            retained = False
+            try:
+                if self._startup_hook is not None:
+                    self._startup_hook()
+                (self.config.store_dir / "segments").mkdir(parents=True, exist_ok=True)
+                (self.config.store_dir / "clips" / ".staging").mkdir(
+                    parents=True,
+                    exist_ok=True,
                 )
-                self._services = _default_services(self.config, repository)
-            for camera_id, fps in self._fps_by_camera.items():
-                self._services.coordinator.set_camera_fps(camera_id, fps)
-            self.stats.encoder = self._services.encoder_name
-            self._actor = ClipActor(
-                self.config,
-                self.stats,
-                ClipActorDependencies(
-                    coordinator=self._services.coordinator,
-                    publisher=self._services.publisher,
-                    close=self._admission.close,
-                    release=self._admission.release,
-                    cancel=self._admission.cancel,
-                    finalized=self._on_clip_finalized,
-                    encoder_name=self._services.encoder_name,
-                ),
-            )
-            self._store_lock = store_lock
-            self._stop_event.clear()
-            self._thread = threading.Thread(
-                target=self._run,
-                name="clip-recorder",
-                daemon=True,
-            )
-            self._admission.set_accepting(True)
-            self._thread.start()
-            retained = True
-        finally:
-            if not retained:
-                self._store_lock = None
-                store_lock.close()
+                self._sweep_stale_staging()
+                self._rotate(force=True)
+                if self._services is None:
+                    repository = PacketRingRepository(
+                        (),
+                        per_camera_limits=PacketRingLimits(
+                            self.config.packet_ring_max_packets,
+                            self.config.packet_ring_max_bytes_per_camera,
+                            self.config.pre_event_seconds
+                            + self.config.post_event_seconds
+                            + self.config.finalize_grace_seconds,
+                        ),
+                        global_max_bytes=self.config.packet_ring_global_max_bytes,
+                    )
+                    self._services = _default_services(self.config, repository)
+                for camera_id, fps in self._fps_by_camera.items():
+                    self._services.coordinator.set_camera_fps(camera_id, fps)
+                self.stats.encoder = self._services.encoder_name
+                self._actor = ClipActor(
+                    self.config,
+                    self.stats,
+                    ClipActorDependencies(
+                        coordinator=self._services.coordinator,
+                        publisher=self._services.publisher,
+                        close=self._admission.close,
+                        release=self._admission.release,
+                        cancel=self._admission.cancel,
+                        finalized=self._on_clip_finalized,
+                        encoder_name=self._services.encoder_name,
+                    ),
+                )
+                self._store_lock = store_lock
+                self._stop_event.clear()
+                thread = threading.Thread(
+                    target=self._run,
+                    name="clip-recorder",
+                    daemon=True,
+                )
+                self._admission.set_accepting(True)
+                thread.start()
+                self._thread = thread
+                retained = True
+            finally:
+                if not retained:
+                    self._store_lock = None
+                    store_lock.close()
 
     def stop(self, *, timeout: float = 5.0) -> None:
-        self._admission.set_accepting(False)
-        self._stop_event.set()
-        if self._thread is not None:
-            self._thread.join(timeout=timeout)
-        if self._thread is None or not self._thread.is_alive():
-            self._release_pending_messages()
-            if self._store_lock is not None:
-                self._store_lock.close()
-                self._store_lock = None
+        with self._lifecycle_lock:
+            self._admission.set_accepting(False)
+            self._stop_event.set()
+            thread = self._thread
+        if thread is not None:
+            thread.join(timeout=timeout)
+        with self._lifecycle_lock:
+            if self._thread is thread and (thread is None or not thread.is_alive()):
+                self._release_pending_messages()
+                if self._store_lock is not None:
+                    self._store_lock.close()
+                    self._store_lock = None
 
     def flush(self, *, timeout: float = 5.0) -> bool:
         thread = self._thread

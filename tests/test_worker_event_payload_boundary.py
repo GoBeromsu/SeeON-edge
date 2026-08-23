@@ -1,4 +1,4 @@
-"""Regression for the vendor-drift remediation (ADR-0004).
+"""Regression for the vendor-drift remediation (ADR-0006).
 
 A prior change on this branch mutated ``contracts.event.EventPayload`` from
 its pinned vendored ``Mapping`` alias into a worker-staging ``TypedDict``

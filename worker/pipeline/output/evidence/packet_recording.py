@@ -117,20 +117,40 @@ class PacketClipRecordingCoordinator:
                 ClipReasonCode.REMUX_FAILED,
                 exc.reason.value,
             )
+        # Detach everything the remux needs, then release the ring lease BEFORE
+        # remuxing. SourcePacket is immutable and already materialized, so the
+        # lease buys nothing here -- but holding it across the remux pins the
+        # oldest entries, which stops _trim_to_limits() from evicting, which
+        # makes the ring drop ARRIVING packets under lease backpressure. Those
+        # drops punch holes into the next clip window, and a hole makes the MP4
+        # muxer stretch the pre-gap packet's stts duration to the next survivor,
+        # which the remux verifier then correctly rejects. That is how this
+        # deployment reached 1053 clips stuck at WAITING and 1102 undelivered
+        # events. Releasing first is bitrate- and duration-independent: no
+        # capacity tuning can substitute for not holding the lease.
+        packets = selection.packets
+        configuration = selection.configuration
+        selected_start = selection.selected_start
+        selected_end = selection.selected_end
+        truncation_reasons = tuple(reason.value for reason in selection.truncations)
+        selection.close()
+
         try:
             artifact = self._remuxer.remux(
-                selection.packets,
-                selection.configuration,
+                packets,
+                configuration,
                 output_dir / "clip.mp4",
             )
-            artifact = replace(
-                artifact,
-                duration_s=max(float(selection.selected_end - selection.selected_start), 0.001),
-                selected_start_pts_sec=float(selection.selected_start),
-                selected_end_pts_sec=float(selection.selected_end),
-                truncation_reasons=tuple(reason.value for reason in selection.truncations),
+            return ClipReady(
+                clip_id,
+                replace(
+                    artifact,
+                    duration_s=max(float(selected_end - selected_start), 0.001),
+                    selected_start_pts_sec=float(selected_start),
+                    selected_end_pts_sec=float(selected_end),
+                    truncation_reasons=truncation_reasons,
+                ),
             )
-            return ClipReady(clip_id, artifact)
         except (ClipRemuxError, OSError) as error:
             LOGGER.warning(
                 "source packet clip remux failed: camera_id=%s error_type=%s",
@@ -142,10 +162,8 @@ class PacketClipRecordingCoordinator:
                 clip_id,
                 ClipReasonCode.REMUX_FAILED,
                 "SOURCE_PACKET_REMUX_FAILED",
-                tuple(reason.value for reason in selection.truncations),
+                truncation_reasons,
             )
-        finally:
-            selection.close()
 
     def close(self, camera_id: str) -> None:
         del camera_id

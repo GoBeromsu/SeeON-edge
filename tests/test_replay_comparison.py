@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from backend.app.edge_db.migrator import migrate_database
 from backend.app.features.qa.store import QaStore
-from shared.edge_db.migrator import migrate_database
 from worker.replay.comparison import MismatchReason, compare_runs
 from worker.replay.engine import ReplayFrameResult, ReplayRun
 from worker.types import BusinessEvent, DecisionTraceSnapshot

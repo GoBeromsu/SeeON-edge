@@ -8,9 +8,10 @@ from pathlib import Path
 import pytest
 import yaml
 
+from backend.app.edge_db.compatibility import CURRENT_SCHEMA_RANGE
+from backend.app.edge_db.migrator import migrate_database
 from shared.detection_policies import default_policy_bundle, make_effective_policy
-from shared.edge_db.compatibility import CURRENT_SCHEMA_RANGE
-from shared.edge_db.migrator import migrate_database
+from shared.events.delivery_queue import DeliveryQueue
 from worker.domains import DETECTION_MODULE_REGISTRY
 from worker.domains.module_definition import SharedComponentIdentity
 from worker.pipeline.output.evidence.evidence_stager import DurableEvidenceStager
@@ -463,7 +464,7 @@ def test_nvidia_manifest_requires_verified_driver_and_runtime_facts() -> None:
         )
 
 
-def test_manifest_store_and_event_reference_preserve_opaque_camera_identity_bytes(
+def test_manifest_queue_preserves_opaque_camera_identity_bytes(
     tmp_path: Path,
 ) -> None:
     camera_id = " \u2007camera/\u1100\u1161/e\u0301 "
@@ -482,38 +483,16 @@ def test_manifest_store_and_event_reference_preserve_opaque_camera_identity_byte
         boot_instance_id="boot:opaque-camera",
         applied_at="2026-08-13T00:00:00Z",
     )
-    assert store.latest_for_camera(camera_id) == manifest
-    assert store.latest_for_camera(camera_id.strip()) is None
+    entries = tuple(DeliveryQueue(database.parent / "delivery-queue").entries())
+    assert len(entries) == 1
+    import base64
 
-    stager = DurableEvidenceStager(
-        database_path=database,
-        camera_id=camera_id,
-        facility_id="facility-1",
-        resident_id=None,
-        config_version=42,
-        clock=lambda: 1.0,
-        runtime_manifest_sha256=manifest.sha256,
-    )
-    stager.stage(
-        {
-            "edge_event_id": "event:opaque-camera",
-            "event_type": "fall",
-            "probability": 0.9,
-            "detected_at": "2026-08-13T00:00:01Z",
-            "camera_id": camera_id,
-            "facility_id": "facility-1",
-            "evidence": {},
-        }
-    )
-    with sqlite3.connect(database) as connection:
-        encoded = connection.execute(
-            "SELECT payload_json FROM evidence_events WHERE edge_event_id = 'event:opaque-camera'"
-        ).fetchone()[0]
-    event_camera_id = json.loads(encoded)["camera_id"]
-    assert event_camera_id.encode("utf-8") == camera_id.encode("utf-8")
+    values = json.loads(base64.b64decode(str(entries[0]["values_b64"])))
+    queued_camera = json.loads(values["canonical_json"])["cameras"][0]["camera_id"]
+    assert queued_camera.encode() == camera_id.encode()
 
 
-def test_store_is_restart_safe_queryable_and_runtime_ddl_free(tmp_path: Path) -> None:
+def test_store_publishes_idempotent_manifest_envelopes_without_runtime_ddl(tmp_path: Path) -> None:
     database = tmp_path / "edge.sqlite3"
     migrate_database(database)
     manifest = _manifest()
@@ -523,22 +502,19 @@ def test_store_is_restart_safe_queryable_and_runtime_ddl_free(tmp_path: Path) ->
     second = store.persist(manifest, boot_instance_id="boot:two", applied_at="2026-08-13T00:01:00Z")
 
     assert first.manifest_sha256 == second.manifest_sha256 == manifest.sha256
-    assert store.get(manifest.sha256) == manifest
-    assert store.latest_for_camera("camera:opaque/a") == manifest
+    entries = tuple(DeliveryQueue(database.parent / "delivery-queue").entries())
+    assert len(entries) == 2
+    assert {entry["kind"] for entry in entries} == {"EVENT"}
     with sqlite3.connect(database) as connection:
         assert connection.execute("PRAGMA user_version").fetchone() == (
             CURRENT_SCHEMA_RANGE.maximum,
         )
-        assert connection.execute("SELECT count(*) FROM runtime_manifest_contents").fetchone() == (
-            1,
-        )
-        assert connection.execute("SELECT count(*) FROM runtime_manifest_boots").fetchone() == (2,)
-        assert connection.execute("SELECT count(*) FROM runtime_manifest_cameras").fetchone() == (
-            4,
-        )
+        assert connection.execute(
+            "SELECT count(*) FROM runtime_manifest_contents"
+        ).fetchone() == (0,)
 
 
-def test_emitted_event_carries_minimal_manifest_reference(tmp_path: Path) -> None:
+def test_manifest_publish_contains_canonical_manifest_reference(tmp_path: Path) -> None:
     database = tmp_path / "edge.sqlite3"
     migrate_database(database)
     manifest = _manifest()
@@ -547,35 +523,12 @@ def test_emitted_event_carries_minimal_manifest_reference(tmp_path: Path) -> Non
         boot_instance_id="boot:event",
         applied_at="2026-08-13T00:00:00Z",
     )
-    stager = DurableEvidenceStager(
-        database_path=database,
-        camera_id="camera:opaque/a",
-        facility_id="facility-not-projected-into-manifest",
-        resident_id=None,
-        config_version=42,
-        clock=lambda: 1.0,
-        runtime_manifest_sha256=manifest.sha256,
-    )
-    stager.stage(
-        {
-            "edge_event_id": "event:one",
-            "event_type": "fall",
-            "probability": 0.9,
-            "detected_at": "2026-08-13T00:00:01Z",
-            "camera_id": "camera:opaque/a",
-            "facility_id": "facility-not-projected-into-manifest",
-            "evidence": {},
-        }
-    )
+    import base64
 
-    with sqlite3.connect(database) as connection:
-        encoded = connection.execute(
-            "SELECT payload_json FROM evidence_events WHERE edge_event_id = 'event:one'"
-        ).fetchone()[0]
-    assert json.loads(encoded)["audit"] == {
-        "config_version": 42,
-        "runtime_manifest_sha256": manifest.sha256,
-    }
+    entry = next(DeliveryQueue(database.parent / "delivery-queue").entries())
+    values = json.loads(base64.b64decode(str(entry["values_b64"])))
+    assert values["manifest_sha256"] == manifest.sha256
+    assert values["canonical_json"] == manifest.canonical_json
 
 
 def test_event_stager_rejects_noncanonical_runtime_manifest_identity(
@@ -583,7 +536,7 @@ def test_event_stager_rejects_noncanonical_runtime_manifest_identity(
 ) -> None:
     with pytest.raises(ValueError, match="runtime_manifest_sha256"):
         DurableEvidenceStager(
-            database_path=tmp_path / "edge.sqlite3",
+            queue_directory=tmp_path / "delivery-queue",
             camera_id="camera:opaque/a",
             facility_id="facility-1",
             resident_id=None,
@@ -599,7 +552,7 @@ def test_store_refuses_boot_identity_reuse_for_different_manifest(tmp_path: Path
     store = AppliedRuntimeManifestStore(database)
     store.persist(_manifest(), boot_instance_id="boot:fixed", applied_at="2026-08-13T00:00:00Z")
 
-    with pytest.raises(AppliedRuntimeManifestError, match="boot instance identity"):
+    with pytest.raises(AppliedRuntimeManifestError, match="queue admission failed: conflict"):
         store.persist(
             _manifest(cameras=_cameras(threshold=0.72)),
             boot_instance_id="boot:fixed",

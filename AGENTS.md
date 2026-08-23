@@ -18,14 +18,14 @@ boundaries. Training lives in `eldercare-dataset-ops`. Local weights stay under
 | `front` | React/Vite SPA. Feature-sliced: `src/features/*`, `src/shared/{ui,api}`, `src/app`. |
 | `backend` | FastAPI gateway. Vertical slices under `app/features/*` (router + store). |
 | `worker` | RTSP inference client. Layers: types / interfaces / adapters / pipeline / domains / runtime. |
-| `shared` | `shared.events` (backend↔worker wire) and `shared.edge_db` (SQLite contracts). |
-| `contracts` | ADR-0004 canonical typed-vocabulary leaf; mirrored byte-for-byte into `eldercare-dataset-ops`. |
+| `shared` | `shared.events` (backend↔worker wire). |
+| `contracts` | ADR-0006 canonical typed-vocabulary leaf; mirrored byte-for-byte into `eldercare-dataset-ops`. |
 | `tests` | pytest contracts and boundary coverage. |
 
 `backend` and `worker` do not import each other. HTTP relay is the command/event
-boundary. On one co-located Linux edge unit they may also open
-`/var/lib/seeon-state/edge.sqlite3` through `shared.edge_db`, with disjoint
-table-family writers. That file is persistence, never polling IPC.
+boundary. The backend alone opens `/var/lib/seeon-state/edge.sqlite3` through
+`backend.app.edge_db`; the worker has no database. That file is persistence,
+never polling IPC.
 
 Directory names are `front`/`backend`/`worker`. Deployment images keep the
 legacy identity: `ml-api` (`Dockerfile.backend`, `ML_API_`/`API_*`) and
@@ -47,7 +47,7 @@ GPU serving is in-process behind `worker/interfaces/serving.py`
 | Evidence | `worker/pipeline/output/evidence/` | Clip recorder, packet ring, snapshot store, durable stager, outbox. |
 | Dashboard | `front/src/app/App.tsx` | `AuthGate` + `Dashboard`. Pages: events, operations, settings. |
 | Event wire | `shared/events/` | Schemas, outbox, `edge_ingest_client.py` (facts + heartbeats to the Event API). |
-| SQLite foundation | `shared/edge_db/` | Schema, migrator, ownership. API writes `control_*`/`qa_*`; worker writes `runtime_*`/`evidence_*`/`derivative_*`; migrator alone writes `schema_*`. |
+| SQLite foundation | `backend/app/edge_db/` | Schema, migrator, and ownership. The backend writes every application table family; the migrator alone writes `schema_*`. |
 
 Per-frame path after the coordinator: `worker/pipeline/camera_pipeline.py` and
 `worker/pipeline/perception/` into `worker/domains/` (fall, bed-exit). Read the
@@ -73,11 +73,10 @@ exports: `tests/test_contract_symbol_exports.py`. Docs live in
 
 ## Conventions
 
-- Keep `contracts` in sync with `eldercare-dataset-ops` (ADR-0004). Perception
+- Keep `contracts` in sync with `eldercare-dataset-ops` (ADR-0006). Perception
   math under `worker/pipeline/perception/features` stays worker-internal.
-- Worker→backend command/event traffic is one-way over relay HTTP. One local
-  `edge.sqlite3` is the approved persistence exception. Never poll it as IPC or
-  put it on NFS/NAS.
+- Worker→backend command/event traffic is one-way over relay HTTP. The backend's
+  local `edge.sqlite3` is never worker persistence or polling IPC.
 - Cameras are registered at runtime through the dashboard registry. Do not seed
   them from env, YAML, or a backend `cameras` pull.
 - Use `uv`. Re-run `lint-imports` after any import-boundary change.
@@ -97,7 +96,12 @@ exports: `tests/test_contract_symbol_exports.py`. Docs live in
 - 암묵 정책: model choice, encoder fallback, extract schedule, or result
   priority hidden in branch fall-through or dict insertion order. Lift the
   decision to an explicit owner (registry, config, declaration).
-- No JSON state stores. Mutable runtime state belongs in SQLite. Content-addressed
+- No JSON state stores for application data. Mutable application state belongs in
+  the backend-owned SQLite database (`backend/app/edge_db`); the inference-runtime
+  slot holds no database at all (ADR-0005) and uses only its approved bounded
+  file surfaces: the publish-once delivery queue, a verified bounded config read
+  cache, media-integrity sidecars, zero-payload lock inodes, and startup-purged
+  scratch. Content-addressed
   evidence files (`manifest.json`, snapshots) are the exception.
 - 침묵하는 `extra=` 로그: `worker/__main__.py` `basicConfig` renders
   `%(message)s` only. Operator-visible fields (camera_id) must live in the

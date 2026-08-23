@@ -16,7 +16,7 @@ Shared `ClipRecorder`, one actor thread, camera-local rings. `ClipAdmission` all
 
 ## Durable staging and outbox
 
-`EvidenceEventSink.emit_for_frame` stages the alert first, then binds an optional clip. Legacy event-only `emit` is rejected. `DurableEvidenceStager` writes a canonical payload into `EvidenceOutbox` under `BEGIN IMMEDIATE`. Same `edge_event_id` must replay identical bytes. Runtime-manifest and decision-trace refs require central `edge.sqlite3`. Events move STAGED to claimed to ACKED, retry, or permanent. Clips wait AWAITING_FINALIZE, then VERIFIED, UNAVAILABLE, or CORRUPT. Publish states: WAITING, IN_FLIGHT, PUBLISHED, PERMANENT, COMPATIBILITY.
+`EvidenceEventSink.emit_for_frame` stages the alert first, then binds an optional clip. Legacy event-only `emit` is rejected. `DurableEvidenceStager` writes a canonical payload into the publish-once `EvidenceOutbox`. Same `edge_event_id` must replay identical bytes. Events move STAGED to claimed to ACKED, retry, or permanent. Clips wait AWAITING_FINALIZE, then VERIFIED, UNAVAILABLE, or CORRUPT. Publish states: WAITING, IN_FLIGHT, PUBLISHED, PERMANENT, COMPATIBILITY.
 
 ## Runtime, reconcile, sender
 
@@ -36,7 +36,13 @@ A queue owns every accepted `FramePacket` until take, reject, or close. After ta
 
 ## SQLite vs files
 
-Production delivery, claims, retention intent, and incident lifecycle live in central `edge.sqlite3`; `worker-state.sqlite3` is legacy/test compatibility, not a co-equal production store. Runtime connections and writer ownership come from `shared.edge_db`. Existing evidence modules retain `ImmediateTransaction` only for compatibility; do not extend that helper or add another database. New central-state work follows `shared/edge_db/AGENTS.md`. Files own immutable bytes: `clips/<id>/clip.mp4`, `thumbnail.jpg`, `manifest.json`, staged snapshots, `derivatives/<incident>/<sha256>.mp4`. Media never lives in rows. Path is not identity; hash and size are.
+The worker keeps only the publish-once queue, media files, integrity sidecars,
+zero-payload locks, and startup-purged scratch. The backend owns delivery
+metadata, claims, retention intent, and incident lifecycle. Do not add a
+database or database connection to worker evidence. Files own immutable bytes:
+`clips/<id>/clip.mp4`, `thumbnail.jpg`, `manifest.json`, staged snapshots, and
+`derivatives/<incident>/<sha256>.mp4`. Media never lives in rows. Path is not
+identity; hash and size are.
 
 ## Focused Tests
 

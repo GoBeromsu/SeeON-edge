@@ -10,18 +10,18 @@ from pathlib import Path
 
 import pytest
 
-from shared.edge_db.compatibility import EdgeDatabaseError
-from shared.edge_db.connection import (
+from backend.app.edge_db.compatibility import EdgeDatabaseError
+from backend.app.edge_db.connection import (
     RuntimeActor,
     best_effort_zero_wait_write,
     open_runtime_database,
     write_transaction,
 )
-from shared.edge_db.migrator import migrate_database
+from backend.app.edge_db.migrator import migrate_database
 
 
 def _hold_worker_write(database: str, channel: Connection) -> None:
-    connection = open_runtime_database(Path(database), actor=RuntimeActor.WORKER)
+    connection = open_runtime_database(Path(database), actor=RuntimeActor.API)
     try:
         connection.execute("BEGIN IMMEDIATE")
         connection.execute("INSERT INTO runtime_contention VALUES (1, 'worker')")
@@ -83,7 +83,7 @@ def _prepare_database(path: Path) -> None:
         connection.close()
 
 
-@pytest.mark.parametrize("actor", [RuntimeActor.API, RuntimeActor.WORKER])
+@pytest.mark.parametrize("actor", [RuntimeActor.API, RuntimeActor.API])
 def test_public_migration_refuses_while_runtime_holds_deployment_lock(
     tmp_path: Path,
     actor: RuntimeActor,
@@ -126,7 +126,7 @@ def test_module_cli_refuses_while_runtime_holds_deployment_lock(tmp_path: Path) 
 
     try:
         completed = subprocess.run(
-            [sys.executable, "-m", "shared.edge_db", "--database", os.fspath(database_path)],
+            [sys.executable, "-m", "backend.app.edge_db", "--database", os.fspath(database_path)],
             check=False,
             capture_output=True,
             text=True,
@@ -201,7 +201,7 @@ def test_fatal_fault_best_effort_write_returns_without_waiting_for_writer(tmp_pa
 
     written = best_effort_zero_wait_write(
         database_path,
-        actor=RuntimeActor.WORKER,
+        actor=RuntimeActor.API,
         write=_zero_wait_fault_write,
     )
     assert written is False

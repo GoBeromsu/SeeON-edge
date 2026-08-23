@@ -3,13 +3,13 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
-import sqlite3
 import threading
 import time
 import uuid
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
+from functools import partial
 from pathlib import Path, PurePosixPath
 from time import monotonic
 from types import MappingProxyType
@@ -22,8 +22,7 @@ from contracts.decode_diagnostics import DecodeSelection
 from contracts.observation import BoundingBox
 from contracts.runner import BedRunnerResult, Image, RunnerProtocol
 from shared.detection_policies import LATEST_POLICY_VERSIONS
-from shared.edge_db import EDGE_DATABASE_PATH
-from shared.edge_db.compatibility import CURRENT_SCHEMA_RANGE
+from shared.events.delivery_queue import DeliveryQueue
 from shared.events.evidence_export_contract import DeliveryDisposition, DeliveryFailure
 from shared.events.evidence_http_transport import (
     bounded_request,
@@ -32,6 +31,7 @@ from shared.events.evidence_http_transport import (
 )
 from shared.events.relay_failure_log import RelayFailureLog
 from shared.events.schemas import build_audit_envelope
+from shared.release_identity import EDGE_DATABASE_SCHEMA_VERSION
 from worker.adapters.decode.cpu_av.adapter import CpuAvAdapter
 from worker.adapters.decode.cpu_av.models import CpuAvConfig
 from worker.adapters.decode.cpu_av.probe import probe_opencv_ffmpeg_capability
@@ -111,8 +111,8 @@ from worker.runtime.config import (
     WorkerConfig,
 )
 from worker.runtime.derivative_runtime import (
+    DerivativeCommandExecutor,
     DerivativeControlService,
-    DerivativeProductionRuntime,
 )
 from worker.runtime.faults.handler import FaultHandler
 from worker.runtime.faults.record import make_fault_record
@@ -141,13 +141,13 @@ from worker.runtime.profile.registry import (
 from worker.runtime.provenance import (
     AppliedDetectionWindow,
     AppliedRuntimeManifest,
-    AppliedRuntimeManifestStore,
     RuntimeEnvironmentFacts,
     build_applied_camera_state,
     build_applied_runtime_manifest,
 )
 from worker.runtime.provenance.environment import collect_runtime_environment_facts
 from worker.runtime.state_dir import resolve_state_dir
+from worker.runtime.telemetry.analysis_trace_sender import AnalysisTraceSender
 from worker.runtime.telemetry.runtime_diagnostics import WorkerDiagnostics
 from worker.runtime.telemetry.runtime_status_sender import (
     RelayRuntimeStatusTransport,
@@ -519,27 +519,14 @@ class _WindowGatedDecider:
         return events
 
 
-def _evidence_outbox_path(state_dir: Path) -> Path:
-    return (
-        EDGE_DATABASE_PATH
-        if state_dir == resolve_state_dir()
-        else state_dir / "worker-state.sqlite3"
-    )
+def _delivery_queue_dir(state_dir: Path) -> Path:
+    """Directory backing the publish-once delivery queue for this slot.
 
-
-def _derivative_schema_available(database_path: Path) -> bool:
-    if not database_path.is_file():
-        return False
-    try:
-        with sqlite3.connect(f"file:{database_path}?mode=ro", uri=True) as connection:
-            return (
-                connection.execute(
-                    "SELECT 1 FROM sqlite_schema WHERE type='table' AND name='derivative_jobs'"
-                ).fetchone()
-                is not None
-            )
-    except sqlite3.Error:
-        return False
+    The queue directory is its own capacity authority: count and byte totals are
+    reconstructed by scanning it under the queue's cross-process lock, so there
+    is no second persisted ledger to diverge from it after a crash.
+    """
+    return state_dir / "delivery-queue"
 
 
 def _verify_opencv_decode() -> VerifyResult:
@@ -813,7 +800,6 @@ class WorkerRuntime:
         self._clip_recorder: ClipRecorder | None = None
         self._packet_repository: PacketRingRepository | None = None
         self._evidence_export_runtime: EvidenceExportRuntime | None = None
-        self._derivative_runtime: DerivativeProductionRuntime | None = None
         self._derivative_control: DerivativeControlService | None = None
         self._clip_deletion_control: ClipDeletionControlService | None = None
         self._runtime_status_sender: RuntimeStatusSender | None = None
@@ -901,6 +887,13 @@ class WorkerRuntime:
         )
 
     def run(self) -> None:
+        self._trace_writer = BoundedTraceWriter(
+            self._state_dir / "runtime-analysis",
+            publisher=AnalysisTraceSender(
+                self.config.relay.url,
+                self.config.relay.token.get_secret_value(),
+            ).send,
+        )
         stages = bootstrap.named_stages(
             self._context,
             self._env,
@@ -925,6 +918,7 @@ class WorkerRuntime:
                     profile_boot_error=None,
                 )
             )
+            self._trace_writer.start()
             self._start_export_sender()
             self._start_derivative_runtime()
             self._start_runtime_status_sender()
@@ -978,10 +972,7 @@ class WorkerRuntime:
         for live_thread in self._live_view_pump_threads:
             live_thread.join(timeout=5.0)
         self._live_view_pump_threads = ()
-        if self._derivative_runtime is not None:
-            self._derivative_runtime.stop()
-            self._derivative_runtime = None
-            self._derivative_control = None
+        self._derivative_control = None
         self._clip_deletion_control = None
         for feeder in self._clip_frame_feeders:
             feeder.stop()
@@ -1013,12 +1004,15 @@ class WorkerRuntime:
             self._live_view is None
             and self._derivative_control is None
             and self._clip_deletion_control is None
+            and self.fall_model is None
         ):
             LOGGER.info("dev_mjpeg disabled; live view server not started")
             return
         server_config = self._mjpeg_config
         if (
-            self._derivative_control is not None or self._clip_deletion_control is not None
+            self._derivative_control is not None
+            or self._clip_deletion_control is not None
+            or self.fall_model is not None
         ) and not server_config.enabled:
             server_config = replace(server_config, enabled=True)
         self._mjpeg_server = start_optional_mjpeg_server(
@@ -1028,6 +1022,7 @@ class WorkerRuntime:
             bed_zone_recognizer=self._bed_zone_recognizer,
             derivative_control=self._derivative_control,
             clip_deletion_control=self._clip_deletion_control,
+            replay_fall_model=self.fall_model,
         )
         if self._mjpeg_server is None:
             LOGGER.warning(
@@ -1178,16 +1173,8 @@ class WorkerRuntime:
             ) from exc
 
     def _start_derivative_runtime(self) -> None:
-        database_path = _evidence_outbox_path(self._state_dir)
-        if not _derivative_schema_available(database_path):
-            return
-        runtime = DerivativeProductionRuntime(
-            database_path,
-            self._resolved_clip_store_dir(),
-        )
-        runtime.start()
-        self._derivative_runtime = runtime
-        self._derivative_control = DerivativeControlService(runtime)
+        executor = DerivativeCommandExecutor(self._resolved_clip_store_dir())
+        self._derivative_control = DerivativeControlService(executor)
 
     def _start_runtime_status_sender(self) -> None:
         """Start periodic runtime-status relay delivery (default 5s cadence).
@@ -1223,6 +1210,7 @@ class WorkerRuntime:
             facility_by_camera,
             transport,
             before_publish=self._refresh_runtime_status_telemetry,
+            delivery_queue=DeliveryQueue(_delivery_queue_dir(self._state_dir)),
         )
         try:
             sender.start()
@@ -1309,7 +1297,7 @@ class WorkerRuntime:
         self._shared_graph = graph
         fall_component = graph.components.get("fall-classifier")
         self.fall_model = (
-            cast("FallModelProtocol", fall_component)
+            fall_component
             if isinstance(fall_component, FallModelProtocol)
             else None
         )
@@ -1390,12 +1378,11 @@ class WorkerRuntime:
             outcomes.append(
                 bootstrap.run_camera_stage(
                     camera.camera_id,
-                    lambda camera=camera, built=built: built.append(
-                        self._build_camera(
-                            camera,
-                            self.shared_yolo,
-                            plans[camera.camera_id],
-                        )
+                    partial(
+                        self._append_built_camera,
+                        camera,
+                        plans[camera.camera_id],
+                        built,
                     ),
                 )
             )
@@ -1480,68 +1467,85 @@ class WorkerRuntime:
         boot: BootContext,
         plans: Mapping[str, CameraDetectionPlan],
     ) -> None:
-        database_path = _evidence_outbox_path(self._state_dir)
-        if database_path.name != "edge.sqlite3":
-            return
+        """Apply provenance after shared identities and camera plans settle.
+
+        The schema value identifies the release this worker targets, not a
+        database observed at runtime; workers deliberately do not open one.
+        Provenance is auxiliary, so failures must never prevent detection.
+        """
         graph = self._shared_graph
         if graph is None:
             raise RuntimeError("runtime provenance requires initialized components")
-        cameras = tuple(
-            build_applied_camera_state(
-                camera_id=camera.camera_id,
-                effective_decode_backend=resolve_decode_backend(boot.decode, camera.decode_backend),
-                ingest_target_fps=self.temporal_profile.target_fps,
-                module_qualified_ids=tuple(
-                    definition.qualified_id
-                    for definition in plans[camera.camera_id].definitions.values()
-                ),
-                schedule=plans[camera.camera_id].schedule,
-                detection_windows={
-                    module_id: (
-                        None
-                        if window is None
-                        else AppliedDetectionWindow(window.start, window.end, window.tz)
-                    )
-                    for module_id, window in plans[camera.camera_id].detection_windows.items()
-                },
-                policies=MappingProxyType(
-                    {
-                        definition.module_id: self.config.detection_policies.resolve(
-                            camera.camera_id,
-                            definition.module_id,
-                            definition.version,
-                        )
+        try:
+            cameras = tuple(
+                build_applied_camera_state(
+                    camera_id=camera.camera_id,
+                    effective_decode_backend=resolve_decode_backend(
+                        boot.decode, camera.decode_backend
+                    ),
+                    ingest_target_fps=self.temporal_profile.target_fps,
+                    module_qualified_ids=tuple(
+                        definition.qualified_id
                         for definition in plans[camera.camera_id].definitions.values()
-                    }
-                ),
-                bed_zone_polygon=camera.bed_zone_polygon,
-                bed_zone_image_width=camera.bed_zone_image_width,
-                bed_zone_image_height=camera.bed_zone_image_height,
+                    ),
+                    schedule=plans[camera.camera_id].schedule,
+                    detection_windows={
+                        module_id: (
+                            None
+                            if window is None
+                            else AppliedDetectionWindow(window.start, window.end, window.tz)
+                        )
+                        for module_id, window in plans[camera.camera_id]
+                        .detection_windows.items()
+                    },
+                    policies=MappingProxyType(
+                        {
+                            definition.module_id: self.config.detection_policies.resolve(
+                                camera.camera_id,
+                                definition.module_id,
+                                definition.version,
+                            )
+                            for definition in plans[camera.camera_id].definitions.values()
+                        }
+                    ),
+                    bed_zone_polygon=camera.bed_zone_polygon,
+                    bed_zone_image_width=camera.bed_zone_image_width,
+                    bed_zone_image_height=camera.bed_zone_image_height,
+                )
+                for camera in self.config.cameras
             )
-            for camera in self.config.cameras
-        )
-        manifest = build_applied_runtime_manifest(
-            boot=boot,
-            module_registry=self._module_registry,
-            module_versions=self._module_versions,
-            component_identities=graph.identities,
-            cameras=cameras,
-            config_version=self.config.version,
-            restart_generation=self._restart_generation,
-            detector_version=DETECTOR_VERSION,
-            environment=self._environment_facts_factory(boot, self._build_revision),
-            edge_database_schema_version=CURRENT_SCHEMA_RANGE.maximum,
-        )
-        applied_at = datetime.now(UTC).isoformat().replace("+00:00", "Z")
-        AppliedRuntimeManifestStore(database_path).persist(
-            manifest,
-            boot_instance_id=self._boot_instance_id,
-            applied_at=applied_at,
-        )
-        self._runtime_manifest = manifest
-        trace_writer = BoundedTraceWriter(database_path)
-        trace_writer.start()
-        self._trace_writer = trace_writer
+            self._runtime_manifest = build_applied_runtime_manifest(
+                boot=boot,
+                module_registry=self._module_registry,
+                module_versions=self._module_versions,
+                component_identities=graph.identities,
+                cameras=cameras,
+                config_version=self.config.version,
+                restart_generation=self._restart_generation,
+                detector_version=DETECTOR_VERSION,
+                environment=self._environment_facts_factory(boot, self._build_revision),
+                edge_database_schema_version=EDGE_DATABASE_SCHEMA_VERSION,
+            )
+        except Exception:  # noqa: BLE001 - provenance must not stop camera activation
+            self._runtime_manifest = None
+            LOGGER.warning(
+                "runtime provenance could not be applied; continuing without it",
+                exc_info=True,
+            )
+
+
+    def _append_built_camera(
+        self,
+        camera: CameraRuntimeConfig,
+        plan: CameraDetectionPlan | None,
+        built: list[CameraRuntimeContext],
+    ) -> None:
+        """Build one camera and append it, bound by value for the staged call.
+
+        Bound through :func:`functools.partial` rather than a closure so each
+        iteration's ``camera``/``plan``/``built`` are captured by value.
+        """
+        built.append(self._build_camera(camera, self.shared_yolo, plan))
 
     def _build_camera(
         self,
@@ -1602,10 +1606,9 @@ class WorkerRuntime:
         domain_audit = resolved_plan.domain_audit
         domain_deciders = resolved_plan.domain_deciders
         if self._trace_writer is not None:
-            self._camera_trace_captures[camera.camera_id] = self._build_trace_capture(
-                camera.camera_id,
-                resolved_plan,
-            )
+            capture = self._build_trace_capture(camera.camera_id, resolved_plan)
+            if capture is not None:
+                self._camera_trace_captures[camera.camera_id] = capture
         # One collector per camera, shared by the two consumers that need the
         # same per-frame snapshots: the alert overlay burned into evidence, and
         # the operator live view. Building it twice would read the same live
@@ -1652,9 +1655,7 @@ class WorkerRuntime:
             live_view_pump,
         )
 
-    def _build_live_view_pump(
-        self, camera_id: str, bus: BoundedFrameBus
-    ) -> LiveViewPump | None:
+    def _build_live_view_pump(self, camera_id: str, bus: BoundedFrameBus) -> LiveViewPump | None:
         """Give ``bus.live`` its consumer (todo 10).
 
         Ingest has always fanned every decoded frame into the latest-only
@@ -1694,6 +1695,7 @@ class WorkerRuntime:
         results = self._camera_inference_results.get(camera.camera_id)
         if results is None:
             raise RuntimeError("camera pipeline requires the batched pose coordinator")
+        trace_capture = self._camera_trace_captures.get(camera.camera_id)
         return CameraPipelinePump(
             camera.camera_id,
             results,
@@ -1703,23 +1705,38 @@ class WorkerRuntime:
             evidence_attacher=self._camera_evidence_attachers.get(camera.camera_id),
             diagnostics=self.diagnostics,
             max_frames=self._max_frames_per_camera,
-            observation_recorder=(
-                None if self._live_view is None else self._live_observations
-            ),
+            observation_recorder=(None if self._live_view is None else self._live_observations),
             debug_snapshots_provider=self._camera_debug_snapshots.get(camera.camera_id),
-            trace_capture=self._camera_trace_captures.get(camera.camera_id),
-            trace_writer=self._trace_writer,
+            # Both or neither. The pipeline rejects a half-composed pair, and a
+            # writer with nothing capturing for it has nowhere to draw from, so
+            # a camera whose capture degraded runs with tracing off entirely
+            # rather than failing its stage over an auxiliary capability.
+            trace_capture=trace_capture,
+            trace_writer=None if trace_capture is None else self._trace_writer,
         )
 
     def _build_trace_capture(
         self,
         camera_id: str,
         plan: CameraDetectionPlan,
-    ) -> TraceCapture:
+    ) -> TraceCapture | None:
+        """Build the analysis-trace capture, or return None when unavailable.
+
+        Trace capture feeds QA replay. It is auxiliary: a camera that cannot
+        capture traces still detects falls, which is the job. Raising here made
+        an optional capability fail the whole camera stage, so a runtime without
+        applied provenance degraded every camera to nothing. On a fall-detection
+        deployment that trade is never worth making.
+        """
         manifest = self._runtime_manifest
         graph = self._shared_graph
         if manifest is None or graph is None:
-            raise RuntimeError("trace capture requires applied runtime provenance")
+            LOGGER.warning(
+                "camera %s starts without analysis-trace capture: runtime provenance "
+                "is not applied yet, so QA replay will have no trace for it",
+                camera_id,
+            )
+            return None
         shared_digests = {
             identity.component_id: identity.artifact_digest for identity in graph.identities
         }
@@ -1777,7 +1794,7 @@ class WorkerRuntime:
 
     def _default_event_sink(self, camera: CameraRuntimeConfig) -> EventSink:
         stager = DurableEvidenceStager(
-            database_path=_evidence_outbox_path(self._state_dir),
+            queue_directory=_delivery_queue_dir(self._state_dir),
             camera_id=camera.camera_id,
             facility_id=camera.facility_id,
             resident_id=camera.resident_id,
@@ -1856,11 +1873,14 @@ class WorkerRuntime:
         try:
             return EvidenceExportRuntime.from_config(
                 store_dir=self._resolved_clip_store_dir(),
+                # The clip store is operator-configurable and may sit on a
+                # different volume from state, so the delivery queue is derived
+                # from state_dir independently rather than from the media store.
+                queue_directory=_delivery_queue_dir(self._state_dir),
                 relay_url=self.config.relay.url,
                 relay_token=self.config.relay.token.get_secret_value(),
                 probe_camera_id=probe_camera_id,
                 clip_export_enabled=self._clip_export_policy.enabled,
-                database_path=_evidence_outbox_path(self._state_dir),
             )
         except ValueError as exc:
             raise EvidenceDeliveryError(
@@ -1964,16 +1984,17 @@ class WorkerRuntime:
         recorder = ClipRecorder(
             clip_config,
             services=default_services(clip_config, packet_repository),
-            is_clip_held=None if evidence_runtime is None else evidence_runtime.is_clip_held,
-            begin_clip_purge=(
-                None if evidence_runtime is None else evidence_runtime.begin_clip_purge
-            ),
-            complete_clip_purge=(
-                None if evidence_runtime is None else evidence_runtime.complete_clip_purge
-            ),
-            fail_clip_purge=(
-                None if evidence_runtime is None else evidence_runtime.fail_clip_purge
-            ),
+            # Holds are backend intent now. The slot keeps no hold index, so it
+            # reports nothing as locally held and never initiates a deletion of
+            # its own. Deletion arrives as an authorized backend command that
+            # the slot executes and acknowledges with a receipt; the retention
+            # floor and hold-before-delete rule are enforced backend-side, so a
+            # slot that answered "always held" here would refuse work the
+            # backend has already authorized.
+            is_clip_held=lambda _clip_id: False,
+            begin_clip_purge=None,
+            complete_clip_purge=None,
+            fail_clip_purge=None,
             operator_delete_preflight=(
                 None
                 if evidence_runtime is None
@@ -2010,14 +2031,10 @@ class WorkerRuntime:
         self._clip_recorder = recorder
         self._clip_deletion_control = ClipDeletionControlService(
             delete_clip=recorder.delete_clip,
-            retention_state=(
-                (lambda _clip_id: None)
-                if evidence_runtime is None
-                else evidence_runtime.clip_retention_state
-            ),
-            complete_pending_purge=(
-                None if evidence_runtime is None else evidence_runtime.complete_clip_purge
-            ),
+            # Retention is backend intent. The slot holds no retention index, so
+            # it reports no local state and never completes a purge on its own.
+            retention_state=lambda _clip_id: None,
+            complete_pending_purge=None,
         )
         self.diagnostics.set_clip_recorder_status(ClipRecorderStatus(available=True))
 

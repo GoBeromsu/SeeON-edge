@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import sqlite3
 from enum import StrEnum
 
 
@@ -24,26 +23,11 @@ class RuntimeManifestReferenceError(RuntimeError):
         super().__init__(f"runtime manifest reference {manifest_sha256} is {failure.value}")
 
 
-def require_runtime_manifest_contents(
-    connection: sqlite3.Connection,
-    manifest_sha256: str,
-) -> None:
-    """Require an immutable contents row on the caller's active transaction."""
-    try:
-        row = connection.execute(
-            "SELECT 1 FROM runtime_manifest_contents WHERE manifest_sha256 = ?",
-            (manifest_sha256,),
-        ).fetchone()
-    except sqlite3.Error as error:
-        raise RuntimeManifestReferenceError(
-            manifest_sha256,
-            RuntimeManifestReferenceFailure.UNAVAILABLE,
-        ) from error
-    if row is None:
-        raise RuntimeManifestReferenceError(
-            manifest_sha256,
-            RuntimeManifestReferenceFailure.MISSING,
-        )
+def require_runtime_manifest_contents(_connection: object, manifest_sha256: str) -> None:
+    """Local runtime-manifest catalogs no longer exist in this slot."""
+    raise RuntimeManifestReferenceError(
+        manifest_sha256, RuntimeManifestReferenceFailure.UNAVAILABLE
+    )
 
 
 __all__ = [

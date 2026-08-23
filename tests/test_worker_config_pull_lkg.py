@@ -271,7 +271,7 @@ def test_pull_worker_config_returns_none_on_urllib_error() -> None:
 
 def test_load_on_fresh_central_edge_db_returns_none_not_migration_error(tmp_path) -> None:
     # Regression: on the production central edge DB path (edge.sqlite3),
-    # open_connection routes through shared.edge_db.open_runtime_database,
+    # open_connection routes through backend.app.edge_db.open_runtime_database,
     # which raises MigrationRequiredError (an EdgeDatabaseError, not a
     # sqlite3.Error) when the file does not exist yet. An unprovisioned
     # first boot must degrade to "no LKG" (None) so `--check-config`'s static

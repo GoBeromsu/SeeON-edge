@@ -71,6 +71,44 @@ def inspect_finalized_media(path: Path, *, ffprobe_bin: str = "ffprobe") -> Medi
     )
 
 
+def _media_length_ms(payload: dict[str, object], streams: object) -> int:
+    """How long the media actually runs, in milliseconds.
+
+    ``format.duration`` is not the answer. RTSP PTS carry the camera's uptime
+    origin, and for a clip cut 8237 seconds into such a stream ffprobe reported
+    ``format.duration=8271`` -- the distance from timeline zero, not the 34
+    seconds of footage. Measured against the ceiling below, that marked every
+    clip this deployment produced CORRUPT, which suppressed the manifest, which
+    kept every playable clip out of the catalogue: the operator saw nothing
+    while good footage sat on disk.
+
+    Subtracting ``start_time`` is not the answer either, because the value is
+    not consistently origin-inclusive -- a file written with an output
+    timestamp offset reports ``duration=34`` alongside ``start_time=8237``, and
+    the subtraction goes negative.
+
+    The video stream's own duration is unambiguous in both cases, so it wins
+    whenever ffprobe reports one.
+    """
+    if isinstance(streams, list):
+        for stream in streams:
+            if not isinstance(stream, dict) or stream.get("codec_type") != "video":
+                continue
+            raw = stream.get("duration")
+            if raw is None:
+                continue
+            seconds = float(raw)
+            if seconds > 0:
+                return round(seconds * 1000)
+    container = payload["format"]
+    if not isinstance(container, dict):
+        raise ClipEvidenceError(EvidenceReasonCode.CORRUPT, "ffprobe metadata invalid")
+    total = float(container["duration"])
+    origin = float(container.get("start_time") or 0.0)
+    remainder = total - origin
+    return round((remainder if remainder > 0 else total) * 1000)
+
+
 def _probe_media(descriptor: int, ffprobe_bin: str) -> tuple[int, str, str | None]:
     descriptor_root = "/proc/self/fd" if os.path.isdir("/proc/self/fd") else "/dev/fd"
     command = [
@@ -78,7 +116,7 @@ def _probe_media(descriptor: int, ffprobe_bin: str) -> tuple[int, str, str | Non
         "-v",
         "error",
         "-show_entries",
-        "stream=codec_type,codec_name,pix_fmt:format=duration",
+        "stream=codec_type,codec_name,pix_fmt,duration:format=duration,start_time",
         "-of",
         "json",
         f"{descriptor_root}/{descriptor}",
@@ -102,7 +140,7 @@ def _probe_media(descriptor: int, ffprobe_bin: str) -> tuple[int, str, str | Non
     try:
         payload = json.loads(completed.stdout)
         streams = payload["streams"]
-        duration_ms = round(float(payload["format"]["duration"]) * 1000)
+        duration_ms = _media_length_ms(payload, streams)
     except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
         raise ClipEvidenceError(EvidenceReasonCode.CORRUPT, "ffprobe metadata invalid") from exc
     if not isinstance(streams, list) or not all(isinstance(stream, dict) for stream in streams):

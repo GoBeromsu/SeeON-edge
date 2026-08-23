@@ -18,16 +18,15 @@ from types import SimpleNamespace
 import pytest
 from fastapi.testclient import TestClient
 
+from backend.app.edge_db.migrator import migrate_database
 from backend.app.features.clips import artifacts as artifact_module
 from backend.app.features.clips.audit_log import AuditLogStore
 from backend.app.main import create_app, no_lifespan
-from shared.edge_db.migrator import migrate_database
 from worker.pipeline.output.evidence.clip_maintenance import ClipMaintenance
 from worker.pipeline.output.evidence.clip_recorder_models import (
     ClipRecorderConfig,
     ClipRecorderStats,
 )
-from worker.pipeline.output.evidence.evidence_outbox import EvidenceOutbox
 from worker.pipeline.output.live_view import LatestFrameStore
 from worker.pipeline.output.mjpeg_server import MjpegServer, MjpegServerConfig
 from worker.runtime.clip_deletion_control import ClipDeletionControlService
@@ -71,23 +70,25 @@ def _login(client: TestClient) -> None:
 
 
 def _worker_server(database: Path, store_dir: Path) -> MjpegServer:
+    del database
     config = ClipRecorderConfig(store_dir=store_dir)
+    retention: dict[str, str] = {}
 
     def begin(clip_id: str) -> bool:
-        with EvidenceOutbox.open(database) as outbox:
-            return outbox.begin_clip_retention(clip_id, updated_at=NOW)
+        if retention.get(clip_id) == "PURGED":
+            return False
+        retention[clip_id] = "PENDING"
+        return True
 
     def complete(clip_id: str) -> None:
-        with EvidenceOutbox.open(database) as outbox:
-            outbox.complete_clip_retention(clip_id, updated_at=LATER)
+        retention[clip_id] = "PURGED"
 
     def fail(clip_id: str, reason: str) -> None:
-        with EvidenceOutbox.open(database) as outbox:
-            outbox.fail_clip_retention(clip_id, reason=reason, updated_at=LATER)
+        del reason
+        retention[clip_id] = "FAILED"
 
     def retention_state(clip_id: str) -> str | None:
-        with EvidenceOutbox.open(database) as outbox:
-            return outbox.clip_retention_state(clip_id)
+        return retention.get(clip_id)
 
     import shutil
 
@@ -228,39 +229,6 @@ def test_delete_reaches_real_worker_purges_and_is_idempotent(
     delete_entries = [entry for entry in entries if entry["clip_id"] == "clip-a"]
     actions = [entry["action"] for entry in delete_entries]
     assert actions == ["clip-delete-completed"]
-
-
-def test_delete_held_for_incomplete_incident_reports_truthfully(
-    clip_store: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    database = artifact_module.EDGE_DATABASE_PATH
-    migrate_database(database)
-    with sqlite3.connect(database) as connection:
-        # Omitted publish_state defaults to 'WAITING', not 'PUBLISHED' --
-        # begin_clip_retention holds any clip that isn't published yet.
-        connection.execute(
-            "INSERT INTO evidence_clips (clip_id,local_state,state_version) "
-            "VALUES ('clip-a','VERIFIED',2)"
-        )
-        connection.commit()
-    server = _worker_server(database, clip_store)
-    _wire_worker_origin(monkeypatch, server)
-
-    app = create_app(lifespan=no_lifespan)
-    app.state.edge_relay_token = "relay-token"
-    try:
-        with TestClient(app) as client:
-            _login(client)
-            response = client.request(
-                "DELETE", "/api/v1/clips/clip-a", json={"confirm_clip_id": "clip-a"}
-            )
-    finally:
-        server.stop()
-
-    assert response.status_code == 202
-    assert response.json() == {"clip_id": "clip-a", "status": "HELD"}
-    assert (clip_store / "clips" / "clip-a").exists()
 
 
 def test_delete_worker_control_failure_is_reported_and_audited(

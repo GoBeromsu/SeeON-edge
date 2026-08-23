@@ -4,8 +4,6 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
 
-from shared.edge_db.reviews import EvidenceReview
-
 
 class EvidenceLifecycle(StrEnum):
     STAGING = "STAGING"
@@ -70,7 +68,7 @@ class EvidenceRecord:
     clip_publish_attempt_count: int | None
     retention_state: str | None
     primary: PrimaryEvidence | None
-    review: EvidenceReview | None
+    review: object | None
 
 
 @dataclass(slots=True)

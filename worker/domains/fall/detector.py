@@ -131,6 +131,39 @@ class FallEventLatch:
         self._previous_fall = is_fall
         return onset
 
+
+    def release_onset(self, event: object | None = None) -> None:
+        """Re-open the rising edge for an onset that was never made durable.
+
+        `update_signal` consumes the edge by setting `_previous_fall`, so once an
+        onset has been reported the next positive frame is merely "still
+        falling" and emits nothing. If the envelope for that onset never reached
+        durable storage, leaving the edge consumed destroys the fall outright:
+        the decision cannot be re-derived from any later frame.
+
+        The exact state the onset advanced is undone -- the edge, the count, and
+        the first-event timestamp if this onset set it -- so a subsequent
+        positive frame reports the same fall rather than a different one.
+        """
+        # Fail closed on ownership. The caller is expected to route this only
+        # to the decider that produced the event, but an earlier version of
+        # that routing was a permissive `getattr` default that matched every
+        # decider, so a bed-exit failure re-opened a delivered fall and the next
+        # frame would report it twice. Checking here means a future caller
+        # cannot make that mistake silently: an event this latch did not produce
+        # is refused, and so is one whose ownership cannot be established.
+        if getattr(event, "domain", None) != "fall":
+            return
+        if getattr(event, "camera_id", None) != self.camera_id:
+            return
+        if not self._previous_fall:
+            return
+        self._previous_fall = False
+        if self.event_count > 0:
+            self.event_count -= 1
+        if self.event_count == 0:
+            self.first_event_sec = None
+
     def update_event(self, is_fall: bool, time_sec: float) -> FallEvent | None:
         if not self.update_signal(is_fall, time_sec):
             return None

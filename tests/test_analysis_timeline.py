@@ -5,6 +5,7 @@ from pathlib import Path
 
 import numpy as np
 
+from backend.app.edge_db.migrator import migrate_database
 from contracts.frame import Frame
 from contracts.observation import (
     BedRegionCacheState,
@@ -12,7 +13,6 @@ from contracts.observation import (
     BoundingBox,
     FrameObservation,
 )
-from shared.edge_db.migrator import migrate_database
 from worker.pipeline.analytics.composite import CompositeResult
 from worker.pipeline.trace import (
     BoundedTraceWriter,
@@ -174,12 +174,14 @@ def test_restart_recovery_preserves_only_the_bounded_camera_ring_and_reports_tru
     assert recovered.truncation.oldest_retained_seq == 2
     assert recovered.truncation.newest_retained_seq == 3
 
+    # The inference slot's bounded ring is process-local; it must not persist
+    # trace rows into the backend-owned database.
     connection = sqlite3.connect(database)
     try:
         assert connection.execute(
             "SELECT count(*) FROM runtime_analysis_traces WHERE camera_id = ?",
             ("opaque/camera:alpha",),
-        ).fetchone() == (2,)
+        ).fetchone() == (0,)
     finally:
         connection.close()
 

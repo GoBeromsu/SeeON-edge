@@ -11,33 +11,36 @@ Read the scoped `AGENTS.md` next to the code you are changing for the
 per-package import ceiling. Boundaries are enforced by import-linter
 (`uv run --group lint lint-imports`), not by convention.
 
+The runtime slot produces media and sends delivery records to the backend. The
+backend owns metadata, database access, and media access. The frontend consumes
+only the backend HTTP API.
+
 ## Co-located persistence boundary
 
 The one supported edge deployment is one local Linux host, one Compose release
 unit, one API process, and one worker process. Those processes remain
 import-independent and HTTP remains their command/event notification boundary.
-They may share persistence through one local
-`/var/lib/seeon-state/edge.sqlite3`; this exception does not permit direct
-function calls, SQLite polling as IPC, NFS/NAS placement, multiple workers, or
-independently released API/worker schemas. The database, `edge.sqlite3-wal`, and
-`edge.sqlite3-shm` must stay together in the same private `0700` local directory;
-the database is `0600`.
+The backend alone owns `/var/lib/seeon-state/edge.sqlite3`; the database,
+`edge.sqlite3-wal`, and `edge.sqlite3-shm` stay together in the same private
+`0700` local directory and the database is `0600`. The runtime slot has no
+database mount and never opens, migrates, or repairs a SQLite database.
 
-Only the one-shot `python -m shared.edge_db` migrator executes DDL or advances
-`PRAGMA user_version`. API and worker connections verify the machine-readable
+Only the one-shot `python -m backend.app.edge_db.importer` migrator executes DDL
+or advances `PRAGMA user_version`. Backend connections verify the machine-readable
 migration ledger and ownership map, enable foreign keys, use WAL with
 `synchronous=FULL` and a fixed 5000 ms busy timeout, and are guarded by a SQLite
-authorizer that rejects DDL and cross-family writes. Transactions are short:
-never hold one across encode, hash, fsync, HTTP, or other external work. Fatal
-fault persistence uses the explicit zero-wait best-effort connection path.
+authorizer that rejects DDL and unauthorized writes. Transactions are short:
+never hold one across hash, fsync, HTTP, or other external work.
 
 | Table prefix | Sole writer |
 | --- | --- |
 | `schema_*` | one-shot migrator |
-| `control_*`, `qa_*` | API |
-| `runtime_*`, `evidence_*`, `derivative_*` | worker |
+| every application table family | backend API |
 
-Schema compatibility is an explicit inclusive range, not an optimistic open:
+Schema compatibility is an explicit inclusive range, not an optimistic open.
+Schema 17 makes the backend the sole application writer. Registration refuses
+to apply schema 17 while undrained schema-16 evidence remains, emits
+`EDGE_DB_DRAIN_INCOMPLETE`, and leaves the schema-16 database byte-identical.
 
 | Database version relative to binary range | Runtime behavior |
 | --- | --- |
@@ -106,7 +109,7 @@ only package permitted to import everything.
 ## Types and the contracts boundary
 
 Worker-internal ports and envelopes live under `worker/`; cross-instance L0 data
-stays in `contracts`. `contracts/` is ADR-0004 vendored byte-for-byte from
+stays in `contracts`. `contracts/` is ADR-0006 vendored byte-for-byte from
 `eldercare-dataset-ops` and is snapshotted by `tests/test_vendor_drift.py`,
 including `contracts/AGENTS.md` — never edit anything under it as part of worker
 work, and never duplicate or shadow a vendored type inside `worker/`.

@@ -1,161 +1,115 @@
 # Edge clip consistency repair
 
-Use this runbook only for the central edge evidence database repair shipped with
-`repair_clip_consistency.py`. It reconciles `clip_events` from validated final
-READY/UNAVAILABLE manifests. It does not modify events, clip records, final
-manifests, or final media.
+Use this runbook only for the backend-owned evidence relation repair shipped as
+`scripts/ops/repair-clip-consistency.py`. It reconciles `clip_events` from
+validated final READY/UNAVAILABLE manifests. It does not modify event payloads,
+clip records, final manifests, or final media.
 
-Do not run apply or resume against a live worker. Keep the generated journal,
-backup, and receipts in the edge-state volume. Apply defaults to off; a plain
-invocation is a dry-run.
+The repair runs against the backend database connection. Never run it in the
+inference-runtime slot and never supply a database path: the runtime slot has
+no database.
 
-## 1. Select the production Compose command
+## 1. Prepare the backend maintenance command
 
-Run from the deployed repository directory and use the same ordered Compose
-files used to start Edge:
+Run from the deployed repository directory. The command is part of the backend
+image at `/app/scripts/ops/repair-clip-consistency.py`; use the `ml-api` image,
+not `ml-worker`. The backend has read-only access to the clip store, which is
+sufficient because manifests are the authority.
 
 ```sh
 cd /opt/eldercare-fall-ml
 export EDGE_DC='docker compose --env-file .env.edge.prod -f compose.edge.yaml'
-# CPU-only host, instead:
-# export EDGE_DC='docker compose --env-file .env.edge.prod -f compose.edge.yaml -f compose.edge.cpu.yaml'
 DC="$EDGE_DC"
 ```
 
-The selected `ml-worker` image must contain
-`/app/scripts/repair_clip_consistency.py`. The command intentionally uses the
-independent persisted paths from `compose.edge.yaml`:
+The paths are:
 
 ```text
-state database: /var/lib/seeon-state/edge.sqlite3
-clip store:     /var/lib/clip-store
-maintenance:    /var/lib/seeon-state/clip-consistency-maintenance
+backend database: /var/lib/seeon-state/edge.sqlite3
+clip store:       /var/lib/clip-store
+maintenance root: /var/lib/seeon-state/clip-consistency-maintenance
 ```
 
-Legacy worker-state.sqlite3 remains accepted when a site has not cut over; the
-tool fingerprints either the worker-state lineage or the central edge schema-15
-evidence relation surface. Prefer the central path on current deployments.
+Do not substitute the clip-store path for the maintenance root. Create the
+maintenance root as a trusted directory owned by the operator account with mode
+`0700` before proceeding.
 
-Do not substitute the clip-store path for the state database path.
+## 2. Quiesce the inference runtime and record proof
 
-## 2. Stop all edge database writers and create operator proof
-
-Stop the normal worker first. `--no-deps` on every one-off command prevents
-Compose from starting another service.
+Stop `ml-worker` so no event delivery can have an active lease. `--no-deps` on
+the one-off command prevents Compose from starting services.
 
 ```sh
 $DC stop ml-worker
-test -z "$($DC ps --status running -q ml-worker)"
+test -z "$( $DC ps --status running -q ml-worker )"
+```
 
-$DC run --rm --no-deps --entrypoint python ml-worker - <<'PY'
-import json
-import os
-import time
-from pathlib import Path
+Create `/var/lib/seeon-state/clip-consistency-maintenance/quiescence.json` on
+the backend state volume with mode `0600`. Its JSON object must contain exactly
+these values; `issued_at` and `expires_at` are Unix timestamps and their gap
+must be no more than 3600 seconds.
 
-root = Path('/var/lib/seeon-state/clip-consistency-maintenance')
-root.mkdir(mode=0o700, parents=True, exist_ok=True)
-os.chmod(root, 0o700)
-now = int(time.time())
-receipt = {
-    'format_version': 1,
-    'state_db': '/var/lib/seeon-state/edge.sqlite3',
-    'clip_store': '/var/lib/clip-store',
-    'stopped_service': 'ml-worker',
-    'stopped_db_writers': ['event', 'config', 'fault'],
-    'operator_uid': os.getuid(),
-    'issued_at': now,
-    'expires_at': now + 1800,
+```json
+{
+  "format_version": 1,
+  "state_db": "/var/lib/seeon-state/edge.sqlite3",
+  "clip_store": "/var/lib/clip-store",
+  "stopped_service": "ml-worker",
+  "stopped_db_writers": ["event", "config", "fault"],
+  "operator_uid": 0,
+  "issued_at": 0,
+  "expires_at": 0
 }
-path = root / 'quiescence.json'
-path.write_text(json.dumps(receipt, sort_keys=True) + '\n', encoding='utf-8')
-os.chmod(path, 0o600)
-PY
 ```
 
-The receipt is a short-lived assertion by the operator; it does not stop a
-process. If it expires, first re-check that `ml-worker` is stopped, then recreate
-it with the command above. Apply also acquires the clip-store lock and
-`BEGIN IMMEDIATE`; either lock failing is a refusal, not a reason to bypass the
-check.
+Use the UID of the account running the one-off backend command, not necessarily
+`0`. The tool rejects a receipt outside the maintenance root, with unexpected
+keys, unsafe ownership or permissions, expired timestamps, or mismatched paths.
 
-## 3. Dry-run
+## 3. Dry-run from the backend image
 
-```sh
-$DC run --rm --no-deps ml-worker \
-  python scripts/repair_clip_consistency.py \
-  --state-db /var/lib/seeon-state/edge.sqlite3 \
-  --clip-store /var/lib/clip-store
-```
-
-Save the single JSON receipt. Review `mismatch_clips`, `mismatch_tuples`,
-`sql_relations_deleted`, `sql_relations_inserted`, and `staging_to_delete`.
-Logical mismatch counters are intentionally distinct from SQL mutation counts.
-Any refusal must be investigated; do not edit a manifest or bypass schema,
-path, lease, lock, or integrity validation.
-
-## 4. Apply
-
-Use a new journal path. Never delete or overwrite an existing journal to force
-another apply.
+A plain invocation is a dry-run and does not mutate relations.
 
 ```sh
-$DC run --rm --no-deps ml-worker \
-  python scripts/repair_clip_consistency.py \
-  --state-db /var/lib/seeon-state/edge.sqlite3 \
+$DC run --rm --no-deps ml-api \
+  python scripts/ops/repair-clip-consistency.py \
   --clip-store /var/lib/clip-store \
-  --apply \
   --maintenance-root /var/lib/seeon-state/clip-consistency-maintenance \
-  --journal /var/lib/seeon-state/clip-consistency-maintenance/apply.json \
   --quiescence-receipt /var/lib/seeon-state/clip-consistency-maintenance/quiescence.json
 ```
 
-Apply creates an owner-only online SQLite backup and strict receipt before any
-relation mutation. The receipt binds all advertised source DB/WAL raw facts,
-the verified logical backup, and the exact schema. Success is a JSON receipt
-with `state` equal to `DONE`. Record its `backup_receipt_path` and
-`journal_path`.
+Record the JSON result. `state` must be `DRY_RUN`; investigate a refusal rather
+than bypassing it. The command validates database integrity and foreign keys,
+requires the evidence relation tables, rejects an active lease, and checks every
+manifest and referenced database record.
 
-## 5. Resume an interrupted apply
+## 4. Apply the reviewed plan
 
-Do not restart the worker when apply exits nonzero after creating a journal.
-Re-check quiescence, recreate the short-lived receipt, and run:
+Only after the dry-run counters and manifest scope have been reviewed, repeat
+with `--apply` while the quiescence receipt remains valid.
 
 ```sh
-$DC run --rm --no-deps ml-worker \
-  python scripts/repair_clip_consistency.py \
-  --state-db /var/lib/seeon-state/edge.sqlite3 \
+$DC run --rm --no-deps ml-api \
+  python scripts/ops/repair-clip-consistency.py \
   --clip-store /var/lib/clip-store \
-  --resume \
   --maintenance-root /var/lib/seeon-state/clip-consistency-maintenance \
-  --journal /var/lib/seeon-state/clip-consistency-maintenance/apply.json \
-  --quiescence-receipt /var/lib/seeon-state/clip-consistency-maintenance/quiescence.json
+  --quiescence-receipt /var/lib/seeon-state/clip-consistency-maintenance/quiescence.json \
+  --apply
 ```
 
-Resume is idempotent. A PREPARED journal first requires the schema and every
-non-`clip_events` logical row to match the complete preimage, then determines
-whether `clip_events` is at the exact before or after hash. DB_COMMITTED
-completes canonical quarantine deletion; DONE returns the existing receipt.
-ABORTED records a proven pre-commit rollback and is not converted into a new
-apply. UNKNOWN records an ambiguous commit whose durable state matched neither
-complete boundary and always fails closed. A `resume_conflict` or UNKNOWN state
-requires incident review with the journal, quarantine, and backup preserved.
+A successful apply returns `state: "DONE"` and writes a content-addressed
+receipt under the maintenance root. Retrying the same plan returns that receipt;
+do not delete it to force a second mutation.
 
-## 6. Verify and restart
+## 5. Restore delivery and verify through the backend
 
-Run the dry-run command from step 3 again. Success requires exit status 0 and
-`changes: 0`. Verify that the backup and receipt paths reported by apply remain
-inside the maintenance root, then restart only the normal worker:
+Start the worker only after the command has completed and retain the dry-run,
+apply result, and receipt with the incident record.
 
 ```sh
-$DC up -d --no-deps ml-worker
-container="$($DC ps -q ml-worker)"
-test -n "$container"
-$DC logs --tail 100 ml-worker
+$DC up -d --wait ml-worker
+$DC logs --since 3m ml-api
 ```
 
-Do not manually remove quarantine directories, journals, backups, or receipts.
-Do not restore a backup over a post-commit database merely because cleanup was
-interrupted; resume is the recovery path. A backup restore is a separate,
-approved incident operation performed with the worker stopped and the current
-database/WAL/SHM preserved for diagnosis.
+Verify incidents and clip availability in the dashboard or through the backend
+API. Do not inspect or repair SQLite from the worker.

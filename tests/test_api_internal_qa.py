@@ -4,12 +4,12 @@ from pathlib import Path
 
 import pytest
 
+from backend.app.edge_db.migrator import migrate_database
 from backend.app.features.qa.store import (
     QaConflictError,
     QaLabelDisposition,
     QaStore,
 )
-from shared.edge_db.migrator import migrate_database
 
 
 def _database(tmp_path: Path) -> Path:

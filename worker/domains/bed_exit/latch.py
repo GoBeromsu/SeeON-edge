@@ -58,6 +58,19 @@ class BedExitLatch:
         self._active_exits = event_keys
         return onset_events
 
+
+
+    def release_onset(self, person_id: int, bed_id: int) -> None:
+        """Drop one (person, bed) onset record so a later frame reports it again."""
+        key = (person_id, bed_id)
+        if key not in self._active_exits:
+            return
+        self._active_exits = self._active_exits - {key}
+        if self.event_count > 0:
+            self.event_count -= 1
+        if self.event_count == 0:
+            self.first_event_sec = None
+
     def coast(self) -> tuple[BedExitEvent, ...]:
         """Emit nothing and retain the last-known latch state during a gap."""
         return ()

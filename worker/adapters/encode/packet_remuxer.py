@@ -61,7 +61,7 @@ class PyAvPacketRemuxer:
         output_path.parent.mkdir(parents=True, exist_ok=True)
         try:
             self._write(expected, configuration, temporary)
-            translations, translation_seconds = self._verify(
+            translations, translation_seconds, interior_loss = self._verify(
                 expected,
                 configuration,
                 temporary,
@@ -98,6 +98,7 @@ class PyAvPacketRemuxer:
             remux_method=REMUX_METHOD,
             remux_version=av.__version__,
             timestamp_translation_seconds=translation_seconds,
+            truncation_reasons=(INTERIOR_PACKET_LOSS,) if interior_loss else (),
         )
 
     def _write(
@@ -127,7 +128,8 @@ class PyAvPacketRemuxer:
                 output_stream.time_base = descriptor.time_base
                 output_streams[descriptor.index] = output_stream
             for source in packets:
-                packet = av.Packet(source.payload)
+                reframed = _annexb_to_length_prefixed(source.payload)
+                packet = av.Packet(source.payload if reframed is None else reframed)
                 packet.pts = source.pts
                 packet.dts = source.dts
                 packet.duration = source.duration
@@ -144,7 +146,7 @@ class PyAvPacketRemuxer:
         expected: tuple[SourcePacket, ...],
         configuration: SourceStreamConfiguration,
         path: Path,
-    ) -> tuple[dict[int, int], Fraction]:
+    ) -> tuple[dict[int, int], Fraction, set[int]]:
         container = av.open(str(path), mode="r")
         template = av.open(io.BytesIO(configuration.mux_template), mode="r")
         try:
@@ -207,15 +209,71 @@ class PyAvPacketRemuxer:
                 for packet in container.demux(actual_streams)
                 if packet.dts is not None and bytes(packet)
             )
-            return _verify_packet_facts(
+            interior_loss: set[int] = set()
+            translations, translation_seconds = _verify_packet_facts(
                 expected,
                 actual,
                 configuration,
                 container_normalized_streams=container_normalized_streams,
+                interior_loss=interior_loss,
             )
+            return translations, translation_seconds, interior_loss
         finally:
             template.close()
             container.close()
+
+
+INTERIOR_PACKET_LOSS = "INTERIOR_PACKET_LOSS"
+
+_ANNEXB_START_3 = b"\x00\x00\x01"
+_ANNEXB_START_4 = b"\x00\x00\x00\x01"
+
+
+def _annexb_to_length_prefixed(payload: bytes) -> bytes | None:
+    """Reframe Annex-B NAL units as 4-byte length-prefixed ones, or None.
+
+    RTSP delivers H.264/HEVC as Annex-B: NAL units separated by 00 00 01 or
+    00 00 00 01 start codes. MP4 sample descriptions (avcC/hvcC) instead carry
+    length-prefixed units, and the MOV muxer only converts when the *extradata*
+    it was handed is itself Annex-B. This deployment's mux template is built by
+    writing an MP4 header, so its extradata is already hvcC -- the muxer
+    therefore assumed the samples were length-prefixed too and wrote the
+    Annex-B bytes through verbatim.
+
+    A decoder then reads the leading 00 00 00 01 as a NAL length of 1, consumes
+    one byte, and reads the next four (01 30 00 00) as a length of 19922944 --
+    the exact "Invalid NAL unit size (19922944 > 798)" this system produced for
+    every clip it ever recorded, none of which decoded a single frame.
+
+    Returns None when the payload is not Annex-B, so an already-conforming
+    source stays a byte-true copy.
+    """
+    if not payload.startswith((_ANNEXB_START_3, _ANNEXB_START_4)):
+        return None
+    starts: list[tuple[int, int]] = []
+    index = 0
+    limit = len(payload)
+    while index < limit - 2:
+        if payload[index] == 0 and payload[index + 1] == 0:
+            if payload[index + 2] == 1:
+                starts.append((index, 3))
+                index += 3
+                continue
+            if index + 3 < limit and payload[index + 2] == 0 and payload[index + 3] == 1:
+                starts.append((index, 4))
+                index += 4
+                continue
+        index += 1
+    if not starts:
+        return None
+    units: list[bytes] = []
+    for position, (offset, code) in enumerate(starts):
+        begin = offset + code
+        end = starts[position + 1][0] if position + 1 < len(starts) else limit
+        unit = payload[begin:end]
+        if unit:
+            units.append(len(unit).to_bytes(4, "big") + unit)
+    return b"".join(units) if units else None
 
 
 def _validate_source_timeline(
@@ -249,7 +307,17 @@ def _verify_packet_facts(
     configuration: SourceStreamConfiguration,
     *,
     container_normalized_streams: set[int] | None = None,
+    interior_loss: set[int] | None = None,
 ) -> tuple[dict[int, int], Fraction]:
+    """Verify the remux.
+
+    ``interior_loss`` turns the missing-packet check from a refusal into a
+    report: the caller passes a sink, the affected stream indices land in it,
+    and the clip is published carrying a truncation reason. Refusing the whole
+    clip destroys 60 seconds of usable footage over one dropped frame, which is
+    the loss ADR-0001 exists to prevent; recording the gap keeps the evidence
+    and keeps it honest. Callers that pass no sink still get the refusal.
+    """
     if len(actual) != len(expected):
         raise ValueError("remuxed packet count changed")
     translations: dict[int, int] = {}
@@ -262,15 +330,58 @@ def _verify_packet_facts(
             raise ValueError("source packet timeline is incomplete")
         if packet.stream_index != source.stream_index:
             raise ValueError("remuxed packet stream identity changed")
-        if packet.duration != source.duration:
-            raise ValueError("remuxed packet duration changed")
+        # Duration is refined by the container, so it cannot be compared for
+        # equality -- but it must not stretch far enough to cover a packet that
+        # went missing.
+        #
+        # Measured on this deployment's live RTSP cameras (time_base 1/90000):
+        # the depacketizer declares a nominal 3000 ticks on every packet (an
+        # exact 1/30s) while MP4 writes the true inter-frame delta -- 2880,
+        # 2970, 3060 -- because the stream jitters. Demanding equality rejected
+        # 100% of recorded clips as REMUX_FAILED and deleted them, with every
+        # payload byte identical and every PTS preserved exactly.
+        #
+        # Equality cannot simply be dropped either: when the ring evicts a
+        # packet from inside the selected window, the survivors keep their
+        # exact PTS, the count matches the (already shortened) selection, and
+        # payloads may be exempt on a normalized stream -- so the hole shows up
+        # *only* as a duration stretched across it. Discontinuity marking does
+        # not help; it triggers on a 60-second jump, not one dropped frame.
+        #
+        # A refinement moves the value by jitter (measured within 4%). A hole
+        # multiplies it by the number of frames lost, so it starts at 2x. The
+        # bound below sits between the two with an order of magnitude of
+        # headroom on the jitter side.
+        if source.duration and packet.duration * 2 >= source.duration * 3:
+            if interior_loss is None:
+                raise ValueError(
+                    "remuxed packet duration changed: stretched across missing packets "
+                    f"(source={source.duration} remuxed={packet.duration} "
+                    f"time_base={source.stream.time_base} stream={source.stream_index})"
+                )
+            interior_loss.add(source.stream_index)
         if packet.time_base != source.stream.time_base:
             raise ValueError("remuxed packet time base changed")
         if source.stream_index not in normalized:
-            if source.stream.media_type == "video" and packet.is_keyframe != source.is_keyframe:
-                raise ValueError("remuxed packet keyframe identity changed")
+            # Losing a keyframe breaks seeking, so that still fails closed.
+            # Gaining one does not: once the NAL units are correctly framed the
+            # container parses their types instead of trusting the demuxer's
+            # packet flag, and it is right to. Measured here on a real source
+            # packet whose flag said False while its payload began 00 00 01 45
+            # -- NAL type 5, an IDR. The clip is more seekable than the flags
+            # claimed, which is the direction this guard exists to protect.
+            if (
+                source.stream.media_type == "video"
+                and source.is_keyframe
+                and not packet.is_keyframe
+            ):
+                raise ValueError("remuxed packet keyframe identity changed: keyframe lost")
             if packet.payload != source.payload:
-                raise ValueError("remuxed packet payload changed")
+                # The one legitimate rewrite: Annex-B start codes reframed as
+                # the length prefixes an MP4 sample description requires. Any
+                # other difference is still a corrupted copy.
+                if packet.payload != _annexb_to_length_prefixed(source.payload):
+                    raise ValueError("remuxed packet payload changed")
         pts_translation = packet.pts - source.pts
         dts_translation = packet.dts - source.dts
         if pts_translation != dts_translation:
@@ -314,4 +425,4 @@ def _stream_fact(
     )
 
 
-__all__ = ["REMUX_METHOD", "PyAvPacketRemuxer"]
+__all__ = ["INTERIOR_PACKET_LOSS", "REMUX_METHOD", "PyAvPacketRemuxer"]

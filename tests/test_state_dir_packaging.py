@@ -14,8 +14,8 @@ from pathlib import Path
 import pytest
 import yaml
 
+from backend.app.edge_db import EDGE_DATABASE_PATH, EDGE_STATE_DIRECTORY
 from backend.app.features.cameras.store import CameraRegistryStore
-from shared.edge_db import EDGE_DATABASE_PATH, EDGE_STATE_DIRECTORY
 from worker.runtime.config.lkg_store import WorkerConfigLkgStore
 from worker.runtime.lease import GPU_LEASE_FILENAME
 
@@ -107,7 +107,7 @@ def test_dockerfiles_declare_no_volume_for_state_dir() -> None:
 # --- compose owns one central database volume -----------------------------
 
 
-@pytest.mark.parametrize("service", ["edge-db-migrator", "ml-api", "ml-worker"])
+@pytest.mark.parametrize("service", ["edge-db-migrator", "ml-api"])
 def test_compose_mounts_central_state_at_baked_path(compose: dict, service: str) -> None:
     target = _compose_named_volume_target(compose, service, "edge-state")
     assert target == EXPECTED_EDGE_STATE_DIR
@@ -151,7 +151,9 @@ def test_worker_resolver_matches_dockerfile_and_compose(
 
     assert str(resolved) == EXPECTED_WORKER_STATE_DIR
     assert str(resolved) in _dockerfile_mkdir_p_args("Dockerfile.edge")
-    assert _compose_named_volume_target(compose, "ml-worker", "edge-state") != str(resolved)
+    assert _compose_named_volume_target(compose, "ml-worker", "worker-local-state") == (
+        EXPECTED_EDGE_STATE_DIR
+    )
 
 
 def test_api_resolver_matches_dockerfile_and_compose(
@@ -192,20 +194,22 @@ def test_api_resolver_reads_no_environment_override() -> None:
 def test_shared_edge_database_path_matches_compose_mount(compose: dict) -> None:
     assert str(EDGE_STATE_DIRECTORY) == EXPECTED_EDGE_STATE_DIR
     assert str(EDGE_DATABASE_PATH) == EXPECTED_EDGE_DATABASE
-    for service in ("ml-api", "ml-worker"):
-        assert _compose_named_volume_target(compose, service, "edge-state") == str(
-            EDGE_DATABASE_PATH.parent
-        )
+    assert _compose_named_volume_target(compose, "ml-api", "edge-state") == str(
+        EDGE_DATABASE_PATH.parent
+    )
+    assert not any(
+        str(volume).startswith("edge-state:")
+        for volume in compose["services"]["ml-worker"]["volumes"]
+    )
 
 
-def test_worker_and_api_database_defaults_use_one_edge_database() -> None:
+def test_worker_config_cache_is_local_and_api_database_is_central() -> None:
     worker_path = WorkerConfigLkgStore().database_path
     api_path = CameraRegistryStore.from_env().path
 
-    # tests/conftest.py redirects the production constant to an isolated file;
-    # equality across runtime consumers is the behavior under test here.
-    assert worker_path == api_path
-    assert worker_path.name == EDGE_DATABASE_PATH.name
+    assert worker_path.name == "config-lkg"
+    assert worker_path.parent == Path.home() / ".local/state/ml-worker"
+    assert api_path.name == EDGE_DATABASE_PATH.name
 
 
 # --- the GPU lease remains in the worker-local state directory -------------
@@ -220,6 +224,6 @@ def test_gpu_lease_uses_worker_local_state_not_central_database_volume(
     lease_path = worker_resolve_state_dir("ml-worker") / GPU_LEASE_FILENAME
 
     assert str(lease_path.parent) == EXPECTED_WORKER_STATE_DIR
-    assert _compose_named_volume_target(compose, "ml-worker", "edge-state") != str(
+    assert _compose_named_volume_target(compose, "ml-worker", "worker-local-state") != str(
         lease_path.parent
     )

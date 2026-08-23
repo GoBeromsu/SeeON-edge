@@ -22,12 +22,18 @@ ALLOWED_PATHS: Final = {
     "/api/v1/incident-reviews/{incident_id:path}",
     "/api/v1/models",
     "/api/v1/relay/alerts",
+    # Worker-to-backend analysis-trace publication. The worker owns the engine
+    # and holds traces only in a process-local cache; this is how they reach
+    # durable backend storage so QA replay has anything to replay.
+    "/api/v1/relay/analysis-traces",
     "/api/v1/relay/capabilities",
     "/api/v1/relay/clips/{clip_id}",
     "/api/v1/relay/config",
     "/api/v1/relay/heartbeat",
     "/api/v1/relay/restart",
     "/api/v1/relay/runtime-status",
+    "/api/v1/relay/snapshot-attachments",
+    "/api/v1/relay/snapshot-dispositions",
     "/api/v1/audit",
     "/api/v1/cameras",
     "/api/v1/cameras/topology",

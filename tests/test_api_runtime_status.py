@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import threading
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -20,11 +21,21 @@ from backend.app.features.status.router import _flatten_runtime_cameras
 from backend.app.features.status.runtime_status_store import RuntimeStatusStore
 from backend.app.main import create_app, no_lifespan
 from contracts.decode_diagnostics import DecodeSelection
+from shared.events.delivery_queue import (
+    MAX_ACCEPTED_BYTES,
+    MAX_ACCEPTED_ENTRIES,
+    DeliveryQueue,
+    EventEntry,
+    SnapshotAttachmentEntry,
+    SnapshotDispositionEntry,
+)
 from worker.pipeline.inference_coordinator import (
     CameraInferenceTelemetry,
     InferenceTelemetrySnapshot,
 )
 from worker.runtime.telemetry.runtime_diagnostics import WorkerDiagnostics
+from worker.runtime.telemetry.runtime_status_sender import RuntimeStatusSender
+from worker.runtime.telemetry.wire import RelayRuntimeStatusPayload
 
 
 def _payload(**overrides: object) -> dict[str, object]:
@@ -69,7 +80,7 @@ def _client() -> TestClient:
     return TestClient(app)
 
 
-def _post(client: TestClient, payload: dict[str, object]):
+def _post(client: TestClient, payload: Mapping[str, object]) -> Response:
     return client.post(
         "/api/v1/relay/runtime-status",
         json=payload,
@@ -116,6 +127,91 @@ def _runtime_detection(client: TestClient, camera_id: str = "camera-1") -> dict[
     return detection
 
 
+class _CapturingRuntimeStatusTransport:
+    def __init__(self) -> None:
+        self.payload: RelayRuntimeStatusPayload | None = None
+
+    def send(self, payload: RelayRuntimeStatusPayload) -> int:
+        self.payload = payload
+        return 1
+
+
+def _delivery_queue(tmp_path: Path) -> DeliveryQueue:
+    queue = DeliveryQueue(tmp_path / "delivery-queue")
+    entries = (
+        EventEntry(
+            edge_event_id="event-1",
+            event_type="fall",
+            detected_at="2026-08-21T00:00:00Z",
+            camera_id="camera-1",
+            facility_id="facility-1",
+            decision_trace=b"trace",
+            values=b"values",
+        ),
+        SnapshotAttachmentEntry(
+            "event-1",
+            "snapshot-1",
+            "a" * 64,
+            "snapshots/snapshot-1.jpg",
+            10,
+            "image/jpeg",
+        ),
+        SnapshotDispositionEntry("event-1", "snapshot-1", "unavailable", "camera offline"),
+    )
+    for entry in entries:
+        assert queue.try_admit(entry).accepted
+    return queue
+
+
+def _post_queue_capacity(client: TestClient, queue: DeliveryQueue) -> dict[str, object]:
+    transport = _CapturingRuntimeStatusTransport()
+    sender = RuntimeStatusSender(
+        WorkerDiagnostics(),
+        "facility-1",
+        transport,
+        delivery_queue=queue,
+    )
+    assert sender.publish_once()
+    assert transport.payload is not None
+    response = _post(client, transport.payload)
+    assert response.status_code == 200
+    facility = _json(client.get("/api/v1/status"))["runtime"]["facilities"]["facility-1"]
+    assert isinstance(facility, dict)
+    delivery_queue = facility["delivery_queue"]
+    assert isinstance(delivery_queue, dict)
+    return delivery_queue
+
+
+def test_status_round_trips_delivery_queue_capacity_and_kind_mix(tmp_path: Path) -> None:
+    queue = _delivery_queue(tmp_path)
+    expected = queue.capacity_snapshot
+
+    projected = _post_queue_capacity(_client(), queue)
+
+    assert projected == {
+        "accepted_count": expected.accepted_count,
+        "accepted_bytes": expected.accepted_bytes,
+        "max_accepted_entries": MAX_ACCEPTED_ENTRIES,
+        "max_accepted_bytes": MAX_ACCEPTED_BYTES,
+        "by_kind": {
+            "EVENT": 1,
+            "SNAPSHOT_ATTACHMENT": 1,
+            "SNAPSHOT_DISPOSITION": 1,
+        },
+        # Evidence the backend refused is retained rather than deleted, so the
+        # operator needs to see it here; nothing is retained in this fixture.
+        "dead_lettered_count": expected.dead_lettered_count,
+        "dead_lettered_bytes": expected.dead_lettered_bytes,
+    }
+
+
+def test_status_reports_delivery_queue_bounds_for_headroom_calculation(tmp_path: Path) -> None:
+    projected = _post_queue_capacity(_client(), _delivery_queue(tmp_path))
+
+    assert projected["max_accepted_entries"] == MAX_ACCEPTED_ENTRIES
+    assert projected["max_accepted_bytes"] == MAX_ACCEPTED_BYTES
+
+
 def test_runtime_status_schema_round_trip_and_rejects_extra_fields() -> None:
     payload = _payload()
 
@@ -128,6 +224,7 @@ def test_runtime_status_schema_round_trip_and_rejects_extra_fields() -> None:
         **payload,
         "gpu": None,
         "worker": None,
+        "delivery_queue": None,
         "cameras": [{**camera, "measured_fps": None, "detection": None}],
     }
     with pytest.raises(ValidationError):

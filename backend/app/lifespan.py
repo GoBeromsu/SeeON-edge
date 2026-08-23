@@ -20,6 +20,7 @@ from typing import Protocol, TypeGuard
 from fastapi import FastAPI
 
 from backend.app.core.config import reject_retired_backend_environment
+from backend.app.edge_db import EDGE_DATABASE_PATH
 from backend.app.features.cameras.store import CameraRegistryStore
 from backend.app.features.clips.catalog import CatalogStore
 from backend.app.features.clips.listing_runtime import maintain_clip_listing
@@ -46,7 +47,6 @@ from contracts.worker_config import (
     PulledWorkerConfig,
     detection_window_validation_error,
 )
-from shared.edge_db import EDGE_DATABASE_PATH
 from shared.events.edge_ingest_client import (
     BackendEvidenceClient,
     EdgeIngestClient,

@@ -177,8 +177,7 @@ def test_concurrent_lkg_writes_preserve_newest_directive(tmp_path: Path) -> None
     assert stored is not None
     assert stored.directive == RestartDirective(generation=1, version=9)
     assert stored.payload["registry_version"] == 9
-    # Re-open via a second store instance pointed at the same database file to
-    # confirm the write is durably persisted, not just cached on `store`.
+    # Re-open the filesystem cache to confirm the write is durable, not cached.
     reopened = WorkerConfigLkgStore(store.database_path).load()
     assert reopened is not None
     assert reopened.payload["registry_version"] == 9
@@ -358,14 +357,11 @@ def test_load_degrades_to_none_when_database_parent_is_uncreatable(
     assert "worker config LKG store unavailable" in error
 
 
-def test_load_degrades_to_none_against_a_newer_schema_version(
+def test_load_ignores_unrelated_database_files(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """A database stamped with a `user_version` newer than this binary's
-    SCHEMA_VERSION (e.g. after a downgrade) must make load() return None
-    rather than let NewerSchemaVersionError propagate -- same degrade-to-
-    unavailable contract as an OSError."""
+    """The bounded filesystem cache has no schema dependency."""
     database_path = tmp_path / "worker-state.sqlite3"
     connection = sqlite3.connect(database_path)
     try:
@@ -378,14 +374,11 @@ def test_load_degrades_to_none_against_a_newer_schema_version(
     loaded = store.load()
 
     assert loaded is None
-    error = capsys.readouterr().err
-    assert "worker config LKG store unavailable" in error
+    assert capsys.readouterr().err == ""
 
 
-def test_clear_removes_the_current_row_but_keeps_history(tmp_path: Path) -> None:
-    """`clear()` only clears the `config_current` pointer -- `config_history`
-    stays intact so it remains locally joinable against un-ACKED evidence
-    audit trails regardless of whether a corrupt current LKG gets cleared."""
+def test_clear_removes_current_snapshot_but_keeps_bounded_revisions(tmp_path: Path) -> None:
+    """Clearing a corrupt current snapshot preserves revision cache entries."""
     store = WorkerConfigLkgStore(tmp_path / "worker-state.sqlite3")
     payload = _payload(registry_version=9, config_version=9, restart_epoch=1)
     assert store.save(payload, RestartDirective(generation=1, version=9))
@@ -395,15 +388,7 @@ def test_clear_removes_the_current_row_but_keeps_history(tmp_path: Path) -> None
 
     assert cleared is True
     assert store.load() is None
-    connection = sqlite3.connect(store.database_path)
-    try:
-        row = connection.execute(
-            "SELECT COUNT(*) FROM config_history WHERE config_version = 9"
-        ).fetchone()
-    finally:
-        connection.close()
-    assert row is not None
-    assert row[0] == 1
+    assert len(tuple((store.database_path / "revisions").glob("*.json"))) == 1
 
 
 def test_clear_degrades_to_false_when_database_parent_is_uncreatable(

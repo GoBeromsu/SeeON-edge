@@ -7,7 +7,7 @@ instances plus a shared library:
 - **`worker/`** — RTSP inference worker that relays facts to the backend (`ml-worker` image).
 - **`front/`** — React/Vite dashboard SPA served by the backend.
 - **`shared/`** — `shared.events` (the backend↔worker wire code); `contracts` is a
-  top-level vendored leaf (ADR-0004).
+  top-level vendored leaf (ADR-0006).
 
 Training is maintained separately in `SeniorAILab/eldercare-dataset-ops`.
 

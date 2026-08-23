@@ -32,6 +32,7 @@ from pathlib import Path
 from threading import Lock
 from typing import Final, TypedDict
 
+from backend.app.edge_db import EDGE_DATABASE_PATH
 from backend.app.features.connection.hub_url import (
     API_BACKEND_ALLOW_INSECURE_HTTP_ENV,
     hub_url_transport_allowed,
@@ -47,7 +48,6 @@ from backend.app.features.connection.sqlite_store import (
     ConnectionValue,
     utc_now_iso,
 )
-from shared.edge_db import EDGE_DATABASE_PATH
 
 API_CONNECTION_SETTINGS_PATH_ENV: Final = "API_CONNECTION_SETTINGS_PATH"
 API_BACKEND_BASE_URL_ENV: Final = "API_BACKEND_BASE_URL"

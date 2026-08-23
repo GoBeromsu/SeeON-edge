@@ -20,7 +20,18 @@ EDGE_RUNTIME_SERVICES: Final = {
     "ml-api": "Dockerfile.backend",
     "ml-worker": "Dockerfile.edge",
 }
-EDGE_SERVICES: Final = {"edge-db-migrator", *EDGE_RUNTIME_SERVICES}
+#: One-shot operator tool behind the `ops` profile. It never starts with the
+#: stack, but it is the only place the documented requeue command can run: the
+#: worker image carries no `scripts/ops` and the backend image has no writable
+#: worker-state mount.
+EDGE_OPS_SERVICES: Final = {"edge-refused-evidence"}
+
+EDGE_SERVICES: Final = {
+    "edge-filesystem-inventory",
+    "edge-db-migrator",
+    *EDGE_OPS_SERVICES,
+    *EDGE_RUNTIME_SERVICES,
+}
 ComposeValue: TypeAlias = (
     str | int | float | bool | None | list["ComposeValue"] | dict[str, "ComposeValue"]
 )
@@ -110,7 +121,7 @@ def test_edge_worker_runtime_status_environment_contract() -> None:
     assert "API_FACILITY_ID" not in worker_environment
 
 
-def test_edge_compose_contains_migrator_api_and_worker() -> None:
+def test_edge_compose_contains_inventory_migrator_api_and_worker() -> None:
     services = _compose_services(EDGE_COMPOSE_FILE)
 
     assert set(services) == EDGE_SERVICES, sorted(services)
@@ -118,12 +129,26 @@ def test_edge_compose_contains_migrator_api_and_worker() -> None:
 
 def test_edge_db_migrator_owns_schema_lifecycle_before_runtime_start() -> None:
     services = _compose_services(EDGE_COMPOSE_FILE)
+    inventory = services["edge-filesystem-inventory"]
     migrator = services["edge-db-migrator"]
     api_depends_on = _mapping_field(services["ml-api"], "depends_on")
     worker_depends_on = _mapping_field(services["ml-worker"], "depends_on")
 
+    assert inventory["restart"] == "no"
+    assert inventory["command"] == ["python", "-m", "backend.app.edge_db.inventory"]
+    assert "edge-state:/var/lib/seeon-state:ro" in _list_field(inventory, "volumes")
+    assert "worker-local-state:/var/lib/seeon-worker-state:ro" in _list_field(
+        inventory, "volumes"
+    )
+    assert any(
+        str(volume).endswith(":/var/lib/clip-store:ro")
+        for volume in _list_field(inventory, "volumes")
+    )
+    assert migrator["depends_on"] == {
+        "edge-filesystem-inventory": {"condition": "service_completed_successfully"}
+    }
     assert migrator["restart"] == "no"
-    assert migrator["command"] == ["python", "-m", "shared.edge_db.importer"]
+    assert migrator["command"] == ["python", "-m", "backend.app.edge_db.importer"]
     assert api_depends_on == {"edge-db-migrator": {"condition": "service_completed_successfully"}}
     assert worker_depends_on == {"ml-api": {"condition": "service_healthy"}}
 
@@ -193,19 +218,24 @@ def test_edge_api_host_port_is_loopback_only() -> None:
     assert ports == ["127.0.0.1:8000:8000"]
 
 
-def test_edge_runtimes_share_one_central_state_volume() -> None:
+def test_edge_runtime_state_volumes_follow_backend_ownership() -> None:
     services = _compose_services(EDGE_COMPOSE_FILE)
     compose = yaml.load(
         (REPO_ROOT / EDGE_COMPOSE_FILE).read_text(encoding="utf-8"),
         Loader=ComposeLoader,
     )
 
-    for service_name in EDGE_SERVICES:
+    for service_name in ("edge-db-migrator", "ml-api"):
         assert "edge-state:/var/lib/seeon-state" in _list_field(services[service_name], "volumes")
+    assert "edge-state:/var/lib/seeon-state" not in _list_field(services["ml-worker"], "volumes")
+    assert "worker-local-state:/var/lib/seeon-state" in _list_field(
+        services["ml-worker"], "volumes"
+    )
     assert set(compose.get("volumes", {})) == {
         "edge-state",
         "ml-api-state",
         "ml-worker-state",
+        "worker-local-state",
     }
     for runtime_name in EDGE_RUNTIME_SERVICES:
         runtime_volumes = _list_field(services[runtime_name], "volumes")

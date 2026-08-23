@@ -18,8 +18,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from threading import Lock
 
+from backend.app.edge_db import EDGE_DATABASE_PATH
 from backend.app.shared.sqlite_bootstrap import connect_catalog_store
-from shared.edge_db import EDGE_DATABASE_PATH
 
 _CREATE_CREDENTIALS_TABLE = (
     "CREATE TABLE IF NOT EXISTS credentials (id INTEGER PRIMARY KEY CHECK (id = 1), "

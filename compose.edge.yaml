@@ -7,12 +7,57 @@
 #   NVIDIA:        -f compose.edge.yaml -f compose.edge.nvidia.yaml
 #   Intel VAAPI:   -f compose.edge.yaml -f compose.edge.igpu.yaml
 
+# The project name is REQUIRED, never defaulted. Compose would otherwise derive
+# it from the directory name, and this host already carries three similarly
+# named state volumes -- `edge_edge-state`, `seeon-edge-wt-alert-api_edge-state`
+# and `seeon-prod-edge-state`. Running from a checkout named `SeeON-edge` would
+# silently bind `seeon-edge_edge-state`, an empty volume, so a cutover would
+# migrate a fresh database while the live one sat untouched and the operator saw
+# a clean success. Failing closed here makes that impossible.
+name: ${COMPOSE_PROJECT_NAME:?COMPOSE_PROJECT_NAME is required so the stack binds the intended edge-state volume}
+
 services:
+  edge-filesystem-inventory:
+    image: ${ML_API_IMAGE:?ML_API_IMAGE is required in edge prod}
+    build: !reset null
+    pull_policy: always
+    restart: "no"
+    volumes:
+      - edge-state:/var/lib/seeon-state:ro
+      - worker-local-state:/var/lib/seeon-worker-state:ro
+      - ${CLIP_STORE_HOST_DIR:?edge requires host clip-store dir}:/var/lib/clip-store:ro
+    command:
+      - python
+      - -m
+      - backend.app.edge_db.inventory
+
+  # One-shot operator tool. The worker image has no scripts/ops and the backend
+  # image has no writable worker-state mount, so without this service the
+  # documented requeue command cannot be run anywhere -- a gate the operator
+  # cannot clear. Never started by the stack; invoked explicitly with
+  # `docker compose run --rm edge-refused-evidence [--requeue]`.
+  edge-refused-evidence:
+    image: ${ML_API_IMAGE:?ML_API_IMAGE is required in edge prod}
+    build: !reset null
+    pull_policy: always
+    restart: "no"
+    profiles: ["ops"]
+    volumes:
+      - worker-local-state:/var/lib/seeon-state
+    entrypoint:
+      - python
+      - scripts/ops/review-refused-evidence.py
+      - --state-dir
+      - /var/lib/seeon-state
+
   edge-db-migrator:
     image: ${ML_API_IMAGE:?ML_API_IMAGE is required in edge prod}
     build: !reset null
     pull_policy: always
     restart: "no"
+    depends_on:
+      edge-filesystem-inventory:
+        condition: service_completed_successfully
     volumes:
       - edge-state:/var/lib/seeon-state
       # Released state volumes remain rollback evidence and are writable only
@@ -22,7 +67,7 @@ services:
     command:
       - python
       - -m
-      - shared.edge_db.importer
+      - backend.app.edge_db.importer
 
   ml-api:
     image: ${ML_API_IMAGE:?ML_API_IMAGE is required in edge prod}
@@ -103,7 +148,7 @@ services:
       # endpoint backed by dashboard/DB state owns those values.
     volumes:
       - ./models:/app/models:ro
-      - edge-state:/var/lib/seeon-state
+      - worker-local-state:/var/lib/seeon-state
       - ${CLIP_STORE_HOST_DIR:?edge requires host clip-store dir}:/var/lib/clip-store:rw
     depends_on:
       ml-api:
@@ -113,9 +158,16 @@ services:
       - -m
       - worker
       - --heartbeat-on-start
+      # REQUIRED in a container. The default resolves under the user's home,
+      # which here is the writable layer, so the durable delivery queue would be
+      # destroyed on every container replacement and the pre-v17 filesystem gate
+      # would read an empty volume and wave the cutover through.
+      - --state-dir
+      - /var/lib/seeon-state
 
 volumes:
   edge-state: {}
+  worker-local-state: {}
   # Read-only rollback boundary for the one-time import; runtimes never mount these.
   ml-api-state: {}
   ml-worker-state: {}

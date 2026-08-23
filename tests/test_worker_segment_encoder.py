@@ -68,9 +68,25 @@ def _packet(seq: int, *, width: int = 4, height: int = 2) -> FramePacket:
     return FramePacket("cam-1", frame, float(seq) * 0.5, seq, width, height, 1.5)
 
 
-def _encoder(tmp_path: Path, spawner: _SpawnSpy) -> FFmpegSegmentEncoder:
+def _encoder(
+    tmp_path: Path,
+    spawner: _SpawnSpy,
+    *,
+    allow_runtime_encode_fallback: bool = True,
+) -> FFmpegSegmentEncoder:
+    """Build an encoder for a test.
+
+    Defaults to opting *in* to CPU encode fallback so the pre-existing demotion
+    tests keep exercising that path with their asserted values unmodified. The
+    production default is the opposite (``False``, fail-closed); the tests that
+    cover that path construct the config explicitly.
+    """
     return FFmpegSegmentEncoder(
-        SegmentEncoderConfig(store_dir=tmp_path, segment_seconds=2.0),
+        SegmentEncoderConfig(
+            store_dir=tmp_path,
+            segment_seconds=2.0,
+            allow_runtime_encode_fallback=allow_runtime_encode_fallback,
+        ),
         spawner=spawner,
     )
 
@@ -375,3 +391,46 @@ def test_geometry_rejects_non_positive_dimensions() -> None:
         _ = EncoderGeometry(0, 2, 5.0)
     with pytest.raises(EncoderPolicyError):
         _ = EncoderGeometry(4, 2, 0.0)
+
+
+def test_nvenc_failure_fails_closed_by_default_and_records_exactly_one_failure(
+    tmp_path: Path,
+) -> None:
+    """Without an explicit opt-in, a failed NVENC open refuses instead of demoting.
+
+    ADR 0002 requires fail-loud behavior absent an explicit exception and ADR
+    0003 permits only explicit fallback, so the demotion is gated. The failure
+    must still be counted exactly once: the first spawn suppresses accounting in
+    anticipation of a retry that never happens on this path.
+    """
+    spawner = _SpawnSpy(fail_encoders=("h264_nvenc",))
+    encoder = _encoder(tmp_path, spawner, allow_runtime_encode_fallback=False)
+
+    with pytest.raises(EncoderStartError):
+        encoder.open("cam-1", "h264_nvenc", EncoderGeometry(4, 2, 5.0))
+
+    assert spawner.encoders == ["h264_nvenc"], "no CPU retry may be attempted"
+    assert encoder.metrics.failures == 1, "exactly once: no under- or double-count"
+    assert encoder.metrics.encode_fallbacks == 0
+    assert encoder.metrics.active_sessions == 0
+    assert "cam-1" in encoder.unavailable_cameras
+    assert "cam-1" not in encoder.encode_selections
+
+
+def test_zero_config_composition_is_fail_closed(tmp_path: Path) -> None:
+    """A caller that configures nothing inherits the fail-closed policy.
+
+    This is the property that matters for a future composition root: wiring the
+    adapter without opting in must not silently resurrect implicit fallback.
+    """
+    config = SegmentEncoderConfig(store_dir=tmp_path)
+    assert config.allow_runtime_encode_fallback is False
+
+    spawner = _SpawnSpy(fail_encoders=("h264_nvenc",))
+    encoder = FFmpegSegmentEncoder(config, spawner=spawner)
+
+    with pytest.raises(EncoderStartError):
+        encoder.open("cam-1", "h264_nvenc", EncoderGeometry(4, 2, 5.0))
+
+    assert spawner.encoders == ["h264_nvenc"]
+    assert encoder.metrics.failures == 1

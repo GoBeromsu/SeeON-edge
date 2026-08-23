@@ -186,7 +186,15 @@ class CapabilityInferenceCoordinator:
                         del pending[id(packet)]
                         lane.inferred += 1
                         if (recorder := self._stage_timing_recorder) is not None:
-                            recorder.record_stage_timing(lane.camera_id, "pose", elapsed)
+                            try:
+                                recorder.record_stage_timing(lane.camera_id, "pose", elapsed)
+                            except Exception:  # noqa: BLE001 - never blocks a lane
+                                LOGGER.warning(
+                                    "pose stage-timing recorder failed for camera %s; "
+                                    "the batch lane continues",
+                                    lane.camera_id,
+                                    exc_info=True,
+                                )
                         published += 1
                     self._telemetry.record_physical_batch(
                         geometry=(items[0][1].width, items[0][1].height),

@@ -9,6 +9,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Final, Protocol, final
 
+from shared.events.delivery_queue import DeliveryQueue
 from shared.events.evidence_export_contract import DeliveryDisposition, DeliveryFailure
 from shared.events.evidence_http_transport import (
     bounded_request,
@@ -20,7 +21,7 @@ from shared.events.evidence_http_transport import (
 )
 from shared.events.relay_failure_log import RelayFailureLog
 from worker.runtime.telemetry.runtime_diagnostics import WorkerDiagnostics
-from worker.runtime.telemetry.wire import RelayRuntimeStatusPayload
+from worker.runtime.telemetry.wire import RelayDeliveryQueuePayload, RelayRuntimeStatusPayload
 
 LOGGER: Final = logging.getLogger(__name__)
 
@@ -116,6 +117,7 @@ class RuntimeStatusSender:
         config: RuntimeStatusSenderConfig | None = None,
         *,
         before_publish: Callable[[], None] | None = None,
+        delivery_queue: DeliveryQueue | None = None,
     ) -> None:
         resolved_config = RuntimeStatusSenderConfig() if config is None else config
         self._diagnostics = diagnostics
@@ -129,6 +131,7 @@ class RuntimeStatusSender:
         # must not depend on `ClipRecorder` (layering), so the composition
         # root (`WorkerRuntime`) supplies this instead.
         self._before_publish = before_publish
+        self._delivery_queue = delivery_queue
         self._publish_interval_sec = max(0.0, resolved_config.publish_interval_sec)
         self._initial_backoff_sec = max(0.0, resolved_config.initial_backoff_sec)
         self._max_backoff_sec = max(
@@ -258,9 +261,29 @@ class RuntimeStatusSender:
     def _snapshots_for_publish(self) -> list[RelayRuntimeStatusPayload]:
         if self._before_publish is not None:
             self._before_publish()
+        delivery_queue = self._delivery_queue_payload()
         if isinstance(self._facility_id, str):
-            return [self._diagnostics.to_payload(self._facility_id, None, 0)]
-        return self._diagnostics.to_payloads(self._facility_id, None, 0)
+            snapshots = [self._diagnostics.to_payload(self._facility_id, None, 0)]
+        else:
+            snapshots = self._diagnostics.to_payloads(self._facility_id, None, 0)
+        if delivery_queue is not None:
+            for snapshot in snapshots:
+                snapshot["delivery_queue"] = delivery_queue
+        return snapshots
+
+    def _delivery_queue_payload(self) -> RelayDeliveryQueuePayload | None:
+        if self._delivery_queue is None:
+            return None
+        snapshot = self._delivery_queue.capacity_snapshot
+        return RelayDeliveryQueuePayload(
+            accepted_count=snapshot.accepted_count,
+            accepted_bytes=snapshot.accepted_bytes,
+            max_accepted_entries=snapshot.max_accepted_entries,
+            max_accepted_bytes=snapshot.max_accepted_bytes,
+            by_kind={kind.value: count for kind, count in snapshot.by_kind.items()},
+            dead_lettered_count=snapshot.dead_lettered_count,
+            dead_lettered_bytes=snapshot.dead_lettered_bytes,
+        )
 
     def _post(self, snapshots: list[RelayRuntimeStatusPayload]) -> bool:
         for snapshot in snapshots:
@@ -287,4 +310,5 @@ __all__ = [
     "RuntimeStatusSender",
     "RuntimeStatusSenderConfig",
     "RuntimeStatusTransport",
+    "bounded_request",
 ]

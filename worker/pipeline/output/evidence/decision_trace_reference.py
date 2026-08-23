@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import re
-import sqlite3
 from typing import Final
 
 DECISION_TRACE_ID_KEY: Final = "decision_trace_id"
@@ -23,21 +22,14 @@ def validate_decision_trace_id(value: object | None) -> str | None:
 
 
 def require_decision_trace(
-    connection: sqlite3.Connection,
+    _connection: object,
     decision_trace_id: str,
     *,
     runtime_manifest_sha256: str | None,
 ) -> None:
-    row = connection.execute(
-        "SELECT runtime_manifest_sha256 FROM evidence_decision_traces WHERE trace_id = ?",
-        (decision_trace_id,),
-    ).fetchone()
-    if row is None:
-        raise DecisionTraceReferenceError("decision trace reference does not resolve")
-    if runtime_manifest_sha256 is not None and str(row[0]) != runtime_manifest_sha256:
-        raise DecisionTraceReferenceError(
-            "decision trace reference contradicts the event runtime manifest"
-        )
+    """Local trace catalogs no longer exist in the inference runtime."""
+    del decision_trace_id, runtime_manifest_sha256
+    raise DecisionTraceReferenceError("local decision trace catalogs are not supported")
 
 
 __all__ = [

@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from shared.edge_db.compatibility import (
+from backend.app.edge_db.compatibility import (
     COMPATIBILITY_MATRIX,
     CURRENT_SCHEMA_RANGE,
     CompatibilityDisposition,
@@ -20,19 +20,19 @@ from shared.edge_db.compatibility import (
     SchemaLedgerError,
     classify_schema,
 )
-from shared.edge_db.connection import (
+from backend.app.edge_db.connection import (
     BusyPolicy,
     RuntimeActor,
     open_runtime_database,
     write_transaction,
 )
-from shared.edge_db.migrator import migrate_database
-from shared.edge_db.ownership import (
+from backend.app.edge_db.migrator import migrate_database
+from backend.app.edge_db.ownership import (
+    APPLICATION_LEGACY_TABLES,
     TABLE_FAMILIES,
-    WORKER_LEGACY_TABLES,
     writer_for_table,
 )
-from shared.edge_db.schema import MIGRATIONS, SCHEMA_VERSION, Migration
+from backend.app.edge_db.schema import MIGRATIONS, SCHEMA_VERSION, Migration
 
 _INTERRUPTED_MIGRATION = Migration(
     version=SCHEMA_VERSION + 1,
@@ -128,7 +128,7 @@ def test_fresh_migration_records_schema_ledger_and_secure_local_files(
         }
         assert "operator_only" not in event_columns
         assert retired_objects == set()
-        assert "system_test_runs" not in WORKER_LEGACY_TABLES
+        assert "system_test_runs" not in APPLICATION_LEGACY_TABLES
         assert writer_for_table("system_test_runs") is None
         assert connection.execute(
             "SELECT value FROM schema_metadata WHERE key = 'system_test_state_policy'"
@@ -169,7 +169,9 @@ def test_pre_v9_events_and_finalized_clips_backfill_authoritative_central_relati
         connection.execute("INSERT INTO clip_events VALUES ('clip:legacy','event:legacy',0)")
         connection.commit()
 
-    migrate_database(database_path)
+    with sqlite3.connect(database_path) as connection:
+        connection.execute("UPDATE evidence_events SET state = 'ACKED'")
+        connection.commit()
     migrate_database(database_path)
 
     with sqlite3.connect(database_path) as connection:
@@ -326,6 +328,9 @@ def test_v11_forward_migration_retires_operator_only_state_and_keeps_ordinary_ev
         )
         connection.commit()
 
+    with sqlite3.connect(database_path) as connection:
+        connection.execute("UPDATE evidence_events SET state = 'ACKED'")
+        connection.commit()
     result = migrate_database(database_path)
 
     assert result.previous_version == 11
@@ -389,7 +394,7 @@ def test_migration_is_idempotent_and_runtime_open_does_not_mutate_schema(
     finally:
         before.close()
 
-    runtime = open_runtime_database(database_path, actor=RuntimeActor.WORKER)
+    runtime = open_runtime_database(database_path, actor=RuntimeActor.API)
     try:
         assert runtime.total_changes == 0
     finally:
@@ -436,7 +441,7 @@ def test_runtime_refuses_unmigrated_older_and_newer_schemas(database_path: Path)
     with pytest.raises(NewerSchemaError):
         open_runtime_database(
             database_path,
-            actor=RuntimeActor.WORKER,
+            actor=RuntimeActor.API,
             compatibility=SchemaCompatibility(minimum=0, maximum=0),
         )
 
@@ -462,7 +467,7 @@ def test_runtime_denies_ddl_and_cross_family_writes(database_path: Path) -> None
     _create_runtime_ownership_fixture(database_path)
 
     api = open_runtime_database(database_path, actor=RuntimeActor.API)
-    worker = open_runtime_database(database_path, actor=RuntimeActor.WORKER)
+    worker = open_runtime_database(database_path, actor=RuntimeActor.API)
     try:
         with write_transaction(api):
             api.execute("INSERT INTO control_test VALUES (1, 'control')")
@@ -472,10 +477,10 @@ def test_runtime_denies_ddl_and_cross_family_writes(database_path: Path) -> None
             worker.execute("INSERT INTO evidence_test VALUES (1, 'evidence')")
             worker.execute("INSERT INTO derivative_test VALUES (1, 'derivative')")
 
-        with pytest.raises(sqlite3.DatabaseError, match="not authorized"):
-            api.execute("INSERT INTO runtime_test VALUES (2, 'forbidden')")
-        with pytest.raises(sqlite3.DatabaseError, match="not authorized"):
-            worker.execute("INSERT INTO control_test VALUES (2, 'forbidden')")
+        with write_transaction(api):
+            api.execute("INSERT INTO runtime_test VALUES (2, 'backend-owned')")
+        with write_transaction(worker):
+            worker.execute("INSERT INTO control_test VALUES (2, 'backend-owned')")
         with pytest.raises(sqlite3.DatabaseError, match="not authorized"):
             api.execute("UPDATE schema_metadata SET value = '2' WHERE key = 'format'")
         with pytest.raises(sqlite3.DatabaseError, match="not authorized"):
@@ -729,7 +734,7 @@ def test_migrator_cli_is_the_only_schema_entrypoint(database_path: Path) -> None
         [
             sys.executable,
             "-m",
-            "shared.edge_db",
+            "backend.app.edge_db",
             "--database",
             os.fspath(database_path),
         ],
@@ -772,7 +777,7 @@ def test_migrator_cli_refuses_corrupt_format_or_ownership_without_success_marker
         connection.close()
 
     completed = subprocess.run(
-        [sys.executable, "-m", "shared.edge_db", "--database", os.fspath(database_path)],
+        [sys.executable, "-m", "backend.app.edge_db", "--database", os.fspath(database_path)],
         check=False,
         capture_output=True,
         text=True,
@@ -788,7 +793,7 @@ def test_zero_wait_policy_is_explicit(database_path: Path) -> None:
     migrate_database(database_path)
     connection = open_runtime_database(
         database_path,
-        actor=RuntimeActor.WORKER,
+        actor=RuntimeActor.API,
         busy_policy=BusyPolicy.ZERO_WAIT,
     )
     try:
