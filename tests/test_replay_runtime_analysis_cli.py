@@ -184,6 +184,64 @@ def test_packaged_replay_cli_refuses_over_limit_content_length(tmp_path: Path) -
     assert completed.returncode == 2
 
 
+def test_packaged_replay_cli_accepts_5000_digit_event_count(tmp_path: Path) -> None:
+    previous = sys.get_int_max_str_digits()
+    sys.set_int_max_str_digits(0)
+    try:
+        digits = "1" * 5_000
+        body = (
+            '{"reproducible": true, "event_count": ' + digits + "}"
+        ).encode()
+        assert len(body) < 6_144
+        server = _serve(body)
+        try:
+            host, port = server.server_address
+            completed = _run_cli(tmp_path, f"http://{host}:{port}")
+        finally:
+            server.shutdown()
+            server.server_close()
+        assert completed.returncode == 0
+        assert "Traceback" not in completed.stderr
+        payload = json.loads(completed.stdout)
+        assert payload["event_count"] == int(digits)
+        assert payload["reproducible"] is True
+        assert not (tmp_path / "never-opened.sqlite3").exists()
+    finally:
+        sys.set_int_max_str_digits(previous)
+
+
+def test_packaged_replay_cli_refuses_incomplete_chunked_transfer(tmp_path: Path) -> None:
+    class _IncompleteChunked(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def do_POST(self) -> None:
+            _ = self.rfile.read(int(self.headers.get("Content-Length", "0")))
+            self.send_response(200)
+            self.send_header("Transfer-Encoding", "chunked")
+            self.end_headers()
+            self.wfile.write(b"20\r\n{\"reproducible\": true,\r\n")
+
+        def log_message(self, format: str, *args: object) -> None:
+            del format, args
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _IncompleteChunked)
+    thread = Thread(target=server.serve_forever, name="replay-cli-chunked", daemon=True)
+    thread.start()
+    try:
+        host, port = server.server_address
+        completed = _run_cli(tmp_path, f"http://{host}:{port}")
+    finally:
+        server.shutdown()
+        server.server_close()
+    payload = _assert_typed_refusal(completed)
+    assert "truncat" in payload["detail"].lower()
+    assert "Traceback" not in completed.stderr
+    assert "IncompleteRead" not in completed.stderr
+    assert "relay-token" not in completed.stderr
+    assert "relay-token" not in completed.stdout
+    assert not (tmp_path / "never-opened.sqlite3").exists()
+
+
 def test_packaged_replay_cli_accepts_valid_reproducible_payload(tmp_path: Path) -> None:
     body = json.dumps(
         {

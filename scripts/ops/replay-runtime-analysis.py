@@ -13,6 +13,8 @@ import argparse
 import http.client
 import json
 import sys
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import override
@@ -85,10 +87,26 @@ def _read_bounded_body(response: http.client.HTTPResponse) -> bytes:
     return raw
 
 
+@contextmanager
+def _allow_wire_int_digits() -> Iterator[None]:
+    """Lift Python's 4300-digit conversion cap only around this parse/dump.
+
+    The owner contract has no independent digit cap. The body-size bound is the
+    resource guard. 0 means unlimited; the previous process limit is restored.
+    """
+    previous = sys.get_int_max_str_digits()
+    sys.set_int_max_str_digits(0)
+    try:
+        yield
+    finally:
+        sys.set_int_max_str_digits(previous)
+
+
 def parse_worker_replay(raw: bytes) -> AcceptedReplay:
     """Parse one worker `/replay` body. Raises ReplayResponseError on any defect."""
     try:
-        payload = json.loads(raw)
+        with _allow_wire_int_digits():
+            payload = json.loads(raw)
     except json.JSONDecodeError as error:
         raise ReplayResponseError("malformed JSON") from error
     if not isinstance(payload, dict):
@@ -146,16 +164,17 @@ def main(argv: list[str] | None = None) -> int:
         return _refuse("truncated replay response")
     except (OSError, ValueError, HTTPError, URLError, json.JSONDecodeError) as error:
         return _refuse(str(error))
-    print(
-        json.dumps(
-            {
-                "event_count": accepted.event_count,
-                "module_qualified_id": accepted.module_qualified_id,
-                "reproducible": True,
-            },
-            sort_keys=True,
+    with _allow_wire_int_digits():
+        print(
+            json.dumps(
+                {
+                    "event_count": accepted.event_count,
+                    "module_qualified_id": accepted.module_qualified_id,
+                    "reproducible": True,
+                },
+                sort_keys=True,
+            )
         )
-    )
     return 0
 
 
