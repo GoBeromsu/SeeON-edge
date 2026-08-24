@@ -26,6 +26,19 @@ from worker.types.frame_memory import (
 )
 from worker.types.frame_packet import FrameKey, FramePacket
 from worker.types.module_result import ModuleResult
+from worker.types.perception_frame import (
+    AssociationResult,
+    BedRegion,
+    BedRegionChannel,
+    ChannelState,
+    HumanPoseChannel,
+    Keypoint,
+    PerceptionFrameFailure,
+    PerceptionFrameIdentity,
+    PerceptionFrameV1,
+    PersonBox,
+    PersonBoxChannel,
+)
 from worker.types.temporal_profile import (
     CURRENT_TEMPORAL_PROFILE,
     TemporalProfile,
@@ -51,6 +64,17 @@ __all__ = [
     "FramePacket",
     "MemoryKind",
     "ModuleResult",
+    "AssociationResult",
+    "BedRegion",
+    "BedRegionChannel",
+    "ChannelState",
+    "HumanPoseChannel",
+    "Keypoint",
+    "PerceptionFrameFailure",
+    "PerceptionFrameIdentity",
+    "PerceptionFrameV1",
+    "PersonBox",
+    "PersonBoxChannel",
     "DecisionTraceSnapshot",
     "NumericTraceValue",
     "PipelineProfile",
