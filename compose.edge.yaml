@@ -55,6 +55,11 @@ services:
     build: !reset null
     pull_policy: always
     restart: "no"
+    logging:
+      driver: local
+      options:
+        max-size: "10m"
+        max-file: "5"
     depends_on:
       edge-filesystem-inventory:
         condition: service_completed_successfully
@@ -74,6 +79,11 @@ services:
     build: !reset null
     pull_policy: always
     restart: unless-stopped
+    logging:
+      driver: local
+      options:
+        max-size: "10m"
+        max-file: "5"
     ports:
       # The serving port and loopback-only exposure are fixed topology.
       - "127.0.0.1:8000:8000"
@@ -130,6 +140,11 @@ services:
     build: !reset null
     pull_policy: always
     restart: unless-stopped
+    logging:
+      driver: local
+      options:
+        max-size: "10m"
+        max-file: "5"
     environment:
       # This explicit allowlist is the complete persistent worker environment
       # contract. Do not forward the host environment wholesale or persist
