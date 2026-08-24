@@ -326,7 +326,7 @@ def _content_checksum(connection: sqlite3.Connection) -> str:
 
 
 def build_schema16_fixture(path: Path, *, drain_blocked: bool) -> dict[str, object]:
-    migrate_database(path, migrations=MIGRATIONS[:-1])
+    migrate_database(path, migrations=MIGRATIONS[:16])
     with sqlite3.connect(path) as connection:
         connection.execute("PRAGMA foreign_keys = ON")
         assert connection.execute("PRAGMA user_version").fetchone() == (16,)

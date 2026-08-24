@@ -157,7 +157,7 @@ class _MigrationAuthorizer:
             writer = writer_for_table(argument_one)
             self._creates_application_table = writer is Writer.API
         if action == sqlite3.SQLITE_ALTER_TABLE and argument_two is not None:
-            if writer_for_table(argument_two) is Writer.API:
+            if writer_for_table(argument_two) in {Writer.API, Writer.MIGRATOR}:
                 self._altered_application_table = argument_two
         if action == sqlite3.SQLITE_SELECT and self._creates_application_table:
             # SQLite reports CREATE TABLE before SELECT for every CTAS form,

@@ -9,7 +9,7 @@ import pytest
 from test_edge_db_schema16_fixtures import build_schema16_fixture
 
 from backend.app.edge_db.migrator import migrate_database
-from backend.app.edge_db.schema import SchemaV17MigrationError
+from backend.app.edge_db.schema import MIGRATIONS, SchemaV17MigrationError
 
 
 def _application_manifest(connection: sqlite3.Connection) -> tuple[dict[str, int], str]:
@@ -86,7 +86,7 @@ def test_schema17_migration_preserves_application_rows_and_only_reassigns_writer
             "SELECT prefix, writer, purpose FROM schema_table_families ORDER BY prefix"
         ).fetchall()
 
-    migrate_database(database)
+    migrate_database(database, migrations=MIGRATIONS[:17])
 
     with sqlite3.connect(database) as connection:
         after_manifest = _application_manifest(connection)
@@ -134,11 +134,11 @@ def test_schema17_migration_refuses_reinvocation_with_typed_error(tmp_path: Path
     database = tmp_path / "schema16.sqlite3"
     build_schema16_fixture(database, drain_blocked=False)
 
-    migrate_database(database)
+    migrate_database(database, migrations=MIGRATIONS[:17])
     # Re-running the canonical path on an already-migrated database is a clean
     # no-op, not an error: an operator who repeats the documented command must
     # not be told the deployment is broken.
-    migrate_database(database)
+    migrate_database(database, migrations=MIGRATIONS[:17])
 
     with sqlite3.connect(database) as connection:
         assert connection.execute("PRAGMA user_version").fetchone() == (17,)
@@ -183,7 +183,7 @@ def test_schema17_drain_gate_refuses_waiting_legacy_clips_without_mutating_datab
 def test_production_migration_ledger_lands_on_schema17(tmp_path: Path) -> None:
     database = tmp_path / "production.sqlite3"
 
-    result = migrate_database(database)
+    result = migrate_database(database, migrations=MIGRATIONS[:17])
 
     assert result.current_version == 17
     with sqlite3.connect(database) as connection:
