@@ -76,19 +76,26 @@ def test_large_indexed_listing_has_bounded_work_and_response(
             json={"username": "admin", "password": "admin"},
         )
         assert login.status_code == 204
-        for offset in range(0, _CLIP_COUNT, _PAGE_SIZE):
-            response = client.get(
-                "/api/v1/clips",
-                params={"limit": _PAGE_SIZE, "offset": offset},
-            )
+        cursor: str | None = None
+        page_number = 0
+        while True:
+            params = {"limit": _PAGE_SIZE}
+            if cursor is not None:
+                params["cursor"] = cursor
+            response = client.get("/api/v1/clips", params=params)
             assert response.status_code == 200
             body = response.json()
-            if offset == 0:
+            if page_number == 0:
                 first_response_bytes = len(response.content)
                 first_facets = body["event_type_counts"]
                 assert len(body["clips"]) == _PAGE_SIZE
                 assert body["pagination"]["total"] == _CLIP_COUNT
+                assert isinstance(body["pagination"]["next_cursor"], str)
             traversed_ids.extend(clip["clip_id"] for clip in body["clips"])
+            cursor = body["pagination"]["next_cursor"]
+            page_number += 1
+            if cursor is None:
+                break
     index.close()
 
     # Then: requests read no manifests, facets and bytes stay bounded, and IDs appear once.

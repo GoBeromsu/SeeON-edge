@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import sqlite3
 from pathlib import Path
+from typing import BinaryIO
 
 import pytest
 from fastapi.testclient import TestClient
@@ -11,14 +13,16 @@ from fastapi.testclient import TestClient
 from backend.app.edge_db.migrator import migrate_database
 from backend.app.features.cameras.store import CameraRegistryStore
 from backend.app.features.clips.catalog import CatalogStore
+from backend.app.features.clips.compact_listing import CompactClipListing, CompactClipQuery
 from backend.app.features.clips.store import ClipStore
+from backend.app.features.evidence.compact_receipts import CompactArtifactReceiptStore
 from backend.app.features.evidence.receipt_store import (
     ArtifactReceipt,
     ArtifactReceiptConflictError,
     ArtifactReceiptStore,
     ArtifactReceiptVerificationError,
     CatalogArtifactReceiptStore,
-    CompactArtifactReceiptStore,
+    VerifiedArtifact,
     verify_artifact,
 )
 from backend.app.features.evidence.relay_projection import RelayEvent, RelayEvidenceProjection
@@ -237,6 +241,150 @@ def test_compact_receipt_commits_clip_and_primary_artifact(tmp_path: Path) -> No
         assert connection.execute(
             "SELECT clip_id,state FROM artifacts WHERE kind='PRIMARY_CLIP'"
         ).fetchone() == ("clip-1", "AVAILABLE")
+
+
+def test_compact_receipt_rejects_equal_size_different_hash_without_partial_state(
+    tmp_path: Path,
+) -> None:
+    # Given: current media bytes differ from an equal-size declared receipt.
+    actual = b"actual-media"
+    declared = b"bogus-media!"
+    assert len(actual) == len(declared)
+    _media(tmp_path, actual)
+    database = tmp_path / "edge.sqlite3"
+    migrate_database(database)
+    store = CompactArtifactReceiptStore(database, tmp_path / "clip-store")
+
+    # When: the compact store independently binds the receipt to current bytes.
+    with pytest.raises(ArtifactReceiptVerificationError):
+        store.commit(_receipt(declared))
+
+    # Then: neither compact authority contains a caller-declared partial fact.
+    with sqlite3.connect(database) as connection:
+        assert connection.execute("SELECT count(*) FROM clips").fetchone() == (0,)
+        assert connection.execute("SELECT count(*) FROM artifacts").fetchone() == (0,)
+
+
+def test_compact_receipt_failure_does_not_promote_existing_waiting_clip(
+    tmp_path: Path,
+) -> None:
+    # Given: manifest reconciliation created a WAITING compact clip row.
+    actual = b"actual-media"
+    declared = b"bogus-media!"
+    _media(tmp_path, actual)
+    database = tmp_path / "edge.sqlite3"
+    migrate_database(database)
+    listing = CompactClipListing(database)
+    listing.rebuild_and_page(
+        ClipStore(tmp_path / "clip-store"),
+        CompactClipQuery(None, None, 10, None),
+    )
+
+    # When: a same-size, wrong-hash receipt is rejected.
+    with pytest.raises(ArtifactReceiptVerificationError):
+        CompactArtifactReceiptStore(database, tmp_path / "clip-store").commit(
+            _receipt(declared)
+        )
+
+    # Then: publication remains WAITING and no PRIMARY_CLIP appears.
+    with sqlite3.connect(database) as connection:
+        assert connection.execute(
+            "SELECT publish_state FROM clips WHERE clip_id='clip-1'"
+        ).fetchone() == ("WAITING",)
+        assert connection.execute("SELECT count(*) FROM artifacts").fetchone() == (0,)
+
+
+@pytest.mark.parametrize("invalid_path", ["symlink", "missing"])
+def test_compact_receipt_rejects_untrusted_media_path_without_partial_state(
+    tmp_path: Path,
+    invalid_path: str,
+) -> None:
+    # Given: direct compact commit sees either no media or a symlinked final path.
+    data = b"verified video"
+    media = _media(tmp_path, data)
+    if invalid_path == "symlink":
+        target = media.with_name("target.mp4")
+        target.write_bytes(data)
+        media.unlink()
+        media.symlink_to(target.name)
+    else:
+        media.unlink()
+    database = tmp_path / "edge.sqlite3"
+    migrate_database(database)
+
+    # When/Then: no untrusted pathname can produce publication state.
+    with pytest.raises(ArtifactReceiptVerificationError):
+        CompactArtifactReceiptStore(database, tmp_path / "clip-store").commit(_receipt(data))
+    with sqlite3.connect(database) as connection:
+        assert connection.execute("SELECT count(*) FROM clips").fetchone() == (0,)
+        assert connection.execute("SELECT count(*) FROM artifacts").fetchone() == (0,)
+
+
+@pytest.mark.parametrize("swap_kind", ["inode", "symlink", "missing"])
+def test_real_route_rejects_media_swap_before_compact_commit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    swap_kind: str,
+) -> None:
+    # Given: route verification has opened the declared inode.
+    original = b"verified video"
+    replacement = b"tampered bytes"
+    assert len(original) == len(replacement)
+    database = tmp_path / "edge.sqlite3"
+    migrate_database(database)
+    store = CompactArtifactReceiptStore(database, tmp_path / "clip-store")
+    client = _client(tmp_path, store)
+    media = _media(tmp_path, original)
+    original_inode = media.stat().st_ino
+    original_commit = CompactArtifactReceiptStore.commit_verified
+    observed_inode: int | None = None
+    verified_handle: BinaryIO | None = None
+
+    def swap_then_commit(
+        compact_store: CompactArtifactReceiptStore,
+        receipt: ArtifactReceipt,
+        route_verified: VerifiedArtifact,
+    ) -> ArtifactReceipt:
+        nonlocal observed_inode, verified_handle
+        verified_handle = route_verified.handle
+        replacement_path = media.with_name("replacement.mp4")
+        replacement_path.write_bytes(replacement)
+        match swap_kind:
+            case "inode":
+                os.replace(replacement_path, media)
+            case "symlink":
+                media.unlink()
+                media.symlink_to(replacement_path.name)
+            case "missing":
+                media.unlink()
+                replacement_path.unlink()
+            case unreachable:
+                raise AssertionError(unreachable)
+        if media.exists():
+            observed_inode = media.stat().st_ino
+        return original_commit(compact_store, receipt, route_verified)
+
+    monkeypatch.setattr(
+        CompactArtifactReceiptStore,
+        "commit_verified",
+        swap_then_commit,
+    )
+
+    # When: the real relay route crosses verification -> compact commit.
+    response = client.put(
+        "/api/v1/relay/clips/clip-1",
+        json=_payload(original),
+        headers={"X-Edge-Relay-Token": TOKEN},
+    )
+
+    # Then: pathname/inode drift is rejected and no publication fact commits.
+    assert response.status_code == 409
+    assert verified_handle is not None and verified_handle.closed
+    if observed_inode is not None:
+        assert observed_inode != original_inode
+    with sqlite3.connect(database) as connection:
+        assert connection.execute("SELECT count(*) FROM clips").fetchone() == (0,)
+        assert connection.execute("SELECT count(*) FROM artifacts").fetchone() == (0,)
 
 
 def test_relay_verifies_before_durable_receipt_and_never_writes_media(tmp_path: Path) -> None:

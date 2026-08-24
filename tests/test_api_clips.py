@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import sqlite3
 from pathlib import Path
 from typing import Self, TypedDict
@@ -179,6 +180,118 @@ def test_manifest_rebuild_rolls_back_when_one_tuple_is_invalid(clip_env) -> None
     assert response.status_code == 503
     with sqlite3.connect(clip_env / ".central-fixture" / "edge.sqlite3") as connection:
         assert connection.execute("SELECT count(*) FROM clips").fetchone() == (0,)
+
+
+def test_compact_rebuild_removes_stale_manifest_from_page_total_and_facets(clip_env) -> None:
+    # Given: one manifest has been reconciled into compact clips.
+    clip_store = clip_env / "clip-store"
+    _write_manifest(clip_store, "stale")
+    with TestClient(create_app(lifespan=no_lifespan)) as client:
+        _login(client)
+        first = client.get("/api/v1/clips", params={"limit": 10})
+        assert first.status_code == 200
+        assert first.json()["pagination"]["total"] == 1
+
+        # When: filesystem truth removes the complete manifest/media directory.
+        shutil.rmtree(clip_store / "clips" / "stale")
+        rebuilt = client.get("/api/v1/clips", params={"limit": 10})
+
+    # Then: page, total, and facets come from the same reconciled visible set.
+    assert rebuilt.status_code == 200
+    assert rebuilt.json()["clips"] == []
+    assert rebuilt.json()["pagination"] == {
+        "limit": 10,
+        "offset": 0,
+        "total": 0,
+        "has_more": False,
+        "next_cursor": None,
+    }
+    assert rebuilt.json()["event_type_counts"] == {}
+
+
+def test_stale_referenced_clip_is_retained_unavailable_but_hidden(clip_env) -> None:
+    # Given: a reconciled clip is retained by PRIMARY_CLIP history.
+    clip_store = clip_env / "clip-store"
+    _write_manifest(clip_store, "history")
+    database = clip_env / ".central-fixture" / "edge.sqlite3"
+    with TestClient(create_app(lifespan=no_lifespan)) as client:
+        _login(client)
+        assert client.get("/api/v1/clips", params={"limit": 10}).status_code == 200
+        with sqlite3.connect(database) as connection:
+            clip = connection.execute(
+                "SELECT media_sha256,media_size_bytes,media_relpath FROM clips "
+                "WHERE clip_id='history'"
+            ).fetchone()
+            connection.execute(
+                """
+                INSERT INTO incidents (
+                    incident_id,edge_event_id,facility_id,camera_id,event_type,detected_at,
+                    lifecycle_state,provenance_state,provenance_missing_reason,
+                    review_version,revision,created_at,updated_at
+                ) VALUES ('incident-history','event-history','facility-1','camera-1','fall',
+                          '2026-07-06T00:00:00Z','OPEN','MISSING','NOT_RECORDED',0,1,
+                          '2026-07-06T00:00:00Z','2026-07-06T00:00:00Z')
+                """
+            )
+            connection.execute(
+                """
+                INSERT INTO artifacts (
+                    incident_id,kind,artifact_id,clip_id,state,contained_relpath,
+                    content_sha256,size_bytes,mime_type,codec,revision,created_at,updated_at
+                ) VALUES ('incident-history','PRIMARY_CLIP','artifact-history','history',
+                          'AVAILABLE',?,?,?,'video/mp4','h264',1,
+                          '2026-07-06T00:00:00Z','2026-07-06T00:00:00Z')
+                """,
+                (clip[2], clip[0], clip[1]),
+            )
+        shutil.rmtree(clip_store / "clips" / "history")
+
+        # When: compact reconciliation observes the missing filesystem fact.
+        rebuilt = client.get("/api/v1/clips", params={"limit": 10})
+
+    # Then: history remains referentially intact but is absent from every listing projection.
+    assert rebuilt.status_code == 200
+    assert rebuilt.json()["pagination"]["total"] == 0
+    assert rebuilt.json()["event_type_counts"] == {}
+    with sqlite3.connect(database) as connection:
+        row = connection.execute(
+            "SELECT local_state,local_reason,manifest_relpath,media_relpath FROM clips "
+            "WHERE clip_id='history'"
+        ).fetchone()
+        relation = connection.execute(
+            "SELECT clip_id FROM artifacts WHERE artifact_id='artifact-history'"
+        ).fetchone()
+    assert row == ("UNAVAILABLE", "MANIFEST_MISSING", None, None)
+    assert relation == ("history",)
+
+
+def test_compact_rebuild_rejects_changed_identity_without_mutating_row(clip_env) -> None:
+    # Given: one immutable manifest/media identity has been reconciled.
+    clip_store = clip_env / "clip-store"
+    _write_manifest(clip_store, "stable")
+    database = clip_env / ".central-fixture" / "edge.sqlite3"
+    with TestClient(create_app(lifespan=no_lifespan)) as client:
+        _login(client)
+        first = client.get("/api/v1/clips", params={"limit": 10})
+        assert first.status_code == 200
+        with sqlite3.connect(database) as connection:
+            before = connection.execute(
+                "SELECT media_sha256, media_size_bytes, publish_state FROM clips "
+                "WHERE clip_id='stable'"
+            ).fetchone()
+
+        # When: bytes change under the same immutable clip identity.
+        (clip_store / "clips" / "stable" / "clip.mp4").write_bytes(b"changed-media")
+        conflict = client.get("/api/v1/clips", params={"limit": 10})
+
+    # Then: conflict is deterministic and the prior compact tuple is unchanged.
+    assert conflict.status_code == 503
+    with sqlite3.connect(database) as connection:
+        after = connection.execute(
+            "SELECT media_sha256, media_size_bytes, publish_state FROM clips "
+            "WHERE clip_id='stable'"
+        ).fetchone()
+    assert after == before
 
 
 def test_list_clips_preserves_event_type_when_event_ref_is_identity(clip_env) -> None:

@@ -99,7 +99,7 @@ def test_compact_listing_rebuilds_thumbnail_identity(clip_env: Path) -> None:
     assert row == ("clips/clip-with/thumbnail.jpg", 64, len(JPEG))
 
 
-def test_indexed_listing_reads_thumbnail_availability_without_request_time_root_walks(
+def test_first_page_ignores_legacy_index_and_rebuilds_thumbnail_availability(
     clip_env: Path,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -130,7 +130,7 @@ def test_indexed_listing_reads_thumbnail_availability_without_request_time_root_
     assert response.status_code == 200
     clips = response.json()["clips"]
     assert len(clips) == 48
-    assert root_walks == 0
+    assert root_walks > 0
     assert all(
         clip["thumbnail_available"] == (int(clip["clip_id"].removeprefix("clip-")) % 2 == 0)
         for clip in clips

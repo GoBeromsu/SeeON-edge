@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-import hashlib
 import logging
 import os
 import re
+import sqlite3
 import stat
 from dataclasses import dataclass
 from pathlib import Path
@@ -17,13 +17,15 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from backend.app.edge_db import EDGE_DATABASE_PATH
 from backend.app.features.clips.store import CLIP_STORE_DIR_ENV, DEFAULT_CLIP_STORE_DIR
+from backend.app.features.evidence.compact_receipts import CompactArtifactReceiptStore
 from backend.app.features.evidence.receipt_store import (
     ArtifactReceipt,
     ArtifactReceiptConflictError,
     ArtifactReceiptPersistenceError,
     ArtifactReceiptStore,
     ArtifactReceiptVerificationError,
-    CompactArtifactReceiptStore,
+    VerifiedArtifact,
+    verified_artifact,
 )
 from backend.app.features.relay.auth import authorize_relay as _authorize
 from backend.app.features.relay.router import RELAY_TOKEN_HEADER, _camera_binding
@@ -213,14 +215,25 @@ def export_clip(
                 else "clip media mismatch",
             ) from exc
         try:
-            _ = _receipt_store(request).commit(
-                ArtifactReceipt(clip_id, payload.sha256, payload.size_bytes)
-            )
+            receipt = ArtifactReceipt(clip_id, payload.sha256, payload.size_bytes)
+            receipt_store = _receipt_store(request)
+            if isinstance(receipt_store, CompactArtifactReceiptStore):
+                _ = receipt_store.commit_verified(receipt, media)
+            else:
+                _ = receipt_store.commit(receipt)
+        except ArtifactReceiptVerificationError as exc:
+            media.handle.close()
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="clip media changed before receipt commit",
+            ) from exc
         except ArtifactReceiptConflictError as exc:
+            media.handle.close()
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT, detail="artifact receipt conflicts"
             ) from exc
-        except ArtifactReceiptPersistenceError as exc:
+        except (ArtifactReceiptPersistenceError, OSError, sqlite3.Error) as exc:
+            media.handle.close()
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail="artifact receipt persistence unavailable",
@@ -239,8 +252,8 @@ def export_clip(
             clip_end_at=payload.clip_end_at,
             finalized_at=payload.finalized_at,
         )
-        with media:
-            result = client.publish_ready(request_payload, media)
+        with media.handle:
+            result = client.publish_ready(request_payload, media.handle)
     else:
         result = client.report_unavailable(
             _UnavailableRequest(
@@ -262,7 +275,11 @@ def export_clip(
     )
 
 
-def _verified_media(request: Request, clip_id: str, payload: ReadyClipPayload) -> BinaryIO:
+def _verified_media(
+    request: Request,
+    clip_id: str,
+    payload: ReadyClipPayload,
+) -> VerifiedArtifact:
     root_value = getattr(request.app.state, "clip_store_root", None)
     root = Path(root_value or os.environ.get(CLIP_STORE_DIR_ENV, DEFAULT_CLIP_STORE_DIR))
     directory_fds: list[int] = []
@@ -291,21 +308,14 @@ def _verified_media(request: Request, clip_id: str, payload: ReadyClipPayload) -
     if media_fd is None:
         raise ArtifactReceiptVerificationError("artifact is unavailable")
     handle = os.fdopen(media_fd, "rb", closefd=True)
-    mismatch = not stat.S_ISREG(file_stat.st_mode) or file_stat.st_size != payload.size_bytes
-    try:
-        if not mismatch:
-            digest = hashlib.sha256()
-            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-                digest.update(chunk)
-            mismatch = digest.hexdigest() != payload.sha256
-            handle.seek(0)
-    except OSError as exc:
+    if not stat.S_ISREG(file_stat.st_mode):
         handle.close()
-        raise ArtifactReceiptVerificationError("artifact cannot be verified") from exc
-    if mismatch:
+        raise ArtifactReceiptVerificationError("artifact is not regular")
+    verified = verified_artifact(handle)
+    if (verified.sha256, verified.size_bytes) != (payload.sha256, payload.size_bytes):
         handle.close()
         raise ArtifactReceiptVerificationError("artifact does not match receipt")
-    return handle
+    return verified
 
 
 def _enabled(request: Request) -> bool:

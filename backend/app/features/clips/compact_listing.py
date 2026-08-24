@@ -1,4 +1,4 @@
-"""Manifest rebuild and keyset reads backed only by schema-18 ``clips``."""
+"""Transactional manifest reconciliation over schema-18 ``clips``."""
 
 from __future__ import annotations
 
@@ -21,6 +21,14 @@ class CompactClipConflictError(RuntimeError):
 
 
 @dataclass(frozen=True, slots=True)
+class CompactClipQuery:
+    camera_id: str | None
+    event_type: str | None
+    limit: int
+    cursor: str | None
+
+
+@dataclass(frozen=True, slots=True)
 class CompactClipPage:
     manifests: tuple[ClipManifest, ...]
     total: int
@@ -29,8 +37,15 @@ class CompactClipPage:
     event_type_counts: dict[str, int]
 
 
+@dataclass(frozen=True, slots=True)
+class _PreparedClip:
+    manifest: ClipManifest
+    values: tuple[str | int | None, ...]
+    identity: tuple[str, str | None, int | None]
+
+
 class CompactClipListing:
-    """Rebuild valid manifest facts and page the compact clip authority."""
+    """Reconcile verified filesystem facts and read one matching keyset page."""
 
     def __init__(self, database_path: Path) -> None:
         self.database_path = database_path
@@ -38,117 +53,167 @@ class CompactClipListing:
     def rebuild_and_page(
         self,
         store: ClipStore,
-        *,
-        camera_id: str | None,
-        event_type: str | None,
-        limit: int,
-        cursor: str | None,
+        query: CompactClipQuery,
     ) -> CompactClipPage:
-        manifests = self._rebuild(store)
-        params: list[str | int] = []
-        predicates: list[str] = []
-        if camera_id is not None:
-            predicates.append("camera_id = ?")
-            params.append(camera_id)
-        if event_type is not None:
-            predicates.append("event_facet = ?")
-            params.append(event_type)
-        if cursor is not None:
-            started_at, clip_id = _parse_cursor(cursor)
-            predicates.append("(started_at < ? OR (started_at = ? AND clip_id < ?))")
-            params.extend((started_at, started_at, clip_id))
-        where = "" if not predicates else " WHERE " + " AND ".join(predicates)
-        connection = open_runtime_database(self.database_path, actor=RuntimeActor.API)
-        try:
-            rows = connection.execute(
-                "SELECT clip_id, started_at FROM clips" + where
-                + " ORDER BY started_at DESC, clip_id DESC LIMIT ?",
-                (*params, limit + 1),
-            ).fetchall()
-            count_params: list[str] = []
-            count_where = ""
-            if camera_id is not None:
-                count_where = " WHERE camera_id = ?"
-                count_params.append(camera_id)
-            total = int(connection.execute(
-                "SELECT count(*) FROM clips" + count_where, tuple(count_params)
-            ).fetchone()[0])
-            facets = dict(connection.execute(
-                "SELECT event_facet, count(*) FROM clips" + count_where
-                + " GROUP BY event_facet ORDER BY event_facet",
-                tuple(count_params),
-            ).fetchall())
-        finally:
-            connection.close()
-        by_id = {manifest.clip_id: manifest for manifest in manifests}
-        visible = tuple(by_id[str(row[0])] for row in rows[:limit] if str(row[0]) in by_id)
-        next_cursor = None
-        if len(rows) > limit:
-            last = rows[limit - 1]
-            next_cursor = _format_cursor(str(last[1]), str(last[0]))
-        return CompactClipPage(visible, total, len(rows) > limit, next_cursor, facets)
-
-    def _rebuild(self, store: ClipStore) -> tuple[ClipManifest, ...]:
-        manifests = tuple(store.list_manifests())
-        prepared: list[tuple[ClipManifest, tuple[str | int | None, ...]]] = []
-        seen: set[str] = set()
-        for manifest in manifests:
-            if manifest.clip_id in seen:
-                store.locate_manifest(manifest.clip_id)
-                raise DuplicateClipIdError(manifest.clip_id, ())
-            seen.add(manifest.clip_id)
-            located = store.locate_manifest(manifest.clip_id)
-            if located is None or not _valid_timestamp(manifest.started_at):
-                continue
-            manifest_path = located.manifest_path
-            manifest_hash, manifest_size = _hash_regular(store.root, manifest_path)
-            manifest_relpath = manifest_path.relative_to(store.root).as_posix()
-            try:
-                media_path = store.resolve_located_video_path(located)
-                media_hash, media_size = _hash_regular(store.root, media_path)
-            except (FileNotFoundError, ValueError):
-                media_path = None
-                media_hash = None
-                media_size = None
-            local_state = "AVAILABLE" if media_path is not None else "CORRUPT"
-            local_reason = None if media_path is not None else "MEDIA_MISSING"
-            media_relpath = (
-                None if media_path is None else media_path.relative_to(store.root).as_posix()
-            )
-            thumbnail_path = manifest_path.parent / "thumbnail.jpg"
-            try:
-                thumbnail_hash, thumbnail_size = _hash_regular(store.root, thumbnail_path)
-                thumbnail_relpath = thumbnail_path.relative_to(store.root).as_posix()
-            except FileNotFoundError:
-                thumbnail_hash = None
-                thumbnail_size = None
-                thumbnail_relpath = None
-            prepared.append((manifest, (
-                manifest.clip_id, manifest.camera_id, effective_event_type(manifest),
-                manifest.started_at, max(1, round(manifest.duration_s * 1000)),
-                manifest.codec or None, "video/mp4", manifest_relpath, media_relpath,
-                thumbnail_relpath, manifest_hash, media_hash, thumbnail_hash,
-                manifest_size, media_size, thumbnail_size, local_state,
-                local_reason, manifest.started_at, manifest.started_at,
-            )))
+        prepared = None if query.cursor is not None else _prepare(store)
         connection = open_runtime_database(self.database_path, actor=RuntimeActor.API)
         try:
             with write_transaction(connection):
-                for manifest, values in prepared:
-                    existing = connection.execute(
-                        "SELECT manifest_sha256, media_sha256, media_size_bytes FROM clips "
-                        "WHERE clip_id = ?", (manifest.clip_id,),
-                    ).fetchone()
-                    identity = (values[10], values[11], values[14])
-                    if existing is not None and tuple(existing) != identity:
-                        raise CompactClipConflictError(
-                            f"clip {manifest.clip_id} immutable content changed"
-                        )
-                    if existing is None:
-                        connection.execute(_INSERT_CLIP, values)
+                if prepared is not None:
+                    _reconcile(connection, prepared)
+                page_rows, total, facets = _page_rows(connection, query)
         finally:
             connection.close()
-        return tuple(manifest for manifest, _values in prepared)
+        prepared_by_id = (
+            {} if prepared is None
+            else {item.manifest.clip_id: item.manifest for item in prepared}
+        )
+        visible: list[ClipManifest] = []
+        for row in page_rows[: query.limit]:
+            clip_id = str(row[0])
+            manifest = prepared_by_id.get(clip_id)
+            if manifest is None:
+                located = store.locate_manifest(clip_id)
+                if located is None:
+                    raise CompactClipConflictError(
+                        f"visible clip {clip_id} disappeared during pagination"
+                    )
+                manifest = located.manifest
+            visible.append(manifest)
+        next_cursor = None
+        if len(page_rows) > query.limit:
+            last = page_rows[query.limit - 1]
+            next_cursor = _format_cursor(str(last[1]), str(last[0]))
+        return CompactClipPage(
+            manifests=tuple(visible),
+            total=total,
+            has_more=len(page_rows) > query.limit,
+            next_cursor=next_cursor,
+            event_type_counts=facets,
+        )
+
+
+def _prepare(store: ClipStore) -> tuple[_PreparedClip, ...]:
+    prepared: list[_PreparedClip] = []
+    seen: set[str] = set()
+    for manifest in store.list_manifests():
+        if manifest.clip_id in seen:
+            store.locate_manifest(manifest.clip_id)
+            raise DuplicateClipIdError(manifest.clip_id, ())
+        seen.add(manifest.clip_id)
+        located = store.locate_manifest(manifest.clip_id)
+        if located is None or not _valid_timestamp(manifest.started_at):
+            continue
+        manifest_path = located.manifest_path
+        manifest_hash, manifest_size = _hash_regular(store.root, manifest_path)
+        manifest_relpath = manifest_path.relative_to(store.root).as_posix()
+        try:
+            media_path = store.resolve_located_video_path(located)
+            media_hash, media_size = _hash_regular(store.root, media_path)
+        except (FileNotFoundError, ValueError):
+            media_path = None
+            media_hash = None
+            media_size = None
+        local_state = "AVAILABLE" if media_path is not None else "CORRUPT"
+        local_reason = None if media_path is not None else "MEDIA_MISSING"
+        media_relpath = (
+            None if media_path is None else media_path.relative_to(store.root).as_posix()
+        )
+        thumbnail_path = manifest_path.parent / "thumbnail.jpg"
+        try:
+            thumbnail_hash, thumbnail_size = _hash_regular(store.root, thumbnail_path)
+            thumbnail_relpath = thumbnail_path.relative_to(store.root).as_posix()
+        except FileNotFoundError:
+            thumbnail_hash = None
+            thumbnail_size = None
+            thumbnail_relpath = None
+        values: tuple[str | int | None, ...] = (
+            manifest.clip_id, manifest.camera_id, effective_event_type(manifest),
+            manifest.started_at, max(1, round(manifest.duration_s * 1000)),
+            manifest.codec or None, "video/mp4", manifest_relpath, media_relpath,
+            thumbnail_relpath, manifest_hash, media_hash, thumbnail_hash,
+            manifest_size, media_size, thumbnail_size, local_state, local_reason,
+            manifest.started_at, manifest.started_at,
+        )
+        prepared.append(
+            _PreparedClip(manifest, values, (manifest_hash, media_hash, media_size))
+        )
+    return tuple(prepared)
+
+
+def _reconcile(connection, prepared: tuple[_PreparedClip, ...]) -> None:
+    present_ids = {item.manifest.clip_id for item in prepared}
+    existing_ids = {
+        str(row[0]) for row in connection.execute("SELECT clip_id FROM clips").fetchall()
+    }
+    for clip_id in existing_ids - present_ids:
+        referenced = connection.execute(
+            "SELECT 1 FROM artifacts WHERE clip_id = ? LIMIT 1",
+            (clip_id,),
+        ).fetchone()
+        if referenced is None:
+            connection.execute("DELETE FROM clips WHERE clip_id = ?", (clip_id,))
+        else:
+            connection.execute(
+                """
+                UPDATE clips SET
+                    manifest_relpath=NULL, media_relpath=NULL, thumbnail_relpath=NULL,
+                    manifest_sha256=NULL, media_sha256=NULL, thumbnail_sha256=NULL,
+                    manifest_size_bytes=NULL, media_size_bytes=NULL, thumbnail_size_bytes=NULL,
+                    local_state='UNAVAILABLE', local_reason='MANIFEST_MISSING',
+                    revision=revision+1
+                WHERE clip_id=? AND (
+                    local_state != 'UNAVAILABLE' OR local_reason != 'MANIFEST_MISSING'
+                )
+                """,
+                (clip_id,),
+            )
+    for item in prepared:
+        existing = connection.execute(
+            "SELECT manifest_sha256, media_sha256, media_size_bytes FROM clips WHERE clip_id = ?",
+            (item.manifest.clip_id,),
+        ).fetchone()
+        if existing is not None and tuple(existing) != item.identity:
+            raise CompactClipConflictError(
+                f"clip {item.manifest.clip_id} immutable content changed"
+            )
+        if existing is None:
+            connection.execute(_INSERT_CLIP, item.values)
+
+
+def _page_rows(connection, query: CompactClipQuery):
+    visible = "local_state != 'UNAVAILABLE' AND manifest_relpath IS NOT NULL"
+    scope_predicates = [visible]
+    scope_params: list[str] = []
+    if query.camera_id is not None:
+        scope_predicates.append("camera_id = ?")
+        scope_params.append(query.camera_id)
+    page_predicates = list(scope_predicates)
+    page_params: list[str | int] = list(scope_params)
+    if query.event_type is not None:
+        page_predicates.append("event_facet = ?")
+        page_params.append(query.event_type)
+    count_predicates = list(page_predicates)
+    count_params = tuple(page_params)
+    if query.cursor is not None:
+        started_at, clip_id = _parse_cursor(query.cursor)
+        page_predicates.append("(started_at < ? OR (started_at = ? AND clip_id < ?))")
+        page_params.extend((started_at, started_at, clip_id))
+    rows = connection.execute(
+        "SELECT clip_id, started_at FROM clips WHERE " + " AND ".join(page_predicates)
+        + " ORDER BY started_at DESC, clip_id DESC LIMIT ?",
+        (*page_params, query.limit + 1),
+    ).fetchall()
+    total = int(connection.execute(
+        "SELECT count(*) FROM clips WHERE " + " AND ".join(count_predicates),
+        count_params,
+    ).fetchone()[0])
+    facets = dict(connection.execute(
+        "SELECT event_facet, count(*) FROM clips WHERE " + " AND ".join(scope_predicates)
+        + " GROUP BY event_facet ORDER BY event_facet",
+        tuple(scope_params),
+    ).fetchall())
+    return rows, total, facets
 
 
 _INSERT_CLIP = """
@@ -199,4 +264,9 @@ def _parse_cursor(cursor: str) -> tuple[str, str]:
     return started_at, clip_id
 
 
-__all__ = ["CompactClipConflictError", "CompactClipListing", "CompactClipPage"]
+__all__ = [
+    "CompactClipConflictError",
+    "CompactClipListing",
+    "CompactClipPage",
+    "CompactClipQuery",
+]

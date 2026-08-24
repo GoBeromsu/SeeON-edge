@@ -56,10 +56,10 @@ class ClipListQuery(BaseModel):
 
     @model_validator(mode="after")
     def require_limit_for_offset(self) -> Self:
-        if self.limit is None and (self.offset > 0 or self.cursor is not None):
-            raise ValueError("pagination requires limit")
-        if self.cursor is not None and self.offset > 0:
-            raise ValueError("cursor and offset are mutually exclusive")
+        if self.limit is None and self.cursor is not None:
+            raise ValueError("cursor requires limit")
+        if self.offset > 0:
+            raise ValueError("offset pagination is retired; use cursor")
         return self
 
 
