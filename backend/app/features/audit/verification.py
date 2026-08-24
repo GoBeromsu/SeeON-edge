@@ -1,4 +1,9 @@
-"""Bounded audit-chain verification and schema-bound checkpoints."""
+"""Bounded audit-chain verification and connection-observed checkpoints.
+
+The local threat boundary detects commits visible to the retained SQLite observer.
+It cannot defend an attacker who can rewrite both the database and process memory
+(or a future external anchor); that requires an authority outside this process.
+"""
 
 from __future__ import annotations
 
@@ -51,6 +56,10 @@ class VerificationCheckpoint:
     schema_version: int
     trigger_fingerprint: str
     database_identity: DatabaseIdentity
+    observer_id: str
+    data_version: int
+    rolling_audit_id: int
+    rolling_previous_hash: str
 
 
 class AuditVerificationError(RuntimeError):
@@ -68,38 +77,111 @@ def verify_connection(
     connection: sqlite3.Connection,
     checkpoint: VerificationCheckpoint | None,
     identity: DatabaseIdentity,
+    *,
+    observer_id: str = "ephemeral",
+    data_version: int | None = None,
 ) -> VerificationCheckpoint:
-    """Verify the unchanged suffix or restart from genesis after a schema epoch change."""
+    """Verify a suffix and one rolling historical page from one observed snapshot."""
     count_row = connection.execute("SELECT COUNT(audit_id) FROM audit_events").fetchone()
     count = 0 if count_row is None else int(count_row[0])
     if count >= MAX_AUDIT_ROWS:
         raise AuditVerificationError("audit history reached the one-million-row refusal limit")
+    observed_version = _data_version(connection) if data_version is None else data_version
     schema_version, trigger_fingerprint = _schema_state(connection)
     if checkpoint is not None and checkpoint.database_identity != identity:
         raise AuditVerificationError("audit checkpoint database identity changed")
-    full = checkpoint is None or (
+    same_observer = checkpoint is not None and checkpoint.observer_id == observer_id
+    schema_changed = checkpoint is not None and (
         checkpoint.schema_version != schema_version
         or checkpoint.trigger_fingerprint != trigger_fingerprint
     )
+    data_changed = (
+        checkpoint is not None
+        and same_observer
+        and checkpoint.data_version != observed_version
+    )
+    # A valid new audit tail accounts for a governed caller-owned commit because
+    # the business write and audit INSERT share that SQLite transaction. A commit
+    # without such a tail is unexplained and must complete a full verification.
+    has_tail = checkpoint is not None and connection.execute(
+        "SELECT 1 FROM audit_events WHERE audit_id>? LIMIT 1", (checkpoint.audit_id,)
+    ).fetchone() is not None
+    full = (
+        checkpoint is None
+        or not same_observer
+        or schema_changed
+        or (data_changed and not has_tail)
+    )
     if full:
-        last_id, previous_hash = 0, GENESIS_HASH
-        anchor_previous_hash = GENESIS_HASH
+        last_id, previous_hash, anchor_previous_hash = _verify_all(connection)
+        rolling_id, rolling_hash = 0, GENESIS_HASH
     else:
         assert checkpoint is not None
         last_id, previous_hash, anchor_previous_hash = _verify_anchor(connection, checkpoint)
+        last_id, previous_hash, anchor_previous_hash = _verify_suffix(
+            connection, last_id, previous_hash, anchor_previous_hash
+        )
+        rolling_id, rolling_hash = _verify_rolling_page(
+            connection,
+            checkpoint.rolling_audit_id,
+            checkpoint.rolling_previous_hash,
+            last_id,
+        )
+    return VerificationCheckpoint(
+        last_id, previous_hash, anchor_previous_hash, schema_version,
+        trigger_fingerprint, identity, observer_id, observed_version,
+        rolling_id, rolling_hash,
+    )
+
+
+def _data_version(connection: sqlite3.Connection) -> int:
+    row = connection.execute("PRAGMA data_version").fetchone()
+    if row is None or type(row[0]) is not int:
+        raise AuditVerificationError("audit data version is unreadable")
+    return row[0]
+
+
+def _verify_all(connection: sqlite3.Connection) -> tuple[int, str, str]:
+    return _verify_suffix(connection, 0, GENESIS_HASH, GENESIS_HASH)
+
+
+def _verify_suffix(
+    connection: sqlite3.Connection,
+    last_id: int,
+    previous_hash: str,
+    anchor_previous_hash: str,
+) -> tuple[int, str, str]:
     while True:
         rows = connection.execute(
             _ROW_SELECT + " WHERE audit_id>? ORDER BY audit_id LIMIT ?",
             (last_id, _VERIFY_PAGE_SIZE),
         ).fetchall()
         if not rows:
-            return VerificationCheckpoint(
-                last_id, previous_hash, anchor_previous_hash,
-                schema_version, trigger_fingerprint, identity,
-            )
+            return last_id, previous_hash, anchor_previous_hash
         for row in rows:
             anchor_previous_hash = previous_hash
             last_id, previous_hash = verify_row(row, previous_hash)
+
+
+def _verify_rolling_page(
+    connection: sqlite3.Connection,
+    rolling_id: int,
+    rolling_previous_hash: str,
+    terminal_id: int,
+) -> tuple[int, str]:
+    rows = connection.execute(
+        _ROW_SELECT + " WHERE audit_id>? AND audit_id<=? ORDER BY audit_id LIMIT ?",
+        (rolling_id, terminal_id, _VERIFY_PAGE_SIZE),
+    ).fetchall()
+    if not rows:
+        return 0, GENESIS_HASH
+    previous_hash = rolling_previous_hash
+    last_id = rolling_id
+    for row in rows:
+        last_id, previous_hash = verify_row(row, previous_hash)
+    if last_id >= terminal_id:
+        return 0, GENESIS_HASH
+    return last_id, previous_hash
 
 
 def _schema_state(connection: sqlite3.Connection) -> tuple[int, str]:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 from pathlib import Path
 
@@ -12,23 +13,28 @@ from backend.app.features.audit.http import AuditReadiness
 from backend.app.features.audit.sessions import close_session, start_session
 from backend.app.features.audit.store import AuditStore, AuditVerificationError
 
+_LOGGER = logging.getLogger(__name__)
+
 
 def close_audit_session(app: FastAPI) -> bool:
     """Close a healthy session; failure deliberately leaves an unclean restart marker."""
     store = getattr(app.state, "audit_store", None)
     readiness = getattr(app.state, "audit_readiness", None)
+    if not isinstance(store, AuditStore):
+        return False
+    closed = False
     if (
-        not isinstance(store, AuditStore)
-        or not isinstance(readiness, AuditReadiness)
-        or not readiness.healthy
-        or readiness.session is None
+        isinstance(readiness, AuditReadiness)
+        and readiness.healthy
+        and readiness.session is not None
     ):
-        return False
-    try:
-        close_session(store, readiness.session)
-    except (AuditVerificationError, OSError, sqlite3.Error, EdgeDatabaseError):
-        return False
-    return True
+        try:
+            close_session(store, readiness.session)
+            closed = True
+        except (AuditVerificationError, OSError, sqlite3.Error, EdgeDatabaseError):
+            _LOGGER.warning("audit session close failed; next startup will fence it")
+    store.close_verifier()
+    return closed
 
 
 def configure_audit_readiness(app: FastAPI, database_path: Path) -> bool:

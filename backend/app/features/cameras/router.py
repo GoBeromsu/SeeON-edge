@@ -26,7 +26,11 @@ from fastapi import (
 from pydantic import BaseModel, ConfigDict, Field
 
 from backend.app.core.config import get_settings
-from backend.app.features.audit.catalog import AuditAction, empty_detail
+from backend.app.features.audit.catalog import (
+    AuditAction,
+    camera_probe_detail,
+    empty_detail,
+)
 from backend.app.features.audit.http import append_transactional
 from backend.app.features.audit.store import AuditEvent
 from backend.app.features.audit.store import utc_now as audit_now
@@ -520,7 +524,7 @@ def test_camera(
     request: Request,
     payload: TestCameraRequest | None = None,
 ) -> dict[str, object]:
-    _authorize(request)
+    actor = _authorize(request)
     record = _store(request.app).get(camera_id)
     if record is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="camera not found")
@@ -533,13 +537,26 @@ def test_camera(
 
     # 저장된 URL을 실제로 검사했을 때만 카메라 상태를 갱신한다. draft를
     # 검사해놓고 저장된 카메라를 "정상"으로 표시하면 거짓 신호가 된다.
+    # External probe I/O has already happened and cannot be rolled back; only its
+    # persisted local outcome and audit evidence share the SQLite transaction.
     if target_url == stored_url:
         now = utc_now_iso()
         updates: dict[str, object] = {"last_probed_at": now}
         if probe.ok:
             updates["last_ok_at"] = now
             updates["never_connected"] = False
-        _store(request.app).update(camera_id, updates)
+        event = AuditEvent(
+            occurred_at=audit_now(), actor_id=actor, action=AuditAction.CAMERA_PROBE,
+            target_id=camera_id,
+            detail=camera_probe_detail(probe.ok, probe.error_class),
+        )
+        _store(request.app).update(
+            camera_id,
+            updates,
+            after_write=lambda connection: append_transactional(
+                request, connection, event
+            ),
+        )
     return _probe_response(probe)
 
 

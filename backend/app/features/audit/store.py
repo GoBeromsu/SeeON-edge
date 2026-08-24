@@ -9,6 +9,8 @@ from contextlib import closing
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from threading import Lock
+from uuid import uuid4
 
 from backend.app.edge_db import EDGE_DATABASE_PATH, RuntimeActor, open_runtime_database
 from backend.app.edge_db.compatibility import EdgeDatabaseError
@@ -59,6 +61,13 @@ def utc_now() -> str:
     return datetime.now(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
+def _observer_data_version(connection: sqlite3.Connection) -> int:
+    row = connection.execute("PRAGMA data_version").fetchone()
+    if row is None or type(row[0]) is not int:
+        raise AuditVerificationError("audit data version is unreadable")
+    return row[0]
+
+
 def _target_type(action: AuditAction) -> str:
     return action.value.partition(".")[0]
 
@@ -90,6 +99,10 @@ class AuditStore:
 
     def __init__(self, path: Path | None = None) -> None:
         self.path: Path = EDGE_DATABASE_PATH if path is None else path
+        self._verifier_connection: sqlite3.Connection | None = None
+        self._verifier_identity: tuple[int, int] | None = None
+        self._verifier_id = uuid4().hex
+        self._verifier_lock = Lock()
 
     def append(
         self, event: AuditEvent, *, connection: sqlite3.Connection | None = None
@@ -148,11 +161,52 @@ class AuditStore:
         self, checkpoint: VerificationCheckpoint | None = None
     ) -> VerificationCheckpoint:
         try:
-            identity = database_identity(self.path)
-            with closing(open_runtime_database(self.path, actor=RuntimeActor.API)) as connection:
-                return verify_connection(connection, checkpoint, identity)
+            if checkpoint is None:
+                with closing(open_runtime_database(self.path, actor=RuntimeActor.API)):
+                    pass
+            with self._verifier_lock:
+                identity = database_identity(self.path)
+                connection = self._verifier(identity, checkpoint)
+                connection.execute("BEGIN")
+                try:
+                    observed_version = _observer_data_version(connection)
+                    verified = verify_connection(
+                        connection, checkpoint, identity,
+                        observer_id=self._verifier_id, data_version=observed_version,
+                    )
+                    connection.execute("COMMIT")
+                    return verified
+                finally:
+                    if connection.in_transaction:
+                        connection.execute("ROLLBACK")
         except (OSError, sqlite3.Error, EdgeDatabaseError, ValueError) as error:
             raise AuditVerificationError(str(error)) from error
+
+    def close_verifier(self) -> None:
+        with self._verifier_lock:
+            if self._verifier_connection is not None:
+                self._verifier_connection.close()
+                self._verifier_connection = None
+                self._verifier_identity = None
+
+    def _verifier(
+        self,
+        identity: tuple[int, int],
+        checkpoint: VerificationCheckpoint | None,
+    ) -> sqlite3.Connection:
+        if self._verifier_connection is not None and self._verifier_identity != identity:
+            if checkpoint is not None:
+                raise AuditVerificationError("audit checkpoint database identity changed")
+            self._verifier_connection.close()
+            self._verifier_connection = None
+        if self._verifier_connection is None:
+            uri = self.path.resolve().as_uri() + "?mode=ro"
+            self._verifier_connection = sqlite3.connect(
+                uri, uri=True, check_same_thread=False, isolation_level=None,
+            )
+            self._verifier_connection.execute("PRAGMA query_only=ON")
+            self._verifier_identity = identity
+        return self._verifier_connection
 
     def _verify(
         self, connection: sqlite3.Connection, checkpoint: VerificationCheckpoint | None

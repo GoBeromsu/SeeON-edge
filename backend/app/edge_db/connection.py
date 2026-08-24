@@ -90,6 +90,7 @@ _READ_PRAGMAS: Final = frozenset(
         "journal_mode",
         "quick_check",
         "schema_version",
+        "data_version",
         "synchronous",
         "table_info",
         "table_xinfo",
