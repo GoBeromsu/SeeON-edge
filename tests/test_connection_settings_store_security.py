@@ -4,22 +4,37 @@ import json
 import sqlite3
 import stat
 from pathlib import Path
-from typing import cast
 
+import pytest
+
+from backend.app.edge_db.compatibility import MigrationRequiredError
 from backend.app.features.connection.store import (
-    ConnectionSettings,
+    API_BACKEND_BASE_URL_ENV,
     ConnectionSettingsStore,
     mask_facility_token,
 )
+from tests_support.compact_authority_db import prepare_compact_database
+
+
+def _enrollment() -> dict[str, str | int]:
+    return {
+        "facility_code": "NH-7H2K9M4QXP",
+        "client_installation_ref": "aa83ea3f-6e5f-4f45-a401-fb36c38835b6",
+        "facility_id": "facility-1",
+        "facility_token": "super-secret-facility-token",
+        "edge_installation_id": "edge-1",
+        "enrollment_generation": 1,
+    }
 
 
 def _store(tmp_path: Path) -> ConnectionSettingsStore:
-    return ConnectionSettingsStore(tmp_path / "connection_settings.sqlite3")
+    path = prepare_compact_database(tmp_path / "connection_settings.sqlite3")
+    return ConnectionSettingsStore(path)
 
 
 class TestReprSafety:
     def test_repr_does_not_contain_the_raw_facility_token(self, tmp_path: Path) -> None:
-        settings = _store(tmp_path).save({"facility_token": "super-secret-facility-token"})
+        settings = _store(tmp_path).save(_enrollment())
 
         assert "super-secret-facility-token" not in repr(settings)
         assert "facility_token" not in repr(settings)
@@ -28,52 +43,45 @@ class TestReprSafety:
 class TestAtomicWriteAndCorruption:
     def test_write_leaves_db_file_0600(self, tmp_path: Path) -> None:
         store = _store(tmp_path)
-        _ = store.save({"facility_id": "facility-1"})
+        store.save(_enrollment())
 
         assert stat.S_IMODE(store.path.stat().st_mode) == 0o600
 
     def test_write_leaves_no_leftover_tmp_file(self, tmp_path: Path) -> None:
         store = _store(tmp_path)
-        _ = store.save({"facility_id": "facility-1"})
+        store.save(_enrollment())
 
         assert list(tmp_path.glob("*.tmp")) == []
 
     def test_row_persists_via_real_sqlite_connection(self, tmp_path: Path) -> None:
         store = _store(tmp_path)
-        _ = store.save({"facility_id": "facility-1", "facility_token": "token-abcd"})
+        store.save(_enrollment())
 
         with sqlite3.connect(store.path) as connection:
-            row = cast(
-                tuple[str, str] | None,
-                connection.execute(
-                    "SELECT facility_id, facility_token FROM connection_settings WHERE id = 1"
-                ).fetchone(),
-            )
+            row = connection.execute(
+                "SELECT facility_id,facility_token FROM edge_site WHERE id=1"
+            ).fetchone()
 
-        assert row == ("facility-1", "token-abcd")
+        assert row == ("facility-1", "super-secret-facility-token")
 
-    def test_corrupt_db_file_treated_as_empty(self, tmp_path: Path) -> None:
+    def test_corrupt_db_file_fails_closed_as_unconfigured(self, tmp_path: Path) -> None:
         path = tmp_path / "connection_settings.sqlite3"
-        _ = path.write_bytes(b"not a valid sqlite database, just garbage bytes")
+        path.write_bytes(b"not a valid sqlite database, just garbage bytes")
 
         settings = ConnectionSettingsStore(path).load()
 
-        assert settings == ConnectionSettings(
-            events_url=None,
-            config_url=None,
-            facility_id=None,
-            facility_token=None,
-            updated_at=None,
-        )
+        assert settings.facility_id is None
+        assert settings.facility_token is None
+        assert settings.edge_installation_id is None
+        assert settings.enrollment_generation is None
 
-    def test_missing_file_does_not_crash_and_save_still_works(self, tmp_path: Path) -> None:
+    def test_missing_file_requires_external_migration(self, tmp_path: Path) -> None:
         path = tmp_path / "nested" / "connection_settings.sqlite3"
-        store = ConnectionSettingsStore(path)
 
-        assert store.load().facility_id is None
-        _ = store.save({"facility_id": "facility-1"})
+        with pytest.raises(MigrationRequiredError):
+            ConnectionSettingsStore(path).load()
 
-        assert store.load().facility_id == "facility-1"
+        assert not path.exists()
 
 
 class TestMasking:
@@ -90,13 +98,13 @@ class TestMasking:
 
     def test_masked_dict_never_contains_raw_token(self, tmp_path: Path) -> None:
         store = _store(tmp_path)
-        _ = store.save({"facility_token": "supersecrettoken1234"})
+        store.save(_enrollment())
 
         public = store.masked()
 
-        assert public["facility_token_masked"] == "****1234"
+        assert public["facility_token_masked"] == "****oken"
         assert public["facility_token_set"] is True
-        assert "supersecrettoken1234" not in json.dumps(public)
+        assert "super-secret-facility-token" not in json.dumps(public)
         assert "facility_token" not in public
 
     def test_masked_dict_when_token_unset(self, tmp_path: Path) -> None:
@@ -105,19 +113,16 @@ class TestMasking:
         assert public["facility_token_masked"] is None
         assert public["facility_token_set"] is False
 
-    def test_masked_dict_reflects_other_fields(self, tmp_path: Path) -> None:
+    def test_masked_dict_reflects_derived_urls(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv(API_BACKEND_BASE_URL_ENV, "https://backend.example/api")
         store = _store(tmp_path)
-        _ = store.save(
-            {
-                "events_url": "https://backend.example/events",
-                "config_url": "https://backend.example/ml-config",
-                "facility_id": "facility-42",
-            }
-        )
+        store.save(_enrollment() | {"facility_id": "facility-42"})
 
         public = store.masked()
 
-        assert public["events_url"] == "https://backend.example/events"
-        assert public["config_url"] == "https://backend.example/ml-config"
+        assert public["events_url"] == "https://backend.example/api/v1/events"
+        assert public["config_url"] == "https://backend.example/api/v1/ml-config"
         assert public["facility_id"] == "facility-42"
         assert public["updated_at"] is not None

@@ -14,6 +14,7 @@ from backend.app.features.runtime_settings.store import RuntimeSettingsStore
 from backend.app.main import create_app, no_lifespan
 from shared.events.evidence_export_client import ReadyClipRequest, UnavailableClipRequest
 from shared.events.evidence_export_contract import BackendCapabilities, ClipReceipt, DeliveryFailure
+from tests_support.compact_authority_db import prepare_compact_database
 
 TOKEN = "relay-token"
 EVENT_ID = "00000000-0000-4000-8000-000000000001"
@@ -61,7 +62,9 @@ def _client(tmp_path: Path, backend: FakeBackendEvidenceClient, *, enabled: bool
     # see _camera_binding_from_registry in relay/router.py), so the fixture
     # must register "camera-1" in a CameraRegistryStore for _camera_binding
     # to resolve it instead of 403ing every export.
-    registry = CameraRegistryStore(tmp_path / "catalog.sqlite3")
+    database = tmp_path / "catalog.sqlite3"
+    prepare_compact_database(database)
+    registry = CameraRegistryStore(database)
     registry.create(
         camera_id="camera-1",
         label="Camera 1",
@@ -77,7 +80,7 @@ def _client(tmp_path: Path, backend: FakeBackendEvidenceClient, *, enabled: bool
     )
     app.state.camera_registry = registry
     app.state.backend_evidence_client = backend
-    runtime_settings = RuntimeSettingsStore(tmp_path / "catalog.sqlite3")
+    runtime_settings = RuntimeSettingsStore(database)
     if enabled:
         runtime_settings.set_clip_export_enabled(True)
     app.state.runtime_settings_store = runtime_settings
@@ -367,7 +370,9 @@ def test_export_refused_when_camera_has_no_hub_mapping(tmp_path: Path) -> None:
     client = _client(tmp_path, backend, enabled=True)
     # Same app the other tests use, but with the camera's Hub mapping removed, so
     # only the mapping state differs from the passing cases above.
-    unmapped = CameraRegistryStore(tmp_path / "unmapped.sqlite3")
+    unmapped_path = tmp_path / "unmapped" / "edge.sqlite3"
+    prepare_compact_database(unmapped_path)
+    unmapped = CameraRegistryStore(unmapped_path)
     unmapped.create(
         camera_id="camera-1",
         label="Camera 1",

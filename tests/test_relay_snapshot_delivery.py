@@ -15,6 +15,7 @@ from backend.app.features.clips.catalog import CatalogStore
 from backend.app.main import create_app, no_lifespan
 from shared.events.evidence_export_client import RelayEvidenceClient
 from shared.events.evidence_export_contract import DeliveryDisposition, DeliveryFailure
+from tests_support.compact_authority_db import prepare_compact_database
 
 TOKEN = "relay-token"
 EVENT_ID = "00000000-0000-4000-8000-000000000020"
@@ -38,7 +39,9 @@ DISPOSITION = {
 def client(tmp_path: Path) -> Iterator[TestClient]:
     app = create_app(lifespan=no_lifespan)
     app.state.edge_relay_token = TOKEN
-    registry = CameraRegistryStore(tmp_path / "registry.sqlite3")
+    registry_path = tmp_path / "registry.sqlite3"
+    prepare_compact_database(registry_path)
+    registry = CameraRegistryStore(registry_path)
     registry.create(
         camera_id="camera-1",
         label="camera-1",
@@ -147,9 +150,5 @@ def test_client_preserves_conflict_and_validation_outcomes(outcome_server: str) 
     conflict = relay.send_snapshot_attachment(ATTACHMENT)
     invalid = relay.send_snapshot_attachment(ATTACHMENT)
 
-    assert conflict == DeliveryFailure(
-        DeliveryDisposition.PERMANENT, "HTTP_409", status_code=409
-    )
-    assert invalid == DeliveryFailure(
-        DeliveryDisposition.PERMANENT, "HTTP_422", status_code=422
-    )
+    assert conflict == DeliveryFailure(DeliveryDisposition.PERMANENT, "HTTP_409", status_code=409)
+    assert invalid == DeliveryFailure(DeliveryDisposition.PERMANENT, "HTTP_422", status_code=422)

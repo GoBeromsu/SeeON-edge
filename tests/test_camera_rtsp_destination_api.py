@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 from backend.app.features.cameras.store import CameraRegistryStore
 from backend.app.main import create_app, no_lifespan
 from shared.rtsp_url_policy import ALLOW_LOCAL_RTSP_ENV, ALLOW_PRIVATE_RTSP_ENV
+from tests_support.compact_authority_db import prepare_compact_database
 
 
 def _login(client: TestClient) -> None:
@@ -19,7 +20,9 @@ def _login(client: TestClient) -> None:
 
 def _app(tmp_path):
     app = create_app(lifespan=no_lifespan)
-    app.state.camera_registry = CameraRegistryStore(tmp_path / "catalog.sqlite3")
+    registry_path = tmp_path / "catalog.sqlite3"
+    prepare_compact_database(registry_path)
+    app.state.camera_registry = CameraRegistryStore(registry_path)
     app.state.edge_relay_token = "worker-secret"
     return app
 

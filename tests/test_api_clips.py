@@ -16,6 +16,7 @@ from backend.app.features.connection.store import (
 from backend.app.lifespan import apply_connection_settings
 from backend.app.main import create_app as _create_app
 from backend.app.main import no_lifespan
+from tests_support.compact_authority_db import prepare_compact_database
 
 
 def create_app(*, lifespan):
@@ -337,6 +338,7 @@ def test_label_clip_signals_degradation_when_label_store_is_unwritable(
         original_mkdir(self, parents=parents, exist_ok=exist_ok)
 
     monkeypatch.setenv("API_BACKEND_CLIP_EVENTS_URL", "http://backend/api/v1/clip-events")
+    monkeypatch.setenv("API_BACKEND_BASE_URL", "http://backend/api")
     monkeypatch.setenv("API_BACKEND_FACILITY_TOKEN", "facility-token")
     backup_calls: list[dict[str, object]] = []
 
@@ -499,6 +501,7 @@ def test_label_and_audit_backend_backup_is_best_effort(
 ) -> None:
     _write_manifest(clip_env / "clip-store", "clip-1")
     monkeypatch.setenv("API_BACKEND_CLIP_EVENTS_URL", "http://backend/api/v1/clip-events")
+    monkeypatch.setenv("API_BACKEND_BASE_URL", "http://backend/api")
     monkeypatch.setenv("API_BACKEND_FACILITY_TOKEN", "facility-token")
     calls: list[BackupCall] = []
 
@@ -519,10 +522,9 @@ def test_label_and_audit_backend_backup_is_best_effort(
         API_CONNECTION_SETTINGS_PATH_ENV,
         str(clip_env / "connection-settings.sqlite3"),
     )
+    prepare_compact_database(clip_env / "connection-settings.sqlite3")
     _ = ConnectionSettingsStore.from_env().save(
         {
-            "events_url": "http://backend/api/v1/events",
-            "config_url": "http://backend/api/v1/ml-config",
             "facility_code": "NH-7H2K9M4QXP",
             "client_installation_ref": "aa83ea3f-6e5f-4f45-a401-fb36c38835b6",
             "facility_id": "87d79f24-b32f-49a3-b534-19f0af7d9135",

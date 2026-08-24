@@ -17,11 +17,14 @@ from fastapi.testclient import TestClient
 from backend.app.features.cameras.store import CameraRegistryStore
 from backend.app.features.relay import router as relay_router
 from backend.app.main import create_app, no_lifespan
+from tests_support.compact_authority_db import prepare_compact_database
 
 
 def _app(tmp_path):
     app = create_app(lifespan=no_lifespan)
-    registry = CameraRegistryStore(tmp_path / "catalog.sqlite3")
+    registry_path = tmp_path / "catalog.sqlite3"
+    prepare_compact_database(registry_path)
+    registry = CameraRegistryStore(registry_path)
     app.state.camera_registry = registry
     app.state.edge_relay_token = "worker-secret"
     return app
@@ -189,9 +192,7 @@ class _LiveApp:
             target=self._server.run, daemon=True, name="relay-bounded-read"
         )
         self._thread.start()
-        wait_until(
-            lambda: self._server.started, timeout=10.0, what="relay uvicorn startup"
-        )
+        wait_until(lambda: self._server.started, timeout=10.0, what="relay uvicorn startup")
 
     @property
     def base_url(self) -> str:

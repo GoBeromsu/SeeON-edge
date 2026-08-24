@@ -56,7 +56,16 @@ def test_boot_time_fixture_injection_still_survives_boot(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     store = _settings_store(monkeypatch)
-    store.save({"events_url": "http://backend.example/api/v1/edge/events"})
+    store.save(
+        {
+            "facility_code": "NH-7H2K9M4QXP",
+            "client_installation_ref": "aa83ea3f-6e5f-4f45-a401-fb36c38835b6",
+            "facility_id": "87d79f24-b32f-49a3-b534-19f0af7d9135",
+            "facility_token": "persisted-token",
+            "edge_installation_id": "d17e0eb8-cb81-4d8e-a427-dfe690518f2b",
+            "enrollment_generation": 1,
+        }
+    )
 
     sentinel = object()
     app = create_app()
@@ -75,8 +84,6 @@ def test_complete_enrollment_restores_one_generation_bundle_on_restart(
     store = _settings_store(monkeypatch)
     store.save(
         {
-            "events_url": "http://backend.example/api/v1/events",
-            "config_url": "http://backend.example/api/v1/ml-config",
             "facility_code": "NH-7H2K9M4QXP",
             "client_installation_ref": "aa83ea3f-6e5f-4f45-a401-fb36c38835b6",
             "facility_id": "87d79f24-b32f-49a3-b534-19f0af7d9135",
@@ -103,8 +110,6 @@ def test_relink_publishes_a_whole_new_generation_bundle(
     for generation, token in ((1, "token-one"), (2, "token-two")):
         store.save(
             {
-                "events_url": "http://backend.example/api/v1/events",
-                "config_url": "http://backend.example/api/v1/ml-config",
                 "facility_code": "NH-7H2K9M4QXP",
                 "client_installation_ref": "aa83ea3f-6e5f-4f45-a401-fb36c38835b6",
                 "facility_id": "87d79f24-b32f-49a3-b534-19f0af7d9135",
@@ -132,8 +137,6 @@ def test_config_refresh_discards_result_when_relink_changes_generation(
     def save_generation(generation: int, token: str) -> None:
         _ = store.save(
             {
-                "events_url": "http://backend.example/api/v1/events",
-                "config_url": "http://backend.example/api/v1/ml-config",
                 "facility_code": "NH-7H2K9M4QXP",
                 "client_installation_ref": "aa83ea3f-6e5f-4f45-a401-fb36c38835b6",
                 "facility_id": "87d79f24-b32f-49a3-b534-19f0af7d9135",

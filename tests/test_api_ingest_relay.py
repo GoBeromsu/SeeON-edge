@@ -26,6 +26,7 @@ from shared.events.evidence_export_contract import (
     DeliveryFailure,
     EventReceipt,
 )
+from tests_support.compact_authority_db import prepare_compact_database
 
 
 @pytest.fixture(autouse=True)
@@ -88,7 +89,9 @@ def _client(
     app = create_app(lifespan=no_lifespan)
     app.state.edge_relay_token = "relay-token"
     registry_root = registry_dir if registry_dir is not None else Path(tempfile.mkdtemp())
-    store = CameraRegistryStore(registry_root / "catalog.sqlite3")
+    registry_path = registry_root / "catalog.sqlite3"
+    prepare_compact_database(registry_path)
+    store = CameraRegistryStore(registry_path)
     store.create(
         camera_id="camera-1",
         label="camera-1",
@@ -194,7 +197,9 @@ def test_unenrolled_runtime_accepts_alert_locally_without_cloud_egress() -> None
     # see _camera_binding_from_registry in relay/router.py); the camera must
     # resolve here so the request reaches the backend-enrollment branch this
     # test actually exercises, instead of 403ing earlier as an unknown camera.
-    store = CameraRegistryStore(Path(tempfile.mkdtemp()) / "catalog.sqlite3")
+    registry_path = Path(tempfile.mkdtemp()) / "catalog.sqlite3"
+    prepare_compact_database(registry_path)
+    store = CameraRegistryStore(registry_path)
     store.create(
         camera_id="camera-1",
         label="camera-1",
@@ -434,7 +439,9 @@ def test_relay_accepts_canonical_camera_id_from_registry_when_inventory_missing(
     fake = FakeBackendIngestClient()
     app = create_app(lifespan=no_lifespan)
     app.state.edge_relay_token = "relay-token"
-    store = CameraRegistryStore(tmp_path / "catalog.sqlite3")
+    registry_path = tmp_path / "catalog.sqlite3"
+    prepare_compact_database(registry_path)
+    store = CameraRegistryStore(registry_path)
     store.create(
         camera_id="provisional-camera",
         label="Lobby",
@@ -460,7 +467,9 @@ def test_relay_accepts_canonical_camera_id_from_registry_when_inventory_missing(
 def _registry_app(fake: FakeBackendIngestClient, tmp_path, *, backend_camera_id: str | None):
     app = create_app(lifespan=no_lifespan)
     app.state.edge_relay_token = "relay-token"
-    store = CameraRegistryStore(tmp_path / "catalog.sqlite3")
+    registry_path = tmp_path / "catalog.sqlite3"
+    prepare_compact_database(registry_path)
+    store = CameraRegistryStore(registry_path)
     store.create(
         camera_id="local-uuid-1",
         label="Lobby",

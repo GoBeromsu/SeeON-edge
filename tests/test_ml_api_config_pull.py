@@ -16,6 +16,7 @@ from backend.app.features.connection.store import ConnectionSettingsStore
 from backend.app.lifespan import BACKEND_CONFIG_SHUTDOWN_WAIT_SEC, refresh_backend_config
 from backend.app.main import create_app
 from contracts.worker_config import CONFIG_VERSION_KEY, RESTART_EPOCH_KEY, PulledNightWindow
+from tests_support.compact_authority_db import prepare_compact_database
 
 
 class FakeBackendIngestClient:
@@ -107,7 +108,9 @@ def _dashboard_camera_registry(tmp_path: Path) -> CameraRegistryStore:
     auth -- not the roster itself -- get an available (non-empty) worker
     config from `/relay/config` (require_available=True) rather than a 503.
     """
-    store = CameraRegistryStore(tmp_path / "cameras.json")
+    registry_path = tmp_path / "cameras.json"
+    prepare_compact_database(registry_path)
+    store = CameraRegistryStore(registry_path)
     store.create(
         camera_id="dashboard-camera",
         label="Dashboard Camera",
@@ -165,9 +168,7 @@ def test_backend_config_pull_applies_metadata_not_camera_roster(
         "config_version": 7,
         "restart_epoch": 0,
         "night_window": {"start": "21:00", "end": "06:00", "tz": "Asia/Seoul"},
-        "detection_windows": {
-            "bed_exit": {"start": "21:00", "end": "06:00", "tz": "Asia/Seoul"}
-        },
+        "detection_windows": {"bed_exit": {"start": "21:00", "end": "06:00", "tz": "Asia/Seoul"}},
     }
     assert relay_config.status_code == 503
 
@@ -384,7 +385,9 @@ def test_heartbeat_config_version_surfaces_in_status_and_remains_optional(
     tmp_path: Path,
 ) -> None:
     monkeypatch.setenv("API_EDGE_RELAY_TOKEN", "relay-token")
-    store = CameraRegistryStore(tmp_path / "catalog.sqlite3")
+    registry_path = tmp_path / "catalog.sqlite3"
+    prepare_compact_database(registry_path)
+    store = CameraRegistryStore(registry_path)
     for camera_id in ("cam-1", "cam-2"):
         store.create(
             camera_id=camera_id,
@@ -676,7 +679,9 @@ def test_successful_refresh_resumes_roster_sync_without_per_camera_mapping(
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
 
     with TestClient(create_app()) as client:
-        store = CameraRegistryStore(tmp_path / "catalog.sqlite3")
+        registry_path = tmp_path / "catalog.sqlite3"
+        prepare_compact_database(registry_path)
+        store = CameraRegistryStore(registry_path)
         store.create(
             camera_id="local-uuid-9",
             label="Room 9",

@@ -29,6 +29,7 @@ from shared.events.delivery_queue import (
     SnapshotAttachmentEntry,
     SnapshotDispositionEntry,
 )
+from tests_support.compact_authority_db import prepare_compact_database
 from worker.pipeline.inference_coordinator import (
     CameraInferenceTelemetry,
     InferenceTelemetrySnapshot,
@@ -879,7 +880,9 @@ def test_status_returns_unmapped_local_camera_id_unchanged(
     """
     app = create_app(lifespan=no_lifespan)
     app.state.edge_relay_token = "relay-token"
-    registry = CameraRegistryStore(tmp_path / "catalog.sqlite3")
+    registry_path = tmp_path / "catalog.sqlite3"
+    prepare_compact_database(registry_path)
+    registry = CameraRegistryStore(registry_path)
     registry.create(
         camera_id="local-unmapped-1",
         label="Lobby",
@@ -919,7 +922,9 @@ def _registry_status_client(
 ) -> TestClient:
     app = create_app(lifespan=no_lifespan)
     app.state.edge_relay_token = "relay-token"
-    registry = CameraRegistryStore(tmp_path / "catalog.sqlite3")
+    registry_path = tmp_path / "catalog.sqlite3"
+    prepare_compact_database(registry_path)
+    registry = CameraRegistryStore(registry_path)
     registry.create(
         camera_id=camera_id,
         label="Lobby",

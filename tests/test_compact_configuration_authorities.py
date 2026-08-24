@@ -23,6 +23,26 @@ from backend.app.features.runtime_settings.store import RuntimeSettingsStore
 from backend.app.shared.dashboard_credentials import DashboardCredentialsStore
 from contracts.edge_provisioning_v1 import MachinePrincipal
 
+CAMERA_STORE_EXPORTS = [
+    "CameraRegistryStore",
+    "CameraStatus",
+    "DEFAULT_FLOOR",
+    "DuplicateCameraError",
+    "FLOOR_MAX",
+    "FLOOR_MIN",
+    "FLOOR_VALUES",
+    "ProbeResult",
+    "floor_label",
+    "is_valid_floor",
+    "mask_rtsp_url",
+    "normalize_stream_identity",
+    "parse_legacy_floor",
+    "public_camera",
+    "registry_expected_cameras",
+    "status_from_probe",
+    "utc_now_iso",
+]
+
 COMPACT_TABLES = {
     "artifacts",
     "audit_events",
@@ -41,6 +61,17 @@ def _database(tmp_path: Path) -> Path:
     database = tmp_path / "edge.sqlite3"
     migrate_database(database)
     return database
+
+
+def test_camera_store_preserves_curated_public_exports() -> None:
+    module = importlib.import_module("backend.app.features.cameras.store")
+    namespace: dict[str, object] = {}
+
+    exec("from backend.app.features.cameras.store import *", {}, namespace)
+
+    assert module.__all__ == CAMERA_STORE_EXPORTS
+    assert list(namespace) == CAMERA_STORE_EXPORTS
+    assert all(namespace[name] is getattr(module, name) for name in CAMERA_STORE_EXPORTS)
 
 
 def test_configuration_authorities_round_trip_on_only_compact_tables(tmp_path: Path) -> None:

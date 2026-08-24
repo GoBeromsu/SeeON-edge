@@ -29,6 +29,7 @@ from shared.events.evidence_export_contract import (
     EventReceipt,
 )
 from tests_support.alert_amplification_runtime import RELAY_TOKEN
+from tests_support.compact_authority_db import prepare_compact_database
 from worker.domains.fall import FallEventLatch
 from worker.pipeline.analytics import CompositeExtractor, NamedExtractor
 from worker.pipeline.bus import Scheduler
@@ -362,7 +363,9 @@ def _derivative_job(tmp_path: Path) -> AnnotatedDerivativeJob:
 def _relay_client(tmp_path: Path, database: Path) -> TestClient:
     app = create_app(lifespan=no_lifespan)
     app.state.edge_relay_token = RELAY_TOKEN
-    registry = CameraRegistryStore(tmp_path / "camera-registry.sqlite3")
+    registry_path = tmp_path / "camera-registry.sqlite3"
+    prepare_compact_database(registry_path)
+    registry = CameraRegistryStore(registry_path)
     registry.create(
         camera_id="room-camera",
         label="room-camera",

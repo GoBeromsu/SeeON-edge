@@ -22,6 +22,7 @@ from backend.app.features.evidence.receipt_store import (
 from backend.app.features.runtime_settings.store import RuntimeSettingsStore
 from backend.app.main import create_app, no_lifespan
 from shared.events.evidence_export_contract import ClipReceipt
+from tests_support.compact_authority_db import prepare_compact_database
 
 TOKEN = "relay-token"
 EVENT_ID = "00000000-0000-4000-8000-000000000001"
@@ -158,7 +159,9 @@ def _client(tmp_path: Path, store: ArtifactReceiptStore) -> TestClient:
     app.state.artifact_receipt_store = store
     app.state.clip_store_root = tmp_path / "clip-store"
     app.state.clip_store = ClipStore(app.state.clip_store_root)
-    registry = CameraRegistryStore(tmp_path / "catalog.sqlite3")
+    database = tmp_path / "catalog.sqlite3"
+    prepare_compact_database(database)
+    registry = CameraRegistryStore(database)
     registry.create(
         camera_id="camera-1",
         label="Camera 1",
@@ -169,7 +172,7 @@ def _client(tmp_path: Path, store: ArtifactReceiptStore) -> TestClient:
     )
     app.state.camera_registry = registry
     app.state.backend_evidence_client = LocalBackend()
-    settings = RuntimeSettingsStore(tmp_path / "catalog.sqlite3")
+    settings = RuntimeSettingsStore(database)
     settings.set_clip_export_enabled(True)
     app.state.runtime_settings_store = settings
     return TestClient(app)

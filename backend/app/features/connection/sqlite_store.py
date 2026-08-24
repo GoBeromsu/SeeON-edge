@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import os
 import sqlite3
 from contextlib import closing
@@ -39,6 +40,8 @@ ENROLLMENT_MARKER_FIELDS: Final = (
 )
 REQUIRED_ENROLLMENT_FIELDS: Final = SAVE_FIELDS
 
+logger = logging.getLogger(__name__)
+
 
 @dataclass(frozen=True, slots=True)
 class ConnectionStoreBackup:
@@ -55,12 +58,16 @@ class ConnectionStoreDatabase:
         self.rollback_directory = path.parent / "connection-settings-rollback"
 
     def read(self) -> ConnectionData:
-        with closing(self._connect()) as connection:
-            row = connection.execute(
-                "SELECT facility_code,client_installation_ref,facility_id,facility_token,"
-                "edge_installation_id,enrollment_generation,enrollment_created_at,"
-                "enrollment_updated_at,updated_at FROM edge_site WHERE id=1"
-            ).fetchone()
+        try:
+            with closing(self._connect()) as connection:
+                row = connection.execute(
+                    "SELECT facility_code,client_installation_ref,facility_id,facility_token,"
+                    "edge_installation_id,enrollment_generation,enrollment_created_at,"
+                    "enrollment_updated_at,updated_at FROM edge_site WHERE id=1"
+                ).fetchone()
+        except sqlite3.DatabaseError as error:
+            logger.warning("connection authority unreadable at %s: %r", self.path, error)
+            return _empty_data()
         return _empty_data() if row is None else dict(zip(COLUMNS, row, strict=True))
 
     def write(self, data: ConnectionData) -> None:
