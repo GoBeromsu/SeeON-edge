@@ -22,6 +22,7 @@ from backend.app.features.connection.store import (
     ConnectionSettingsStore,
     InvalidConnectionSettingError,
 )
+from tests_support.compact_authority_db import prepare_compact_database
 
 _CREDS = EnrollmentCredentials(
     facility_code="NH-7H2K9M4QXP",
@@ -31,10 +32,13 @@ _CREDS = EnrollmentCredentials(
 
 
 @pytest.fixture(autouse=True)
-def production_hub_transport_contract(monkeypatch: pytest.MonkeyPatch) -> None:
+def production_hub_transport_contract(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     """HTTPS policy tests must not inherit the suite's insecure-HTTP opt-in."""
 
     monkeypatch.delenv(API_BACKEND_ALLOW_INSECURE_HTTP_ENV, raising=False)
+    prepare_compact_database(tmp_path / "c.sqlite3")
 
 
 class TestHubUrlPolicy:
@@ -84,12 +88,12 @@ class TestStoreRejectsInsecureHubUrls:
         assert settings.events_url == "https://hub.example.com/api/v1/events"
         assert settings.config_url == "https://hub.example.com/api/v1/ml-config"
 
-    def test_save_rejects_cleartext_public_events_url(self, tmp_path: Path) -> None:
+    def test_save_rejects_retired_editable_events_url(self, tmp_path: Path) -> None:
         store = ConnectionSettingsStore(tmp_path / "c.sqlite3")
         with pytest.raises(InvalidConnectionSettingError) as exc:
             store.save({"events_url": "http://49.247.204.81/api/v1/events"})
         assert exc.value.field_name == "events_url"
-        assert "cleartext" in exc.value.reason
+        assert "unknown connection setting" in exc.value.reason
 
 
 class TestEnrollmentNeverSendsBearerToRejectedOrigin:

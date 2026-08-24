@@ -5,6 +5,7 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
+from backend.app.edge_db.migrator import migrate_database
 from backend.app.features.cameras.edge_topology_sync_state import (
     EdgeTopologySyncStateStore,
     PendingTopologySnapshot,
@@ -21,6 +22,7 @@ from contracts.edge_provisioning_v1 import (
     TopologyMutationResult,
     TopologySuccessEnvelope,
 )
+from tests_support.compact_authority_db import seed_enrollment
 
 PRINCIPAL = MachinePrincipal("c72bd9a7-3e04-47ba-a8cd-a56e54f98152", 3)
 CONFIRMATION_ID = "0197f671-3a31-7a6c-a6e4-83ed412de81b"
@@ -54,6 +56,12 @@ class _Client:
 
 
 def _app_client(path: Path) -> tuple[TestClient, _Client]:
+    migrate_database(path)
+    seed_enrollment(
+        path,
+        edge_installation_id=PRINCIPAL.edge_installation_id,
+        enrollment_generation=PRINCIPAL.enrollment_generation,
+    )
     registry = CameraRegistryStore(path)
     registry.create_floor(edge_ref="floor-1", name="First", order_index=1)
     registry.create_room(edge_ref="room-101", floor_edge_ref="floor-1", name="101")

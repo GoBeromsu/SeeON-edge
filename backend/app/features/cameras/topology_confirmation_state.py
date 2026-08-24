@@ -79,11 +79,11 @@ class TopologyConfirmationStore:
         row = self._connection.execute(_SELECT).fetchone()
         if row is None or row[0] is None:
             return None
-        principal = MachinePrincipal(str(row[11]), int(row[12]))
+        principal = MachinePrincipal(str(row[12]), int(row[13]))
         terminal = None
         if row[10] is not None:
             terminal = TopologySuccessEnvelope(
-                str(row[3]), int(row[4]), int(row[5]), _decode_result(str(row[10])), None
+                str(row[3]), int(row[4]), int(row[11]), _decode_result(str(row[10])), None
             )
         return TopologyConfirmationPreview(
             str(row[0]),
@@ -108,15 +108,13 @@ class TopologyConfirmationStore:
         try:
             cursor = self._connection.execute(
                 "UPDATE edge_site SET topology_confirmation_confirmed=1,"
-                "topology_confirmation_result=?,topology_confirmation_server_revision=?,"
-                "topology_server_revision=?,updated_at=? WHERE id=1 "
+                "topology_confirmation_result=?,topology_server_revision=?,updated_at=? WHERE id=1 "
                 "AND topology_confirmation_id=? AND topology_confirmation_digest=? "
                 "AND topology_confirmation_client_revision=? "
                 "AND topology_confirmation_server_revision=? "
                 "AND topology_confirmation_result IS NULL",
                 (
                     encoded,
-                    response.server_revision,
                     response.server_revision,
                     utc_now(),
                     preview.confirmation_id,
@@ -155,7 +153,8 @@ _SELECT = (
     "topology_confirmation_client_revision,topology_confirmation_server_revision,"
     "topology_confirmation_registry_version,topology_confirmation_cameras,"
     "topology_confirmation_rooms,topology_confirmation_floors,"
-    "topology_confirmation_result,edge_installation_id,enrollment_generation "
+    "topology_confirmation_result,topology_server_revision,"
+    "edge_installation_id,enrollment_generation "
     "FROM edge_site WHERE id=1"
 )
 

@@ -30,6 +30,7 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 from test_api_ingest_relay import FakeBackendIngestClient
 
+from backend.app.edge_db.migrator import migrate_database
 from backend.app.features.cameras.router import _mapping_state
 from backend.app.features.cameras.store import CameraRegistryStore
 from backend.app.main import create_app, no_lifespan
@@ -42,7 +43,9 @@ _RELAY_HEADERS = {"X-Edge-Relay-Token": "relay-token"}
 def _app_with_camera(tmp_path: Path, *, backend_camera_id: str | None, pending: bool = False):
     app = create_app(lifespan=no_lifespan)
     app.state.edge_relay_token = "relay-token"
-    store = CameraRegistryStore(tmp_path / "catalog.sqlite3")
+    path = tmp_path / "catalog.sqlite3"
+    migrate_database(path)
+    store = CameraRegistryStore(path)
     store.create(
         camera_id=_LOCAL_ID,
         label="Room 101",

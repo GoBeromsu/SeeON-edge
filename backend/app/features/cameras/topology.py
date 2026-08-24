@@ -3,12 +3,12 @@ from __future__ import annotations
 import sqlite3
 from enum import StrEnum, unique
 
+from backend.app.edge_db.configuration import utc_now
 from backend.app.features.cameras.topology_query import (
     RegistryTopologySnapshot,
     TopologyDirtyMarker,
     read_topology_snapshot,
 )
-from backend.app.edge_db.configuration import utc_now
 from contracts.edge_provisioning_validation import require_canonical_id, require_edge_ref
 
 

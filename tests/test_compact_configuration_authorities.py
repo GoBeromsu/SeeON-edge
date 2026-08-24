@@ -1,13 +1,20 @@
 from __future__ import annotations
 
+import importlib
 import sqlite3
 from pathlib import Path
 
+import pytest
+
+from backend.app.edge_db.configuration import open_configuration_database
 from backend.app.edge_db.migrator import migrate_database
 from backend.app.features.cameras.bed_zone_store import BedZoneStore
 from backend.app.features.cameras.edge_topology_sync_state import EdgeTopologySyncStateStore
 from backend.app.features.cameras.store import CameraRegistryStore
+from backend.app.features.cameras.topology_confirmation_state import TopologyConfirmationStore
+from backend.app.features.clips.storage_location_store import ClipStorageLocationStore
 from backend.app.features.connection.store import ConnectionSettingsStore
+from backend.app.features.detection_settings.policy_store import DetectionPolicyStore
 from backend.app.features.detection_settings.store import (
     DetectionSettingsStore,
     DomainDetectionSetting,
@@ -101,19 +108,87 @@ def test_configuration_authorities_round_trip_on_only_compact_tables(tmp_path: P
     assert tables == COMPACT_TABLES
 
 
-def test_store_construction_executes_no_ddl(tmp_path: Path) -> None:
-    # Given: a fresh compact database with SQLite authorizer-visible schema.
+def test_store_construction_executes_no_ddl(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Given: a migrated schema-18 DB and a direct DDL-denying capture seam.
     database = _database(tmp_path)
-    before = database.read_bytes()
+    ddl_attempts: list[tuple[int, str | None]] = []
+    connections: list[sqlite3.Connection] = []
+    ddl_actions = {
+        value
+        for name in (
+            "SQLITE_ALTER_TABLE",
+            "SQLITE_CREATE_INDEX",
+            "SQLITE_CREATE_TABLE",
+            "SQLITE_CREATE_TRIGGER",
+            "SQLITE_CREATE_VIEW",
+            "SQLITE_DROP_INDEX",
+            "SQLITE_DROP_TABLE",
+            "SQLITE_DROP_TRIGGER",
+            "SQLITE_DROP_VIEW",
+        )
+        if (value := getattr(sqlite3, name, None)) is not None
+    }
 
-    # When: every configuration store is constructed and read.
+    def captured_open(path: Path) -> sqlite3.Connection:
+        connection = open_configuration_database(path)
+
+        def authorize(
+            action: int,
+            argument_one: str | None,
+            _argument_two: str | None,
+            _database_name: str | None,
+            _source: str | None,
+        ) -> int:
+            if action in ddl_actions:
+                ddl_attempts.append((action, argument_one))
+                return sqlite3.SQLITE_DENY
+            return sqlite3.SQLITE_OK
+
+        connection.set_authorizer(authorize)
+        connections.append(connection)
+        return connection
+
+    for module_name in (
+        "backend.app.shared.dashboard_credentials",
+        "backend.app.features.connection.sqlite_store",
+        "backend.app.features.cameras.store",
+        "backend.app.features.cameras.bed_zone_store",
+        "backend.app.features.cameras.edge_topology_sync_state",
+        "backend.app.features.cameras.topology_confirmation_state",
+        "backend.app.features.clips.storage_location_store",
+        "backend.app.features.runtime_settings.store",
+        "backend.app.features.detection_settings.store",
+        "backend.app.features.detection_settings.policy_store",
+    ):
+        monkeypatch.setattr(
+            importlib.import_module(module_name),
+            "open_configuration_database",
+            captured_open,
+        )
+
+    # Mutation proof: this seam detects and rejects a constructor-style CREATE.
+    mutation_connection = captured_open(database)
+    with pytest.raises(sqlite3.DatabaseError):
+        mutation_connection.execute("CREATE TABLE forbidden_authority(id INTEGER)")
+    assert ddl_attempts and ddl_attempts[-1][1] == "forbidden_authority"
+    mutation_connection.close()
+    ddl_attempts.clear()
+
+    # When: every Task 7 authority is constructed and read.
     assert DashboardCredentialsStore(database).load() is None
     assert ConnectionSettingsStore(database).load().facility_id is None
     assert CameraRegistryStore(database).snapshot() == {"registry_version": 0, "cameras": []}
     assert BedZoneStore(database).get_all() == {}
     assert RuntimeSettingsStore(database).get().version == 0
     assert DetectionSettingsStore(database).get_all() == {}
-    EdgeTopologySyncStateStore(database).load()
+    assert DetectionPolicyStore(database).generation(None) == 0
+    assert TopologyConfirmationStore(database).load() is None
+    assert ClipStorageLocationStore(database).get() == ""
+    assert EdgeTopologySyncStateStore(database).load().principal is None
 
-    # Then: construction/read did not mutate the database file or add schema.
-    assert database.read_bytes() == before
+    # Then: no constructor/read attempted DDL. Monkeypatch restores the real seam.
+    assert ddl_attempts == []
+    for connection in connections:
+        connection.close()

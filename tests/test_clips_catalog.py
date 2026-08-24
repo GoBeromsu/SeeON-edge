@@ -9,13 +9,10 @@ from pathlib import Path
 import pytest
 from fastapi import FastAPI
 
-from backend.app.features.cameras.store import (
-    _CREATE_CAMERA_REGISTRY_TABLE,
-    CameraRegistryStore,
-)
+from backend.app.edge_db.migrator import migrate_database
+from backend.app.features.cameras.store import CameraRegistryStore
 from backend.app.features.clips import catalog as catalog_module
 from backend.app.features.clips.catalog import (
-    _V3_TABLE_STATEMENTS,
     SCHEMA_VERSION,
     CatalogConflictError,
     CatalogSchemaNewerThanSupportedError,
@@ -23,14 +20,7 @@ from backend.app.features.clips.catalog import (
     get_catalog_store,
 )
 from backend.app.features.clips.store import ClipStore, LabelRecord, LabelStore
-from backend.app.features.status.runtime_status_store import (
-    _CREATE_RUNTIME_LATENCY_TABLE,
-    RuntimeStatusStore,
-)
-from backend.app.shared.dashboard_credentials import (
-    _CREATE_CREDENTIALS_TABLE,
-    DashboardCredentialsStore,
-)
+from backend.app.shared.dashboard_credentials import DashboardCredentialsStore
 
 _EVENT_ID = "11111111-1111-4111-8111-111111111111"
 
@@ -66,9 +56,10 @@ def _write_manifest(root, payload: dict[str, object]) -> None:
     path.write_text(json.dumps(payload), encoding="utf-8")
 
 
-def test_catalog_from_env_resolves_under_state_dir_and_is_queryable(tmp_path) -> None:
+def test_catalog_from_env_resolves_under_state_dir_and_is_queryable(tmp_path, monkeypatch) -> None:
     """``from_env()`` resolves through the central database seam."""
-    catalog_path = catalog_module.EDGE_DATABASE_PATH
+    catalog_path = tmp_path / "clip-catalog.sqlite3"
+    monkeypatch.setattr(catalog_module, "EDGE_DATABASE_PATH", catalog_path)
 
     store = CatalogStore.from_env()
     try:
@@ -409,9 +400,7 @@ def test_camera_backfill_projects_only_allowed_scalar_fields_and_excludes_secret
                         "decode_backend": "nvdec",
                         "created_at": "2026-01-01T00:00:00Z",
                         "mapping_pending": False,
-                        "rtsp_url": (
-                            "rtsp://operator:fixture-password@example.test/live"
-                        ),
+                        "rtsp_url": ("rtsp://operator:fixture-password@example.test/live"),
                         "username": "operator",
                         "password": "fixture-password",
                         "meta": {"auth": {"token": "synthetic-token"}},
@@ -721,16 +710,9 @@ def test_catalog_migration_from_v2_adds_v3_tables_without_touching_legacy_camera
     reopened.close()
 
 
-def test_camera_registry_credentials_and_latency_stores_coexist_in_one_catalog_db(
-    tmp_path,
-) -> None:
-    """The three PR E stores (``CameraRegistryStore``, ``DashboardCredentialsStore``,
-    ``RuntimeStatusStore``) each independently bootstrap their own table in
-    the shared ``catalog.sqlite3`` file, without conflicting with each other
-    or with ``CatalogStore``'s own tables -- including the pre-existing
-    ``cameras`` cache table, which is a distinct table from the new
-    ``camera_registry`` table despite the similar name."""
-    path = tmp_path / "catalog.sqlite3"
+def test_camera_registry_and_credentials_share_externally_migrated_schema18(tmp_path) -> None:
+    path = tmp_path / "edge.sqlite3"
+    migrate_database(path)
 
     camera_store = CameraRegistryStore(path)
     camera_store.create(
@@ -740,62 +722,25 @@ def test_camera_registry_credentials_and_latency_stores_coexist_in_one_catalog_d
         space_id=None,
         status="online",
     )
+    DashboardCredentialsStore(path).save(username="admin", password="admin")
 
-    credentials_store = DashboardCredentialsStore(path)
-    credentials_store.save(username="admin", password="admin")
-
-    latency_store = RuntimeStatusStore(latency_state_path=path)
-    latency_store.record_latency("facility-1", "1970-01-01T00:00:00Z", received_at=10.0)
-
-    catalog_store = CatalogStore.open(path)
-    try:
-        # CatalogStore.backfill() reads from CameraRegistryStore.snapshot()
-        # and writes into the *separate* `cameras` cache table -- proving the
-        # two identically-domained but distinct tables don't collide.
-        catalog_store.backfill(ClipStore(tmp_path / "empty"), camera_registry=camera_store)
-        cached_cameras = catalog_store.records("cameras")
-        assert [record["id"] for record in cached_cameras] == ["cam-1"]
-
+    reloaded = CameraRegistryStore(path).snapshot()
+    credentials = DashboardCredentialsStore(path).load()
+    with sqlite3.connect(path) as connection:
         tables = {
-            row[0]
-            for row in catalog_store._connection.execute(
-                "SELECT name FROM sqlite_master WHERE type = 'table'"
-            ).fetchall()
+            str(row[0])
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+            )
         }
-        assert {"cameras", "camera_registry", "credentials", "runtime_latency"} <= tables
-    finally:
-        catalog_store.close()
-
-    # Each store's own data survives round-tripping through the shared file
-    # alongside the others, confirmed via fresh store instances.
-    reloaded_camera_store = CameraRegistryStore(path)
-    reloaded_snapshot = reloaded_camera_store.snapshot()
-    assert reloaded_snapshot["registry_version"] == 1
-    assert [record["id"] for record in reloaded_snapshot["cameras"]] == ["cam-1"]
-
-    reloaded_credentials_store = DashboardCredentialsStore(path)
-    reloaded_credentials = reloaded_credentials_store.load()
-    assert reloaded_credentials is not None
-    assert reloaded_credentials.username == "admin"
-    assert reloaded_credentials.verify_password("admin")
-
-    reloaded_latency_store = RuntimeStatusStore(latency_state_path=path)
-    latency = reloaded_latency_store._latency_for_facility("facility-1")
-    assert latency is not None
-    assert latency["first_attempt_samples"] == 1
+    assert reloaded["registry_version"] == 1
+    assert [record["id"] for record in reloaded["cameras"]] == ["cam-1"]
+    assert credentials is not None and credentials.verify_password("admin")
+    assert "camera_registry" not in tables
+    assert "runtime_latency" not in tables
 
 
-def test_v3_table_ddl_is_identical_across_catalog_and_the_three_owning_stores() -> None:
-    """``DashboardCredentialsStore``, ``CameraRegistryStore``, and
-    ``RuntimeStatusStore`` each independently bootstrap their own table with
-    DDL text that must stay byte-identical to catalog.py's
-    ``_V3_TABLE_STATEMENTS`` (see the coexistence test above and each
-    module's docstring) -- nothing else pins that today. If any of the four
-    constants drifts, this pins it with a clear diff instead of a silent
-    runtime mismatch between what CatalogStore's migration creates and what
-    an owning store's own idempotent bootstrap creates."""
-    assert _V3_TABLE_STATEMENTS == (
-        _CREATE_CREDENTIALS_TABLE,
-        _CREATE_CAMERA_REGISTRY_TABLE,
-        _CREATE_RUNTIME_LATENCY_TABLE,
-    )
+def test_schema18_authorities_do_not_export_feature_local_ddl() -> None:
+    import backend.app.features.cameras.store as camera_store_module
+
+    assert not hasattr(camera_store_module, "_CREATE_CAMERA_REGISTRY_TABLE")

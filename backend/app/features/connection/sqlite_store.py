@@ -95,13 +95,17 @@ class ConnectionStoreDatabase:
     def create_pre_v1_backup(self) -> ConnectionStoreBackup:
         self.rollback_directory.mkdir(parents=True, exist_ok=True, mode=0o700)
         temporary = self.rollback_directory / f".{self.path.name}.{uuid4().hex}.tmp"
-        with closing(self._connect()) as source, closing(sqlite3.connect(temporary)) as target:
-            source.backup(target)
-        os.chmod(temporary, 0o600)
-        digest = hashlib.sha256(temporary.read_bytes()).hexdigest()
-        final = self.rollback_directory / f"{self.path.name}.enrollment.{digest}"
-        os.replace(temporary, final)
-        return ConnectionStoreBackup(final, digest, final.stat().st_size)
+        try:
+            with closing(self._connect()) as source, closing(sqlite3.connect(temporary)) as target:
+                source.backup(target)
+            os.chmod(temporary, 0o600)
+            digest = hashlib.sha256(temporary.read_bytes()).hexdigest()
+            final = self.rollback_directory / f"{self.path.name}.enrollment.{digest}"
+            os.replace(temporary, final)
+            return ConnectionStoreBackup(final, digest, final.stat().st_size)
+        except (OSError, sqlite3.Error, KeyboardInterrupt):
+            temporary.unlink(missing_ok=True)
+            raise
 
     def integrity_check(self, path: Path) -> str:
         with closing(sqlite3.connect(f"file:{path}?mode=ro", uri=True)) as connection:
