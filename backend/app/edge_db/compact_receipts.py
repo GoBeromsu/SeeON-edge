@@ -144,12 +144,7 @@ def _target_pks(
     if table == "clip_listing_generation":
         return [f"clips:clip_id={clip_id}" for clip_id in context.rebuilt_clip_ids]
     if table == "connection_store_migrations":
-        connection_version = values["version"]
-        return (
-            [f"schema_migrations:version={connection_version}"]
-            if isinstance(connection_version, int) and 1 <= connection_version <= 18
-            else []
-        )
+        return ["schema_migrations:version=18"]
     if table in {"schema_import_receipts", "schema_import_sources", "schema_metadata"}:
         return ["schema_migrations:version=18"]
     if table == "control_legacy_label_migrations":
@@ -199,16 +194,25 @@ def receipt_lines(
                 require_map_target(table, targets)
                 empty_reasons = {
                     "audit": "unclassified_legacy_audit_archived",
-                    "connection_store_migrations": "unrelated_connection_migration_archived",
                     "control_detection_policy_revisions": "superseded_policy_revision_archived",
                 }
                 action, reason = disposition(table, targets, empty_reasons.get(table))
+                relation_kind = (
+                    "CUTOVER_RECONCILIATION"
+                    if table == "connection_store_migrations"
+                    else {
+                        "MAP": "ROW_AUTHORITY",
+                        "REBUILD": "FILESYSTEM_AUTHORITY",
+                        "NONE": "ARCHIVE_ONLY",
+                    }[action]
+                )
                 yield (
                     canonical_json(
                         {
                             "action": action,
                             "inventory_sha256": inventory_sha256,
                             "reason": reason,
+                            "relation_kind": relation_kind,
                             "source_pk": _primary_key(columns, row, pk_indices),
                             "source_row_sha256": _row_digest(columns, row),
                             "source_table": table,

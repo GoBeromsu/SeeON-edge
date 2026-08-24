@@ -41,6 +41,9 @@ def test_dense_all_72_table_fixture_reconciles_bidirectionally(tmp_path: Path) -
             table: int(source.execute(f'SELECT count(*) FROM "{table}"').fetchone()[0])
             for table in tables
         }
+        source_connection_migration = source.execute(
+            "SELECT version,name,applied_at FROM connection_store_migrations WHERE version=1"
+        ).fetchone()
     assert len(tables) == 72
     assert min(counts.values()) >= 1
     source_rows = sum(counts.values())
@@ -75,9 +78,15 @@ def test_dense_all_72_table_fixture_reconciles_bidirectionally(tmp_path: Path) -
         if record["source_table"] in _LOCKED_MAP_TABLES
     }
     assert targets[("clips", ("clip_id=legacy-clip",))] == ["clips:clip_id=legacy-clip"]
-    assert targets[("connection_store_migrations", ("version=1",))] == [
-        "schema_migrations:version=1"
-    ]
+    connection_receipt = next(
+        record
+        for record in by_table["connection_store_migrations"]
+        if record["source_pk"] == ["version=1"]
+    )
+    assert connection_receipt["target_pks"] == ["schema_migrations:version=18"]
+    assert connection_receipt["relation_kind"] == "CUTOVER_RECONCILIATION"
+    assert not ({"name", "applied_at", "backup_filename"} & connection_receipt.keys())
+    assert source_connection_migration == (1, "fixture", "2026-08-21T12:00:00Z")
     assert targets[("control_detection_policy_state", ("facility_id=facility:fixture",))] == [
         "policies:policy_id=1"
     ]
@@ -146,6 +155,14 @@ def test_dense_all_72_table_fixture_reconciles_bidirectionally(tmp_path: Path) -
                 "previous_hash,record_hash,retention_class,hold_reference "
                 "FROM audit_events ORDER BY audit_id"
             ).fetchall(),
+            "row18": target.execute(
+                "SELECT name,source_schema_version,source_db_sha256,reconciliation_sha256 "
+                "FROM schema_migrations WHERE version=18"
+            ).fetchone(),
+            "row1": target.execute(
+                "SELECT name,source_schema_version,source_db_sha256,reconciliation_sha256 "
+                "FROM schema_migrations WHERE version=1"
+            ).fetchone(),
             "tables": target.execute(
                 "SELECT count(*) FROM pragma_table_list() WHERE schema='main' "
                 "AND name NOT LIKE 'sqlite_%'"
@@ -190,6 +207,13 @@ def test_dense_all_72_table_fixture_reconciles_bidirectionally(tmp_path: Path) -
         ],
         "audit": values["audit"],
         "audit_hash_rows": values["audit_hash_rows"],
+        "row18": (
+            "strict_ten_table_application_schema",
+            17,
+            source_hash,
+            result.receipt_sha256,
+        ),
+        "row1": ("edge_database_foundation", None, None, None),
         "tables": (10,),
     }
     audits = values["audit"]

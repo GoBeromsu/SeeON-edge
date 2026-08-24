@@ -34,6 +34,12 @@ class ReconciliationReceipt(BaseModel):
     action: Literal["MAP", "REBUILD", "NONE"]
     inventory_sha256: str
     reason: str | None
+    relation_kind: Literal[
+        "ROW_AUTHORITY",
+        "CUTOVER_RECONCILIATION",
+        "FILESYSTEM_AUTHORITY",
+        "ARCHIVE_ONLY",
+    ]
     source_pk: list[str]
     source_row_sha256: str
     source_table: str
@@ -45,6 +51,22 @@ class ReconciliationReceipt(BaseModel):
             raise ReceiptSemanticError("MAP receipt requires targets and no retirement reason")
         if self.action == "NONE" and (self.reason is None or self.target_pks):
             raise ReceiptSemanticError("NONE receipt requires a reason and no targets")
+        expected_relation = {
+            "MAP": "ROW_AUTHORITY",
+            "REBUILD": "FILESYSTEM_AUTHORITY",
+            "NONE": "ARCHIVE_ONLY",
+        }[self.action]
+        if self.source_table == "connection_store_migrations":
+            if (
+                self.action != "MAP"
+                or self.target_pks != ["schema_migrations:version=18"]
+                or self.relation_kind != "CUTOVER_RECONCILIATION"
+            ):
+                raise ReceiptSemanticError(
+                    "connection migration must authorize cutover reconciliation row 18"
+                )
+        elif self.relation_kind != expected_relation:
+            raise ReceiptSemanticError("receipt relation kind differs from disposition")
         if self.action == "REBUILD" and self.reason != "filesystem_manifest_authority":
             raise ReceiptSemanticError("REBUILD receipt requires filesystem authority reason")
         return self
@@ -133,8 +155,19 @@ def verify_receipts(verification: ReceiptVerification) -> None:
             if next(expected, None) is not None:
                 raise sqlite3.DatabaseError("receipt omits source rows")
         actual = _target_rows(connection)
+        row18 = connection.execute(
+            "SELECT source_schema_version,source_db_sha256,reconciliation_sha256 "
+            "FROM schema_migrations WHERE version=18"
+        ).fetchone()
     finally:
         connection.close()
+    expected_row18 = (
+        17,
+        _file_sha256(verification.source),
+        _file_sha256(verification.receipt),
+    )
+    if row18 != expected_row18:
+        raise sqlite3.DatabaseError("cutover reconciliation provenance differs from artifacts")
     if count != verification.expected_rows:
         raise sqlite3.DatabaseError("reconciliation receipt row count differs from source")
     if declared != actual:

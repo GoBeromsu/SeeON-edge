@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import shutil
 import sqlite3
@@ -83,6 +84,15 @@ def test_audit_recursively_redacts_keys_and_known_secret_alias_values(
     facility_token = "facility-token-exact-alias"
     salt = b"0123456789abcdef"
     password_hash = b"password-hash-material".ljust(64, b"h")
+    opaque_session = "opaque-session-value-9182"
+    relative_path = "evidence/snapshots/resident-7.jpg"
+    token_bytes = facility_token.encode()
+    token_aliases = (
+        token_bytes.hex(),
+        token_bytes.hex().upper(),
+        base64.b64encode(token_bytes).decode(),
+        base64.urlsafe_b64encode(token_bytes).decode().rstrip("="),
+    )
     payload = {
         "actor_type": "user",
         "actor_id": "operator-2",
@@ -93,6 +103,9 @@ def test_audit_recursively_redacts_keys_and_known_secret_alias_values(
         "FaCiLiTy_ToKeN": facility_token,
         "nested": {
             "ToKeN": "nested-token-secret",
+            "Session_ID": opaque_session,
+            "media_relpath": relative_path,
+            "generic_path": "private/relative/file.bin",
             "alias_values": [facility_token, salt.hex(), password_hash.hex()],
             "Authorization": "Bearer leaked-bearer",
             "Cookie": "session=leaked-cookie",
@@ -111,12 +124,39 @@ def test_audit_recursively_redacts_keys_and_known_secret_alias_values(
             (facility_token, TS, TS, TS),
         )
         connection.execute(
+            "INSERT INTO clips VALUES "
+            "('path-source','camera-2','fall','ready',?,?,?,1,'video/mp4','h264','{}')",
+            (TS, relative_path, "a" * 64),
+        )
+        connection.execute(
             "INSERT INTO audit VALUES (8,?,'clip-view',?)",
             (TS, json.dumps(payload)),
         )
         connection.execute(
             "INSERT INTO audit VALUES (9,?,'raw-request-body',?)",
             (TS, json.dumps(payload)),
+        )
+        connection.execute(
+            "INSERT INTO audit VALUES (10,?,'clip-view',?)",
+            (
+                TS,
+                json.dumps(
+                    {
+                        "actor_type": "user",
+                        "actor_id": "operator-3",
+                        "target_type": "clip",
+                        "target_id": "path-source",
+                        "outcome": "success",
+                        "innocuous": [
+                            *token_aliases,
+                            opaque_session,
+                            relative_path,
+                            "private/relative/file.bin",
+                        ],
+                        "safe": "still-preserved",
+                    }
+                ),
+            ),
         )
         connection.commit()
     _refresh_live(request.source, request.live)
@@ -127,7 +167,7 @@ def test_audit_recursively_redacts_keys_and_known_secret_alias_values(
         rows = connection.execute(
             "SELECT audit_id,detail_json FROM audit_events ORDER BY audit_id"
         ).fetchall()
-    assert [row[0] for row in rows] == [8]
+    assert [row[0] for row in rows] == [8, 10]
     assert json.loads(rows[0][1]) == {
         "actor_id": "operator-2",
         "actor_type": "user",
@@ -137,7 +177,17 @@ def test_audit_recursively_redacts_keys_and_known_secret_alias_values(
         "target_id": "clip-2",
         "target_type": "clip",
     }
-    serialized = rows[0][1] + request.receipt.read_text()
+    assert json.loads(rows[1][1]) == {
+        "actor_id": "operator-3",
+        "actor_type": "user",
+        "innocuous": ["[REDACTED]"] * 7,
+        "outcome": "success",
+        "safe": "still-preserved",
+        "target_id": "path-source",
+        "target_type": "clip",
+    }
+    candidate_audit_bytes = b"\n".join(str(value).encode() for row in rows for value in row)
+    serialized = candidate_audit_bytes + request.receipt.read_bytes()
     secrets = (
         facility_token,
         salt.hex(),
@@ -146,8 +196,12 @@ def test_audit_recursively_redacts_keys_and_known_secret_alias_values(
         "leaked-bearer",
         "leaked-cookie",
         "protected-name",
+        opaque_session,
+        relative_path,
+        "private/relative/file.bin",
+        *token_aliases,
     )
-    assert all(secret not in serialized for secret in secrets)
+    assert all(secret.encode() not in serialized for secret in secrets)
     receipts = [json.loads(line) for line in request.receipt.read_text().splitlines()]
     unsafe = next(
         record
