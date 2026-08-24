@@ -4,9 +4,12 @@ import shutil
 import sqlite3
 from pathlib import Path
 
+import pytest
 from compact_cutover_fixtures import TS, cutover_request
 
 from backend.app.edge_db.compact_cutover import run_compact_cutover
+
+pytestmark = pytest.mark.usefixtures("supported_compact_cutover_sqlite")
 
 
 def test_evidence_incident_and_current_review_win_conflicts(tmp_path: Path) -> None:

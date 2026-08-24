@@ -104,6 +104,21 @@ def _copy_cameras(source: sqlite3.Connection, target: sqlite3.Connection) -> Non
 
 
 def _copy_edge_site(source: sqlite3.Connection, target: sqlite3.Connection) -> None:
+    owners = (
+        "camera_registry",
+        "clip_storage_location",
+        "connection_settings",
+        "detection_settings",
+        "edge_topology_confirmation_preview",
+        "edge_topology_sync_state",
+        "runtime_settings",
+    )
+    has_owner = any(
+        source.execute(f"SELECT EXISTS(SELECT 1 FROM {table})").fetchone() == (1,)
+        for table in owners
+    )
+    if not has_owner:
+        return
     target.execute("INSERT INTO edge_site (id,updated_at) VALUES (1,?)", (_TS,))
     registry = source.execute("SELECT registry_version FROM camera_registry WHERE id=1").fetchone()
     if registry is not None:
@@ -138,6 +153,39 @@ def _copy_edge_site(source: sqlite3.Connection, target: sqlite3.Connection) -> N
             "facility_token=?,edge_installation_id=?,enrollment_generation=?,"
             "enrollment_created_at=?,enrollment_updated_at=?,updated_at=? WHERE id=1",
             connection,
+        )
+    sync = source.execute(
+        "SELECT last_snapshotted_registry_version,last_client_revision,server_revision,"
+        "pending_snapshot_id,pending_body,pending_registry_version,pending_client_revision,"
+        "pending_expected_server_revision,consecutive_failures,next_retry_at,pause_reason,"
+        "last_accepted_at FROM edge_topology_sync_state WHERE id=1"
+    ).fetchone()
+    if sync is not None:
+        target.execute(
+            "UPDATE edge_site SET topology_snapshot_registry_version=?,"
+            "topology_client_revision=?,topology_server_revision=?,"
+            "topology_pending_snapshot_id=?,topology_pending_body=?,"
+            "topology_pending_registry_version=?,topology_pending_client_revision=?,"
+            "topology_pending_expected_server_revision=?,topology_consecutive_failures=?,"
+            "topology_next_retry_at=?,topology_pause_reason=?,topology_last_accepted_at=? "
+            "WHERE id=1",
+            sync,
+        )
+    confirmation = source.execute(
+        "SELECT confirmation_id,digest,expires_at,snapshot_id,client_revision,server_revision,"
+        "registry_version,cameras,rooms,floors,confirmed,terminal_response "
+        "FROM edge_topology_confirmation_preview WHERE id=1"
+    ).fetchone()
+    if confirmation is not None:
+        target.execute(
+            "UPDATE edge_site SET topology_confirmation_id=?,"
+            "topology_confirmation_digest=?,topology_confirmation_expires_at=?,"
+            "topology_confirmation_snapshot_id=?,topology_confirmation_client_revision=?,"
+            "topology_confirmation_server_revision=?,topology_confirmation_registry_version=?,"
+            "topology_confirmation_cameras=?,topology_confirmation_rooms=?,"
+            "topology_confirmation_floors=?,topology_confirmation_confirmed=?,"
+            "topology_confirmation_result=? WHERE id=1",
+            confirmation,
         )
     selected = source.execute(
         "SELECT selected_path FROM clip_storage_location WHERE id=1"

@@ -103,9 +103,12 @@ def compile_schema18_manifest() -> Schema18Manifest:
         connection.execute("PRAGMA foreign_keys = ON")
         connection.execute(SCHEMA_V1.statements[1])
         for statement in SCHEMA_V18_STATEMENTS:
-            if statement.strip().upper().startswith("DROP TABLE"):
-                continue
-            connection.execute(statement)
+            normalized = statement.strip().upper()
+            retires_source = normalized.startswith(("DROP TABLE", "DROP TRIGGER")) or (
+                "QA_REPLAY_RUNS" in normalized and normalized.startswith(("UPDATE", "DELETE"))
+            )
+            if not retires_source:
+                connection.execute(statement)
         return read_schema18_manifest(connection)
     finally:
         connection.close()

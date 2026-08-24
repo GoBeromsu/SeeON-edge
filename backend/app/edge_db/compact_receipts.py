@@ -6,65 +6,20 @@ import hashlib
 import json
 import os
 import sqlite3
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from pathlib import Path
-from typing import Final, TypeAlias, assert_never
+from typing import TypeAlias, assert_never
+
+from backend.app.edge_db.compact_receipt_context import (
+    ReceiptContext,
+    build_receipt_context,
+    disposition,
+)
 
 SqliteValue: TypeAlias = None | int | float | str | bytes
 
 
-_MAP_TABLES: Final = frozenset(
-    {
-        "audit",
-        "camera_bed_zone",
-        "camera_registry",
-        "camera_topology_cameras",
-        "camera_topology_floors",
-        "camera_topology_rooms",
-        "clip_storage_location",
-        "clips",
-        "connection_settings",
-        "connection_store_migrations",
-        "control_detection_policy_activations",
-        "control_detection_policy_revisions",
-        "control_detection_policy_state",
-        "control_evidence_review_revisions",
-        "control_evidence_review_state",
-        "control_legacy_label_migrations",
-        "credentials",
-        "detection_settings",
-        "edge_topology_confirmation_preview",
-        "edge_topology_sync_state",
-        "events",
-        "evidence_artifact_slots",
-        "evidence_clips",
-        "evidence_events",
-        "evidence_incident_snapshots",
-        "evidence_incidents",
-        "evidence_media_objects",
-        "evidence_primary_clips",
-        "evidence_retention_states",
-        "labels",
-        "runtime_settings",
-        "schema_import_receipts",
-        "schema_import_sources",
-        "schema_metadata",
-        "schema_migrations",
-        "snapshots",
-        "topology_dirty",
-    }
-)
-_REBUILD_TABLES: Final = frozenset(
-    {
-        "clip_listing_generation",
-        "clip_listing_rows",
-        "clip_listing_summary",
-        "clip_listing_thumbnails",
-    }
-)
-
-
-def canonical_json(payload: dict[str, str | int | list[str]]) -> str:
+def canonical_json(payload: dict[str, str | int | list[str] | None]) -> str:
     return json.dumps(
         payload,
         ensure_ascii=False,
@@ -109,22 +64,41 @@ def _primary_key(
     return ["row_sha256=" + _row_digest(columns, row)]
 
 
-def _action(table: str) -> str:
-    if table in _MAP_TABLES:
-        return "MAP"
-    if table in _REBUILD_TABLES:
-        return "REBUILD"
-    return "NONE"
-
-
-def _target_pks(table: str, columns: tuple[str, ...], row: tuple[SqliteValue, ...]) -> list[str]:
+def _target_pks(
+    table: str,
+    columns: tuple[str, ...],
+    row: tuple[SqliteValue, ...],
+    context: ReceiptContext,
+) -> list[str]:
     values = dict(zip(columns, row, strict=True))
     if table == "schema_migrations":
-        return [f"schema_migrations:version={_pk(values['version'])}"]
+        version_value = values["version"]
+        if not isinstance(version_value, int):
+            raise sqlite3.DatabaseError("migration receipt version is not an integer")
+        version = version_value
+        targets = [f"schema_migrations:version={version}"]
+        return targets + (["schema_migrations:version=18"] if version == 17 else [])
+    if table == "audit":
+        return [f"audit_events:audit_id={_pk(values['audit_id'])}"]
     if table == "credentials":
         return [f"credentials:id={_pk(values['id'])}"]
+    if table == "camera_registry":
+        return ["edge_site:id=1", *(f"cameras:camera_id={item}" for item in context.camera_ids)]
+    if table in {"camera_topology_cameras", "camera_bed_zone"}:
+        return [f"cameras:camera_id={_pk(values['camera_id'])}"]
+    if table in {"clips", "evidence_clips", "evidence_retention_states"}:
+        clip_id = str(values["clip_id"])
+        return [f"clips:clip_id={clip_id}"] if clip_id in context.rebuilt_clip_ids else []
+    if table == "evidence_primary_clips":
+        clip_id = str(values["clip_id"])
+        return [f"clips:clip_id={clip_id}"] if clip_id in context.rebuilt_clip_ids else []
     if table == "evidence_incidents":
         return [f"incidents:incident_id={_pk(values['incident_id'])}"]
+    if table == "control_evidence_review_state":
+        return [f"incidents:incident_id={_pk(values['incident_id'])}"]
+    if table == "labels":
+        incident_id = context.label_incidents.get(str(values["clip_id"]))
+        return [] if incident_id is None else [f"incidents:incident_id={incident_id}"]
     if table == "evidence_artifact_slots" and values["slot_name"] in {
         "PRIMARY_CLIP",
         "SNAPSHOT",
@@ -136,23 +110,33 @@ def _target_pks(table: str, columns: tuple[str, ...], row: tuple[SqliteValue, ..
         return [f"locations:location_id={_pk(values['edge_ref'])},kind=FLOOR"]
     if table == "camera_topology_rooms":
         return [f"locations:location_id={_pk(values['edge_ref'])},kind=ROOM"]
+    if table == "control_detection_policy_activations":
+        policy_id = context.policy_ids.get(str(values["activation_id"]))
+        return [] if policy_id is None else [f"policies:policy_id={policy_id}"]
+    if table == "clip_listing_generation":
+        return [f"clips:clip_id={clip_id}" for clip_id in context.rebuilt_clip_ids]
+    if table in {"schema_import_receipts", "schema_import_sources", "schema_metadata"}:
+        return ["schema_migrations:version=18"]
+    if table == "control_legacy_label_migrations" and values["incident_id"] is not None:
+        return [f"incidents:incident_id={_pk(values['incident_id'])}"]
     if table in {
-        "camera_registry",
         "clip_storage_location",
         "connection_settings",
         "detection_settings",
         "edge_topology_confirmation_preview",
         "edge_topology_sync_state",
         "runtime_settings",
-        "topology_dirty",
     }:
         return ["edge_site:id=1"]
     return []
 
 
-def _receipt_lines(source: Path, inventory_sha256: str) -> Iterable[bytes]:
+def receipt_lines(
+    source: Path, inventory_sha256: str, rebuilt_clip_ids: tuple[str, ...]
+) -> Iterable[bytes]:
     connection = sqlite3.connect(f"file:{source}?mode=ro", uri=True)
     try:
+        context = build_receipt_context(connection, rebuilt_clip_ids)
         tables = tuple(
             str(row[0])
             for row in connection.execute(
@@ -173,15 +157,18 @@ def _receipt_lines(source: Path, inventory_sha256: str) -> Iterable[bytes]:
                 f'SELECT {quoted} FROM "{table}" ORDER BY {order}'
             )
             for row in rows:
+                targets = _target_pks(table, columns, row, context)
+                action, reason = disposition(table, targets)
                 yield (
                     canonical_json(
                         {
-                            "action": _action(table),
+                            "action": action,
                             "inventory_sha256": inventory_sha256,
+                            "reason": reason,
                             "source_pk": _primary_key(columns, row, pk_indices),
                             "source_row_sha256": _row_digest(columns, row),
                             "source_table": table,
-                            "target_pks": _target_pks(table, columns, row),
+                            "target_pks": targets,
                         }
                     ).encode()
                     + b"\n"
@@ -190,32 +177,42 @@ def _receipt_lines(source: Path, inventory_sha256: str) -> Iterable[bytes]:
         connection.close()
 
 
-def write_or_verify_receipts(source: Path, inventory_sha256: str, receipt: Path) -> tuple[int, str]:
+def write_or_verify_receipts(
+    source: Path,
+    inventory_sha256: str,
+    receipt: Path,
+    rebuilt_clip_ids: tuple[str, ...],
+    *,
+    on_written: Callable[[], None] | None = None,
+) -> tuple[int, str]:
     """Stream canonical receipts without retaining a large source in memory."""
     count = 0
     digest = hashlib.sha256()
     if receipt.exists():
         with receipt.open("rb") as existing:
-            for line in _receipt_lines(source, inventory_sha256):
+            for line in receipt_lines(source, inventory_sha256, rebuilt_clip_ids):
                 if existing.readline() != line:
                     raise sqlite3.DatabaseError("EDGE_DB_CUTOVER_STALE_RECEIPT")
                 digest.update(line)
                 count += 1
             if existing.read(1):
                 raise sqlite3.DatabaseError("EDGE_DB_CUTOVER_STALE_RECEIPT")
+            os.fsync(existing.fileno())
         return count, digest.hexdigest()
     descriptor = os.open(receipt, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o400)
     try:
         with os.fdopen(descriptor, "wb", closefd=False) as stream:
-            for line in _receipt_lines(source, inventory_sha256):
+            for line in receipt_lines(source, inventory_sha256, rebuilt_clip_ids):
                 stream.write(line)
                 digest.update(line)
                 count += 1
             stream.flush()
+            if on_written is not None:
+                on_written()
             os.fsync(stream.fileno())
     finally:
         os.close(descriptor)
     return count, digest.hexdigest()
 
 
-__all__ = ["canonical_json", "write_or_verify_receipts"]
+__all__ = ["canonical_json", "receipt_lines", "write_or_verify_receipts"]

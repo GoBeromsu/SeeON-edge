@@ -2,189 +2,56 @@
 
 from __future__ import annotations
 
-import hashlib
 import os
 import shutil
 import sqlite3
-import stat
-from collections.abc import Callable, Sequence
-from dataclasses import dataclass
-from enum import StrEnum
-from pathlib import Path
+from collections.abc import Sequence
 
-from backend.app.edge_db.compact_projection import (
+from backend.app.edge_db.compact_cutover_files import (
+    copy_exclusive,
+    file_sha256,
+    fsync_directory,
+    fsync_file,
+)
+from backend.app.edge_db.compact_cutover_preflight import (
+    checkpoint_and_preflight,
+    require_paths,
+    schema_version,
+)
+from backend.app.edge_db.compact_cutover_types import (
+    CompactCutoverError,
+    CompactCutoverRequest,
+    CompactCutoverResult,
+    CutoverPhase,
+    CutoverProgress,
+)
+from backend.app.edge_db.compact_inventory import (
     filesystem_inventory_sha256,
-    project_compact_data,
     require_filesystem_drain,
+)
+from backend.app.edge_db.compact_projection import (
+    project_compact_data,
+    rebuilt_clip_ids,
     verify_manifest_projection,
 )
 from backend.app.edge_db.compact_receipt_verification import (
+    ReceiptVerification,
     verify_candidate_contract,
     verify_receipts,
 )
 from backend.app.edge_db.compact_receipts import write_or_verify_receipts
-from backend.app.edge_db.compatibility import EdgeDatabaseError
 from backend.app.edge_db.cutover_authorization import issue_compact_cutover_authorization
 from backend.app.edge_db.migrator import deployment_lock, migrate_database
-from backend.app.edge_db.schema import MIGRATIONS
-from backend.app.edge_db.sqlite_runtime import SqliteVersion, require_supported_sqlite
+from backend.app.edge_db.sqlite_runtime import require_supported_sqlite
 
 
-class CutoverPhase(StrEnum):
-    PREFLIGHT = "preflight"
-    ARCHIVED = "archived"
-    RECEIPT_SYNCED = "receipt_synced"
-    CANDIDATE_MIGRATED = "candidate_migrated"
-    CANDIDATE_SYNCED = "candidate_synced"
-    REPLACED = "replaced"
-
-
-CutoverProgress = Callable[[CutoverPhase], None]
-
-
-@dataclass(frozen=True, slots=True)
-class CompactCutoverRequest:
-    source: Path
-    live: Path
-    archive: Path
-    candidate: Path
-    receipt: Path
-    clip_store: Path
-    worker_state: Path
-    expected_source_sha256: str | None = None
-    sqlite_version: SqliteVersion | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class CompactCutoverResult:
-    live: Path
-    archive: Path
-    receipt: Path
-    source_sha256: str
-    receipt_sha256: str
-    source_rows: int
-
-
-class CompactCutoverError(EdgeDatabaseError):
-    def __init__(self, reason: str) -> None:
-        self.reason = reason
-        super().__init__(reason)
-
-    def __str__(self) -> str:
-        return self.reason
-
-
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        for block in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest()
+def _runtime_sqlite_version() -> tuple[int, int, int]:
+    return sqlite3.sqlite_version_info[:3]
 
 
 def _emit(progress: CutoverProgress | None, phase: CutoverPhase) -> None:
     if progress is not None:
         progress(phase)
-
-
-def _require_regular(path: Path, *, reason: str) -> None:
-    try:
-        mode = path.lstat().st_mode
-    except FileNotFoundError as error:
-        raise CompactCutoverError(f"{reason}_MISSING") from error
-    if stat.S_ISLNK(mode):
-        raise CompactCutoverError("EDGE_DB_CUTOVER_SYMLINK")
-    if not stat.S_ISREG(mode):
-        raise CompactCutoverError(f"{reason}_NOT_REGULAR")
-
-
-def _require_paths(request: CompactCutoverRequest) -> None:
-    _require_regular(request.source, reason="EDGE_DB_CUTOVER_SOURCE")
-    _require_regular(request.live, reason="EDGE_DB_CUTOVER_LIVE")
-    if request.source.samefile(request.live):
-        raise CompactCutoverError("EDGE_DB_CUTOVER_SOURCE_IS_LIVE")
-    live_wal = Path(f"{request.live}-wal")
-    if live_wal.exists() and live_wal.stat().st_size > 0:
-        raise CompactCutoverError("EDGE_DB_CUTOVER_LIVE_SIDECAR")
-    for directory in (request.clip_store, request.worker_state, request.live.parent):
-        mode = directory.lstat().st_mode
-        if stat.S_ISLNK(mode):
-            raise CompactCutoverError("EDGE_DB_CUTOVER_SYMLINK")
-        if not stat.S_ISDIR(mode):
-            raise CompactCutoverError("EDGE_DB_CUTOVER_DIRECTORY_INVALID")
-    parent = request.live.parent.resolve()
-    if request.source.parent.resolve() != parent:
-        raise CompactCutoverError("EDGE_DB_CUTOVER_CROSS_FILESYSTEM")
-    for output in (request.archive, request.candidate, request.receipt):
-        if output.parent.resolve() != parent:
-            raise CompactCutoverError("EDGE_DB_CUTOVER_CROSS_FILESYSTEM")
-        if output.is_symlink():
-            raise CompactCutoverError("EDGE_DB_CUTOVER_SYMLINK")
-    devices = {
-        request.source.stat().st_dev,
-        request.live.stat().st_dev,
-        request.clip_store.stat().st_dev,
-        request.worker_state.stat().st_dev,
-        parent.stat().st_dev,
-    }
-    if len(devices) != 1:
-        raise CompactCutoverError("EDGE_DB_CUTOVER_CROSS_FILESYSTEM")
-    if request.source.stat().st_uid != request.live.stat().st_uid:
-        raise CompactCutoverError("EDGE_DB_CUTOVER_OWNERSHIP")
-    if request.source.stat().st_uid != os.geteuid():
-        raise CompactCutoverError("EDGE_DB_CUTOVER_OWNERSHIP")
-
-
-def _schema_version(path: Path) -> int:
-    with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as connection:
-        row = connection.execute("PRAGMA user_version").fetchone()
-    return -1 if row is None else int(row[0])
-
-
-def _checkpoint_and_preflight(source: Path) -> None:
-    connection = sqlite3.connect(source, timeout=5.0, isolation_level=None)
-    try:
-        connection.execute("PRAGMA busy_timeout=5000")
-        checkpoint = connection.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
-        if checkpoint is None or int(checkpoint[0]) != 0:
-            raise CompactCutoverError("EDGE_DB_CUTOVER_CHECKPOINT_BUSY")
-    finally:
-        connection.close()
-    with sqlite3.connect(f"file:{source}?mode=ro", uri=True) as readonly:
-        version = readonly.execute("PRAGMA user_version").fetchone()
-        if version != (17,):
-            raise CompactCutoverError("EDGE_DB_CUTOVER_SOURCE_VERSION")
-        preflight = MIGRATIONS[17].preflight
-        assert preflight is not None
-        preflight(readonly)
-
-
-def _copy_or_verify(source: Path, destination: Path, stale_reason: str) -> None:
-    digest = _sha256(source)
-    if destination.exists():
-        _require_regular(destination, reason=stale_reason)
-        if _sha256(destination) != digest:
-            raise CompactCutoverError(stale_reason)
-        return
-    shutil.copyfile(source, destination)
-    destination.chmod(0o400 if "ARCHIVE" in stale_reason else 0o600)
-    _fsync_file(destination)
-
-
-def _fsync_file(path: Path) -> None:
-    descriptor = os.open(path, os.O_RDONLY)
-    try:
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
-
-
-def _fsync_directory(path: Path) -> None:
-    descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
-    try:
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
 
 
 def run_compact_cutover(
@@ -193,34 +60,61 @@ def run_compact_cutover(
     on_phase: CutoverProgress | None = None,
 ) -> CompactCutoverResult:
     """Build, reconcile, and atomically install a schema-18 candidate."""
-    require_supported_sqlite(request.sqlite_version or sqlite3.sqlite_version_info[:3])
-    _require_paths(request)
+    require_supported_sqlite(_runtime_sqlite_version())
     with deployment_lock(request.live.parent) as lock:
-        _checkpoint_and_preflight(request.source)
+        require_paths(request)
+        _emit(on_phase, CutoverPhase.BEFORE_CHECKPOINT)
+        checkpoint_and_preflight(request.source)
+        _emit(on_phase, CutoverPhase.AFTER_CHECKPOINT)
         try:
             require_filesystem_drain(request.clip_store, request.worker_state)
         except sqlite3.DatabaseError as error:
             raise CompactCutoverError("EDGE_DB_CUTOVER_FILESYSTEM_DRAIN") from error
-        source_hash = _sha256(request.source)
+        source_hash = file_sha256(request.source)
         if request.expected_source_sha256 not in {None, source_hash}:
             raise CompactCutoverError("EDGE_DB_CUTOVER_SOURCE_CHANGED")
-        live_version = _schema_version(request.live)
+        live_version = schema_version(request.live)
         required_bytes = request.source.stat().st_size * 3
         if live_version == 17 and shutil.disk_usage(request.live.parent).free < required_bytes:
             raise CompactCutoverError("EDGE_DB_CUTOVER_INSUFFICIENT_SPACE")
         inventory_hash = filesystem_inventory_sha256(request.clip_store, request.worker_state)
-        _emit(on_phase, CutoverPhase.PREFLIGHT)
-        _copy_or_verify(request.source, request.archive, "EDGE_DB_CUTOVER_STALE_ARCHIVE")
-        _emit(on_phase, CutoverPhase.ARCHIVED)
+        rebuilt = rebuilt_clip_ids(request.clip_store)
+        if request.archive.exists():
+            if file_sha256(request.archive) != source_hash:
+                raise CompactCutoverError("EDGE_DB_CUTOVER_STALE_ARCHIVE")
+            fsync_file(request.archive)
+        else:
+            copy_exclusive(
+                request.source,
+                request.archive,
+                mode=0o400,
+                on_written=lambda: _emit(on_phase, CutoverPhase.ARCHIVE_WRITTEN),
+            )
+            fsync_directory(request.live.parent)
+        _emit(on_phase, CutoverPhase.ARCHIVE_SYNCED)
         try:
             source_rows, receipt_hash = write_or_verify_receipts(
-                request.source, inventory_hash, request.receipt
+                request.source,
+                inventory_hash,
+                request.receipt,
+                rebuilt,
+                on_written=lambda: _emit(on_phase, CutoverPhase.RECEIPT_WRITTEN),
             )
         except sqlite3.DatabaseError as error:
             raise CompactCutoverError("EDGE_DB_CUTOVER_STALE_RECEIPT") from error
+        fsync_directory(request.live.parent)
         _emit(on_phase, CutoverPhase.RECEIPT_SYNCED)
         if live_version == 18:
-            verify_receipts(request.live, request.receipt, source_rows)
+            verify_receipts(
+                ReceiptVerification(
+                    request.source,
+                    request.live,
+                    request.receipt,
+                    source_rows,
+                    inventory_hash,
+                    rebuilt,
+                )
+            )
             verify_manifest_projection(request.clip_store, request.live)
             verify_candidate_contract(request.live, request.receipt)
             return CompactCutoverResult(
@@ -231,11 +125,45 @@ def run_compact_cutover(
                 receipt_sha256=receipt_hash,
                 source_rows=source_rows,
             )
-        if live_version != 17 or _sha256(request.live) != source_hash:
+        if live_version != 17 or file_sha256(request.live) != source_hash:
             raise CompactCutoverError("EDGE_DB_CUTOVER_LIVE_CHANGED")
-        candidate_version = _schema_version(request.candidate) if request.candidate.exists() else 17
-        if not request.candidate.exists() or candidate_version == 17:
-            _copy_or_verify(request.archive, request.candidate, "EDGE_DB_CUTOVER_STALE_CANDIDATE")
+        candidate_ready = False
+        if request.candidate.exists():
+            candidate_version = schema_version(request.candidate)
+            if candidate_version == 18:
+                try:
+                    verify_receipts(
+                        ReceiptVerification(
+                            request.source,
+                            request.candidate,
+                            request.receipt,
+                            source_rows,
+                            inventory_hash,
+                            rebuilt,
+                        )
+                    )
+                    verify_manifest_projection(request.clip_store, request.candidate)
+                    verify_candidate_contract(request.candidate, request.receipt)
+                except (sqlite3.Error, ValueError):
+                    os.unlink(request.candidate)
+                    fsync_directory(request.live.parent)
+                else:
+                    candidate_ready = True
+            elif candidate_version == 17 and file_sha256(request.candidate) == source_hash:
+                os.unlink(request.candidate)
+                fsync_directory(request.live.parent)
+            else:
+                raise CompactCutoverError("EDGE_DB_CUTOVER_STALE_CANDIDATE")
+        if not candidate_ready:
+            copy_exclusive(
+                request.archive,
+                request.candidate,
+                mode=0o600,
+                on_written=lambda: _emit(on_phase, CutoverPhase.CANDIDATE_WRITTEN),
+            )
+            fsync_directory(request.live.parent)
+            _emit(on_phase, CutoverPhase.CANDIDATE_SYNCED)
+            _emit(on_phase, CutoverPhase.BEFORE_V18_TRANSACTION)
             authorization = issue_compact_cutover_authorization(
                 lock,
                 source=request.archive,
@@ -243,23 +171,41 @@ def run_compact_cutover(
                 reconciliation=request.receipt,
             )
             migrate_database(request.candidate, lock=lock, cutover=authorization)
-            _emit(on_phase, CutoverPhase.CANDIDATE_MIGRATED)
+            _emit(on_phase, CutoverPhase.V18_COMMITTED)
             project_compact_data(request.source, request.candidate, request.clip_store)
-        elif candidate_version != 18:
-            raise CompactCutoverError("EDGE_DB_CUTOVER_STALE_CANDIDATE")
-        verify_receipts(request.candidate, request.receipt, source_rows)
+        _emit(on_phase, CutoverPhase.BEFORE_RECONCILIATION)
+        verify_receipts(
+            ReceiptVerification(
+                request.source,
+                request.candidate,
+                request.receipt,
+                source_rows,
+                inventory_hash,
+                rebuilt,
+            )
+        )
         verify_manifest_projection(request.clip_store, request.candidate)
         verify_candidate_contract(request.candidate, request.receipt)
-        _fsync_file(request.candidate)
-        _fsync_directory(request.live.parent)
-        _emit(on_phase, CutoverPhase.CANDIDATE_SYNCED)
-        if _sha256(request.source) != source_hash or _sha256(request.archive) != source_hash:
+        _emit(on_phase, CutoverPhase.RECONCILED)
+        fsync_file(request.candidate)
+        _emit(on_phase, CutoverPhase.CANDIDATE_FILE_SYNCED)
+        _emit(on_phase, CutoverPhase.BEFORE_PRE_RENAME_DIRECTORY_SYNC)
+        fsync_directory(request.live.parent)
+        _emit(on_phase, CutoverPhase.PRE_RENAME_DIRECTORY_SYNCED)
+        if (
+            file_sha256(request.source) != source_hash
+            or file_sha256(request.archive) != source_hash
+        ):
             raise CompactCutoverError("EDGE_DB_CUTOVER_SOURCE_CHANGED")
-        if _sha256(request.live) != source_hash:
+        if file_sha256(request.live) != source_hash:
             raise CompactCutoverError("EDGE_DB_CUTOVER_LIVE_CHANGED")
         os.replace(request.candidate, request.live)
-        _fsync_directory(request.live.parent)
-        _emit(on_phase, CutoverPhase.REPLACED)
+        _emit(on_phase, CutoverPhase.RENAMED)
+        fsync_directory(request.live.parent)
+        _emit(on_phase, CutoverPhase.FINAL_DIRECTORY_SYNCED)
+        _emit(on_phase, CutoverPhase.BEFORE_MANIFEST_VERIFY)
+        verify_manifest_projection(request.clip_store, request.live)
+        _emit(on_phase, CutoverPhase.MANIFEST_VERIFIED)
     return CompactCutoverResult(
         live=request.live,
         archive=request.archive,

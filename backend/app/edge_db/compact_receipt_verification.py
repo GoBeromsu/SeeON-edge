@@ -4,12 +4,28 @@ from __future__ import annotations
 
 import hashlib
 import sqlite3
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, model_validator
 
+from backend.app.edge_db.compact_receipts import receipt_lines
 from backend.app.edge_db.compact_schema import COMPACT_APPLICATION_TABLES
+
+
+@dataclass(frozen=True, slots=True)
+class ReceiptVerification:
+    source: Path
+    candidate: Path
+    receipt: Path
+    expected_rows: int
+    inventory_sha256: str
+    rebuilt_clip_ids: tuple[str, ...]
+
+
+class ReceiptSemanticError(ValueError):
+    """A parsed receipt has an invalid action/reason/target combination."""
 
 
 class ReconciliationReceipt(BaseModel):
@@ -17,10 +33,21 @@ class ReconciliationReceipt(BaseModel):
 
     action: Literal["MAP", "REBUILD", "NONE"]
     inventory_sha256: str
+    reason: str | None
     source_pk: list[str]
     source_row_sha256: str
     source_table: str
     target_pks: list[str]
+
+    @model_validator(mode="after")
+    def require_semantic_disposition(self) -> ReconciliationReceipt:
+        if self.action == "MAP" and (self.reason is not None or not self.target_pks):
+            raise ReceiptSemanticError("MAP receipt requires targets and no retirement reason")
+        if self.action == "NONE" and (self.reason is None or self.target_pks):
+            raise ReceiptSemanticError("NONE receipt requires a reason and no targets")
+        if self.action == "REBUILD" and self.reason != "filesystem_manifest_authority":
+            raise ReceiptSemanticError("REBUILD receipt requires filesystem authority reason")
+        return self
 
 
 def _file_sha256(path: Path) -> str:
@@ -58,31 +85,64 @@ def verify_candidate_contract(candidate: Path, receipt: Path) -> None:
             raise sqlite3.DatabaseError("EDGE_DB_CUTOVER_CANDIDATE_CHECKPOINT")
 
 
-def verify_receipts(candidate: Path, receipt: Path, expected_rows: int) -> None:
-    """Parse every receipt and prove each declared target primary key exists."""
+def _target_rows(connection: sqlite3.Connection) -> set[str]:
+    specifications = (
+        ("schema_migrations", ("version",)),
+        ("credentials", ("id",)),
+        ("edge_site", ("id",)),
+        ("locations", ("location_id", "kind")),
+        ("cameras", ("camera_id",)),
+        ("policies", ("policy_id",)),
+        ("clips", ("clip_id",)),
+        ("incidents", ("incident_id",)),
+        ("artifacts", ("incident_id", "kind")),
+        ("audit_events", ("audit_id",)),
+    )
+    targets: set[str] = set()
+    for table, columns in specifications:
+        selected = ",".join(columns)
+        for row in connection.execute(f"SELECT {selected} FROM {table}"):
+            key = ",".join(f"{column}={value}" for column, value in zip(columns, row, strict=True))
+            targets.add(f"{table}:{key}")
+    return targets
+
+
+def verify_receipts(verification: ReceiptVerification) -> None:
+    """Prove source rows, declared fan-out, and candidate rows in both directions."""
     count = 0
-    connection = sqlite3.connect(f"file:{candidate}?mode=ro", uri=True)
+    declared: set[str] = set()
+    expected = iter(
+        receipt_lines(
+            verification.source,
+            verification.inventory_sha256,
+            verification.rebuilt_clip_ids,
+        )
+    )
+    connection = sqlite3.connect(f"file:{verification.candidate}?mode=ro", uri=True)
     try:
-        with receipt.open("rb") as stream:
+        with verification.receipt.open("rb") as stream:
             for line in stream:
+                if next(expected, None) != line:
+                    raise sqlite3.DatabaseError("receipt differs from source row inventory")
                 record = ReconciliationReceipt.model_validate_json(line)
+                if record.inventory_sha256 != verification.inventory_sha256:
+                    raise sqlite3.DatabaseError("receipt inventory hash differs")
                 count += 1
                 for target in record.target_pks:
-                    table, encoded_key = target.split(":", 1)
-                    predicates = encoded_key.split(",")
-                    columns, values = zip(
-                        *(predicate.split("=", 1) for predicate in predicates), strict=True
-                    )
-                    where = " AND ".join(f'"{column}"=?' for column in columns)
-                    found = connection.execute(
-                        f'SELECT 1 FROM "{table}" WHERE {where}', values
-                    ).fetchone()
-                    if found != (1,):
-                        raise sqlite3.DatabaseError(f"missing receipt target {target}")
+                    declared.add(target)
+            if next(expected, None) is not None:
+                raise sqlite3.DatabaseError("receipt omits source rows")
+        actual = _target_rows(connection)
     finally:
         connection.close()
-    if count != expected_rows:
+    if count != verification.expected_rows:
         raise sqlite3.DatabaseError("reconciliation receipt row count differs from source")
+    if declared != actual:
+        missing = sorted(actual - declared)
+        extra = sorted(declared - actual)
+        raise sqlite3.DatabaseError(
+            f"bidirectional receipt mismatch missing={missing} extra={extra}"
+        )
 
 
-__all__ = ["verify_candidate_contract", "verify_receipts"]
+__all__ = ["ReceiptVerification", "verify_candidate_contract", "verify_receipts"]

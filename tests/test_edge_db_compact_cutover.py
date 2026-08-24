@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 from compact_cutover_fixtures import TS, cutover_request, sha256
 
+from backend.app.edge_db import compact_cutover
 from backend.app.edge_db.compact_cutover import (
     CompactCutoverError,
     CompactCutoverRequest,
@@ -17,6 +18,9 @@ from backend.app.edge_db.compact_cutover import (
 )
 from backend.app.edge_db.compatibility import MigrationRequiredError
 from backend.app.edge_db.connection import RuntimeActor, open_runtime_database
+from backend.app.edge_db.sqlite_runtime import SqliteVersionTooOldError
+
+pytestmark = pytest.mark.usefixtures("supported_compact_cutover_sqlite")
 
 
 def test_empty_schema17_cutover_is_exact_and_receipted(tmp_path: Path) -> None:
@@ -71,13 +75,16 @@ def test_empty_schema17_cutover_is_exact_and_receipted(tmp_path: Path) -> None:
         open_runtime_database(request.archive, actor=RuntimeActor.API)
 
 
-def test_old_sqlite_refuses_before_any_cutover_artifact(tmp_path: Path) -> None:
+def test_old_sqlite_refuses_before_any_cutover_artifact(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     # Given a source but an unsafe packaged SQLite version
-    request = cutover_request(tmp_path, version=(3, 45, 1))
+    request = cutover_request(tmp_path)
     before = request.source.read_bytes()
 
     # When cutover is attempted
-    with pytest.raises(Exception, match="below required"):
+    monkeypatch.setattr(compact_cutover, "_runtime_sqlite_version", lambda: (3, 45, 1))
+    with pytest.raises(SqliteVersionTooOldError, match="below required"):
         run_compact_cutover(request)
 
     # Then it fails before candidate, archive, or receipt creation.
@@ -125,7 +132,6 @@ def test_changed_expected_digest_refuses_without_artifacts(tmp_path: Path) -> No
         clip_store=request.clip_store,
         worker_state=request.worker_state,
         expected_source_sha256="0" * 64,
-        sqlite_version=request.sqlite_version,
     )
 
     with pytest.raises(CompactCutoverError, match="SOURCE_CHANGED"):
@@ -228,7 +234,7 @@ def test_interrupt_before_replace_keeps_live_v17(tmp_path: Path) -> None:
     before = request.live.read_bytes()
 
     def interrupt(phase: CutoverPhase) -> None:
-        if phase is CutoverPhase.CANDIDATE_SYNCED:
+        if phase is CutoverPhase.PRE_RENAME_DIRECTORY_SYNCED:
             raise InterruptedError
 
     with pytest.raises(InterruptedError):

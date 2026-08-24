@@ -8,8 +8,10 @@ from pathlib import Path
 from typing import Final
 
 from backend.app.edge_db.compact_artifact_projection import project_artifacts
+from backend.app.edge_db.compact_audit_projection import project_audit
 from backend.app.edge_db.compact_configuration_projection import project_configuration
 from backend.app.edge_db.compact_policy_projection import project_policies
+from backend.app.edge_db.functions import register_edge_db_functions
 from backend.app.features.clips.manifest import (
     discover_manifest_paths,
     read_manifest_file,
@@ -33,45 +35,6 @@ def _regular(path: Path) -> None:
         raise sqlite3.DatabaseError(f"unsafe cutover file: {path}")
 
 
-def filesystem_inventory_sha256(clip_store: Path, worker_state: Path) -> str:
-    """Hash names, sizes, and contents for manifests, media, queue, and dead-letter."""
-    digest = hashlib.sha256()
-    roots = (
-        clip_store,
-        worker_state / "delivery-queue",
-        worker_state / "delivery-queue-dead-letter",
-    )
-    for root in roots:
-        if not root.exists():
-            continue
-        if root.is_symlink() or not root.is_dir():
-            raise sqlite3.DatabaseError(f"unsafe cutover inventory root: {root}")
-        for path in sorted(candidate for candidate in root.rglob("*") if candidate.is_file()):
-            _regular(path)
-            relative = f"{root.name}/{path.relative_to(root).as_posix()}".encode()
-            digest.update(len(relative).to_bytes(4, "big"))
-            digest.update(relative)
-            digest.update(path.stat().st_size.to_bytes(8, "big"))
-            digest.update(bytes.fromhex(_sha256(path)))
-    return digest.hexdigest()
-
-
-def require_filesystem_drain(clip_store: Path, worker_state: Path) -> None:
-    """Refuse queued, dead-lettered, staged clip, or staged snapshot evidence."""
-    pending: list[Path] = []
-    for directory in (
-        worker_state / "delivery-queue",
-        worker_state / "delivery-queue-dead-letter",
-    ):
-        if directory.exists():
-            pending.extend(path for path in directory.rglob("*") if path.is_file())
-    for directory in (clip_store / "clips" / ".staging", clip_store / ".snapshot-staging"):
-        if directory.exists():
-            pending.extend(path for path in directory.rglob("*") if path.is_file() or path.is_dir())
-    if pending:
-        raise sqlite3.DatabaseError("EDGE_DB_FILESYSTEM_DRAIN_INCOMPLETE")
-
-
 def _copy_credentials(source: sqlite3.Connection, target: sqlite3.Connection) -> None:
     row = source.execute(
         "SELECT id,username,algorithm,salt,password_hash,updated_at FROM credentials WHERE id=1"
@@ -91,6 +54,14 @@ def _review(
         "AND revision.review_version=state.current_version WHERE state.incident_id=?",
         (incident_id,),
     ).fetchone()
+    if row is None:
+        row = source.execute(
+            "SELECT 1,label,reviewer,reviewed_at,NULL FROM labels "
+            "WHERE clip_id=(SELECT clip_id FROM evidence_primary_clips WHERE incident_id=?) "
+            "AND label IN ('TRUE_POSITIVE','FALSE_POSITIVE') "
+            "AND (SELECT count(*) FROM evidence_primary_clips WHERE clip_id=labels.clip_id)=1",
+            (incident_id,),
+        ).fetchone()
     if row is None:
         return (0, None, None, None, None)
     disposition = {"TRUE_POSITIVE": "TP", "FALSE_POSITIVE": "FP"}.get(str(row[1]))
@@ -216,6 +187,16 @@ def _copy_manifests(clip_store: Path, target: sqlite3.Connection) -> None:
         )
 
 
+def rebuilt_clip_ids(clip_store: Path) -> tuple[str, ...]:
+    identifiers: list[str] = []
+    for path in sorted(discover_manifest_paths(clip_store)):
+        manifest = read_manifest_file(path)
+        if manifest is None or manifest.clip_id in identifiers:
+            raise sqlite3.DatabaseError(f"invalid or duplicate clip manifest: {path}")
+        identifiers.append(manifest.clip_id)
+    return tuple(identifiers)
+
+
 def verify_manifest_projection(clip_store: Path, candidate: Path) -> None:
     """Prove every verified manifest/media pair has exact candidate hashes."""
     connection = sqlite3.connect(f"file:{candidate}?mode=ro", uri=True)
@@ -245,6 +226,7 @@ def project_compact_data(source_path: Path, candidate: Path, clip_store: Path) -
     target = sqlite3.connect(candidate)
     try:
         target.execute("PRAGMA foreign_keys=ON")
+        register_edge_db_functions(target)
         target.execute("BEGIN IMMEDIATE")
         _copy_credentials(source, target)
         project_configuration(source, target)
@@ -252,6 +234,7 @@ def project_compact_data(source_path: Path, candidate: Path, clip_store: Path) -
         _copy_incidents(source, target)
         _copy_manifests(clip_store, target)
         project_artifacts(source, target)
+        project_audit(source, target)
         target.commit()
     finally:
         target.close()
@@ -259,8 +242,7 @@ def project_compact_data(source_path: Path, candidate: Path, clip_store: Path) -
 
 
 __all__ = [
-    "filesystem_inventory_sha256",
     "project_compact_data",
-    "require_filesystem_drain",
+    "rebuilt_clip_ids",
     "verify_manifest_projection",
 ]

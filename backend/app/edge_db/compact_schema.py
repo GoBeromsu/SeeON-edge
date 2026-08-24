@@ -26,7 +26,6 @@ COMPACT_API_TABLES: Final = frozenset(
 
 # FK-safe drop order for the 71 non-ledger tables present at schema 17.
 SCHEMA17_RETIRED_TABLES: Final = (
-    "qa_replay_runs",
     "audit",
     "camera_bed_zone",
     "camera_registry",
@@ -97,6 +96,7 @@ SCHEMA17_RETIRED_TABLES: Final = (
     "evidence_events",
     "runtime_analysis_traces",
     "runtime_manifest_contents",
+    "qa_replay_runs",
 )
 
 SCHEMA_V18_STATEMENTS: Final = (
@@ -124,7 +124,12 @@ SCHEMA_V18_STATEMENTS: Final = (
             )
         )
     """,
-    *(f"DROP TABLE {_table}" for _table in SCHEMA17_RETIRED_TABLES),
+    *(f"DROP TABLE {_table}" for _table in SCHEMA17_RETIRED_TABLES if _table != "qa_replay_runs"),
+    "DROP TRIGGER qa_replay_runs_immutable_update",
+    "DROP TRIGGER qa_replay_runs_immutable_delete",
+    "UPDATE qa_replay_runs SET source_kind = 'captured', source_run_id = NULL",
+    "DELETE FROM qa_replay_runs",
+    "DROP TABLE qa_replay_runs",
     *COMPACT_SCHEMA_CREATE_STATEMENTS,
 )
 

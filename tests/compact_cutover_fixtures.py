@@ -13,11 +13,7 @@ from backend.app.edge_db.schema import MIGRATIONS
 TS = "2026-08-24T00:00:00Z"
 
 
-def cutover_request(
-    tmp_path: Path,
-    *,
-    version: tuple[int, int, int] = (3, 51, 3),
-) -> CompactCutoverRequest:
+def cutover_request(tmp_path: Path) -> CompactCutoverRequest:
     state = tmp_path / "state"
     state.mkdir(mode=0o700)
     source = state / "source.sqlite3"
@@ -36,7 +32,6 @@ def cutover_request(
         receipt=state / "edge.v17.reconciliation.jsonl",
         clip_store=clip_store,
         worker_state=worker_state,
-        sqlite_version=version,
     )
 
 

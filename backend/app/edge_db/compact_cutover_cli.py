@@ -10,7 +10,7 @@ from pathlib import Path
 
 from backend.app.edge_db.compact_cutover import CompactCutoverRequest, run_compact_cutover
 from backend.app.edge_db.compatibility import EdgeDatabaseError
-from backend.app.edge_db.sqlite_runtime import SqliteRuntimeError, parse_sqlite_version
+from backend.app.edge_db.sqlite_runtime import SqliteRuntimeError
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -28,14 +28,12 @@ def _parser() -> argparse.ArgumentParser:
     ):
         parser.add_argument(f"--{name}", type=Path, required=True)
     parser.add_argument("--expected-source-sha256")
-    parser.add_argument("--sqlite-version")
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
-        version = None if args.sqlite_version is None else parse_sqlite_version(args.sqlite_version)
         result = run_compact_cutover(
             CompactCutoverRequest(
                 source=args.source,
@@ -46,7 +44,6 @@ def main(argv: Sequence[str] | None = None) -> int:
                 clip_store=args.clip_store,
                 worker_state=args.worker_state,
                 expected_source_sha256=args.expected_source_sha256,
-                sqlite_version=version,
             )
         )
     except (OSError, sqlite3.Error, EdgeDatabaseError, SqliteRuntimeError) as error:
