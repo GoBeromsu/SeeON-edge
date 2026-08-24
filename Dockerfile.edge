@@ -12,8 +12,11 @@ RUN test -d /opt/nvidia/deepstream/deepstream/sources \
     && find /opt/nvidia/deepstream/deepstream/sources -type f -name 'nvds*.h' -print -quit | grep -q . \
     && cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
     && cmake --build build --parallel \
+    && ctest --test-dir build --output-on-failure \
     && cmake --install build --prefix /opt/seeon-native \
-    && sha256sum /opt/seeon-native/bin/seeon-deepstream-preflight
+    && sha256sum \
+        /opt/seeon-native/bin/seeon-deepstream-preflight \
+        /opt/seeon-native/bin/seeon-deepstream-child
 
 FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim@sha256:e5b65587bce7de595f299855d7385fe7fca39b8a74baa261ba1b7147afa78e58 AS uv-bin
 
@@ -21,6 +24,7 @@ FROM nvcr.io/nvidia/deepstream@sha256:f6fa0247da9290979cbb05749e7da9435d089c93db
 
 COPY --from=uv-bin /usr/local/bin/uv /usr/local/bin/uv
 COPY --from=deepstream-native-build /opt/seeon-native/bin/seeon-deepstream-preflight /usr/local/bin/seeon-deepstream-preflight
+COPY --from=deepstream-native-build /opt/seeon-native/bin/seeon-deepstream-child /usr/local/bin/seeon-deepstream-child
 
 ENV UV_LINK_MODE=copy \
     UV_PYTHON_DOWNLOADS=never \
@@ -84,7 +88,8 @@ RUN mkdir -p \
     && chmod 0444 /opt/seeon/deepstream-manifest.json \
     && sha256sum \
         /opt/seeon/deepstream-manifest.json \
-        /usr/local/bin/seeon-deepstream-preflight
+        /usr/local/bin/seeon-deepstream-preflight \
+        /usr/local/bin/seeon-deepstream-child
 
 ARG SOURCE_REVISION
 RUN if [ "$SOURCE_REVISION" = "0000000000000000000000000000000000000000" ] \
