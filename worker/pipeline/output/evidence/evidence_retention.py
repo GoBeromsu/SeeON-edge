@@ -89,10 +89,14 @@ class EvidenceRetention:
     def is_held(self, clip_id: str) -> bool:
         return self._is_held(clip_id)
 
-    def purge(self, candidate: PurgeCandidate) -> PurgeResult:
+    def preflight(self, candidate: PurgeCandidate) -> PurgeResult | None:
+        """Verify hold, ownership, containment, and immutable media without deleting."""
         if self._is_held(candidate.clip_id):
             return PurgeResult.HELD
-        verification = self._verify_candidate(candidate)
+        return self._verify_candidate(candidate)
+
+    def purge(self, candidate: PurgeCandidate) -> PurgeResult:
+        verification = self.preflight(candidate)
         if verification is not None:
             return verification
         if self._begin_purge is not None:

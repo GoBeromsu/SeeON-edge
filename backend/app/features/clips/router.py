@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import sqlite3
+from dataclasses import dataclass
 from typing import Annotated, Literal, cast
 
 from fastapi import APIRouter, HTTPException, Query, Request, status
 from fastapi.responses import Response
-from pydantic import ValidationError
 
 from backend.app.edge_db import EDGE_DATABASE_PATH
 from backend.app.features.audit.catalog import AuditAction
@@ -22,7 +22,11 @@ from backend.app.features.clips.compact_listing import (
     CompactClipListing,
     CompactClipQuery,
 )
-from backend.app.features.clips.deletion_control import control_clip_deletion
+from backend.app.features.clips.deletion_control import (
+    control_clip_deletion,
+    preflight_clip_deletion,
+)
+from backend.app.features.clips.deletion_lifecycle import ClipDeletionLifecycle
 from backend.app.features.clips.derivative_control import control_derivative
 from backend.app.features.clips.manifest import is_valid_clip_id
 from backend.app.features.clips.media_response import media_response, media_type
@@ -56,6 +60,34 @@ from backend.app.features.evidence.receipt_store import (
 )
 from backend.app.shared.backend_client_bundle import backend_client_bundle
 from backend.app.shared.dashboard_auth import authorize_dashboard
+
+
+@dataclass(frozen=True, slots=True)
+class _DeletionCommandResult:
+    clip_id: str
+    status: str
+
+
+def _validate_deletion_payload(
+    payload: dict[str, object], clip_id: str, *, allow_ready: bool
+) -> _DeletionCommandResult:
+    allowed = {
+        "PURGED", "HELD", "MISSING", "UNVERIFIABLE", "DELETE_FAILED",
+        "VERIFICATION_FAILED",
+    }
+    if allow_ready:
+        allowed.add("READY")
+    if (
+        set(payload) != {"clip_id", "status"}
+        or payload.get("clip_id") != clip_id
+        or payload.get("status") not in allowed
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="worker clip deletion response is invalid",
+        )
+    return _DeletionCommandResult(clip_id, str(payload["status"]))
+
 
 router = APIRouter(tags=["clips"])
 
@@ -272,18 +304,41 @@ def delete_clip(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="clip id confirmation does not match",
         )
-    append_governed(
-        request, actor_id=actor, action=AuditAction.CLIP_DELETE, target_id=clip_id
+    lifecycle = ClipDeletionLifecycle(EDGE_DATABASE_PATH, request.app)
+    retention_state = lifecycle.state(clip_id)
+    if retention_state == "PURGED":
+        return DeleteClipResponse(clip_id=clip_id, status="PURGED")
+
+    preflight = _validate_deletion_payload(
+        preflight_clip_deletion(request, clip_id), clip_id, allow_ready=True
     )
-    result = control_clip_deletion(request, clip_id)
-    try:
-        response = DeleteClipResponse.model_validate(result)
-    except ValidationError as error:
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail="worker clip deletion response is invalid",
-        ) from error
-    return response
+    if preflight.status == "HELD":
+        return DeleteClipResponse(clip_id=clip_id, status="HELD")
+    if preflight.status == "MISSING":
+        if retention_state == "PENDING":
+            lifecycle.complete(clip_id, actor_id=actor)
+            return DeleteClipResponse(clip_id=clip_id, status="PURGED")
+        return DeleteClipResponse(clip_id=clip_id, status="MISSING")
+    if preflight.status != "READY":
+        return DeleteClipResponse.model_validate(
+            {"clip_id": preflight.clip_id, "status": preflight.status}
+        )
+
+    pending_state = lifecycle.begin(clip_id, actor)
+    if pending_state is None:
+        return DeleteClipResponse(clip_id=clip_id, status="MISSING")
+    if pending_state == "PURGED":
+        return DeleteClipResponse(clip_id=clip_id, status="PURGED")
+
+    response = _validate_deletion_payload(
+        control_clip_deletion(request, clip_id), clip_id, allow_ready=False
+    )
+    if response.status in {"PURGED", "MISSING"}:
+        lifecycle.complete(clip_id, actor_id=actor)
+        return DeleteClipResponse(clip_id=clip_id, status="PURGED")
+    return DeleteClipResponse.model_validate(
+        {"clip_id": response.clip_id, "status": response.status}
+    )
 
 
 @router.get("/clips/{clip_id}/analysis", response_model=ClipAnalysisResponse)

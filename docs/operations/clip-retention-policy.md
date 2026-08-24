@@ -46,6 +46,16 @@
    삭제 후 경로가 실제로 사라졌는지 다시 확인한다(`PurgeResult.VERIFIED` 아니면
    `VERIFICATION_FAILED`).
 
+운영자 `DELETE /api/v1/clips/{clip_id}`도 동일한 60일 하한과 검증을 우회하지
+않는다. 백엔드는 먼저 인증된 worker `deletion-preflight` 명령으로 hold와 경로
+포함 관계를 비파괴 확인한다. `HELD`이면 파일과 DB를 모두 그대로 둔다. 삭제
+가능한 경우에만 백엔드가 한 SQLite 트랜잭션에서 `PENDING`과
+`clip.delete.request` 감사를 함께 커밋한 뒤 인증된 worker 삭제 명령을 보낸다.
+worker는 SQLite를 열지 않고 검증된 클립 디렉터리만 제거한다. 응답 후 백엔드는
+두 번째 트랜잭션에서 `PURGED`와 `clip.delete.complete` 감사를 함께 커밋한다.
+worker가 중단되면 `PENDING`이 사실대로 남고, 재시작 시 백엔드는 인증된
+비파괴 preflight가 `MISSING`을 확인한 항목만 정확히 한 번 완료한다.
+
 디스크 사용량 상한(`disk_high_watermark`, 기본 `DEFAULT_DISK_HIGH_WATERMARK = 0.80`,
 `CLIP_STORE_MAX_USAGE`/`CLIP_DISK_HIGH_WATERMARK` 환경변수로 조정 가능,
 `clip_config.py:42-52`)을 넘으면 `RotationReport.pressure_blocked = True`로

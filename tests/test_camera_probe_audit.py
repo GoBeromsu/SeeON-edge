@@ -197,7 +197,8 @@ def test_camera_probe_production_wiring_is_covered_and_mutation_sensitive() -> N
         "RUNTIME_SETTINGS_UPDATE", "POLICY_APPLY", "POLICY_ROLLBACK",
         "INCIDENT_LIST", "INCIDENT_DETAIL", "INCIDENT_REVIEW", "CLIP_LIST",
         "CLIP_DETAIL", "CLIP_PLAY", "CLIP_THUMBNAIL", "CLIP_ARTIFACT",
-        "CLIP_DELETE", "AUDIT_LIST", "AUDIT_DETAIL", "RELAY_ALERT",
+        "CLIP_DELETE_REQUEST", "CLIP_DELETE_COMPLETE", "AUDIT_LIST",
+        "AUDIT_DETAIL", "RELAY_ALERT",
     }
     production = "\n".join(
         path.read_text(encoding="utf-8")

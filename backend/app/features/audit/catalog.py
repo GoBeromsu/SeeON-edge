@@ -54,7 +54,8 @@ class AuditAction(StrEnum):
     CLIP_PLAY = "clip.play"
     CLIP_THUMBNAIL = "clip.thumbnail"
     CLIP_ARTIFACT = "clip.artifact"
-    CLIP_DELETE = "clip.delete"
+    CLIP_DELETE_REQUEST = "clip.delete.request"
+    CLIP_DELETE_COMPLETE = "clip.delete.complete"
     EVIDENCE_RECEIPT = "evidence.receipt"
     AUDIT_LIST = "audit.list"
     AUDIT_DETAIL = "audit.detail"
@@ -109,7 +110,8 @@ ACTION_DETAIL_CATALOG: Final = (
         AuditAction.POLICY_APPLY, AuditAction.POLICY_ROLLBACK, AuditAction.INCIDENT_LIST,
         AuditAction.INCIDENT_DETAIL, AuditAction.INCIDENT_REVIEW, AuditAction.CLIP_LIST,
         AuditAction.CLIP_DETAIL, AuditAction.CLIP_PLAY, AuditAction.CLIP_THUMBNAIL,
-        AuditAction.CLIP_ARTIFACT, AuditAction.CLIP_DELETE,
+        AuditAction.CLIP_ARTIFACT, AuditAction.CLIP_DELETE_REQUEST,
+        AuditAction.CLIP_DELETE_COMPLETE,
         AuditAction.EVIDENCE_RECEIPT, AuditAction.AUDIT_LIST, AuditAction.AUDIT_DETAIL,
         AuditAction.RELAY_ALERT, AuditAction.RELAY_SNAPSHOT_ATTACHMENT,
         AuditAction.RELAY_SNAPSHOT_DISPOSITION,

@@ -21,12 +21,14 @@ from fastapi import FastAPI
 
 from backend.app.core.config import reject_retired_backend_environment
 from backend.app.edge_db import EDGE_DATABASE_PATH
+from backend.app.features.audit.http import AuditUnavailableError
 from backend.app.features.audit.startup import (
     close_audit_session,
     configure_audit_readiness,
 )
 from backend.app.features.cameras.store import CameraRegistryStore
 from backend.app.features.clips.catalog import CatalogStore
+from backend.app.features.clips.deletion_lifecycle import reconcile_pending_clip_deletions
 from backend.app.features.status.backend_heartbeat_relay import (
     effective_relay_interval_sec,
     get_heartbeat_relay_state,
@@ -92,6 +94,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     _load_config(app)
 
     audit_healthy = configure_audit_readiness(app, EDGE_DATABASE_PATH)
+    if audit_healthy:
+        try:
+            app.state.clip_deletion_reconciliation = reconcile_pending_clip_deletions(
+                app, EDGE_DATABASE_PATH
+            )
+        except AuditUnavailableError:
+            audit_healthy = False
 
     if not isinstance(getattr(app.state, "heartbeat_store", None), HeartbeatStore):
         app.state.heartbeat_store = HeartbeatStore(

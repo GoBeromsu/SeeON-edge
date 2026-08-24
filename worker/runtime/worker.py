@@ -2030,11 +2030,8 @@ class WorkerRuntime:
             return
         self._clip_recorder = recorder
         self._clip_deletion_control = ClipDeletionControlService(
+            preflight_clip=recorder.preflight_clip_deletion,
             delete_clip=recorder.delete_clip,
-            # Retention is backend intent. The slot holds no retention index, so
-            # it reports no local state and never completes a purge on its own.
-            retention_state=lambda _clip_id: None,
-            complete_pending_purge=None,
         )
         self.diagnostics.set_clip_recorder_status(ClipRecorderStatus(available=True))
 

@@ -87,6 +87,8 @@ class DerivativeControl(Protocol):
 
 
 class ClipDeletionControl(Protocol):
+    def preflight(self, clip_id: str) -> dict[str, object]: ...
+
     def delete(self, clip_id: str) -> dict[str, object]: ...
 
 
@@ -137,6 +139,10 @@ def build_http_server(
             pose_camera_id = _pose_camera_id(path)
             if pose_camera_id is not None:
                 self._handle_get_pose(pose_camera_id)
+                return
+            clip_preflight_id = _clip_delete_preflight_identity(path)
+            if clip_preflight_id is not None:
+                self._handle_clip_delete_preflight(clip_preflight_id)
                 return
             derivative = _derivative_identity(path)
             if derivative is not None:
@@ -235,6 +241,20 @@ def build_http_server(
                 self._handle_clip_delete(clip_id)
                 return
             self.send_error(HTTPStatus.NOT_FOUND)
+
+        def _handle_clip_delete_preflight(self, clip_id: str) -> None:
+            if not _authorized_probe(self.headers.get("X-Edge-Relay-Token"), probe_token):
+                self.send_error(HTTPStatus.FORBIDDEN)
+                return
+            if clip_deletion_control is None:
+                self.send_error(HTTPStatus.SERVICE_UNAVAILABLE)
+                return
+            try:
+                payload = clip_deletion_control.preflight(clip_id)
+            except (OSError, RuntimeError, TypeError, ValueError):
+                self.send_error(HTTPStatus.CONFLICT)
+                return
+            self._write_status_json(HTTPStatus.OK, payload)
 
         def _handle_clip_delete(self, clip_id: str) -> None:
             if not _authorized_probe(self.headers.get("X-Edge-Relay-Token"), probe_token):
@@ -533,6 +553,15 @@ def build_http_server(
             del format, args
 
     return _ThreadingHTTPServer((host, port), Handler)
+
+
+def _clip_delete_preflight_identity(path: str) -> str | None:
+    """Match the explicit non-destructive clip deletion preflight command."""
+    parts = path.split("/")
+    if len(parts) != 4 or parts[1] != "clips" or parts[3] != "deletion-preflight":
+        return None
+    clip_id = unquote(parts[2])
+    return clip_id or None
 
 
 def _clip_delete_identity(path: str) -> str | None:
