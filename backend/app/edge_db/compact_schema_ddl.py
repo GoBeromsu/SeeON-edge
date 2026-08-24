@@ -141,7 +141,7 @@ COMPACT_SCHEMA_CREATE_STATEMENTS: Final = (
         fall_mode TEXT CHECK (fall_mode IS NULL OR fall_mode IN ('always', 'window')),
         fall_start_time TEXT CHECK (
             fall_start_time IS NULL
-            OR (length(fall_start_time) = 5 AND instr(fall_start_time, char(0)) = 0 
+            OR (length(fall_start_time) = 5 AND instr(fall_start_time, char(0)) = 0
             AND substr(fall_start_time, 3, 1) = ':'
             AND substr(fall_start_time, 1, 2) GLOB '[0-9][0-9]'
             AND substr(fall_start_time, 4, 2) GLOB '[0-9][0-9]'
@@ -150,7 +150,7 @@ COMPACT_SCHEMA_CREATE_STATEMENTS: Final = (
         ),
         fall_end_time TEXT CHECK (
             fall_end_time IS NULL
-            OR (length(fall_end_time) = 5 AND instr(fall_end_time, char(0)) = 0 
+            OR (length(fall_end_time) = 5 AND instr(fall_end_time, char(0)) = 0
             AND substr(fall_end_time, 3, 1) = ':'
             AND substr(fall_end_time, 1, 2) GLOB '[0-9][0-9]'
             AND substr(fall_end_time, 4, 2) GLOB '[0-9][0-9]'
@@ -161,7 +161,7 @@ COMPACT_SCHEMA_CREATE_STATEMENTS: Final = (
         bed_exit_mode TEXT CHECK (bed_exit_mode IS NULL OR bed_exit_mode IN ('always', 'window')),
         bed_exit_start_time TEXT CHECK (
             bed_exit_start_time IS NULL
-            OR (length(bed_exit_start_time) = 5 AND instr(bed_exit_start_time, char(0)) = 0 
+            OR (length(bed_exit_start_time) = 5 AND instr(bed_exit_start_time, char(0)) = 0
             AND substr(bed_exit_start_time, 3, 1) = ':'
             AND substr(bed_exit_start_time, 1, 2) GLOB '[0-9][0-9]'
             AND substr(bed_exit_start_time, 4, 2) GLOB '[0-9][0-9]'
@@ -170,7 +170,7 @@ COMPACT_SCHEMA_CREATE_STATEMENTS: Final = (
         ),
         bed_exit_end_time TEXT CHECK (
             bed_exit_end_time IS NULL
-            OR (length(bed_exit_end_time) = 5 AND instr(bed_exit_end_time, char(0)) = 0 
+            OR (length(bed_exit_end_time) = 5 AND instr(bed_exit_end_time, char(0)) = 0
             AND substr(bed_exit_end_time, 3, 1) = ':'
             AND substr(bed_exit_end_time, 1, 2) GLOB '[0-9][0-9]'
             AND substr(bed_exit_end_time, 4, 2) GLOB '[0-9][0-9]'
@@ -1797,6 +1797,7 @@ COMPACT_SCHEMA_CREATE_STATEMENTS: Final = (
         OR NEW.mime_type IS NOT OLD.mime_type
         OR NEW.codec IS NOT OLD.codec
         OR NEW.captured_at IS NOT OLD.captured_at
+        OR NEW.clip_id IS NOT OLD.clip_id
     )
     BEGIN
         SELECT RAISE(ABORT, 'artifact retained identity is immutable');

@@ -60,6 +60,9 @@ class _LockProof:
         self._ino = stat.st_ino
 
 
+_LIVE_LOCKS: dict[int, tuple[int, int, int]] = {}
+
+
 @dataclass(slots=True)
 class DeploymentLock:
     """Proof that this process currently owns one deployment lock."""
@@ -70,6 +73,14 @@ class DeploymentLock:
     _proof: object = None
 
     def require_for(self, database: Path) -> None:
+        registered = _LIVE_LOCKS.get(id(self))
+        if registered is None:
+            if isinstance(self._proof, _LockProof) and not self._active:
+                raise DeploymentLockError("EXPIRED_LOCK")
+            raise DeploymentLockError("FORGED_LOCK")
+        registered_descriptor, registered_dev, registered_ino = registered
+        if registered_descriptor != self._descriptor:
+            raise DeploymentLockError("FORGED_LOCK")
         if not isinstance(self._proof, _LockProof):
             raise DeploymentLockError("FORGED_LOCK")
         if not self._active:
@@ -79,6 +90,11 @@ class DeploymentLock:
             lock_stat = (self.state_directory / "deployment.lock").stat()
         except OSError as error:
             raise DeploymentLockError("FORGED_LOCK") from error
+        if (descriptor_stat.st_dev, descriptor_stat.st_ino) != (
+            registered_dev,
+            registered_ino,
+        ):
+            raise DeploymentLockError("FORGED_LOCK")
         if (descriptor_stat.st_dev, descriptor_stat.st_ino) != (
             self._proof._dev,
             self._proof._ino,
@@ -112,9 +128,12 @@ def deployment_lock(
         ownership = DeploymentLock(
             resolved_directory, descriptor, _proof=_LockProof(descriptor)
         )
+        proof_stat = os.fstat(descriptor)
+        _LIVE_LOCKS[id(ownership)] = (descriptor, proof_stat.st_dev, proof_stat.st_ino)
         yield ownership
     finally:
         if ownership is not None:
+            _LIVE_LOCKS.pop(id(ownership), None)
             ownership._active = False
             fcntl.flock(descriptor, fcntl.LOCK_UN)
         os.close(descriptor)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import sqlite3
 from collections.abc import Callable
 from pathlib import Path
@@ -74,6 +75,26 @@ def test_forged_lock_cannot_issue_or_redeem(tmp_path: Path) -> None:
     fake = DeploymentLock(database.parent.resolve(), 0, True)
     with pytest.raises(CompactCutoverRequiredError, match="FORGED_LOCK"):
         _issue(fake, database)
+
+
+def test_stolen_expired_proof_cannot_upgrade_live_v17(tmp_path: Path) -> None:
+    database = tmp_path / "cand.sqlite3"
+    _v17(database)
+    before = database.read_bytes()
+    with deployment_lock(database.parent) as lock:
+        stolen_proof = lock._proof
+        state_directory = lock.state_directory
+    descriptor = os.open(state_directory / "deployment.lock", os.O_RDWR)
+    try:
+        replayed = DeploymentLock(state_directory, descriptor, True, stolen_proof)
+        with pytest.raises(CompactCutoverRequiredError, match="FORGED_LOCK"):
+            authorization = _issue(replayed, database)
+            migrate_database(database, lock=replayed, cutover=authorization)
+    finally:
+        os.close(descriptor)
+    assert database.read_bytes() == before
+    with sqlite3.connect(database) as connection:
+        assert connection.execute("PRAGMA user_version").fetchone() == (17,)
 
 
 def test_arbitrary_hash_is_not_trusted(tmp_path: Path) -> None:

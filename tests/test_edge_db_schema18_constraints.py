@@ -252,6 +252,44 @@ def test_available_to_corrupt_preserves_retained_identity(tmp_path: Path) -> Non
         connection.close()
 
 
+def test_primary_clip_relation_cannot_change_on_corrupt(tmp_path: Path) -> None:
+    connection = _db(tmp_path)
+    later = "2026-08-24T00:00:01Z"
+    try:
+        _insert_incident(connection)
+        _insert_clip_row(connection)
+        connection.execute(
+            "INSERT INTO clips ("
+            "clip_id,camera_id,event_facet,started_at,local_state,local_reason,"
+            "publish_state,retention_state,revision,created_at,updated_at,"
+            "manifest_relpath,manifest_sha256,manifest_size_bytes,"
+            "media_relpath,media_sha256,media_size_bytes"
+            ") VALUES ('clip-2','cam-1','fall',?,'AVAILABLE',NULL,'WAITING','RETAINED',"
+            "1,?,?, 'clips/b.json',?,?, 'clips/b.mp4',?,?)",
+            (TS, TS, TS, HASH_A, 10, HASH_B, 20),
+        )
+        connection.execute(
+            "INSERT INTO artifacts ("
+            "incident_id,kind,artifact_id,clip_id,state,contained_relpath,"
+            "content_sha256,size_bytes,mime_type,codec,captured_at,revision,"
+            "created_at,updated_at"
+            ") VALUES ('inc-1','PRIMARY_CLIP','art-1','clip-1','AVAILABLE',"
+            "'clips/a.mp4',?,20,'video/mp4','hevc',NULL,1,?,?)",
+            (HASH_B, TS, TS),
+        )
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(
+                "UPDATE artifacts SET state='CORRUPT', reason='HASH_MISMATCH', "
+                "revision=2, clip_id='clip-2', updated_at=? WHERE incident_id='inc-1'",
+                (later,),
+            )
+        assert connection.execute(
+            "SELECT clip_id, state FROM artifacts WHERE incident_id='inc-1'"
+        ).fetchone() == ("clip-1", "AVAILABLE")
+    finally:
+        connection.close()
+
+
 def test_snapshot_available_to_corrupt_rejects_rewritten_identity(tmp_path: Path) -> None:
     connection = _db(tmp_path)
     later = "2026-08-24T00:00:01Z"

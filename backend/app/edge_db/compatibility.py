@@ -159,7 +159,7 @@ CANONICAL_MIGRATION_LEDGER: Final[tuple[MigrationIdentity, ...]] = (
     (
         18,
         "strict_ten_table_application_schema",
-        "9b6327c94b511abd0dd57c1c804d77dc77f3a196925a9ed40652d2af952125ad",
+        "7513b07e490bbd40e1cee2bd4d35f2342f3ef312c96bbb30c817464ab09f5e78",
     ),
 )
 
