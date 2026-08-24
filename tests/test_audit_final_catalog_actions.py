@@ -6,6 +6,7 @@ import sqlite3
 from pathlib import Path
 
 import pytest
+from fastapi.testclient import TestClient
 
 from backend.app.edge_db.migrator import migrate_database
 from backend.app.features.audit.catalog import AuditAction, empty_detail
@@ -21,6 +22,7 @@ from backend.app.features.connection.topology_retry_coordinator import TopologyR
 from backend.app.features.evidence.compact_receipts import CompactArtifactReceiptStore
 from backend.app.features.evidence.receipt_store import ArtifactReceipt, verified_artifact
 from backend.app.features.evidence.relay_projection import RelayEvent, RelayEvidenceProjection
+from backend.app.main import create_app, no_lifespan
 from contracts.edge_provisioning_v1 import (
     MachinePrincipal,
     MutationCounts,
@@ -95,6 +97,29 @@ def _sync_fixture(path: Path) -> tuple[TopologyRetryCoordinator, EdgeTopologySyn
     state = EdgeTopologySyncStateStore(path)
     client = Client()
     return TopologyRetryCoordinator(registry, state, lambda: client), state
+
+
+def test_connection_sync_route_commits_canonical_action_and_detail(tmp_path: Path) -> None:
+    path = tmp_path / "sync-route" / "edge.sqlite3"
+    coordinator, _state = _sync_fixture(path)
+    app = create_app(lifespan=no_lifespan)
+    app.state.topology_retry_coordinator = coordinator
+    client = TestClient(app)
+    assert client.post(
+        "/api/v1/auth/session", json={"username": "admin", "password": "admin"}
+    ).status_code == 204
+
+    response = client.post("/api/v1/connection/sync-cameras")
+
+    assert response.status_code == 200
+    with sqlite3.connect(path) as connection:
+        rows = connection.execute(
+            "SELECT action,target_id,actor_type,auth_mechanism,detail_json "
+            "FROM audit_events WHERE action NOT LIKE 'audit.%'"
+        ).fetchall()
+    assert rows == [
+        ("connection.sync", "camera-roster", "user", "dashboard_session", '{"version":1}')
+    ]
 
 
 def test_connection_sync_audit_is_one_atomic_operation(tmp_path: Path) -> None:

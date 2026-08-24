@@ -3,12 +3,13 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import ClassVar
+from typing import ClassVar, cast
 
 import pytest
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from backend.app.features.cameras.store import CameraRegistryStore
@@ -61,7 +62,7 @@ def client(tmp_path: Path) -> Iterator[TestClient]:
     app.state.catalog_store.close()
 
 
-def _post(client: TestClient, path: str, payload: dict[str, object]):
+def _post(client: TestClient, path: str, payload: Mapping[str, object]):
     return client.post(path, json=payload, headers={"X-Edge-Relay-Token": TOKEN})
 
 
@@ -135,6 +136,40 @@ def test_snapshot_disposition_is_durable_and_never_changes_referenced_event(
         ).fetchone()
     assert after == before
     assert disposition == ("UNAVAILABLE", "UNAVAILABLE:camera offline")
+
+
+def test_snapshot_disposition_route_commits_canonical_action_and_detail(
+    client: TestClient,
+) -> None:
+    event = {
+        "edge_event_id": EVENT_ID,
+        "event_type": "fall",
+        "probability": 0.8,
+        "detected_at": "2026-08-21T00:00:00Z",
+        "camera_id": "camera-1",
+        "facility_id": "facility-1",
+    }
+    assert _post(client, "/api/v1/relay/alerts", event).status_code == 202
+
+    response = _post(client, "/api/v1/relay/snapshot-dispositions", DISPOSITION)
+
+    assert response.status_code == 202
+    app = cast(FastAPI, client.app)
+    database = Path(app.state.edge_database_path)
+    with sqlite3.connect(database) as connection:
+        rows = connection.execute(
+            "SELECT action,target_id,actor_type,auth_mechanism,detail_json "
+            "FROM audit_events WHERE target_id='snapshot-missing'"
+        ).fetchall()
+    assert rows == [
+        (
+            "relay.snapshot-disposition",
+            "snapshot-missing",
+            "service",
+            "relay_token",
+            '{"version":1}',
+        )
+    ]
 
 
 def test_snapshot_attachment_rejects_inline_media_payload(client: TestClient) -> None:

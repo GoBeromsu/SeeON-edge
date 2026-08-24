@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sqlite3
 from collections.abc import Callable
 from dataclasses import FrozenInstanceError, dataclass, field
 from pathlib import Path
@@ -292,6 +293,27 @@ def test_ready_relay_resolves_owned_media_by_clip_id_and_returns_typed_receipt(
     )
     with pytest.raises(FrozenInstanceError):
         _set_attribute(ready_request, "camera_id", "camera-other")
+
+
+def test_evidence_receipt_route_commits_canonical_action_and_detail(tmp_path: Path) -> None:
+    _write_ready_media(tmp_path)
+    client = _client(tmp_path, FakeBackendEvidenceClient(), enabled=True)
+
+    response = client.put(
+        "/api/v1/relay/clips/clip-1",
+        json=_ready_payload(),
+        headers={"X-Edge-Relay-Token": TOKEN},
+    )
+
+    assert response.status_code == 200
+    with sqlite3.connect(tmp_path / "catalog.sqlite3") as connection:
+        rows = connection.execute(
+            "SELECT action,target_id,actor_type,auth_mechanism,detail_json "
+            "FROM audit_events WHERE action NOT LIKE 'audit.%'"
+        ).fetchall()
+    assert rows == [
+        ("evidence.receipt", "clip-1", "service", "relay_token", '{"version":1}')
+    ]
 
 
 def test_unavailable_relay_passes_complete_immutable_state_request(tmp_path: Path) -> None:
