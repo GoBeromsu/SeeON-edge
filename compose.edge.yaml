@@ -148,6 +148,9 @@ services:
       # endpoint backed by dashboard/DB state owns those values.
     volumes:
       - ./models:/app/models:ro
+      # Engines are prepared explicitly from the image-pinned manifest. Runtime
+      # preflight verifies this writable cache and never writes beside models.
+      - worker-engine-cache:/var/cache/seeon/tensorrt:rw
       - worker-local-state:/var/lib/seeon-state
       - ${CLIP_STORE_HOST_DIR:?edge requires host clip-store dir}:/var/lib/clip-store:rw
     depends_on:
@@ -168,6 +171,7 @@ services:
 volumes:
   edge-state: {}
   worker-local-state: {}
+  worker-engine-cache: {}
   # Read-only rollback boundary for the one-time import; runtimes never mount these.
   ml-api-state: {}
   ml-worker-state: {}

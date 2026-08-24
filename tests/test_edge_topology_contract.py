@@ -235,6 +235,7 @@ def test_edge_runtime_state_volumes_follow_backend_ownership() -> None:
         "edge-state",
         "ml-api-state",
         "ml-worker-state",
+        "worker-engine-cache",
         "worker-local-state",
     }
     for runtime_name in EDGE_RUNTIME_SERVICES:

@@ -60,6 +60,10 @@ from worker.domains.fall import FallModelProtocol
 from worker.interfaces.decision import Decider
 from worker.interfaces.output import EventSink
 from worker.interfaces.serving import ServingClient
+from worker.native.deepstream.preflight import (
+    DeepStreamPreflightError,
+    run_configured_deepstream_preflight,
+)
 from worker.pipeline.analytics import CompositeExtractor, NamedExtractor
 from worker.pipeline.analytics.merge import result_merger_names
 from worker.pipeline.bus import BoundedFrameBus, Scheduler
@@ -613,6 +617,10 @@ def _production_device_resident_source() -> VerifyResult:
     satisfies the plain-CUDA check still fails this one closed with the
     probe's own truthful reason -- see ``DeviceResidentCapability``.
     """
+    try:
+        _ = run_configured_deepstream_preflight()
+    except DeepStreamPreflightError as error:
+        return VerifyResult(False, "nvidia", "deepstream_preflight", str(error))
     capability = probe_device_resident_capability()
     return VerifyResult(capability.available, "nvidia", "device", capability.reason)
 
