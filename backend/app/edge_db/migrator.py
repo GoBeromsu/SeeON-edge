@@ -11,7 +11,7 @@ from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Final
+from typing import TYPE_CHECKING, Final
 
 from backend.app.edge_db.compatibility import (
     CANONICAL_MIGRATION_LEDGER,
@@ -21,6 +21,8 @@ from backend.app.edge_db.compatibility import (
     SchemaLedgerError,
     verify_runtime_schema,
 )
+from backend.app.edge_db.cutover_authorization import CompactCutoverRequiredError
+from backend.app.edge_db.functions import register_edge_db_functions
 from backend.app.edge_db.ownership import Writer, writer_for_table
 from backend.app.edge_db.paths import (
     EDGE_DATABASE_PATH,
@@ -28,6 +30,9 @@ from backend.app.edge_db.paths import (
     secure_database_files,
 )
 from backend.app.edge_db.schema import MIGRATIONS, Migration
+
+if TYPE_CHECKING:
+    from backend.app.edge_db.cutover_authorization import CompactCutoverAuthorization
 
 MIGRATION_BUSY_TIMEOUT_MS: Final = 5_000
 MigrationProgress = Callable[[int, int], None]
@@ -180,7 +185,25 @@ class _MigrationAuthorizer:
             return sqlite3.SQLITE_DENY
         if action == sqlite3.SQLITE_PRAGMA:
             pragma = "" if argument_one is None else argument_one.lower()
-            if pragma in {"integrity_check", "quick_check"} and argument_two is None:
+            if pragma in {
+                "foreign_key_list",
+                "index_info",
+                "index_list",
+                "index_xinfo",
+                "integrity_check",
+                "quick_check",
+                "table_info",
+                "table_xinfo",
+            } and argument_two is None:
+                return sqlite3.SQLITE_OK
+            if pragma in {
+                "foreign_key_list",
+                "index_info",
+                "index_list",
+                "index_xinfo",
+                "table_info",
+                "table_xinfo",
+            }:
                 return sqlite3.SQLITE_OK
             if pragma == "quick_check" and argument_two == self._altered_application_table:
                 # SQLite implements ALTER TABLE with an internal table-scoped
@@ -204,6 +227,7 @@ def migrate_database(
     migrations: Sequence[Migration] = MIGRATIONS,
     on_statement_applied: MigrationProgress | None = None,
     lock: DeploymentLock | None = None,
+    cutover: CompactCutoverAuthorization | None = None,
 ) -> MigrationResult:
     """Apply each pending migration atomically under the deployment lock."""
     if lock is None:
@@ -213,6 +237,7 @@ def migrate_database(
                 migrations=migrations,
                 on_statement_applied=on_statement_applied,
                 lock=ownership,
+                cutover=cutover,
             )
     lock.require_for(path)
     _validate_ledger(migrations)
@@ -232,15 +257,23 @@ def migrate_database(
         target = len(migrations)
         if previous > target:
             raise NewerSchemaError(found=previous, maximum=target)
+        register_edge_db_functions(connection)
         _verify_schema(connection, migrations, previous)
         authorizer = _MigrationAuthorizer()
         connection.set_authorizer(authorizer)
+        cutover_source = None
 
         for migration in migrations:
             if migration.version <= _user_version(connection):
                 continue
+            if migration.version == 18 and previous not in {0, 17}:
+                continue
             if migration.preflight is not None:
                 migration.preflight(connection)
+            if migration.version == 18 and previous == 17:
+                if cutover is None:
+                    raise CompactCutoverRequiredError
+                cutover_source = cutover.bind(lock)
             connection.execute("BEGIN IMMEDIATE")
             try:
                 current = _user_version(connection)
@@ -255,13 +288,32 @@ def migrate_database(
                     if on_statement_applied is not None:
                         on_statement_applied(migration.version, statement_index)
                 authorizer.begin_statement()
-                connection.execute(
-                    """
-                    INSERT INTO schema_migrations (version, name, checksum, applied_at)
-                    VALUES (?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-                    """,
-                    (migration.version, migration.name, migration.checksum),
-                )
+                if migration.version == 18 and cutover_source is not None:
+                    connection.execute(
+                        """
+                        INSERT INTO schema_migrations (
+                            version, name, checksum, applied_at,
+                            source_schema_version, source_db_sha256, reconciliation_sha256
+                        )
+                        VALUES (?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), ?, ?, ?)
+                        """,
+                        (
+                            migration.version,
+                            migration.name,
+                            migration.checksum,
+                            cutover_source.source_schema_version,
+                            cutover_source.source_db_sha256,
+                            cutover_source.reconciliation_sha256,
+                        ),
+                    )
+                else:
+                    connection.execute(
+                        """
+                        INSERT INTO schema_migrations (version, name, checksum, applied_at)
+                        VALUES (?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+                        """,
+                        (migration.version, migration.name, migration.checksum),
+                    )
                 authorizer.begin_statement()
                 connection.execute(f"PRAGMA user_version = {migration.version}")
                 connection.commit()

@@ -19,6 +19,7 @@ from backend.app.edge_db.compatibility import (
     SchemaCompatibility,
     verify_runtime_schema,
 )
+from backend.app.edge_db.functions import register_edge_db_functions
 from backend.app.edge_db.ownership import Writer, writer_for_table
 from backend.app.edge_db.paths import secure_database_files
 
@@ -67,7 +68,14 @@ _DDL_ACTIONS: Final = frozenset(
     getattr(sqlite3, name) for name in _DDL_ACTION_NAMES if hasattr(sqlite3, name)
 )
 _ARGUMENT_READ_PRAGMAS: Final = frozenset(
-    {"foreign_key_list", "index_info", "index_list", "table_info", "table_xinfo"}
+    {
+        "foreign_key_list",
+        "index_info",
+        "index_list",
+        "index_xinfo",
+        "table_info",
+        "table_xinfo",
+    }
 )
 _READ_PRAGMAS: Final = frozenset(
     {
@@ -77,6 +85,7 @@ _READ_PRAGMAS: Final = frozenset(
         "foreign_keys",
         "index_info",
         "index_list",
+        "index_xinfo",
         "integrity_check",
         "journal_mode",
         "quick_check",
@@ -207,6 +216,7 @@ def open_runtime_database(
         connection.execute("PRAGMA synchronous = FULL")
         journal_row = connection.execute("PRAGMA journal_mode").fetchone()
         _require_wal(journal_row)
+        register_edge_db_functions(connection)
         verify_runtime_schema(connection, compatibility)
         connection.set_authorizer(_runtime_authorizer(actor))
         secure_database_files(path)

@@ -9,6 +9,10 @@ from enum import StrEnum
 from typing import Final
 
 from backend.app.edge_db.ownership import COMPACT_APPLICATION_TABLES, TABLE_FAMILIES
+from backend.app.edge_db.schema18_manifest import (
+    compile_schema18_manifest,
+    read_schema18_manifest,
+)
 from shared.release_identity import (
     EDGE_DATABASE_FORMAT_IDENTITY,
     EDGE_DATABASE_SCHEMA_VERSION,
@@ -155,7 +159,7 @@ CANONICAL_MIGRATION_LEDGER: Final[tuple[MigrationIdentity, ...]] = (
     (
         18,
         "strict_ten_table_application_schema",
-        "dd71277e8739f1bc7606aa3019b7d09b1cbd24a253e226df6ef77cf4cbc0b07b",
+        "bf6d85f6e5c044deed5a26ffdf554d1d3cc81554fc65add5661dc82024615cb1",
     ),
 )
 
@@ -249,7 +253,7 @@ def verify_runtime_schema(
 
 
 def _verify_compact_application_tables(connection: sqlite3.Connection) -> None:
-    """Require the exact schema-18 table allowlist, all STRICT."""
+    """Require the exact schema-18 table allowlist and structural contract."""
     try:
         rows = connection.execute(
             "SELECT name, sql FROM sqlite_schema "
@@ -262,6 +266,13 @@ def _verify_compact_application_tables(connection: sqlite3.Connection) -> None:
         raise SchemaLedgerError("edge database application table set is invalid")
     if any(sql is None or " STRICT" not in sql.upper() for _name, sql in rows):
         raise SchemaLedgerError("edge database application tables must be STRICT")
+    try:
+        actual = read_schema18_manifest(connection)
+    except sqlite3.Error as error:
+        raise SchemaLedgerError("schema 18 contract is unreadable") from error
+    delta = actual.diff(compile_schema18_manifest())
+    if delta:
+        raise SchemaLedgerError("schema 18 contract is invalid")
 
 
 __all__ = [
