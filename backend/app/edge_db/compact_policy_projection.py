@@ -18,6 +18,12 @@ def project_policies(source: sqlite3.Connection, target: sqlite3.Connection) -> 
             "FROM control_detection_policy_revisions"
         )
     }
+    facility_generations = {
+        str(facility_id): int(generation)
+        for facility_id, generation in source.execute(
+            "SELECT facility_id,activation_generation FROM control_detection_policy_state"
+        )
+    }
     activations = source.execute(
         "SELECT activation_id,facility_id,camera_id,module_id,module_version,active_revision_id,"
         "previous_revision_id,activation_generation,status,refusal_reason,activated_at,applied_at "
@@ -34,6 +40,9 @@ def project_policies(source: sqlite3.Connection, target: sqlite3.Connection) -> 
         previous = None if activation[6] is None else revisions.get(str(activation[6]))
         if activation[6] is not None and previous is None:
             raise sqlite3.DatabaseError("previous policy revision is missing")
+        activation_generation = activation[7]
+        if not isinstance(activation_generation, int):
+            raise sqlite3.DatabaseError("policy activation generation is invalid")
         target.execute(
             "INSERT INTO policies (policy_id,facility_id,camera_id,module_id,"
             "module_version,schema_id,"
@@ -54,7 +63,7 @@ def project_policies(source: sqlite3.Connection, target: sqlite3.Connection) -> 
                 int(previous is not None),
                 None if previous is None else previous[7],
                 None if previous is None else previous[8],
-                activation[7],
+                facility_generations.get(str(activation[1]), activation_generation),
                 activation[8],
                 activation[9],
                 activation[10],

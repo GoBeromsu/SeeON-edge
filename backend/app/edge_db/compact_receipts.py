@@ -14,6 +14,7 @@ from backend.app.edge_db.compact_receipt_context import (
     ReceiptContext,
     build_receipt_context,
     disposition,
+    require_map_target,
 )
 
 SqliteValue: TypeAlias = None | int | float | str | bytes
@@ -79,7 +80,8 @@ def _target_pks(
         targets = [f"schema_migrations:version={version}"]
         return targets + (["schema_migrations:version=18"] if version == 17 else [])
     if table == "audit":
-        return [f"audit_events:audit_id={_pk(values['audit_id'])}"]
+        audit_id = context.legacy_audit_ids.get(str(values["audit_id"]))
+        return [] if audit_id is None else [f"audit_events:audit_id={audit_id}"]
     if table == "credentials":
         return [f"credentials:id={_pk(values['id'])}"]
     if table == "camera_registry":
@@ -88,14 +90,34 @@ def _target_pks(
         return [f"cameras:camera_id={_pk(values['camera_id'])}"]
     if table in {"clips", "evidence_clips", "evidence_retention_states"}:
         clip_id = str(values["clip_id"])
-        return [f"clips:clip_id={clip_id}"] if clip_id in context.rebuilt_clip_ids else []
+        return [f"clips:clip_id={clip_id}"] if clip_id in context.clip_ids else []
     if table == "evidence_primary_clips":
+        targets = [f"artifacts:incident_id={_pk(values['incident_id'])},kind=PRIMARY_CLIP"]
         clip_id = str(values["clip_id"])
-        return [f"clips:clip_id={clip_id}"] if clip_id in context.rebuilt_clip_ids else []
+        if clip_id in context.clip_ids:
+            targets.append(f"clips:clip_id={clip_id}")
+        return targets
+    if table == "evidence_events":
+        incident_id = context.event_incidents.get(str(values["edge_event_id"]))
+        return [] if incident_id is None else [f"incidents:incident_id={incident_id}"]
+    if table == "evidence_incident_snapshots":
+        return [f"artifacts:incident_id={_pk(values['incident_id'])},kind=SNAPSHOT"]
+    if table == "evidence_media_objects":
+        return list(context.media_targets.get(str(values["media_id"]), ()))
+    if table == "snapshots":
+        incident_id = context.snapshot_incidents.get(str(values["snapshot_id"]))
+        return [] if incident_id is None else [f"artifacts:incident_id={incident_id},kind=SNAPSHOT"]
     if table == "evidence_incidents":
         return [f"incidents:incident_id={_pk(values['incident_id'])}"]
     if table == "control_evidence_review_state":
         return [f"incidents:incident_id={_pk(values['incident_id'])}"]
+    if table == "control_evidence_review_revisions":
+        review_id = str(values["review_id"])
+        targets = [f"audit_events:audit_id={context.review_audit_ids[review_id]}"]
+        incident_id = context.review_incidents[review_id]
+        if review_id in context.current_reviews:
+            targets.append(f"incidents:incident_id={incident_id}")
+        return targets
     if table == "labels":
         incident_id = context.label_incidents.get(str(values["clip_id"]))
         return [] if incident_id is None else [f"incidents:incident_id={incident_id}"]
@@ -113,12 +135,28 @@ def _target_pks(
     if table == "control_detection_policy_activations":
         policy_id = context.policy_ids.get(str(values["activation_id"]))
         return [] if policy_id is None else [f"policies:policy_id={policy_id}"]
+    if table == "control_detection_policy_revisions":
+        policy_id = context.policy_revisions.get(str(values["revision_id"]))
+        return [] if policy_id is None else [f"policies:policy_id={policy_id}"]
+    if table == "control_detection_policy_state":
+        policy_ids = context.policy_facilities.get(str(values["facility_id"]), ())
+        return [f"policies:policy_id={policy_id}" for policy_id in policy_ids]
     if table == "clip_listing_generation":
         return [f"clips:clip_id={clip_id}" for clip_id in context.rebuilt_clip_ids]
+    if table == "connection_store_migrations":
+        connection_version = values["version"]
+        return (
+            [f"schema_migrations:version={connection_version}"]
+            if isinstance(connection_version, int) and 1 <= connection_version <= 18
+            else []
+        )
     if table in {"schema_import_receipts", "schema_import_sources", "schema_metadata"}:
         return ["schema_migrations:version=18"]
-    if table == "control_legacy_label_migrations" and values["incident_id"] is not None:
-        return [f"incidents:incident_id={_pk(values['incident_id'])}"]
+    if table == "control_legacy_label_migrations":
+        targets = ["schema_migrations:version=18"]
+        if values["incident_id"] is not None:
+            targets.append(f"incidents:incident_id={_pk(values['incident_id'])}")
+        return targets
     if table in {
         "clip_storage_location",
         "connection_settings",
@@ -158,7 +196,13 @@ def receipt_lines(
             )
             for row in rows:
                 targets = _target_pks(table, columns, row, context)
-                action, reason = disposition(table, targets)
+                require_map_target(table, targets)
+                empty_reasons = {
+                    "audit": "unclassified_legacy_audit_archived",
+                    "connection_store_migrations": "unrelated_connection_migration_archived",
+                    "control_detection_policy_revisions": "superseded_policy_revision_archived",
+                }
+                action, reason = disposition(table, targets, empty_reasons.get(table))
                 yield (
                     canonical_json(
                         {

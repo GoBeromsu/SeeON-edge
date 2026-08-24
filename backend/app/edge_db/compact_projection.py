@@ -9,6 +9,7 @@ from typing import Final
 
 from backend.app.edge_db.compact_artifact_projection import project_artifacts
 from backend.app.edge_db.compact_audit_projection import project_audit
+from backend.app.edge_db.compact_clip_projection import project_clip_facts
 from backend.app.edge_db.compact_configuration_projection import project_configuration
 from backend.app.edge_db.compact_policy_projection import project_policies
 from backend.app.edge_db.functions import register_edge_db_functions
@@ -214,8 +215,11 @@ def verify_manifest_projection(clip_store: Path, candidate: Path) -> None:
             ).fetchone()
             if actual != expected:
                 raise sqlite3.DatabaseError(f"clip manifest projection differs: {manifest.clip_id}")
-        if connection.execute("SELECT count(*) FROM clips").fetchone() != (len(manifests),):
-            raise sqlite3.DatabaseError("candidate contains a clip absent from inventory")
+        manifest_backed = connection.execute(
+            "SELECT count(*) FROM clips WHERE manifest_relpath IS NOT NULL"
+        ).fetchone()
+        if manifest_backed != (len(manifests),):
+            raise sqlite3.DatabaseError("candidate manifest clip inventory differs")
     finally:
         connection.close()
 
@@ -233,6 +237,7 @@ def project_compact_data(source_path: Path, candidate: Path, clip_store: Path) -
         project_policies(source, target)
         _copy_incidents(source, target)
         _copy_manifests(clip_store, target)
+        project_clip_facts(source, target)
         project_artifacts(source, target)
         project_audit(source, target)
         target.commit()

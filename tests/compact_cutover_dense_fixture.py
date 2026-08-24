@@ -7,6 +7,12 @@ import shutil
 import sqlite3
 from pathlib import Path
 
+from compact_cutover_sensitive_fixture import (
+    FACILITY_TOKEN,
+    PASSWORD_HASH,
+    SALT,
+    dense_audit_payload,
+)
 from test_edge_db_schema16_fixtures import (
     DIGEST,
     MANIFEST,
@@ -83,8 +89,9 @@ def _populate_missing_tables(connection: sqlite3.Connection) -> None:
         ],
         separators=(",", ":"),
     )
+    audit_payload = dense_audit_payload()
     statements = (
-        ("INSERT INTO credentials VALUES (1,'admin','scrypt',?,?,?)", (b"s" * 16, b"h" * 64, NOW)),
+        ("INSERT INTO credentials VALUES (1,'admin','scrypt',?,?,?)", (SALT, PASSWORD_HASH, NOW)),
         ("INSERT INTO camera_registry VALUES (1,11,?)", (camera,)),
         ("INSERT INTO camera_topology_floors VALUES ('floor-edge','Floor',0)", ()),
         (
@@ -108,8 +115,8 @@ def _populate_missing_tables(connection: sqlite3.Connection) -> None:
         ("INSERT INTO runtime_latency VALUES ('facility:fixture','{}')", ()),
         (
             "INSERT INTO connection_settings VALUES "
-            "(1,NULL,NULL,'facility:fixture','secret',?,'FC','client','edge-install',1,?,?)",
-            (NOW, NOW, NOW),
+            "(1,NULL,NULL,'facility:fixture',? ,?,'FC','client','edge-install',1,?,?)",
+            (FACILITY_TOKEN, NOW, NOW, NOW),
         ),
         ("INSERT INTO connection_store_migrations VALUES (1,'fixture',?,NULL,NULL,NULL)", (NOW,)),
         (
@@ -124,21 +131,7 @@ def _populate_missing_tables(connection: sqlite3.Connection) -> None:
             "(1,'confirm','dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd',?,'snapshot',2,3,11,'edge-install',1,1,1,1,1,'accepted')",
             (NOW,),
         ),
-        (
-            "INSERT INTO audit VALUES (7,?,'clip-view',?)",
-            (
-                NOW,
-                json.dumps(
-                    {
-                        "actor_type": "user",
-                        "actor_id": "operator",
-                        "target_type": "clip",
-                        "target_id": "clip:fixture",
-                        "outcome": "success",
-                    }
-                ),
-            ),
-        ),
+        ("INSERT INTO audit VALUES (7,?,'clip-view',?)", (NOW, json.dumps(audit_payload))),
         ("INSERT INTO events VALUES ('catalog-only','camera:fixture','fall',?,NULL,'{}')", (NOW,)),
         ("INSERT INTO cameras VALUES ('legacy-camera','Legacy',NULL,'{}')", ()),
         (
@@ -148,8 +141,9 @@ def _populate_missing_tables(connection: sqlite3.Connection) -> None:
         ),
         (
             "INSERT INTO snapshots VALUES "
-            "('snapshot:fixture','camera:fixture','event:complete',?,'snap.jpg',?,10,'image/jpeg','{}')",
-            (NOW, MEDIA),
+            "('snapshot:fixture','camera:fixture','event:complete',?,'snapshots/fixture.jpg',"
+            "?,12,'image/jpeg','{}')",
+            (NOW, "f" * 64),
         ),
         (
             "INSERT INTO labels VALUES ('clip:fixture','TRUE_POSITIVE','legacy-reviewer',?,'{}')",
@@ -163,8 +157,14 @@ def _populate_missing_tables(connection: sqlite3.Connection) -> None:
         ("INSERT INTO clip_listing_thumbnails VALUES (1,'clip:fixture',1,1,1)", ()),
         ("INSERT INTO clip_listing_summary VALUES (1,'camera:fixture','fall',1)", ()),
         (
+            "INSERT INTO evidence_media_objects VALUES "
+            "('media:snapshot',?,12,'image/jpeg','CLIP_STORE','snapshots/fixture.jpg',"
+            "'fixture.jpg',?)",
+            ("f" * 64, NOW),
+        ),
+        (
             "INSERT INTO evidence_incident_snapshots VALUES "
-            "('incident:fixture','snapshot:fixture','media:fixture',?,'camera:fixture',?)",
+            "('incident:fixture','snapshot:fixture','media:snapshot',?,'camera:fixture',?)",
             (NOW, NOW),
         ),
         (
@@ -186,6 +186,40 @@ def _populate_missing_tables(connection: sqlite3.Connection) -> None:
     )
     for statement, values in statements:
         connection.execute(statement, values)
+    connection.execute(
+        "INSERT INTO control_detection_policy_revisions VALUES "
+        "(2,'facility:fixture','camera:fixture','fall',1,'fall-policy',1,"
+        "'{\"threshold\":0.2}',?,?)",
+        ("2" * 64, NOW),
+    )
+    connection.execute(
+        "INSERT INTO control_detection_policy_revisions VALUES "
+        "(3,'facility:fixture','camera:fixture','fall',1,'fall-policy',1,"
+        "'{\"threshold\":0.3}',?,?)",
+        ("3" * 64, NOW),
+    )
+    connection.execute(
+        "UPDATE control_detection_policy_activations SET active_revision_id=3,"
+        "previous_revision_id=2,activation_generation=3 WHERE activation_id=1"
+    )
+    connection.execute(
+        "UPDATE control_detection_policy_state SET activation_generation=4 "
+        "WHERE facility_id='facility:fixture'"
+    )
+    connection.execute(
+        "INSERT INTO control_evidence_review_revisions VALUES "
+        "('review:current','incident:fixture','clip:fixture',2,'senior-operator',?,"
+        "'TRUE_POSITIVE','governed current review')",
+        (NOW,),
+    )
+    connection.execute(
+        "UPDATE control_evidence_review_state SET current_version=2 "
+        "WHERE incident_id='incident:fixture'"
+    )
+    connection.execute(
+        "UPDATE evidence_events SET backend_event_id='backend:event:fixture' "
+        "WHERE edge_event_id='event:complete'"
+    )
     render = (
         "INSERT INTO derivative_render_records VALUES "
         "('incident:fixture','ANNOTATED_CLIP',?,'media:fixture','clip:fixture',?,?,?,?,1,"
