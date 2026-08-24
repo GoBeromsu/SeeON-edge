@@ -9,6 +9,7 @@ from collections.abc import Sequence
 
 from backend.app.edge_db.compact_cutover_files import (
     copy_exclusive,
+    discard_sqlite_artifact,
     file_sha256,
     fsync_directory,
     fsync_file,
@@ -145,13 +146,11 @@ def run_compact_cutover(
                     verify_manifest_projection(request.clip_store, request.candidate)
                     verify_candidate_contract(request.candidate, request.receipt)
                 except (sqlite3.Error, ValueError):
-                    os.unlink(request.candidate)
-                    fsync_directory(request.live.parent)
+                    discard_sqlite_artifact(request.candidate)
                 else:
                     candidate_ready = True
             elif candidate_version == 17 and file_sha256(request.candidate) == source_hash:
-                os.unlink(request.candidate)
-                fsync_directory(request.live.parent)
+                discard_sqlite_artifact(request.candidate)
             else:
                 raise CompactCutoverError("EDGE_DB_CUTOVER_STALE_CANDIDATE")
         if not candidate_ready:
@@ -199,6 +198,17 @@ def run_compact_cutover(
             raise CompactCutoverError("EDGE_DB_CUTOVER_SOURCE_CHANGED")
         if file_sha256(request.live) != source_hash:
             raise CompactCutoverError("EDGE_DB_CUTOVER_LIVE_CHANGED")
+        verify_receipts(
+            ReceiptVerification(
+                request.source,
+                request.candidate,
+                request.receipt,
+                source_rows,
+                inventory_hash,
+                rebuilt,
+            )
+        )
+        verify_candidate_contract(request.candidate, request.receipt)
         os.replace(request.candidate, request.live)
         _emit(on_phase, CutoverPhase.RENAMED)
         fsync_directory(request.live.parent)

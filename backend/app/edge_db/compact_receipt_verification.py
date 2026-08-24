@@ -12,6 +12,7 @@ from pydantic import BaseModel, ConfigDict, model_validator
 
 from backend.app.edge_db.compact_receipts import receipt_lines
 from backend.app.edge_db.compact_schema import COMPACT_APPLICATION_TABLES
+from backend.app.edge_db.compatibility import EdgeDatabaseError, verify_runtime_schema
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,6 +89,10 @@ def verify_candidate_contract(candidate: Path, receipt: Path) -> None:
             raise sqlite3.DatabaseError("EDGE_DB_CUTOVER_INTEGRITY")
         if connection.execute("PRAGMA foreign_key_check").fetchall():
             raise sqlite3.DatabaseError("EDGE_DB_CUTOVER_FOREIGN_KEY")
+        try:
+            verify_runtime_schema(connection)
+        except EdgeDatabaseError as error:
+            raise sqlite3.DatabaseError("EDGE_DB_CUTOVER_CANONICAL_IDENTITY") from error
         tables = {
             str(row[0])
             for row in connection.execute(

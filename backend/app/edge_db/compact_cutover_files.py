@@ -95,6 +95,17 @@ def copy_exclusive(
     return destination_stat
 
 
+def discard_sqlite_artifact(path: Path) -> None:
+    """Remove a rejected database and validated private WAL/SHM sidecars durably."""
+    paths = (path, Path(f"{path}-wal"), Path(f"{path}-shm"))
+    existing = tuple(item for item in paths if item.exists() or item.is_symlink())
+    for item in existing:
+        require_regular_single_link(item, "EDGE_DB_CUTOVER_CANDIDATE_SIDECAR")
+    for item in existing:
+        os.unlink(item)
+    fsync_directory(path.parent)
+
+
 def fsync_file(path: Path) -> None:
     descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
     try:
@@ -113,6 +124,7 @@ def fsync_directory(path: Path) -> None:
 
 __all__ = [
     "copy_exclusive",
+    "discard_sqlite_artifact",
     "file_sha256",
     "fsync_directory",
     "fsync_file",
