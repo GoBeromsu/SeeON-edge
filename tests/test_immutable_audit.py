@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -13,7 +14,9 @@ from backend.app.features.audit.catalog import (
     AuditAction,
     AuditDetailError,
     JsonValue,
-    parse_detail,
+    empty_detail,
+    parse_detail_json,
+    recovery_detail,
 )
 from backend.app.features.audit.startup import configure_audit_readiness
 from backend.app.features.audit.store import (
@@ -36,7 +39,7 @@ def _event(action: AuditAction = AuditAction.CLIP_LIST) -> AuditEvent:
         actor_id="admin",
         action=action,
         target_id="clips",
-        detail=parse_detail(action, {}),
+        detail=empty_detail(action),
     )
 
 
@@ -160,14 +163,16 @@ def test_detail_parser_rejects_recursive_privacy_aliases(
 ) -> None:
     # Given/When/Then: privacy-bearing mixed-case keys or values never enter audit JSON
     with pytest.raises(AuditDetailError):
-        parse_detail(AuditAction.CLIP_LIST, detail)
+        parse_detail_json(
+            AuditAction.CLIP_LIST, json.dumps({"version": 1, "nested": detail})
+        )
 
 
 def test_capacity_refusal_reads_only_count_before_history_bodies(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # Given: the production million-row threshold represented by a one-row boundary fixture.
-    from backend.app.features.audit import store as audit_module
+    from backend.app.features.audit import verification as audit_module
 
     audit = AuditStore(_database_path())
     audit.append(_event())
@@ -188,18 +193,16 @@ def test_capacity_refusal_reads_only_count_before_history_bodies(
 def test_detail_parser_rejects_more_than_sixteen_kibibytes() -> None:
     # Given/When/Then: canonical UTF-8 detail is bounded before SQLite
     with pytest.raises(AuditDetailError):
-        parse_detail(AuditAction.RECOVERY_FENCE, {"failure_code": "x" * 17000})
+        recovery_detail("x" * 17000, "2026-08-24T00:01:00.000Z")
 
 
 def test_detail_parser_canonicalizes_safe_registered_detail() -> None:
     # Given: a registered reconciliation detail shape
     # When: keys arrive in a non-canonical order
-    detail = parse_detail(
-        AuditAction.RECOVERY_FENCE,
-        {"ended_at": "2026-08-24T00:01:00.000Z", "failure_code": "SQLITE_FULL"},
-    )
+    detail = recovery_detail("SQLITE_FULL", "2026-08-24T00:01:00.000Z")
 
     # Then: the machine-consumed JSON is deterministic
     assert detail.json == (
-        '{"ended_at":"2026-08-24T00:01:00.000Z","failure_code":"SQLITE_FULL"}'
+        '{"ended_at":"2026-08-24T00:01:00.000Z",'
+        '"failure_code":"SQLITE_FULL","version":1}'
     )

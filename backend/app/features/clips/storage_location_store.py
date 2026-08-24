@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import sqlite3
+from collections.abc import Callable
 from pathlib import Path
 from threading import Lock
 
@@ -30,7 +32,12 @@ class ClipStorageLocationStore:
             ).fetchone()
         return "" if row is None or row[0] is None else str(row[0])
 
-    def put(self, selected_path: str) -> str:
+    def put(
+        self,
+        selected_path: str,
+        *,
+        after_write: Callable[[sqlite3.Connection], None] | None = None,
+    ) -> str:
         with self._lock:
             self._connection.execute("BEGIN IMMEDIATE")
             try:
@@ -39,6 +46,8 @@ class ClipStorageLocationStore:
                     "UPDATE edge_site SET clip_store_subdir=?,updated_at=? WHERE id=1",
                     (selected_path or None, utc_now()),
                 )
+                if after_write is not None:
+                    after_write(self._connection)
                 self._connection.execute("COMMIT")
             except BaseException:
                 self._connection.execute("ROLLBACK")

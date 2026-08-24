@@ -9,7 +9,12 @@ from typing import NoReturn
 from fastapi import Request, Response, status
 
 from backend.app.edge_db.compatibility import EdgeDatabaseError
-from backend.app.features.audit.catalog import AuditAction, parse_detail
+from backend.app.features.audit.catalog import AuditAction, empty_detail
+from backend.app.features.audit.sessions import (
+    AuditSession,
+    append_with_recovery,
+    start_session,
+)
 from backend.app.features.audit.store import (
     AuditEvent,
     AuditStore,
@@ -26,11 +31,17 @@ class AuditUnavailableError(RuntimeError):
 class AuditReadiness:
     """Mutable process readiness and one bounded degraded-interval fence."""
 
-    __slots__ = ("_lock", "failure_code", "healthy")
+    __slots__ = ("_lock", "failure_code", "healthy", "session")
 
-    def __init__(self, healthy: bool = True, failure_code: str | None = None) -> None:
+    def __init__(
+        self,
+        healthy: bool = True,
+        failure_code: str | None = None,
+        session: AuditSession | None = None,
+    ) -> None:
         self.healthy = healthy
         self.failure_code = failure_code
+        self.session = session
         self._lock = Lock()
 
     def degraded(self, failure_code: str) -> None:
@@ -46,6 +57,18 @@ class AuditReadiness:
         with self._lock:
             self.healthy = True
             self.failure_code = None
+
+    def ensure_session(
+        self, store: AuditStore, connection: sqlite3.Connection | None = None
+    ) -> AuditSession:
+        with self._lock:
+            if self.session is None:
+                self.session = (
+                    start_session(store)
+                    if connection is None
+                    else start_session(store, connection)
+                )
+            return self.session
 
 
 def audit_store(request: Request) -> AuditStore:
@@ -79,17 +102,6 @@ def _verify_incremental(request: Request, store: AuditStore) -> None:
         raise AuditUnavailableError from error
 
 
-def _recovery_event(failure_code: str) -> AuditEvent:
-    return AuditEvent(
-        occurred_at=utc_now(), actor_id="audit-readiness",
-        action=AuditAction.RECOVERY_FENCE, target_id="degraded-interval",
-        detail=parse_detail(
-            AuditAction.RECOVERY_FENCE,
-            {"failure_code": failure_code, "ended_at": utc_now()},
-        ),
-    )
-
-
 def append_governed(
     request: Request, *, actor_id: str, action: AuditAction, target_id: str
 ) -> None:
@@ -97,14 +109,17 @@ def append_governed(
     readiness = audit_readiness(request)
     event = AuditEvent(
         occurred_at=utc_now(), actor_id=actor_id, action=action,
-        target_id=target_id, detail=parse_detail(action, {}),
+        target_id=target_id, detail=empty_detail(action),
     )
     failure_code = readiness.current_failure()
-    events = (event,) if failure_code is None else (_recovery_event(failure_code), event)
     try:
         store = audit_store(request)
         _verify_incremental(request, store)
-        store.append_batch(events)
+        session = readiness.ensure_session(store)
+        if failure_code is None:
+            store.append(event)
+        else:
+            append_with_recovery(store, event, session, failure_code)
         readiness.recovered()
         request.app.state.readiness = {"ready": True, "status": "ready"}
     except (OSError, sqlite3.Error, EdgeDatabaseError) as error:
@@ -120,9 +135,13 @@ def append_transactional(
     try:
         store = audit_store(request)
         _verify_incremental(request, store)
-        if failure_code is not None:
-            store.append(_recovery_event(failure_code), connection=connection)
-        store.append(event, connection=connection)
+        session = readiness.ensure_session(store, connection)
+        if failure_code is None:
+            store.append(event, connection=connection)
+        else:
+            append_with_recovery(
+                store, event, session, failure_code, connection
+            )
         readiness.recovered()
         request.app.state.readiness = {"ready": True, "status": "ready"}
     except (OSError, sqlite3.Error, EdgeDatabaseError) as error:

@@ -13,7 +13,7 @@ from backend.app.edge_db import RuntimeActor, open_runtime_database
 from backend.app.edge_db.compatibility import EdgeDatabaseError
 from backend.app.features.audit.catalog import AuditAction
 from backend.app.features.audit.http import append_governed, audit_store, refuse_unavailable
-from backend.app.features.audit.store import SqlValue
+from backend.app.features.audit.verification import SqlValue
 from backend.app.shared.dashboard_auth import authorize_dashboard
 
 router = APIRouter(prefix="/audit", tags=["audit"])

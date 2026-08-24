@@ -35,7 +35,7 @@ from fastapi import APIRouter, FastAPI, HTTPException, Request, status
 from pydantic import BaseModel, ConfigDict, Field
 
 from backend.app.core.config import get_settings
-from backend.app.features.audit.catalog import AuditAction, parse_detail
+from backend.app.features.audit.catalog import AuditAction, empty_detail
 from backend.app.features.audit.http import append_transactional
 from backend.app.features.audit.store import AuditEvent
 from backend.app.features.audit.store import utc_now as audit_now
@@ -138,7 +138,7 @@ def recognize_bed_zone(
             connection,
             AuditEvent(
                 occurred_at=audit_now(), actor_id=actor, action=AuditAction.BED_ZONE_UPDATE,
-                target_id=camera_id, detail=parse_detail(AuditAction.BED_ZONE_UPDATE, {}),
+                target_id=camera_id, detail=empty_detail(AuditAction.BED_ZONE_UPDATE),
             ),
         ),
     )

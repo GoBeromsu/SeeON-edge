@@ -44,6 +44,7 @@ from backend.app.features.connection.sqlite_store import (
     ConnectionStoreBackup,
     ConnectionStoreDatabase,
     ConnectionValue,
+    ConnectionWriteHook,
     utc_now_iso,
 )
 
@@ -141,7 +142,12 @@ class ConnectionSettingsStore:
             enrollment_updated_at=_text(saved["enrollment_updated_at"]),
         )
 
-    def save(self, updates: Mapping[str, ConnectionValue]) -> ConnectionSettings:
+    def save(
+        self,
+        updates: Mapping[str, ConnectionValue],
+        *,
+        after_write: ConnectionWriteHook | None = None,
+    ) -> ConnectionSettings:
         _validate_updates(updates)
         with self._lock:
             data = self._database.read()
@@ -153,7 +159,7 @@ class ConnectionSettingsStore:
             if _has_enrollment_state(data):
                 data["enrollment_created_at"] = data["enrollment_created_at"] or timestamp
                 data["enrollment_updated_at"] = timestamp
-            self._database.write(data)
+            self._database.write(data, after_write)
         return self.load()
 
     def masked(self) -> MaskedConnectionSettings:

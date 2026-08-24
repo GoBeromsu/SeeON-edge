@@ -21,7 +21,7 @@ from backend.app.features.audit.catalog import (
     AuditAction,
     AuditActorType,
     AuditAuthMechanism,
-    parse_detail,
+    empty_detail,
 )
 from backend.app.features.audit.http import append_transactional
 from backend.app.features.audit.store import AuditEvent
@@ -773,7 +773,7 @@ def _project_relay_event(request: Request, payload: RelayAlertRequest) -> bool:
                 AuditEvent(
                     occurred_at=audit_now(), actor_id="worker-relay",
                     action=AuditAction.RELAY_ALERT, target_id=payload.edge_event_id,
-                    detail=parse_detail(AuditAction.RELAY_ALERT, {}),
+                    detail=empty_detail(AuditAction.RELAY_ALERT),
                     actor_type=AuditActorType.SERVICE,
                     auth_mechanism=AuditAuthMechanism.RELAY_TOKEN,
                 ),

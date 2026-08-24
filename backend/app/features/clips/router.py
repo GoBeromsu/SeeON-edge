@@ -383,6 +383,13 @@ def clip_video(
                 status_code=status.HTTP_409_CONFLICT,
                 detail="clip video receipt verification failed",
             ) from exc
+    response = media_response(
+        opened,
+        request.headers.get("range"),
+        media_type(opened.path.name),
+    )
+    if response.status_code >= status.HTTP_400_BAD_REQUEST:
+        return response
     try:
         append_governed(
             request, actor_id=actor, action=AuditAction.CLIP_VIDEO, target_id=manifest.clip_id
@@ -390,11 +397,6 @@ def clip_video(
     except AuditUnavailableError:
         opened.handle.close()
         raise
-    response = media_response(
-        opened,
-        request.headers.get("range"),
-        media_type(opened.path.name),
-    )
     response.headers["X-Clip-View"] = actual_view
     if view != actual_view:
         response.headers["X-Clip-View-Fallback"] = actual_view

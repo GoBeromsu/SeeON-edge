@@ -26,7 +26,7 @@ from typing import ClassVar, Literal
 from fastapi import APIRouter, FastAPI, HTTPException, Request, status
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from backend.app.features.audit.catalog import AuditAction, parse_detail
+from backend.app.features.audit.catalog import AuditAction, empty_detail
 from backend.app.features.audit.http import append_transactional
 from backend.app.features.audit.store import AuditEvent
 from backend.app.features.audit.store import utc_now as audit_now
@@ -152,9 +152,17 @@ def put_detection_settings(
     payload: DetectionSettingsPayload,
     request: Request,
 ) -> dict[str, object]:
-    _authorize(request)
+    actor = _authorize(request)
     settings = {domain: _to_domain_setting(getattr(payload.domains, domain)) for domain in DOMAINS}
-    _store(request.app).replace_all(settings)
+    event = AuditEvent(
+        occurred_at=audit_now(), actor_id=actor,
+        action=AuditAction.DETECTION_SETTINGS_UPDATE, target_id="detection-settings",
+        detail=empty_detail(AuditAction.DETECTION_SETTINGS_UPDATE),
+    )
+    _store(request.app).replace_all(
+        settings,
+        after_write=lambda connection: append_transactional(request, connection, event),
+    )
     return {"domains": {domain: setting.as_dict() for domain, setting in settings.items()}}
 
 
@@ -248,7 +256,7 @@ def apply_detection_policy(
     event = AuditEvent(
         occurred_at=audit_now(), actor_id=actor, action=AuditAction.POLICY_APPLY,
         target_id=payload.camera_id or payload.module_id,
-        detail=parse_detail(AuditAction.POLICY_APPLY, {}),
+        detail=empty_detail(AuditAction.POLICY_APPLY),
     )
     try:
         activation = _policy_store(request.app).apply(
@@ -282,7 +290,7 @@ def rollback_detection_policy(
     event = AuditEvent(
         occurred_at=audit_now(), actor_id=actor, action=AuditAction.POLICY_ROLLBACK,
         target_id=payload.camera_id or payload.module_id,
-        detail=parse_detail(AuditAction.POLICY_ROLLBACK, {}),
+        detail=empty_detail(AuditAction.POLICY_ROLLBACK),
     )
     try:
         activation = _policy_store(request.app).rollback(

@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from fastapi import APIRouter, HTTPException, Request, Response, status
 from pydantic import BaseModel, ConfigDict, Field
 
-from backend.app.features.audit.catalog import AuditAction, parse_detail
+from backend.app.features.audit.catalog import AuditAction, empty_detail
 from backend.app.features.audit.http import (
     AuditUnavailableError,
     append_governed,
@@ -176,7 +176,7 @@ def update_credentials(
     event = AuditEvent(
         occurred_at=utc_now(), actor_id=actor, action=AuditAction.CREDENTIAL_ROTATE,
         target_id=payload.username or actor,
-        detail=parse_detail(AuditAction.CREDENTIAL_ROTATE, {}),
+        detail=empty_detail(AuditAction.CREDENTIAL_ROTATE),
     )
     token = rotate_dashboard_credentials(
         request,

@@ -7,6 +7,9 @@ from fastapi.exceptions import HTTPException
 from pydantic import UUID4, BaseModel, ConfigDict, Field
 
 from backend.app.core.config import get_settings
+from backend.app.features.audit.catalog import AuditAction, empty_detail
+from backend.app.features.audit.http import append_transactional
+from backend.app.features.audit.store import AuditEvent, utc_now
 from backend.app.features.cameras.roster_sync import sync_camera_roster
 from backend.app.features.cameras.router import _authorize
 from backend.app.features.connection.enrollment import (
@@ -110,7 +113,7 @@ def put_connection(
     request: Request,
     background_tasks: BackgroundTasks,
 ) -> dict[str, object]:
-    _authorize(request)
+    actor = _authorize(request)
     store = ConnectionSettingsStore.from_env()
     credentials = _credentials(payload)
     try:
@@ -132,7 +135,16 @@ def put_connection(
             "facility_id": verified.facility.facility_id,
             "edge_installation_id": verified.principal.edge_installation_id,
             "enrollment_generation": verified.principal.enrollment_generation,
-        }
+        },
+        after_write=lambda connection: append_transactional(
+            request,
+            connection,
+            AuditEvent(
+                occurred_at=utc_now(), actor_id=actor, action=AuditAction.CONNECTION_UPDATE,
+                target_id=verified.facility.facility_id,
+                detail=empty_detail(AuditAction.CONNECTION_UPDATE),
+            ),
+        ),
     )
     apply_connection_settings(request.app)
     _kick_backend_config_refresh(request.app)

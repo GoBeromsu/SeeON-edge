@@ -26,7 +26,7 @@ from fastapi import (
 from pydantic import BaseModel, ConfigDict, Field
 
 from backend.app.core.config import get_settings
-from backend.app.features.audit.catalog import AuditAction, parse_detail
+from backend.app.features.audit.catalog import AuditAction, empty_detail
 from backend.app.features.audit.http import append_transactional
 from backend.app.features.audit.store import AuditEvent
 from backend.app.features.audit.store import utc_now as audit_now
@@ -1285,7 +1285,7 @@ def _audit_hook(
 ) -> Callable[[sqlite3.Connection], None]:
     event = AuditEvent(
         occurred_at=audit_now(), actor_id=actor, action=action, target_id=target_id,
-        detail=parse_detail(action, {}),
+        detail=empty_detail(action),
     )
     return lambda connection: append_transactional(request, connection, event)
 

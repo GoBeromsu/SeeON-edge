@@ -9,7 +9,7 @@ from fastapi import APIRouter, HTTPException, Query, Request, status
 from pydantic import BaseModel, ConfigDict, Field
 
 from backend.app.edge_db import EDGE_DATABASE_PATH
-from backend.app.features.audit.catalog import AuditAction, parse_detail
+from backend.app.features.audit.catalog import AuditAction, empty_detail
 from backend.app.features.audit.http import append_governed, append_transactional
 from backend.app.features.audit.store import AuditEvent
 from backend.app.features.evidence.record_store import (
@@ -94,7 +94,7 @@ def review_incident(
     event = AuditEvent(
         occurred_at=datetime.now(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
         actor_id=actor, action=AuditAction.INCIDENT_REVIEW, target_id=summary.incident_id,
-        detail=parse_detail(AuditAction.INCIDENT_REVIEW, {}),
+        detail=empty_detail(AuditAction.INCIDENT_REVIEW),
     )
     try:
         _reviews(request).update(

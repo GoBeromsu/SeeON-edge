@@ -8,7 +8,7 @@ from typing import BinaryIO
 import pytest
 from fastapi.testclient import TestClient
 
-from backend.app.features.audit.catalog import AuditAction, parse_detail
+from backend.app.features.audit.catalog import AuditAction, empty_detail
 from backend.app.features.audit.store import AuditEvent, AuditRecord, AuditStore, utc_now
 from backend.app.features.cameras.store import CameraRegistryStore
 from backend.app.features.clips.artifacts import CentralClipArtifactQuery, CentralClipArtifacts
@@ -24,6 +24,23 @@ class EmptyArtifactQuery(CentralClipArtifactQuery):
     def get(self, clip_id: str) -> CentralClipArtifacts | None:
         del clip_id
         return None
+
+
+class AuthorizerAuditDenyStore(AuditStore):
+    def _append(self, connection: sqlite3.Connection, event: AuditEvent) -> AuditRecord:
+        def authorize(
+            action: int,
+            arg1: str | None,
+            _arg2: str | None,
+            _database: str | None,
+            _source: str | None,
+        ) -> int:
+            if action == sqlite3.SQLITE_INSERT and arg1 == "audit_events":
+                return sqlite3.SQLITE_DENY
+            return sqlite3.SQLITE_OK
+
+        connection.set_authorizer(authorize)
+        return super()._append(connection, event)
 
 
 class FailingAuditStore(AuditStore):
@@ -66,7 +83,7 @@ def _login(client: TestClient) -> None:
 def test_stored_evidence_audit_failure_has_empty_503_and_live_probe_survives(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # Given: authenticated stored evidence and a deterministic SQLITE_FULL append seam.
+    # Given: authenticated stored evidence and a real SQLite audit INSERT denial.
     root = tmp_path / "clips"
     _write_clip(root, "clip-a")
     monkeypatch.setenv("CLIP_STORE_DIR", str(root))
@@ -84,7 +101,7 @@ def test_stored_evidence_audit_failure_has_empty_503_and_live_probe_survives(
     with TestClient(app) as client:
         _login(client)
         healthy_store = app.state.audit_store
-        app.state.audit_store = FailingAuditStore(healthy_store.path)
+        app.state.audit_store = AuthorizerAuditDenyStore(healthy_store.path)
 
         # When: JSON and descriptor-backed reads reach the audit commit boundary.
         listed = client.get("/api/v1/clips")
@@ -101,10 +118,46 @@ def test_stored_evidence_audit_failure_has_empty_503_and_live_probe_survives(
     assert (artifacts.status_code, artifacts.content) == (503, b"")
     assert (video.status_code, video.content) == (503, b"")
     assert (thumbnail.status_code, thumbnail.content) == (503, b"")
+    for header in ("accept-ranges", "content-range", "content-disposition"):
+        assert header not in video.headers
+        assert header not in thumbnail.headers
     assert opened_handles and all(handle.closed for handle in opened_handles)
     assert readiness.status_code == 503
     assert readiness.json()["reason"] == "audit unavailable"
     assert liveness.status_code == 200
+
+
+def test_valid_video_200_and_206_append_one_success_audit_each(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Given: one authenticated descriptor-backed clip.
+    root = tmp_path / "clips"
+    _write_clip(root, "clip-a")
+    monkeypatch.setenv("CLIP_STORE_DIR", str(root))
+    app = create_app(lifespan=no_lifespan)
+    with TestClient(app) as client:
+        _login(client)
+        with sqlite3.connect(AuditStore().path) as connection:
+            before = connection.execute(
+                "SELECT COUNT(*) FROM audit_events WHERE action='clip.video'"
+            ).fetchone()[0]
+
+        # When: complete and satisfiable-range responses are prepared and served.
+        complete = client.get("/api/v1/clips/clip-a/video")
+        partial = client.get(
+            "/api/v1/clips/clip-a/video", headers={"Range": "bytes=0-7"}
+        )
+
+        with sqlite3.connect(AuditStore().path) as connection:
+            after = connection.execute(
+                "SELECT COUNT(*) FROM audit_events WHERE action='clip.video'"
+            ).fetchone()[0]
+
+    # Then: both valid response classes are audited exactly once.
+    assert (complete.status_code, complete.content) == (200, b"verified-video")
+    assert (partial.status_code, partial.content) == (206, b"verified")
+    assert partial.headers["content-range"] == "bytes 0-7/14"
+    assert after - before == 2
 
 
 def test_credential_rotation_rolls_back_before_cookie_or_session_mutation(tmp_path: Path) -> None:
@@ -218,7 +271,7 @@ def test_audit_router_uses_unique_descending_keyset_pages() -> None:
         store.append(
             AuditEvent(
                 occurred_at=utc_now(), actor_id="seed", action=parsed,
-                target_id=action, detail=parse_detail(parsed, {}),
+                target_id=action, detail=empty_detail(parsed),
             )
         )
     with TestClient(app) as client:

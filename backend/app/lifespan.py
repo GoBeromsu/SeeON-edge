@@ -21,7 +21,10 @@ from fastapi import FastAPI
 
 from backend.app.core.config import reject_retired_backend_environment
 from backend.app.edge_db import EDGE_DATABASE_PATH
-from backend.app.features.audit.startup import configure_audit_readiness
+from backend.app.features.audit.startup import (
+    close_audit_session,
+    configure_audit_readiness,
+)
 from backend.app.features.cameras.store import CameraRegistryStore
 from backend.app.features.clips.catalog import CatalogStore
 from backend.app.features.clips.listing_runtime import maintain_clip_listing
@@ -167,6 +170,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     try:
         yield
     finally:
+        close_audit_session(app)
         await clip_listing_stack.aclose()
         refresh_stop.set()
         refresh_task = app.state.backend_config_refresh_task
