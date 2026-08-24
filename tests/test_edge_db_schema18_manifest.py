@@ -105,6 +105,25 @@ def test_compiled_schema18_manifest_matches_fresh_database(tmp_path: Path) -> No
             ),
             id="missing_check",
         ),
+        pytest.param(
+            lambda c: c.executescript(
+                """
+                CREATE TABLE schema_migrations_new (
+                    version INTEGER PRIMARY KEY CHECK (version >= 0),
+                    name TEXT NOT NULL UNIQUE,
+                    checksum TEXT NOT NULL CHECK (length(checksum) = 64),
+                    applied_at TEXT NOT NULL,
+                    source_schema_version INTEGER,
+                    source_db_sha256 TEXT,
+                    reconciliation_sha256 TEXT
+                ) STRICT;
+                INSERT INTO schema_migrations_new SELECT * FROM schema_migrations;
+                DROP TABLE schema_migrations;
+                ALTER TABLE schema_migrations_new RENAME TO schema_migrations;
+                """
+            ),
+            id="schema_migrations_check_drift",
+        ),
     ],
 )
 def test_runtime_rejects_schema18_structural_mutations(

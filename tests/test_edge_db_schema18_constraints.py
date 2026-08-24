@@ -182,6 +182,134 @@ def test_artifact_identity_transition_and_revision_are_guarded(tmp_path: Path) -
         connection.close()
 
 
+def _insert_incident(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        "INSERT INTO incidents ("
+        "incident_id,edge_event_id,facility_id,camera_id,event_type,detected_at,"
+        "lifecycle_state,provenance_state,provenance_missing_reason,"
+        "review_version,revision,created_at,updated_at"
+        ") VALUES ('inc-1','evt-1','fac','cam-1','fall',?,'OPEN','MISSING',"
+        "'NOT_RECORDED',0,1,?,?)",
+        (TS, TS, TS),
+    )
+
+
+def _insert_clip_row(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        "INSERT INTO clips ("
+        "clip_id,camera_id,event_facet,started_at,local_state,local_reason,"
+        "publish_state,retention_state,revision,created_at,updated_at,"
+        "manifest_relpath,manifest_sha256,manifest_size_bytes,"
+        "media_relpath,media_sha256,media_size_bytes"
+        ") VALUES ('clip-1','cam-1','fall',?,'AVAILABLE',NULL,'WAITING','RETAINED',"
+        "1,?,?, 'clips/a.json',?,?, 'clips/a.mp4',?,?)",
+        (TS, TS, TS, HASH_A, 10, HASH_B, 20),
+    )
+
+
+def test_available_to_corrupt_preserves_retained_identity(tmp_path: Path) -> None:
+    connection = _db(tmp_path)
+    later = "2026-08-24T00:00:01Z"
+    try:
+        _insert_incident(connection)
+        _insert_clip_row(connection)
+        connection.execute(
+            "INSERT INTO artifacts ("
+            "incident_id,kind,artifact_id,clip_id,state,contained_relpath,"
+            "content_sha256,size_bytes,mime_type,codec,captured_at,revision,"
+            "created_at,updated_at"
+            ") VALUES ('inc-1','PRIMARY_CLIP','art-1','clip-1','AVAILABLE',"
+            "'clips/a.mp4',?,20,'video/mp4','hevc',NULL,1,?,?)",
+            (HASH_B, TS, TS),
+        )
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(
+                "UPDATE artifacts SET state='CORRUPT', reason='HASH_MISMATCH', "
+                "revision=2, contained_relpath='clips/other.mp4', updated_at=? "
+                "WHERE incident_id='inc-1'",
+                (later,),
+            )
+        connection.execute(
+            "UPDATE artifacts SET state='CORRUPT', reason='HASH_MISMATCH', "
+            "revision=2, updated_at=? WHERE incident_id='inc-1'",
+            (later,),
+        )
+        row = connection.execute(
+            "SELECT state, reason, contained_relpath, content_sha256, size_bytes, "
+            "mime_type, captured_at, revision FROM artifacts WHERE incident_id='inc-1'"
+        ).fetchone()
+        assert row == (
+            "CORRUPT",
+            "HASH_MISMATCH",
+            "clips/a.mp4",
+            HASH_B,
+            20,
+            "video/mp4",
+            None,
+            2,
+        )
+    finally:
+        connection.close()
+
+
+def test_snapshot_available_to_corrupt_rejects_rewritten_identity(tmp_path: Path) -> None:
+    connection = _db(tmp_path)
+    later = "2026-08-24T00:00:01Z"
+    try:
+        _insert_incident(connection)
+        connection.execute(
+            "INSERT INTO artifacts ("
+            "incident_id,kind,artifact_id,state,contained_relpath,content_sha256,"
+            "size_bytes,mime_type,captured_at,revision,created_at,updated_at"
+            ") VALUES ('inc-1','SNAPSHOT','snap-1','AVAILABLE','snaps/a.jpg',?,"
+            "8,'image/jpeg',?,1,?,?)",
+            (HASH_A, TS, TS, TS),
+        )
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(
+                "UPDATE artifacts SET state='CORRUPT', reason='BAD', revision=2, "
+                "content_sha256=?, updated_at=? WHERE incident_id='inc-1'",
+                (HASH_B, later),
+            )
+        connection.execute(
+            "UPDATE artifacts SET state='CORRUPT', reason='BAD', revision=2, "
+            "updated_at=? WHERE incident_id='inc-1'",
+            (later,),
+        )
+    finally:
+        connection.close()
+
+
+def test_legal_artifact_transitions_are_pinned(tmp_path: Path) -> None:
+    connection = _db(tmp_path)
+    later = "2026-08-24T00:00:01Z"
+    try:
+        _insert_incident(connection)
+        connection.execute(
+            "INSERT INTO artifacts ("
+            "incident_id,kind,state,revision,created_at,updated_at,captured_at"
+            ") VALUES ('inc-1','SNAPSHOT','PENDING',1,?,?,?)",
+            (TS, TS, TS),
+        )
+        connection.execute(
+            "UPDATE artifacts SET state='AVAILABLE', artifact_id='snap-1', "
+            "contained_relpath='snaps/a.jpg', content_sha256=?, size_bytes=8, "
+            "mime_type='image/jpeg', revision=2, updated_at=? WHERE incident_id='inc-1'",
+            (HASH_A, later),
+        )
+        assert connection.execute(
+            "SELECT state, revision FROM artifacts WHERE incident_id='inc-1'"
+        ).fetchone() == ("AVAILABLE", 2)
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(
+                "UPDATE artifacts SET state='PENDING', revision=3, updated_at=? "
+                "WHERE incident_id='inc-1'",
+                (later,),
+            )
+    finally:
+        connection.close()
+
+
 def test_audit_hash_is_previous_bytes_plus_sorted_compact_utf8() -> None:
     payload = {"b": 1, "a": "é"}
     canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))

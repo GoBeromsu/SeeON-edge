@@ -10,30 +10,25 @@ import pytest
 from backend.app.edge_db.cutover_authorization import (
     CompactCutoverAuthorization,
     CompactCutoverRequiredError,
-    CompactCutoverSource,
     CompactCutoverSourceError,
     issue_compact_cutover_authorization,
 )
-from backend.app.edge_db.migrator import deployment_lock, migrate_database
+from backend.app.edge_db.migrator import DeploymentLock, deployment_lock, migrate_database
 from backend.app.edge_db.schema import MIGRATIONS, SchemaV18MigrationError
 
-SOURCE_DB = "ab" * 32
-RECONCILIATION = "cd" * 32
+RECONCILIATION = b"schema18-reconciliation-receipt"
 
 
 def _v17(database: Path) -> None:
     migrate_database(database, migrations=MIGRATIONS[:17])
 
 
-def _source(
-    version: int = 17,
-    digest: str = SOURCE_DB,
-    recon: str = RECONCILIATION,
-) -> CompactCutoverSource:
-    return CompactCutoverSource(
-        source_schema_version=version,
-        source_db_sha256=digest,
-        reconciliation_sha256=recon,
+def _issue(lock: DeploymentLock, candidate: Path, source: Path | None = None) -> object:
+    return issue_compact_cutover_authorization(
+        lock,
+        source=candidate if source is None else source,
+        candidate=candidate,
+        reconciliation=RECONCILIATION,
     )
 
 
@@ -62,10 +57,10 @@ def test_forged_authorization_refuses_v17_upgrade(tmp_path: Path) -> None:
     database = tmp_path / "forged.sqlite3"
     _v17(database)
     before = database.read_bytes()
-    forged = CompactCutoverAuthorization(source=_source(), _capability="forged")
+    forged = CompactCutoverAuthorization(_ticket="forged")
 
     with deployment_lock(database.parent) as lock:
-        with pytest.raises(CompactCutoverRequiredError, match="EDGE_DB_CUTOVER_UNAUTHORIZED"):
+        with pytest.raises(CompactCutoverRequiredError, match="FORGED_LOCK"):
             migrate_database(database, lock=lock, cutover=forged)
 
     assert database.read_bytes() == before
@@ -73,46 +68,80 @@ def test_forged_authorization_refuses_v17_upgrade(tmp_path: Path) -> None:
         assert connection.execute("PRAGMA user_version").fetchone() == (17,)
 
 
-def test_invalid_source_tuple_cannot_issue_authorization(tmp_path: Path) -> None:
-    database = tmp_path / "invalid.sqlite3"
+def test_forged_lock_cannot_issue_or_redeem(tmp_path: Path) -> None:
+    database = tmp_path / "live.sqlite3"
     _v17(database)
+    fake = DeploymentLock(database.parent.resolve(), 0, True)
+    with pytest.raises(CompactCutoverRequiredError, match="FORGED_LOCK"):
+        _issue(fake, database)
+
+
+def test_arbitrary_hash_is_not_trusted(tmp_path: Path) -> None:
+    database = tmp_path / "cand.sqlite3"
+    _v17(database)
+    before = database.read_bytes()
     with deployment_lock(database.parent) as lock:
-        with pytest.raises(CompactCutoverSourceError):
-            issue_compact_cutover_authorization(lock, _source(version=16))
-        with pytest.raises(CompactCutoverSourceError):
-            issue_compact_cutover_authorization(lock, _source(digest="0" * 64, recon="0" * 64))
+        with pytest.raises(TypeError):
+            issue_compact_cutover_authorization(
+                lock,
+                source_schema_version=17,
+                source_db_sha256="ab" * 32,
+                reconciliation_sha256="cd" * 32,
+            )
+        authorization = _issue(lock, database)
+        result = migrate_database(database, lock=lock, cutover=authorization)
+    assert result.current_version == 18
+    expected_source = hashlib.sha256(before).hexdigest()
+    expected_recon = hashlib.sha256(RECONCILIATION).hexdigest()
+    with sqlite3.connect(database) as connection:
+        row = connection.execute(
+            "SELECT source_schema_version, source_db_sha256, reconciliation_sha256 "
+            "FROM schema_migrations WHERE version = 18"
+        ).fetchone()
+        assert row == (17, expected_source, expected_recon)
+        assert row[1] != "ab" * 32
+
+
+def test_source_candidate_preimage_must_match(tmp_path: Path) -> None:
+    source = tmp_path / "source.sqlite3"
+    candidate = tmp_path / "candidate.sqlite3"
+    _v17(source)
+    _v17(candidate)
+    with sqlite3.connect(candidate) as connection:
+        connection.execute("CREATE TABLE extra_preimage (id INTEGER PRIMARY KEY)")
+        connection.commit()
+    with deployment_lock(candidate.parent) as lock:
         with pytest.raises(CompactCutoverSourceError):
             issue_compact_cutover_authorization(
                 lock,
-                CompactCutoverSource(
-                    source_schema_version=17,
-                    source_db_sha256="G" * 64,
-                    reconciliation_sha256=RECONCILIATION,
-                ),
+                source=source,
+                candidate=candidate,
+                reconciliation=RECONCILIATION,
             )
 
 
 def test_authorized_candidate_upgrade_populates_row18_provenance(tmp_path: Path) -> None:
-    database = tmp_path / "candidate.sqlite3"
-    _v17(database)
-    digest = hashlib.sha256(database.read_bytes()).hexdigest()
-    recon = "ef" * 32
+    source = tmp_path / "archive.sqlite3"
+    candidate = tmp_path / "state" / "candidate.sqlite3"
+    candidate.parent.mkdir()
+    _v17(source)
+    candidate.write_bytes(source.read_bytes())
+    digest = hashlib.sha256(source.read_bytes()).hexdigest()
+    recon = hashlib.sha256(RECONCILIATION).hexdigest()
     assert digest != recon
 
-    with deployment_lock(database.parent) as lock:
+    with deployment_lock(candidate.parent) as lock:
         authorization = issue_compact_cutover_authorization(
             lock,
-            CompactCutoverSource(
-                source_schema_version=17,
-                source_db_sha256=digest,
-                reconciliation_sha256=recon,
-            ),
+            source=source,
+            candidate=candidate,
+            reconciliation=RECONCILIATION,
         )
-        result = migrate_database(database, lock=lock, cutover=authorization)
+        result = migrate_database(candidate, lock=lock, cutover=authorization)
 
     assert result.previous_version == 17
     assert result.current_version == 18
-    with sqlite3.connect(database) as connection:
+    with sqlite3.connect(candidate) as connection:
         assert connection.execute("PRAGMA user_version").fetchone() == (18,)
         row = connection.execute(
             "SELECT source_schema_version, source_db_sha256, reconciliation_sha256 "
@@ -124,6 +153,66 @@ def test_authorized_candidate_upgrade_populates_row18_provenance(tmp_path: Path)
             "FROM schema_migrations WHERE version < 18"
         ).fetchall()
         assert historical == [(None, None, None)] * 17
+
+
+def test_wrong_candidate_is_refused_before_mutation(tmp_path: Path) -> None:
+    state = tmp_path / "state"
+    state.mkdir()
+    first = state / "first.sqlite3"
+    other = state / "other.sqlite3"
+    _v17(first)
+    other.write_bytes(first.read_bytes())
+    before = other.read_bytes()
+    with deployment_lock(state) as lock:
+        authorization = _issue(lock, first)
+        with pytest.raises(CompactCutoverRequiredError, match="WRONG_CANDIDATE"):
+            migrate_database(other, lock=lock, cutover=authorization)
+    assert other.read_bytes() == before
+    with sqlite3.connect(other) as connection:
+        assert connection.execute("PRAGMA user_version").fetchone() == (17,)
+
+
+def test_reused_authorization_is_refused(tmp_path: Path) -> None:
+    state = tmp_path / "state"
+    state.mkdir()
+    first = state / "first.sqlite3"
+    second = state / "second.sqlite3"
+    _v17(first)
+    second.write_bytes(first.read_bytes())
+    before = second.read_bytes()
+    with deployment_lock(state) as lock:
+        authorization = _issue(lock, first)
+        migrate_database(first, lock=lock, cutover=authorization)
+        with pytest.raises(CompactCutoverRequiredError, match="REUSED"):
+            migrate_database(second, lock=lock, cutover=authorization)
+    assert second.read_bytes() == before
+    with sqlite3.connect(second) as connection:
+        assert connection.execute("PRAGMA user_version").fetchone() == (17,)
+
+
+def test_expired_lock_cannot_redeem_authorization(tmp_path: Path) -> None:
+    database = tmp_path / "cand.sqlite3"
+    _v17(database)
+    before = database.read_bytes()
+    with deployment_lock(database.parent) as lock:
+        authorization = _issue(lock, database)
+    with pytest.raises(CompactCutoverRequiredError, match="EXPIRED_LOCK"):
+        migrate_database(database, lock=lock, cutover=authorization)
+    assert database.read_bytes() == before
+
+
+def test_candidate_changed_after_issuance_is_refused(tmp_path: Path) -> None:
+    database = tmp_path / "cand.sqlite3"
+    _v17(database)
+    with deployment_lock(database.parent) as lock:
+        authorization = _issue(lock, database)
+        database.write_bytes(database.read_bytes() + b"\x00")
+        before = database.read_bytes()
+        with pytest.raises(CompactCutoverRequiredError, match="CANDIDATE_CHANGED"):
+            migrate_database(database, lock=lock, cutover=authorization)
+    assert database.read_bytes() == before
+    with sqlite3.connect(database) as connection:
+        assert connection.execute("PRAGMA user_version").fetchone() == (17,)
 
 
 def test_fresh_install_still_walks_to_schema18_without_authorization(tmp_path: Path) -> None:

@@ -1,7 +1,6 @@
 """CREATE statements for the schema 18 ten-table contract."""
 
 # noqa: SIZE_OK — pure DDL ledger; splitting it would hide the contract.
-# ruff: noqa: E501
 
 from __future__ import annotations
 
@@ -27,13 +26,15 @@ COMPACT_SCHEMA_CREATE_STATEMENTS: Final = (
             AND substr(updated_at, 17, 1) = ':'
             AND substr(updated_at, -1) = 'Z'
             AND datetime(substr(updated_at, 1, 19)) IS NOT NULL
-            AND strftime('%Y-%m-%dT%H:%M:%S', substr(updated_at, 1, 19)) = substr(updated_at, 1, 19)
+            AND strftime('%Y-%m-%dT%H:%M:%S', substr(updated_at, 1, 19))
+                = substr(updated_at, 1, 19)
             AND (
                 length(updated_at) = 20
                 OR (
                     substr(updated_at, 20, 1) = '.'
                     AND length(updated_at) BETWEEN 22 AND 27
-                    AND substr(updated_at, 21, length(updated_at) - 21) NOT GLOB '*[^0-9]*'
+                    AND substr(updated_at, 21, length(updated_at) - 21)
+                        NOT GLOB '*[^0-9]*'
                 )
             )
         )
@@ -83,13 +84,15 @@ COMPACT_SCHEMA_CREATE_STATEMENTS: Final = (
                 AND substr(enrollment_created_at, 17, 1) = ':'
                 AND substr(enrollment_created_at, -1) = 'Z'
                 AND datetime(substr(enrollment_created_at, 1, 19)) IS NOT NULL
-                AND strftime('%Y-%m-%dT%H:%M:%S', substr(enrollment_created_at, 1, 19)) = substr(enrollment_created_at, 1, 19)
+                AND strftime('%Y-%m-%dT%H:%M:%S', substr(enrollment_created_at, 1, 19))
+                    = substr(enrollment_created_at, 1, 19)
                 AND (
                     length(enrollment_created_at) = 20
                     OR (
                         substr(enrollment_created_at, 20, 1) = '.'
                         AND length(enrollment_created_at) BETWEEN 22 AND 27
-                        AND substr(enrollment_created_at, 21, length(enrollment_created_at) - 21) NOT GLOB '*[^0-9]*'
+                        AND substr(enrollment_created_at, 21, length(enrollment_created_at) - 21)
+                            NOT GLOB '*[^0-9]*'
                     )
                 )
             )
@@ -106,13 +109,15 @@ COMPACT_SCHEMA_CREATE_STATEMENTS: Final = (
                 AND substr(enrollment_updated_at, 17, 1) = ':'
                 AND substr(enrollment_updated_at, -1) = 'Z'
                 AND datetime(substr(enrollment_updated_at, 1, 19)) IS NOT NULL
-                AND strftime('%Y-%m-%dT%H:%M:%S', substr(enrollment_updated_at, 1, 19)) = substr(enrollment_updated_at, 1, 19)
+                AND strftime('%Y-%m-%dT%H:%M:%S', substr(enrollment_updated_at, 1, 19))
+                    = substr(enrollment_updated_at, 1, 19)
                 AND (
                     length(enrollment_updated_at) = 20
                     OR (
                         substr(enrollment_updated_at, 20, 1) = '.'
                         AND length(enrollment_updated_at) BETWEEN 22 AND 27
-                        AND substr(enrollment_updated_at, 21, length(enrollment_updated_at) - 21) NOT GLOB '*[^0-9]*'
+                        AND substr(enrollment_updated_at, 21, length(enrollment_updated_at) - 21)
+                            NOT GLOB '*[^0-9]*'
                     )
                 )
             )
@@ -136,21 +141,41 @@ COMPACT_SCHEMA_CREATE_STATEMENTS: Final = (
         fall_mode TEXT CHECK (fall_mode IS NULL OR fall_mode IN ('always', 'window')),
         fall_start_time TEXT CHECK (
             fall_start_time IS NULL
-            OR (length(fall_start_time) = 5 AND instr(fall_start_time, char(0)) = 0 AND substr(fall_start_time, 3, 1) = ':' AND substr(fall_start_time, 1, 2) GLOB '[0-9][0-9]' AND substr(fall_start_time, 4, 2) GLOB '[0-9][0-9]' AND CAST(substr(fall_start_time, 1, 2) AS INTEGER) BETWEEN 0 AND 23 AND CAST(substr(fall_start_time, 4, 2) AS INTEGER) BETWEEN 0 AND 59)
+            OR (length(fall_start_time) = 5 AND instr(fall_start_time, char(0)) = 0 
+            AND substr(fall_start_time, 3, 1) = ':'
+            AND substr(fall_start_time, 1, 2) GLOB '[0-9][0-9]'
+            AND substr(fall_start_time, 4, 2) GLOB '[0-9][0-9]'
+            AND CAST(substr(fall_start_time, 1, 2) AS INTEGER) BETWEEN 0 AND 23
+            AND CAST(substr(fall_start_time, 4, 2) AS INTEGER) BETWEEN 0 AND 59)
         ),
         fall_end_time TEXT CHECK (
             fall_end_time IS NULL
-            OR (length(fall_end_time) = 5 AND instr(fall_end_time, char(0)) = 0 AND substr(fall_end_time, 3, 1) = ':' AND substr(fall_end_time, 1, 2) GLOB '[0-9][0-9]' AND substr(fall_end_time, 4, 2) GLOB '[0-9][0-9]' AND CAST(substr(fall_end_time, 1, 2) AS INTEGER) BETWEEN 0 AND 23 AND CAST(substr(fall_end_time, 4, 2) AS INTEGER) BETWEEN 0 AND 59)
+            OR (length(fall_end_time) = 5 AND instr(fall_end_time, char(0)) = 0 
+            AND substr(fall_end_time, 3, 1) = ':'
+            AND substr(fall_end_time, 1, 2) GLOB '[0-9][0-9]'
+            AND substr(fall_end_time, 4, 2) GLOB '[0-9][0-9]'
+            AND CAST(substr(fall_end_time, 1, 2) AS INTEGER) BETWEEN 0 AND 23
+            AND CAST(substr(fall_end_time, 4, 2) AS INTEGER) BETWEEN 0 AND 59)
         ),
         bed_exit_on INTEGER CHECK (bed_exit_on IS NULL OR bed_exit_on IN (0, 1)),
         bed_exit_mode TEXT CHECK (bed_exit_mode IS NULL OR bed_exit_mode IN ('always', 'window')),
         bed_exit_start_time TEXT CHECK (
             bed_exit_start_time IS NULL
-            OR (length(bed_exit_start_time) = 5 AND instr(bed_exit_start_time, char(0)) = 0 AND substr(bed_exit_start_time, 3, 1) = ':' AND substr(bed_exit_start_time, 1, 2) GLOB '[0-9][0-9]' AND substr(bed_exit_start_time, 4, 2) GLOB '[0-9][0-9]' AND CAST(substr(bed_exit_start_time, 1, 2) AS INTEGER) BETWEEN 0 AND 23 AND CAST(substr(bed_exit_start_time, 4, 2) AS INTEGER) BETWEEN 0 AND 59)
+            OR (length(bed_exit_start_time) = 5 AND instr(bed_exit_start_time, char(0)) = 0 
+            AND substr(bed_exit_start_time, 3, 1) = ':'
+            AND substr(bed_exit_start_time, 1, 2) GLOB '[0-9][0-9]'
+            AND substr(bed_exit_start_time, 4, 2) GLOB '[0-9][0-9]'
+            AND CAST(substr(bed_exit_start_time, 1, 2) AS INTEGER) BETWEEN 0 AND 23
+            AND CAST(substr(bed_exit_start_time, 4, 2) AS INTEGER) BETWEEN 0 AND 59)
         ),
         bed_exit_end_time TEXT CHECK (
             bed_exit_end_time IS NULL
-            OR (length(bed_exit_end_time) = 5 AND instr(bed_exit_end_time, char(0)) = 0 AND substr(bed_exit_end_time, 3, 1) = ':' AND substr(bed_exit_end_time, 1, 2) GLOB '[0-9][0-9]' AND substr(bed_exit_end_time, 4, 2) GLOB '[0-9][0-9]' AND CAST(substr(bed_exit_end_time, 1, 2) AS INTEGER) BETWEEN 0 AND 23 AND CAST(substr(bed_exit_end_time, 4, 2) AS INTEGER) BETWEEN 0 AND 59)
+            OR (length(bed_exit_end_time) = 5 AND instr(bed_exit_end_time, char(0)) = 0 
+            AND substr(bed_exit_end_time, 3, 1) = ':'
+            AND substr(bed_exit_end_time, 1, 2) GLOB '[0-9][0-9]'
+            AND substr(bed_exit_end_time, 4, 2) GLOB '[0-9][0-9]'
+            AND CAST(substr(bed_exit_end_time, 1, 2) AS INTEGER) BETWEEN 0 AND 23
+            AND CAST(substr(bed_exit_end_time, 4, 2) AS INTEGER) BETWEEN 0 AND 59)
         ),
         topology_snapshot_registry_version INTEGER NOT NULL DEFAULT 0
             CHECK (topology_snapshot_registry_version >= 0),
@@ -201,13 +226,19 @@ COMPACT_SCHEMA_CREATE_STATEMENTS: Final = (
                 AND substr(topology_dirty_created_at, 17, 1) = ':'
                 AND substr(topology_dirty_created_at, -1) = 'Z'
                 AND datetime(substr(topology_dirty_created_at, 1, 19)) IS NOT NULL
-                AND strftime('%Y-%m-%dT%H:%M:%S', substr(topology_dirty_created_at, 1, 19)) = substr(topology_dirty_created_at, 1, 19)
+                AND strftime('%Y-%m-%dT%H:%M:%S', substr(topology_dirty_created_at, 1, 19))
+                    = substr(topology_dirty_created_at, 1, 19)
                 AND (
                     length(topology_dirty_created_at) = 20
                     OR (
                         substr(topology_dirty_created_at, 20, 1) = '.'
                         AND length(topology_dirty_created_at) BETWEEN 22 AND 27
-                        AND substr(topology_dirty_created_at, 21, length(topology_dirty_created_at) - 21) NOT GLOB '*[^0-9]*'
+                        AND substr(
+                            topology_dirty_created_at,
+                            21,
+                            length(topology_dirty_created_at) - 21
+                        )
+                            NOT GLOB '*[^0-9]*'
                     )
                 )
             )
@@ -238,13 +269,19 @@ COMPACT_SCHEMA_CREATE_STATEMENTS: Final = (
                 AND substr(topology_confirmation_expires_at, 17, 1) = ':'
                 AND substr(topology_confirmation_expires_at, -1) = 'Z'
                 AND datetime(substr(topology_confirmation_expires_at, 1, 19)) IS NOT NULL
-                AND strftime('%Y-%m-%dT%H:%M:%S', substr(topology_confirmation_expires_at, 1, 19)) = substr(topology_confirmation_expires_at, 1, 19)
+                AND strftime('%Y-%m-%dT%H:%M:%S', substr(topology_confirmation_expires_at, 1, 19))
+                    = substr(topology_confirmation_expires_at, 1, 19)
                 AND (
                     length(topology_confirmation_expires_at) = 20
                     OR (
                         substr(topology_confirmation_expires_at, 20, 1) = '.'
                         AND length(topology_confirmation_expires_at) BETWEEN 22 AND 27
-                        AND substr(topology_confirmation_expires_at, 21, length(topology_confirmation_expires_at) - 21) NOT GLOB '*[^0-9]*'
+                        AND substr(
+                            topology_confirmation_expires_at,
+                            21,
+                            length(topology_confirmation_expires_at) - 21
+                        )
+                            NOT GLOB '*[^0-9]*'
                     )
                 )
             )
@@ -312,13 +349,15 @@ COMPACT_SCHEMA_CREATE_STATEMENTS: Final = (
                 AND substr(audit_last_success_at, 17, 1) = ':'
                 AND substr(audit_last_success_at, -1) = 'Z'
                 AND datetime(substr(audit_last_success_at, 1, 19)) IS NOT NULL
-                AND strftime('%Y-%m-%dT%H:%M:%S', substr(audit_last_success_at, 1, 19)) = substr(audit_last_success_at, 1, 19)
+                AND strftime('%Y-%m-%dT%H:%M:%S', substr(audit_last_success_at, 1, 19))
+                    = substr(audit_last_success_at, 1, 19)
                 AND (
                     length(audit_last_success_at) = 20
                     OR (
                         substr(audit_last_success_at, 20, 1) = '.'
                         AND length(audit_last_success_at) BETWEEN 22 AND 27
-                        AND substr(audit_last_success_at, 21, length(audit_last_success_at) - 21) NOT GLOB '*[^0-9]*'
+                        AND substr(audit_last_success_at, 21, length(audit_last_success_at) - 21)
+                            NOT GLOB '*[^0-9]*'
                     )
                 )
             )
@@ -342,13 +381,15 @@ COMPACT_SCHEMA_CREATE_STATEMENTS: Final = (
                 AND substr(degraded_observed_at, 17, 1) = ':'
                 AND substr(degraded_observed_at, -1) = 'Z'
                 AND datetime(substr(degraded_observed_at, 1, 19)) IS NOT NULL
-                AND strftime('%Y-%m-%dT%H:%M:%S', substr(degraded_observed_at, 1, 19)) = substr(degraded_observed_at, 1, 19)
+                AND strftime('%Y-%m-%dT%H:%M:%S', substr(degraded_observed_at, 1, 19))
+                    = substr(degraded_observed_at, 1, 19)
                 AND (
                     length(degraded_observed_at) = 20
                     OR (
                         substr(degraded_observed_at, 20, 1) = '.'
                         AND length(degraded_observed_at) BETWEEN 22 AND 27
-                        AND substr(degraded_observed_at, 21, length(degraded_observed_at) - 21) NOT GLOB '*[^0-9]*'
+                        AND substr(degraded_observed_at, 21, length(degraded_observed_at) - 21)
+                            NOT GLOB '*[^0-9]*'
                     )
                 )
             )
@@ -363,13 +404,15 @@ COMPACT_SCHEMA_CREATE_STATEMENTS: Final = (
             AND substr(updated_at, 17, 1) = ':'
             AND substr(updated_at, -1) = 'Z'
             AND datetime(substr(updated_at, 1, 19)) IS NOT NULL
-            AND strftime('%Y-%m-%dT%H:%M:%S', substr(updated_at, 1, 19)) = substr(updated_at, 1, 19)
+            AND strftime('%Y-%m-%dT%H:%M:%S', substr(updated_at, 1, 19))
+                = substr(updated_at, 1, 19)
             AND (
                 length(updated_at) = 20
                 OR (
                     substr(updated_at, 20, 1) = '.'
                     AND length(updated_at) BETWEEN 22 AND 27
-                    AND substr(updated_at, 21, length(updated_at) - 21) NOT GLOB '*[^0-9]*'
+                    AND substr(updated_at, 21, length(updated_at) - 21)
+                        NOT GLOB '*[^0-9]*'
                 )
             )
         ),
@@ -549,13 +592,15 @@ COMPACT_SCHEMA_CREATE_STATEMENTS: Final = (
             AND substr(created_at, 17, 1) = ':'
             AND substr(created_at, -1) = 'Z'
             AND datetime(substr(created_at, 1, 19)) IS NOT NULL
-            AND strftime('%Y-%m-%dT%H:%M:%S', substr(created_at, 1, 19)) = substr(created_at, 1, 19)
+            AND strftime('%Y-%m-%dT%H:%M:%S', substr(created_at, 1, 19))
+                = substr(created_at, 1, 19)
             AND (
                 length(created_at) = 20
                 OR (
                     substr(created_at, 20, 1) = '.'
                     AND length(created_at) BETWEEN 22 AND 27
-                    AND substr(created_at, 21, length(created_at) - 21) NOT GLOB '*[^0-9]*'
+                    AND substr(created_at, 21, length(created_at) - 21)
+                        NOT GLOB '*[^0-9]*'
                 )
             )
         ),
@@ -569,13 +614,15 @@ COMPACT_SCHEMA_CREATE_STATEMENTS: Final = (
             AND substr(updated_at, 17, 1) = ':'
             AND substr(updated_at, -1) = 'Z'
             AND datetime(substr(updated_at, 1, 19)) IS NOT NULL
-            AND strftime('%Y-%m-%dT%H:%M:%S', substr(updated_at, 1, 19)) = substr(updated_at, 1, 19)
+            AND strftime('%Y-%m-%dT%H:%M:%S', substr(updated_at, 1, 19))
+                = substr(updated_at, 1, 19)
             AND (
                 length(updated_at) = 20
                 OR (
                     substr(updated_at, 20, 1) = '.'
                     AND length(updated_at) BETWEEN 22 AND 27
-                    AND substr(updated_at, 21, length(updated_at) - 21) NOT GLOB '*[^0-9]*'
+                    AND substr(updated_at, 21, length(updated_at) - 21)
+                        NOT GLOB '*[^0-9]*'
                 )
             )
         ),
@@ -657,13 +704,15 @@ COMPACT_SCHEMA_CREATE_STATEMENTS: Final = (
                 AND substr(last_probed_at, 17, 1) = ':'
                 AND substr(last_probed_at, -1) = 'Z'
                 AND datetime(substr(last_probed_at, 1, 19)) IS NOT NULL
-                AND strftime('%Y-%m-%dT%H:%M:%S', substr(last_probed_at, 1, 19)) = substr(last_probed_at, 1, 19)
+                AND strftime('%Y-%m-%dT%H:%M:%S', substr(last_probed_at, 1, 19))
+                    = substr(last_probed_at, 1, 19)
                 AND (
                     length(last_probed_at) = 20
                     OR (
                         substr(last_probed_at, 20, 1) = '.'
                         AND length(last_probed_at) BETWEEN 22 AND 27
-                        AND substr(last_probed_at, 21, length(last_probed_at) - 21) NOT GLOB '*[^0-9]*'
+                        AND substr(last_probed_at, 21, length(last_probed_at) - 21)
+                            NOT GLOB '*[^0-9]*'
                     )
                 )
             )
@@ -680,13 +729,15 @@ COMPACT_SCHEMA_CREATE_STATEMENTS: Final = (
                 AND substr(last_ok_at, 17, 1) = ':'
                 AND substr(last_ok_at, -1) = 'Z'
                 AND datetime(substr(last_ok_at, 1, 19)) IS NOT NULL
-                AND strftime('%Y-%m-%dT%H:%M:%S', substr(last_ok_at, 1, 19)) = substr(last_ok_at, 1, 19)
+                AND strftime('%Y-%m-%dT%H:%M:%S', substr(last_ok_at, 1, 19))
+                    = substr(last_ok_at, 1, 19)
                 AND (
                     length(last_ok_at) = 20
                     OR (
                         substr(last_ok_at, 20, 1) = '.'
                         AND length(last_ok_at) BETWEEN 22 AND 27
-                        AND substr(last_ok_at, 21, length(last_ok_at) - 21) NOT GLOB '*[^0-9]*'
+                        AND substr(last_ok_at, 21, length(last_ok_at) - 21)
+                            NOT GLOB '*[^0-9]*'
                     )
                 )
             )
@@ -713,13 +764,15 @@ COMPACT_SCHEMA_CREATE_STATEMENTS: Final = (
                 AND substr(bed_recognized_at, 17, 1) = ':'
                 AND substr(bed_recognized_at, -1) = 'Z'
                 AND datetime(substr(bed_recognized_at, 1, 19)) IS NOT NULL
-                AND strftime('%Y-%m-%dT%H:%M:%S', substr(bed_recognized_at, 1, 19)) = substr(bed_recognized_at, 1, 19)
+                AND strftime('%Y-%m-%dT%H:%M:%S', substr(bed_recognized_at, 1, 19))
+                    = substr(bed_recognized_at, 1, 19)
                 AND (
                     length(bed_recognized_at) = 20
                     OR (
                         substr(bed_recognized_at, 20, 1) = '.'
                         AND length(bed_recognized_at) BETWEEN 22 AND 27
-                        AND substr(bed_recognized_at, 21, length(bed_recognized_at) - 21) NOT GLOB '*[^0-9]*'
+                        AND substr(bed_recognized_at, 21, length(bed_recognized_at) - 21)
+                            NOT GLOB '*[^0-9]*'
                     )
                 )
             )
@@ -735,13 +788,15 @@ COMPACT_SCHEMA_CREATE_STATEMENTS: Final = (
             AND substr(created_at, 17, 1) = ':'
             AND substr(created_at, -1) = 'Z'
             AND datetime(substr(created_at, 1, 19)) IS NOT NULL
-            AND strftime('%Y-%m-%dT%H:%M:%S', substr(created_at, 1, 19)) = substr(created_at, 1, 19)
+            AND strftime('%Y-%m-%dT%H:%M:%S', substr(created_at, 1, 19))
+                = substr(created_at, 1, 19)
             AND (
                 length(created_at) = 20
                 OR (
                     substr(created_at, 20, 1) = '.'
                     AND length(created_at) BETWEEN 22 AND 27
-                    AND substr(created_at, 21, length(created_at) - 21) NOT GLOB '*[^0-9]*'
+                    AND substr(created_at, 21, length(created_at) - 21)
+                        NOT GLOB '*[^0-9]*'
                 )
             )
         ),
@@ -755,13 +810,15 @@ COMPACT_SCHEMA_CREATE_STATEMENTS: Final = (
             AND substr(updated_at, 17, 1) = ':'
             AND substr(updated_at, -1) = 'Z'
             AND datetime(substr(updated_at, 1, 19)) IS NOT NULL
-            AND strftime('%Y-%m-%dT%H:%M:%S', substr(updated_at, 1, 19)) = substr(updated_at, 1, 19)
+            AND strftime('%Y-%m-%dT%H:%M:%S', substr(updated_at, 1, 19))
+                = substr(updated_at, 1, 19)
             AND (
                 length(updated_at) = 20
                 OR (
                     substr(updated_at, 20, 1) = '.'
                     AND length(updated_at) BETWEEN 22 AND 27
-                    AND substr(updated_at, 21, length(updated_at) - 21) NOT GLOB '*[^0-9]*'
+                    AND substr(updated_at, 21, length(updated_at) - 21)
+                        NOT GLOB '*[^0-9]*'
                 )
             )
         ),
@@ -876,13 +933,15 @@ COMPACT_SCHEMA_CREATE_STATEMENTS: Final = (
             AND substr(activated_at, 17, 1) = ':'
             AND substr(activated_at, -1) = 'Z'
             AND datetime(substr(activated_at, 1, 19)) IS NOT NULL
-            AND strftime('%Y-%m-%dT%H:%M:%S', substr(activated_at, 1, 19)) = substr(activated_at, 1, 19)
+            AND strftime('%Y-%m-%dT%H:%M:%S', substr(activated_at, 1, 19))
+                = substr(activated_at, 1, 19)
             AND (
                 length(activated_at) = 20
                 OR (
                     substr(activated_at, 20, 1) = '.'
                     AND length(activated_at) BETWEEN 22 AND 27
-                    AND substr(activated_at, 21, length(activated_at) - 21) NOT GLOB '*[^0-9]*'
+                    AND substr(activated_at, 21, length(activated_at) - 21)
+                        NOT GLOB '*[^0-9]*'
                 )
             )
         ),
@@ -898,13 +957,15 @@ COMPACT_SCHEMA_CREATE_STATEMENTS: Final = (
                 AND substr(applied_at, 17, 1) = ':'
                 AND substr(applied_at, -1) = 'Z'
                 AND datetime(substr(applied_at, 1, 19)) IS NOT NULL
-                AND strftime('%Y-%m-%dT%H:%M:%S', substr(applied_at, 1, 19)) = substr(applied_at, 1, 19)
+                AND strftime('%Y-%m-%dT%H:%M:%S', substr(applied_at, 1, 19))
+                    = substr(applied_at, 1, 19)
                 AND (
                     length(applied_at) = 20
                     OR (
                         substr(applied_at, 20, 1) = '.'
                         AND length(applied_at) BETWEEN 22 AND 27
-                        AND substr(applied_at, 21, length(applied_at) - 21) NOT GLOB '*[^0-9]*'
+                        AND substr(applied_at, 21, length(applied_at) - 21)
+                            NOT GLOB '*[^0-9]*'
                     )
                 )
             )
@@ -919,13 +980,15 @@ COMPACT_SCHEMA_CREATE_STATEMENTS: Final = (
             AND substr(updated_at, 17, 1) = ':'
             AND substr(updated_at, -1) = 'Z'
             AND datetime(substr(updated_at, 1, 19)) IS NOT NULL
-            AND strftime('%Y-%m-%dT%H:%M:%S', substr(updated_at, 1, 19)) = substr(updated_at, 1, 19)
+            AND strftime('%Y-%m-%dT%H:%M:%S', substr(updated_at, 1, 19))
+                = substr(updated_at, 1, 19)
             AND (
                 length(updated_at) = 20
                 OR (
                     substr(updated_at, 20, 1) = '.'
                     AND length(updated_at) BETWEEN 22 AND 27
-                    AND substr(updated_at, 21, length(updated_at) - 21) NOT GLOB '*[^0-9]*'
+                    AND substr(updated_at, 21, length(updated_at) - 21)
+                        NOT GLOB '*[^0-9]*'
                 )
             )
         ),
@@ -982,13 +1045,15 @@ COMPACT_SCHEMA_CREATE_STATEMENTS: Final = (
             AND substr(started_at, 17, 1) = ':'
             AND substr(started_at, -1) = 'Z'
             AND datetime(substr(started_at, 1, 19)) IS NOT NULL
-            AND strftime('%Y-%m-%dT%H:%M:%S', substr(started_at, 1, 19)) = substr(started_at, 1, 19)
+            AND strftime('%Y-%m-%dT%H:%M:%S', substr(started_at, 1, 19))
+                = substr(started_at, 1, 19)
             AND (
                 length(started_at) = 20
                 OR (
                     substr(started_at, 20, 1) = '.'
                     AND length(started_at) BETWEEN 22 AND 27
-                    AND substr(started_at, 21, length(started_at) - 21) NOT GLOB '*[^0-9]*'
+                    AND substr(started_at, 21, length(started_at) - 21)
+                        NOT GLOB '*[^0-9]*'
                 )
             )
         ),
@@ -1004,13 +1069,15 @@ COMPACT_SCHEMA_CREATE_STATEMENTS: Final = (
                 AND substr(finalized_at, 17, 1) = ':'
                 AND substr(finalized_at, -1) = 'Z'
                 AND datetime(substr(finalized_at, 1, 19)) IS NOT NULL
-                AND strftime('%Y-%m-%dT%H:%M:%S', substr(finalized_at, 1, 19)) = substr(finalized_at, 1, 19)
+                AND strftime('%Y-%m-%dT%H:%M:%S', substr(finalized_at, 1, 19))
+                    = substr(finalized_at, 1, 19)
                 AND (
                     length(finalized_at) = 20
                     OR (
                         substr(finalized_at, 20, 1) = '.'
                         AND length(finalized_at) BETWEEN 22 AND 27
-                        AND substr(finalized_at, 21, length(finalized_at) - 21) NOT GLOB '*[^0-9]*'
+                        AND substr(finalized_at, 21, length(finalized_at) - 21)
+                            NOT GLOB '*[^0-9]*'
                     )
                 )
             )
@@ -1092,13 +1159,15 @@ COMPACT_SCHEMA_CREATE_STATEMENTS: Final = (
                 AND substr(published_at, 17, 1) = ':'
                 AND substr(published_at, -1) = 'Z'
                 AND datetime(substr(published_at, 1, 19)) IS NOT NULL
-                AND strftime('%Y-%m-%dT%H:%M:%S', substr(published_at, 1, 19)) = substr(published_at, 1, 19)
+                AND strftime('%Y-%m-%dT%H:%M:%S', substr(published_at, 1, 19))
+                    = substr(published_at, 1, 19)
                 AND (
                     length(published_at) = 20
                     OR (
                         substr(published_at, 20, 1) = '.'
                         AND length(published_at) BETWEEN 22 AND 27
-                        AND substr(published_at, 21, length(published_at) - 21) NOT GLOB '*[^0-9]*'
+                        AND substr(published_at, 21, length(published_at) - 21)
+                            NOT GLOB '*[^0-9]*'
                     )
                 )
             )
@@ -1129,13 +1198,15 @@ COMPACT_SCHEMA_CREATE_STATEMENTS: Final = (
                 AND substr(retention_requested_at, 17, 1) = ':'
                 AND substr(retention_requested_at, -1) = 'Z'
                 AND datetime(substr(retention_requested_at, 1, 19)) IS NOT NULL
-                AND strftime('%Y-%m-%dT%H:%M:%S', substr(retention_requested_at, 1, 19)) = substr(retention_requested_at, 1, 19)
+                AND strftime('%Y-%m-%dT%H:%M:%S', substr(retention_requested_at, 1, 19))
+                    = substr(retention_requested_at, 1, 19)
                 AND (
                     length(retention_requested_at) = 20
                     OR (
                         substr(retention_requested_at, 20, 1) = '.'
                         AND length(retention_requested_at) BETWEEN 22 AND 27
-                        AND substr(retention_requested_at, 21, length(retention_requested_at) - 21) NOT GLOB '*[^0-9]*'
+                        AND substr(retention_requested_at, 21, length(retention_requested_at) - 21)
+                            NOT GLOB '*[^0-9]*'
                     )
                 )
             )
@@ -1152,13 +1223,15 @@ COMPACT_SCHEMA_CREATE_STATEMENTS: Final = (
                 AND substr(retention_updated_at, 17, 1) = ':'
                 AND substr(retention_updated_at, -1) = 'Z'
                 AND datetime(substr(retention_updated_at, 1, 19)) IS NOT NULL
-                AND strftime('%Y-%m-%dT%H:%M:%S', substr(retention_updated_at, 1, 19)) = substr(retention_updated_at, 1, 19)
+                AND strftime('%Y-%m-%dT%H:%M:%S', substr(retention_updated_at, 1, 19))
+                    = substr(retention_updated_at, 1, 19)
                 AND (
                     length(retention_updated_at) = 20
                     OR (
                         substr(retention_updated_at, 20, 1) = '.'
                         AND length(retention_updated_at) BETWEEN 22 AND 27
-                        AND substr(retention_updated_at, 21, length(retention_updated_at) - 21) NOT GLOB '*[^0-9]*'
+                        AND substr(retention_updated_at, 21, length(retention_updated_at) - 21)
+                            NOT GLOB '*[^0-9]*'
                     )
                 )
             )
@@ -1174,13 +1247,15 @@ COMPACT_SCHEMA_CREATE_STATEMENTS: Final = (
             AND substr(created_at, 17, 1) = ':'
             AND substr(created_at, -1) = 'Z'
             AND datetime(substr(created_at, 1, 19)) IS NOT NULL
-            AND strftime('%Y-%m-%dT%H:%M:%S', substr(created_at, 1, 19)) = substr(created_at, 1, 19)
+            AND strftime('%Y-%m-%dT%H:%M:%S', substr(created_at, 1, 19))
+                = substr(created_at, 1, 19)
             AND (
                 length(created_at) = 20
                 OR (
                     substr(created_at, 20, 1) = '.'
                     AND length(created_at) BETWEEN 22 AND 27
-                    AND substr(created_at, 21, length(created_at) - 21) NOT GLOB '*[^0-9]*'
+                    AND substr(created_at, 21, length(created_at) - 21)
+                        NOT GLOB '*[^0-9]*'
                 )
             )
         ),
@@ -1194,13 +1269,15 @@ COMPACT_SCHEMA_CREATE_STATEMENTS: Final = (
             AND substr(updated_at, 17, 1) = ':'
             AND substr(updated_at, -1) = 'Z'
             AND datetime(substr(updated_at, 1, 19)) IS NOT NULL
-            AND strftime('%Y-%m-%dT%H:%M:%S', substr(updated_at, 1, 19)) = substr(updated_at, 1, 19)
+            AND strftime('%Y-%m-%dT%H:%M:%S', substr(updated_at, 1, 19))
+                = substr(updated_at, 1, 19)
             AND (
                 length(updated_at) = 20
                 OR (
                     substr(updated_at, 20, 1) = '.'
                     AND length(updated_at) BETWEEN 22 AND 27
-                    AND substr(updated_at, 21, length(updated_at) - 21) NOT GLOB '*[^0-9]*'
+                    AND substr(updated_at, 21, length(updated_at) - 21)
+                        NOT GLOB '*[^0-9]*'
                 )
             )
         ),
@@ -1308,13 +1385,15 @@ COMPACT_SCHEMA_CREATE_STATEMENTS: Final = (
             AND substr(detected_at, 17, 1) = ':'
             AND substr(detected_at, -1) = 'Z'
             AND datetime(substr(detected_at, 1, 19)) IS NOT NULL
-            AND strftime('%Y-%m-%dT%H:%M:%S', substr(detected_at, 1, 19)) = substr(detected_at, 1, 19)
+            AND strftime('%Y-%m-%dT%H:%M:%S', substr(detected_at, 1, 19))
+                = substr(detected_at, 1, 19)
             AND (
                 length(detected_at) = 20
                 OR (
                     substr(detected_at, 20, 1) = '.'
                     AND length(detected_at) BETWEEN 22 AND 27
-                    AND substr(detected_at, 21, length(detected_at) - 21) NOT GLOB '*[^0-9]*'
+                    AND substr(detected_at, 21, length(detected_at) - 21)
+                        NOT GLOB '*[^0-9]*'
                 )
             )
         ),
@@ -1376,13 +1455,15 @@ COMPACT_SCHEMA_CREATE_STATEMENTS: Final = (
                 AND substr(review_at, 17, 1) = ':'
                 AND substr(review_at, -1) = 'Z'
                 AND datetime(substr(review_at, 1, 19)) IS NOT NULL
-                AND strftime('%Y-%m-%dT%H:%M:%S', substr(review_at, 1, 19)) = substr(review_at, 1, 19)
+                AND strftime('%Y-%m-%dT%H:%M:%S', substr(review_at, 1, 19))
+                    = substr(review_at, 1, 19)
                 AND (
                     length(review_at) = 20
                     OR (
                         substr(review_at, 20, 1) = '.'
                         AND length(review_at) BETWEEN 22 AND 27
-                        AND substr(review_at, 21, length(review_at) - 21) NOT GLOB '*[^0-9]*'
+                        AND substr(review_at, 21, length(review_at) - 21)
+                            NOT GLOB '*[^0-9]*'
                     )
                 )
             )
@@ -1402,13 +1483,15 @@ COMPACT_SCHEMA_CREATE_STATEMENTS: Final = (
             AND substr(created_at, 17, 1) = ':'
             AND substr(created_at, -1) = 'Z'
             AND datetime(substr(created_at, 1, 19)) IS NOT NULL
-            AND strftime('%Y-%m-%dT%H:%M:%S', substr(created_at, 1, 19)) = substr(created_at, 1, 19)
+            AND strftime('%Y-%m-%dT%H:%M:%S', substr(created_at, 1, 19))
+                = substr(created_at, 1, 19)
             AND (
                 length(created_at) = 20
                 OR (
                     substr(created_at, 20, 1) = '.'
                     AND length(created_at) BETWEEN 22 AND 27
-                    AND substr(created_at, 21, length(created_at) - 21) NOT GLOB '*[^0-9]*'
+                    AND substr(created_at, 21, length(created_at) - 21)
+                        NOT GLOB '*[^0-9]*'
                 )
             )
         ),
@@ -1422,13 +1505,15 @@ COMPACT_SCHEMA_CREATE_STATEMENTS: Final = (
             AND substr(updated_at, 17, 1) = ':'
             AND substr(updated_at, -1) = 'Z'
             AND datetime(substr(updated_at, 1, 19)) IS NOT NULL
-            AND strftime('%Y-%m-%dT%H:%M:%S', substr(updated_at, 1, 19)) = substr(updated_at, 1, 19)
+            AND strftime('%Y-%m-%dT%H:%M:%S', substr(updated_at, 1, 19))
+                = substr(updated_at, 1, 19)
             AND (
                 length(updated_at) = 20
                 OR (
                     substr(updated_at, 20, 1) = '.'
                     AND length(updated_at) BETWEEN 22 AND 27
-                    AND substr(updated_at, 21, length(updated_at) - 21) NOT GLOB '*[^0-9]*'
+                    AND substr(updated_at, 21, length(updated_at) - 21)
+                        NOT GLOB '*[^0-9]*'
                 )
             )
         ),
@@ -1562,13 +1647,15 @@ COMPACT_SCHEMA_CREATE_STATEMENTS: Final = (
                 AND substr(captured_at, 17, 1) = ':'
                 AND substr(captured_at, -1) = 'Z'
                 AND datetime(substr(captured_at, 1, 19)) IS NOT NULL
-                AND strftime('%Y-%m-%dT%H:%M:%S', substr(captured_at, 1, 19)) = substr(captured_at, 1, 19)
+                AND strftime('%Y-%m-%dT%H:%M:%S', substr(captured_at, 1, 19))
+                    = substr(captured_at, 1, 19)
                 AND (
                     length(captured_at) = 20
                     OR (
                         substr(captured_at, 20, 1) = '.'
                         AND length(captured_at) BETWEEN 22 AND 27
-                        AND substr(captured_at, 21, length(captured_at) - 21) NOT GLOB '*[^0-9]*'
+                        AND substr(captured_at, 21, length(captured_at) - 21)
+                            NOT GLOB '*[^0-9]*'
                     )
                 )
             )
@@ -1584,13 +1671,15 @@ COMPACT_SCHEMA_CREATE_STATEMENTS: Final = (
             AND substr(created_at, 17, 1) = ':'
             AND substr(created_at, -1) = 'Z'
             AND datetime(substr(created_at, 1, 19)) IS NOT NULL
-            AND strftime('%Y-%m-%dT%H:%M:%S', substr(created_at, 1, 19)) = substr(created_at, 1, 19)
+            AND strftime('%Y-%m-%dT%H:%M:%S', substr(created_at, 1, 19))
+                = substr(created_at, 1, 19)
             AND (
                 length(created_at) = 20
                 OR (
                     substr(created_at, 20, 1) = '.'
                     AND length(created_at) BETWEEN 22 AND 27
-                    AND substr(created_at, 21, length(created_at) - 21) NOT GLOB '*[^0-9]*'
+                    AND substr(created_at, 21, length(created_at) - 21)
+                        NOT GLOB '*[^0-9]*'
                 )
             )
         ),
@@ -1604,13 +1693,15 @@ COMPACT_SCHEMA_CREATE_STATEMENTS: Final = (
             AND substr(updated_at, 17, 1) = ':'
             AND substr(updated_at, -1) = 'Z'
             AND datetime(substr(updated_at, 1, 19)) IS NOT NULL
-            AND strftime('%Y-%m-%dT%H:%M:%S', substr(updated_at, 1, 19)) = substr(updated_at, 1, 19)
+            AND strftime('%Y-%m-%dT%H:%M:%S', substr(updated_at, 1, 19))
+                = substr(updated_at, 1, 19)
             AND (
                 length(updated_at) = 20
                 OR (
                     substr(updated_at, 20, 1) = '.'
                     AND length(updated_at) BETWEEN 22 AND 27
-                    AND substr(updated_at, 21, length(updated_at) - 21) NOT GLOB '*[^0-9]*'
+                    AND substr(updated_at, 21, length(updated_at) - 21)
+                        NOT GLOB '*[^0-9]*'
                 )
             )
         ),
@@ -1697,6 +1788,21 @@ COMPACT_SCHEMA_CREATE_STATEMENTS: Final = (
     END
     """,
     """
+    CREATE TRIGGER artifacts_corrupt_preserves_identity
+    BEFORE UPDATE ON artifacts
+    WHEN OLD.state = 'AVAILABLE' AND NEW.state = 'CORRUPT' AND (
+        NEW.contained_relpath IS NOT OLD.contained_relpath
+        OR NEW.content_sha256 IS NOT OLD.content_sha256
+        OR NEW.size_bytes IS NOT OLD.size_bytes
+        OR NEW.mime_type IS NOT OLD.mime_type
+        OR NEW.codec IS NOT OLD.codec
+        OR NEW.captured_at IS NOT OLD.captured_at
+    )
+    BEGIN
+        SELECT RAISE(ABORT, 'artifact retained identity is immutable');
+    END
+    """,
+    """
     CREATE TRIGGER artifacts_immutable_identity
     BEFORE UPDATE ON artifacts
     WHEN NEW.incident_id IS NOT OLD.incident_id
@@ -1728,13 +1834,15 @@ COMPACT_SCHEMA_CREATE_STATEMENTS: Final = (
             AND substr(occurred_at, 17, 1) = ':'
             AND substr(occurred_at, -1) = 'Z'
             AND datetime(substr(occurred_at, 1, 19)) IS NOT NULL
-            AND strftime('%Y-%m-%dT%H:%M:%S', substr(occurred_at, 1, 19)) = substr(occurred_at, 1, 19)
+            AND strftime('%Y-%m-%dT%H:%M:%S', substr(occurred_at, 1, 19))
+                = substr(occurred_at, 1, 19)
             AND (
                 length(occurred_at) = 20
                 OR (
                     substr(occurred_at, 20, 1) = '.'
                     AND length(occurred_at) BETWEEN 22 AND 27
-                    AND substr(occurred_at, 21, length(occurred_at) - 21) NOT GLOB '*[^0-9]*'
+                    AND substr(occurred_at, 21, length(occurred_at) - 21)
+                        NOT GLOB '*[^0-9]*'
                 )
             )
         ),
@@ -1748,13 +1856,15 @@ COMPACT_SCHEMA_CREATE_STATEMENTS: Final = (
             AND substr(recorded_at, 17, 1) = ':'
             AND substr(recorded_at, -1) = 'Z'
             AND datetime(substr(recorded_at, 1, 19)) IS NOT NULL
-            AND strftime('%Y-%m-%dT%H:%M:%S', substr(recorded_at, 1, 19)) = substr(recorded_at, 1, 19)
+            AND strftime('%Y-%m-%dT%H:%M:%S', substr(recorded_at, 1, 19))
+                = substr(recorded_at, 1, 19)
             AND (
                 length(recorded_at) = 20
                 OR (
                     substr(recorded_at, 20, 1) = '.'
                     AND length(recorded_at) BETWEEN 22 AND 27
-                    AND substr(recorded_at, 21, length(recorded_at) - 21) NOT GLOB '*[^0-9]*'
+                    AND substr(recorded_at, 21, length(recorded_at) - 21)
+                        NOT GLOB '*[^0-9]*'
                 )
             )
         ),

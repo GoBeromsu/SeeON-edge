@@ -49,6 +49,17 @@ class DeploymentLockError(EdgeDatabaseError):
     """An exclusive migration lock could not be acquired."""
 
 
+class _LockProof:
+    """Inode-bound proof minted only after a successful flock."""
+
+    __slots__ = ("_dev", "_ino")
+
+    def __init__(self, descriptor: int) -> None:
+        stat = os.fstat(descriptor)
+        self._dev = stat.st_dev
+        self._ino = stat.st_ino
+
+
 @dataclass(slots=True)
 class DeploymentLock:
     """Proof that this process currently owns one deployment lock."""
@@ -56,10 +67,25 @@ class DeploymentLock:
     state_directory: Path
     _descriptor: int
     _active: bool = True
+    _proof: object = None
 
     def require_for(self, database: Path) -> None:
+        if not isinstance(self._proof, _LockProof):
+            raise DeploymentLockError("FORGED_LOCK")
         if not self._active:
-            raise DeploymentLockError("edge deployment lock ownership has expired")
+            raise DeploymentLockError("EXPIRED_LOCK")
+        try:
+            descriptor_stat = os.fstat(self._descriptor)
+            lock_stat = (self.state_directory / "deployment.lock").stat()
+        except OSError as error:
+            raise DeploymentLockError("FORGED_LOCK") from error
+        if (descriptor_stat.st_dev, descriptor_stat.st_ino) != (
+            self._proof._dev,
+            self._proof._ino,
+        ):
+            raise DeploymentLockError("FORGED_LOCK")
+        if (lock_stat.st_dev, lock_stat.st_ino) != (self._proof._dev, self._proof._ino):
+            raise DeploymentLockError("FORGED_LOCK")
         if database.parent.resolve() != self.state_directory:
             raise DeploymentLockError("edge deployment lock does not cover the database path")
 
@@ -83,7 +109,9 @@ def deployment_lock(
             raise DeploymentLockError(
                 "edge deployment lock is held by a running runtime"
             ) from error
-        ownership = DeploymentLock(resolved_directory, descriptor)
+        ownership = DeploymentLock(
+            resolved_directory, descriptor, _proof=_LockProof(descriptor)
+        )
         yield ownership
     finally:
         if ownership is not None:
@@ -113,6 +141,25 @@ def _validate_ledger(migrations: Sequence[Migration]) -> None:
 def _user_version(connection: sqlite3.Connection) -> int:
     row = connection.execute("PRAGMA user_version").fetchone()
     return 0 if row is None else int(row[0])
+
+
+def _peek_user_version(path: Path) -> int:
+    connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    try:
+        return _user_version(connection)
+    finally:
+        connection.close()
+
+
+def _run_schema18_preflight(path: Path, migrations: Sequence[Migration]) -> None:
+    for migration in migrations:
+        if migration.version == 18 and migration.preflight is not None:
+            connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+            try:
+                migration.preflight(connection)
+            finally:
+                connection.close()
+            return
 
 
 def _enable_wal(connection: sqlite3.Connection) -> None:
@@ -239,8 +286,21 @@ def migrate_database(
                 lock=ownership,
                 cutover=cutover,
             )
-    lock.require_for(path)
+    try:
+        lock.require_for(path)
+    except DeploymentLockError as error:
+        if cutover is not None:
+            raise CompactCutoverRequiredError(str(error)) from error
+        raise
     _validate_ledger(migrations)
+    cutover_source = None
+    if path.is_file() and any(migration.version == 18 for migration in migrations):
+        peeked = _peek_user_version(path)
+        if peeked == 17:
+            _run_schema18_preflight(path, migrations)
+            if cutover is None:
+                raise CompactCutoverRequiredError
+            cutover_source = cutover.redeem(lock, path)
     prepare_database_path(path)
     connection = sqlite3.connect(
         path,
@@ -261,7 +321,6 @@ def migrate_database(
         _verify_schema(connection, migrations, previous)
         authorizer = _MigrationAuthorizer()
         connection.set_authorizer(authorizer)
-        cutover_source = None
 
         for migration in migrations:
             if migration.version <= _user_version(connection):
@@ -270,10 +329,10 @@ def migrate_database(
                 continue
             if migration.preflight is not None:
                 migration.preflight(connection)
-            if migration.version == 18 and previous == 17:
+            if migration.version == 18 and previous == 17 and cutover_source is None:
                 if cutover is None:
                     raise CompactCutoverRequiredError
-                cutover_source = cutover.bind(lock)
+                cutover_source = cutover.redeem(lock, path)
             connection.execute("BEGIN IMMEDIATE")
             try:
                 current = _user_version(connection)

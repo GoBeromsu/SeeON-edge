@@ -6,15 +6,7 @@ import sqlite3
 from dataclasses import dataclass
 
 from backend.app.edge_db.compact_schema import SCHEMA_V18_STATEMENTS
-
-_SCHEMA_MIGRATIONS_V1 = """
-CREATE TABLE schema_migrations (
-    version INTEGER PRIMARY KEY CHECK (version > 0),
-    name TEXT NOT NULL UNIQUE,
-    checksum TEXT NOT NULL CHECK (length(checksum) = 64),
-    applied_at TEXT NOT NULL
-) STRICT
-"""
+from backend.app.edge_db.schema import SCHEMA_V1
 
 
 @dataclass(frozen=True, slots=True)
@@ -109,7 +101,7 @@ def compile_schema18_manifest() -> Schema18Manifest:
     connection = sqlite3.connect(":memory:")
     try:
         connection.execute("PRAGMA foreign_keys = ON")
-        connection.execute(_SCHEMA_MIGRATIONS_V1)
+        connection.execute(SCHEMA_V1.statements[1])
         for statement in SCHEMA_V18_STATEMENTS:
             if statement.strip().upper().startswith("DROP TABLE"):
                 continue
@@ -170,7 +162,7 @@ def _read_table(connection: sqlite3.Connection, name: str) -> TableSpec:
         foreign_keys=foreign_keys,
         indexes=indexes,
         triggers=triggers,
-        check_sql="" if name == "schema_migrations" else _normalized_sql(create_sql),
+        check_sql=_normalized_sql(create_sql),
     )
 
 
