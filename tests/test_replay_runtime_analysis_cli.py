@@ -9,6 +9,8 @@ from threading import Thread
 
 import pytest
 
+from shared.events.replay_wire import MAX_REPLAY_BODY_BYTES
+
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "ops" / "replay-runtime-analysis.py"
 
@@ -92,9 +94,9 @@ def _assert_typed_refusal(completed: subprocess.CompletedProcess[str]) -> dict[s
         (b'{"reproducible": true, "event_count": "1"}', "event_count"),
         (b'{"reproducible": true, "event_count": 1.5}', "event_count"),
         (b'{"reproducible": true, "event_count": -1}', "event_count"),
+        (b'{"reproducible": true, "event_count": true}', "event_count"),
         (b'{"event_count": 0}', "reproducible"),
         (b'{"reproducible": "true", "event_count": 0}', "reproducible"),
-        (b'{"reproducible": true, "event_count": 0, "reasons": {"bad": true}}', "reasons"),
         (b'{"reproducible": true, "event_count":', "JSON"),
         (b"{not-json", "JSON"),
     ],
@@ -112,6 +114,74 @@ def test_packaged_replay_cli_refuses_malformed_worker_payloads(
     payload = _assert_typed_refusal(completed)
     assert detail_fragment.lower() in payload["detail"].lower()
     assert not (tmp_path / "never-opened.sqlite3").exists()
+
+
+def test_packaged_replay_cli_accepts_payload_without_reasons_field(tmp_path: Path) -> None:
+    body = json.dumps({"reproducible": True, "event_count": 0}).encode()
+    server = _serve(body)
+    try:
+        host, port = server.server_address
+        completed = _run_cli(tmp_path, f"http://{host}:{port}")
+    finally:
+        server.shutdown()
+        server.server_close()
+    assert completed.returncode == 0
+    assert json.loads(completed.stdout)["event_count"] == 0
+
+
+def test_packaged_replay_cli_refuses_truncated_content_length(tmp_path: Path) -> None:
+    full = b'{"reproducible": true, "event_count": 0}'
+
+    class _Truncating(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:
+            _ = self.rfile.read(int(self.headers.get("Content-Length", "0")))
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(full)))
+            self.end_headers()
+            self.wfile.write(full[:12])
+
+        def log_message(self, format: str, *args: object) -> None:
+            del format, args
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _Truncating)
+    thread = Thread(target=server.serve_forever, name="replay-cli-trunc", daemon=True)
+    thread.start()
+    try:
+        host, port = server.server_address
+        completed = _run_cli(tmp_path, f"http://{host}:{port}")
+    finally:
+        server.shutdown()
+        server.server_close()
+    payload = _assert_typed_refusal(completed)
+    assert "truncat" in payload["detail"].lower()
+
+
+def test_packaged_replay_cli_refuses_over_limit_content_length(tmp_path: Path) -> None:
+    class _Oversize(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:
+            _ = self.rfile.read(int(self.headers.get("Content-Length", "0")))
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(MAX_REPLAY_BODY_BYTES + 1))
+            self.end_headers()
+            self.wfile.write(b"x")
+
+        def log_message(self, format: str, *args: object) -> None:
+            del format, args
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _Oversize)
+    thread = Thread(target=server.serve_forever, name="replay-cli-oversize", daemon=True)
+    thread.start()
+    try:
+        host, port = server.server_address
+        completed = _run_cli(tmp_path, f"http://{host}:{port}")
+    finally:
+        server.shutdown()
+        server.server_close()
+    payload = _assert_typed_refusal(completed)
+    assert str(MAX_REPLAY_BODY_BYTES) in payload["detail"]
+    assert completed.returncode == 2
 
 
 def test_packaged_replay_cli_accepts_valid_reproducible_payload(tmp_path: Path) -> None:

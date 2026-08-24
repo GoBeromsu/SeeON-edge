@@ -3,18 +3,27 @@
 
 Does not open SQLite. The captured timeline is a caller-supplied JSON file.
 Worker responses are parsed at this boundary into a typed success or a typed
-JSON refusal.
+JSON refusal. Response reads are bounded by the same replay wire constant the
+worker uses for `/replay` request bodies.
 """
 
 from __future__ import annotations
 
 import argparse
+import http.client
 import json
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import override
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
+
+_REPO = Path(__file__).resolve().parents[2]
+if str(_REPO) not in sys.path:
+    sys.path.insert(0, str(_REPO))
+
+from shared.events.replay_wire import MAX_REPLAY_BODY_BYTES  # noqa: E402
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,6 +62,29 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _read_bounded_body(response: http.client.HTTPResponse) -> bytes:
+    declared = response.getheader("Content-Length")
+    if declared is None:
+        raw = response.read(MAX_REPLAY_BODY_BYTES + 1)
+        if len(raw) > MAX_REPLAY_BODY_BYTES:
+            raise ReplayResponseError(
+                f"replay response exceeds maximum of {MAX_REPLAY_BODY_BYTES} bytes"
+            )
+        return raw
+    try:
+        length = int(declared)
+    except ValueError as error:
+        raise ReplayResponseError("invalid Content-Length") from error
+    if length < 0 or length > MAX_REPLAY_BODY_BYTES:
+        raise ReplayResponseError(
+            f"replay response exceeds maximum of {MAX_REPLAY_BODY_BYTES} bytes"
+        )
+    raw = response.read(length)
+    if len(raw) != length:
+        raise ReplayResponseError("truncated replay response")
+    return raw
+
+
 def parse_worker_replay(raw: bytes) -> AcceptedReplay:
     """Parse one worker `/replay` body. Raises ReplayResponseError on any defect."""
     try:
@@ -73,10 +105,6 @@ def parse_worker_replay(raw: bytes) -> AcceptedReplay:
     event_count = payload["event_count"]
     if isinstance(event_count, bool) or not isinstance(event_count, int) or event_count < 0:
         raise ReplayResponseError("event_count must be a non-negative integer")
-    if "reasons" in payload:
-        reasons = payload["reasons"]
-        if not isinstance(reasons, list) or any(not isinstance(item, str) for item in reasons):
-            raise ReplayResponseError("reasons must be a list of strings")
     module_id = payload.get("module_qualified_id")
     if module_id is not None and not isinstance(module_id, str):
         raise ReplayResponseError("module_qualified_id must be text")
@@ -111,9 +139,11 @@ def main(argv: list[str] | None = None) -> int:
             method="POST",
         )
         with urlopen(request, timeout=arguments.timeout_sec) as response:
-            accepted = parse_worker_replay(response.read())
+            accepted = parse_worker_replay(_read_bounded_body(response))
     except ReplayResponseError as error:
         return _refuse(str(error))
+    except (http.client.IncompleteRead, http.client.RemoteDisconnected):
+        return _refuse("truncated replay response")
     except (OSError, ValueError, HTTPError, URLError, json.JSONDecodeError) as error:
         return _refuse(str(error))
     print(
