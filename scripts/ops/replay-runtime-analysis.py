@@ -2,15 +2,34 @@
 """Replay a captured analysis timeline through the worker control surface.
 
 Does not open SQLite. The captured timeline is a caller-supplied JSON file.
+Worker responses are parsed at this boundary into a typed success or a typed
+JSON refusal.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+from dataclasses import dataclass
 from pathlib import Path
+from typing import override
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
+
+
+@dataclass(frozen=True, slots=True)
+class ReplayResponseError(Exception):
+    detail: str
+
+    @override
+    def __str__(self) -> str:
+        return self.detail
+
+
+@dataclass(frozen=True, slots=True)
+class AcceptedReplay:
+    event_count: int
+    module_qualified_id: str | None
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -34,39 +53,53 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
+def parse_worker_replay(raw: bytes) -> AcceptedReplay:
+    """Parse one worker `/replay` body. Raises ReplayResponseError on any defect."""
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as error:
+        raise ReplayResponseError("malformed JSON") from error
+    if not isinstance(payload, dict):
+        raise ReplayResponseError("replay response must be an object")
+    if "reproducible" not in payload:
+        raise ReplayResponseError("reproducible is required")
+    reproducible = payload["reproducible"]
+    if not isinstance(reproducible, bool):
+        raise ReplayResponseError("reproducible must be a boolean")
+    if not reproducible:
+        raise ReplayResponseError("worker refused incomplete replay input")
+    if "event_count" not in payload:
+        raise ReplayResponseError("event_count is required")
+    event_count = payload["event_count"]
+    if isinstance(event_count, bool) or not isinstance(event_count, int) or event_count < 0:
+        raise ReplayResponseError("event_count must be a non-negative integer")
+    if "reasons" in payload:
+        reasons = payload["reasons"]
+        if not isinstance(reasons, list) or any(not isinstance(item, str) for item in reasons):
+            raise ReplayResponseError("reasons must be a list of strings")
+    module_id = payload.get("module_qualified_id")
+    if module_id is not None and not isinstance(module_id, str):
+        raise ReplayResponseError("module_qualified_id must be text")
+    return AcceptedReplay(event_count, module_id)
+
+
+def _refuse(detail: str) -> int:
+    print(json.dumps({"status": "refused", "detail": detail}, sort_keys=True))
+    return 2
+
+
 def main(argv: list[str] | None = None) -> int:
     arguments = _parser().parse_args(argv)
     _ = arguments.database, arguments.camera_id, arguments.requested_by
     if arguments.trace_json is None or not arguments.trace_json.is_file():
-        print(
-            json.dumps(
-                {
-                    "status": "refused",
-                    "detail": "trace JSON is required; analysis persistence is retired",
-                },
-                sort_keys=True,
-            )
-        )
-        return 2
+        return _refuse("trace JSON is required; analysis persistence is retired")
     try:
         trace = json.loads(arguments.trace_json.read_text(encoding="utf-8"))
         if not isinstance(trace, dict):
-            print(
-                json.dumps(
-                    {"status": "refused", "detail": "trace JSON must be an object"},
-                    sort_keys=True,
-                )
-            )
-            return 2
+            return _refuse("trace JSON must be an object")
         policy = json.loads(arguments.policy_json)
         if not isinstance(policy, dict):
-            print(
-                json.dumps(
-                    {"status": "refused", "detail": "policy JSON must be an object"},
-                    sort_keys=True,
-                )
-            )
-            return 2
+            return _refuse("policy JSON must be an object")
         payload = {"trace": trace, "module_id": arguments.module_id, "policy": policy}
         request = Request(
             arguments.worker_url.rstrip("/") + "/replay",
@@ -78,24 +111,17 @@ def main(argv: list[str] | None = None) -> int:
             method="POST",
         )
         with urlopen(request, timeout=arguments.timeout_sec) as response:
-            result = json.loads(response.read())
-        if not isinstance(result, dict) or result.get("reproducible") is not True:
-            print(
-                json.dumps(
-                    {"status": "refused", "detail": "worker refused incomplete replay input"},
-                    sort_keys=True,
-                )
-            )
-            return 2
+            accepted = parse_worker_replay(response.read())
+    except ReplayResponseError as error:
+        return _refuse(str(error))
     except (OSError, ValueError, HTTPError, URLError, json.JSONDecodeError) as error:
-        print(json.dumps({"status": "refused", "detail": str(error)}, sort_keys=True))
-        return 2
+        return _refuse(str(error))
     print(
         json.dumps(
             {
-                "event_count": int(result["event_count"]),
+                "event_count": accepted.event_count,
+                "module_qualified_id": accepted.module_qualified_id,
                 "reproducible": True,
-                "module_qualified_id": result.get("module_qualified_id"),
             },
             sort_keys=True,
         )

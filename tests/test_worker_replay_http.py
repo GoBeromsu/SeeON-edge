@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import sys
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
 from urllib.error import HTTPError
@@ -155,6 +156,7 @@ def _replay_command() -> object:
     spec = spec_from_file_location("replay_runtime_analysis", script)
     assert spec is not None and spec.loader is not None
     module = module_from_spec(spec)
+    sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
 
