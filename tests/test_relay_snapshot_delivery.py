@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import threading
 from collections.abc import Iterator
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -12,6 +13,7 @@ from fastapi.testclient import TestClient
 
 from backend.app.features.cameras.store import CameraRegistryStore
 from backend.app.features.clips.catalog import CatalogStore
+from backend.app.features.evidence.relay_projection import RelayEvidenceProjection
 from backend.app.main import create_app, no_lifespan
 from shared.events.evidence_export_client import RelayEvidenceClient
 from shared.events.evidence_export_contract import DeliveryDisposition, DeliveryFailure
@@ -51,6 +53,8 @@ def client(tmp_path: Path) -> Iterator[TestClient]:
         backend_camera_id="camera-1",
     )
     app.state.camera_registry = registry
+    app.state.relay_evidence_projection = RelayEvidenceProjection(registry_path)
+    app.state.edge_database_path = registry_path
     app.state.catalog_store = CatalogStore.open(tmp_path / "catalog.sqlite3")
     with TestClient(app) as test_client:
         yield test_client
@@ -98,14 +102,28 @@ def test_snapshot_disposition_is_durable_and_never_changes_referenced_event(
         "facility_id": "facility-1",
     }
     assert _post(client, "/api/v1/relay/alerts", event).status_code == 202
-    before = client.app.state.catalog_store.records("events")
+    database = Path(client.app.state.edge_database_path)
+    with sqlite3.connect(database) as connection:
+        before = connection.execute(
+            "SELECT edge_event_id,event_type,revision FROM incidents WHERE edge_event_id=?",
+            (EVENT_ID,),
+        ).fetchone()
 
     response = _post(client, "/api/v1/relay/snapshot-dispositions", DISPOSITION)
 
     assert response.status_code == 202
-    assert client.app.state.catalog_store.records("events") == before
-    audit = client.app.state.catalog_store.records("audit")
-    assert audit == [{"action": "snapshot_disposition", **DISPOSITION}]
+    with sqlite3.connect(database) as connection:
+        after = connection.execute(
+            "SELECT edge_event_id,event_type,revision FROM incidents WHERE edge_event_id=?",
+            (EVENT_ID,),
+        ).fetchone()
+        disposition = connection.execute(
+            "SELECT state,reason FROM artifacts WHERE incident_id=("
+            "SELECT incident_id FROM incidents WHERE edge_event_id=?) AND kind='SNAPSHOT'",
+            (EVENT_ID,),
+        ).fetchone()
+    assert after == before
+    assert disposition == ("UNAVAILABLE", "UNAVAILABLE:camera offline")
 
 
 def test_snapshot_attachment_rejects_inline_media_payload(client: TestClient) -> None:

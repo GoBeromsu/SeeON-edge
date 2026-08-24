@@ -10,6 +10,7 @@ convergence, audit events, and the real backend-to-worker control seam.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 from pathlib import Path
@@ -114,14 +115,59 @@ def _worker_server(database: Path, store_dir: Path) -> MjpegServer:
     return server
 
 
-def _seed_published_clip(database: Path, clip_id: str = "clip-a") -> None:
+def _seed_published_clip(database: Path, store_dir: Path, clip_id: str = "clip-a") -> None:
+    manifest = store_dir / "clips" / clip_id / "manifest.json"
+    media = manifest.with_name("clip.mp4")
+    manifest_bytes = manifest.read_bytes()
+    media_bytes = media.read_bytes()
+    incident_id = f"incident:{clip_id}"
     with sqlite3.connect(database) as connection:
         connection.execute(
-            "INSERT INTO evidence_clips (clip_id,local_state,state_version,publish_state) "
-            "VALUES (?,'VERIFIED',2,'PUBLISHED')",
-            (clip_id,),
+            "INSERT INTO incidents(incident_id,edge_event_id,facility_id,camera_id,event_type,"
+            "probability,detected_at,lifecycle_state,provenance_state,"
+            "provenance_missing_reason,review_version,revision,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,1.0,?,'OPEN','MISSING','NOT_RECORDED',0,1,?,?)",
+            (incident_id, "event-a", "facility-a", "camera-a", "fall", NOW, NOW, NOW),
         )
-        connection.commit()
+        connection.execute(
+            "INSERT INTO clips(clip_id,camera_id,event_facet,started_at,duration_ms,codec,"
+            "mime_type,manifest_relpath,media_relpath,manifest_sha256,media_sha256,"
+            "manifest_size_bytes,media_size_bytes,local_state,publish_state,published_at,"
+            "retention_state,revision,created_at,updated_at) "
+            "VALUES (?,?,?,?,1000,'h264','video/mp4',?,?,?,?,?,?,'AVAILABLE','PUBLISHED',?,"
+            "'RETAINED',1,?,?)",
+            (
+                clip_id,
+                "camera-a",
+                "fall",
+                NOW,
+                f"clips/{clip_id}/manifest.json",
+                f"clips/{clip_id}/clip.mp4",
+                hashlib.sha256(manifest_bytes).hexdigest(),
+                hashlib.sha256(media_bytes).hexdigest(),
+                len(manifest_bytes),
+                len(media_bytes),
+                NOW,
+                NOW,
+                NOW,
+            ),
+        )
+        connection.execute(
+            "INSERT INTO artifacts(incident_id,kind,artifact_id,clip_id,state,contained_relpath,"
+            "content_sha256,size_bytes,mime_type,codec,revision,created_at,updated_at) "
+            "VALUES (?,'PRIMARY_CLIP',?,?, 'AVAILABLE',?,?,?,?, 'h264',1,?,?)",
+            (
+                incident_id,
+                f"primary:{clip_id}",
+                clip_id,
+                f"clips/{clip_id}/clip.mp4",
+                hashlib.sha256(media_bytes).hexdigest(),
+                len(media_bytes),
+                "video/mp4",
+                NOW,
+                NOW,
+            ),
+        )
 
 
 def _wire_worker_origin(monkeypatch: pytest.MonkeyPatch, server: MjpegServer) -> None:
@@ -200,7 +246,7 @@ def test_delete_reaches_real_worker_purges_and_is_idempotent(
 ) -> None:
     database = artifact_module.EDGE_DATABASE_PATH
     migrate_database(database)
-    _seed_published_clip(database)
+    _seed_published_clip(database, clip_store)
     server = _worker_server(database, clip_store)
     _wire_worker_origin(monkeypatch, server)
     audit_path = tmp_path / "labels" / "audit.jsonl"
@@ -225,6 +271,13 @@ def test_delete_reaches_real_worker_purges_and_is_idempotent(
         server.stop()
 
     assert not (clip_store / "clips" / "clip-a").exists()
+    with sqlite3.connect(database) as connection:
+        assert connection.execute(
+            "SELECT retention_state FROM clips WHERE clip_id='clip-a'"
+        ).fetchone() == ("RETAINED",)
+        assert connection.execute(
+            "SELECT state FROM artifacts WHERE clip_id='clip-a' AND kind='PRIMARY_CLIP'"
+        ).fetchone() == ("AVAILABLE",)
     entries = AuditLogStore(audit_path).list_entries()
     delete_entries = [entry for entry in entries if entry["clip_id"] == "clip-a"]
     actions = [entry["action"] for entry in delete_entries]

@@ -8,7 +8,9 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
+from backend.app.edge_db.configuration import open_configuration_database
 from backend.app.edge_db.migrator import migrate_database
+from backend.app.features.cameras import store as camera_store_module
 from backend.app.features.cameras.store import CameraRegistryStore
 from backend.app.features.evidence.record_store import CentralEvidenceQuery
 from backend.app.features.evidence.relay_projection import (
@@ -107,13 +109,37 @@ def test_snapshot_database_failure_rolls_back_incident(tmp_path: Path) -> None:
         assert connection.execute("SELECT count(*) FROM artifacts").fetchone() == (0,)
 
 
-def test_unmapped_relay_alert_is_locally_accepted_on_real_http_surface(tmp_path: Path) -> None:
+def test_unmapped_relay_alert_is_locally_accepted_on_real_http_surface(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     # Given: a registered camera without a Hub mapping and a compact projection store.
     database = _database(tmp_path)
     app = create_app(lifespan=no_lifespan)
     app.state.edge_relay_token = "relay-token"
     app.state.relay_evidence_projection = RelayEvidenceProjection(database)
-    registry = CameraRegistryStore(tmp_path / "registry.sqlite3")
+    ddl_attempts: list[int] = []
+
+    def captured_open(path: Path) -> sqlite3.Connection:
+        connection = open_configuration_database(path)
+
+        def authorize(
+            action: int,
+            _argument_one: str | None,
+            _argument_two: str | None,
+            _database_name: str | None,
+            _source: str | None,
+        ) -> int:
+            if action in {sqlite3.SQLITE_CREATE_TABLE, sqlite3.SQLITE_ALTER_TABLE}:
+                ddl_attempts.append(action)
+                return sqlite3.SQLITE_DENY
+            return sqlite3.SQLITE_OK
+
+        connection.set_authorizer(authorize)
+        return connection
+
+    monkeypatch.setattr(camera_store_module, "open_configuration_database", captured_open)
+    registry = CameraRegistryStore(database)
+    assert ddl_attempts == []
     registry.create(
         camera_id="camera-1",
         label="Camera 1",

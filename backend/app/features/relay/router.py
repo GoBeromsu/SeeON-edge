@@ -709,29 +709,6 @@ def relay_snapshot_disposition(
 ) -> dict[str, str]:
     """Durably record an unavailable or failed snapshot without touching its event."""
 
-    store = get_catalog_store(request.app)
-    if store is None:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="snapshot disposition storage unavailable",
-        )
-    key = _snapshot_delivery_key(payload.edge_event_id, payload.snapshot_id)
-    record = {
-        "action": "snapshot_disposition",
-        **payload.model_dump(exclude_none=True),
-    }
-    try:
-        store.record("audit", key, record)
-    except CatalogConflictError as error:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="snapshot disposition conflicts with existing terminal outcome",
-        ) from error
-    except (OSError, sqlite3.Error) as error:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="snapshot disposition storage unavailable",
-        ) from error
     _project_snapshot_disposition(request, payload)
     return {"status": "accepted"}
 
@@ -756,7 +733,7 @@ def _project_relay_event(request: Request, payload: RelayAlertRequest) -> bool:
     if projection is None:
         return False
     snapshot = None
-    if payload.snapshot is not None:
+    if payload.snapshot is not None and payload.snapshot_jpeg_base64 is not None:
         snapshot = RelaySnapshot(
             snapshot_id=payload.snapshot.snapshot_id,
             path=payload.snapshot.path,

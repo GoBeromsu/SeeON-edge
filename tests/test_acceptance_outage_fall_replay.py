@@ -6,7 +6,7 @@ import base64
 import hashlib
 import json
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -15,7 +15,6 @@ from fastapi.testclient import TestClient
 
 from backend.app.edge_db.migrator import migrate_database
 from backend.app.features.cameras.store import CameraRegistryStore
-from backend.app.features.clips.catalog import CatalogStore
 from backend.app.features.evidence.record_store import CentralEvidenceQuery
 from backend.app.features.evidence.relay_projection import RelayEvidenceProjection
 from backend.app.main import create_app, no_lifespan
@@ -162,6 +161,7 @@ class _RelayTransport:
     """In-process adapter to the real relay routes; None models no reachable backend."""
 
     client: TestClient | None = None
+    sent_events: list[dict[str, object]] = field(default_factory=list)
 
     def send_event(self, payload_json: str, edge_event_id: str) -> EventReceipt | DeliveryFailure:
         if self.client is None:
@@ -170,6 +170,7 @@ class _RelayTransport:
                 "backend-down",
                 transport_error="ConnectionError: backend unavailable",
             )
+        self.sent_events.append(json.loads(payload_json))
         response = self.client.post(
             "/api/v1/relay/alerts",
             content=payload_json,
@@ -375,7 +376,6 @@ def _relay_client(tmp_path: Path, database: Path) -> TestClient:
         backend_camera_id="room-camera",
     )
     app.state.camera_registry = registry
-    app.state.catalog_store = CatalogStore.open(tmp_path / "relay-catalog.sqlite3")
     app.state.relay_evidence_projection = RelayEvidenceProjection(database)
     app.state.central_evidence_query = CentralEvidenceQuery(database)
     return TestClient(app)
@@ -438,11 +438,10 @@ def test_fall_survives_outage_and_replays_with_terminal_snapshot_absence(tmp_pat
     with sqlite3.connect(database) as connection:
         assert connection.execute(
             """
-            SELECT slot.state, slot.reason
-            FROM evidence_incidents AS incident
-            JOIN evidence_events AS event USING (edge_event_id)
-            JOIN evidence_artifact_slots AS slot ON slot.incident_id = incident.incident_id
-            WHERE event.edge_event_id = ? AND slot.slot_name = 'SNAPSHOT'
+            SELECT artifact.state, artifact.reason
+            FROM incidents AS incident
+            JOIN artifacts AS artifact ON artifact.incident_id = incident.incident_id
+            WHERE incident.edge_event_id = ? AND artifact.kind = 'SNAPSHOT'
             """,
             (edge_event_id,),
         ).fetchone() == ("UNAVAILABLE", "UNAVAILABLE:stage_failed")
@@ -485,13 +484,8 @@ def test_replayed_fall_keeps_decision_envelope_and_typed_derivative_degradation(
     assert derivative.outcome is DerivativeOutcome.UNAVAILABLE
     assert derivative.reason == detail_loss.value
     with sqlite3.connect(database) as connection:
-        [payload_json] = connection.execute(
-            """
-            SELECT event.payload_json
-            FROM evidence_incidents AS incident
-            JOIN evidence_events AS event USING (edge_event_id)
-            WHERE incident.edge_event_id = ?
-            """,
+        assert connection.execute(
+            "SELECT edge_event_id FROM incidents WHERE edge_event_id=?",
             (edge_event_id,),
-        ).fetchone()
-    assert json.loads(payload_json)["audit"] == _DECISION_ENVELOPE
+        ).fetchone() == (edge_event_id,)
+    assert transport.sent_events[-1]["audit"] == _DECISION_ENVELOPE

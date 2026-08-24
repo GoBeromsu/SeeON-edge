@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from collections.abc import Callable
 from dataclasses import FrozenInstanceError, dataclass, field
 from pathlib import Path
@@ -10,6 +11,8 @@ import pytest
 from fastapi.testclient import TestClient
 
 from backend.app.features.cameras.store import CameraRegistryStore
+from backend.app.features.evidence.compact_receipts import CompactArtifactReceiptStore
+from backend.app.features.evidence.relay_projection import RelayEvent, RelayEvidenceProjection
 from backend.app.features.runtime_settings.store import RuntimeSettingsStore
 from backend.app.main import create_app, no_lifespan
 from shared.events.evidence_export_client import ReadyClipRequest, UnavailableClipRequest
@@ -80,12 +83,52 @@ def _client(tmp_path: Path, backend: FakeBackendEvidenceClient, *, enabled: bool
     )
     app.state.camera_registry = registry
     app.state.backend_evidence_client = backend
+    app.state.artifact_receipt_store = CompactArtifactReceiptStore(
+        database, tmp_path / "clip-store"
+    )
+    RelayEvidenceProjection(database).project_event(
+        RelayEvent(
+            EVENT_ID,
+            "fall",
+            0.9,
+            "2026-07-16T00:00:00Z",
+            "camera-1",
+            "facility-1",
+            None,
+            None,
+            None,
+        )
+    )
     runtime_settings = RuntimeSettingsStore(database)
     if enabled:
         runtime_settings.set_clip_export_enabled(True)
     app.state.runtime_settings_store = runtime_settings
     app.state.clip_store_root = tmp_path / "clip-store"
     return TestClient(app)
+
+
+def _write_ready_media(tmp_path: Path) -> Path:
+    media = tmp_path / "clip-store" / "clips" / "clip-1" / "clip.mp4"
+    media.parent.mkdir(parents=True, exist_ok=True)
+    media.write_bytes(b"mp4x")
+    media.with_name("manifest.json").write_text(
+        json.dumps(
+            {
+                "clip_id": "clip-1",
+                "camera_id": "camera-1",
+                "event_ref": EVENT_ID,
+                "event_type": "fall",
+                "started_at": "2026-07-16T00:00:00Z",
+                "duration_s": 1.0,
+                "codec": "h264",
+                "path": "clips/clip-1/clip.mp4",
+                "video_available": True,
+                "finalized": True,
+            }
+        ),
+        encoding="utf-8",
+    )
+    return media
 
 
 def _ready_payload() -> dict[str, object]:
@@ -182,13 +225,21 @@ def test_ready_relay_resolves_owned_media_by_clip_id_and_returns_typed_receipt(
     tmp_path: Path,
 ) -> None:
     # Given: strict shared-store bytes exist under the route clip ID.
-    media = tmp_path / "clip-store" / "clips" / "clip-1" / "clip.mp4"
-    media.parent.mkdir(parents=True)
-    media.write_bytes(b"mp4x")
+    _write_ready_media(tmp_path)
     backend = FakeBackendEvidenceClient()
     client = _client(tmp_path, backend, enabled=True)
 
-    # When: the worker relays metadata without supplying a path.
+    # Mutation proof: a receipt that does not match the opened bytes remains a conflict.
+    bad_payload = _ready_payload() | {"sha256": "0" * 64}
+    bad_receipt = client.put(
+        "/api/v1/relay/clips/clip-1",
+        json=bad_payload,
+        headers={"X-Edge-Relay-Token": TOKEN},
+    )
+    assert bad_receipt.status_code == 409
+    assert backend.ready_calls == 0
+
+    # When: the worker relays matching metadata without supplying a path.
     response = client.put(
         "/api/v1/relay/clips/clip-1",
         json=_ready_payload(),
@@ -283,9 +334,7 @@ def test_ready_relay_uploads_verified_descriptor_when_path_is_swapped(
     tmp_path: Path,
 ) -> None:
     # Given: an attacker swaps the pathname only after ml-api verifies and opens it.
-    media = tmp_path / "clip-store" / "clips" / "clip-1" / "clip.mp4"
-    media.parent.mkdir(parents=True)
-    media.write_bytes(b"mp4x")
+    media = _write_ready_media(tmp_path)
     backend = FakeBackendEvidenceClient()
 
     def swap_path() -> None:
