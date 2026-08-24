@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import sqlite3
+from collections.abc import Callable
 from typing import TypeAlias
 
 from fastapi import FastAPI
+from pydantic import JsonValue
 
 from backend.app.features.connection.topology_retry_coordinator import (
     TopologyRetryResult,
@@ -22,12 +25,14 @@ def sync_camera_roster(
     _now: float | None = None,
     _force: bool = False,
     _refresh: bool = False,
+    after_write: Callable[[sqlite3.Connection], None] | None = None,
 ) -> RosterSyncResult:
     """Publish at most one durable snapshot for this explicit event."""
     return topology_retry_coordinator(app).trigger(
         force=_force,
         refresh=_refresh,
         now_epoch=_now,
+        after_write=after_write,
     )
 
 
@@ -41,7 +46,7 @@ def resume_camera_roster_after_connectivity(app: FastAPI) -> RosterSyncResult:
     return sync_camera_roster(app, _force=True, _refresh=True)
 
 
-def camera_sync_view(app: FastAPI, _camera_id: str) -> dict[str, object]:
+def camera_sync_view(app: FastAPI, _camera_id: str) -> dict[str, JsonValue]:
     """Expose the durable complete-topology state through the legacy camera view."""
     result = topology_retry_coordinator(app).current_result()
     return {

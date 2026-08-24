@@ -329,7 +329,7 @@ def test_streams_manifest_video_and_appends_audit(clip_env) -> None:
     assert query_video.content == b"video:clip-1"
     assert audit.status_code == 200
     video_events = [
-        event for event in audit.json()["events"] if event["action"] == "clip.video"
+        event for event in audit.json()["events"] if event["action"] == "clip.play"
     ]
     assert [(event["actor_id"], event["target_id"]) for event in video_events] == [
         ("admin", "clip-1"),

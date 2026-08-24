@@ -87,7 +87,18 @@ def test_snapshot_attachment_is_idempotent_and_rebinding_conflicts(client: TestC
     assert conflict.status_code == 409
     assert "content identity" in conflict.json()["detail"]
     assert invalid.status_code == 422
-    assert len(client.app.state.catalog_store.records("snapshots")) == 1
+    database = Path(client.app.state.edge_database_path)
+    with sqlite3.connect(database) as connection:
+        artifact_count = connection.execute(
+            "SELECT COUNT(*) FROM artifacts WHERE artifact_id='snapshot-1'"
+        ).fetchone()[0]
+        audit_count = connection.execute(
+            "SELECT COUNT(*) FROM audit_events "
+            "WHERE action='relay.snapshot-attachment'"
+        ).fetchone()[0]
+    assert artifact_count == 1
+    assert audit_count == 2
+    assert client.app.state.catalog_store.records("snapshots") == []
 
 
 def test_snapshot_disposition_is_durable_and_never_changes_referenced_event(

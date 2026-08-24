@@ -139,7 +139,7 @@ def test_valid_video_200_and_206_append_one_success_audit_each(
         _login(client)
         with sqlite3.connect(AuditStore().path) as connection:
             before = connection.execute(
-                "SELECT COUNT(*) FROM audit_events WHERE action='clip.video'"
+                "SELECT COUNT(*) FROM audit_events WHERE action='clip.play'"
             ).fetchone()[0]
 
         # When: complete and satisfiable-range responses are prepared and served.
@@ -150,7 +150,7 @@ def test_valid_video_200_and_206_append_one_success_audit_each(
 
         with sqlite3.connect(AuditStore().path) as connection:
             after = connection.execute(
-                "SELECT COUNT(*) FROM audit_events WHERE action='clip.video'"
+                "SELECT COUNT(*) FROM audit_events WHERE action='clip.play'"
             ).fetchone()[0]
 
     # Then: both valid response classes are audited exactly once.

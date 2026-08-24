@@ -182,8 +182,19 @@ def test_connection(
 
 @router.post("/sync-cameras", response_model=CameraRosterSyncResponse)
 def sync_cameras(request: Request) -> dict[str, object]:
-    _authorize(request)
-    result = sync_camera_roster(request.app)
+    actor = _authorize(request)
+    result = sync_camera_roster(
+        request.app,
+        after_write=lambda connection: append_transactional(
+            request,
+            connection,
+            AuditEvent(
+                occurred_at=utc_now(), actor_id=actor,
+                action=AuditAction.CONNECTION_SYNC, target_id="camera-roster",
+                detail=empty_detail(AuditAction.CONNECTION_SYNC),
+            ),
+        ),
+    )
     return {
         "status": result.status,
         "error_class": result.error_class,

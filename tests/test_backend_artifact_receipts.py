@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import sqlite3
+from collections.abc import Callable
 from pathlib import Path
 from typing import BinaryIO
 
@@ -350,6 +351,8 @@ def test_real_route_rejects_media_swap_before_compact_commit(
         compact_store: CompactArtifactReceiptStore,
         receipt: ArtifactReceipt,
         route_verified: VerifiedArtifact,
+        *,
+        after_write: Callable[[sqlite3.Connection], None] | None = None,
     ) -> ArtifactReceipt:
         nonlocal observed_inode, verified_handle
         verified_handle = route_verified.handle
@@ -368,7 +371,9 @@ def test_real_route_rejects_media_swap_before_compact_commit(
                 raise AssertionError(unreachable)
         if media.exists():
             observed_inode = media.stat().st_ino
-        return original_commit(compact_store, receipt, route_verified)
+        return original_commit(
+            compact_store, receipt, route_verified, after_write=after_write
+        )
 
     monkeypatch.setattr(
         CompactArtifactReceiptStore,
@@ -505,10 +510,14 @@ def test_real_route_valid_compact_receipt_commits_and_closes_descriptor(
             self,
             receipt: ArtifactReceipt,
             route_verified: VerifiedArtifact,
+            *,
+            after_write: Callable[[sqlite3.Connection], None] | None = None,
         ) -> ArtifactReceipt:
             nonlocal captured_handle
             captured_handle = route_verified.handle
-            return super().commit_verified(receipt, route_verified)
+            return super().commit_verified(
+                receipt, route_verified, after_write=after_write
+            )
 
     store = ObservedStore(
         database,

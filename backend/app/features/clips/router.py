@@ -392,7 +392,7 @@ def clip_video(
         return response
     try:
         append_governed(
-            request, actor_id=actor, action=AuditAction.CLIP_VIDEO, target_id=manifest.clip_id
+            request, actor_id=actor, action=AuditAction.CLIP_PLAY, target_id=manifest.clip_id
         )
     except AuditUnavailableError:
         opened.handle.close()

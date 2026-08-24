@@ -684,6 +684,8 @@ def relay_snapshot_attachment(
 ) -> dict[str, str]:
     """Record one immutable media reference without accepting media bytes."""
 
+    if _project_snapshot_attachment(request, payload):
+        return {"status": "accepted"}
     store = get_catalog_store(request.app)
     if store is None:
         raise HTTPException(
@@ -706,7 +708,6 @@ def relay_snapshot_attachment(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="snapshot attachment storage unavailable",
         ) from error
-    _project_snapshot_attachment(request, payload)
     return {"status": "accepted"}
 
 
@@ -772,7 +773,7 @@ def _project_relay_event(request: Request, payload: RelayAlertRequest) -> bool:
                 connection,
                 AuditEvent(
                     occurred_at=audit_now(), actor_id="worker-relay",
-                    action=AuditAction.RELAY_ALERT, target_id=payload.edge_event_id,
+                    action=AuditAction.RELAY_ALERT, target_id=str(payload.edge_event_id),
                     detail=empty_detail(AuditAction.RELAY_ALERT),
                     actor_type=AuditActorType.SERVICE,
                     auth_mechanism=AuditAuthMechanism.RELAY_TOKEN,
@@ -795,11 +796,11 @@ def _project_relay_event(request: Request, payload: RelayAlertRequest) -> bool:
 
 def _project_snapshot_attachment(
     request: Request, payload: RelaySnapshotAttachmentRequest
-) -> None:
+) -> bool:
     try:
         projection = _relay_evidence_projection(request)
         if projection is None:
-            return
+            return False
         projection.attach_snapshot(
             edge_event_id=payload.edge_event_id,
             snapshot_id=payload.snapshot_id,
@@ -807,6 +808,18 @@ def _project_snapshot_attachment(
             media_reference=payload.media_reference,
             size_bytes=payload.size_bytes,
             mime_type=payload.mime_type,
+            after_write=lambda connection: append_transactional(
+                request,
+                connection,
+                AuditEvent(
+                    occurred_at=audit_now(), actor_id="worker-relay",
+                    action=AuditAction.RELAY_SNAPSHOT_ATTACHMENT,
+                    target_id=payload.snapshot_id,
+                    detail=empty_detail(AuditAction.RELAY_SNAPSHOT_ATTACHMENT),
+                    actor_type=AuditActorType.SERVICE,
+                    auth_mechanism=AuditAuthMechanism.RELAY_TOKEN,
+                ),
+            ),
         )
     except RelayEvidenceProjectionMissingEvent as error:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
@@ -821,6 +834,8 @@ def _project_snapshot_attachment(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="central evidence projection unavailable",
         ) from error
+    else:
+        return True
 
 
 def _project_snapshot_disposition(
@@ -835,6 +850,18 @@ def _project_snapshot_disposition(
             snapshot_id=payload.snapshot_id,
             disposition=payload.disposition,
             reason=payload.reason,
+            after_write=lambda connection: append_transactional(
+                request,
+                connection,
+                AuditEvent(
+                    occurred_at=audit_now(), actor_id="worker-relay",
+                    action=AuditAction.RELAY_SNAPSHOT_DISPOSITION,
+                    target_id=payload.snapshot_id,
+                    detail=empty_detail(AuditAction.RELAY_SNAPSHOT_DISPOSITION),
+                    actor_type=AuditActorType.SERVICE,
+                    auth_mechanism=AuditAuthMechanism.RELAY_TOKEN,
+                ),
+            ),
         )
     except RelayEvidenceProjectionMissingEvent as error:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error

@@ -111,6 +111,7 @@ class RelayEvidenceProjection:
         media_reference: str,
         size_bytes: int,
         mime_type: str,
+        after_write: Callable[[sqlite3.Connection], None] | None = None,
     ) -> None:
         snapshot = RelaySnapshot(
             snapshot_id=snapshot_id,
@@ -124,11 +125,19 @@ class RelayEvidenceProjection:
         try:
             with write_transaction(connection):
                 _put_snapshot(connection, _incident_for_event(connection, edge_event_id), snapshot)
+                if after_write is not None:
+                    after_write(connection)
         finally:
             connection.close()
 
     def record_snapshot_disposition(
-        self, *, edge_event_id: str, snapshot_id: str, disposition: str, reason: str
+        self,
+        *,
+        edge_event_id: str,
+        snapshot_id: str,
+        disposition: str,
+        reason: str,
+        after_write: Callable[[sqlite3.Connection], None] | None = None,
     ) -> None:
         terminal_reason = _bounded_reason(disposition, reason)
         connection = open_runtime_database(self.database_path, actor=RuntimeActor.API)
@@ -156,6 +165,8 @@ class RelayEvidenceProjection:
                     raise RelayEvidenceProjectionConflict(
                         "snapshot disposition conflicts with existing terminal fact"
                     )
+                if after_write is not None:
+                    after_write(connection)
         finally:
             connection.close()
 

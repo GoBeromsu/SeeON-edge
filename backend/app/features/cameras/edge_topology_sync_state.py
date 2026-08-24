@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 import sqlite3
-from collections.abc import Generator
+from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import StrEnum, unique
 from pathlib import Path
-from threading import Lock
+from threading import RLock
 from typing import Final, Protocol
 
 from backend.app.edge_db.configuration import (
@@ -67,12 +67,22 @@ class TopologySyncStateConflictError(RuntimeError):
 class EdgeTopologySyncStateStore:
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
-        self._lock = Lock()
+        self._lock = RLock()
         self._connection = open_configuration_database(self.path)
 
     def load(self) -> EdgeTopologySyncState:
         with self._lock:
             return self._load(self._connection)
+
+    @contextmanager
+    def operation(
+        self,
+        after_write: Callable[[sqlite3.Connection], None],
+    ) -> Generator[sqlite3.Connection]:
+        """Own one explicit sync route transaction, including all state stages."""
+        with self._lock, self._transaction() as connection:
+            yield connection
+            after_write(connection)
 
     def ensure_principal(self, principal: MachinePrincipal) -> EdgeTopologySyncState:
         with self._lock, self._transaction() as connection:
@@ -192,14 +202,16 @@ class EdgeTopologySyncStateStore:
 
     @contextmanager
     def _transaction(self) -> Generator[sqlite3.Connection]:
+        if self._connection.in_transaction:
+            yield self._connection
+            return
         self._connection.execute("BEGIN IMMEDIATE")
+        completed = False
         try:
             yield self._connection
-        except BaseException:
-            self._connection.execute("ROLLBACK")
-            raise
-        else:
-            self._connection.execute("COMMIT")
+            completed = True
+        finally:
+            self._connection.execute("COMMIT" if completed else "ROLLBACK")
 
     @staticmethod
     def _load(connection: sqlite3.Connection) -> EdgeTopologySyncState:

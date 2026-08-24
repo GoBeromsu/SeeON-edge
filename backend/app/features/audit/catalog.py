@@ -38,7 +38,6 @@ class AuditAction(StrEnum):
     LOCATION_UPDATE = "location.update"
     LOCATION_DELETE = "location.delete"
     BED_ZONE_UPDATE = "bed-zone.update"
-    BED_ZONE_DELETE = "bed-zone.delete"
     CONNECTION_UPDATE = "connection.update"
     CONNECTION_SYNC = "connection.sync"
     TOPOLOGY_CONFIRM = "topology.confirm"
@@ -53,7 +52,6 @@ class AuditAction(StrEnum):
     CLIP_LIST = "clip.list"
     CLIP_DETAIL = "clip.detail"
     CLIP_PLAY = "clip.play"
-    CLIP_VIDEO = "clip.video"
     CLIP_THUMBNAIL = "clip.thumbnail"
     CLIP_ARTIFACT = "clip.artifact"
     CLIP_DELETE = "clip.delete"
@@ -105,13 +103,13 @@ ACTION_DETAIL_CATALOG: Final = (
         AuditAction.CREDENTIAL_ROTATE, AuditAction.CAMERA_CREATE, AuditAction.CAMERA_UPDATE,
         AuditAction.CAMERA_DELETE, AuditAction.LOCATION_CREATE,
         AuditAction.LOCATION_UPDATE, AuditAction.LOCATION_DELETE, AuditAction.BED_ZONE_UPDATE,
-        AuditAction.BED_ZONE_DELETE, AuditAction.CONNECTION_UPDATE, AuditAction.CONNECTION_SYNC,
+        AuditAction.CONNECTION_UPDATE, AuditAction.CONNECTION_SYNC,
         AuditAction.TOPOLOGY_CONFIRM, AuditAction.CLIP_STORAGE_UPDATE,
         AuditAction.DETECTION_SETTINGS_UPDATE, AuditAction.RUNTIME_SETTINGS_UPDATE,
         AuditAction.POLICY_APPLY, AuditAction.POLICY_ROLLBACK, AuditAction.INCIDENT_LIST,
         AuditAction.INCIDENT_DETAIL, AuditAction.INCIDENT_REVIEW, AuditAction.CLIP_LIST,
-        AuditAction.CLIP_DETAIL, AuditAction.CLIP_PLAY, AuditAction.CLIP_VIDEO,
-        AuditAction.CLIP_THUMBNAIL, AuditAction.CLIP_ARTIFACT, AuditAction.CLIP_DELETE,
+        AuditAction.CLIP_DETAIL, AuditAction.CLIP_PLAY, AuditAction.CLIP_THUMBNAIL,
+        AuditAction.CLIP_ARTIFACT, AuditAction.CLIP_DELETE,
         AuditAction.EVIDENCE_RECEIPT, AuditAction.AUDIT_LIST, AuditAction.AUDIT_DETAIL,
         AuditAction.RELAY_ALERT, AuditAction.RELAY_SNAPSHOT_ATTACHMENT,
         AuditAction.RELAY_SNAPSHOT_DISPOSITION,

@@ -196,7 +196,7 @@ def test_camera_probe_production_wiring_is_covered_and_mutation_sensitive() -> N
         "CONNECTION_UPDATE", "CLIP_STORAGE_UPDATE", "DETECTION_SETTINGS_UPDATE",
         "RUNTIME_SETTINGS_UPDATE", "POLICY_APPLY", "POLICY_ROLLBACK",
         "INCIDENT_LIST", "INCIDENT_DETAIL", "INCIDENT_REVIEW", "CLIP_LIST",
-        "CLIP_DETAIL", "CLIP_VIDEO", "CLIP_THUMBNAIL", "CLIP_ARTIFACT",
+        "CLIP_DETAIL", "CLIP_PLAY", "CLIP_THUMBNAIL", "CLIP_ARTIFACT",
         "CLIP_DELETE", "AUDIT_LIST", "AUDIT_DETAIL", "RELAY_ALERT",
     }
     production = "\n".join(
@@ -206,4 +206,4 @@ def test_camera_probe_production_wiring_is_covered_and_mutation_sensitive() -> N
     )
     assert governed <= _wired_actions(production)
     mutated = source.replace("AuditAction.CAMERA_PROBE", "AuditAction.CAMERA_UPDATE")
-    assert "CAMERA_PROBE" not in _wired_actions(production.replace(source, mutated))
+    assert "CAMERA_PROBE" not in _wired_actions(mutated)

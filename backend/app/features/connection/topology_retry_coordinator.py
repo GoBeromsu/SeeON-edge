@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import secrets
+import sqlite3
 import threading
 import time
 import uuid
@@ -14,6 +15,7 @@ from backend.app.features.cameras.edge_topology_sync_state import (
     EdgeTopologySyncStateStore,
     PendingTopologySnapshot,
     TopologyPauseReason,
+    TopologySyncStateConflictError,
 )
 from backend.app.features.cameras.store import CameraRegistryStore
 from backend.app.features.cameras.topology_client import (
@@ -79,6 +81,7 @@ class TopologyRetryCoordinator:
         force: bool = False,
         refresh: bool = False,
         now_epoch: float | None = None,
+        after_write: Callable[[sqlite3.Connection], None] | None = None,
     ) -> TopologyRetryResult:
         now = time.time() if now_epoch is None else now_epoch
         if not self._lock.acquire(blocking=False):
@@ -87,35 +90,54 @@ class TopologyRetryCoordinator:
             client = self._client_provider()
             if client is None:
                 return self._unconfigured_result()
-            state = self._state_store.ensure_principal(client.principal)
-            state = self._resume_if_refreshed(client, state, refresh)
-            if state.pause_reason is not None:
-                return self.current_result(attempted=False)
-            if (
-                state.pending is not None
-                and not force
-                and state.next_retry_at is not None
-                and now < state.next_retry_at
-            ):
-                return self.current_result(attempted=False)
-            pending = state.pending
-            if pending is None:
-                topology = self._registry.topology_snapshot()
-                dirty = topology.dirty
-                if (
-                    dirty is None
-                    or dirty.registry_version <= state.last_snapshotted_registry_version
-                ):
-                    return self.current_result(attempted=False)
-                if topology.readiness_error is not None:
-                    return self._result(state, False, "pending", None, _INCOMPLETE)
-                pending = self._state_store.create_pending(
-                    TopologySnapshotBuilder(topology, client.principal, _uuid7())
+            if after_write is None:
+                return self._trigger(client, force=force, refresh=refresh, now=now)
+            with self._state_store.operation(after_write) as connection:
+                return self._trigger(
+                    client, force=force, refresh=refresh, now=now,
+                    connection=connection,
                 )
-            outcome = client.put(pending)
-            return self._record_outcome(outcome, pending.snapshot_id, now)
         finally:
             self._lock.release()
+
+    def _trigger(
+        self,
+        client: TopologyClientProtocol,
+        *,
+        force: bool,
+        refresh: bool,
+        now: float,
+        connection: sqlite3.Connection | None = None,
+    ) -> TopologyRetryResult:
+        state = self._state_store.ensure_principal(client.principal)
+        state = self._resume_if_refreshed(client, state, refresh)
+        if state.pause_reason is not None:
+            return self.current_result(attempted=False)
+        if (
+            state.pending is not None
+            and not force
+            and state.next_retry_at is not None
+            and now < state.next_retry_at
+        ):
+            return self.current_result(attempted=False)
+        pending = state.pending
+        if pending is None:
+            topology = self._registry.topology_snapshot()
+            dirty = topology.dirty
+            if (
+                dirty is None
+                or dirty.registry_version <= state.last_snapshotted_registry_version
+            ):
+                return self.current_result(attempted=False)
+            if topology.readiness_error is not None:
+                return self._result(state, False, "pending", None, _INCOMPLETE)
+            pending = self._state_store.create_pending(
+                TopologySnapshotBuilder(topology, client.principal, _uuid7())
+            )
+        outcome = client.put(pending)
+        return self._record_outcome(
+            outcome, pending.snapshot_id, now, connection=connection
+        )
 
     def current_result(self, *, attempted: bool = False) -> TopologyRetryResult:
         return current_retry_result(
@@ -125,8 +147,13 @@ class TopologyRetryCoordinator:
     def preview(self) -> TopologyConfirmationPreview | None:
         return self._confirmation.preview()
 
-    def confirm(self, command: TopologyConfirmationCommand) -> TopologyConfirmationResult:
-        return self._confirmation.confirm(command)
+    def confirm(
+        self,
+        command: TopologyConfirmationCommand,
+        *,
+        after_write: Callable[[sqlite3.Connection], None] | None = None,
+    ) -> TopologyConfirmationResult:
+        return self._confirmation.confirm(command, after_write=after_write)
 
     def _resume_if_refreshed(
         self,
@@ -145,15 +172,23 @@ class TopologyRetryCoordinator:
         return self._state_store.resume_pending(pending.snapshot_id)
 
     def _record_outcome(
-        self, outcome: TopologyPutResult, snapshot_id: str, now: float
+        self,
+        outcome: TopologyPutResult,
+        snapshot_id: str,
+        now: float,
+        *,
+        connection: sqlite3.Connection | None = None,
     ) -> TopologyRetryResult:
         match outcome:
             case TopologyAccepted(response=response):
                 pending = self._state_store.load().pending
                 if pending is None:
-                    raise RuntimeError("accepted topology has no pending snapshot")
+                    raise TopologySyncStateConflictError(
+                        "accepted topology has no pending snapshot"
+                    )
                 self._confirmation.save_preview(
-                    response, pending.principal, pending.registry_version
+                    response, pending.principal, pending.registry_version,
+                    connection=connection,
                 )
                 state = self._state_store.accept(snapshot_id, response, now_epoch=now)
                 return self._result(state, True, "synced", None, None)

@@ -205,7 +205,7 @@ def test_invalid_video_range_appends_no_success_audit(
         _login(client)
         with sqlite3.connect(_database_path()) as connection:
             before = connection.execute(
-                "SELECT COUNT(*) FROM audit_events WHERE action='clip.video'"
+                "SELECT COUNT(*) FROM audit_events WHERE action='clip.play'"
             ).fetchone()[0]
 
         # When: range preparation rejects a non-overlapping request.
@@ -215,7 +215,7 @@ def test_invalid_video_range_appends_no_success_audit(
 
         with sqlite3.connect(_database_path()) as connection:
             after = connection.execute(
-                "SELECT COUNT(*) FROM audit_events WHERE action='clip.video'"
+                "SELECT COUNT(*) FROM audit_events WHERE action='clip.play'"
             ).fetchone()[0]
 
     # Then: 416 is not recorded as successful access.
