@@ -612,8 +612,9 @@ def test_catalog_migration_from_v1_adds_v3_tables_and_promotes_columns(tmp_path)
                 "SELECT name FROM sqlite_master WHERE type = 'table'"
             ).fetchall()
         }
-        assert {"credentials", "camera_registry", "runtime_latency"} <= tables
-        for table in ("credentials", "camera_registry", "runtime_latency"):
+        assert {"credentials", "camera_registry"} <= tables
+        assert "runtime_latency" not in tables
+        for table in ("credentials", "camera_registry"):
             count = store._connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
             assert count == 0, f"expected {table} to start empty, found {count} row(s)"
 
@@ -693,9 +694,10 @@ def test_catalog_migration_from_v2_adds_v3_tables_without_touching_legacy_camera
                 "SELECT name FROM sqlite_master WHERE type = 'table'"
             ).fetchall()
         }
-        assert {"credentials", "camera_registry", "runtime_latency"} <= tables
+        assert {"credentials", "camera_registry"} <= tables
+        assert "runtime_latency" not in tables
 
-        for table in ("credentials", "camera_registry", "runtime_latency"):
+        for table in ("credentials", "camera_registry"):
             count = store._connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
             assert count == 0, f"expected {table} to start empty, found {count} row(s)"
 

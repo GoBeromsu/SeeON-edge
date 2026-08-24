@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import threading
 from collections.abc import Mapping
 from pathlib import Path
@@ -1128,47 +1129,61 @@ def test_status_keeps_unknown_camera_beside_known_mapped_camera(
     assert runtime_cameras["local-uuid-1"].get("unresolved") is not True
 
 
-def test_latency_max_persists_and_excludes_nonfirst_attempts(tmp_path: Path) -> None:
-    state_path = tmp_path / "catalog.sqlite3"
-    store = RuntimeStatusStore(latency_state_path=state_path)
+def test_latency_is_latest_memory_only_and_missing_after_restart(tmp_path: Path) -> None:
+    database = tmp_path / "edge.sqlite3"
+    from backend.app.edge_db.migrator import migrate_database
 
+    migrate_database(database)
+    store = RuntimeStatusStore()
     store.record_latency("facility-1", "1970-01-01T00:00:00Z", received_at=10.0)
     store.record_latency("facility-1", "1970-01-01T00:00:00Z", received_at=20.0)
-    restarted = RuntimeStatusStore(latency_state_path=state_path)
-    restarted.record_latency("facility-1", "1970-01-01T00:00:00Z", received_at=11.0)
+    store.record(_payload(), received_at=21.0)
+    live = store.snapshot(now=21.0)["facilities"]["facility-1"]["latency"]
+    restarted = RuntimeStatusStore()
     restarted.record(_payload(), received_at=21.0)
 
-    latency = restarted.snapshot()["facilities"]["facility-1"]["latency"]
-    assert latency == {"first_attempt_samples": 3, "max_sec": 20.0, "since_sec": 10.0}
+    assert live == {"first_attempt_samples": 2, "max_sec": 20.0, "since_sec": 10.0}
+    assert restarted.snapshot(now=21.0)["facilities"]["facility-1"]["latency"] is None
+    with sqlite3.connect(database) as connection:
+        tables = {
+            str(row[0])
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+            )
+        }
+    assert "runtime_latency" not in tables
+    assert "control_heartbeats" not in tables
 
 
-def test_persist_latency_degrades_gracefully_when_the_connection_is_unusable(
-    tmp_path: Path, caplog: pytest.LogCaptureFixture
-) -> None:
-    """A broken SQLite connection at persist time must not crash the caller
-    -- the store keeps functioning in-memory for the rest of the process
-    lifetime, it just loses latency history across restarts. Mirrors the
-    pre-SQLite-conversion OSError-only degradation contract, now broadened to
-    also catch sqlite3.Error since the failure surface changed from file I/O
-    to SQL."""
-    state_path = tmp_path / "catalog.sqlite3"
-    store = RuntimeStatusStore(latency_state_path=state_path)
-    store.record_latency("facility-1", "1970-01-01T00:00:00Z", received_at=10.0)
+def test_runtime_status_missing_is_not_zeroed_success() -> None:
+    store = RuntimeStatusStore(stale_after_sec=15.0)
 
-    # Simulate the connection breaking underneath the store between a
-    # successful load and a subsequent persist (e.g. the underlying file
-    # became unwritable, or SQLite closed the connection on error).
-    store._connection.close()
+    snapshot = store.snapshot(now=100.0)
 
-    with caplog.at_level("WARNING"):
-        store.record_latency("facility-1", "1970-01-01T00:00:00Z", received_at=20.0)
+    assert snapshot["facilities"] == {}
+    assert snapshot["stale_after_sec"] == 15.0
 
-    assert f"runtime latency store unavailable at {state_path}" in caplog.text
-    # The store still functions in-memory: the new sample is reflected even
-    # though it could not be durably persisted.
-    latency = store._latency_for_facility("facility-1")
-    assert latency == {"first_attempt_samples": 2, "max_sec": 20.0, "since_sec": 10.0}
-    assert store.snapshot()["facilities"] == {}
+
+def test_runtime_status_valid_empty_cameras_is_not_missing() -> None:
+    store = RuntimeStatusStore(stale_after_sec=15.0)
+    store.record(_payload(cameras=[]), received_at=100.0)
+
+    snapshot = store.snapshot(now=100.0)
+    facility = snapshot["facilities"]["facility-1"]
+
+    assert facility["stale"] is False
+    assert facility["cameras"] == []
+    assert facility["received_at"] == 100.0
+
+
+def test_runtime_status_future_received_at_is_not_accepted_as_fresh() -> None:
+    store = RuntimeStatusStore(stale_after_sec=15.0, clock=lambda: 100.0)
+    result = store.record(_payload(), received_at=1_000.0)
+
+    snapshot = store.snapshot(now=100.0)
+
+    assert result.accepted is False
+    assert snapshot["facilities"] == {}
 
 
 def test_runtime_status_none_generation_is_issued_and_retransmission_keeps_it() -> None:

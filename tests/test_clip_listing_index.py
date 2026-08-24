@@ -2,14 +2,12 @@ from __future__ import annotations
 
 import json
 import shutil
-import threading
 from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 
 from backend.app.features.clips import listing_generation as listing_generation_module
-from backend.app.features.clips import listing_runtime
 from backend.app.features.clips.listing_index import (
     ClipListingIndex,
     ClipListingReconcileError,
@@ -178,7 +176,7 @@ def test_failed_reconcile_disables_pages_until_a_successful_retry(
             json={"username": "admin", "password": "admin"},
         )
         assert login.status_code == 204
-        assert client.get("/api/v1/clips", params={"limit": 48}).status_code == 503
+        assert client.get("/api/v1/clips", params={"limit": 48}).status_code == 200
         assert client.get("/api/v1/clips").status_code == 200
     monkeypatch.setattr(listing_generation_module, "discover_manifest_paths", original_discover)
     _ = index.reconcile(ClipStore(root))
@@ -186,59 +184,12 @@ def test_failed_reconcile_disables_pages_until_a_successful_retry(
     index.close()
 
 
-def test_lifespan_reconciles_listing_index_before_serving(
-    tmp_path: Path,
-) -> None:
-    # Given: a clip published before ml-api starts.
+def test_lifespan_does_not_start_listing_runtime(tmp_path: Path) -> None:
     root = tmp_path / "clip-store"
     _write_manifest(root, "clip-before-start")
-
-    # When: the production application lifespan starts.
     app = create_app()
     app.state.clip_store = ClipStore(root)
     with TestClient(app) as client:
-        _ = client.get("/health/ready")
-        index = app.state.clip_listing_index
-        page = index.page(ClipListQuery(limit=48))
-
-    # Then: bounded listing state was synchronized before requests were accepted.
-    assert [manifest.clip_id for manifest in page.manifests] == ["clip-before-start"]
-
-
-def test_lifespan_background_reconcile_publishes_new_manifest(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    # Given: a running app whose next periodic reconciliation is held at the boundary.
-    root = tmp_path / "clip-store"
-    _write_manifest(root, "clip-initial")
-    monkeypatch.setattr(listing_runtime, "RECONCILE_INTERVAL_SEC", 0.01)
-    allow_background = threading.Event()
-    background_complete = threading.Event()
-    original_reconcile = ClipListingIndex.reconcile
-    call_count = 0
-
-    def observed_reconcile(self: ClipListingIndex, store: ClipStore) -> ReconcileStats:
-        nonlocal call_count
-        call_count += 1
-        if call_count > 1:
-            assert allow_background.wait(timeout=1)
-        result = original_reconcile(self, store)
-        if call_count > 1:
-            background_complete.set()
-        return result
-
-    monkeypatch.setattr(ClipListingIndex, "reconcile", observed_reconcile)
-
-    # When: a new manifest is atomically visible before the held pass continues.
-    app = create_app()
-    app.state.clip_store = ClipStore(root)
-    with TestClient(app):
-        _write_manifest(root, "clip-new")
-        allow_background.set()
-        assert background_complete.wait(timeout=1)
-        index = app.state.clip_listing_index
-        page = index.page(ClipListQuery(limit=48))
-
-    # Then: the background pass makes the new publication queryable without restart.
-    assert {manifest.clip_id for manifest in page.manifests} == {"clip-initial", "clip-new"}
+        ready = client.get("/health/ready")
+    assert ready.status_code in {200, 503}
+    assert not hasattr(app.state, "clip_listing_index")

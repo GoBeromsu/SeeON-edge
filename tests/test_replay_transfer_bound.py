@@ -141,106 +141,25 @@ def test_the_per_frame_bound_is_not_optimistic() -> None:
     )
 
 
-def test_recovery_is_bounded_to_the_retention_window(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Recovery must not return unbounded history.
+def test_persisted_analysis_recovery_is_retired() -> None:
+    import importlib
 
-    `recover()` selected every row for a camera with no limit. On a long-running
-    deployment that returns far more than the retention window and more than the
-    transfer bound permits, so the replay request would be refused at the
-    boundary for a camera whose recent history was perfectly recoverable.
+    with pytest.raises(ModuleNotFoundError):
+        importlib.import_module("backend.app.features.qa.runtime_trace_store")
 
-    The limit is patched down rather than seeding three thousand rows: the
-    property under test is that the query is bounded by the declared constant,
-    not the size of the constant.
-    """
+
+def test_schema18_does_not_grow_runtime_analysis_tables(tmp_path: Path) -> None:
     import sqlite3
 
-    from replay_fixtures import valid_trace_payload
-
     from backend.app.edge_db.migrator import migrate_database
-    from backend.app.features.qa import runtime_trace_store as store_module
-    from shared.events.replay_wire import decode_replay_trace
 
     database = tmp_path / "edge.sqlite3"
     migrate_database(database)
-    store = store_module.RuntimeAnalysisStore(database)
-
-    payload = valid_trace_payload()
-    camera_id = str(payload["camera_id"])
-    template = payload["frames"][0]  # type: ignore[index]
-    for index in range(5):
-        frame = {**template}
-        frame["trace_id"] = f"{index:064d}"
-        frame["frame_key"] = [*template["frame_key"][:3], index + 1]  # type: ignore[index]
-        store.ingest(
-            decode_replay_trace({**payload, "frames": [frame]})
-        )
-
     with sqlite3.connect(database) as connection:
-        seeded = connection.execute(
-            "SELECT COUNT(*) FROM runtime_analysis_traces WHERE camera_id = ?", (camera_id,)
-        ).fetchone()[0]
-    assert seeded == 5, "the fixture did not seed distinct frames"
-
-    monkeypatch.setattr(store_module, "MAX_TRACE_FRAMES", 2)
-    recovered = store.recover(camera_id)
-
-    assert len(recovered.frames) == 2, (
-        f"recovery returned {len(recovered.frames)} frames against a declared "
-        f"window of 2; an unbounded query returns more than the transfer bound "
-        f"can carry and the replay request is refused at the boundary"
-    )
-
-
-def test_backend_trace_storage_is_bounded_not_unbounded(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Ingest must prune, or the edge database grows forever.
-
-    `runtime_analysis_*` carried no DELETE at all, so every camera publishing
-    analysis traces grew the edge database without bound -- unbounded growth of
-    the very database this ownership change centres on, on a device with finite
-    storage. Recovery is limited to the retention window, so anything older is
-    storage nobody can read.
-    """
-    import sqlite3
-
-    from replay_fixtures import valid_trace_payload
-
-    from backend.app.edge_db.migrator import migrate_database
-    from backend.app.features.qa import runtime_trace_store as store_module
-    from shared.events.replay_wire import decode_replay_trace
-
-    database = tmp_path / "edge.sqlite3"
-    migrate_database(database)
-    monkeypatch.setattr(store_module, "MAX_TRACE_FRAMES", 3)
-    store = store_module.RuntimeAnalysisStore(database)
-
-    payload = valid_trace_payload()
-    camera_id = str(payload["camera_id"])
-    template = payload["frames"][0]  # type: ignore[index]
-    for index in range(8):
-        frame = {**template}
-        frame["trace_id"] = f"{index:064d}"
-        frame["frame_key"] = [*template["frame_key"][:3], index + 1]  # type: ignore[index]
-        store.ingest(decode_replay_trace({**payload, "frames": [frame]}))
-
-    with sqlite3.connect(database) as connection:
-        stored = connection.execute(
-            "SELECT COUNT(*) FROM runtime_analysis_traces WHERE camera_id = ?", (camera_id,)
-        ).fetchone()[0]
-
-    assert stored == 3, (
-        f"{stored} frames retained against a window of 3; ingest is not pruning "
-        f"and the edge database grows without bound"
-    )
-
-    # Pruning must trim the front, never the middle: a late-starting window is
-    # replayable, a holed one is refused.
-    recovered = store.recover(camera_id)
-    sequences = [frame["frame_key"][3] for frame in recovered.frames]  # type: ignore[index]
-    assert sequences == [6, 7, 8], (
-        f"retained {sequences}; pruning must keep the newest contiguous window"
-    )
+        tables = {
+            str(row[0])
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+            )
+        }
+    assert not any(name.startswith("runtime_analysis_") for name in tables)

@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
-from collections.abc import Iterable
 from pathlib import Path
 from time import perf_counter
 
@@ -11,7 +10,6 @@ import pytest
 from fastapi.testclient import TestClient
 
 from backend.app.edge_db.migrator import migrate_database
-from backend.app.features.clips import listing_repository
 from backend.app.features.clips.listing_index import (
     ClipListingIndex,
     ClipListingReconcileError,
@@ -245,27 +243,24 @@ def test_runtime_open_on_migrated_edge_database_executes_no_ddl(
     # Given: the one-shot migrator has provisioned the complete central database.
     path = tmp_path / "edge.sqlite3"
     migrate_database(path)
-    statements: list[str] = []
-    connect = listing_repository.connect_catalog_store
+    from backend.app.edge_db.connection import RuntimeActor, open_runtime_database
 
-    def connect_traced(database: Path, create_statements: Iterable[str]) -> sqlite3.Connection:
-        connection = connect(database, create_statements)
-        connection.set_trace_callback(statements.append)
-        return connection
-
-    monkeypatch.setattr(listing_repository, "connect_catalog_store", connect_traced)
-
-    # When: listing runtime repositories repeatedly open the migrated database.
-    for _ in range(2):
-        repository = listing_repository.ListingRepository.open(path)
-        repository.close()
-
-    # Then: runtime only validates existing schema and never attempts DDL.
-    ddl_prefixes = ("ALTER ", "CREATE ", "DROP ", "REINDEX ", "VACUUM ")
-    assert statements
-    assert not [
-        statement for statement in statements if statement.lstrip().upper().startswith(ddl_prefixes)
-    ]
+    connection = open_runtime_database(path, actor=RuntimeActor.API)
+    try:
+        tables = {
+            str(row[0])
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+            )
+        }
+        with pytest.raises(sqlite3.DatabaseError):
+            connection.execute(
+                "CREATE TABLE clip_listing_generation (id INTEGER PRIMARY KEY, "
+                "active_generation INTEGER NOT NULL, next_generation INTEGER NOT NULL) STRICT"
+            )
+    finally:
+        connection.close()
+    assert "clip_listing_generation" not in tables
 
 
 def test_listing_lifespan_can_enter_same_app_twice(
@@ -278,17 +273,18 @@ def test_listing_lifespan_can_enter_same_app_twice(
     app.state.clip_store = ClipStore(root)
 
     # When: the same application's production lifespan is entered twice.
-    indexes: list[ClipListingIndex] = []
+    pages: list[int] = []
     for _ in range(2):
         with TestClient(app) as client:
             _login(client)
             response = client.get("/api/v1/clips", params={"limit": 48})
             assert response.status_code == 200
-            indexes.append(app.state.clip_listing_index)
+            pages.append(len(response.json()["clips"]))
+            assert not hasattr(app.state, "clip_listing_index")
         assert not hasattr(app.state, "clip_listing_index")
 
-    # Then: the second entry owns a fresh open index instead of reusing closed state.
-    assert indexes[0] is not indexes[1]
+    # Then: compact listing serves both entries without a listing-runtime index.
+    assert pages == [1, 1]
 
 
 def test_reconcile_after_close_returns_typed_unavailable_error(tmp_path: Path) -> None:

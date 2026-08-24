@@ -40,7 +40,6 @@ from backend.app.features.evidence.relay_projection import (
     RelayEvidenceProjectionMissingEvent,
     RelaySnapshot,
 )
-from backend.app.features.qa.runtime_trace_store import RuntimeAnalysisStore, RuntimeTraceConflict
 from backend.app.features.relay.auth import authorize_relay
 from backend.app.features.status.heartbeat_store import get_heartbeat_store
 from backend.app.features.status.runtime_status_store import get_runtime_status_store
@@ -957,9 +956,6 @@ def relay_analysis_trace(
         )
     try:
         trace = decode_replay_trace(payload.model_dump())
-        RuntimeAnalysisStore(EDGE_DATABASE_PATH).ingest(trace)
-    except RuntimeTraceConflict as exc:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     except ReplayWireError as exc:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)

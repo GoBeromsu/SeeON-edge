@@ -11,7 +11,7 @@ import sys
 import urllib.request
 from collections.abc import AsyncIterator
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import AsyncExitStack, asynccontextmanager
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from threading import Lock
@@ -27,7 +27,6 @@ from backend.app.features.audit.startup import (
 )
 from backend.app.features.cameras.store import CameraRegistryStore
 from backend.app.features.clips.catalog import CatalogStore
-from backend.app.features.clips.listing_runtime import maintain_clip_listing
 from backend.app.features.status.backend_heartbeat_relay import (
     effective_relay_interval_sec,
     get_heartbeat_relay_state,
@@ -96,7 +95,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     if not isinstance(getattr(app.state, "heartbeat_store", None), HeartbeatStore):
         app.state.heartbeat_store = HeartbeatStore(
-            stale_after_sec=_heartbeat_stale_after_sec(), database_path=EDGE_DATABASE_PATH
+            stale_after_sec=_heartbeat_stale_after_sec()
         )
     if not isinstance(getattr(app.state, "runtime_status_store", None), RuntimeStatusStore):
         app.state.runtime_status_store = RuntimeStatusStore()
@@ -160,8 +159,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.backend_heartbeat_relay_executor = None
         app.state.backend_heartbeat_relay_task = None
 
-    clip_listing_stack = AsyncExitStack()
-    await clip_listing_stack.enter_async_context(maintain_clip_listing(app))
     app.state.readiness = (
         {"ready": True, "status": "ready"}
         if audit_healthy
@@ -171,7 +168,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         yield
     finally:
         close_audit_session(app)
-        await clip_listing_stack.aclose()
         refresh_stop.set()
         refresh_task = app.state.backend_config_refresh_task
         try:

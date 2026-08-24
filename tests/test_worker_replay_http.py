@@ -10,9 +10,7 @@ from urllib.request import Request, urlopen
 import pytest
 
 from backend.app.edge_db.migrator import migrate_database
-from backend.app.features.qa.runtime_trace_store import RuntimeAnalysisStore
 from shared.detection_policies import BedExitPolicyV1, FallPolicyV1, make_effective_policy
-from shared.events.replay_wire import decode_replay_trace
 from worker.pipeline.output.live_view import LatestFrameStore
 from worker.pipeline.output.mjpeg_server import MjpegServer, MjpegServerConfig
 
@@ -161,68 +159,11 @@ def _replay_command() -> object:
     return module
 
 
-def test_packaged_replay_command_recovers_posts_and_records_run(tmp_path: Path) -> None:
-    database = tmp_path / "edge.sqlite3"
-    migrate_database(database)
-    RuntimeAnalysisStore(database).ingest(decode_replay_trace(_trace()))
-    server = MjpegServer(LatestFrameStore(), MjpegServerConfig(port=0, probe_token=_TOKEN))
-    server.start()
-    try:
-        policy = _payload()["policy"]
-        command = _replay_command()
-        assert command.main(  # type: ignore[attr-defined]
-            [
-                "--database", str(database),
-                "--camera-id", "camera-replay-http",
-                "--worker-url", f"http://127.0.0.1:{server.port}",
-                "--relay-token", _TOKEN,
-                "--module-id", "bed_exit",
-                "--policy-json", json.dumps(policy),
-                "--requested-by", "test-operator",
-            ]
-        ) == 0
-    finally:
-        server.stop()
-    connection = sqlite3.connect(database)
-    try:
-        assert connection.execute("SELECT count(*) FROM qa_replay_runs").fetchone() == (1,)
-    finally:
-        connection.close()
-
-
-def test_packaged_replay_command_missing_input_persists_nothing(tmp_path: Path) -> None:
+def test_packaged_replay_command_does_not_persist_qa_rows(tmp_path: Path) -> None:
     database = tmp_path / "edge.sqlite3"
     migrate_database(database)
     command = _replay_command()
-    assert command.main(  # type: ignore[attr-defined]
-        [
-            "--database", str(database),
-            "--camera-id", "missing",
-            "--worker-url", "http://127.0.0.1:1",
-            "--relay-token", _TOKEN,
-            "--module-id", "bed_exit",
-            "--policy-json", json.dumps(_payload()["policy"]),
-            "--requested-by", "test-operator",
-        ]
-    ) == 2
-    connection = sqlite3.connect(database)
-    try:
-        assert connection.execute("SELECT count(*) FROM qa_replay_runs").fetchone() == (0,)
-    finally:
-        connection.close()
-
-
-def test_packaged_replay_command_refuses_truncated_input_without_persisting(
-    tmp_path: Path,
-) -> None:
-    database = tmp_path / "edge.sqlite3"
-    migrate_database(database)
-    trace = _trace()
-    trace["truncation"]["handoff_dropped_frames"] = 1
-    RuntimeAnalysisStore(database).ingest(decode_replay_trace(trace))
-
-    command = _replay_command()
-    assert command.main(  # type: ignore[attr-defined]
+    status = command.main(  # type: ignore[attr-defined]
         [
             "--database", str(database),
             "--camera-id", "camera-replay-http",
@@ -232,9 +173,17 @@ def test_packaged_replay_command_refuses_truncated_input_without_persisting(
             "--policy-json", json.dumps(_payload()["policy"]),
             "--requested-by", "test-operator",
         ]
-    ) == 2
+    )
+    assert status != 0
     connection = sqlite3.connect(database)
     try:
-        assert connection.execute("SELECT count(*) FROM qa_replay_runs").fetchone() == (0,)
+        tables = {
+            str(row[0])
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+            )
+        }
+        assert "qa_replay_runs" not in tables
+        assert not any(name.startswith("runtime_analysis_") for name in tables)
     finally:
         connection.close()

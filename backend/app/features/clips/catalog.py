@@ -180,10 +180,6 @@ _V3_TABLE_STATEMENTS = (
         "CREATE TABLE IF NOT EXISTS camera_registry (id INTEGER PRIMARY KEY CHECK (id = 1), "
         "registry_version INTEGER NOT NULL, cameras_json TEXT NOT NULL) STRICT"
     ),
-    (
-        "CREATE TABLE IF NOT EXISTS runtime_latency (facility_id TEXT PRIMARY KEY, "
-        "payload_json TEXT NOT NULL) STRICT"
-    ),
 )
 _CREATE_STATEMENTS = (*_CATALOG_TABLE_STATEMENTS, *_V3_TABLE_STATEMENTS)
 _INDEX_STATEMENTS = (

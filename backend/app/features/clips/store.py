@@ -215,7 +215,7 @@ class LabelStore:
     def save(self, record: LabelRecord) -> bool:
         """Best-effort persist; an unwritable state dir must not crash the caller.
 
-        Mirrors ``RuntimeStatusStore._persist_latency``'s graceful-degradation
+        Mirrors catalog-store graceful-degradation
         pattern (``backend/app/features/status/runtime_status_store.py``): a
         label write that cannot land durably is dropped (with a warning)
         rather than crashing the labeling request. Returns ``True`` only when

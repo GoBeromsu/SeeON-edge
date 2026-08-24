@@ -1,5 +1,5 @@
 """Shared connect-and-bootstrap logic for the three ``catalog.sqlite3``-owning
-stores (``CameraRegistryStore``, ``RuntimeStatusStore``, ``DashboardCredentialsStore``).
+stores (``CameraRegistryStore``, ``DashboardCredentialsStore``).
 
 Each of those stores independently opens the shared catalog database and
 idempotently creates its own single table via ``CREATE TABLE IF NOT EXISTS``
