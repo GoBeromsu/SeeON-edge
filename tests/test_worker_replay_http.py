@@ -159,22 +159,7 @@ def _replay_command() -> object:
     return module
 
 
-def test_packaged_replay_command_does_not_persist_qa_rows(tmp_path: Path) -> None:
-    database = tmp_path / "edge.sqlite3"
-    migrate_database(database)
-    command = _replay_command()
-    status = command.main(  # type: ignore[attr-defined]
-        [
-            "--database", str(database),
-            "--camera-id", "camera-replay-http",
-            "--worker-url", "http://127.0.0.1:1",
-            "--relay-token", _TOKEN,
-            "--module-id", "bed_exit",
-            "--policy-json", json.dumps(_payload()["policy"]),
-            "--requested-by", "test-operator",
-        ]
-    )
-    assert status != 0
+def _assert_no_replay_tables(database: Path) -> None:
     connection = sqlite3.connect(database)
     try:
         tables = {
@@ -183,7 +168,88 @@ def test_packaged_replay_command_does_not_persist_qa_rows(tmp_path: Path) -> Non
                 "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
             )
         }
-        assert "qa_replay_runs" not in tables
-        assert not any(name.startswith("runtime_analysis_") for name in tables)
     finally:
         connection.close()
+    assert "qa_replay_runs" not in tables
+    assert not any(name.startswith("runtime_analysis_") for name in tables)
+
+
+def test_packaged_replay_command_posts_without_persisting(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    database = tmp_path / "edge.sqlite3"
+    migrate_database(database)
+    trace_path = tmp_path / "trace.json"
+    _ = trace_path.write_text(json.dumps(_trace()), encoding="utf-8")
+    server = MjpegServer(LatestFrameStore(), MjpegServerConfig(port=0, probe_token=_TOKEN))
+    server.start()
+    try:
+        status = _replay_command().main(  # type: ignore[attr-defined]
+            [
+                "--database", str(database),
+                "--camera-id", "camera-replay-http",
+                "--worker-url", f"http://127.0.0.1:{server.port}",
+                "--relay-token", _TOKEN,
+                "--module-id", "bed_exit",
+                "--policy-json", json.dumps(_payload()["policy"]),
+                "--requested-by", "test-operator",
+                "--trace-json", str(trace_path),
+            ]
+        )
+    finally:
+        server.stop()
+    printed = json.loads(capsys.readouterr().out)
+    assert status == 0
+    assert printed["reproducible"] is True
+    assert printed["event_count"] == 0
+    _assert_no_replay_tables(database)
+
+
+def test_packaged_replay_command_missing_input_does_not_open_sqlite(tmp_path: Path) -> None:
+    database = tmp_path / "edge.sqlite3"
+    migrate_database(database)
+    status = _replay_command().main(  # type: ignore[attr-defined]
+        [
+            "--database", str(database),
+            "--camera-id", "missing",
+            "--worker-url", "http://127.0.0.1:1",
+            "--relay-token", _TOKEN,
+            "--module-id", "bed_exit",
+            "--policy-json", json.dumps(_payload()["policy"]),
+            "--requested-by", "test-operator",
+        ]
+    )
+    assert status == 2
+    _assert_no_replay_tables(database)
+
+
+def test_packaged_replay_command_refuses_truncated_input_without_persisting(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "edge.sqlite3"
+    migrate_database(database)
+    trace = _trace()
+    truncation = trace["truncation"]
+    assert isinstance(truncation, dict)
+    truncation["handoff_dropped_frames"] = 1
+    trace_path = tmp_path / "trace.json"
+    _ = trace_path.write_text(json.dumps(trace), encoding="utf-8")
+    server = MjpegServer(LatestFrameStore(), MjpegServerConfig(port=0, probe_token=_TOKEN))
+    server.start()
+    try:
+        status = _replay_command().main(  # type: ignore[attr-defined]
+            [
+                "--database", str(database),
+                "--camera-id", "camera-replay-http",
+                "--worker-url", f"http://127.0.0.1:{server.port}",
+                "--relay-token", _TOKEN,
+                "--module-id", "bed_exit",
+                "--policy-json", json.dumps(_payload()["policy"]),
+                "--requested-by", "test-operator",
+                "--trace-json", str(trace_path),
+            ]
+        )
+    finally:
+        server.stop()
+    assert status == 2
+    _assert_no_replay_tables(database)

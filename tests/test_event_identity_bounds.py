@@ -90,36 +90,39 @@ def test_flood_journal_compacts_to_max_bytes_keeping_newest(tmp_path: Path) -> N
     assert store.resolve(oldest_key) != json.loads(payload[0])["edge_event_id"]
 
 
-def test_malformed_truncated_duplicate_and_future_lines_do_not_corrupt_valid(
-    tmp_path: Path,
+@pytest.mark.parametrize(
+    "bad_line",
+    [
+        "{not-json",
+        '{"source_key":"truncated","edge_event_id":"',
+        _line("valid", str(uuid4()), 60.0),
+        _line("future", str(uuid4()), 10_000.0),
+    ],
+)
+def test_mixed_valid_and_invalid_journal_fails_closed_without_rewrite(
+    tmp_path: Path, bad_line: str
 ) -> None:
     path = tmp_path / "identities.jsonl"
     valid_id = str(uuid4())
-    duplicate_id = str(uuid4())
-    future_id = str(uuid4())
-    path.write_text(
-        "\n".join(
-            [
-                _line("valid", valid_id, 50.0),
-                "{not-json",
-                _line("valid", duplicate_id, 60.0),
-                _line("future", future_id, 10_000.0),
-                '{"source_key":"truncated","edge_event_id":"',
-            ]
-        )
-        + "\n",
-        encoding="utf-8",
-    )
+    original = "\n".join([_line("valid", valid_id, 50.0), bad_line]) + "\n"
+    path.write_text(original, encoding="utf-8")
 
-    store = EventIdentityStore(path, clock=_Clock(100.0))
+    with pytest.raises(EventIdentityStoreError):
+        EventIdentityStore(path, clock=_Clock(100.0))
 
-    assert store.resolve("valid") == valid_id
-    assert store.resolve("future") != future_id
-    retained = path.read_text(encoding="utf-8")
-    assert valid_id in retained
-    assert duplicate_id not in retained
-    assert future_id not in retained
-    assert "not-json" not in retained
+    assert path.read_text(encoding="utf-8") == original
+    assert valid_id in original
+
+
+def test_malformed_only_journal_fails_closed_without_rewrite(tmp_path: Path) -> None:
+    path = tmp_path / "identities.jsonl"
+    original = "{ this is not valid json\n"
+    path.write_text(original, encoding="utf-8")
+
+    with pytest.raises(EventIdentityStoreError):
+        EventIdentityStore(path, clock=_Clock(100.0))
+
+    assert path.read_text(encoding="utf-8") == original
 
 
 def test_legacy_untimestamped_line_is_retained(tmp_path: Path) -> None:

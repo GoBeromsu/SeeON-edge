@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import hashlib
-import logging
 import os
 import tempfile
 import threading
@@ -15,7 +14,6 @@ from pydantic import UUID4, BaseModel, ConfigDict, ValidationError
 
 RETENTION_SEC: Final = 90 * 24 * 3600
 MAX_JOURNAL_BYTES: Final = 16 * 1024 * 1024
-_LOGGER: Final = logging.getLogger(__name__)
 Clock: TypeAlias = Callable[[], float]
 
 
@@ -60,9 +58,7 @@ class EventIdentityStore:
         self._max_bytes = max_bytes
         self._lock = threading.Lock()
         now = self._clock()
-        loaded, invalid = self._load(path, now)
-        if path is not None and path.exists() and not loaded and invalid:
-            raise EventIdentityStoreError(path, "journal has no retained valid identities")
+        loaded = self._load(path, now)
         self._by_source_key = self._select_retained(loaded, now)
         if path is not None and path.exists() and loaded:
             self._rewrite(self._by_source_key)
@@ -88,7 +84,7 @@ class EventIdentityStore:
         return str(persisted.edge_event_id)
 
     def _refresh_locked(self) -> None:
-        loaded, _invalid = self._load(self._path, self._clock())
+        loaded = self._load(self._path, self._clock())
         for source_key, record in loaded.items():
             current = self._by_source_key.get(source_key)
             if current is None:
@@ -125,13 +121,10 @@ class EventIdentityStore:
         _atomic_replace(path, payload)
 
     @staticmethod
-    def _load(
-        path: Path | None, now: float
-    ) -> tuple[dict[str, _PersistedIdentity], bool]:
+    def _load(path: Path | None, now: float) -> dict[str, _PersistedIdentity]:
         if path is None or not path.exists():
-            return {}, False
+            return {}
         loaded: dict[str, _PersistedIdentity] = {}
-        invalid = False
         try:
             with path.open(encoding="utf-8") as journal:
                 for line_number, line in enumerate(journal, start=1):
@@ -139,21 +132,16 @@ class EventIdentityStore:
                         continue
                     parsed = _parse_line(line, now)
                     if parsed is None:
-                        invalid = True
-                        _LOGGER.warning(
-                            "event identity journal %s skipped malformed line %s",
-                            path,
-                            line_number,
-                        )
-                        continue
+                        detail = f"malformed line {line_number}"
+                        raise EventIdentityStoreError(path, detail)
                     previous = loaded.get(parsed.source_key)
                     if previous is not None and previous.edge_event_id != parsed.edge_event_id:
-                        invalid = True
-                        continue
+                        detail = f"conflicting source key at line {line_number}"
+                        raise EventIdentityStoreError(path, detail)
                     loaded[parsed.source_key] = parsed
         except OSError as error:
             raise EventIdentityStoreError(path, str(error)) from error
-        return loaded, invalid
+        return loaded
 
 
 def event_identity_path(camera_id: str, state_dir: Path) -> Path:
