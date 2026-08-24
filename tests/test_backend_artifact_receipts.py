@@ -15,7 +15,10 @@ from backend.app.features.cameras.store import CameraRegistryStore
 from backend.app.features.clips.catalog import CatalogStore
 from backend.app.features.clips.compact_listing import CompactClipListing, CompactClipQuery
 from backend.app.features.clips.store import ClipStore
-from backend.app.features.evidence.compact_receipts import CompactArtifactReceiptStore
+from backend.app.features.evidence.compact_receipts import (
+    CompactArtifactReceiptStore,
+    CompactReceiptHooks,
+)
 from backend.app.features.evidence.receipt_store import (
     ArtifactReceipt,
     ArtifactReceiptConflictError,
@@ -385,6 +388,152 @@ def test_real_route_rejects_media_swap_before_compact_commit(
     with sqlite3.connect(database) as connection:
         assert connection.execute("SELECT count(*) FROM clips").fetchone() == (0,)
         assert connection.execute("SELECT count(*) FROM artifacts").fetchone() == (0,)
+
+
+def test_real_route_rejects_swap_after_preflight_before_transaction(
+    tmp_path: Path,
+) -> None:
+    # Given: pathname identity is captured, then equal-size replacement occurs before DB open.
+    original = b"verified video"
+    replacement = b"tampered bytes"
+    database = tmp_path / "edge.sqlite3"
+    migrate_database(database)
+    media = _media(tmp_path, original)
+    inode_proof: tuple[int, int] | None = None
+
+    def swap_after_preflight() -> None:
+        nonlocal inode_proof
+        replacement_path = media.with_name("replacement.mp4")
+        replacement_path.write_bytes(replacement)
+        old_inode = media.stat().st_ino
+        os.replace(replacement_path, media)
+        inode_proof = old_inode, media.stat().st_ino
+
+    store = CompactArtifactReceiptStore(
+        database,
+        tmp_path / "clip-store",
+        CompactReceiptHooks(after_preflight=swap_after_preflight),
+    )
+    client = _client(tmp_path, store)
+
+    # When: the real route reaches the exact post-preflight/pre-transaction hook.
+    response = client.put(
+        "/api/v1/relay/clips/clip-1",
+        json=_payload(original),
+        headers={"X-Edge-Relay-Token": TOKEN},
+    )
+
+    # Then: the first in-transaction guard rejects replacement before any SQL write.
+    assert response.status_code == 409
+    assert inode_proof is not None and inode_proof[0] != inode_proof[1]
+    with sqlite3.connect(database) as connection:
+        assert connection.execute("SELECT count(*) FROM clips").fetchone() == (0,)
+        assert connection.execute("SELECT count(*) FROM artifacts").fetchone() == (0,)
+
+
+@pytest.mark.parametrize("swap_kind", ["inode", "symlink", "missing"])
+def test_real_route_rolls_back_swap_during_receipt_transaction(
+    tmp_path: Path,
+    swap_kind: str,
+) -> None:
+    # Given: SQL writes occur, then the current pathname is replaced before commit.
+    original = b"verified video"
+    replacement = b"tampered bytes"
+    database = tmp_path / "edge.sqlite3"
+    migrate_database(database)
+    media = _media(tmp_path, original)
+    inode_proof: tuple[int, int] | None = None
+
+    def swap_before_final_check() -> None:
+        nonlocal inode_proof
+        replacement_path = media.with_name("replacement.mp4")
+        replacement_path.write_bytes(replacement)
+        old_inode = media.stat().st_ino
+        match swap_kind:
+            case "inode":
+                os.replace(replacement_path, media)
+            case "symlink":
+                media.unlink()
+                media.symlink_to(replacement_path.name)
+            case "missing":
+                media.unlink()
+                replacement_path.unlink()
+            case unreachable:
+                raise AssertionError(unreachable)
+        if media.exists():
+            inode_proof = old_inode, media.stat().st_ino
+
+    store = CompactArtifactReceiptStore(
+        database,
+        tmp_path / "clip-store",
+        CompactReceiptHooks(before_final_check=swap_before_final_check),
+    )
+    client = _client(tmp_path, store)
+
+    # When: the deterministic hook swaps after SQL but before transaction commit.
+    response = client.put(
+        "/api/v1/relay/clips/clip-1",
+        json=_payload(original),
+        headers={"X-Edge-Relay-Token": TOKEN},
+    )
+
+    # Then: the final in-transaction guard rolls back every compact write.
+    assert response.status_code == 409
+    if inode_proof is not None:
+        assert inode_proof[0] != inode_proof[1]
+    with sqlite3.connect(database) as connection:
+        assert connection.execute("SELECT count(*) FROM clips").fetchone() == (0,)
+        assert connection.execute("SELECT count(*) FROM artifacts").fetchone() == (0,)
+
+
+def test_real_route_valid_compact_receipt_commits_and_closes_descriptor(
+    tmp_path: Path,
+) -> None:
+    # Given: valid bytes remain on the same pathname for both transaction guards.
+    data = b"verified video"
+    database = tmp_path / "edge.sqlite3"
+    migrate_database(database)
+    media = _media(tmp_path, data)
+    hook_order: list[str] = []
+    captured_handle: BinaryIO | None = None
+
+    class ObservedStore(CompactArtifactReceiptStore):
+        def commit_verified(
+            self,
+            receipt: ArtifactReceipt,
+            route_verified: VerifiedArtifact,
+        ) -> ArtifactReceipt:
+            nonlocal captured_handle
+            captured_handle = route_verified.handle
+            return super().commit_verified(receipt, route_verified)
+
+    store = ObservedStore(
+        database,
+        tmp_path / "clip-store",
+        CompactReceiptHooks(
+            after_preflight=lambda: hook_order.append("after-preflight"),
+            before_final_check=lambda: hook_order.append("before-final-check"),
+        ),
+    )
+    client = _client(tmp_path, store)
+
+    # When: the real route completes a descriptor-bound compact receipt.
+    response = client.put(
+        "/api/v1/relay/clips/clip-1",
+        json=_payload(data),
+        headers={"X-Edge-Relay-Token": TOKEN},
+    )
+
+    # Then: both timing seams execute, computed identity commits, and the FD closes.
+    assert response.status_code == 200
+    assert hook_order == ["after-preflight", "before-final-check"]
+    assert captured_handle is not None and captured_handle.closed
+    with sqlite3.connect(database) as connection:
+        stored = connection.execute(
+            "SELECT media_sha256,media_size_bytes,publish_state FROM clips "
+            "WHERE clip_id='clip-1'"
+        ).fetchone()
+    assert stored == (_receipt(data).sha256, media.stat().st_size, "PUBLISHED")
 
 
 def test_relay_verifies_before_durable_receipt_and_never_writes_media(tmp_path: Path) -> None:
