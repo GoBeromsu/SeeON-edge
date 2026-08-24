@@ -6,9 +6,11 @@ import hashlib
 import hmac
 import json
 import logging
+import sqlite3
 import urllib.error
 import urllib.request
 import uuid
+from collections.abc import Callable
 from typing import Annotated, Literal
 
 from fastapi import (
@@ -24,6 +26,10 @@ from fastapi import (
 from pydantic import BaseModel, ConfigDict, Field
 
 from backend.app.core.config import get_settings
+from backend.app.features.audit.catalog import AuditAction, parse_detail
+from backend.app.features.audit.http import append_transactional
+from backend.app.features.audit.store import AuditEvent
+from backend.app.features.audit.store import utc_now as audit_now
 from backend.app.features.cameras.bed_zone_router import BedZonePayload
 from backend.app.features.cameras.bed_zone_store import BedZone, BedZoneStore
 from backend.app.features.cameras.roster_sync import (
@@ -345,10 +351,13 @@ def create_topology_floor(
     request: Request,
     background_tasks: BackgroundTasks,
 ) -> dict[str, object]:
-    _authorize(request)
+    actor = _authorize(request)
     try:
         _store(request.app).create_floor(
-            edge_ref=payload.edge_ref, name=payload.name, order_index=payload.order_index
+            edge_ref=payload.edge_ref, name=payload.name, order_index=payload.order_index,
+            after_write=_audit_hook(
+                request, actor, AuditAction.LOCATION_CREATE, payload.edge_ref
+            ),
         )
     except TopologyConflictError as error:
         raise _topology_conflict(error) from error
@@ -363,9 +372,10 @@ def update_topology_floor(
     request: Request,
     background_tasks: BackgroundTasks,
 ) -> dict[str, object]:
-    _authorize(request)
+    actor = _authorize(request)
     if not _store(request.app).update_floor(
-        edge_ref, name=payload.name, order_index=payload.order_index
+        edge_ref, name=payload.name, order_index=payload.order_index,
+        after_write=_audit_hook(request, actor, AuditAction.LOCATION_UPDATE, edge_ref),
     ):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="floor not found")
     background_tasks.add_task(_trigger_roster_sync, request.app)
@@ -376,9 +386,12 @@ def update_topology_floor(
 def delete_topology_floor(
     edge_ref: str, request: Request, background_tasks: BackgroundTasks
 ) -> Response:
-    _authorize(request)
+    actor = _authorize(request)
     try:
-        changed = _store(request.app).delete_floor(edge_ref)
+        changed = _store(request.app).delete_floor(
+            edge_ref,
+            after_write=_audit_hook(request, actor, AuditAction.LOCATION_DELETE, edge_ref),
+        )
     except TopologyConflictError as error:
         raise _topology_conflict(error) from error
     if not changed:
@@ -393,13 +406,16 @@ def create_topology_room(
     request: Request,
     background_tasks: BackgroundTasks,
 ) -> dict[str, object]:
-    _authorize(request)
+    actor = _authorize(request)
     try:
         _store(request.app).create_room(
             edge_ref=payload.edge_ref,
             floor_edge_ref=payload.floor_edge_ref,
             name=payload.name,
             legacy_canonical_space_id=payload.legacy_canonical_space_id,
+            after_write=_audit_hook(
+                request, actor, AuditAction.LOCATION_CREATE, payload.edge_ref
+            ),
         )
     except TopologyConflictError as error:
         raise _topology_conflict(error) from error
@@ -414,8 +430,11 @@ def update_topology_room(
     request: Request,
     background_tasks: BackgroundTasks,
 ) -> dict[str, str]:
-    _authorize(request)
-    if not _store(request.app).update_room(edge_ref, name=payload.name):
+    actor = _authorize(request)
+    if not _store(request.app).update_room(
+        edge_ref, name=payload.name,
+        after_write=_audit_hook(request, actor, AuditAction.LOCATION_UPDATE, edge_ref),
+    ):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="room not found")
     background_tasks.add_task(_trigger_roster_sync, request.app)
     return {"edge_ref": edge_ref, "name": payload.name}
@@ -425,9 +444,12 @@ def update_topology_room(
 def delete_topology_room(
     edge_ref: str, request: Request, background_tasks: BackgroundTasks
 ) -> Response:
-    _authorize(request)
+    actor = _authorize(request)
     try:
-        changed = _store(request.app).delete_room(edge_ref)
+        changed = _store(request.app).delete_room(
+            edge_ref,
+            after_write=_audit_hook(request, actor, AuditAction.LOCATION_DELETE, edge_ref),
+        )
     except TopologyConflictError as error:
         raise _topology_conflict(error) from error
     if not changed:
@@ -442,7 +464,7 @@ def create_camera(
     request: Request,
     background_tasks: BackgroundTasks,
 ) -> dict[str, object]:
-    _authorize(request)
+    actor = _authorize(request)
     rtsp_url = _validated_rtsp_url(payload.rtsp_url)
     decode_backend = _normalize_decode_backend(payload.decode_backend)
     floor = _normalize_floor(payload.floor)
@@ -476,6 +498,9 @@ def create_camera(
             never_connected=not probe.ok,
             edge_ref=payload.edge_ref,
             room_edge_ref=payload.room_edge_ref,
+            after_write=_audit_hook(
+                request, actor, AuditAction.CAMERA_CREATE, provisional_id
+            ),
         )
     except DuplicateCameraError as exc:
         raise _duplicate_camera_error(exc) from exc
@@ -525,7 +550,7 @@ def update_camera(
     request: Request,
     background_tasks: BackgroundTasks,
 ) -> dict[str, object]:
-    _authorize(request)
+    actor = _authorize(request)
     current = _store(request.app).get(camera_id)
     if current is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="camera not found")
@@ -556,7 +581,10 @@ def update_camera(
         updates["room_edge_ref"] = payload.room_edge_ref
 
     try:
-        updated = _store(request.app).update(camera_id, updates)
+        updated = _store(request.app).update(
+            camera_id, updates,
+            after_write=_audit_hook(request, actor, AuditAction.CAMERA_UPDATE, camera_id),
+        )
     except DuplicateCameraError as exc:
         raise _duplicate_camera_error(exc) from exc
     except TopologyConflictError as error:
@@ -641,9 +669,12 @@ def delete_camera(
     request: Request,
     background_tasks: BackgroundTasks,
 ) -> Response:
-    _authorize(request)
+    actor = _authorize(request)
     existing = _store(request.app).get(camera_id)
-    if existing is None or not _store(request.app).delete(camera_id):
+    if existing is None or not _store(request.app).delete(
+        camera_id,
+        after_write=_audit_hook(request, actor, AuditAction.CAMERA_DELETE, camera_id),
+    ):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="camera not found")
     # A bed zone may be keyed by either the local registry id or the
     # canonical backend_camera_id (see _lookup_bed_zone) depending on which
@@ -1249,8 +1280,18 @@ def _lookup_bed_zone(
     return None
 
 
-def _authorize(request: Request) -> None:
-    authorize_dashboard(request)
+def _audit_hook(
+    request: Request, actor: str, action: AuditAction, target_id: str
+) -> Callable[[sqlite3.Connection], None]:
+    event = AuditEvent(
+        occurred_at=audit_now(), actor_id=actor, action=action, target_id=target_id,
+        detail=parse_detail(action, {}),
+    )
+    return lambda connection: append_transactional(request, connection, event)
+
+
+def _authorize(request: Request) -> str:
+    return authorize_dashboard(request)
 
 
 def _authorize_worker(request: Request, relay_token: str | None) -> None:

@@ -17,6 +17,15 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from starlette.types import Message, Receive
 
 from backend.app.edge_db import EDGE_DATABASE_PATH
+from backend.app.features.audit.catalog import (
+    AuditAction,
+    AuditActorType,
+    AuditAuthMechanism,
+    parse_detail,
+)
+from backend.app.features.audit.http import append_transactional
+from backend.app.features.audit.store import AuditEvent
+from backend.app.features.audit.store import utc_now as audit_now
 from backend.app.features.cameras.router import (
     acknowledge_applied_detection_policies,
     worker_config_snapshot,
@@ -758,6 +767,17 @@ def _project_relay_event(request: Request, payload: RelayAlertRequest) -> bool:
                 else payload.audit.model_dump(exclude_none=True),
             ),
             snapshot,
+            after_write=lambda connection: append_transactional(
+                request,
+                connection,
+                AuditEvent(
+                    occurred_at=audit_now(), actor_id="worker-relay",
+                    action=AuditAction.RELAY_ALERT, target_id=payload.edge_event_id,
+                    detail=parse_detail(AuditAction.RELAY_ALERT, {}),
+                    actor_type=AuditActorType.SERVICE,
+                    auth_mechanism=AuditAuthMechanism.RELAY_TOKEN,
+                ),
+            ),
         )
     except RelayEvidenceProjectionConflict as error:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error

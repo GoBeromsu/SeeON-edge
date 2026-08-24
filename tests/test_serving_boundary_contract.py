@@ -35,6 +35,7 @@ ALLOWED_PATHS: Final = {
     "/api/v1/relay/snapshot-attachments",
     "/api/v1/relay/snapshot-dispositions",
     "/api/v1/audit",
+    "/api/v1/audit/{audit_id}",
     "/api/v1/cameras",
     "/api/v1/cameras/topology",
     "/api/v1/cameras/topology/floors",

@@ -78,81 +78,19 @@ class CentralClipArtifactQuery:
         connection = open_runtime_database(self.database_path, actor=RuntimeActor.API)
         try:
             row = connection.execute(
-                """
-                SELECT incident.incident_id, primary_slot.state,
-                       trace.trace_id, trace.module_qualified_id,
-                       trace.policy_qualified_id, trace.effective_policy_id,
-                       trace.runtime_manifest_sha256, trace.reason,
-                       trace.previous_state, trace.current_state, trace.triggered,
-                       trace.track_id, trace.bed_id, derivative.state,
-                       media.contained_relpath, media.content_sha256, media.size_bytes
-                FROM evidence_primary_clips AS primary_record
-                JOIN evidence_incidents AS incident USING (incident_id)
-                LEFT JOIN evidence_artifact_slots AS primary_slot
-                  ON primary_slot.incident_id = incident.incident_id
-                 AND primary_slot.slot_name = 'PRIMARY_CLIP'
-                LEFT JOIN evidence_clip_trace_refs AS trace_ref
-                  ON trace_ref.clip_id = primary_record.clip_id
-                LEFT JOIN evidence_decision_traces AS trace
-                  ON trace.trace_id = trace_ref.decision_trace_id
-                LEFT JOIN derivative_evidence_slots AS derivative
-                  ON derivative.incident_id = incident.incident_id
-                 AND derivative.derivative_kind = 'ANNOTATED_CLIP'
-                LEFT JOIN derivative_render_records AS render
-                  ON render.incident_id = derivative.incident_id
-                 AND render.derivative_kind = derivative.derivative_kind
-                LEFT JOIN evidence_media_objects AS media
-                  ON media.media_id = render.media_id
-                WHERE primary_record.clip_id = ?
-                """,
+                "SELECT incident_id,state FROM artifacts "
+                "WHERE clip_id=? AND kind='PRIMARY_CLIP'",
                 (clip_id,),
             ).fetchone()
-            if row is None:
-                return None
-            analysis = None
-            if row[2] is not None:
-                values = connection.execute(
-                    "SELECT name, numeric_value, missing_reason "
-                    "FROM evidence_decision_values WHERE decision_trace_id=? ORDER BY name",
-                    (str(row[2]),),
-                ).fetchall()
-                analysis = ClipAnalysis(
-                    decision_trace_id=str(row[2]),
-                    module_qualified_id=str(row[3]),
-                    policy_qualified_id=str(row[4]),
-                    effective_policy_id=str(row[5]),
-                    runtime_manifest_sha256=str(row[6]),
-                    reason=str(row[7]),
-                    previous_state=str(row[8]),
-                    current_state=str(row[9]),
-                    triggered=bool(row[10]),
-                    track_id=_optional_int(row[11]),
-                    bed_id=_optional_int(row[12]),
-                    values=tuple(
-                        (str(value[0]), _optional_float(value[1]), _text(value[2]))
-                        for value in values
-                    ),
-                )
-            incident_id = str(row[0])
-            still = _derivative_projection(connection, incident_id, "STILL")
-            video = _derivative_projection(connection, incident_id, "VIDEO")
-            return CentralClipArtifacts(
-                incident_id=incident_id,
-                clean_state=str(row[1] or "UNAVAILABLE"),
-                analysis=analysis,
-                annotated_state=(
-                    video.state if video is not None else str(row[13] or "NOT_REQUESTED")
-                ),
-                annotated_relpath=(video.relpath if video is not None else _text(row[14])),
-                annotated_sha256=(video.sha256 if video is not None else _text(row[15])),
-                annotated_size_bytes=(
-                    video.size_bytes if video is not None else _optional_int(row[16])
-                ),
-                still=still,
-                video=video,
-            )
         finally:
             connection.close()
+        if row is None:
+            return None
+        return CentralClipArtifacts(
+            incident_id=str(row[0]), clean_state=str(row[1]), analysis=None,
+            annotated_state="NOT_REQUESTED", annotated_relpath=None,
+            annotated_sha256=None, annotated_size_bytes=None, still=None, video=None,
+        )
 
 
 def _derivative_projection(

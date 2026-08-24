@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 import uuid
+from collections.abc import Callable
 from pathlib import Path
 from threading import Lock
 
@@ -81,6 +82,7 @@ class CameraRegistryStore(CameraLocationOperations):
         never_connected: bool = True,
         edge_ref: str | None = None,
         room_edge_ref: str | None = None,
+        after_write: Callable[[sqlite3.Connection], None] | None = None,
     ) -> dict[str, object]:
         with self._lock, camera_transaction(self._connection) as connection:
             duplicate = find_duplicate(connection, rtsp_url)
@@ -122,6 +124,8 @@ class CameraRegistryStore(CameraLocationOperations):
                 room_edge_ref=room_edge_ref,
             )
             record_registry_mutation(connection)
+            if after_write is not None:
+                after_write(connection)
             record = get_camera(connection, identifier, self._statuses)
             if record is None:
                 raise sqlite3.DatabaseError("camera insert returned no row")
@@ -129,7 +133,13 @@ class CameraRegistryStore(CameraLocationOperations):
             record["status"] = status
             return record
 
-    def update(self, camera_id: str, updates: dict[str, object]) -> dict[str, object] | None:
+    def update(
+        self,
+        camera_id: str,
+        updates: dict[str, object],
+        *,
+        after_write: Callable[[sqlite3.Connection], None] | None = None,
+    ) -> dict[str, object] | None:
         with self._lock, camera_transaction(self._connection) as connection:
             current = get_camera(connection, camera_id, self._statuses)
             if current is None:
@@ -176,6 +186,8 @@ class CameraRegistryStore(CameraLocationOperations):
                     room_edge_ref=_text(values.get("room_edge_ref")),
                 )
             record_registry_mutation(connection)
+            if after_write is not None:
+                after_write(connection)
             updated = get_camera(connection, camera_id, self._statuses)
             status = updates.get("status")
             if status in {"online", "offline", "starting", "unknown"}:
@@ -184,13 +196,23 @@ class CameraRegistryStore(CameraLocationOperations):
                 updated["status"] = self._statuses.get(camera_id, "unknown")
             return updated
 
-    def delete(self, camera_id: str) -> bool:
-        with self._lock, camera_transaction(self._connection) as connection:
-            cursor = connection.execute("DELETE FROM cameras WHERE camera_id=?", (camera_id,))
-            if cursor.rowcount == 0:
-                return False
+    def delete(
+        self,
+        camera_id: str,
+        *,
+        after_write: Callable[[sqlite3.Connection], None] | None = None,
+    ) -> bool:
+        with self._lock:
+            with camera_transaction(self._connection) as connection:
+                cursor = connection.execute(
+                    "DELETE FROM cameras WHERE camera_id=?", (camera_id,)
+                )
+                if cursor.rowcount == 0:
+                    return False
+                record_registry_mutation(connection)
+                if after_write is not None:
+                    after_write(connection)
             self._statuses.pop(camera_id, None)
-            record_registry_mutation(connection)
             return True
 
     def get(self, camera_id: str) -> dict[str, object] | None:

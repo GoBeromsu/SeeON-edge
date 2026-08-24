@@ -21,7 +21,6 @@ from fastapi.testclient import TestClient
 
 from backend.app.edge_db.migrator import migrate_database
 from backend.app.features.clips import artifacts as artifact_module
-from backend.app.features.clips.audit_log import AuditLogStore
 from backend.app.main import create_app, no_lifespan
 from worker.pipeline.output.evidence.clip_maintenance import ClipMaintenance
 from worker.pipeline.output.evidence.clip_recorder_models import (
@@ -242,14 +241,12 @@ def test_delete_unknown_clip_reports_truthful_missing_status(
 def test_delete_reaches_real_worker_purges_and_is_idempotent(
     clip_store: Path,
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
 ) -> None:
     database = artifact_module.EDGE_DATABASE_PATH
     migrate_database(database)
     _seed_published_clip(database, clip_store)
     server = _worker_server(database, clip_store)
     _wire_worker_origin(monkeypatch, server)
-    audit_path = tmp_path / "labels" / "audit.jsonl"
 
     app = create_app(lifespan=no_lifespan)
     app.state.edge_relay_token = "relay-token"
@@ -278,22 +275,20 @@ def test_delete_reaches_real_worker_purges_and_is_idempotent(
         assert connection.execute(
             "SELECT state FROM artifacts WHERE clip_id='clip-a' AND kind='PRIMARY_CLIP'"
         ).fetchone() == ("AVAILABLE",)
-    entries = AuditLogStore(audit_path).list_entries()
-    delete_entries = [entry for entry in entries if entry["clip_id"] == "clip-a"]
-    actions = [entry["action"] for entry in delete_entries]
-    assert actions == ["clip-delete-completed"]
+        actions = connection.execute(
+            "SELECT action FROM audit_events WHERE target_id='clip-a' ORDER BY audit_id"
+        ).fetchall()
+    assert actions == [("clip.delete",), ("clip.delete",)]
 
 
 def test_delete_worker_control_failure_is_reported_and_audited(
     clip_store: Path,
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
 ) -> None:
     monkeypatch.setattr(
         "backend.app.features.clips.deletion_control.get_settings",
         lambda: SimpleNamespace(worker_stream_origin="", worker_stream_timeout_s=2.0),
     )
-    audit_path = tmp_path / "labels" / "audit.jsonl"
 
     with TestClient(create_app(lifespan=no_lifespan)) as client:
         _login(client)
@@ -302,9 +297,11 @@ def test_delete_worker_control_failure_is_reported_and_audited(
         )
 
     assert response.status_code == 503
-    entries = AuditLogStore(audit_path).list_entries()
-    actions = [entry["action"] for entry in entries if entry["clip_id"] == "clip-a"]
-    assert actions == ["clip-delete-failed"]
+    with sqlite3.connect(artifact_module.EDGE_DATABASE_PATH) as connection:
+        actions = connection.execute(
+            "SELECT action FROM audit_events WHERE target_id='clip-a'"
+        ).fetchall()
+    assert actions == [("clip.delete",)]
 
 
 def test_delete_response_is_strictly_typed(clip_store: Path) -> None:

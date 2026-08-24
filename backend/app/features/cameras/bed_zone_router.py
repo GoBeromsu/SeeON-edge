@@ -35,6 +35,10 @@ from fastapi import APIRouter, FastAPI, HTTPException, Request, status
 from pydantic import BaseModel, ConfigDict, Field
 
 from backend.app.core.config import get_settings
+from backend.app.features.audit.catalog import AuditAction, parse_detail
+from backend.app.features.audit.http import append_transactional
+from backend.app.features.audit.store import AuditEvent
+from backend.app.features.audit.store import utc_now as audit_now
 from backend.app.features.cameras.bed_zone_store import BedZoneStore
 from backend.app.features.cameras.store import utc_now_iso
 from backend.app.shared.dashboard_auth import authorize_dashboard
@@ -75,7 +79,7 @@ def recognize_bed_zone(
     camera_id: str,
     request: Request,
 ) -> BedZoneRecognizeResponse:
-    _authorize(request)
+    actor = _authorize(request)
     settings = get_settings()
     upstream_url = _bed_zone_url(settings.worker_stream_origin, camera_id)
     # Worker :8090 gates bed-zone recognition with the same relay token as
@@ -129,6 +133,14 @@ def recognize_bed_zone(
         image_width=image_width,
         image_height=image_height,
         recognized_at=recognized_at,
+        after_write=lambda connection: append_transactional(
+            request,
+            connection,
+            AuditEvent(
+                occurred_at=audit_now(), actor_id=actor, action=AuditAction.BED_ZONE_UPDATE,
+                target_id=camera_id, detail=parse_detail(AuditAction.BED_ZONE_UPDATE, {}),
+            ),
+        ),
     )
     return BedZoneRecognizeResponse(bed_zone=BedZonePayload(**saved.as_dict()))
 
@@ -186,8 +198,8 @@ def _bed_zone_url(origin: str, camera_id: str) -> str:
     return f"{base}/overlay/{encoded_camera_id}/bed-zone/recognize"
 
 
-def _authorize(request: Request) -> None:
-    authorize_dashboard(request)
+def _authorize(request: Request) -> str:
+    return authorize_dashboard(request)
 
 
 _RELAY_TOKEN_HEADER = "X-Edge-Relay-Token"

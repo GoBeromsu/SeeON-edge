@@ -26,6 +26,10 @@ from typing import ClassVar, Literal
 from fastapi import APIRouter, FastAPI, HTTPException, Request, status
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from backend.app.features.audit.catalog import AuditAction, parse_detail
+from backend.app.features.audit.http import append_transactional
+from backend.app.features.audit.store import AuditEvent
+from backend.app.features.audit.store import utc_now as audit_now
 from backend.app.features.cameras.store import CameraRegistryStore
 from backend.app.features.connection.store import ConnectionSettingsStore
 from backend.app.features.detection_settings.policy_store import (
@@ -233,7 +237,7 @@ def apply_detection_policy(
     payload: DetectionPolicyChangeRequest,
     request: Request,
 ) -> dict[str, object]:
-    _authorize(request)
+    actor = _authorize(request)
     facility_id = _require_enrolled_facility(request.app)
     _require_policy_camera(request.app, payload.camera_id)
     if payload.expected_revision_id is None:
@@ -241,6 +245,11 @@ def apply_detection_policy(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail="expected_revision_id is required for policy apply",
         )
+    event = AuditEvent(
+        occurred_at=audit_now(), actor_id=actor, action=AuditAction.POLICY_APPLY,
+        target_id=payload.camera_id or payload.module_id,
+        detail=parse_detail(AuditAction.POLICY_APPLY, {}),
+    )
     try:
         activation = _policy_store(request.app).apply(
             facility_id=facility_id,
@@ -251,6 +260,7 @@ def apply_detection_policy(
             camera_id=payload.camera_id,
             values=payload.values,
             expected_revision_id=payload.expected_revision_id,
+            after_write=lambda connection: append_transactional(request, connection, event),
         )
     except PolicyRevisionConflict as error:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
@@ -266,9 +276,14 @@ def rollback_detection_policy(
     payload: DetectionPolicyRollbackRequest,
     request: Request,
 ) -> dict[str, object]:
-    _authorize(request)
+    actor = _authorize(request)
     facility_id = _require_enrolled_facility(request.app)
     _require_policy_camera(request.app, payload.camera_id)
+    event = AuditEvent(
+        occurred_at=audit_now(), actor_id=actor, action=AuditAction.POLICY_ROLLBACK,
+        target_id=payload.camera_id or payload.module_id,
+        detail=parse_detail(AuditAction.POLICY_ROLLBACK, {}),
+    )
     try:
         activation = _policy_store(request.app).rollback(
             facility_id=facility_id,
@@ -276,6 +291,7 @@ def rollback_detection_policy(
             module_version=payload.module_version,
             camera_id=payload.camera_id,
             expected_revision_id=payload.expected_revision_id,
+            after_write=lambda connection: append_transactional(request, connection, event),
         )
     except PolicyRevisionConflict as error:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
@@ -373,8 +389,8 @@ def _require_policy_camera(app: FastAPI, camera_id: str | None) -> None:
     raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="camera not found")
 
 
-def _authorize(request: Request) -> None:
-    authorize_dashboard(request)
+def _authorize(request: Request) -> str:
+    return authorize_dashboard(request)
 
 
 __all__ = ["router", "DetectionSettingsResponse", "current_settings_snapshot"]

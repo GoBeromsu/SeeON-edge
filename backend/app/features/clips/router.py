@@ -10,16 +10,13 @@ from fastapi.responses import Response
 from pydantic import ValidationError
 
 from backend.app.edge_db import EDGE_DATABASE_PATH
+from backend.app.features.audit.catalog import AuditAction
+from backend.app.features.audit.http import AuditUnavailableError, append_governed
 from backend.app.features.clips.artifacts import (
     CentralClipArtifactQuery,
     open_verified_annotated,
 )
-from backend.app.features.clips.audit_log import (
-    AUDIT_NO_CLIP_ID,
-    AuditLogStore,
-    post_backend_backup,
-    utc_now_iso,
-)
+from backend.app.features.clips.audit_log import post_backend_backup, utc_now_iso
 from backend.app.features.clips.compact_listing import (
     CompactClipConflictError,
     CompactClipListing,
@@ -32,11 +29,9 @@ from backend.app.features.clips.media_response import media_response, media_type
 from backend.app.features.clips.responses import clip_response, resolved_video_size
 from backend.app.features.clips.schemas import (
     ArtifactState,
-    AuditResponse,
     ClipAnalysisResponse,
     ClipAnalysisValueResponse,
     ClipArtifactViewsResponse,
-    ClipDeleteStatus,
     ClipDerivativeResponse,
     ClipListQuery,
     ClipManifestResponse,
@@ -110,11 +105,8 @@ def list_clips(
         ),
         event_type_counts=dict(page.event_type_counts),
     )
-    _ = _audit_store(request).append(
-        actor=actor,
-        action="list",
-        clip_id=AUDIT_NO_CLIP_ID,
-        backend_token=_backend_token(request),
+    append_governed(
+        request, actor_id=actor, action=AuditAction.CLIP_LIST, target_id="clips"
     )
     return response
 
@@ -133,11 +125,8 @@ def get_clip_metadata(
         resolved_video_size(store, located),
         store.thumbnail_available(located),
     )
-    _ = _audit_store(request).append(
-        actor=actor,
-        action="metadata-view",
-        clip_id=manifest.clip_id,
-        backend_token=_backend_token(request),
+    append_governed(
+        request, actor_id=actor, action=AuditAction.CLIP_DETAIL, target_id=manifest.clip_id
     )
     return response
 
@@ -159,11 +148,8 @@ def clip_artifacts(
         "NOT_REQUESTED" if artifacts is None else artifacts.annotated_state,
     )
     annotated_available = annotated_state == "AVAILABLE"
-    _ = _audit_store(request).append(
-        actor=actor,
-        action="artifact-view",
-        clip_id=manifest.clip_id,
-        backend_token=_backend_token(request),
+    append_governed(
+        request, actor_id=actor, action=AuditAction.CLIP_ARTIFACT, target_id=manifest.clip_id
     )
     return ClipArtifactViewsResponse(
         clip_id=manifest.clip_id,
@@ -185,15 +171,9 @@ def request_clip_derivative(
     kind: Literal["still", "video"],
     request: Request,
 ) -> ClipDerivativeResponse:
-    actor = _authorize(request)
-    manifest = _get_located_clip_or_404(request, clip_id).manifest
+    _authorize(request)
+    _get_located_clip_or_404(request, clip_id)
     payload = control_derivative(request, clip_id, kind, "request")
-    _ = _audit_store(request).append(
-        actor=actor,
-        action=f"derivative-{kind}-request",
-        clip_id=manifest.clip_id,
-        backend_token=_backend_token(request),
-    )
     return _derivative_response(request, clip_id, kind, payload)
 
 
@@ -206,15 +186,9 @@ def get_clip_derivative(
     kind: Literal["still", "video"],
     request: Request,
 ) -> ClipDerivativeResponse:
-    actor = _authorize(request)
-    manifest = _get_located_clip_or_404(request, clip_id).manifest
+    _authorize(request)
+    _get_located_clip_or_404(request, clip_id)
     payload = control_derivative(request, clip_id, kind, "status")
-    _ = _audit_store(request).append(
-        actor=actor,
-        action=f"derivative-{kind}-status",
-        clip_id=manifest.clip_id,
-        backend_token=_backend_token(request),
-    )
     return _derivative_response(request, clip_id, kind, payload)
 
 
@@ -228,15 +202,9 @@ def cancel_clip_derivative(
     kind: Literal["still", "video"],
     request: Request,
 ) -> ClipDerivativeResponse:
-    actor = _authorize(request)
-    manifest = _get_located_clip_or_404(request, clip_id).manifest
+    _authorize(request)
+    _get_located_clip_or_404(request, clip_id)
     payload = control_derivative(request, clip_id, kind, "cancel")
-    _ = _audit_store(request).append(
-        actor=actor,
-        action=f"derivative-{kind}-cancel",
-        clip_id=manifest.clip_id,
-        backend_token=_backend_token(request),
-    )
     return _derivative_response(request, clip_id, kind, payload)
 
 
@@ -267,16 +235,6 @@ def _derivative_response(
             "runtime_manifest_sha256": projection.runtime_manifest_sha256,
         }
     return ClipDerivativeResponse.model_validate(payload)
-
-
-_CLIP_DELETE_AUDIT_ACTION: dict[ClipDeleteStatus, str] = {
-    "PURGED": "clip-delete-completed",
-    "HELD": "clip-delete-held",
-    "MISSING": "clip-delete-failed",
-    "UNVERIFIABLE": "clip-delete-failed",
-    "DELETE_FAILED": "clip-delete-failed",
-    "VERIFICATION_FAILED": "clip-delete-failed",
-}
 
 
 @router.delete(
@@ -314,17 +272,10 @@ def delete_clip(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="clip id confirmation does not match",
         )
-    backend_token = _backend_token(request)
-    try:
-        result = control_clip_deletion(request, clip_id)
-    except HTTPException:
-        _ = _audit_store(request).append(
-            actor=actor,
-            action="clip-delete-failed",
-            clip_id=clip_id,
-            backend_token=backend_token,
-        )
-        raise
+    append_governed(
+        request, actor_id=actor, action=AuditAction.CLIP_DELETE, target_id=clip_id
+    )
+    result = control_clip_deletion(request, clip_id)
     try:
         response = DeleteClipResponse.model_validate(result)
     except ValidationError as error:
@@ -332,23 +283,6 @@ def delete_clip(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail="worker clip deletion response is invalid",
         ) from error
-    audit = _audit_store(request)
-    action = _CLIP_DELETE_AUDIT_ACTION[response.status]
-    # A converged PURGED retry is not a second operator action. Keep one
-    # durable completion record while still returning the truthful result.
-    if not (
-        response.status == "PURGED"
-        and any(
-            entry.get("action") == action and entry.get("clip_id") == clip_id
-            for entry in audit.list_entries()
-        )
-    ):
-        _ = audit.append(
-            actor=actor,
-            action=action,
-            clip_id=clip_id,
-            backend_token=backend_token,
-        )
     return response
 
 
@@ -357,7 +291,7 @@ def clip_analysis(
     clip_id: str,
     request: Request,
 ) -> ClipAnalysisResponse:
-    actor = _authorize(request)
+    _authorize(request)
     manifest = _get_located_clip_or_404(request, clip_id).manifest
     artifacts = _artifact_query(request).get(clip_id)
     if artifacts is None or artifacts.analysis is None:
@@ -366,12 +300,6 @@ def clip_analysis(
             detail="clip analysis not available",
         )
     analysis = artifacts.analysis
-    _ = _audit_store(request).append(
-        actor=actor,
-        action="analysis-view",
-        clip_id=manifest.clip_id,
-        backend_token=_backend_token(request),
-    )
     return ClipAnalysisResponse(
         clip_id=manifest.clip_id,
         decision_trace_id=analysis.decision_trace_id,
@@ -455,12 +383,13 @@ def clip_video(
                 status_code=status.HTTP_409_CONFLICT,
                 detail="clip video receipt verification failed",
             ) from exc
-    _ = _audit_store(request).append(
-        actor=actor,
-        action="play-annotated" if actual_view == "annotated" else "play",
-        clip_id=manifest.clip_id,
-        backend_token=_backend_token(request),
-    )
+    try:
+        append_governed(
+            request, actor_id=actor, action=AuditAction.CLIP_VIDEO, target_id=manifest.clip_id
+        )
+    except AuditUnavailableError:
+        opened.handle.close()
+        raise
     response = media_response(
         opened,
         request.headers.get("range"),
@@ -477,7 +406,7 @@ def clip_thumbnail(
     clip_id: str,
     request: Request,
 ) -> Response:
-    _ = _authorize(request)
+    actor = _authorize(request)
     store = _clip_store(request)
     located = _get_located_clip_or_404(request, clip_id)
     try:
@@ -487,6 +416,9 @@ def clip_thumbnail(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="clip thumbnail not found",
         ) from exc
+    append_governed(
+        request, actor_id=actor, action=AuditAction.CLIP_THUMBNAIL, target_id=clip_id
+    )
     return Response(
         content=content,
         media_type="image/jpeg",
@@ -517,32 +449,7 @@ def label_clip(
         )
     backend_token = _backend_token(request)
     post_backend_backup("clip_label", record.as_response(), backend_token=backend_token)
-    _audit_store(request).append(
-        actor=reviewer,
-        action="label",
-        clip_id=manifest.clip_id,
-        backend_token=backend_token,
-    )
     return record.as_response()
-
-
-@router.get("/audit", response_model=AuditResponse)
-def list_audit(
-    request: Request,
-) -> dict[str, object]:
-    actor = _authorize(request)
-    store = _audit_store(request)
-    # Snapshot entries before recording this view so the response reflects
-    # the log state prior to this request, matching how "play"/"label" audit
-    # entries never appear until after their triggering action completes.
-    entries = store.list_entries()
-    store.append(
-        actor=actor,
-        action="audit-view",
-        clip_id=AUDIT_NO_CLIP_ID,
-        backend_token=_backend_token(request),
-    )
-    return {"entries": entries}
 
 
 def _get_located_clip_or_404(request: Request, clip_id: str) -> LocatedClip:
@@ -586,14 +493,6 @@ def _label_store(request: Request) -> LabelStore:
     if not isinstance(store, LabelStore):
         store = LabelStore.from_env()
         request.app.state.clip_label_store = store
-    return store
-
-
-def _audit_store(request: Request) -> AuditLogStore:
-    store = getattr(request.app.state, "clip_audit_log", None)
-    if not isinstance(store, AuditLogStore):
-        store = AuditLogStore.from_env()
-        request.app.state.clip_audit_log = store
     return store
 
 

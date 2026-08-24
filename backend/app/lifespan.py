@@ -21,6 +21,7 @@ from fastapi import FastAPI
 
 from backend.app.core.config import reject_retired_backend_environment
 from backend.app.edge_db import EDGE_DATABASE_PATH
+from backend.app.features.audit.startup import configure_audit_readiness
 from backend.app.features.cameras.store import CameraRegistryStore
 from backend.app.features.clips.catalog import CatalogStore
 from backend.app.features.clips.listing_runtime import maintain_clip_listing
@@ -87,6 +88,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     reject_retired_backend_environment(os.environ)
     logger.info("ml-api state directory resolved to %s", resolve_state_dir("ml-api"))
     _load_config(app)
+
+    audit_healthy = configure_audit_readiness(app, EDGE_DATABASE_PATH)
 
     if not isinstance(getattr(app.state, "heartbeat_store", None), HeartbeatStore):
         app.state.heartbeat_store = HeartbeatStore(
@@ -156,7 +159,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     clip_listing_stack = AsyncExitStack()
     await clip_listing_stack.enter_async_context(maintain_clip_listing(app))
-    app.state.readiness = {"ready": True, "status": "ready"}
+    app.state.readiness = (
+        {"ready": True, "status": "ready"}
+        if audit_healthy
+        else {"ready": False, "status": "degraded", "reason": "audit unavailable"}
+    )
     try:
         yield
     finally:

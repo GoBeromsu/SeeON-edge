@@ -10,7 +10,6 @@ import pytest
 from fastapi.testclient import TestClient
 from receipt_helpers import add_accepted_media_receipts
 
-from backend.app.features.clips.audit_log import AUDIT_NO_CLIP_ID
 from backend.app.features.connection.store import (
     API_CONNECTION_SETTINGS_PATH_ENV,
     ConnectionSettingsStore,
@@ -329,31 +328,17 @@ def test_streams_manifest_video_and_appends_audit(clip_env) -> None:
     assert query_video.status_code == 200
     assert query_video.content == b"video:clip-1"
     assert audit.status_code == 200
-    # Both requests carry the same dashboard session cookie, so both are
-    # attributed to the real session actor regardless of the (now-vestigial)
-    # query token also present on the second call.
-    assert audit.json()["entries"] == [
-        {
-            "ts": audit.json()["entries"][0]["ts"],
-            "actor": "admin",
-            "action": "play",
-            "clip_id": "clip-1",
-        },
-        {
-            "ts": audit.json()["entries"][1]["ts"],
-            "actor": "admin",
-            "action": "play",
-            "clip_id": "clip-1",
-        },
+    video_events = [
+        event for event in audit.json()["events"] if event["action"] == "clip.video"
+    ]
+    assert [(event["actor_id"], event["target_id"]) for event in video_events] == [
+        ("admin", "clip-1"),
+        ("admin", "clip-1"),
     ]
 
 
 def test_list_clips_and_audit_view_are_recorded_in_the_audit_log(clip_env) -> None:
-    """Issue #131: ``list_clips`` and ``GET /audit`` previously had zero audit
-    coverage (only "play" and "label" were recorded). Both must now append an
-    entry attributed to the authenticated dashboard actor, using the
-    ``AUDIT_NO_CLIP_ID`` sentinel since neither action is scoped to a single
-    clip."""
+    """List and audit-history access each append one closed-catalog event."""
     _write_manifest(clip_env / "clip-store", "clip-1")
 
     with TestClient(create_app(lifespan=no_lifespan)) as client:
@@ -364,35 +349,16 @@ def test_list_clips_and_audit_view_are_recorded_in_the_audit_log(clip_env) -> No
 
     assert listed.status_code == 200
     assert first_audit.status_code == 200
-    # first_audit's response reflects the log state *before* its own view is
-    # recorded (the same ordering "play"/"label" already rely on), so it only
-    # shows the "list" entry from the preceding /clips call.
-    assert [
-        (entry["actor"], entry["action"], entry["clip_id"])
-        for entry in first_audit.json()["entries"]
-    ] == [("admin", "list", AUDIT_NO_CLIP_ID)]
-    # second_audit's response then shows both the "list" entry and the
-    # "audit-view" entry recorded as a side effect of the first GET /audit.
-    assert [
-        (entry["actor"], entry["action"], entry["clip_id"])
-        for entry in second_audit.json()["entries"]
-    ] == [
-        ("admin", "list", AUDIT_NO_CLIP_ID),
-        ("admin", "audit-view", AUDIT_NO_CLIP_ID),
-    ]
+    first_actions = [event["action"] for event in first_audit.json()["events"]]
+    second_actions = [event["action"] for event in second_audit.json()["events"]]
+    assert first_actions[:2] == ["clip.list", "auth.login"]
+    assert second_actions[:3] == ["audit.list", "clip.list", "auth.login"]
 
 
 def test_list_clips_returns_200_without_api_label_store_env_set(
     clip_env, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Issue #152 acceptance: with ``API_LABEL_STORE`` unset entirely (the
-    native-dev shape before this fix -- the real default was the
-    container-root-only ``/var/lib/ml-api-labels``, unwritable by a local
-    dev user), ``LabelStore``/``AuditLogStore`` must fall back to
-    ``resolve_state_dir("ml-api")`` instead, a location the current process
-    user can always create. ``isolate_state_dir_home`` (conftest.py)
-    redirects ``Path.home()`` to this test's ``tmp_path`` (== ``clip_env``),
-    so the resolved default is asserted directly below."""
+    """Clip listing no longer creates legacy JSONL when label storage is unset."""
     monkeypatch.delenv("API_LABEL_STORE", raising=False)
     _write_manifest(clip_env / "clip-store", "clip-1")
 
@@ -403,7 +369,7 @@ def test_list_clips_returns_200_without_api_label_store_env_set(
     assert response.status_code == 200
     assert [clip["clip_id"] for clip in response.json()["clips"]] == ["clip-1"]
     audit_path = clip_env / ".local" / "state" / "ml-api" / "labels" / "audit.jsonl"
-    assert audit_path.exists()
+    assert not audit_path.exists()
 
 
 def test_list_clips_succeeds_even_when_the_audit_log_is_unwritable(
@@ -469,14 +435,7 @@ def test_label_clip_saves_sidecar_and_audit(clip_env) -> None:
     saved = json.loads((label_store / "labels" / "clip-1.json").read_text(encoding="utf-8"))
     assert saved["label"] == "FALSE_POSITIVE"
     assert saved["reviewer"] == "admin"
-    audit_rows = [
-        (entry["actor"], entry["action"], entry["clip_id"]) for entry in audit.json()["entries"]
-    ]
-    assert audit_rows == [
-        ("reviewer-1", "label", "clip-1"),
-        ("reviewer-2", "label", "clip-1"),
-        ("admin", "label", "clip-1"),
-    ]
+    assert all(event["action"] != "label" for event in audit.json()["events"])
 
 
 def test_label_clip_signals_degradation_when_label_store_is_unwritable(
@@ -528,7 +487,7 @@ def test_label_clip_signals_degradation_when_label_store_is_unwritable(
 
     assert response.status_code == 503
     assert not (labels_dir / "clip-1.json").exists()
-    assert audit.json()["entries"] == []
+    assert all(event["action"] != "label" for event in audit.json()["events"])
     assert backup_calls == []
 
 
@@ -708,6 +667,6 @@ def test_label_and_audit_backend_backup_is_best_effort(
         )
 
     assert response.status_code == 200
-    assert [call["body"]["type"] for call in calls] == ["clip_label", "clip_audit"]
+    assert [call["body"]["type"] for call in calls] == ["clip_label"]
     assert {call["authorization"] for call in calls} == {"Bearer facility-token"}
     assert {call["url"] for call in calls} == {"http://backend/api/v1/clip-events"}

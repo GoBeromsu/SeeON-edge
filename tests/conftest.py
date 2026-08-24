@@ -21,6 +21,7 @@ def isolate_central_edge_database(
     migrate_database(database)
     modules = (
         "backend.app.lifespan",
+        "backend.app.features.audit.store",
         "backend.app.shared.dashboard_credentials",
         "backend.app.features.detection_settings.store",
         "backend.app.features.detection_settings.policy_store",

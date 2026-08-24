@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -52,7 +53,13 @@ class RelayEvidenceProjection:
     def __init__(self, database_path: Path) -> None:
         self.database_path = database_path
 
-    def project_event(self, event: RelayEvent, snapshot: RelaySnapshot | None = None) -> None:
+    def project_event(
+        self,
+        event: RelayEvent,
+        snapshot: RelaySnapshot | None = None,
+        *,
+        after_write: Callable[[sqlite3.Connection], None] | None = None,
+    ) -> None:
         connection = open_runtime_database(self.database_path, actor=RuntimeActor.API)
         try:
             with write_transaction(connection):
@@ -90,6 +97,8 @@ class RelayEvidenceProjection:
                     )
                 if snapshot is not None:
                     _put_snapshot(connection, expected[0], snapshot)
+                if after_write is not None:
+                    after_write(connection)
         finally:
             connection.close()
 

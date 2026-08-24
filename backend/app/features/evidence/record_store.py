@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import binascii
 import sqlite3
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -66,6 +67,7 @@ class CentralEvidenceReviewStore:
         reviewed_at: str,
         disposition: ReviewDisposition,
         notes: str | None,
+        after_write: Callable[[sqlite3.Connection], None] | None = None,
     ) -> EvidenceReview:
         _validate_review_input(incident_id, expected_version, actor_id, reviewed_at, notes)
         match disposition:
@@ -103,6 +105,8 @@ class CentralEvidenceReviewStore:
                     "WHERE incident_id = ? AND kind = 'PRIMARY_CLIP'",
                     (incident_id,),
                 ).fetchone()
+                if after_write is not None:
+                    after_write(connection)
         finally:
             connection.close()
         version = expected_version + 1
