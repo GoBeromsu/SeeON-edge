@@ -71,7 +71,7 @@ def clip_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return tmp_path
 
 
-def test_page_uses_sqlite_only_while_total_and_facets_cover_full_fixture(
+def test_first_page_ignores_installed_legacy_index_and_returns_compact_cursor(
     clip_env: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -113,8 +113,15 @@ def test_page_uses_sqlite_only_while_total_and_facets_cover_full_fixture(
 
     assert response.status_code == 200
     body = response.json()
-    assert resolved_clip_ids == []
-    assert body["pagination"] == {"limit": 48, "offset": 0, "total": 60, "has_more": True}
+    assert len(resolved_clip_ids) == 48
+    assert body["pagination"] == {
+        "limit": 48,
+        "offset": 0,
+        "total": 60,
+        "has_more": True,
+        "next_cursor": body["pagination"]["next_cursor"],
+    }
+    assert isinstance(body["pagination"]["next_cursor"], str)
     assert body["event_type_counts"] == {"bed-exit": 15, "fall": 35, "other": 10}
     assert [clip["clip_id"] for clip in body["clips"]] == [
         f"clip-{index:03d}" for index in range(59, 11, -1)
@@ -171,20 +178,28 @@ def test_event_filter_uses_effective_category_and_keeps_camera_scoped_facets(
     body = response.json()
     assert [clip["clip_id"] for clip in body["clips"]] == expected_ids
     assert body["pagination"]["total"] == expected_total
+    assert body["pagination"]["has_more"] is (expected_total > len(expected_ids))
     assert body["event_type_counts"] == {"bed-exit": 5, "fall": 5, "other": 2}
     app.state.clip_listing_index.close()
 
 
-def test_paged_list_is_unavailable_without_a_successful_index_sync() -> None:
-    # Given: an application whose listing index has not completed startup sync.
+def test_paged_list_rebuilds_without_a_listing_generation() -> None:
+    # Given: an application with no legacy listing-generation index.
     with TestClient(create_app(lifespan=no_lifespan)) as client:
         _login(client)
 
         # When: a bounded listing is requested.
-        response = client.get("/api/v1/clips", params={"limit": 48, "offset": 0})
+        response = client.get("/api/v1/clips", params={"limit": 48})
 
-    # Then: the API fails closed instead of doing an unbounded filesystem scan.
-    assert response.status_code == 503
+    # Then: schema-18 clips is rebuilt directly and returns an empty keyset page.
+    assert response.status_code == 200
+    assert response.json()["pagination"] == {
+        "limit": 48,
+        "offset": 0,
+        "total": 0,
+        "has_more": False,
+        "next_cursor": None,
+    }
 
 
 def test_unpaged_list_preserves_all_clips_and_reports_unbounded_pagination(clip_env: Path) -> None:
@@ -211,7 +226,13 @@ def test_unpaged_list_preserves_all_clips_and_reports_unbounded_pagination(clip_
     assert response.status_code == 200
     body = response.json()
     assert [clip["clip_id"] for clip in body["clips"]] == ["clip-b", "clip-a"]
-    assert body["pagination"] == {"limit": None, "offset": 0, "total": 2, "has_more": False}
+    assert body["pagination"] == {
+        "limit": None,
+        "offset": 0,
+        "total": 2,
+        "has_more": False,
+        "next_cursor": None,
+    }
     assert body["event_type_counts"] == {"bed-exit": 1, "fall": 1}
 
 

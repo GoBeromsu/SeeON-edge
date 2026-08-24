@@ -28,6 +28,7 @@ import urllib.request
 from pathlib import Path
 
 from backend.app.edge_db.migrator import migrate_database
+from backend.app.edge_db.schema import MIGRATIONS
 from worker.pipeline.output.evidence.clip_maintenance import ClipMaintenance, default_disk_usage
 from worker.pipeline.output.evidence.clip_recorder import ClipRecorder, ClipRecorderConfig
 from worker.pipeline.output.evidence.clip_recorder_models import ClipRecorderStats
@@ -410,7 +411,9 @@ def test_worker_http_deletes_clip_preserves_shared_derivative_and_is_idempotent(
 ) -> None:
     database = tmp_path / "edge.sqlite3"
     store_dir = tmp_path / "clip-store"
-    migrate_database(database)
+    # Task 11 owns schema-18 deletion intent/reconciliation. Task 8 pins the
+    # parent worker-owned response contract on its schema-17 authority.
+    migrate_database(database, migrations=MIGRATIONS[:17])
     clip_dir = _write_finalized_clip(store_dir, "clip-a")
     _seed_central_evidence(database, clip_id="clip-a", lifecycle_state="COMPLETE")
     derivative_path = (
@@ -446,7 +449,7 @@ def test_worker_http_deletes_clip_preserves_shared_derivative_and_is_idempotent(
 def test_worker_http_clip_delete_requires_relay_auth(tmp_path: Path) -> None:
     database = tmp_path / "edge.sqlite3"
     store_dir = tmp_path / "clip-store"
-    migrate_database(database)
+    migrate_database(database, migrations=MIGRATIONS[:17])
     _write_finalized_clip(store_dir, "clip-a")
     _seed_central_evidence(database, clip_id="clip-a")
     service = _control_service(database, store_dir)
@@ -491,7 +494,7 @@ def test_pending_retention_with_directory_still_present_converges_on_retry(
     """
     database = tmp_path / "edge.sqlite3"
     store_dir = tmp_path / "clip-store"
-    migrate_database(database)
+    migrate_database(database, migrations=MIGRATIONS[:17])
     clip_dir = _write_finalized_clip(store_dir, "clip-a")
     _seed_central_evidence(database, clip_id="clip-a")
     assert _begin(database)("clip-a")
@@ -510,7 +513,7 @@ def test_pending_retention_with_directory_already_removed_converges_on_same_proc
 ) -> None:
     database = tmp_path / "edge.sqlite3"
     store_dir = tmp_path / "clip-store"
-    migrate_database(database)
+    migrate_database(database, migrations=MIGRATIONS[:17])
     clip_dir = _write_finalized_clip(store_dir, "clip-a")
     _seed_central_evidence(database, clip_id="clip-a")
     assert _begin(database)("clip-a")
@@ -544,7 +547,7 @@ def test_pending_retention_with_directory_already_removed_converges_on_restart_r
     """
     database = tmp_path / "edge.sqlite3"
     store_dir = tmp_path / "clip-store"
-    migrate_database(database)
+    migrate_database(database, migrations=MIGRATIONS[:17])
     clip_dir = _write_finalized_clip(store_dir, "clip-a")
     _seed_central_evidence(database, clip_id="clip-a")
     assert _begin(database)("clip-a")

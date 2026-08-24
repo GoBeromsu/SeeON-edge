@@ -34,6 +34,7 @@ class ClipsPaginationResponse(BaseModel):
     offset: int = Field(ge=0)
     total: int = Field(ge=0)
     has_more: bool
+    next_cursor: str | None = None
 
 
 class ListClipsResponse(BaseModel):
@@ -50,12 +51,15 @@ class ClipListQuery(BaseModel):
     camera_id: str | None = Field(default=None, min_length=1)
     event_type: ClipEventType | None = None
     limit: int | None = Field(default=None, ge=1, le=100)
+    cursor: str | None = Field(default=None, min_length=1, max_length=384)
     offset: int = Field(default=0, ge=0)
 
     @model_validator(mode="after")
     def require_limit_for_offset(self) -> Self:
-        if self.limit is None and self.offset > 0:
-            raise ValueError("offset requires limit")
+        if self.limit is None and self.cursor is not None:
+            raise ValueError("cursor requires limit")
+        if self.offset > 0:
+            raise ValueError("offset pagination is retired; use cursor")
         return self
 
 

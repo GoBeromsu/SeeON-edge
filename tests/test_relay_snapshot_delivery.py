@@ -63,6 +63,15 @@ def _post(client: TestClient, path: str, payload: dict[str, object]):
 
 def test_snapshot_attachment_is_idempotent_and_rebinding_conflicts(client: TestClient) -> None:
     path = "/api/v1/relay/snapshot-attachments"
+    event = {
+        "edge_event_id": EVENT_ID,
+        "event_type": "fall",
+        "probability": 0.8,
+        "detected_at": "2026-08-21T00:00:00Z",
+        "camera_id": "camera-1",
+        "facility_id": "facility-1",
+    }
+    assert _post(client, "/api/v1/relay/alerts", event).status_code == 202
 
     assert _post(client, path, ATTACHMENT).status_code == 202
     assert _post(client, path, ATTACHMENT).status_code == 202

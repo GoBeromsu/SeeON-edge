@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import sqlite3
 from typing import Annotated, Literal, cast
 
 from fastapi import APIRouter, HTTPException, Query, Request, status
 from fastapi.responses import Response
 from pydantic import ValidationError
 
+from backend.app.edge_db import EDGE_DATABASE_PATH
 from backend.app.features.clips.artifacts import (
     CentralClipArtifactQuery,
     open_verified_annotated,
@@ -18,10 +20,13 @@ from backend.app.features.clips.audit_log import (
     post_backend_backup,
     utc_now_iso,
 )
+from backend.app.features.clips.compact_listing import (
+    CompactClipConflictError,
+    CompactClipListing,
+    CompactClipQuery,
+)
 from backend.app.features.clips.deletion_control import control_clip_deletion
 from backend.app.features.clips.derivative_control import control_derivative
-from backend.app.features.clips.listing import select_clip_page
-from backend.app.features.clips.listing_index import ClipListingIndex, ClipListingReconcileError
 from backend.app.features.clips.manifest import is_valid_clip_id
 from backend.app.features.clips.media_response import media_response, media_type
 from backend.app.features.clips.responses import clip_response, resolved_video_size
@@ -66,42 +71,34 @@ def list_clips(
     filters: Annotated[ClipListQuery, Query()],
 ) -> ListClipsResponse:
     actor = _authorize(request)
-    if filters.limit is None:
-        store = _clip_store(request)
-        page = select_clip_page(store.list_manifests(), filters)
-        try:
-            clips = [
-                clip_response(
-                    manifest,
-                    resolved_video_size(store, manifest),
-                    store.thumbnail_available(manifest.clip_id),
-                )
-                for manifest in page.manifests
-            ]
-        except DuplicateClipIdError as exc:
-            raise _duplicate_clip_http_error(exc) from exc
-    else:
-        index = getattr(request.app.state, "clip_listing_index", None)
-        if not isinstance(index, ClipListingIndex):
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="clip listing index unavailable",
-            )
-        try:
-            page = index.page(filters)
-        except ClipListingReconcileError as exc:
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="clip listing index unavailable",
-            ) from exc
-        clips = [
-            clip_response(
-                manifest,
-                manifest.size_bytes,
-                manifest.thumbnail_available,
-            )
-            for manifest in page.manifests
-        ]
+    store = _clip_store(request)
+    try:
+        page = CompactClipListing(EDGE_DATABASE_PATH).rebuild_and_page(
+            store,
+            CompactClipQuery(
+                camera_id=filters.camera_id,
+                event_type=filters.event_type,
+                limit=filters.limit or 100,
+                cursor=filters.cursor,
+            ),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    except DuplicateClipIdError as exc:
+        raise _duplicate_clip_http_error(exc) from exc
+    except (CompactClipConflictError, OSError, sqlite3.Error) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="clip listing rebuild unavailable",
+        ) from exc
+    clips = [
+        clip_response(
+            manifest,
+            resolved_video_size(store, manifest),
+            store.thumbnail_available(manifest.clip_id),
+        )
+        for manifest in page.manifests
+    ]
     response = ListClipsResponse(
         clips=clips,
         pagination=ClipsPaginationResponse(
@@ -109,6 +106,7 @@ def list_clips(
             offset=filters.offset,
             total=page.total,
             has_more=page.has_more,
+            next_cursor=getattr(page, "next_cursor", None),
         ),
         event_type_counts=dict(page.event_type_counts),
     )
