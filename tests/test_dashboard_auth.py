@@ -3,8 +3,10 @@ import stat
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
+from backend.app.edge_db.migrator import migrate_database
 from backend.app.features.cameras.store import CameraRegistryStore
 from backend.app.main import create_app, no_lifespan
 from backend.app.shared.dashboard_auth import (
@@ -19,9 +21,19 @@ from backend.app.shared.dashboard_credentials import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _migrated_compact_database(tmp_path: Path) -> None:
+    migrate_database(tmp_path / "catalog.sqlite3")
+
+
 def _app(tmp_path, **state):
     app = create_app(lifespan=no_lifespan)
-    app.state.camera_registry = CameraRegistryStore(tmp_path / "catalog.sqlite3")
+    registry = state.pop("camera_registry", None)
+    app.state.camera_registry = (
+        registry
+        if isinstance(registry, CameraRegistryStore)
+        else CameraRegistryStore(tmp_path / "catalog.sqlite3")
+    )
     app.state.edge_relay_token = "worker-secret"
     for key, value in state.items():
         setattr(app.state, key, value)
@@ -391,7 +403,11 @@ def test_corrupt_credentials_store_fails_closed_without_env_fallback(tmp_path, m
     store_path.write_bytes(b"not a sqlite database")
     monkeypatch.setenv(API_DASHBOARD_USERNAME_ENV, "operator")
     monkeypatch.setenv(API_DASHBOARD_PASSWORD_ENV, "env-secret-should-not-apply")
-    app = _app(tmp_path, dashboard_credentials_store=DashboardCredentialsStore(store_path))
+    app = _app(
+        tmp_path,
+        dashboard_credentials_store=DashboardCredentialsStore(store_path),
+        camera_registry=CameraRegistryStore(tmp_path / ".central-fixture" / "edge.sqlite3"),
+    )
 
     with TestClient(app) as client:
         response = client.post(

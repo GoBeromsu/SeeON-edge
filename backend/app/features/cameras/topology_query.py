@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import sqlite3
 from dataclasses import dataclass
 
@@ -48,65 +47,34 @@ def read_topology_snapshot(
     connection: sqlite3.Connection, *, registry_version: int, camera_ids: tuple[str, ...]
 ) -> RegistryTopologySnapshot:
     bindings = {
-        str(row[0]): (str(row[1]), str(row[2]))
+        str(row[0]): (str(row[1]), str(row[2]), str(row[3]))
         for row in connection.execute(
-            "SELECT camera_id, edge_ref, room_edge_ref FROM camera_topology_cameras"
+            "SELECT camera_id,edge_ref,room_location_id,label FROM cameras "
+            "WHERE edge_ref IS NOT NULL"
         )
     }
-    floors = _floors(connection, bindings, _camera_labels(connection))
-    unmapped = tuple(sorted(camera_id for camera_id in camera_ids if camera_id not in bindings))
-    dirty_row = connection.execute(
-        "SELECT registry_version, created_at FROM topology_dirty WHERE id = 1"
-    ).fetchone()
-    dirty = (
-        None
-        if dirty_row is None
-        else TopologyDirtyMarker(
-            registry_version=int(dirty_row[0]), created_at=str(dirty_row[1])
-        )
-    )
-    readiness = EdgeErrorCode.LEGACY_MAPPING_REQUIRED if unmapped else None
-    return RegistryTopologySnapshot(registry_version, floors, dirty, readiness, unmapped)
-
-
-def _camera_labels(connection: sqlite3.Connection) -> dict[str, str]:
-    row = connection.execute("SELECT cameras_json FROM camera_registry WHERE id = 1").fetchone()
-    if row is None:
-        return {}
-    records = json.loads(str(row[0]))
-    return {
-        str(record["id"]): str(record["label"])
-        for record in records
-        if isinstance(record, dict)
-    }
-
-
-def _floors(
-    connection: sqlite3.Connection,
-    bindings: dict[str, tuple[str, str]],
-    labels: dict[str, str],
-) -> tuple[TopologyFloor, ...]:
-    camera_by_room = {
-        room_ref: TopologyCamera(edge_ref=edge_ref, label=labels.get(camera_id, ""))
-        for camera_id, (edge_ref, room_ref) in bindings.items()
+    cameras_by_room = {
+        room_ref: TopologyCamera(edge_ref=edge_ref, label=label)
+        for _, (edge_ref, room_ref, label) in bindings.items()
     }
     rooms_by_floor: dict[str, list[TopologyRoom]] = {}
     for row in connection.execute(
-        "SELECT edge_ref, floor_edge_ref, name, room_type, capacity, legacy_canonical_space_id "
-        "FROM camera_topology_rooms ORDER BY edge_ref"
+        "SELECT location_id,parent_location_id,name,capacity,legacy_space_id "
+        "FROM locations WHERE kind='ROOM' ORDER BY location_id"
     ):
-        camera = camera_by_room.get(str(row[0]))
+        room_ref = str(row[0])
+        camera = cameras_by_room.get(room_ref)
         rooms_by_floor.setdefault(str(row[1]), []).append(
             TopologyRoom(
-                str(row[0]),
+                room_ref,
                 str(row[2]),
-                str(row[3]),
-                int(row[4]),
+                "ROOM",
+                int(row[3]),
                 () if camera is None else (camera,),
-                None if row[5] is None else str(row[5]),
+                None if row[4] is None else str(row[4]),
             )
         )
-    return tuple(
+    floors = tuple(
         TopologyFloor(
             str(row[0]),
             str(row[1]),
@@ -114,9 +82,19 @@ def _floors(
             tuple(rooms_by_floor.get(str(row[0]), ())),
         )
         for row in connection.execute(
-            "SELECT edge_ref, name, order_index FROM camera_topology_floors ORDER BY edge_ref"
+            "SELECT location_id,name,order_index FROM locations "
+            "WHERE kind='FLOOR' ORDER BY location_id"
         )
     )
+    dirty_row = connection.execute(
+        "SELECT topology_dirty_registry_version,topology_dirty_created_at FROM edge_site WHERE id=1"
+    ).fetchone()
+    dirty = None
+    if dirty_row is not None and dirty_row[0] is not None:
+        dirty = TopologyDirtyMarker(int(dirty_row[0]), str(dirty_row[1]))
+    unmapped = tuple(sorted(camera_id for camera_id in camera_ids if camera_id not in bindings))
+    readiness = EdgeErrorCode.LEGACY_MAPPING_REQUIRED if unmapped else None
+    return RegistryTopologySnapshot(registry_version, floors, dirty, readiness, unmapped)
 
 
 def _cloud_room(room: TopologyRoom) -> JsonRecord:

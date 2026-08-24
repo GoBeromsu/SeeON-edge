@@ -8,6 +8,7 @@ from backend.app.features.cameras.topology_query import (
     TopologyDirtyMarker,
     read_topology_snapshot,
 )
+from backend.app.edge_db.configuration import utc_now
 from contracts.edge_provisioning_validation import require_canonical_id, require_edge_ref
 
 
@@ -37,10 +38,12 @@ class CameraTopologyStore:
         self, connection: sqlite3.Connection, *, edge_ref: str, name: str, order_index: int
     ) -> None:
         parsed_ref = _edge_ref(edge_ref)
+        now = utc_now()
         try:
             connection.execute(
-                "INSERT INTO camera_topology_floors (edge_ref, name, order_index) VALUES (?, ?, ?)",
-                (parsed_ref, name, order_index),
+                "INSERT INTO locations(location_id,kind,name,order_index,created_at,updated_at) "
+                "VALUES (?,'FLOOR',?,?,?,?)",
+                (parsed_ref, name, order_index, now, now),
             )
         except sqlite3.IntegrityError as error:
             raise TopologyConflictError(TopologyErrorCode.DUPLICATE_REF, parsed_ref) from error
@@ -48,22 +51,15 @@ class CameraTopologyStore:
     def update_floor(
         self, connection: sqlite3.Connection, edge_ref: str, *, name: str, order_index: int
     ) -> bool:
-        parsed_ref = _edge_ref(edge_ref)
         cursor = connection.execute(
-            "UPDATE camera_topology_floors SET name = ?, order_index = ? WHERE edge_ref = ?",
-            (name, order_index, parsed_ref),
+            "UPDATE locations SET name=?,order_index=?,updated_at=? "
+            "WHERE location_id=? AND kind='FLOOR'",
+            (name, order_index, utc_now(), _edge_ref(edge_ref)),
         )
         return cursor.rowcount > 0
 
     def delete_floor(self, connection: sqlite3.Connection, edge_ref: str) -> bool:
-        parsed_ref = _edge_ref(edge_ref)
-        try:
-            cursor = connection.execute(
-                "DELETE FROM camera_topology_floors WHERE edge_ref = ?", (parsed_ref,)
-            )
-        except sqlite3.IntegrityError as error:
-            raise TopologyConflictError(TopologyErrorCode.ROOM_OCCUPIED, parsed_ref) from error
-        return cursor.rowcount > 0
+        return _delete_location(connection, _edge_ref(edge_ref), "FLOOR")
 
     def create_room(
         self,
@@ -75,38 +71,36 @@ class CameraTopologyStore:
         legacy_canonical_space_id: str | None,
     ) -> None:
         parsed_ref = _edge_ref(edge_ref)
-        parsed_floor_ref = _edge_ref(floor_edge_ref)
-        legacy_id = _legacy_id(legacy_canonical_space_id, parsed_ref)
-        if not _exists(connection, "camera_topology_floors", parsed_floor_ref):
-            raise TopologyConflictError(TopologyErrorCode.MISSING_PARENT, parsed_floor_ref)
+        floor_ref = _edge_ref(floor_edge_ref)
+        if not _location_exists(connection, floor_ref, "FLOOR"):
+            raise TopologyConflictError(TopologyErrorCode.MISSING_PARENT, floor_ref)
+        now = utc_now()
         try:
             connection.execute(
-                "INSERT INTO camera_topology_rooms "
-                "(edge_ref, floor_edge_ref, name, room_type, capacity, legacy_canonical_space_id) "
-                "VALUES (?, ?, ?, 'ROOM', 1, ?)",
-                (parsed_ref, parsed_floor_ref, name, legacy_id),
+                "INSERT INTO locations(location_id,kind,parent_location_id,parent_kind,name,"
+                "order_index,capacity,legacy_space_id,created_at,updated_at) "
+                "VALUES (?,'ROOM',?,'FLOOR',?,0,1,?,?,?)",
+                (
+                    parsed_ref,
+                    floor_ref,
+                    name,
+                    _legacy_id(legacy_canonical_space_id, parsed_ref),
+                    now,
+                    now,
+                ),
             )
         except sqlite3.IntegrityError as error:
             raise TopologyConflictError(TopologyErrorCode.DUPLICATE_REF, parsed_ref) from error
 
-    def update_room(
-        self, connection: sqlite3.Connection, edge_ref: str, *, name: str
-    ) -> bool:
-        parsed_ref = _edge_ref(edge_ref)
+    def update_room(self, connection: sqlite3.Connection, edge_ref: str, *, name: str) -> bool:
         cursor = connection.execute(
-            "UPDATE camera_topology_rooms SET name = ? WHERE edge_ref = ?", (name, parsed_ref)
+            "UPDATE locations SET name=?,updated_at=? WHERE location_id=? AND kind='ROOM'",
+            (name, utc_now(), _edge_ref(edge_ref)),
         )
         return cursor.rowcount > 0
 
     def delete_room(self, connection: sqlite3.Connection, edge_ref: str) -> bool:
-        parsed_ref = _edge_ref(edge_ref)
-        try:
-            cursor = connection.execute(
-                "DELETE FROM camera_topology_rooms WHERE edge_ref = ?", (parsed_ref,)
-            )
-        except sqlite3.IntegrityError as error:
-            raise TopologyConflictError(TopologyErrorCode.ROOM_OCCUPIED, parsed_ref) from error
-        return cursor.rowcount > 0
+        return _delete_location(connection, _edge_ref(edge_ref), "ROOM")
 
     def bind_camera(
         self,
@@ -121,25 +115,35 @@ class CameraTopologyStore:
         if edge_ref is None or room_edge_ref is None:
             raise TopologyConflictError(TopologyErrorCode.INVALID_BINDING, camera_id)
         parsed_ref = _edge_ref(edge_ref)
-        parsed_room_ref = _edge_ref(room_edge_ref)
-        if not _exists(connection, "camera_topology_rooms", parsed_room_ref):
-            raise TopologyConflictError(TopologyErrorCode.MISSING_PARENT, parsed_room_ref)
+        room_ref = _edge_ref(room_edge_ref)
+        if not _location_exists(connection, room_ref, "ROOM"):
+            raise TopologyConflictError(TopologyErrorCode.MISSING_PARENT, room_ref)
         try:
-            connection.execute(
-                "INSERT INTO camera_topology_cameras (camera_id, edge_ref, room_edge_ref) "
-                "VALUES (?, ?, ?)",
-                (camera_id, parsed_ref, parsed_room_ref),
+            cursor = connection.execute(
+                "UPDATE cameras SET edge_ref=?,room_location_id=?,room_location_kind='ROOM',"
+                "updated_at=? WHERE camera_id=?",
+                (parsed_ref, room_ref, utc_now(), camera_id),
             )
+            if cursor.rowcount != 1:
+                raise TopologyConflictError(TopologyErrorCode.INVALID_BINDING, camera_id)
         except sqlite3.IntegrityError as error:
+            occupied = connection.execute(
+                "SELECT 1 FROM cameras WHERE room_location_id=? AND camera_id<>?",
+                (room_ref, camera_id),
+            ).fetchone()
             code = (
                 TopologyErrorCode.ROOM_OCCUPIED
-                if _room_occupied(connection, parsed_room_ref)
+                if occupied is not None
                 else TopologyErrorCode.DUPLICATE_REF
             )
             raise TopologyConflictError(code, parsed_ref) from error
 
     def delete_camera(self, connection: sqlite3.Connection, camera_id: str) -> None:
-        connection.execute("DELETE FROM camera_topology_cameras WHERE camera_id = ?", (camera_id,))
+        connection.execute(
+            "UPDATE cameras SET edge_ref=NULL,room_location_id=NULL,room_location_kind=NULL "
+            "WHERE camera_id=?",
+            (camera_id,),
+        )
 
     def snapshot(
         self, connection: sqlite3.Connection, *, registry_version: int, camera_ids: tuple[str, ...]
@@ -147,6 +151,25 @@ class CameraTopologyStore:
         return read_topology_snapshot(
             connection, registry_version=registry_version, camera_ids=camera_ids
         )
+
+
+def _delete_location(connection: sqlite3.Connection, edge_ref: str, kind: str) -> bool:
+    try:
+        cursor = connection.execute(
+            "DELETE FROM locations WHERE location_id=? AND kind=?", (edge_ref, kind)
+        )
+    except sqlite3.IntegrityError as error:
+        raise TopologyConflictError(TopologyErrorCode.ROOM_OCCUPIED, edge_ref) from error
+    return cursor.rowcount > 0
+
+
+def _location_exists(connection: sqlite3.Connection, edge_ref: str, kind: str) -> bool:
+    return (
+        connection.execute(
+            "SELECT 1 FROM locations WHERE location_id=? AND kind=?", (edge_ref, kind)
+        ).fetchone()
+        is not None
+    )
 
 
 def _edge_ref(value: str) -> str:
@@ -163,19 +186,6 @@ def _legacy_id(value: str | None, edge_ref: str) -> str | None:
         return require_canonical_id(value)
     except Exception as error:
         raise TopologyConflictError(TopologyErrorCode.INVALID_LEGACY_SPACE_ID, edge_ref) from error
-
-
-def _exists(connection: sqlite3.Connection, table: str, edge_ref: str) -> bool:
-    row = connection.execute(
-        f"SELECT 1 FROM {table} WHERE edge_ref = ?", (edge_ref,)
-    ).fetchone()
-    return row is not None
-
-
-def _room_occupied(connection: sqlite3.Connection, room_edge_ref: str) -> bool:
-    return connection.execute(
-        "SELECT 1 FROM camera_topology_cameras WHERE room_edge_ref = ?", (room_edge_ref,)
-    ).fetchone() is not None
 
 
 __all__ = [

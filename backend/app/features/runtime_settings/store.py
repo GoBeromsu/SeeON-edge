@@ -1,8 +1,7 @@
-"""SQLite-backed runtime settings shared by API projection and relay policy."""
+"""Schema-18 runtime settings authority."""
 
 from __future__ import annotations
 
-import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Lock
@@ -10,13 +9,10 @@ from threading import Lock
 from fastapi import FastAPI
 
 from backend.app.edge_db import EDGE_DATABASE_PATH
-from backend.app.shared.sqlite_bootstrap import connect_catalog_store
-
-_CREATE_RUNTIME_SETTINGS_TABLE = (
-    "CREATE TABLE IF NOT EXISTS runtime_settings ("
-    "id INTEGER PRIMARY KEY CHECK (id = 1), "
-    "clip_export_enabled INTEGER NOT NULL CHECK (clip_export_enabled IN (0, 1)), "
-    "version INTEGER NOT NULL CHECK (version >= 0)) STRICT"
+from backend.app.edge_db.configuration import (
+    ensure_edge_site,
+    open_configuration_database,
+    utc_now,
 )
 
 
@@ -26,10 +22,7 @@ class RuntimeSetting:
     version: int = 0
 
     def as_dict(self) -> dict[str, object]:
-        return {
-            "clip_export_enabled": self.clip_export_enabled,
-            "version": self.version,
-        }
+        return {"clip_export_enabled": self.clip_export_enabled, "version": self.version}
 
 
 class RuntimeSettingsVersionConflict(RuntimeError):
@@ -38,16 +31,11 @@ class RuntimeSettingsVersionConflict(RuntimeError):
         self.current = current
 
 
-def _check_expected_version(current: RuntimeSetting, expected: int | None) -> None:
-    if expected is not None and expected != current.version:
-        raise RuntimeSettingsVersionConflict(current)
-
-
 class RuntimeSettingsStore:
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
         self._lock = Lock()
-        self._connection: sqlite3.Connection | None = None
+        self._connection = open_configuration_database(self.path)
 
     @classmethod
     def from_env(cls) -> RuntimeSettingsStore:
@@ -55,63 +43,42 @@ class RuntimeSettingsStore:
 
     def get(self) -> RuntimeSetting:
         with self._lock:
-            row = (
-                self._connect()
-                .execute("SELECT clip_export_enabled, version FROM runtime_settings WHERE id = 1")
-                .fetchone()
-            )
-        if row is None:
-            return RuntimeSetting()
-        return RuntimeSetting(clip_export_enabled=bool(row[0]), version=int(row[1]))
+            return self._get_unlocked()
 
     def set_clip_export_enabled(
-        self,
-        enabled: bool,
-        *,
-        expected_version: int | None = None,
+        self, enabled: bool, *, expected_version: int | None = None
     ) -> RuntimeSetting:
         with self._lock:
-            connection = self._connect()
-            connection.execute("BEGIN IMMEDIATE")
+            self._connection.execute("BEGIN IMMEDIATE")
             try:
-                row = connection.execute(
-                    "SELECT clip_export_enabled, version FROM runtime_settings WHERE id = 1"
-                ).fetchone()
-                current = (
-                    RuntimeSetting() if row is None else RuntimeSetting(bool(row[0]), int(row[1]))
-                )
-                _check_expected_version(current, expected_version)
-                if row is None and not enabled:
+                current = self._get_unlocked()
+                _require_expected_version(current, expected_version)
+                if current.clip_export_enabled == enabled:
                     setting = current
-                elif row is None:
-                    setting = RuntimeSetting(clip_export_enabled=True, version=1)
-                    connection.execute(
-                        "INSERT INTO runtime_settings "
-                        "(id, clip_export_enabled, version) VALUES (1, ?, ?)",
-                        (1, setting.version),
-                    )
-                elif bool(row[0]) == enabled:
-                    setting = RuntimeSetting(clip_export_enabled=enabled, version=int(row[1]))
                 else:
-                    setting = RuntimeSetting(
-                        clip_export_enabled=enabled,
-                        version=int(row[1]) + 1,
+                    ensure_edge_site(self._connection)
+                    setting = RuntimeSetting(enabled, current.version + 1)
+                    self._connection.execute(
+                        "UPDATE edge_site SET clip_export_enabled=?,runtime_settings_version=?,"
+                        "updated_at=? WHERE id=1",
+                        (int(enabled), setting.version, utc_now()),
                     )
-                    connection.execute(
-                        "UPDATE runtime_settings SET clip_export_enabled = ?, version = ? "
-                        "WHERE id = 1",
-                        (int(enabled), setting.version),
-                    )
-                connection.execute("COMMIT")
-            except Exception:
-                connection.execute("ROLLBACK")
+                self._connection.execute("COMMIT")
+            except BaseException:
+                self._connection.execute("ROLLBACK")
                 raise
         return setting
 
-    def _connect(self) -> sqlite3.Connection:
-        if self._connection is None:
-            self._connection = connect_catalog_store(self.path, (_CREATE_RUNTIME_SETTINGS_TABLE,))
-        return self._connection
+    def _get_unlocked(self) -> RuntimeSetting:
+        row = self._connection.execute(
+            "SELECT clip_export_enabled,runtime_settings_version FROM edge_site WHERE id=1"
+        ).fetchone()
+        return RuntimeSetting() if row is None else RuntimeSetting(bool(row[0]), int(row[1]))
+
+
+def _require_expected_version(current: RuntimeSetting, expected: int | None) -> None:
+    if expected is not None and expected != current.version:
+        raise RuntimeSettingsVersionConflict(current)
 
 
 def get_runtime_settings_store(app: FastAPI) -> RuntimeSettingsStore:

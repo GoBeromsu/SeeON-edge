@@ -1,17 +1,27 @@
-"""API-owned immutable detection-policy revisions and activation pointers."""
+"""Schema-18 current-plus-previous detection policy authority."""
 
 from __future__ import annotations
 
 import hashlib
 import json
 import sqlite3
+from contextlib import closing
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from pathlib import Path
-from typing import Literal, cast
+from typing import cast
 
 from backend.app.edge_db import EDGE_DATABASE_PATH
-from backend.app.edge_db.connection import RuntimeActor, open_runtime_database, write_transaction
+from backend.app.edge_db.connection import write_transaction
+from backend.app.edge_db.configuration import open_configuration_database, utc_now
+from backend.app.features.detection_settings.policy_models import (
+    ActivationStatus,
+    PolicyActivation,
+    PolicyActivationRefused,
+    PolicyCameraIdentity,
+    PolicyDiff,
+    PolicyRevisionConflict,
+    PolicyRollbackUnavailable,
+)
 from shared.detection_policies import (
     LATEST_POLICY_VERSIONS,
     EffectivePolicy,
@@ -25,88 +35,29 @@ from shared.detection_policies import (
     policy_values_dict,
 )
 
-ActivationStatus = Literal["pending", "applied", "failed"]
-
-
-class PolicyActivationRefused(RuntimeError):
-    def __init__(self, activation_id: int, reason: str) -> None:
-        self.activation_id = activation_id
-        self.reason = reason
-        super().__init__(f"detection policy activation {activation_id} refused: {reason}")
-
-
-class PolicyRevisionConflict(RuntimeError):
-    pass
-
-
-class PolicyRollbackUnavailable(RuntimeError):
-    pass
-
 
 @dataclass(frozen=True, slots=True)
-class PolicyCameraIdentity:
-    camera_id: str
-
-
-@dataclass(frozen=True, slots=True)
-class PolicyActivation:
-    activation_id: int
+class _PolicyRecord:
+    policy_id: int
     facility_id: str
     camera_id: str | None
     module_id: str
     module_version: int
-    active_revision_id: int | None
-    previous_revision_id: int | None
-    activation_generation: int
+    schema_id: str
+    schema_version: int
+    active_values: NumericPolicy | None
+    previous_present: bool
+    previous_values: NumericPolicy | None
+    generation: int
     status: ActivationStatus
     refusal_reason: str | None
-
-    def as_dict(self) -> dict[str, object]:
-        return {
-            "activation_id": self.activation_id,
-            "facility_id": self.facility_id,
-            "camera_id": self.camera_id,
-            "module_id": self.module_id,
-            "module_version": self.module_version,
-            "active_revision_id": self.active_revision_id,
-            "previous_revision_id": self.previous_revision_id,
-            "activation_generation": self.activation_generation,
-            "status": self.status,
-            "refusal_reason": self.refusal_reason,
-        }
-
-
-@dataclass(frozen=True, slots=True)
-class PolicyDiff:
-    changed: bool
-    current: EffectivePolicy
-    proposed: EffectivePolicy
-    compared_payload: dict[str, object]
-    concurrency_token: int
-
-    def as_dict(self) -> dict[str, object]:
-        return {
-            "changed": self.changed,
-            "current": self.current.as_dict(),
-            "proposed": self.proposed.as_dict(),
-            "compared_payload": dict(self.compared_payload),
-            "concurrency_token": self.concurrency_token,
-        }
-
-
-@dataclass(frozen=True, slots=True)
-class _Revision:
-    revision_id: int
-    facility_id: str
-    camera_id: str | None
-    module_id: str
-    module_version: int
-    values: NumericPolicy
 
 
 class DetectionPolicyStore:
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
+        with closing(open_configuration_database(self.path)):
+            pass
 
     @classmethod
     def from_env(cls) -> DetectionPolicyStore:
@@ -115,16 +66,12 @@ class DetectionPolicyStore:
     def generation(self, facility_id: str | None) -> int:
         if facility_id is None:
             return 0
-        connection = self._connect()
-        try:
+        with closing(open_configuration_database(self.path)) as connection:
             row = connection.execute(
-                "SELECT activation_generation FROM control_detection_policy_state "
-                "WHERE facility_id = ?",
+                "SELECT max(activation_generation) FROM policies WHERE facility_id=?",
                 (facility_id,),
             ).fetchone()
-            return 0 if row is None else int(row[0])
-        finally:
-            connection.close()
+        return 0 if row is None or row[0] is None else int(row[0])
 
     def diff(
         self,
@@ -137,81 +84,42 @@ class DetectionPolicyStore:
         camera_id: str | None,
         values: object,
     ) -> PolicyDiff:
-        if values is None and camera_id is None:
-            raise PolicyDocumentError("facility default policy values cannot be null")
-        proposed_values = (
-            None
-            if values is None
-            else parse_policy_values(
+        parsed = self._parse_input(
+            module_id, module_version, schema_id, schema_version, camera_id, values
+        )
+        with closing(open_configuration_database(self.path)) as connection:
+            database_camera_id = _database_camera_id(connection, camera_id)
+            record = _record(connection, facility_id, database_camera_id, module_id, module_version)
+            current = _effective(
+                connection, facility_id, database_camera_id, module_id, module_version
+            )
+            facility = _effective(connection, facility_id, None, module_id, module_version)
+        proposed = (
+            facility
+            if parsed is None
+            else make_effective_policy(
                 module_id=module_id,
                 module_version=module_version,
-                schema_id=schema_id,
-                schema_version=schema_version,
-                values=values,
+                values=parsed,
+                source="facility-default" if camera_id is None else "camera-override",
+                facility_revision_id=0 if camera_id is None else facility.facility_revision_id,
+                camera_revision_id=None if camera_id is None else 0,
             )
         )
-        connection = self._connect()
-        try:
-            activation = self._activation(
-                connection, facility_id, camera_id, module_id, module_version
-            )
-            concurrency_token = _concurrency_token(activation)
-            facility = self._resolve_scope(connection, facility_id, None, module_id, module_version)
-            facility_effective = self._effective_from_scope(
-                module_id,
-                module_version,
-                facility,
-                None,
-            )
-            if camera_id is None:
-                assert proposed_values is not None
-                current = facility_effective
-                proposed = make_effective_policy(
-                    module_id=module_id,
-                    module_version=module_version,
-                    values=proposed_values,
-                    source="facility-default",
-                    facility_revision_id=-1,
-                    camera_revision_id=None,
-                )
-            else:
-                camera = self._resolve_scope(
-                    connection, facility_id, camera_id, module_id, module_version
-                )
-                current = self._effective_from_scope(module_id, module_version, facility, camera)
-                proposed = (
-                    facility_effective
-                    if proposed_values is None
-                    else make_effective_policy(
-                        module_id=module_id,
-                        module_version=module_version,
-                        values=proposed_values,
-                        source="camera-override",
-                        facility_revision_id=(None if facility is None else facility.revision_id),
-                        camera_revision_id=-1,
-                    )
-                )
-        finally:
-            connection.close()
         changed = (
             current.source == "camera-override"
-            if proposed_values is None
+            if parsed is None
             else (current.source, current.values) != (proposed.source, proposed.values)
         )
-        # Proposal sentinel revisions are for a non-persisting diff only. Build
-        # their stable preview identity from zero instead of accepting negative
-        # persisted revision identities at the shared boundary.
-        if proposed_values is not None:
-            proposed = _preview_policy(proposed, camera_id=camera_id)
         compared_payload: dict[str, object] = {
             "module_id": module_id,
             "module_version": module_version,
             "schema_id": schema_id,
             "schema_version": schema_version,
             "camera_id": camera_id,
-            "values": (None if proposed_values is None else policy_values_dict(proposed_values)),
+            "values": None if parsed is None else policy_values_dict(parsed),
         }
-        return PolicyDiff(changed, current, proposed, compared_payload, concurrency_token)
+        return PolicyDiff(changed, current, proposed, compared_payload, _token(record))
 
     def apply(
         self,
@@ -225,110 +133,46 @@ class DetectionPolicyStore:
         values: object | None,
         expected_revision_id: int,
     ) -> PolicyActivation:
-        if values is None and camera_id is None:
-            raise PolicyDocumentError("facility default policy values cannot be null")
         if expected_revision_id < 0:
             raise PolicyDocumentError("expected_revision_id must be >= 0")
-        parsed = (
-            None
-            if values is None
-            else parse_policy_values(
+        parsed = self._parse_input(
+            module_id, module_version, schema_id, schema_version, camera_id, values
+        )
+        with (
+            closing(open_configuration_database(self.path)) as connection,
+            write_transaction(connection),
+        ):
+            database_camera_id = _database_camera_id(connection, camera_id)
+            raw = _raw_record(
+                connection, facility_id, database_camera_id, module_id, module_version
+            )
+            record = _try_record(raw)
+            if _raw_token(raw) != expected_revision_id:
+                raise PolicyRevisionConflict(
+                    "detection policy activation changed since the submitted diff"
+                )
+            if record is not None and record.status != "failed" and record.active_values == parsed:
+                return _activation(record, camera_id)
+            if raw is None and parsed is None:
+                raise PolicyRevisionConflict("camera policy already inherits its default")
+            generation = _next_generation(connection, facility_id)
+            previous_present, previous_values = _previous_state(raw, record, camera_id)
+            policy_id = _save_policy(
+                connection,
+                raw,
+                facility_id=facility_id,
+                camera_id=database_camera_id,
                 module_id=module_id,
                 module_version=module_version,
                 schema_id=schema_id,
                 schema_version=schema_version,
-                values=values,
+                active_values=parsed,
+                previous_present=previous_present,
+                previous_values=previous_values,
+                generation=generation,
             )
-        )
-        connection = self._connect()
-        try:
-            with write_transaction(connection):
-                activation = self._activation(
-                    connection, facility_id, camera_id, module_id, module_version
-                )
-                current_token = _concurrency_token(activation)
-                if current_token != expected_revision_id:
-                    raise PolicyRevisionConflict(
-                        "detection policy activation changed since the submitted diff"
-                    )
-                current_revision = None if activation is None else activation.active_revision_id
-                active_revision_is_valid = activation is None or activation.status != "failed"
-                if active_revision_is_valid:
-                    try:
-                        same_active_values = self._same_active_values(
-                            connection,
-                            current_revision,
-                            parsed,
-                            active_is_inherit=values is None,
-                        )
-                    except (PolicyDocumentError, TypeError, ValueError):
-                        active_revision_is_valid = False
-                        same_active_values = False
-                else:
-                    same_active_values = False
-                if same_active_values:
-                    if activation is None:
-                        raise PolicyRevisionConflict("camera policy already inherits its default")
-                    return activation
-                revision_id = (
-                    None
-                    if parsed is None
-                    else self._insert_revision(
-                        connection,
-                        facility_id=facility_id,
-                        camera_id=camera_id,
-                        module_id=module_id,
-                        module_version=module_version,
-                        schema_id=schema_id,
-                        schema_version=schema_version,
-                        values=parsed,
-                    )
-                )
-                generation = self._next_generation(connection, facility_id)
-                now = _utc_now()
-                if activation is None:
-                    cursor = connection.execute(
-                        "INSERT INTO control_detection_policy_activations "
-                        "(facility_id,camera_id,module_id,module_version,active_revision_id,"
-                        "previous_revision_id,activation_generation,status,refusal_reason,"
-                        "activated_at,applied_at) VALUES (?,?,?,?,?,?,?,'pending',NULL,?,NULL)",
-                        (
-                            facility_id,
-                            camera_id,
-                            module_id,
-                            module_version,
-                            revision_id,
-                            None,
-                            generation,
-                            now,
-                        ),
-                    )
-                    activation_id = _last_insert_id(cursor)
-                else:
-                    activation_id = activation.activation_id
-                    previous_revision_id = (
-                        activation.active_revision_id
-                        if active_revision_is_valid
-                        else activation.previous_revision_id
-                    )
-                    connection.execute(
-                        "UPDATE control_detection_policy_activations SET "
-                        "previous_revision_id=?, active_revision_id=?, "
-                        "activation_generation=?, status='pending', refusal_reason=NULL, "
-                        "activated_at=?, applied_at=NULL WHERE activation_id=?",
-                        (
-                            previous_revision_id,
-                            revision_id,
-                            generation,
-                            now,
-                            activation_id,
-                        ),
-                    )
-                resolved = self._activation_by_id(connection, activation_id)
-                assert resolved is not None
-                return resolved
-        finally:
-            connection.close()
+            saved = _record_by_id(connection, policy_id)
+            return _activation(saved, camera_id)
 
     def rollback(
         self,
@@ -341,442 +185,359 @@ class DetectionPolicyStore:
     ) -> PolicyActivation:
         if expected_revision_id < 0:
             raise PolicyDocumentError("expected_revision_id must be >= 0")
-        connection = self._connect()
-        try:
-            with write_transaction(connection):
-                activation = self._activation(
-                    connection, facility_id, camera_id, module_id, module_version
+        with (
+            closing(open_configuration_database(self.path)) as connection,
+            write_transaction(connection),
+        ):
+            database_camera_id = _database_camera_id(connection, camera_id)
+            raw = _raw_record(
+                connection, facility_id, database_camera_id, module_id, module_version
+            )
+            record = None if raw is None else _decode_record(raw)
+            if _token(record) != expected_revision_id:
+                raise PolicyRevisionConflict(
+                    "detection policy activation changed since the submitted rollback"
                 )
-                current_token = _concurrency_token(activation)
-                if current_token != expected_revision_id:
-                    raise PolicyRevisionConflict(
-                        "detection policy activation changed since the submitted rollback"
-                    )
-                if activation is None or activation.previous_revision_id is None:
-                    raise PolicyRollbackUnavailable(
-                        "no prior immutable policy revision is available for rollback"
-                    )
-                rollback_revision_id = activation.previous_revision_id
-                predecessor_revision_id = self._prior_revision_id(
-                    connection,
-                    facility_id=facility_id,
-                    camera_id=camera_id,
-                    module_id=module_id,
-                    module_version=module_version,
-                    before_revision_id=rollback_revision_id,
-                )
-                generation = self._next_generation(connection, facility_id)
-                connection.execute(
-                    "UPDATE control_detection_policy_activations SET "
-                    "active_revision_id=?, previous_revision_id=?, activation_generation=?, "
-                    "status='pending', refusal_reason=NULL, "
-                    "activated_at=?, applied_at=NULL WHERE activation_id=?",
-                    (
-                        rollback_revision_id,
-                        predecessor_revision_id,
-                        generation,
-                        _utc_now(),
-                        activation.activation_id,
-                    ),
-                )
-                resolved = self._activation_by_id(connection, activation.activation_id)
-                assert resolved is not None
-                return resolved
-        finally:
-            connection.close()
+            if record is None or not record.previous_present:
+                raise PolicyRollbackUnavailable("no prior policy state is available for rollback")
+            generation = _next_generation(connection, facility_id)
+            values_json, digest = _encoded(record.previous_values)
+            connection.execute(
+                "UPDATE policies SET active_values_json=?,active_content_sha256=?,"
+                "previous_present=0,previous_values_json=NULL,previous_content_sha256=NULL,"
+                "activation_generation=?,status='pending',refusal_reason=NULL,activated_at=?,"
+                "applied_at=NULL,updated_at=? WHERE policy_id=?",
+                (values_json, digest, generation, utc_now(), utc_now(), record.policy_id),
+            )
+            return _activation(_record_by_id(connection, record.policy_id), camera_id)
 
     def resolve_bundle(
-        self,
-        facility_id: str | None,
-        cameras: tuple[PolicyCameraIdentity, ...],
+        self, facility_id: str | None, cameras: tuple[PolicyCameraIdentity, ...]
     ) -> PolicyBundle:
         base = default_policy_bundle(tuple(camera.camera_id for camera in cameras))
         if facility_id is None:
             return base
-        connection = self._connect()
-        try:
-            defaults: dict[str, EffectivePolicy] = {}
-            facility_revisions: dict[str, _Revision | None] = {}
-            for module_id, module_version in LATEST_POLICY_VERSIONS.items():
-                facility_revision = self._resolve_scope(
-                    connection, facility_id, None, module_id, module_version
-                )
-                facility_revisions[module_id] = facility_revision
-                defaults[module_id] = self._effective_from_scope(
-                    module_id, module_version, facility_revision, None
-                )
-            bundle = PolicyBundle(base.schema_version, defaults, {})
-            for camera in cameras:
-                policies: dict[str, EffectivePolicy] = {}
-                for module_id, module_version in LATEST_POLICY_VERSIONS.items():
-                    camera_revision = self._resolve_scope(
-                        connection,
-                        facility_id,
-                        camera.camera_id,
-                        module_id,
-                        module_version,
-                    )
-                    policies[module_id] = self._effective_from_scope(
-                        module_id,
-                        module_version,
-                        facility_revisions[module_id],
-                        camera_revision,
-                    )
-                bundle = bundle.with_camera(camera.camera_id, policies)
-        except PolicyActivationRefused:
-            raise
-        except (PolicyDocumentError, sqlite3.Error, TypeError, ValueError) as exc:
-            raise PolicyActivationRefused(0, str(exc)) from exc
-        finally:
-            connection.close()
+        with closing(open_configuration_database(self.path)) as connection:
+            try:
+                defaults = {
+                    module_id: _effective(connection, facility_id, None, module_id, version)
+                    for module_id, version in LATEST_POLICY_VERSIONS.items()
+                }
+                bundle = PolicyBundle(base.schema_version, defaults, {})
+                for camera in cameras:
+                    database_camera_id = _database_camera_id(connection, camera.camera_id)
+                    policies = {
+                        module_id: _effective(
+                            connection, facility_id, database_camera_id, module_id, version
+                        )
+                        for module_id, version in LATEST_POLICY_VERSIONS.items()
+                    }
+                    bundle = bundle.with_camera(camera.camera_id, policies)
+            except (PolicyDocumentError, sqlite3.Error, TypeError, ValueError) as error:
+                raise PolicyActivationRefused(0, str(error)) from error
         return bundle
 
     def mark_applied(self, facility_id: str, activation_generation: int) -> None:
-        connection = self._connect()
-        try:
-            with write_transaction(connection):
-                connection.execute(
-                    "UPDATE control_detection_policy_activations SET status='applied', "
-                    "refusal_reason=NULL, applied_at=? WHERE facility_id=? "
-                    "AND status='pending' AND activation_generation <= ?",
-                    (_utc_now(), facility_id, activation_generation),
-                )
-        finally:
-            connection.close()
+        with (
+            closing(open_configuration_database(self.path)) as connection,
+            write_transaction(connection),
+        ):
+            now = utc_now()
+            connection.execute(
+                "UPDATE policies SET status='applied',refusal_reason=NULL,"
+                "applied_at=?,updated_at=? "
+                "WHERE facility_id=? AND status='pending' AND activation_generation<=?",
+                (now, now, facility_id, activation_generation),
+            )
 
     def activations(self, facility_id: str) -> tuple[PolicyActivation, ...]:
-        connection = self._connect()
-        try:
+        with closing(open_configuration_database(self.path)) as connection:
             rows = connection.execute(
-                _ACTIVATION_SELECT + " WHERE facility_id=? ORDER BY activation_id",
-                (facility_id,),
+                _RAW_SELECT + " WHERE p.facility_id=? ORDER BY p.policy_id", (facility_id,)
             ).fetchall()
-            return tuple(_activation_from_row(row) for row in rows)
-        finally:
-            connection.close()
+            return tuple(_activation(_decode_record(row), _external_camera_id(row)) for row in rows)
 
-    def _resolve_scope(
-        self,
-        connection: sqlite3.Connection,
-        facility_id: str,
-        camera_id: str | None,
-        module_id: str,
-        module_version: int,
-    ) -> _Revision | None:
-        activation = self._activation(connection, facility_id, camera_id, module_id, module_version)
-        if activation is None:
-            return None
-        return self._revision_for_activation(connection, activation)
-
-    def _revision_for_activation(
-        self, connection: sqlite3.Connection, activation: PolicyActivation
-    ) -> _Revision | None:
-        if activation.status == "failed":
-            raise PolicyActivationRefused(
-                activation.activation_id,
-                activation.refusal_reason or "activation is marked failed",
-            )
-        revision_id = activation.active_revision_id
-        if revision_id is None:
-            return None
-        try:
-            revision = self._validated_active_revision(connection, revision_id, activation)
-        except (PolicyDocumentError, TypeError, ValueError) as exc:
-            reason = str(exc)
-            connection.execute(
-                "UPDATE control_detection_policy_activations SET status='failed', "
-                "refusal_reason=?, applied_at=NULL WHERE activation_id=?",
-                (reason, activation.activation_id),
-            )
-            connection.commit()
-            raise PolicyActivationRefused(activation.activation_id, reason) from exc
-        return revision
-
-    def _validated_active_revision(
-        self,
-        connection: sqlite3.Connection,
-        revision_id: int,
-        activation: PolicyActivation,
-    ) -> _Revision:
-        revision = self._revision(connection, revision_id)
-        if revision is None:
-            raise PolicyDocumentError("active revision row is missing")
-        if (
-            revision.facility_id,
-            revision.camera_id,
-            revision.module_id,
-            revision.module_version,
-        ) != (
-            activation.facility_id,
-            activation.camera_id,
-            activation.module_id,
-            activation.module_version,
-        ):
-            raise PolicyDocumentError("active revision scope does not match activation")
-        return revision
-
-    def _revision(self, connection: sqlite3.Connection, revision_id: int) -> _Revision | None:
-        row = connection.execute(
-            "SELECT revision_id,facility_id,camera_id,module_id,module_version,schema_id,"
-            "schema_version,values_json,content_sha256 "
-            "FROM control_detection_policy_revisions WHERE revision_id=?",
-            (revision_id,),
-        ).fetchone()
-        if row is None:
-            return None
-        values_json = str(row[7])
-        if hashlib.sha256(values_json.encode()).hexdigest() != str(row[8]):
-            raise PolicyDocumentError("policy revision content hash mismatch")
-        try:
-            raw_values = json.loads(values_json)
-        except json.JSONDecodeError as exc:
-            raise PolicyDocumentError("policy revision JSON is malformed") from exc
-        values = parse_policy_values(
-            module_id=str(row[3]),
-            module_version=int(row[4]),
-            schema_id=str(row[5]),
-            schema_version=int(row[6]),
-            values=raw_values,
-        )
-        return _Revision(
-            int(row[0]),
-            str(row[1]),
-            None if row[2] is None else str(row[2]),
-            str(row[3]),
-            int(row[4]),
-            values,
-        )
-
-    def _effective_from_scope(
-        self,
-        module_id: str,
-        module_version: int,
-        facility: _Revision | None,
-        camera: _Revision | None,
-    ) -> EffectivePolicy:
-        definition = policy_definition(module_id, module_version)
-        if camera is not None:
-            return make_effective_policy(
-                module_id=module_id,
-                module_version=module_version,
-                values=camera.values,
-                source="camera-override",
-                facility_revision_id=None if facility is None else facility.revision_id,
-                camera_revision_id=camera.revision_id,
-            )
-        if facility is not None:
-            return make_effective_policy(
-                module_id=module_id,
-                module_version=module_version,
-                values=facility.values,
-                source="facility-default",
-                facility_revision_id=facility.revision_id,
-                camera_revision_id=None,
-            )
-        return make_effective_policy(
-            module_id=module_id,
-            module_version=module_version,
-            values=definition.image_default,
-            source="image-default",
-            facility_revision_id=None,
-            camera_revision_id=None,
-        )
-
-    def _insert_revision(
-        self,
-        connection: sqlite3.Connection,
-        *,
-        facility_id: str,
-        camera_id: str | None,
+    @staticmethod
+    def _parse_input(
         module_id: str,
         module_version: int,
         schema_id: str,
         schema_version: int,
-        values: NumericPolicy,
-    ) -> int:
-        values_json = json.dumps(
-            policy_values_dict(values),
-            sort_keys=True,
-            separators=(",", ":"),
-            ensure_ascii=False,
-        )
-        cursor = connection.execute(
-            "INSERT INTO control_detection_policy_revisions "
-            "(facility_id,camera_id,module_id,module_version,schema_id,schema_version,"
-            "values_json,content_sha256,created_at) VALUES (?,?,?,?,?,?,?,?,?)",
-            (
-                facility_id,
-                camera_id,
-                module_id,
-                module_version,
-                schema_id,
-                schema_version,
-                values_json,
-                hashlib.sha256(values_json.encode()).hexdigest(),
-                _utc_now(),
-            ),
-        )
-        return _last_insert_id(cursor)
-
-    def _same_active_values(
-        self,
-        connection: sqlite3.Connection,
-        revision_id: int | None,
-        values: NumericPolicy | None,
-        *,
-        active_is_inherit: bool,
-    ) -> bool:
-        if active_is_inherit:
-            return revision_id is None
-        if revision_id is None or values is None:
-            return False
-        revision = self._revision(connection, revision_id)
-        return revision is not None and revision.values == values
-
-    def _prior_revision_id(
-        self,
-        connection: sqlite3.Connection,
-        *,
-        facility_id: str,
         camera_id: str | None,
-        module_id: str,
-        module_version: int,
-        before_revision_id: int,
-    ) -> int | None:
-        camera_clause = "camera_id IS NULL" if camera_id is None else "camera_id=?"
-        parameters: tuple[object, ...] = (
-            (facility_id, module_id, module_version, before_revision_id)
-            if camera_id is None
-            else (
-                facility_id,
-                camera_id,
-                module_id,
-                module_version,
-                before_revision_id,
-            )
+        values: object | None,
+    ) -> NumericPolicy | None:
+        if values is None:
+            if camera_id is None:
+                raise PolicyDocumentError("facility default policy values cannot be null")
+            return None
+        return parse_policy_values(
+            module_id=module_id,
+            module_version=module_version,
+            schema_id=schema_id,
+            schema_version=schema_version,
+            values=values,
         )
-        row = connection.execute(
-            "SELECT max(revision_id) FROM control_detection_policy_revisions "
-            f"WHERE facility_id=? AND {camera_clause} AND module_id=? "
-            "AND module_version=? AND revision_id < ?",
-            parameters,
-        ).fetchone()
-        return None if row is None or row[0] is None else _db_int(row[0], "revision_id")
-
-    def _next_generation(self, connection: sqlite3.Connection, facility_id: str) -> int:
-        row = connection.execute(
-            "SELECT activation_generation FROM control_detection_policy_state WHERE facility_id=?",
-            (facility_id,),
-        ).fetchone()
-        generation = 1 if row is None else int(row[0]) + 1
-        connection.execute(
-            "INSERT INTO control_detection_policy_state(facility_id,activation_generation) "
-            "VALUES (?,?) ON CONFLICT(facility_id) DO UPDATE SET "
-            "activation_generation=excluded.activation_generation",
-            (facility_id, generation),
-        )
-        return generation
-
-    def _activation(
-        self,
-        connection: sqlite3.Connection,
-        facility_id: str,
-        camera_id: str | None,
-        module_id: str,
-        module_version: int,
-    ) -> PolicyActivation | None:
-        camera_clause = "camera_id IS NULL" if camera_id is None else "camera_id=?"
-        parameters: tuple[object, ...] = (
-            (facility_id, module_id, module_version)
-            if camera_id is None
-            else (facility_id, camera_id, module_id, module_version)
-        )
-        row = connection.execute(
-            _ACTIVATION_SELECT
-            + f" WHERE facility_id=? AND {camera_clause} AND module_id=? AND module_version=?",
-            parameters,
-        ).fetchone()
-        return None if row is None else _activation_from_row(row)
-
-    def _activation_by_id(
-        self, connection: sqlite3.Connection, activation_id: int
-    ) -> PolicyActivation | None:
-        row = connection.execute(
-            _ACTIVATION_SELECT + " WHERE activation_id=?", (activation_id,)
-        ).fetchone()
-        return None if row is None else _activation_from_row(row)
-
-    def _connect(self) -> sqlite3.Connection:
-        return open_runtime_database(self.path, actor=RuntimeActor.API)
 
 
-_ACTIVATION_SELECT = (
-    "SELECT activation_id,facility_id,camera_id,module_id,module_version,"
-    "active_revision_id,previous_revision_id,activation_generation,status,refusal_reason "
-    "FROM control_detection_policy_activations"
-)
-
-
-def _activation_from_row(row: tuple[object, ...]) -> PolicyActivation:
-    return PolicyActivation(
-        activation_id=_db_int(row[0], "activation_id"),
-        facility_id=str(row[1]),
-        camera_id=None if row[2] is None else str(row[2]),
-        module_id=str(row[3]),
-        module_version=_db_int(row[4], "module_version"),
-        active_revision_id=(None if row[5] is None else _db_int(row[5], "active_revision_id")),
-        previous_revision_id=(None if row[6] is None else _db_int(row[6], "previous_revision_id")),
-        activation_generation=_db_int(row[7], "activation_generation"),
-        status=_activation_status(row[8]),
-        refusal_reason=None if row[9] is None else str(row[9]),
+def _effective(
+    connection: sqlite3.Connection,
+    facility_id: str,
+    camera_id: str | None,
+    module_id: str,
+    module_version: int,
+) -> EffectivePolicy:
+    facility = _record(connection, facility_id, None, module_id, module_version)
+    camera = (
+        None
+        if camera_id is None
+        else _record(connection, facility_id, camera_id, module_id, module_version)
+    )
+    selected = camera if camera is not None and camera.active_values is not None else facility
+    if selected is None or selected.active_values is None:
+        values = policy_definition(module_id, module_version).image_default
+        source = "image-default"
+    else:
+        values = selected.active_values
+        source = "camera-override" if camera is selected else "facility-default"
+    return make_effective_policy(
+        module_id=module_id,
+        module_version=module_version,
+        values=values,
+        source=source,
+        facility_revision_id=None if facility is None else facility.generation,
+        camera_revision_id=(
+            camera.generation if camera is not None and camera.active_values is not None else None
+        ),
     )
 
 
-def _last_insert_id(cursor: sqlite3.Cursor) -> int:
-    value = cursor.lastrowid
+def _record(
+    connection: sqlite3.Connection,
+    facility_id: str,
+    camera_id: str | None,
+    module_id: str,
+    module_version: int,
+) -> _PolicyRecord | None:
+    raw = _raw_record(connection, facility_id, camera_id, module_id, module_version)
+    if raw is None:
+        return None
+    try:
+        record = _decode_record(raw)
+    except (PolicyDocumentError, TypeError, ValueError) as error:
+        reason = str(error)
+        connection.execute(
+            "UPDATE policies SET status='failed',refusal_reason=?,applied_at=NULL,updated_at=? "
+            "WHERE policy_id=?",
+            (reason, utc_now(), int(raw[0])),
+        )
+        raise PolicyActivationRefused(int(raw[0]), reason) from error
+    if record.status == "failed":
+        raise PolicyActivationRefused(
+            record.policy_id, record.refusal_reason or "activation is marked failed"
+        )
+    return record
+
+
+def _raw_record(
+    connection: sqlite3.Connection,
+    facility_id: str,
+    camera_id: str | None,
+    module_id: str,
+    module_version: int,
+) -> tuple[object, ...] | None:
+    camera_clause = "p.camera_id IS NULL" if camera_id is None else "p.camera_id=?"
+    params = (
+        (facility_id, module_id, module_version)
+        if camera_id is None
+        else (facility_id, camera_id, module_id, module_version)
+    )
+    return connection.execute(
+        _RAW_SELECT
+        + f" WHERE p.facility_id=? AND {camera_clause} AND p.module_id=? AND p.module_version=?",
+        params,
+    ).fetchone()
+
+
+def _decode_record(row: tuple[object, ...]) -> _PolicyRecord:
+    status = _status(row[13])
+    active = None if status == "failed" else _decode_values(row[7], row[8], row)
+    previous = None if status == "failed" else _decode_values(row[10], row[11], row)
+    return _PolicyRecord(
+        int(row[0]),
+        str(row[1]),
+        None if row[2] is None else str(row[2]),
+        str(row[3]),
+        int(row[4]),
+        str(row[5]),
+        int(row[6]),
+        active,
+        bool(row[9]),
+        previous,
+        int(row[12]),
+        status,
+        None if row[14] is None else str(row[14]),
+    )
+
+
+def _decode_values(value: object, digest: object, row: tuple[object, ...]) -> NumericPolicy | None:
     if value is None:
-        raise PolicyDocumentError("policy insert did not return a row id")
-    return value
+        return None
+    encoded = str(value)
+    if hashlib.sha256(encoded.encode()).hexdigest() != str(digest):
+        raise PolicyDocumentError("policy content hash mismatch")
+    return parse_policy_values(
+        module_id=str(row[3]),
+        module_version=int(row[4]),
+        schema_id=str(row[5]),
+        schema_version=int(row[6]),
+        values=json.loads(encoded),
+    )
 
 
-def _db_int(value: object, field_name: str) -> int:
-    if isinstance(value, bool) or not isinstance(value, int):
-        raise PolicyDocumentError(f"stored policy {field_name} is not an integer")
-    return value
+def _save_policy(
+    connection: sqlite3.Connection,
+    raw: tuple[object, ...] | None,
+    **values: object,
+) -> int:
+    active_json, active_hash = _encoded(cast(NumericPolicy | None, values["active_values"]))
+    previous_json, previous_hash = _encoded(cast(NumericPolicy | None, values["previous_values"]))
+    now = utc_now()
+    params = (
+        values["facility_id"],
+        values["camera_id"],
+        values["module_id"],
+        values["module_version"],
+        values["schema_id"],
+        values["schema_version"],
+        active_json,
+        active_hash,
+        int(bool(values["previous_present"])),
+        previous_json,
+        previous_hash,
+        values["generation"],
+        now,
+        now,
+    )
+    if raw is None:
+        cursor = connection.execute(
+            "INSERT INTO policies(facility_id,camera_id,module_id,module_version,schema_id,"
+            "schema_version,active_values_json,active_content_sha256,previous_present,"
+            "previous_values_json,previous_content_sha256,activation_generation,status,"
+            "activated_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,'pending',?,?)",
+            params,
+        )
+        if cursor.lastrowid is None:
+            raise PolicyDocumentError("policy insert did not return a row id")
+        return cursor.lastrowid
+    policy_id = int(raw[0])
+    connection.execute(
+        "UPDATE policies SET schema_id=?,schema_version=?,active_values_json=?,"
+        "active_content_sha256=?,previous_present=?,previous_values_json=?,"
+        "previous_content_sha256=?,activation_generation=?,status='pending',"
+        "refusal_reason=NULL,activated_at=?,applied_at=NULL,updated_at=? WHERE policy_id=?",
+        (params[4], params[5], *params[6:12], now, now, policy_id),
+    )
+    return policy_id
 
 
-def _activation_status(value: object) -> ActivationStatus:
+def _record_by_id(connection: sqlite3.Connection, policy_id: int) -> _PolicyRecord:
+    row = connection.execute(_RAW_SELECT + " WHERE p.policy_id=?", (policy_id,)).fetchone()
+    if row is None:
+        raise PolicyDocumentError("policy row is missing")
+    return _decode_record(row)
+
+
+def _encoded(values: NumericPolicy | None) -> tuple[str | None, str | None]:
+    if values is None:
+        return None, None
+    encoded = json.dumps(policy_values_dict(values), sort_keys=True, separators=(",", ":"))
+    return encoded, hashlib.sha256(encoded.encode()).hexdigest()
+
+
+def _previous_state(
+    raw: tuple[object, ...] | None,
+    record: _PolicyRecord | None,
+    camera_id: str | None,
+) -> tuple[bool, NumericPolicy | None]:
+    if record is not None and record.status != "failed":
+        return True, record.active_values
+    if raw is not None:
+        return bool(raw[9]), None if raw[10] is None else _decode_values(raw[10], raw[11], raw)
+    return camera_id is not None, None
+
+
+def _activation(record: _PolicyRecord, external_camera_id: str | None) -> PolicyActivation:
+    active_revision = None if record.active_values is None else record.generation
+    previous_revision = (
+        None
+        if not record.previous_present
+        else (0 if record.previous_values is None else max(1, record.generation - 1))
+    )
+    return PolicyActivation(
+        record.policy_id,
+        record.facility_id,
+        external_camera_id,
+        record.module_id,
+        record.module_version,
+        active_revision,
+        previous_revision,
+        record.generation,
+        record.status,
+        record.refusal_reason,
+    )
+
+
+def _next_generation(connection: sqlite3.Connection, facility_id: str) -> int:
+    row = connection.execute(
+        "SELECT max(activation_generation) FROM policies WHERE facility_id=?", (facility_id,)
+    ).fetchone()
+    return 1 if row is None or row[0] is None else int(row[0]) + 1
+
+
+def _database_camera_id(connection: sqlite3.Connection, camera_id: str | None) -> str | None:
+    if camera_id is None:
+        return None
+    row = connection.execute(
+        "SELECT camera_id FROM cameras WHERE camera_id=? OR backend_camera_id=?",
+        (camera_id, camera_id),
+    ).fetchone()
+    return camera_id if row is None else str(row[0])
+
+
+def _external_camera_id(row: tuple[object, ...]) -> str | None:
+    return None if row[15] is None and row[2] is None else str(row[15] or row[2])
+
+
+def _try_record(raw: tuple[object, ...] | None) -> _PolicyRecord | None:
+    if raw is None:
+        return None
+    try:
+        return _decode_record(raw)
+    except (PolicyDocumentError, TypeError, ValueError):
+        return None
+
+
+def _token(record: _PolicyRecord | None) -> int:
+    return 0 if record is None else record.generation
+
+
+def _raw_token(raw: tuple[object, ...] | None) -> int:
+    return 0 if raw is None else int(raw[12])
+
+
+def _status(value: object) -> ActivationStatus:
     if value not in {"pending", "applied", "failed"}:
         raise PolicyDocumentError("stored policy activation status is unknown")
     return cast(ActivationStatus, value)
 
 
-def _preview_policy(policy: EffectivePolicy, *, camera_id: str | None) -> EffectivePolicy:
-    return make_effective_policy(
-        module_id=policy.module_id,
-        module_version=policy.module_version,
-        values=policy.values,
-        source="facility-default" if camera_id is None else "camera-override",
-        facility_revision_id=0 if camera_id is None else policy.facility_revision_id,
-        camera_revision_id=None if camera_id is None else 0,
-    )
-
-
-def _concurrency_token(activation: PolicyActivation | None) -> int:
-    """Stable CAS token for a scope, including generation-zero / inherited state.
-
-    Image-default facility rows and camera scopes that currently inherit have no
-    active revision row identity. Those states still participate in compare-and-swap
-    with token ``0`` so a missing expected token can never mean "unchecked write".
-    """
-    if activation is None or activation.active_revision_id is None:
-        return 0
-    return activation.active_revision_id
-
-
-def _utc_now() -> str:
-    return datetime.now(UTC).isoformat()
-
+_RAW_SELECT = (
+    "SELECT p.policy_id,p.facility_id,p.camera_id,p.module_id,p.module_version,p.schema_id,"
+    "p.schema_version,p.active_values_json,p.active_content_sha256,p.previous_present,"
+    "p.previous_values_json,p.previous_content_sha256,p.activation_generation,p.status,"
+    "p.refusal_reason,c.backend_camera_id FROM policies p "
+    "LEFT JOIN cameras c ON c.camera_id=p.camera_id"
+)
 
 __all__ = [
     "DetectionPolicyStore",

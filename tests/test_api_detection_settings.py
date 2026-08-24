@@ -9,14 +9,23 @@ detection_windows/night_window first, then on=true/mode=always."""
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 from fastapi.testclient import TestClient
 
+from backend.app.edge_db.migrator import migrate_database
 from backend.app.features.detection_settings.store import DetectionSettingsStore
 from backend.app.main import create_app, no_lifespan
 from contracts.worker_config import PulledNightWindow, PulledWorkerConfig
 
 DASHBOARD_LOGIN = {"username": "admin", "password": "admin"}
+
+
+@pytest.fixture(autouse=True)
+def _migrated_compact_database(tmp_path: Path) -> None:
+    migrate_database(tmp_path / "catalog.sqlite3")
+
 
 _DEFAULT_DOMAINS = {
     "fall": {"on": True, "mode": "always", "start": None, "end": None},

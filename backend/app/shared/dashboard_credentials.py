@@ -19,13 +19,7 @@ from pathlib import Path
 from threading import Lock
 
 from backend.app.edge_db import EDGE_DATABASE_PATH
-from backend.app.shared.sqlite_bootstrap import connect_catalog_store
-
-_CREATE_CREDENTIALS_TABLE = (
-    "CREATE TABLE IF NOT EXISTS credentials (id INTEGER PRIMARY KEY CHECK (id = 1), "
-    "username TEXT NOT NULL, algorithm TEXT NOT NULL, salt BLOB NOT NULL, "
-    "password_hash BLOB NOT NULL, updated_at TEXT NOT NULL) STRICT"
-)
+from backend.app.edge_db.configuration import open_configuration_database
 
 _ALGORITHM_SCRYPT = "scrypt"
 _SCRYPT_N = 2**14
@@ -107,7 +101,7 @@ class DashboardCredentialsStore:
 
     def _connect(self) -> sqlite3.Connection:
         if self._connection is None:
-            self._connection = connect_catalog_store(self.path, (_CREATE_CREDENTIALS_TABLE,))
+            self._connection = open_configuration_database(self.path)
         return self._connection
 
     def _load_unlocked(self) -> PersistedDashboardCredentials | None:
@@ -118,9 +112,7 @@ class DashboardCredentialsStore:
                 "FROM credentials WHERE id = 1"
             ).fetchone()
         except (OSError, sqlite3.Error) as exc:
-            message = (
-                f"dashboard credentials store unreadable at {self.path}: {exc!r}"
-            )
+            message = f"dashboard credentials store unreadable at {self.path}: {exc!r}"
             print(message, file=sys.stderr)
             raise DashboardCredentialsStoreError(message) from exc
         if row is None:

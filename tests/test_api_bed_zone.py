@@ -21,12 +21,18 @@ import pytest
 from fastapi.testclient import TestClient
 
 from backend.app.core.config import get_settings
+from backend.app.edge_db.migrator import migrate_database
 from backend.app.features.cameras.bed_zone_store import BedZoneStore
 from backend.app.features.cameras.store import CameraRegistryStore
 from backend.app.main import LifespanFactory, create_app, no_lifespan
 
 NO_LIFESPAN: LifespanFactory = no_lifespan
 RECOGNIZE_PATH = "/api/v1/cameras/camera-1/bed-zone/recognize"
+
+
+@pytest.fixture(autouse=True)
+def _migrated_compact_database(tmp_path: Path) -> None:
+    migrate_database(tmp_path / "catalog.sqlite3")
 
 
 def _login(client: TestClient) -> None:
@@ -87,7 +93,15 @@ def bed_zone_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
 
 def _app(tmp_path: Path):
     app = create_app(lifespan=NO_LIFESPAN)
-    app.state.camera_registry = CameraRegistryStore(tmp_path / "catalog.sqlite3")
+    registry = CameraRegistryStore(tmp_path / "catalog.sqlite3")
+    registry.create(
+        camera_id="camera-1",
+        label="Bed camera",
+        rtsp_url="rtsp://camera.invalid/live",
+        space_id=None,
+        status="unknown",
+    )
+    app.state.camera_registry = registry
     app.state.bed_zone_store = BedZoneStore(tmp_path / "catalog.sqlite3")
     return app
 
@@ -249,9 +263,7 @@ def test_recognize_reports_a_read_timeout_as_503_not_500(
     timeout, not surface as an unhandled 500."""
     upstream = _ReadFailsUpstreamResponse(make_error())
 
-    def fake_urlopen(
-        request: urllib.request.Request, timeout: float
-    ) -> _ReadFailsUpstreamResponse:
+    def fake_urlopen(request: urllib.request.Request, timeout: float) -> _ReadFailsUpstreamResponse:
         del request, timeout
         return upstream
 
@@ -298,14 +310,6 @@ def test_recognize_requires_a_dashboard_session(
 
 def test_get_cameras_includes_a_null_bed_zone_before_recognition(tmp_path: Path) -> None:
     app = _app(tmp_path)
-    registry: CameraRegistryStore = app.state.camera_registry
-    registry.create(
-        camera_id="camera-1",
-        label="Room 1",
-        rtsp_url="rtsp://camera.local/1",
-        space_id=None,
-        status="online",
-    )
 
     with TestClient(app) as client:
         _login(client)
@@ -321,14 +325,6 @@ def test_get_cameras_includes_the_bed_zone_after_recognition(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     app = _app(tmp_path)
-    registry: CameraRegistryStore = app.state.camera_registry
-    registry.create(
-        camera_id="camera-1",
-        label="Room 1",
-        rtsp_url="rtsp://camera.local/1",
-        space_id=None,
-        status="online",
-    )
 
     def fake_urlopen(request: urllib.request.Request, timeout: float) -> FakeUpstreamResponse:
         del request, timeout
@@ -358,14 +354,6 @@ def test_deleting_a_camera_also_deletes_its_bed_zone(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     app = _app(tmp_path)
-    registry: CameraRegistryStore = app.state.camera_registry
-    registry.create(
-        camera_id="camera-1",
-        label="Room 1",
-        rtsp_url="rtsp://camera.local/1",
-        space_id=None,
-        status="online",
-    )
     bed_zone_store: BedZoneStore = app.state.bed_zone_store
     bed_zone_store.put(
         "camera-1",
@@ -390,13 +378,6 @@ def test_worker_config_snapshot_includes_bed_zone_polygon(
     monkeypatch.setenv("API_EDGE_RELAY_TOKEN", "relay-token")
     app = _app(tmp_path)
     registry: CameraRegistryStore = app.state.camera_registry
-    registry.create(
-        camera_id="camera-1",
-        label="Room 1",
-        rtsp_url="rtsp://camera.local/1",
-        space_id=None,
-        status="online",
-    )
     registry.create(
         camera_id="camera-2",
         label="Room 2",

@@ -96,7 +96,7 @@ def default_dashboard_credentials_store_to_tmp_path(
     monkeypatch.setattr(
         DashboardCredentialsStore,
         "from_env",
-        classmethod(lambda cls: cls(tmp_path / "catalog.sqlite3")),
+        classmethod(lambda cls: cls(tmp_path / ".central-fixture" / "edge.sqlite3")),
     )
     yield
 
@@ -147,7 +147,7 @@ def default_connection_settings_store_to_tmp_path(
     monkeypatch.setattr(
         ConnectionSettingsStore,
         "from_env",
-        classmethod(lambda cls: cls(tmp_path / "connection-settings.sqlite3")),
+        classmethod(lambda cls: cls(tmp_path / ".central-fixture" / "edge.sqlite3")),
     )
     yield
 

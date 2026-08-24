@@ -1,19 +1,4 @@
-"""Persisted per-camera bed-zone polygon storage for ml-api.
-
-Backs the on-demand bed-zone recognition endpoint (see
-``bed_zone_router.recognize_bed_zone``): once an operator triggers
-recognition and the worker returns a polygon, it is persisted here so it
-survives restarts and is fed back to the worker (via
-``cameras.router.worker_config_snapshot``) as the authoritative bed region
-for bed-exit detection, instead of relying on live per-frame segmentation.
-
-Storage lives in its own ``camera_bed_zone`` table of the shared
-``catalog.sqlite3`` database (see ``sqlite_bootstrap.connect_catalog_store``),
-distinct from ``CameraRegistryStore``'s single-row JSON-blob ``camera_registry``
-table: a bed zone is naturally keyed one-row-per-camera, not a single blob, so
-a real primary key (rather than read-modify-write-whole-blob) is the simpler
-and more concurrency-friendly shape here.
-"""
+"""Bed-zone projection stored on schema-18 camera rows."""
 
 from __future__ import annotations
 
@@ -22,21 +7,11 @@ import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Lock
-from typing import TypeAlias
 
 from pydantic import TypeAdapter, ValidationError
 
 from backend.app.edge_db import EDGE_DATABASE_PATH
-from backend.app.shared.sqlite_bootstrap import connect_catalog_store
-
-_CREATE_BED_ZONE_TABLE = (
-    "CREATE TABLE IF NOT EXISTS camera_bed_zone ("
-    "camera_id TEXT PRIMARY KEY, "
-    "polygon_json TEXT NOT NULL, "
-    "image_width INTEGER NOT NULL, "
-    "image_height INTEGER NOT NULL, "
-    "recognized_at TEXT NOT NULL) STRICT"
-)
+from backend.app.edge_db.configuration import open_configuration_database, utc_now
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,7 +34,7 @@ class BedZoneStore:
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
         self._lock = Lock()
-        self._connection: sqlite3.Connection | None = None
+        self._connection = open_configuration_database(self.path)
 
     @classmethod
     def from_env(cls) -> BedZoneStore:
@@ -67,28 +42,24 @@ class BedZoneStore:
 
     def get(self, camera_id: str) -> BedZone | None:
         with self._lock:
-            connection = self._connect()
-            row = connection.execute(
-                "SELECT polygon_json, image_width, image_height, recognized_at "
-                "FROM camera_bed_zone WHERE camera_id = ?",
+            row = self._connection.execute(
+                "SELECT bed_polygon_json,bed_image_width,bed_image_height,bed_recognized_at "
+                "FROM cameras WHERE camera_id=?",
                 (camera_id,),
             ).fetchone()
-        if row is None:
-            return None
-        return _row_to_bed_zone(row)
+        return None if row is None or row[0] is None else _row_to_bed_zone(row)
 
     def get_all(self) -> dict[str, BedZone]:
         with self._lock:
-            connection = self._connect()
-            rows = connection.execute(
-                "SELECT camera_id, polygon_json, image_width, image_height, recognized_at "
-                "FROM camera_bed_zone"
+            rows = self._connection.execute(
+                "SELECT camera_id,bed_polygon_json,bed_image_width,bed_image_height,"
+                "bed_recognized_at FROM cameras WHERE bed_polygon_json IS NOT NULL"
             ).fetchall()
         result: dict[str, BedZone] = {}
-        for camera_id, *rest in rows:
-            bed_zone = _row_to_bed_zone(tuple(rest))
+        for row in rows:
+            bed_zone = _row_to_bed_zone(row[1:])
             if bed_zone is not None:
-                result[str(camera_id)] = bed_zone
+                result[str(row[0])] = bed_zone
         return result
 
     def put(
@@ -100,20 +71,15 @@ class BedZoneStore:
         image_height: int,
         recognized_at: str,
     ) -> BedZone:
-        polygon_json = json.dumps(polygon, separators=(",", ":"))
+        encoded = json.dumps(polygon, separators=(",", ":"))
         with self._lock:
-            connection = self._connect()
-            connection.execute(
-                "INSERT INTO camera_bed_zone "
-                "(camera_id, polygon_json, image_width, image_height, recognized_at) "
-                "VALUES (?, ?, ?, ?, ?) "
-                "ON CONFLICT(camera_id) DO UPDATE SET "
-                "polygon_json = excluded.polygon_json, "
-                "image_width = excluded.image_width, "
-                "image_height = excluded.image_height, "
-                "recognized_at = excluded.recognized_at",
-                (camera_id, polygon_json, image_width, image_height, recognized_at),
+            cursor = self._connection.execute(
+                "UPDATE cameras SET bed_polygon_json=?,bed_image_width=?,bed_image_height=?,"
+                "bed_recognized_at=?,revision=revision+1,updated_at=? WHERE camera_id=?",
+                (encoded, image_width, image_height, recognized_at, utc_now(), camera_id),
             )
+        if cursor.rowcount != 1:
+            raise sqlite3.IntegrityError("bed-zone camera does not exist")
         return BedZone(
             polygon=tuple((int(x), int(y)) for x, y in polygon),
             image_width=image_width,
@@ -123,71 +89,25 @@ class BedZoneStore:
 
     def delete(self, camera_id: str) -> bool:
         with self._lock:
-            connection = self._connect()
-            cursor = connection.execute(
-                "DELETE FROM camera_bed_zone WHERE camera_id = ?", (camera_id,)
+            cursor = self._connection.execute(
+                "UPDATE cameras SET bed_polygon_json=NULL,bed_image_width=NULL,"
+                "bed_image_height=NULL,bed_recognized_at=NULL,revision=revision+1,updated_at=? "
+                "WHERE camera_id=? AND bed_polygon_json IS NOT NULL",
+                (utc_now(), camera_id),
             )
-            return cursor.rowcount > 0
-
-    def _connect(self) -> sqlite3.Connection:
-        if self._connection is None:
-            self._connection = connect_catalog_store(self.path, (_CREATE_BED_ZONE_TABLE,))
-        return self._connection
+        return cursor.rowcount > 0
 
 
-BedZoneRow: TypeAlias = tuple[str, int, int, str]
-_BED_ZONE_ROW = TypeAdapter(BedZoneRow)
+_BED_ZONE_ROW = TypeAdapter(tuple[str, int, int, str])
 
 
-def _row_to_bed_zone(row: object) -> BedZone | None:
+def _row_to_bed_zone(row: tuple[object, ...]) -> BedZone | None:
     try:
         polygon_json, image_width, image_height, recognized_at = _BED_ZONE_ROW.validate_python(row)
+        raw_polygon = TypeAdapter(list[tuple[int, int]]).validate_json(polygon_json)
     except ValidationError:
         return None
-    try:
-        raw_polygon = json.loads(polygon_json)
-    except (json.JSONDecodeError, TypeError, ValueError):
-        return None
-    if not isinstance(raw_polygon, list):
-        return None
-    polygon = _parse_polygon_points(raw_polygon)
-    if polygon is None:
-        return None
-    return BedZone(
-        polygon=polygon,
-        image_width=image_width,
-        image_height=image_height,
-        recognized_at=recognized_at,
-    )
-
-
-def _parse_polygon_points(raw_polygon: list[object]) -> tuple[tuple[int, int], ...] | None:
-    points: list[tuple[int, int]] = []
-    for point in raw_polygon:
-        parsed = _parse_point(point)
-        if parsed is None:
-            return None
-        points.append(parsed)
-    return tuple(points)
-
-
-def _parse_point(point: object) -> tuple[int, int] | None:
-    if not isinstance(point, (list, tuple)) or len(point) < 2:
-        return None
-    x = _as_finite_int(point[0])
-    y = _as_finite_int(point[1])
-    if x is None or y is None:
-        return None
-    return x, y
-
-
-def _as_finite_int(value: object) -> int | None:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return None
-    as_int = int(value)
-    if float(value) != float(as_int):
-        return None
-    return as_int
+    return BedZone(tuple(raw_polygon), image_width, image_height, recognized_at)
 
 
 __all__ = ["BedZone", "BedZoneStore"]
