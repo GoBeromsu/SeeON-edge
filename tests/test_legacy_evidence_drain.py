@@ -19,7 +19,6 @@ from backend.app.edge_db.migrator import migrate_database
 from backend.app.edge_db.schema import MIGRATIONS, SchemaV17MigrationError
 from backend.app.features.cameras.store import CameraRegistryStore
 from backend.app.features.clips.catalog import CatalogStore
-from backend.app.features.evidence.relay_projection import RelayEvidenceProjection
 from backend.app.main import create_app, no_lifespan
 from shared.events.edge_ingest_client import EdgeIngestClient
 from shared.events.evidence_export_client import RelayEvidenceClient
@@ -75,7 +74,8 @@ class _RelayServer:
         )
         app.state.camera_registry = registry
         app.state.catalog_store = CatalogStore.open(tmp_path / "relay-catalog.sqlite3")
-        app.state.relay_evidence_projection = RelayEvidenceProjection(database)
+        # Legacy drain compatibility remains catalog-only; Task 8's compact
+        # projection is schema-18 runtime state, not a schema-17 drain writer.
         app.state.backend_ingest_client = EdgeIngestClient(
             events_url=f"{hub_origin}/api/v1/events",
             bearer_token="fixture-token",
@@ -399,7 +399,7 @@ def test_legacy_drain_422_keeps_row_pending_cli_nonzero_and_blocks_migration(
 
 def test_legacy_drain_cli_coexists_with_relay_runtime_lock(tmp_path: Path) -> None:
     database = tmp_path / "edge.sqlite3"
-    migrate_database(database)
+    migrate_database(database, migrations=MIGRATIONS[:17])
     _insert_pending(database)
 
     with ServedFixture() as hub, _RelayServer(tmp_path, database, hub.origin) as relay:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -75,6 +76,27 @@ def test_list_and_metadata_compute_thumbnail_availability_for_returned_items(
     assert availability == {"clip-with": True, "clip-without": False}
     assert metadata.status_code == 200
     assert metadata.json()["thumbnail_available"] is True
+
+
+def test_compact_listing_rebuilds_thumbnail_identity(clip_env: Path) -> None:
+    # Given: a finalized clip with a regular thumbnail.
+    _write_clip(clip_env, "clip-with", thumbnail=True)
+
+    # When: keyset listing rebuilds schema-18 clips.
+    with TestClient(create_app(lifespan=no_lifespan)) as client:
+        _login(client)
+        response = client.get("/api/v1/clips", params={"limit": 10})
+
+    # Then: the response and compact authority both retain thumbnail identity.
+    assert response.status_code == 200
+    assert response.json()["clips"][0]["thumbnail_available"] is True
+    database = clip_env.parent / ".central-fixture" / "edge.sqlite3"
+    with sqlite3.connect(database) as connection:
+        row = connection.execute(
+            "SELECT thumbnail_relpath, length(thumbnail_sha256), thumbnail_size_bytes "
+            "FROM clips WHERE clip_id='clip-with'"
+        ).fetchone()
+    assert row == ("clips/clip-with/thumbnail.jpg", 64, len(JPEG))
 
 
 def test_indexed_listing_reads_thumbnail_availability_without_request_time_root_walks(

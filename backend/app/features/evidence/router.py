@@ -15,6 +15,7 @@ from uuid import UUID
 from fastapi import APIRouter, Header, HTTPException, Request, status
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from backend.app.edge_db import EDGE_DATABASE_PATH
 from backend.app.features.clips.store import CLIP_STORE_DIR_ENV, DEFAULT_CLIP_STORE_DIR
 from backend.app.features.evidence.receipt_store import (
     ArtifactReceipt,
@@ -22,7 +23,7 @@ from backend.app.features.evidence.receipt_store import (
     ArtifactReceiptPersistenceError,
     ArtifactReceiptStore,
     ArtifactReceiptVerificationError,
-    CatalogArtifactReceiptStore,
+    CompactArtifactReceiptStore,
 )
 from backend.app.features.relay.auth import authorize_relay as _authorize
 from backend.app.features.relay.router import RELAY_TOKEN_HEADER, _camera_binding
@@ -314,7 +315,9 @@ def _enabled(request: Request) -> bool:
 def _receipt_store(request: Request) -> ArtifactReceiptStore:
     store = getattr(request.app.state, "artifact_receipt_store", None)
     if not isinstance(store, ArtifactReceiptStore):
-        store = CatalogArtifactReceiptStore.from_app(request.app)
+        root_value = getattr(request.app.state, "clip_store_root", None)
+        root = Path(root_value or os.environ.get(CLIP_STORE_DIR_ENV, DEFAULT_CLIP_STORE_DIR))
+        store = CompactArtifactReceiptStore(EDGE_DATABASE_PATH, root)
         request.app.state.artifact_receipt_store = store
     return store
 

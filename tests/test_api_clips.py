@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from pathlib import Path
 from typing import Self, TypedDict
 
@@ -128,6 +129,56 @@ def test_list_clips_returns_only_finalized_latest_first_and_filters_camera(clip_
     assert listed.json()["clips"][0]["event_type"] == "fall"
     assert filtered.status_code == 200
     assert [clip["clip_id"] for clip in filtered.json()["clips"]] == ["clip-old"]
+
+
+def test_clip_keyset_pages_equal_timestamps_without_skip_or_duplicate(clip_env) -> None:
+    # Given: three verified manifests with the same start timestamp.
+    clip_store = clip_env / "clip-store"
+    for clip_id in ("clip-a", "clip-b", "clip-c"):
+        _write_manifest(clip_store, clip_id, started_at="2026-07-06T00:00:00Z")
+
+    # When: a dashboard traverses one-row keyset pages and probes a malformed cursor.
+    with TestClient(create_app(lifespan=no_lifespan)) as client:
+        _login(client)
+        seen: list[str] = []
+        cursor: str | None = None
+        while True:
+            params = {"limit": 1}
+            if cursor is not None:
+                params["cursor"] = cursor
+            response = client.get("/api/v1/clips", params=params)
+            assert response.status_code == 200
+            body = response.json()
+            seen.extend(clip["clip_id"] for clip in body["clips"])
+            cursor = body["pagination"]["next_cursor"]
+            if cursor is None:
+                break
+        malformed = client.get("/api/v1/clips", params={"limit": 1, "cursor": "%%%"})
+
+    # Then: (started_at, clip_id) is unique and malformed cursors fail closed.
+    assert seen == ["clip-c", "clip-b", "clip-a"]
+    assert malformed.status_code == 400
+
+
+def test_manifest_rebuild_rolls_back_when_one_tuple_is_invalid(clip_env) -> None:
+    # Given: one valid manifest followed by a duration outside schema 18's clip bound.
+    clip_store = clip_env / "clip-store"
+    _write_manifest(clip_store, "clip-a", started_at="2026-07-06T00:00:00Z")
+    _write_manifest(clip_store, "clip-b", started_at="2026-07-06T00:00:01Z")
+    invalid_path = clip_store / "clips" / "clip-b" / "manifest.json"
+    invalid = json.loads(invalid_path.read_text(encoding="utf-8"))
+    invalid["duration_s"] = 121.0
+    invalid_path.write_text(json.dumps(invalid), encoding="utf-8")
+
+    # When: the request rebuilds both facts in one real SQLite transaction.
+    with TestClient(create_app(lifespan=no_lifespan)) as client:
+        _login(client)
+        response = client.get("/api/v1/clips", params={"limit": 10})
+
+    # Then: the request is not misleadingly successful and no partial clip row commits.
+    assert response.status_code == 503
+    with sqlite3.connect(clip_env / ".central-fixture" / "edge.sqlite3") as connection:
+        assert connection.execute("SELECT count(*) FROM clips").fetchone() == (0,)
 
 
 def test_list_clips_preserves_event_type_when_event_ref_is_identity(clip_env) -> None:

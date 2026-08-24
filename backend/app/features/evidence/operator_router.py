@@ -79,18 +79,14 @@ def review_incident(
 ) -> dict[str, object]:
     actor = _authorize(request)
     summary = _query(request).get(incident_id)
-    if summary is None or summary.primary_clip_id is None:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="incident has no reviewable primary clip",
-        )
+    if summary is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="incident not found")
     try:
         _reviews(request).update(
             incident_id=summary.incident_id,
-            clip_id=summary.primary_clip_id,
             expected_version=payload.expected_version,
             actor_id=actor,
-            reviewed_at=datetime.now(UTC).isoformat(),
+            reviewed_at=datetime.now(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
             disposition=ReviewDisposition(payload.disposition),
             notes=payload.notes,
         )

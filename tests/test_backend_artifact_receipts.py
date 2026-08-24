@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
+from backend.app.edge_db.migrator import migrate_database
 from backend.app.features.cameras.store import CameraRegistryStore
 from backend.app.features.clips.catalog import CatalogStore
 from backend.app.features.clips.store import ClipStore
@@ -17,8 +18,10 @@ from backend.app.features.evidence.receipt_store import (
     ArtifactReceiptStore,
     ArtifactReceiptVerificationError,
     CatalogArtifactReceiptStore,
+    CompactArtifactReceiptStore,
     verify_artifact,
 )
+from backend.app.features.evidence.relay_projection import RelayEvent, RelayEvidenceProjection
 from backend.app.features.runtime_settings.store import RuntimeSettingsStore
 from backend.app.main import create_app, no_lifespan
 from shared.events.evidence_export_contract import ClipReceipt
@@ -197,6 +200,43 @@ def _media(tmp_path: Path, data: bytes) -> Path:
         encoding="utf-8",
     )
     return path
+
+
+def test_compact_receipt_commits_clip_and_primary_artifact(tmp_path: Path) -> None:
+    # Given: verified local media and an incident matching its manifest event reference.
+    data = b"verified video"
+    _media(tmp_path, data)
+    database = tmp_path / "edge.sqlite3"
+    migrate_database(database)
+    RelayEvidenceProjection(database).project_event(
+        RelayEvent(
+            edge_event_id="event-1",
+            event_type="fall",
+            probability=0.8,
+            detected_at="2026-07-06T00:00:00Z",
+            camera_id="camera-1",
+            facility_id="facility-1",
+            resident_id=None,
+            evidence=None,
+            audit=None,
+        )
+    )
+    store = CompactArtifactReceiptStore(database, tmp_path / "clip-store")
+    receipt = _receipt(data)
+
+    # When: the authenticated receipt is committed and reopened.
+    assert store.commit(receipt) == receipt
+    reopened = CompactArtifactReceiptStore(database, tmp_path / "clip-store")
+
+    # Then: clips owns publication and artifacts owns PRIMARY_CLIP projection.
+    assert reopened.get("clip-1") == receipt
+    with sqlite3.connect(database) as connection:
+        assert connection.execute(
+            "SELECT publish_state FROM clips WHERE clip_id='clip-1'"
+        ).fetchone() == ("PUBLISHED",)
+        assert connection.execute(
+            "SELECT clip_id,state FROM artifacts WHERE kind='PRIMARY_CLIP'"
+        ).fetchone() == ("clip-1", "AVAILABLE")
 
 
 def test_relay_verifies_before_durable_receipt_and_never_writes_media(tmp_path: Path) -> None:

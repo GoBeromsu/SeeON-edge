@@ -29,6 +29,7 @@ from backend.app.features.evidence.relay_projection import (
     RelayEvidenceProjectionConflict,
     RelayEvidenceProjectionError,
     RelayEvidenceProjectionMissingEvent,
+    RelaySnapshot,
 )
 from backend.app.features.qa.runtime_trace_store import RuntimeAnalysisStore, RuntimeTraceConflict
 from backend.app.features.relay.auth import authorize_relay
@@ -589,8 +590,8 @@ def relay_alert(
     # record of every alert attempt even when the camera can't yet be
     # resolved or the backend can't be reached, instead of the attempt
     # leaving no local trace at all when _camera_binding() 403s below.
-    catalog_result = _record_catalog(request, payload)
-    _project_relay_event(request, payload)
+    projected = _project_relay_event(request, payload)
+    catalog_result = None if projected else _record_catalog(request, payload)
     binding = _camera_binding(request, payload.camera_id, payload.facility_id)
     # Only a Hub-issued id may address the upstream ingest API. The previous
     # `or payload.camera_id` fallback sent the worker's edge-local id, which the
@@ -748,13 +749,23 @@ def _relay_evidence_projection(request: Request) -> RelayEvidenceProjection | No
     return RelayEvidenceProjection(EDGE_DATABASE_PATH)
 
 
-def _project_relay_event(request: Request, payload: RelayAlertRequest) -> None:
+def _project_relay_event(request: Request, payload: RelayAlertRequest) -> bool:
     if payload.edge_event_id is None:
-        return
+        return False
+    projection = _relay_evidence_projection(request)
+    if projection is None:
+        return False
+    snapshot = None
+    if payload.snapshot is not None:
+        snapshot = RelaySnapshot(
+            snapshot_id=payload.snapshot.snapshot_id,
+            path=payload.snapshot.path,
+            sha256=payload.snapshot.sha256,
+            size_bytes=payload.snapshot.size_bytes,
+            mime_type=payload.snapshot.mime_type,
+            captured_at=payload.snapshot.captured_at,
+        )
     try:
-        projection = _relay_evidence_projection(request)
-        if projection is None:
-            return
         projection.project_event(
             RelayEvent(
                 edge_event_id=payload.edge_event_id,
@@ -768,13 +779,21 @@ def _project_relay_event(request: Request, payload: RelayAlertRequest) -> None:
                 audit=None
                 if payload.audit is None
                 else payload.audit.model_dump(exclude_none=True),
-            )
+            ),
+            snapshot,
         )
+    except RelayEvidenceProjectionConflict as error:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+    except RelayEvidenceProjectionError as error:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(error)
+        ) from error
     except (OSError, sqlite3.Error) as error:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="central evidence projection unavailable",
         ) from error
+    return True
 
 
 def _project_snapshot_attachment(

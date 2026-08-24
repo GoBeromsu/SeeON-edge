@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import sqlite3
 from typing import Annotated, Literal, cast
 
 from fastapi import APIRouter, HTTPException, Query, Request, status
 from fastapi.responses import Response
 from pydantic import ValidationError
 
+from backend.app.edge_db import EDGE_DATABASE_PATH
 from backend.app.features.clips.artifacts import (
     CentralClipArtifactQuery,
     open_verified_annotated,
@@ -17,6 +19,10 @@ from backend.app.features.clips.audit_log import (
     AuditLogStore,
     post_backend_backup,
     utc_now_iso,
+)
+from backend.app.features.clips.compact_listing import (
+    CompactClipConflictError,
+    CompactClipListing,
 )
 from backend.app.features.clips.deletion_control import control_clip_deletion
 from backend.app.features.clips.derivative_control import control_derivative
@@ -82,26 +88,44 @@ def list_clips(
             raise _duplicate_clip_http_error(exc) from exc
     else:
         index = getattr(request.app.state, "clip_listing_index", None)
-        if not isinstance(index, ClipListingIndex):
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="clip listing index unavailable",
-            )
-        try:
-            page = index.page(filters)
-        except ClipListingReconcileError as exc:
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="clip listing index unavailable",
-            ) from exc
-        clips = [
-            clip_response(
-                manifest,
-                manifest.size_bytes,
-                manifest.thumbnail_available,
-            )
-            for manifest in page.manifests
-        ]
+        if isinstance(index, ClipListingIndex) and filters.cursor is None:
+            try:
+                page = index.page(filters)
+            except ClipListingReconcileError as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="clip listing index unavailable",
+                ) from exc
+            clips = [
+                clip_response(manifest, manifest.size_bytes, manifest.thumbnail_available)
+                for manifest in page.manifests
+            ]
+        else:
+            try:
+                page = CompactClipListing(EDGE_DATABASE_PATH).rebuild_and_page(
+                    _clip_store(request), camera_id=filters.camera_id,
+                    event_type=filters.event_type, limit=filters.limit,
+                    cursor=filters.cursor,
+                )
+            except ValueError as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
+                ) from exc
+            except DuplicateClipIdError as exc:
+                raise _duplicate_clip_http_error(exc) from exc
+            except (CompactClipConflictError, OSError, sqlite3.Error) as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="clip listing rebuild unavailable",
+                ) from exc
+            clips = [
+                clip_response(
+                    manifest,
+                    resolved_video_size(_clip_store(request), manifest),
+                    _clip_store(request).thumbnail_available(manifest.clip_id),
+                )
+                for manifest in page.manifests
+            ]
     response = ListClipsResponse(
         clips=clips,
         pagination=ClipsPaginationResponse(
@@ -109,6 +133,7 @@ def list_clips(
             offset=filters.offset,
             total=page.total,
             has_more=page.has_more,
+            next_cursor=getattr(page, "next_cursor", None),
         ),
         event_type_counts=dict(page.event_type_counts),
     )
