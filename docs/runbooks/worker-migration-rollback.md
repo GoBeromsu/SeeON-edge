@@ -49,23 +49,26 @@ cd /opt/eldercare-fall-ml
 DC='docker compose --env-file .env.edge.prod -f compose.edge.yaml'
 ```
 
-Run the one-shot import. This is the only command allowed to execute DDL:
+Run inventory, then the one-shot schema-18 candidate cutover. This is the only
+command allowed to execute DDL:
 
 ```sh
-$DC up --pull always --no-deps edge-db-migrator
+$DC up --pull always edge-filesystem-inventory
+$DC up --pull always edge-db-migrator
 ```
 
-Stop unless it exits zero and reports `EDGE_DB_IMPORT_OK`. Confirm its source
-receipts, counts, digests, and integrity result before admitting traffic. Then
-preserve the required dependency order:
+Stop unless it exits zero and reports `EDGE_DB_COMPACT_CUTOVER_OK`. Confirm its
+source receipts, counts, digests, and integrity result before admitting traffic.
+Then preserve the required dependency order:
 
 ```sh
 $DC up -d --wait ml-api
 $DC up -d --wait ml-worker
 ```
 
-Compose enforces `edge-db-migrator` completed successfully -> `ml-api` healthy ->
-`ml-worker`. Do not start either runtime around the dependency gates. Record
+Compose enforces inventory completed successfully -> candidate cutover completed
+successfully -> `ml-api` healthy -> `ml-worker`. Do not start either runtime
+around the dependency gates. Record
 the first successful API write to `edge.sqlite3` as the **central cutover traffic boundary**. From that point, legacy snapshots are stale.
 
 ## Rollback decision

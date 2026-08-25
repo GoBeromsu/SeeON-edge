@@ -37,13 +37,19 @@ RUN mkdir -p /app/models/fall /app/models/pose /app/models/bed
 # compose.edge.yaml attaches a named volume at this same path instead.
 RUN mkdir -p /root/.local/state/ml-api
 
+ARG EDGE_DATABASE_SCHEMA_VERSION=18
+RUN install -d -m 0755 /opt/seeon \
+    && printf '%s\n' "${EDGE_DATABASE_SCHEMA_VERSION}" > /opt/seeon/edge-database-schema-version \
+    && chmod 0444 /opt/seeon/edge-database-schema-version
+
 ARG SOURCE_REVISION=0000000000000000000000000000000000000000
 RUN if [ "${#SOURCE_REVISION}" -ne 40 ] || printf '%s' "$SOURCE_REVISION" | grep -Eq '[^0123456789abcdef]'; then \
       printf '%s\n' 'SOURCE_REVISION must be exactly 40 lowercase hexadecimal characters' >&2; \
       exit 1; \
     fi
 LABEL org.opencontainers.image.revision="${SOURCE_REVISION}" \
-      org.opencontainers.image.source="SeniorAILab/eldercare-fall-ml-v2"
+      org.opencontainers.image.source="SeniorAILab/eldercare-fall-ml-v2" \
+      seeon.edge.database.schema-version="${EDGE_DATABASE_SCHEMA_VERSION}"
 
 ENV HOST=127.0.0.1 \
     PORT=8000

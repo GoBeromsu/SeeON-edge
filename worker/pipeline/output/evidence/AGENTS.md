@@ -1,6 +1,6 @@
 # worker/pipeline/output/evidence
 
-Durable clip, snapshot, and relay-outbox path after admission. Pixels stop here as remuxed source packets, JPEG snapshots, and derivative files. Decision never writes this tree.
+Durable clip, snapshot, and relay-outbox path after admission. Pixels stop here as remuxed source packets and JPEG snapshots. Decision never writes this tree.
 
 `worker.pipeline` must not import `worker.runtime`. Runtime injects the store dir, outbox DB, lock, and sender. Missing production wiring or a locked store refuses to start. Remote failures do not block startup: retryable classes retry, compatibility failures reprobe, and payload-invalid failures become permanent. Two workers must not share one outbox.
 
@@ -24,7 +24,7 @@ Shared `ClipRecorder`, one actor thread, camera-local rings. `ClipAdmission` all
 
 ## Snapshots and manifests
 
-`SnapshotStore` is two-phase: stage under `.snapshot-staging`, publish bytes after the event commit, then commit identity metadata. Crash leaves a named transition. Ready manifests pin sha256, size, duration, codec, and event refs. Re-encoded derivatives must not claim source preservation. Verify those facts on recovery. Snapshot capacity drops are sink backpressure, not alert failure.
+`SnapshotStore` is two-phase: stage under `.snapshot-staging`, publish bytes after the event commit, then commit identity metadata. Crash leaves a named transition. Ready manifests pin sha256, size, duration, codec, and event refs. Verify those facts on recovery. Snapshot capacity drops are sink backpressure, not alert failure.
 
 ## Retention and deletion
 
@@ -40,9 +40,8 @@ The worker keeps only the publish-once queue, media files, integrity sidecars,
 zero-payload locks, and startup-purged scratch. The backend owns delivery
 metadata, claims, retention intent, and incident lifecycle. Do not add a
 database or database connection to worker evidence. Files own immutable bytes:
-`clips/<id>/clip.mp4`, `thumbnail.jpg`, `manifest.json`, staged snapshots, and
-`derivatives/<incident>/<sha256>.mp4`. Media never lives in rows. Path is not
-identity; hash and size are.
+`clips/<id>/clip.mp4`, `thumbnail.jpg`, `manifest.json`, and staged snapshots.
+Media never lives in rows. Path is not identity; hash and size are.
 
 ## Focused Tests
 

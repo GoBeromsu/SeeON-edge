@@ -25,22 +25,22 @@ The backend alone owns `/var/lib/seeon-state/edge.sqlite3`; the database,
 `0700` local directory and the database is `0600`. The runtime slot has no
 database mount and never opens, migrates, or repairs a SQLite database.
 
-Only the one-shot `python -m backend.app.edge_db.importer` migrator executes DDL
+Only the one-shot `python -m backend.app.edge_db.compact_cutover` migrator executes DDL
 or advances `PRAGMA user_version`. Backend connections verify the machine-readable
 migration ledger and ownership map, enable foreign keys, use WAL with
 `synchronous=FULL` and a fixed 5000 ms busy timeout, and are guarded by a SQLite
 authorizer that rejects DDL and unauthorized writes. Transactions are short:
 never hold one across hash, fsync, HTTP, or other external work.
 
-| Table prefix | Sole writer |
+| Table | Sole writer |
 | --- | --- |
-| `schema_*` | one-shot migrator |
-| every application table family | backend API |
+| `schema_migrations` | one-shot migrator |
+| compact application tables | backend API |
 
 Schema compatibility is an explicit inclusive range, not an optimistic open.
-Schema 17 makes the backend the sole application writer. Registration refuses
-to apply schema 17 while undrained schema-16 evidence remains, emits
-`EDGE_DB_DRAIN_INCOMPLETE`, and leaves the schema-16 database byte-identical.
+Schema 18 is the compact ten-table contract. Registration refuses to apply
+schema 18 while undrained schema-17 evidence remains, emits
+`EDGE_DB_DRAIN_INCOMPLETE`, and leaves the schema-17 database byte-identical.
 
 | Database version relative to binary range | Runtime behavior |
 | --- | --- |
