@@ -8,11 +8,12 @@ import { HttpError } from '@/shared/api/http';
 
 vi.mock('@/shared/api/client', async () => {
   const actual = await vi.importActual<typeof import('@/shared/api/client')>('@/shared/api/client');
-  return withOverrides(actual, {
+  return {
+    ...actual,
     fetchDashboardSession: vi.fn(),
     loginDashboard: vi.fn(),
     logoutDashboard: vi.fn(),
-  });
+  };
 });
 
 function mockAuthorizedSession(): void {

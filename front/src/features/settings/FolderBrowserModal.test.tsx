@@ -7,7 +7,7 @@ import type { ClipStorageBrowseResult } from '@/shared/api/client';
 
 vi.mock('@/shared/api/client', async () => {
   const actual = await vi.importActual<typeof import('@/shared/api/client')>('@/shared/api/client');
-  return withOverrides(actual, { browseClipStorage: vi.fn() });
+  return { ...actual, browseClipStorage: vi.fn() };
 });
 
 const rootListing: ClipStorageBrowseResult = {

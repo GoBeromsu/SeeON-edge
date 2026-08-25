@@ -17,12 +17,13 @@ import type {
 
 vi.mock('@/shared/api/client', async () => {
   const actual = await vi.importActual<typeof import('@/shared/api/client')>('@/shared/api/client');
-  return withOverrides(actual, {
+  return {
+    ...actual,
     fetchDetectionPolicies: vi.fn(),
     diffDetectionPolicy: vi.fn(),
     applyDetectionPolicy: vi.fn(),
     rollbackDetectionPolicy: vi.fn(),
-  });
+  };
 });
 
 vi.mock('@/shared/ui/Toast', () => ({

@@ -10,11 +10,11 @@ import { CameraSyncStep } from '@/features/connection/CameraSyncStep';
 
 vi.mock('@/shared/api/client', async () => {
   const actual = await vi.importActual<typeof import('@/shared/api/client')>('@/shared/api/client');
-  return withOverrides(actual, { updateCamera: vi.fn() });
+  return { ...actual, updateCamera: vi.fn() };
 });
 vi.mock('@/shared/api/topologyClient', async () => {
   const actual = await vi.importActual<typeof import('@/shared/api/topologyClient')>('@/shared/api/topologyClient');
-  return withOverrides(actual, { createTopologyFloor: vi.fn(), fetchTopology: vi.fn(), syncTopology: vi.fn() });
+  return { ...actual, createTopologyFloor: vi.fn(), fetchTopology: vi.fn(), syncTopology: vi.fn() };
 });
 
 const mappedTopology: CameraTopology = {

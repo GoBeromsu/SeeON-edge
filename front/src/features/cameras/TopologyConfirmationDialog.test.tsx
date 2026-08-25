@@ -7,7 +7,7 @@ import { TopologyConfirmationDialog } from '@/features/cameras/TopologyConfirmat
 
 vi.mock('@/shared/api/topologyClient', async () => {
   const actual = await vi.importActual<typeof import('@/shared/api/topologyClient')>('@/shared/api/topologyClient');
-  return withOverrides(actual, { confirmTopologyPreview: vi.fn(), fetchTopologyPreview: vi.fn() });
+  return { ...actual, confirmTopologyPreview: vi.fn(), fetchTopologyPreview: vi.fn() };
 });
 
 const preview: TopologyPreview = {

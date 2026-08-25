@@ -7,7 +7,7 @@ import type { Clip, ClipArtifacts } from '@/shared/api/types';
 
 vi.mock('@/shared/api/client', async () => {
   const actual = await vi.importActual<typeof import('@/shared/api/client')>('@/shared/api/client');
-  return withOverrides(actual, { deleteClip: vi.fn(), fetchClipArtifacts: vi.fn() });
+  return { ...actual, deleteClip: vi.fn(), fetchClipArtifacts: vi.fn() };
 });
 
 const activeRoots = new Set<ReturnType<typeof createRoot>>();

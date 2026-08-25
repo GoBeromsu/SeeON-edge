@@ -32,5 +32,20 @@ export default defineConfig({
     css: true,
     setupFiles: './src/test/setup.ts',
     exclude: ['node_modules/**', 'e2e/**', 'test-results/**'],
+    // Run test files one at a time.
+    //
+    // Under the default parallel forks pool this suite fails at roughly 1% with a partially
+    // materialized module namespace: a `vi.mock` factory's `vi.importActual('@/shared/api/client')`
+    // returns a namespace that is missing real exports, surfacing as
+    // `No "<export>" export is defined on the "@/shared/api/client" mock` or
+    // `TypeError: <export> is not a function`. It reproduces on unmodified base source, so it is a
+    // vite-node/Vitest 2.1.9 defect rather than anything this repo's tests spell wrongly, and every
+    // attempt to fix it at the test seam only relocated the victim.
+    //
+    // `fileParallelism: false` is the single semantic setting that contains it: Vitest still uses
+    // the forks pool with per-file isolation, it just stops running files concurrently. Do not add
+    // redundant `pool`/`maxWorkers`/`minWorkers` bounds -- bounded-but-still-parallel worker counts
+    // were measured and are not deterministic. Cost is roughly 2.4s -> 19-24s for the full suite.
+    fileParallelism: false,
   },
 });

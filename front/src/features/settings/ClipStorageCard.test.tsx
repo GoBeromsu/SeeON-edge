@@ -9,7 +9,7 @@ import type { PollingResource } from '@/shared/api/usePollingResource';
 
 vi.mock('@/shared/api/client', async () => {
   const actual = await vi.importActual<typeof import('@/shared/api/client')>('@/shared/api/client');
-  return withOverrides(actual, { saveClipStorageLocation: vi.fn(), browseClipStorage: vi.fn() });
+  return { ...actual, saveClipStorageLocation: vi.fn(), browseClipStorage: vi.fn() };
 });
 
 const storage: ClipStorageInfo = {

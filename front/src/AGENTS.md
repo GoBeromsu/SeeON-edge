@@ -20,7 +20,6 @@ Import that way in app, features, shared, and tests. Never `../../`.
   - `shared/format/`: tiny formatters (`bytes`, `uuid`).
 - `styles/`: token + shell CSS imported from `styles.css`. Don't dump feature layout here.
 - `test/setup.ts`: jsdom act flag + `HTMLMediaElement.play` stub. Vitest `setupFiles` points here.
-  `test/moduleMock.ts` holds `withOverrides`, the shared seam every `vi.mock` partial factory uses.
 
 ## Imports
 
@@ -48,30 +47,7 @@ Colocate: `Foo.tsx` + `Foo.test.tsx` (or `.ts`). Page suites may split as `Event
 Import `describe` / `it` / `expect` / `vi` from `vitest`. Use `@/` in tests too.
 Component tests: `createRoot` + `act`, wipe `document.body` and restore mocks in `afterEach`.
 Pure helpers get a `.test.ts` with table-style cases (see `operationsModel.test.ts`).
-`src/test/` is setup and shared test seams only, not a test dump.
-
-A `vi.mock` factory that wants "the real module plus a few overrides" must use
-`withOverrides(actual, { ... })` from `@/test/moduleMock`, resolved *inside* the factory via
-`vi.importActual` because `vi.mock` is hoisted above imports. Never write
-`return { ...actual, ...overrides }`: Vite's SSR transform installs exports with `defineProperty`
-calls scattered through a module body that opens with top-level `await`, so spreading can freeze a
-partially materialized namespace and permanently drop real exports
-(`No "x" export is defined on the "y" mock`). `withOverrides` forwards reads to the live namespace
-at access time instead of copying it.
-
-Its Proxy target is a fresh extensible null-prototype facade, never `actual`. A real namespace owns
-a non-configurable `Symbol.toStringTag`, so proxying `actual` directly and rewriting descriptors to
-`configurable: true` makes `Object.getOwnPropertyDescriptor(s)` throw, and an override-only key
-makes `ownKeys` throw on a non-extensible target. Keep the facade.
-
-Mutating traps reject *before* writing to the private override layer, and `preventExtensions` /
-`setPrototypeOf` always return `false`. Writing first and letting the engine reject the trap leaves
-the layer poisoned so every later read throws; sealing the facade breaks `ownKeys`.
-
-`test/importStructure.test.ts` is a TypeScript-AST guard: a file may import a local module at most
-once at top level, and `shared/api/client.test.ts` must import `@/shared/api/client` exactly once.
-Two top-level imports of one module become two Vite SSR requests, letting the second observe a
-half-built namespace. Use a dynamic `await import(...)` inside the test when a namespace is needed.
+`src/test/` is setup only, not a test dump.
 
 ## Where to look
 

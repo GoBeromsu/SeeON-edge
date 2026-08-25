@@ -8,7 +8,7 @@ import type { BedZone } from '@/shared/api/client';
 
 vi.mock('@/shared/api/client', async () => {
   const actual = await vi.importActual<typeof import('@/shared/api/client')>('@/shared/api/client');
-  return withOverrides(actual, { recognizeBedZone: vi.fn() });
+  return { ...actual, recognizeBedZone: vi.fn() };
 });
 
 const bedZone: BedZone = {

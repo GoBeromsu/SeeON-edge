@@ -9,7 +9,7 @@ import type { BedZone, Camera } from '@/shared/api/client';
 
 vi.mock('@/shared/api/client', async () => {
   const actual = await vi.importActual<typeof import('@/shared/api/client')>('@/shared/api/client');
-  return withOverrides(actual, { createCamera: vi.fn(), recognizeBedZone: vi.fn() });
+  return { ...actual, createCamera: vi.fn(), recognizeBedZone: vi.fn() };
 });
 
 const createdCamera: Camera = {

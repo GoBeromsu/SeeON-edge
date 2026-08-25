@@ -10,7 +10,7 @@ import type { PollingResource } from '@/shared/api/usePollingResource';
 // and tiles all stay real so this exercises the actual wall, not a stand-in.
 vi.mock('@/shared/api/usePollingResource', async () => {
   const actual = await vi.importActual<typeof import('@/shared/api/usePollingResource')>('@/shared/api/usePollingResource');
-  return withOverrides(actual, { useStatusResource: vi.fn() });
+  return { ...actual, useStatusResource: vi.fn() };
 });
 
 const cameraA: Camera = {

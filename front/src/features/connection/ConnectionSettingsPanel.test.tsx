@@ -8,7 +8,7 @@ import type { PollingResource } from '@/shared/api/usePollingResource';
 
 vi.mock('@/shared/api/client', async () => {
   const actual = await vi.importActual<typeof import('@/shared/api/client')>('@/shared/api/client');
-  return withOverrides(actual, { saveConnection: vi.fn(), testConnection: vi.fn() });
+  return { ...actual, saveConnection: vi.fn(), testConnection: vi.fn() };
 });
 
 const enrolledView: ConnectionView = {

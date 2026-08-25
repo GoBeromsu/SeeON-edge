@@ -8,12 +8,13 @@ import { EdgeSetupWizard } from '@/features/connection/EdgeSetupWizard';
 
 vi.mock('@/shared/api/topologyClient', async () => {
   const actual = await vi.importActual<typeof import('@/shared/api/topologyClient')>('@/shared/api/topologyClient');
-  return withOverrides(actual, {
+  return {
+    ...actual,
     fetchTopology: vi.fn(),
     fetchTopologyPreview: vi.fn(),
     syncTopology: vi.fn(),
     confirmTopologyPreview: vi.fn(),
-  });
+  };
 });
 
 const notEnrolledConnection: ConnectionView = {

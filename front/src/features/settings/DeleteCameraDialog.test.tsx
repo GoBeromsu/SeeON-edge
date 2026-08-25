@@ -8,7 +8,7 @@ import type { Camera } from '@/shared/api/client';
 
 vi.mock('@/shared/api/client', async () => {
   const actual = await vi.importActual<typeof import('@/shared/api/client')>('@/shared/api/client');
-  return withOverrides(actual, { deleteCamera: vi.fn() });
+  return { ...actual, deleteCamera: vi.fn() };
 });
 
 const camera: Camera = {

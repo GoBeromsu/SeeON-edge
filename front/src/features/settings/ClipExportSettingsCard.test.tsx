@@ -9,7 +9,7 @@ import type { PollingResource } from '@/shared/api/usePollingResource';
 
 vi.mock('@/shared/api/client', async () => {
   const actual = await vi.importActual<typeof import('@/shared/api/client')>('@/shared/api/client');
-  return withOverrides(actual, { saveRuntimeSettings: vi.fn() });
+  return { ...actual, saveRuntimeSettings: vi.fn() };
 });
 
 const settings: RuntimeSettings = { clip_export_enabled: false, version: 0 };
