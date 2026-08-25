@@ -8,6 +8,8 @@ namespace seeon {
 struct ChildOptions {
   int control_fd = -1;
   int wake_fd = -1;
+  int au_fd = -1;
+  int preview_fd = -1;
   int failure_fd = -1;
   int ready_fd = -1;
   std::uint32_t parent_pid = 0;

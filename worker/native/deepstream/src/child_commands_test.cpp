@@ -63,6 +63,11 @@ int main() {
   result = seeon::handle_command(state, add);
   check(result.reply.header.stream_epoch == 1, "re-add did not start a fresh epoch");
 
+  seeon::PipelineBindingPtr retired_binding;
+  {
+    std::lock_guard lock{state.slot_mutex};
+    retired_binding = state.sources.at("camera-a").binding;
+  }
   auto rebuild = request(options, seeon::ipc::Kind::kSourceFailure, 2, "eos");
   result = seeon::handle_command(state, rebuild);
   check(result.reply.header.stream_epoch == 2, "reconnect did not advance epoch");
@@ -73,7 +78,16 @@ int main() {
           "replacement pipeline did not publish an early frame");
     check(found->second.latest->header.stream_epoch == 2,
           "replacement pipeline early frame carried the old epoch");
+    check(found->second.binding != retired_binding,
+          "replacement pipeline retained the old pipeline token");
   }
+  bool old_pipeline_dispatched = false;
+  check(!retired_binding->dispatch_au(
+            [&old_pipeline_dispatched](std::uint32_t, std::uint64_t, std::uint64_t) {
+              old_pipeline_dispatched = true;
+            }),
+        "retired pipeline token remained live after epoch roll");
+  check(!old_pipeline_dispatched, "retired pipeline emitted a cross-epoch AU");
 
   result = seeon::handle_command(state, remove);
   check(result.reply.header.kind == static_cast<std::uint8_t>(seeon::ipc::Kind::kAck),

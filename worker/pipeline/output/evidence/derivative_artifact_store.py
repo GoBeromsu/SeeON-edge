@@ -11,6 +11,7 @@ from worker.pipeline.output.annotated_derivative import (
     DerivativeArtifact,
     DerivativeKind,
 )
+from worker.pipeline.output.derivative_producer import DerivativeProducer
 from worker.pipeline.output.evidence.durability import fsync_directory, fsync_file
 
 
@@ -51,8 +52,17 @@ class DerivativeArtifactStore:
     ) -> StoredDerivativeArtifact:
         if artifact.mime_type != job.derivative_kind.mime_type:
             raise DerivativeArtifactConflictError("derivative kind and MIME type differ")
-        if artifact.render_device != "cpu" or artifact.input_memory_kind != "host":
-            raise DerivativeArtifactConflictError("derivative render memory facts are invalid")
+        producer = (
+            DerivativeProducer.NATIVE_GPU
+            if artifact.render_backend == DerivativeProducer.NATIVE_GPU.value
+            else DerivativeProducer.CPU_REFERENCE
+        )
+        producer_facts = {
+            DerivativeProducer.CPU_REFERENCE: ("cpu", "host"),
+            DerivativeProducer.NATIVE_GPU: ("gpu", "encoded-source"),
+        }
+        if (artifact.render_device, artifact.input_memory_kind) != producer_facts[producer]:
+            raise DerivativeArtifactConflictError("derivative producer facts are invalid")
         if _facts(job.primary_media_path) != (job.primary_sha256, job.source_size_bytes):
             raise DerivativeArtifactConflictError("primary source media changed or is unavailable")
         self.store_root.mkdir(parents=True, exist_ok=True)

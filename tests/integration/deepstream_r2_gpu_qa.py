@@ -46,7 +46,7 @@ def main() -> int:
         raise RuntimeError("native ready handshake failed")
     arguments = Path(f"/proc/{transport.process.pid}/cmdline").read_bytes().split(b"\0")
     inherited = dict(zip(arguments[1::2], arguments[2::2], strict=False))
-    for flag in (b"--control-fd", b"--wake-fd", b"--failure-fd"):
+    for flag in (b"--control-fd", b"--wake-fd", b"--au-fd", b"--failure-fd"):
         descriptor = inherited[flag].decode()
         fdinfo = Path(f"/proc/{transport.process.pid}/fdinfo/{descriptor}").read_text()
         flags_line = next(line for line in fdinfo.splitlines() if line.startswith("flags:"))
@@ -83,6 +83,7 @@ def main() -> int:
         raise RuntimeError("raw child did not stop cleanly")
     control.close()
     transport.wake.close()
+    transport.access_units.close()
     transport.failures.close()
 
     supervisor = DeepStreamChildSupervisor(config(root / "eos", qa_mode=True))

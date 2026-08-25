@@ -87,42 +87,39 @@ def _source_and_muxed(*, translation: int = -10):
     return packets, muxed
 
 
-def test_normalized_stream_tolerates_rewritten_payload_bytes() -> None:
-    """An MP4 muxer rewriting Annex-B into AVCC changes payload bytes by design."""
+def test_annexb_normalizer_rejects_unbounded_start_code_count() -> None:
+    payload = b"\0\0\1e" * 4_097
+
+    with pytest.raises(ValueError, match="NAL unit count"):
+        packet_remuxer._annexb_to_length_prefixed(payload, 4)  # noqa: SLF001
+
+
+def test_normalized_stream_rejects_unexplained_payload_rewrite() -> None:
+    """Container normalization is not an exemption from AU byte verification."""
     packets, muxed = _source_and_muxed()
     rewritten = (replace(muxed[0], payload=b"avcc-length-prefixed"), muxed[1])
 
-    # Without the exemption this is a hard failure.
     with pytest.raises(ValueError, match="payload changed"):
         packet_remuxer._verify_packet_facts(  # noqa: SLF001
-            packets, rewritten, packets[0].configuration
+            packets,
+            rewritten,
+            packets[0].configuration,
+            container_normalized_streams={_VIDEO_STREAM},
         )
 
-    # With it, the rewrite is accepted.
-    packet_remuxer._verify_packet_facts(  # noqa: SLF001
-        packets,
-        rewritten,
-        packets[0].configuration,
-        container_normalized_streams={_VIDEO_STREAM},
-    )
 
-
-def test_normalized_stream_tolerates_changed_keyframe_identity() -> None:
-    """The same exemption covers keyframe flags, for the same reason."""
+def test_normalized_stream_rejects_lost_keyframe_identity() -> None:
+    """A container rewrite cannot make a known source keyframe optional."""
     packets, muxed = _source_and_muxed()
     reflagged = (replace(muxed[0], is_keyframe=False), muxed[1])
 
     with pytest.raises(ValueError, match="keyframe identity changed"):
         packet_remuxer._verify_packet_facts(  # noqa: SLF001
-            packets, reflagged, packets[0].configuration
+            packets,
+            reflagged,
+            packets[0].configuration,
+            container_normalized_streams={_VIDEO_STREAM},
         )
-
-    packet_remuxer._verify_packet_facts(  # noqa: SLF001
-        packets,
-        reflagged,
-        packets[0].configuration,
-        container_normalized_streams={_VIDEO_STREAM},
-    )
 
 
 def test_a_recomputed_duration_no_longer_destroys_the_clip() -> None:

@@ -16,6 +16,7 @@ from worker.pipeline.output.evidence.clip_config import (
 )
 from worker.pipeline.output.evidence.clip_identity import ClipReservation
 from worker.types import CURRENT_TEMPORAL_PROFILE, BusinessEvent, FrameKey, FramePacket
+from worker.types.source_packet import StreamEpoch
 
 
 @dataclass(frozen=True, slots=True)
@@ -106,7 +107,14 @@ class FlushMessage:
     done: threading.Event
 
 
-RecorderMessage = FrameMessage | EventMessage | FlushMessage
+@dataclass(frozen=True, slots=True)
+class EpochRollMessage:
+    previous: StreamEpoch
+    current: StreamEpoch
+    done: threading.Event
+
+
+RecorderMessage = FrameMessage | EventMessage | FlushMessage | EpochRollMessage
 
 
 @final
@@ -159,6 +167,7 @@ __all__ = [
     "ActiveClip",
     "ClipRecorderConfig",
     "ClipRecorderStats",
+    "EpochRollMessage",
     "EventMessage",
     "FlushMessage",
     "FrameMessage",

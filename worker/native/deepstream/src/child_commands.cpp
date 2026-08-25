@@ -4,6 +4,7 @@
 
 #include <chrono>
 #include <cstring>
+#include <memory>
 #include <utility>
 
 namespace seeon {
@@ -20,13 +21,16 @@ CommandResult handle_command(ServerState& state, const ipc::Message& request) {
   const auto kind = static_cast<ipc::Kind>(request.header.kind);
   const bool debug_command = kind == ipc::Kind::kEmitMetadata ||
                              kind == ipc::Kind::kWaitPublish ||
-                             kind == ipc::Kind::kInjectSourceEos;
+                             kind == ipc::Kind::kInjectSourceEos ||
+                             kind == ipc::Kind::kGetPreviewStatus ||
+                             kind == ipc::Kind::kWaitPreview;
   if (debug_command && !state.options.qa_mode) {
     return {error_reply(request, "qa_command_disabled")};
   }
   std::string error;
   switch (kind) {
     case ipc::Kind::kAddSource: {
+      const auto binding = std::make_shared<PipelineBinding>(request.header.source_generation, 1);
       {
         std::lock_guard lock{state.slot_mutex};
         if (!state.generation_high_water.contains(request.camera) &&
@@ -41,10 +45,10 @@ CommandResult handle_command(ServerState& state, const ipc::Message& request) {
         state.generation_high_water[request.camera] = request.header.source_generation;
         state.sources.emplace(
             request.camera,
-            SourceSlot{request.header.source_generation, 1, 0, std::nullopt});
+            SourceSlot{request.header.source_generation, 1, 0, std::nullopt, binding});
       }
       const std::string uri{request.payload.begin(), request.payload.end()};
-      if (!state.runtime.add(request.camera, uri, &error)) {
+      if (!state.runtime.add(request.camera, uri, binding, &error)) {
         std::lock_guard lock{state.slot_mutex};
         state.sources.erase(request.camera);
         return {error_reply(request, error)};
@@ -82,14 +86,22 @@ CommandResult handle_command(ServerState& state, const ipc::Message& request) {
           return {error_reply(request, "source_unknown")};
         }
       }
+      if (!state.runtime.quiesce(request.camera)) {
+        return {error_reply(request, "source_quiesce_failed")};
+      }
       std::uint64_t epoch = 0;
+      PipelineBindingPtr binding;
       {
         std::lock_guard lock{state.slot_mutex};
         const auto found = state.sources.find(request.camera);
         epoch = ++found->second.epoch;
         found->second.latest.reset();
+        found->second.source_sequence = 0;
+        binding = std::make_shared<PipelineBinding>(found->second.generation, epoch);
+        found->second.binding = binding;
       }
-      if (!state.runtime.rebuild(request.camera, &error)) {
+      if (!state.runtime.restart(request.camera, binding, &error)) {
+        binding->invalidate();
         return {error_reply(request, error)};
       }
       {
@@ -152,17 +164,43 @@ CommandResult handle_command(ServerState& state, const ipc::Message& request) {
       return state.runtime.inject_eos(request.camera)
                  ? CommandResult{ipc::reply(request, ipc::Kind::kAck)}
                  : CommandResult{error_reply(request, "source_unknown")};
+    case ipc::Kind::kSetPreviewDemand: {
+      if (request.payload.size() != sizeof(std::uint32_t)) {
+        return {error_reply(request, "preview demand size")};
+      }
+      std::uint32_t viewers = 0;
+      std::memcpy(&viewers, request.payload.data(), sizeof(viewers));
+      return state.runtime.set_preview_viewers(request.camera, viewers)
+                 ? CommandResult{ipc::reply(request, ipc::Kind::kAck)}
+                 : CommandResult{error_reply(request, "source_unknown")};
+    }
+    case ipc::Kind::kGetPreviewStatus: {
+      const auto status = state.runtime.preview_status(request.camera);
+      if (!status.has_value()) return {error_reply(request, "source_unknown")};
+      std::vector<std::uint8_t> payload(sizeof(PreviewStatus));
+      std::memcpy(payload.data(), &*status, sizeof(PreviewStatus));
+      return {ipc::reply(request, ipc::Kind::kAck, std::move(payload))};
+    }
+    case ipc::Kind::kWaitPreview: {
+      if (request.payload.size() != sizeof(std::uint64_t)) {
+        return {error_reply(request, "preview target size")};
+      }
+      std::uint64_t target = 0;
+      std::memcpy(&target, request.payload.data(), sizeof(target));
+      return state.runtime.wait_preview(request.camera, target)
+                 ? CommandResult{ipc::reply(request, ipc::Kind::kAck)}
+                 : CommandResult{error_reply(request, "preview target timeout")};
+    }
     case ipc::Kind::kWaitPublish: {
       if (request.payload.size() != sizeof(std::uint64_t)) {
         return {error_reply(request, "publish target size")};
       }
       std::uint64_t target = 0;
       std::memcpy(&target, request.payload.data(), sizeof(target));
-      std::unique_lock lock{state.slot_mutex};
+      std::unique_lock lock{state.published_mutex};
       const bool reached = state.published_condition.wait_for(
-          lock,
-          std::chrono::seconds{2},
-          [&state, target] { return state.published >= target; });
+          lock, std::chrono::seconds{2},
+          [&state, target] { return state.published.load() >= target; });
       return reached ? CommandResult{ipc::reply(request, ipc::Kind::kAck)}
                      : CommandResult{error_reply(request, "publish target timeout"), 4};
     }

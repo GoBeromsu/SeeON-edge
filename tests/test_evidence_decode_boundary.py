@@ -599,25 +599,6 @@ def test_clip_enabled_keeps_nvdec_decode_out_of_the_python_process(tmp_path: Pat
         session.close()
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "PRE-EXISTING ADR-0001 GAP (not a decode-boundary regression, and not "
-        "todo 11's to fix): when a source's own extradata differs from the mux "
-        "template's -- which is ALWAYS true for RTSP, where packets arrive in "
-        "Annex-B framing while the PyAV-built template capsule carries "
-        "length-prefixed AVCC -- ``_verify_packet_facts`` puts the stream in "
-        "``container_normalized_streams`` and then skips BOTH the per-packet "
-        "payload comparison and the keyframe-identity comparison for it. A "
-        "corrupted payload or a dropped keyframe flag on the production source "
-        "type therefore passes verification silently; the real-stack "
-        "counterpart "
-        "(tests/test_worker_packet_remux_real_ffmpeg.py::"
-        "test_real_nvdec_boundary_clip_preserves_keyframe_identity) shows the "
-        "published RTSP clip really does lose every keyframe flag. Owner: the "
-        "remuxer/ADR-0001 lane."
-    ),
-)
 def test_container_normalized_streams_still_verifies_payload_bytes() -> None:
     """Container normalization must not disable the byte-level guarantee."""
     # Given: a stream whose extradata was normalized by the container, and a

@@ -3,6 +3,9 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import subprocess
+import sys
+import textwrap
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -12,7 +15,7 @@ import pytest
 import worker.pipeline.output.evidence.clip_publication as clip_publication
 from backend.app.features.clips.catalog import strict_manifest_records
 from backend.app.features.clips.store import ClipStore
-from worker.pipeline.output.evidence.clip_identity import ClipIdAllocator
+from worker.pipeline.output.evidence.clip_identity import ClipIdAllocator, ClipReservation
 from worker.pipeline.output.evidence.clip_publication import (
     ClipPublicationMetadata,
     ClipPublisher,
@@ -20,7 +23,11 @@ from worker.pipeline.output.evidence.clip_publication import (
     PublicationStage,
 )
 from worker.pipeline.output.evidence.evidence_media import MediaFacts
-from worker.pipeline.output.evidence.evidence_outbox_types import EdgeEventId, EvidenceReasonCode
+from worker.pipeline.output.evidence.evidence_outbox_types import (
+    ClipId,
+    EdgeEventId,
+    EvidenceReasonCode,
+)
 
 EVENT_ONE = EdgeEventId("00000000-0000-4000-8000-000000000001")
 EVENT_TWO = EdgeEventId("00000000-0000-4000-8000-000000000002")
@@ -41,6 +48,61 @@ def _metadata() -> ClipPublicationMetadata:
         encoder="libx264",
         runtime_manifest_sha256=RUNTIME_MANIFEST_SHA256,
     )
+
+
+def test_process_kill_after_manifest_reconstructs_exact_event_outcomes(tmp_path: Path) -> None:
+    script = textwrap.dedent(
+        f"""
+        import os
+        from datetime import UTC, datetime, timedelta
+        from pathlib import Path
+        from worker.pipeline.output.evidence.clip_identity import ClipIdAllocator
+        from worker.pipeline.output.evidence.clip_publication import (
+            ClipPublicationMetadata, ClipPublisher, PublicationStage,
+        )
+        from worker.pipeline.output.evidence.evidence_outbox_types import (
+            EdgeEventId, EvidenceReasonCode,
+        )
+        root = Path({str(tmp_path)!r})
+        reservation = ClipIdAllocator(
+            root, id_factory=lambda _camera: 'killed-clip'
+        ).reserve('camera-1')
+        start = datetime(2026, 7, 16, 1, 2, 3, tzinfo=UTC)
+        metadata = ClipPublicationMetadata(
+            'camera-1',
+            (EdgeEventId('{EVENT_ONE}'), EdgeEventId('{EVENT_TWO}')),
+            'fall', start, start + timedelta(seconds=1), start + timedelta(seconds=2),
+            start, 1.0, 'libx264', '{RUNTIME_MANIFEST_SHA256}',
+        )
+        def barrier(stage, _path):
+            if stage is PublicationStage.MANIFEST_RENAMED:
+                os._exit(91)
+        ClipPublisher(root, barrier=barrier).publish_unavailable(
+            reservation, metadata, EvidenceReasonCode.ENCODER_FAILED,
+        )
+        """
+    )
+    killed = subprocess.run([sys.executable, "-c", script], check=False)
+    assert killed.returncode == 91
+    reservation = ClipReservation(
+        ClipId("killed-clip"), "camera-1",
+        tmp_path / "clips/.staging/killed-clip",
+        tmp_path / "clips/killed-clip",
+    )
+
+    publisher = ClipPublisher(tmp_path)
+    _ = publisher.publish_unavailable(
+        reservation, _metadata(), EvidenceReasonCode.ENCODER_FAILED
+    )
+    _ = publisher.publish_unavailable(
+        reservation, _metadata(), EvidenceReasonCode.ENCODER_FAILED
+    )
+
+    outcomes = tuple((reservation.final_dir / "terminal-outcomes").glob("*.json"))
+    assert len(outcomes) == 2
+    assert {json.loads(path.read_text())["event_id"] for path in outcomes} == {
+        str(EVENT_ONE), str(EVENT_TWO)
+    }
 
 
 def test_reservation_skips_collisions_and_keeps_the_caller_visible_identity(
@@ -299,7 +361,7 @@ def test_ready_publication_fsyncs_before_renames_and_staging_cleanup(
 
     _ = ClipPublisher(tmp_path).publish_ready(reservation, artifact, _metadata())
 
-    assert operations == [
+    assert operations[:8] == [
         ("fsync-directory", "clips", ""),
         ("fsync-file", "derivative.mp4", ""),
         ("replace", "derivative.mp4", "clip.mp4"),
@@ -308,6 +370,13 @@ def test_ready_publication_fsyncs_before_renames_and_staging_cleanup(
         ("replace", "manifest.json.tmp", "manifest.json"),
         ("fsync-file", "manifest.json", ""),
         ("fsync-directory", "durable-clip-id", ""),
+    ]
+    terminal_targets = [
+        target for operation, _source, target in operations if operation == "replace"
+    ]
+    assert "terminal-outcome.json" in terminal_targets
+    assert sum(target.endswith(".json") for target in terminal_targets) == 4
+    assert operations[-2:] == [
         ("rmtree", "durable-clip-id", ""),
         ("fsync-directory", ".staging", ""),
     ]

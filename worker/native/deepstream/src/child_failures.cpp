@@ -5,14 +5,26 @@
 #include <unistd.h>
 
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace seeon {
 ServerState::ServerState(const ChildOptions& options_value)
     : options(options_value),
       runtime(
-          [this](const std::string& camera, std::uint64_t pts) { on_frame(camera, pts); },
-          [this](const NativeFailure& failure) { on_failure(failure); }),
+          [this](const std::string& camera, const PipelineBindingPtr& binding,
+                 std::uint64_t pts) { on_frame(camera, binding, pts); },
+          [this](const NativeFailure& failure) { on_failure(failure); },
+          [this](const std::string& camera, const PipelineBindingPtr& binding,
+                 ParsedAccessUnit unit) {
+            on_access_unit(camera, binding, std::move(unit));
+          },
+          [this](const std::string& camera, std::uint64_t pts,
+                 std::vector<std::uint8_t> jpeg) {
+            static_cast<void>(preview_sender.publish(camera, pts, std::move(jpeg)));
+          }),
+      au_sender(options_value.au_fd, 128, kMaxAuFrameBytes),
+      preview_sender(options_value.preview_fd),
       failure_fd(eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK)) {}
 
 ServerState::~ServerState() { close(failure_fd); }

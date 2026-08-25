@@ -4,10 +4,15 @@ from __future__ import annotations
 
 import subprocess
 import threading
-from typing import Final
+from typing import Final, final
 
-from worker.native.deepstream.control import DeepStreamControlClient
+from worker.adapters.decode.native_au_receiver import NativeAuReceiver
+from worker.adapters.decode.native_preview_receiver import NativePreviewReceiver
+from worker.native.deepstream.control import ChildControlError, DeepStreamControlClient
 from worker.native.deepstream.metadata import LatestMetadataSlot, MetadataReceiver
+from worker.pipeline.output.evidence.packet_repository import PacketRingRepository
+from worker.pipeline.output.evidence.packet_ring import PacketRingLimits
+from worker.pipeline.output.live_view import LatestFrameStore
 from worker.runtime.deepstream.child_monitor import ChildExitMonitor, monitor_metadata
 from worker.runtime.deepstream.cleanup import ChildResources, stop_child_resources
 from worker.runtime.deepstream.config import (
@@ -23,7 +28,10 @@ from worker.runtime.deepstream.path_security import (
     PrivatePathError,
     validate_private_directory,
 )
-from worker.runtime.deepstream.source_control import DarkSourceController
+from worker.runtime.deepstream.source_control import (
+    DarkSourceController,
+    SourceReadinessError,
+)
 from worker.runtime.deepstream.startup import connect_session
 from worker.runtime.deepstream.transport import spawn_child
 from worker.runtime.lease import GpuLease
@@ -31,6 +39,7 @@ from worker.runtime.lease import GpuLease
 FATAL_CHILD_EXIT_CODE: Final = 4
 
 
+@final
 class DeepStreamChildSupervisor:
     """Own one inherited-IPC child and persist fatal exit without caller participation."""
 
@@ -39,6 +48,14 @@ class DeepStreamChildSupervisor:
         self._process: subprocess.Popen[bytes] | None = None
         self._metadata: LatestMetadataSlot = LatestMetadataSlot()
         self._receiver: MetadataReceiver | None = None
+        self._au_receiver: NativeAuReceiver | None = None
+        self._preview_receiver: NativePreviewReceiver | None = None
+        self._preview_frames = LatestFrameStore()
+        self._packet_repository = PacketRingRepository(
+            (),
+            per_camera_limits=PacketRingLimits(4_000, 64 * 1024 * 1024, 120.0),
+            global_max_bytes=512 * 1024 * 1024,
+        )
         self._failure_receiver: NativeFailureReceiver | None = None
         self._control: DeepStreamControlClient | None = None
         self._sources: DarkSourceController | None = None
@@ -57,6 +74,20 @@ class DeepStreamChildSupervisor:
     @property
     def metadata(self) -> LatestMetadataSlot:
         return self._metadata
+
+    @property
+    def packet_repository(self) -> PacketRingRepository:
+        return self._packet_repository
+
+    @property
+    def au_receiver(self) -> NativeAuReceiver:
+        if self._au_receiver is None:
+            raise ChildStartupError("not_started", "gpu-0")
+        return self._au_receiver
+
+    @property
+    def preview_frames(self) -> LatestFrameStore:
+        return self._preview_frames
 
     @property
     def control(self) -> DeepStreamControlClient:
@@ -101,6 +132,19 @@ class DeepStreamChildSupervisor:
         self._control = session.control
         self._receiver = session.receiver
         self._sources = session.sources
+        self._au_receiver = NativeAuReceiver(
+            transport.access_units,
+            str(self._config.worker_boot_id),
+            self._packet_repository,
+            self._handle_au_gap,
+            self._fail_deadly,
+        )
+        session.sources.set_retire_hook(self._au_receiver.retire_camera)
+        self._au_receiver.start()
+        self._preview_receiver = NativePreviewReceiver(
+            transport.previews, self._preview_frames
+        )
+        self._preview_receiver.start()
         failures = NativeFailureCoordinator(
             self._config,
             lambda: self._sources,
@@ -126,6 +170,29 @@ class DeepStreamChildSupervisor:
 
     def _set_fatal_category(self, category: str) -> None:
         self._fatal_category = category
+
+    def _handle_au_gap(self, camera_id: str, category: str) -> None:
+        sources = self._sources
+        if sources is not None:
+            try:
+                _ = sources.rebuild(camera_id, category)
+            except (ChildControlError, SourceReadinessError):
+                self._fail_deadly("au_epoch_rebuild_failed")
+
+    def _fail_deadly(self, category: str) -> None:
+        process = self._process
+        if category == "au_stream_closed" and process is not None:
+            try:
+                _ = process.wait(timeout=0.1)
+            except subprocess.TimeoutExpired:
+                pass
+            else:
+                category = "child_exit"
+        self._set_fatal_category(category)
+        self._fatal_received.set()
+        _ = persist_child_fault(self._config, category)
+        if process is not None and process.poll() is None:
+            process.kill()
 
     def _mark_control_eof(self) -> None:
         if self._fatal_category == "child_exit":
@@ -154,6 +221,12 @@ class DeepStreamChildSupervisor:
     def stop(self) -> None:
         self._stopping.set()
         self._sources = None
+        au_receiver, self._au_receiver = self._au_receiver, None
+        if au_receiver is not None:
+            au_receiver.close()
+        preview_receiver, self._preview_receiver = self._preview_receiver, None
+        if preview_receiver is not None:
+            preview_receiver.close()
         resources = ChildResources(
             self._process,
             self._control,

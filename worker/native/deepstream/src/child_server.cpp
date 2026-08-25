@@ -92,6 +92,10 @@ int ChildServer::run() {
       break;
     }
   }
+  state.au_sender.stop();
+  state.preview_sender.stop();
+  close(options_.au_fd);
+  close(options_.preview_fd);
   close(options_.control_fd);
   close(options_.wake_fd);
   close(options_.failure_fd);

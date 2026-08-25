@@ -10,6 +10,7 @@ from worker.native.deepstream.control_reply import decode_status, validate_reply
 from worker.native.deepstream.control_types import (
     ChildControlError,
     ControlIdentity,
+    NativePreviewStatus,
     NativeStatus,
     parse_source_uri,
 )
@@ -144,6 +145,35 @@ class DeepStreamControlClient:
     def inject_source_eos(self, camera_id: str) -> None:
         _ = self.request(self._message(MessageKind.INJECT_SOURCE_EOS, camera_id))
 
+    def set_preview_viewers(self, camera_id: str, viewers: int) -> None:
+        if viewers < 0 or viewers > 4_096:
+            raise ChildControlError("preview_viewers_invalid", str(viewers))
+        _ = self.request(
+            self._message(
+                MessageKind.SET_PREVIEW_DEMAND,
+                camera_id,
+                viewers.to_bytes(4, "little"),
+            )
+        )
+
+    def wait_for_preview(self, camera_id: str, target: int) -> None:
+        _ = self.request(
+            self._message(
+                MessageKind.WAIT_PREVIEW,
+                camera_id,
+                target.to_bytes(8, "little"),
+            )
+        )
+
+    def preview_status(self, camera_id: str) -> NativePreviewStatus:
+        reply = self.request(self._message(MessageKind.GET_PREVIEW_STATUS, camera_id))
+        if len(reply.payload) != 16:
+            raise ChildControlError("preview_status_size", str(len(reply.payload)))
+        return NativePreviewStatus(
+            int.from_bytes(reply.payload[:8], "little"),
+            int.from_bytes(reply.payload[8:], "little"),
+        )
+
     def pull_latest(self, camera_id: str) -> MetadataFrame | None:
         try:
             reply = self.request(self._message(MessageKind.GET_LATEST, camera_id))
@@ -170,6 +200,7 @@ __all__ = [
     "ChildControlError",
     "ControlIdentity",
     "DeepStreamControlClient",
+    "NativePreviewStatus",
     "NativeStatus",
     "parse_source_uri",
 ]

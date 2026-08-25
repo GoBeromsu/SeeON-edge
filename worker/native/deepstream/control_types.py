@@ -18,6 +18,12 @@ class ControlIdentity:
 
 
 @dataclass(frozen=True, slots=True)
+class NativePreviewStatus:
+    encoded: int
+    viewers: int
+
+
+@dataclass(frozen=True, slots=True)
 class NativeStatus:
     metadata_published: int
     metadata_overwritten: int
@@ -51,4 +57,10 @@ def parse_source_uri(raw: str) -> str:
     return raw
 
 
-__all__ = ["ChildControlError", "ControlIdentity", "NativeStatus", "parse_source_uri"]
+__all__ = [
+    "ChildControlError",
+    "ControlIdentity",
+    "NativePreviewStatus",
+    "NativeStatus",
+    "parse_source_uri",
+]

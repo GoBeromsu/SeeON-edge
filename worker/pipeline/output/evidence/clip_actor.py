@@ -2,20 +2,17 @@ from __future__ import annotations
 
 import logging
 import time
-from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
-from typing import Final, Protocol, assert_never, final
+from typing import Final, assert_never, final
 
 from worker.adapters.encode.adapter_errors import EncoderPolicyError
-from worker.adapters.encode.models import ClipArtifact
-from worker.pipeline.output.evidence.clip_identity import ClipReservation
+from worker.pipeline.output.evidence.clip_actor_metadata import (
+    evidence_reason,
+    publication_metadata,
+)
+from worker.pipeline.output.evidence.clip_actor_types import ClipActorDependencies
 from worker.pipeline.output.evidence.clip_publication import (
     ClipPublicationConflictError,
-    ClipPublicationMetadata,
-    ClipTimeOrigin,
-    JsonValue,
-    PublishedClip,
 )
 from worker.pipeline.output.evidence.clip_recorder_models import (
     ActiveClip,
@@ -25,91 +22,15 @@ from worker.pipeline.output.evidence.clip_recorder_models import (
     FrameMessage,
 )
 from worker.pipeline.output.evidence.clip_recording import (
-    ClipOutcome,
     ClipReady,
     ClipReasonCode,
     ClipUnavailable,
 )
-from worker.pipeline.output.evidence.decision_trace_reference import (
-    DECISION_TRACE_ID_KEY,
-    validate_decision_trace_id,
-)
 from worker.pipeline.output.evidence.evidence_media import ClipEvidenceError
-from worker.pipeline.output.evidence.evidence_metadata import (
-    runtime_manifest_sha256_from_audit,
-)
-from worker.pipeline.output.evidence.evidence_outbox_types import (
-    ClipId,
-    EdgeEventId,
-    EvidenceReasonCode,
-)
-from worker.types import BusinessEvent, FrameKey, FramePacket
+from worker.pipeline.output.evidence.terminal_outcome import TerminalOutcomeConflictError
+from worker.types.source_packet import StreamEpoch
 
 LOGGER: Final = logging.getLogger(__name__)
-
-
-class RecordingCoordinator(Protocol):
-    def write(self, packet: FramePacket) -> bool: ...
-
-    def seal(self, camera_id: str) -> bool: ...
-
-    def finalize(
-        self,
-        *,
-        camera_id: str,
-        clip_id: str,
-        event_time_sec: float,
-        event: BusinessEvent,
-        output_dir: Path | None = None,
-        trigger_frame_key: FrameKey | None = None,
-    ) -> ClipOutcome: ...
-
-    def close(self, camera_id: str) -> None: ...
-
-    def close_all(self) -> None: ...
-
-
-class ClipPublicationPort(Protocol):
-    def publish_ready(
-        self,
-        reservation: ClipReservation,
-        artifact_path: Path,
-        metadata: ClipPublicationMetadata,
-    ) -> PublishedClip | None: ...
-
-    def publish_unavailable(
-        self,
-        reservation: ClipReservation,
-        metadata: ClipPublicationMetadata,
-        reason_code: EvidenceReasonCode,
-    ) -> PublishedClip | None: ...
-
-
-class ClipCloseHook(Protocol):
-    def __call__(self, camera_id: str, clip_id: ClipId, /) -> None: ...
-
-
-class ClipReleaseHook(Protocol):
-    def __call__(self, camera_id: str, clip_id: ClipId, /) -> None: ...
-
-
-class ClipCancelHook(Protocol):
-    def __call__(self, reservation: ClipReservation, /) -> None: ...
-
-
-class ClipFinalizedHook(Protocol):
-    def __call__(self, clip_id: ClipId, /) -> None: ...
-
-
-@dataclass(frozen=True, slots=True)
-class ClipActorDependencies:
-    coordinator: RecordingCoordinator
-    publisher: ClipPublicationPort
-    close: ClipCloseHook
-    release: ClipReleaseHook
-    finalized: ClipFinalizedHook | None = None
-    encoder_name: str = "libx264"
-    cancel: ClipCancelHook | None = None
 
 
 @final
@@ -143,9 +64,33 @@ class ClipActor:
         camera_id = message.reservation.camera_id
         active = self._active_by_camera.get(camera_id)
         if active is not None and active.reservation.clip_id == message.reservation.clip_id:
-            if message.event_ref not in active.event_refs:
-                active.event_refs.append(message.event_ref)
-            return
+            if (
+                active.trigger_frame_key is None
+                or active.trigger_frame_key.worker_boot_id
+                != message.trigger_packet.worker_boot_id
+                or active.trigger_frame_key.stream_epoch
+                != message.trigger_packet.stream_epoch
+                or active.trigger_frame_key.source_generation
+                != message.trigger_packet.source_generation
+            ):
+                self._finalize(active, forced=True)
+            else:
+                event_time = (
+                    message.trigger_packet.frame.time_sec
+                    if message.trigger_packet.pts is None
+                    else message.trigger_packet.pts
+                )
+                active.start_time_sec = min(
+                    active.start_time_sec,
+                    event_time - self._config.pre_event_seconds,
+                )
+                active.cutoff_time_sec = max(
+                    active.cutoff_time_sec,
+                    event_time + self._config.post_event_seconds,
+                )
+                if message.event_ref not in active.event_refs:
+                    active.event_refs.append(message.event_ref)
+                return
         if active is not None:
             self._finalize(active, forced=True)
         if not message.allow_new_clip:
@@ -177,6 +122,17 @@ class ClipActor:
         if active.last_time_sec >= active.cutoff_time_sec:
             self._finalize(active, forced=False)
 
+    def handle_epoch_roll(self, previous: StreamEpoch) -> None:
+        for active in tuple(self._active_by_camera.values()):
+            key = active.trigger_frame_key
+            if (
+                key is not None
+                and key.worker_boot_id == previous.worker_boot_id
+                and key.stream_epoch == previous.stream_epoch
+                and key.source_generation == previous.source_generation
+            ):
+                self._finalize(active, forced=True, epoch_rolled=True)
+
     def expire(self) -> None:
         now = time.monotonic()
         maximum_age = self._config.post_event_seconds + self._config.finalize_grace_seconds
@@ -192,7 +148,9 @@ class ClipActor:
     def shutdown(self) -> None:
         self.flush()
 
-    def _finalize(self, active: ActiveClip, *, forced: bool) -> None:
+    def _finalize(
+        self, active: ActiveClip, *, forced: bool, epoch_rolled: bool = False
+    ) -> None:
         published = False
         camera_id = active.reservation.camera_id
         if forced and active.last_time_sec < active.cutoff_time_sec:
@@ -200,17 +158,29 @@ class ClipActor:
         try:
             self._dependencies.close(camera_id, active.reservation.clip_id)
             _ = self._dependencies.coordinator.seal(camera_id)
-            outcome = self._dependencies.coordinator.finalize(
-                camera_id=camera_id,
-                clip_id=str(active.reservation.clip_id),
-                event_time_sec=active.event_time_sec,
-                event=active.event,
-                output_dir=active.reservation.staging_dir,
-                trigger_frame_key=active.trigger_frame_key,
+            outcome = (
+                ClipUnavailable(
+                    str(active.reservation.clip_id),
+                    ClipReasonCode.STREAM_EPOCH_MISMATCH,
+                    "STREAM_EPOCH_ROLLED",
+                    ("STREAM_EPOCH_ROLLED",),
+                )
+                if epoch_rolled
+                else self._dependencies.coordinator.finalize(
+                    camera_id=camera_id,
+                    clip_id=str(active.reservation.clip_id),
+                    event_time_sec=active.event_time_sec,
+                    event=active.event,
+                    output_dir=active.reservation.staging_dir,
+                    trigger_frame_key=active.trigger_frame_key,
+                    window_bounds=(active.start_time_sec, active.cutoff_time_sec),
+                )
             )
             match outcome:
                 case ClipReady(artifact=artifact):
-                    metadata = self._metadata(active, artifact.duration_s, artifact)
+                    metadata = publication_metadata(
+                        active, artifact.duration_s, self._dependencies.encoder_name, artifact
+                    )
                     _ = self._dependencies.publisher.publish_ready(
                         active.reservation,
                         artifact.path,
@@ -221,16 +191,17 @@ class ClipActor:
                     detail_reason=detail_reason,
                     truncation_reasons=truncation_reasons,
                 ):
-                    metadata = self._metadata(
+                    metadata = publication_metadata(
                         active,
                         max(0.0, active.last_time_sec - active.start_time_sec),
+                        self._dependencies.encoder_name,
                         source_error_reason=detail_reason,
                         truncation_reasons=truncation_reasons,
                     )
                     _ = self._dependencies.publisher.publish_unavailable(
                         active.reservation,
                         metadata,
-                        _evidence_reason(reason_code),
+                        evidence_reason(reason_code),
                     )
                     self._stats.video_unavailable_clips += 1
                 case unreachable:
@@ -240,6 +211,7 @@ class ClipActor:
         except (
             ClipEvidenceError,
             ClipPublicationConflictError,
+            TerminalOutcomeConflictError,
             EncoderPolicyError,
             OSError,
         ):
@@ -254,8 +226,25 @@ class ClipActor:
                 },
                 exc_info=True,
             )
-            if self._dependencies.cancel is not None:
-                self._dependencies.cancel(active.reservation)
+            publish_corrupt = getattr(self._dependencies.publisher, "publish_corrupt", None)
+            try:
+                if callable(publish_corrupt):
+                    _ = publish_corrupt(
+                        active.reservation,
+                        publication_metadata(
+                            active,
+                            max(0.0, active.last_time_sec - active.start_time_sec),
+                            self._dependencies.encoder_name,
+                            source_error_reason="FINALIZE_FAILED",
+                        ),
+                    )
+                    published = True
+                    self._stats.video_unavailable_clips += 1
+                elif self._dependencies.cancel is not None:
+                    self._dependencies.cancel(active.reservation)
+            except (ClipPublicationConflictError, TerminalOutcomeConflictError, OSError):
+                if self._dependencies.cancel is not None:
+                    self._dependencies.cancel(active.reservation)
         finally:
             self._active_by_camera.pop(camera_id, None)
             self._stats.active_clips = len(self._active_by_camera)
@@ -264,110 +253,6 @@ class ClipActor:
         if published and self._dependencies.finalized is not None:
             self._dependencies.finalized(active.reservation.clip_id)
 
-    def _metadata(
-        self,
-        active: ActiveClip,
-        duration_s: float,
-        artifact: ClipArtifact | None = None,
-        *,
-        source_error_reason: str | None = None,
-        truncation_reasons: tuple[str, ...] = (),
-    ) -> ClipPublicationMetadata:
-        # `active.started_at` is a wall-clock anchor taken when the event
-        # arrived, but `duration_s` is derived from source/stream time
-        # (segment or frame timestamps), not wall-clock elapsed time. When
-        # frames are ingested faster than real time (bursty catch-up,
-        # non-realtime test/replay sources), `started_at + duration_s` can
-        # land after `finalized_at`, which the manifest's `clip_start_at <=
-        # clip_end_at <= finalized_at` contract forbids. Anchor the window
-        # to the immutable `finalized_at` instead and derive both ends from
-        # it, so the invariant holds unconditionally.
-        finalized_at = datetime.now(UTC)
-        clip_end_at = min(active.started_at + timedelta(seconds=duration_s), finalized_at)
-        clip_start_at = clip_end_at - timedelta(seconds=duration_s)
-        time_origin = None
-        if artifact is not None and artifact.media_origin_pts_sec is not None:
-            time_origin = ClipTimeOrigin(
-                worker_boot_id=artifact.worker_boot_id,
-                camera_id=artifact.camera_id,
-                stream_epoch=artifact.stream_epoch,
-                generation=artifact.generation,
-                media_origin_pts_sec=artifact.media_origin_pts_sec,
-                event_pts_sec=active.event_time_sec,
-                requested_start_pts_sec=active.start_time_sec,
-                requested_end_pts_sec=active.cutoff_time_sec,
-            )
-        source_media: dict[str, JsonValue] | None = None
-        if artifact is not None and artifact.remux_method is not None:
-            source_media = {
-                "configuration_id": artifact.configuration_id,
-                "selected_start_pts_sec": artifact.selected_start_pts_sec,
-                "selected_end_pts_sec": artifact.selected_end_pts_sec,
-                "packet_count": artifact.packet_count,
-                "remux_method": artifact.remux_method,
-                "remux_version": artifact.remux_version,
-                "timestamp_translation_seconds": (
-                    f"{artifact.timestamp_translation_seconds.numerator}/"
-                    f"{artifact.timestamp_translation_seconds.denominator}"
-                ),
-                "streams": [
-                    {
-                        "index": stream.index,
-                        "media_type": stream.media_type,
-                        "codec_name": stream.codec_name,
-                        "codec_tag": stream.codec_tag,
-                        "time_base": (
-                            f"{stream.time_base.numerator}/{stream.time_base.denominator}"
-                        ),
-                        "extradata_sha256": stream.extradata_sha256,
-                        "width": stream.width,
-                        "height": stream.height,
-                        "sample_rate": stream.sample_rate,
-                        "channels": stream.channels,
-                        "packet_count": stream.packet_count,
-                        "timestamp_translation_ticks": (stream.timestamp_translation_ticks),
-                    }
-                    for stream in artifact.streams
-                ],
-            }
-        return ClipPublicationMetadata(
-            camera_id=active.reservation.camera_id,
-            event_refs=tuple(EdgeEventId(value) for value in active.event_refs),
-            event_type=active.event_type,
-            clip_start_at=clip_start_at,
-            clip_end_at=clip_end_at,
-            finalized_at=finalized_at,
-            started_at=active.started_at,
-            duration_s=duration_s,
-            encoder=self._dependencies.encoder_name,
-            runtime_manifest_sha256=runtime_manifest_sha256_from_audit(active.event.audit),
-            decision_trace_id=validate_decision_trace_id(
-                None
-                if active.event.audit is None
-                else active.event.audit.get(DECISION_TRACE_ID_KEY)
-            ),
-            time_origin=time_origin,
-            source_media=source_media,
-            source_error_reason=source_error_reason,
-            truncation_reasons=(
-                artifact.truncation_reasons if artifact is not None else truncation_reasons
-            ),
-            domain=active.event.domain,
-        )
-
-
-def _evidence_reason(reason_code: ClipReasonCode) -> EvidenceReasonCode:
-    match reason_code:
-        case ClipReasonCode.ENCODER_FAILED:
-            return EvidenceReasonCode.ENCODER_FAILED
-        case ClipReasonCode.REMUX_FAILED:
-            return EvidenceReasonCode.FINALIZE_FAILED
-        case ClipReasonCode.NO_SEGMENTS:
-            return EvidenceReasonCode.NO_FRAMES
-        case ClipReasonCode.STREAM_EPOCH_MISMATCH:
-            return EvidenceReasonCode.STREAM_EPOCH_MISMATCH
-        case unreachable:
-            assert_never(unreachable)
 
 
 __all__ = ["ClipActor", "ClipActorDependencies"]

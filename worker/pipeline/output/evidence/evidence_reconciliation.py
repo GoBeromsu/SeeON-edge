@@ -3,22 +3,17 @@
 from __future__ import annotations
 
 import hashlib
-import json
-import os
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
-from worker.pipeline.output.evidence.durability import fsync_directory
 from worker.pipeline.output.evidence.evidence_manifest import (
     ClipEvidenceError,
     ReadyClipManifest,
     UnavailableClipManifest,
-    parse_manifest,
     parse_manifest_content,
     verify_ready_manifest,
 )
-from worker.pipeline.output.evidence.evidence_outbox import EvidenceOutbox
 from worker.pipeline.output.evidence.evidence_outbox_types import (
     ClipId,
     ClipLocalState,
@@ -26,10 +21,41 @@ from worker.pipeline.output.evidence.evidence_outbox_types import (
     ClipOutcomeConflictError,
     EdgeEventId,
     EventClipConflictError,
-    EvidenceReasonCode,
     MissingStagedEventError,
 )
-from worker.pipeline.output.evidence.snapshot_store import SnapshotStore
+from worker.pipeline.output.evidence.evidence_reconciliation_helpers import (
+    canonical_object as _canonical_object,
+)
+from worker.pipeline.output.evidence.evidence_reconciliation_helpers import (
+    canonical_truncations as _canonical_truncations,
+)
+from worker.pipeline.output.evidence.evidence_reconciliation_helpers import (
+    optional_text as _optional_text,
+)
+from worker.pipeline.output.evidence.evidence_reconciliation_helpers import (
+    record_corrupt as _record_corrupt,
+)
+from worker.pipeline.output.evidence.evidence_reconciliation_helpers import (
+    relative_or_none as _relative_or_none,
+)
+from worker.pipeline.output.evidence.evidence_reconciliation_helpers import (
+    validate_clip_directory as _validate_clip_directory,
+)
+from worker.pipeline.output.evidence.evidence_reconciliation_helpers import (
+    validate_clip_identity as _validate_clip_identity,
+)
+from worker.pipeline.output.evidence.evidence_reconciliation_helpers import (
+    validated_video_path as _validated_video_path,
+)
+from worker.pipeline.output.evidence.evidence_reconciliation_port import ReconciliationOutbox
+from worker.pipeline.output.evidence.evidence_reconciliation_scan import scan_evidence
+from worker.pipeline.output.evidence.terminal_outcome import (
+    TerminalClipOutcome,
+    TerminalClipState,
+    TerminalOutcomeConflictError,
+    commit_corrupt_terminal_outcome,
+    commit_terminal_outcome,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,7 +74,7 @@ class ReconciliationReport:
 def reconcile_finalized_clip(
     store_dir: Path,
     clip_id: ClipId,
-    outbox: EvidenceOutbox,
+    outbox: ReconciliationOutbox,
 ) -> ClipLocalState:
     clip_dir = store_dir / "clips" / clip_id
     return _reconcile_final_dir(store_dir, clip_dir, clip_id, outbox)
@@ -56,109 +82,17 @@ def reconcile_finalized_clip(
 
 def reconcile_event_evidence(
     store_dir: Path,
-    outbox: EvidenceOutbox,
+    outbox: ReconciliationOutbox,
 ) -> ReconciliationReport:
-    clips_root = store_dir / "clips"
-    staging_root = clips_root / ".staging"
-    clips_root.mkdir(parents=True, exist_ok=True)
-    staging_root.mkdir(parents=True, exist_ok=True)
-    quarantine_root = clips_root / ".quarantine"
-    quarantine_root.mkdir(parents=True, exist_ok=True)
-    verified = 0
-    unavailable = 0
-    corrupt = 0
-    quarantined = 0
-    seen: set[ClipId] = set()
-    retained = set(outbox.retained_clip_ids())
-    for clip_dir in sorted(clips_root.iterdir(), key=lambda path: path.name):
-        if clip_dir.name in {".staging", ".quarantine"}:
-            continue
-        clip_id = ClipId(clip_dir.name)
-        if outbox.clip_retention_state(clip_id) == "PURGED":
-            _quarantine(clip_dir, quarantine_root / f"retained-{clip_dir.name}")
-            quarantined += 1
-            continue
-        if outbox.clip_outcome(clip_id) is None and not _belongs_to_staged_event(clip_dir, outbox):
-            _quarantine(clip_dir, quarantine_root / f"final-{clip_dir.name}")
-            quarantined += 1
-            continue
-        seen.add(clip_id)
-        outcome = _reconcile_final_dir(store_dir, clip_dir, clip_id, outbox)
-        match outcome:
-            case ClipLocalState.VERIFIED:
-                verified += 1
-            case ClipLocalState.UNAVAILABLE:
-                unavailable += 1
-            case ClipLocalState.CORRUPT:
-                corrupt += 1
-            case ClipLocalState.AWAITING_FINALIZE:
-                raise AssertionError("reconciliation cannot retain awaiting finalization")
-    for staging_dir in sorted(staging_root.iterdir(), key=lambda path: path.name):
-        clip_id = ClipId(staging_dir.name)
-        outcome = outbox.clip_outcome(clip_id)
-        if clip_id not in seen and outcome is not None:
-            outbox.record_clip_outcome(
-                _unavailable_outcome(
-                    clip_id,
-                    EvidenceReasonCode.INTERRUPTED_FINALIZE,
-                    _relative_or_none(store_dir, staging_dir / "manifest.json"),
-                )
-            )
-            seen.add(clip_id)
-            unavailable += 1
-        _quarantine(staging_dir, quarantine_root / f"staging-{staging_dir.name}")
-        quarantined += 1
-    for clip_id in outbox.awaiting_clip_ids():
-        if clip_id in seen:
-            continue
-        outbox.record_clip_outcome(
-            _unavailable_outcome(clip_id, EvidenceReasonCode.MISSING, None)
-        )
-        unavailable += 1
-    reconciled_at = _utc_now()
-    for clip_id in retained:
-        if (
-            outbox.clip_retention_state(clip_id) == "PENDING"
-            and not (clips_root / clip_id).exists()
-        ):
-            outbox.complete_clip_retention(clip_id, updated_at=reconciled_at)
-    for clip_id in outbox.finalized_clip_ids():
-        if clip_id in seen or clip_id in retained:
-            continue
-        current = outbox.clip_outcome(clip_id)
-        if current is None or current.local_state is not ClipLocalState.VERIFIED:
-            continue
-        outbox.record_clip_outcome(
-            replace(
-                current,
-                local_state=ClipLocalState.CORRUPT,
-                unavailable_reason=EvidenceReasonCode.MISSING,
-            )
-        )
-        corrupt += 1
-    snapshot_report = outbox.reconcile_snapshots(
-        SnapshotStore(store_dir),
-        now=datetime.now(UTC),
-    )
-    completed = outbox.complete_published_records(updated_at=reconciled_at)
-    return ReconciliationReport(
-        verified=verified,
-        unavailable=unavailable,
-        corrupt=corrupt,
-        quarantined=quarantined,
-        snapshot_corrupt=snapshot_report.corrupt,
-        snapshot_attached=snapshot_report.attached,
-        snapshot_discarded=snapshot_report.discarded,
-        snapshot_purged=snapshot_report.purged,
-        completed=completed,
-    )
+    values = scan_evidence(store_dir, outbox, _reconcile_final_dir, _utc_now())
+    return ReconciliationReport(*values)
 
 
 def _reconcile_final_dir(
     store_dir: Path,
     clip_dir: Path,
     clip_id: ClipId,
-    outbox: EvidenceOutbox,
+    outbox: ReconciliationOutbox,
 ) -> ClipLocalState:
     manifest_path = clip_dir / "manifest.json"
     relative_manifest = _relative_or_none(store_dir, manifest_path)
@@ -169,10 +103,18 @@ def _reconcile_final_dir(
         _validate_clip_identity(manifest.clip_id, clip_id)
         event_ids = tuple(EdgeEventId(event_ref) for event_ref in manifest.event_refs)
         outbox.validate_recovery_manifest(manifest)
+        manifest_digest = hashlib.sha256(manifest_content).hexdigest()
         match manifest:
             case ReadyClipManifest():
                 video_path = _validated_video_path(clip_dir)
                 verify_ready_manifest(manifest, video_path)
+                _ = commit_terminal_outcome(
+                    clip_dir,
+                    TerminalClipOutcome(
+                        str(clip_id), tuple(str(value) for value in event_ids),
+                        TerminalClipState.READY, manifest_digest,
+                    ),
+                )
                 outbox.reconcile_clip(
                     event_ids,
                     ClipOutcome(
@@ -205,6 +147,13 @@ def _reconcile_final_dir(
                 )
                 return ClipLocalState.VERIFIED
             case UnavailableClipManifest():
+                _ = commit_terminal_outcome(
+                    clip_dir,
+                    TerminalClipOutcome(
+                        str(clip_id), tuple(str(value) for value in event_ids),
+                        TerminalClipState.UNAVAILABLE, manifest_digest,
+                    ),
+                )
                 outbox.reconcile_clip(
                     event_ids,
                     ClipOutcome(
@@ -237,122 +186,22 @@ def _reconcile_final_dir(
         EventClipConflictError,
         MissingStagedEventError,
         ValueError,
+        TerminalOutcomeConflictError,
     ):
+        if event_ids:
+            try:
+                content = manifest_path.read_bytes()
+                _ = commit_corrupt_terminal_outcome(
+                    clip_dir,
+                    TerminalClipOutcome(
+                        str(clip_id), tuple(str(value) for value in event_ids),
+                        TerminalClipState.CORRUPT, hashlib.sha256(content).hexdigest(),
+                    ),
+                )
+            except (OSError, TerminalOutcomeConflictError):
+                pass
         _record_corrupt(outbox, clip_id, relative_manifest, event_ids)
         return ClipLocalState.CORRUPT
-
-
-def _record_corrupt(
-    outbox: EvidenceOutbox,
-    clip_id: ClipId,
-    manifest_path: str | None,
-    event_ids: tuple[EdgeEventId, ...],
-) -> None:
-    outcome = ClipOutcome(
-        clip_id=clip_id,
-        local_state=ClipLocalState.CORRUPT,
-        manifest_path=manifest_path,
-        state_version=2,
-        unavailable_reason=EvidenceReasonCode.CORRUPT,
-    )
-    if event_ids:
-        try:
-            outbox.reconcile_clip(event_ids, outcome)
-        except (
-            ClipOutcomeConflictError,
-            EventClipConflictError,
-            MissingStagedEventError,
-            ValueError,
-        ):
-            pass
-        else:
-            return
-    outbox.record_clip_outcome(outcome)
-
-
-def _validate_clip_directory(clip_dir: Path) -> None:
-    if clip_dir.is_symlink() or not clip_dir.is_dir():
-        raise ClipEvidenceError(EvidenceReasonCode.CORRUPT, "clip directory invalid")
-
-
-def _validate_clip_identity(manifest_clip_id: str, expected_clip_id: ClipId) -> None:
-    if manifest_clip_id != expected_clip_id:
-        raise ClipEvidenceError(EvidenceReasonCode.CORRUPT, "clip identity mismatch")
-
-
-def _validated_video_path(clip_dir: Path) -> Path:
-    video_path = clip_dir / "clip.mp4"
-    if video_path.parent.resolve() != clip_dir.resolve():
-        raise ClipEvidenceError(EvidenceReasonCode.CORRUPT, "media path escaped clip")
-    return video_path
-
-
-def _unavailable_outcome(
-    clip_id: ClipId,
-    reason_code: EvidenceReasonCode,
-    manifest_path: str | None,
-) -> ClipOutcome:
-    return ClipOutcome(
-        clip_id=clip_id,
-        local_state=ClipLocalState.UNAVAILABLE,
-        manifest_path=manifest_path,
-        state_version=2,
-        unavailable_reason=reason_code,
-    )
-
-
-def _relative_or_none(store_dir: Path, path: Path) -> str | None:
-    try:
-        return str(path.relative_to(store_dir))
-    except ValueError:
-        return None
-
-
-def _belongs_to_staged_event(clip_dir: Path, outbox: EvidenceOutbox) -> bool:
-    try:
-        manifest = parse_manifest(clip_dir / "manifest.json")
-    except ClipEvidenceError:
-        return False
-    return any(outbox.has_event(EdgeEventId(event_ref)) for event_ref in manifest.event_refs)
-
-
-def _quarantine(source: Path, destination: Path) -> None:
-    if destination.exists():
-        raise ClipEvidenceError(
-            EvidenceReasonCode.CORRUPT,
-            f"quarantine destination already exists: {destination.name}",
-        )
-    os.replace(source, destination)
-    fsync_directory(destination.parent)
-    fsync_directory(source.parent)
-
-
-def _canonical_object(value: object) -> str | None:
-    if value is None:
-        return None
-    if not isinstance(value, dict):
-        raise TypeError("central evidence manifest object facts are invalid")
-    return json.dumps(value, ensure_ascii=True, separators=(",", ":"), sort_keys=True)
-
-
-def _canonical_truncations(value: object) -> str:
-    if value is None:
-        values: list[str] = []
-    elif isinstance(value, list) and all(isinstance(reason, str) and reason for reason in value):
-        values = value
-    else:
-        raise ValueError("central evidence truncation facts are invalid")
-    if len(values) != len(set(values)):
-        raise ValueError("central evidence truncation facts are duplicated")
-    return json.dumps(values, ensure_ascii=True, separators=(",", ":"))
-
-
-def _optional_text(value: object) -> str | None:
-    if value is None:
-        return None
-    if not isinstance(value, str) or not value:
-        raise ValueError("central evidence missing reason is invalid")
-    return value
 
 
 def _utc_now() -> str:

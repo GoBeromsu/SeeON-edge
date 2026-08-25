@@ -32,6 +32,24 @@ def _packet(seq: int, *, camera_id: str = "cam-1", width: int = 4, height: int =
     return FramePacket(camera_id, frame, float(seq), seq, width, height, 1.0)
 
 
+def test_frame_key_preserves_native_source_generation() -> None:
+    packet = _packet(1)
+    packet = FramePacket(
+        packet.camera_id,
+        packet.frame,
+        packet.pts,
+        packet.seq,
+        packet.width,
+        packet.height,
+        packet.decode_time_ms,
+        worker_boot_id="boot",
+        stream_epoch=2,
+        source_generation=3,
+    )
+
+    assert packet.frame_key.source_generation == 3
+
+
 def _event() -> BusinessEvent:
     return BusinessEvent("fall", "fall.detected", 7, "cam-1", "facility-1", 12.0, 0.9)
 

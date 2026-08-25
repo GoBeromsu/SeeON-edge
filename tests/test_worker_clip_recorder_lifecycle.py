@@ -117,8 +117,9 @@ class _Coordinator:
         event: BusinessEvent,
         output_dir: Path | None = None,
         trigger_frame_key: FrameKey | None = None,
+        window_bounds: tuple[float, float] | None = None,
     ) -> ClipOutcome:
-        del camera_id, event_time_sec, event, output_dir, trigger_frame_key
+        del camera_id, event_time_sec, event, output_dir, trigger_frame_key, window_bounds
         if self.outcome is None:
             raise OSError("staging unavailable")
         return self.outcome

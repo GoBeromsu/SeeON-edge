@@ -62,7 +62,10 @@ void publish_metadata(ServerState& state, const ipc::Message& request, SourceSlo
     ++state.overwritten;
   }
   source.latest = std::move(metadata);
-  ++state.published;
+  {
+    std::lock_guard published_lock{state.published_mutex};
+    ++state.published;
+  }
   if (wake_required) {
     wake_metadata(state, request.camera);
   }
@@ -71,7 +74,7 @@ void publish_metadata(ServerState& state, const ipc::Message& request, SourceSlo
 
 ipc::Message status_reply(const ServerState& state, const ipc::Message& request) {
   const StatusPayload status{
-      state.published,
+      state.published.load(),
       state.overwritten,
       state.wake_dropped,
       state.source_failures,
@@ -86,20 +89,33 @@ ipc::Message status_reply(const ServerState& state, const ipc::Message& request)
 }  // namespace seeon::command_support
 
 namespace seeon {
-void ServerState::on_frame(const std::string& camera, std::uint64_t pts) {
-  std::lock_guard lock{slot_mutex};
-  const auto found = sources.find(camera);
-  if (found == sources.end()) {
-    return;
-  }
-  ipc::Message message{};
-  message.header.worker_boot_id = options.worker_boot_id;
-  message.header.child_instance_id = options.child_instance_id;
-  message.header.source_generation = found->second.generation;
-  message.header.stream_epoch = found->second.epoch;
-  message.header.source_pts = pts;
-  message.camera = camera;
-  message.transform = "seeon-perception-v1";
-  command_support::publish_metadata(*this, message, found->second);
+void ServerState::on_access_unit(const std::string& camera,
+                                 const PipelineBindingPtr& binding,
+                                 ParsedAccessUnit unit) {
+  static_cast<void>(binding->dispatch_au(
+      [this, &camera, &unit](std::uint32_t generation, std::uint64_t epoch,
+                             std::uint64_t sequence) {
+        static_cast<void>(au_sender.enqueue(
+            AuEnvelope{camera, generation, epoch, sequence, std::move(unit)}));
+      }));
+}
+
+void ServerState::on_frame(const std::string& camera, const PipelineBindingPtr& binding,
+                           std::uint64_t pts) {
+  static_cast<void>(binding->dispatch_frame(
+      [this, &camera, pts, &binding](std::uint32_t generation, std::uint64_t epoch) {
+        std::lock_guard lock{slot_mutex};
+        const auto found = sources.find(camera);
+        if (found == sources.end() || found->second.binding != binding) return;
+        ipc::Message message{};
+        message.header.worker_boot_id = options.worker_boot_id;
+        message.header.child_instance_id = options.child_instance_id;
+        message.header.source_generation = generation;
+        message.header.stream_epoch = epoch;
+        message.header.source_pts = pts;
+        message.camera = camera;
+        message.transform = "seeon-perception-v1";
+        command_support::publish_metadata(*this, message, found->second);
+      }));
 }
 }  // namespace seeon

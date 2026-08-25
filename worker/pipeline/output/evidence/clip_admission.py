@@ -3,6 +3,8 @@ from __future__ import annotations
 import queue
 import shutil
 import threading
+from dataclasses import dataclass
+from typing import final
 
 from worker.pipeline.output.evidence.clip_identity import (
     ClipIdAllocator,
@@ -25,6 +27,20 @@ from worker.pipeline.output.evidence.evidence_outbox_types import ClipId
 from worker.types import BusinessEvent, FramePacket
 
 
+# allow: MUTABLE_OK - active union bounds expand on overlap.
+@dataclass(slots=True)
+class _ReservationWindow:
+    """Mutable admission-owned bounds for one in-flight incident union."""
+
+    reservation: ClipReservation
+    worker_boot_id: str
+    stream_epoch: int
+    source_generation: int
+    start_time_sec: float
+    end_time_sec: float
+
+
+@final
 class ClipAdmission:
     def __init__(
         self,
@@ -35,8 +51,10 @@ class ClipAdmission:
         self._stats = stats
         self._queue = message_queue
         self._allocator = ClipIdAllocator(config.store_dir)
+        self._pre_event_seconds = config.pre_event_seconds
+        self._post_event_seconds = config.post_event_seconds
         self._lock = threading.RLock()
-        self._reservations_by_camera: dict[str, ClipReservation] = {}
+        self._reservations_by_camera: dict[str, list[_ReservationWindow]] = {}
         self._accepting = True
 
     def set_accepting(self, accepting: bool) -> None:
@@ -71,9 +89,28 @@ class ClipAdmission:
         with self._lock:
             if not self._accepting:
                 return None
-            reservation = self._reservations_by_camera.get(camera_id)
-            created = reservation is None
-            if reservation is None:
+            event_time = (
+                trigger_packet.frame.time_sec
+                if trigger_packet.pts is None
+                else trigger_packet.pts
+            )
+            start_time = event_time - self._pre_event_seconds
+            end_time = event_time + self._post_event_seconds
+            windows = self._reservations_by_camera.setdefault(camera_id, [])
+            active = next(
+                (
+                    candidate
+                    for candidate in windows
+                    if candidate.worker_boot_id == trigger_packet.worker_boot_id
+                    and candidate.stream_epoch == trigger_packet.stream_epoch
+                    and candidate.source_generation == trigger_packet.source_generation
+                    and start_time <= candidate.end_time_sec
+                    and end_time >= candidate.start_time_sec
+                ),
+                None,
+            )
+            created = active is None
+            if active is None:
                 if self._stats.recording_suspended or not allow_new_clip:
                     if not allow_new_clip:
                         self._stats.attach_missed_events += 1
@@ -83,8 +120,20 @@ class ClipAdmission:
                 except ClipIdCollisionError:
                     self._stats.clip_id_collisions = self._allocator.collision_count
                     return None
+                active = _ReservationWindow(
+                    reservation,
+                    trigger_packet.worker_boot_id,
+                    trigger_packet.stream_epoch,
+                    trigger_packet.source_generation,
+                    start_time,
+                    end_time,
+                )
+                windows.append(active)
                 self._stats.clip_id_collisions = self._allocator.collision_count
-                self._reservations_by_camera[camera_id] = reservation
+            else:
+                active.start_time_sec = min(active.start_time_sec, start_time)
+                active.end_time_sec = max(active.end_time_sec, end_time)
+            reservation = active.reservation
             queued_trigger = trigger_packet.retain()
             try:
                 self._queue.put_nowait(
@@ -118,19 +167,26 @@ class ClipAdmission:
 
     def close(self, camera_id: str, clip_id: ClipId) -> None:
         with self._lock:
-            reservation = self._reservations_by_camera.get(camera_id)
-            if reservation is None or reservation.clip_id != clip_id:
+            windows = self._reservations_by_camera.get(camera_id, [])
+            remaining = [item for item in windows if item.reservation.clip_id != clip_id]
+            if len(remaining) == len(windows):
                 return
-            self._reservations_by_camera.pop(camera_id, None)
+            if remaining:
+                self._reservations_by_camera[camera_id] = remaining
+            else:
+                _ = self._reservations_by_camera.pop(camera_id, None)
 
     def release(self, camera_id: str, clip_id: ClipId) -> None:
         self.close(camera_id, clip_id)
 
     def cancel(self, reservation: ClipReservation) -> None:
         with self._lock:
-            registered = self._reservations_by_camera.get(reservation.camera_id)
-            if registered == reservation:
-                self._reservations_by_camera.pop(reservation.camera_id, None)
+            windows = self._reservations_by_camera.get(reservation.camera_id, [])
+            remaining = [item for item in windows if item.reservation != reservation]
+            if remaining:
+                self._reservations_by_camera[reservation.camera_id] = remaining
+            else:
+                _ = self._reservations_by_camera.pop(reservation.camera_id, None)
             self._cancel(reservation)
 
     def _cancel(self, reservation: ClipReservation) -> None:

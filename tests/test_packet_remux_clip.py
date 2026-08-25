@@ -355,7 +355,7 @@ def test_annexb_payloads_are_reframed_for_the_mp4_sample_description() -> None:
     four bytes that follow a 00 00 00 01 misread as a length of 1.
     """
     payload = b"\x00\x00\x00\x01\x46\x01\x10" + b"\x00\x00\x01\x40\x01\x0c"
-    reframed = packet_remuxer._annexb_to_length_prefixed(payload)  # noqa: SLF001
+    reframed = packet_remuxer._annexb_to_length_prefixed(payload, 4)  # noqa: SLF001
 
     assert reframed == (
         (3).to_bytes(4, "big") + b"\x46\x01\x10" + (3).to_bytes(4, "big") + b"\x40\x01\x0c"
@@ -366,13 +366,13 @@ def test_a_stream_that_is_already_length_prefixed_stays_a_byte_true_copy() -> No
     """Only Annex-B is reframed; a conforming source must not be touched."""
     payload = (4).to_bytes(4, "big") + b"\x26\x01\xaf\x0e"
 
-    assert packet_remuxer._annexb_to_length_prefixed(payload) is None  # noqa: SLF001
+    assert packet_remuxer._annexb_to_length_prefixed(payload, 4) is None  # noqa: SLF001
 
 
 def test_emulation_prevention_bytes_are_not_mistaken_for_start_codes() -> None:
     """00 00 03 inside a NAL is escaping, not a boundary; splitting there corrupts it."""
     payload = b"\x00\x00\x00\x01\x26\x01\x00\x00\x03\x01\xff"
-    reframed = packet_remuxer._annexb_to_length_prefixed(payload)  # noqa: SLF001
+    reframed = packet_remuxer._annexb_to_length_prefixed(payload, 4)  # noqa: SLF001
 
     assert reframed == (7).to_bytes(4, "big") + b"\x26\x01\x00\x00\x03\x01\xff"
 

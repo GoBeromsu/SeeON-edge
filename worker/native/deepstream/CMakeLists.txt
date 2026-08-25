@@ -2,7 +2,12 @@ cmake_minimum_required(VERSION 3.22)
 project(seeon_deepstream_preflight VERSION 1.0.0 LANGUAGES CXX)
 
 find_package(PkgConfig REQUIRED)
-pkg_check_modules(GSTREAMER REQUIRED IMPORTED_TARGET gstreamer-1.0 gstreamer-base-1.0)
+pkg_check_modules(
+  GSTREAMER REQUIRED IMPORTED_TARGET
+  gstreamer-1.0
+  gstreamer-app-1.0
+  gstreamer-base-1.0
+)
 
 set(SEEON_WARNINGS -Wall -Wextra -Wpedantic -Werror)
 
@@ -13,12 +18,19 @@ target_link_libraries(seeon-deepstream-preflight PRIVATE PkgConfig::GSTREAMER)
 
 add_executable(
   seeon-deepstream-child
+  src/au_parser.cpp
+  src/au_transport.cpp
   src/child.cpp
   src/child_commands.cpp
   src/child_command_support.cpp
   src/child_failures.cpp
   src/child_server.cpp
+  src/encoded_source_bus.cpp
+  src/encoded_source_branch.cpp
+  src/encoded_source_sample.cpp
   src/perception_wire.cpp
+  src/preview_transport.cpp
+  src/source_bus.cpp
   src/source_runtime.cpp
   src/source_uri.cpp
 )
@@ -48,6 +60,7 @@ if(BUILD_TESTING)
   add_executable(
     seeon-deepstream-source-runtime-test
     src/source_runtime_test.cpp
+    src/au_transport.cpp
     src/source_runtime.cpp
     src/source_uri.cpp
   )
@@ -57,6 +70,12 @@ if(BUILD_TESTING)
   add_executable(
     seeon-deepstream-source-runtime-gstreamer-test
     src/source_runtime_gstreamer_test.cpp
+    src/au_parser.cpp
+    src/au_transport.cpp
+    src/encoded_source_bus.cpp
+    src/encoded_source_branch.cpp
+    src/encoded_source_sample.cpp
+    src/source_bus.cpp
     src/source_runtime.cpp
     src/source_uri.cpp
   )
@@ -77,16 +96,26 @@ if(BUILD_TESTING)
   add_executable(
     seeon-deepstream-child-commands-test
     src/child_commands_test.cpp
+    src/au_transport.cpp
     src/child_commands.cpp
     src/child_command_support.cpp
     src/child_failures.cpp
     src/perception_wire.cpp
+    src/preview_transport.cpp
     src/source_runtime.cpp
     src/source_uri.cpp
   )
   target_compile_features(seeon-deepstream-child-commands-test PRIVATE cxx_std_20)
   target_compile_options(seeon-deepstream-child-commands-test PRIVATE ${SEEON_WARNINGS})
   add_test(NAME seeon-deepstream-child-commands-test COMMAND seeon-deepstream-child-commands-test)
+  add_executable(seeon-deepstream-au-parser-test src/au_parser_test.cpp src/au_parser.cpp)
+  target_compile_features(seeon-deepstream-au-parser-test PRIVATE cxx_std_20)
+  target_compile_options(seeon-deepstream-au-parser-test PRIVATE ${SEEON_WARNINGS})
+  add_test(NAME seeon-deepstream-au-parser-test COMMAND seeon-deepstream-au-parser-test)
+  add_executable(seeon-deepstream-au-transport-test src/au_transport_test.cpp src/au_transport.cpp)
+  target_compile_features(seeon-deepstream-au-transport-test PRIVATE cxx_std_20)
+  target_compile_options(seeon-deepstream-au-transport-test PRIVATE ${SEEON_WARNINGS})
+  add_test(NAME seeon-deepstream-au-transport-test COMMAND seeon-deepstream-au-transport-test)
 endif()
 
 install(TARGETS seeon-deepstream-preflight seeon-deepstream-child RUNTIME DESTINATION bin)

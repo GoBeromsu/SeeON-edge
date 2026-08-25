@@ -142,7 +142,7 @@ def _as_muxed(payload: bytes) -> bytes:
     NAL units, so the remuxer reframes it. The media is unchanged -- only the
     unit separators are -- and these tests still compare every byte.
     """
-    reframed = packet_remuxer._annexb_to_length_prefixed(payload)  # noqa: SLF001
+    reframed = packet_remuxer._annexb_to_length_prefixed(payload, 4)  # noqa: SLF001
     return payload if reframed is None else reframed
 
 

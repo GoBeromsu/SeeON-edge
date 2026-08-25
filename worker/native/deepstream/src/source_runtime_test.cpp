@@ -2,6 +2,7 @@
 
 #include <cstdlib>
 #include <iostream>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -31,13 +32,17 @@ int main() {
   std::vector<std::string> frames;
   std::vector<seeon::NativeFailure> failures;
   seeon::SourceRuntime runtime(
-      [&frames](const std::string& camera, std::uint64_t) { frames.push_back(camera); },
+      [&frames](const std::string& camera, const seeon::PipelineBindingPtr&, std::uint64_t) {
+        frames.push_back(camera);
+      },
       [&failures](const seeon::NativeFailure& failure) { failures.push_back(failure); });
   std::string error_code;
-  check(!runtime.add("camera-file", "file:///tmp/input", &error_code),
+  const auto binding = std::make_shared<seeon::PipelineBinding>(1, 1);
+  check(!runtime.add("camera-file", "file:///tmp/input", binding, &error_code),
         "invalid source was added");
   check(error_code == "source_uri_invalid", "invalid source error taxonomy changed");
-  check(runtime.add("camera-a", "loopback://camera-a", &error_code), "source add failed");
+  check(runtime.add("camera-a", "loopback://camera-a", binding, &error_code),
+        "source add failed");
   check(runtime.count() == 1, "source count mismatch");
   check(!frames.empty() && frames.back() == "camera-a", "source frame callback absent");
   check(runtime.inject_eos("camera-a"), "EOS injection failed");

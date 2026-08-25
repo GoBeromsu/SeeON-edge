@@ -11,7 +11,6 @@ from worker.pipeline.output.annotated_derivative import (
     AnnotatedDerivativeJob,
     AnnotatedDerivativeLimits,
     CpuAnnotatedStillRenderer,
-    CpuAnnotatedVideoRenderer,
     DerivativeArtifact,
     DerivativeKind,
     DerivativeRenderError,
@@ -21,6 +20,9 @@ from worker.pipeline.output.evidence.derivative_artifact_store import (
     DerivativeArtifactConflictError,
     DerivativeArtifactStore,
     StoredDerivativeArtifact,
+)
+from worker.pipeline.output.native_annotated_derivative import (
+    NativeGpuAnnotatedVideoRenderer,
 )
 from worker.pipeline.trace.models import DetailUnavailableReason
 
@@ -77,7 +79,9 @@ class DerivativeCommandExecutor:
             store_root, max_disk_bytes=self.limits.max_disk_bytes
         )
         self.still_renderer = still_renderer or CpuAnnotatedStillRenderer(limits=self.limits)
-        self.video_renderer = video_renderer or CpuAnnotatedVideoRenderer(limits=self.limits)
+        self.video_renderer = video_renderer or NativeGpuAnnotatedVideoRenderer(
+            limits=self.limits
+        )
 
     def execute(self, command: DerivativeCommand) -> DerivativeReceipt:
         job = command.job
@@ -155,11 +159,43 @@ def _available_receipt(
     )
 
 
+class DerivativeFuture:
+    def __init__(self) -> None:
+        self._done = threading.Event()
+        self._receipt: DerivativeReceipt | None = None
+
+    def complete(self, receipt: DerivativeReceipt) -> None:
+        self._receipt = receipt
+        self._done.set()
+
+    def result(self, timeout: float | None = None) -> DerivativeReceipt:
+        if not self._done.wait(timeout) or self._receipt is None:
+            raise TimeoutError("derivative command did not complete")
+        return self._receipt
+
+
 class DerivativeControlService:
     """HTTP adapter for command delivery; clip-only requests are explicitly unavailable."""
 
     def __init__(self, executor: DerivativeCommandExecutor) -> None:
         self.executor = executor
+        self._pending = threading.BoundedSemaphore(executor.limits.max_pending_jobs)
+
+    def submit(self, command: DerivativeCommand) -> DerivativeFuture:
+        if not self._pending.acquire(blocking=False):
+            raise OverflowError("bounded derivative command capacity exceeded")
+        future = DerivativeFuture()
+
+        def execute() -> None:
+            try:
+                future.complete(self.executor.execute(command))
+            finally:
+                self._pending.release()
+
+        threading.Thread(
+            target=execute, name="native-derivative-render", daemon=True
+        ).start()
+        return future
 
     def execute(self, command: DerivativeCommand) -> DerivativeReceipt:
         return self.executor.execute(command)
@@ -186,6 +222,7 @@ __all__ = [
     "DerivativeCommand",
     "DerivativeCommandExecutor",
     "DerivativeControlService",
+    "DerivativeFuture",
     "DerivativeOutcome",
     "DerivativeReceipt",
 ]

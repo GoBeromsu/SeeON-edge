@@ -231,6 +231,7 @@ class ClipRecordingCoordinator:
         event: BusinessEvent,
         output_dir: Path | None = None,
         trigger_frame_key: FrameKey | None = None,
+        window_bounds: tuple[float, float] | None = None,
     ) -> ClipOutcome:
         session = self._sessions.get(camera_id)
         if session is None:
@@ -241,7 +242,11 @@ class ClipRecordingCoordinator:
         ):
             return ClipUnavailable(clip_id, ClipReasonCode.STREAM_EPOCH_MISMATCH)
 
-        start_time_sec, end_time_sec = self._window.bounds(event_time_sec)
+        start_time_sec, end_time_sec = (
+            self._window.bounds(event_time_sec)
+            if window_bounds is None
+            else window_bounds
+        )
         try:
             segments = session.select_segments(
                 start_time_sec=start_time_sec,

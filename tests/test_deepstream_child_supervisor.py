@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 import worker.runtime.deepstream.supervisor as supervisor
+from worker.runtime.deepstream.source_control import SourceReadinessError
 from worker.runtime.lease import GpuLease, GpuLeaseUnavailableError
 
 
@@ -63,6 +64,29 @@ def test_supervisor_uses_ready_fd_not_misleading_stdout(tmp_path: Path) -> None:
     child.stop()
     child.stop()
     assert child.pid is None
+
+
+def test_au_rebuild_failure_enters_real_fatal_path(tmp_path: Path) -> None:
+    child = supervisor.DeepStreamChildSupervisor(
+        supervisor.ChildConfig(
+            executable=tmp_path / "unused",
+            worker_boot_id=uuid.uuid4(),
+            socket_dir=tmp_path / "ipc",
+            first_fault_path=tmp_path / "fault.json",
+            lease_state_dir=tmp_path,
+        )
+    )
+
+    class FailingSources:
+        def rebuild(self, camera_id: str, category: str) -> None:
+            raise SourceReadinessError(category, camera_id)
+
+    child._sources = FailingSources()  # type: ignore[assignment]  # noqa: SLF001
+    child._handle_au_gap("camera-a", "parser")  # noqa: SLF001
+
+    assert child._fatal_received.is_set()  # noqa: SLF001
+    assert child._fatal_category == "au_epoch_rebuild_failed"  # noqa: SLF001
+    assert child._config.first_fault_path.is_file()  # noqa: SLF001
 
 
 def test_supervisor_refuses_before_spawn_when_python_gpu_lease_is_held(tmp_path: Path) -> None:

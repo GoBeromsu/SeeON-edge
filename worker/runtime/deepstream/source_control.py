@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Protocol, final, override
@@ -80,6 +81,10 @@ class DarkSourceController:
         self._lifecycle = threading.Condition()
         self._lifecycle_active = False
         self._states: dict[str, SourceSnapshot] = {}
+        self._retire_hook = lambda _camera_id: None
+
+    def set_retire_hook(self, hook: Callable[[str], None]) -> None:
+        self._retire_hook = hook
 
     def snapshot(self, camera_id: str) -> SourceSnapshot:
         with self._state_lock:
@@ -159,6 +164,7 @@ class DarkSourceController:
             self._set(_transition(current, SourceState.REMOVING))
             self._control.remove_source(camera_id)
             self._slot.remove_source(camera_id)
+            self._retire_hook(camera_id)
             removed = _transition(current, SourceState.TOMBSTONED)
             self._set(removed)
             return removed
@@ -172,6 +178,7 @@ class DarkSourceController:
             return error
         finally:
             self._slot.remove_source(camera_id)
+            self._retire_hook(camera_id)
         return None
 
     def _begin_lifecycle(self) -> None:

@@ -24,9 +24,15 @@ class StreamEpoch:
     worker_boot_id: str
     camera_id: str
     stream_epoch: int
+    source_generation: int = 0
 
     def __post_init__(self) -> None:
-        if not self.worker_boot_id or not self.camera_id or self.stream_epoch <= 0:
+        if (
+            not self.worker_boot_id
+            or not self.camera_id
+            or self.stream_epoch <= 0
+            or self.source_generation < 0
+        ):
             raise ValueError("stream epoch identity must be complete")
 
 
@@ -44,6 +50,10 @@ class SourceStreamDescriptor:
     channels: int | None = None
     profile: str | None = None
     level: int | None = None
+    stream_format: str = "container"
+    alignment: str = "packet"
+    nal_length_size: int | None = None
+    parser_caps_sha256: str | None = None
 
     def __post_init__(self) -> None:
         if self.index < 0 or not self.codec_name or self.time_base <= 0:
@@ -54,6 +64,16 @@ class SourceStreamDescriptor:
             raise ValueError("video stream dimensions must be positive")
         if self.media_type == "audio" and (self.sample_rate is None or self.sample_rate <= 0):
             raise ValueError("audio sample rate must be positive")
+        if not self.stream_format or not self.alignment or (
+            self.nal_length_size is not None and self.nal_length_size not in {1, 2, 3, 4}
+        ) or (
+            self.parser_caps_sha256 is not None
+            and (
+                len(self.parser_caps_sha256) != 64
+                or any(character not in "0123456789abcdef" for character in self.parser_caps_sha256)
+            )
+        ):
+            raise ValueError("source packet framing is invalid")
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,6 +108,10 @@ class SourceStreamConfiguration:
                 "channels": stream.channels,
                 "profile": stream.profile,
                 "level": stream.level,
+                "stream_format": stream.stream_format,
+                "alignment": stream.alignment,
+                "nal_length_size": stream.nal_length_size,
+                "parser_caps_sha256": stream.parser_caps_sha256,
             }
             for stream in ordered
         ]
