@@ -34,6 +34,26 @@
  * report it *faithfully* rather than downgrading it; that is safe precisely because a
  * non-configurable, non-writable property can never subsequently change.
  *
+ * ## Mutation policy
+ *
+ * Once a non-configurable property has been mirrored, the facade genuinely owns it, so any later
+ * `set`/`defineProperty`/`deleteProperty` on that key is illegal and the engine will reject the
+ * trap result. Every mutating trap therefore *decides before it writes*: it inspects the facade's
+ * own descriptor first and returns `false` for a mirrored key without touching the private override
+ * layer. Mutating first and letting the engine throw would leave the layer poisoned, and every
+ * subsequent read would then throw as well.
+ *
+ * Rejection is keyed on the key being *locked* -- already mirrored onto the facade, or
+ * non-configurable on `actual` -- never on the attempted value. Testing `actual` too is what makes
+ * the result order-independent: without it, the same `set` would succeed before the key was
+ * reflected and fail afterwards. Overrides supplied at construction still shadow such a key,
+ * because the override branch short-circuits before any mirroring can happen. Ordinary
+ * configurable override keys keep working normally.
+ *
+ * `preventExtensions` always returns `false` and never seals the facade: a non-extensible target
+ * would make `ownKeys` throw for every override-only key. `setPrototypeOf` is refused for the same
+ * reason -- the facade's null prototype matches a real namespace and must stay put.
+ *
  * Scope: this implements the mock semantics these factories need -- live reads, override
  * shadowing, and consistent enumeration/reflection. It is not a general module-namespace emulator;
  * `isExtensible` reports the facade (always extensible), which is what lets an override-only key
@@ -47,6 +67,10 @@ export function withOverrides<T extends object>(actual: T, overrides: Record<str
   }
   const facade: Record<PropertyKey, unknown> = Object.create(null);
   const isOverride = (prop: PropertyKey): boolean => Object.prototype.hasOwnProperty.call(layer, prop);
+  /** Mirrored onto the facade, or non-configurable on the namespace: unbindable either way. */
+  const isLocked = (facadeTarget: object, prop: PropertyKey): boolean =>
+    Object.prototype.hasOwnProperty.call(facadeTarget, prop)
+    || Reflect.getOwnPropertyDescriptor(actual, prop)?.configurable === false;
 
   return new Proxy(facade, {
     get(_facade, prop) {
@@ -76,19 +100,28 @@ export function withOverrides<T extends object>(actual: T, overrides: Record<str
       }
       return { ...descriptor, configurable: true };
     },
-    set(_facade, prop, value) {
+    set(facadeTarget, prop, value) {
+      // Decide before writing: a locked key can never be re-bound without breaking an invariant.
+      if (isLocked(facadeTarget, prop)) return false;
       layer[prop as string] = value;
       return true;
     },
-    defineProperty(_facade, prop, descriptor) {
+    defineProperty(facadeTarget, prop, descriptor) {
+      if (isLocked(facadeTarget, prop)) return false;
       Object.defineProperty(layer, prop, descriptor);
       return true;
     },
     deleteProperty(facadeTarget, prop) {
-      // A mirrored non-configurable property cannot be removed without breaking the invariant.
-      if (Object.prototype.hasOwnProperty.call(facadeTarget, prop)) return false;
+      if (isLocked(facadeTarget, prop)) return false;
       delete layer[prop as string];
       return true;
+    },
+    preventExtensions() {
+      // Sealing the facade would make ownKeys throw for every override-only key.
+      return false;
+    },
+    setPrototypeOf() {
+      return false;
     },
   }) as T;
 }

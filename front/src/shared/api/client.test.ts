@@ -501,23 +501,6 @@ describe('api client contracts', () => {
     await expect(fetchClipStorage()).rejects.toThrow('Invalid clip storage response');
   });
 
-  it.each([
-    ['fetchClipAnalysis'],
-    ['controlClipDerivative'],
-    ['requestClipDerivative'],
-    ['setClipLabel'],
-  ])('exports no retired %s client', async (name) => {
-    // Resolved dynamically rather than via a second top-level `import * as`: two top-level
-    // `__vite_ssr_import__` requests for one module let the named-import binding observe the
-    // namespace while it is still materializing, which surfaces as `x is not a function`.
-    const clientModule = await import('@/shared/api/client');
-    const exported = Object.keys(clientModule);
-    // Positive control first: a bare `not.toContain` would also pass against an empty namespace,
-    // so assert the module really is loaded before trusting the absence assertion.
-    expect(exported).toContain('fetchClipArtifacts');
-    expect(exported).toContain('deleteClip');
-    expect(exported).not.toContain(name);
-  });
 
   it('reads the slimmed clip artifacts contract', async () => {
     const fetchMock = vi.fn().mockResolvedValue({

@@ -7,7 +7,6 @@ import { fetchDashboardSession, loginDashboard, logoutDashboard } from '@/shared
 import { HttpError } from '@/shared/api/http';
 
 vi.mock('@/shared/api/client', async () => {
-  const { withOverrides } = await vi.importActual<typeof import('@/test/moduleMock')>('@/test/moduleMock');
   const actual = await vi.importActual<typeof import('@/shared/api/client')>('@/shared/api/client');
   return withOverrides(actual, {
     fetchDashboardSession: vi.fn(),

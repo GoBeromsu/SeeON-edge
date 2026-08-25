@@ -85,8 +85,8 @@ describe('partial-mock seam against a still-materializing module namespace', () 
  */
 describe('withOverrides preserves Proxy invariants against a real module namespace', () => {
   it('reflects Symbol.toStringTag from an actual vi.importActual namespace without throwing', async () => {
-    const actual = await vi.importActual<Record<string, unknown>>('@/shared/api/client');
-    const proxy = withOverrides(actual, { deleteClip: vi.fn() });
+    const actual = await vi.importActual<Record<string, unknown>>('@/shared/api/clipCursor');
+    const proxy = withOverrides(actual, { decodeClipCursor: vi.fn() });
 
     const descriptor = Object.getOwnPropertyDescriptor(proxy, Symbol.toStringTag);
     expect(descriptor).toEqual({
@@ -97,9 +97,9 @@ describe('withOverrides preserves Proxy invariants against a real module namespa
   });
 
   it('reflects every descriptor of an actual namespace via getOwnPropertyDescriptors', async () => {
-    const actual = await vi.importActual<Record<string, unknown>>('@/shared/api/client');
+    const actual = await vi.importActual<Record<string, unknown>>('@/shared/api/clipCursor');
     const override = vi.fn();
-    const proxy = withOverrides(actual, { deleteClip: override, overrideOnly: override });
+    const proxy = withOverrides(actual, { decodeClipCursor: override, overrideOnly: override });
 
     const descriptors = Object.getOwnPropertyDescriptors(proxy);
 
@@ -108,22 +108,22 @@ describe('withOverrides preserves Proxy invariants against a real module namespa
       value: 'Module', writable: false, enumerable: false, configurable: false,
     });
     // Real export still reflected, override shadows it, override-only key is present.
-    expect(Reflect.ownKeys(proxy)).toContain('fetchClipArtifacts');
+    expect(Reflect.ownKeys(proxy)).toContain('encodeClipCursor');
     expect((descriptors as Record<string, PropertyDescriptor>).overrideOnly?.value).toBe(override);
-    expect(proxy.deleteClip).toBe(override);
-    expect(typeof proxy.fetchClipArtifacts).toBe('function');
+    expect(proxy.decodeClipCursor).toBe(override);
+    expect(typeof proxy.encodeClipCursor).toBe('function');
   });
 
   it('enumerates an actual namespace consistently across keys, ownKeys and `in`', async () => {
-    const actual = await vi.importActual<Record<string, unknown>>('@/shared/api/client');
+    const actual = await vi.importActual<Record<string, unknown>>('@/shared/api/clipCursor');
     const proxy = withOverrides(actual, { overrideOnly: vi.fn() });
 
-    expect(Object.keys(proxy)).toContain('fetchClipArtifacts');
+    expect(Object.keys(proxy)).toContain('encodeClipCursor');
     expect(Object.keys(proxy)).toContain('overrideOnly');
     // Symbol.toStringTag is non-enumerable, so it must appear in ownKeys but not in Object.keys.
     expect(Reflect.ownKeys(proxy)).toContain(Symbol.toStringTag);
     expect(Object.keys(proxy)).not.toContain('Symbol(Symbol.toStringTag)');
-    expect('fetchClipArtifacts' in proxy).toBe(true);
+    expect('encodeClipCursor' in proxy).toBe(true);
     expect('overrideOnly' in proxy).toBe(true);
     expect('definitelyMissingExport' in proxy).toBe(false);
     expect(Object.getOwnPropertyDescriptor(proxy, 'definitelyMissingExport')).toBeUndefined();
@@ -162,9 +162,9 @@ describe('withOverrides preserves Proxy invariants against a real module namespa
   });
 
   it('does not mutate the actual namespace or the caller overrides', async () => {
-    const actual = await vi.importActual<Record<string, unknown>>('@/shared/api/client');
+    const actual = await vi.importActual<Record<string, unknown>>('@/shared/api/clipCursor');
     const before = Reflect.ownKeys(actual).map(String).sort();
-    const overrides = { deleteClip: vi.fn() };
+    const overrides = { decodeClipCursor: vi.fn() };
     const overrideKeysBefore = Reflect.ownKeys(overrides).map(String).sort();
 
     const proxy = withOverrides(actual, overrides);
@@ -178,15 +178,15 @@ describe('withOverrides preserves Proxy invariants against a real module namespa
 
 describe('withOverrides property semantics', () => {
   it('shadows a real export with an override and leaves the namespace value reachable underneath', async () => {
-    const actual = await vi.importActual<Record<string, unknown>>('@/shared/api/client');
-    const real = actual.fetchClipArtifacts;
+    const actual = await vi.importActual<Record<string, unknown>>('@/shared/api/clipCursor');
+    const real = actual.encodeClipCursor;
     const override = vi.fn();
 
-    const proxy = withOverrides(actual, { fetchClipArtifacts: override });
+    const proxy = withOverrides(actual, { encodeClipCursor: override });
 
-    expect(proxy.fetchClipArtifacts).toBe(override);
-    expect(actual.fetchClipArtifacts).toBe(real);
-    expect(Reflect.ownKeys(proxy).filter((k) => k === 'fetchClipArtifacts')).toHaveLength(1);
+    expect(proxy.encodeClipCursor).toBe(override);
+    expect(actual.encodeClipCursor).toBe(real);
+    expect(Reflect.ownKeys(proxy).filter((k) => k === 'encodeClipCursor')).toHaveLength(1);
   });
 
   it('supports a symbol override alongside the namespace symbol', () => {
@@ -227,5 +227,131 @@ describe('withOverrides property semantics', () => {
     expect(Object.getOwnPropertyDescriptor(proxy, 'absent')).toBeUndefined();
     expect(Reflect.ownKeys(proxy)).not.toContain('absent');
     expect(Reflect.ownKeys(proxy)).toContain('present');
+  });
+});
+
+/**
+ * Operation-order safety. Reflecting a non-configurable property mirrors it onto the facade, so any
+ * later mutation of that key is illegal. The trap must decide *before* touching the private
+ * override layer, otherwise the call throws while the layer is already poisoned and every later
+ * read/reflection throws too. `preventExtensions` must likewise never make the facade
+ * non-extensible, or `ownKeys` starts reporting keys absent from a sealed target.
+ */
+describe('withOverrides rejects illegal mutations atomically', () => {
+  function sealedActual(): Record<PropertyKey, unknown> {
+    const actual: Record<PropertyKey, unknown> = Object.create(null);
+    Object.defineProperty(actual, 'fixed', { value: 1, writable: false, enumerable: true, configurable: false });
+    Object.defineProperty(actual, 'writableFixed', { value: 'w1', writable: true, enumerable: true, configurable: false });
+    Object.defineProperty(actual, 'accessorFixed', { get: () => 'a1', enumerable: true, configurable: false });
+    Object.defineProperty(actual, marker, { value: 'm1', writable: false, enumerable: true, configurable: false });
+    return actual;
+  }
+  const marker = Symbol('markerFixed');
+
+  function materialize(proxy: Record<PropertyKey, unknown>, key: PropertyKey): void {
+    void Object.getOwnPropertyDescriptor(proxy, key);
+  }
+
+  function expectStillValid(proxy: Record<PropertyKey, unknown>, key: PropertyKey, value: unknown): void {
+    expect(proxy[key as string]).toBe(value);
+    expect(() => Object.getOwnPropertyDescriptors(proxy)).not.toThrow();
+    expect(() => Reflect.ownKeys(proxy)).not.toThrow();
+    expect(Reflect.ownKeys(proxy)).toContain(key);
+  }
+
+  it.each([
+    ['different value', 'fixed', 2, 1],
+    ['same value', 'fixed', 1, 1],
+    ['non-configurable writable data', 'writableFixed', 'w2', 'w1'],
+    ['non-configurable accessor', 'accessorFixed', 'a2', 'a1'],
+  ] as const)('rejects set after materialization (%s) and leaves state valid', (_name, key, next, kept) => {
+    const proxy = withOverrides(sealedActual(), {}) as Record<PropertyKey, unknown>;
+    materialize(proxy, key);
+
+    expect(Reflect.set(proxy, key, next)).toBe(false);
+    expectStillValid(proxy, key, kept);
+  });
+
+  it('rejects a symbol-keyed set after materialization and leaves state valid', () => {
+    const proxy = withOverrides(sealedActual(), {}) as Record<PropertyKey, unknown>;
+    materialize(proxy, marker);
+
+    expect(Reflect.set(proxy, marker, 'm2')).toBe(false);
+    expectStillValid(proxy, marker, 'm1');
+  });
+
+  it('rejects defineProperty after materialization and leaves state valid', () => {
+    const proxy = withOverrides(sealedActual(), {}) as Record<PropertyKey, unknown>;
+    materialize(proxy, 'fixed');
+
+    expect(Reflect.defineProperty(proxy, 'fixed', { value: 2 })).toBe(false);
+    expectStillValid(proxy, 'fixed', 1);
+  });
+
+  it('rejects deleteProperty after materialization and leaves state valid', () => {
+    const proxy = withOverrides(sealedActual(), {}) as Record<PropertyKey, unknown>;
+    materialize(proxy, 'fixed');
+
+    expect(Reflect.deleteProperty(proxy, 'fixed')).toBe(false);
+    expectStillValid(proxy, 'fixed', 1);
+  });
+
+  it('rejects the mutation identically whether or not the key was materialized first', () => {
+    const unmaterialized = withOverrides(sealedActual(), {}) as Record<PropertyKey, unknown>;
+    const materialized = withOverrides(sealedActual(), {}) as Record<PropertyKey, unknown>;
+    materialize(materialized, 'fixed');
+
+    // Order-independence: the outcome must not depend on prior reflection.
+    expect(Reflect.set(unmaterialized, 'fixed', 2)).toBe(Reflect.set(materialized, 'fixed', 2));
+    expectStillValid(unmaterialized, 'fixed', 1);
+    expectStillValid(materialized, 'fixed', 1);
+  });
+
+  it('still allows ordinary override keys to be set, defined and deleted', () => {
+    const replacement = vi.fn();
+    const proxy = withOverrides(sealedActual(), { plain: vi.fn() }) as Record<PropertyKey, unknown>;
+
+    expect(Reflect.set(proxy, 'plain', replacement)).toBe(true);
+    expect(proxy.plain).toBe(replacement);
+    expect(Reflect.defineProperty(proxy, 'added', { value: 7, configurable: true, enumerable: true })).toBe(true);
+    expect(proxy.added).toBe(7);
+    expect(Reflect.deleteProperty(proxy, 'added')).toBe(true);
+    expect('added' in proxy).toBe(false);
+    expect(() => Object.getOwnPropertyDescriptors(proxy)).not.toThrow();
+  });
+
+  it('refuses preventExtensions and keeps ownKeys coherent afterwards', () => {
+    const proxy = withOverrides(sealedActual(), { overrideOnly: vi.fn() }) as Record<PropertyKey, unknown>;
+
+    expect(Reflect.preventExtensions(proxy)).toBe(false);
+    expect(Object.isExtensible(proxy)).toBe(true);
+    expect(() => Object.preventExtensions(proxy)).toThrow(TypeError);
+
+    // The facade must still be extensible, so override-only keys remain reportable.
+    expect(Object.isExtensible(proxy)).toBe(true);
+    expect(() => Reflect.ownKeys(proxy)).not.toThrow();
+    expect(Reflect.ownKeys(proxy)).toContain('overrideOnly');
+    expect(() => Object.getOwnPropertyDescriptors(proxy)).not.toThrow();
+  });
+
+  it('keeps the prototype null and refuses setPrototypeOf', () => {
+    const proxy = withOverrides(sealedActual(), {}) as Record<PropertyKey, unknown>;
+
+    expect(Object.getPrototypeOf(proxy)).toBeNull();
+    expect(Reflect.setPrototypeOf(proxy, { poisoned: true })).toBe(false);
+    expect(Object.getPrototypeOf(proxy)).toBeNull();
+  });
+
+  it('never mutates the private layer or the caller overrides on a rejected operation', () => {
+    const overrides = { plain: vi.fn() };
+    const proxy = withOverrides(sealedActual(), overrides) as Record<PropertyKey, unknown>;
+    materialize(proxy, 'fixed');
+
+    expect(Reflect.set(proxy, 'fixed', 2)).toBe(false);
+    void Reflect.defineProperty(proxy, 'fixed', { value: 3 });
+
+    expect(Reflect.ownKeys(overrides)).toEqual(['plain']);
+    expect(proxy.fixed).toBe(1);
+    expect(proxy.plain).toBe(overrides.plain);
   });
 });

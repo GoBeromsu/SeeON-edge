@@ -9,7 +9,6 @@ import type { PollingResource } from '@/shared/api/usePollingResource';
 // Narrowest seam: the wall's own status subscription. The camera list, filtering, snapshot queue
 // and tiles all stay real so this exercises the actual wall, not a stand-in.
 vi.mock('@/shared/api/usePollingResource', async () => {
-  const { withOverrides } = await vi.importActual<typeof import('@/test/moduleMock')>('@/test/moduleMock');
   const actual = await vi.importActual<typeof import('@/shared/api/usePollingResource')>('@/shared/api/usePollingResource');
   return withOverrides(actual, { useStatusResource: vi.fn() });
 });

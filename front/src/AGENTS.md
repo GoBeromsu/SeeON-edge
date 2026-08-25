@@ -64,6 +64,15 @@ a non-configurable `Symbol.toStringTag`, so proxying `actual` directly and rewri
 `configurable: true` makes `Object.getOwnPropertyDescriptor(s)` throw, and an override-only key
 makes `ownKeys` throw on a non-extensible target. Keep the facade.
 
+Mutating traps reject *before* writing to the private override layer, and `preventExtensions` /
+`setPrototypeOf` always return `false`. Writing first and letting the engine reject the trap leaves
+the layer poisoned so every later read throws; sealing the facade breaks `ownKeys`.
+
+`test/importStructure.test.ts` is a TypeScript-AST guard: a file may import a local module at most
+once at top level, and `shared/api/client.test.ts` must import `@/shared/api/client` exactly once.
+Two top-level imports of one module become two Vite SSR requests, letting the second observe a
+half-built namespace. Use a dynamic `await import(...)` inside the test when a namespace is needed.
+
 ## Where to look
 
 - Route or query key → `app/dashboardLocation.ts`, then the page under `app/pages/`.

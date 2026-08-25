@@ -7,7 +7,6 @@ import type { PollingResource } from '@/shared/api/usePollingResource';
 import { EdgeSetupWizard } from '@/features/connection/EdgeSetupWizard';
 
 vi.mock('@/shared/api/topologyClient', async () => {
-  const { withOverrides } = await vi.importActual<typeof import('@/test/moduleMock')>('@/test/moduleMock');
   const actual = await vi.importActual<typeof import('@/shared/api/topologyClient')>('@/shared/api/topologyClient');
   return withOverrides(actual, {
     fetchTopology: vi.fn(),
