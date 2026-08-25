@@ -6,6 +6,19 @@ from typing import Final
 
 from backend.app.edge_db.compact_schema_ddl import COMPACT_SCHEMA_CREATE_STATEMENTS
 
+# Immutable ledger-table foundation DDL, shared byte-for-byte with SCHEMA_V1 so
+# its migration checksum stays identical. It lives on this DDL-ledger-free leaf so
+# the schema-18 manifest can seed the persistent `schema_migrations` table (which
+# SCHEMA_V18_STATEMENTS only ALTERs) without importing the v1-v18 DDL ledger.
+SCHEMA_MIGRATIONS_LEDGER_TABLE_SQL: Final = """
+        CREATE TABLE schema_migrations (
+            version INTEGER PRIMARY KEY CHECK (version > 0),
+            name TEXT NOT NULL UNIQUE,
+            checksum TEXT NOT NULL CHECK (length(checksum) = 64),
+            applied_at TEXT NOT NULL
+        ) STRICT
+        """
+
 COMPACT_APPLICATION_TABLES: Final = frozenset(
     {
         "artifacts",
@@ -137,5 +150,6 @@ __all__ = [
     "COMPACT_API_TABLES",
     "COMPACT_APPLICATION_TABLES",
     "SCHEMA17_RETIRED_TABLES",
+    "SCHEMA_MIGRATIONS_LEDGER_TABLE_SQL",
     "SCHEMA_V18_STATEMENTS",
 ]
