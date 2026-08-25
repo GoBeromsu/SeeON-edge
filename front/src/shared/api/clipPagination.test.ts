@@ -197,6 +197,30 @@ describe('clip pagination API', () => {
     expect(restored.pagination.next_cursor).toBe(forward.pagination.next_cursor);
   });
 
+  it('walks astral-character clip ids in SQLite BINARY order without skipping a row', async () => {
+    // Recorded from real SQLite `ORDER BY started_at DESC, clip_id DESC` over these exact ids.
+    const sqliteDescending = ['\u{1F600}', '\u{10000}', '\uE000', '\uAC00', 'zz', 'ascii'];
+    const startedAt = '2026-08-02T03:12:00Z';
+    const clips = sqliteDescending.map((clipId, index) => clipManifest({
+      clip_id: clipId, event_ref: `event-${index}`, started_at: startedAt,
+    }));
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => ({ clips }) }));
+
+    const seen: string[] = [];
+    let cursor: string | null = null;
+    for (let guard = 0; guard < 10; guard += 1) {
+      const page: Awaited<ReturnType<typeof fetchClipPage>> = await fetchClipPage(
+        cursor === null ? { limit: 2 } : { limit: 2, cursor },
+      );
+      seen.push(...page.clips.map((clip) => clip.id));
+      if (page.pagination.next_cursor === null) break;
+      cursor = page.pagination.next_cursor;
+    }
+
+    expect(seen).toEqual(sqliteDescending);
+    expect(new Set(seen).size).toBe(sqliteDescending.length);
+  });
+
   it('rejects a malformed cursor instead of silently returning the newest page', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
       ok: true, status: 200, json: async () => ({ clips: [clipManifest()] }),

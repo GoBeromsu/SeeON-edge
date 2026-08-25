@@ -7,6 +7,7 @@ import {
   clipRequestUrls,
   flush,
   keysetBody,
+  pageOrdinal,
   renderPage,
   resetLocation,
 } from '@/app/pages/EventsPage.testSupport';
@@ -103,7 +104,7 @@ describe('EventsPage bounded event facets', () => {
     await flush();
     act(() => (host.querySelector('button[aria-label="다음 페이지"]') as HTMLButtonElement).click());
     await flush();
-    expect(host.querySelector('[data-testid="events-page-range"]')?.textContent).toContain('2 페이지');
+    expect(pageOrdinal(host)).toBe(2);
 
     const otherChip = Array.from(host.querySelectorAll<HTMLButtonElement>('button'))
       .find((button) => button.textContent?.startsWith('기타'));
@@ -111,7 +112,7 @@ describe('EventsPage bounded event facets', () => {
     await flush();
 
     expect(window.location.search).toBe('?page=events&event=other');
-    expect(host.querySelector('[data-testid="events-page-range"]')?.textContent).toContain('1 페이지');
+    expect(pageOrdinal(host)).toBe(1);
     expect(clipRequestUrls(fetchMock)).toContain('/api/v1/clips?camera_id=cam-1&event_type=other&limit=48');
   });
 });

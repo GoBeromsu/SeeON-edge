@@ -118,6 +118,15 @@ export function clipCursorOf(url: string): string | null {
   return new URL(url, 'http://localhost').searchParams.get('cursor');
 }
 
+/**
+ * Machine-consumed pager position: the `data-page-ordinal` the pager renders alongside its copy.
+ * Tests assert this number, never the rendered sentence. `null` means no pager is mounted.
+ */
+export function pageOrdinal(host: ParentNode): number | null {
+  const value = host.querySelector<HTMLElement>('[data-testid="events-page-range"]')?.dataset.pageOrdinal;
+  return value === undefined ? null : Number(value);
+}
+
 export function installLegacyFetchMock(clips: readonly Record<string, unknown>[]): ReturnType<typeof vi.fn> {
   const fetchMock = vi.fn((input: RequestInfo | URL) => {
     const url = typeof input === 'string' ? input : input.toString();

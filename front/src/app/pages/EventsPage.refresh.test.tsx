@@ -8,6 +8,7 @@ import {
   flush,
   installFetchMock,
   keysetBody,
+  pageOrdinal,
   renderPage,
   resetLocation,
 } from '@/app/pages/EventsPage.testSupport';
@@ -56,7 +57,7 @@ describe('EventsPage refresh state', () => {
     const { host } = await renderPage();
     act(() => (host.querySelector('button[aria-label="다음 페이지"]') as HTMLButtonElement).click());
     await flush();
-    expect(host.querySelector('[data-testid="events-page-range"]')?.textContent).toContain('2 페이지');
+    expect(pageOrdinal(host)).toBe(2);
 
     // Retention keeps only the 10 newest clips, so the retained cursor selects an empty page.
     const survivingClips = [...initialClips]

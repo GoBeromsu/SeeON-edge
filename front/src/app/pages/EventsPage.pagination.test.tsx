@@ -10,6 +10,7 @@ import {
   installFetchMock,
   installLegacyFetchMock,
   keysetBody,
+  pageOrdinal,
   renderPage,
   resetLocation,
 } from '@/app/pages/EventsPage.testSupport';
@@ -207,7 +208,7 @@ describe('EventsPage keyset pagination', () => {
     clickPager(host, '다음 페이지');
     await flush();
     expect(clipsCallCount).toBe(3);
-    expect(host.querySelector('[data-testid="events-page-range"]')?.textContent).toContain('2 페이지');
+    expect(pageOrdinal(host)).toBe(2);
 
     await act(async () => { await vi.advanceTimersByTimeAsync(16_000); });
 
@@ -225,7 +226,7 @@ describe('EventsPage keyset pagination', () => {
 
     clickPager(host, '다음 페이지');
     await flush();
-    expect(host.querySelector('[data-testid="events-page-range"]')?.textContent).toContain('2 페이지');
+    expect(pageOrdinal(host)).toBe(2);
 
     clips = clips.slice(0, 10);
     fetchMock.mockImplementation((input: RequestInfo | URL) => {

@@ -34,8 +34,16 @@ export function EventsPager({
   return (
     <nav className="mt-6 flex flex-wrap items-center justify-between gap-3" aria-label="이벤트 페이지" aria-busy={pending}>
       {/* A keyset page has no addressable global offset, so only the honest counts are shown: how
-          many rows this page holds, the backend's total, and how far the operator has walked. */}
-      <p className="tabular-nums text-sm text-muted-foreground" data-testid="events-page-range">
+          many rows this page holds, the backend's total, and how far the operator has walked. The
+          data-* attributes expose those same numbers as machine-consumed values so tests never have
+          to read the rendered sentence. */}
+      <p
+        className="tabular-nums text-sm text-muted-foreground"
+        data-testid="events-page-range"
+        data-page-ordinal={pageIndex + 1}
+        data-visible-count={visibleCount}
+        data-total-count={total}
+      >
         {visibleCount}건 표시 / 전체 {total}건 · {pageIndex + 1} 페이지
       </p>
       <div className="flex flex-wrap items-center justify-end gap-2">

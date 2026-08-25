@@ -41,11 +41,42 @@ export function decodeClipCursor(cursor: string): ClipCursorKey | null {
   return { startedAt, clipId };
 }
 
-/** Descending total order: newer first, and at an identical timestamp the larger clip id first. */
+const UTF8 = new TextEncoder();
+
+/**
+ * Ascending SQLite BINARY comparison: unsigned UTF-8 byte order, shorter-is-less on a common prefix.
+ *
+ * Schema 18 allows any 1-128 character NUL-free TEXT clip id, and SQLite's default collation orders
+ * those by their UTF-8 bytes. JavaScript relational operators instead order by UTF-16 code units,
+ * which disagrees for every non-BMP id: U+10000 is the surrogate pair D800/DC00 and sorts BELOW
+ * U+E000 in UTF-16, but is F0 90 80 80 and sorts ABOVE U+E000's EE 80 80 in UTF-8. Using the UTF-16
+ * order here would let a synthesized boundary disagree with the backend predicate and skip a row.
+ */
+function compareBinaryAscending(left: string, right: string): number {
+  const leftBytes = UTF8.encode(left);
+  const rightBytes = UTF8.encode(right);
+  const shared = Math.min(leftBytes.length, rightBytes.length);
+  for (let index = 0; index < shared; index += 1) {
+    if (leftBytes[index] !== rightBytes[index]) return leftBytes[index] < rightBytes[index] ? -1 : 1;
+  }
+  if (leftBytes.length === rightBytes.length) return 0;
+  return leftBytes.length < rightBytes.length ? -1 : 1;
+}
+
+/**
+ * Descending total order: newer first, and at an identical timestamp the byte-larger clip id first.
+ *
+ * `started_at` stays a plain string comparison because the backend admits a row into `clips` only
+ * after `_valid_timestamp` parses it as RFC3339 UTC ending in `Z` at 20-30 characters
+ * (`backend/app/features/clips/compact_listing.py`), which is ASCII-only -- and over ASCII, UTF-16
+ * code-unit order and UTF-8 byte order are identical. The clip id has no such restriction, so it
+ * must go through the BINARY comparison.
+ */
 export function compareClipKeysDescending(left: ClipCursorKey, right: ClipCursorKey): number {
   if (left.startedAt !== right.startedAt) return left.startedAt < right.startedAt ? 1 : -1;
-  if (left.clipId === right.clipId) return 0;
-  return left.clipId < right.clipId ? 1 : -1;
+  const byClipId = compareBinaryAscending(left.clipId, right.clipId);
+  if (byClipId === 0) return 0;
+  return byClipId < 0 ? 1 : -1;
 }
 
 /** True when `key` belongs strictly after the cursor boundary in the descending page order. */

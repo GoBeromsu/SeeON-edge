@@ -191,9 +191,10 @@ describe('EventsPage bounded failure states', () => {
     act(() => (host.querySelector('button.rounded-card') as HTMLButtonElement).click());
     await flush();
     act(() => findButton(document.body, '클립 삭제').click());
-    const confirmDialog = Array.from(document.querySelectorAll<HTMLElement>('[role="dialog"]'))
-      .find((dialog) => dialog.textContent?.includes('클립 삭제 확인')) as HTMLElement;
-    typeConfirm(confirmDialog.querySelector('#delete-confirm-input') as HTMLInputElement, 'clip-held');
+    // Located by the confirm input's stable id, never by the dialog's rendered copy.
+    const confirmInput = document.querySelector('#delete-confirm-input') as HTMLInputElement;
+    const confirmDialog = confirmInput.closest('[role="dialog"]') as HTMLElement;
+    typeConfirm(confirmInput, 'clip-held');
     await act(async () => { findButton(confirmDialog, '삭제').click(); });
     await flush();
 
