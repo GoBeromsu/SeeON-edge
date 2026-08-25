@@ -18,14 +18,12 @@ from typing_extensions import override
 from backend.app.core.config import get_settings
 from backend.app.features.connection.store import (
     API_BACKEND_BASE_URL_ENV,
+    API_BACKEND_CONFIG_URL_ENV,
+    API_BACKEND_EVENTS_URL_ENV,
     API_CONNECTION_SETTINGS_PATH_ENV,
     ConnectionSettingsStore,
 )
-from backend.app.lifespan import (
-    API_BACKEND_CONFIG_URL_ENV,
-    API_BACKEND_EVENTS_URL_ENV,
-    API_EDGE_RELAY_TOKEN_ENV,
-)
+from backend.app.lifespan import API_EDGE_RELAY_TOKEN_ENV
 from backend.app.main import create_app, no_lifespan
 
 DASHBOARD_LOGIN: Mapping[str, JsonValue] = {

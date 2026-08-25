@@ -51,8 +51,8 @@ relay `BoundedBodyRoute`; add a suffix entry, do not copy the class.
 API actor writes only the compact application tables. Never INSERT retired
 `control_*`, `qa_*`, `runtime_*`, `evidence_*`, or `derivative_*` families.
 Auth has no SQLite row; sessions live in
-`shared/dashboard_auth.py`. Incomplete enrollment deletes ingest, evidence,
-and mapper attrs and sets `backend_configured=False`. Handlers do not
+`shared/dashboard_auth.py`. Incomplete enrollment deletes ingest and evidence
+attrs and sets `backend_configured=False`. Handlers do not
 build `EdgeIngestClient`. Drive the slice through
 `create_app(lifespan=no_lifespan)` plus an injected store, or full lifespan
 when listing or refresh is the subject. Slice tests: `tests/test_api_*.py`,

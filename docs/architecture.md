@@ -506,27 +506,20 @@ above reflect the real locations.
 **ADR-0001 source-packet preservation is complete for primary clean clips.**
 The worker keeps bounded encoded-packet history per camera and remuxes one
 keyframe-aligned stream epoch/configuration without transcoding. Decoded frames
-remain analysis and snapshot taps; transformed clips are separate derivatives
-and never replace the preserved clean clip.
+remain analysis and optional snapshot taps. Transformed derivative publication
+is not a current production surface.
 
-**Live overlays and annotated evidence share one canonical scene.**
+**Live overlays use one canonical scene; replay is process-local.**
 `worker/types/overlay_scene.py` owns the versioned, hardware-neutral primitives
 and explicit present/stale/missing/not-evaluated semantics.
-`OverlaySceneBuilder` creates those primitives from either frozen live
-observations or persisted analysis/decision traces; renderers do not run policy
-or inference. The OpenCV CPU still renderer and event-only FFmpeg CPU MP4 path
-consume that same scene contract with fixed colors, layout, transforms, and
-host-independent CJK raster cells.
+`OverlaySceneBuilder` creates those primitives from frozen live observations;
+renderers do not run policy or inference. Decision-trace replay stays in the
+worker process as a bounded in-memory writer. There is no backend analysis-trace
+HTTP or SQLite warehouse.
 
-Annotated MP4s are bounded, content-addressed, immutable derivative media.
-Publication verifies the clean source identity, fsyncs and atomically renames
-media before a short central-DB linkage transaction, and startup reconciliation
-converges pending/mutated/orphan state without changing clean evidence. The
-authenticated clip artifact projection exposes clean/analysis/annotated state;
-an unavailable or invalid annotation falls back to descriptor-pinned clean
-playback. Queue count/source bytes, frame memory, scene count, duration, render
-time, output bytes, and aggregate derivative disk usage all have explicit
-limits. No continuous second encoder or second inference pass is involved.
+The authenticated clip artifact projection exposes clean video plus an optional
+snapshot. There is no analysis or overlay-encoded artifact view, and no overlay
+fallback to clean playback.
 
 **Encoder-lifecycle work is risk reduction, not a GPU fix.** The per-camera
 encoder session, segment ring, and their instrumentation reduce the window in
