@@ -1,13 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import {
-  cameraDuplicateDetail,
-  cameraProbeFailureDetail,
-  createCamera,
-  type Camera,
-  type BedZone,
-} from '@/shared/api/client';
+import { cameraDuplicateDetail, cameraProbeFailureDetail, createCamera, type Camera } from '@/shared/api/client';
 import { AccessibleDialog } from '@/shared/ui/AccessibleDialog';
-import { BedZoneRecognitionPanel } from '@/features/settings/BedZoneRecognitionPanel';
 import { FloorSelect } from '@/features/settings/FloorSelect';
 import { DEFAULT_FLOOR } from '@/features/settings/floorOptions';
 import { assessRtspSubstreamGuidance } from '@/features/settings/rtspSubstreamGuidance';
@@ -27,15 +20,13 @@ const PROBE_FAILURE_MESSAGE: Record<string, string> = {
 };
 
 /**
- * 카메라 등록 모달 (front/design-handoff/Eldercare Prototype.dc.html:305-336 모달 1): 1단계에서 연결
- * 정보를 입력하면 그 자리에서 POST /cameras가 프로브 후 저장까지 수행하므로(별도 프로브 엔드포인트
- * 없음), 2단계는 이미 생성된 카메라에 대해 침대 영역을 인식하는 단계다. 층은 사용자가 이 모달에서
- * 선택하는 로컬 override(`floor`)이며, 외부 space-sync가 채우는 읽기 전용 `floor_name`과는 별개다
- * (issue #85; 정밀 계약은 CameraResponse.floor 문서 주석 참고). 고정 목록(B1~10층)에서 고르는
- * 정수이고 기본값은 1층이다(issue #155).
+ * 카메라 등록 모달: POST /cameras가 RTSP probe와 저장을 한 요청으로 수행한다. 성공하면 registry
+ * refresh와 닫기가 즉시 이어진다. 침대 영역 인식은 기존 카메라의 연결 관리 화면에서만 수행한다.
+ * 층은 사용자가 이 모달에서 선택하는 로컬 override(`floor`)이며, 외부 space-sync가 채우는 읽기
+ * 전용 `floor_name`과는 별개다 (issue #85). 고정 목록(B1~10층)에서 고르는 정수이고 기본값은
+ * 1층이다(issue #155).
  */
 export function CameraRegisterModal({ open, cameras, onClose, onCreated }: CameraRegisterModalProps): JSX.Element {
-  const [step, setStep] = useState<1 | 2>(1);
   const [label, setLabel] = useState('');
   const [rtspUrl, setRtspUrl] = useState('');
   const [floor, setFloor] = useState<number>(DEFAULT_FLOOR);
@@ -76,21 +67,16 @@ export function CameraRegisterModal({ open, cameras, onClose, onCreated }: Camer
   const [busy, setBusy] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [duplicateLabel, setDuplicateLabel] = useState<string | null>(null);
-  const [camera, setCamera] = useState<Camera | null>(null);
-  const [bedZone, setBedZone] = useState<BedZone | null>(null);
   const busyRef = useRef(false);
   const wasOpen = useRef(open);
 
   useEffect(() => {
     if (open && !wasOpen.current) {
-      setStep(1);
       setLabel('');
       setRtspUrl('');
       setFloor(DEFAULT_FLOOR);
       setErrorMessage(null);
       setDuplicateLabel(null);
-      setCamera(null);
-      setBedZone(null);
       setBusy(false);
       busyRef.current = false;
     }
@@ -125,7 +111,7 @@ export function CameraRegisterModal({ open, cameras, onClose, onCreated }: Camer
     setErrorMessage(null);
     setDuplicateLabel(null);
     try {
-      const created = await createCamera(
+      await createCamera(
         {
           label,
           rtsp_url: rtspUrl,
@@ -134,9 +120,9 @@ export function CameraRegisterModal({ open, cameras, onClose, onCreated }: Camer
         },
         { forceRegister: force },
       );
-      setCamera(created);
-      setBedZone(created.bed_zone ?? null);
-      setStep(2);
+      toast.success('카메라를 등록했습니다.');
+      onCreated();
+      onClose();
     } catch (error) {
       const probeFailure = cameraProbeFailureDetail(error);
       if (probeFailure) {
@@ -159,32 +145,13 @@ export function CameraRegisterModal({ open, cameras, onClose, onCreated }: Camer
     }
   }
 
-  function handleComplete(): void {
-    if (!bedZone) {
-      toast.error('침대 영역 인식을 완료해야 저장할 수 있습니다.');
-      return;
-    }
-    toast.success('카메라를 등록했습니다.');
-    onCreated();
-  }
 
   return (
-    <AccessibleDialog open={open} title="카메라 등록" onClose={requestClose} size={step === 1 ? 'md' : 'lg'}>
-      <p className="mb-3 text-xs font-semibold text-muted-foreground">
-        <span className={step === 1 ? 'text-foreground' : ''}>1 연결 정보</span>
-        {' → '}
-        <span className={step === 2 ? 'text-foreground' : ''}>2 침대 영역</span>
-      </p>
-
-      {step === 1 ? (
-        <form
+    <AccessibleDialog open={open} title="카메라 등록" onClose={requestClose} size="md">
+      <form
           onSubmit={(event) => {
             event.preventDefault();
-            if (camera) {
-              setStep(2);
-            } else {
-              void submitStep1();
-            }
+            void submitStep1();
           }}
           noValidate
         >
@@ -193,7 +160,7 @@ export function CameraRegisterModal({ open, cameras, onClose, onCreated }: Camer
             <input
               name="label"
               value={label}
-              disabled={busy || camera !== null}
+              disabled={busy}
               onChange={(event) => setLabel(event.target.value)}
               placeholder="예: 101호"
             />
@@ -203,7 +170,7 @@ export function CameraRegisterModal({ open, cameras, onClose, onCreated }: Camer
             <FloorSelect
               value={floor}
               onChange={(next) => setFloor(next ?? DEFAULT_FLOOR)}
-              disabled={busy || camera !== null}
+              disabled={busy}
             />
           </label>
           <label>
@@ -211,7 +178,7 @@ export function CameraRegisterModal({ open, cameras, onClose, onCreated }: Camer
             <input
               name="rtsp_url"
               value={rtspUrl}
-              disabled={busy || camera !== null}
+              disabled={busy}
               onChange={(event) => setRtspUrl(event.target.value)}
               placeholder="rtsp://192.0.2.10:554/stream"
             />
@@ -228,7 +195,7 @@ export function CameraRegisterModal({ open, cameras, onClose, onCreated }: Camer
               <select
                 name="space_id"
                 value={spaceId}
-                disabled={busy || camera !== null}
+                disabled={busy}
                 onChange={(event) => setSpaceId(event.target.value)}
               >
                 <option value="">방을 선택하세요</option>
@@ -286,29 +253,10 @@ export function CameraRegisterModal({ open, cameras, onClose, onCreated }: Camer
               className="brand-action inline-flex h-9 items-center justify-center rounded-control px-4 text-sm font-semibold"
               disabled={busy}
             >
-              {busy ? '등록 중...' : '다음'}
+              {busy ? '등록 중...' : '등록'}
             </button>
           </div>
         </form>
-      ) : null}
-
-      {step === 2 && camera ? (
-        <div>
-          <BedZoneRecognitionPanel cameraId={camera.id} bedZone={bedZone} onRecognized={setBedZone} />
-          <div className="dialog-actions mt-4">
-            <button type="button" className="dialog-secondary-action" onClick={() => setStep(1)}>
-              이전
-            </button>
-            <button
-              type="button"
-              className="brand-action inline-flex h-9 items-center justify-center rounded-control px-4 text-sm font-semibold"
-              onClick={handleComplete}
-            >
-              저장하고 완료
-            </button>
-          </div>
-        </div>
-      ) : null}
     </AccessibleDialog>
   );
 }

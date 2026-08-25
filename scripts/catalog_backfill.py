@@ -6,7 +6,6 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from backend.app.features.clips.audit_log import AuditLogStore
 from backend.app.features.clips.catalog import (
     CatalogStore,
     sanitized_camera_payload,
@@ -22,7 +21,6 @@ parser.add_argument(
     default=resolve_state_dir("ml-api") / "catalog.sqlite3",
 )
 parser.add_argument("--clip-store", type=Path, required=True)
-parser.add_argument("--audit", type=Path)
 parser.add_argument(
     "--cameras",
     type=Path,
@@ -32,10 +30,7 @@ args = parser.parse_args()
 store = CatalogStore.open(args.catalog)
 try:
     camera_snapshot = strict_camera_snapshot(args.cameras)
-    store.backfill(
-        ClipStore(args.clip_store),
-        audit_log=AuditLogStore(args.audit) if args.audit else None,
-    )
+    store.backfill(ClipStore(args.clip_store))
     if camera_snapshot is not None:
         for camera in camera_snapshot["cameras"]:
             if isinstance(camera.get("id"), str) and camera["id"]:

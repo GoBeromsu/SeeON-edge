@@ -20,7 +20,6 @@ from backend.app.features.connection.store import (
     ConnectionSettingsStore,
 )
 from backend.app.features.status.heartbeat_store import HeartbeatStore
-from backend.app.lifespan import API_FACILITY_ID_ENV, EDGE_FACILITY_TOKEN_ENV
 from backend.app.main import create_app, no_lifespan
 from tests_support.compact_authority_db import prepare_compact_database
 from worker.runtime.config.pull_models import BackendWorkerConfigPayload
@@ -65,9 +64,9 @@ class TestConnectionFacilityDbOnly:
     def test_env_facility_id_does_not_seed_load(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.setenv(API_FACILITY_ID_ENV, "facility-from-env")
+        monkeypatch.setenv("API_FACILITY_ID", "facility-from-env")
         monkeypatch.setenv(API_BACKEND_BASE_URL_ENV, "https://api.example.com")
-        monkeypatch.delenv(EDGE_FACILITY_TOKEN_ENV, raising=False)
+        monkeypatch.delenv("EDGE_FACILITY_TOKEN", raising=False)
         store = ConnectionSettingsStore(tmp_path / "connection.sqlite3")
         settings = store.load()
         assert settings.facility_id is None

@@ -40,11 +40,7 @@ from backend.app.shared.backend_client_bundle import (
     BackendClientBundle,
     backend_client_bundle,
 )
-from backend.app.shared.backend_mapping import (
-    BackendCameraMapper,
-    derive_edge_cameras_endpoint,
-    mark_backend_status,
-)
+from backend.app.shared.backend_mapping import mark_backend_status
 from backend.app.shared.state_dir import resolve_state_dir
 from contracts.worker_config import (
     PulledCameraConfig,
@@ -59,17 +55,6 @@ from shared.events.edge_ingest_client import (
 
 API_BACKEND_EVENTS_URL_ENV = "API_BACKEND_EVENTS_URL"
 API_EDGE_RELAY_TOKEN_ENV = "API_EDGE_RELAY_TOKEN"
-# Shared secret for the ml-api -> backend Event API bearer auth (issue #552).
-# Name matches the backend's EdgeFacilityTokenGuard config key exactly so the
-# same value can be copied verbatim across the edge and host env files.
-EDGE_FACILITY_TOKEN_ENV = "EDGE_FACILITY_TOKEN"  # scope-fidelity: name-only
-# Retained as a name-only constant for tests/docs that assert the env key is
-# no longer an admission authority. Production code must not read this env.
-API_FACILITY_ID_ENV = "API_FACILITY_ID"  # scope-fidelity: name-only
-# Same name-only retention as the two constants above: the retired ml-config
-# URL is asserted by tests/docs as no longer being an authority, and no
-# production code reads it.
-API_BACKEND_CONFIG_URL_ENV = "API_BACKEND_CONFIG_URL"  # scope-fidelity: name-only
 API_BACKEND_INGEST_TIMEOUT_SEC_ENV = "API_BACKEND_INGEST_TIMEOUT_SEC"
 API_HEARTBEAT_STALE_AFTER_SEC_ENV = "API_HEARTBEAT_STALE_AFTER_SEC"
 API_BACKEND_CONFIG_REFRESH_SEC_ENV = "API_BACKEND_CONFIG_REFRESH_SEC"
@@ -250,7 +235,6 @@ def apply_connection_settings(app: FastAPI) -> None:
             "backend_client_bundle",
             "backend_ingest_client",
             "backend_evidence_client",
-            "backend_camera_mapper",
         ):
             if hasattr(app.state, attribute):
                 delattr(app.state, attribute)
@@ -282,11 +266,6 @@ def apply_connection_settings(app: FastAPI) -> None:
         bearer_token=settings.facility_token,
         timeout_sec=timeout_sec,
     )
-    camera_mapper = BackendCameraMapper(
-        endpoint=derive_edge_cameras_endpoint(settings.events_url),
-        token=settings.facility_token,
-        timeout_sec=timeout_sec,
-    )
     bundle = BackendClientBundle(
         facility_code=settings.facility_code,
         client_installation_ref=settings.client_installation_ref,
@@ -298,12 +277,10 @@ def apply_connection_settings(app: FastAPI) -> None:
         config_url=settings.config_url,
         ingest_client=ingest_client,
         evidence_client=evidence_client,
-        camera_mapper=camera_mapper,
     )
     app.state.backend_client_bundle = bundle
     app.state.backend_ingest_client = bundle.ingest_client
     app.state.backend_evidence_client = bundle.evidence_client
-    app.state.backend_camera_mapper = bundle.camera_mapper
     app.state.backend_configured = True
 
 

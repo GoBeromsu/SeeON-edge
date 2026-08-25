@@ -59,8 +59,8 @@ docker compose -f compose.edge.yaml -f compose.edge.<profile>.yaml up -d --pull 
 ### 3. 순서를 지킨다
 
 `edge-filesystem-inventory` → `edge-db-migrator` → `ml-api`(healthy) →
-`ml-worker`. compose 의존성이 이를 강제한다. inventory 는 schema 17 이전에만
-worker delivery queue 와 clip staging 을 비운 상태인지 확인하며, schema 17 이후에는
+`ml-worker`. compose 의존성이 이를 강제한다. inventory 는 schema 18 이전에
+worker delivery queue 와 clip staging 을 비운 상태인지 확인하며, schema 18 이후에는
 대기 envelope 를 backend 가 drain 할 수 있도록 통과한다.
 
 워커가 떠 있는 상태로 migrator 를 돌리면 다음으로 실패한다.

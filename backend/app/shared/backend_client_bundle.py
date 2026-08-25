@@ -4,7 +4,6 @@ from dataclasses import dataclass, field
 
 from fastapi import FastAPI
 
-from backend.app.shared.backend_mapping import BackendCameraMapper
 from shared.events.edge_ingest_client import EdgeIngestClient
 from shared.events.evidence_export_client import BackendEvidenceClient
 
@@ -21,7 +20,6 @@ class BackendClientBundle:
     config_url: str
     ingest_client: EdgeIngestClient
     evidence_client: BackendEvidenceClient
-    camera_mapper: BackendCameraMapper
 
     @property
     def generation_key(self) -> tuple[str, int]:

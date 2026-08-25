@@ -5,8 +5,10 @@ from __future__ import annotations
 import sqlite3
 from dataclasses import dataclass
 
-from backend.app.edge_db.compact_schema import SCHEMA_V18_STATEMENTS
-from backend.app.edge_db.schema import SCHEMA_V1
+from backend.app.edge_db.compact_schema import (
+    SCHEMA_MIGRATIONS_LEDGER_TABLE_SQL,
+    SCHEMA_V18_STATEMENTS,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -101,11 +103,14 @@ def compile_schema18_manifest() -> Schema18Manifest:
     connection = sqlite3.connect(":memory:")
     try:
         connection.execute("PRAGMA foreign_keys = ON")
-        connection.execute(SCHEMA_V1.statements[1])
+        connection.execute(SCHEMA_MIGRATIONS_LEDGER_TABLE_SQL)
         for statement in SCHEMA_V18_STATEMENTS:
-            if statement.strip().upper().startswith("DROP TABLE"):
-                continue
-            connection.execute(statement)
+            normalized = statement.strip().upper()
+            retires_source = normalized.startswith(("DROP TABLE", "DROP TRIGGER")) or (
+                "QA_REPLAY_RUNS" in normalized and normalized.startswith(("UPDATE", "DELETE"))
+            )
+            if not retires_source:
+                connection.execute(statement)
         return read_schema18_manifest(connection)
     finally:
         connection.close()

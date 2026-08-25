@@ -1,6 +1,6 @@
 """Bounded device-resident frame pool with lease/event ownership and backpressure.
 
-Implements ``worker.interfaces.device_batch.DeviceResidentPool``. This module
+Owns bounded device-resident frame slots. This module
 never imports ``torch`` directly: slot allocation, H2D upload, and D2H
 readback are all injected as ``StorageAllocator``/``TransferHooks`` callables
 so the same pool logic is exercised by a real CUDA-backed allocator

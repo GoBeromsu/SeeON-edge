@@ -71,6 +71,7 @@ ALLOWED_PATHS: Final = {
     "/docs/oauth2-redirect",
     "/health/live",
     "/health/ready",
+    "/health/release-identity",
     "/openapi.json",
     "/redoc",
 }

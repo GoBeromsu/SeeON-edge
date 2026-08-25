@@ -11,15 +11,12 @@ from backend.app.edge_db.migrator import migrate_database
 from backend.app.features.connection import store as connection_store_module
 from backend.app.features.connection.store import (
     API_BACKEND_BASE_URL_ENV,
+    API_BACKEND_CONFIG_URL_ENV,
+    API_BACKEND_EVENTS_URL_ENV,
     API_CONNECTION_SETTINGS_PATH_ENV,
     DEFAULT_CONNECTION_SETTINGS_PATH,
     ConnectionSettings,
     ConnectionSettingsStore,
-)
-from backend.app.lifespan import (
-    API_BACKEND_CONFIG_URL_ENV,
-    API_BACKEND_EVENTS_URL_ENV,
-    EDGE_FACILITY_TOKEN_ENV,
 )
 
 _production_from_env = ConnectionSettingsStore.from_env
@@ -154,7 +151,7 @@ class TestLoadPrecedence:
     def test_unsaved_identity_does_not_fall_back_to_env_after_a_save(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.setenv(EDGE_FACILITY_TOKEN_ENV, "token-from-env")
+        monkeypatch.setenv("EDGE_FACILITY_TOKEN", "token-from-env")
         store = _store(tmp_path)
 
         with pytest.raises(ValueError, match="events_url"):

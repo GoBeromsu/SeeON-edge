@@ -1,4 +1,4 @@
-"""Read-only filesystem drain gate for the schema-17 cutover."""
+"""Read-only filesystem drain gate for the schema-18 cutover."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ from backend.app.edge_db.paths import EDGE_DATABASE_PATH
 
 DEFAULT_RUNTIME_STATE_DIR = Path("/var/lib/seeon-worker-state")
 DEFAULT_CLIP_STORE_DIR = Path("/var/lib/clip-store")
-SCHEMA_V17 = 17
+SCHEMA_V18 = 18
 
 
 @dataclass(frozen=True, slots=True)
@@ -104,7 +104,7 @@ def check_filesystem_drain(
         # of this gate and just as damaging as letting a dirty one through.
         return True, "EDGE_FS_INVENTORY_FRESH no database yet; nothing to drain"
     version = read_schema_version(database)
-    if version >= SCHEMA_V17:
+    if version >= SCHEMA_V18:
         return True, f"EDGE_FS_INVENTORY_BYPASS schema={version} gate retired post-cutover"
     # The worker records beneath the operator-selected clip_store_subdir, so
     # scanning the mount root reports zero pending staging for a store it never
@@ -119,7 +119,7 @@ def check_filesystem_drain(
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Check filesystem drain before schema-17 cutover")
+    parser = argparse.ArgumentParser(description="Check filesystem drain before schema-18 cutover")
     parser.add_argument("--database", type=Path, default=EDGE_DATABASE_PATH)
     parser.add_argument("--runtime-state-dir", type=Path, default=DEFAULT_RUNTIME_STATE_DIR)
     parser.add_argument("--clip-store-dir", type=Path, default=DEFAULT_CLIP_STORE_DIR)
