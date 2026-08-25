@@ -9,7 +9,7 @@ identity comes exclusively from ``ConnectionSettingsStore`` (DB) via
 ``BackendClientBundle``.
 
 Camera provisioning itself no longer goes through this client's per-camera
-``put_mapping``/``push_camera``/``put_roster`` calls: the dashboard camera
+``push_camera``/``put_roster`` calls: the dashboard camera
 registry publishes complete topology snapshots to the backend instead (see
 ``features/cameras/roster_sync.py`` and
 ``features/connection/topology_retry_coordinator.py``), using a
@@ -23,8 +23,8 @@ callers/tests of this module.
 fall-ai backend) takes exactly ONE ``EdgeCameraMappingRequestDto`` per call --
 ``{edge_camera_ref, label, spaceId}``, all three required (see the ADR) -- not
 a bulk array. ``put_roster`` therefore issues one PUT per camera (via the same
-request-building ``put_mapping`` uses) and aggregates per-camera outcomes,
-rather than sending one bulk body.
+request-building helper used by ``push_camera``) and aggregates per-camera
+outcomes, rather than sending one bulk body.
 """
 
 from __future__ import annotations
@@ -122,9 +122,8 @@ class BackendCameraMapper:
         self, *, edge_camera_ref: str, label: str, space_id: str
     ) -> urllib.request.Request:
         """Build the single-object PUT request body ``EdgeCameraMappingRequestDto``
-        requires (``edge_camera_ref``/``label``/``spaceId``, all required) --
-        shared by ``put_mapping`` and ``push_camera`` so both send an
-        identical request shape.
+        requires (``edge_camera_ref``/``label``/``spaceId``, all required) for
+        ``push_camera`` and ``put_roster``.
         """
         assert self.endpoint is not None
         assert self.token is not None
@@ -145,31 +144,10 @@ class BackendCameraMapper:
             method="PUT",
         )
 
-    def put_mapping(self, *, edge_camera_ref: str, label: str, space_id: str) -> MappingResult:
-        if not self.configured:
-            return MappingResult(backend_camera_id=None, pending=True, reachable=None)
-        request = self._mapping_request(
-            edge_camera_ref=edge_camera_ref, label=label, space_id=space_id
-        )
-        try:
-            with urllib.request.urlopen(request, timeout=self.timeout_sec) as response:
-                parsed = json.loads(response.read().decode("utf-8") or "{}")
-        except (TimeoutError, OSError, urllib.error.URLError, urllib.error.HTTPError, ValueError):
-            return MappingResult(backend_camera_id=None, pending=True, reachable=False)
-        camera_id = _camera_id_from_response(parsed)
-        return MappingResult(
-            backend_camera_id=camera_id,
-            pending=camera_id is None,
-            reachable=True,
-        )
-
     def push_camera(self, *, edge_camera_ref: str, label: str, space_id: str) -> CameraPushResult:
-        """Push a single camera via the same request ``put_mapping`` builds,
-        but classify failures into the richer error vocabulary
-        (``auth``/``timeout``/``unreachable``) that ``put_mapping``'s own
-        try/except collapses into a single ``pending`` bit -- used by
-        ``put_roster`` (below) so callers get an actionable per-camera
-        reason rather than just "not confirmed yet".
+        """Push a single camera and classify failures into the richer error
+        vocabulary (``auth``/``timeout``/``unreachable``), used by
+        ``put_roster`` so callers get an actionable per-camera reason.
         """
         if not self.configured:
             return CameraPushResult(ok=False, error_class="unconfigured", status_code=None)
