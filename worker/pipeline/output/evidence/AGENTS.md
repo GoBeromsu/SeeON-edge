@@ -2,7 +2,7 @@
 
 Durable clip, snapshot, and relay-outbox path after admission. Pixels stop here as remuxed source packets and JPEG snapshots. Decision never writes this tree.
 
-`worker.pipeline` must not import `worker.runtime`. Runtime injects the store dir, outbox DB, lock, and sender. Missing production wiring or a locked store refuses to start. Remote failures do not block startup: retryable classes retry, compatibility failures reprobe, and payload-invalid failures become permanent. Two workers must not share one outbox.
+`worker.pipeline` must not import `worker.runtime`. Runtime injects the store dir, delivery queue, lock, and sender. Missing production wiring or a locked store refuses to start. Remote failures do not block startup: retryable classes retry, compatibility failures reprobe, and payload-invalid failures become permanent. Two workers must not share one delivery queue.
 
 ## Packet FIFO and feed
 
@@ -14,13 +14,13 @@ Durable clip, snapshot, and relay-outbox path after admission. Pixels stop here 
 
 Shared `ClipRecorder`, one actor thread, camera-local rings. `ClipAdmission` allocates a collision-free `ClipId` and a `.staging` dir. `PacketClipRecordingCoordinator` window-selects around the trigger PTS, stream-copies to `clip.mp4`, then the publisher atomically replaces into `clips/<clip_id>/`. Unavailable is a published outcome, not a silent skip. Thumbnail miss logs and still publishes. `ClipStoreLock` takes a non-blocking flock on `.worker.lock` for the recorder lifetime.
 
-## Durable staging and outbox
+## Durable staging and delivery queue
 
-`EvidenceEventSink.emit_for_frame` stages the alert first, then binds an optional clip. Legacy event-only `emit` is rejected. `DurableEvidenceStager` writes a canonical payload into the publish-once `EvidenceOutbox`. Same `edge_event_id` must replay identical bytes. Events move STAGED to claimed to ACKED, retry, or permanent. Clips wait AWAITING_FINALIZE, then VERIFIED, UNAVAILABLE, or CORRUPT. Publish states: WAITING, IN_FLIGHT, PUBLISHED, PERMANENT, COMPATIBILITY.
+`EvidenceEventSink.emit_for_frame` stages the alert first, then binds an optional clip. Legacy event-only `emit` is rejected. `DurableEvidenceStager` writes a canonical payload into the publish-once filesystem `DeliveryQueue`. Same `edge_event_id` must replay identical bytes.
 
-## Runtime, reconcile, sender
+## Runtime and sender
 
-`EvidenceExportRuntime.initialize_under_lock` reconciles disk against the WAL, then loads holds. Sender starts only after that. `EvidenceSender` is event-first. Clips send only when the live export switch and backend capability both allow it. Claim uses a 30s `ClaimLease`; CAS failure is `LEASE_LOST`. Turning clip export OFF after claim releases the lease and restores the attempt count. Receipt mismatch retries. Restart walks final dirs, quarantines orphans and leftover staging, marks interrupted finalize UNAVAILABLE, and marks missing verified bytes CORRUPT.
+`EvidenceExportRuntime.initialize_under_lock` marks the queue ready, then the sender may start. `EvidenceSender` is event-first. Clips send only when the live export switch and backend capability both allow it.
 
 ## Snapshots and manifests
 
@@ -32,7 +32,7 @@ Hold-aware. Unpublished or incomplete incidents stay HELD. Missing hold hook tre
 
 ## Leases and who owns what
 
-A queue owns every accepted `FramePacket` until take, reject, or close. After take, the feeder owns it through `on_frame` and must release. Admission's retain is a second handle the actor releases. Packet-ring selections are a third lease family. Process-wide: outbox DB, clip-store lock, sender owner id, snapshot store. Per camera: packet ring, feeder thread, clip reservation. Don't hoist a camera ring or reservation.
+A queue owns every accepted `FramePacket` until take, reject, or close. After take, the feeder owns it through `on_frame` and must release. Admission's retain is a second handle the actor releases. Packet-ring selections are a third lease family. Process-wide: delivery queue, clip-store lock, sender owner id, snapshot store. Per camera: packet ring, feeder thread, clip reservation. Don't hoist a camera ring or reservation.
 
 ## SQLite vs files
 
@@ -48,8 +48,8 @@ Media never lives in rows. Path is not identity; hash and size are.
 - `tests/test_packet_ring.py`, `tests/test_packet_remux_clip.py`, `tests/test_worker_clip_frame_feeder.py`
 - `tests/test_worker_clip_admission.py`, `tests/test_worker_clip_actor.py`, `tests/test_worker_clip_recorder.py`
 - `tests/test_worker_clip_publication.py`, `tests/test_worker_clip_recording.py`, `tests/test_clip_store_lock.py`
-- `tests/test_evidence_stager.py`, `tests/test_evidence_outbox.py`, `tests/test_evidence_sender.py`
-- `tests/test_evidence_reconciliation.py`, `tests/test_evidence_retention.py`, `tests/test_worker_clip_maintenance.py`
+- `tests/test_evidence_stager.py`, `tests/test_evidence_sender.py`, `tests/test_evidence_delivery_queue_restart.py`
+- `tests/test_retired_worker_dead_surfaces.py`, `tests/test_evidence_retention.py`, `tests/test_worker_clip_maintenance.py`
 - `tests/test_snapshot_store.py`, `tests/test_snapshot_lifecycle.py`, `tests/test_evidence_stager_provenance.py`
 - Boundary: `uv run --group lint lint-imports`
 
