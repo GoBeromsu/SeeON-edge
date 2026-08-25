@@ -15,6 +15,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import signal
+import socket
 from pathlib import Path
 from typing import Any
 
@@ -25,7 +26,13 @@ from pydantic import ValidationError
 
 import worker.__main__ as worker_main
 from contracts.worker_config import PulledWorkerConfig
-from worker.runtime.config import RestartDirective, WorkerConfig, WorkerConfigPoll
+from worker.runtime.config import (
+    ConfigSnapshot,
+    ConfigSource,
+    RestartDirective,
+    WorkerConfig,
+    WorkerConfigPoll,
+)
 from worker.runtime.config.loader import load_worker_config as production_load_worker_config
 from worker.runtime.worker import WorkerRuntime
 
@@ -72,6 +79,16 @@ def _isolate_from_default_ingest_composition(monkeypatch: pytest.MonkeyPatch) ->
     than per test to keep that isolation guaranteed rather than opt-in.
     """
     real_init = WorkerRuntime.__init__
+    real_connect = socket.socket.connect
+
+    def _reject_network_connect(
+        client: socket.socket, address: tuple[str, int] | str
+    ) -> None:
+        if client.family in (socket.AF_INET, socket.AF_INET6):
+            raise AssertionError("entrypoint tests must not open network sockets")
+        real_connect(client, address)
+
+    monkeypatch.setattr(socket.socket, "connect", _reject_network_connect)
 
     def _init_with_fake_loop_factory(self: WorkerRuntime, *args: object, **kwargs: object) -> None:
         kwargs.setdefault("loop_factory", _fake_loop_factory)
@@ -85,8 +102,20 @@ def _isolate_from_default_ingest_composition(monkeypatch: pytest.MonkeyPatch) ->
         except (OSError, UnicodeError, yaml.YAMLError, ValidationError, TypeError, ValueError):
             return production_load_worker_config(path)
 
+    def resolve_fixture_startup_config(
+        yaml_config: WorkerConfig, _relay_url: str, _relay_token: str | None
+    ) -> ConfigSnapshot:
+        return ConfigSnapshot(
+            config=yaml_config,
+            registry_version=0,
+            directive=RestartDirective(generation=0, version=0),
+            source=ConfigSource.YAML,
+            stale=True,
+        )
+
     monkeypatch.setattr(worker_main, "load_worker_config", load_fixture_config)
     monkeypatch.setattr(worker_main, "require_api_release_identity", lambda _relay_url: None)
+    monkeypatch.setattr(worker_main, "resolve_startup_config", resolve_fixture_startup_config)
 
 
 # --- argparse surface -------------------------------------------------
@@ -319,6 +348,7 @@ def test_restart_check_wired_from_config_relay_settings(
     monkeypatch.delenv("RELAY_TOKEN", raising=False)
     calls: list[tuple[str, str, RestartDirective, object]] = []
     release_identity_calls: list[str] = []
+    startup_calls: list[tuple[str, str | None]] = []
     sentinel_check = lambda: False  # noqa: E731
 
     def _fake_make_restart_check(
@@ -332,6 +362,18 @@ def test_restart_check_wired_from_config_relay_settings(
         calls.append((relay_url, relay_token, boot_directive, pull_config))
         return sentinel_check
 
+    def _resolve_startup_config(
+        yaml_config: WorkerConfig, relay_url: str, relay_token: str | None
+    ) -> ConfigSnapshot:
+        startup_calls.append((relay_url, relay_token))
+        return ConfigSnapshot(
+            config=yaml_config,
+            registry_version=9,
+            directive=RestartDirective(generation=4, version=9),
+            source=ConfigSource.PULLED,
+            stale=False,
+        )
+
     constructed: list[WorkerRuntime] = []
     real_init = WorkerRuntime.__init__
 
@@ -341,6 +383,7 @@ def test_restart_check_wired_from_config_relay_settings(
 
     monkeypatch.setattr(worker_main, "make_restart_check", _fake_make_restart_check)
     monkeypatch.setattr(worker_main, "require_api_release_identity", release_identity_calls.append)
+    monkeypatch.setattr(worker_main, "resolve_startup_config", _resolve_startup_config)
     monkeypatch.setattr(WorkerRuntime, "__init__", _spy_init)
     monkeypatch.setattr(WorkerRuntime, "run", lambda self: None)
 
@@ -349,10 +392,11 @@ def test_restart_check_wired_from_config_relay_settings(
     assert exit_code == 0
     assert len(calls) == 1
     assert release_identity_calls == ["http://127.0.0.1:8000"]
+    assert startup_calls == [("http://127.0.0.1:8000", "relay-token-1")]
     relay_url, relay_token, boot_directive, pull_config = calls[0]
     assert relay_url == "http://127.0.0.1:8000"
     assert relay_token == "relay-token-1"
-    assert boot_directive == RestartDirective(generation=0, version=0)
+    assert boot_directive == RestartDirective(generation=4, version=9)
     assert callable(pull_config)
     assert constructed[0]._restart_check is sentinel_check  # noqa: SLF001
 
