@@ -86,6 +86,7 @@ def _isolate_from_default_ingest_composition(monkeypatch: pytest.MonkeyPatch) ->
             return production_load_worker_config(path)
 
     monkeypatch.setattr(worker_main, "load_worker_config", load_fixture_config)
+    monkeypatch.setattr(worker_main, "require_api_release_identity", lambda _relay_url: None)
 
 
 # --- argparse surface -------------------------------------------------
@@ -317,6 +318,7 @@ def test_restart_check_wired_from_config_relay_settings(
     monkeypatch.delenv("RELAY_URL", raising=False)
     monkeypatch.delenv("RELAY_TOKEN", raising=False)
     calls: list[tuple[str, str, RestartDirective, object]] = []
+    release_identity_calls: list[str] = []
     sentinel_check = lambda: False  # noqa: E731
 
     def _fake_make_restart_check(
@@ -338,6 +340,7 @@ def test_restart_check_wired_from_config_relay_settings(
         constructed.append(self)
 
     monkeypatch.setattr(worker_main, "make_restart_check", _fake_make_restart_check)
+    monkeypatch.setattr(worker_main, "require_api_release_identity", release_identity_calls.append)
     monkeypatch.setattr(WorkerRuntime, "__init__", _spy_init)
     monkeypatch.setattr(WorkerRuntime, "run", lambda self: None)
 
@@ -345,6 +348,7 @@ def test_restart_check_wired_from_config_relay_settings(
 
     assert exit_code == 0
     assert len(calls) == 1
+    assert release_identity_calls == ["http://127.0.0.1:8000"]
     relay_url, relay_token, boot_directive, pull_config = calls[0]
     assert relay_url == "http://127.0.0.1:8000"
     assert relay_token == "relay-token-1"
