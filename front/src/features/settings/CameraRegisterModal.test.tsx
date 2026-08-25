@@ -1,11 +1,11 @@
 import { act } from 'react';
 import { createRoot } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { createCamera, recognizeBedZone } from '@/shared/api/client';
+import { createCamera } from '@/shared/api/client';
 import { HttpError } from '@/shared/api/http';
 import { CameraRegisterModal } from '@/features/settings/CameraRegisterModal';
 import { toast } from '@/shared/ui/Toast';
-import type { BedZone, Camera } from '@/shared/api/client';
+import type { Camera } from '@/shared/api/client';
 
 vi.mock('@/shared/api/client', async () => {
   const actual = await vi.importActual<typeof import('@/shared/api/client')>('@/shared/api/client');
@@ -20,13 +20,6 @@ const createdCamera: Camera = {
   status: 'starting',
   created_at: null,
   bed_zone: null,
-};
-
-const bedZone: BedZone = {
-  polygon: [[0, 0], [100, 0], [100, 100], [0, 100]],
-  image_width: 1920,
-  image_height: 1080,
-  recognized_at: '2026-08-01T00:00:00Z',
 };
 
 function render(open = true, onClose = vi.fn(), onCreated = vi.fn(), cameras: Camera[] = []) {
@@ -65,7 +58,6 @@ function setSelect(name: string, value: string): void {
 
 beforeEach(() => {
   vi.mocked(createCamera).mockReset();
-  vi.mocked(recognizeBedZone).mockReset();
 });
 
 afterEach(() => {
@@ -79,34 +71,27 @@ describe('CameraRegisterModal', () => {
     render();
     setInput('rtsp_url', 'rtsp://cam/1');
 
-    await act(async () => findButton('다음').click());
+    await act(async () => findButton('등록').click());
 
     expect(createCamera).not.toHaveBeenCalled();
     expect(errorSpy).toHaveBeenCalledWith('카메라 이름을 입력하세요.');
   });
 
-  it('creates the camera via step 1 and advances to the bed-zone recognition step', async () => {
+  it('refreshes once and closes immediately after creation without rendering a registration bed-zone step', async () => {
     vi.mocked(createCamera).mockResolvedValue(createdCamera);
-    render();
+    const successSpy = vi.spyOn(toast, 'success');
+    const { onClose, onCreated } = render();
     setInput('label', '101호');
     setInput('rtsp_url', 'rtsp://cam/1');
 
-    await act(async () => findButton('다음').click());
+    await act(async () => findButton('등록').click());
 
     expect(createCamera).toHaveBeenCalledWith({ label: '101호', rtsp_url: 'rtsp://cam/1', floor: 1 }, { forceRegister: false });
-    expect(document.body.textContent).toContain('침대 영역 인식이 필요합니다.');
-  });
-
-  it('widens the dialog from step 1 (440px) to step 2 (640px) per the design spec', async () => {
-    vi.mocked(createCamera).mockResolvedValue(createdCamera);
-    render();
-    expect(document.querySelector('[role="dialog"]')?.getAttribute('data-size')).toBe('md');
-
-    setInput('label', '101호');
-    setInput('rtsp_url', 'rtsp://cam/1');
-    await act(async () => findButton('다음').click());
-
-    expect(document.querySelector('[role="dialog"]')?.getAttribute('data-size')).toBe('lg');
+    expect(successSpy).toHaveBeenCalledWith('카메라를 등록했습니다.');
+    expect(onCreated).toHaveBeenCalledTimes(1);
+    expect(onClose).toHaveBeenCalledTimes(1);
+    expect(document.body.textContent).not.toContain('2 침대 영역');
+    expect(document.querySelector('canvas')).toBeNull();
   });
 
   it('shows an inline probe-failure message mapped from the error_class on a 422 rejection', async () => {
@@ -117,51 +102,45 @@ describe('CameraRegisterModal', () => {
     setInput('label', '101호');
     setInput('rtsp_url', 'rtsp://cam/1');
 
-    await act(async () => findButton('다음').click());
+    await act(async () => findButton('등록').click());
 
     expect(document.querySelector('[role="alert"]')?.textContent).toContain('시간이 초과');
   });
 
-  it('shows the existing camera label and a force-register retry on a 409 duplicate rejection', async () => {
+  it('shows the existing camera label and force-register retry on a 409 duplicate rejection', async () => {
     vi.mocked(createCamera).mockRejectedValueOnce(
       new HttpError(409, {
         detail: { error: 'duplicate_camera', existing_camera_id: 'cam-1', existing_label: '기존 카메라' },
       }),
     );
     vi.mocked(createCamera).mockResolvedValueOnce(createdCamera);
-    render();
+    const { onClose, onCreated } = render();
     setInput('label', '101호');
     setInput('rtsp_url', 'rtsp://cam/1');
 
-    await act(async () => findButton('다음').click());
+    await act(async () => findButton('등록').click());
 
     expect(document.querySelector('[role="alert"]')?.textContent).toContain('기존 카메라');
 
     await act(async () => findButton('그래도 등록').click());
 
     expect(createCamera).toHaveBeenLastCalledWith({ label: '101호', rtsp_url: 'rtsp://cam/1', floor: 1 }, { forceRegister: true });
-    expect(document.body.textContent).toContain('침대 영역 인식이 필요합니다.');
+    expect(onCreated).toHaveBeenCalledTimes(1);
+    expect(onClose).toHaveBeenCalledTimes(1);
   });
 
-  it('blocks completion with a toast until the bed zone is recognized, then completes after recognition', async () => {
-    vi.mocked(createCamera).mockResolvedValue(createdCamera);
-    vi.mocked(recognizeBedZone).mockResolvedValue(bedZone);
-    const errorSpy = vi.spyOn(toast, 'error');
-    const successSpy = vi.spyOn(toast, 'success');
-    const { onCreated } = render();
+  it('keeps the modal open and does not refresh when creation is rejected', async () => {
+    vi.mocked(createCamera).mockRejectedValue(new Error('server unavailable'));
+    const { onClose, onCreated } = render();
     setInput('label', '101호');
     setInput('rtsp_url', 'rtsp://cam/1');
-    await act(async () => findButton('다음').click());
 
-    act(() => findButton('저장하고 완료').click());
-    expect(errorSpy).toHaveBeenCalledWith('침대 영역 인식을 완료해야 저장할 수 있습니다.');
+    await act(async () => findButton('등록').click());
+
+    expect(document.querySelector('[role="dialog"]')).not.toBeNull();
+    expect(document.querySelector('[role="alert"]')?.textContent).toContain('등록하지 못했습니다');
     expect(onCreated).not.toHaveBeenCalled();
-
-    await act(async () => findButton('▶ 인식 시작').click());
-    act(() => findButton('저장하고 완료').click());
-
-    expect(successSpy).toHaveBeenCalledWith('카메라를 등록했습니다.');
-    expect(onCreated).toHaveBeenCalled();
+    expect(onClose).not.toHaveBeenCalled();
   });
 
   it('층 드롭다운의 기본값은 1층이고, 건드리지 않으면 정수 1을 등록 요청에 포함시킨다 (issue #155)', async () => {
@@ -171,7 +150,7 @@ describe('CameraRegisterModal', () => {
     setInput('label', '101호');
     setInput('rtsp_url', 'rtsp://cam/1');
 
-    await act(async () => findButton('다음').click());
+    await act(async () => findButton('등록').click());
 
     expect(createCamera).toHaveBeenCalledWith(
       { label: '101호', rtsp_url: 'rtsp://cam/1', floor: 1 },
@@ -186,7 +165,7 @@ describe('CameraRegisterModal', () => {
     setInput('rtsp_url', 'rtsp://cam/1');
     setSelect('floor', '2');
 
-    await act(async () => findButton('다음').click());
+    await act(async () => findButton('등록').click());
 
     expect(createCamera).toHaveBeenCalledWith(
       { label: '101호', rtsp_url: 'rtsp://cam/1', floor: 2 },
@@ -201,7 +180,7 @@ describe('CameraRegisterModal', () => {
     setInput('rtsp_url', 'rtsp://cam/1');
     setSelect('floor', '-1');
 
-    await act(async () => findButton('다음').click());
+    await act(async () => findButton('등록').click());
 
     expect(createCamera).toHaveBeenCalledWith(
       { label: '101호', rtsp_url: 'rtsp://cam/1', floor: -1 },
@@ -209,21 +188,16 @@ describe('CameraRegisterModal', () => {
     );
   });
 
-  it('resets its draft the next time it is reopened', async () => {
-    vi.mocked(createCamera).mockResolvedValue(createdCamera);
+  it('resets its draft the next time it is reopened', () => {
     const { root, onClose } = render(true);
     setInput('label', '101호');
     setInput('rtsp_url', 'rtsp://cam/1');
-    await act(async () => findButton('다음').click());
-    expect(document.body.textContent).toContain('침대 영역 인식이 필요합니다.');
 
     act(() => root.render(<CameraRegisterModal open={false} cameras={[]} onClose={onClose} onCreated={vi.fn()} />));
     act(() => root.render(<CameraRegisterModal open cameras={[]} onClose={onClose} onCreated={vi.fn()} />));
 
     expect((document.querySelector('input[name="label"]') as HTMLInputElement).value).toBe('');
-    expect(document.body.textContent).not.toContain('침대 영역 인식이 필요합니다.');
   });
-
   it('warns (without blocking) when the RTSP address looks like an IDIS main stream (issue #154)', async () => {
     vi.mocked(createCamera).mockResolvedValue(createdCamera);
     render();
@@ -232,7 +206,7 @@ describe('CameraRegisterModal', () => {
 
     expect(document.querySelector('[data-testid="rtsp-substream-guidance"]')?.textContent).toContain('trackID=2');
 
-    await act(async () => findButton('다음').click());
+    await act(async () => findButton('등록').click());
 
     expect(createCamera).toHaveBeenCalledWith(
       { label: '101호', rtsp_url: 'rtsp://admin:pw@192.0.2.10:554/trackID=1', floor: 1 },
@@ -278,7 +252,7 @@ describe('I7 — 클라우드 방(space) 선택', () => {
     setInput('label', '205호');
     setInput('rtsp_url', 'rtsp://cam/1');
 
-    await act(async () => findButton('다음').click());
+    await act(async () => findButton('등록').click());
 
     expect(createCamera).not.toHaveBeenCalled();
     expect(errorSpy).toHaveBeenCalledWith('이 카메라가 설치된 방을 선택하세요.');
@@ -291,7 +265,7 @@ describe('I7 — 클라우드 방(space) 선택', () => {
     setInput('rtsp_url', 'rtsp://cam/1');
     setSelect('space_id', 'sp_205');
 
-    await act(async () => findButton('다음').click());
+    await act(async () => findButton('등록').click());
 
     expect(createCamera).toHaveBeenCalledWith(
       { label: '205호', rtsp_url: 'rtsp://cam/1', floor: 1, space_id: 'sp_205' },
@@ -318,7 +292,7 @@ describe('I7 — 클라우드 방(space) 선택', () => {
     setInput('label', '101호');
     setInput('rtsp_url', 'rtsp://cam/1');
 
-    await act(async () => findButton('다음').click());
+    await act(async () => findButton('등록').click());
 
     expect(createCamera).toHaveBeenCalledWith(
       { label: '101호', rtsp_url: 'rtsp://cam/1', floor: 1 },

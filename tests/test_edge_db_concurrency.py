@@ -24,7 +24,7 @@ def _hold_worker_write(database: str, channel: Connection) -> None:
     connection = open_runtime_database(Path(database), actor=RuntimeActor.API)
     try:
         connection.execute("BEGIN IMMEDIATE")
-        connection.execute("INSERT INTO runtime_contention VALUES (1, 'worker')")
+        connection.execute("UPDATE edge_site SET registry_version = 1 WHERE id = 1")
         channel.send("LOCKED")
         assert channel.recv() == "COMMIT"
         connection.commit()
@@ -39,9 +39,9 @@ def _write_api_after_barrier(database: str, channel: Connection) -> None:
     try:
         channel.send("STARTING")
         with write_transaction(connection):
-            connection.execute("INSERT INTO control_contention VALUES (1, 'api')")
+            connection.execute("UPDATE edge_site SET clip_export_enabled = 1 WHERE id = 1")
         channel.send("COMMITTED")
-    except Exception as error:  # noqa: BLE001 - process boundary returns the actual failure
+    except (sqlite3.Error, EdgeDatabaseError) as error:
         channel.send(f"ERROR:{type(error).__name__}:{error}")
     finally:
         connection.close()
@@ -49,7 +49,7 @@ def _write_api_after_barrier(database: str, channel: Connection) -> None:
 
 
 def _zero_wait_fault_write(connection: sqlite3.Connection) -> None:
-    connection.execute("INSERT INTO runtime_contention VALUES (2, 'fault')")
+    connection.execute("UPDATE edge_site SET runtime_settings_version = 2 WHERE id = 1")
 
 
 def _hold_runtime_open(database: str, actor: str, channel: Connection) -> None:
@@ -67,18 +67,10 @@ def _prepare_database(path: Path) -> None:
     migrate_database(path)
     connection = sqlite3.connect(path)
     try:
-        connection.executescript(
-            """
-            CREATE TABLE control_contention (
-                id INTEGER PRIMARY KEY,
-                value TEXT NOT NULL
-            ) STRICT;
-            CREATE TABLE runtime_contention (
-                id INTEGER PRIMARY KEY,
-                value TEXT NOT NULL
-            ) STRICT;
-            """
+        connection.execute(
+            "INSERT INTO edge_site (id,updated_at) VALUES (1,'2026-08-24T00:00:00Z')"
         )
+        connection.commit()
     finally:
         connection.close()
 
@@ -179,8 +171,9 @@ def test_two_process_api_and_worker_writes_serialize_and_keep_integrity(tmp_path
 
     connection = sqlite3.connect(database_path)
     try:
-        assert connection.execute("SELECT * FROM runtime_contention").fetchall() == [(1, "worker")]
-        assert connection.execute("SELECT * FROM control_contention").fetchall() == [(1, "api")]
+        assert connection.execute(
+            "SELECT registry_version,clip_export_enabled FROM edge_site WHERE id=1"
+        ).fetchone() == (1, 1)
         assert connection.execute("PRAGMA integrity_check").fetchone() == ("ok",)
     finally:
         connection.close()
@@ -215,7 +208,7 @@ def test_fatal_fault_best_effort_write_returns_without_waiting_for_writer(tmp_pa
     connection = sqlite3.connect(database_path)
     try:
         assert connection.execute(
-            "SELECT count(*) FROM runtime_contention WHERE id = 2"
+            "SELECT runtime_settings_version FROM edge_site WHERE id=1"
         ).fetchone() == (0,)
     finally:
         connection.close()

@@ -333,21 +333,18 @@ def test_enabled_worker_binds_the_live_view_port_and_serves_its_cameras(
     assert any(f"port={port}" in record.getMessage() for record in bound_records)
 
 
-def test_disabled_live_view_still_opens_production_derivative_control(
+def test_disabled_live_view_still_opens_clip_deletion_control(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """Disabling visual streaming does not disable derivative control.
-
-    The shared HTTP listener remains reachable for authenticated STILL/VIDEO
-    requests, while no camera is registered in the visual frame store.
-    """
+    """Disabling visual streaming does not disable authenticated clip deletion."""
     _stub_heartbeat_transport(monkeypatch)
     runtime = _runtime(_config("camera-a"), tmp_path, {})
 
     assert runtime._live_view is None  # noqa: SLF001
     assert runtime._mjpeg_config.enabled is False  # noqa: SLF001
+    assert not hasattr(runtime, "_derivative_control")
 
     with caplog.at_level("INFO", logger="worker.runtime.worker"):
         with _running(runtime, lambda: runtime._mjpeg_server is not None):  # noqa: SLF001
@@ -360,7 +357,7 @@ def test_disabled_live_view_still_opens_production_derivative_control(
 
     assert runtime._mjpeg_server is None  # noqa: SLF001
     bound_records = [
-        record for record in caplog.records if "derivative control server bound" in record.message
+        record for record in caplog.records if "clip deletion server bound" in record.message
     ]
     assert bound_records
     assert any("host=127.0.0.1" in record.getMessage() for record in bound_records)

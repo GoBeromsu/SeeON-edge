@@ -10,6 +10,7 @@ from backend.app.main import create_app, no_lifespan
 UNVERSIONED_ALLOWLIST: Final = {
     "/health/live",
     "/health/ready",
+    "/health/release-identity",
     "/openapi.json",
     "/docs",
     "/docs/oauth2-redirect",

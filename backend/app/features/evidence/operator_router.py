@@ -132,7 +132,6 @@ def _summary_response(summary: CentralEvidenceSummary) -> dict[str, object]:
         "primary_clip_id": summary.primary_clip_id,
         "primary_artifact_state": summary.primary_artifact_state,
         "snapshot_artifact_state": summary.snapshot_artifact_state,
-        "derivative_state": summary.derivative_state,
         "event_delivery_state": summary.event_delivery_state,
         "clip_publish_state": summary.clip_publish_state,
         "retention_state": summary.retention_state,

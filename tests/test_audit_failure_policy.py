@@ -250,7 +250,23 @@ def test_delete_intent_refuses_before_relay_when_audit_fails(
     with TestClient(app) as client:
         _login(client)
         healthy_store = app.state.audit_store
+        with sqlite3.connect(healthy_store.path) as connection:
+            connection.execute(
+                "INSERT INTO clips(clip_id,camera_id,event_facet,started_at,duration_ms,"
+                "codec,mime_type,manifest_relpath,media_relpath,manifest_sha256,media_sha256,"
+                "manifest_size_bytes,media_size_bytes,local_state,publish_state,published_at,"
+                "retention_state,revision,created_at,updated_at) VALUES "
+                "('clip-a','camera-a','fall','2026-05-01T00:00:00Z',1000,'h264',"
+                "'video/mp4','clips/clip-a/manifest.json','clips/clip-a/clip.mp4',?,?,1,1,"
+                "'AVAILABLE','PUBLISHED','2026-05-01T00:00:00Z','RETAINED',1,"
+                "'2026-05-01T00:00:00Z','2026-05-01T00:00:00Z')",
+                ("a" * 64, "b" * 64),
+            )
         app.state.audit_store = FailingAuditStore(healthy_store.path)
+        monkeypatch.setattr(
+            "backend.app.features.clips.router.preflight_clip_deletion",
+            lambda _request, clip_id: {"clip_id": clip_id, "status": "READY"},
+        )
 
         # When: backend-intent deletion reaches audit before relay.
         response = client.request(

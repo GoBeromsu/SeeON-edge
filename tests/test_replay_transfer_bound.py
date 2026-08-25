@@ -20,7 +20,6 @@ from typing import Any
 
 import pytest
 
-from backend.app.features.relay.router import MAX_RELAY_ANALYSIS_TRACE_BODY_BYTES
 from shared.events.replay_wire import (
     MAX_REPLAY_BODY_BYTES,
     MAX_TRACE_FRAME_BYTES,
@@ -118,7 +117,6 @@ def test_the_bound_is_derived_from_retention_not_chosen() -> None:
 def test_both_ends_read_the_same_bound() -> None:
     """A worker that sends more than the backend accepts loses the trace."""
     assert WORKER_CAP == MAX_REPLAY_BODY_BYTES
-    assert MAX_RELAY_ANALYSIS_TRACE_BODY_BYTES == MAX_REPLAY_BODY_BYTES
 
 
 @pytest.mark.parametrize("frames", [1, 100, 1_000, MAX_TRACE_FRAMES])

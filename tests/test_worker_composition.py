@@ -733,7 +733,7 @@ def test_applied_manifest_makes_the_trace_producer_live(
 
     `_runtime_manifest` was initialised to None and never assigned, so
     `_build_trace_capture` always returned None, capture and writer were never
-    composed, and `AnalysisTraceSender.send` was unreachable on a live frame.
+    composed, and local analysis-trace capture was unreachable on a live frame.
     The tables it feeds therefore stayed empty in production and the replay
     command refused forever -- a consumer wired to a producer that never ran.
     """

@@ -57,7 +57,7 @@ vendored type, and don't add a class named `DetectionResult`.
 that when you add a field. Publish packets immutable. Copy the image before
 draw or mutate.
 
-Four sinks may see pixels: model extract, derivative evidence, overlay/MJPEG,
+Four sinks may see pixels: model extract, overlay/MJPEG, and
 alert snapshot. Domains take `DecisionInput` and return `BusinessEvent`
 tuples. A detector that needs pixels is a design error. Extract the number in
 `pipeline/perception` first.

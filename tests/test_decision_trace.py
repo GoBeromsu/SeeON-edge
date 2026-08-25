@@ -5,7 +5,6 @@ from pathlib import Path
 
 import numpy as np
 
-from backend.app.edge_db.migrator import migrate_database
 from contracts.frame import Frame
 from contracts.observation import (
     BedRegionCacheState,
@@ -176,27 +175,6 @@ def _stager(database: Path) -> DurableEvidenceStager:
 def test_real_camera_pump_captures_before_emitting_the_admitted_event(
     tmp_path: Path,
 ) -> None:
-    database = tmp_path / "edge.sqlite3"
-    migrate_database(database)
-    import sqlite3
-
-    connection = sqlite3.connect(database)
-    try:
-        connection.execute(
-            "INSERT INTO runtime_manifest_contents VALUES (?, 1, '{}', ?)",
-            (RUNTIME_MANIFEST_SHA256, "2026-08-13T00:00:00Z"),
-        )
-        connection.execute(
-            "INSERT INTO runtime_manifest_boots VALUES ('boot-a', ?, ?)",
-            (RUNTIME_MANIFEST_SHA256, "2026-08-13T00:00:00Z"),
-        )
-        connection.execute(
-            "INSERT INTO runtime_manifest_cameras VALUES ('boot-a', 'camera-a', ?, ?)",
-            (RUNTIME_MANIFEST_SHA256, "2026-08-13T00:00:00Z"),
-        )
-        connection.commit()
-    finally:
-        connection.close()
     detector = FallEventLatch(
         _FallModel(), camera_id="camera-a", facility_id="facility-a", operating_threshold=0.7
     )
@@ -222,7 +200,7 @@ def test_real_camera_pump_captures_before_emitting_the_admitted_event(
             del timeout_sec
             return None
 
-    writer = BoundedTraceWriter(database, TraceRetentionPolicy.testing())
+    writer = BoundedTraceWriter(tmp_path / "detail-cache", TraceRetentionPolicy.testing())
     writer.start()
     sink = _Sink()
     pump = CameraPipelinePump(

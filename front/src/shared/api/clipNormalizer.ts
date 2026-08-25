@@ -10,6 +10,13 @@ import {
   pickString,
 } from '@/shared/api/normalizerFields';
 import { toEventFacet } from '@/shared/api/clipEventFacet';
+import {
+  compareClipKeysDescending,
+  decodeClipCursor,
+  encodeClipCursor,
+  isAfterClipCursor,
+  type ClipCursorKey,
+} from '@/shared/api/clipCursor';
 import type { ClipPage, ClipPageQuery, ClipPagination } from '@/shared/api/clipPaginationTypes';
 import type { Clip } from '@/shared/api/types';
 
@@ -74,33 +81,50 @@ export function normalizeClipPageResponse(value: unknown, query: ClipPageQuery):
   const filtered = query.eventType
     ? cameraClips.filter((clip) => clip.event_type === query.eventType)
     : cameraClips;
-  const pageClips = filtered.slice(query.offset, query.offset + query.limit);
+  // Page a whole-list body with the backend's own keyset order so equal timestamps resolve on the
+  // clip-id tiebreak instead of a positional offset that shifts under concurrent retention.
+  const ordered = [...filtered].sort((left, right) => compareClipKeysDescending(clipKey(left), clipKey(right)));
+  const boundary = query.cursor ? decodeClipCursor(query.cursor) : null;
+  if (query.cursor !== undefined && boundary === null) throw new Error('Invalid clips cursor');
+  const remaining = boundary === null
+    ? ordered
+    : ordered.filter((clip) => isAfterClipCursor(clipKey(clip), boundary));
+  const pageClips = remaining.slice(0, query.limit);
+  const hasMore = remaining.length > pageClips.length;
+  const lastClip = pageClips.at(-1);
   return {
     clips: pageClips,
     pagination: {
       limit: query.limit,
-      offset: query.offset,
       total: filtered.length,
-      has_more: query.offset + pageClips.length < filtered.length,
+      has_more: hasMore,
+      next_cursor: hasMore && lastClip ? encodeClipCursor(clipKey(lastClip)) : null,
     },
     event_type_counts: eventTypeCounts,
     complete_clips: clips,
   };
 }
 
+function clipKey(clip: Clip): ClipCursorKey {
+  return { startedAt: clip.created_at ?? '', clipId: clip.id };
+}
+
 function normalizePagination(value: unknown): ClipPagination {
   if (!isRecord(value)
     || !isPositiveInteger(value.limit)
-    || !isNonNegativeInteger(value.offset)
     || !isNonNegativeInteger(value.total)
-    || typeof value.has_more !== 'boolean') {
+    || typeof value.has_more !== 'boolean'
+    || !(value.next_cursor === null || value.next_cursor === undefined || isNonEmptyString(value.next_cursor))) {
     throw new Error('Invalid clips pagination response');
   }
+  // A page that reports more rows without a cursor cannot be advanced; treat it as the last page
+  // rather than silently re-requesting the same keyset boundary.
+  const nextCursor = typeof value.next_cursor === 'string' ? value.next_cursor : null;
   return {
     limit: value.limit,
-    offset: value.offset,
     total: value.total,
-    has_more: value.has_more,
+    has_more: value.has_more && nextCursor !== null,
+    next_cursor: nextCursor,
   };
 }
 
