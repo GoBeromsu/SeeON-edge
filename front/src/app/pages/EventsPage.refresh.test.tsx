@@ -7,6 +7,7 @@ import {
   clipRequestUrls,
   flush,
   installFetchMock,
+  keysetBody,
   renderPage,
   resetLocation,
 } from '@/app/pages/EventsPage.testSupport';
@@ -31,12 +32,8 @@ function jsonResponse(body: unknown) {
   return { ok: true, status: 200, json: async () => body };
 }
 
-function pagedResponse(clips: readonly Record<string, unknown>[], offset: number, total: number) {
-  return jsonResponse({
-    clips,
-    pagination: { limit: 48, offset, total, has_more: offset + clips.length < total },
-    event_type_counts: { fall: total },
-  });
+function pagedResponse(clips: readonly Record<string, unknown>[], cursor: string | null = null) {
+  return jsonResponse(keysetBody(clips, 48, cursor, { fall: clips.length }));
 }
 
 afterEach(() => {
@@ -48,26 +45,29 @@ afterEach(() => {
 });
 
 describe('EventsPage refresh state', () => {
-  it('falls back to page zero when retention invalidates both the target and reported last page', async () => {
+  it('restores the newest page when the retained cursor now points past every surviving clip', async () => {
     resetLocation();
     const initialClips = Array.from({ length: 97 }, (_, index) => clipManifest({
-      clip_id: `clip-${index + 1}`,
+      clip_id: `clip-${String(index + 1).padStart(3, '0')}`,
       event_ref: `event-${index + 1}`,
+      started_at: `2026-08-${String(1 + Math.floor(index / 24)).padStart(2, '0')}T${String(index % 24).padStart(2, '0')}:00:00Z`,
     }));
     const fetchMock = installFetchMock(initialClips);
     const { host } = await renderPage();
-    const pageThree = host.querySelector('button[aria-label="3페이지"]') as HTMLButtonElement;
-    act(() => pageThree.click());
+    act(() => (host.querySelector('button[aria-label="다음 페이지"]') as HTMLButtonElement).click());
     await flush();
+    expect(host.querySelector('[data-testid="events-page-range"]')?.textContent).toContain('2 페이지');
 
-    const survivingClips = initialClips.slice(0, 10);
+    // Retention keeps only the 10 newest clips, so the retained cursor selects an empty page.
+    const survivingClips = [...initialClips]
+      .sort((left, right) => String(left.started_at) < String(right.started_at) ? 1 : -1)
+      .slice(0, 10);
     fetchMock.mockImplementation((input: RequestInfo | URL) => {
       const url = String(input);
       if (url.includes('/cameras')) return Promise.resolve(jsonResponse(cameraRegistry));
-      const offset = Number(new URL(url, 'http://localhost').searchParams.get('offset'));
-      if (offset === 96) return Promise.resolve(pagedResponse([], 96, 60));
-      if (offset === 48) return Promise.resolve(pagedResponse([], 48, 10));
-      return Promise.resolve(pagedResponse(survivingClips, 0, 10));
+      if (url.includes('/incidents')) return Promise.resolve(jsonResponse({ incidents: [] }));
+      const cursor = new URL(url, 'http://localhost').searchParams.get('cursor');
+      return Promise.resolve(pagedResponse(survivingClips, cursor));
     });
 
     const refresh = host.querySelector('button[aria-label="현재 페이지 새로 고침"]') as HTMLButtonElement;
@@ -75,13 +75,11 @@ describe('EventsPage refresh state', () => {
     await flush();
     await flush();
 
-    expect(clipRequestUrls(fetchMock).slice(-3)).toEqual([
-      '/api/v1/clips?limit=48&offset=96',
-      '/api/v1/clips?limit=48&offset=48',
-      '/api/v1/clips?limit=48&offset=0',
-    ]);
+    const requests = clipRequestUrls(fetchMock).slice(-2);
+    expect(requests[0]).toContain('cursor=');
+    expect(requests[1]).toBe('/api/v1/clips?limit=48');
     expect(host.querySelectorAll('button.rounded-card')).toHaveLength(10);
-    expect(host.querySelector('[aria-current="page"]')).toBeNull();
+    expect(host.querySelector('nav[aria-label="이벤트 페이지"]')).toBeNull();
   });
 
   it('shows last success and background refreshing while page one polls', async () => {
@@ -99,7 +97,7 @@ describe('EventsPage refresh state', () => {
       if (url.includes('/cameras')) return Promise.resolve(jsonResponse(cameraRegistry));
       if (url.includes('/incidents')) return Promise.resolve(jsonResponse({ incidents: [] }));
       clipsCallCount += 1;
-      if (clipsCallCount === 1) return Promise.resolve(pagedResponse(clips, 0, clips.length));
+      if (clipsCallCount === 1) return Promise.resolve(pagedResponse(clips));
       return poll.promise;
     });
     vi.stubGlobal('fetch', fetchMock);
@@ -128,7 +126,7 @@ describe('EventsPage refresh state', () => {
       if (url.includes('/cameras')) return Promise.resolve(jsonResponse(cameraRegistry));
       if (url.includes('/incidents')) return Promise.resolve(jsonResponse({ incidents: [] }));
       clipsCallCount += 1;
-      if (clipsCallCount === 1) return Promise.resolve(pagedResponse(clips, 0, clips.length));
+      if (clipsCallCount === 1) return Promise.resolve(pagedResponse(clips));
       return clipsCallCount === 2 ? failedPoll.promise : retry.promise;
     });
     vi.stubGlobal('fetch', fetchMock);
@@ -159,7 +157,7 @@ describe('EventsPage refresh state', () => {
     expect(host.querySelectorAll('button.rounded-card')).toHaveLength(48);
 
     await act(async () => {
-      retry.resolve(pagedResponse(clips, 0, clips.length));
+      retry.resolve(pagedResponse(clips));
       await Promise.resolve();
     });
     await flush();

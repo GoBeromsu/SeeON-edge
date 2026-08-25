@@ -378,20 +378,20 @@ export type DetectionPolicyCatalog = {
 
 /** GET /clips/storage — usage + current selection under the CLIP_STORE_DIR mount root. */
 export type IncidentReview = { version: number; disposition: 'TRUE_POSITIVE' | 'FALSE_POSITIVE'; reviewed_at: string; notes: string | null };
-export type Incident = { incident_id: string; edge_event_id: string; camera_id: string; event_type: string; detected_at: string; lifecycle_state: string; revision: number; failure_reason: string | null; runtime_manifest_sha256: string | null; decision_trace_id: string | null; module_qualified_id: string | null; policy_qualified_id: string | null; primary_clip_id: string | null; primary_artifact_state: string | null; snapshot_artifact_state: string | null; derivative_state: string | null; event_delivery_state: string; clip_publish_state: string | null; retention_state: string | null; review: IncidentReview | null };
+export type Incident = { incident_id: string; edge_event_id: string; camera_id: string; event_type: string; detected_at: string; lifecycle_state: string; revision: number; failure_reason: string | null; runtime_manifest_sha256: string | null; decision_trace_id: string | null; module_qualified_id: string | null; policy_qualified_id: string | null; primary_clip_id: string | null; primary_artifact_state: string | null; snapshot_artifact_state: string | null; event_delivery_state: string; clip_publish_state: string | null; retention_state: string | null; review: IncidentReview | null };
 export type IncidentListPage = {
   incidents: Incident[];
   pagination: { limit: number; next_cursor: string | null; has_more: boolean };
 };
 
-export type ArtifactState = 'AVAILABLE' | 'UNAVAILABLE' | 'MISSING' | 'CORRUPT' | 'TRUNCATED' | 'QUEUED' | 'RUNNING' | 'CANCELLED' | 'NOT_REQUESTED';
+/** `GET /clips/{clip_id}/artifacts` clean-media state; the backend emits only these two values. */
+export type CleanArtifactState = 'AVAILABLE' | 'UNAVAILABLE';
+export type SnapshotArtifactState = 'PENDING' | 'AVAILABLE' | 'UNAVAILABLE' | 'CORRUPT' | 'PURGED';
 
 /** GET/PUT status for `DELETE /clips/{clip_id}` -- always the truthful worker-owned retention outcome, never a bare ack. */
 export type ClipDeleteStatus = 'PURGED' | 'HELD' | 'MISSING' | 'UNVERIFIABLE' | 'DELETE_FAILED' | 'VERIFICATION_FAILED';
 export type ClipDeleteResult = { clip_id: string; status: ClipDeleteStatus };
-export type ClipArtifacts = { clip_id: string; clean: ArtifactState; analysis: ArtifactState; annotated: ArtifactState; playback_view: 'clean' | 'annotated'; annotated_fallback_to_clean: boolean };
-export type ClipDerivative = { incident_id: string; kind: 'STILL' | 'VIDEO'; request_id: string; state: ArtifactState; reason: string | null; attempt_count: number; render_backend: string | null; primary_clip_id: string | null; decision_trace_id: string | null; runtime_manifest_sha256: string | null };
-export type ClipAnalysis = { clip_id: string; decision_trace_id: string; module_qualified_id: string; policy_qualified_id: string; effective_policy_id: string; runtime_manifest_sha256: string; reason: string; previous_state: string; current_state: string; triggered: boolean; track_id: number | null; bed_id: number | null; values: Array<{ name: string; value: number | null; missing_reason: string | null }> };
+export type ClipArtifacts = { clip_id: string; clean: CleanArtifactState; snapshot: SnapshotArtifactState | null };
 
 export type ClipStorageInfo = {
   /** Stable non-filesystem label for the configured mount (never an absolute host path). */

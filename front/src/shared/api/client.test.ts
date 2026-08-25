@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { bedZoneRecognitionFailureDetail, browseClipStorage, cameraDuplicateDetail, cameraProbeFailureDetail, createCamera, deleteClip, fetchCameraOverlay, fetchCameras, fetchClips, fetchClipStorage, fetchDetectionSettings, fetchRuntimeSettings, fetchStatus, fetchSystem, getApiBase, getCameraSnapshotUrl, getCameraStreamUrl, loginDashboard, logoutDashboard, recognizeBedZone, saveClipStorageLocation, saveConnection, saveDetectionSettings, saveRuntimeSettings, setCameraOverlay, testCamera, testConnection, updateCamera, updateCameraDecodeBackend } from '@/shared/api/client';
+import * as clientModule from '@/shared/api/client';
+import { bedZoneRecognitionFailureDetail, browseClipStorage, cameraDuplicateDetail, cameraProbeFailureDetail, createCamera, deleteClip, fetchCameraOverlay, fetchCameras, fetchClipArtifacts, fetchClips, fetchClipStorage, fetchDetectionSettings, fetchRuntimeSettings, fetchStatus, fetchSystem, getApiBase, getCameraSnapshotUrl, getCameraStreamUrl, loginDashboard, logoutDashboard, recognizeBedZone, saveClipStorageLocation, saveConnection, saveDetectionSettings, saveRuntimeSettings, setCameraOverlay, testCamera, testConnection, updateCamera, updateCameraDecodeBackend } from '@/shared/api/client';
 import { HttpError } from '@/shared/api/http';
 import type { DetectionSettings } from '@/shared/api/client';
 
@@ -499,5 +500,52 @@ describe('api client contracts', () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => ({ selected_path: '' }) }));
 
     await expect(fetchClipStorage()).rejects.toThrow('Invalid clip storage response');
+  });
+
+  it.each([
+    ['fetchClipAnalysis'],
+    ['controlClipDerivative'],
+    ['requestClipDerivative'],
+    ['setClipLabel'],
+  ])('exports no retired %s client', (name) => {
+    expect(Object.keys(clientModule)).not.toContain(name);
+  });
+
+  it('reads the slimmed clip artifacts contract', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ clip_id: 'clip/1', clean: 'AVAILABLE', snapshot: 'PENDING' }),
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(fetchClipArtifacts('clip/1')).resolves.toEqual({
+      clip_id: 'clip/1', clean: 'AVAILABLE', snapshot: 'PENDING',
+    });
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/v1/clips/clip%2F1/artifacts',
+      expect.objectContaining({ credentials: 'same-origin' }),
+    );
+  });
+
+  it('defaults an omitted snapshot artifact to null instead of inventing a state', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true, status: 200, json: async () => ({ clip_id: 'clip-1', clean: 'UNAVAILABLE' }),
+    }));
+
+    await expect(fetchClipArtifacts('clip-1')).resolves.toEqual({
+      clip_id: 'clip-1', clean: 'UNAVAILABLE', snapshot: null,
+    });
+  });
+
+  it.each([
+    [{ clip_id: 'clip-1', clean: 'CORRUPT' }],
+    [{ clip_id: 'clip-1', clean: 'AVAILABLE', analysis: 'AVAILABLE', annotated: 'UNAVAILABLE', playback_view: 'annotated' }],
+    [{ clip_id: '', clean: 'AVAILABLE' }],
+    [{ clean: 'AVAILABLE' }],
+  ])('rejects a retired or contract-invalid clip artifacts response %#', async (payload) => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => payload }));
+
+    await expect(fetchClipArtifacts('clip-1')).rejects.toThrow('Invalid clip artifacts response');
   });
 });
