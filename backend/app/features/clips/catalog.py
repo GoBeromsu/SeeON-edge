@@ -891,17 +891,10 @@ class CatalogStore:
         clip_store: Any,
         camera_registry: Any | None = None,
         audit_log: Any | None = None,
-        label_store: Any | None = None,
     ) -> None:
         with self._serialized_operation():
             for record in strict_manifest_records(clip_store):
                 self._record_unlocked("clips", record.manifest.clip_id, record.payload)
-                if label_store is not None:
-                    label = label_store.get(record.manifest.clip_id)
-                    if label is not None:
-                        self._record_unlocked(
-                            "labels", record.manifest.clip_id, label.as_response()
-                        )
             if camera_registry is not None:
                 for camera in camera_registry.snapshot().get("cameras", []):
                     if (

@@ -12,7 +12,7 @@ from backend.app.features.clips.catalog import (
     sanitized_camera_payload,
     strict_camera_snapshot,
 )
-from backend.app.features.clips.store import ClipStore, LabelStore
+from backend.app.features.clips.store import ClipStore
 from backend.app.shared.state_dir import resolve_state_dir
 
 parser = argparse.ArgumentParser()
@@ -23,7 +23,6 @@ parser.add_argument(
 )
 parser.add_argument("--clip-store", type=Path, required=True)
 parser.add_argument("--audit", type=Path)
-parser.add_argument("--labels", type=Path)
 parser.add_argument(
     "--cameras",
     type=Path,
@@ -36,7 +35,6 @@ try:
     store.backfill(
         ClipStore(args.clip_store),
         audit_log=AuditLogStore(args.audit) if args.audit else None,
-        label_store=LabelStore(args.labels) if args.labels else None,
     )
     if camera_snapshot is not None:
         for camera in camera_snapshot["cameras"]:

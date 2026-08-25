@@ -63,93 +63,22 @@ class ClipListQuery(BaseModel):
         return self
 
 
-class LabelClipRequest(BaseModel):
-    model_config: ClassVar[ConfigDict] = ConfigDict(extra="forbid")
-
-    label: Literal["TRUE_POSITIVE", "FALSE_POSITIVE"] | None
-    reviewer: str | None = Field(default=None, min_length=1)
-
-
-class LabelClipResponse(BaseModel):
-    model_config: ClassVar[ConfigDict] = ConfigDict(extra="forbid")
-
-    clip_id: str = Field(min_length=1)
-    label: Literal["TRUE_POSITIVE", "FALSE_POSITIVE"] | None
-    reviewer: str = Field(min_length=1)
-    reviewed_at: str = Field(min_length=1)
-
-
-ArtifactState = Literal[
+CleanArtifactState = Literal["AVAILABLE", "UNAVAILABLE"]
+SnapshotArtifactState = Literal[
     "PENDING",
-    "RUNNING",
     "AVAILABLE",
     "UNAVAILABLE",
     "CORRUPT",
-    "CANCELLED",
-    "NOT_REQUESTED",
+    "PURGED",
 ]
-DerivativeKind = Literal["STILL", "VIDEO"]
-
-
-class ClipDerivativeResponse(BaseModel):
-    model_config: ClassVar[ConfigDict] = ConfigDict(extra="forbid")
-
-    incident_id: str = Field(min_length=1)
-    kind: DerivativeKind
-    request_id: str = Field(min_length=64, max_length=64)
-    state: ArtifactState
-    reason: str | None
-    attempt_count: int = Field(ge=0)
-    mime_type: Literal["image/jpeg", "video/mp4"] | None = None
-    sha256: str | None = Field(default=None, min_length=64, max_length=64)
-    size_bytes: int | None = Field(default=None, gt=0)
-    width: int | None = Field(default=None, gt=0)
-    height: int | None = Field(default=None, gt=0)
-    start_time_ms: int | None = Field(default=None, ge=0)
-    end_time_ms: int | None = Field(default=None, ge=0)
-    render_backend: str | None = Field(default=None, min_length=1)
-    render_version: str | None = Field(default=None, min_length=1)
-    scene_id: str | None = Field(default=None, min_length=64, max_length=64)
-    primary_clip_id: str | None = Field(default=None, min_length=1)
-    decision_trace_id: str | None = Field(default=None, min_length=64, max_length=64)
-    runtime_manifest_sha256: str | None = Field(default=None, min_length=64, max_length=64)
 
 
 class ClipArtifactViewsResponse(BaseModel):
     model_config: ClassVar[ConfigDict] = ConfigDict(extra="forbid")
 
     clip_id: str = Field(min_length=1)
-    clean: ArtifactState
-    analysis: ArtifactState
-    annotated: ArtifactState
-    playback_view: Literal["clean", "annotated"]
-    annotated_fallback_to_clean: bool
-
-
-class ClipAnalysisValueResponse(BaseModel):
-    model_config: ClassVar[ConfigDict] = ConfigDict(extra="forbid")
-
-    name: str = Field(min_length=1)
-    value: float | None
-    missing_reason: str | None
-
-
-class ClipAnalysisResponse(BaseModel):
-    model_config: ClassVar[ConfigDict] = ConfigDict(extra="forbid")
-
-    clip_id: str = Field(min_length=1)
-    decision_trace_id: str = Field(min_length=64, max_length=64)
-    module_qualified_id: str = Field(min_length=1)
-    policy_qualified_id: str = Field(min_length=1)
-    effective_policy_id: str = Field(min_length=64, max_length=64)
-    runtime_manifest_sha256: str = Field(min_length=64, max_length=64)
-    reason: str = Field(min_length=1)
-    previous_state: str = Field(min_length=1)
-    current_state: str = Field(min_length=1)
-    triggered: bool
-    track_id: int | None
-    bed_id: int | None
-    values: list[ClipAnalysisValueResponse]
+    clean: CleanArtifactState
+    snapshot: SnapshotArtifactState | None = None
 
 
 class AuditResponse(BaseModel):

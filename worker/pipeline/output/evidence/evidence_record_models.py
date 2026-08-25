@@ -9,7 +9,6 @@ class EvidenceLifecycle(StrEnum):
     STAGING = "STAGING"
     MEDIA_READY = "MEDIA_READY"
     PUBLISHED = "PUBLISHED"
-    DERIVATIVE_PENDING = "DERIVATIVE_PENDING"
     COMPLETE = "COMPLETE"
     FAILED = "FAILED"
 
@@ -61,7 +60,6 @@ class EvidenceRecord:
     failure_reason: str | None
     primary_state: ArtifactState
     snapshot_state: ArtifactState
-    derivative_state: ArtifactState | None
     event_delivery_state: str
     event_attempt_count: int
     clip_publish_state: str | None

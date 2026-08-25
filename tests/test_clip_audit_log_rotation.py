@@ -98,7 +98,7 @@ def test_rotation_is_a_no_op_when_the_live_file_does_not_exist_yet(tmp_path) -> 
 def test_append_degrades_gracefully_and_logs_when_the_log_is_unwritable(
     tmp_path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """Issue #152: ``list_clips``/``clip_video``/``label_clip`` all call
+    """Issue #152: ``list_clips``/``clip_video`` all call
     ``append()`` after their own primary action already succeeded (or, for
     ``list_clips``, as the *only* side effect of a pure read) -- an unwritable
     audit log must never turn any of those into a 500. The failure must still

@@ -98,7 +98,7 @@ class AuditLogStore:
         crashing a write action (``label``) *after* its primary write already
         landed durably would misreport a save that actually succeeded as a
         failed request. So an unwritable audit log degrades the same way
-        ``LabelStore.save`` and ``RuntimeStatusStore`` already do: logged, not
+        ``RuntimeStatusStore`` already does: logged, not
         raised. The best-effort backend backup below still runs regardless,
         giving the entry a second (remote) chance to land even when the local
         write failed.

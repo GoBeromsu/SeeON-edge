@@ -68,7 +68,7 @@ class CudaOverlaySceneRenderer:
     ``worker.pipeline.output.overlay.OverlayRenderer`` does for CPU, so a
     derivative artifact's ``render_backend``/``render_device``/
     ``input_memory_kind`` fields
-    (``worker.pipeline.output.annotated_derivative.DerivativeArtifact``)
+    (a published media artifact)
     truthfully distinguish which renderer actually produced a given
     annotated derivative.
     """
