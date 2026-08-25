@@ -65,6 +65,31 @@ describe('ClipPlaybackModal', () => {
     expect(HTMLMediaElement.prototype.play).toHaveBeenCalledOnce();
   });
 
+  it('plays the clean media URL and never requests a retired analysis or derivative route', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true, status: 200, json: async () => ({ clip_id: 'clip-1', clean: 'AVAILABLE', snapshot: null }),
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    render(baseClip);
+    await act(async () => Promise.resolve());
+
+    const requested = fetchMock.mock.calls.map(([input]) => String(input));
+    expect(requested).toEqual(['/api/v1/clips/clip-1/artifacts']);
+    expect(dialog().querySelector('video')?.getAttribute('src')).toBe('/api/v1/clips/clip-1/video');
+    vi.unstubAllGlobals();
+  });
+
+  it('renders no retired analysis, annotated, or derivative control', async () => {
+    render(baseClip);
+    await act(async () => Promise.resolve());
+
+    expect(dialog().querySelector('[aria-label="증거 보기 선택"]')).toBeNull();
+    expect(dialog().querySelector('[aria-label="파생 증거 제어"]')).toBeNull();
+    expect(dialog().querySelector('[aria-label="적용 실행 증명"]')).toBeNull();
+    expect(dialog().querySelectorAll('[aria-pressed]')).toHaveLength(0);
+  });
+
   it('keeps native controls and explains how to continue when autoplay is rejected', async () => {
     vi.mocked(HTMLMediaElement.prototype.play).mockRejectedValueOnce(new DOMException('blocked', 'NotAllowedError'));
 

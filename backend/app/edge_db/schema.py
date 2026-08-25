@@ -11,7 +11,11 @@ from dataclasses import dataclass
 from typing import Final
 
 from backend.app.edge_db.application_schema import APPLICATION_SCHEMA_STATEMENTS
-from backend.app.edge_db.compact_schema import SCHEMA17_RETIRED_TABLES, SCHEMA_V18_STATEMENTS
+from backend.app.edge_db.compact_schema import (
+    SCHEMA17_RETIRED_TABLES,
+    SCHEMA_MIGRATIONS_LEDGER_TABLE_SQL,
+    SCHEMA_V18_STATEMENTS,
+)
 from backend.app.edge_db.evidence_backfill import EVIDENCE_BACKFILL_STATEMENTS
 from backend.app.edge_db.review_migration import LEGACY_LABEL_MIGRATION_STATEMENTS
 
@@ -98,14 +102,7 @@ SCHEMA_V1 = Migration(
             value TEXT NOT NULL
         ) STRICT
         """,
-        """
-        CREATE TABLE schema_migrations (
-            version INTEGER PRIMARY KEY CHECK (version > 0),
-            name TEXT NOT NULL UNIQUE,
-            checksum TEXT NOT NULL CHECK (length(checksum) = 64),
-            applied_at TEXT NOT NULL
-        ) STRICT
-        """,
+        SCHEMA_MIGRATIONS_LEDGER_TABLE_SQL,
         """
         CREATE TABLE schema_table_families (
             prefix TEXT PRIMARY KEY CHECK (prefix GLOB '*_'),

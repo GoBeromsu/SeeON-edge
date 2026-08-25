@@ -1,6 +1,6 @@
 # 0004 — Camera Roster Sync Contract Assumptions
 
-- Status: Accepted
+- Status: **Superseded for the mapper push path.** Roster publication is a `TopologyClient` snapshot, not `BackendCameraMapper.put_roster` / `from_env()`. Keep this ADR as the historical contract investigation.
 - Date: 2026-08-02
 - Relates to: story G004 (camera roster sync), `backend/app/shared/backend_mapping.py`,
   `backend/app/features/cameras/roster_sync.py`, `backend/app/features/connection/store.py`.

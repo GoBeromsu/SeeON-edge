@@ -2,7 +2,7 @@
 
 Vertical cut: one capability, one package. Router and store live together.
 Sibling `*_router.py` files stay in that package. `create_app` is the only
-mounter. `qa/` is store-only until a router lands here.
+mounter. `qa/` is retired and is not a runtime owner.
 ## Layout
 
 Export `router`. End the router module with `__all__` that includes it.
@@ -10,9 +10,9 @@ Do not `include_router` a sibling slice from inside this tree.
 Owner constructs (`from_env()` or lifespan) and exposes a getter that
 writes `app.state` once. Dependents call the getter. They never
 `from_env()` a second copy of someone else's store.
-Lifespan pre-builds `camera_registry`, `heartbeat_store`,
-`runtime_status_store` and starts `maintain_clip_listing`. Other stores
-may lazy-open so `no_lifespan` tests still boot. Catalog is optional:
+Lifespan pre-builds `camera_registry`, in-memory `heartbeat_store`, and
+`runtime_status_store`. Clip listing is compact-authority on request. Other
+stores may lazy-open so `no_lifespan` tests still boot. Catalog is optional:
 `get_catalog_store` returns `None` and sets `catalog_error` when the file
 cannot open. Relay still accepts the alert.
 ## Cross-slice graph
@@ -48,11 +48,11 @@ and return 409 with the current row. Dashboard routes call
 `authorize_dashboard`. Worker routes call `relay.auth.authorize_relay`.
 New slices do not borrow `cameras.router._authorize`. Body caps stay on
 relay `BoundedBodyRoute`; add a suffix entry, do not copy the class.
-API actor writes `control_*` and `qa_*` only. Never INSERT `runtime_*`,
-`evidence_*`, or `derivative_*`. `QaStore` opens as `RuntimeActor.API` and
-never imports worker replay. Auth has no SQLite row; sessions live in
-`shared/dashboard_auth.py`. Incomplete enrollment deletes ingest, evidence,
-and mapper attrs and sets `backend_configured=False`. Handlers do not
+API actor writes only the compact application tables. Never INSERT retired
+`control_*`, `qa_*`, `runtime_*`, `evidence_*`, or `derivative_*` families.
+Auth has no SQLite row; sessions live in
+`shared/dashboard_auth.py`. Incomplete enrollment deletes ingest and evidence
+attrs and sets `backend_configured=False`. Handlers do not
 build `EdgeIngestClient`. Drive the slice through
 `create_app(lifespan=no_lifespan)` plus an injected store, or full lifespan
 when listing or refresh is the subject. Slice tests: `tests/test_api_*.py`,
@@ -66,5 +66,5 @@ top-level folder for the same capability. Operator UX growing inside
 local registry id on a Hub-bound payload. Worker-config keeps unmapped cameras
 and uses `backend_camera_id` or the local id so ingestion never stops. Raw path joins into the clip store (use
 `clips/descriptor_files.py` or evidence `_verified_media`, O_NOFOLLOW).
-Teaching `qa/` HTTP from `create_app` without adding the router here.
+Teaching retired QA HTTP from `create_app`.
 Polling `edge.sqlite3` for worker progress; HTTP relay is the signal.

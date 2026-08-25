@@ -5,8 +5,10 @@ from __future__ import annotations
 import hmac
 import os
 import secrets
+import sqlite3
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Protocol
 
@@ -51,7 +53,8 @@ def _compare_str(candidate: str, expected: str) -> bool:
 class DashboardCredentials(Protocol):
     """Something that knows one dashboard username and can verify a login."""
 
-    username: str
+    @property
+    def username(self) -> str: ...
 
     def verify(self, username: str, password: str) -> bool: ...
 
@@ -211,6 +214,7 @@ def rotate_dashboard_credentials(
     *,
     new_username: str | None,
     new_password: str,
+    after_write: Callable[[sqlite3.Connection], None] | None = None,
 ) -> str:
     """Persist the new credentials, revoke every existing session, and return
     a fresh session token for the caller (so the PUT response can carry a
@@ -230,7 +234,9 @@ def rotate_dashboard_credentials(
 
     with _SESSION_STORE_INIT_LOCK:
         resolved_username = (new_username or "").strip() or sessions.username
-        persisted = store.save(username=resolved_username, password=new_password)
+        persisted = store.save(
+            username=resolved_username, password=new_password, after_write=after_write
+        )
 
         sessions.rotate_credentials(persisted)
 

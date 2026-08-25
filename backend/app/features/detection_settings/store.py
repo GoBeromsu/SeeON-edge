@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import sqlite3
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Lock
@@ -57,7 +59,12 @@ class DetectionSettingsStore:
                 )
         return result
 
-    def replace_all(self, settings: dict[str, DomainDetectionSetting]) -> None:
+    def replace_all(
+        self,
+        settings: dict[str, DomainDetectionSetting],
+        *,
+        after_write: Callable[[sqlite3.Connection], None] | None = None,
+    ) -> None:
         _require_known_domains(settings)
         with self._lock:
             self._connection.execute("BEGIN IMMEDIATE")
@@ -69,6 +76,8 @@ class DetectionSettingsStore:
                         f"{domain}_start_time=?,{domain}_end_time=?,updated_at=? WHERE id=1",
                         (int(setting.on), setting.mode, setting.start, setting.end, utc_now()),
                     )
+                if after_write is not None:
+                    after_write(self._connection)
                 self._connection.execute("COMMIT")
             except BaseException:
                 self._connection.execute("ROLLBACK")

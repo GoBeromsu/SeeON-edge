@@ -5,7 +5,8 @@ from __future__ import annotations
 import os
 import shutil
 import stat
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Generator, Iterable
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
@@ -89,10 +90,14 @@ class EvidenceRetention:
     def is_held(self, clip_id: str) -> bool:
         return self._is_held(clip_id)
 
-    def purge(self, candidate: PurgeCandidate) -> PurgeResult:
+    def preflight(self, candidate: PurgeCandidate) -> PurgeResult | None:
+        """Verify hold, ownership, containment, and immutable media without deleting."""
         if self._is_held(candidate.clip_id):
             return PurgeResult.HELD
-        verification = self._verify_candidate(candidate)
+        return self._verify_candidate(candidate)
+
+    def purge(self, candidate: PurgeCandidate) -> PurgeResult:
+        verification = self.preflight(candidate)
         if verification is not None:
             return verification
         if self._begin_purge is not None:
@@ -102,16 +107,28 @@ class EvidenceRetention:
             except Exception:  # noqa: BLE001 - retention must fail closed at the DB boundary
                 return PurgeResult.VERIFICATION_FAILED
         try:
-            shutil.rmtree(candidate.clip_dir)
+            # Open and verify again after the intent hook, then remove only by
+            # the verified clips-root descriptor. A preflight is intentionally
+            # non-authoritative: a root can be replaced between commands.
+            with self._opened_verified_candidate(candidate) as clips_directory:
+                shutil.rmtree(candidate.clip_id, dir_fd=clips_directory)
+                try:
+                    os.stat(
+                        candidate.clip_id,
+                        dir_fd=clips_directory,
+                        follow_symlinks=False,
+                    )
+                except FileNotFoundError:
+                    pass
+                else:
+                    self._record_failure(candidate.clip_id, "DELETE_NOT_DURABLE")
+                    return PurgeResult.VERIFICATION_FAILED
         except FileNotFoundError:
             self._record_failure(candidate.clip_id, "MISSING_DURING_DELETE")
             return PurgeResult.MISSING
-        except OSError:
+        except (OSError, ValueError):
             self._record_failure(candidate.clip_id, "DELETE_FAILED")
             return PurgeResult.DELETE_FAILED
-        if os.path.lexists(candidate.clip_dir):
-            self._record_failure(candidate.clip_id, "DELETE_NOT_DURABLE")
-            return PurgeResult.VERIFICATION_FAILED
         if self._complete_purge is not None:
             try:
                 self._complete_purge(candidate.clip_id)
@@ -177,55 +194,117 @@ class EvidenceRetention:
         return usage.total > 0 and usage.used / usage.total > high_watermark
 
     def _verify_candidate(self, candidate: PurgeCandidate) -> PurgeResult | None:
+        try:
+            with self._opened_verified_candidate(candidate):
+                return None
+        except _CandidateMissing:
+            return PurgeResult.MISSING
+        except (FileNotFoundError, OSError, ValidationError, ValueError):
+            return PurgeResult.UNVERIFIABLE
+
+    @contextmanager
+    def _opened_verified_candidate(self, candidate: PurgeCandidate) -> Generator[int, None, None]:
+        """Yield a no-symlink clips-root descriptor after complete verification.
+
+        Every path component is opened relative to an already verified parent
+        with ``O_NOFOLLOW``. The destructive caller retains the clips descriptor
+        so it never resolves the attacker-controlled pathname again.
+        """
         expected = self._clips_dir / candidate.clip_id
         if candidate.clip_dir != expected or candidate.clip_id in {"", ".", ".."}:
-            return PurgeResult.UNVERIFIABLE
+            raise ValueError("clip candidate escapes governed root")
         try:
-            directory_stat = candidate.clip_dir.lstat()
-        except FileNotFoundError:
-            return PurgeResult.MISSING
-        except OSError:
-            return PurgeResult.UNVERIFIABLE
-        if stat.S_ISLNK(directory_stat.st_mode) or not stat.S_ISDIR(directory_stat.st_mode):
-            return PurgeResult.UNVERIFIABLE
-        manifest_path = candidate.clip_dir / "manifest.json"
+            root = _open_directory_path(self._store_dir)
+        except FileNotFoundError as error:
+            raise _CandidateMissing from error
+        clips_directory: int | None = None
+        clip_directory: int | None = None
         try:
-            manifest_stat = manifest_path.lstat()
-            if stat.S_ISLNK(manifest_stat.st_mode) or not stat.S_ISREG(manifest_stat.st_mode):
-                return PurgeResult.UNVERIFIABLE
-            manifest = _RetentionManifest.model_validate_json(manifest_path.read_bytes())
-        except (FileNotFoundError, OSError, ValidationError):
-            return PurgeResult.UNVERIFIABLE
-        if manifest.clip_id != candidate.clip_id:
-            return PurgeResult.UNVERIFIABLE
-        finalized_v2 = (
-            manifest.manifest_schema_version == 2 and manifest.finalized_at is not None
-        )
-        if not manifest.finalized and not finalized_v2:
-            return PurgeResult.UNVERIFIABLE
-        if manifest.local_state == "CORRUPT":
-            return PurgeResult.UNVERIFIABLE
-        media_relpath = manifest.path or manifest.media_relpath
-        if media_relpath is None:
-            unavailable = (
-                manifest.video_available is False
-                or manifest.local_state == "UNAVAILABLE"
-                or manifest.state == "UNAVAILABLE"
-            )
-            return None if unavailable else PurgeResult.UNVERIFIABLE
-        parts = PurePosixPath(media_relpath).parts
-        if len(parts) != 3 or parts[:2] != ("clips", candidate.clip_id):
-            return PurgeResult.UNVERIFIABLE
-        media_path = self._store_dir.joinpath(*parts)
-        if media_path.parent != candidate.clip_dir:
-            return PurgeResult.UNVERIFIABLE
-        try:
-            media_stat = media_path.lstat()
-        except OSError:
-            return PurgeResult.UNVERIFIABLE
-        if stat.S_ISLNK(media_stat.st_mode) or not stat.S_ISREG(media_stat.st_mode):
-            return PurgeResult.UNVERIFIABLE
-        return None
+            try:
+                clips_directory = _open_directory_entry(root, "clips")
+                clip_directory = _open_directory_entry(clips_directory, candidate.clip_id)
+            except FileNotFoundError as error:
+                raise _CandidateMissing from error
+            manifest = _read_manifest(clip_directory)
+            _validate_manifest(manifest, candidate.clip_id)
+            media_relpath = manifest.path or manifest.media_relpath
+            if media_relpath is not None:
+                parts = PurePosixPath(media_relpath).parts
+                if len(parts) != 3 or parts[:2] != ("clips", candidate.clip_id):
+                    raise ValueError("media path escapes governed clip directory")
+                _verify_regular_file(clip_directory, parts[2])
+            else:
+                unavailable = (
+                    manifest.video_available is False
+                    or manifest.local_state == "UNAVAILABLE"
+                    or manifest.state == "UNAVAILABLE"
+                )
+                if not unavailable:
+                    raise ValueError("available clip has no contained media")
+            yield clips_directory
+        finally:
+            if clip_directory is not None:
+                os.close(clip_directory)
+            if clips_directory is not None:
+                os.close(clips_directory)
+            os.close(root)
+
+
+class _CandidateMissing(FileNotFoundError):
+    """The governed clips root exists but this candidate does not."""
+
+
+def _open_directory_path(path: Path) -> int:
+    """Open an absolute store path only when every component is a real directory."""
+    absolute = path.absolute()
+    descriptor = os.open("/", os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        for component in absolute.parts[1:]:
+            child = _open_directory_entry(descriptor, component)
+            os.close(descriptor)
+            descriptor = child
+    except BaseException:
+        os.close(descriptor)
+        raise
+    else:
+        return descriptor
+
+
+def _open_directory_entry(parent: int, name: str) -> int:
+    entry = os.stat(name, dir_fd=parent, follow_symlinks=False)
+    if stat.S_ISLNK(entry.st_mode) or not stat.S_ISDIR(entry.st_mode):
+        raise ValueError(f"governed path component is not a real directory: {name}")
+    return os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
+
+
+def _read_manifest(directory: int) -> _RetentionManifest:
+    descriptor = _open_regular_file(directory, "manifest.json")
+    with os.fdopen(descriptor, "rb") as manifest_file:
+        return _RetentionManifest.model_validate_json(manifest_file.read())
+
+
+def _verify_regular_file(directory: int, name: str) -> None:
+    descriptor = _open_regular_file(directory, name)
+    os.close(descriptor)
+
+
+def _open_regular_file(directory: int, name: str) -> int:
+    entry = os.stat(name, dir_fd=directory, follow_symlinks=False)
+    if stat.S_ISLNK(entry.st_mode) or not stat.S_ISREG(entry.st_mode):
+        raise ValueError(f"governed path component is not a regular file: {name}")
+    return os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory)
+
+
+def _validate_manifest(manifest: _RetentionManifest, clip_id: str) -> None:
+    if manifest.clip_id != clip_id:
+        raise ValueError("manifest clip identity differs from governed directory")
+    finalized_v2 = (
+        manifest.manifest_schema_version == 2 and manifest.finalized_at is not None
+    )
+    if not manifest.finalized and not finalized_v2:
+        raise ValueError("manifest is not finalized")
+    if manifest.local_state == "CORRUPT":
+        raise ValueError("corrupt evidence cannot be purged")
 
 
 __all__ = [

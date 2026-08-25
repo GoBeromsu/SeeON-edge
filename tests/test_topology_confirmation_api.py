@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 from collections.abc import Callable
 from pathlib import Path
 
@@ -141,6 +142,32 @@ def test_local_preview_and_confirmation_require_dashboard_auth(tmp_path: Path) -
     assert preview.status_code == 401
     assert confirmation.status_code == 401
     assert upstream.confirmation is None
+
+
+def test_topology_confirm_route_commits_canonical_action_and_detail(tmp_path: Path) -> None:
+    database = tmp_path / "canonical-confirm.sqlite3"
+    client, _upstream = _app_client(database)
+    _login(client)
+
+    response = client.post(
+        "/api/v1/connection/topology-preview/confirm",
+        json={
+            "confirmation_id": CONFIRMATION_ID,
+            "digest": DIGEST,
+            "client_revision": 1,
+            "server_revision": 7,
+        },
+    )
+
+    assert response.status_code == 200
+    with sqlite3.connect(database) as connection:
+        rows = connection.execute(
+            "SELECT action,target_id,actor_type,auth_mechanism,detail_json "
+            "FROM audit_events WHERE action NOT LIKE 'audit.%'"
+        ).fetchall()
+    assert rows == [
+        ("topology.confirm", CONFIRMATION_ID, "user", "dashboard_session", '{"version":1}')
+    ]
 
 
 def test_authenticated_local_routes_confirm_with_server_held_token_hidden(

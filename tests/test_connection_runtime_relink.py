@@ -11,12 +11,12 @@ from backend.app import lifespan as lifespan_module
 from backend.app.features.connection import store as connection_store_module
 from backend.app.features.connection.store import (
     API_BACKEND_BASE_URL_ENV,
+    API_BACKEND_CONFIG_URL_ENV,
+    API_BACKEND_EVENTS_URL_ENV,
     API_CONNECTION_SETTINGS_PATH_ENV,
     ConnectionSettingsStore,
 )
 from backend.app.lifespan import (
-    API_BACKEND_CONFIG_URL_ENV,
-    API_BACKEND_EVENTS_URL_ENV,
     API_EDGE_RELAY_TOKEN_ENV,
     apply_connection_settings,
 )
@@ -99,7 +99,7 @@ def test_complete_enrollment_restores_one_generation_bundle_on_restart(
         assert bundle.enrollment_generation == 4
         assert bundle.ingest_client.bearer_token == "persisted-token"
         assert bundle.evidence_client.bearer_token == "persisted-token"
-        assert bundle.camera_mapper.token == "persisted-token"
+        assert not hasattr(bundle, "camera_mapper")
 
 
 def test_relink_publishes_a_whole_new_generation_bundle(
@@ -124,8 +124,8 @@ def test_relink_publishes_a_whole_new_generation_bundle(
         assert {
             bundle.ingest_client.bearer_token,
             bundle.evidence_client.bearer_token,
-            bundle.camera_mapper.token,
         } == {token}
+        assert not hasattr(bundle, "camera_mapper")
 
 
 def test_config_refresh_discards_result_when_relink_changes_generation(

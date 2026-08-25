@@ -61,6 +61,29 @@ class ClipMaintenance:
                 continue
         self._stats.stale_staging_cleaned += cleaned
 
+    def preflight_clip(self, clip_id: str) -> PurgeResult | None:
+        """Check an operator deletion without mutating files or durable state."""
+        clips_dir = self._config.store_dir / "clips"
+        clip_dir = clips_dir / clip_id
+        if clip_id in {"", ".", ".."} or clip_dir.parent != clips_dir:
+            return PurgeResult.UNVERIFIABLE
+        if self._operator_delete_preflight is not None:
+            result = self._operator_delete_preflight(clip_id)
+            if result is not None:
+                return result
+        finalized_at = _operator_finalized_at(clip_dir)
+        candidate = PurgeCandidate(
+            clip_id=clip_id,
+            clip_dir=clip_dir,
+            finalized_at=finalized_at,
+        )
+        verification = self._retention.preflight(candidate)
+        if verification is not None:
+            return verification
+        if finalized_at > datetime.now(UTC) - timedelta(days=self._config.retention_days):
+            return PurgeResult.HELD
+        return None
+
     def purge_clip(self, clip_id: str) -> PurgeResult:
         """Delete one specific finalized primary clip on operator request.
 
@@ -78,14 +101,10 @@ class ClipMaintenance:
         ``"a/b"``) itself, before ever constructing a ``PurgeCandidate``
         ``EvidenceRetention``'s own containment check would otherwise trust.
         """
-        clips_dir = self._config.store_dir / "clips"
-        clip_dir = clips_dir / clip_id
-        if clip_id in {"", ".", ".."} or clip_dir.parent != clips_dir:
-            return PurgeResult.UNVERIFIABLE
-        if self._operator_delete_preflight is not None:
-            result = self._operator_delete_preflight(clip_id)
-            if result is not None:
-                return result
+        preflight = self.preflight_clip(clip_id)
+        if preflight is not None:
+            return preflight
+        clip_dir = self._config.store_dir / "clips" / clip_id
         candidate = PurgeCandidate(
             clip_id=clip_id,
             clip_dir=clip_dir,
@@ -141,6 +160,19 @@ def finalized_clips(store_dir: Path) -> list[tuple[datetime, Path]]:
                 continue
         clips.append((finalized_at, manifest_path.parent))
     return clips
+
+
+def _operator_finalized_at(clip_dir: Path) -> datetime:
+    manifest_path = clip_dir / "manifest.json"
+    try:
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+        raw = payload.get("finalized_at", payload.get("started_at", ""))
+        parsed = _parse_utc(str(raw))
+        if parsed is not None:
+            return parsed
+        return datetime.fromtimestamp(manifest_path.stat().st_mtime, UTC)
+    except (OSError, json.JSONDecodeError):
+        return datetime.now(UTC)
 
 
 def _parse_utc(value: str) -> datetime | None:

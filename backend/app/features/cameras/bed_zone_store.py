@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Lock
@@ -12,6 +13,7 @@ from pydantic import TypeAdapter, ValidationError
 
 from backend.app.edge_db import EDGE_DATABASE_PATH
 from backend.app.edge_db.configuration import open_configuration_database, utc_now
+from backend.app.edge_db.connection import write_transaction
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,16 +72,19 @@ class BedZoneStore:
         image_width: int,
         image_height: int,
         recognized_at: str,
+        after_write: Callable[[sqlite3.Connection], None] | None = None,
     ) -> BedZone:
         encoded = json.dumps(polygon, separators=(",", ":"))
-        with self._lock:
+        with self._lock, write_transaction(self._connection):
             cursor = self._connection.execute(
                 "UPDATE cameras SET bed_polygon_json=?,bed_image_width=?,bed_image_height=?,"
                 "bed_recognized_at=?,revision=revision+1,updated_at=? WHERE camera_id=?",
                 (encoded, image_width, image_height, recognized_at, utc_now(), camera_id),
             )
-        if cursor.rowcount != 1:
-            raise sqlite3.IntegrityError("bed-zone camera does not exist")
+            if cursor.rowcount != 1:
+                raise sqlite3.IntegrityError("bed-zone camera does not exist")
+            if after_write is not None:
+                after_write(self._connection)
         return BedZone(
             polygon=tuple((int(x), int(y)) for x, y in polygon),
             image_width=image_width,

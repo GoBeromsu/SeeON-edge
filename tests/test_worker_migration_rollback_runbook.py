@@ -15,14 +15,18 @@ def _shell_commands(path: Path) -> str:
 
 def test_migration_commands_enforce_migrator_api_worker_order() -> None:
     commands = _shell_commands(ROLLBACK_RUNBOOK)
-    migrator = "$DC up --pull always --no-deps edge-db-migrator"
+    inventory = "$DC up --pull always edge-filesystem-inventory"
+    migrator = "$DC up --pull always edge-db-migrator"
     api = "$DC up -d --wait ml-api"
     worker = "$DC up -d --wait ml-worker"
 
     assert "/var/lib/seeon-state/edge.sqlite3" not in commands
+    assert inventory in commands
     assert migrator in commands
     assert api in commands
     assert worker in commands
-    assert commands.index(migrator) < commands.index(api) < commands.index(worker)
+    assert commands.index(inventory) < commands.index(migrator) < commands.index(api) < (
+        commands.index(worker)
+    )
     assert "down -v" not in commands
     assert not re.search(r"\b(?:CREATE|ALTER|DROP)\s+(?:TABLE|INDEX)\b", commands, re.I)

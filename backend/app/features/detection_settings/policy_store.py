@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Callable
 from contextlib import closing
 from pathlib import Path
 
@@ -103,6 +104,7 @@ class DetectionPolicyStore:
         camera_id: str | None,
         values: object | None,
         expected_revision_id: int,
+        after_write: Callable[[sqlite3.Connection], None] | None = None,
     ) -> PolicyActivation:
         if expected_revision_id < 0:
             raise PolicyDocumentError("expected_revision_id must be >= 0")
@@ -121,6 +123,8 @@ class DetectionPolicyStore:
                     "detection policy activation changed since the submitted diff"
                 )
             if record is not None and record.status != "failed" and record.active_values == parsed:
+                if after_write is not None:
+                    after_write(connection)
                 return activation(record, camera_id)
             if raw is None and parsed is None:
                 raise PolicyRevisionConflict("camera policy already inherits its default")
@@ -143,6 +147,8 @@ class DetectionPolicyStore:
                 ),
             )
             saved = record_by_id(connection, policy_id)
+            if after_write is not None:
+                after_write(connection)
             return activation(saved, camera_id)
 
     def rollback(
@@ -153,6 +159,7 @@ class DetectionPolicyStore:
         module_version: int,
         camera_id: str | None,
         expected_revision_id: int,
+        after_write: Callable[[sqlite3.Connection], None] | None = None,
     ) -> PolicyActivation:
         if expected_revision_id < 0:
             raise PolicyDocumentError("expected_revision_id must be >= 0")
@@ -178,7 +185,10 @@ class DetectionPolicyStore:
                 "applied_at=NULL,updated_at=? WHERE policy_id=?",
                 (values_json, digest, generation, utc_now(), utc_now(), record.policy_id),
             )
-            return activation(record_by_id(connection, record.policy_id), camera_id)
+            saved = activation(record_by_id(connection, record.policy_id), camera_id)
+            if after_write is not None:
+                after_write(connection)
+            return saved
 
     def resolve_bundle(
         self, facility_id: str | None, cameras: tuple[PolicyCameraIdentity, ...]

@@ -10,7 +10,7 @@ from typing import TypedDict
 
 from pydantic import JsonValue, TypeAdapter, ValidationError
 
-_CLIP_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
+_CLIP_ID_RE = re.compile(r"^[A-Za-z0-9:_-]{1,128}$")
 _MEDIA_SUFFIXES = {".mp4", ".mov", ".m4v", ".webm", ".mkv"}
 _MANIFEST_PAYLOAD = TypeAdapter(dict[str, JsonValue])
 

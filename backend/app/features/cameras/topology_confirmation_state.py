@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -42,13 +43,19 @@ class TopologyConfirmationStore:
         self._connection = open_configuration_database(Path(path))
 
     def save(
-        self, response: TopologySuccessEnvelope, principal: MachinePrincipal, registry_version: int
+        self,
+        response: TopologySuccessEnvelope,
+        principal: MachinePrincipal,
+        registry_version: int,
+        *,
+        connection: sqlite3.Connection | None = None,
     ) -> None:
+        active = self._connection if connection is None else connection
         preview = response.omissions
         if preview is None:
-            self._clear()
+            self._clear(active)
             return
-        cursor = self._connection.execute(
+        cursor = active.execute(
             "UPDATE edge_site SET topology_confirmation_id=?,topology_confirmation_digest=?,"
             "topology_confirmation_expires_at=?,topology_confirmation_snapshot_id=?,"
             "topology_confirmation_client_revision=?,topology_confirmation_server_revision=?,"
@@ -101,10 +108,15 @@ class TopologyConfirmationStore:
         )
 
     def complete(
-        self, preview: TopologyConfirmationPreview, response: TopologySuccessEnvelope
+        self,
+        preview: TopologyConfirmationPreview,
+        response: TopologySuccessEnvelope,
+        *,
+        after_write: Callable[[sqlite3.Connection], None] | None = None,
     ) -> None:
         encoded = _encode_result(response.result)
         self._connection.execute("BEGIN IMMEDIATE")
+        completed = False
         try:
             cursor = self._connection.execute(
                 "UPDATE edge_site SET topology_confirmation_confirmed=1,"
@@ -124,13 +136,14 @@ class TopologyConfirmationStore:
                 ),
             )
             _require_updated(cursor)
-            self._connection.execute("COMMIT")
-        except BaseException:
-            self._connection.execute("ROLLBACK")
-            raise
+            if after_write is not None:
+                after_write(self._connection)
+            completed = True
+        finally:
+            self._connection.execute("COMMIT" if completed else "ROLLBACK")
 
-    def _clear(self) -> None:
-        self._connection.execute(
+    def _clear(self, connection: sqlite3.Connection) -> None:
+        connection.execute(
             "UPDATE edge_site SET topology_confirmation_id=NULL,"
             "topology_confirmation_digest=NULL,topology_confirmation_expires_at=NULL,"
             "topology_confirmation_snapshot_id=NULL,topology_confirmation_client_revision=NULL,"

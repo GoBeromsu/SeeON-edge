@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import sqlite3
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Lock
@@ -46,7 +48,11 @@ class RuntimeSettingsStore:
             return self._get_unlocked()
 
     def set_clip_export_enabled(
-        self, enabled: bool, *, expected_version: int | None = None
+        self,
+        enabled: bool,
+        *,
+        expected_version: int | None = None,
+        after_write: Callable[[sqlite3.Connection], None] | None = None,
     ) -> RuntimeSetting:
         with self._lock:
             self._connection.execute("BEGIN IMMEDIATE")
@@ -63,6 +69,8 @@ class RuntimeSettingsStore:
                         "updated_at=? WHERE id=1",
                         (int(enabled), setting.version, utc_now()),
                     )
+                if after_write is not None:
+                    after_write(self._connection)
                 self._connection.execute("COMMIT")
             except BaseException:
                 self._connection.execute("ROLLBACK")

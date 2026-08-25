@@ -21,20 +21,8 @@ def validate_decision_trace_id(value: object | None) -> str | None:
     return value
 
 
-def require_decision_trace(
-    _connection: object,
-    decision_trace_id: str,
-    *,
-    runtime_manifest_sha256: str | None,
-) -> None:
-    """Local trace catalogs no longer exist in the inference runtime."""
-    del decision_trace_id, runtime_manifest_sha256
-    raise DecisionTraceReferenceError("local decision trace catalogs are not supported")
-
-
 __all__ = [
     "DECISION_TRACE_ID_KEY",
     "DecisionTraceReferenceError",
-    "require_decision_trace",
     "validate_decision_trace_id",
 ]

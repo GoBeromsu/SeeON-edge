@@ -432,9 +432,7 @@ class LiveBackend:
             )
         self.app.state.camera_registry = registry
         self.app.state.backend_ingest_client = self.ingest_client
-        self.app.state.runtime_status_store = RuntimeStatusStore(
-            latency_state_path=state_dir / "catalog.sqlite3"
-        )
+        self.app.state.runtime_status_store = RuntimeStatusStore()
         self.app.state.catalog_store = CatalogStore.open(state_dir / "catalog.sqlite3")
         self.port = free_tcp_port()
         config = uvicorn.Config(

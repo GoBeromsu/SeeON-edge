@@ -15,6 +15,7 @@ export function ClipCard({ clip, cameraLabel, onSelect }: ClipCardProps): JSX.El
     <button
       type="button"
       className="flex flex-col overflow-hidden rounded-card border border-border bg-card text-left"
+      data-clip-id={clip.id}
       onClick={() => onSelect(clip.id)}
     >
       <div className="event-media-frame relative">

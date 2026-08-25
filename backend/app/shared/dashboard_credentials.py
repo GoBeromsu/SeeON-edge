@@ -13,12 +13,13 @@ import hmac
 import os
 import sqlite3
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from threading import Lock
 
-from backend.app.edge_db import EDGE_DATABASE_PATH
+from backend.app.edge_db import EDGE_DATABASE_PATH, write_transaction
 from backend.app.edge_db.configuration import open_configuration_database
 
 _ALGORITHM_SCRYPT = "scrypt"
@@ -86,7 +87,13 @@ class DashboardCredentialsStore:
         with self._lock:
             return self._load_unlocked()
 
-    def save(self, *, username: str, password: str) -> PersistedDashboardCredentials:
+    def save(
+        self,
+        *,
+        username: str,
+        password: str,
+        after_write: Callable[[sqlite3.Connection], None] | None = None,
+    ) -> PersistedDashboardCredentials:
         salt = os.urandom(_SALT_BYTES)
         record = PersistedDashboardCredentials(
             username=username,
@@ -96,7 +103,11 @@ class DashboardCredentialsStore:
             updated_at=datetime.now(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
         )
         with self._lock:
-            self._write_unlocked(record)
+            connection = self._connect()
+            with write_transaction(connection):
+                self._write_unlocked(record)
+                if after_write is not None:
+                    after_write(connection)
         return record
 
     def _connect(self) -> sqlite3.Connection:

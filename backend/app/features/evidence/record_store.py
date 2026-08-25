@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import binascii
 import sqlite3
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -32,7 +33,6 @@ class CentralEvidenceSummary:
     primary_clip_id: str | None
     primary_artifact_state: str | None
     snapshot_artifact_state: str | None
-    derivative_state: str | None
     event_delivery_state: str
     clip_publish_state: str | None
     retention_state: str | None
@@ -66,6 +66,7 @@ class CentralEvidenceReviewStore:
         reviewed_at: str,
         disposition: ReviewDisposition,
         notes: str | None,
+        after_write: Callable[[sqlite3.Connection], None] | None = None,
     ) -> EvidenceReview:
         _validate_review_input(incident_id, expected_version, actor_id, reviewed_at, notes)
         match disposition:
@@ -103,6 +104,8 @@ class CentralEvidenceReviewStore:
                     "WHERE incident_id = ? AND kind = 'PRIMARY_CLIP'",
                     (incident_id,),
                 ).fetchone()
+                if after_write is not None:
+                    after_write(connection)
         finally:
             connection.close()
         version = expected_version + 1
@@ -219,7 +222,7 @@ def _summary_from_row(row: sqlite3.Row | tuple[object, ...]) -> CentralEvidenceS
         runtime_manifest_sha256=_text(row[8]), decision_trace_id=None,
         module_qualified_id=_text(row[9]), policy_qualified_id=_text(row[10]),
         primary_clip_id=_text(row[11]), primary_artifact_state=_text(row[12]),
-        snapshot_artifact_state=_text(row[13]), derivative_state=None,
+        snapshot_artifact_state=_text(row[13]),
         event_delivery_state="ACKED", clip_publish_state=_text(row[14]),
         retention_state=_text(row[15]), review=review,
     )

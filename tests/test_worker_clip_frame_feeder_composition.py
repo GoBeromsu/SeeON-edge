@@ -169,6 +169,10 @@ def _make_recording_clip_recorder_class(
             del trigger_packet, event, allow_new_clip
             return None
 
+        def preflight_clip_deletion(self, clip_id: str) -> None:
+            del clip_id
+            return None
+
         def delete_clip(self, clip_id: str) -> object:
             raise AssertionError("clip deletion is not exercised by this composition test")
 

@@ -144,7 +144,7 @@ def test_purge_verification_failure_is_reported_and_evidence_remains(
     # Given: a verified, remotely acknowledged clip and a silent delete failure.
     candidate = _clip(tmp_path, "delete-noop", datetime.now(UTC))
     retention = _retention(tmp_path, set())
-    monkeypatch.setattr(shutil, "rmtree", lambda _path: None)
+    monkeypatch.setattr(shutil, "rmtree", lambda *_args, **_kwargs: None)
 
     # When: purge runs and the directory still exists afterward.
     result = retention.purge(candidate)

@@ -6,6 +6,7 @@ import hashlib
 import logging
 import os
 import sqlite3
+from collections.abc import Callable
 from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
@@ -22,6 +23,7 @@ from backend.app.edge_db.configuration import (
 
 ConnectionValue: TypeAlias = str | int | None
 ConnectionData: TypeAlias = dict[str, ConnectionValue]
+ConnectionWriteHook: TypeAlias = Callable[[sqlite3.Connection], None]
 
 SAVE_FIELDS: Final = (
     "facility_code",
@@ -70,7 +72,9 @@ class ConnectionStoreDatabase:
             return _empty_data()
         return _empty_data() if row is None else dict(zip(COLUMNS, row, strict=True))
 
-    def write(self, data: ConnectionData) -> None:
+    def write(
+        self, data: ConnectionData, after_write: ConnectionWriteHook | None = None
+    ) -> None:
         with closing(self._connect()) as connection:
             connection.execute("BEGIN IMMEDIATE")
             try:
@@ -94,6 +98,8 @@ class ConnectionStoreDatabase:
                 )
                 if previous_principal != current_principal:
                     connection.execute(_RESET_TOPOLOGY_SQL, (data["updated_at"],))
+                if after_write is not None:
+                    after_write(connection)
                 connection.execute("COMMIT")
             except BaseException:
                 connection.execute("ROLLBACK")
@@ -163,6 +169,7 @@ __all__ = [
     "ConnectionData",
     "ConnectionStoreBackup",
     "ConnectionStoreDatabase",
+    "ConnectionWriteHook",
     "ConnectionValue",
     "utc_now_iso",
 ]

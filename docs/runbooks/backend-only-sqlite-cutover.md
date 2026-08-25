@@ -8,6 +8,22 @@ Read this whole file before starting. The migration is **forward-only after its
 first write**, and the drain gate exists to stop you migrating over evidence that
 has not been delivered.
 
+## Schema 18 staging boundary
+
+This runbook lands the lossless schema-17 staging database only. The legacy
+three-database importer now stops at v17; ordinary `migrate_database` is not
+authorized to compact that file. Schema 18 must use the stopped-runtime
+candidate command and its immutable source/archive/reconciliation artifacts:
+
+```sh
+python -m backend.app.edge_db.compact_cutover --help
+```
+
+The source clone and live v17 file are distinct inputs. Keep the source and
+archive permanently read-only; only the verified candidate may atomically
+replace `--live`. A complete schema-18 deployment procedure remains owned by
+the schema-18 release runbook task.
+
 ## Preconditions
 
 1. **Images built from the intended revision.** Verified for `fa3811a`:
