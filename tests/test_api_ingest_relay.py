@@ -752,9 +752,7 @@ class ReceiptBackendIngestClient(FakeBackendIngestClient):
 
 def _receipt_client(fake: ReceiptBackendIngestClient, tmp_path) -> TestClient:
     client = _client(fake)
-    client.app.state.runtime_status_store = RuntimeStatusStore(
-        latency_state_path=tmp_path / "catalog.sqlite3"
-    )
+    client.app.state.runtime_status_store = RuntimeStatusStore()
     return client
 
 

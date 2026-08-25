@@ -1,11 +1,9 @@
 from __future__ import annotations
 
-import sqlite3
 from pathlib import Path
 
 import numpy as np
 
-from backend.app.edge_db.migrator import migrate_database
 from contracts.frame import Frame
 from contracts.observation import (
     BedRegionCacheState,
@@ -63,26 +61,6 @@ def _result(seq: int) -> CompositeResult:
     return CompositeResult((), observation, decision_input)
 
 
-def _seed_manifest(database: Path) -> None:
-    connection = sqlite3.connect(database)
-    try:
-        connection.execute(
-            "INSERT INTO runtime_manifest_contents VALUES (?, 1, '{}', ?)",
-            (RUNTIME_MANIFEST_SHA256, "2026-08-13T00:00:00Z"),
-        )
-        connection.execute(
-            "INSERT INTO runtime_manifest_boots VALUES ('boot-a', ?, ?)",
-            (RUNTIME_MANIFEST_SHA256, "2026-08-13T00:00:00Z"),
-        )
-        connection.execute(
-            "INSERT INTO runtime_manifest_cameras VALUES ('boot-a', ?, ?, ?)",
-            ("opaque/camera:alpha", RUNTIME_MANIFEST_SHA256, "2026-08-13T00:00:00Z"),
-        )
-        connection.commit()
-    finally:
-        connection.close()
-
-
 def _capture() -> TraceCapture:
     return TraceCapture(
         identities=(
@@ -100,11 +78,8 @@ def _capture() -> TraceCapture:
 def test_analysis_timeline_is_image_free_typed_and_explicit_about_missing_pts(
     tmp_path: Path,
 ) -> None:
-    database = tmp_path / "edge.sqlite3"
-    migrate_database(database)
-    _seed_manifest(database)
     writer = BoundedTraceWriter(
-        database,
+        tmp_path / "runtime-analysis",
         TraceRetentionPolicy(
             max_frames_per_camera=4,
             max_age_seconds=60.0,
@@ -135,17 +110,14 @@ def test_analysis_timeline_is_image_free_typed_and_explicit_about_missing_pts(
     assert frame.beds[0].provenance == "fresh"
     assert frame.beds[0].polygon == ((0, 1), (5, 0), (5, 4), (0, 4))
 
-    raw_database = database.read_bytes()
-    assert np.full((4, 6, 3), 3, dtype=np.uint8).tobytes() not in raw_database
-    assert b"rtsp://" not in raw_database
+    recovered_again = writer.recover_camera("opaque/camera:alpha")
+    assert recovered_again.frames[0].persons[0].box == (1, 0, 4, 4)
+    assert "rtsp://" not in repr(recovered_again)
 
 
 def test_restart_recovery_preserves_only_the_bounded_camera_ring_and_reports_truncation(
     tmp_path: Path,
 ) -> None:
-    database = tmp_path / "edge.sqlite3"
-    migrate_database(database)
-    _seed_manifest(database)
     policy = TraceRetentionPolicy(
         max_frames_per_camera=2,
         max_age_seconds=100.0,
@@ -153,7 +125,7 @@ def test_restart_recovery_preserves_only_the_bounded_camera_ring_and_reports_tru
         max_batch_size=2,
         max_numeric_values_per_decision=16,
     )
-    writer = BoundedTraceWriter(database, policy)
+    writer = BoundedTraceWriter(tmp_path / "runtime-analysis", policy)
     writer.start()
     try:
         for seq in range(4):
@@ -167,23 +139,12 @@ def test_restart_recovery_preserves_only_the_bounded_camera_ring_and_reports_tru
     finally:
         writer.stop()
 
-    restarted = BoundedTraceWriter(database, policy)
+    restarted = BoundedTraceWriter(tmp_path / "runtime-analysis", policy)
     recovered = restarted.recover_camera("opaque/camera:alpha")
     assert [frame.frame_key[-1] for frame in recovered.frames] == [2, 3]
     assert recovered.truncation.pruned_frames == 2
     assert recovered.truncation.oldest_retained_seq == 2
     assert recovered.truncation.newest_retained_seq == 3
-
-    # The inference slot's bounded ring is process-local; it must not persist
-    # trace rows into the backend-owned database.
-    connection = sqlite3.connect(database)
-    try:
-        assert connection.execute(
-            "SELECT count(*) FROM runtime_analysis_traces WHERE camera_id = ?",
-            ("opaque/camera:alpha",),
-        ).fetchone() == (0,)
-    finally:
-        connection.close()
 
 
 def test_bounded_handoff_drops_without_waiting_and_exposes_the_drop() -> None:

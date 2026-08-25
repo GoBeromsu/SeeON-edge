@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from pathlib import Path
+import importlib
 
-from backend.app.edge_db.migrator import migrate_database
-from backend.app.features.qa.store import QaStore
+import pytest
+
 from worker.replay.comparison import MismatchReason, compare_runs
 from worker.replay.engine import ReplayFrameResult, ReplayRun
 from worker.types import BusinessEvent, DecisionTraceSnapshot
@@ -94,46 +94,12 @@ def _run(
     )
 
 
-def _run_payload(run: ReplayRun) -> dict[str, object]:
-    return {
-        "boot_ids": list(run.boot_ids),
-        "camera_id": run.camera_id,
-        "module_qualified_id": run.module_qualified_id,
-        "policy_qualified_id": run.policy_qualified_id,
-        "effective_policy_id": run.effective_policy_id,
-        "reproducible": run.reproducible,
-        "non_reproducible_reason": run.non_reproducible_reason,
-        "frames": [
-            {
-                "frame_key": list(frame.frame_key),
-                "analysis_trace_id": frame.analysis_trace_id,
-                "event_count": len(frame.events),
-                "snapshots": [
-                    {
-                        "reason": snapshot.reason,
-                        "previous_state": snapshot.previous_state,
-                        "current_state": snapshot.current_state,
-                        "triggered": snapshot.triggered,
-                        "track_id": snapshot.track_id,
-                        "bed_id": snapshot.bed_id,
-                        "values": {str(name): value for name, value in snapshot.values.items()},
-                        "missing_values": {
-                            str(name): str(reason)
-                            for name, reason in snapshot.missing_values.items()
-                        },
-                    }
-                    for snapshot in frame.snapshots
-                ],
-            }
-            for frame in run.frames
-        ],
-    }
+def test_qa_comparison_store_is_removed() -> None:
+    with pytest.raises(ModuleNotFoundError):
+        importlib.import_module("backend.app.features.qa.store")
 
 
-def test_ab_mismatches_persist_with_run_and_policy_provenance(tmp_path: Path) -> None:
-    database = tmp_path / "edge.sqlite3"
-    migrate_database(database)
-    store = QaStore(database)
+def test_ab_mismatches_name_event_and_snapshot_reasons() -> None:
     baseline_run = _run(
         policy_id="a" * 64,
         events=(),
@@ -163,53 +129,6 @@ def test_ab_mismatches_persist_with_run_and_policy_provenance(tmp_path: Path) ->
         for mismatch in comparison.mismatches
         if mismatch.reason is not MismatchReason.REPRODUCIBILITY_DIFFERS
     )
-
-    baseline = store.record_run(
-        camera_id=baseline_run.camera_id,
-        module_qualified_id=baseline_run.module_qualified_id,
-        policy_qualified_id=baseline_run.policy_qualified_id,
-        effective_policy_id=baseline_run.effective_policy_id,
-        frame_count=len(baseline_run.frames),
-        event_count=baseline_run.event_count,
-        source_kind="captured",
-        source_run_id=None,
-        requested_by="qa-operator",
-        requested_at="2026-08-14T00:00:00Z",
-        result=_run_payload(baseline_run),
-    )
-    candidate = store.record_run(
-        camera_id=candidate_run.camera_id,
-        module_qualified_id=candidate_run.module_qualified_id,
-        policy_qualified_id=candidate_run.policy_qualified_id,
-        effective_policy_id=candidate_run.effective_policy_id,
-        frame_count=len(candidate_run.frames),
-        event_count=candidate_run.event_count,
-        source_kind="replay",
-        source_run_id=baseline.run_id,
-        requested_by="qa-operator",
-        requested_at="2026-08-14T00:01:00Z",
-        result=_run_payload(candidate_run),
-    )
-    persisted = store.record_comparison(
-        baseline_run_id=baseline.run_id,
-        candidate_run_id=candidate.run_id,
-        created_at="2026-08-14T00:02:00Z",
-        comparison=comparison.as_dict(),
-    )
-
-    reloaded_candidate = store.get_run(candidate.run_id)
-    reloaded = store.get_comparison(persisted.comparison_id)
-    assert reloaded_candidate is not None
-    assert reloaded_candidate.source_kind == "replay"
-    assert reloaded_candidate.source_run_id == baseline.run_id
-    assert reloaded_candidate.effective_policy_id == "b" * 64
-    assert reloaded is not None
-    assert reloaded.baseline_run_id == baseline.run_id
-    assert reloaded.candidate_run_id == candidate.run_id
-    assert reloaded.mismatch_count == len(comparison.mismatches)
-    assert reloaded.comparison == comparison.as_dict()
-    assert reloaded.comparison["baseline_effective_policy_id"] == baseline.effective_policy_id
-    assert reloaded.comparison["candidate_effective_policy_id"] == candidate.effective_policy_id
 
 
 def test_identical_runs_compare_clean() -> None:
@@ -264,8 +183,6 @@ def test_snapshot_field_mismatches_are_one_field_at_a_time() -> None:
             MismatchReason.MISSING_VALUE_DIFFERS,
         ),
     ]
-    # STATE_DIFFERS case also changes triggered default only when state fall - handle carefully.
-    # For state change we keep triggered False so only STATE_DIFFERS fires.
     baseline = _run(policy_id="a" * 64, events=(), snapshots=(baseline_snap,))
     for candidate_snap, expected_reason in cases:
         candidate = _run(policy_id="b" * 64, events=(), snapshots=(candidate_snap,))
@@ -274,7 +191,6 @@ def test_snapshot_field_mismatches_are_one_field_at_a_time() -> None:
         reasons = {mismatch.reason for mismatch in comparison.mismatches}
         assert expected_reason in reasons, (expected_reason, reasons)
         if expected_reason is MismatchReason.MISSING_VALUE_DIFFERS:
-            # Replacing values with missing also yields VALUE_DIFFERS for absent keys.
             assert MismatchReason.VALUE_DIFFERS in reasons
 
 
@@ -300,7 +216,9 @@ def test_event_cardinality_mismatch_is_explicit() -> None:
     baseline = _run(policy_id="a" * 64, events=(_event(), _event(identity=2)), snapshots=())
     candidate = _run(policy_id="b" * 64, events=(_event(),), snapshots=())
     comparison = compare_runs(baseline, candidate)
-    assert [m.reason for m in comparison.mismatches] == [MismatchReason.EVENT_COUNT_DIFFERS]
+    assert [mismatch.reason for mismatch in comparison.mismatches] == [
+        MismatchReason.EVENT_COUNT_DIFFERS
+    ]
 
 
 def test_frame_missing_in_other_is_reported() -> None:

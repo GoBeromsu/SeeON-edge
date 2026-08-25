@@ -33,11 +33,103 @@ const cameras = {
   }],
 };
 
+/** Playable clean evidence: the events + operations surfaces must mount a real native <video>. */
 const clip = {
   clip_id: 'clip-1', camera_id: 'cam-1', event_ref: 'event-1', event_type: 'fall',
   started_at: '2026-08-02T03:12:00Z', duration_s: 12, codec: 'h264', path: null,
-  video_available: false, thumbnail_available: false, video_error: '증거 파일이 손상되었습니다.', finalized: true,
+  video_available: true, thumbnail_available: false, video_error: null, finalized: true,
+  size_bytes: 8_400_000,
 };
+
+/** Second clip shares clip-1's timestamp so the keyset page boundary can only use the clip-id tiebreak. */
+const equalTimestampClip = {
+  ...clip, clip_id: 'clip-0', event_ref: 'event-0', event_type: 'bed-exit', size_bytes: 4_200_000,
+};
+
+const clipsByCursorDescending = [clip, equalTimestampClip];
+
+function encodeCursor(startedAt: string, clipId: string): string {
+  return Buffer.from(`${startedAt}\0${clipId}`).toString('base64url');
+}
+
+/** One-row keyset pages mirroring `ORDER BY started_at DESC, clip_id DESC`. */
+function clipsPage(cursor: string | null): Record<string, unknown> {
+  const boundaryIndex = cursor === null
+    ? -1
+    : clipsByCursorDescending.findIndex(
+      (candidate) => encodeCursor(candidate.started_at, candidate.clip_id) === cursor,
+    );
+  const remaining = clipsByCursorDescending.slice(boundaryIndex + 1);
+  const page = remaining.slice(0, 1);
+  const hasMore = remaining.length > page.length;
+  const last = page.at(-1);
+  return {
+    clips: page,
+    pagination: {
+      limit: 1, offset: 0, total: clipsByCursorDescending.length, has_more: hasMore,
+      next_cursor: hasMore && last ? encodeCursor(last.started_at, last.clip_id) : null,
+    },
+    event_type_counts: { fall: 1, 'bed-exit': 1 },
+  };
+}
+
+/**
+ * Real decodable clean media so Chromium actually mounts and decodes the evidence player rather
+ * than surfacing the bounded media-fail state. The bundled headless Chromium ships no proprietary
+ * H.264 decoder (`canPlayType('video/mp4; codecs="avc1.42E01E"')` is empty), so this browser
+ * fixture is VP8/WebM. The product is codec-agnostic: it plays whatever `GET /clips/{id}/video`
+ * returns and never inspects the container. Inlined because the repo ignores committed media
+ * binaries; regenerate with
+ * `ffmpeg -f lavfi -i color=c=gray:s=320x180:d=1:r=10 -c:v libvpx -b:v 50k -pix_fmt yuv420p out.webm`.
+ */
+const CLEAN_MEDIA = Buffer.from([
+  'GkXfo59ChoEBQveBAULygQRC84EIQoKEd2VibUKHgQJChYECGFOAZwEAAAAAAANgEU2bdLpNu4tT',
+  'q4QVSalmU6yBoU27i1OrhBZUrmtTrIHYTbuMU6uEElTDZ1OsggEfTbuMU6uEHFO7a1OsggNK7AEA',
+  'AAAAAABZAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+  'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAVSalmsirXsYMPQkBNgI1MYXZm',
+  'NjAuMTYuMTAwV0GNTGF2ZjYwLjE2LjEwMESJiECPQAAAAAAAFlSua8KuAQAAAAAAADnXgQFzxYgh',
+  'JpkQvMCiwZyBACK1nIN1bmSIgQCGhVZfVlA4g4EBI+ODhAX14QDgirCCAUC6gbSagQISVMNn/HNz',
+  'oGPAgGfImkWjh0VOQ09ERVJEh41MYXZmNjAuMTYuMTAwc3PWY8CLY8WIISaZELzAosFnyKFFo4dF',
+  'TkNPREVSRIeUTGF2YzYwLjMxLjEwMiBsaWJ2cHhnyKFFo4hEVVJBVElPTkSHkzAwOjAwOjAxLjAw',
+  'MDAwMDAwMAAfQ7Z1QaTngQCjQIiBAACA8A4AnQEqQAG0AABHCIWFiIWEiAICAAYWBh17c2TnD2Tn',
+  'D2TnD2TnD2TnD2TnD2TnD2TnD2TnD2TnD2TnD2TnD2TnD2TnD2TnD2TnD2TnD2TnD2TnD2TnD2Tn',
+  'D2TnD2TnD2TnD2TnD2TnD2TnD2TnD2TnD2TnD2TnD2TnD2TnD16A/mgAo52BAGQAsQIAARAQABgA',
+  'GFgv9AAIgAQzX61yT5WAAKOdgQDIALECAAEQEAAYABhYL/QACIAEM1+tck+VgACjnYEBLACxAgAB',
+  'EBAAGAAYWC/0AAiABDNfrXJPlYAAo52BAZAAsQIAARAQABgAGFgv9AAIgAQzX61yT5WAAKOdgQH0',
+  'ALECAAEQEAAYABhYL/QACIAEM1+tck+VgACjnYECWACxAgABEBAAGAAYWC/0AAiABDNfrXJPlYAA',
+  'o5yBArwAkQIAARAQFGAAYWC/0AAiABDNfrXJPlYAo52BAyAAsQIAARAQABgAGFgv9AAIgAQzX61y',
+  'T5WAAKOdgQOEALECAAEQEAAYABhYL/QACIAEM1+tck+VgAAcU7trkbuPs4EAt4r3gQHxggGg8IED',
+].join(''), 'base64');
+const CLEAN_MEDIA_TYPE = 'video/webm';
+
+/** Serves the clean media the way the backend does: 200 with Accept-Ranges, or a 206 byte slice. */
+function fulfillCleanMedia(route: Route, rangeHeader: string | undefined) {
+  const match = /^bytes=(\d*)-(\d*)$/.exec(rangeHeader ?? '');
+  if (match === null) {
+    return route.fulfill({
+      status: 200,
+      headers: {
+        'content-type': CLEAN_MEDIA_TYPE,
+        'accept-ranges': 'bytes',
+        'content-length': String(CLEAN_MEDIA.byteLength),
+      },
+      body: CLEAN_MEDIA,
+    });
+  }
+  const start = match[1] ? Number(match[1]) : 0;
+  const end = match[2] ? Number(match[2]) : CLEAN_MEDIA.byteLength - 1;
+  const slice = CLEAN_MEDIA.subarray(start, end + 1);
+  return route.fulfill({
+    status: 206,
+    headers: {
+      'content-type': CLEAN_MEDIA_TYPE,
+      'accept-ranges': 'bytes',
+      'content-range': `bytes ${start}-${end}/${CLEAN_MEDIA.byteLength}`,
+      'content-length': String(slice.byteLength),
+    },
+    body: slice,
+  });
+}
 
 const policy = {
   module_id: 'fall', module_version: 1, schema_id: 'fall-policy', schema_version: 1,
@@ -45,37 +137,35 @@ const policy = {
   values: { threshold: 0.75 }, effective_policy_id: 'fall.v1:camera-override:8',
 };
 
-async function installOperatorBackend(page: Page): Promise<{ reviews: Array<Record<string, unknown>>; requests: Array<{ path: string; method: string; body: unknown }> }> {
+async function installOperatorBackend(page: Page): Promise<{ reviews: Array<Record<string, unknown>>; requests: Array<{ path: string; method: string; body: unknown; cursor: string | null }> }> {
   const reviews: Array<Record<string, unknown>> = [];
-  const requests: Array<{ path: string; method: string; body: unknown }> = [];
+  const requests: Array<{ path: string; method: string; body: unknown; cursor: string | null }> = [];
   let policyApplyAttempts = 0;
-  const derivativeStates: Record<string, string> = { still: 'NOT_REQUESTED', video: 'UNAVAILABLE' };
   await page.route('**/api/v1/**', async (route) => {
     const request = route.request();
     const url = new URL(request.url());
     const path = url.pathname;
     const json = (body: unknown, status = 200) => route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(body) });
-    requests.push({ path, method: request.method(), body: request.postData() ? request.postDataJSON() : null });
+    requests.push({
+      path, method: request.method(), body: request.postData() ? request.postDataJSON() : null,
+      cursor: url.searchParams.get('cursor'),
+    });
 
     if (path.endsWith('/auth/session')) return json({});
     if (path.endsWith('/cameras')) return json(cameras);
-    if (path.endsWith('/clips')) return json({ clips: [clip], pagination: { limit: 48, offset: 0, total: 1, has_more: false }, event_type_counts: { fall: 1 } });
-    if (path.endsWith('/clips/clip-1/artifacts')) return json({ clip_id: 'clip-1', clean: 'CORRUPT', analysis: 'AVAILABLE', annotated: 'UNAVAILABLE', playback_view: 'clean', annotated_fallback_to_clean: true });
-    if (path.endsWith('/clips/clip-1/analysis')) return json({ clip_id: 'clip-1', decision_trace_id: 'c'.repeat(64), module_qualified_id: 'fall.v1', policy_qualified_id: 'fall-policy.v1', effective_policy_id: 'd'.repeat(64), runtime_manifest_sha256: 'a'.repeat(64), reason: 'fall-onset', previous_state: 'clear', current_state: 'fall', triggered: true, track_id: 7, bed_id: null, values: [] });
-    if (path.includes('/clips/clip-1/derivatives/')) {
-      const kind = path.endsWith('/still') ? 'still' : 'video';
-      if (request.method() === 'POST') derivativeStates[kind] = 'QUEUED';
-      if (request.method() === 'DELETE') derivativeStates[kind] = 'CANCELLED';
-      return json({ incident_id: 'incident-1', kind: kind.toUpperCase(), request_id: 'f'.repeat(64), state: derivativeStates[kind], reason: derivativeStates[kind] === 'UNAVAILABLE' ? '원본 증거가 없습니다.' : null, attempt_count: 1, render_backend: null, primary_clip_id: 'clip-1', decision_trace_id: 'c'.repeat(64), runtime_manifest_sha256: 'a'.repeat(64) }, 202);
+    if (path.endsWith('/clips')) return json(clipsPage(url.searchParams.get('cursor')));
+    if (path.endsWith('/artifacts')) {
+      return json({ clip_id: path.split('/').at(-2), clean: 'AVAILABLE', snapshot: 'AVAILABLE' });
     }
+    if (path.endsWith('/video')) return fulfillCleanMedia(route, request.headers().range);
     if (path.endsWith('/incidents')) {
       return json({ incidents: [{
         incident_id: 'incident-1', edge_event_id: 'event-1', camera_id: 'cam-1', event_type: 'fall',
         detected_at: '2026-08-02T03:12:00Z', lifecycle_state: 'COMPLETE', revision: 3,
         failure_reason: null, runtime_manifest_sha256: 'a'.repeat(64), decision_trace_id: 'trace-한글',
         module_qualified_id: 'fall.v1', policy_qualified_id: 'fall-policy.v1', primary_clip_id: 'clip-1',
-        primary_artifact_state: 'CORRUPT', snapshot_artifact_state: 'MISSING', derivative_state: 'UNAVAILABLE',
-        event_delivery_state: 'DELIVERED', clip_publish_state: 'TRUNCATED', retention_state: 'RETAINED', review: null,
+        primary_artifact_state: 'AVAILABLE', snapshot_artifact_state: 'AVAILABLE',
+        event_delivery_state: 'DELIVERED', clip_publish_state: 'PUBLISHED', retention_state: 'RETAINED', review: null,
       }] });
     }
     if (path.endsWith('/incident-reviews/incident-1')) {
@@ -86,8 +176,8 @@ async function installOperatorBackend(page: Page): Promise<{ reviews: Array<Reco
         detected_at: '2026-08-02T03:12:00Z', lifecycle_state: 'COMPLETE', revision: 3,
         failure_reason: null, runtime_manifest_sha256: 'a'.repeat(64), decision_trace_id: 'trace-한글',
         module_qualified_id: 'fall.v1', policy_qualified_id: 'fall-policy.v1', primary_clip_id: 'clip-1',
-        primary_artifact_state: 'CORRUPT', snapshot_artifact_state: 'MISSING', derivative_state: 'UNAVAILABLE',
-        event_delivery_state: 'DELIVERED', clip_publish_state: 'TRUNCATED', retention_state: 'RETAINED',
+        primary_artifact_state: 'AVAILABLE', snapshot_artifact_state: 'AVAILABLE',
+        event_delivery_state: 'DELIVERED', clip_publish_state: 'PUBLISHED', retention_state: 'RETAINED',
         review: { version: 1, disposition: body.disposition, reviewed_at: '2026-08-02T03:13:00Z', notes: null },
       });
     }
@@ -228,21 +318,67 @@ test('authenticated operator can inspect qualified policy, review evidence, and 
   await expect(page.getByRole('heading', { name: '이벤트' })).toBeVisible();
   await expect(page.getByText('중앙 인시던트')).toBeVisible();
   await page.getByRole('button', { name: /낙상/ }).last().click();
-  await expect(page.getByRole('dialog')).toContainText('원본 / 스냅샷 / 파생');
-  await expect(page.getByRole('dialog')).toContainText('CORRUPT / MISSING / UNAVAILABLE');
+  await expect(page.getByTestId('incident-artifact-states')).toHaveText('AVAILABLE / AVAILABLE');
   await page.getByRole('button', { name: '실제 알림으로 검토' }).click();
   await expect.poll(() => backend.reviews.length).toBe(1);
   expect(backend.reviews[0]).toMatchObject({ expected_version: 0, disposition: 'TRUE_POSITIVE' });
   await page.getByRole('dialog').getByRole('button', { name: '닫기' }).click();
+
+  // Events surface plays the clean clip with native controls -- there is no annotated/analysis view.
   await page.getByRole('button', { name: /서울 301호.*낙상/ }).click();
-  await expect(page.getByRole('dialog', { name: /낙상/ })).toContainText('적용 실행 증명');
-  await expect(page.getByRole('dialog')).toContainText('원본 손상됨 · 분석 사용 가능 · 주석 사용 불가');
-  await page.getByRole('dialog').getByRole('button', { name: '요청', exact: true }).first().click();
-  await expect(page.getByRole('dialog')).toContainText('주석 스틸: 대기 중');
-  await page.getByRole('dialog').getByRole('button', { name: '취소' }).click();
-  await expect(page.getByRole('dialog')).toContainText('주석 스틸: 취소됨');
-  expect(backend.requests.filter((entry) => entry.path.endsWith('/derivatives/still')).map((entry) => entry.method)).toEqual(['POST', 'DELETE']);
+  const eventsDialog = page.getByRole('dialog', { name: /낙상/ });
+  const eventsVideo = eventsDialog.locator('video');
+  await expect(eventsVideo).toHaveCount(1);
+  await expect(eventsVideo).toHaveJSProperty('controls', true);
+  await expect(eventsVideo).toHaveJSProperty('src', 'http://127.0.0.1:4173/api/v1/clips/clip-1/video');
+  // Real decode: HAVE_CURRENT_DATA or better, with the manifest duration read off the media itself.
+  await expect.poll(() => eventsVideo.evaluate((video: HTMLVideoElement) => video.readyState)).toBeGreaterThanOrEqual(2);
+  await expect.poll(() => eventsVideo.evaluate((video: HTMLVideoElement) => video.videoWidth)).toBe(320);
+  expect(backend.requests.some((entry) => entry.path.endsWith('/clips/clip-1/video'))).toBe(true);
+  await expect(eventsDialog.getByTestId('clip-artifact-status')).toBeVisible();
+  for (const retired of ['증거 보기 선택', '파생 증거 제어', '적용 실행 증명']) {
+    await expect(page.locator(`[aria-label="${retired}"]`)).toHaveCount(0);
+  }
+  await expect(eventsDialog.getByRole('button', { name: '클립 삭제' })).toBeVisible();
+  mkdirSync(qaDirectory, { recursive: true });
+  await page.screenshot({ path: `${qaDirectory}/events-clean-playback.png`, fullPage: true });
   await page.getByRole('dialog').getByRole('button', { name: '닫기' }).click();
+
+  // Keyset boundary: two clips share one timestamp, so paging can only advance on the clip-id
+  // tiebreak. Forward then back must land on the same rows without duplicating or skipping either.
+  const firstPageId = await page.locator('button[data-clip-id]').first().getAttribute('data-clip-id');
+  await page.getByRole('button', { name: '다음 페이지' }).click();
+  await expect(page.locator(`button[data-clip-id="${firstPageId}"]`)).toHaveCount(0);
+  const secondPageId = await page.locator('button[data-clip-id]').first().getAttribute('data-clip-id');
+  expect(secondPageId).not.toBe(firstPageId);
+  await expect(page.getByRole('button', { name: '다음 페이지' })).toBeDisabled();
+  await page.screenshot({ path: `${qaDirectory}/events-keyset-boundary.png`, fullPage: true });
+  await page.getByRole('button', { name: '이전 페이지' }).click();
+  await expect(page.locator(`button[data-clip-id="${firstPageId}"]`)).toHaveCount(1);
+  const forwardCursors = backend.requests
+    .filter((entry) => entry.path.endsWith('/clips') && entry.cursor !== null)
+    .map((entry) => entry.cursor);
+  expect(new Set(forwardCursors).size).toBe(forwardCursors.length);
+  expect(backend.requests.filter((entry) => /\/analysis$|\/derivatives\/|\/label$|analysis-traces/.test(entry.path))).toEqual([]);
+
+  // Operations room history plays the same clean media with native controls and no delete surface.
+  await page.getByRole('button', { name: '관제', exact: true }).click();
+  await expect(page.getByRole('heading', { name: '관제' })).toBeVisible();
+  await page.getByRole('button', { name: /서울 301호/ }).first().click();
+  await expect(page.getByRole('region', { name: '호실 상세' })).toBeVisible();
+  await expect(page.getByRole('region', { name: '이벤트 히스토리' })).toBeVisible();
+  await page.getByRole('region', { name: '이벤트 히스토리' }).getByRole('button', { name: /낙상/ }).first().click();
+  const roomDialog = page.getByRole('dialog', { name: /낙상/ });
+  const roomVideo = roomDialog.locator('video');
+  await expect(roomVideo).toHaveCount(1);
+  await expect(roomVideo).toHaveJSProperty('controls', true);
+  await expect(roomVideo).toHaveJSProperty('src', 'http://127.0.0.1:4173/api/v1/clips/clip-1/video');
+  await expect.poll(() => roomVideo.evaluate((video: HTMLVideoElement) => video.readyState)).toBeGreaterThanOrEqual(2);
+  await expect.poll(() => roomVideo.evaluate((video: HTMLVideoElement) => video.videoWidth)).toBe(320);
+  await expect(roomDialog.getByRole('link', { name: '다운로드' })).toHaveAttribute('href', '/api/v1/clips/clip-1/video');
+  await expect(roomDialog.getByRole('button', { name: '클립 삭제' })).toHaveCount(0);
+  await page.screenshot({ path: `${qaDirectory}/operations-clean-playback.png`, fullPage: true });
+  await roomDialog.getByRole('button', { name: '닫기' }).click();
 
   await page.getByRole('button', { name: '설정', exact: true }).click();
   await expect(page.getByRole('heading', { name: '설정', exact: true })).toBeVisible();

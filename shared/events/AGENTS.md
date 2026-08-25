@@ -1,12 +1,10 @@
 # EVENTS KNOWLEDGE BASE
 
-Backend↔worker wire: outbound event shape, in-memory outbox, publishers, Event API client, evidence HTTP, relay failure logs.
+Backend↔worker wire: outbound event shape, Event API client, evidence HTTP, relay failure logs.
 
 ## Ownership
 
 - `schemas.py`: `EmittedEvent`, `build_emitted_event`, `build_audit_envelope`. Re-exports `AlertEventType` and `EventApiPayload`.
-- `local_publisher.py`: `EventPublisher` protocol plus network-free `LoggingEventPublisher`. `StubEventPublisher` is that logger.
-- `outbox.py`: publisher-backed in-memory queue. Not the durable worker evidence outbox.
 - `edge_ingest_client.py`: no-HMAC Event API client for alerts and heartbeats. Shared by the API relay and the worker.
 - `evidence_export_client.py`: `RelayEvidenceClient` (worker to ml-api) and `BackendEvidenceClient` (ml-api to Hub).
 - `evidence_export_contract.py`: `DeliveryFailure`, receipts, capabilities, `RETRY` / `PERMANENT` / `COMPATIBILITY`.
@@ -18,12 +16,6 @@ Backend↔worker wire: outbound event shape, in-memory outbox, publishers, Event
 ML emits typed events. Backend owns severity, channel, policy, and final dedup. Incident management owns only idempotency and cooldown.
 `EmittedEvent` carries facility, camera, domain, event_type, lifecycle, severity, front_event_type, and evidence. Empty `event_type` raises.
 `build_audit_envelope` stamps `clock_source=edge_wall_clock` plus optional model, detector, and threshold. Don't invent Hub fields here.
-
-## Publishers and outbox
-
-`EventPublisher.publish` is the only emit seam. The logging publisher records in memory and writes one info line. It never opens a socket.
-`Outbox.buffer` is non-blocking. A full queue (default 128) increments `drop_count` and `failure_count` and returns False.
-`flush` publishes until empty. A publish exception requeues that event, bumps `failure_count`, and re-raises. Empty flush is a no-op.
 
 ## EdgeIngestClient and one-way egress
 
@@ -57,8 +49,8 @@ Camera id is a string field. A live session belongs in `worker/pipeline/ingest`.
 ## Focused tests
 
 ```bash
-uv run pytest -q tests/test_events_schema.py tests/test_events_outbox.py tests/test_events_ingest_client.py tests/test_evidence_export_client.py tests/test_evidence_http_transport.py
+uv run pytest -q tests/test_events_schema.py tests/test_dead_shared_surfaces.py tests/test_events_ingest_client.py tests/test_evidence_export_client.py tests/test_evidence_http_transport.py
 uv run --group lint lint-imports
 ```
 
-Schema tests lock `EmittedEvent` fields and the Event API payload. Outbox tests cover buffer, drop, and idempotent flush. Ingest tests hit a local HTTP server: no HMAC, optional Bearer, omitted `clip_id`, failure count, dropped `detection-lost`, and receipt `on_accepted`.
+Schema tests lock `EmittedEvent` fields and the Event API payload. Ingest tests hit a local HTTP server: no HMAC, optional Bearer, omitted `clip_id`, failure count, dropped `detection-lost`, and receipt `on_accepted`.

@@ -12,7 +12,6 @@ from typing import Self, final
 
 import pytest
 
-from worker.pipeline.output.evidence.evidence_outbox_schema import SCHEMA_VERSION
 from worker.runtime.config import (
     ConfigSource,
     JsonObject,
@@ -365,7 +364,7 @@ def test_load_ignores_unrelated_database_files(
     database_path = tmp_path / "worker-state.sqlite3"
     connection = sqlite3.connect(database_path)
     try:
-        connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION + 1}")
+        connection.execute("PRAGMA user_version = 99")
         connection.commit()
     finally:
         connection.close()

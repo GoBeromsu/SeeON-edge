@@ -110,10 +110,6 @@ from worker.runtime.config import (
     LiveClipExportPolicy,
     WorkerConfig,
 )
-from worker.runtime.derivative_runtime import (
-    DerivativeCommandExecutor,
-    DerivativeControlService,
-)
 from worker.runtime.faults.handler import FaultHandler
 from worker.runtime.faults.record import make_fault_record
 from worker.runtime.ingest_composition import (
@@ -147,7 +143,6 @@ from worker.runtime.provenance import (
 )
 from worker.runtime.provenance.environment import collect_runtime_environment_facts
 from worker.runtime.state_dir import resolve_state_dir
-from worker.runtime.telemetry.analysis_trace_sender import AnalysisTraceSender
 from worker.runtime.telemetry.runtime_diagnostics import WorkerDiagnostics
 from worker.runtime.telemetry.runtime_status_sender import (
     RelayRuntimeStatusTransport,
@@ -800,7 +795,6 @@ class WorkerRuntime:
         self._clip_recorder: ClipRecorder | None = None
         self._packet_repository: PacketRingRepository | None = None
         self._evidence_export_runtime: EvidenceExportRuntime | None = None
-        self._derivative_control: DerivativeControlService | None = None
         self._clip_deletion_control: ClipDeletionControlService | None = None
         self._runtime_status_sender: RuntimeStatusSender | None = None
         self._clip_frame_feeders: tuple[ClipFrameFeeder, ...] = ()
@@ -889,10 +883,6 @@ class WorkerRuntime:
     def run(self) -> None:
         self._trace_writer = BoundedTraceWriter(
             self._state_dir / "runtime-analysis",
-            publisher=AnalysisTraceSender(
-                self.config.relay.url,
-                self.config.relay.token.get_secret_value(),
-            ).send,
         )
         stages = bootstrap.named_stages(
             self._context,
@@ -920,7 +910,6 @@ class WorkerRuntime:
             )
             self._trace_writer.start()
             self._start_export_sender()
-            self._start_derivative_runtime()
             self._start_runtime_status_sender()
             self._start_clip_frame_feeders()
             self._start_live_view_pumps()
@@ -972,7 +961,6 @@ class WorkerRuntime:
         for live_thread in self._live_view_pump_threads:
             live_thread.join(timeout=5.0)
         self._live_view_pump_threads = ()
-        self._derivative_control = None
         self._clip_deletion_control = None
         for feeder in self._clip_frame_feeders:
             feeder.stop()
@@ -1002,7 +990,6 @@ class WorkerRuntime:
         """
         if (
             self._live_view is None
-            and self._derivative_control is None
             and self._clip_deletion_control is None
             and self.fall_model is None
         ):
@@ -1010,8 +997,7 @@ class WorkerRuntime:
             return
         server_config = self._mjpeg_config
         if (
-            self._derivative_control is not None
-            or self._clip_deletion_control is not None
+            self._clip_deletion_control is not None
             or self.fall_model is not None
         ) and not server_config.enabled:
             server_config = replace(server_config, enabled=True)
@@ -1020,7 +1006,6 @@ class WorkerRuntime:
             server_config,
             probe=self._rtsp_probe,
             bed_zone_recognizer=self._bed_zone_recognizer,
-            derivative_control=self._derivative_control,
             clip_deletion_control=self._clip_deletion_control,
             replay_fall_model=self.fall_model,
         )
@@ -1035,7 +1020,7 @@ class WorkerRuntime:
                 },
             )
         else:
-            surface = "live view" if self._live_view is not None else "derivative control"
+            surface = "live view" if self._live_view is not None else "clip deletion"
             LOGGER.info(
                 "%s server bound: host=%s port=%d",
                 surface,
@@ -1171,10 +1156,6 @@ class WorkerRuntime:
             raise EvidenceDeliveryError(
                 "evidence export sender failed to start; staged alerts would not reach the relay"
             ) from exc
-
-    def _start_derivative_runtime(self) -> None:
-        executor = DerivativeCommandExecutor(self._resolved_clip_store_dir())
-        self._derivative_control = DerivativeControlService(executor)
 
     def _start_runtime_status_sender(self) -> None:
         """Start periodic runtime-status relay delivery (default 5s cadence).
@@ -2030,11 +2011,8 @@ class WorkerRuntime:
             return
         self._clip_recorder = recorder
         self._clip_deletion_control = ClipDeletionControlService(
+            preflight_clip=recorder.preflight_clip_deletion,
             delete_clip=recorder.delete_clip,
-            # Retention is backend intent. The slot holds no retention index, so
-            # it reports no local state and never completes a purge on its own.
-            retention_state=lambda _clip_id: None,
-            complete_pending_purge=None,
         )
         self.diagnostics.set_clip_recorder_status(ClipRecorderStatus(available=True))
 

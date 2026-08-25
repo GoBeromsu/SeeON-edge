@@ -22,10 +22,6 @@ ALLOWED_PATHS: Final = {
     "/api/v1/incident-reviews/{incident_id:path}",
     "/api/v1/models",
     "/api/v1/relay/alerts",
-    # Worker-to-backend analysis-trace publication. The worker owns the engine
-    # and holds traces only in a process-local cache; this is how they reach
-    # durable backend storage so QA replay has anything to replay.
-    "/api/v1/relay/analysis-traces",
     "/api/v1/relay/capabilities",
     "/api/v1/relay/clips/{clip_id}",
     "/api/v1/relay/config",
@@ -51,16 +47,13 @@ ALLOWED_PATHS: Final = {
     "/api/v1/clips/storage/browse",
     "/api/v1/clips/storage/location",
     "/api/v1/clips/{clip_id}",
-    "/api/v1/clips/{clip_id}/analysis",
     "/api/v1/clips/{clip_id}/artifacts",
-    "/api/v1/clips/{clip_id}/derivatives/{kind}",
     "/api/v1/clips/{clip_id}/metadata",
     "/api/v1/connection",
     "/api/v1/connection/sync-cameras",
     "/api/v1/connection/test",
     "/api/v1/connection/topology-preview",
     "/api/v1/connection/topology-preview/confirm",
-    "/api/v1/clips/{clip_id}/label",
     "/api/v1/clips/{clip_id}/thumbnail",
     "/api/v1/clips/{clip_id}/video",
     "/api/v1/detection-policies",
@@ -78,6 +71,7 @@ ALLOWED_PATHS: Final = {
     "/docs/oauth2-redirect",
     "/health/live",
     "/health/ready",
+    "/health/release-identity",
     "/openapi.json",
     "/redoc",
 }

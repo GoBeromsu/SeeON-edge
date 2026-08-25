@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import sys
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
 from urllib.error import HTTPError
@@ -10,9 +11,7 @@ from urllib.request import Request, urlopen
 import pytest
 
 from backend.app.edge_db.migrator import migrate_database
-from backend.app.features.qa.runtime_trace_store import RuntimeAnalysisStore
 from shared.detection_policies import BedExitPolicyV1, FallPolicyV1, make_effective_policy
-from shared.events.replay_wire import decode_replay_trace
 from worker.pipeline.output.live_view import LatestFrameStore
 from worker.pipeline.output.mjpeg_server import MjpegServer, MjpegServerConfig
 
@@ -157,44 +156,61 @@ def _replay_command() -> object:
     spec = spec_from_file_location("replay_runtime_analysis", script)
     assert spec is not None and spec.loader is not None
     module = module_from_spec(spec)
+    sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
 
 
-def test_packaged_replay_command_recovers_posts_and_records_run(tmp_path: Path) -> None:
+def _assert_no_replay_tables(database: Path) -> None:
+    connection = sqlite3.connect(database)
+    try:
+        tables = {
+            str(row[0])
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+            )
+        }
+    finally:
+        connection.close()
+    assert "qa_replay_runs" not in tables
+    assert not any(name.startswith("runtime_analysis_") for name in tables)
+
+
+def test_packaged_replay_command_posts_without_persisting(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     database = tmp_path / "edge.sqlite3"
     migrate_database(database)
-    RuntimeAnalysisStore(database).ingest(decode_replay_trace(_trace()))
+    trace_path = tmp_path / "trace.json"
+    _ = trace_path.write_text(json.dumps(_trace()), encoding="utf-8")
     server = MjpegServer(LatestFrameStore(), MjpegServerConfig(port=0, probe_token=_TOKEN))
     server.start()
     try:
-        policy = _payload()["policy"]
-        command = _replay_command()
-        assert command.main(  # type: ignore[attr-defined]
+        status = _replay_command().main(  # type: ignore[attr-defined]
             [
                 "--database", str(database),
                 "--camera-id", "camera-replay-http",
                 "--worker-url", f"http://127.0.0.1:{server.port}",
                 "--relay-token", _TOKEN,
                 "--module-id", "bed_exit",
-                "--policy-json", json.dumps(policy),
+                "--policy-json", json.dumps(_payload()["policy"]),
                 "--requested-by", "test-operator",
+                "--trace-json", str(trace_path),
             ]
-        ) == 0
+        )
     finally:
         server.stop()
-    connection = sqlite3.connect(database)
-    try:
-        assert connection.execute("SELECT count(*) FROM qa_replay_runs").fetchone() == (1,)
-    finally:
-        connection.close()
+    printed = json.loads(capsys.readouterr().out)
+    assert status == 0
+    assert printed["reproducible"] is True
+    assert printed["event_count"] == 0
+    _assert_no_replay_tables(database)
 
 
-def test_packaged_replay_command_missing_input_persists_nothing(tmp_path: Path) -> None:
+def test_packaged_replay_command_missing_input_does_not_open_sqlite(tmp_path: Path) -> None:
     database = tmp_path / "edge.sqlite3"
     migrate_database(database)
-    command = _replay_command()
-    assert command.main(  # type: ignore[attr-defined]
+    status = _replay_command().main(  # type: ignore[attr-defined]
         [
             "--database", str(database),
             "--camera-id", "missing",
@@ -204,12 +220,9 @@ def test_packaged_replay_command_missing_input_persists_nothing(tmp_path: Path) 
             "--policy-json", json.dumps(_payload()["policy"]),
             "--requested-by", "test-operator",
         ]
-    ) == 2
-    connection = sqlite3.connect(database)
-    try:
-        assert connection.execute("SELECT count(*) FROM qa_replay_runs").fetchone() == (0,)
-    finally:
-        connection.close()
+    )
+    assert status == 2
+    _assert_no_replay_tables(database)
 
 
 def test_packaged_replay_command_refuses_truncated_input_without_persisting(
@@ -218,23 +231,27 @@ def test_packaged_replay_command_refuses_truncated_input_without_persisting(
     database = tmp_path / "edge.sqlite3"
     migrate_database(database)
     trace = _trace()
-    trace["truncation"]["handoff_dropped_frames"] = 1
-    RuntimeAnalysisStore(database).ingest(decode_replay_trace(trace))
-
-    command = _replay_command()
-    assert command.main(  # type: ignore[attr-defined]
-        [
-            "--database", str(database),
-            "--camera-id", "camera-replay-http",
-            "--worker-url", "http://127.0.0.1:1",
-            "--relay-token", _TOKEN,
-            "--module-id", "bed_exit",
-            "--policy-json", json.dumps(_payload()["policy"]),
-            "--requested-by", "test-operator",
-        ]
-    ) == 2
-    connection = sqlite3.connect(database)
+    truncation = trace["truncation"]
+    assert isinstance(truncation, dict)
+    truncation["handoff_dropped_frames"] = 1
+    trace_path = tmp_path / "trace.json"
+    _ = trace_path.write_text(json.dumps(trace), encoding="utf-8")
+    server = MjpegServer(LatestFrameStore(), MjpegServerConfig(port=0, probe_token=_TOKEN))
+    server.start()
     try:
-        assert connection.execute("SELECT count(*) FROM qa_replay_runs").fetchone() == (0,)
+        status = _replay_command().main(  # type: ignore[attr-defined]
+            [
+                "--database", str(database),
+                "--camera-id", "camera-replay-http",
+                "--worker-url", f"http://127.0.0.1:{server.port}",
+                "--relay-token", _TOKEN,
+                "--module-id", "bed_exit",
+                "--policy-json", json.dumps(_payload()["policy"]),
+                "--requested-by", "test-operator",
+                "--trace-json", str(trace_path),
+            ]
+        )
     finally:
-        connection.close()
+        server.stop()
+    assert status == 2
+    _assert_no_replay_tables(database)

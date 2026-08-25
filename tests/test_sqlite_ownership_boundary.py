@@ -288,24 +288,21 @@ def test_the_runtime_slot_carries_no_operational_sqlite_cli() -> None:
     )
 
 
-def test_a_backend_owned_replay_command_is_packaged() -> None:
-    """Replay must have a backend-owned operator entry point, not just an ADR.
+def test_retired_qa_persistence_does_not_return_sqlite_to_the_runtime_slot() -> None:
+    """QA/replay warehouses are retired. The worker slot still must not grow SQLite.
 
-    An earlier ADR argued no such command could be built, on two claims that
-    turned out to be false: the `runtime_analysis_*` tables are replay-complete,
-    and an authenticated backend-to-worker control channel already exists. This
-    asserts the command itself, so the capability cannot regress back into a
-    document explaining its own absence.
+    Persisted `qa_*` / `runtime_analysis_*` tables are gone. The remaining
+    invariant is the ownership fence: replay code in the inference-runtime slot
+    still cannot open a database, and backend feature code must not recreate
+    those tables at runtime.
     """
-    ops = ROOT / "scripts" / "ops"
-    replay_commands = sorted(path.name for path in ops.glob("*replay*.py"))
-    assert replay_commands, (
-        "no backend-owned replay command exists in scripts/ops; the runtime-slot "
-        "CLI was retired, so retiring it without a replacement removes the "
-        "capability rather than relocating it"
+    assert not (ROOT / "backend" / "app" / "features" / "qa").exists()
+    replay_package = ROOT / "worker" / "replay"
+    assert replay_package.is_dir()
+    offenders = sorted(
+        path.relative_to(ROOT).as_posix()
+        for path in replay_package.rglob("*.py")
+        if "sqlite3" in path.read_text(encoding="utf-8")
+        or "edge_db" in path.read_text(encoding="utf-8")
     )
-
-    backend_image = (ROOT / "Dockerfile.backend").read_text(encoding="utf-8")
-    assert "COPY scripts/ops" in backend_image, (
-        "the replay command is not shipped in the image that would run it"
-    )
+    assert not offenders

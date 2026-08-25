@@ -4,14 +4,16 @@ export type ClipPageQuery = {
   readonly cameraId?: string;
   readonly eventType?: string;
   readonly limit: number;
-  readonly offset: number;
+  /** Opaque backend keyset cursor. Absent selects the newest page. */
+  readonly cursor?: string;
 };
 
 export type ClipPagination = {
   readonly limit: number;
-  readonly offset: number;
   readonly total: number;
   readonly has_more: boolean;
+  /** Opaque `(started_at, clip_id)` keyset cursor for the next page; null on the last page. */
+  readonly next_cursor: string | null;
 };
 
 export type ClipPage = {

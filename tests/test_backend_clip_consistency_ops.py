@@ -12,7 +12,8 @@ from pathlib import Path
 import pytest
 
 from backend.app.edge_db.migrator import migrate_database
-from backend.app.edge_db.ownership import Writer
+from backend.app.edge_db.ownership import Writer, writer_for_table
+from backend.app.edge_db.schema import SCHEMA_VERSION
 from backend.app.features.clips import consistency_ops
 from backend.app.features.clips.consistency_ops import (
     ClipConsistencyError,
@@ -104,6 +105,16 @@ def test_apply_refuses_without_quiescence_before_any_mutation(tmp_path: Path) ->
         repair_clip_consistency(_request(database, store, maintenance, receipt, apply=True))
 
 
+def _application_tables(database: Path) -> set[str]:
+    with sqlite3.connect(database) as connection:
+        return {
+            str(row[0])
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+            )
+        }
+
+
 def test_dry_run_does_not_mutate_and_invalid_manifest_refuses(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -113,17 +124,24 @@ def test_dry_run_does_not_mutate_and_invalid_manifest_refuses(
         "open_runtime_database",
         lambda path, **_: sqlite3.connect(path, isolation_level=None),
     )
-    dry = repair_clip_consistency(_request(database, store, maintenance, receipt))
-    assert dry.state == "DRY_RUN"
+    tables = _application_tables(database)
+    assert {"clips", "incidents", "artifacts"} <= tables
+    assert tables.isdisjoint({"evidence_events", "evidence_clips", "clip_events"})
+    with sqlite3.connect(database) as connection:
+        assert connection.execute("PRAGMA user_version").fetchone() == (SCHEMA_VERSION,)
+
+    with pytest.raises(ClipConsistencyError, match="schema_drift"):
+        repair_clip_consistency(_request(database, store, maintenance, receipt))
     assert not list(maintenance.iterdir())
+
     bad = store / "clips" / "clip-a"
     bad.mkdir()
     (bad / "manifest.json").write_text("{}", encoding="utf-8")
     with pytest.raises(ClipConsistencyError, match="final_invalid"):
-        repair_clip_consistency(_request(database, store, maintenance, receipt))
+        inspect_finalized_clip(store, "clip-a")
 
 
-def test_apply_succeeds_after_schema_17_ownership(
+def test_apply_refuses_after_schema18_retires_evidence_relations(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     database, store, maintenance, receipt = _layout(tmp_path)
@@ -133,11 +151,15 @@ def test_apply_succeeds_after_schema_17_ownership(
         "open_runtime_database",
         lambda path, **_: sqlite3.connect(path, isolation_level=None),
     )
-    result = repair_clip_consistency(_request(database, store, maintenance, receipt, apply=True))
-    assert result.state == "DONE"
+    assert writer_for_table("clips") is Writer.API
+    assert writer_for_table("incidents") is Writer.API
+    assert writer_for_table("artifacts") is Writer.API
+    with pytest.raises(ClipConsistencyError, match="schema_drift"):
+        repair_clip_consistency(_request(database, store, maintenance, receipt, apply=True))
+    assert list(maintenance.glob("clip-consistency-*.json")) == []
 
 
-def test_apply_writes_durable_idempotent_receipt(
+def test_apply_writes_no_receipt_when_schema18_retires_evidence_relations(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     database, store, maintenance, receipt = _layout(tmp_path)
@@ -148,11 +170,11 @@ def test_apply_writes_durable_idempotent_receipt(
         lambda path, **_: sqlite3.connect(path, isolation_level=None),
     )
     monkeypatch.setattr(consistency_ops, "writer_for_table", lambda _: Writer.API)
-    first = repair_clip_consistency(_request(database, store, maintenance, receipt, apply=True))
-    second = repair_clip_consistency(_request(database, store, maintenance, receipt, apply=True))
-    assert first.receipt_path == second.receipt_path
-    assert first.receipt_path is not None
-    assert Path(first.receipt_path).stat().st_mode & 0o777 == 0o600
+    with pytest.raises(ClipConsistencyError, match="schema_drift"):
+        repair_clip_consistency(_request(database, store, maintenance, receipt, apply=True))
+    with pytest.raises(ClipConsistencyError, match="schema_drift"):
+        repair_clip_consistency(_request(database, store, maintenance, receipt, apply=True))
+    assert list(maintenance.glob("clip-consistency-*.json")) == []
 
 
 def test_operator_command_exits_nonzero_on_refusal(tmp_path: Path) -> None:
