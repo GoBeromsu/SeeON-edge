@@ -22,6 +22,7 @@ import hashlib
 import json
 import shutil
 import sqlite3
+import threading
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -100,6 +101,116 @@ def test_clip_recorder_delete_clip_delegates_to_maintenance(tmp_path: Path) -> N
 
     assert result is PurgeResult.PURGED
     assert not clip_dir.exists()
+
+
+def test_clip_maintenance_refuses_symlinked_clips_root_without_deleting_outside(
+    tmp_path: Path,
+) -> None:
+    store_dir = tmp_path / "clip-store"
+    outside = tmp_path / "outside"
+    clip_dir = outside / "clip-a"
+    clip_dir.mkdir(parents=True)
+    (clip_dir / "clip.mp4").write_bytes(b"external")
+    (clip_dir / "manifest.json").write_text(
+        json.dumps(
+            {
+                "clip_id": "clip-a",
+                "finalized": True,
+                "started_at": NOW,
+                "video_available": True,
+                "path": "clips/clip-a/clip.mp4",
+            }
+        ),
+        encoding="utf-8",
+    )
+    store_dir.mkdir()
+    (store_dir / "clips").symlink_to(outside, target_is_directory=True)
+    maintenance = ClipMaintenance(
+        ClipRecorderConfig(store_dir=store_dir),
+        ClipRecorderStats(),
+        is_clip_held=lambda _clip_id: False,
+        disk_usage_provider=default_disk_usage,
+    )
+
+    assert maintenance.preflight_clip("clip-a") is PurgeResult.UNVERIFIABLE
+    assert maintenance.purge_clip("clip-a") is PurgeResult.UNVERIFIABLE
+    assert clip_dir.is_dir()
+    assert (clip_dir / "clip.mp4").is_file()
+
+
+def test_clip_maintenance_refuses_symlinked_store_path_intermediate(
+    tmp_path: Path,
+) -> None:
+    actual_parent = tmp_path / "actual-parent"
+    actual_store = actual_parent / "clip-store"
+    clip_dir = _write_finalized_clip(actual_store, "clip-a")
+    configured_parent = tmp_path / "configured-parent"
+    configured_parent.symlink_to(actual_parent, target_is_directory=True)
+    maintenance = ClipMaintenance(
+        ClipRecorderConfig(store_dir=configured_parent / "clip-store"),
+        ClipRecorderStats(),
+        is_clip_held=lambda _clip_id: False,
+        disk_usage_provider=default_disk_usage,
+    )
+
+    assert maintenance.preflight_clip("clip-a") is PurgeResult.UNVERIFIABLE
+    assert maintenance.purge_clip("clip-a") is PurgeResult.UNVERIFIABLE
+    assert clip_dir.is_dir()
+
+
+def test_root_swap_after_preflight_refuses_destructive_delete(
+    tmp_path: Path,
+) -> None:
+    store_dir = tmp_path / "clip-store"
+    clip_dir = _write_finalized_clip(store_dir, "clip-a")
+    outside = tmp_path / "outside"
+    outside_clip = outside / "clip-a"
+    outside_clip.mkdir(parents=True)
+    (outside_clip / "clip.mp4").write_bytes(b"external")
+    (outside_clip / "manifest.json").write_text(
+        json.dumps(
+            {
+                "clip_id": "clip-a",
+                "finalized": True,
+                "started_at": NOW,
+                "video_available": True,
+                "path": "clips/clip-a/clip.mp4",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (outside / "sentinel").write_text("preserve", encoding="utf-8")
+    maintenance = ClipMaintenance(
+        ClipRecorderConfig(store_dir=store_dir),
+        ClipRecorderStats(),
+        is_clip_held=lambda _clip_id: False,
+        disk_usage_provider=default_disk_usage,
+    )
+    preflight_finished = threading.Event()
+    root_swapped = threading.Event()
+    result: list[PurgeResult | None] = []
+
+    def delete_after_preflight() -> None:
+        assert maintenance.preflight_clip("clip-a") is None
+        preflight_finished.set()
+        assert root_swapped.wait(2.0)
+        result.append(maintenance.purge_clip("clip-a"))
+
+    deletion = threading.Thread(target=delete_after_preflight)
+    deletion.start()
+    assert preflight_finished.wait(2.0)
+    original_root = store_dir / "clips"
+    original_root.rename(store_dir / "clips-before-swap")
+    original_root.symlink_to(outside, target_is_directory=True)
+    root_swapped.set()
+    deletion.join(2.0)
+
+    assert not deletion.is_alive()
+    assert result == [PurgeResult.UNVERIFIABLE]
+    assert (store_dir / "clips-before-swap" / clip_dir.name).is_dir()
+    assert outside_clip.is_dir()
+    assert (outside_clip / "clip.mp4").is_file()
+    assert (outside / "sentinel").read_text(encoding="utf-8") == "preserve"
 
 
 def test_clip_recorder_delete_clip_reports_unverifiable_for_symlink_escape(
@@ -234,6 +345,54 @@ def test_control_service_keeps_durable_state_out_of_worker_adapter() -> None:
 
     assert service.delete("clip-a") == {"clip_id": "clip-a", "status": "PURGED"}
     assert calls == ["clip-a"]
+
+
+def test_control_service_serializes_same_clip_delete_at_a_barrier() -> None:
+    first_started = threading.Event()
+    second_entered = threading.Event()
+    release_first = threading.Event()
+    calls: list[str] = []
+    calls_lock = threading.Lock()
+    results: list[dict[str, object]] = []
+
+    def delete_clip(clip_id: str) -> PurgeResult:
+        with calls_lock:
+            calls.append(clip_id)
+            call_number = len(calls)
+        if call_number == 1:
+            first_started.set()
+            assert release_first.wait(2.0)
+        return PurgeResult.PURGED
+
+    service = ClipDeletionControlService(
+        preflight_clip=lambda _clip_id: None,
+        delete_clip=delete_clip,
+    )
+
+    first = threading.Thread(target=lambda: results.append(service.delete("clip-a")))
+    first.start()
+    assert first_started.wait(2.0)
+
+    def second_delete() -> None:
+        second_entered.set()
+        results.append(service.delete("clip-a"))
+
+    second = threading.Thread(target=second_delete)
+    second.start()
+    assert second_entered.wait(2.0)
+    with calls_lock:
+        assert calls == ["clip-a"]
+    release_first.set()
+    first.join(2.0)
+    second.join(2.0)
+
+    assert not first.is_alive()
+    assert not second.is_alive()
+    assert calls == ["clip-a", "clip-a"]
+    assert results == [
+        {"clip_id": "clip-a", "status": "PURGED"},
+        {"clip_id": "clip-a", "status": "PURGED"},
+    ]
 
 
 # --- worker HTTP surface: DELETE /clips/{clip_id} ------------------------------
