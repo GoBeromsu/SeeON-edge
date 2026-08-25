@@ -1,216 +1,133 @@
 from __future__ import annotations
 
-import json
 import sqlite3
-import stat
 from pathlib import Path
-from sqlite3 import Connection
-from typing import cast
 
 import pytest
 
-from backend.app.features.connection.sqlite_store import ConnectionStoreDatabase
-from backend.app.features.connection.store import ConnectionSettingsStore
+from backend.app.edge_db.compatibility import MigrationRequiredError
+from backend.app.features.connection.store import (
+    ConnectionSettingsStore,
+    InvalidConnectionSettingError,
+)
+from tests_support.compact_authority_db import prepare_compact_database
+
+REQUIRED_FIELDS = (
+    "facility_code",
+    "client_installation_ref",
+    "facility_id",
+    "facility_token",
+    "edge_installation_id",
+    "enrollment_generation",
+)
 
 
-def _legacy_database(path: Path) -> None:
-    with sqlite3.connect(path) as connection:
-        _ = connection.execute(
-            """CREATE TABLE connection_settings (
-            id INTEGER PRIMARY KEY CHECK (id = 1),
-            events_url TEXT, config_url TEXT, facility_id TEXT,
-            facility_token TEXT, updated_at TEXT) STRICT"""
-        )
-        _ = connection.execute(
-            """INSERT INTO connection_settings
-            (id, events_url, config_url, facility_id, facility_token, updated_at)
-            VALUES (1, ?, ?, ?, ?, ?)""",
-            (
-                "https://saved.example/events",
-                "https://saved.example/ml-config",
-                "legacy-facility",
-                "synthetic-token-1234",
-                "2026-08-10T00:00:00.000Z",
-            ),
-        )
+def _enrollment() -> dict[str, str | int]:
+    return {
+        "facility_code": "NH-7H2K9M4QXP",
+        "client_installation_ref": "aa83ea3f-6e5f-4f45-a401-fb36c38835b6",
+        "facility_id": "facility-1",
+        "facility_token": "token-1234",
+        "edge_installation_id": "edge-1",
+        "enrollment_generation": 3,
+    }
 
 
-class TestPreMigrationCharacterization:
-    def test_current_url_row_is_readable(self, tmp_path: Path) -> None:
-        database = tmp_path / "connection-settings.sqlite3"
-        _legacy_database(database)
-
-        settings = ConnectionSettingsStore(database).load()
-
-        assert settings.events_url == "https://saved.example/events"
-        assert settings.config_url == "https://saved.example/ml-config"
-
-    def test_current_public_view_masks_token(self, tmp_path: Path) -> None:
-        database = tmp_path / "connection-settings.sqlite3"
-        _legacy_database(database)
-
-        public = ConnectionSettingsStore(database).masked()
-
-        assert public["facility_token_masked"] == "****1234"
-        assert "synthetic-token-1234" not in json.dumps(public)
-
-    def test_current_write_uses_owner_only_file_mode(self, tmp_path: Path) -> None:
-        store = ConnectionSettingsStore(tmp_path / "connection-settings.sqlite3")
-
-        _ = store.save({"events_url": "https://saved.example/events"})
-
-        assert stat.S_IMODE(store.path.stat().st_mode) == 0o600
-
-    def test_current_corrupt_database_falls_back_to_empty(self, tmp_path: Path) -> None:
-        database = tmp_path / "connection-settings.sqlite3"
-        _ = database.write_bytes(b"not sqlite")
-
-        settings = ConnectionSettingsStore(database).load()
-
-        assert settings.events_url is None
-        assert settings.facility_id is None
-
-    def test_current_legacy_identity_row_is_readable(self, tmp_path: Path) -> None:
-        database = tmp_path / "connection-settings.sqlite3"
-        _legacy_database(database)
-
-        settings = ConnectionSettingsStore(database).load()
-
-        assert settings.facility_id == "legacy-facility"
-        assert settings.facility_token == "synthetic-token-1234"
+def _store(tmp_path: Path) -> ConnectionSettingsStore:
+    path = prepare_compact_database(tmp_path / "edge.sqlite3")
+    return ConnectionSettingsStore(path)
 
 
-def test_additive_migration_preserves_legacy_reader_columns(tmp_path: Path) -> None:
-    database = tmp_path / "connection-settings.sqlite3"
-    _legacy_database(database)
+def test_constructor_requires_external_schema18_migration(tmp_path: Path) -> None:
+    path = tmp_path / "missing.sqlite3"
 
-    _ = ConnectionSettingsStore(database).load()
+    with pytest.raises(MigrationRequiredError):
+        ConnectionSettingsStore(path).load()
 
-    with sqlite3.connect(database) as connection:
-        schema_rows: list[tuple[int, str, str, int, str | None, int]] = connection.execute(
-            "PRAGMA table_info(connection_settings)"
-        ).fetchall()
-        columns = {row[1] for row in schema_rows}
-        legacy_row = cast(
-            tuple[str, str, str, str, str] | None,
-            connection.execute(
-                "SELECT events_url, config_url, facility_id, facility_token, updated_at "
-                + "FROM connection_settings WHERE id = 1"
-            ).fetchone(),
-        )
-    assert {
-        "facility_code",
-        "edge_installation_id",
-        "enrollment_generation",
-        "enrollment_created_at",
-        "enrollment_updated_at",
-    } <= columns
-    assert legacy_row == (
-        "https://saved.example/events",
-        "https://saved.example/ml-config",
-        "legacy-facility",
-        "synthetic-token-1234",
-        "2026-08-10T00:00:00.000Z",
-    )
+    assert not path.exists()
+
+
+def test_fresh_schema18_connection_authority_is_empty(tmp_path: Path) -> None:
+    settings = _store(tmp_path).load()
+
+    assert settings.facility_id is None
+    assert settings.facility_token is None
+    assert settings.events_url is None
+    assert settings.config_url is None
 
 
 def test_runtime_enrollment_survives_restart_and_is_masked(tmp_path: Path) -> None:
-    database = tmp_path / "connection-settings.sqlite3"
-    store = ConnectionSettingsStore(database)
+    store = _store(tmp_path)
+    saved = store.save(_enrollment())
 
-    saved = store.save(
-        {
-            "facility_code": "NH-7H2K9M4QXP",
-            "client_installation_ref": "aa83ea3f-6e5f-4f45-a401-fb36c38835b6",
-            "facility_token": "synthetic-enrollment-token-9876",
-            "facility_id": "canonical-facility-id",
-            "edge_installation_id": "edge-installation-id",
-            "enrollment_generation": 3,
-        }
-    )
-    reopened = ConnectionSettingsStore(database)
+    restarted = ConnectionSettingsStore(store.path)
 
-    assert saved.facility_code == "NH-7H2K9M4QXP"
-    assert reopened.load().edge_installation_id == "edge-installation-id"
-    assert reopened.load().enrollment_generation == 3
-    assert reopened.load().enrollment_created_at is not None
-    assert reopened.load().enrollment_updated_at is not None
-    assert reopened.masked()["facility_token_masked"] == "****9876"
-    assert "synthetic-enrollment-token-9876" not in json.dumps(reopened.masked())
-    assert "synthetic-enrollment-token-9876" not in repr(reopened.load())
+    assert restarted.load() == saved
+    assert restarted.masked() == {
+        "events_url": None,
+        "config_url": None,
+        "facility_id": "facility-1",
+        "facility_token_masked": "****1234",
+        "facility_token_set": True,
+        "updated_at": saved.updated_at,
+    }
 
 
-@pytest.mark.parametrize(
-    "required_field",
-    [
-        "facility_code",
-        "client_installation_ref",
-        "facility_token",
-        "facility_id",
-        "edge_installation_id",
-        "enrollment_generation",
-    ],
-)
-def test_complete_enrollment_rejects_clearing_each_required_field(
-    tmp_path: Path, required_field: str
+@pytest.mark.parametrize("field_name", REQUIRED_FIELDS)
+def test_complete_enrollment_rejects_clearing_each_required_field_atomically(
+    tmp_path: Path, field_name: str
 ) -> None:
-    store = ConnectionSettingsStore(tmp_path / "connection-settings.sqlite3")
-    before = store.save(
-        {
-            "facility_code": "NH-7H2K9M4QXP",
-            "client_installation_ref": "aa83ea3f-6e5f-4f45-a401-fb36c38835b6",
-            "facility_token": "synthetic-enrollment-token-9876",
-            "facility_id": "canonical-facility-id",
-            "edge_installation_id": "edge-installation-id",
-            "enrollment_generation": 3,
-        }
-    )
+    store = _store(tmp_path)
+    before = store.save(_enrollment())
 
-    with pytest.raises(ValueError):
-        _ = store.save({required_field: None})
+    with pytest.raises(InvalidConnectionSettingError, match="saved atomically"):
+        store.save({field_name: None})
 
-    assert ConnectionSettingsStore(store.path).load() == before
+    assert store.load() == before
 
 
 @pytest.mark.parametrize(
     "updates",
     [
         {"facility_code": ""},
-        {"edge_installation_id": ""},
+        {"client_installation_ref": " "},
         {"enrollment_generation": 0},
-        {"enrollment_generation": -1},
+        {"enrollment_generation": True},
+        {"events_url": "https://stored.example/events"},
+        {"config_url": "https://stored.example/config"},
     ],
 )
-def test_invalid_enrollment_fields_are_rejected_atomically(
-    tmp_path: Path, updates: dict[str, str | int | None]
+def test_invalid_or_retired_enrollment_fields_are_rejected_atomically(
+    tmp_path: Path, updates: dict[str, str | int | bool]
 ) -> None:
-    store = ConnectionSettingsStore(tmp_path / "connection-settings.sqlite3")
-    _ = store.save({"facility_id": "legacy-facility"})
+    store = _store(tmp_path)
+    before = store.save(_enrollment())
 
-    with pytest.raises(ValueError):
-        _ = store.save(updates)
+    with pytest.raises(InvalidConnectionSettingError):
+        store.save(updates)
 
-    assert store.load().facility_id == "legacy-facility"
+    assert store.load() == before
 
 
-def test_readonly_migration_failure_keeps_legacy_row_readable(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    database = tmp_path / "connection-settings.sqlite3"
-    _legacy_database(database)
-
-    def deny_backup(_database: ConnectionStoreDatabase, _source: Connection) -> None:
-        raise PermissionError
-
-    monkeypatch.setattr(ConnectionStoreDatabase, "_create_backup", deny_backup)
-
-    settings = ConnectionSettingsStore(database).load()
-
-    assert settings.events_url == "https://saved.example/events"
-    assert settings.facility_id == "legacy-facility"
-    with sqlite3.connect(database) as connection:
-        schema_rows = cast(
-            list[tuple[int, str, str, int, str | None, int]],
-            connection.execute("PRAGMA table_info(connection_settings)").fetchall(),
+def test_schema18_connection_write_changes_only_enrollment_columns(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    with sqlite3.connect(store.path) as connection:
+        connection.execute(
+            "INSERT INTO edge_site(id,clip_export_enabled,runtime_settings_version,updated_at) "
+            "VALUES (1,1,7,'2026-08-24T00:00:00Z')"
         )
-    assert "facility_code" not in {row[1] for row in schema_rows}
+
+    store.save(_enrollment())
+
+    with sqlite3.connect(store.path) as connection:
+        row = connection.execute(
+            "SELECT clip_export_enabled,runtime_settings_version,facility_id FROM edge_site "
+            "WHERE id=1"
+        ).fetchone()
+        tables = {
+            str(item[0])
+            for item in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        }
+    assert row == (1, 7, "facility-1")
+    assert "connection_settings" not in tables
+    assert "connection_store_migrations" not in tables

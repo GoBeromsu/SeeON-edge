@@ -1,20 +1,24 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import threading
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import ClassVar
+from typing import ClassVar, cast
 
 import pytest
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from backend.app.features.cameras.store import CameraRegistryStore
 from backend.app.features.clips.catalog import CatalogStore
+from backend.app.features.evidence.relay_projection import RelayEvidenceProjection
 from backend.app.main import create_app, no_lifespan
 from shared.events.evidence_export_client import RelayEvidenceClient
 from shared.events.evidence_export_contract import DeliveryDisposition, DeliveryFailure
+from tests_support.compact_authority_db import prepare_compact_database
 
 TOKEN = "relay-token"
 EVENT_ID = "00000000-0000-4000-8000-000000000020"
@@ -38,7 +42,9 @@ DISPOSITION = {
 def client(tmp_path: Path) -> Iterator[TestClient]:
     app = create_app(lifespan=no_lifespan)
     app.state.edge_relay_token = TOKEN
-    registry = CameraRegistryStore(tmp_path / "registry.sqlite3")
+    registry_path = tmp_path / "registry.sqlite3"
+    prepare_compact_database(registry_path)
+    registry = CameraRegistryStore(registry_path)
     registry.create(
         camera_id="camera-1",
         label="camera-1",
@@ -48,18 +54,29 @@ def client(tmp_path: Path) -> Iterator[TestClient]:
         backend_camera_id="camera-1",
     )
     app.state.camera_registry = registry
+    app.state.relay_evidence_projection = RelayEvidenceProjection(registry_path)
+    app.state.edge_database_path = registry_path
     app.state.catalog_store = CatalogStore.open(tmp_path / "catalog.sqlite3")
     with TestClient(app) as test_client:
         yield test_client
     app.state.catalog_store.close()
 
 
-def _post(client: TestClient, path: str, payload: dict[str, object]):
+def _post(client: TestClient, path: str, payload: Mapping[str, object]):
     return client.post(path, json=payload, headers={"X-Edge-Relay-Token": TOKEN})
 
 
 def test_snapshot_attachment_is_idempotent_and_rebinding_conflicts(client: TestClient) -> None:
     path = "/api/v1/relay/snapshot-attachments"
+    event = {
+        "edge_event_id": EVENT_ID,
+        "event_type": "fall",
+        "probability": 0.8,
+        "detected_at": "2026-08-21T00:00:00Z",
+        "camera_id": "camera-1",
+        "facility_id": "facility-1",
+    }
+    assert _post(client, "/api/v1/relay/alerts", event).status_code == 202
 
     assert _post(client, path, ATTACHMENT).status_code == 202
     assert _post(client, path, ATTACHMENT).status_code == 202
@@ -71,7 +88,18 @@ def test_snapshot_attachment_is_idempotent_and_rebinding_conflicts(client: TestC
     assert conflict.status_code == 409
     assert "content identity" in conflict.json()["detail"]
     assert invalid.status_code == 422
-    assert len(client.app.state.catalog_store.records("snapshots")) == 1
+    database = Path(client.app.state.edge_database_path)
+    with sqlite3.connect(database) as connection:
+        artifact_count = connection.execute(
+            "SELECT COUNT(*) FROM artifacts WHERE artifact_id='snapshot-1'"
+        ).fetchone()[0]
+        audit_count = connection.execute(
+            "SELECT COUNT(*) FROM audit_events "
+            "WHERE action='relay.snapshot-attachment'"
+        ).fetchone()[0]
+    assert artifact_count == 1
+    assert audit_count == 2
+    assert client.app.state.catalog_store.records("snapshots") == []
 
 
 def test_snapshot_disposition_is_durable_and_never_changes_referenced_event(
@@ -86,14 +114,62 @@ def test_snapshot_disposition_is_durable_and_never_changes_referenced_event(
         "facility_id": "facility-1",
     }
     assert _post(client, "/api/v1/relay/alerts", event).status_code == 202
-    before = client.app.state.catalog_store.records("events")
+    database = Path(client.app.state.edge_database_path)
+    with sqlite3.connect(database) as connection:
+        before = connection.execute(
+            "SELECT edge_event_id,event_type,revision FROM incidents WHERE edge_event_id=?",
+            (EVENT_ID,),
+        ).fetchone()
 
     response = _post(client, "/api/v1/relay/snapshot-dispositions", DISPOSITION)
 
     assert response.status_code == 202
-    assert client.app.state.catalog_store.records("events") == before
-    audit = client.app.state.catalog_store.records("audit")
-    assert audit == [{"action": "snapshot_disposition", **DISPOSITION}]
+    with sqlite3.connect(database) as connection:
+        after = connection.execute(
+            "SELECT edge_event_id,event_type,revision FROM incidents WHERE edge_event_id=?",
+            (EVENT_ID,),
+        ).fetchone()
+        disposition = connection.execute(
+            "SELECT state,reason FROM artifacts WHERE incident_id=("
+            "SELECT incident_id FROM incidents WHERE edge_event_id=?) AND kind='SNAPSHOT'",
+            (EVENT_ID,),
+        ).fetchone()
+    assert after == before
+    assert disposition == ("UNAVAILABLE", "UNAVAILABLE:camera offline")
+
+
+def test_snapshot_disposition_route_commits_canonical_action_and_detail(
+    client: TestClient,
+) -> None:
+    event = {
+        "edge_event_id": EVENT_ID,
+        "event_type": "fall",
+        "probability": 0.8,
+        "detected_at": "2026-08-21T00:00:00Z",
+        "camera_id": "camera-1",
+        "facility_id": "facility-1",
+    }
+    assert _post(client, "/api/v1/relay/alerts", event).status_code == 202
+
+    response = _post(client, "/api/v1/relay/snapshot-dispositions", DISPOSITION)
+
+    assert response.status_code == 202
+    app = cast(FastAPI, client.app)
+    database = Path(app.state.edge_database_path)
+    with sqlite3.connect(database) as connection:
+        rows = connection.execute(
+            "SELECT action,target_id,actor_type,auth_mechanism,detail_json "
+            "FROM audit_events WHERE target_id='snapshot-missing'"
+        ).fetchall()
+    assert rows == [
+        (
+            "relay.snapshot-disposition",
+            "snapshot-missing",
+            "service",
+            "relay_token",
+            '{"version":1}',
+        )
+    ]
 
 
 def test_snapshot_attachment_rejects_inline_media_payload(client: TestClient) -> None:
@@ -147,9 +223,5 @@ def test_client_preserves_conflict_and_validation_outcomes(outcome_server: str) 
     conflict = relay.send_snapshot_attachment(ATTACHMENT)
     invalid = relay.send_snapshot_attachment(ATTACHMENT)
 
-    assert conflict == DeliveryFailure(
-        DeliveryDisposition.PERMANENT, "HTTP_409", status_code=409
-    )
-    assert invalid == DeliveryFailure(
-        DeliveryDisposition.PERMANENT, "HTTP_422", status_code=422
-    )
+    assert conflict == DeliveryFailure(DeliveryDisposition.PERMANENT, "HTTP_409", status_code=409)
+    assert invalid == DeliveryFailure(DeliveryDisposition.PERMANENT, "HTTP_422", status_code=422)

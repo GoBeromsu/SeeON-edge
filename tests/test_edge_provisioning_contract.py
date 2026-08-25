@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import urllib.request
 from pathlib import Path
 from typing import Final
 
@@ -10,7 +9,6 @@ import pytest
 from pydantic import JsonValue as PydanticJsonValue
 from pydantic import TypeAdapter
 
-from backend.app.shared.backend_mapping import BackendCameraMapper
 from contracts.edge_provisioning_models import JsonRecord, JsonValue
 from contracts.edge_provisioning_v1 import (
     CANONICAL_SCHEMA_VERSION,
@@ -261,37 +259,12 @@ def test_error_envelope_parser_rejects_malformed_envelopes() -> None:
         _ = parse_error_envelope({"schemaVersion": 1, "error": {"code": "INVALID_SCHEMA"}})
 
 
-def test_current_mapper_remains_per_camera_legacy_client_without_network() -> None:
-    mapper = _CharacterizedMapper(
-        endpoint="https://api.example/api/v1/edge/cameras",
-        token="fixture-token",
-        facility_id="legacy-facility",
-    )
+def test_per_camera_mapper_client_is_absent() -> None:
+    from backend.app.shared import backend_mapping
 
-    request = mapper.request(edge_camera_ref="camera-001", label="Camera Test", space_id="room-201")
-
-    assert request.full_url == "https://api.example/api/v1/edge/cameras"
-    assert request.get_method() == "PUT"
-    assert request.get_header("Authorization") == "Bearer fixture-token"
-    assert request.get_header("X-facility-id") == "legacy-facility"
-    request_data = request.data
-    assert isinstance(request_data, bytes)
-    assert json.loads(request_data.decode("utf-8")) == {
-        "edge_camera_ref": "camera-001",
-        "label": "Camera Test",
-        "spaceId": "room-201",
-    }
-
-
-class _CharacterizedMapper(BackendCameraMapper):
-    def request(
-        self, *, edge_camera_ref: str, label: str, space_id: str
-    ) -> urllib.request.Request:
-        return self._mapping_request(
-            edge_camera_ref=edge_camera_ref,
-            label=label,
-            space_id=space_id,
-        )
+    assert not hasattr(backend_mapping, "BackendCameraMapper")
+    assert not hasattr(backend_mapping, "push_camera")
+    assert "def push_camera" not in Path(backend_mapping.__file__).read_text(encoding="utf-8")
 
 
 def _snapshot() -> TopologySnapshot:

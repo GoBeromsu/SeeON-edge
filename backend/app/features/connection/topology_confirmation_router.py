@@ -6,6 +6,9 @@ from fastapi import APIRouter, Request, status
 from fastapi.exceptions import HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 
+from backend.app.features.audit.catalog import AuditAction, empty_detail
+from backend.app.features.audit.http import append_transactional
+from backend.app.features.audit.store import AuditEvent, utc_now
 from backend.app.features.cameras.edge_topology_sync_state import TopologyPauseReason
 from backend.app.features.cameras.router import _authorize
 from backend.app.features.cameras.topology_client import (
@@ -109,14 +112,24 @@ def confirm_topology_preview(
     payload: TopologyConfirmRequest,
     request: Request,
 ) -> TopologyConfirmResponse:
-    _authorize(request)
+    actor = _authorize(request)
     outcome = topology_retry_coordinator(request.app).confirm(
         TopologyConfirmationCommand(
             payload.confirmation_id,
             payload.digest,
             payload.client_revision,
             payload.server_revision,
-        )
+        ),
+        after_write=lambda connection: append_transactional(
+            request,
+            connection,
+            AuditEvent(
+                occurred_at=utc_now(), actor_id=actor,
+                action=AuditAction.TOPOLOGY_CONFIRM,
+                target_id=payload.confirmation_id,
+                detail=empty_detail(AuditAction.TOPOLOGY_CONFIRM),
+            ),
+        ),
     )
     match outcome:
         case TopologyAccepted(response=response):

@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from backend.app.edge_db.migrator import migrate_database
 from backend.app.features.cameras.edge_topology_sync_state import (
     EdgeTopologySyncStateStore,
     PendingTopologySnapshot,
@@ -18,6 +19,7 @@ from backend.app.features.cameras.topology_client import (
     TopologyPutResult,
     TopologyRetryable,
 )
+from backend.app.features.connection.store import ConnectionSettingsStore
 from backend.app.features.connection.topology_retry_coordinator import (
     TopologyRetryCoordinator,
 )
@@ -32,7 +34,35 @@ from contracts.edge_provisioning_v1 import (
 PRINCIPAL = MachinePrincipal("c72bd9a7-3e04-47ba-a8cd-a56e54f98152", 1)
 
 
+@pytest.fixture(autouse=True)
+def _enrolled_compact_database(tmp_path: Path) -> None:
+    path = tmp_path / "catalog.sqlite3"
+    migrate_database(path)
+    ConnectionSettingsStore(path).save(
+        {
+            "facility_code": "NH-1234",
+            "client_installation_ref": "install-1",
+            "facility_id": "facility-1",
+            "facility_token": "token-1",
+            "edge_installation_id": PRINCIPAL.edge_installation_id,
+            "enrollment_generation": PRINCIPAL.enrollment_generation,
+        }
+    )
+
+
 def _ready_registry(path: Path) -> CameraRegistryStore:
+    if not path.exists():
+        migrate_database(path)
+        ConnectionSettingsStore(path).save(
+            {
+                "facility_code": "NH-1234",
+                "client_installation_ref": "install-1",
+                "facility_id": "facility-1",
+                "facility_token": "token-1",
+                "edge_installation_id": PRINCIPAL.edge_installation_id,
+                "enrollment_generation": PRINCIPAL.enrollment_generation,
+            }
+        )
     store = CameraRegistryStore(path)
     store.create_floor(edge_ref="floor-1", name="First", order_index=1)
     store.create_room(edge_ref="room-101", floor_edge_ref="floor-1", name="101")
@@ -79,9 +109,7 @@ class _Client:
     def refresh_server_revision(self) -> int | None:
         return self.refreshed_revision
 
-    def confirm(
-        self, snapshot_id: str, confirmation: TopologyConfirmation
-    ) -> TopologyPutResult:
+    def confirm(self, snapshot_id: str, confirmation: TopologyConfirmation) -> TopologyPutResult:
         self.confirmations.append((snapshot_id, confirmation))
         return TopologyRetryable("unreachable")
 
@@ -202,9 +230,7 @@ def test_auth_pause_resumes_exact_pending_after_connectivity(
     # Given
     path = tmp_path / f"catalog-{status}.sqlite3"
     registry = _ready_registry(path)
-    client = _Client(
-        [lambda _pending: TopologyPaused(reason, status), _accepted]
-    )
+    client = _Client([lambda _pending: TopologyPaused(reason, status), _accepted])
     coordinator = TopologyRetryCoordinator(
         registry, EdgeTopologySyncStateStore(path), lambda: client
     )

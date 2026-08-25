@@ -4,14 +4,13 @@ import base64
 import hashlib
 import sqlite3
 import tempfile
-from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 
 from backend.app.features.cameras.store import CameraRegistryStore
-from backend.app.features.clips.catalog import CatalogStore
+from backend.app.features.evidence.relay_projection import RelayEvidenceProjection
 from backend.app.features.relay.router import (
     MAX_CATALOG_PAYLOAD_BYTES,
     MAX_CATALOG_PAYLOAD_DEPTH,
@@ -26,32 +25,7 @@ from shared.events.evidence_export_contract import (
     DeliveryFailure,
     EventReceipt,
 )
-
-
-@pytest.fixture(autouse=True)
-def default_catalog_path_to_tmp_path(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> Iterator[None]:
-    """Redirect the catalog resolver so no test in this file can reach the
-    real ``~/.local/state/ml-api/catalog.sqlite3``, even if a call site
-    forgets to pass ``catalog_path`` into ``_client()``.
-
-    Mirrors ``tests/conftest.py``'s
-    ``default_dashboard_credentials_store_to_tmp_path`` fixture: relay POSTs
-    that never explicitly inject a catalog path fall through to
-    ``get_catalog_store()`` -> ``_catalog_path()``, which otherwise resolves
-    the real home-directory state dir (no env override exists for this path
-    anymore). That ambient-filesystem write shouldn't happen from the suite
-    at all, so ``_catalog_path()`` itself is patched to build the path from
-    a per-test tmp path instead -- a belt-and-suspenders guard on top of the
-    explicit ``catalog_path=`` call sites below.
-    """
-
-    monkeypatch.setattr(
-        "backend.app.features.clips.catalog._catalog_path",
-        lambda: tmp_path / "catalog.sqlite3",
-    )
-    yield
+from tests_support.compact_authority_db import prepare_compact_database
 
 
 class FakeBackendIngestClient:
@@ -88,7 +62,9 @@ def _client(
     app = create_app(lifespan=no_lifespan)
     app.state.edge_relay_token = "relay-token"
     registry_root = registry_dir if registry_dir is not None else Path(tempfile.mkdtemp())
-    store = CameraRegistryStore(registry_root / "catalog.sqlite3")
+    registry_path = catalog_path or registry_root / "edge.sqlite3"
+    prepare_compact_database(registry_path)
+    store = CameraRegistryStore(registry_path)
     store.create(
         camera_id="camera-1",
         label="camera-1",
@@ -99,13 +75,18 @@ def _client(
     )
     app.state.camera_registry = store
     app.state.backend_ingest_client = fake or FakeBackendIngestClient()
-    if catalog_path is not None:
-        # Pre-set app.state.catalog_store so get_catalog_store() (called
-        # lazily on first relay use) short-circuits on the isinstance check
-        # and never resolves a path itself -- constructor injection instead
-        # of env-var injection now that no state-path env override exists.
-        app.state.catalog_store = CatalogStore.open(catalog_path)
+    app.state.relay_evidence_projection = RelayEvidenceProjection(registry_path)
+    app.state.edge_database_path = registry_path
     return TestClient(app)
+
+
+def _compact_incident(database: Path, edge_event_id: str) -> tuple[object, ...] | None:
+    with sqlite3.connect(database) as connection:
+        return connection.execute(
+            "SELECT edge_event_id,camera_id,facility_id,event_type,probability,detected_at "
+            "FROM incidents WHERE edge_event_id=?",
+            (edge_event_id,),
+        ).fetchone()
 
 
 def _alert_payload(**overrides) -> dict:
@@ -194,7 +175,9 @@ def test_unenrolled_runtime_accepts_alert_locally_without_cloud_egress() -> None
     # see _camera_binding_from_registry in relay/router.py); the camera must
     # resolve here so the request reaches the backend-enrollment branch this
     # test actually exercises, instead of 403ing earlier as an unknown camera.
-    store = CameraRegistryStore(Path(tempfile.mkdtemp()) / "catalog.sqlite3")
+    registry_path = Path(tempfile.mkdtemp()) / "catalog.sqlite3"
+    prepare_compact_database(registry_path)
+    store = CameraRegistryStore(registry_path)
     store.create(
         camera_id="camera-1",
         label="camera-1",
@@ -265,7 +248,14 @@ def test_relay_alert_records_catalog_even_when_camera_unresolved(tmp_path) -> No
         )
 
         assert response.status_code == 403
-        assert client.app.state.catalog_store.records("events") == [{**payload}]
+        assert _compact_incident(tmp_path / "catalog.sqlite3", str(payload["edge_event_id"])) == (
+            payload["edge_event_id"],
+            "camera-unknown",
+            "facility-1",
+            "bed-exit",
+            0.87,
+            "2026-06-25T12:00:00.000Z",
+        )
 
 
 def test_relay_alert_forwards_valid_event_to_backend_ingest_client() -> None:
@@ -288,7 +278,7 @@ def test_relay_alert_forwards_valid_event_to_backend_ingest_client() -> None:
     ]
 
 
-def test_relay_alert_catalog_preserves_normal_evidence_losslessly(tmp_path) -> None:
+def test_relay_alert_compact_projection_preserves_incident_identity(tmp_path) -> None:
     fake = FakeBackendIngestClient()
     evidence = {"domain": "night-bed-exit", "window": {"start": 1, "end": 2}}
     payload = _alert_payload(
@@ -304,14 +294,18 @@ def test_relay_alert_catalog_preserves_normal_evidence_losslessly(tmp_path) -> N
 
     assert response.status_code == 202
     assert response.json()["status"] == "accepted"
-    assert client.app.state.catalog_store.records("events") == [{**payload}]
+    assert _compact_incident(tmp_path / "catalog.sqlite3", str(payload["edge_event_id"])) == (
+        payload["edge_event_id"],
+        "camera-1",
+        "facility-1",
+        "bed-exit",
+        0.87,
+        "2026-06-25T12:00:00.000Z",
+    )
 
 
-def test_relay_alert_skips_oversized_catalog_record_but_delivers_alert() -> None:
-    # No catalog is ever opened on this path: the size guard rejects the
-    # payload before the router reaches ``get_catalog_store`` (see
-    # ``backend/app/features/relay/router.py``), so ``catalog_store`` must
-    # stay unset -- matching the assertion below.
+def test_relay_alert_projects_identity_without_persisting_oversized_metadata() -> None:
+    # Compact incidents retain bounded identity, not arbitrary evidence metadata.
     fake = FakeBackendIngestClient()
     client = _client(fake)
     response = client.post(
@@ -324,16 +318,19 @@ def test_relay_alert_skips_oversized_catalog_record_but_delivers_alert() -> None
     )
 
     assert response.status_code == 202
-    assert response.json()["catalog"] == "not_recorded"
-    assert "maximum size" in response.json()["catalog_reason"]
+    assert response.json()["status"] == "accepted"
     assert len(fake.alerts) == 1
-    assert not hasattr(client.app.state, "catalog_store")
+    assert (
+        _compact_incident(
+            Path(client.app.state.edge_database_path),
+            "00000000-0000-4000-8000-000000000011",
+        )
+        is not None
+    )
 
 
-def test_relay_alert_skips_overdeep_catalog_record_but_delivers_alert() -> None:
-    """Catalog limits never block safety-alert egress because it is only an index."""
-    # No catalog is ever opened on this path either -- see the sibling
-    # oversized-record test above.
+def test_relay_alert_projects_identity_without_persisting_overdeep_metadata() -> None:
+    """Deep metadata is omitted while compact incident identity remains durable."""
     fake = FakeBackendIngestClient()
     evidence: dict[str, object] = {}
     current = evidence
@@ -352,33 +349,35 @@ def test_relay_alert_skips_overdeep_catalog_record_but_delivers_alert() -> None:
     )
 
     assert response.status_code == 202
-    assert response.json()["catalog"] == "not_recorded"
-    assert "maximum depth" in response.json()["catalog_reason"]
+    assert response.json()["status"] == "accepted"
     assert len(fake.alerts) == 1
-    assert not hasattr(client.app.state, "catalog_store")
+    assert (
+        _compact_incident(
+            Path(client.app.state.edge_database_path),
+            "00000000-0000-4000-8000-000000000012",
+        )
+        is not None
+    )
 
 
-class FailingCatalogStore:
-    def record_many(self, records: tuple[tuple[str, str, dict], ...]) -> None:
+def test_relay_alert_fails_before_egress_when_compact_projection_is_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = FakeBackendIngestClient()
+
+    def fail_projection(*_args: object, **_kwargs: object) -> None:
         raise sqlite3.OperationalError("database is locked")
 
-
-def test_relay_alert_delivers_before_sqlite_catalog_failure(monkeypatch) -> None:
-    fake = FakeBackendIngestClient()
-    monkeypatch.setattr(
-        "backend.app.features.relay.router.get_catalog_store",
-        lambda app: FailingCatalogStore(),
-    )
+    monkeypatch.setattr(RelayEvidenceProjection, "project_event", fail_projection)
     response = _client(fake).post(
         "/api/v1/relay/alerts",
         json=_alert_payload(edge_event_id="00000000-0000-4000-8000-000000000013"),
         headers={"X-Edge-Relay-Token": "relay-token"},
     )
 
-    assert response.status_code == 202
-    assert response.json()["catalog"] == "not_recorded"
-    assert "operational failure" in response.json()["catalog_reason"]
-    assert len(fake.alerts) == 1
+    assert response.status_code == 503
+    assert response.json() == {"detail": "central evidence projection unavailable"}
+    assert fake.alerts == []
 
 
 def test_relay_alert_omits_missing_clip_id_for_backward_compatibility() -> None:
@@ -434,7 +433,9 @@ def test_relay_accepts_canonical_camera_id_from_registry_when_inventory_missing(
     fake = FakeBackendIngestClient()
     app = create_app(lifespan=no_lifespan)
     app.state.edge_relay_token = "relay-token"
-    store = CameraRegistryStore(tmp_path / "catalog.sqlite3")
+    registry_path = tmp_path / "catalog.sqlite3"
+    prepare_compact_database(registry_path)
+    store = CameraRegistryStore(registry_path)
     store.create(
         camera_id="provisional-camera",
         label="Lobby",
@@ -460,7 +461,9 @@ def test_relay_accepts_canonical_camera_id_from_registry_when_inventory_missing(
 def _registry_app(fake: FakeBackendIngestClient, tmp_path, *, backend_camera_id: str | None):
     app = create_app(lifespan=no_lifespan)
     app.state.edge_relay_token = "relay-token"
-    store = CameraRegistryStore(tmp_path / "catalog.sqlite3")
+    registry_path = tmp_path / "catalog.sqlite3"
+    prepare_compact_database(registry_path)
+    store = CameraRegistryStore(registry_path)
     store.create(
         camera_id="local-uuid-1",
         label="Lobby",
@@ -718,6 +721,12 @@ def test_relay_alert_keeps_metadata_only_snapshot_compatible(tmp_path) -> None:
 
     assert response.status_code == 202
     assert "snapshot_bytes" not in fake.alerts[0]
+    assert (
+        _compact_incident(tmp_path / "catalog.sqlite3", "00000000-0000-4000-8000-000000000020")
+        is not None
+    )
+    with sqlite3.connect(tmp_path / "catalog.sqlite3") as connection:
+        assert connection.execute("SELECT count(*) FROM artifacts").fetchone() == (0,)
 
 
 class ReceiptBackendIngestClient(FakeBackendIngestClient):
@@ -743,9 +752,7 @@ class ReceiptBackendIngestClient(FakeBackendIngestClient):
 
 def _receipt_client(fake: ReceiptBackendIngestClient, tmp_path) -> TestClient:
     client = _client(fake)
-    client.app.state.runtime_status_store = RuntimeStatusStore(
-        latency_state_path=tmp_path / "catalog.sqlite3"
-    )
+    client.app.state.runtime_status_store = RuntimeStatusStore()
     return client
 
 

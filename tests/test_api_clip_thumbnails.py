@@ -2,13 +2,13 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 
 from backend.app.features.clips import store as store_module
-from backend.app.features.clips.listing_index import ClipListingIndex
 from backend.app.features.clips.store import ClipStore
 from backend.app.main import create_app, no_lifespan
 
@@ -77,19 +77,35 @@ def test_list_and_metadata_compute_thumbnail_availability_for_returned_items(
     assert metadata.json()["thumbnail_available"] is True
 
 
-def test_indexed_listing_reads_thumbnail_availability_without_request_time_root_walks(
+def test_compact_listing_rebuilds_thumbnail_identity(clip_env: Path) -> None:
+    # Given: a finalized clip with a regular thumbnail.
+    _write_clip(clip_env, "clip-with", thumbnail=True)
+
+    # When: keyset listing rebuilds schema-18 clips.
+    with TestClient(create_app(lifespan=no_lifespan)) as client:
+        _login(client)
+        response = client.get("/api/v1/clips", params={"limit": 10})
+
+    # Then: the response and compact authority both retain thumbnail identity.
+    assert response.status_code == 200
+    assert response.json()["clips"][0]["thumbnail_available"] is True
+    database = clip_env.parent / ".central-fixture" / "edge.sqlite3"
+    with sqlite3.connect(database) as connection:
+        row = connection.execute(
+            "SELECT thumbnail_relpath, length(thumbnail_sha256), thumbnail_size_bytes "
+            "FROM clips WHERE clip_id='clip-with'"
+        ).fetchone()
+    assert row == ("clips/clip-with/thumbnail.jpg", 64, len(JPEG))
+
+
+def test_first_page_rebuilds_thumbnail_availability(
     clip_env: Path,
-    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     for item_index in range(60):
         _write_clip(clip_env, f"clip-{item_index:03d}", thumbnail=item_index % 2 == 0)
-    store = ClipStore(clip_env)
-    index = ClipListingIndex.open(tmp_path / "catalog.sqlite3")
-    _ = index.reconcile(store)
     app = create_app(lifespan=no_lifespan)
-    app.state.clip_store = store
-    app.state.clip_listing_index = index
+    app.state.clip_store = ClipStore(clip_env)
     root_walks = 0
     original = store_module.bounded_clip_roots
 
@@ -103,12 +119,11 @@ def test_indexed_listing_reads_thumbnail_availability_without_request_time_root_
     with TestClient(app) as client:
         _login(client)
         response = client.get("/api/v1/clips", params={"limit": 48, "offset": 0})
-    index.close()
 
     assert response.status_code == 200
     clips = response.json()["clips"]
     assert len(clips) == 48
-    assert root_walks == 0
+    assert root_walks > 0
     assert all(
         clip["thumbnail_available"] == (int(clip["clip_id"].removeprefix("clip-")) % 2 == 0)
         for clip in clips

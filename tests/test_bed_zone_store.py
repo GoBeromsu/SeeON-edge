@@ -6,7 +6,17 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from backend.app.features.cameras.bed_zone_store import BedZone, BedZoneStore
+from tests_support.compact_authority_db import prepare_compact_database, seed_camera
+
+
+@pytest.fixture(autouse=True)
+def _compact_camera_database(tmp_path: Path) -> None:
+    path = prepare_compact_database(tmp_path / "catalog.sqlite3")
+    seed_camera(path, "camera-1")
+    seed_camera(path, "camera-2")
 
 
 def test_get_returns_none_for_an_unknown_camera(tmp_path: Path) -> None:

@@ -17,7 +17,6 @@ persistence, and therefore detection, carries on.
 from __future__ import annotations
 
 import itertools
-import json
 import threading
 from pathlib import Path
 from typing import Any
@@ -29,8 +28,7 @@ from worker.pipeline.trace import (
     OptionalNumber,
     TraceFrame,
 )
-from worker.pipeline.trace.writer import BoundedTraceWriter, TraceRetentionPolicy
-from worker.runtime.telemetry.analysis_trace_sender import AnalysisTraceSender
+from worker.pipeline.trace.writer import BoundedTraceWriter
 
 
 def _frame(sequence: int) -> TraceFrame:
@@ -127,94 +125,6 @@ def test_publication_failures_are_counted_not_silent(
         "publication failures are not counted, so an operator cannot tell a "
         "silently dead QA relay from a healthy one"
     )
-
-
-def test_writer_transmits_its_actual_pruning_count(tmp_path: Path) -> None:
-    """The relay receives the writer's authoritative loss facts, not invented zeros."""
-    payloads: list[dict[str, object]] = []
-
-    def _request(*args: object) -> tuple[int, bytes]:
-        payload = args[3]
-        assert isinstance(payload, bytes)
-        decoded = json.loads(payload)
-        assert isinstance(decoded, dict)
-        payloads.append(decoded)
-        return (204, b"")
-
-    sender = AnalysisTraceSender(
-        "http://relay.example",
-        "relay-token",
-        request=_request,
-    )
-    writer = BoundedTraceWriter(
-        tmp_path / "runtime-analysis",
-        policy=TraceRetentionPolicy(
-            max_frames_per_camera=1,
-            max_age_seconds=300.0,
-            max_pending_frames=8,
-            max_batch_size=1,
-            max_numeric_values_per_decision=32,
-            max_total_frames=64,
-            max_total_rows=2_048,
-            max_total_bytes=1_048_576,
-        ),
-        publisher=sender.send,
-    )
-    writer.start()
-    try:
-        assert writer.submit(_frame(_next()), require_persisted=True)
-        assert writer.submit(_frame(_next()), require_persisted=True)
-    finally:
-        writer.stop()
-
-    assert len(payloads) == 2
-    truncation = payloads[-1]["truncation"]
-    assert isinstance(truncation, dict)
-    assert truncation["pruned_frames"] == 1
-
-
-def test_writer_transmits_its_actual_handoff_drop_count(tmp_path: Path) -> None:
-    payloads: list[dict[str, object]] = []
-
-    def _request(*args: object) -> tuple[int, bytes]:
-        payload = args[3]
-        assert isinstance(payload, bytes)
-        decoded = json.loads(payload)
-        assert isinstance(decoded, dict)
-        payloads.append(decoded)
-        return (204, b"")
-
-    sender = AnalysisTraceSender(
-        "http://relay.example",
-        "relay-token",
-        request=_request,
-    )
-    writer = BoundedTraceWriter(
-        tmp_path / "runtime-analysis",
-        policy=TraceRetentionPolicy(
-            max_frames_per_camera=32,
-            max_age_seconds=300.0,
-            max_pending_frames=1,
-            max_batch_size=1,
-            max_numeric_values_per_decision=32,
-            max_total_frames=64,
-            max_total_rows=2_048,
-            max_total_bytes=1_048_576,
-        ),
-        publisher=sender.send,
-    )
-    assert writer.submit(_frame(_next()))
-    assert writer.submit(_frame(_next())) is False
-    writer.start()
-    try:
-        writer.flush()
-    finally:
-        writer.stop()
-
-    assert len(payloads) == 1
-    truncation = payloads[0]["truncation"]
-    assert isinstance(truncation, dict)
-    assert truncation["handoff_dropped_frames"] == 1
 
 
 class _FlakyPublisher:

@@ -14,6 +14,7 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from backend.app.core.config import get_settings
+from backend.app.edge_db.migrator import migrate_database
 from backend.app.features.cameras.router import _authorize_worker
 from backend.app.features.cameras.store import CameraRegistryStore, public_camera
 from backend.app.features.status.heartbeat_store import get_heartbeat_store
@@ -32,6 +33,13 @@ from worker.runtime.ingest_composition import decoder_for
 
 AUTH = {"Authorization": "Bearer relay-token"}
 REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+@pytest.fixture(autouse=True)
+def _migrated_compact_databases(tmp_path: Path) -> None:
+    migrate_database(tmp_path / "catalog.sqlite3")
+    migrate_database(tmp_path / "connection-settings.sqlite3")
+
 
 # Dashboard auth now always resolves to a session store (persisted file > env
 # > the built-in admin/admin default, see backend/app/shared/dashboard_auth.py).
@@ -115,11 +123,14 @@ def test_camera_registry_crud_masks_rtsp_versions_and_worker_config_auth(
     # this saved row is what makes the coordinator's client_provider() resolve
     # a principal at all -- see BLOCKER 2 in the merge notes for why the sync
     # still stops at "pending" without ever reaching the backend.
-    ConnectionSettingsStore(tmp_path / "connection-settings.sqlite3").save(
+    ConnectionSettingsStore.from_env().save(
         {
-            "events_url": "http://backend/api/v1/events",
+            "facility_code": "NH-1234",
+            "client_installation_ref": "install-1",
             "facility_id": "facility-1",
             "facility_token": "facility-token",
+            "edge_installation_id": "edge-1",
+            "enrollment_generation": 1,
         }
     )
     captured: list[CapturedBackendCall] = []
@@ -307,6 +318,18 @@ def test_list_cameras_survives_conflict_paused_topology_sync(tmp_path) -> None:
     from contracts.edge_provisioning_v1 import MachinePrincipal
 
     registry_path = tmp_path / "catalog.sqlite3"
+    from backend.app.features.connection.store import ConnectionSettingsStore
+
+    ConnectionSettingsStore(registry_path).save(
+        {
+            "facility_code": "NH-1234",
+            "client_installation_ref": "install-1",
+            "facility_id": "facility-1",
+            "facility_token": "token-1",
+            "edge_installation_id": "c72bd9a7-3e04-47ba-a8cd-a56e54f98152",
+            "enrollment_generation": 1,
+        }
+    )
     registry = CameraRegistryStore(registry_path)
     registry.create_floor(edge_ref="floor-1", name="1F", order_index=1)
     registry.create_room(edge_ref="room-101", floor_edge_ref="floor-1", name="101")
@@ -867,6 +890,7 @@ def test_system_reports_backend_state_and_version(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     monkeypatch.setenv("ML_EDGE_VERSION", "2026.07.06")
+    monkeypatch.setenv("API_BACKEND_BASE_URL", "http://backend")
     # "configured" now comes from an applied backend_client_bundle, which
     # requires a complete ConnectionSettingsStore enrollment row -- API_BACKEND_URL
     # alone (the old env-only signal) no longer has any authority over it.
@@ -880,8 +904,6 @@ def test_system_reports_backend_state_and_version(
     )
     ConnectionSettingsStore.from_env().save(
         {
-            "events_url": "http://backend/api/v1/events",
-            "config_url": "http://backend/api/v1/ml-config",
             "facility_code": "NH-7H2K9M4QXP",
             "client_installation_ref": "aa83ea3f-6e5f-4f45-a401-fb36c38835b6",
             "facility_id": "87d79f24-b32f-49a3-b534-19f0af7d9135",
@@ -1824,7 +1846,7 @@ def test_list_cameras_reflects_room_name_after_roster_refresh(
         calls["count"] += 1
         return FakeHTTPResponse(payload)
 
-    monkeypatch.setenv("API_BACKEND_CONFIG_URL", "http://backend/ml-config")
+    monkeypatch.setenv("API_BACKEND_BASE_URL", "http://backend")
     monkeypatch.setenv(
         "API_CONNECTION_SETTINGS_PATH", str(tmp_path / "connection-settings.sqlite3")
     )
@@ -1832,10 +1854,10 @@ def test_list_cameras_reflects_room_name_after_roster_refresh(
 
     # refresh_backend_config only runs once a backend_client_bundle exists, which
     # requires the full enrollment row -- not just config_url/facility_id.
-    ConnectionSettingsStore(tmp_path / "connection-settings.sqlite3").save(
+    database = tmp_path / ".central-fixture" / "edge.sqlite3"
+    connection_store = ConnectionSettingsStore.from_env()
+    connection_store.save(
         {
-            "events_url": "http://backend/api/v1/events",
-            "config_url": "http://backend/ml-config",
             "facility_code": "NH-7H2K9M4QXP",
             "client_installation_ref": "aa83ea3f-6e5f-4f45-a401-fb36c38835b6",
             "facility_id": "facility-1",
@@ -1846,9 +1868,10 @@ def test_list_cameras_reflects_room_name_after_roster_refresh(
     )
     monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
     app = create_app(lifespan=no_lifespan)
+    app.state.connection_settings_store = connection_store
     apply_connection_settings(app)
     app.state.edge_relay_token = "relay-token"
-    app.state.camera_registry = CameraRegistryStore(tmp_path / "catalog.sqlite3")
+    app.state.camera_registry = CameraRegistryStore(database)
 
     assert refresh_backend_config(app) is True
     with TestClient(app) as client:
@@ -1890,17 +1913,15 @@ def test_roster_refresh_failure_preserves_last_good_and_marks_stale(
             )
         raise urllib.error.URLError("offline")
 
-    monkeypatch.setenv("API_BACKEND_CONFIG_URL", "http://backend/ml-config")
+    monkeypatch.setenv("API_BACKEND_BASE_URL", "http://backend")
     from backend.app.features.connection.store import ConnectionSettingsStore
 
     conn_path = tmp_path / "connection-settings.sqlite3"
     monkeypatch.setenv("API_CONNECTION_SETTINGS_PATH", str(conn_path))
     # refresh_backend_config only runs once a backend_client_bundle exists, which
     # requires the full enrollment row -- not just config_url/facility_id.
-    ConnectionSettingsStore(conn_path).save(
+    ConnectionSettingsStore.from_env().save(
         {
-            "events_url": "http://backend/api/v1/events",
-            "config_url": "http://backend/ml-config",
             "facility_code": "NH-7H2K9M4QXP",
             "client_installation_ref": "aa83ea3f-6e5f-4f45-a401-fb36c38835b6",
             "facility_id": "facility-1",
@@ -1982,9 +2003,9 @@ def test_list_cameras_status_matches_heartbeat_under_either_local_or_backend_id(
     def _make_app() -> tuple[object, CameraRegistryStore]:
         app = create_app(lifespan=no_lifespan)
         app.state.edge_relay_token = "relay-token"
-        store = app.state.camera_registry = CameraRegistryStore(
-            tmp_path / f"cameras-{uuid.uuid4()}.json"
-        )
+        database = tmp_path / str(uuid.uuid4()) / "edge.sqlite3"
+        migrate_database(database)
+        store = app.state.camera_registry = CameraRegistryStore(database)
         store.create(
             camera_id="loc-12",
             label="mapped-camera",

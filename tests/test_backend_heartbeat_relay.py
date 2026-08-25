@@ -16,6 +16,7 @@ from backend.app.features.status.backend_heartbeat_relay import (
 from backend.app.features.status.heartbeat_store import HeartbeatStore
 from backend.app.lifespan import API_BACKEND_HEARTBEAT_RELAY_SEC_ENV
 from backend.app.main import create_app
+from tests_support.compact_authority_db import prepare_compact_database
 
 
 @pytest.fixture(autouse=True)
@@ -82,7 +83,9 @@ def _registry(records: list[dict[str, str | None]]) -> CameraRegistryStore:
     anything else, including a duck-typed fake, as "no registry" -- see
     ``registry_store = registry if isinstance(registry, CameraRegistryStore)
     else None``), so tests need the real thing rather than a stub."""
-    store = CameraRegistryStore(Path(tempfile.mkdtemp()) / "catalog.sqlite3")
+    registry_path = Path(tempfile.mkdtemp()) / "catalog.sqlite3"
+    prepare_compact_database(registry_path)
+    store = CameraRegistryStore(registry_path)
     for record in records:
         camera_id = record["id"]
         assert isinstance(camera_id, str)

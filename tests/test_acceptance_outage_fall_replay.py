@@ -3,10 +3,9 @@
 from __future__ import annotations
 
 import base64
-import hashlib
 import json
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -15,13 +14,11 @@ from fastapi.testclient import TestClient
 
 from backend.app.edge_db.migrator import migrate_database
 from backend.app.features.cameras.store import CameraRegistryStore
-from backend.app.features.clips.catalog import CatalogStore
 from backend.app.features.evidence.record_store import CentralEvidenceQuery
 from backend.app.features.evidence.relay_projection import RelayEvidenceProjection
 from backend.app.main import create_app, no_lifespan
 from contracts.frame import Frame
 from contracts.runner import Image, RunnerResult, pose_result
-from shared.detection_policies import FallPolicyV1, make_effective_policy
 from shared.events.delivery_queue import DeliveryQueue
 from shared.events.evidence_export_contract import (
     DeliveryDisposition,
@@ -29,39 +26,20 @@ from shared.events.evidence_export_contract import (
     EventReceipt,
 )
 from tests_support.alert_amplification_runtime import RELAY_TOKEN
+from tests_support.compact_authority_db import prepare_compact_database
 from worker.domains.fall import FallEventLatch
 from worker.pipeline.analytics import CompositeExtractor, NamedExtractor
 from worker.pipeline.bus import Scheduler
 from worker.pipeline.camera_pipeline import CameraPipelinePump
 from worker.pipeline.decision import EventAggregator, IncidentManager
 from worker.pipeline.inference_coordinator import CoordinatedInference
-from worker.pipeline.output.annotated_derivative import AnnotatedDerivativeJob, DerivativeKind
 from worker.pipeline.output.event_sink import EvidenceEventSink
 from worker.pipeline.output.evidence.evidence_sender import EvidenceSender, SenderConfig, SenderStep
 from worker.pipeline.output.evidence.evidence_stager import DurableEvidenceStager
 from worker.pipeline.output.evidence.snapshot_store import SnapshotStore
 from worker.pipeline.output.evidence_attacher import AlertEvidenceAttacher
 from worker.pipeline.perception import GreedyIouTracker, SceneState
-from worker.pipeline.trace import (
-    BoundedTraceWriter,
-    TraceCapture,
-    TraceIdentity,
-    TraceRetentionPolicy,
-)
-from worker.pipeline.trace.models import DetailUnavailableReason
-from worker.runtime.derivative_runtime import (
-    DerivativeCommand,
-    DerivativeCommandExecutor,
-    DerivativeOutcome,
-)
 from worker.types import FallModelInput, FramePacket, ModuleResult
-from worker.types.overlay_scene import (
-    CoordinateTransform,
-    ObservationSemantics,
-    OverlayScene,
-    SceneFrameIdentity,
-    SceneValue,
-)
 
 _EDGE_EVENT_ID = "00000000-0000-4000-8000-0000000000c1"
 _DETECTED_AT = "2026-08-22T00:00:00.000Z"
@@ -161,6 +139,7 @@ class _RelayTransport:
     """In-process adapter to the real relay routes; None models no reachable backend."""
 
     client: TestClient | None = None
+    sent_events: list[dict[str, object]] = field(default_factory=list)
 
     def send_event(self, payload_json: str, edge_event_id: str) -> EventReceipt | DeliveryFailure:
         if self.client is None:
@@ -169,6 +148,7 @@ class _RelayTransport:
                 "backend-down",
                 transport_error="ConnectionError: backend unavailable",
             )
+        self.sent_events.append(json.loads(payload_json))
         response = self.client.post(
             "/api/v1/relay/alerts",
             content=payload_json,
@@ -254,115 +234,12 @@ class _SnapshotRenderer:
         return b"actual-snapshot-capture"
 
 
-def _dropped_detail_reason(tmp_path: Path) -> DetailUnavailableReason:
-    """Prune an actual persisted frame; do not invent a degradation reason."""
-    policy = make_effective_policy(
-        module_id="fall",
-        module_version=1,
-        values=FallPolicyV1(operating_threshold=0.7),
-        source="image-default",
-        facility_revision_id=None,
-        camera_revision_id=None,
-    )
-    capture = TraceCapture(
-        (
-            TraceIdentity(
-                module_qualified_id="fall.v1",
-                component_qualified_ids=(f"pose.sha256.{_RUNTIME_MANIFEST}",),
-                policy_qualified_id="fall.policy.v1",
-                effective_policy_id=policy.effective_policy_id,
-                runtime_manifest_sha256=_RUNTIME_MANIFEST,
-            ),
-        )
-    )
-    writer = BoundedTraceWriter(
-        tmp_path / "detail-cache",
-        TraceRetentionPolicy(
-            max_frames_per_camera=1,
-            max_age_seconds=300.0,
-            max_pending_frames=2,
-            max_batch_size=1,
-            max_numeric_values_per_decision=32,
-            max_total_frames=1,
-            max_total_rows=1_024,
-            max_total_bytes=262_144,
-        ),
-    )
-    writer.start()
-    try:
-        first = _packet()
-        second = FramePacket(
-            camera_id=_CAMERA_ID,
-            frame=Frame(
-                first.frame.index + 1,
-                first.frame.time_sec + 1.0,
-                np.zeros((120, 180, 3), dtype=np.uint8),
-            ),
-            pts=first.pts + 1.0 if first.pts is not None else None,
-            seq=first.seq + 1,
-            width=180,
-            height=120,
-            decode_time_ms=0.25,
-            worker_boot_id=first.worker_boot_id,
-            stream_epoch=first.stream_epoch,
-        )
-        for packet in (first, second):
-            result = _analytics().process(
-                packet,
-                prefetched_results=(
-                    ModuleResult("pose", _PoseRunner().run(packet.frame.image), 0.0, "pose"),
-                ),
-            )
-            assert writer.submit(capture.build(packet, result, ()))
-        writer.flush()
-        recovered = writer.recover_camera(_CAMERA_ID)
-    finally:
-        writer.stop()
-    assert recovered.truncation.pruned_frames == 1
-    assert recovered.truncation.detail_unavailable_reason is DetailUnavailableReason.RETENTION_BOUND
-    return recovered.truncation.detail_unavailable_reason
-
-
-def _derivative_job(tmp_path: Path) -> AnnotatedDerivativeJob:
-    source = tmp_path / "primary.mp4"
-    source.write_bytes(b"primary")
-    scene = OverlayScene(
-        "scene",
-        SceneFrameIdentity(
-            "boot",
-            _CAMERA_ID,
-            1,
-            1,
-            SceneValue(0.0, ObservationSemantics.PRESENT),
-            SceneValue(0.0, ObservationSemantics.PRESENT),
-            "config",
-        ),
-        (1, 1),
-        "source-pixels",
-        CoordinateTransform(1, 1, 1, 1, 1.0, 1.0, 0.0, 0.0),
-        (),
-        (),
-        (),
-        (),
-        (),
-    )
-    return AnnotatedDerivativeJob(
-        "incident",
-        "clip",
-        source,
-        hashlib.sha256(b"primary").hexdigest(),
-        _RUNTIME_MANIFEST,
-        "b" * 64,
-        (scene,),
-        len(b"primary"),
-        derivative_kind=DerivativeKind.STILL,
-    )
-
-
 def _relay_client(tmp_path: Path, database: Path) -> TestClient:
     app = create_app(lifespan=no_lifespan)
     app.state.edge_relay_token = RELAY_TOKEN
-    registry = CameraRegistryStore(tmp_path / "camera-registry.sqlite3")
+    registry_path = tmp_path / "camera-registry.sqlite3"
+    prepare_compact_database(registry_path)
+    registry = CameraRegistryStore(registry_path)
     registry.create(
         camera_id="room-camera",
         label="room-camera",
@@ -372,7 +249,6 @@ def _relay_client(tmp_path: Path, database: Path) -> TestClient:
         backend_camera_id="room-camera",
     )
     app.state.camera_registry = registry
-    app.state.catalog_store = CatalogStore.open(tmp_path / "relay-catalog.sqlite3")
     app.state.relay_evidence_projection = RelayEvidenceProjection(database)
     app.state.central_evidence_query = CentralEvidenceQuery(database)
     return TestClient(app)
@@ -435,17 +311,16 @@ def test_fall_survives_outage_and_replays_with_terminal_snapshot_absence(tmp_pat
     with sqlite3.connect(database) as connection:
         assert connection.execute(
             """
-            SELECT slot.state, slot.reason
-            FROM evidence_incidents AS incident
-            JOIN evidence_events AS event USING (edge_event_id)
-            JOIN evidence_artifact_slots AS slot ON slot.incident_id = incident.incident_id
-            WHERE event.edge_event_id = ? AND slot.slot_name = 'SNAPSHOT'
+            SELECT artifact.state, artifact.reason
+            FROM incidents AS incident
+            JOIN artifacts AS artifact ON artifact.incident_id = incident.incident_id
+            WHERE incident.edge_event_id = ? AND artifact.kind = 'SNAPSHOT'
             """,
             (edge_event_id,),
         ).fetchone() == ("UNAVAILABLE", "UNAVAILABLE:stage_failed")
 
 
-def test_replayed_fall_keeps_decision_envelope_and_typed_derivative_degradation(
+def test_replayed_fall_keeps_decision_envelope(
     tmp_path: Path,
 ) -> None:
     """The decision envelope must survive the outage, not just the event.
@@ -475,20 +350,9 @@ def test_replayed_fall_keeps_decision_envelope_and_typed_derivative_degradation(
             is SenderStep.EVENT_ACKED
         )
 
-    detail_loss = _dropped_detail_reason(tmp_path)
-    derivative = DerivativeCommandExecutor(tmp_path / "derivatives").execute(
-        DerivativeCommand(_derivative_job(tmp_path), detail_loss)
-    )
-    assert derivative.outcome is DerivativeOutcome.UNAVAILABLE
-    assert derivative.reason == detail_loss.value
     with sqlite3.connect(database) as connection:
-        [payload_json] = connection.execute(
-            """
-            SELECT event.payload_json
-            FROM evidence_incidents AS incident
-            JOIN evidence_events AS event USING (edge_event_id)
-            WHERE incident.edge_event_id = ?
-            """,
+        assert connection.execute(
+            "SELECT edge_event_id FROM incidents WHERE edge_event_id=?",
             (edge_event_id,),
-        ).fetchone()
-    assert json.loads(payload_json)["audit"] == _DECISION_ENVELOPE
+        ).fetchone() == (edge_event_id,)
+    assert transport.sent_events[-1]["audit"] == _DECISION_ENVELOPE

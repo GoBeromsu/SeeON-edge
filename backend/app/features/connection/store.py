@@ -36,16 +36,15 @@ from backend.app.edge_db import EDGE_DATABASE_PATH
 from backend.app.features.connection.hub_url import (
     API_BACKEND_ALLOW_INSECURE_HTTP_ENV,
     hub_url_transport_allowed,
-    reject_hub_url_reason,
 )
 from backend.app.features.connection.sqlite_store import (
-    ENROLLMENT_MARKER_FIELDS,
     REQUIRED_ENROLLMENT_FIELDS,
     SAVE_FIELDS,
     ConnectionData,
     ConnectionStoreBackup,
     ConnectionStoreDatabase,
     ConnectionValue,
+    ConnectionWriteHook,
     utc_now_iso,
 )
 
@@ -103,17 +102,6 @@ def _normalize_api_base(base: str | None) -> str | None:
     return trimmed if trimmed.endswith("/api") else f"{trimmed}/api"
 
 
-def _permitted_hub_url(value: str | None) -> str | None:
-    """Return ``value`` only when it satisfies the Hub transport policy."""
-
-    if value is None:
-        return None
-    cleaned = value.strip()
-    if not cleaned:
-        return None
-    return cleaned if hub_url_transport_allowed(cleaned) else None
-
-
 class ConnectionSettingsStore:
     def __init__(self, path: str | Path) -> None:
         self.path: Path = Path(path)
@@ -130,23 +118,13 @@ class ConnectionSettingsStore:
         with self._lock:
             saved = self._database.read()
         base = _normalize_api_base(os.environ.get(API_BACKEND_BASE_URL_ENV))
-        legacy_events = (
-            _permitted_hub_url(_text(saved["events_url"]))
-            if self.path.name != "edge.sqlite3"
-            else None
-        )
-        legacy_config = (
-            _permitted_hub_url(_text(saved["config_url"]))
-            if self.path.name != "edge.sqlite3"
-            else None
-        )
         return ConnectionSettings(
             # The public base URL is the sole deployment authority. Legacy
             # saved/per-field URLs remain in the pre-cutover schema only so
             # Todo 6 can import them; they never override this deployment.
             # Cleartext public bases never seed events/config (HTTPS policy).
-            events_url=(f"{base}/v1/events" if base else legacy_events),
-            config_url=(f"{base}/v1/ml-config" if base else legacy_config),
+            events_url=(f"{base}/v1/events" if base else None),
+            config_url=(f"{base}/v1/ml-config" if base else None),
             # Site facility id is dashboard/DB only — never seed from env.
             facility_id=_text(saved["facility_id"]),
             # Token is dashboard/DB only, like facility_id. The previous
@@ -164,7 +142,12 @@ class ConnectionSettingsStore:
             enrollment_updated_at=_text(saved["enrollment_updated_at"]),
         )
 
-    def save(self, updates: Mapping[str, ConnectionValue]) -> ConnectionSettings:
+    def save(
+        self,
+        updates: Mapping[str, ConnectionValue],
+        *,
+        after_write: ConnectionWriteHook | None = None,
+    ) -> ConnectionSettings:
         _validate_updates(updates)
         with self._lock:
             data = self._database.read()
@@ -176,7 +159,7 @@ class ConnectionSettingsStore:
             if _has_enrollment_state(data):
                 data["enrollment_created_at"] = data["enrollment_created_at"] or timestamp
                 data["enrollment_updated_at"] = timestamp
-            self._database.write(data)
+            self._database.write(data, after_write)
         return self.load()
 
     def masked(self) -> MaskedConnectionSettings:
@@ -219,30 +202,11 @@ def _validate_updates(updates: Mapping[str, ConnectionValue]) -> None:
         "edge_installation_id",
     ):
         value = updates.get(field_name)
-        invalid_text = value is not None and (
-            not isinstance(value, str) or not value.strip()
-        )
+        invalid_text = value is not None and (not isinstance(value, str) or not value.strip())
         if field_name in updates and invalid_text:
             raise InvalidConnectionSettingError(
                 field_name=field_name,
                 reason="invalid connection setting field",
-            )
-    for field_name in ("events_url", "config_url"):
-        if field_name not in updates:
-            continue
-        value = updates[field_name]
-        if value is None:
-            continue
-        if not isinstance(value, str) or not value.strip():
-            raise InvalidConnectionSettingError(
-                field_name=field_name,
-                reason="invalid connection setting field",
-            )
-        reason = reject_hub_url_reason(value)
-        if reason is not None:
-            raise InvalidConnectionSettingError(
-                field_name=field_name,
-                reason=reason,
             )
     generation = updates.get("enrollment_generation")
     if generation is not None and (type(generation) is not int or generation < 1):
@@ -253,7 +217,7 @@ def _validate_updates(updates: Mapping[str, ConnectionValue]) -> None:
 
 
 def _has_enrollment_state(data: ConnectionData) -> bool:
-    return any(data[field_name] is not None for field_name in ENROLLMENT_MARKER_FIELDS)
+    return any(data[field_name] is not None for field_name in REQUIRED_ENROLLMENT_FIELDS)
 
 
 def _validate_complete_enrollment(data: ConnectionData) -> None:

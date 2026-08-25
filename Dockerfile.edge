@@ -78,6 +78,7 @@ RUN mkdir -p /app/models/fall/lstm-runtime /app/models/pose /app/models/bed
 # attaches a named volume at this same path instead.
 RUN mkdir -p /root/.local/state/ml-worker
 
+ARG EDGE_DATABASE_SCHEMA_VERSION=18
 ARG SOURCE_REVISION
 RUN if [ "$SOURCE_REVISION" = "0000000000000000000000000000000000000000" ] \
       || [ "${#SOURCE_REVISION}" -ne 40 ] \
@@ -87,9 +88,11 @@ RUN if [ "$SOURCE_REVISION" = "0000000000000000000000000000000000000000" ] \
     fi; \
     install -d -m 0755 /opt/seeon; \
     printf '%s\n' "$SOURCE_REVISION" > /opt/seeon/ml-worker-image-revision; \
-    chmod 0444 /opt/seeon/ml-worker-image-revision
+    printf '%s\n' "$EDGE_DATABASE_SCHEMA_VERSION" > /opt/seeon/edge-database-schema-version; \
+    chmod 0444 /opt/seeon/ml-worker-image-revision /opt/seeon/edge-database-schema-version
 LABEL org.opencontainers.image.revision="${SOURCE_REVISION}" \
-      org.opencontainers.image.source="SeniorAILab/eldercare-fall-ml-v2"
+      org.opencontainers.image.source="SeniorAILab/eldercare-fall-ml-v2" \
+      seeon.edge.database.schema-version="${EDGE_DATABASE_SCHEMA_VERSION}"
 ENV ML_WORKER_BUILD_REVISION="${SOURCE_REVISION}"
 
 CMD ["python", "-m", "worker"]

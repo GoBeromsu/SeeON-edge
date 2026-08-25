@@ -11,12 +11,12 @@ from backend.app import lifespan as lifespan_module
 from backend.app.features.connection import store as connection_store_module
 from backend.app.features.connection.store import (
     API_BACKEND_BASE_URL_ENV,
+    API_BACKEND_CONFIG_URL_ENV,
+    API_BACKEND_EVENTS_URL_ENV,
     API_CONNECTION_SETTINGS_PATH_ENV,
     ConnectionSettingsStore,
 )
 from backend.app.lifespan import (
-    API_BACKEND_CONFIG_URL_ENV,
-    API_BACKEND_EVENTS_URL_ENV,
     API_EDGE_RELAY_TOKEN_ENV,
     apply_connection_settings,
 )
@@ -56,7 +56,16 @@ def test_boot_time_fixture_injection_still_survives_boot(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     store = _settings_store(monkeypatch)
-    store.save({"events_url": "http://backend.example/api/v1/edge/events"})
+    store.save(
+        {
+            "facility_code": "NH-7H2K9M4QXP",
+            "client_installation_ref": "aa83ea3f-6e5f-4f45-a401-fb36c38835b6",
+            "facility_id": "87d79f24-b32f-49a3-b534-19f0af7d9135",
+            "facility_token": "persisted-token",
+            "edge_installation_id": "d17e0eb8-cb81-4d8e-a427-dfe690518f2b",
+            "enrollment_generation": 1,
+        }
+    )
 
     sentinel = object()
     app = create_app()
@@ -75,8 +84,6 @@ def test_complete_enrollment_restores_one_generation_bundle_on_restart(
     store = _settings_store(monkeypatch)
     store.save(
         {
-            "events_url": "http://backend.example/api/v1/events",
-            "config_url": "http://backend.example/api/v1/ml-config",
             "facility_code": "NH-7H2K9M4QXP",
             "client_installation_ref": "aa83ea3f-6e5f-4f45-a401-fb36c38835b6",
             "facility_id": "87d79f24-b32f-49a3-b534-19f0af7d9135",
@@ -92,7 +99,7 @@ def test_complete_enrollment_restores_one_generation_bundle_on_restart(
         assert bundle.enrollment_generation == 4
         assert bundle.ingest_client.bearer_token == "persisted-token"
         assert bundle.evidence_client.bearer_token == "persisted-token"
-        assert bundle.camera_mapper.token == "persisted-token"
+        assert not hasattr(bundle, "camera_mapper")
 
 
 def test_relink_publishes_a_whole_new_generation_bundle(
@@ -103,8 +110,6 @@ def test_relink_publishes_a_whole_new_generation_bundle(
     for generation, token in ((1, "token-one"), (2, "token-two")):
         store.save(
             {
-                "events_url": "http://backend.example/api/v1/events",
-                "config_url": "http://backend.example/api/v1/ml-config",
                 "facility_code": "NH-7H2K9M4QXP",
                 "client_installation_ref": "aa83ea3f-6e5f-4f45-a401-fb36c38835b6",
                 "facility_id": "87d79f24-b32f-49a3-b534-19f0af7d9135",
@@ -119,8 +124,8 @@ def test_relink_publishes_a_whole_new_generation_bundle(
         assert {
             bundle.ingest_client.bearer_token,
             bundle.evidence_client.bearer_token,
-            bundle.camera_mapper.token,
         } == {token}
+        assert not hasattr(bundle, "camera_mapper")
 
 
 def test_config_refresh_discards_result_when_relink_changes_generation(
@@ -132,8 +137,6 @@ def test_config_refresh_discards_result_when_relink_changes_generation(
     def save_generation(generation: int, token: str) -> None:
         _ = store.save(
             {
-                "events_url": "http://backend.example/api/v1/events",
-                "config_url": "http://backend.example/api/v1/ml-config",
                 "facility_code": "NH-7H2K9M4QXP",
                 "client_installation_ref": "aa83ea3f-6e5f-4f45-a401-fb36c38835b6",
                 "facility_id": "87d79f24-b32f-49a3-b534-19f0af7d9135",

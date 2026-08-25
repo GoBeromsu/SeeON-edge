@@ -1,3 +1,5 @@
+"""Authenticated backend-to-worker clip deletion commands."""
+
 from __future__ import annotations
 
 import json
@@ -5,32 +7,41 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-from fastapi import HTTPException, Request, status
+from fastapi import FastAPI, HTTPException, Request, status
 
 from backend.app.core.config import get_settings
 
 
-def control_clip_deletion(request: Request, clip_id: str) -> dict[str, object]:
-    """Forward an operator's clip-delete command to the worker over the same
-    authenticated control seam used by derivative requests
-    (``backend.app.features.clips.derivative_control``): one plain-HTTP call
-    to the worker's shared MJPEG/derivative-control listener, gated by the
-    ``X-Edge-Relay-Token`` the backend already holds.
-    """
+def preflight_clip_deletion(target: FastAPI | Request, clip_id: str) -> dict[str, object]:
+    """Ask the worker to verify hold, ownership, and containment without mutation."""
+    return _command(target, clip_id, method="GET", suffix="/deletion-preflight")
+
+
+def control_clip_deletion(target: FastAPI | Request, clip_id: str) -> dict[str, object]:
+    """Command deletion only after the backend has committed durable intent."""
+    return _command(target, clip_id, method="DELETE", suffix="")
+
+
+def _command(
+    target: FastAPI | Request,
+    clip_id: str,
+    *,
+    method: str,
+    suffix: str,
+) -> dict[str, object]:
     settings = get_settings()
     origin = settings.worker_stream_origin.strip().rstrip("/")
     if not origin:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="worker derivative origin is not configured",
+            detail="worker clip deletion origin is not configured",
         )
     encoded = urllib.parse.quote(clip_id, safe="")
-    url = f"{origin}/clips/{encoded}"
-    token = getattr(request.app.state, "edge_relay_token", None)
-    headers = {}
-    if isinstance(token, str) and token:
-        headers["X-Edge-Relay-Token"] = token
-    upstream_request = urllib.request.Request(url, method="DELETE", headers=headers)
+    url = f"{origin}/clips/{encoded}{suffix}"
+    holder = target.app if isinstance(target, Request) else target
+    token = getattr(holder.state, "edge_relay_token", None)
+    headers = {"X-Edge-Relay-Token": token} if isinstance(token, str) and token else {}
+    upstream_request = urllib.request.Request(url, method=method, headers=headers)
     try:
         upstream = urllib.request.urlopen(
             upstream_request,
@@ -41,7 +52,7 @@ def control_clip_deletion(request: Request, clip_id: str) -> dict[str, object]:
         raise HTTPException(
             status_code=code, detail="worker clip deletion request failed"
         ) from error
-    except (OSError, urllib.error.URLError) as error:
+    except (TimeoutError, OSError, urllib.error.URLError) as error:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="worker clip deletion runtime unavailable",
@@ -70,4 +81,4 @@ def control_clip_deletion(request: Request, clip_id: str) -> dict[str, object]:
     return {str(key): value for key, value in parsed.items()}
 
 
-__all__ = ["control_clip_deletion"]
+__all__ = ["control_clip_deletion", "preflight_clip_deletion"]

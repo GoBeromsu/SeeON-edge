@@ -5,9 +5,15 @@ import sqlite3
 
 import pytest
 
+from backend.app.edge_db.migrator import migrate_database
 from backend.app.features.cameras.store import CameraRegistryStore
 from backend.app.features.cameras.topology import TopologyConflictError, TopologyErrorCode
 from contracts.edge_provisioning_models import EdgeErrorCode
+
+
+@pytest.fixture(autouse=True)
+def _migrated_compact_database(tmp_path) -> None:
+    migrate_database(tmp_path / "catalog.sqlite3")
 
 
 def test_topology_identity_survives_rename_and_restart(tmp_path) -> None:
@@ -164,10 +170,7 @@ def test_camera_write_and_dirty_marker_are_one_sqlite_transaction(tmp_path) -> N
 
     # Then
     with sqlite3.connect(path) as connection:
-        registry_version = connection.execute(
-            "SELECT registry_version FROM camera_registry WHERE id = 1"
-        ).fetchone()[0]
-        dirty_version = connection.execute(
-            "SELECT registry_version FROM topology_dirty WHERE id = 1"
-        ).fetchone()[0]
+        registry_version, dirty_version = connection.execute(
+            "SELECT registry_version,topology_dirty_registry_version FROM edge_site WHERE id=1"
+        ).fetchone()
     assert registry_version == dirty_version == 3

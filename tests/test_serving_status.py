@@ -7,10 +7,13 @@ from fastapi.testclient import TestClient
 from backend.app.features.cameras.store import CameraRegistryStore
 from backend.app.features.status.heartbeat_store import HeartbeatStore
 from backend.app.main import create_app, no_lifespan
+from tests_support.compact_authority_db import prepare_compact_database
 
 
 def _registry(tmp_path: Path, *camera_ids: str) -> CameraRegistryStore:
-    store = CameraRegistryStore(tmp_path / "catalog.sqlite3")
+    registry_path = tmp_path / "catalog.sqlite3"
+    prepare_compact_database(registry_path)
+    store = CameraRegistryStore(registry_path)
     for camera_id in camera_ids:
         store.create(
             camera_id=camera_id,

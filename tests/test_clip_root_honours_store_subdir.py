@@ -34,9 +34,9 @@ def _database(tmp_path: Path, *, selected: str | None) -> Path:
     if selected is not None:
         with sqlite3.connect(database) as connection:
             connection.execute(
-                "INSERT INTO clip_storage_location (id, selected_path) VALUES (1, ?) "
-                "ON CONFLICT(id) DO UPDATE SET selected_path = excluded.selected_path",
-                (selected,),
+                "INSERT INTO edge_site(id,clip_store_subdir,updated_at) VALUES (1,?,?) "
+                "ON CONFLICT(id) DO UPDATE SET clip_store_subdir=excluded.clip_store_subdir",
+                (selected or None, "2026-08-24T00:00:00Z"),
             )
     return database
 
@@ -57,17 +57,14 @@ def test_no_selection_resolves_to_the_mount_root(tmp_path: Path) -> None:
     assert resolve_clip_root(mount, database) == mount
 
 
-def test_an_absent_selection_table_is_not_treated_as_ambiguity(
-    tmp_path: Path,
-) -> None:
+def test_an_absent_edge_site_row_is_not_treated_as_ambiguity(tmp_path: Path) -> None:
     """A store that never chose a subdirectory records at the mount root.
 
     Refusing here would make the gate unclearable for the ordinary case, which
     is its own accident.
     """
     mount = tmp_path / "clip-store"
-    database = tmp_path / "bare.sqlite3"
-    sqlite3.connect(database).close()
+    database = _database(tmp_path, selected=None)
 
     assert resolve_clip_root(mount, database) == mount
 
@@ -79,12 +76,10 @@ def test_a_missing_database_fails_closed(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("selected", ["/etc", "../escape", "a/../../b"])
-def test_an_uncontained_selection_is_refused(tmp_path: Path, selected: str) -> None:
-    """A selection that escapes the mount is never a clip root."""
-    database = _database(tmp_path, selected=selected)
-
-    with pytest.raises(ClipRootError, match="contained relative path"):
-        resolve_clip_root(tmp_path / "clip-store", database)
+def test_schema18_refuses_an_uncontained_selection(tmp_path: Path, selected: str) -> None:
+    """The compact authority rejects paths that could escape the mount."""
+    with pytest.raises(sqlite3.IntegrityError, match="CHECK constraint failed"):
+        _database(tmp_path, selected=selected)
 
 
 def test_the_inventory_gate_scans_the_resolved_root(tmp_path: Path) -> None:
@@ -105,7 +100,5 @@ def test_the_inventory_gate_scans_the_resolved_root(tmp_path: Path) -> None:
 
     cleared, detail = inventory.check_filesystem_drain(database, state, mount)
 
-    assert not cleared, (
-        f"the gate cleared with unfinished staging in the real clip store: {detail}"
-    )
+    assert not cleared, f"the gate cleared with unfinished staging in the real clip store: {detail}"
     assert "staging" in detail

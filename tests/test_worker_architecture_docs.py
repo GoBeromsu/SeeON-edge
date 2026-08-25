@@ -400,7 +400,6 @@ def test_rollback_runbook_matches_central_database_lifecycle_contract() -> None:
     assert "/var/lib/seeon-state/edge.sqlite3" in text
     assert "edge-state" in text
     assert "edge-db-migrator" in text
-    assert "EDGE_DB_IMPORT_OK" in text
     assert "central cutover traffic boundary" in text
     assert "Before central cutover traffic" in text
     assert "After central cutover traffic" in text
@@ -417,7 +416,7 @@ def test_rollback_runbook_matches_central_database_lifecycle_contract() -> None:
     ):
         assert legacy in text
 
-    migrator = "$DC up --pull always --no-deps edge-db-migrator"
+    migrator = "$DC up --pull always edge-db-migrator"
     api = "$DC up -d --wait ml-api"
     worker = "$DC up -d --wait ml-worker"
     assert migrator in commands
@@ -426,6 +425,45 @@ def test_rollback_runbook_matches_central_database_lifecycle_contract() -> None:
     assert commands.index(migrator) < commands.index(api) < commands.index(worker)
     assert "down -v" in text
     assert "delete `edge-state`" in text
+
+
+def test_compact_cutover_cli_emits_machine_consumed_sentinels(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    supported_compact_cutover_sqlite: None,
+) -> None:
+    from backend.app.edge_db import compact_cutover_cli
+    from backend.app.edge_db.compact_cutover import main
+
+    (tmp_path / "clips").mkdir()
+    (tmp_path / "worker").mkdir()
+    status = main(
+        [
+            "--source",
+            str(tmp_path / "missing-source.sqlite3"),
+            "--live",
+            str(tmp_path / "missing-live.sqlite3"),
+            "--archive",
+            str(tmp_path / "archive.sqlite3"),
+            "--candidate",
+            str(tmp_path / "candidate.sqlite3"),
+            "--receipt",
+            str(tmp_path / "receipt.jsonl"),
+            "--clip-store",
+            str(tmp_path / "clips"),
+            "--worker-state",
+            str(tmp_path / "worker"),
+        ]
+    )
+    captured = capsys.readouterr()
+    assert status == 1
+    assert captured.err.startswith("EDGE_DB_COMPACT_CUTOVER_FAILED:")
+    assert "EDGE_DB_CUTOVER_SOURCE_MISSING" in captured.err
+    assert "EDGE_DB_IMPORT_OK" not in captured.err
+    assert "EDGE_DB_IMPORT_OK" not in captured.out
+    cli_source = Path(compact_cutover_cli.__file__).read_text(encoding="utf-8")
+    assert "EDGE_DB_COMPACT_CUTOVER_OK" in cli_source
+    assert "EDGE_DB_IMPORT_OK" not in cli_source
 
 
 @pytest.mark.parametrize(
