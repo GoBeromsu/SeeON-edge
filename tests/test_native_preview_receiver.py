@@ -12,7 +12,12 @@ _HEADER = struct.Struct("<4sIQQHI")
 def test_native_preview_publishes_real_jpeg_to_latest_frame_store() -> None:
     parent, child = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
     store = LatestFrameStore()
-    receiver = NativePreviewReceiver(parent, store)
+    telemetry: list[tuple[str, int, int]] = []
+    receiver = NativePreviewReceiver(
+        parent,
+        store,
+        lambda camera_id, pts, sequence: telemetry.append((camera_id, pts, sequence)),
+    )
     receiver.start()
     camera, jpeg = b"camera-a", b"\xff\xd8native-jpeg\xff\xd9"
     body = camera + jpeg
@@ -25,3 +30,4 @@ def test_native_preview_publishes_real_jpeg_to_latest_frame_store() -> None:
     assert frame is not None
     assert frame.jpeg == jpeg
     assert frame.seq == 7
+    assert telemetry == [("camera-a", 90_000, 7)]

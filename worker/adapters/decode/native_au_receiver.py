@@ -3,6 +3,7 @@ from __future__ import annotations
 import queue
 import socket
 import threading
+from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass
 from typing import Protocol, final
@@ -52,12 +53,14 @@ class NativeAuReceiver:
         sink: NativeAuSink,
         gap_handler: NativeAuGapHandler,
         stream_death_handler: NativeAuStreamDeathHandler | None = None,
+        accept_handler: Callable[[str, int, int, int], None] | None = None,
     ) -> None:
         self._endpoint = endpoint
         self._worker_boot_id = worker_boot_id
         self._sink = sink
         self._gap_handler = gap_handler
         self._stream_death_handler = stream_death_handler or (lambda _category: None)
+        self._accept_handler = accept_handler
         self._stop = threading.Event()
         self._drain_thread: threading.Thread | None = None
         self._process_thread: threading.Thread | None = None
@@ -207,6 +210,13 @@ class NativeAuReceiver:
         self._timeline[key] = (envelope.dts, envelope.duration)
         self._gaps_active.discard(envelope.camera_id)
         self._progress.accept(envelope.camera_id)
+        if self._accept_handler is not None:
+            self._accept_handler(
+                envelope.camera_id,
+                envelope.pts,
+                envelope.sequence,
+                envelope.generation,
+            )
 
     def _timestamp_discontinuous(self, key: tuple[str, int, int], envelope: AuEnvelope) -> bool:
         previous = self._timeline.get(key)

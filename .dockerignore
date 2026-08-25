@@ -43,4 +43,6 @@ artifacts
 tests
 demo
 training
+# C8 operator harness must never cross COPY worker ./worker into ml-worker.
+worker/tools/deepstream_canary
 README.md

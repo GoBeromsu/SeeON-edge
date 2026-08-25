@@ -16,6 +16,7 @@ from worker.native.deepstream.metadata import AcceptanceToken, LatestMetadataSlo
 from worker.pipeline.decision import EventAggregator
 from worker.pipeline.output.evidence_attacher import AlertEvidenceAttacher
 from worker.pipeline.perception import SceneState, build_decision_input, build_frame_observation
+from worker.runtime.deepstream.canary_telemetry import NativeCanaryTelemetry
 from worker.types import BusinessEvent, ChannelState, NativeEvidenceTrigger
 
 LOGGER = logging.getLogger(__name__)
@@ -42,6 +43,7 @@ class NativePolicyContext:
     attacher: AlertEvidenceAttacher
     diagnostics: NativeDiagnostics
     bed_interval: int
+    canary_telemetry: NativeCanaryTelemetry | None = None
 
 
 @final
@@ -58,6 +60,7 @@ class NativePolicyPump:
         self._attacher = context.attacher
         self._diagnostics = context.diagnostics
         self._bed_interval = context.bed_interval
+        self._canary_telemetry = context.canary_telemetry
         self._stop = threading.Event()
         self._fps: deque[float] = deque()
         self.processed_count = 0
@@ -75,6 +78,12 @@ class NativePolicyPump:
             except TimeoutError:
                 continue
             token = AcceptanceToken(self._binding, frame.native_publish_sequence)
+            if self._canary_telemetry is not None:
+                self._canary_telemetry.record(
+                    frame.frame.identity.source_pts or 0,
+                    frame.source_time_ns,
+                    frame.native_publish_sequence,
+                )
             try:
                 self._process(frame)
             except (ChildControlError, OSError, ValueError, RuntimeError):

@@ -211,10 +211,12 @@ step_worker_processes() {
   output=$(run_timeout nvidia-smi --query-compute-apps=pid,process_name --format=csv,noheader 2>&1); rc=$?
   if ((rc != 0)); then
     record 5 FAIL "GPU 프로세스 조회 실패(rc=$rc)." '런북 2절 또는 런북 4절을 처리하세요.'
-  elif grep -Eqi '(python|ffmpeg)' <<<"$output"; then
-    record 5 OK "GPU 사용 프로세스 확인: $(printf '%s' "$output" | tr '\n' ';' | cut -c1-180)"
+  elif grep -Eqi 'ffmpeg' <<<"$output"; then
+    record 5 FAIL 'C7 토폴로지에서 금지된 per-camera ffmpeg GPU 프로세스가 있습니다.' 'ml-worker가 Python PID 1 + native DeepStream child 하나인지 확인하세요.'
+  elif [[ $(grep -Eic 'seeon-deepstream|deepstream-child' <<<"$output") -eq 1 ]]; then
+    record 5 OK "native DeepStream GPU child 하나 확인: $(printf '%s' "$output" | tr '\n' ';' | cut -c1-180)"
   else
-    record 5 FAIL 'GPU에 python 또는 ffmpeg 프로세스가 없습니다(워커 정지 또는 CPU 폴백 가능성).' '런북 1-3절에서 워커 상태와 ML_WORKER_PROFILE을 확인하세요.'
+    record 5 FAIL 'GPU에 native DeepStream child가 정확히 하나가 아닙니다(Python parent는 CUDA context를 만들면 안 됩니다).' 'ml-worker가 Python PID 1 + native DeepStream child 하나인지 확인하세요.'
   fi
 }
 

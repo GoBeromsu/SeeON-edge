@@ -5,6 +5,7 @@ from __future__ import annotations
 import socket
 import struct
 import threading
+from collections.abc import Callable
 from contextlib import suppress
 from typing import Final, Protocol, final
 
@@ -21,9 +22,15 @@ class NativePreviewSink(Protocol):
 
 @final
 class NativePreviewReceiver:
-    def __init__(self, endpoint: socket.socket, store: NativePreviewSink) -> None:
+    def __init__(
+        self,
+        endpoint: socket.socket,
+        store: NativePreviewSink,
+        on_preview: Callable[[str, int, int], None] | None = None,
+    ) -> None:
         self._endpoint = endpoint
         self._store = store
+        self._on_preview = on_preview
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -45,7 +52,7 @@ class NativePreviewReceiver:
         while not self._stop.is_set():
             try:
                 header = _recv_exact(self._endpoint, _HEADER.size)
-                magic, body_size, sequence, _pts, camera_size, jpeg_size = _HEADER.unpack(header)
+                magic, body_size, sequence, pts, camera_size, jpeg_size = _HEADER.unpack(header)
                 if (
                     magic != b"SJP1"
                     or body_size > _MAX_PREVIEW_BYTES
@@ -61,6 +68,8 @@ class NativePreviewReceiver:
                 return
             self._store.register_camera(camera)
             self._store.publish_jpeg(camera, jpeg, frame_index=sequence, seq=sequence)
+            if self._on_preview is not None:
+                self._on_preview(camera, pts, sequence)
 
 
 def _recv_exact(endpoint: socket.socket, size: int) -> bytes:

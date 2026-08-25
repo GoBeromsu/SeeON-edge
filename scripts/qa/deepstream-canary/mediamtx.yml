@@ -1,0 +1,17 @@
+logLevel: info
+rtsp: true
+rtspAddress: :8554
+protocols: [tcp]
+hls: true
+hlsAddress: :8888
+webrtc: false
+srt: false
+api: true
+apiAddress: :9997
+metrics: true
+metricsAddress: :9998
+pathDefaults:
+  source: publisher
+  overridePublisher: false
+paths:
+  all_others:

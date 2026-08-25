@@ -81,11 +81,15 @@ def test_native_au_receiver_adapts_parser_facts_into_source_packet() -> None:
     parent, child = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
     sink = _Sink()
     gaps: list[tuple[str, str]] = []
+    accepted: list[tuple[str, int, int, int]] = []
     receiver = NativeAuReceiver(
         parent,
         "boot-1",
         sink,
         lambda camera, reason: gaps.append((camera, reason)),
+        accept_handler=lambda camera, pts, sequence, generation: accepted.append(
+            (camera, pts, sequence, generation)
+        ),
     )
     receiver.start()
 
@@ -107,6 +111,7 @@ def test_native_au_receiver_adapts_parser_facts_into_source_packet() -> None:
     assert packet.configuration.streams[0].stream_format == "avc"
     assert packet.configuration.streams[0].nal_length_size == 4
     assert not gaps
+    assert accepted == [("camera-a", 3_000, 1, 3)]
 
 
 def test_native_au_receiver_reports_gap_without_appending_across_epoch() -> None:

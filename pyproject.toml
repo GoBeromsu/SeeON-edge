@@ -38,6 +38,9 @@ worker = [
     "pillow>=12",
     "nvidia-ml-py>=12",
     "av>=15,<17",
+    "onnx>=1.12,<2",
+    "onnxruntime>=1.29.0",
+    "onnxslim>=0.1.82",
 ]
 
 [tool.uv]

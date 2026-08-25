@@ -65,6 +65,10 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 COPY contracts ./contracts
 COPY shared ./shared
 COPY worker ./worker
+# C8 canary orchestration is a host-side operator tool. .dockerignore removes
+# it from the COPY context; this assertion makes accidental product shipment a
+# build failure rather than a documentation promise.
+RUN test ! -e /app/worker/tools/deepstream_canary
 # No operational SQLite CLI ships in this image. ADR 0005 gives the
 # inference-runtime slot no database, so clip-consistency repair is
 # backend-owned (scripts/ops/repair-clip-consistency.py against

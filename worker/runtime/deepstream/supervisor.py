@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import logging
 import subprocess
 import threading
+import time
 from dataclasses import dataclass
 from typing import Final, final
 
@@ -14,6 +16,7 @@ from worker.native.deepstream.metadata import LatestMetadataSlot, MetadataReceiv
 from worker.pipeline.output.evidence.packet_repository import PacketRingRepository
 from worker.pipeline.output.evidence.packet_ring import PacketRingLimits
 from worker.pipeline.output.live_view import LatestFrameStore
+from worker.runtime.deepstream.canary_telemetry import NativeCanaryTelemetry
 from worker.runtime.deepstream.child_monitor import ChildExitMonitor, monitor_metadata
 from worker.runtime.deepstream.cleanup import ChildResources, stop_child_resources
 from worker.runtime.deepstream.config import (
@@ -38,6 +41,7 @@ from worker.runtime.deepstream.transport import spawn_child
 from worker.runtime.lease import GpuLease
 
 FATAL_CHILD_EXIT_CODE: Final = 4
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,6 +67,9 @@ class DeepStreamChildSupervisor:
         self._receiver: MetadataReceiver | None = None
         self._au_receiver: NativeAuReceiver | None = None
         self._preview_receiver: NativePreviewReceiver | None = None
+        self._canary_au_telemetry: dict[
+            str, tuple[int, NativeCanaryTelemetry | None]
+        ] = {}
         self._preview_frames = LatestFrameStore() if resources is None else resources.preview_frames
         self._packet_repository = (
             PacketRingRepository(
@@ -156,10 +163,14 @@ class DeepStreamChildSupervisor:
             self._packet_repository,
             self._handle_au_gap,
             self._fail_deadly,
+            self._record_canary_au,
         )
         session.sources.set_retire_hook(self._au_receiver.retire_camera)
         self._au_receiver.start()
-        self._preview_receiver = NativePreviewReceiver(transport.previews, self._preview_frames)
+        self._preview_receiver = NativePreviewReceiver(
+            transport.previews,
+            self._preview_frames,
+        )
         self._preview_receiver.start()
         failures = NativeFailureCoordinator(
             self._config,
@@ -168,11 +179,19 @@ class DeepStreamChildSupervisor:
             self._fatal_received,
             self._set_fatal_category,
         )
+        def source_failure(camera_id: str, category: str) -> None:
+            LOGGER.warning(
+                "native source failure: camera_id=%s category=%s",
+                camera_id,
+                category,
+            )
+            failures.source_failure(camera_id, category)
+
         self._failure_receiver = NativeFailureReceiver(
             transport.failures,
             self._config.worker_boot_id,
             self._config.child_instance_id,
-            failures.source_failure,
+            source_failure,
             failures.fatal,
         )
         self._failure_receiver.start()
@@ -233,6 +252,21 @@ class DeepStreamChildSupervisor:
                 self._config.first_fault_path,
             )
         return 0
+
+    def _record_canary_au(
+        self,
+        camera_id: str,
+        pts: int,
+        sequence: int,
+        generation: int,
+    ) -> None:
+        current = self._canary_au_telemetry.get(camera_id)
+        if current is None or current[0] != generation:
+            current = (generation, NativeCanaryTelemetry.from_environment(camera_id))
+            self._canary_au_telemetry[camera_id] = current
+        telemetry = current[1]
+        if telemetry is not None:
+            telemetry.record(pts, time.time_ns(), sequence)
 
     def stop(self) -> None:
         self._stopping.set()
