@@ -88,6 +88,44 @@ def _encode_for_test(metadata: MetadataFrame) -> bytes:
     )
 
 
+def test_metadata_carries_source_geometry_and_time_when_child_publishes() -> None:
+    # Given: the child publishes a frame with its decoded source geometry and
+    # capture wall-clock -- the carrier DecisionInput and the evidence trigger
+    # need (C7: geometry/source-time carrier).
+    metadata = _nonempty_metadata()
+    frame = metadata.frame
+    encoded = encode_message(
+        ControlMessage(
+            MessageKind.METADATA,
+            uuid.UUID(frame.identity.worker_boot_id),
+            metadata.child_instance_id,
+            frame.identity.camera_id,
+            metadata.source_generation,
+            frame.identity.stream_epoch,
+            frame.identity.source_pts or 0,
+            frame.identity.seq,
+            metadata.native_publish_sequence,
+            0,
+            metadata.transform_id,
+            encode_perception_frame(
+                frame,
+                source_width=640,
+                source_height=360,
+                source_time_ns=1_724_500_000_123_456_789,
+            ),
+        )
+    )
+
+    # When
+    decoded = decode_metadata(encoded)
+
+    # Then: geometry and source time survive the wire exactly.
+    assert decoded.source_width == 640
+    assert decoded.source_height == 360
+    assert decoded.source_time_ns == 1_724_500_000_123_456_789
+    assert decoded.frame == frame
+
+
 def test_empty_payload_matches_cross_language_golden_vector() -> None:
     # Given
     message = ControlMessage(
@@ -109,8 +147,9 @@ def test_empty_payload_matches_cross_language_golden_vector() -> None:
 
     # Then
     assert payload.hex() == (
-        "5046563112345678123456781234567812345678080063616d6572612d61"
-        "070000000000000040e20100000000000b0000000000000002020200000000000000"
+        "5046563212345678123456781234567812345678080063616d6572612d61"
+        "070000000000000040e20100000000000b000000000000000000000000000000"
+        "0000000002020200000000000000"
     )
 
 

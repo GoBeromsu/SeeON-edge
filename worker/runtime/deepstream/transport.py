@@ -97,6 +97,12 @@ def spawn_child(config: ChildConfig) -> ChildTransport:
             str(ready_write),
             "--qa-mode",
             "1" if config.qa_mode else "0",
+            "--box-source",
+            config.box_source,
+            "--engine-cache",
+            str(config.engine_cache),
+            "--target-fps",
+            str(config.target_fps),
         )
         child_env = dict(os.environ)
         child_env["CUDA_VISIBLE_DEVICES"] = "0"

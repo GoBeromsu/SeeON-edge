@@ -145,14 +145,23 @@ class DeepStreamControlClient:
     def inject_source_eos(self, camera_id: str) -> None:
         _ = self.request(self._message(MessageKind.INJECT_SOURCE_EOS, camera_id))
 
-    def set_preview_viewers(self, camera_id: str, viewers: int) -> None:
+    def set_preview_viewers(
+        self,
+        camera_id: str,
+        viewers: int,
+        mode: str = "none",
+    ) -> None:
         if viewers < 0 or viewers > 4_096:
             raise ChildControlError("preview_viewers_invalid", str(viewers))
+        mode_values = {"none": 0, "fall": 1, "bedexit": 2}
+        mode_value = mode_values.get(mode)
+        if mode_value is None:
+            raise ChildControlError("preview_mode_invalid", mode)
         _ = self.request(
             self._message(
                 MessageKind.SET_PREVIEW_DEMAND,
                 camera_id,
-                viewers.to_bytes(4, "little"),
+                viewers.to_bytes(4, "little") + bytes((mode_value,)),
             )
         )
 
@@ -184,6 +193,18 @@ class DeepStreamControlClient:
         if reply.kind is MessageKind.CAPABILITY_INACTIVE:
             return None
         return decode_metadata(encode_message(reply))
+
+    def snapshot(self, camera_id: str) -> bytes:
+        reply = self.request(self._message(MessageKind.SNAPSHOT, camera_id))
+        if not reply.payload.startswith(b"\xff\xd8") or not reply.payload.endswith(b"\xff\xd9"):
+            raise ChildControlError("snapshot_invalid", camera_id)
+        return reply.payload
+
+    def record_status(self, camera_id: str) -> int:
+        reply = self.request(self._message(MessageKind.RECORD, camera_id))
+        if len(reply.payload) != 8:
+            raise ChildControlError("record_status_size", str(len(reply.payload)))
+        return int.from_bytes(reply.payload, "little")
 
     def wait_for_publish(self, target: int) -> None:
         payload = target.to_bytes(8, "little")

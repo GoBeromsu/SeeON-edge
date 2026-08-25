@@ -6,6 +6,7 @@ import socket
 import threading
 import uuid
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 
 import worker.runtime.deepstream.runner as runner_module
@@ -15,6 +16,7 @@ from worker.native.deepstream.metadata import AcceptanceToken, LatestMetadataSlo
 from worker.native.deepstream.metadata_receiver import MetadataReceiver
 from worker.runtime.deepstream import ChildConfig, DarkRunRequest, DarkSource
 from worker.runtime.deepstream.source_control import DarkSourceController, SourceState
+from worker.types import AssociationResult
 
 _BOOT = uuid.UUID("12345678-1234-5678-1234-567812345678")
 _CHILD = uuid.UUID("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
@@ -26,7 +28,7 @@ def _binding(*, epoch: int) -> SourceBinding:
 
 
 def _frame(*, epoch: int, pts: int, sequence: int, publish_sequence: int) -> MetadataFrame:
-    return MetadataFrame.empty(
+    empty = MetadataFrame.empty(
         ControlMessage(
             MessageKind.METADATA,
             _BOOT,
@@ -40,6 +42,17 @@ def _frame(*, epoch: int, pts: int, sequence: int, publish_sequence: int) -> Met
             0,
             _TRANSFORM,
         )
+    )
+    identity = empty.frame.identity
+    return replace(
+        empty,
+        frame=replace(
+            empty.frame,
+            association=AssociationResult("legacy-greedy-bbox-iou.v1", (), (), identity),
+        ),
+        source_width=640,
+        source_height=360,
+        source_time_ns=max(1, pts),
     )
 
 

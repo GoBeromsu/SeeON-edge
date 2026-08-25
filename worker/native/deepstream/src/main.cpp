@@ -1,3 +1,5 @@
+#include "trt_perception.hpp"
+
 #include <gst/gst.h>
 
 #include <chrono>
@@ -5,6 +7,7 @@
 #include <iostream>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 namespace {
 constexpr auto kWarmupTimeout = std::chrono::seconds{15};
@@ -64,23 +67,51 @@ void warmup() {
 }
 }  // namespace
 
+namespace {
+
+// The authoritative inference warmup: load all three pinned engines from the
+// content-addressed cache and run one synthetic 640x360 frame through
+// preprocess -> pose+person+bed inference -> parsers -> association. The exact
+// JSON receipt (not log text) is what the Python preflight validates.
+void warmup_inference(const std::string& engine_cache) {
+  std::string error;
+  const auto perception = seeon::trt::TrtPerception::load(engine_cache, &error);
+  if (perception == nullptr) {
+    throw std::runtime_error{"engine load failed: " + error};
+  }
+  constexpr int kWidth = 640;
+  constexpr int kHeight = 360;
+  std::vector<std::uint8_t> frame(static_cast<std::size_t>(kWidth) * kHeight * 4, 114);
+  seeon::trt::PerceptionResult result;
+  if (!perception->infer(frame.data(), kWidth, kHeight, kWidth * 4, true, &result,
+                         &error)) {
+    throw std::runtime_error{"inference warmup failed: " + error};
+  }
+  seeon::perception::LegacyGreedyBboxIou association;
+  static_cast<void>(association.observe(result.pose.boxes));
+}
+
+}  // namespace
+
 int main(int argc, char** argv) {
   gst_init(&argc, &argv);
   if (argc == 2 && std::strcmp(argv[1], "--version") == 0) {
     std::cout << "seeon-deepstream-preflight 1.0.0\n";
     return 0;
   }
-  if (argc != 2 || std::strcmp(argv[1], "--warmup") != 0) {
-    std::cerr << "usage: seeon-deepstream-preflight --version|--warmup\n";
+  if (argc != 3 || std::strcmp(argv[1], "--warmup") != 0) {
+    std::cerr << "usage: seeon-deepstream-preflight --version|--warmup <engine-cache>\n";
     return 2;
   }
   try {
     warmup();
+    warmup_inference(argv[2]);
   } catch (const std::exception& error) {
     std::cerr << "{\"status\":\"error\",\"code\":\"warmup_failed\",\"detail\":\""
               << error.what() << "\"}\n";
     return 1;
   }
-  std::cout << "{\"status\":\"ok\",\"frames\":1,\"source\":\"loopback\"}\n";
+  std::cout << "{\"status\":\"ok\",\"frames\":1,\"source\":\"loopback\","
+            << "\"engines\":[\"bed\",\"person\",\"pose\"],\"inference\":\"ok\"}\n";
   return 0;
 }

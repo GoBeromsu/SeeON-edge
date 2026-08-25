@@ -66,8 +66,11 @@ std::vector<std::uint8_t> encode_perception(const ipc::Message& envelope,
       !valid_channel(frame.bed_state, frame.bed_regions.size())) {
     throw std::runtime_error{"invalid channel state"};
   }
-  std::vector<std::uint8_t> payload{'P', 'F', 'V', '1'};
+  std::vector<std::uint8_t> payload{'P', 'F', 'V', '2'};
   append_identity(payload, envelope);
+  append(payload, frame.source_width);
+  append(payload, frame.source_height);
+  append(payload, frame.source_time_ns);
   payload.insert(payload.end(), {frame.person_state, frame.pose_state, frame.bed_state,
                                  static_cast<std::uint8_t>(frame.association.has_value())});
   append_count(payload, frame.boxes.size());
@@ -106,6 +109,10 @@ std::vector<std::uint8_t> encode_perception(const ipc::Message& envelope,
       }
       append(payload, track_id);
       append(payload, cue_index);
+    }
+    append_count(payload, association.live_track_ids.size());
+    for (const std::int64_t live_id : association.live_track_ids) {
+      append(payload, live_id);
     }
   }
   return payload;

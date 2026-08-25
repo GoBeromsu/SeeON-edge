@@ -13,7 +13,7 @@ ServerState::ServerState(const ChildOptions& options_value)
     : options(options_value),
       runtime(
           [this](const std::string& camera, const PipelineBindingPtr& binding,
-                 std::uint64_t pts) { on_frame(camera, binding, pts); },
+                 const DecodedFrameView& view) { on_frame(camera, binding, view); },
           [this](const NativeFailure& failure) { on_failure(failure); },
           [this](const std::string& camera, const PipelineBindingPtr& binding,
                  ParsedAccessUnit unit) {

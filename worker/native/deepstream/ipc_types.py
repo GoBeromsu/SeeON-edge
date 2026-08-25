@@ -75,6 +75,10 @@ class MetadataFrame:
     child_instance_id: uuid.UUID
     native_publish_sequence: int
     transform_id: str
+    # Wire-v2 geometry/source-time carrier (0 == not provided by the child).
+    source_width: int = 0
+    source_height: int = 0
+    source_time_ns: int = 0
 
     @property
     def identity(self) -> PerceptionFrameIdentity:

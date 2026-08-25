@@ -12,17 +12,17 @@ from worker.runtime.deepstream.source_control import SourceReadinessError
 from worker.runtime.lease import GpuLease, GpuLeaseUnavailableError
 
 
-def test_dark_mode_constructs_no_child_by_default() -> None:
-    # Given / When
-    # Then
-    assert supervisor.configured_dark_supervisors({}) == ()
+def test_non_nvidia_profile_constructs_no_child() -> None:
+    # Given / When / Then
+    assert supervisor.configured_dark_supervisors({"ML_WORKER_PROFILE": "cpu"}) == ()
 
 
-def test_c5_admits_only_one_explicit_gpu_zero_child() -> None:
+def test_nvidia_profile_admits_exactly_one_gpu_zero_child_without_dark_switch() -> None:
     # Given
     environment = {
-        "SEEON_DEEPSTREAM_DARK_CHILD": "1",
+        "ML_WORKER_PROFILE": "nvidia",
         "NVIDIA_VISIBLE_DEVICES": "0",
+        "SEEON_DEEPSTREAM_ENGINE_CACHE": "/var/cache/seeon/tensorrt/c7-fixture",
     }
 
     # When
@@ -33,7 +33,11 @@ def test_c5_admits_only_one_explicit_gpu_zero_child() -> None:
     assert configured[0].socket_dir.name == "gpu-0"
     with pytest.raises(supervisor.DarkChildConfigError) as failed:
         _ = supervisor.configured_dark_supervisors(
-            {"SEEON_DEEPSTREAM_DARK_CHILD": "1", "NVIDIA_VISIBLE_DEVICES": "0,2"}
+            {
+                "ML_WORKER_PROFILE": "nvidia",
+                "NVIDIA_VISIBLE_DEVICES": "0,2",
+                "SEEON_DEEPSTREAM_ENGINE_CACHE": "/var/cache/seeon/tensorrt/c7-fixture",
+            }
         )
     assert failed.value.code == "unsupported_gpu"
 
@@ -81,7 +85,7 @@ def test_au_rebuild_failure_enters_real_fatal_path(tmp_path: Path) -> None:
         def rebuild(self, camera_id: str, category: str) -> None:
             raise SourceReadinessError(category, camera_id)
 
-    child._sources = FailingSources()  # type: ignore[assignment]  # noqa: SLF001
+    child._sources = FailingSources()  # pyright: ignore[reportAttributeAccessIssue]  # noqa: SLF001
     child._handle_au_gap("camera-a", "parser")  # noqa: SLF001
 
     assert child._fatal_received.is_set()  # noqa: SLF001

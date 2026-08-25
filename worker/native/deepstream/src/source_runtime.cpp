@@ -9,8 +9,10 @@
 #include <utility>
 
 #ifdef SEEON_HAS_GSTREAMER
+#include <gst/app/gstappsink.h>
 #include <gst/base/gstbasetransform.h>
 #include <gst/gst.h>
+#include <gst/video/video.h>
 
 namespace {
 typedef struct _SeeonPerceptionTransform {
@@ -46,12 +48,35 @@ struct SourceContext {
   std::string camera;
 };
 
-GstPadProbeReturn on_buffer(GstPad*, GstPadProbeInfo* info, gpointer raw) {
+GstFlowReturn on_generic_sample(GstAppSink* sink, gpointer raw) {
   auto* context = static_cast<SourceContext*>(raw);
-  GstBuffer* buffer = gst_pad_probe_info_get_buffer(info);
-  context->frame_callback(context->camera, context->binding,
-                          GST_BUFFER_PTS_IS_VALID(buffer) ? GST_BUFFER_PTS(buffer) : 0);
-  return GST_PAD_PROBE_OK;
+  GstSample* sample = gst_app_sink_pull_sample(sink);
+  if (sample == nullptr) return GST_FLOW_ERROR;
+  GstCaps* caps = gst_sample_get_caps(sample);
+  GstBuffer* buffer = gst_sample_get_buffer(sample);
+  GstVideoInfo info;
+  gst_video_info_init(&info);
+  if (caps == nullptr || buffer == nullptr || !gst_video_info_from_caps(&info, caps)) {
+    gst_sample_unref(sample);
+    return GST_FLOW_OK;
+  }
+  GstVideoFrame frame;
+  if (!gst_video_frame_map(&frame, &info, buffer, GST_MAP_READ)) {
+    gst_sample_unref(sample);
+    return GST_FLOW_OK;
+  }
+  const seeon::DecodedFrameView view{
+      GST_BUFFER_PTS_IS_VALID(buffer) ? GST_BUFFER_PTS(buffer) : 0,
+      static_cast<std::uint64_t>(g_get_real_time()) * 1000ULL,
+      GST_VIDEO_INFO_WIDTH(&info),
+      GST_VIDEO_INFO_HEIGHT(&info),
+      GST_VIDEO_FRAME_PLANE_STRIDE(&frame, 0),
+      static_cast<const std::uint8_t*>(GST_VIDEO_FRAME_PLANE_DATA(&frame, 0)),
+  };
+  context->frame_callback(context->camera, context->binding, view);
+  gst_video_frame_unmap(&frame);
+  gst_sample_unref(sample);
+  return GST_FLOW_OK;
 }
 void destroy_context(gpointer raw) { delete static_cast<SourceContext*>(raw); }
 
@@ -130,14 +155,12 @@ GstElement* build_pipeline(const std::string& camera, const std::string& uri,
                                                     ? "videotestsrc" : "uridecodebin", nullptr);
   GstElement* convert = gst_element_factory_make("videoconvert", nullptr);
   GstElement* rgba = gst_element_factory_make("capsfilter", nullptr);
-  GstElement* nvconvert = gst_element_factory_make("nvvideoconvert", nullptr);
-  GstElement* nvmm = gst_element_factory_make("capsfilter", nullptr);
   GstElement* transform = gst_element_factory_make("seeonperceptiontransform", nullptr);
-  GstElement* sink = gst_element_factory_make("fakesink", nullptr);
+  GstElement* sink = gst_element_factory_make("appsink", nullptr);
   if (pipeline == nullptr || source == nullptr || convert == nullptr || rgba == nullptr ||
-      nvconvert == nullptr || nvmm == nullptr || transform == nullptr || sink == nullptr) {
+      transform == nullptr || sink == nullptr) {
     *error_code = "camera_id=" + camera + " element_unavailable";
-    GstElement* elements[] = {source, convert, rgba, nvconvert, nvmm, transform, sink};
+    GstElement* elements[] = {source, convert, rgba, transform, sink};
     for (GstElement* element : elements) {
       if (element != nullptr) {
         static_cast<void>(gst_object_ref_sink(element));
@@ -154,14 +177,12 @@ GstElement* build_pipeline(const std::string& camera, const std::string& uri,
     g_signal_connect(source, "pad-added", G_CALLBACK(on_decode_pad), convert);
   }
   GstCaps* rgba_caps = gst_caps_from_string("video/x-raw,format=RGBA");
-  GstCaps* nvmm_caps = gst_caps_from_string("video/x-raw(memory:NVMM),format=NV12");
   g_object_set(rgba, "caps", rgba_caps, nullptr);
-  g_object_set(nvmm, "caps", nvmm_caps, nullptr);
-  g_object_set(sink, "sync", FALSE, nullptr);
+  g_object_set(sink, "emit-signals", TRUE, "sync", FALSE, "max-buffers", 1U, "drop", TRUE,
+               nullptr);
   gst_caps_unref(rgba_caps);
-  gst_caps_unref(nvmm_caps);
-  gst_bin_add_many(GST_BIN(pipeline), source, convert, rgba, nvconvert, nvmm, transform, sink, nullptr);
-  const bool downstream = gst_element_link_many(convert, rgba, nvconvert, nvmm, transform, sink, nullptr);
+  gst_bin_add_many(GST_BIN(pipeline), source, convert, rgba, transform, sink, nullptr);
+  const bool downstream = gst_element_link_many(convert, rgba, transform, sink, nullptr);
   const bool upstream = !uri.starts_with("loopback://") || gst_element_link(source, convert);
   if (!downstream || !upstream) {
     *error_code = "element_link_failed";
@@ -169,10 +190,9 @@ GstElement* build_pipeline(const std::string& camera, const std::string& uri,
     return nullptr;
   }
   auto* context = new SourceContext{frames, binding, camera};
-  GstPad* output = gst_element_get_static_pad(transform, "src");
-  static_cast<void>(gst_pad_add_probe(output, GST_PAD_PROBE_TYPE_BUFFER, on_buffer, context,
-                                      destroy_context));
-  gst_object_unref(output);
+  g_signal_connect_data(sink, "new-sample", G_CALLBACK(on_generic_sample), context,
+                        [](gpointer raw, GClosure*) { destroy_context(raw); },
+                        static_cast<GConnectFlags>(0));
   attach_source_bus_handler(pipeline, camera, failures);
   if (gst_element_set_state(pipeline, GST_STATE_PLAYING) == GST_STATE_CHANGE_FAILURE) {
     *error_code = "pipeline_start_failed";
@@ -197,7 +217,7 @@ bool SourceRuntime::add(const std::string& camera, const std::string& uri,
   impl_->sources.emplace(camera, Impl::Source{uri, pipeline, viewers, binding});
 #else
   impl_->sources.emplace(camera, Impl::Source{uri, binding});
-  frame_callback_(camera, binding, 0);
+  frame_callback_(camera, binding, DecodedFrameView{});
 #endif
   return true;
 }
@@ -241,7 +261,7 @@ bool SourceRuntime::restart(const std::string& camera, const PipelineBindingPtr&
   found->second.binding = binding;
 #else
   found->second.binding = binding;
-  frame_callback_(camera, binding, 0);
+  frame_callback_(camera, binding, DecodedFrameView{});
 #endif
   return true;
 }
@@ -291,6 +311,30 @@ std::optional<PreviewStatus> SourceRuntime::preview_status(const std::string& ca
              : encoded_preview_status(found->second.pipeline);
 #else
   return impl_->sources.contains(camera) ? std::optional{PreviewStatus{0, 0}} : std::nullopt;
+#endif
+}
+
+bool SourceRuntime::snapshot_jpeg(const std::string& camera,
+                                  std::vector<std::uint8_t>* jpeg) {
+#ifdef SEEON_HAS_GSTREAMER
+  const auto found = impl_->sources.find(camera);
+  return found != impl_->sources.end() && found->second.pipeline != nullptr &&
+         snapshot_encoded_preview(found->second.pipeline, jpeg);
+#else
+  if (!impl_->sources.contains(camera)) return false;
+  jpeg->assign({0xFF, 0xD8, 0xFF, 0xD9});  // minimal JPEG for lifecycle tests
+  return true;
+#endif
+}
+
+std::optional<std::uint64_t> SourceRuntime::au_forwarded(const std::string& camera) const {
+#ifdef SEEON_HAS_GSTREAMER
+  const auto found = impl_->sources.find(camera);
+  return found == impl_->sources.end() || found->second.pipeline == nullptr
+             ? std::nullopt
+             : std::optional{encoded_au_forwarded(found->second.pipeline)};
+#else
+  return impl_->sources.contains(camera) ? std::optional<std::uint64_t>{0} : std::nullopt;
 #endif
 }
 

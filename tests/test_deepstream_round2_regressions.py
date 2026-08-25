@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import threading
 import uuid
+from dataclasses import replace
 from pathlib import Path
 from typing import override
 
@@ -14,6 +15,7 @@ from worker.native.deepstream.ipc import ControlMessage, MessageKind, MetadataFr
 from worker.native.deepstream.metadata import AcceptanceToken, LatestMetadataSlot, SourceBinding
 from worker.runtime.deepstream import ChildConfig, DarkRunRequest, DarkSource
 from worker.runtime.deepstream.source_control import DarkSourceController, SourceState
+from worker.types import AssociationResult
 
 _BOOT = uuid.UUID("12345678-1234-5678-1234-567812345678")
 _CHILD = uuid.UUID("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
@@ -32,7 +34,7 @@ def _frame(
     publish_sequence: int,
     generation: int = 1,
 ) -> MetadataFrame:
-    return MetadataFrame.empty(
+    empty = MetadataFrame.empty(
         ControlMessage(
             MessageKind.METADATA,
             _BOOT,
@@ -46,6 +48,17 @@ def _frame(
             0,
             _TRANSFORM,
         )
+    )
+    identity = empty.frame.identity
+    return replace(
+        empty,
+        frame=replace(
+            empty.frame,
+            association=AssociationResult("legacy-greedy-bbox-iou.v1", (), (), identity),
+        ),
+        source_width=640,
+        source_height=360,
+        source_time_ns=max(1, pts),
     )
 
 

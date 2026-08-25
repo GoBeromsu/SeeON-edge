@@ -45,7 +45,7 @@ CommandResult handle_command(ServerState& state, const ipc::Message& request) {
         state.generation_high_water[request.camera] = request.header.source_generation;
         state.sources.emplace(
             request.camera,
-            SourceSlot{request.header.source_generation, 1, 0, std::nullopt, binding});
+            SourceSlot{request.header.source_generation, 1, 0, 0, std::nullopt, binding, nullptr});
       }
       const std::string uri{request.payload.begin(), request.payload.end()};
       if (!state.runtime.add(request.camera, uri, binding, &error)) {
@@ -97,6 +97,9 @@ CommandResult handle_command(ServerState& state, const ipc::Message& request) {
         epoch = ++found->second.epoch;
         found->second.latest.reset();
         found->second.source_sequence = 0;
+        found->second.last_inference_source_time_ns = 0;
+        // C4 epoch guardrail: a rolled epoch mints association ids from zero.
+        found->second.association.reset();
         binding = std::make_shared<PipelineBinding>(found->second.generation, epoch);
         found->second.binding = binding;
       }
@@ -132,10 +135,23 @@ CommandResult handle_command(ServerState& state, const ipc::Message& request) {
       latest.header.request_id = request.header.request_id;
       return {std::move(latest)};
     }
-    case ipc::Kind::kRecord:
-    case ipc::Kind::kSnapshot:
-      return {ipc::reply(request, ipc::Kind::kCapabilityInactive,
-                         text_payload("dark capability not active"))};
+    case ipc::Kind::kRecord: {
+      // Source-primary recording is the continuous encoded-AU tee; the command
+      // acknowledges liveness with the forwarded-AU counter for this camera.
+      const auto forwarded = state.runtime.au_forwarded(request.camera);
+      if (!forwarded.has_value()) return {error_reply(request, "source_unknown")};
+      std::vector<std::uint8_t> payload(sizeof(std::uint64_t));
+      const std::uint64_t count = *forwarded;
+      std::memcpy(payload.data(), &count, sizeof(count));
+      return {ipc::reply(request, ipc::Kind::kAck, std::move(payload))};
+    }
+    case ipc::Kind::kSnapshot: {
+      std::vector<std::uint8_t> jpeg;
+      if (!state.runtime.snapshot_jpeg(request.camera, &jpeg)) {
+        return {error_reply(request, "snapshot_unavailable")};
+      }
+      return {ipc::reply(request, ipc::Kind::kAck, std::move(jpeg))};
+    }
     case ipc::Kind::kStatus: {
       std::lock_guard lock{state.slot_mutex};
       return {status_reply(state, request)};
@@ -165,11 +181,13 @@ CommandResult handle_command(ServerState& state, const ipc::Message& request) {
                  ? CommandResult{ipc::reply(request, ipc::Kind::kAck)}
                  : CommandResult{error_reply(request, "source_unknown")};
     case ipc::Kind::kSetPreviewDemand: {
-      if (request.payload.size() != sizeof(std::uint32_t)) {
+      if (request.payload.size() != sizeof(std::uint32_t) + 1) {
         return {error_reply(request, "preview demand size")};
       }
       std::uint32_t viewers = 0;
       std::memcpy(&viewers, request.payload.data(), sizeof(viewers));
+      const std::uint8_t mode = request.payload[sizeof(std::uint32_t)];
+      if (mode > 2) return {error_reply(request, "preview mode invalid")};
       return state.runtime.set_preview_viewers(request.camera, viewers)
                  ? CommandResult{ipc::reply(request, ipc::Kind::kAck)}
                  : CommandResult{error_reply(request, "source_unknown")};

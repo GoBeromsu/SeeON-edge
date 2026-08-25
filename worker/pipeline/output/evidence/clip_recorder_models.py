@@ -15,7 +15,13 @@ from worker.pipeline.output.evidence.clip_config import (
     configured_store_dir,
 )
 from worker.pipeline.output.evidence.clip_identity import ClipReservation
-from worker.types import CURRENT_TEMPORAL_PROFILE, BusinessEvent, FrameKey, FramePacket
+from worker.types import (
+    CURRENT_TEMPORAL_PROFILE,
+    BusinessEvent,
+    EvidenceTrigger,
+    FrameKey,
+    FramePacket,
+)
 from worker.types.source_packet import StreamEpoch
 
 
@@ -98,7 +104,7 @@ class EventMessage:
     event_ref: str
     event_type: str | None
     event: BusinessEvent
-    trigger_packet: FramePacket
+    trigger_packet: EvidenceTrigger
     allow_new_clip: bool
 
 

@@ -492,7 +492,7 @@ def test_nvidia_reports_device_resident_runtime_path() -> None:
     )
     assert report.converter_chain == ("cuda-nv12-to-rgb24",)
     assert report.device_resident_after_decode is True
-    assert report.concrete_stages_available is False
+    assert report.concrete_stages_available is True
     assert report.full_frame_h2d_count == 0
     assert report.full_frame_d2h_count == 0
     assert context.capability_graph.converter_names == report.converter_chain
@@ -579,7 +579,7 @@ def test_nvidia_profile_boots_once_device_resident_probe_is_positive() -> None:
     )
     assert context.canonical_profile == "nvidia"
     assert context.runtime_profile.device_resident_after_decode is True
-    assert context.runtime_profile.concrete_stages_available is False
+    assert context.runtime_profile.concrete_stages_available is True
 
 
 def test_nvidia_plain_cuda_probe_never_satisfies_device_resident_gate() -> None:

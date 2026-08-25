@@ -95,6 +95,10 @@ class AssociationResult:
     selected_cue_indexes: tuple[int, ...]
     identity: PerceptionFrameIdentity
     cue_source: str = PERSON_BOX_CUE_SOURCE
+    # Every currently-live durable track id (matched + coasting), in ascending
+    # order. DecisionInput.live_track_ids consumes this; per-cue track_ids
+    # alone cannot reconstruct coasting tracks.
+    live_track_ids: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

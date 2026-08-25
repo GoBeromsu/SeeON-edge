@@ -5,9 +5,7 @@ import re
 import pytest
 
 import worker.runtime.worker as worker_module
-from worker.adapters.decode.nvdec_device.capability import DeviceResidentCapability
-from worker.adapters.device.cuda.probe import CudaCapability
-from worker.adapters.device.nvml.probe import NvmlGpuStatus
+from worker.native.deepstream.preflight import DeepStreamPreflightError
 from worker.runtime.profile.boot import resolve_boot_context, resolve_profile
 from worker.runtime.profile.device import CudaProbe
 from worker.runtime.profile.registry import (
@@ -91,7 +89,7 @@ def test_nvidia_is_never_selected_without_exact_opt_in() -> None:
     assert spec.inference == "tensorrt"
     assert spec.overlay == "cuda-device"
     assert spec.encode == "h264_nvenc"
-    assert spec.concrete_stages_available is False
+    assert spec.concrete_stages_available is True
     assert spec.encode_fallback is None
 
 
@@ -182,39 +180,27 @@ def test_nvidia_reports_device_resident_runtime_path_when_probe_passes() -> None
     )
     assert report.converter_chain == ("cuda-nv12-to-rgb24",)
     assert report.device_resident_after_decode is True
-    assert report.concrete_stages_available is False
+    assert report.concrete_stages_available is True
     assert report.full_frame_h2d_count == 0
     assert report.full_frame_d2h_count == 0
-
-
-def _unavailable_capability(reason: str) -> DeviceResidentCapability:
-    return DeviceResidentCapability(
-        available=False,
-        reason=reason,
-        cuda=CudaCapability(True, "cuda available", device_count=1, arch_list=("sm_90",)),
-        nvml=NvmlGpuStatus(True, "ok", driver_version="580.1", device_name="RTX 5070 Ti"),
-        stream_event_supported=False,
-        dlpack_supported=False,
-    )
 
 
 @pytest.mark.parametrize(
     "reason",
     (
-        "torch build has no DLPack (from_dlpack/__dlpack__) support",
-        "nvml device identity unavailable: NVML init failed",
-        "torch.cuda.Stream/Event construction failed",
+        "engine identity mismatch",
+        "required DeepStream plugin unavailable",
+        "NVIDIA device unavailable",
     ),
 )
-def test_nvidia_profile_verify_error_carries_exact_residency_reason(
+def test_nvidia_profile_verify_error_carries_exact_preflight_reason(
     monkeypatch: pytest.MonkeyPatch,
     reason: str,
 ) -> None:
-    monkeypatch.setattr(
-        worker_module,
-        "probe_device_resident_capability",
-        lambda: _unavailable_capability(reason),
-    )
+    def fail_preflight() -> dict[str, str]:
+        raise DeepStreamPreflightError("preflight_refused", reason)
+
+    monkeypatch.setattr(worker_module, "run_configured_deepstream_preflight", fail_preflight)
     with pytest.raises(ProfileVerifyError, match=re.escape(reason)):
         resolve_boot_context(
             {ML_WORKER_PROFILE_ENV: "nvidia"},

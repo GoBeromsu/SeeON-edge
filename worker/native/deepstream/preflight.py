@@ -19,6 +19,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final, Never
 
+from worker.native.deepstream.engine_cache import EngineCacheError, verify_plan_cache
+
 CommandRunner = Callable[[tuple[str, ...], float], str]
 MountProbe = Callable[[Path], bool]
 
@@ -258,22 +260,41 @@ def _run_deepstream_preflight(
         engine = cache_path / f"{name}.engine"
         if not engine.is_file() or _sha256(engine) != digest:
             raise DeepStreamPreflightError("engine_identity_mismatch", name)
+    # C7: the three inference engines are content-addressed by the engine_plan
+    # (weights + exporter + precision + builder). The deploy host builds them
+    # once in an explicit step; boot only verifies and NEVER builds.
+    try:
+        plan_cache_dir = verify_plan_cache(manifest)
+    except EngineCacheError as exc:
+        raise DeepStreamPreflightError(exc.code, exc.detail) from exc
+    plan_identity = json.loads(
+        (plan_cache_dir / ENGINE_IDENTITY_FILENAME).read_text(encoding="utf-8")
+    )
     timeout = float(manifest["warmup"]["timeout_seconds"])
     try:
-        warmup_text = command_runner((str(native_path), "--warmup"), timeout)
+        warmup_text = command_runner(
+            (str(native_path), "--warmup", str(plan_cache_dir)), timeout
+        )
         # nvstreammux writes its EOS diagnostic to stdout. Only the final,
         # exact native receipt is authoritative; earlier success-like text is not.
         warmup = json.loads(warmup_text.strip().splitlines()[-1])
     except Exception as exc:  # noqa: BLE001 - normalized into a typed boot refusal
         raise DeepStreamPreflightError("warmup_failed", str(exc)) from exc
-    if warmup != {"status": "ok", "frames": 1, "source": "loopback"}:
+    if warmup != {
+        "status": "ok",
+        "frames": 1,
+        "source": "loopback",
+        "engines": ["bed", "person", "pose"],
+        "inference": "ok",
+    }:
         raise DeepStreamPreflightError("warmup_failed", "native warmup receipt is invalid")
     return {
         "status": "ok",
         "profile": "nvidia",
         "runtime": dict(runtime),
         "gpu": gpu,
-        "engines": expected_identity,
+        "engines": plan_identity,
+        "engine_cache_dir": str(plan_cache_dir),
         "warmup": warmup,
     }
 

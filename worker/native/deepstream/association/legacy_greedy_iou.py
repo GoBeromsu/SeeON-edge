@@ -197,6 +197,7 @@ class LegacyGreedyBboxIouStrategy:
             track_ids=track_ids,
             selected_cue_indexes=selected_cue_indexes,
             identity=identity,
+            live_track_ids=tuple(sorted(self.live_ids)),
         )
 
     def coast(self) -> None:

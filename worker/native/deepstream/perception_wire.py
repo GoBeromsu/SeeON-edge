@@ -1,9 +1,16 @@
-"""Bounded compact encoding for complete worker-internal PerceptionFrameV1 values."""
+"""Bounded compact encoding for complete worker-internal PerceptionFrameV1 values.
+
+Wire v2 (magic ``PFV2``) additionally carries the decoded source geometry and
+the capture wall-clock right after the frame identity: the Python-side
+DecisionInput and evidence trigger need both, and neither exists in
+``PerceptionFrameV1`` itself (C1 contract stays untouched).
+"""
 
 from __future__ import annotations
 
 import struct
 import uuid
+from dataclasses import dataclass
 from typing import Final
 
 from worker.native.deepstream.perception_wire_primitives import (
@@ -33,6 +40,7 @@ from worker.types.perception_frame import (
 )
 
 _MAX_KEYPOINTS: Final = 64
+_GEOMETRY: Final = struct.Struct("<HHQ")
 _I64_U16: Final = struct.Struct("<qH")
 _BOX: Final = struct.Struct("<iiiid")
 _KEYPOINT: Final = struct.Struct("<iid")
@@ -72,7 +80,23 @@ def _read_identity(reader: _Reader) -> PerceptionFrameIdentity:
     return PerceptionFrameIdentity(str(boot), camera, epoch, sequence, pts)
 
 
-def encode_perception_frame(frame: PerceptionFrameV1) -> bytes:
+@dataclass(frozen=True, slots=True)
+class DecodedPerception:
+    """One decoded wire frame plus its geometry/source-time carrier."""
+
+    frame: PerceptionFrameV1
+    source_width: int
+    source_height: int
+    source_time_ns: int
+
+
+def encode_perception_frame(
+    frame: PerceptionFrameV1,
+    *,
+    source_width: int = 0,
+    source_height: int = 0,
+    source_time_ns: int = 0,
+) -> bytes:
     outcome = assemble_perception_frame(
         identity=frame.identity,
         person_box=frame.person_box,
@@ -84,6 +108,11 @@ def encode_perception_frame(frame: PerceptionFrameV1) -> bytes:
         raise PerceptionWireError("invalid_perception_frame", repr(outcome))
     writer = _Writer()
     _write_identity(writer, frame.identity)
+    if not (0 <= source_width <= 65_535 and 0 <= source_height <= 65_535):
+        raise PerceptionWireError("geometry_bounds", f"{source_width}x{source_height}")
+    if source_time_ns < 0:
+        raise PerceptionWireError("source_time_bounds", str(source_time_ns))
+    writer.raw(_GEOMETRY.pack(source_width, source_height, source_time_ns))
     writer.raw(
         bytes(
             (
@@ -123,16 +152,20 @@ def encode_perception_frame(frame: PerceptionFrameV1) -> bytes:
             strict=True,
         ):
             writer.raw(_I64_U16.pack(track_id, cue_index))
+        writer.u16(len(association.live_track_ids))
+        for live_id in association.live_track_ids:
+            writer.raw(struct.pack("<q", live_id))
     return bytes(writer.value)
 
 
-def decode_perception_frame(payload: bytes, expected: PerceptionFrameIdentity) -> PerceptionFrameV1:
+def decode_perception_wire(payload: bytes, expected: PerceptionFrameIdentity) -> DecodedPerception:
     reader = _Reader(payload)
     if reader.raw(4) != _MAGIC:
         raise PerceptionWireError("payload_magic", repr(payload[:4]))
     identity = _read_identity(reader)
     if identity != expected:
         raise PerceptionWireError("inner_identity_mismatch", repr(identity.durable_key))
+    source_width, source_height, source_time_ns = _GEOMETRY.unpack(reader.raw(_GEOMETRY.size))
     person_state, pose_state, bed_state, association_present = (reader.u8() for _ in range(4))
     boxes = tuple(
         PersonBox(reader.i32(), reader.i32(), reader.i32(), reader.i32(), reader.f64())
@@ -159,12 +192,14 @@ def decode_perception_frame(payload: bytes, expected: PerceptionFrameIdentity) -
             raise PerceptionWireError("association_identity_mismatch", repr(association_identity))
         strategy, cue_source = reader.text(), reader.text()
         pairs = tuple((reader.i64(), reader.u16()) for _ in range(reader.u16()))
+        live_ids = tuple(reader.i64() for _ in range(reader.u16()))
         association = AssociationResult(
             strategy,
             tuple(pair[0] for pair in pairs),
             tuple(pair[1] for pair in pairs),
             identity,
             cue_source,
+            live_ids,
         )
     elif association_present != 0:
         raise PerceptionWireError("association_flag", str(association_present))
@@ -179,7 +214,17 @@ def decode_perception_frame(payload: bytes, expected: PerceptionFrameIdentity) -
     )
     if not isinstance(outcome, PerceptionFrameV1):
         raise PerceptionWireError("invalid_perception_frame", repr(outcome))
-    return outcome
+    return DecodedPerception(outcome, source_width, source_height, source_time_ns)
 
 
-__all__ = ["PerceptionWireError", "decode_perception_frame", "encode_perception_frame"]
+def decode_perception_frame(payload: bytes, expected: PerceptionFrameIdentity) -> PerceptionFrameV1:
+    return decode_perception_wire(payload, expected).frame
+
+
+__all__ = [
+    "DecodedPerception",
+    "PerceptionWireError",
+    "decode_perception_frame",
+    "decode_perception_wire",
+    "encode_perception_frame",
+]

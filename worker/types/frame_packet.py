@@ -95,6 +95,10 @@ class FramePacket:
         return self.lease.descriptor
 
     @property
+    def trigger_time_sec(self) -> float:
+        return self.frame.time_sec if self.pts is None else self.pts
+
+    @property
     def frame_key(self) -> FrameKey:
         return FrameKey(
             self.worker_boot_id,

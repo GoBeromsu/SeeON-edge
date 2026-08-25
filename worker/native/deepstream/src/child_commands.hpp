@@ -3,14 +3,17 @@
 #include "au_transport.hpp"
 #include "child_server.hpp"
 #include "ipc_protocol.hpp"
+#include "native_perception.hpp"
 #include "preview_transport.hpp"
 #include "source_runtime.hpp"
+#include "trt_perception.hpp"
 
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
 #include <deque>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -20,8 +23,12 @@ struct SourceSlot {
   std::uint32_t generation;
   std::uint64_t epoch;
   std::uint64_t source_sequence = 0;
+  std::uint64_t last_inference_source_time_ns = 0;
   std::optional<ipc::Message> latest;
   PipelineBindingPtr binding;
+  // Per-source association state; a fresh instance on add and on every epoch
+  // roll (C4: a rolled epoch can never resume a previous track id).
+  std::shared_ptr<perception::LegacyGreedyBboxIou> association;
 };
 
 class ServerState {
@@ -30,13 +37,14 @@ class ServerState {
   ~ServerState();
 
   void on_frame(const std::string& camera, const PipelineBindingPtr& binding,
-                std::uint64_t pts);
+                const DecodedFrameView& view);
   void on_access_unit(const std::string& camera, const PipelineBindingPtr& binding,
                       ParsedAccessUnit unit);
   void on_failure(const NativeFailure& failure);
   [[nodiscard]] std::deque<NativeFailure> take_failures();
 
   const ChildOptions& options;
+  std::unique_ptr<trt::TrtPerception> perception;
   SourceRuntime runtime;
   AuSender au_sender;
   PreviewSender preview_sender;

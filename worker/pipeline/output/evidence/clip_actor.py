@@ -75,11 +75,7 @@ class ClipActor:
             ):
                 self._finalize(active, forced=True)
             else:
-                event_time = (
-                    message.trigger_packet.frame.time_sec
-                    if message.trigger_packet.pts is None
-                    else message.trigger_packet.pts
-                )
+                event_time = message.trigger_packet.trigger_time_sec
                 active.start_time_sec = min(
                     active.start_time_sec,
                     event_time - self._config.pre_event_seconds,
@@ -97,11 +93,7 @@ class ClipActor:
             self._stats.attach_missed_events += 1
             self._dependencies.release(camera_id, message.reservation.clip_id)
             return
-        event_time = (
-            message.trigger_packet.frame.time_sec
-            if message.trigger_packet.pts is None
-            else message.trigger_packet.pts
-        )
+        event_time = message.trigger_packet.trigger_time_sec
         started_at = datetime.now(UTC) - timedelta(seconds=self._config.pre_event_seconds)
         active = ActiveClip(
             reservation=message.reservation,

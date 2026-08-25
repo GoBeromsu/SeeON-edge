@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final
@@ -211,8 +212,10 @@ def export_onnx(
     from ultralytics import __version__ as exporter_version
 
     output_dir.mkdir(parents=True, exist_ok=True)
+    export_weight = output_dir / weight_path.name
+    _ = shutil.copyfile(weight_path, export_weight)
     exported = Path(
-        YOLO(str(weight_path)).export(
+        YOLO(str(export_weight)).export(
             format="onnx",
             imgsz=LETTERBOX_SIZE,
             dynamic=True,

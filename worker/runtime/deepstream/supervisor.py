@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import subprocess
 import threading
+from dataclasses import dataclass
 from typing import Final, final
 
 from worker.adapters.decode.native_au_receiver import NativeAuReceiver
@@ -39,22 +40,38 @@ from worker.runtime.lease import GpuLease
 FATAL_CHILD_EXIT_CODE: Final = 4
 
 
+@dataclass(frozen=True, slots=True)
+class SharedSupervisorResources:
+    packet_repository: PacketRingRepository
+    preview_frames: LatestFrameStore
+    bootstrap_owns_lease: bool = True
+
+
 @final
 class DeepStreamChildSupervisor:
     """Own one inherited-IPC child and persist fatal exit without caller participation."""
 
-    def __init__(self, config: ChildConfig) -> None:
+    def __init__(
+        self,
+        config: ChildConfig,
+        resources: SharedSupervisorResources | None = None,
+    ) -> None:
         self._config: ChildConfig = config
+        self._bootstrap_owns_lease = False if resources is None else resources.bootstrap_owns_lease
         self._process: subprocess.Popen[bytes] | None = None
         self._metadata: LatestMetadataSlot = LatestMetadataSlot()
         self._receiver: MetadataReceiver | None = None
         self._au_receiver: NativeAuReceiver | None = None
         self._preview_receiver: NativePreviewReceiver | None = None
-        self._preview_frames = LatestFrameStore()
-        self._packet_repository = PacketRingRepository(
-            (),
-            per_camera_limits=PacketRingLimits(4_000, 64 * 1024 * 1024, 120.0),
-            global_max_bytes=512 * 1024 * 1024,
+        self._preview_frames = LatestFrameStore() if resources is None else resources.preview_frames
+        self._packet_repository = (
+            PacketRingRepository(
+                (),
+                per_camera_limits=PacketRingLimits(4_000, 64 * 1024 * 1024, 120.0),
+                global_max_bytes=512 * 1024 * 1024,
+            )
+            if resources is None
+            else resources.packet_repository
         )
         self._failure_receiver: NativeFailureReceiver | None = None
         self._control: DeepStreamControlClient | None = None
@@ -109,7 +126,8 @@ class DeepStreamChildSupervisor:
             validate_private_directory(self._config.socket_dir)
         except PrivatePathError as error:
             raise ChildStartupError(error.code, error.detail) from error
-        self._lease = GpuLease.acquire(self._config.lease_state_dir)
+        if not self._bootstrap_owns_lease:
+            self._lease = GpuLease.acquire(self._config.lease_state_dir)
         try:
             transport = spawn_child(self._config)
         except OSError as error:
@@ -141,9 +159,7 @@ class DeepStreamChildSupervisor:
         )
         session.sources.set_retire_hook(self._au_receiver.retire_camera)
         self._au_receiver.start()
-        self._preview_receiver = NativePreviewReceiver(
-            transport.previews, self._preview_frames
-        )
+        self._preview_receiver = NativePreviewReceiver(transport.previews, self._preview_frames)
         self._preview_receiver.start()
         failures = NativeFailureCoordinator(
             self._config,
@@ -252,6 +268,7 @@ __all__ = [
     "DarkChildConfigError",
     "DeepStreamChildSupervisor",
     "FATAL_CHILD_EXIT_CODE",
+    "SharedSupervisorResources",
     "configured_dark_supervisors",
     "PrivatePathError",
     "validate_private_directory",

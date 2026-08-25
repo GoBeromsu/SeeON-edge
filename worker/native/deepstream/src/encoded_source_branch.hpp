@@ -19,6 +19,9 @@ namespace seeon {
 [[nodiscard]] bool set_encoded_preview_viewers(GstElement* pipeline, std::uint32_t viewers);
 [[nodiscard]] std::optional<PreviewStatus> encoded_preview_status(GstElement* pipeline);
 [[nodiscard]] bool wait_encoded_preview(GstElement* pipeline, std::uint64_t target);
+[[nodiscard]] bool snapshot_encoded_preview(GstElement* pipeline,
+                                            std::vector<std::uint8_t>* jpeg);
+[[nodiscard]] std::uint64_t encoded_au_forwarded(GstElement* pipeline);
 void quiesce_encoded_pipeline(GstElement* pipeline);
 }  // namespace seeon
 #endif

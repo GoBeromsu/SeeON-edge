@@ -24,7 +24,7 @@ from worker.pipeline.output.evidence.evidence_metadata import (
     runtime_manifest_sha256_from_audit,
 )
 from worker.pipeline.output.evidence.evidence_outbox_types import ClipId
-from worker.types import BusinessEvent, FramePacket
+from worker.types import BusinessEvent, EvidenceTrigger, FramePacket
 
 
 # allow: MUTABLE_OK - active union bounds expand on overlap.
@@ -76,7 +76,7 @@ class ClipAdmission:
 
     def accept_event(
         self,
-        trigger_packet: FramePacket,
+        trigger_packet: EvidenceTrigger,
         event: BusinessEvent,
         *,
         allow_new_clip: bool,
@@ -89,11 +89,7 @@ class ClipAdmission:
         with self._lock:
             if not self._accepting:
                 return None
-            event_time = (
-                trigger_packet.frame.time_sec
-                if trigger_packet.pts is None
-                else trigger_packet.pts
-            )
+            event_time = trigger_packet.trigger_time_sec
             start_time = event_time - self._pre_event_seconds
             end_time = event_time + self._post_event_seconds
             windows = self._reservations_by_camera.setdefault(camera_id, [])

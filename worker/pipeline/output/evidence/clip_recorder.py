@@ -36,7 +36,7 @@ from worker.pipeline.output.evidence.evidence_outbox_types import ClipId
 from worker.pipeline.output.evidence.evidence_retention import DiskUsage, PurgeResult
 from worker.pipeline.output.evidence.packet_repository import PacketRingRepository
 from worker.pipeline.output.evidence.packet_ring import PacketRingLimits
-from worker.types import BusinessEvent, FramePacket
+from worker.types import BusinessEvent, EvidenceTrigger, FramePacket
 from worker.types.source_packet import StreamEpoch
 
 
@@ -209,7 +209,7 @@ class ClipRecorder:
 
     def on_event(
         self,
-        trigger_packet: FramePacket,
+        trigger_packet: EvidenceTrigger,
         event: BusinessEvent,
         *,
         allow_new_clip: bool = True,

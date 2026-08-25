@@ -15,7 +15,7 @@ from worker.native.deepstream.ipc_types import (
 )
 from worker.native.deepstream.perception_wire import (
     PerceptionWireError,
-    decode_perception_frame,
+    decode_perception_wire,
 )
 from worker.types.perception_frame import PerceptionFrameIdentity
 
@@ -114,15 +114,18 @@ def decode_metadata(data: bytes) -> MetadataFrame:
         message.source_pts,
     )
     try:
-        frame = decode_perception_frame(message.payload, expected)
+        decoded = decode_perception_wire(message.payload, expected)
     except PerceptionWireError as error:
         raise IpcProtocolError(error.code, error.detail) from error
     return MetadataFrame(
-        frame,
+        decoded.frame,
         message.source_generation,
         message.child_instance_id,
         message.native_publish_sequence,
         message.transform_id,
+        decoded.source_width,
+        decoded.source_height,
+        decoded.source_time_ns,
     )
 
 

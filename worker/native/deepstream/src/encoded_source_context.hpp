@@ -29,6 +29,8 @@ struct EncodedSourceContext {
   GstElement* decode_queue = nullptr;
   std::atomic<std::uint64_t> preview_encoded{0};
   std::atomic<std::uint64_t> preview_viewers{0};
+  std::atomic<std::uint64_t> au_forwarded{0};
+  std::vector<std::uint8_t> last_preview_jpeg;  // guarded by preview_mutex
   std::optional<ParsedAccessUnit> pending_duration;
   std::int64_t last_duration = 0;
   std::atomic<bool> parser_failure_latched{false};

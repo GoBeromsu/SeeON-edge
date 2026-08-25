@@ -10,6 +10,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <cstdio>
 #include <utility>
 #include <vector>
 
@@ -33,6 +34,21 @@ int ChildServer::run() {
   }
   ServerState state{options_};
   if (!state.runtime.custom_transform_available()) {
+    close(signal_fd);
+    return 4;
+  }
+  // READY must prove loaded engines: production spawns always pass a real
+  // engine cache; "-" is the explicit QA lifecycle opt-out (qa_mode only).
+  if (options_.engine_cache != "-") {
+    std::string engine_error;
+    state.perception = trt::TrtPerception::load(options_.engine_cache, &engine_error);
+    if (state.perception == nullptr) {
+      std::fprintf(stderr, "engine load refused READY: %s\n", engine_error.c_str());
+      close(signal_fd);
+      return 4;
+    }
+  } else if (!options_.qa_mode) {
+    std::fprintf(stderr, "production child requires an engine cache\n");
     close(signal_fd);
     return 4;
   }

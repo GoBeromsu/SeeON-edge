@@ -44,7 +44,67 @@ bool identity_matches(const ServerState& state, const ipc::Message& request) {
          request.transform == "seeon-perception-v1";
 }
 
-void publish_metadata(ServerState& state, const ipc::Message& request, SourceSlot& source) {
+namespace {
+
+std::uint8_t channel_state(std::size_t count) { return count == 0 ? 2 : 1; }
+
+PerceptionPayload perception_payload(const ServerState& state, SourceSlot& source,
+                                     const trt::PerceptionResult& result,
+                                     std::uint64_t source_time_ns) {
+  PerceptionPayload payload;
+  payload.source_width = static_cast<std::uint16_t>(result.source_width);
+  payload.source_height = static_cast<std::uint16_t>(result.source_height);
+  payload.source_time_ns = source_time_ns;
+  const auto& cues = state.options.person_box_from_person_engine ? result.person
+                                                                 : result.pose.boxes;
+  payload.person_state = channel_state(cues.size());
+  payload.boxes.reserve(cues.size());
+  for (const auto& box : cues) {
+    payload.boxes.push_back(WireBox{box.x1, box.y1, box.x2, box.y2, box.confidence});
+  }
+  payload.pose_state = channel_state(result.pose.poses.size());
+  payload.poses.reserve(result.pose.poses.size());
+  for (const auto& pose : result.pose.poses) {
+    std::vector<WireKeypoint> points;
+    points.reserve(pose.size());
+    for (const auto& point : pose) {
+      points.push_back(WireKeypoint{point.x, point.y, point.score});
+    }
+    payload.poses.push_back(std::move(points));
+  }
+  payload.bed_state = channel_state(result.bed.size());
+  payload.bed_regions.reserve(result.bed.size());
+  for (const auto& region : result.bed) {
+    WireBedRegion wire{WireBox{region.bounds.x1, region.bounds.y1, region.bounds.x2,
+                               region.bounds.y2, region.bounds.confidence},
+                       {}};
+    wire.polygon.reserve(region.polygon.size());
+    for (const auto& [x, y] : region.polygon) wire.polygon.emplace_back(x, y);
+    payload.bed_regions.push_back(std::move(wire));
+  }
+  if (source.association == nullptr) {
+    source.association = std::make_shared<perception::LegacyGreedyBboxIou>();
+  }
+  std::vector<perception::ParsedBox> association_cues;
+  association_cues.reserve(cues.size());
+  for (const auto& box : cues) association_cues.push_back(box);
+  const auto association = source.association->observe(association_cues);
+  WireAssociation wire_association{"legacy-greedy-bbox-iou.v1", "person_box", {}, {}};
+  wire_association.selections.reserve(association.track_ids.size());
+  for (std::size_t index = 0; index < association.track_ids.size(); ++index) {
+    wire_association.selections.emplace_back(association.track_ids[index],
+                                             association.selected_cue_indexes[index]);
+  }
+  const auto live_ids = source.association->live_ids();
+  wire_association.live_track_ids.assign(live_ids.begin(), live_ids.end());
+  payload.association = std::move(wire_association);
+  return payload;
+}
+
+}  // namespace
+
+void publish_metadata(ServerState& state, const ipc::Message& request, SourceSlot& source,
+                      const trt::PerceptionResult* result, std::uint64_t source_time_ns) {
   ++source.source_sequence;
   ++state.publish_sequence;
   ipc::Message metadata = request;
@@ -56,7 +116,11 @@ void publish_metadata(ServerState& state, const ipc::Message& request, SourceSlo
   metadata.header.source_sequence = source.source_sequence;
   metadata.header.native_publish_sequence = state.publish_sequence;
   metadata.header.request_id = 0;
-  metadata.payload = encode_empty_perception(metadata);
+  metadata.payload = result == nullptr
+                         ? encode_empty_perception(metadata)
+                         : encode_perception(
+                               metadata,
+                               perception_payload(state, source, *result, source_time_ns));
   const bool wake_required = !source.latest.has_value();
   if (!wake_required) {
     ++state.overwritten;
@@ -101,9 +165,36 @@ void ServerState::on_access_unit(const std::string& camera,
 }
 
 void ServerState::on_frame(const std::string& camera, const PipelineBindingPtr& binding,
-                           std::uint64_t pts) {
+                           const DecodedFrameView& view) {
+  // Pace before inference. Decode and the AU tee remain source-rate; only the
+  // expensive perception branch is admitted at the configured policy rate.
+  {
+    std::lock_guard lock{slot_mutex};
+    const auto found = sources.find(camera);
+    if (found == sources.end() || found->second.binding != binding) return;
+    const std::uint64_t interval_ns = 1'000'000'000ULL / options.target_fps;
+    if (found->second.last_inference_source_time_ns != 0 &&
+        view.source_time_ns < found->second.last_inference_source_time_ns + interval_ns) {
+      return;
+    }
+    found->second.last_inference_source_time_ns = view.source_time_ns;
+  }
+  // Inference runs outside the slot lock: a binding that rolls mid-inference
+  // simply drops the stale result at dispatch.
+  trt::PerceptionResult result;
+  const trt::PerceptionResult* published = nullptr;
+  if (perception != nullptr && view.rgba != nullptr) {
+    std::string error;
+    if (!perception->infer(view.rgba, view.width, view.height, view.stride,
+                           options.person_box_from_person_engine, &result, &error)) {
+      on_failure({camera, "tensorrt", FailureScope::kFatal});
+      return;
+    }
+    published = &result;
+  }
   static_cast<void>(binding->dispatch_frame(
-      [this, &camera, pts, &binding](std::uint32_t generation, std::uint64_t epoch) {
+      [this, &camera, &view, &binding, published](std::uint32_t generation,
+                                                  std::uint64_t epoch) {
         std::lock_guard lock{slot_mutex};
         const auto found = sources.find(camera);
         if (found == sources.end() || found->second.binding != binding) return;
@@ -112,10 +203,11 @@ void ServerState::on_frame(const std::string& camera, const PipelineBindingPtr& 
         message.header.child_instance_id = options.child_instance_id;
         message.header.source_generation = generation;
         message.header.stream_epoch = epoch;
-        message.header.source_pts = pts;
+        message.header.source_pts = view.pts;
         message.camera = camera;
         message.transform = "seeon-perception-v1";
-        command_support::publish_metadata(*this, message, found->second);
+        command_support::publish_metadata(*this, message, found->second, published,
+                                          view.source_time_ns);
       }));
 }
 }  // namespace seeon

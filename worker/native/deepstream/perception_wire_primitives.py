@@ -5,7 +5,7 @@ from __future__ import annotations
 import struct
 from typing import Final, final
 
-MAGIC: Final = b"PFV1"
+MAGIC: Final = b"PFV2"
 MAX_ITEMS: Final = 256
 MAX_TEXT: Final = 128
 _U16: Final = struct.Struct("<H")

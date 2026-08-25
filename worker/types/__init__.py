@@ -16,6 +16,7 @@ from worker.types.capabilities import (
 )
 from worker.types.copy_metrics import CopyMetrics, CopyMetricsSnapshot
 from worker.types.decision_input import DecisionInput
+from worker.types.evidence_trigger import EvidenceTrigger, NativeEvidenceTrigger
 from worker.types.fall_model_input import FallModelInput
 from worker.types.frame_memory import (
     FrameDescriptor,
@@ -54,6 +55,7 @@ __all__ = [
     "CopyMetricsSnapshot",
     "DecisionInput",
     "EMPTY_FRAME_BED_POSE_FEATURES",
+    "EvidenceTrigger",
     "FallModelInput",
     "FrameBedPoseFeatures",
     "FrameCapability",
@@ -64,6 +66,7 @@ __all__ = [
     "FramePacket",
     "MemoryKind",
     "ModuleResult",
+    "NativeEvidenceTrigger",
     "AssociationResult",
     "BedRegion",
     "BedRegionChannel",

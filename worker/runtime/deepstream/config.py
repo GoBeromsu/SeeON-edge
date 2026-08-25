@@ -23,6 +23,9 @@ class ChildConfig:
     startup_timeout_sec: float = 10.0
     stop_timeout_sec: float = 5.0
     qa_mode: bool = False
+    engine_cache: Path = Path("-")
+    box_source: str = "pose"
+    target_fps: int = 15
 
 
 @dataclass(frozen=True, slots=True)
@@ -36,8 +39,8 @@ class DarkChildConfigError(Exception):
 
 
 def configured_dark_supervisors(env: Mapping[str, str]) -> tuple[ChildConfig, ...]:
-    """Return explicit GPU-0 dark child only; unchanged environments return none."""
-    if env.get("SEEON_DEEPSTREAM_DARK_CHILD") != "1":
+    """Return the single GPU-0 child selected by the canonical nvidia profile."""
+    if env.get("ML_WORKER_PROFILE", "cpu").strip() != "nvidia":
         return ()
     visible = env.get("NVIDIA_VISIBLE_DEVICES", "0").strip()
     visible_devices = (
@@ -53,12 +56,28 @@ def configured_dark_supervisors(env: Mapping[str, str]) -> tuple[ChildConfig, ..
     fault_root = Path(
         env.get("SEEON_DEEPSTREAM_FIRST_FAULT_DIR", "/var/lib/seeon-state/deepstream")
     )
+    engine_cache = env.get("SEEON_DEEPSTREAM_ENGINE_CACHE", "").strip()
+    if not engine_cache:
+        raise DarkChildConfigError("engine_cache_missing", "SEEON_DEEPSTREAM_ENGINE_CACHE")
+    box_source = env.get("ML_WORKER_BOX_SOURCE", "pose").strip()
+    if box_source not in {"pose", "person"}:
+        raise DarkChildConfigError("box_source_invalid", box_source)
+    raw_target_fps = env.get("ML_WORKER_TARGET_FPS", "15")
+    try:
+        target_fps = int(raw_target_fps)
+    except ValueError as error:
+        raise DarkChildConfigError("target_fps_invalid", raw_target_fps) from error
+    if target_fps <= 0:
+        raise DarkChildConfigError("target_fps_invalid", str(target_fps))
     return (
         ChildConfig(
             executable=executable,
             worker_boot_id=boot,
             socket_dir=socket_dir / "gpu-0",
             first_fault_path=fault_root / "deepstream-gpu-0.fault",
+            engine_cache=Path(engine_cache),
+            box_source=box_source,
+            target_fps=target_fps,
         ),
     )
 

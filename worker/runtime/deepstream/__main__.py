@@ -52,6 +52,7 @@ def main(argv: list[str] | None = None) -> int:
             socket_dir=state_dir / "ipc",
             first_fault_path=state_dir / "deepstream-first-fault.json",
             lease_state_dir=state_dir,
+            qa_mode=True,
         ),
         sources=tuple(_source(raw) for raw in args.source),
         inject_fatal=args.inject_fatal,

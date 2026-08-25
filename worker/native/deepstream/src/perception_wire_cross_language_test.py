@@ -45,9 +45,10 @@ def main() -> None:
         [sys.argv[1], "--emit-nonempty"], text=True
     ).strip()
     reader = Reader(bytes.fromhex(encoded))
-    assert reader.take(4) == b"PFV1"
+    assert reader.take(4) == b"PFV2"
     expected_identity = ("12345678-1234-5678-1234-567812345678", "camera-a", 7, 123456, 11)
     assert identity(reader) == expected_identity
+    assert reader.unpack("<HHQ") == (640, 360, 123456789)
     assert reader.unpack("<BBBB") == (1, 1, 1, 1)
 
     (box_count,) = reader.unpack("<H")
@@ -78,6 +79,9 @@ def main() -> None:
     (pair_count,) = reader.unpack("<H")
     pairs = [reader.unpack("<qH") for _ in range(int(pair_count))]
     assert pairs == [(41, 0), (42, 1)]
+    (live_count,) = reader.unpack("<H")
+    live_track_ids = [reader.unpack("<q")[0] for _ in range(int(live_count))]
+    assert live_track_ids == [41, 42]
     assert reader.offset == len(reader.payload)
 
 

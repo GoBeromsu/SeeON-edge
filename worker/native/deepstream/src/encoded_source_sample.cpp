@@ -16,6 +16,7 @@ void parser_failure(EncodedSourceContext* context) {
 }
 
 void emit(EncodedSourceContext* context, ParsedAccessUnit unit) {
+  context->au_forwarded.fetch_add(1);
   context->access_units(context->camera, context->binding, std::move(unit));
 }
 

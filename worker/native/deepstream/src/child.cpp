@@ -15,6 +15,11 @@ bool parse_fd(std::string_view value, int* output) {
   return result.ec == std::errc{} && result.ptr == value.data() + value.size() && *output >= 0;
 }
 
+bool parse_u32(std::string_view value, std::uint32_t* output) {
+  const auto result = std::from_chars(value.data(), value.data() + value.size(), *output);
+  return result.ec == std::errc{} && result.ptr == value.data() + value.size();
+}
+
 bool read_identity(int descriptor, seeon::ChildOptions* options) {
   std::array<std::uint8_t, 36> identity{};
   std::size_t offset = 0;
@@ -34,7 +39,7 @@ bool read_identity(int descriptor, seeon::ChildOptions* options) {
 }
 
 std::optional<seeon::ChildOptions> parse_options(int argc, char** argv) {
-  if (argc != 17) {
+  if (argc != 23) {
     return std::nullopt;
   }
   seeon::ChildOptions options{};
@@ -57,6 +62,17 @@ std::optional<seeon::ChildOptions> parse_options(int argc, char** argv) {
     } else if (flag == "--qa-mode") {
       if (value != "0" && value != "1") return std::nullopt;
       options.qa_mode = value == "1";
+    } else if (flag == "--box-source") {
+      if (value != "pose" && value != "person") return std::nullopt;
+      options.person_box_from_person_engine = value == "person";
+    } else if (flag == "--engine-cache") {
+      if (value.empty()) return std::nullopt;
+      options.engine_cache = std::string{value};
+    } else if (flag == "--target-fps") {
+      if (!parse_u32(value, &options.target_fps) || options.target_fps == 0 ||
+          options.target_fps > 120) {
+        return std::nullopt;
+      }
     } else if (flag == "--ready-fd") {
       if (!parse_fd(value, &options.ready_fd)) return std::nullopt;
     } else {
@@ -64,7 +80,7 @@ std::optional<seeon::ChildOptions> parse_options(int argc, char** argv) {
     }
   }
   if (options.control_fd < 0 || options.wake_fd < 0 || options.au_fd < 0 ||
-      options.preview_fd < 0 || options.failure_fd < 0 ||
+      options.preview_fd < 0 || options.failure_fd < 0 || options.engine_cache.empty() ||
       options.ready_fd < 0 || identity_fd < 0 || !read_identity(identity_fd, &options)) {
     return std::nullopt;
   }

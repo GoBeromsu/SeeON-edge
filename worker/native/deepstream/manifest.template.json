@@ -41,6 +41,16 @@
     "path": "/var/cache/seeon/tensorrt",
     "engines": []
   },
+  "engine_plan": {
+    "exporter": "ultralytics-8.4.61-onnx-opset17",
+    "precision": "fp32",
+    "builder": "trtexec-fp32-dynhw",
+    "models": [
+      {"name": "pose", "weight": "/app/models/pose/yolo26n-pose.pt"},
+      {"name": "person", "weight": "/app/models/person/yolo26n.pt"},
+      {"name": "bed", "weight": "/app/models/bed/yolo26m-seg.pt"}
+    ]
+  },
   "warmup": {
     "timeout_seconds": 20
   }

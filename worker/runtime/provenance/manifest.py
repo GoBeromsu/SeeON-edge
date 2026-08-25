@@ -151,7 +151,12 @@ def _verified_component_identities(
             raise AppliedRuntimeManifestError(
                 f"unresolved applied identity for component {identity.component_id!r}"
             )
-        if identity.device != boot.device:
+        cpu_policy = (
+            boot.profile.name == "nvidia"
+            and identity.device == "cpu"
+            and identity.runtime == "cpu-policy"
+        )
+        if identity.device != boot.device and not cpu_policy:
             raise AppliedRuntimeManifestError(
                 f"contradictory device identity for component {identity.component_id!r}"
             )
