@@ -1,6 +1,6 @@
 # worker/pipeline/output/evidence
 
-Durable clip, snapshot, and relay-outbox path after admission. Pixels stop here as remuxed source packets and JPEG snapshots. Decision never writes this tree.
+Durable clip, snapshot, and filesystem delivery path after admission. Pixels stop here as remuxed source packets and JPEG snapshots. Decision never writes this tree.
 
 `worker.pipeline` must not import `worker.runtime`. Runtime injects the store dir, delivery queue, lock, and sender. Missing production wiring or a locked store refuses to start. Remote failures do not block startup: retryable classes retry, compatibility failures reprobe, and payload-invalid failures become permanent. Two workers must not share one delivery queue.
 
@@ -8,11 +8,15 @@ Durable clip, snapshot, and relay-outbox path after admission. Pixels stop here 
 
 `bus.evidence` is FIFO, default 128. A full subscription rejects the incoming packet and releases it. `ClipFrameFeeder` is the only drain: take, `ClipRecorder.on_frame`, then `packet.release()`. Admission retains before enqueue. A full recorder queue (also 128) drops the frame or event, releases the retained handle, and increments the drop counter.
 
-`PacketRingRepository` owns one `SourcePacketRing` per camera under a process-wide byte ceiling. Primary clips remux those source packets. Decoded frames are analysis and snapshot taps only. `select()` holds a `PacketSelection` lease; `close()` must pair it. Epoch roll retires leased packets and drops the rest. Global pressure evicts the oldest unleased packet from the fattest ring. Don't remux across a discontinuity, a closed ring, or a stale stream epoch. Don't close the repository from a routine encoder flush. Rings live until ingest stops.
+`PacketRingRepository` owns one `SourcePacketRing` per camera under a process-wide byte ceiling. Primary clips remux those source packets. Decoded frames are analysis and snapshot taps only. Under `nvidia`, `NativeAuReceiver` feeds this repository from the native pre-decode encoded-AU tee; no decode, OSD, or encoder enters the primary path. `select()` holds a `PacketSelection` lease; `close()` must pair it. Epoch roll retires leased packets and drops the rest. Global pressure evicts the oldest unleased packet from the fattest ring. Don't remux across a discontinuity, a closed ring, or a stale stream epoch. Don't close the repository from a routine encoder flush. Rings live until ingest stops.
 
 ## Clip recording
 
 Shared `ClipRecorder`, one actor thread, camera-local rings. `ClipAdmission` allocates a collision-free `ClipId` and a `.staging` dir. `PacketClipRecordingCoordinator` window-selects around the trigger PTS, stream-copies to `clip.mp4`, then the publisher atomically replaces into `clips/<clip_id>/`. Unavailable is a published outcome, not a silent skip. Thumbnail miss logs and still publishes. `ClipStoreLock` takes a non-blocking flock on `.worker.lock` for the recorder lifetime.
+
+The `nvidia` runtime owns the policy/attach handoff; this package receives its
+`NativeEvidenceTrigger` and binds source identity to the packet-ring selection.
+See `worker/runtime/deepstream/AGENTS.md`.
 
 ## Durable staging and delivery queue
 
@@ -50,7 +54,7 @@ Media never lives in rows. Path is not identity; hash and size are.
 - `tests/test_worker_clip_publication.py`, `tests/test_worker_clip_recording.py`, `tests/test_clip_store_lock.py`
 - `tests/test_evidence_stager.py`, `tests/test_evidence_sender.py`, `tests/test_evidence_delivery_queue_restart.py`
 - `tests/test_retired_worker_dead_surfaces.py`, `tests/test_evidence_retention.py`, `tests/test_worker_clip_maintenance.py`
-- `tests/test_snapshot_store.py`, `tests/test_snapshot_lifecycle.py`, `tests/test_evidence_stager_provenance.py`
+- `tests/test_snapshot_store.py`
 - Boundary: `uv run --group lint lint-imports`
 
 Keep new pure-code modules at or below 250 logical LOC. Preserve lease balance, hold-before-delete, and the SQLite-vs-bytes split whenever a handoff changes shape.

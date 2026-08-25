@@ -42,6 +42,14 @@ handles stay `object`.
   camera_id, facility_id, time_sec, probability, person_id?, bed_id?, audit?,
   snapshot_jpeg?)`. Domains emit these. Pipeline admits, records, and relays
   them.
+- `perception_frame.py`: image-free `PerceptionFrameV1` is the worker-internal
+  native contract. `PerceptionFrameIdentity` carries boot, camera, stream epoch,
+  sequence, and optional source PTS. Person-box, human-pose, and bed-region
+  channels independently use `ChannelState.INFERRED`, `INFERRED_EMPTY`, or
+  `SKIPPED`; optional `AssociationResult` binds tracks to person cues.
+- `evidence_trigger.py`: `NativeEvidenceTrigger` binds a native decision to
+  camera, boot, stream epoch, source generation, sequence, source PTS, and
+  source time without carrying or retaining an image.
 
 ## Conventions
 
@@ -68,6 +76,8 @@ tuples. A detector that needs pixels is a design error. Extract the number in
 
 - `tests/test_worker_types.py`
 - `tests/test_frame_lease.py`
+- `tests/test_perception_frame_v1.py`
+- `tests/test_nvidia_native_policy_pump.py` (`NativeEvidenceTrigger` handoff)
 - `tests/test_import_dependency_ladder.py`
 - Boundary: `uv run --group lint lint-imports`
 

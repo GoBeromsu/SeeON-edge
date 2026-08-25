@@ -24,6 +24,9 @@ Always-fail stubs belong in tests only.
 - `bus.py`: named, bounded, per-camera `FrameBus.subscribe` / `publish`. `publish` consumes the caller's lease. `FrameSubscription.take` / `close`.
 - `extract.py`: `Extractor.extract(FramePacket) -> ModuleResult`.
 - `decision.py`: `Decider.update(DecisionInput) -> tuple[BusinessEvent, ...]`. No pixels.
+- `perception.py`: `PerceptionFrameAdapter` adapts capability outputs or compact
+  payloads into worker-internal `PerceptionFrameV1` envelopes or typed failures.
+  This C1 boundary is not a `contracts` type or a backend/public wire.
 
 ## Serving
 
@@ -62,6 +65,8 @@ Implicit host-device transfer is a leak; name a materializer instead.
 ## Tests
 
 - `tests/test_worker_interfaces.py`: checkable fakes, envelope types, one-caller swap.
+- `tests/test_perception_frame_v1.py`: `PerceptionFrameAdapter` exports,
+  signature, substitutability, and worker-internal envelope behavior.
 - `tests/test_import_dependency_ladder.py` and `uv run --group lint lint-imports`.
 - `tests/test_serving_batch_client.py`, `tests/test_worker_model_serving.py`: batch vs single-frame.
-- `tests/test_nvidia_device_resident_prototype.py`: pool and batcher ports.
+- `tests/test_nvidia_device_resident_prototype.py`: surviving experimental adapter prototypes.

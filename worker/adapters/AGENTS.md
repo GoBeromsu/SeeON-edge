@@ -18,7 +18,7 @@ runtime" and "worker runtime is the sole composition root".
 ## Local ownership
 
 - `decode/`: concrete CPU, VAAPI, NVDEC/CUVID, PyAV, and experimental device-resident backends. Backend-specific ownership, packet, epoch, and cleanup rules live in `decode/AGENTS.md`.
-- `encode/nvenc_device/`: device-input encoder. Only the unified `nvidia` profile; host-only profiles never construct it.
+- `encode/nvenc_device/`: experimental device-input encoder and diagnostics. No current production profile constructs it; `nvidia` uses the native DeepStream media plane instead.
 - `model/`: `ModelRegistry` (pose/person/bed), fall-family registry, YOLO and LSTM runners, required warmup, `InProcessServingClient`.
 - `encode/`: `FFmpegSegmentEncoder` (one long-lived muxer per camera), concat finalizer, thumbnail.
 - `device/`: honest probes. `cuda/` / `mps/` answer whether this process can build `device="cuda"` / `device="mps"`. `nvml/` fills GPU telemetry. Import success is not capability.
@@ -32,7 +32,7 @@ Implement the port. Don't invent a parallel API.
 - `ClipEncoder.open(camera, profile, geometry)`. Profile arrives resolved. Don't re-parse `ML_WORKER_PROFILE`.
 - `ServingClient.create(task, ...)`. One runner per task/options per process. Preserve object identity across cameras.
 - `FrameMaterializer` / `HostFrameView`. Non-host `view` fails. No silent host<->device transfer.
-- `DeviceResidentPool` / `DeviceResidentBatcher` stay experimental.
+- The `decode/nvdec_device/` pool and `encode/nvenc_device/` renderer stay experimental.
 
 A new backend is a new package behind the existing port, registered by `worker/runtime`. Not a branch inside an adapter. Not `if profile` in a pipeline stage. Delete unused skeletons. Don't leak FFmpeg, cv2, or torch through the port signature.
 

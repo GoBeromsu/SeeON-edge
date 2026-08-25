@@ -1,8 +1,8 @@
 # PROJECT KNOWLEDGE BASE
 
-**Generated:** 2026-08-18
-**Commit:** 2e53438
-**Branch:** main
+**Generated:** 2026-08-25
+**Commit:** 1d79e2f
+**Branch:** seeon-edge-ds-09
 
 Python/uv + React monorepo for fall and bed-exit detection. Three deployable
 instances (`front`, `backend`, `worker`) plus `shared` and the canonical
@@ -33,8 +33,10 @@ legacy identity: `ml-api` (`Dockerfile.backend`, `ML_API_`/`API_*`) and
 prefixes. `front` is built into the backend image and served at `/`.
 
 GPU serving is in-process behind `worker/interfaces/serving.py`
-(`worker/adapters/model/in_process.py`). Required GPU/NVDEC infra fails fast
-(ADR-0002). The worker is an RTSP client only.
+(`worker/adapters/model/in_process.py`) except under `nvidia`, where the native
+DeepStream child owns media/inference and the Python parent owns supervision
+(`worker/native/deepstream/`, `worker/runtime/deepstream/`). Required GPU/NVDEC
+infra fails fast (ADR-0002). The worker is an RTSP client only.
 
 ## Code Map
 
@@ -42,16 +44,23 @@ GPU serving is in-process behind `worker/interfaces/serving.py`
 | --- | --- | --- |
 | Backend factory | `backend/app/main.py` | `create_app()` registers feature routers under `/api/v1`, seeds `app.state.edge_relay_token`, mounts `front` dist. Health stays at `/health/live` and `/health/ready`. |
 | Worker CLI | `worker/__main__.py` | `python -m worker`. Parses flags, loads config, constructs `WorkerRuntime`. |
-| Composition root | `worker/runtime/worker.py` | Wires ingest, serving, domains, evidence, MJPEG, and relay. |
-| Cross-cam inference | `worker/pipeline/inference_coordinator.py` | `CapabilityInferenceCoordinator` drains latest-only frames and owns every pose forward. |
-| Evidence | `worker/pipeline/output/evidence/` | Clip recorder, packet ring, snapshot store, durable stager, outbox. |
+| Composition root | `worker/runtime/worker.py` | Selects the host coordinator/camera pipeline or the `nvidia` native media plane/policy pumps; wires evidence, MJPEG, and relay. |
+| Worker profile routing | `worker/runtime/profile/` | `ML_WORKER_PROFILE` selects the canonical stage/memory descriptor; `nvidia` routes production construction to the native child instead of host adapters. |
+| Host cross-cam inference | `worker/pipeline/inference_coordinator.py` | Non-`nvidia` only: `CapabilityInferenceCoordinator` drains latest-only frames and owns host pose forwards. The `nvidia` path never constructs it. |
+| Evidence | `worker/pipeline/output/evidence/` | Clip recorder, packet ring, snapshot store, durable stager, filesystem delivery queue. |
 | Dashboard | `front/src/app/App.tsx` | `AuthGate` + `Dashboard`. Pages: events, operations, settings. |
-| Event wire | `shared/events/` | Schemas, outbox, `edge_ingest_client.py` (facts + heartbeats to the Event API). |
+| Event wire | `shared/events/` | Schemas and `edge_ingest_client.py` (facts + heartbeats to the Event API). |
 | SQLite foundation | `backend/app/edge_db/` | Schema, migrator, and ownership. The backend writes every application table family; the migrator alone writes `schema_*`. |
+| Native media child | `worker/native/deepstream/` | C++ RTSP/NVDEC/TensorRT/association plus the Python contract for `nvidia`; boot verifies engines and never builds them. |
+| Child supervision | `worker/runtime/deepstream/` | Python PID-1 supervisor, inherited IPC, restart-based source lifecycle, and CPU-only policy pump. |
+| Canary harness | `worker/tools/deepstream_canary/` | Host-side isolated qualification tool; excluded from the production worker image and path. |
 
-Per-frame path after the coordinator: `worker/pipeline/camera_pipeline.py` and
-`worker/pipeline/perception/` into `worker/domains/` (fall, bed-exit). Read the
-nearest scoped `AGENTS.md` before changing a package.
+On non-`nvidia` profiles, the per-frame path after the coordinator is
+`worker/pipeline/camera_pipeline.py` and `worker/pipeline/perception/` into
+`worker/domains/` (fall, bed-exit). Under `ML_WORKER_PROFILE=nvidia`, the native
+child owns decode/inference/parser/association and `NativePolicyPump` feeds the
+Python-owned policy state. Read the nearest scoped `AGENTS.md` before changing
+a package.
 
 ## Commands
 

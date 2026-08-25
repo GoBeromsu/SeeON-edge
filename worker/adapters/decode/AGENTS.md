@@ -11,7 +11,10 @@ Constructor argument. Vendor kits live here: OpenCV, PyAV, ffmpeg.
 - `vaapi/`: iGPU ffmpeg child, host rgb24. OpenCV demotion is a runtime profile call, not an adapter probe.
 - `nvdec_cuvid/`: fail-loud NVDEC/CUVID. FFprobe, `*_cuvid` codec, bounded stdout queue, child reap.
 - `pyav_*.py`: packet-preserving demux and NVDEC tee. Remux path only.
-- `nvdec_device/`: device-resident pool. Only the unified `nvidia` profile. Host-only profiles never construct it.
+- `nvdec_device/`: experimental device-resident pool and diagnostics. No current production profile constructs it; `nvidia` uses the native DeepStream child instead.
+- `native_au_receiver.py`: bounded child AU stream into the shared
+  `PacketRingRepository`; retires camera generations and escalates stream death.
+- `native_preview_receiver.py`: bounded child JPEG stream into `LatestFrameStore`.
 
 ## Port and backend selection
 
@@ -33,7 +36,7 @@ Runtime profile owns `(device, decode, encode)`. Adapters do not probe onto anot
 
 ## Packet preservation and epochs
 
-Primary clips remux source packets. Decoded frames are analysis and snapshot taps. `PyAvPacketDemuxer` publishes byte-identical compressed packets to `SourcePacketSink`. Exactly one video stream. A full ring increments `packet_drop_count`. Never echo a credentialed URL.
+Primary clips remux source packets. Decoded frames are analysis and snapshot taps. `PyAvPacketDemuxer` publishes byte-identical compressed packets to `SourcePacketSink`. Exactly one video stream. A full ring increments `packet_drop_count`. Never echo a credentialed URL. Under `nvidia`, `NativeAuReceiver` feeds the same packet repository from the child's pre-decode AU tee and `NativePreviewReceiver` feeds the live-view store; no per-camera FFmpeg runs on that path.
 
 NVDEC preservation requires `EpochRollingSourcePacketSink` and opens `NvdecPacketTeeSession`: demux in-process, all video decode in one ffmpeg child on stdin. `DecoderInputQueue` is capacity 32. Overflow discards backlog and resumes at a keyframe.
 
@@ -47,6 +50,6 @@ Fail closed. OpenCV needs `CAP_FFMPEG` in the videoio registry. NVDEC preflight 
 
 ## Focused tests
 
-`tests/test_worker_decode_cpu.py`, `tests/test_worker_opencv_decode_probe.py`, `tests/test_worker_nvdec_adapter.py`, `tests/test_worker_nvdec_probe.py`, `tests/test_worker_nvdec_process.py`, `tests/test_worker_vaapi_adapter.py`, `tests/test_worker_vaapi_probe.py`, `tests/test_decode_seam_selection_matrix.py`, `tests/test_decode_seam_packet_tee.py`, `tests/test_decode_seam_epoch_roll.py`, `tests/test_decode_seam_nvdec_subprocess.py`, `tests/test_pyav_preserving_nvdec_tee.py`, `tests/test_packet_ring.py`. Boundary: `uv run --group lint lint-imports`.
+`tests/test_worker_decode_cpu.py`, `tests/test_worker_opencv_decode_probe.py`, `tests/test_worker_nvdec_adapter.py`, `tests/test_worker_nvdec_probe.py`, `tests/test_worker_nvdec_process.py`, `tests/test_worker_vaapi_adapter.py`, `tests/test_worker_vaapi_probe.py`, `tests/test_decode_seam_selection_matrix.py`, `tests/test_decode_seam_packet_tee.py`, `tests/test_decode_seam_epoch_roll.py`, `tests/test_decode_seam_nvdec_subprocess.py`, `tests/test_pyav_preserving_nvdec_tee.py`, `tests/test_native_au_receiver.py`, `tests/test_native_preview_receiver.py`, `tests/test_packet_ring.py`. Boundary: `uv run --group lint lint-imports`.
 
 Default tests stay hardware-free. Assert probe invariants and selection, not "this machine has no GPU".
