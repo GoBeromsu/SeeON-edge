@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import io
 import re
 import sqlite3
@@ -13,7 +12,6 @@ import pytest
 import yaml
 from fastapi.testclient import TestClient
 
-from backend.app.edge_db.migrator import MIGRATIONS, migrate_database
 from backend.app.edge_db.ownership import COMPACT_APPLICATION_TABLES
 from backend.app.main import create_app, no_lifespan
 from shared.release_identity import (
@@ -47,54 +45,6 @@ def _compose() -> dict[str, Any]:
     payload = yaml.load(COMPOSE.read_text(encoding="utf-8"), Loader=Loader)
     assert isinstance(payload, dict)
     return payload
-
-
-def _v17(database: Path) -> None:
-    migrate_database(database, migrations=MIGRATIONS[:17])
-
-
-def _cutover_paths(tmp_path: Path) -> dict[str, Path]:
-    state = tmp_path / "state"
-    state.mkdir()
-    return {
-        "source": state / "edge.sqlite3",
-        "live": state / "edge.sqlite3",
-        "archive": state / "edge-v17-archive.sqlite3",
-        "candidate": state / "edge-v18-candidate.sqlite3",
-        "receipt": state / "schema18-cutover-receipts.jsonl",
-        "clip_store": tmp_path / "clip-store",
-        "worker_state": tmp_path / "worker-state",
-    }
-
-
-SUPPORTED_SQLITE = (3, 51, 3)
-
-
-def _cutover(paths: dict[str, Path], **kwargs: object) -> object:
-    from backend.app.edge_db.compact_cutover import run_compact_cutover
-
-    return run_compact_cutover(
-        _request(paths),
-        sqlite_version=SUPPORTED_SQLITE,
-        **kwargs,
-    )
-
-
-def _request(paths: dict[str, Path], **overrides: object) -> object:
-    from backend.app.edge_db.compact_cutover import CompactCutoverRequest
-
-    values = dict(paths)
-    values.update(overrides)
-    return CompactCutoverRequest(
-        source=values["source"],
-        live=values["live"],
-        archive=values["archive"],
-        candidate=values["candidate"],
-        receipt=values["receipt"],
-        clip_store=values["clip_store"],
-        worker_state=values["worker_state"],
-        expected_source_sha256=values.get("expected_source_sha256"),
-    )
 
 
 def _in_flight(database: Path) -> None:
@@ -221,16 +171,22 @@ def test_cli_help_matches_compose_and_runbook_flags() -> None:
     assert "--rollback" in runbook
 
 
-def test_empty_v17_candidate_cutover_installs_schema_18(tmp_path: Path) -> None:
-    paths = _cutover_paths(tmp_path)
-    _v17(paths["live"])
-    before = paths["live"].read_bytes()
-    result = _cutover(paths)
-    assert result.current_version == 18
-    assert hashlib.sha256(paths["archive"].read_bytes()).hexdigest() == hashlib.sha256(
-        before
-    ).hexdigest()
-    with sqlite3.connect(paths["live"]) as connection:
+def test_empty_v17_candidate_cutover_installs_schema_18(
+    tmp_path: Path, supported_compact_cutover_sqlite: None
+) -> None:
+    from compact_cutover_fixtures import cutover_request, sha256
+
+    from backend.app.edge_db.compact_cutover import run_compact_cutover
+
+    request = cutover_request(tmp_path)
+    before = sha256(request.source)
+    result = run_compact_cutover(request)
+    assert result.source_rows >= 1
+    assert sha256(request.archive) == before
+    receipts = request.receipt.read_text(encoding="utf-8").splitlines()
+    assert len(receipts) == result.source_rows
+    assert all('"action":' in line for line in receipts)
+    with sqlite3.connect(request.live) as connection:
         assert connection.execute("PRAGMA user_version").fetchone() == (18,)
         tables = {
             str(row[0])
@@ -239,62 +195,112 @@ def test_empty_v17_candidate_cutover_installs_schema_18(tmp_path: Path) -> None:
             )
         }
     assert tables == COMPACT_APPLICATION_TABLES
-    assert oct(paths["archive"].stat().st_mode & 0o777) == "0o400"
+    assert oct(request.archive.stat().st_mode & 0o777) == "0o400"
+
+
+def test_populated_v17_emits_one_receipt_per_source_row(
+    tmp_path: Path, supported_compact_cutover_sqlite: None
+) -> None:
+    import json
+
+    from compact_cutover_dense_fixture import dense_cutover_request
+    from compact_cutover_fixtures import sha256
+
+    from backend.app.edge_db.compact_cutover import run_compact_cutover
+
+    request = dense_cutover_request(tmp_path)
+    source_hash = sha256(request.source)
+    with sqlite3.connect(request.source) as source:
+        tables = [
+            str(row[0])
+            for row in source.execute(
+                "SELECT name FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+            )
+        ]
+        source_rows = sum(
+            int(source.execute(f'SELECT count(*) FROM "{table}"').fetchone()[0])
+            for table in tables
+        )
+    assert len(tables) == 72
+    result = run_compact_cutover(request)
+    receipts = [json.loads(line) for line in request.receipt.read_text().splitlines()]
+    assert result.source_rows == source_rows == len(receipts)
+    assert {record["action"] for record in receipts} <= {"MAP", "REBUILD", "NONE"}
+    assert {record["source_table"] for record in receipts} == set(tables)
+    assert sha256(request.source) == source_hash == sha256(request.archive)
+    with sqlite3.connect(request.live) as connection:
+        assert connection.execute("PRAGMA user_version").fetchone() == (18,)
 
 
 def test_old_sqlite_refuses_before_candidate(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    from compact_cutover_fixtures import cutover_request
+
     from backend.app.edge_db import compact_cutover
-    from backend.app.edge_db.compact_cutover import CompactCutoverError, run_compact_cutover
+    from backend.app.edge_db.compact_cutover import run_compact_cutover
+    from backend.app.edge_db.sqlite_runtime import SqliteVersionTooOldError
 
-    paths = _cutover_paths(tmp_path)
-    _v17(paths["live"])
-    before = paths["live"].read_bytes()
-    monkeypatch.setattr(compact_cutover.sqlite3, "sqlite_version_info", (3, 45, 1))
-    with pytest.raises(CompactCutoverError, match="sqlite 3.45.1"):
-        run_compact_cutover(_request(paths))
-    assert paths["live"].read_bytes() == before
-    assert not paths["archive"].exists()
-    assert not paths["candidate"].exists()
+    request = cutover_request(tmp_path)
+    before = request.live.read_bytes()
+    monkeypatch.setattr(compact_cutover, "_runtime_sqlite_version", lambda: (3, 45, 1))
+    with pytest.raises(SqliteVersionTooOldError, match="3.45.1"):
+        run_compact_cutover(request)
+    assert request.live.read_bytes() == before
+    assert not request.archive.exists()
+    assert not request.candidate.exists()
 
 
-def test_in_flight_source_refuses_without_replacement(tmp_path: Path) -> None:
-    from backend.app.edge_db.compact_cutover import CompactCutoverError
+def test_in_flight_source_refuses_without_replacement(
+    tmp_path: Path, supported_compact_cutover_sqlite: None
+) -> None:
+    from compact_cutover_fixtures import cutover_request
 
-    paths = _cutover_paths(tmp_path)
-    _v17(paths["live"])
-    _in_flight(paths["live"])
-    before = paths["live"].read_bytes()
-    with pytest.raises(CompactCutoverError, match=SCHEMA18_DRAIN_SENTINEL):
-        _cutover(paths)
-    assert paths["live"].read_bytes() == before
-    assert not paths["candidate"].exists()
-    with sqlite3.connect(paths["live"]) as connection:
+    from backend.app.edge_db.compact_cutover import run_compact_cutover
+    from backend.app.edge_db.schema import SchemaV18MigrationError
+
+    request = cutover_request(tmp_path)
+    _in_flight(request.source)
+    before = request.live.read_bytes()
+    with pytest.raises(SchemaV18MigrationError, match=SCHEMA18_DRAIN_SENTINEL):
+        run_compact_cutover(request)
+    assert request.live.read_bytes() == before
+    assert not request.candidate.exists()
+    with sqlite3.connect(request.live) as connection:
         assert connection.execute("PRAGMA user_version").fetchone() == (17,)
 
 
-def test_bad_archive_hash_refuses_without_replacement(tmp_path: Path) -> None:
-    from backend.app.edge_db.compact_cutover import CompactCutoverError
+def test_bad_archive_hash_refuses_without_replacement(
+    tmp_path: Path, supported_compact_cutover_sqlite: None
+) -> None:
+    from compact_cutover_fixtures import cutover_request
 
-    paths = _cutover_paths(tmp_path)
-    _v17(paths["live"])
-    before = paths["live"].read_bytes()
-    paths["archive"].write_bytes(b"not-the-source-archive")
+    from backend.app.edge_db.compact_cutover import CompactCutoverError, run_compact_cutover
+
+    request = cutover_request(tmp_path)
+    before = request.live.read_bytes()
+    request.archive.write_bytes(b"not-the-source-archive")
     with pytest.raises(CompactCutoverError, match="EDGE_DB_CUTOVER_STALE_ARCHIVE"):
-        _cutover(paths)
-    assert paths["live"].read_bytes() == before
-    assert not paths["candidate"].exists()
-    assert paths["archive"].read_bytes() == b"not-the-source-archive"
+        run_compact_cutover(request)
+    assert request.live.read_bytes() == before
+    assert not request.candidate.exists()
+    assert request.archive.read_bytes() == b"not-the-source-archive"
 
 
-def test_post_first_write_rollback_is_forward_only(tmp_path: Path) -> None:
-    from backend.app.edge_db.compact_cutover import CompactCutoverError
+def test_post_first_write_rollback_is_forward_only(
+    tmp_path: Path, supported_compact_cutover_sqlite: None
+) -> None:
+    from compact_cutover_fixtures import cutover_request
 
-    paths = _cutover_paths(tmp_path)
-    _v17(paths["live"])
-    _cutover(paths)
-    with sqlite3.connect(paths["live"]) as connection:
+    from backend.app.edge_db.compact_cutover import (
+        CompactCutoverError,
+        rollback_compact_cutover,
+        run_compact_cutover,
+    )
+
+    request = cutover_request(tmp_path)
+    run_compact_cutover(request)
+    with sqlite3.connect(request.live) as connection:
         connection.execute(
             "INSERT INTO credentials "
             "(id, username, algorithm, salt, password_hash, updated_at) "
@@ -302,24 +308,29 @@ def test_post_first_write_rollback_is_forward_only(tmp_path: Path) -> None:
             (b"\x00" * 16, b"\x01" * 64),
         )
         connection.commit()
-    after_write = paths["live"].read_bytes()
+    after_write = request.live.read_bytes()
     with pytest.raises(CompactCutoverError, match="EDGE_DB_CUTOVER_FORWARD_ONLY"):
-        _cutover(paths, rollback=True)
-    assert paths["live"].read_bytes() == after_write
-    with sqlite3.connect(paths["live"]) as connection:
+        rollback_compact_cutover(request)
+    assert request.live.read_bytes() == after_write
+    with sqlite3.connect(request.live) as connection:
         assert connection.execute("PRAGMA user_version").fetchone() == (18,)
         assert connection.execute("SELECT username FROM credentials").fetchone() == ("ops",)
 
 
-def test_rollback_before_first_write_restores_archive(tmp_path: Path) -> None:
-    paths = _cutover_paths(tmp_path)
-    _v17(paths["live"])
-    archive_bytes = paths["live"].read_bytes()
-    _cutover(paths)
-    result = _cutover(paths, rollback=True)
-    assert result.current_version == 17
-    assert paths["live"].read_bytes() == archive_bytes
-    assert paths["archive"].read_bytes() == archive_bytes
+def test_rollback_before_first_write_restores_archive(
+    tmp_path: Path, supported_compact_cutover_sqlite: None
+) -> None:
+    from compact_cutover_fixtures import cutover_request, sha256
+
+    from backend.app.edge_db.compact_cutover import rollback_compact_cutover, run_compact_cutover
+    from backend.app.edge_db.compact_cutover_preflight import schema_version
+
+    request = cutover_request(tmp_path)
+    archive_hash = sha256(request.source)
+    run_compact_cutover(request)
+    rollback_compact_cutover(request)
+    assert schema_version(request.live) == 17
+    assert sha256(request.live) == archive_hash == sha256(request.archive)
 
 
 def test_runtime_does_not_open_archive_or_legacy_tables() -> None:

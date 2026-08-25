@@ -109,9 +109,12 @@ Stop unless it prints `EDGE_DB_COMPACT_CUTOVER_OK`. Confirm:
 
 - candidate `PRAGMA user_version` is 18 before rename
 - application tables are exactly the ten compact names
+- the receipt JSONL has one MAP/REBUILD/NONE line per v17 source row
 - archive SHA-256 still equals the pre-cutover live digest
 - a changed archive digest prints `EDGE_DB_CUTOVER_STALE_ARCHIVE` and leaves
   live at 17
+- when `--source` and `--live` name the same inode, the CLI snapshots live to
+  `edge-v17-source.sqlite3` first so the Task 6 projector keeps an immutable source
 
 ## Same-filesystem replace
 

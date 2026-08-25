@@ -101,12 +101,13 @@ def _seeded(tmp_path: Path, seed: Callable[[sqlite3.Connection], None], name: st
     return database
 
 
-def test_runbook_drain_query_matches_cutover_refusal(tmp_path: Path) -> None:
-    from backend.app.edge_db.compact_cutover import (
-        CompactCutoverError,
-        CompactCutoverRequest,
-        run_compact_cutover,
-    )
+def test_runbook_drain_query_matches_cutover_refusal(
+    tmp_path: Path, supported_compact_cutover_sqlite: None
+) -> None:
+    from compact_cutover_fixtures import cutover_request
+
+    from backend.app.edge_db.compact_cutover import run_compact_cutover
+    from backend.app.edge_db.schema import SchemaV18MigrationError
 
     def in_flight(connection: sqlite3.Connection) -> None:
         connection.execute(
@@ -120,23 +121,20 @@ def test_runbook_drain_query_matches_cutover_refusal(tmp_path: Path) -> None:
         )
 
     for_query = _seeded(tmp_path, in_flight, "query")
-    for_cutover = _seeded(tmp_path, in_flight, "cutover")
     connection = sqlite3.connect(f"file:{for_query}?mode=ro", uri=True)
     try:
         blocked = bool(connection.execute(_runbook_gate_sql()).fetchone()[0])
     finally:
         connection.close()
     assert blocked is True
-    request = CompactCutoverRequest(
-        source=for_cutover,
-        live=for_cutover,
-        archive=tmp_path / "archive.sqlite3",
-        candidate=tmp_path / "candidate.sqlite3",
-        receipt=tmp_path / "receipt.jsonl",
-        clip_store=tmp_path / "clips",
-        worker_state=tmp_path / "worker",
-    )
-    with pytest.raises(CompactCutoverError, match="EDGE_DB_DRAIN_INCOMPLETE"):
-        run_compact_cutover(request, sqlite_version=(3, 51, 3))
-    with sqlite3.connect(for_cutover) as live:
-        assert live.execute("PRAGMA user_version").fetchone() == (17,)
+    request = cutover_request(tmp_path)
+    connection = sqlite3.connect(request.source)
+    try:
+        in_flight(connection)
+        connection.commit()
+    finally:
+        connection.close()
+    before = request.live.read_bytes()
+    with pytest.raises(SchemaV18MigrationError, match="EDGE_DB_DRAIN_INCOMPLETE"):
+        run_compact_cutover(request)
+    assert request.live.read_bytes() == before

@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import shutil
 import sqlite3
 from collections.abc import Sequence
+from pathlib import Path
 
 from backend.app.edge_db.compact_cutover_files import (
     copy_exclusive,
@@ -43,7 +45,7 @@ from backend.app.edge_db.compact_receipt_verification import (
 from backend.app.edge_db.compact_receipts import write_or_verify_receipts
 from backend.app.edge_db.cutover_authorization import issue_compact_cutover_authorization
 from backend.app.edge_db.migrator import deployment_lock, migrate_database
-from backend.app.edge_db.sqlite_runtime import require_supported_sqlite
+from backend.app.edge_db.sqlite_runtime import SqliteVersion, require_supported_sqlite
 
 
 def _runtime_sqlite_version() -> tuple[int, int, int]:
@@ -55,13 +57,72 @@ def _emit(progress: CutoverProgress | None, phase: CutoverPhase) -> None:
         progress(phase)
 
 
+def installed_marker(live: Path) -> Path:
+    return live.with_name(f"{live.name}.v18-installed.sha256")
+
+
+def _receipt_hash(request: CompactCutoverRequest, fallback: str) -> str:
+    if request.receipt.exists():
+        return file_sha256(request.receipt)
+    return fallback
+
+
+def _live_fingerprint(live: Path) -> str:
+    digest = hashlib.sha256()
+    for path in (live, Path(f"{live}-wal"), Path(f"{live}-shm")):
+        if path.exists():
+            digest.update(path.read_bytes())
+    return digest.hexdigest()
+
+
+def rollback_compact_cutover(request: CompactCutoverRequest) -> CompactCutoverResult:
+    """Restore the read-only v17 archive only before the first post-cutover write."""
+    live_version = schema_version(request.live)
+    archive_hash = file_sha256(request.archive)
+    if live_version == 17:
+        return CompactCutoverResult(
+            live=request.live,
+            archive=request.archive,
+            receipt=request.receipt,
+            source_sha256=archive_hash,
+            receipt_sha256=_receipt_hash(request, archive_hash),
+            source_rows=0,
+        )
+    if live_version != 18:
+        raise CompactCutoverError("EDGE_DB_CUTOVER_ROLLBACK_UNAVAILABLE")
+    marker = installed_marker(request.live)
+    installed = marker.read_text(encoding="utf-8").strip() if marker.is_file() else ""
+    if not installed or _live_fingerprint(request.live) != installed:
+        raise CompactCutoverError("EDGE_DB_CUTOVER_FORWARD_ONLY")
+    restore = request.live.with_name(f"{request.live.name}.v17-restore")
+    discard_sqlite_artifact(restore)
+    copy_exclusive(request.archive, restore, mode=0o600)
+    os.replace(restore, request.live)
+    for suffix in ("-wal", "-shm"):
+        sidecar = Path(f"{request.live}{suffix}")
+        if sidecar.exists() or sidecar.is_symlink():
+            sidecar.unlink()
+    discard_sqlite_artifact(marker)
+    return CompactCutoverResult(
+        live=request.live,
+        archive=request.archive,
+        receipt=request.receipt,
+        source_sha256=archive_hash,
+        receipt_sha256=_receipt_hash(request, archive_hash),
+        source_rows=0,
+    )
+
+
 def run_compact_cutover(
     request: CompactCutoverRequest,
     *,
     on_phase: CutoverProgress | None = None,
+    sqlite_version: SqliteVersion | None = None,
 ) -> CompactCutoverResult:
     """Build, reconcile, and atomically install a schema-18 candidate."""
-    require_supported_sqlite(_runtime_sqlite_version())
+    require_supported_sqlite(
+        _runtime_sqlite_version() if sqlite_version is None else sqlite_version
+    )
     with deployment_lock(request.live.parent) as lock:
         require_paths(request)
         _emit(on_phase, CutoverPhase.BEFORE_CHECKPOINT)
@@ -210,6 +271,9 @@ def run_compact_cutover(
         )
         verify_candidate_contract(request.candidate, request.receipt)
         os.replace(request.candidate, request.live)
+        installed_marker(request.live).write_text(
+            f"{_live_fingerprint(request.live)}\n", encoding="utf-8"
+        )
         _emit(on_phase, CutoverPhase.RENAMED)
         fsync_directory(request.live.parent)
         _emit(on_phase, CutoverPhase.FINAL_DIRECTORY_SYNCED)
@@ -242,6 +306,8 @@ __all__ = [
     "CompactCutoverRequest",
     "CompactCutoverResult",
     "CutoverPhase",
+    "installed_marker",
     "main",
+    "rollback_compact_cutover",
     "run_compact_cutover",
 ]
