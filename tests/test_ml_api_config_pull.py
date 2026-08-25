@@ -101,16 +101,14 @@ def _set_pull_env(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
-def _dashboard_camera_registry(tmp_path: Path) -> CameraRegistryStore:
-    """A dashboard camera registry with one registered camera (issue #33: the
-    registry, not a backend ml-config pull, is the sole roster source), so
-    tests whose real subject is config refresh / detection windows / token
-    auth -- not the roster itself -- get an available (non-empty) worker
-    config from `/relay/config` (require_available=True) rather than a 503.
+def _dashboard_camera_registry() -> CameraRegistryStore:
+    """Register one camera on the suite's single EDGE_DATABASE_PATH principal.
+
+    Production keeps enrollment and the camera registry on one compact DB.
+    A split registry path made boot roster sync read an un-enrolled store
+    while ConnectionSettingsStore seeded the fixture DB.
     """
-    registry_path = tmp_path / "cameras.json"
-    prepare_compact_database(registry_path)
-    store = CameraRegistryStore(registry_path)
+    store = CameraRegistryStore.from_env()
     store.create(
         camera_id="dashboard-camera",
         label="Dashboard Camera",
@@ -174,7 +172,7 @@ def test_backend_config_pull_applies_metadata_not_camera_roster(
 
 
 def test_backend_detection_windows_present_ignores_legacy_night_window_entirely(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Plan-file payload-level rule: once ``detectionWindows`` is present at
     all, it is the sole authority for every domain and legacy ``nightWindow``
@@ -210,7 +208,7 @@ def test_backend_detection_windows_present_ignores_legacy_night_window_entirely(
     _set_pull_env(monkeypatch)
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
     app = create_app()
-    app.state.camera_registry = _dashboard_camera_registry(tmp_path)
+    app.state.camera_registry = _dashboard_camera_registry()
 
     with TestClient(app) as client:
         response = client.get(
@@ -238,7 +236,7 @@ def test_backend_detection_windows_present_ignores_legacy_night_window_entirely(
 
 
 def test_backend_detection_windows_absent_still_uses_legacy_night_window(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """When ``detectionWindows`` is absent entirely, the legacy single
     ``nightWindow`` field still applies to bed_exit (compat fallback).
@@ -253,7 +251,7 @@ def test_backend_detection_windows_absent_still_uses_legacy_night_window(
     _set_pull_env(monkeypatch)
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
     app = create_app()
-    app.state.camera_registry = _dashboard_camera_registry(tmp_path)
+    app.state.camera_registry = _dashboard_camera_registry()
 
     with TestClient(app) as client:
         response = client.get(
@@ -268,7 +266,7 @@ def test_backend_detection_windows_absent_still_uses_legacy_night_window(
 
 
 def test_backend_config_pull_survives_invalid_window_and_never_populates_cameras(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A malformed window value for one domain (start == end here) must not
     crash the whole pull: it fails open to ALWAYS for that domain (logged to
@@ -299,7 +297,7 @@ def test_backend_config_pull_survives_invalid_window_and_never_populates_cameras
     _set_pull_env(monkeypatch)
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
     app = create_app()
-    app.state.camera_registry = _dashboard_camera_registry(tmp_path)
+    app.state.camera_registry = _dashboard_camera_registry()
 
     with TestClient(app) as client:
         assert client.app.state.pulled_config is not None
@@ -336,7 +334,7 @@ def test_backend_config_pull_failure_does_not_create_inventory(
 
 
 def test_config_and_restart_require_token_and_restart_reflects_live_epoch(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _set_pull_env(monkeypatch)
     monkeypatch.setattr(
@@ -345,7 +343,7 @@ def test_config_and_restart_require_token_and_restart_reflects_live_epoch(
         lambda url, timeout: FakeHTTPResponse(_backend_config()),
     )
     app = create_app()
-    app.state.camera_registry = _dashboard_camera_registry(tmp_path)
+    app.state.camera_registry = _dashboard_camera_registry()
 
     with TestClient(app) as client:
         assert client.get("/api/v1/relay/config").status_code == 401
@@ -439,7 +437,7 @@ def test_config_returns_503_when_backend_config_unavailable(
 
 
 def test_config_refresh_reflects_backend_change_without_restart(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     configs = [
         _backend_config(),  # boot -> config_version 7
@@ -467,7 +465,7 @@ def test_config_refresh_reflects_backend_change_without_restart(
     _set_pull_env(monkeypatch)
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
     app = create_app()
-    app.state.camera_registry = _dashboard_camera_registry(tmp_path)
+    app.state.camera_registry = _dashboard_camera_registry()
 
     with TestClient(app) as client:
         assert client.app.state.config_version == 7
@@ -494,7 +492,7 @@ def test_config_refresh_reflects_backend_change_without_restart(
 
 
 def test_config_refresh_preserves_last_good_on_failure(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls = {"n": 0}
 
@@ -507,7 +505,7 @@ def test_config_refresh_preserves_last_good_on_failure(
     _set_pull_env(monkeypatch)
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
     app = create_app()
-    app.state.camera_registry = _dashboard_camera_registry(tmp_path)
+    app.state.camera_registry = _dashboard_camera_registry()
 
     with TestClient(app) as client:
         assert client.app.state.config_version == 7
@@ -746,7 +744,7 @@ def test_backend_camera_mapper_has_no_env_constructor(
 
 
 def test_backend_detection_windows_populate_per_domain_map_and_bed_exit_alias(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The backend's ``detectionWindows`` (domain -> window|null) becomes
     ``PulledWorkerConfig.detection_windows``; a null entry for a domain is
@@ -781,7 +779,7 @@ def test_backend_detection_windows_populate_per_domain_map_and_bed_exit_alias(
     _set_pull_env(monkeypatch)
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
     app = create_app()
-    app.state.camera_registry = _dashboard_camera_registry(tmp_path)
+    app.state.camera_registry = _dashboard_camera_registry()
 
     with TestClient(app) as client:
         pulled = client.app.state.pulled_config

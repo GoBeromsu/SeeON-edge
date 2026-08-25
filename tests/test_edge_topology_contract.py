@@ -148,7 +148,25 @@ def test_edge_db_migrator_owns_schema_lifecycle_before_runtime_start() -> None:
         "edge-filesystem-inventory": {"condition": "service_completed_successfully"}
     }
     assert migrator["restart"] == "no"
-    assert migrator["command"] == ["python", "-m", "backend.app.edge_db.importer"]
+    assert migrator["command"] == [
+        "python",
+        "-m",
+        "backend.app.edge_db.compact_cutover",
+        "--source",
+        "/var/lib/seeon-state/edge.sqlite3",
+        "--live",
+        "/var/lib/seeon-state/edge.sqlite3",
+        "--archive",
+        "/var/lib/seeon-state/edge-v17-archive.sqlite3",
+        "--candidate",
+        "/var/lib/seeon-state/edge-v18-candidate.sqlite3",
+        "--receipt",
+        "/var/lib/seeon-state/schema18-cutover-receipts.jsonl",
+        "--clip-store",
+        "/var/lib/clip-store",
+        "--worker-state",
+        "/var/lib/seeon-worker-state",
+    ]
     assert api_depends_on == {"edge-db-migrator": {"condition": "service_completed_successfully"}}
     assert worker_depends_on == {"ml-api": {"condition": "service_healthy"}}
 
