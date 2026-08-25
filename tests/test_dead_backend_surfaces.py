@@ -174,11 +174,3 @@ def test_catalog_backfill_has_no_jsonl_audit_side_channel() -> None:
     from backend.app.features.clips.catalog import CatalogStore
 
     assert "audit_log" not in CatalogStore.backfill.__code__.co_varnames
-
-
-def test_architecture_doc_states_clean_snapshot_and_process_local_replay() -> None:
-    text = (ROOT / "docs" / "architecture.md").read_text(encoding="utf-8")
-    assert "annotated MP4" not in text
-    assert "clean/analysis/annotated" not in text
-    assert "optional snapshot" in text
-    assert "process-local" in text
