@@ -508,7 +508,12 @@ describe('api client contracts', () => {
     ['requestClipDerivative'],
     ['setClipLabel'],
   ])('exports no retired %s client', (name) => {
-    expect(Object.keys(clientModule)).not.toContain(name);
+    const exported = Object.keys(clientModule);
+    // Positive control first: a bare `not.toContain` would also pass against an empty namespace,
+    // so assert the module really is loaded before trusting the absence assertion.
+    expect(exported).toContain('fetchClipArtifacts');
+    expect(exported).toContain('deleteClip');
+    expect(exported).not.toContain(name);
   });
 
   it('reads the slimmed clip artifacts contract', async () => {
