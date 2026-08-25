@@ -22,11 +22,10 @@ import type {
   CameraPatchInput,
   CameraRegistry,
   CameraTestResult,
+  CleanArtifactState,
   Clip,
-  ClipAnalysis,
   ClipArtifacts,
   ClipDeleteResult,
-  ClipDerivative,
   ClipStorageBrowseResult,
   ClipStorageInfo,
   ConnectionInput,
@@ -350,16 +349,37 @@ export async function reviewIncident(incidentId: string, input: { expected_versi
   return await requestJson(`/incident-reviews/${encodeURIComponent(incidentId)}`, { method: 'PUT', body: JSON.stringify(input) }) as Incident;
 }
 
-export async function fetchClipArtifacts(clipId: string): Promise<ClipArtifacts> {
-  return await requestJson(`/clips/${encodeURIComponent(clipId)}/artifacts`) as ClipArtifacts;
+const CLEAN_ARTIFACT_STATES = new Set<CleanArtifactState>(['AVAILABLE', 'UNAVAILABLE']);
+const SNAPSHOT_ARTIFACT_STATES = new Set<NonNullable<ClipArtifacts['snapshot']>>([
+  'PENDING', 'AVAILABLE', 'UNAVAILABLE', 'CORRUPT', 'PURGED',
+]);
+
+const CLIP_ARTIFACT_FIELDS = new Set(['clip_id', 'clean', 'snapshot']);
+
+/**
+ * The slimmed evidence contract is clip identity + clean media state + an optional snapshot state.
+ * Unknown keys are rejected so a retired analysis/annotated/derivative field can never reach the UI.
+ */
+function normalizeClipArtifacts(value: unknown): ClipArtifacts {
+  if (!isRecord(value) || typeof value.clip_id !== 'string' || value.clip_id.length === 0
+    || typeof value.clean !== 'string' || !CLEAN_ARTIFACT_STATES.has(value.clean as CleanArtifactState)
+    || Object.keys(value).some((key) => !CLIP_ARTIFACT_FIELDS.has(key))) {
+    throw new Error('Invalid clip artifacts response');
+  }
+  const snapshot = value.snapshot;
+  if (snapshot !== undefined && snapshot !== null
+    && (typeof snapshot !== 'string' || !SNAPSHOT_ARTIFACT_STATES.has(snapshot as NonNullable<ClipArtifacts['snapshot']>))) {
+    throw new Error('Invalid clip artifacts response');
+  }
+  return {
+    clip_id: value.clip_id,
+    clean: value.clean as CleanArtifactState,
+    snapshot: (snapshot ?? null) as ClipArtifacts['snapshot'],
+  };
 }
 
-export async function fetchClipAnalysis(clipId: string): Promise<ClipAnalysis> {
-  return await requestJson(`/clips/${encodeURIComponent(clipId)}/analysis`) as ClipAnalysis;
-}
-
-export async function controlClipDerivative(clipId: string, kind: 'still' | 'video', action: 'request' | 'cancel' | 'status'): Promise<ClipDerivative> {
-  return await requestJson(`/clips/${encodeURIComponent(clipId)}/derivatives/${kind}`, { method: action === 'request' ? 'POST' : action === 'cancel' ? 'DELETE' : 'GET' }) as ClipDerivative;
+export async function fetchClipArtifacts(clipId: string, signal?: AbortSignal): Promise<ClipArtifacts> {
+  return normalizeClipArtifacts(await requestJson(`/clips/${encodeURIComponent(clipId)}/artifacts`, { signal }));
 }
 
 const CLIP_DELETE_STATUSES = new Set<ClipDeleteResult['status']>([

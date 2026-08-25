@@ -10,7 +10,7 @@ export async function fetchClipPage(query: ClipPageQuery, signal?: AbortSignal):
   if (cameraId) params.set('camera_id', cameraId);
   if (eventType) params.set('event_type', eventType);
   params.set('limit', String(query.limit));
-  params.set('offset', String(query.offset));
+  if (query.cursor) params.set('cursor', query.cursor);
   const value = await requestJson(`/clips?${params.toString()}`, { signal });
   return normalizeClipPageResponse(value, query);
 }

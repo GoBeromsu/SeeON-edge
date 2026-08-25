@@ -52,8 +52,6 @@ from shared.events.evidence_export_contract import (
     DeliveryFailure,
     EventReceipt,
 )
-from shared.events.replay_wire import MAX_REPLAY_BODY_BYTES as _REPLAY_BODY_LIMIT
-from shared.events.replay_wire import ReplayWireError, decode_replay_trace
 
 RELAY_TOKEN_HEADER = "X-Edge-Relay-Token"
 
@@ -76,14 +74,6 @@ MAX_CATALOG_PAYLOAD_DEPTH = 8
 MAX_RELAY_REQUEST_BODY_BYTES = 512 * 1024
 MAX_RELAY_HEARTBEAT_BODY_BYTES = 4 * 1024
 MAX_RELAY_RUNTIME_STATUS_BODY_BYTES = 64 * 1024
-# Analysis frames are image-free but may contain a full pose/keypoint timeline.
-# The worker sends at most this many frames per request; this is deliberately
-# aligned with its trace writer batch bound rather than relying on a proxy's
-# incidental request limit.
-MAX_RELAY_ANALYSIS_TRACE_FRAMES = 16
-# Derived, not chosen: see shared/events/replay_wire.py. Worker and backend
-# read the same value so the two ends cannot drift apart.
-MAX_RELAY_ANALYSIS_TRACE_BODY_BYTES = _REPLAY_BODY_LIMIT
 MAX_RELAY_SNAPSHOT_ATTACHMENT_BODY_BYTES = 8 * 1024
 MAX_RELAY_SNAPSHOT_DISPOSITION_BODY_BYTES = 8 * 1024
 
@@ -93,7 +83,6 @@ _MAX_BODY_BYTES_BY_SUFFIX: dict[str, int] = {
     "/alerts": MAX_RELAY_REQUEST_BODY_BYTES,
     "/heartbeat": MAX_RELAY_HEARTBEAT_BODY_BYTES,
     "/runtime-status": MAX_RELAY_RUNTIME_STATUS_BODY_BYTES,
-    "/analysis-traces": MAX_RELAY_ANALYSIS_TRACE_BODY_BYTES,
     "/snapshot-attachments": MAX_RELAY_SNAPSHOT_ATTACHMENT_BODY_BYTES,
     "/snapshot-dispositions": MAX_RELAY_SNAPSHOT_DISPOSITION_BODY_BYTES,
 }
@@ -229,19 +218,6 @@ def require_relay_runtime_status(
     )
 
 
-def require_relay_analysis_trace(
-    request: Request,
-    relay_token: Annotated[str | None, Header(alias=RELAY_TOKEN_HEADER)] = None,
-    authorization: Annotated[str | None, Header()] = None,
-) -> None:
-    _authorize_relay_body(
-        request,
-        max_bytes=MAX_RELAY_ANALYSIS_TRACE_BODY_BYTES,
-        relay_token=relay_token,
-        authorization=authorization,
-    )
-
-
 def require_relay_snapshot_attachment(
     request: Request,
     relay_token: Annotated[str | None, Header(alias=RELAY_TOKEN_HEADER)] = None,
@@ -290,23 +266,6 @@ class RelayAuditEnvelope(BaseModel):
     key list, which is exactly what let this one through, but a test that derives
     the emitted keys from the producer itself.
     """
-
-
-class RelayAnalysisTraceRequest(BaseModel):
-    """Closed shared replay envelope received from the inference runtime."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    camera_id: str = Field(...)
-    frames: list[dict[str, object]] = Field(...)
-    truncation: dict[str, object] = Field(...)
-
-
-class RelayAnalysisTraceResponse(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    accepted: bool = Field(...)
-    frame_count: int = Field(...)
 
 
 class RelaySnapshotMetadata(BaseModel):
@@ -939,28 +898,6 @@ def relay_runtime_status(
     if not result.accepted:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=result.reason)
     return RelayRuntimeStatusResponse(accepted=True, generation=result.generation)
-
-
-@router.post("/analysis-traces", response_model=RelayAnalysisTraceResponse)
-def relay_analysis_trace(
-    payload: RelayAnalysisTraceRequest,
-    _: Annotated[None, Depends(require_relay_analysis_trace)],
-) -> RelayAnalysisTraceResponse:
-    if len(payload.frames) > MAX_RELAY_ANALYSIS_TRACE_FRAMES:
-        raise HTTPException(
-            status_code=status.HTTP_413_CONTENT_TOO_LARGE,
-            detail=(
-                "analysis trace transfer exceeds maximum of "
-                f"{MAX_RELAY_ANALYSIS_TRACE_FRAMES} frames"
-            ),
-        )
-    try:
-        trace = decode_replay_trace(payload.model_dump())
-    except ReplayWireError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)
-        ) from exc
-    return RelayAnalysisTraceResponse(accepted=True, frame_count=len(trace.frames))
 
 
 def _record_catalog(request: Request, payload: RelayAlertRequest) -> str | None:

@@ -23,15 +23,7 @@ class RuntimeManifestReferenceError(RuntimeError):
         super().__init__(f"runtime manifest reference {manifest_sha256} is {failure.value}")
 
 
-def require_runtime_manifest_contents(_connection: object, manifest_sha256: str) -> None:
-    """Local runtime-manifest catalogs no longer exist in this slot."""
-    raise RuntimeManifestReferenceError(
-        manifest_sha256, RuntimeManifestReferenceFailure.UNAVAILABLE
-    )
-
-
 __all__ = [
     "RuntimeManifestReferenceError",
     "RuntimeManifestReferenceFailure",
-    "require_runtime_manifest_contents",
 ]

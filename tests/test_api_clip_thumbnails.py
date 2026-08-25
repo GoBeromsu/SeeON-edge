@@ -9,7 +9,6 @@ import pytest
 from fastapi.testclient import TestClient
 
 from backend.app.features.clips import store as store_module
-from backend.app.features.clips.listing_index import ClipListingIndex
 from backend.app.features.clips.store import ClipStore
 from backend.app.main import create_app, no_lifespan
 
@@ -99,19 +98,14 @@ def test_compact_listing_rebuilds_thumbnail_identity(clip_env: Path) -> None:
     assert row == ("clips/clip-with/thumbnail.jpg", 64, len(JPEG))
 
 
-def test_first_page_ignores_legacy_index_and_rebuilds_thumbnail_availability(
+def test_first_page_rebuilds_thumbnail_availability(
     clip_env: Path,
-    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     for item_index in range(60):
         _write_clip(clip_env, f"clip-{item_index:03d}", thumbnail=item_index % 2 == 0)
-    store = ClipStore(clip_env)
-    index = ClipListingIndex.open(tmp_path / "catalog.sqlite3")
-    _ = index.reconcile(store)
     app = create_app(lifespan=no_lifespan)
-    app.state.clip_store = store
-    app.state.clip_listing_index = index
+    app.state.clip_store = ClipStore(clip_env)
     root_walks = 0
     original = store_module.bounded_clip_roots
 
@@ -125,7 +119,6 @@ def test_first_page_ignores_legacy_index_and_rebuilds_thumbnail_availability(
     with TestClient(app) as client:
         _login(client)
         response = client.get("/api/v1/clips", params={"limit": 48, "offset": 0})
-    index.close()
 
     assert response.status_code == 200
     clips = response.json()["clips"]

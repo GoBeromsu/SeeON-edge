@@ -1,13 +1,11 @@
-"""Read-only manifest access and API-owned clip labels."""
+"""Read-only manifest access for clip playback."""
 
 from __future__ import annotations
 
-import json
-import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, final
+from typing import final
 
 from backend.app.features.clips.descriptor_files import (
     OpenedRegularFile,
@@ -27,29 +25,9 @@ from backend.app.features.clips.thumbnail_files import (
 )
 from backend.app.shared.state_dir import resolve_state_dir
 
-logger = logging.getLogger(__name__)
-
 CLIP_STORE_DIR_ENV = "CLIP_STORE_DIR"
 API_LABEL_STORE_ENV = "API_LABEL_STORE"
 DEFAULT_CLIP_STORE_DIR = "/var/lib/clip-store"
-
-LabelValue = Literal["TRUE_POSITIVE", "FALSE_POSITIVE"] | None
-
-@dataclass(frozen=True)
-class LabelRecord:
-    clip_id: str
-    label: LabelValue
-    reviewer: str
-    reviewed_at: str
-
-    def as_response(self) -> dict[str, object]:
-        return {
-            "clip_id": self.clip_id,
-            "label": self.label,
-            "reviewer": self.reviewer,
-            "reviewed_at": self.reviewed_at,
-        }
-
 
 @dataclass(frozen=True, slots=True)
 class LocatedClip:
@@ -203,77 +181,12 @@ def default_label_store_dir() -> Path:
     return resolve_state_dir("ml-api") / "labels"
 
 
-class LabelStore:
-    def __init__(self, root: Path | str) -> None:
-        self.root = Path(root)
-
-    @classmethod
-    def from_env(cls) -> LabelStore:
-        configured = os.environ.get(API_LABEL_STORE_ENV)
-        return cls(configured) if configured else cls(default_label_store_dir())
-
-    def save(self, record: LabelRecord) -> bool:
-        """Best-effort persist; an unwritable state dir must not crash the caller.
-
-        Mirrors catalog-store graceful-degradation
-        pattern (``backend/app/features/status/runtime_status_store.py``): a
-        label write that cannot land durably is dropped (with a warning)
-        rather than crashing the labeling request. Returns ``True`` only when
-        the record actually landed durably, so the caller (``label_clip`` in
-        ``router.py``) can surface a degraded save to the client instead of
-        silently reporting success.
-        """
-        if not is_valid_clip_id(record.clip_id):
-            raise ValueError("invalid clip_id")
-        labels_dir = self.root / "labels"
-        try:
-            labels_dir.mkdir(parents=True, exist_ok=True)
-            target = labels_dir / f"{record.clip_id}.json"
-            tmp = target.with_suffix(".json.tmp")
-            tmp.write_text(
-                json.dumps(record.as_response(), ensure_ascii=False, separators=(",", ":"))
-                + "\n",
-                encoding="utf-8",
-            )
-            os.replace(tmp, target)
-        except OSError as exc:
-            logger.warning("label store unavailable at %s: %s", labels_dir, exc)
-            return False
-        return True
-
-    def get(self, clip_id: str) -> LabelRecord | None:
-        if not is_valid_clip_id(clip_id):
-            raise ValueError("invalid clip_id")
-        target = self.root / "labels" / f"{clip_id}.json"
-        try:
-            parsed = json.loads(target.read_text(encoding="utf-8"))
-        except (FileNotFoundError, json.JSONDecodeError, OSError):
-            return None
-        if not isinstance(parsed, dict):
-            return None
-        return LabelRecord(
-            clip_id=str(parsed.get("clip_id", "")),
-            label=_label_value(parsed.get("label")),
-            reviewer=str(parsed.get("reviewer", "")),
-            reviewed_at=str(parsed.get("reviewed_at", "")),
-        )
-
-
-def _label_value(value: object) -> LabelValue:
-    if value is None or value in ("TRUE_POSITIVE", "FALSE_POSITIVE"):
-        return value
-    raise ValueError("invalid label")
-
-
 __all__ = [
     "API_LABEL_STORE_ENV",
     "CLIP_STORE_DIR_ENV",
     "ClipManifest",
     "ClipStore",
     "DuplicateClipIdError",
-    "LabelRecord",
-    "LabelStore",
-    "LabelValue",
     "LocatedClip",
     "default_label_store_dir",
     "is_valid_clip_id",

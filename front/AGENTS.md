@@ -32,7 +32,7 @@ Frontend-wide rules for `front/`. Slice layout lives in `src/AGENTS.md`.
 - Honor `video_available`, `video_error`, `thumbnail_available`. Missing media is unavailable, not an endless spinner and not a fake poster.
 - Live wall uses `useMjpegStream`: `fetch` plus canvas, Content-Length framed parts, stall reconnect after 3s, exponential backoff. No `<img multipart>`. No timed remount `key`.
 - Offline or offscreen tiles pass `baseUrl: null` and fall back to snapshot. Live fetch streams do not need `_r=` cache-busting.
-- After an accepted clip delete, drop playback. A late artifacts or analysis response must not resurrect the player.
+- After an accepted clip delete, drop playback. A late artifacts response must not resurrect the player.
 
 ## Verification
 

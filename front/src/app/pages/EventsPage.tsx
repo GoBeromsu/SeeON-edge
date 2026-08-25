@@ -135,8 +135,11 @@ export function EventsPage(): JSX.Element {
             pageIndex={clipsResource.pageIndex}
             total={clipsResource.data.pagination.total}
             visibleCount={clips.length}
+            hasNextPage={clipsResource.hasNextPage}
             pendingPageIndex={clipsResource.pendingPageIndex}
-            onNavigate={clipsResource.navigate}
+            onNext={clipsResource.openNextPage}
+            onPrevious={clipsResource.openPreviousPage}
+            onFirst={clipsResource.openFirstPage}
             onRefresh={clipsResource.refresh}
           />
         ) : null}

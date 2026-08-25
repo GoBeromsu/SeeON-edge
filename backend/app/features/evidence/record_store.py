@@ -33,7 +33,6 @@ class CentralEvidenceSummary:
     primary_clip_id: str | None
     primary_artifact_state: str | None
     snapshot_artifact_state: str | None
-    derivative_state: str | None
     event_delivery_state: str
     clip_publish_state: str | None
     retention_state: str | None
@@ -223,7 +222,7 @@ def _summary_from_row(row: sqlite3.Row | tuple[object, ...]) -> CentralEvidenceS
         runtime_manifest_sha256=_text(row[8]), decision_trace_id=None,
         module_qualified_id=_text(row[9]), policy_qualified_id=_text(row[10]),
         primary_clip_id=_text(row[11]), primary_artifact_state=_text(row[12]),
-        snapshot_artifact_state=_text(row[13]), derivative_state=None,
+        snapshot_artifact_state=_text(row[13]),
         event_delivery_state="ACKED", clip_publish_state=_text(row[14]),
         retention_state=_text(row[15]), review=review,
     )

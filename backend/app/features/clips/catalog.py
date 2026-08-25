@@ -5,7 +5,6 @@ The edge worker never opens this database; it supplies metadata through relay.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 import math
@@ -890,18 +889,10 @@ class CatalogStore:
         self,
         clip_store: Any,
         camera_registry: Any | None = None,
-        audit_log: Any | None = None,
-        label_store: Any | None = None,
     ) -> None:
         with self._serialized_operation():
             for record in strict_manifest_records(clip_store):
                 self._record_unlocked("clips", record.manifest.clip_id, record.payload)
-                if label_store is not None:
-                    label = label_store.get(record.manifest.clip_id)
-                    if label is not None:
-                        self._record_unlocked(
-                            "labels", record.manifest.clip_id, label.as_response()
-                        )
             if camera_registry is not None:
                 for camera in camera_registry.snapshot().get("cameras", []):
                     if (
@@ -912,16 +903,6 @@ class CatalogStore:
                         self._record_unlocked(
                             "cameras", camera["id"], sanitized_camera_payload(camera)
                         )
-            if audit_log is not None:
-                for entry in audit_log.list_entries():
-                    audit_id = str(
-                        entry.get("audit_id")
-                        or entry.get("id")
-                        or hashlib.sha256(
-                            json.dumps(entry, sort_keys=True, separators=(",", ":")).encode()
-                        ).hexdigest()
-                    )
-                    self._record_unlocked("audit", audit_id, entry)
 
     @contextmanager
     def _serialized_operation(self) -> Generator[None, None, None]:

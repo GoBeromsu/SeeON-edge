@@ -19,7 +19,7 @@ from backend.app.features.clips.catalog import (
     CatalogStore,
     get_catalog_store,
 )
-from backend.app.features.clips.store import ClipStore, LabelRecord, LabelStore
+from backend.app.features.clips.store import ClipStore
 from backend.app.shared.dashboard_credentials import DashboardCredentialsStore
 
 _EVENT_ID = "11111111-1111-4111-8111-111111111111"
@@ -69,32 +69,6 @@ def test_catalog_from_env_resolves_under_state_dir_and_is_queryable(tmp_path, mo
         store.close()
 
     assert catalog_path.exists()
-
-
-def test_label_store_save_degrades_gracefully_when_labels_dir_is_unwritable(
-    tmp_path, monkeypatch, caplog
-) -> None:
-    """``LabelStore.save`` must not crash the labeling request when its state
-    dir can't be created -- the same OSError guard as
-    ``RuntimeStatusStore._persist_latency`` (``runtime_status_store.py``)."""
-    store = LabelStore(tmp_path)
-    record = LabelRecord(
-        clip_id="clip-1",
-        label="TRUE_POSITIVE",
-        reviewer="reviewer-1",
-        reviewed_at="2026-01-01T00:00:00Z",
-    )
-
-    def unwritable(self, *, parents: bool = False, exist_ok: bool = False) -> None:
-        raise PermissionError("labels mount unavailable")
-
-    monkeypatch.setattr(Path, "mkdir", unwritable)
-
-    with caplog.at_level("WARNING"):
-        store.save(record)
-
-    assert "label store unavailable" in caplog.text
-    assert store.get("clip-1") is None
 
 
 def test_catalog_open_failure_is_recorded_without_raising(monkeypatch) -> None:

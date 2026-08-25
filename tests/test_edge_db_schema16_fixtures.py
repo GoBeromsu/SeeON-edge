@@ -13,7 +13,6 @@ from worker.pipeline.output.evidence.evidence_outbox_types import (
     ClipPublishState,
     EventDeliveryState,
 )
-from worker.pipeline.output.evidence.evidence_record_models import EvidenceLifecycle
 
 NOW = "2026-08-21T12:00:00Z"
 MANIFEST = "a" * 64
@@ -183,7 +182,7 @@ def _populate_fixture(connection: sqlite3.Connection, *, drain_blocked: bool) ->
             "fall.fixture",
             "fall.policy.fixture",
             POLICY,
-            EvidenceLifecycle.COMPLETE.value,
+            "COMPLETE",
             NOW,
             NOW,
         ),
