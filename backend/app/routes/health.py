@@ -6,6 +6,11 @@ from typing import Any
 
 from fastapi import APIRouter, Request, Response, status
 
+from shared.release_identity import (
+    EDGE_DATABASE_FORMAT_IDENTITY,
+    EDGE_DATABASE_SCHEMA_VERSION,
+)
+
 probe_router = APIRouter(tags=["health"])
 router = APIRouter(tags=["health"])
 
@@ -13,6 +18,14 @@ router = APIRouter(tags=["health"])
 @probe_router.get("/health/live")
 def live() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@probe_router.get("/health/release-identity")
+def release_identity() -> dict[str, object]:
+    return {
+        "format": EDGE_DATABASE_FORMAT_IDENTITY,
+        "edge_database_schema_version": EDGE_DATABASE_SCHEMA_VERSION,
+    }
 
 
 @probe_router.get("/health/ready")

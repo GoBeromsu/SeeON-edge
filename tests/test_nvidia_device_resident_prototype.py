@@ -32,12 +32,10 @@ from worker.adapters.decode.nvdec_device.models import DeviceResidentPoolConfig
 from worker.adapters.decode.nvdec_device.pool import DeviceResidentFramePool
 from worker.adapters.device.cuda.probe import CudaCapability
 from worker.adapters.device.nvml.probe import NvmlGpuStatus
-from worker.interfaces.device_batch import DeviceResidentBatcher, DeviceResidentPool
-from worker.runtime.telemetry.device_residency import device_residency_diagnostics
+from worker.runtime.telemetry.models import DeviceResidencyDiagnostics
 from worker.runtime.telemetry.runtime_diagnostics import WorkerDiagnostics
 from worker.types import (
     FrameDescriptor,
-    FrameLease,
     FrameLeaseReleasedError,
     MemoryKind,
     PixelFormat,
@@ -90,16 +88,6 @@ def test_released_slot_is_reused_without_reallocating() -> None:
     second = pool.acquire()
     assert allocator.allocations == 1  # reused the recycled slot, no second allocation
     second.release()
-
-
-def test_pool_conforms_to_device_resident_pool_protocol() -> None:
-    pool, _allocator = fake_device_resident_pool(
-        camera_id="camera-a", capacity=1, width=2, height=2
-    )
-    assert isinstance(pool, DeviceResidentPool)
-    lease = pool.acquire()
-    assert isinstance(lease, FrameLease)
-    lease.release()
 
 
 def test_acquired_lease_is_device_resident_never_host() -> None:
@@ -189,7 +177,6 @@ def test_pool_pressure_watermark_and_capacity_are_reported() -> None:
 def test_batcher_rejects_batches_larger_than_declared_max() -> None:
     pool, allocator = fake_device_resident_pool(camera_id="camera-a", capacity=2, width=2, height=2)
     batcher = FakeDeviceResidentBatcher(max_batch_size=1, allocator=allocator)
-    assert isinstance(batcher, DeviceResidentBatcher)
 
     lease_a = pool.acquire()
     lease_b = pool.acquire()
@@ -359,41 +346,24 @@ def test_probe_reports_available_when_every_gate_passes() -> None:
 # --------------------------------------------------------------------------
 
 
-def test_device_residency_diagnostics_projects_pool_telemetry() -> None:
-    pool, allocator = fake_device_resident_pool(camera_id="camera-a", capacity=2, width=2, height=2)
-    lease = pool.acquire()
-    allocator.upload(lease, np.zeros((2, 2, 3), dtype=np.uint8))
-    lease.release()
-
-    diagnostics = device_residency_diagnostics(
-        pool.telemetry.snapshot(),
-        residency_path="decode->preprocess->inference",
-        wall_clock=lambda: 123.0,
-    )
-    assert diagnostics.residency_path == "decode->preprocess->inference"
-    assert diagnostics.h2d_transfers == 1
-    assert diagnostics.pool_capacity == 2
-    assert diagnostics.pool_outstanding == 0
-    assert diagnostics.unavailable_reason is None
-    assert diagnostics.updated_at_sec == 123.0
-
-
-def test_device_residency_diagnostics_rejects_blank_residency_path() -> None:
-    pool, _allocator = fake_device_resident_pool(
-        camera_id="camera-a", capacity=1, width=2, height=2
-    )
-    with pytest.raises(ValueError, match="residency_path"):
-        device_residency_diagnostics(pool.telemetry.snapshot(), residency_path="")
-
-
 def test_worker_diagnostics_carries_device_residency_per_camera() -> None:
-    pool, _allocator = fake_device_resident_pool(
-        camera_id="camera-a", capacity=1, width=2, height=2
-    )
     diagnostics = WorkerDiagnostics()
-    payload = device_residency_diagnostics(
-        pool.telemetry.snapshot(),
+    payload = DeviceResidencyDiagnostics(
         residency_path="decode->preprocess->inference",
+        h2d_transfers=0,
+        h2d_bytes=0,
+        d2h_transfers=0,
+        d2h_bytes=0,
+        pool_capacity=1,
+        pool_outstanding=0,
+        pool_high_watermark=0,
+        pool_exhaustion_events=0,
+        decode_time_ms_total=0.0,
+        decode_samples=0,
+        inference_time_ms_total=0.0,
+        inference_samples=0,
+        unavailable_reason=None,
+        updated_at_sec=0.0,
     )
     diagnostics.record_device_residency("camera-a", payload)
 

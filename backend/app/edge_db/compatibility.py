@@ -159,7 +159,7 @@ CANONICAL_MIGRATION_LEDGER: Final[tuple[MigrationIdentity, ...]] = (
     (
         18,
         "strict_ten_table_application_schema",
-        "7513b07e490bbd40e1cee2bd4d35f2342f3ef312c96bbb30c817464ab09f5e78",
+        "d43dbc02e395e3df5117f7dc96814a87299f949cac7195cc72fb950d60964c9c",
     ),
 )
 
@@ -256,8 +256,7 @@ def _verify_compact_application_tables(connection: sqlite3.Connection) -> None:
     """Require the exact schema-18 table allowlist and structural contract."""
     try:
         rows = connection.execute(
-            "SELECT name, sql FROM sqlite_schema "
-            "WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
+            "SELECT name, sql FROM sqlite_schema WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
         ).fetchall()
     except sqlite3.Error as error:
         raise SchemaLedgerError("edge database application table set is unreadable") from error

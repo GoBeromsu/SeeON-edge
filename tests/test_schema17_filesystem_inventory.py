@@ -1,4 +1,4 @@
-"""Filesystem inventory gate must retire once central schema 17 is installed."""
+"""Filesystem inventory gate must retire once central schema 18 is installed."""
 
 from __future__ import annotations
 
@@ -86,10 +86,32 @@ def test_pre_cutover_staged_clip_blocks(tmp_path: Path, capsys: pytest.CaptureFi
     assert "clip staging entries=1" in capsys.readouterr().err
 
 
-def test_post_cutover_bypasses_pending_delivery_queue(
+def test_schema17_pending_delivery_queue_still_blocks(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     database = _database(tmp_path, 17)
+    runtime_state = tmp_path / "worker-state"
+    _pending_entry(runtime_state)
+
+    exit_code = inventory.main(
+        [
+            "--database",
+            str(database),
+            "--runtime-state-dir",
+            str(runtime_state),
+            "--clip-store-dir",
+            str(tmp_path / "clip-store"),
+        ]
+    )
+
+    assert exit_code == 1
+    assert "delivery-queue entries=1" in capsys.readouterr().err
+
+
+def test_post_cutover_bypasses_pending_delivery_queue(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    database = _database(tmp_path, 18)
     runtime_state = tmp_path / "worker-state"
     _pending_entry(runtime_state)
 

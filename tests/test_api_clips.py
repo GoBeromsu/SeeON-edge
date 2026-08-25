@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import shutil
 import sqlite3
-from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -347,34 +346,22 @@ def test_list_clips_returns_200_without_api_label_store_env_set(
     assert not audit_path.exists()
 
 
-def test_list_clips_succeeds_even_when_the_audit_log_is_unwritable(
+def test_list_clips_does_not_create_jsonl_audit_side_channel(
     clip_env, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Issue #152: ``list_clips`` (``router.py``) appends a "list" audit entry
-    as a side effect of an otherwise pure read. Before this fix, an
-    unwritable audit log (e.g. the real ``/var/lib/ml-api-labels`` default
-    outside a container) crashed that append with an unhandled
-    ``PermissionError``, turning ``GET /clips`` into a 500 -- the operations
-    page couldn't load event history at all. The audit append is now
-    best-effort, so listing must succeed regardless."""
     clip_store = clip_env / "clip-store"
     _write_manifest(clip_store, "clip-1")
     audit_path = clip_env / "label-store" / "audit.jsonl"
-    original_open = Path.open
-
-    def guarded_open(self: Path, *args, **kwargs):
-        if self == audit_path:
-            raise PermissionError("audit log mount unavailable")
-        return original_open(self, *args, **kwargs)
 
     with TestClient(create_app(lifespan=no_lifespan)) as client:
         _login(client)
-        monkeypatch.setattr(Path, "open", guarded_open)
         response = client.get("/api/v1/clips")
+        audit = client.get("/api/v1/audit")
 
     assert response.status_code == 200
     assert [clip["clip_id"] for clip in response.json()["clips"]] == ["clip-1"]
-    # The append attempted to write and failed -- the file was never created.
+    assert audit.status_code == 200
+    assert "clip.list" in [event["action"] for event in audit.json()["events"]]
     assert not audit_path.exists()
 
 

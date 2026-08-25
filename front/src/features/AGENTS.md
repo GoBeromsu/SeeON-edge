@@ -4,8 +4,8 @@ One folder, one capability. `app/pages/` composes these. Parent already names th
 
 ## Ownership
 
-- `operations/`: live wall + room detail. Owns MJPEG (`useMjpegStream`), snapshot queue, overlay fetch/set, floor/liveness sort (`operationsModel`), room clip history. `ClipPlayerModal` plays that history. No delete, no artifacts, no analysis.
-- `events/`: clip catalog + incident review. Owns filters, pager, `useEventsPage` / `useClipMetadata`, `eventTypes` facets (`bed-exit` / `fall` / `other`). `ClipPlaybackModal` is the evidence surface: delete, artifacts, analysis, derivative control.
+- `operations/`: live wall + room detail. Owns MJPEG (`useMjpegStream`), snapshot queue, overlay fetch/set, floor/liveness sort (`operationsModel`), room clip history. `ClipPlayerModal` plays that history. No delete, no artifacts.
+- `events/`: clip catalog + incident review. Owns filters, keyset pager, `useEventsPage` / `useClipMetadata`, `eventTypes` facets (`bed-exit` / `fall` / `other`). `ClipPlaybackModal` is the evidence surface: one clean `<video>`, artifact state, delete. There is no analysis, annotated, or derivative view.
 - `settings/`: registry writes and site policy. `CameraSection` orchestrates table + register + edit + delete. Its `DetectionSettingsCard` is the global schedule editor (`saveDetectionSettings`). Also clip storage/export, policy evidence, processing status, bed-zone panel.
 - `connection/`: 3-step wizard + `ConnectionSettingsPanel`. `wizardSteps.ts` is pure and server-state only (`enrolled`, camera total, `dirty_registry_version`, `readiness_error`, `preview.confirmed`). SettingsPage mounts the wizard. No page of its own.
 - `cameras/`: topology widgets only. Pairing list, structure editor, confirm dialog. No wizard progress, no registry table. Wizard steps 2 and 3 consume them.
@@ -39,7 +39,9 @@ Do not add a fourth. Lift a new shared widget to `shared/ui` or `shared/api`.
 
 Same-named cards stay separate files. operations card = status + overlay + navigate. settings card = editor. Don't merge by import.
 
-Clip modals stay separate. operations `ClipPlayerModal` = room-history playback. events `ClipPlaybackModal` = delete / artifacts / analysis. Don't grow delete into operations.
+Clip modals stay separate. operations `ClipPlayerModal` = room-history playback. events `ClipPlaybackModal` = clean playback + artifacts + delete. Don't grow delete into operations.
+
+Clip paging is keyset only. `GET /clips` takes `limit` plus an opaque `cursor` and answers with `next_cursor`; the order is `(started_at DESC, clip_id DESC)`. `useEventsPage` keeps the walked cursor trail so 이전/다음 stay on exact boundaries. Never reintroduce `offset`, a page-number jump, or a client-side re-sort that ignores the clip-id tiebreak.
 
 `operations/crossPageNavigation.ts` fakes `?page=` + `popstate` because App owns the controller. Only operations uses it. Don't invent a second navigator. Don't import App.
 

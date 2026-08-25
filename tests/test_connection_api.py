@@ -191,7 +191,7 @@ def test_put_connection_verifies_persists_and_publishes_one_bundle_immediately(
         assert bundle.facility_id == "87d79f24-b32f-49a3-b534-19f0af7d9135"
         assert bundle.ingest_client.bearer_token == "eft_v1.token.secret"
         assert bundle.evidence_client.bearer_token == "eft_v1.token.secret"
-        assert bundle.camera_mapper.token == "eft_v1.token.secret"
+        assert not hasattr(bundle, "camera_mapper")
     finally:
         server.shutdown()
         thread.join(timeout=1.0)

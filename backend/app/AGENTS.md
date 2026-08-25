@@ -8,7 +8,7 @@ with the worker.
 
 - `create_app()` seeds `app.state.edge_relay_token` from `API_EDGE_RELAY_TOKEN`, mounts unversioned `probe_router`, then registers product routers under `Settings.api_v1_prefix` (`/api/v1`). Front dist mounts at `/` from `API_FRONT_DIST` when that dir exists.
 - Auth reads only `app.state.edge_relay_token`. Handlers never re-read env. Lifespan seeding is `hasattr`-guarded so the factory (and tests) win. `no_lifespan` is the test hook.
-- `lifespan.py` rejects retired env keys, resolves the ml-api state dir, then assembles `heartbeat_store`, `runtime_status_store`, `camera_registry`, and the connection-derived ingest / evidence / mapper bundle.
+- `lifespan.py` rejects retired env keys, resolves the ml-api state dir, then assembles in-memory `heartbeat_store` / `runtime_status_store`, `camera_registry`, and the connection-derived ingest / evidence bundle. Clip listing is compact-authority on request.
 - Config refresh and heartbeat relay each get a dedicated 1-worker executor. `API_BACKEND_HEARTBEAT_RELAY_SEC=0` kills the relay loop.
 - Clip listing is compact-authority on request. Shutdown cancels both loops, then `catalog_store.close()`.
 - Lifespan does not build detectors or RTSP. Pulled ml-config `cameras` are not admission; the dashboard registry is the camera SSOT.
@@ -19,14 +19,14 @@ One capability per `features/<slice>/`. The slice owns its router and store. Ext
 
 - `auth`: dashboard session + credential rotation (`shared/dashboard_auth.py`).
 - `cameras`: registry, topology, bed zones, worker-config, MJPEG proxy. Owns `camera_registry`, `bed_zone_store`.
-- `clips`: listing, media, labels, audit, storage, catalog. Owns `clip_store`, `clip_label_store`, `clip_audit_log`, `catalog_store`, `clip_storage_location_store`.
+- `clips`: listing, media, storage, catalog. Owns compact `clips` / `artifacts` access, `catalog_store`, and `clip_storage_location_store`.
 - `connection`: enrollment, Hub URL, roster sync, topology confirm. Owns `ConnectionSettingsStore`.
 - `detection_settings`: settings + policy apply/rollback. Owns `detection_settings_store`, `detection_policy_store`.
 - `evidence`: worker clip ingest under `/relay` plus operator incidents.
 - `relay`: `/relay/{config,restart,alerts,heartbeat,runtime-status}`. No store; consumes cameras / status / clips via deps.
 - `runtime_settings`: operator knobs. Owns `RuntimeSettingsStore`.
 - `status`: `/status` and `/system` from relay-derived liveness. Owns `heartbeat_store`, `runtime_status_store`.
-- `qa`: retired. Replay/QA tables are not a runtime owner.
+- `qa`: retired. No QA/replay table is a runtime owner.
 - `routes/`: app-level health + models. See `routes/AGENTS.md`.
 - `core/` is `Settings` (`ML_API_`). `shared/` is infra (mapping, sessions, sqlite bootstrap, state dir), never feature state.
 
@@ -45,7 +45,7 @@ HTTP schemas are Pydantic `BaseModel`, never `dataclass`. They live in the slice
 `app.state` is the injection board. The owning slice constructs the store (`from_env()` or lifespan) and exposes a getter. Other slices depend; they do not build a second copy.
 
 - cameras: `camera_registry`, `bed_zone_store`
-- clips: `clip_store`, `clip_label_store`, `clip_audit_log`, `catalog_store`, `clip_storage_location_store`
+- clips: compact clip/artifact stores, `catalog_store`, `clip_storage_location_store`
 - status: `heartbeat_store`, `runtime_status_store`
 - detection_settings: `detection_settings_store`, `detection_policy_store`
 

@@ -34,7 +34,9 @@ function pageResponse(
 ) {
   return jsonResponse({
     clips,
-    pagination: { limit: 48, offset: 0, total: clips.length + 1, has_more: true },
+    pagination: {
+      limit: 48, offset: 0, total: clips.length + 1, has_more: true, next_cursor: 'bmV4dA==',
+    },
     event_type_counts: eventTypeCounts,
   });
 }

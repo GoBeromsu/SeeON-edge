@@ -7,6 +7,7 @@ ROOT = Path(__file__).resolve().parents[1]
 DOCKERFILE = ROOT / "Dockerfile.edge"
 ZERO_REVISION = "0" * 40
 IMAGE_REVISION_MARKER = "/opt/seeon/ml-worker-image-revision"
+SCHEMA_IDENTITY_MARKER = "/opt/seeon/edge-database-schema-version"
 
 
 def _dockerfile() -> str:
@@ -36,4 +37,6 @@ def test_edge_image_bakes_one_revision_into_label_environment_and_marker() -> No
     assert 'org.opencontainers.image.revision="${SOURCE_REVISION}"' in source
     assert 'ML_WORKER_BUILD_REVISION="${SOURCE_REVISION}"' in source
     assert f'"$SOURCE_REVISION" > {IMAGE_REVISION_MARKER}' in source
-    assert f"chmod 0444 {IMAGE_REVISION_MARKER}" in source
+    assert SCHEMA_IDENTITY_MARKER in source
+    assert 'seeon.edge.database.schema-version="${EDGE_DATABASE_SCHEMA_VERSION}"' in source
+    assert f"chmod 0444 {IMAGE_REVISION_MARKER} {SCHEMA_IDENTITY_MARKER}" in source

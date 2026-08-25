@@ -30,7 +30,7 @@ describe('EventsPage', () => {
     expect(host.textContent).not.toContain('카메라 미상');
   });
 
-  it('filters the grid by event type on the server and resets to page 1', async () => {
+  it('filters the grid by event type on the server and restores the newest keyset page', async () => {
     resetLocation();
     const fetchMock = installFetchMock();
     const { host } = await renderPage();
@@ -40,7 +40,7 @@ describe('EventsPage', () => {
     await flush();
 
     expect(host.querySelectorAll('button.rounded-card')).toHaveLength(2);
-    expect(clipRequestUrls(fetchMock)).toContain('/api/v1/clips?event_type=fall&limit=48&offset=0');
+    expect(clipRequestUrls(fetchMock)).toContain('/api/v1/clips?event_type=fall&limit=48');
     expect(window.location.search).toContain('event=fall');
   });
 
@@ -60,7 +60,7 @@ describe('EventsPage', () => {
     const cards = Array.from(host.querySelectorAll('button.rounded-card'));
     expect(cards).toHaveLength(2);
     expect(cards.every((card) => !card.textContent?.includes('302호'))).toBe(true);
-    expect(clipRequestUrls(fetchMock)).toContain('/api/v1/clips?camera_id=cam-1&limit=48&offset=0');
+    expect(clipRequestUrls(fetchMock)).toContain('/api/v1/clips?camera_id=cam-1&limit=48');
   });
 
   it('opens only one modal video via the clip URL and closes it on Escape', async () => {

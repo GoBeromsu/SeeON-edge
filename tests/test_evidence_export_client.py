@@ -24,7 +24,7 @@ from shared.events.evidence_export_contract import (
     EventReceipt,
 )
 from shared.events.evidence_http_transport import MAX_RESPONSE_BYTES
-from worker.pipeline.output.evidence.evidence_outbox import (
+from worker.pipeline.output.evidence.evidence_outbox_types import (
     ClaimedClip,
     ClipId,
     ClipLocalState,

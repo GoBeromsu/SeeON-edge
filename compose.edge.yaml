@@ -55,11 +55,18 @@ services:
     build: !reset null
     pull_policy: always
     restart: "no"
+    logging:
+      driver: local
+      options:
+        max-size: "10m"
+        max-file: "5"
     depends_on:
       edge-filesystem-inventory:
         condition: service_completed_successfully
     volumes:
       - edge-state:/var/lib/seeon-state
+      - worker-local-state:/var/lib/seeon-worker-state:ro
+      - ${CLIP_STORE_HOST_DIR:?edge requires host clip-store dir}:/var/lib/clip-store:ro
       # Released state volumes remain rollback evidence and are writable only
       # before cutover. The migrator checkpoints/backs them up, then reads them.
       - ml-api-state:/var/lib/legacy-api-state
@@ -67,13 +74,32 @@ services:
     command:
       - python
       - -m
-      - backend.app.edge_db.importer
+      - backend.app.edge_db.compact_cutover
+      - --source
+      - /var/lib/seeon-state/edge.sqlite3
+      - --live
+      - /var/lib/seeon-state/edge.sqlite3
+      - --archive
+      - /var/lib/seeon-state/edge-v17-archive.sqlite3
+      - --candidate
+      - /var/lib/seeon-state/edge-v18-candidate.sqlite3
+      - --receipt
+      - /var/lib/seeon-state/schema18-cutover-receipts.jsonl
+      - --clip-store
+      - /var/lib/clip-store
+      - --worker-state
+      - /var/lib/seeon-worker-state
 
   ml-api:
     image: ${ML_API_IMAGE:?ML_API_IMAGE is required in edge prod}
     build: !reset null
     pull_policy: always
     restart: unless-stopped
+    logging:
+      driver: local
+      options:
+        max-size: "10m"
+        max-file: "5"
     ports:
       # The serving port and loopback-only exposure are fixed topology.
       - "127.0.0.1:8000:8000"
@@ -130,6 +156,11 @@ services:
     build: !reset null
     pull_policy: always
     restart: unless-stopped
+    logging:
+      driver: local
+      options:
+        max-size: "10m"
+        max-file: "5"
     environment:
       # This explicit allowlist is the complete persistent worker environment
       # contract. Do not forward the host environment wholesale or persist

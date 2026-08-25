@@ -3,12 +3,17 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-from backend.app.edge_db.compatibility import CURRENT_SCHEMA_RANGE
+import pytest
+
+from backend.app.edge_db.compact_schema import COMPACT_APPLICATION_TABLES
+from backend.app.edge_db.cutover_authorization import CompactCutoverRequiredError
 from backend.app.edge_db.migrator import migrate_database
 from backend.app.edge_db.schema import MIGRATIONS, SCHEMA_VERSION
 
+RETIRED_ANALYSIS_TABLES = ("runtime_analysis_traces", "runtime_analysis_components")
 
-def test_forward_migration_preserves_old_component_rows_and_admits_truthful_states(
+
+def test_forward_migration_from_v7_caps_at_v17_and_preserves_analysis_rows(
     tmp_path: Path,
 ) -> None:
     database = tmp_path / "edge.sqlite3"
@@ -35,7 +40,8 @@ def test_forward_migration_preserves_old_component_rows_and_admits_truthful_stat
     result = migrate_database(database)
 
     assert result.previous_version == 7
-    assert result.current_version == CURRENT_SCHEMA_RANGE.maximum == SCHEMA_VERSION
+    assert result.current_version == 17
+    assert result.current_version != SCHEMA_VERSION
     with sqlite3.connect(database) as connection:
         connection.execute(
             "INSERT INTO runtime_analysis_components VALUES (?, 1, 'classifier', 'executed')",
@@ -48,6 +54,28 @@ def test_forward_migration_preserves_old_component_rows_and_admits_truthful_stat
         assert connection.execute(
             "SELECT ordinal, observation_state FROM runtime_analysis_components ORDER BY ordinal"
         ).fetchall() == [(0, "observed"), (1, "executed"), (2, "not-applicable")]
+        tables = {
+            str(row[0])
+            for row in connection.execute(
+                "SELECT name FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+            )
+        }
+        assert set(RETIRED_ANALYSIS_TABLES) <= tables
+
+    with pytest.raises(CompactCutoverRequiredError, match="EDGE_DB_CUTOVER_UNAUTHORIZED"):
+        migrate_database(database)
+
+    fresh = tmp_path / "schema18.sqlite3"
+    migrate_database(fresh)
+    with sqlite3.connect(fresh) as connection:
+        tables = {
+            str(row[0])
+            for row in connection.execute(
+                "SELECT name FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+            )
+        }
+    assert tables == COMPACT_APPLICATION_TABLES
+    assert tables.isdisjoint(RETIRED_ANALYSIS_TABLES)
 
 
 def test_migrator_authorizer_allows_only_alter_internal_quick_check(tmp_path: Path) -> None:
