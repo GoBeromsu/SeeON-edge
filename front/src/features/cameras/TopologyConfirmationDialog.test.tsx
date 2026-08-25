@@ -6,8 +6,9 @@ import { HttpError } from '@/shared/api/http';
 import { TopologyConfirmationDialog } from '@/features/cameras/TopologyConfirmationDialog';
 
 vi.mock('@/shared/api/topologyClient', async () => {
+  const { withOverrides } = await vi.importActual<typeof import('@/test/moduleMock')>('@/test/moduleMock');
   const actual = await vi.importActual<typeof import('@/shared/api/topologyClient')>('@/shared/api/topologyClient');
-  return { ...actual, confirmTopologyPreview: vi.fn(), fetchTopologyPreview: vi.fn() };
+  return withOverrides(actual, { confirmTopologyPreview: vi.fn(), fetchTopologyPreview: vi.fn() });
 });
 
 const preview: TopologyPreview = {

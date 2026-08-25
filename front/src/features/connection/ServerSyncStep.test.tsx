@@ -6,8 +6,9 @@ import type { CameraRegistry } from '@/shared/api/client';
 import { ServerSyncStep } from '@/features/connection/ServerSyncStep';
 
 vi.mock('@/shared/api/topologyClient', async () => {
+  const { withOverrides } = await vi.importActual<typeof import('@/test/moduleMock')>('@/test/moduleMock');
   const actual = await vi.importActual<typeof import('@/shared/api/topologyClient')>('@/shared/api/topologyClient');
-  return { ...actual, confirmTopologyPreview: vi.fn(), fetchTopologyPreview: vi.fn() };
+  return withOverrides(actual, { confirmTopologyPreview: vi.fn(), fetchTopologyPreview: vi.fn() });
 });
 
 const preview: TopologyPreview = {

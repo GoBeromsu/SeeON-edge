@@ -7,8 +7,9 @@ import { BedZoneRecognitionPanel } from '@/features/settings/BedZoneRecognitionP
 import type { BedZone } from '@/shared/api/client';
 
 vi.mock('@/shared/api/client', async () => {
+  const { withOverrides } = await vi.importActual<typeof import('@/test/moduleMock')>('@/test/moduleMock');
   const actual = await vi.importActual<typeof import('@/shared/api/client')>('@/shared/api/client');
-  return { ...actual, recognizeBedZone: vi.fn() };
+  return withOverrides(actual, { recognizeBedZone: vi.fn() });
 });
 
 const bedZone: BedZone = {
