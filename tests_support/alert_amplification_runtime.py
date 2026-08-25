@@ -19,6 +19,7 @@ from backend.app.features.clips.catalog import CatalogStore
 from backend.app.features.evidence.relay_projection import RelayEvidenceProjection
 from backend.app.main import create_app, no_lifespan
 from shared.events.edge_ingest_client import EdgeIngestClient
+from tests_support.compact_authority_db import prepare_compact_database
 from tests_support.local_backend_fixture import LocalBackendFixture
 
 RELAY_TOKEN = "relay-token"
@@ -72,7 +73,9 @@ def relay_client(origin: str, tmp_path: Path, *, database: Path | None = None) -
 
     app = create_app(lifespan=no_lifespan)
     app.state.edge_relay_token = RELAY_TOKEN
-    registry = CameraRegistryStore(Path(tempfile.mkdtemp()) / "registry.sqlite3")
+    registry_path = Path(tempfile.mkdtemp()) / "registry.sqlite3"
+    prepare_compact_database(registry_path)
+    registry = CameraRegistryStore(registry_path)
     registry.create(
         camera_id=CAMERA_ID,
         label=CAMERA_ID,

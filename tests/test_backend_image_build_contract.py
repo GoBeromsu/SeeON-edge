@@ -33,3 +33,11 @@ def test_backend_image_includes_the_legacy_evidence_drain_script() -> None:
     dockerfile = (ROOT / "Dockerfile.backend").read_text(encoding="utf-8")
 
     assert "COPY scripts/ops ./scripts/ops" in dockerfile
+
+
+def test_backend_image_bakes_schema_18_release_identity() -> None:
+    dockerfile = (ROOT / "Dockerfile.backend").read_text(encoding="utf-8")
+
+    assert "ARG EDGE_DATABASE_SCHEMA_VERSION=18" in dockerfile
+    assert "/opt/seeon/edge-database-schema-version" in dockerfile
+    assert 'seeon.edge.database.schema-version="${EDGE_DATABASE_SCHEMA_VERSION}"' in dockerfile

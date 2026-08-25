@@ -1,19 +1,52 @@
 #!/usr/bin/env python3
-"""Replay one complete backend-owned analysis timeline through the worker control surface."""
+"""Replay a captured analysis timeline through the worker control surface.
+
+Does not open SQLite. The captured timeline is a caller-supplied JSON file.
+Worker responses are parsed at this boundary into a typed success or a typed
+JSON refusal. Response reads are bounded by the same replay wire constant the
+worker uses for `/replay` request bodies.
+"""
 
 from __future__ import annotations
 
 import argparse
+import http.client
 import json
 import sys
-from datetime import UTC, datetime
+from collections.abc import Iterator
+from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
+from typing import override
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+_REPO = Path(__file__).resolve().parents[2]
+if str(_REPO) not in sys.path:
+    sys.path.insert(0, str(_REPO))
+
+from shared.events.replay_wire import MAX_REPLAY_BODY_BYTES  # noqa: E402
+
+
+@dataclass(frozen=True, slots=True)
+class ReplayResponseError(Exception):
+    detail: str
+
+    @override
+    def __str__(self) -> str:
+        return self.detail
+
+
+@dataclass(frozen=True, slots=True)
+class AcceptedReplay:
+    event_count: int
+    module_qualified_id: str | None
+
 
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Replay a complete captured analysis timeline.")
+    parser = argparse.ArgumentParser(
+        description="Replay a captured analysis timeline without SQLite persistence."
+    )
     parser.add_argument("--database", required=True, type=Path)
     parser.add_argument("--camera-id", required=True)
     parser.add_argument("--worker-url", required=True)
@@ -22,31 +55,98 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--policy-json", required=True, help="Exact EffectivePolicy JSON.")
     parser.add_argument("--requested-by", required=True)
     parser.add_argument("--timeout-sec", type=float, default=5.0)
+    parser.add_argument(
+        "--trace-json",
+        type=Path,
+        default=None,
+        help="Captured analysis timeline JSON. Required; persistence recovery is retired.",
+    )
     return parser
 
 
-def main(argv: list[str] | None = None) -> int:
-    repository = Path(__file__).resolve().parents[2]
-    sys.path.insert(0, str(repository))
-    from backend.app.features.qa.runtime_trace_store import (
-        ReplayInputUnavailable,
-        RuntimeAnalysisStore,
-    )
-    from backend.app.features.qa.store import QaStore
-
-    arguments = _parser().parse_args(argv)
+def _read_bounded_body(response: http.client.HTTPResponse) -> bytes:
+    declared = response.getheader("Content-Length")
+    if declared is None:
+        raw = response.read(MAX_REPLAY_BODY_BYTES + 1)
+        if len(raw) > MAX_REPLAY_BODY_BYTES:
+            raise ReplayResponseError(
+                f"replay response exceeds maximum of {MAX_REPLAY_BODY_BYTES} bytes"
+            )
+        return raw
     try:
-        trace = RuntimeAnalysisStore(arguments.database).recover(arguments.camera_id)
+        length = int(declared)
+    except ValueError as error:
+        raise ReplayResponseError("invalid Content-Length") from error
+    if length < 0 or length > MAX_REPLAY_BODY_BYTES:
+        raise ReplayResponseError(
+            f"replay response exceeds maximum of {MAX_REPLAY_BODY_BYTES} bytes"
+        )
+    raw = response.read(length)
+    if len(raw) != length:
+        raise ReplayResponseError("truncated replay response")
+    return raw
+
+
+@contextmanager
+def _allow_wire_int_digits() -> Iterator[None]:
+    """Lift Python's 4300-digit conversion cap only around this parse/dump.
+
+    The owner contract has no independent digit cap. The body-size bound is the
+    resource guard. 0 means unlimited; the previous process limit is restored.
+    """
+    previous = sys.get_int_max_str_digits()
+    sys.set_int_max_str_digits(0)
+    try:
+        yield
+    finally:
+        sys.set_int_max_str_digits(previous)
+
+
+def parse_worker_replay(raw: bytes) -> AcceptedReplay:
+    """Parse one worker `/replay` body. Raises ReplayResponseError on any defect."""
+    try:
+        with _allow_wire_int_digits():
+            payload = json.loads(raw)
+    except json.JSONDecodeError as error:
+        raise ReplayResponseError("malformed JSON") from error
+    if not isinstance(payload, dict):
+        raise ReplayResponseError("replay response must be an object")
+    if "reproducible" not in payload:
+        raise ReplayResponseError("reproducible is required")
+    reproducible = payload["reproducible"]
+    if not isinstance(reproducible, bool):
+        raise ReplayResponseError("reproducible must be a boolean")
+    if not reproducible:
+        raise ReplayResponseError("worker refused incomplete replay input")
+    if "event_count" not in payload:
+        raise ReplayResponseError("event_count is required")
+    event_count = payload["event_count"]
+    if isinstance(event_count, bool) or not isinstance(event_count, int) or event_count < 0:
+        raise ReplayResponseError("event_count must be a non-negative integer")
+    module_id = payload.get("module_qualified_id")
+    if module_id is not None and not isinstance(module_id, str):
+        raise ReplayResponseError("module_qualified_id must be text")
+    return AcceptedReplay(event_count, module_id)
+
+
+def _refuse(detail: str) -> int:
+    print(json.dumps({"status": "refused", "detail": detail}, sort_keys=True))
+    return 2
+
+
+def main(argv: list[str] | None = None) -> int:
+    arguments = _parser().parse_args(argv)
+    _ = arguments.database, arguments.camera_id, arguments.requested_by
+    if arguments.trace_json is None or not arguments.trace_json.is_file():
+        return _refuse("trace JSON is required; analysis persistence is retired")
+    try:
+        trace = json.loads(arguments.trace_json.read_text(encoding="utf-8"))
+        if not isinstance(trace, dict):
+            return _refuse("trace JSON must be an object")
         policy = json.loads(arguments.policy_json)
         if not isinstance(policy, dict):
-            print(
-                json.dumps(
-                    {"status": "refused", "detail": "policy JSON must be an object"},
-                    sort_keys=True,
-                )
-            )
-            return 2
-        payload = {"trace": trace.as_dict(), "module_id": arguments.module_id, "policy": policy}
+            return _refuse("policy JSON must be an object")
+        payload = {"trace": trace, "module_id": arguments.module_id, "policy": policy}
         request = Request(
             arguments.worker_url.rstrip("/") + "/replay",
             data=json.dumps(payload, sort_keys=True, separators=(",", ":")).encode(),
@@ -57,32 +157,24 @@ def main(argv: list[str] | None = None) -> int:
             method="POST",
         )
         with urlopen(request, timeout=arguments.timeout_sec) as response:
-            result = json.loads(response.read())
-        if not isinstance(result, dict) or result.get("reproducible") is not True:
-            print(
-                json.dumps(
-                    {"status": "refused", "detail": "worker refused incomplete replay input"},
-                    sort_keys=True,
-                )
+            accepted = parse_worker_replay(_read_bounded_body(response))
+    except ReplayResponseError as error:
+        return _refuse(str(error))
+    except (http.client.IncompleteRead, http.client.RemoteDisconnected):
+        return _refuse("truncated replay response")
+    except (OSError, ValueError, HTTPError, URLError, json.JSONDecodeError) as error:
+        return _refuse(str(error))
+    with _allow_wire_int_digits():
+        print(
+            json.dumps(
+                {
+                    "event_count": accepted.event_count,
+                    "module_qualified_id": accepted.module_qualified_id,
+                    "reproducible": True,
+                },
+                sort_keys=True,
             )
-            return 2
-    except (ReplayInputUnavailable, ValueError, HTTPError, URLError) as error:
-        print(json.dumps({"status": "refused", "detail": str(error)}, sort_keys=True))
-        return 2
-    run = QaStore(arguments.database).record_run(
-        camera_id=arguments.camera_id,
-        module_qualified_id=str(result["module_qualified_id"]),
-        policy_qualified_id=str(result["policy_qualified_id"]),
-        effective_policy_id=str(result["effective_policy_id"]),
-        frame_count=len(result["frames"]),
-        event_count=int(result["event_count"]),
-        source_kind="captured",
-        source_run_id=None,
-        requested_by=arguments.requested_by,
-        requested_at=datetime.now(UTC).isoformat(),
-        result=result,
-    )
-    print(json.dumps({"run_id": run.run_id, "event_count": run.event_count}, sort_keys=True))
+        )
     return 0
 
 

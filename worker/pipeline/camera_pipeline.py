@@ -199,7 +199,7 @@ class CameraPipelinePump:
             # Analysis tracing is auxiliary. The decision basis an admitted event
             # needs travels in its delivery-queue EVENT envelope, exactly as
             # worker/pipeline/trace/store.py states: that cache exists only for
-            # best-effort annotated derivatives while the process is alive.
+            # process-local replay while the process is alive.
             #
             # Emission was nonetheless conditional on it. A writer not yet
             # started, a full handoff queue, or a failing trace store raised

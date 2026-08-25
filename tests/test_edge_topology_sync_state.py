@@ -3,10 +3,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+import pytest
+
+from backend.app.edge_db.migrator import migrate_database
 from backend.app.features.cameras.edge_topology_sync_state import (
     EdgeTopologySyncStateStore,
 )
 from backend.app.features.cameras.store import CameraRegistryStore
+from backend.app.features.connection.store import ConnectionSettingsStore
 from contracts.edge_provisioning_v1 import (
     MachinePrincipal,
     MutationCounts,
@@ -15,6 +19,22 @@ from contracts.edge_provisioning_v1 import (
 )
 
 PRINCIPAL = MachinePrincipal("c72bd9a7-3e04-47ba-a8cd-a56e54f98152", 1)
+
+
+@pytest.fixture(autouse=True)
+def _enrolled_compact_database(tmp_path: Path) -> None:
+    path = tmp_path / "catalog.sqlite3"
+    migrate_database(path)
+    ConnectionSettingsStore(path).save(
+        {
+            "facility_code": "NH-1234",
+            "client_installation_ref": "install-1",
+            "facility_id": "facility-1",
+            "facility_token": "token-1",
+            "edge_installation_id": PRINCIPAL.edge_installation_id,
+            "enrollment_generation": PRINCIPAL.enrollment_generation,
+        }
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,9 +86,7 @@ def test_accept_clears_only_the_represented_dirty_registry_version(tmp_path: Pat
     represented_version = registry.topology_snapshot().registry_version
     state = EdgeTopologySyncStateStore(path)
     state.ensure_principal(PRINCIPAL)
-    pending = state.create_pending(
-        _Builder(represented_version, PRINCIPAL, "snapshot-a", b"body")
-    )
+    pending = state.create_pending(_Builder(represented_version, PRINCIPAL, "snapshot-a", b"body"))
     registry.create_floor(edge_ref="floor-2", name="Second", order_index=2)
 
     # When
@@ -95,6 +113,16 @@ def test_generation_change_discards_old_pending_but_keeps_registry_dirty(tmp_pat
     state.create_pending(_Builder(1, PRINCIPAL, "snapshot-a", b"old"))
 
     # When
+    ConnectionSettingsStore(path).save(
+        {
+            "facility_code": "NH-1234",
+            "client_installation_ref": "install-1",
+            "facility_id": "facility-1",
+            "facility_token": "token-2",
+            "edge_installation_id": PRINCIPAL.edge_installation_id,
+            "enrollment_generation": 2,
+        }
+    )
     changed = state.ensure_principal(MachinePrincipal(PRINCIPAL.edge_installation_id, 2))
 
     # Then

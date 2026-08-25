@@ -27,11 +27,7 @@ from backend.app.edge_db.connection import (
     write_transaction,
 )
 from backend.app.edge_db.migrator import migrate_database
-from backend.app.edge_db.ownership import (
-    APPLICATION_LEGACY_TABLES,
-    TABLE_FAMILIES,
-    writer_for_table,
-)
+from backend.app.edge_db.ownership import APPLICATION_LEGACY_TABLES, writer_for_table
 from backend.app.edge_db.schema import MIGRATIONS, SCHEMA_VERSION, Migration
 
 _INTERRUPTED_MIGRATION = Migration(
@@ -82,57 +78,49 @@ def test_fresh_migration_records_schema_ledger_and_secure_local_files(
         assert connection.execute("PRAGMA foreign_keys").fetchone() == (1,)
         assert connection.execute("PRAGMA busy_timeout").fetchone() == (5000,)
         assert connection.execute("PRAGMA integrity_check").fetchone() == ("ok",)
-        assert {
-            row[0]: row[1]
+        application_tables = {
+            str(row[0])
             for row in connection.execute(
-                "SELECT prefix, writer FROM schema_table_families ORDER BY prefix"
+                "SELECT name FROM sqlite_schema "
+                "WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
             )
-        } == {family.prefix: family.writer.value for family in TABLE_FAMILIES}
+        }
+        assert writer_for_table("schema_migrations") is not None
+        assert {
+            table: None if writer is None else writer.value
+            for table in application_tables
+            if table != "schema_migrations"
+            for writer in (writer_for_table(table),)
+        } == {
+            table: "api"
+            for table in application_tables
+            if table != "schema_migrations"
+        }
         assert connection.execute(
             "SELECT version, name FROM schema_migrations ORDER BY version"
         ).fetchall() == [(migration.version, migration.name) for migration in MIGRATIONS]
-        assert {
-            row[0]
-            for row in connection.execute(
-                "SELECT name FROM sqlite_schema WHERE type = 'table' AND name LIKE 'clip_listing_%'"
-            )
-        } == {
-            "clip_listing_generation",
-            "clip_listing_rows",
-            "clip_listing_summary",
-            "clip_listing_thumbnails",
+        assert application_tables == {
+            "artifacts",
+            "audit_events",
+            "cameras",
+            "clips",
+            "credentials",
+            "edge_site",
+            "incidents",
+            "locations",
+            "policies",
+            "schema_migrations",
         }
-        assert {
-            row[0]
+        create_sql = {
+            str(row[0]): str(row[1])
             for row in connection.execute(
-                "SELECT name FROM sqlite_schema WHERE type = 'index' AND name LIKE 'clip_listing_%'"
-            )
-        } == {
-            "clip_listing_camera_facet_order_idx",
-            "clip_listing_camera_order_idx",
-            "clip_listing_global_facet_order_idx",
-            "clip_listing_global_order_idx",
-        }
-        assert connection.execute(
-            "SELECT id, active_generation, next_generation FROM clip_listing_generation"
-        ).fetchall() == [(1, 0, 1)]
-        event_columns = {
-            str(row[1]) for row in connection.execute("PRAGMA table_info(evidence_events)")
-        }
-        retired_objects = {
-            str(row[0])
-            for row in connection.execute(
-                "SELECT name FROM sqlite_schema WHERE name IN "
-                "('system_test_runs', 'evidence_events_operator_claim_idx')"
+                "SELECT name, sql FROM sqlite_schema "
+                "WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
             )
         }
-        assert "operator_only" not in event_columns
-        assert retired_objects == set()
+        assert all(" STRICT" in sql.upper() for sql in create_sql.values())
         assert "system_test_runs" not in APPLICATION_LEGACY_TABLES
         assert writer_for_table("system_test_runs") is None
-        assert connection.execute(
-            "SELECT value FROM schema_metadata WHERE key = 'system_test_state_policy'"
-        ).fetchone() == ("retired",)
 
         # WAL and SHM are colocated inside the one local state directory while open.
         names = {path.name for path in database_path.parent.iterdir()}
@@ -172,7 +160,7 @@ def test_pre_v9_events_and_finalized_clips_backfill_authoritative_central_relati
     with sqlite3.connect(database_path) as connection:
         connection.execute("UPDATE evidence_events SET state = 'ACKED'")
         connection.commit()
-    migrate_database(database_path)
+    migrate_database(database_path, migrations=MIGRATIONS[:17])
 
     with sqlite3.connect(database_path) as connection:
         incident = connection.execute(
@@ -331,10 +319,10 @@ def test_v11_forward_migration_retires_operator_only_state_and_keeps_ordinary_ev
     with sqlite3.connect(database_path) as connection:
         connection.execute("UPDATE evidence_events SET state = 'ACKED'")
         connection.commit()
-    result = migrate_database(database_path)
+    result = migrate_database(database_path, migrations=MIGRATIONS[:17])
 
     assert result.previous_version == 11
-    assert result.current_version == SCHEMA_VERSION
+    assert result.current_version == 17
     with sqlite3.connect(database_path) as connection:
         objects = {
             str(row[0])
@@ -446,48 +434,25 @@ def test_runtime_refuses_unmigrated_older_and_newer_schemas(database_path: Path)
         )
 
 
-def _create_runtime_ownership_fixture(database_path: Path) -> None:
+def test_runtime_denies_ddl_and_schema_ledger_writes(database_path: Path) -> None:
     migrate_database(database_path)
-    connection = sqlite3.connect(database_path)
-    try:
-        connection.executescript(
-            """
-            CREATE TABLE control_test (id INTEGER PRIMARY KEY, value TEXT NOT NULL) STRICT;
-            CREATE TABLE qa_test (id INTEGER PRIMARY KEY, value TEXT NOT NULL) STRICT;
-            CREATE TABLE runtime_test (id INTEGER PRIMARY KEY, value TEXT NOT NULL) STRICT;
-            CREATE TABLE evidence_test (id INTEGER PRIMARY KEY, value TEXT NOT NULL) STRICT;
-            CREATE TABLE derivative_test (id INTEGER PRIMARY KEY, value TEXT NOT NULL) STRICT;
-            """
-        )
-    finally:
-        connection.close()
-
-
-def test_runtime_denies_ddl_and_cross_family_writes(database_path: Path) -> None:
-    _create_runtime_ownership_fixture(database_path)
 
     api = open_runtime_database(database_path, actor=RuntimeActor.API)
-    worker = open_runtime_database(database_path, actor=RuntimeActor.API)
     try:
         with write_transaction(api):
-            api.execute("INSERT INTO control_test VALUES (1, 'control')")
-            api.execute("INSERT INTO qa_test VALUES (1, 'qa')")
-        with write_transaction(worker):
-            worker.execute("INSERT INTO runtime_test VALUES (1, 'runtime')")
-            worker.execute("INSERT INTO evidence_test VALUES (1, 'evidence')")
-            worker.execute("INSERT INTO derivative_test VALUES (1, 'derivative')")
-
-        with write_transaction(api):
-            api.execute("INSERT INTO runtime_test VALUES (2, 'backend-owned')")
-        with write_transaction(worker):
-            worker.execute("INSERT INTO control_test VALUES (2, 'backend-owned')")
+            api.execute(
+                "INSERT INTO locations "
+                "(location_id, kind, parent_location_id, parent_kind, name, order_index, "
+                "created_at, updated_at) VALUES "
+                "('floor-1', 'FLOOR', NULL, NULL, 'Floor 1', 0, "
+                "'2026-08-24T00:00:00Z', '2026-08-24T00:00:00Z')"
+            )
         with pytest.raises(sqlite3.DatabaseError, match="not authorized"):
-            api.execute("UPDATE schema_metadata SET value = '2' WHERE key = 'format'")
+            api.execute("UPDATE schema_migrations SET name = 'forged' WHERE version = 1")
         with pytest.raises(sqlite3.DatabaseError, match="not authorized"):
-            worker.execute("CREATE TABLE runtime_illegal (id INTEGER)")
+            api.execute("CREATE TABLE runtime_illegal (id INTEGER)")
     finally:
         api.close()
-        worker.close()
 
 
 def test_migrator_allows_declared_ddl_for_quoted_table_family_names(
@@ -625,12 +590,12 @@ def test_migrator_denies_trigger_mediated_cross_family_write(database_path: Path
         statements=(
             """
             CREATE TRIGGER schema_cross_family_trigger
-            AFTER UPDATE ON schema_metadata
+            AFTER UPDATE ON schema_migrations
             BEGIN
                 INSERT INTO "evidence_trigger_target" VALUES (1);
             END
             """,
-            "UPDATE schema_metadata SET value = value WHERE key = 'format'",
+            "UPDATE schema_migrations SET name = name WHERE version = 1",
         ),
     )
 
@@ -754,12 +719,12 @@ def test_migrator_cli_is_the_only_schema_entrypoint(database_path: Path) -> None
     ("corrupt_sql", "expected_error"),
     [
         (
-            "UPDATE schema_metadata SET value = 'forged' WHERE key = 'format'",
-            "format",
+            "UPDATE schema_migrations SET checksum = '" + ("0" * 64) + "' WHERE version = 1",
+            "ledger",
         ),
         (
-            "UPDATE schema_table_families SET writer = 'worker' WHERE prefix = 'control_'",
-            "ownership",
+            "CREATE TABLE extra_table (id INTEGER PRIMARY KEY) STRICT",
+            "application table",
         ),
     ],
 )

@@ -22,6 +22,7 @@ from backend.app.features.clips.storage_location_store import ClipStorageLocatio
 from backend.app.features.detection_settings.store import DetectionSettingsStore
 from backend.app.main import create_app, no_lifespan
 from contracts.worker_config import PulledNightWindow, PulledWorkerConfig
+from tests_support.compact_authority_db import prepare_compact_database
 
 AUTH = {"Authorization": "Bearer relay-token"}
 DASHBOARD_LOGIN = {"username": "admin", "password": "admin"}
@@ -42,6 +43,7 @@ def clear_env(monkeypatch: pytest.MonkeyPatch):
 def _app(tmp_path):
     app = create_app(lifespan=no_lifespan)
     db_path = tmp_path / "catalog.sqlite3"
+    prepare_compact_database(db_path)
     app.state.camera_registry = CameraRegistryStore(db_path)
     app.state.detection_settings_store = DetectionSettingsStore(db_path)
     app.state.clip_storage_location_store = ClipStorageLocationStore(db_path)
@@ -187,9 +189,7 @@ def test_clip_store_subdir_is_absent_until_a_non_root_location_is_selected(tmp_p
         assert "clip_store_subdir" not in before.json()
 
         _login(client)
-        put_response = client.put(
-            "/api/v1/clips/storage/location", json={"path": ""}
-        )
+        put_response = client.put("/api/v1/clips/storage/location", json={"path": ""})
         # An empty (root) selection stays absent from the worker-config body.
         assert put_response.status_code in (200, 404)
 

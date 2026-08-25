@@ -168,13 +168,15 @@ def test_incident_multiplication_is_structurally_impossible(tmp_path: Path) -> N
 
     with sqlite3.connect(database) as connection:
         connection.execute("PRAGMA foreign_keys = ON")
-        with pytest.raises(sqlite3.IntegrityError, match="evidence_incidents.edge_event_id"):
+        with pytest.raises(sqlite3.IntegrityError, match="incidents.edge_event_id"):
             connection.execute(
                 """
-                INSERT INTO evidence_incidents (
-                    incident_id, edge_event_id, camera_id, event_type, detected_at,
-                    provenance_missing_reason, lifecycle_state, created_at, updated_at
-                ) VALUES (?, ?, 'room-camera', 'fall', ?, 'NOT_RECORDED', 'STAGING', ?, ?)
+                INSERT INTO incidents (
+                    incident_id, edge_event_id, facility_id, camera_id, event_type,
+                    detected_at, lifecycle_state, provenance_state,
+                    provenance_missing_reason, review_version, revision, created_at, updated_at
+                ) VALUES (?, ?, 'facility-1', 'room-camera', 'fall', ?, 'OPEN',
+                          'MISSING', 'NOT_RECORDED', 0, 1, ?, ?)
                 """,
                 (
                     f"{projected['incident_id']}-duplicate",
@@ -221,16 +223,15 @@ def test_snapshot_companions_bind_without_mutating_the_delivered_event(tmp_path:
 
     with sqlite3.connect(database) as connection:
         assert connection.execute(
-            "SELECT state, delivery_state FROM evidence_events WHERE edge_event_id = ?",
+            "SELECT review_version, revision FROM incidents WHERE edge_event_id = ?",
             (_EDGE_EVENT_ID,),
-        ).fetchone() == ("ACKED", "ACKED")
+        ).fetchone() == (0, 1)
         assert connection.execute(
-            "SELECT state FROM evidence_artifact_slots "
-            "WHERE incident_id = ? AND slot_name = 'SNAPSHOT'",
+            "SELECT state FROM artifacts WHERE incident_id = ? AND kind = 'SNAPSHOT'",
             (f"incident:{_EDGE_EVENT_ID}",),
         ).fetchone() == ("AVAILABLE",)
         assert connection.execute(
-            "SELECT state, reason FROM evidence_artifact_slots "
-            "WHERE incident_id = ? AND slot_name = 'SNAPSHOT'",
+            "SELECT state, reason FROM artifacts "
+            "WHERE incident_id = ? AND kind = 'SNAPSHOT'",
             (f"incident:{second_event_id}",),
         ).fetchone() == ("UNAVAILABLE", "UNAVAILABLE:capture_failed")

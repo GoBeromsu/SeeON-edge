@@ -17,6 +17,7 @@ from backend.app.features.connection.store import (
 )
 from backend.app.lifespan import apply_connection_settings
 from backend.app.main import create_app, no_lifespan
+from tests_support.compact_authority_db import prepare_compact_database
 
 
 class _TopologyHandler(BaseHTTPRequestHandler):
@@ -66,14 +67,20 @@ def _run_server(server: ThreadingHTTPServer) -> Thread:
     return thread
 
 
-def _ready_app(tmp_path: Path, events_url: str):
+def _ready_app(tmp_path: Path, events_url: str, monkeypatch: pytest.MonkeyPatch):
     app = create_app(lifespan=no_lifespan)
-    store = CameraRegistryStore(tmp_path / "catalog.sqlite3")
+    registry_path = tmp_path / "catalog.sqlite3"
+    prepare_compact_database(registry_path)
+    store = CameraRegistryStore(registry_path)
     app.state.camera_registry = store
+    monkeypatch.setattr(
+        ConnectionSettingsStore,
+        "from_env",
+        classmethod(lambda cls: cls(registry_path)),
+    )
+    monkeypatch.setenv("API_BACKEND_BASE_URL", events_url.removesuffix("/api/v1/events"))
     ConnectionSettingsStore.from_env().save(
         {
-            "events_url": events_url,
-            "config_url": f"{events_url}/config",
             "facility_code": "FAC-001",
             "client_installation_ref": "edge-unit-001",
             "facility_id": "11111111-1111-4111-8111-111111111111",
@@ -98,14 +105,18 @@ def _ready_app(tmp_path: Path, events_url: str):
 
 
 def test_sync_camera_roster_sends_complete_stable_topology_without_local_secrets(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # Given
     _TopologyHandler.requests = []
     server = ThreadingHTTPServer(("127.0.0.1", 0), _TopologyHandler)
     thread = _run_server(server)
     try:
-        app, store = _ready_app(tmp_path, f"http://127.0.0.1:{server.server_port}/api/v1/events")
+        app, store = _ready_app(
+            tmp_path,
+            f"http://127.0.0.1:{server.server_port}/api/v1/events",
+            monkeypatch,
+        )
 
         # When
         result = sync_camera_roster(app)
@@ -133,7 +144,9 @@ def test_sync_camera_roster_sends_complete_stable_topology_without_local_secrets
 def test_sync_camera_roster_fails_closed_for_unmapped_camera(tmp_path: Path) -> None:
     # Given
     app = create_app(lifespan=no_lifespan)
-    store = CameraRegistryStore(tmp_path / "catalog.sqlite3")
+    registry_path = tmp_path / "catalog.sqlite3"
+    prepare_compact_database(registry_path)
+    store = CameraRegistryStore(registry_path)
     app.state.camera_registry = store
     store.create(
         camera_id="legacy-camera",
@@ -158,7 +171,9 @@ def test_floor_crud_emits_one_event_driven_sync_trigger(
 ) -> None:
     # Given
     app = create_app(lifespan=no_lifespan)
-    app.state.camera_registry = CameraRegistryStore(tmp_path / "catalog.sqlite3")
+    registry_path = tmp_path / "catalog.sqlite3"
+    prepare_compact_database(registry_path)
+    app.state.camera_registry = CameraRegistryStore(registry_path)
     calls: list[int] = []
     from backend.app.features.cameras import router as router_module
 
@@ -166,9 +181,12 @@ def test_floor_crud_emits_one_event_driven_sync_trigger(
 
     # When
     with TestClient(app) as client:
-        assert client.post(
-            "/api/v1/auth/session", json={"username": "admin", "password": "admin"}
-        ).status_code == 204
+        assert (
+            client.post(
+                "/api/v1/auth/session", json={"username": "admin", "password": "admin"}
+            ).status_code
+            == 204
+        )
         response = client.post(
             "/api/v1/cameras/topology/floors",
             json={"edge_ref": "floor-1", "name": "First", "order_index": 1},

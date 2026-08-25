@@ -5,6 +5,7 @@ import {
   cleanupPages,
   clipManifest,
   flush,
+  keysetBody,
   renderPage,
   resetLocation,
 } from '@/app/pages/EventsPage.testSupport';
@@ -15,15 +16,7 @@ function jsonResponse(body: unknown, status = 200) {
 }
 
 function pageResponse(clips: readonly Record<string, unknown>[]) {
-  return jsonResponse({
-    clips,
-    pagination: { limit: 48, offset: 0, total: clips.length, has_more: false },
-    event_type_counts: clips.reduce<Record<string, number>>((counts, clip) => {
-      const type = String(clip.event_type);
-      counts[type] = (counts[type] ?? 0) + 1;
-      return counts;
-    }, {}),
-  });
+  return jsonResponse(keysetBody(clips, 48, null));
 }
 
 function typeConfirm(input: HTMLInputElement, value: string): void {
@@ -77,10 +70,7 @@ describe('EventsPage clip deletion', () => {
         return Promise.resolve(jsonResponse({
           clip_id: 'clip-purge-me',
           clean: 'AVAILABLE',
-          analysis: 'MISSING',
-          annotated: 'NOT_REQUESTED',
-          playback_view: 'clean',
-          annotated_fallback_to_clean: true,
+          snapshot: null,
         }));
       }
       if (url.endsWith('/clips/clip-purge-me/metadata')) {

@@ -15,7 +15,7 @@ class ReviewDisposition(StrEnum):
 class EvidenceReview:
     review_id: str
     incident_id: str
-    clip_id: str
+    clip_id: str | None
     version: int
     actor_id: str
     reviewed_at: str

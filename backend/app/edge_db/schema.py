@@ -1,5 +1,7 @@
 """Forward-only DDL ledger owned exclusively by the edge DB migrator."""
 
+# noqa: SIZE_OK — immutable v1-v18 statement ledger; historical bytes stay here.
+
 from __future__ import annotations
 
 import hashlib
@@ -9,6 +11,11 @@ from dataclasses import dataclass
 from typing import Final
 
 from backend.app.edge_db.application_schema import APPLICATION_SCHEMA_STATEMENTS
+from backend.app.edge_db.compact_schema import (
+    SCHEMA17_RETIRED_TABLES,
+    SCHEMA_MIGRATIONS_LEDGER_TABLE_SQL,
+    SCHEMA_V18_STATEMENTS,
+)
 from backend.app.edge_db.evidence_backfill import EVIDENCE_BACKFILL_STATEMENTS
 from backend.app.edge_db.review_migration import LEGACY_LABEL_MIGRATION_STATEMENTS
 
@@ -29,6 +36,10 @@ class Migration:
 
 class SchemaV17MigrationError(RuntimeError):
     """The direct schema-17 ownership migration cannot safely proceed."""
+
+
+class SchemaV18MigrationError(RuntimeError):
+    """The compact schema-18 rebuild cannot safely proceed."""
 
 
 _DRAIN_INCOMPLETE_SENTINEL: Final = "EDGE_DB_DRAIN_INCOMPLETE"
@@ -91,14 +102,7 @@ SCHEMA_V1 = Migration(
             value TEXT NOT NULL
         ) STRICT
         """,
-        """
-        CREATE TABLE schema_migrations (
-            version INTEGER PRIMARY KEY CHECK (version > 0),
-            name TEXT NOT NULL UNIQUE,
-            checksum TEXT NOT NULL CHECK (length(checksum) = 64),
-            applied_at TEXT NOT NULL
-        ) STRICT
-        """,
+        SCHEMA_MIGRATIONS_LEDGER_TABLE_SQL,
         """
         CREATE TABLE schema_table_families (
             prefix TEXT PRIMARY KEY CHECK (prefix GLOB '*_'),
@@ -1619,6 +1623,31 @@ SCHEMA_V17 = Migration(
     preflight=_require_schema17_drain,
 )
 
+
+def _require_schema18_drain(connection: sqlite3.Connection) -> None:
+    """Refuse the compact rebuild while source evidence is still in flight."""
+    blocked = connection.execute(
+        """
+        SELECT EXISTS(SELECT 1 FROM evidence_events WHERE state IN ('STAGED', 'READY', 'IN_FLIGHT'))
+            OR EXISTS(SELECT 1 FROM evidence_clips WHERE local_state = 'AWAITING_FINALIZE')
+            OR EXISTS(SELECT 1 FROM evidence_clips WHERE publish_state = 'IN_FLIGHT')
+            OR EXISTS(SELECT 1 FROM derivative_jobs WHERE state IN ('PENDING', 'RUNNING'))
+            OR EXISTS(SELECT 1 FROM derivative_evidence_slots WHERE state = 'PENDING')
+            OR EXISTS(SELECT 1 FROM evidence_retention_states WHERE state = 'PENDING')
+        """
+    ).fetchone()
+    if blocked == (1,):
+        raise SchemaV18MigrationError(_DRAIN_INCOMPLETE_SENTINEL)
+
+
+SCHEMA_V18 = Migration(
+    version=18,
+    name="strict_ten_table_application_schema",
+    statements=SCHEMA_V18_STATEMENTS,
+    writable_tables=frozenset(SCHEMA17_RETIRED_TABLES),
+    preflight=_require_schema18_drain,
+)
+
 MIGRATIONS: Final = (
     SCHEMA_V1,
     SCHEMA_V2,
@@ -1637,6 +1666,7 @@ MIGRATIONS: Final = (
     SCHEMA_V15,
     SCHEMA_V16,
     SCHEMA_V17,
+    SCHEMA_V18,
 )
 SCHEMA_VERSION: Final = MIGRATIONS[-1].version
 
@@ -1645,4 +1675,5 @@ __all__ = [
     "SCHEMA_VERSION",
     "Migration",
     "SchemaV17MigrationError",
+    "SchemaV18MigrationError",
 ]

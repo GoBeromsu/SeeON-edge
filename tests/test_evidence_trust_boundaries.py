@@ -21,7 +21,7 @@ from worker.pipeline.output.evidence.evidence_media import (
     _media_length_ms,
     inspect_finalized_media,
 )
-from worker.pipeline.output.evidence.evidence_outbox import (
+from worker.pipeline.output.evidence.evidence_outbox_types import (
     EdgeEventId,
     EvidenceReasonCode,
 )

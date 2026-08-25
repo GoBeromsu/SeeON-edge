@@ -41,20 +41,22 @@ def resolve_clip_root(mount: Path, database: Path) -> Path:
         )
     connection = sqlite3.connect(f"file:{database}?mode=ro", uri=True)
     try:
-        present = connection.execute(
-            "SELECT count(*) FROM sqlite_master "
-            "WHERE type = 'table' AND name = 'clip_storage_location'"
-        ).fetchone()[0]
-        if not present:
-            # No selection was ever made. That is definite information, not
-            # ambiguity: the mount root is the documented default and every
-            # deployment that never chose a subdirectory records there. Treating
-            # it as an error would make the gate unclearable for the ordinary
-            # case, which is its own accident.
-            return mount
-        row = connection.execute(
-            "SELECT selected_path FROM clip_storage_location WHERE id = 1"
-        ).fetchone()
+        tables = {
+            str(item[0])
+            for item in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        }
+        if "edge_site" in tables:
+            row = connection.execute(
+                "SELECT clip_store_subdir FROM edge_site WHERE id=1"
+            ).fetchone()
+        elif "clip_storage_location" in tables:
+            row = connection.execute(
+                "SELECT selected_path FROM clip_storage_location WHERE id=1"
+            ).fetchone()
+        else:
+            row = None
     except sqlite3.Error as error:
         raise ClipRootError(
             f"clip storage selection is unreadable in {database}: {error}"
@@ -62,12 +64,10 @@ def resolve_clip_root(mount: Path, database: Path) -> Path:
     finally:
         connection.close()
 
-    selected = "" if row is None else str(row[0])
+    selected = "" if row is None or row[0] is None else str(row[0])
     if not selected:
         return mount
     candidate = PurePosixPath(selected)
     if candidate.is_absolute() or ".." in candidate.parts:
-        raise ClipRootError(
-            f"clip storage selection {selected!r} is not a contained relative path"
-        )
+        raise ClipRootError(f"clip storage selection {selected!r} is not a contained relative path")
     return mount / selected

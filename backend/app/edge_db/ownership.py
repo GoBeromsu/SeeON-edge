@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Final
 
+from backend.app.edge_db.compact_schema import COMPACT_API_TABLES, COMPACT_APPLICATION_TABLES
+
 
 class Writer(StrEnum):
     API = "api"
@@ -71,6 +73,8 @@ TABLE_FAMILIES: Final = (
 
 def writer_for_table(table: str) -> Writer | None:
     """Return the declared writer for *table*, including released imported names."""
+    if table in COMPACT_API_TABLES:
+        return Writer.API
     if table in API_LEGACY_TABLES:
         return Writer.API
     if table in APPLICATION_LEGACY_TABLES:
@@ -83,8 +87,10 @@ def writer_for_table(table: str) -> Writer | None:
 
 __all__ = [
     "API_LEGACY_TABLES",
-    "TABLE_FAMILIES",
     "APPLICATION_LEGACY_TABLES",
+    "COMPACT_API_TABLES",
+    "COMPACT_APPLICATION_TABLES",
+    "TABLE_FAMILIES",
     "TableFamily",
     "Writer",
     "writer_for_table",

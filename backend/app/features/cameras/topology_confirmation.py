@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -74,10 +75,19 @@ class TopologyConfirmationService:
         response: TopologySuccessEnvelope,
         principal: MachinePrincipal,
         registry_version: int,
+        *,
+        connection: sqlite3.Connection | None = None,
     ) -> None:
-        self._store.save(response, principal, registry_version)
+        self._store.save(
+            response, principal, registry_version, connection=connection
+        )
 
-    def confirm(self, command: TopologyConfirmationCommand) -> TopologyConfirmationResult:
+    def confirm(
+        self,
+        command: TopologyConfirmationCommand,
+        *,
+        after_write: Callable[[sqlite3.Connection], None] | None = None,
+    ) -> TopologyConfirmationResult:
         with self._lock:
             preview = self._store.load()
             client = self._client_provider()
@@ -107,7 +117,9 @@ class TopologyConfirmationService:
                     ):
                         return TopologyRetryable("unreachable")
                     try:
-                        self._store.complete(preview, response)
+                        self._store.complete(
+                            preview, response, after_write=after_write
+                        )
                     except TopologyConfirmationStateConflictError:
                         return TopologyConfirmationRejected(
                             409, EdgeErrorCode.CONFIRMATION_STALE

@@ -6,6 +6,8 @@ import {
   clipManifest,
   clipRequestUrls,
   flush,
+  keysetBody,
+  pageOrdinal,
   renderPage,
   resetLocation,
 } from '@/app/pages/EventsPage.testSupport';
@@ -53,7 +55,7 @@ describe('EventsPage bounded event facets', () => {
         status: 200,
         json: async () => ({
           clips,
-          pagination: { limit: 48, offset: 0, total: TOTAL_CLIPS, has_more: true },
+          pagination: { limit: 48, offset: 0, total: TOTAL_CLIPS, has_more: true, next_cursor: 'bmV4dA==' },
           event_type_counts: unknownFacetCounts(),
         }),
       });
@@ -76,35 +78,33 @@ describe('EventsPage bounded event facets', () => {
     expect(document.querySelectorAll('video')).toHaveLength(1);
   });
 
-  it('keeps the camera request and events URL while the other filter resets pagination', async () => {
+  it('keeps the camera request and events URL while the other filter restores the newest keyset page', async () => {
     resetLocation();
     const clips = Array.from({ length: 96 }, (_, index) => clipManifest({
-      clip_id: `clip-${index + 1}`,
+      clip_id: `clip-${String(index + 1).padStart(3, '0')}`,
       event_ref: `unique-event-${index + 1}`,
       event_type: `vendor-event-${index}`,
+      started_at: `2026-08-${String(1 + Math.floor(index / 24)).padStart(2, '0')}T${String(index % 24).padStart(2, '0')}:00:00Z`,
     }));
     const fetchMock = vi.fn((input: RequestInfo | URL) => {
       const url = String(input);
       if (url.includes('/cameras')) return Promise.resolve({ ok: true, status: 200, json: async () => cameraRegistry });
       const params = new URL(url, 'http://localhost').searchParams;
-      const offset = Number(params.get('offset'));
       return Promise.resolve({
         ok: true,
         status: 200,
-        json: async () => ({
-          clips: clips.slice(offset, offset + 48),
-          pagination: { limit: 48, offset, total: clips.length, has_more: offset + 48 < clips.length },
-          event_type_counts: { 'vendor-event': clips.length },
-        }),
+        json: async () => keysetBody(
+          clips, Number(params.get('limit')), params.get('cursor'), { 'vendor-event': clips.length },
+        ),
       });
     });
     vi.stubGlobal('fetch', fetchMock);
     const { host } = await renderPage();
     chooseCamera(host, 'cam-1');
     await flush();
-    const pageTwo = host.querySelector('button[aria-label="2페이지"]') as HTMLButtonElement;
-    act(() => pageTwo.click());
+    act(() => (host.querySelector('button[aria-label="다음 페이지"]') as HTMLButtonElement).click());
     await flush();
+    expect(pageOrdinal(host)).toBe(2);
 
     const otherChip = Array.from(host.querySelectorAll<HTMLButtonElement>('button'))
       .find((button) => button.textContent?.startsWith('기타'));
@@ -112,9 +112,7 @@ describe('EventsPage bounded event facets', () => {
     await flush();
 
     expect(window.location.search).toBe('?page=events&event=other');
-    expect(host.querySelector('[aria-current="page"]')?.textContent).toBe('1');
-    expect(clipRequestUrls(fetchMock)).toContain(
-      '/api/v1/clips?camera_id=cam-1&event_type=other&limit=48&offset=0',
-    );
+    expect(pageOrdinal(host)).toBe(1);
+    expect(clipRequestUrls(fetchMock)).toContain('/api/v1/clips?camera_id=cam-1&event_type=other&limit=48');
   });
 });

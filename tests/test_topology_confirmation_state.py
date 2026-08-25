@@ -3,10 +3,12 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
+import pytest
+
+from backend.app.edge_db.migrator import migrate_database
 from backend.app.features.cameras.edge_topology_sync_state import EdgeTopologySyncStateStore
-from backend.app.features.cameras.topology_confirmation_state import (
-    TopologyConfirmationStore,
-)
+from backend.app.features.cameras.topology_confirmation_state import TopologyConfirmationStore
+from backend.app.features.connection.store import ConnectionSettingsStore
 from contracts.edge_provisioning_v1 import (
     MachinePrincipal,
     MutationCounts,
@@ -19,6 +21,22 @@ PRINCIPAL = MachinePrincipal("c72bd9a7-3e04-47ba-a8cd-a56e54f98152", 3)
 SNAPSHOT_ID = "0197f671-3a31-7a6c-a6e4-83ed412de81a"
 CONFIRMATION_ID = "0197f671-3a31-7a6c-a6e4-83ed412de81b"
 DIGEST = "a" * 64
+
+
+@pytest.fixture(autouse=True)
+def _enrolled_compact_database(tmp_path: Path) -> None:
+    path = tmp_path / "catalog.sqlite3"
+    migrate_database(path)
+    ConnectionSettingsStore(path).save(
+        {
+            "facility_code": "NH-1234",
+            "client_installation_ref": "install-1",
+            "facility_id": "facility-1",
+            "facility_token": "token-1",
+            "edge_installation_id": PRINCIPAL.edge_installation_id,
+            "enrollment_generation": PRINCIPAL.enrollment_generation,
+        }
+    )
 
 
 def _result(*, deactivated: int = 0) -> TopologyMutationResult:
@@ -56,8 +74,7 @@ def test_preview_and_terminal_response_survive_store_restart(tmp_path: Path) -> 
     _ = state_store.ensure_principal(PRINCIPAL)
     with sqlite3.connect(path) as connection:
         connection.execute(
-            "UPDATE edge_topology_sync_state SET last_client_revision = 4, "
-            "server_revision = 7 WHERE id = 1"
+            "UPDATE edge_site SET topology_client_revision=4,topology_server_revision=7 WHERE id=1"
         )
 
     # When
@@ -76,30 +93,14 @@ def test_preview_and_terminal_response_survive_store_restart(tmp_path: Path) -> 
     assert terminal_preview.terminal_response == _terminal_response()
 
 
-def test_existing_preview_schema_is_extended_for_terminal_replay(tmp_path: Path) -> None:
-    # Given
+def test_confirmation_store_uses_no_feature_local_table(tmp_path: Path) -> None:
     path = tmp_path / "catalog.sqlite3"
-    with sqlite3.connect(path) as connection:
-        connection.execute(
-            "CREATE TABLE edge_topology_confirmation_preview ("
-            "id INTEGER PRIMARY KEY CHECK (id = 1), confirmation_id TEXT NOT NULL, "
-            "digest TEXT NOT NULL, expires_at TEXT NOT NULL, snapshot_id TEXT NOT NULL, "
-            "client_revision INTEGER NOT NULL, server_revision INTEGER NOT NULL, "
-            "registry_version INTEGER NOT NULL, edge_installation_id TEXT NOT NULL, "
-            "enrollment_generation INTEGER NOT NULL, cameras INTEGER NOT NULL, "
-            "rooms INTEGER NOT NULL, floors INTEGER NOT NULL, "
-            "confirmed INTEGER NOT NULL DEFAULT 0) STRICT"
-        )
 
-    # When
-    _ = TopologyConfirmationStore(path)
+    assert TopologyConfirmationStore(path).load() is None
 
-    # Then
     with sqlite3.connect(path) as connection:
-        columns = {
-            str(row[1])
-            for row in connection.execute(
-                "PRAGMA table_info(edge_topology_confirmation_preview)"
-            ).fetchall()
+        tables = {
+            str(row[0])
+            for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")
         }
-    assert "terminal_response" in columns
+    assert "edge_topology_confirmation_preview" not in tables

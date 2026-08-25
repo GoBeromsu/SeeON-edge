@@ -25,11 +25,13 @@ from shared.events.evidence_http_transport import (
     encode_json,
 )
 from shared.events.relay_failure_log import classify_relay_failure
+from shared.release_identity import ReleaseIdentityMismatchError
 from worker.adapters.encode.thumbnail import FFmpegThumbnailGenerator
 from worker.adapters.model.in_process import InProcessServingClient
 from worker.pipeline.output.evidence.clip_config import configured_ffmpeg_bin, configured_store_dir
 from worker.pipeline.output.evidence.clip_store_lock import ClipStoreLockedError
 from worker.pipeline.output.evidence.thumbnail_backfill import backfill_thumbnails
+from worker.runtime.bootstrap import REFUSE_TO_START_EXIT_CODE
 from worker.runtime.config import (
     RELAY_HEARTBEAT_PATH,
     RELAY_TOKEN_ENV,
@@ -49,6 +51,7 @@ from worker.runtime.config import (
     resolve_local_overrides,
     resolve_startup_config,
 )
+from worker.runtime.config.release_pair import require_api_release_identity
 from worker.runtime.provenance.environment import resolve_worker_build_revision
 from worker.runtime.state_dir import resolve_state_dir
 from worker.runtime.worker import WorkerRuntime
@@ -295,6 +298,13 @@ def main(argv: list[str] | None = None) -> int:
             or yaml_config.relay.token.get_secret_value()
         )
         try:
+            require_api_release_identity(relay_url)
+        except ReleaseIdentityMismatchError:
+            LOGGER.exception("mixed edge image schema identity refused")
+            return REFUSE_TO_START_EXIT_CODE
+        except OSError:
+            pass
+        try:
             snapshot = resolve_startup_config(yaml_config, relay_url, relay_token)
         except (WorkerConfigError, ValidationError):
             # Defensive only: every call to the `_snapshot_from_payload` /
@@ -385,6 +395,13 @@ def main(argv: list[str] | None = None) -> int:
         except (WorkerConfigError, ValidationError):
             LOGGER.exception("worker local model/clip configuration failed")
             return CONFIG_ERROR_EXIT_CODE
+        try:
+            require_api_release_identity(relay_url)
+        except ReleaseIdentityMismatchError:
+            LOGGER.exception("mixed edge image schema identity refused")
+            return REFUSE_TO_START_EXIT_CODE
+        except OSError:
+            pass
         try:
             snapshot = load_worker_config_from_relay(
                 relay_url, relay_token, models=models, clip=clip, dev_mjpeg=dev_mjpeg

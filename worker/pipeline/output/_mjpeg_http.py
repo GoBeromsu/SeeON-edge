@@ -78,15 +78,9 @@ class BedZoneNotFoundError(RuntimeError):
 BedZoneRecognizer = Callable[[Image], BedZonePayload]
 
 
-class DerivativeControl(Protocol):
-    def request(self, clip_id: str, kind: str) -> dict[str, object]: ...
-
-    def cancel(self, clip_id: str, kind: str) -> dict[str, object] | None: ...
-
-    def status(self, clip_id: str, kind: str) -> dict[str, object] | None: ...
-
-
 class ClipDeletionControl(Protocol):
+    def preflight(self, clip_id: str) -> dict[str, object]: ...
+
     def delete(self, clip_id: str) -> dict[str, object]: ...
 
 
@@ -120,7 +114,6 @@ def build_http_server(
     probe_token: str | None,
     probe: MjpegProbe,
     bed_zone_recognizer: BedZoneRecognizer | None = None,
-    derivative_control: DerivativeControl | None = None,
     clip_deletion_control: ClipDeletionControl | None = None,
     replay_fall_model: FallModelProtocol | None = None,
     bed_zone_frame_timeout_s: float = BED_ZONE_FRAME_TIMEOUT_SECONDS,
@@ -138,18 +131,14 @@ def build_http_server(
             if pose_camera_id is not None:
                 self._handle_get_pose(pose_camera_id)
                 return
-            derivative = _derivative_identity(path)
-            if derivative is not None:
-                self._handle_derivative("status", *derivative)
+            clip_preflight_id = _clip_delete_preflight_identity(path)
+            if clip_preflight_id is not None:
+                self._handle_clip_delete_preflight(clip_preflight_id)
                 return
             self.send_error(HTTPStatus.NOT_FOUND)
 
         def do_POST(self) -> None:  # noqa: N802 - stdlib hook name
             path = urlsplit(self.path).path
-            derivative = _derivative_identity(path)
-            if derivative is not None:
-                self._handle_derivative("request", *derivative)
-                return
             if path == "/replay":
                 self._handle_replay()
                 return
@@ -226,15 +215,25 @@ def build_http_server(
 
         def do_DELETE(self) -> None:  # noqa: N802 - stdlib hook name
             path = urlsplit(self.path).path
-            derivative = _derivative_identity(path)
-            if derivative is not None:
-                self._handle_derivative("cancel", *derivative)
-                return
             clip_id = _clip_delete_identity(path)
             if clip_id is not None:
                 self._handle_clip_delete(clip_id)
                 return
             self.send_error(HTTPStatus.NOT_FOUND)
+
+        def _handle_clip_delete_preflight(self, clip_id: str) -> None:
+            if not _authorized_probe(self.headers.get("X-Edge-Relay-Token"), probe_token):
+                self.send_error(HTTPStatus.FORBIDDEN)
+                return
+            if clip_deletion_control is None:
+                self.send_error(HTTPStatus.SERVICE_UNAVAILABLE)
+                return
+            try:
+                payload = clip_deletion_control.preflight(clip_id)
+            except (OSError, RuntimeError, TypeError, ValueError):
+                self.send_error(HTTPStatus.CONFLICT)
+                return
+            self._write_status_json(HTTPStatus.OK, payload)
 
         def _handle_clip_delete(self, clip_id: str) -> None:
             if not _authorized_probe(self.headers.get("X-Edge-Relay-Token"), probe_token):
@@ -250,32 +249,6 @@ def build_http_server(
                 return
             self._write_status_json(HTTPStatus.ACCEPTED, payload)
 
-        def _handle_derivative(self, action: str, clip_id: str, kind: str) -> None:
-            if not _authorized_probe(self.headers.get("X-Edge-Relay-Token"), probe_token):
-                self.send_error(HTTPStatus.FORBIDDEN)
-                return
-            if derivative_control is None:
-                self.send_error(HTTPStatus.SERVICE_UNAVAILABLE)
-                return
-            try:
-                payload: dict[str, object] | None
-                if action == "request":
-                    payload = derivative_control.request(clip_id, kind)
-                    code = HTTPStatus.ACCEPTED
-                elif action == "cancel":
-                    payload = derivative_control.cancel(clip_id, kind)
-                    code = HTTPStatus.ACCEPTED
-                else:
-                    payload = derivative_control.status(clip_id, kind)
-                    code = HTTPStatus.OK
-            except (OSError, RuntimeError, TypeError, ValueError):
-                self.send_error(HTTPStatus.CONFLICT)
-                return
-            if payload is None:
-                self.send_error(HTTPStatus.NOT_FOUND)
-                return
-            self._write_status_json(code, payload)
-
         def _resolve_frame(self, camera_id: str) -> LatestFrame | None:
             if camera_id == "" or not store.is_known(camera_id):
                 self.send_error(HTTPStatus.NOT_FOUND)
@@ -287,7 +260,7 @@ def build_http_server(
             return frame
 
         def _handle_stream(self, camera_id: str) -> None:
-            # Same constant-time relay-token gate as /probe, derivative control,
+            # Same constant-time relay-token gate as /probe,
             # and clip delete (security finding #3). Auth runs before any
             # viewer-counter side effect so a rejected caller never opens the
             # encode gate.
@@ -535,6 +508,15 @@ def build_http_server(
     return _ThreadingHTTPServer((host, port), Handler)
 
 
+def _clip_delete_preflight_identity(path: str) -> str | None:
+    """Match the explicit non-destructive clip deletion preflight command."""
+    parts = path.split("/")
+    if len(parts) != 4 or parts[1] != "clips" or parts[3] != "deletion-preflight":
+        return None
+    clip_id = unquote(parts[2])
+    return clip_id or None
+
+
 def _clip_delete_identity(path: str) -> str | None:
     """Match ``/clips/{clip_id}`` (only) and return the decoded clip id."""
     parts = path.split("/")
@@ -542,16 +524,6 @@ def _clip_delete_identity(path: str) -> str | None:
         return None
     clip_id = unquote(parts[2])
     return clip_id or None
-
-
-def _derivative_identity(path: str) -> tuple[str, str] | None:
-    parts = path.split("/")
-    if len(parts) != 4 or parts[1] != "derivatives":
-        return None
-    clip_id, kind = unquote(parts[2]), parts[3].upper()
-    if not clip_id or kind not in {"STILL", "VIDEO"}:
-        return None
-    return clip_id, kind
 
 
 def _pose_camera_id(path: str) -> str | None:
@@ -891,7 +863,6 @@ __all__ = [
     "BedZonePayload",
     "BedZoneRecognizer",
     "ClipDeletionControl",
-    "DerivativeControl",
     "MjpegProbe",
     "MjpegProbeError",
     "MjpegProbePayload",

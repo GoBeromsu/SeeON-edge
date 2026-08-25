@@ -28,6 +28,7 @@ import urllib.request
 from pathlib import Path
 
 from backend.app.edge_db.migrator import migrate_database
+from backend.app.edge_db.schema import MIGRATIONS
 from worker.pipeline.output.evidence.clip_maintenance import ClipMaintenance, default_disk_usage
 from worker.pipeline.output.evidence.clip_recorder import ClipRecorder, ClipRecorderConfig
 from worker.pipeline.output.evidence.clip_recorder_models import ClipRecorderStats
@@ -36,8 +37,8 @@ from worker.pipeline.output.live_view import LatestFrameStore
 from worker.pipeline.output.mjpeg_server import MjpegServer, MjpegServerConfig
 from worker.runtime.clip_deletion_control import ClipDeletionControlService
 
-NOW = "2026-08-13T00:00:00Z"
-LATER = "2026-08-13T00:00:01Z"
+NOW = "2026-05-01T00:00:00Z"
+LATER = "2026-05-01T00:00:01Z"
 MANIFEST_ID = "a" * 64
 POLICY_ID = "b" * 64
 TRACE_ID = "c" * 64
@@ -102,6 +103,116 @@ def test_clip_recorder_delete_clip_delegates_to_maintenance(tmp_path: Path) -> N
     assert not clip_dir.exists()
 
 
+def test_clip_maintenance_refuses_symlinked_clips_root_without_deleting_outside(
+    tmp_path: Path,
+) -> None:
+    store_dir = tmp_path / "clip-store"
+    outside = tmp_path / "outside"
+    clip_dir = outside / "clip-a"
+    clip_dir.mkdir(parents=True)
+    (clip_dir / "clip.mp4").write_bytes(b"external")
+    (clip_dir / "manifest.json").write_text(
+        json.dumps(
+            {
+                "clip_id": "clip-a",
+                "finalized": True,
+                "started_at": NOW,
+                "video_available": True,
+                "path": "clips/clip-a/clip.mp4",
+            }
+        ),
+        encoding="utf-8",
+    )
+    store_dir.mkdir()
+    (store_dir / "clips").symlink_to(outside, target_is_directory=True)
+    maintenance = ClipMaintenance(
+        ClipRecorderConfig(store_dir=store_dir),
+        ClipRecorderStats(),
+        is_clip_held=lambda _clip_id: False,
+        disk_usage_provider=default_disk_usage,
+    )
+
+    assert maintenance.preflight_clip("clip-a") is PurgeResult.UNVERIFIABLE
+    assert maintenance.purge_clip("clip-a") is PurgeResult.UNVERIFIABLE
+    assert clip_dir.is_dir()
+    assert (clip_dir / "clip.mp4").is_file()
+
+
+def test_clip_maintenance_refuses_symlinked_store_path_intermediate(
+    tmp_path: Path,
+) -> None:
+    actual_parent = tmp_path / "actual-parent"
+    actual_store = actual_parent / "clip-store"
+    clip_dir = _write_finalized_clip(actual_store, "clip-a")
+    configured_parent = tmp_path / "configured-parent"
+    configured_parent.symlink_to(actual_parent, target_is_directory=True)
+    maintenance = ClipMaintenance(
+        ClipRecorderConfig(store_dir=configured_parent / "clip-store"),
+        ClipRecorderStats(),
+        is_clip_held=lambda _clip_id: False,
+        disk_usage_provider=default_disk_usage,
+    )
+
+    assert maintenance.preflight_clip("clip-a") is PurgeResult.UNVERIFIABLE
+    assert maintenance.purge_clip("clip-a") is PurgeResult.UNVERIFIABLE
+    assert clip_dir.is_dir()
+
+
+def test_root_swap_after_preflight_refuses_destructive_delete(
+    tmp_path: Path,
+) -> None:
+    store_dir = tmp_path / "clip-store"
+    clip_dir = _write_finalized_clip(store_dir, "clip-a")
+    outside = tmp_path / "outside"
+    outside_clip = outside / "clip-a"
+    outside_clip.mkdir(parents=True)
+    (outside_clip / "clip.mp4").write_bytes(b"external")
+    (outside_clip / "manifest.json").write_text(
+        json.dumps(
+            {
+                "clip_id": "clip-a",
+                "finalized": True,
+                "started_at": NOW,
+                "video_available": True,
+                "path": "clips/clip-a/clip.mp4",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (outside / "sentinel").write_text("preserve", encoding="utf-8")
+    maintenance = ClipMaintenance(
+        ClipRecorderConfig(store_dir=store_dir),
+        ClipRecorderStats(),
+        is_clip_held=lambda _clip_id: False,
+        disk_usage_provider=default_disk_usage,
+    )
+    preflight_finished = threading.Event()
+    root_swapped = threading.Event()
+    result: list[PurgeResult | None] = []
+
+    def delete_after_preflight() -> None:
+        assert maintenance.preflight_clip("clip-a") is None
+        preflight_finished.set()
+        assert root_swapped.wait(2.0)
+        result.append(maintenance.purge_clip("clip-a"))
+
+    deletion = threading.Thread(target=delete_after_preflight)
+    deletion.start()
+    assert preflight_finished.wait(2.0)
+    original_root = store_dir / "clips"
+    original_root.rename(store_dir / "clips-before-swap")
+    original_root.symlink_to(outside, target_is_directory=True)
+    root_swapped.set()
+    deletion.join(2.0)
+
+    assert not deletion.is_alive()
+    assert result == [PurgeResult.UNVERIFIABLE]
+    assert (store_dir / "clips-before-swap" / clip_dir.name).is_dir()
+    assert outside_clip.is_dir()
+    assert (outside_clip / "clip.mp4").is_file()
+    assert (outside / "sentinel").read_text(encoding="utf-8") == "preserve"
+
+
 def test_clip_recorder_delete_clip_reports_unverifiable_for_symlink_escape(
     tmp_path: Path,
 ) -> None:
@@ -152,6 +263,33 @@ def test_clip_recorder_delete_clip_rejects_path_traversal_clip_id(tmp_path: Path
     assert (outside / "canary.txt").exists()
 
 
+def test_operator_delete_preserves_sixty_day_floor(tmp_path: Path) -> None:
+    store_dir = tmp_path / "clip-store"
+    clip_dir = store_dir / "clips" / "young"
+    clip_dir.mkdir(parents=True)
+    (clip_dir / "clip.mp4").write_bytes(b"young")
+    (clip_dir / "manifest.json").write_text(
+        json.dumps(
+            {
+                "clip_id": "young",
+                "finalized": True,
+                "started_at": "2026-08-23T00:00:00Z",
+                "video_available": True,
+                "path": "clips/young/clip.mp4",
+            }
+        ),
+        encoding="utf-8",
+    )
+    recorder = ClipRecorder(
+        ClipRecorderConfig(store_dir=store_dir),
+        is_clip_held=lambda _clip_id: False,
+    )
+
+    assert recorder.preflight_clip_deletion("young") is PurgeResult.HELD
+    assert recorder.delete_clip("young") is PurgeResult.HELD
+    assert clip_dir.is_dir()
+
+
 def test_clip_recorder_delete_clip_reports_held_when_is_clip_held_true(tmp_path: Path) -> None:
     store_dir = tmp_path / "clip-store"
     clip_dir = _write_finalized_clip(store_dir, "clip-a")
@@ -164,85 +302,93 @@ def test_clip_recorder_delete_clip_reports_held_when_is_clip_held_true(tmp_path:
     assert clip_dir.exists()
 
 
-# --- ClipDeletionControlService: idempotence and serialization -----------------
+# --- ClipDeletionControlService: non-destructive preflight --------------------
 
 
-def test_control_service_short_circuits_purged_without_reinvoking_delete() -> None:
+def test_control_service_preflight_reports_hold_without_invoking_delete() -> None:
     calls: list[str] = []
     service = ClipDeletionControlService(
+        preflight_clip=lambda _clip_id: PurgeResult.HELD,
         delete_clip=lambda clip_id: calls.append(clip_id) or PurgeResult.PURGED,
-        retention_state=lambda _clip_id: "PURGED",
     )
 
-    payload = service.delete("clip-a")
-
-    assert payload == {"clip_id": "clip-a", "status": "PURGED"}
+    assert service.preflight("clip-a") == {"clip_id": "clip-a", "status": "HELD"}
     assert calls == []
 
 
-def test_control_service_retries_delete_when_state_is_pending() -> None:
+def test_control_service_preflight_reports_ready_without_invoking_delete() -> None:
     calls: list[str] = []
     service = ClipDeletionControlService(
+        preflight_clip=lambda _clip_id: None,
         delete_clip=lambda clip_id: calls.append(clip_id) or PurgeResult.PURGED,
-        retention_state=lambda _clip_id: "PENDING",
     )
 
-    payload = service.delete("clip-a")
-
-    assert payload == {"clip_id": "clip-a", "status": "PURGED"}
-    assert calls == ["clip-a"]
+    assert service.preflight("clip-a") == {"clip_id": "clip-a", "status": "READY"}
+    assert calls == []
 
 
-def test_control_service_first_request_reports_missing_truthfully() -> None:
+def test_control_service_delete_reports_missing_truthfully() -> None:
     service = ClipDeletionControlService(
+        preflight_clip=lambda _clip_id: PurgeResult.MISSING,
         delete_clip=lambda _clip_id: PurgeResult.MISSING,
-        retention_state=lambda _clip_id: None,
     )
 
     assert service.delete("clip-a") == {"clip_id": "clip-a", "status": "MISSING"}
 
 
-def test_control_service_serializes_concurrent_requests_for_the_same_clip() -> None:
-    started = threading.Event()
-    release = threading.Event()
-    call_count = 0
-    lock = threading.Lock()
-    purged = threading.Event()
+def test_control_service_keeps_durable_state_out_of_worker_adapter() -> None:
+    calls: list[str] = []
+    service = ClipDeletionControlService(
+        preflight_clip=lambda _clip_id: None,
+        delete_clip=lambda clip_id: calls.append(clip_id) or PurgeResult.PURGED,
+    )
 
-    def slow_delete(_clip_id: str) -> PurgeResult:
-        nonlocal call_count
-        with lock:
-            call_count += 1
-        started.set()
-        assert release.wait(2.0)
-        purged.set()
+    assert service.delete("clip-a") == {"clip_id": "clip-a", "status": "PURGED"}
+    assert calls == ["clip-a"]
+
+
+def test_control_service_serializes_same_clip_delete_at_a_barrier() -> None:
+    first_started = threading.Event()
+    second_entered = threading.Event()
+    release_first = threading.Event()
+    calls: list[str] = []
+    calls_lock = threading.Lock()
+    results: list[dict[str, object]] = []
+
+    def delete_clip(clip_id: str) -> PurgeResult:
+        with calls_lock:
+            calls.append(clip_id)
+            call_number = len(calls)
+        if call_number == 1:
+            first_started.set()
+            assert release_first.wait(2.0)
         return PurgeResult.PURGED
 
     service = ClipDeletionControlService(
-        delete_clip=slow_delete,
-        # Mirrors the real ``EvidenceExportRuntime.clip_retention_state``
-        # contract: PURGED only becomes visible once the first delete's DB
-        # transition actually lands.
-        retention_state=lambda _clip_id: "PURGED" if purged.is_set() else None,
+        preflight_clip=lambda _clip_id: None,
+        delete_clip=delete_clip,
     )
-    results: list[dict[str, object]] = []
 
-    def run() -> None:
+    first = threading.Thread(target=lambda: results.append(service.delete("clip-a")))
+    first.start()
+    assert first_started.wait(2.0)
+
+    def second_delete() -> None:
+        second_entered.set()
         results.append(service.delete("clip-a"))
 
-    first = threading.Thread(target=run)
-    first.start()
-    assert started.wait(2.0)
-    second = threading.Thread(target=run)
+    second = threading.Thread(target=second_delete)
     second.start()
-    # The second request must block behind the first's lock, not race it.
-    second.join(0.1)
-    assert second.is_alive()
-    release.set()
+    assert second_entered.wait(2.0)
+    with calls_lock:
+        assert calls == ["clip-a"]
+    release_first.set()
     first.join(2.0)
     second.join(2.0)
 
-    assert call_count == 1
+    assert not first.is_alive()
+    assert not second.is_alive()
+    assert calls == ["clip-a", "clip-a"]
     assert results == [
         {"clip_id": "clip-a", "status": "PURGED"},
         {"clip_id": "clip-a", "status": "PURGED"},
@@ -342,24 +488,16 @@ _RETENTION: dict[tuple[Path, str], str] = {}
 
 
 def _control_service(database: Path, store_dir: Path) -> ClipDeletionControlService:
-    config = ClipRecorderConfig(store_dir=store_dir)
+    del database
     maintenance = ClipMaintenance(
-        config,
+        ClipRecorderConfig(store_dir=store_dir),
         ClipRecorderStats(),
         is_clip_held=lambda _clip_id: False,
         disk_usage_provider=lambda _path: shutil.disk_usage(store_dir),
-        begin_clip_purge=_begin(database),
-        complete_clip_purge=_complete(database),
-        fail_clip_purge=_fail(database),
     )
-
-    def retention_state(clip_id: str) -> str | None:
-        return _RETENTION.get((database, clip_id))
-
     return ClipDeletionControlService(
+        preflight_clip=maintenance.preflight_clip,
         delete_clip=maintenance.purge_clip,
-        retention_state=retention_state,
-        complete_pending_purge=_complete(database),
     )
 
 
@@ -389,6 +527,22 @@ def _fail(database: Path):
     return fail
 
 
+def _preflight_over_http(
+    port: int, clip_id: str, *, token: str | None = "relay-token"
+) -> tuple[int, dict[str, object]]:
+    headers = {} if token is None else {"X-Edge-Relay-Token": token}
+    request = urllib.request.Request(
+        f"http://127.0.0.1:{port}/clips/{clip_id}/deletion-preflight",
+        method="GET",
+        headers=headers,
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=2.0) as response:
+            return response.status, json.loads(response.read())
+    except urllib.error.HTTPError as error:
+        return error.code, {}
+
+
 def _delete_over_http(
     port: int, clip_id: str, *, token: str | None = "relay-token"
 ) -> tuple[int, dict[str, object]]:
@@ -410,7 +564,9 @@ def test_worker_http_deletes_clip_preserves_shared_derivative_and_is_idempotent(
 ) -> None:
     database = tmp_path / "edge.sqlite3"
     store_dir = tmp_path / "clip-store"
-    migrate_database(database)
+    # Task 11 owns schema-18 deletion intent/reconciliation. Task 8 pins the
+    # parent worker-owned response contract on its schema-17 authority.
+    migrate_database(database, migrations=MIGRATIONS[:17])
     clip_dir = _write_finalized_clip(store_dir, "clip-a")
     _seed_central_evidence(database, clip_id="clip-a", lifecycle_state="COMPLETE")
     derivative_path = (
@@ -427,26 +583,29 @@ def test_worker_http_deletes_clip_preserves_shared_derivative_and_is_idempotent(
     )
     server.start()
     try:
+        preflight_status, preflight_payload = _preflight_over_http(server.port, "clip-a")
+        assert preflight_status == 200
+        assert preflight_payload == {"clip_id": "clip-a", "status": "READY"}
+        assert clip_dir.is_dir()
+
         status, payload = _delete_over_http(server.port, "clip-a")
         assert status == 202
         assert payload == {"clip_id": "clip-a", "status": "PURGED"}
         assert not clip_dir.exists()
         assert derivative_path.exists(), "shared derivative blobs must never be deleted"
 
-        # Duplicate request: idempotent, no crash, no re-delete attempt.
+        # Worker reports filesystem truth; backend owns PURGED idempotency.
         status_again, payload_again = _delete_over_http(server.port, "clip-a")
         assert status_again == 202
-        assert payload_again == {"clip_id": "clip-a", "status": "PURGED"}
+        assert payload_again == {"clip_id": "clip-a", "status": "MISSING"}
     finally:
         server.stop()
-
-    assert _RETENTION[(database, "clip-a")] == "PURGED"
 
 
 def test_worker_http_clip_delete_requires_relay_auth(tmp_path: Path) -> None:
     database = tmp_path / "edge.sqlite3"
     store_dir = tmp_path / "clip-store"
-    migrate_database(database)
+    migrate_database(database, migrations=MIGRATIONS[:17])
     _write_finalized_clip(store_dir, "clip-a")
     _seed_central_evidence(database, clip_id="clip-a")
     service = _control_service(database, store_dir)
@@ -457,6 +616,8 @@ def test_worker_http_clip_delete_requires_relay_auth(tmp_path: Path) -> None:
     )
     server.start()
     try:
+        assert _preflight_over_http(server.port, "clip-a", token=None)[0] == 403
+        assert _preflight_over_http(server.port, "clip-a", token="wrong")[0] == 403
         assert _delete_over_http(server.port, "clip-a", token=None)[0] == 403
         assert _delete_over_http(server.port, "clip-a", token="wrong")[0] == 403
     finally:
@@ -491,7 +652,7 @@ def test_pending_retention_with_directory_still_present_converges_on_retry(
     """
     database = tmp_path / "edge.sqlite3"
     store_dir = tmp_path / "clip-store"
-    migrate_database(database)
+    migrate_database(database, migrations=MIGRATIONS[:17])
     clip_dir = _write_finalized_clip(store_dir, "clip-a")
     _seed_central_evidence(database, clip_id="clip-a")
     assert _begin(database)("clip-a")
@@ -502,7 +663,7 @@ def test_pending_retention_with_directory_still_present_converges_on_retry(
 
     assert payload == {"clip_id": "clip-a", "status": "PURGED"}
     assert not clip_dir.exists()
-    assert _RETENTION[(database, "clip-a")] == "PURGED"
+    assert _RETENTION[(database, "clip-a")] == "PENDING"
 
 
 def test_pending_retention_with_directory_already_removed_converges_on_same_process_http_retry(
@@ -510,7 +671,7 @@ def test_pending_retention_with_directory_already_removed_converges_on_same_proc
 ) -> None:
     database = tmp_path / "edge.sqlite3"
     store_dir = tmp_path / "clip-store"
-    migrate_database(database)
+    migrate_database(database, migrations=MIGRATIONS[:17])
     clip_dir = _write_finalized_clip(store_dir, "clip-a")
     _seed_central_evidence(database, clip_id="clip-a")
     assert _begin(database)("clip-a")
@@ -529,8 +690,8 @@ def test_pending_retention_with_directory_already_removed_converges_on_same_proc
         server.stop()
 
     assert status == 202
-    assert payload == {"clip_id": "clip-a", "status": "PURGED"}
-    assert _RETENTION[(database, "clip-a")] == "PURGED"
+    assert payload == {"clip_id": "clip-a", "status": "MISSING"}
+    assert _RETENTION[(database, "clip-a")] == "PENDING"
 
 
 def test_pending_retention_with_directory_already_removed_converges_on_restart_reconciliation(
@@ -544,7 +705,7 @@ def test_pending_retention_with_directory_already_removed_converges_on_restart_r
     """
     database = tmp_path / "edge.sqlite3"
     store_dir = tmp_path / "clip-store"
-    migrate_database(database)
+    migrate_database(database, migrations=MIGRATIONS[:17])
     clip_dir = _write_finalized_clip(store_dir, "clip-a")
     _seed_central_evidence(database, clip_id="clip-a")
     assert _begin(database)("clip-a")

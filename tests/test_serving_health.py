@@ -87,6 +87,8 @@ def test_fastapi_lifespan_does_not_assemble_ml_runtime() -> None:
     assert not hasattr(app.state, "model")
     assert not hasattr(app.state, "fall_pipeline")
     assert status_body["cameras"] == {}
+    assert status_body["runtime"]["facilities"] == {}
+    assert not hasattr(app.state, "clip_listing_index")
     assert "stale_after_sec" in status_body
     assert health_body["status"] == "ok"
     assert health_body["relay"]["camera_count"] == 0

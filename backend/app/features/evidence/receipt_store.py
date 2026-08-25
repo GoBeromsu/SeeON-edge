@@ -8,10 +8,12 @@ no DDL: deployments inject the migrated persistence implementation through
 from __future__ import annotations
 
 import hashlib
+import os
 import re
+import stat
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, BinaryIO, Protocol, runtime_checkable
 
 from backend.app.features.clips.catalog import CatalogConflictError, CatalogStore
 
@@ -61,6 +63,41 @@ class ArtifactReceiptStore(Protocol):
     def commit(self, receipt: ArtifactReceipt) -> ArtifactReceipt: ...
 
     def get(self, artifact_id: str) -> ArtifactReceipt | None: ...
+
+
+@dataclass(frozen=True, slots=True)
+class VerifiedArtifact:
+    handle: BinaryIO
+    sha256: str
+    size_bytes: int
+    device: int
+    inode: int
+
+    @property
+    def identity(self) -> tuple[int, int]:
+        return self.device, self.inode
+
+
+def verified_artifact(handle: BinaryIO) -> VerifiedArtifact:
+    """Hash one open regular descriptor and preserve its identity and position."""
+    try:
+        descriptor_stat = os.fstat(handle.fileno())
+        if not stat.S_ISREG(descriptor_stat.st_mode):
+            raise ArtifactReceiptVerificationError("artifact descriptor is not regular")
+        handle.seek(0)
+        digest = hashlib.sha256()
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+        handle.seek(0)
+    except OSError as error:
+        raise ArtifactReceiptVerificationError("artifact descriptor cannot be verified") from error
+    return VerifiedArtifact(
+        handle=handle,
+        sha256=digest.hexdigest(),
+        size_bytes=descriptor_stat.st_size,
+        device=descriptor_stat.st_dev,
+        inode=descriptor_stat.st_ino,
+    )
 
 
 class CatalogArtifactReceiptStore:
@@ -115,6 +152,8 @@ __all__ = [
     "ArtifactReceipt",
     "ArtifactReceiptConflictError",
     "CatalogArtifactReceiptStore",
+    "VerifiedArtifact",
+    "verified_artifact",
     "ArtifactReceiptPersistenceError",
     "ArtifactReceiptStore",
     "ArtifactReceiptVerificationError",

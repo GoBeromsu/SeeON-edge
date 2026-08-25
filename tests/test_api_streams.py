@@ -20,6 +20,7 @@ from backend.app.features.cameras import streams_router
 from backend.app.features.cameras.store import CameraRegistryStore
 from backend.app.features.cameras.streams_router import _iter_upstream, _UpstreamCloser
 from backend.app.main import LifespanFactory, create_app, no_lifespan
+from tests_support.compact_authority_db import prepare_compact_database
 
 AUTH = {"Authorization": "Bearer relay-token"}
 NO_LIFESPAN: LifespanFactory = no_lifespan
@@ -187,7 +188,9 @@ def test_stream_proxy_resolves_dashboard_id_to_worker_id(
         )
 
     _install_mock_transport(monkeypatch, handler)
-    registry = CameraRegistryStore(tmp_path / "catalog.sqlite3")
+    registry_path = tmp_path / "catalog.sqlite3"
+    prepare_compact_database(registry_path)
+    registry = CameraRegistryStore(registry_path)
     _ = registry.create(
         camera_id="dashboard-camera-id",
         label="Room 201",

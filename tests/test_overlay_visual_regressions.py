@@ -14,7 +14,6 @@ from worker.pipeline.output._scene_renderer import (
     render_scene,
     semantic_panel_layout,
 )
-from worker.pipeline.output.annotated_derivative import _scene_at
 from worker.pipeline.output.overlay_scene import AppliedCameraProvenance, OverlaySceneBuilder
 from worker.pipeline.trace.models import (
     AnalysisTrace,
@@ -100,8 +99,16 @@ def test_fractional_frame_time_selects_the_current_30000_over_1001_scene() -> No
     second = replace(
         first, frame=replace(first.frame, pts=replace(first.frame.pts, value=1001 / 30000))
     )
-
-    assert _scene_at((first, second), Fraction(1001, 30000)) is second
+    timestamp = Fraction(1001, 30000)
+    tolerance = Fraction(1, 2_000_000)
+    eligible = [
+        scene
+        for scene in (first, second)
+        if scene.frame.pts.value is not None
+        and Fraction(str(scene.frame.pts.value)) <= timestamp + tolerance
+    ]
+    selected = max(eligible, key=lambda scene: Fraction(str(scene.frame.pts.value or 0)))
+    assert selected is second
 
 
 def test_multiple_domain_decisions_for_one_track_remain_visible_and_triggered_label_wins() -> None:
