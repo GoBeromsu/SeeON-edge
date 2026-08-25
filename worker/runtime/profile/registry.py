@@ -117,7 +117,7 @@ _NVIDIA = ProfileSpec(
     "cuda-device",
     "h264_nvenc",
     None,
-    concrete_stages_available=False,
+    concrete_stages_available=True,
 )
 _INTEL_VAAPI_HOST = ProfileSpec(
     "intel-vaapi-host",

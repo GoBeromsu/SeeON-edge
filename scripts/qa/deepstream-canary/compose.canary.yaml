@@ -1,0 +1,104 @@
+name: seeon-ds-canary
+services:
+  relay-stub:
+    image: python@sha256:2c941e860699f878900b0edc2403613c234d4b32eda3cc9fa7036991a2a63c4a
+    read_only: true
+    networks:
+      canary:
+        aliases: [ml-api]
+    environment:
+      CANARY_RELAY_TOKEN: ${CANARY_RELAY_TOKEN}
+      CANARY_RECEIPT_DIR: /receipts
+      CANARY_WORKER_CONFIG_DIR: /configs
+      CANARY_ACTIVE_CONFIG: /receipts/active-config
+    volumes:
+      - ${CANARY_ASSET_DIR}/relay_stub.py:/relay_stub.py:ro
+      - ${CANARY_RECEIPT_DIR}:/receipts:rw
+      - ${CANARY_CONFIG_PATH}:/configs:ro
+    command: [python, /relay_stub.py]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/live', timeout=2)"]
+      interval: 1s
+      timeout: 3s
+      retries: 10
+
+  mediamtx:
+    image: bluenviron/mediamtx@sha256:2001b73159ec146478df64d5fe5a973ae0d978a1648138cbbc6bc6f9c4cc9c82
+    read_only: true
+    networks: [canary]
+    volumes:
+      - ${CANARY_ASSET_DIR}/mediamtx.yml:/mediamtx.yml:ro
+    ports:
+      - "127.0.0.1:18554:8554"
+      - "127.0.0.1:18888:8888"
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    healthcheck:
+      test: [CMD, /mediamtx, --version]
+      interval: 1s
+      timeout: 3s
+      retries: 10
+
+  engine-builder:
+    image: ${CANARY_WORKER_IMAGE}
+    pull_policy: never
+    restart: "no"
+    profiles: [prepare]
+    networks: [canary]
+    environment:
+      CANARY_ENGINE_CACHE_SOURCE: /prepared-cache
+    volumes:
+      - ${CANARY_ASSET_DIR}/prepare_engines.py:/prepare_engines.py:ro
+      # CANARY_ENGINE_SOURCE_MOUNT
+      - ${CANARY_MODEL_DIR}:/app/models:ro
+      - ${CANARY_ENGINE_DIR}:/var/cache/seeon/tensorrt:rw
+      - ${CANARY_RECEIPT_DIR}:/receipts:rw
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    command: [python, /prepare_engines.py, /opt/seeon/deepstream-manifest.json, /receipts/engine-prepare.json]
+
+  ml-worker:
+    image: ${CANARY_WORKER_IMAGE}
+    pull_policy: never
+    restart: "no"
+    networks: [canary]
+    depends_on:
+      relay-stub:
+        condition: service_healthy
+      mediamtx:
+        condition: service_healthy
+    environment:
+      RELAY_TOKEN: ${CANARY_RELAY_TOKEN}
+      ML_WORKER_PROFILE: nvidia
+      ML_RTSP_ALLOW_LOCAL_DESTINATIONS: "1"
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility,video
+      SEEON_CANARY_TELEMETRY_PATH: /receipts/native-telemetry.jsonl
+    ports:
+      - "127.0.0.1:18090:8090"
+    volumes:
+      - ${CANARY_MODEL_DIR}:/app/models:ro
+      - ${CANARY_STATE_DIR}:/var/lib/seeon-state:rw
+      - ${CANARY_SOCKET_DIR}:/var/lib/seeon-state/deepstream-ipc:rw
+      - ${CANARY_ENGINE_DIR}:/var/cache/seeon/tensorrt:rw
+      - ${CANARY_SCRATCH_DIR}:/var/lib/seeon-scratch:rw
+      - ${CANARY_CLIP_DIR}:/var/lib/clip-store:rw
+      - ${CANARY_RECEIPT_DIR}:/receipts:rw
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    command: [python, -m, worker, --state-dir, /var/lib/seeon-state]
+
+networks:
+  canary:
+    internal: true

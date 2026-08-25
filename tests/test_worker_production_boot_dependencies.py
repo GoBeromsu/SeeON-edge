@@ -16,17 +16,20 @@ from pathlib import Path
 import pytest
 
 import worker.runtime.worker as worker_module
-from worker.adapters.decode.nvdec_device.capability import DeviceResidentCapability
-from worker.adapters.device.cuda.probe import CudaCapability
+from contracts.runner import RunnerProtocol
 from worker.adapters.device.mps.probe import MpsCapability
-from worker.adapters.device.nvml.probe import NvmlGpuStatus
+from worker.native.deepstream.preflight import DeepStreamPreflightError
 from worker.runtime.config import WorkerConfig
 from worker.runtime.lease import GpuLease
 from worker.runtime.worker import WorkerRuntime, production_boot_dependencies
 
 
 class _FakeServingClient:
-    def create(self, task: str) -> object:
+    def create(
+        self,
+        task: str,
+        **_kwargs: str | int | float | bool | None,
+    ) -> RunnerProtocol:
         raise AssertionError(f"unexpected serving client call for task {task!r}")
 
 
@@ -113,21 +116,14 @@ def test_production_boot_dependencies_mps_false_fails_closed_without_mps(
     assert result.reason == "MPS is unavailable"
 
 
-def test_production_boot_dependencies_device_resident_true_when_capability_true(
+def test_production_boot_dependencies_nvidia_true_when_preflight_passes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # Given -- a real NVIDIA host where every Todo 17 concrete-stage gate passes
+    # Given
     monkeypatch.setattr(
         worker_module,
-        "probe_device_resident_capability",
-        lambda: DeviceResidentCapability(
-            available=True,
-            reason="device-resident concrete stages are available",
-            cuda=CudaCapability(True, "cuda available", device_count=1, arch_list=("sm_90",)),
-            nvml=NvmlGpuStatus(True, "ok", driver_version="580.1", device_name="RTX 5070 Ti"),
-            stream_event_supported=True,
-            dlpack_supported=True,
-        ),
+        "run_configured_deepstream_preflight",
+        lambda: {"status": "ok"},
     )
 
     # When
@@ -137,28 +133,17 @@ def test_production_boot_dependencies_device_resident_true_when_capability_true(
     assert result.ok is True
     assert result.profile == "nvidia"
     assert result.stage == "device"
-    assert result.reason == "device-resident concrete stages are available"
+    assert result.reason == "pinned DeepStream preflight passed"
 
 
-def test_production_boot_dependencies_device_resident_false_fails_closed_without_it(
+def test_production_boot_dependencies_nvidia_fails_closed_when_preflight_fails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # Given -- the real signal on this repo's macOS dev machines: no NVIDIA device
-    monkeypatch.setattr(
-        worker_module,
-        "probe_device_resident_capability",
-        lambda: DeviceResidentCapability(
-            available=False,
-            reason=(
-                "cuda capability unavailable: torch.cuda.is_available() is False "
-                "and no CUDA devices are visible"
-            ),
-            cuda=CudaCapability(False, "no cuda"),
-            nvml=NvmlGpuStatus(False, "no nvml"),
-            stream_event_supported=False,
-            dlpack_supported=False,
-        ),
-    )
+    # Given
+    def fail_preflight() -> dict[str, str]:
+        raise DeepStreamPreflightError("gpu_absent", "NVIDIA device unavailable")
+
+    monkeypatch.setattr(worker_module, "run_configured_deepstream_preflight", fail_preflight)
 
     # When
     result = production_boot_dependencies().verifiers["nvidia"]()
@@ -166,7 +151,7 @@ def test_production_boot_dependencies_device_resident_false_fails_closed_without
     # Then
     assert result.ok is False
     assert result.profile == "nvidia"
-    assert "cuda capability unavailable" in result.reason
+    assert "NVIDIA device unavailable" in result.reason
 
 
 def test_production_boot_dependencies_nvidia_fails_closed_on_plain_cuda_only_host(
@@ -178,29 +163,16 @@ def test_production_boot_dependencies_nvidia_fails_closed_on_plain_cuda_only_hos
     device-resident concrete stages, so its verifier must consult the
     device-resident probe -- never `probe_cuda_capability` alone.
     """
-    monkeypatch.setattr(
-        worker_module,
-        "probe_device_resident_capability",
-        lambda: DeviceResidentCapability(
-            available=False,
-            reason="nvml device identity unavailable: no nvml",
-            cuda=CudaCapability(True, "cuda available", device_count=1, arch_list=("sm_90",)),
-            nvml=NvmlGpuStatus(False, "no nvml"),
-            stream_event_supported=False,
-            dlpack_supported=False,
-        ),
-    )
-    monkeypatch.setattr(
-        worker_module,
-        "probe_cuda_capability",
-        lambda: CudaCapability(True, "cuda available", device_count=1, arch_list=("sm_90",)),
-    )
+    def fail_preflight() -> dict[str, str]:
+        raise DeepStreamPreflightError("plugin_missing", "nvstreammux unavailable")
+
+    monkeypatch.setattr(worker_module, "run_configured_deepstream_preflight", fail_preflight)
 
     result = production_boot_dependencies().verifiers["nvidia"]()
 
     assert result.ok is False
     assert result.profile == "nvidia"
-    assert "nvml device identity unavailable" in result.reason
+    assert "nvstreammux unavailable" in result.reason
 
 
 def test_worker_runtime_defaults_boot_dependencies_to_production_dependencies(
@@ -215,15 +187,8 @@ def test_worker_runtime_defaults_boot_dependencies_to_production_dependencies(
     """
     monkeypatch.setattr(
         worker_module,
-        "probe_device_resident_capability",
-        lambda: DeviceResidentCapability(
-            available=True,
-            reason="device-resident concrete stages are available",
-            cuda=CudaCapability(True, "cuda available", device_count=1, arch_list=("sm_90",)),
-            nvml=NvmlGpuStatus(True, "ok", driver_version="580.1", device_name="RTX 5070 Ti"),
-            stream_event_supported=True,
-            dlpack_supported=True,
-        ),
+        "run_configured_deepstream_preflight",
+        lambda: {"status": "ok"},
     )
 
     runtime = WorkerRuntime(
@@ -234,4 +199,4 @@ def test_worker_runtime_defaults_boot_dependencies_to_production_dependencies(
 
     result = runtime._boot_dependencies.verifiers["nvidia"]()  # noqa: SLF001
     assert result.ok is True
-    assert result.reason == "device-resident concrete stages are available"
+    assert result.reason == "pinned DeepStream preflight passed"

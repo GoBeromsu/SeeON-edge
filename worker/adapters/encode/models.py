@@ -89,6 +89,10 @@ class RemuxStreamFact:
     channels: int | None = None
     packet_count: int = 0
     timestamp_translation_ticks: int | None = None
+    input_framing: str = "container"
+    output_framing: str = "container"
+    normalizer_version: str = "none"
+    parser_caps_sha256: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -110,6 +114,10 @@ class ClipArtifact:
     remux_version: str | None = None
     timestamp_translation_seconds: Fraction = Fraction(0)
     truncation_reasons: tuple[str, ...] = ()
+    au_index_sha256: str | None = None
+    au_index_size_bytes: int | None = None
+    au_index_schema: int | None = None
+    au_index_count: int | None = None
 
 
 __all__ = [

@@ -5,7 +5,7 @@ from typing import Protocol
 
 from worker.adapters.encode import FFmpegThumbnailGenerator
 from worker.adapters.encode.packet_remuxer import PyAvPacketRemuxer
-from worker.pipeline.output.evidence.clip_actor import (
+from worker.pipeline.output.evidence.clip_actor_types import (
     ClipPublicationPort,
     RecordingCoordinator,
 )
@@ -25,6 +25,7 @@ class ClipRecorderServices:
     coordinator: RecorderCoordinator
     publisher: ClipPublicationPort
     encoder_name: str
+    repository: PacketRingRepository | None = None
 
 
 def default_services(
@@ -53,6 +54,7 @@ def default_services(
             thumbnail_generator=FFmpegThumbnailGenerator(ffmpeg_bin=config.ffmpeg_bin),
         ),
         "source-packet-remux",
+        repository,
     )
 
 

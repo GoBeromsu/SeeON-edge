@@ -72,6 +72,7 @@ class PacketClipRecordingCoordinator:
         event: BusinessEvent,
         output_dir: Path | None = None,
         trigger_frame_key: FrameKey | None = None,
+        window_bounds: tuple[float, float] | None = None,
     ) -> ClipOutcome:
         del event_time_sec, event
         if output_dir is None:
@@ -97,13 +98,20 @@ class PacketClipRecordingCoordinator:
             trigger_frame_key.worker_boot_id,
             camera_id,
             trigger_frame_key.stream_epoch,
+            trigger_frame_key.source_generation,
         )
+        if window_bounds is None:
+            pre_seconds = Fraction(str(self._window.pre_event_seconds))
+            post_seconds = Fraction(str(self._window.post_event_seconds))
+        else:
+            pre_seconds = trigger_pts - Fraction(str(window_bounds[0]))
+            post_seconds = Fraction(str(window_bounds[1])) - trigger_pts
         try:
             selection = self._repository.ring(camera_id).select(
                 trigger_epoch=epoch,
                 trigger_pts=trigger_pts,
-                pre_seconds=Fraction(str(self._window.pre_event_seconds)),
-                post_seconds=Fraction(str(self._window.post_event_seconds)),
+                pre_seconds=max(pre_seconds, Fraction()),
+                post_seconds=max(post_seconds, Fraction()),
             )
         except ValueError:
             return ClipUnavailable(

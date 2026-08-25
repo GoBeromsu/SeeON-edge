@@ -63,6 +63,18 @@ class AlertEvidenceAttacher:
     def __post_init__(self) -> None:
         validate_runtime_manifest_sha256(self.runtime_manifest_sha256)
 
+    def attach_native(self, event: BusinessEvent, snapshot_jpeg: bytes | None) -> BusinessEvent:
+        """Attach the same audit envelope to an exact child-produced snapshot."""
+        audit = dict(event.audit or {})
+        audit.update(self.domain_audit.get(event.domain, {}))
+        if self.runtime_manifest_sha256 is not None:
+            audit[RUNTIME_MANIFEST_SHA256_KEY] = self.runtime_manifest_sha256
+        return replace(
+            event,
+            audit=None if not audit else audit,
+            snapshot_jpeg=snapshot_jpeg,
+        )
+
     def attach(
         self,
         event: BusinessEvent,

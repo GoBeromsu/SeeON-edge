@@ -61,8 +61,9 @@ class _Coordinator:
         event: BusinessEvent,
         output_dir: Path | None = None,
         trigger_frame_key: object | None = None,
+        window_bounds: tuple[float, float] | None = None,
     ) -> ClipOutcome:
-        del camera_id, event_time_sec, event, output_dir, trigger_frame_key
+        del camera_id, event_time_sec, event, output_dir, trigger_frame_key, window_bounds
         return ClipUnavailable(clip_id, ClipReasonCode.ENCODER_FAILED)
 
     def close(self, camera_id: str) -> None:

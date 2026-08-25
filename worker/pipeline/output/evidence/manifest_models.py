@@ -14,65 +14,7 @@ from worker.pipeline.output.evidence.evidence_metadata import (
     validate_runtime_manifest_sha256,
 )
 from worker.pipeline.output.evidence.evidence_outbox_types import EvidenceReasonCode
-
-
-class RemuxStreamFacts(BaseModel):
-    model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True, extra="forbid")
-
-    index: int
-    media_type: str | None = None
-    codec_name: str | None = None
-    codec_tag: str | None = None
-    time_base: str
-    extradata_sha256: str | None = None
-    width: int | None = None
-    height: int | None = None
-    sample_rate: int | None = None
-    channels: int | None = None
-    packet_count: int
-    timestamp_translation_ticks: int | None = None
-
-    @model_validator(mode="after")
-    def _typed_values(self) -> Self:
-        if self.index < 0 or self.packet_count < 0:
-            raise PydanticCustomError("remux_stream", "remux stream counters are invalid")
-        _ = _fraction(self.time_base)
-        if self.extradata_sha256 is not None:
-            _sha256(self.extradata_sha256, "extradata_sha256")
-        for value in (self.width, self.height, self.sample_rate, self.channels):
-            if value is not None and value <= 0:
-                raise PydanticCustomError("remux_stream", "remux stream dimensions are invalid")
-        return self
-
-
-class SourceMediaFacts(BaseModel):
-    model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True, extra="forbid")
-
-    configuration_id: str | None = None
-    selected_start_pts_sec: float | None = None
-    selected_end_pts_sec: float | None = None
-    packet_count: int | None = None
-    remux_method: str | None = None
-    remux_version: str | None = None
-    timestamp_translation_seconds: str
-    streams: tuple[RemuxStreamFacts, ...]
-
-    @model_validator(mode="after")
-    def _coherent(self) -> Self:
-        translation = _fraction(self.timestamp_translation_seconds)
-        if self.packet_count is not None and self.packet_count < 0:
-            raise PydanticCustomError("source_media", "source packet count is invalid")
-        if not self.streams:
-            raise PydanticCustomError("source_media", "source streams must not be empty")
-        for stream in self.streams:
-            if stream.timestamp_translation_ticks is None:
-                continue
-            stream_translation = Fraction(stream.timestamp_translation_ticks) * _fraction(
-                stream.time_base
-            )
-            if stream_translation != translation:
-                raise PydanticCustomError("source_media", "nonuniform remux timestamp translation")
-        return self
+from worker.pipeline.output.evidence.manifest_media_models import SourceMediaFacts
 
 
 class TimeOriginFacts(BaseModel):

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -42,6 +43,14 @@ class LatestFrameStore:
         self._viewer_counts: dict[str, int] = {}
         self._snapshot_demand: set[str] = set()
         self._mode: dict[str, OverlayMode] = {}
+        self._demand_listener: Callable[[str, int, OverlayMode, bool], None] | None = None
+
+    def set_demand_listener(
+        self,
+        listener: Callable[[str, int, OverlayMode, bool], None] | None,
+    ) -> None:
+        with self._condition:
+            self._demand_listener = listener
 
     def register_camera(self, camera_id: str) -> None:
         with self._condition:
@@ -52,12 +61,22 @@ class LatestFrameStore:
         """Count one open ``/stream/{camera_id}`` HTTP connection."""
         with self._condition:
             self._viewer_counts[camera_id] = self._viewer_counts.get(camera_id, 0) + 1
+            viewers = self._viewer_counts[camera_id]
+            mode = self._mode.get(camera_id, "none")
+            listener = self._demand_listener
+        if listener is not None:
+            listener(camera_id, viewers, mode, False)
 
     def mark_viewer_disconnected(self, camera_id: str) -> None:
         """Undo one ``mark_viewer_connected`` (every stream return path calls this)."""
         with self._condition:
             count = self._viewer_counts.get(camera_id, 0) - 1
-            self._viewer_counts[camera_id] = max(count, 0)
+            viewers = max(count, 0)
+            self._viewer_counts[camera_id] = viewers
+            mode = self._mode.get(camera_id, "none")
+            listener = self._demand_listener
+        if listener is not None:
+            listener(camera_id, viewers, mode, False)
 
     def has_viewers(self, camera_id: str) -> bool:
         with self._condition:
@@ -73,6 +92,11 @@ class LatestFrameStore:
         """
         with self._condition:
             self._snapshot_demand.add(camera_id)
+            viewers = self._viewer_counts.get(camera_id, 0)
+            mode = self._mode.get(camera_id, "none")
+            listener = self._demand_listener
+        if listener is not None:
+            listener(camera_id, viewers, mode, True)
 
     def consume_snapshot_demand(self, camera_id: str) -> bool:
         """Atomically check and clear the one-frame snapshot demand flag."""
@@ -85,6 +109,10 @@ class LatestFrameStore:
     def set_mode(self, camera_id: str, mode: OverlayMode) -> None:
         with self._condition:
             self._mode[camera_id] = mode
+            viewers = self._viewer_counts.get(camera_id, 0)
+            listener = self._demand_listener
+        if listener is not None:
+            listener(camera_id, viewers, mode, False)
 
     def get_mode(self, camera_id: str) -> OverlayMode:
         with self._condition:

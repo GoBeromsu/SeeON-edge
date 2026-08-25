@@ -18,7 +18,7 @@ from worker.types import BusinessEvent, FramePacket
 RUNTIME_MANIFEST_SHA256 = "b" * 64
 
 
-def _packet(*, pts: float, seq: int, epoch: int) -> FramePacket:
+def _packet(*, pts: float, seq: int, epoch: int, generation: int = 1) -> FramePacket:
     frame = Frame(index=seq, time_sec=pts, image=np.zeros((2, 3, 3), dtype=np.uint8))
     return FramePacket(
         camera_id="camera-1",
@@ -30,6 +30,7 @@ def _packet(*, pts: float, seq: int, epoch: int) -> FramePacket:
         decode_time_ms=0.25,
         worker_boot_id="boot-1",
         stream_epoch=epoch,
+        source_generation=generation,
     )
 
 
@@ -79,3 +80,24 @@ def test_event_uses_the_trigger_packet_not_the_latest_evidence_packet(tmp_path: 
     assert message.event.audit == {"runtime_manifest_sha256": RUNTIME_MANIFEST_SHA256}
     assert message.event.time_sec == 12.5
     assert message.trigger_packet.frame_key == trigger.frame_key
+
+
+def test_cross_epoch_and_generation_events_never_union(tmp_path: Path) -> None:
+    messages: queue.Queue[object] = queue.Queue()
+    admission = ClipAdmission(ClipRecorderConfig(store_dir=tmp_path), ClipRecorderStats(), messages)
+    event = BusinessEvent(
+        "fall", "fall.detected", "event-epoch", "camera-1", "facility-1", 10.0, 0.9,
+        audit={"runtime_manifest_sha256": RUNTIME_MANIFEST_SHA256},
+    )
+    first = admission.accept_event(
+        _packet(pts=10.0, seq=1, epoch=2, generation=3), event, allow_new_clip=True
+    )
+    second = admission.accept_event(
+        _packet(pts=10.1, seq=2, epoch=3, generation=3), event, allow_new_clip=True
+    )
+    third = admission.accept_event(
+        _packet(pts=10.2, seq=3, epoch=3, generation=4), event, allow_new_clip=True
+    )
+
+    assert first is not None
+    assert len({first, second, third}) == 3

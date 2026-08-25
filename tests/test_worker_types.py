@@ -44,6 +44,7 @@ _EXPECTED_FIELDS = {
         "source_pts",
         "source_dts",
         "source_time_base",
+        "source_generation",
         "lease",
     ),
     ModuleResult: ("module_name", "result", "elapsed_ms", "output_adapter"),

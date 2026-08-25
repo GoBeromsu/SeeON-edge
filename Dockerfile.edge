@@ -1,64 +1,62 @@
 # syntax=docker/dockerfile:1.7
 
-FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim
+# DeepStream 9.1 publishes no devel tag. The digest-pinned triton-multiarch
+# image is intentionally used for both stages: it was verified to contain the
+# 9.1 sources/headers, GStreamer development metadata, C++ compiler and CMake.
+FROM nvcr.io/nvidia/deepstream@sha256:f6fa0247da9290979cbb05749e7da9435d089c93db7c4dcfe85ba2488b5f4994 AS deepstream-native-build
+
+WORKDIR /src
+COPY worker/native/deepstream/CMakeLists.txt ./CMakeLists.txt
+COPY worker/native/deepstream/src ./src
+RUN test -d /opt/nvidia/deepstream/deepstream/sources \
+    && find /opt/nvidia/deepstream/deepstream/sources -type f -name 'nvds*.h' -print -quit | grep -q . \
+    && cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
+    && cmake --build build --parallel \
+    && ctest --test-dir build --output-on-failure \
+    && cmake --install build --prefix /opt/seeon-native \
+    && sha256sum \
+        /opt/seeon-native/bin/seeon-deepstream-preflight \
+        /opt/seeon-native/bin/seeon-deepstream-child
+
+FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim@sha256:e5b65587bce7de595f299855d7385fe7fca39b8a74baa261ba1b7147afa78e58 AS uv-bin
+
+FROM nvcr.io/nvidia/deepstream@sha256:f6fa0247da9290979cbb05749e7da9435d089c93db7c4dcfe85ba2488b5f4994 AS runtime
+
+COPY --from=uv-bin /usr/local/bin/uv /usr/local/bin/uv
+COPY --from=deepstream-native-build /opt/seeon-native/bin/seeon-deepstream-preflight /usr/local/bin/seeon-deepstream-preflight
+COPY --from=deepstream-native-build /opt/seeon-native/bin/seeon-deepstream-child /usr/local/bin/seeon-deepstream-child
 
 ENV UV_LINK_MODE=copy \
     UV_PYTHON_DOWNLOADS=never \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PATH="/app/.venv/bin:${PATH}"
+    PATH="/app/.venv/bin:${PATH}" \
+    SEEON_DEEPSTREAM_MANIFEST=/opt/seeon/deepstream-manifest.json \
+    SEEON_DEEPSTREAM_FIRST_FAULT=/var/lib/seeon-state/deepstream-first-fault.json
 
 WORKDIR /app
 
-# ffmpeg is required by the clip recorder for H.264 encoding (h264_nvenc on the
-# edge GPU, libx264 fallback). --no-install-recommends keeps the image lean; the
-# version probe fails the build early if the binary is missing.
+# Keep the shared image's existing clip/font and Intel decode capabilities.
+# DeepStream 9.1 is Ubuntu 24.04, so unlike the old Debian base no apt source
+# rewriting is needed for the non-free Intel media driver.
+# The NGC image retains dpkg records for several codec libraries whose files
+# are intentionally pruned. --reinstall restores those exact Noble packages;
+# without it Ubuntu ffmpeg links against absent libvpx/lame/x26x objects.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ffmpeg fonts-noto-cjk \
+    && apt-get install -y --reinstall --no-install-recommends \
+        ffmpeg \
+        fonts-noto-cjk \
+        intel-media-va-driver-non-free \
+        libflac12t64 \
+        libmp3lame0 \
+        libmpg123-0t64 \
+        libvpx9 \
+        libx264-164 \
+        libx265-199 \
+        vainfo \
     && rm -rf /var/lib/apt/lists/* \
     && ffmpeg -version \
     && test -f /usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc
-
-# Intel VAAPI runtime for the `igpu` profile (decode-only; see
-# worker/adapters/decode/vaapi/). `intel-media-va-driver-non-free` is the
-# real iHD driver Arrow Lake needs -- the free `intel-media-va-driver`
-# package only ships the legacy i965 driver, which does not support Arrow
-# Lake's Xe-class iGPU, so non-free is a hard requirement here, not a
-# convenience choice. It lives in Debian's non-free component, which the
-# base image's sources.list does not enable by default. `libva-drm2` is the
-# libva DRM winsys plugin (talks to /dev/dri render nodes); `vainfo` is a
-# diagnostic CLI only, for verifying the driver loads at runtime (see
-# docs/runbooks/vaapi-igpu-decode.md) -- neither pulls a desktop mesa/GL
-# stack. This installs on every profile's image (one shared Dockerfile), the
-# same tradeoff already made for ffmpeg above; it does not touch or gate the
-# nvdec/opencv/cuda paths.
-#
-# DO NOT add a second sources.list.d entry for deb.debian.org (e.g. a
-# legacy one-line `deb http://deb.debian.org/debian bookworm ...` file).
-# This base image ships /etc/apt/sources.list.d/debian.sources in deb822
-# format with an explicit `Signed-By:` keyring already pinned. A second
-# entry for the *same* repo+suite without a matching Signed-By makes apt
-# see two disagreeing values for one source and refuse to read sources at
-# all ("E: Conflicting values set for option Signed-By regarding source
-# http://deb.debian.org/debian/ bookworm: ... != ..."), failing the build
-# before any package install runs. Instead, widen the Components: already
-# present on that entry. The sed is scoped to the bookworm/bookworm-updates
-# stanza only, so it does not also enable non-free on the bookworm-security
-# stanza. If a future base image bump changes this layout, fail loudly here
-# instead of a silent no-op that only surfaces later as a confusing
-# "package not found" from apt-get install.
-RUN set -eux; \
-    sed -i '/^Suites: bookworm bookworm-updates$/,/^$/ s/^Components:.*/Components: main contrib non-free non-free-firmware/' \
-        /etc/apt/sources.list.d/debian.sources; \
-    grep -A5 '^Suites: bookworm bookworm-updates$' /etc/apt/sources.list.d/debian.sources \
-        | grep -q '^Components:.*non-free' \
-        || { echo "ERROR: failed to enable non-free components on debian.sources -- base image apt sources layout changed, update this RUN" >&2; exit 1; }
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends \
-        intel-media-va-driver-non-free \
-        libva-drm2 \
-        vainfo \
-    && rm -rf /var/lib/apt/lists/*
 
 COPY pyproject.toml uv.lock ./
 RUN --mount=type=cache,target=/root/.cache/uv \
@@ -67,16 +65,35 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 COPY contracts ./contracts
 COPY shared ./shared
 COPY worker ./worker
+# C8 canary orchestration is a host-side operator tool. .dockerignore removes
+# it from the COPY context; this assertion makes accidental product shipment a
+# build failure rather than a documentation promise.
+RUN test ! -e /app/worker/tools/deepstream_canary
 # No operational SQLite CLI ships in this image. ADR 0005 gives the
 # inference-runtime slot no database, so clip-consistency repair is
 # backend-owned (scripts/ops/repair-clip-consistency.py against
 # backend/app/features/clips/consistency_ops.py).
-RUN mkdir -p /app/models/fall/lstm-runtime /app/models/pose /app/models/bed
 # State dir is image-owned (matches worker/runtime/state_dir.py's resolver for
 # the root container user); deliberately no VOLUME here to avoid anonymous-
-# volume sprawl and derived-image RUN neutralization — compose.edge.yaml
+# volume sprawl and derived-image RUN neutralization -- compose.edge.yaml
 # attaches a named volume at this same path instead.
 RUN mkdir -p /root/.local/state/ml-worker
+RUN mkdir -p \
+        /app/models/fall/lstm-runtime \
+        /app/models/pose \
+        /app/models/bed \
+        /var/lib/seeon-state \
+        /var/cache/seeon/tensorrt \
+    && python worker/native/deepstream/build_manifest.py \
+        worker/native/deepstream/manifest.template.json \
+        /opt/seeon/deepstream-manifest.json \
+    && python -m worker.native.deepstream.preflight \
+        --prepare-engine-cache /opt/seeon/deepstream-manifest.json \
+    && chmod 0444 /opt/seeon/deepstream-manifest.json \
+    && sha256sum \
+        /opt/seeon/deepstream-manifest.json \
+        /usr/local/bin/seeon-deepstream-preflight \
+        /usr/local/bin/seeon-deepstream-child
 
 ARG EDGE_DATABASE_SCHEMA_VERSION=18
 ARG SOURCE_REVISION
@@ -92,7 +109,8 @@ RUN if [ "$SOURCE_REVISION" = "0000000000000000000000000000000000000000" ] \
     chmod 0444 /opt/seeon/ml-worker-image-revision /opt/seeon/edge-database-schema-version
 LABEL org.opencontainers.image.revision="${SOURCE_REVISION}" \
       org.opencontainers.image.source="SeniorAILab/eldercare-fall-ml-v2" \
-      seeon.edge.database.schema-version="${EDGE_DATABASE_SCHEMA_VERSION}"
+      seeon.edge.database.schema-version="${EDGE_DATABASE_SCHEMA_VERSION}" \
+      com.seniorailab.seeon.deepstream.image="nvcr.io/nvidia/deepstream@sha256:f6fa0247da9290979cbb05749e7da9435d089c93db7c4dcfe85ba2488b5f4994"
 ENV ML_WORKER_BUILD_REVISION="${SOURCE_REVISION}"
 
 CMD ["python", "-m", "worker"]

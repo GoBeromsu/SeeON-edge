@@ -4,12 +4,13 @@ import queue
 import threading
 from collections.abc import Callable
 from pathlib import Path
-from typing import assert_never, final
+from typing import final
 
 from worker.pipeline.output.evidence.clip_actor import (
     ClipActor,
     ClipActorDependencies,
 )
+from worker.pipeline.output.evidence.clip_actor_loop import release_pending, run_actor_loop
 from worker.pipeline.output.evidence.clip_admission import ClipAdmission
 from worker.pipeline.output.evidence.clip_maintenance import (
     ClipMaintenance,
@@ -20,6 +21,7 @@ from worker.pipeline.output.evidence.clip_recorder_models import (
     ActiveClip,
     ClipRecorderConfig,
     ClipRecorderStats,
+    EpochRollMessage,
     EventMessage,
     FlushMessage,
     FrameMessage,
@@ -34,7 +36,8 @@ from worker.pipeline.output.evidence.evidence_outbox_types import ClipId
 from worker.pipeline.output.evidence.evidence_retention import DiskUsage, PurgeResult
 from worker.pipeline.output.evidence.packet_repository import PacketRingRepository
 from worker.pipeline.output.evidence.packet_ring import PacketRingLimits
-from worker.types import BusinessEvent, FramePacket
+from worker.types import BusinessEvent, EvidenceTrigger, FramePacket
+from worker.types.source_packet import StreamEpoch
 
 
 @final
@@ -66,6 +69,7 @@ class ClipRecorder:
         self._admission = ClipAdmission(self.config, self.stats, self._queue)
         self._startup_hook = startup_hook
         self._on_clip_finalized = on_clip_finalized
+        self._epoch_subscribed = False
         self._maintenance = ClipMaintenance(
             self.config,
             self.stats,
@@ -134,6 +138,9 @@ class ClipRecorder:
                 for camera_id, fps in self._fps_by_camera.items():
                     self._services.coordinator.set_camera_fps(camera_id, fps)
                 self.stats.encoder = self._services.encoder_name
+                if self._services.repository is not None and not self._epoch_subscribed:
+                    self._services.repository.subscribe_epoch_roll(self._on_epoch_roll)
+                    self._epoch_subscribed = True
                 self._actor = ClipActor(
                     self.config,
                     self.stats,
@@ -194,13 +201,6 @@ class ClipRecorder:
         return self._maintenance.preflight_clip(clip_id)
 
     def delete_clip(self, clip_id: str) -> PurgeResult:
-        """Operator-requested deletion of one finalized primary clip.
-
-        Delegates straight to ``ClipMaintenance.purge_clip`` -- the same
-        held/verification/begin/complete/fail wiring this recorder already
-        passes to automatic ``rotate()`` -- so an operator delete and the
-        retention sweep can never disagree about what is safe to remove.
-        """
         return self._maintenance.purge_clip(clip_id)
 
     def set_camera_fps(self, camera_id: str, fps: float) -> None:
@@ -213,7 +213,7 @@ class ClipRecorder:
 
     def on_event(
         self,
-        trigger_packet: FramePacket,
+        trigger_packet: EvidenceTrigger,
         event: BusinessEvent,
         *,
         allow_new_clip: bool = True,
@@ -241,39 +241,20 @@ class ClipRecorder:
 
     def _run(self) -> None:
         actor = self._actor
-        if actor is None:
+        if actor is not None:
+            run_actor_loop(actor, self._queue, self._stop_event, lambda: self._rotate(force=True))
+
+    def _on_epoch_roll(self, previous: StreamEpoch, current: StreamEpoch) -> None:
+        thread = self._thread
+        if thread is None or not thread.is_alive():
             return
+        done = threading.Event()
         try:
-            while True:
-                try:
-                    message = self._queue.get(timeout=0.1)
-                except queue.Empty:
-                    if self._stop_event.is_set() and self._queue.empty():
-                        break
-                    actor.expire()
-                    continue
-                try:
-                    match message:
-                        case FrameMessage():
-                            self._handle_frame(message)
-                        case EventMessage():
-                            self._handle_event(message)
-                        case FlushMessage(done=done):
-                            try:
-                                actor.flush()
-                                self._rotate(force=True)
-                            finally:
-                                done.set()
-                        case unreachable:
-                            assert_never(unreachable)
-                finally:
-                    if isinstance(message, FrameMessage):
-                        message.packet.release()
-                    elif isinstance(message, EventMessage):
-                        message.trigger_packet.release()
-                    self._queue.task_done()
-        finally:
-            actor.shutdown()
+            self._queue.put(EpochRollMessage(previous, current, done), timeout=2.0)
+        except queue.Full as error:
+            raise RuntimeError("epoch roll could not seal active clip") from error
+        if not done.wait(timeout=5.0):
+            raise RuntimeError("epoch roll active clip seal timed out")
 
     def _handle_frame(self, message: FrameMessage) -> None:
         if self._actor is not None:
@@ -284,18 +265,7 @@ class ClipRecorder:
             self._actor.handle_event(message)
 
     def _release_pending_messages(self) -> None:
-        while True:
-            try:
-                message = self._queue.get_nowait()
-            except queue.Empty:
-                return
-            try:
-                if isinstance(message, FrameMessage):
-                    message.packet.release()
-                elif isinstance(message, EventMessage):
-                    message.trigger_packet.release()
-            finally:
-                self._queue.task_done()
+        release_pending(self._queue)
 
     def _sweep_stale_staging(self) -> None:
         self._maintenance.sweep_stale_staging()

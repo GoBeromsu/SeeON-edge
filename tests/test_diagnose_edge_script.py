@@ -73,7 +73,7 @@ def _run_diagnose(
     stubs = {
         "nvidia-smi": (
             'if [ "$1" = "--query-compute-apps=pid,process_name" ]; '
-            'then echo "123, python"; else echo "GPU 0"; fi'
+            'then echo "123, seeon-deepstream-child"; else echo "GPU 0"; fi'
         ),
         "docker": "exit 1",
         "sh": "exit 0",

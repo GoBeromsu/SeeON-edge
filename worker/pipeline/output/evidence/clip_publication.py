@@ -2,19 +2,21 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
 import shutil
 from collections.abc import Mapping
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Final, final
 
 from worker.adapters.encode.adapter_errors import ThumbnailGenerationError
 from worker.adapters.encode.thumbnail import THUMBNAIL_FILENAME, FFmpegThumbnailGenerator
 from worker.interfaces import ThumbnailGenerator
+from worker.pipeline.output.evidence.clip_corrupt_publication import publish_existing_corrupt
 from worker.pipeline.output.evidence.clip_identity import ClipReservation
+from worker.pipeline.output.evidence.clip_manifest_payload import manifest_payload
 from worker.pipeline.output.evidence.clip_publication_types import (
     ClipPublicationConflictError,
     ClipPublicationMetadata,
@@ -26,12 +28,15 @@ from worker.pipeline.output.evidence.clip_publication_types import (
 )
 from worker.pipeline.output.evidence.durability import fsync_directory, fsync_file
 from worker.pipeline.output.evidence.evidence_manifest import (
-    ReadyClipManifest,
-    UnavailableClipManifest,
     finalize_ready_manifest,
     unavailable_manifest,
 )
 from worker.pipeline.output.evidence.evidence_outbox_types import EvidenceReasonCode
+from worker.pipeline.output.evidence.terminal_outcome import (
+    TerminalClipOutcome,
+    TerminalClipState,
+    commit_terminal_outcome,
+)
 
 LOGGER: Final = logging.getLogger(__name__)
 
@@ -93,13 +98,22 @@ class ClipPublisher:
             ffprobe_bin=self._ffprobe_bin,
             runtime_manifest_sha256=metadata.runtime_manifest_sha256,
         )
-        payload = _manifest_payload(
+        payload = manifest_payload(
             manifest,
             metadata,
             path=f"clips/{reservation.clip_id}/{video_path.name}",
             video_available=True,
         )
         manifest_path = self._publish_manifest(reservation, payload)
+        _ = commit_terminal_outcome(
+            reservation.final_dir,
+            TerminalClipOutcome(
+                str(reservation.clip_id),
+                tuple(str(value) for value in metadata.event_refs),
+                TerminalClipState.READY,
+                hashlib.sha256(manifest_path.read_bytes()).hexdigest(),
+            ),
+        )
         self._cleanup_staging(reservation)
         return PublishedClip(reservation.clip_id, manifest, manifest_path, video_path)
 
@@ -122,15 +136,34 @@ class ClipPublisher:
             reason_code=reason_code,
             runtime_manifest_sha256=metadata.runtime_manifest_sha256,
         )
-        payload = _manifest_payload(
+        payload = manifest_payload(
             manifest,
             metadata,
             path=None,
             video_available=False,
         )
         manifest_path = self._publish_manifest(reservation, payload)
+        _ = commit_terminal_outcome(
+            reservation.final_dir,
+            TerminalClipOutcome(
+                str(reservation.clip_id),
+                tuple(str(value) for value in metadata.event_refs),
+                TerminalClipState.UNAVAILABLE,
+                hashlib.sha256(manifest_path.read_bytes()).hexdigest(),
+            ),
+        )
         self._cleanup_staging(reservation)
         return PublishedClip(reservation.clip_id, manifest, manifest_path, None)
+
+    def publish_corrupt(
+        self,
+        reservation: ClipReservation,
+        metadata: ClipPublicationMetadata,
+    ) -> PublishedClip:
+        existing = publish_existing_corrupt(reservation, metadata)
+        if existing is not None:
+            return existing
+        return self.publish_unavailable(reservation, metadata, EvidenceReasonCode.CORRUPT)
 
     def _publish_media(
         self,
@@ -154,11 +187,19 @@ class ClipPublisher:
                 reservation.clip_id,
                 "staged derivative is missing",
             )
+        au_index = artifact_path.with_name("au-index.cbor")
+        if au_index.exists():
+            fsync_file(au_index)
         fsync_file(artifact_path)
         self._barrier(PublicationStage.MEDIA_FSYNCED, artifact_path)
         os.replace(artifact_path, destination)
+        if au_index.exists():
+            os.replace(au_index, reservation.final_dir / "au-index.cbor")
         self._barrier(PublicationStage.MEDIA_RENAMED, destination)
         fsync_file(destination)
+        final_au_index = reservation.final_dir / "au-index.cbor"
+        if final_au_index.exists():
+            fsync_file(final_au_index)
         fsync_directory(reservation.final_dir)
         return destination
 
@@ -211,57 +252,6 @@ class ClipPublisher:
         if reservation.camera_id.strip() == "":
             raise ClipPublicationConflictError(reservation.clip_id, "camera id is blank")
 
-
-def _manifest_payload(
-    manifest: ReadyClipManifest | UnavailableClipManifest,
-    metadata: ClipPublicationMetadata,
-    *,
-    path: str | None,
-    video_available: bool,
-) -> dict[str, JsonValue]:
-    payload: dict[str, JsonValue] = manifest.model_dump(mode="json", exclude_none=True)
-    payload.update(
-        {
-            "event_ref": str(metadata.event_refs[0]),
-            "started_at": _utc_iso(metadata.started_at),
-            "duration_s": metadata.duration_s,
-            "encoder": metadata.encoder,
-            "path": path,
-            "finalized": True,
-            "video_available": video_available,
-            "recovery_state": "MEDIA_VERIFIED" if video_available else "UNAVAILABLE",
-        }
-    )
-    if metadata.decision_trace_id is not None:
-        payload["decision_trace_id"] = metadata.decision_trace_id
-    if metadata.event_type is not None:
-        payload["event_type"] = metadata.event_type
-    if metadata.domain is not None:
-        payload["domain"] = metadata.domain
-    if metadata.source_media is not None:
-        payload["source_media"] = metadata.source_media
-    if metadata.source_error_reason is not None:
-        payload["source_error_reason"] = metadata.source_error_reason
-    if metadata.truncation_reasons:
-        payload["truncation_reasons"] = list(metadata.truncation_reasons)
-    if metadata.time_origin is not None:
-        origin = metadata.time_origin
-        payload["time_origin"] = {
-            "worker_boot_id": origin.worker_boot_id,
-            "camera_id": origin.camera_id,
-            "stream_epoch": origin.stream_epoch,
-            "generation": origin.generation,
-            "media_origin_pts_sec": origin.media_origin_pts_sec,
-            "event_pts_sec": origin.event_pts_sec,
-            "requested_start_pts_sec": origin.requested_start_pts_sec,
-            "requested_end_pts_sec": origin.requested_end_pts_sec,
-            "event_media_time_ms": origin.event_media_time_ms,
-        }
-    return payload
-
-
-def _utc_iso(value: datetime) -> str:
-    return value.astimezone(UTC).isoformat().replace("+00:00", "Z")
 
 
 __all__ = [

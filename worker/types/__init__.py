@@ -16,6 +16,7 @@ from worker.types.capabilities import (
 )
 from worker.types.copy_metrics import CopyMetrics, CopyMetricsSnapshot
 from worker.types.decision_input import DecisionInput
+from worker.types.evidence_trigger import EvidenceTrigger, NativeEvidenceTrigger
 from worker.types.fall_model_input import FallModelInput
 from worker.types.frame_memory import (
     FrameDescriptor,
@@ -26,6 +27,19 @@ from worker.types.frame_memory import (
 )
 from worker.types.frame_packet import FrameKey, FramePacket
 from worker.types.module_result import ModuleResult
+from worker.types.perception_frame import (
+    AssociationResult,
+    BedRegion,
+    BedRegionChannel,
+    ChannelState,
+    HumanPoseChannel,
+    Keypoint,
+    PerceptionFrameFailure,
+    PerceptionFrameIdentity,
+    PerceptionFrameV1,
+    PersonBox,
+    PersonBoxChannel,
+)
 from worker.types.temporal_profile import (
     CURRENT_TEMPORAL_PROFILE,
     TemporalProfile,
@@ -41,6 +55,7 @@ __all__ = [
     "CopyMetricsSnapshot",
     "DecisionInput",
     "EMPTY_FRAME_BED_POSE_FEATURES",
+    "EvidenceTrigger",
     "FallModelInput",
     "FrameBedPoseFeatures",
     "FrameCapability",
@@ -51,6 +66,18 @@ __all__ = [
     "FramePacket",
     "MemoryKind",
     "ModuleResult",
+    "NativeEvidenceTrigger",
+    "AssociationResult",
+    "BedRegion",
+    "BedRegionChannel",
+    "ChannelState",
+    "HumanPoseChannel",
+    "Keypoint",
+    "PerceptionFrameFailure",
+    "PerceptionFrameIdentity",
+    "PerceptionFrameV1",
+    "PersonBox",
+    "PersonBoxChannel",
     "DecisionTraceSnapshot",
     "NumericTraceValue",
     "PipelineProfile",

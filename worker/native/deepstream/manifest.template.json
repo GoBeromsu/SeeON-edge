@@ -1,0 +1,57 @@
+{
+  "schema_version": 1,
+  "runtime": {
+    "deepstream": "9.1.0",
+    "deepstream_version_path": "/opt/nvidia/deepstream/deepstream/version",
+    "cuda": "13.2",
+    "tensorrt": "10.16.0.72",
+    "minimum_driver": "595.58.03",
+    "minimum_compute_capability": "12.0"
+  },
+  "plugins": [
+    {
+      "element": "nvstreammux",
+      "version": "9.1.0",
+      "path": "/usr/lib/x86_64-linux-gnu/gstreamer-1.0/deepstream/libnvdsgst_multistream.so"
+    },
+    {
+      "element": "nvvideoconvert",
+      "version": "1.2.3",
+      "path": "/usr/lib/x86_64-linux-gnu/gstreamer-1.0/deepstream/libgstnvvideoconvert.so"
+    },
+    {
+      "element": "nvv4l2decoder",
+      "version": "1.14.0",
+      "path": "/usr/lib/x86_64-linux-gnu/gstreamer-1.0/deepstream/libgstnvvideo4linux2.so"
+    },
+    {
+      "element": "nvinfer",
+      "version": "9.1.0",
+      "path": "/usr/lib/x86_64-linux-gnu/gstreamer-1.0/deepstream/libnvdsgst_infer.so"
+    }
+  ],
+  "native": {
+    "path": "/usr/local/bin/seeon-deepstream-preflight"
+  },
+  "models": {
+    "path": "/app/models",
+    "require_read_only": true
+  },
+  "engine_cache": {
+    "path": "/var/cache/seeon/tensorrt",
+    "engines": []
+  },
+  "engine_plan": {
+    "exporter": "ultralytics-8.4.61-onnx-opset17",
+    "precision": "fp32",
+    "builder": "trtexec-fp32-dynhw",
+    "models": [
+      {"name": "pose", "weight": "/app/models/pose/yolo26n-pose.pt"},
+      {"name": "person", "weight": "/app/models/person/yolo26n.pt"},
+      {"name": "bed", "weight": "/app/models/bed/yolo26m-seg.pt"}
+    ]
+  },
+  "warmup": {
+    "timeout_seconds": 20
+  }
+}

@@ -34,6 +34,7 @@ from worker.pipeline.output.evidence.evidence_outbox_types import (
     EvidenceReasonCode,
 )
 from worker.types import BusinessEvent, FrameKey, FramePacket
+from worker.types.source_packet import StreamEpoch
 
 RUNTIME_MANIFEST_SHA256 = "b" * 64
 
@@ -123,8 +124,9 @@ class _Coordinator:
         event: BusinessEvent,
         output_dir: Path | None = None,
         trigger_frame_key: FrameKey | None = None,
+        window_bounds: tuple[float, float] | None = None,
     ) -> ClipOutcome:
-        del camera_id, clip_id, event_time_sec, event, output_dir
+        del camera_id, clip_id, event_time_sec, event, output_dir, window_bounds
         self.trigger_frame_keys.append(trigger_frame_key)
         return self.outcome
 
@@ -184,8 +186,9 @@ class _FailThenSucceedCoordinator:
         event: BusinessEvent,
         output_dir: Path | None = None,
         trigger_frame_key: FrameKey | None = None,
+        window_bounds: tuple[float, float] | None = None,
     ) -> ClipOutcome:
-        del camera_id, event_time_sec, event, output_dir
+        del camera_id, event_time_sec, event, output_dir, window_bounds
         self.trigger_frame_keys.append(trigger_frame_key)
         self.attempts += 1
         if self.attempts == 1:
@@ -255,6 +258,21 @@ def test_actor_passes_the_trigger_frame_key_to_clip_finalization(tmp_path: Path)
     assert coordinator.trigger_frame_keys == [message.trigger_packet.frame_key]
 
 
+def test_epoch_roll_immediately_seals_active_window_unavailable(tmp_path: Path) -> None:
+    reservation = _reservation(tmp_path)
+    actor, stats, _, publisher, _ = _actor(
+        tmp_path,
+        ClipUnavailable("unused", ClipReasonCode.NO_SEGMENTS),
+    )
+    actor.handle_event(_event_message(reservation, "event-1"))
+
+    actor.handle_epoch_roll(StreamEpoch("boot-1", "cam-1", 3, 0))
+
+    assert stats.active_clips == 0
+    assert publisher.unavailable[0][2] is EvidenceReasonCode.STREAM_EPOCH_MISMATCH
+    assert publisher.unavailable[0][1].source_error_reason == "STREAM_EPOCH_ROLLED"
+
+
 def test_actor_carries_admitted_event_runtime_manifest_into_publication_metadata(
     tmp_path: Path,
 ) -> None:
@@ -303,6 +321,7 @@ def test_ready_artifact_origin_is_published_as_clip_time_origin(tmp_path: Path) 
                 height=90,
                 packet_count=25,
                 timestamp_translation_ticks=-10,
+                parser_caps_sha256="c" * 64,
             ),
         ),
         remux_method="pyav-packet-stream-copy",
@@ -332,6 +351,7 @@ def test_ready_artifact_origin_is_published_as_clip_time_origin(tmp_path: Path) 
     assert isinstance(streams[0], dict)
     assert streams[0]["packet_count"] == 25
     assert streams[0]["timestamp_translation_ticks"] == -10
+    assert streams[0]["parser_caps_sha256"] == "c" * 64
     assert metadata.source_media["selected_start_pts_sec"] == 9.0
 
 
@@ -384,7 +404,7 @@ def test_coalesced_refs_remain_ordered_and_unique(tmp_path: Path) -> None:
     assert publisher.unavailable[0][1].event_refs == ("event-1", "event-2")
 
 
-def test_coalesced_event_keeps_the_first_event_cutoff(tmp_path: Path) -> None:
+def test_coalesced_event_extends_the_union_cutoff(tmp_path: Path) -> None:
     reservation = _reservation(tmp_path)
     actor, _, _, publisher, _ = _actor(
         tmp_path,
@@ -395,7 +415,8 @@ def test_coalesced_event_keeps_the_first_event_cutoff(tmp_path: Path) -> None:
     first_cutoff = actor._active_by_camera["cam-1"].cutoff_time_sec
     actor.handle_event(_event_message(reservation, "event-2", time_sec=20.0))
 
-    assert actor._active_by_camera["cam-1"].cutoff_time_sec == first_cutoff == 12.0
+    assert first_cutoff == 12.0
+    assert actor._active_by_camera["cam-1"].cutoff_time_sec == 22.0
     actor.flush()
     assert publisher.unavailable[0][1].event_refs == ("event-1", "event-2")
 

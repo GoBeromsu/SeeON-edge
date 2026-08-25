@@ -16,7 +16,7 @@ from worker.pipeline.output.evidence.snapshot_store import (
     SnapshotStore,
     StoredSnapshot,
 )
-from worker.types import FramePacket
+from worker.types import EvidenceTrigger
 from worker.types.business_event import BusinessEvent
 
 LOGGER: Final = logging.getLogger(__name__)
@@ -49,7 +49,7 @@ class EvidenceStager(Protocol):
 class EventClipRecorder(Protocol):
     def on_event(
         self,
-        trigger_packet: FramePacket,
+        trigger_packet: EvidenceTrigger,
         event: BusinessEvent,
         *,
         allow_new_clip: bool = True,
@@ -70,7 +70,7 @@ class EvidenceEventSink:
         del event
         raise ValueError("trigger packet is required for evidence emission")
 
-    def emit_for_frame(self, event: BusinessEvent, trigger_packet: FramePacket) -> None:
+    def emit_for_frame(self, event: BusinessEvent, trigger_packet: EvidenceTrigger) -> None:
         """Persist an event with its authoritative triggering frame packet."""
         if trigger_packet.camera_id != event.camera_id:
             raise ValueError("event camera does not match trigger packet")

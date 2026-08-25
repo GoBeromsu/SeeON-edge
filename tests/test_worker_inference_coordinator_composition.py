@@ -3,7 +3,6 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Literal, final
 
 import numpy as np
@@ -60,6 +59,17 @@ class _FallMetadata:
 
 
 @final
+class _NoopIngest:
+    camera_id = "camera-a"
+
+    def run(self) -> None:
+        return None
+
+    def stop(self) -> None:
+        return None
+
+
+@final
 class _FallModel:
     metadata = _FallMetadata()
     operating_threshold = 0.5
@@ -104,7 +114,7 @@ def _packet() -> FramePacket:
     )
 
 
-def test_composed_coordinator_removes_pose_and_reuses_the_cuda_runner(
+def test_non_nvidia_composed_coordinator_removes_pose_and_reuses_the_runner(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -126,12 +136,12 @@ def test_composed_coordinator_removes_pose_and_reuses_the_cuda_runner(
     runtime = WorkerRuntime(
         _config(),
         serving_client=serving,
-        loop_factory=lambda *_args: SimpleNamespace(run=lambda: None, stop=lambda: None),
+        loop_factory=lambda *_args: _NoopIngest(),
         state_dir=tmp_path,
         clip_store_dir=tmp_path / "clips",
     )
     monkeypatch.setattr(WorkerRuntime, "_create_fall_model", lambda *_args: _FallModel())
-    profile = PROFILE_REGISTRY["nvidia"]
+    profile = PROFILE_REGISTRY["cpu-host"]
     boot = BootContext(profile, profile.device, profile.decode, profile.encode)
     graph = runtime._initialize_models(boot)  # noqa: SLF001
     runtime._warmed_component_ids = frozenset(graph.components)  # noqa: SLF001
@@ -147,7 +157,7 @@ def test_composed_coordinator_removes_pose_and_reuses_the_cuda_runner(
     try:
         assert [extractor.module_name for extractor in context.analytics.extractors] == ["bed"]
         assert context.inference_results is not None
-        assert context.pump._results is context.inference_results  # type: ignore[attr-defined]  # noqa: SLF001
+        assert context.pump._results is context.inference_results  # pyright: ignore[reportAttributeAccessIssue]  # noqa: SLF001
         assert coordinator._lanes[0].results is context.inference_results  # noqa: SLF001
 
         pooled_pose = graph.components["pose"]
@@ -160,9 +170,9 @@ def test_composed_coordinator_removes_pose_and_reuses_the_cuda_runner(
 
         pose_runners = [runner for runner in created if runner.task == "pose"]
         assert [(runner.device, runner is pooled_pose.runner) for runner in pose_runners] == [
-            ("cuda", True)
+            ("cpu", True)
         ]
-        assert forwards == [(id(pooled_pose.runner), "cuda")]
+        assert forwards == [(id(pooled_pose.runner), "cpu")]
     finally:
         coordinator.stop()
         context.pump.stop()

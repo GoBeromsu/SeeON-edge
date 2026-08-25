@@ -16,6 +16,7 @@ class FrameKey:
     pts: float | None
     source_pts: int | None = None
     source_time_base: Fraction | None = None
+    source_generation: int = 0
 
 
 @dataclass(frozen=True, slots=True, init=False)
@@ -32,6 +33,7 @@ class FramePacket:
     source_pts: int | None = None
     source_dts: int | None = None
     source_time_base: Fraction | None = None
+    source_generation: int = 0
     lease: FrameLease = field(compare=False, hash=False, repr=False)
 
     def __init__(
@@ -49,6 +51,7 @@ class FramePacket:
         source_dts: int | None = None,
         source_time_base: Fraction | None = None,
         lease: FrameLease | None = None,
+        source_generation: int = 0,
         *,
         _frame: Frame | None = None,
     ) -> None:
@@ -73,6 +76,7 @@ class FramePacket:
         object.__setattr__(self, "source_pts", source_pts)
         object.__setattr__(self, "source_dts", source_dts)
         object.__setattr__(self, "source_time_base", source_time_base)
+        object.__setattr__(self, "source_generation", source_generation)
         object.__setattr__(self, "lease", resolved_lease)
 
     @property
@@ -91,6 +95,10 @@ class FramePacket:
         return self.lease.descriptor
 
     @property
+    def trigger_time_sec(self) -> float:
+        return self.frame.time_sec if self.pts is None else self.pts
+
+    @property
     def frame_key(self) -> FrameKey:
         return FrameKey(
             self.worker_boot_id,
@@ -100,6 +108,7 @@ class FramePacket:
             self.pts,
             self.source_pts,
             self.source_time_base,
+            self.source_generation,
         )
 
     def retain(self) -> FramePacket:
