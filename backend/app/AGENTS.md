@@ -8,7 +8,7 @@ with the worker.
 
 - `create_app()` seeds `app.state.edge_relay_token` from `API_EDGE_RELAY_TOKEN`, mounts unversioned `probe_router`, then registers product routers under `Settings.api_v1_prefix` (`/api/v1`). Front dist mounts at `/` from `API_FRONT_DIST` when that dir exists.
 - Auth reads only `app.state.edge_relay_token`. Handlers never re-read env. Lifespan seeding is `hasattr`-guarded so the factory (and tests) win. `no_lifespan` is the test hook.
-- `lifespan.py` rejects retired env keys, resolves the ml-api state dir, then assembles in-memory `heartbeat_store` / `runtime_status_store`, `camera_registry`, and the connection-derived ingest / evidence / mapper bundle. Clip listing is compact-authority on request.
+- `lifespan.py` rejects retired env keys, resolves the ml-api state dir, then assembles in-memory `heartbeat_store` / `runtime_status_store`, `camera_registry`, and the connection-derived ingest / evidence bundle. Clip listing is compact-authority on request.
 - Config refresh and heartbeat relay each get a dedicated 1-worker executor. `API_BACKEND_HEARTBEAT_RELAY_SEC=0` kills the relay loop.
 - Clip listing is compact-authority on request. Shutdown cancels both loops, then `catalog_store.close()`.
 - Lifespan does not build detectors or RTSP. Pulled ml-config `cameras` are not admission; the dashboard registry is the camera SSOT.

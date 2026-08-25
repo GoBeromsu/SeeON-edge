@@ -713,21 +713,17 @@ def test_successful_refresh_resumes_roster_sync_without_per_camera_mapping(
         assert camera["camera_id"] == "local-uuid-9"
 
 
-def test_backend_camera_mapper_has_no_env_constructor(
+def test_backend_camera_mapper_surface_is_absent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Regression guard: ``BackendCameraMapper`` must not grow a ``from_env()``
-    (or similarly named) constructor again. Facility identity -- including the
-    mapper's bearer token -- is DB-only (``ConnectionSettingsStore``,
-    dashboard-entered); the only construction site is ``lifespan.py``, which
-    passes DB-sourced values explicitly. An env-seeded constructor previously
-    existed here, was dead in production, and was removed because it was the
-    only way EDGE_FACILITY_TOKEN (or its legacy aliases) could reintroduce a
-    token through the environment/compose/Git."""
-    from backend.app.shared.backend_mapping import BackendCameraMapper
+    """Per-camera mapper construction is gone; env tokens cannot seed it."""
+    from backend.app.shared import backend_mapping
 
-    assert not hasattr(BackendCameraMapper, "from_env")
-
+    assert not hasattr(backend_mapping, "BackendCameraMapper")
+    mapping_text = Path(backend_mapping.__file__).read_text(encoding="utf-8")
+    assert "def from_env" not in mapping_text
+    assert "def push_camera" not in mapping_text
+    assert "def put_roster" not in mapping_text
     for name in (
         "EDGE_FACILITY_TOKEN",
         "API_FACILITY_TOKEN",
@@ -735,14 +731,6 @@ def test_backend_camera_mapper_has_no_env_constructor(
         "API_EDGE_FACILITY_TOKEN",
     ):
         monkeypatch.setenv(name, "should-be-ignored")
-
-    # Constructing directly with no token (as an unenrolled edge would be,
-    # since nothing DB-sourced is passed) must not somehow pick up the env
-    # values set above -- there is no code path left that could, but this
-    # pins the observable behavior.
-    mapper = BackendCameraMapper(endpoint="http://backend:8080/api/v1/edge/cameras", token=None)
-    assert mapper.configured is False
-    assert mapper.token is None
 
 
 def test_backend_detection_windows_populate_per_domain_map_and_bed_exit_alias(

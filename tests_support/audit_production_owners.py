@@ -1,4 +1,4 @@
-"""Exhaustive catalog-to-production callable ownership declaration."""
+"""Test-only catalog of production callables that own each audit action."""
 
 from __future__ import annotations
 
@@ -119,9 +119,3 @@ def assert_owner_catalog_complete(owners: ActionOwners) -> None:
     )
     if invalid:
         raise AuditOwnerCatalogError("audit production owner catalog contains an invalid owner")
-
-
-__all__ = [
-    "ActionOwners", "AuditOwnerCatalogError", "assert_owner_catalog_complete",
-    "production_action_owners",
-]
