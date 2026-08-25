@@ -10,7 +10,7 @@ from pathlib import Path
 
 from backend.app.edge_db.compact_cutover import CompactCutoverRequest, run_compact_cutover
 from backend.app.edge_db.compatibility import EdgeDatabaseError
-from backend.app.edge_db.sqlite_runtime import SqliteRuntimeError, parse_sqlite_version
+from backend.app.edge_db.sqlite_runtime import SqliteRuntimeError
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -28,8 +28,6 @@ def _parser() -> argparse.ArgumentParser:
     ):
         parser.add_argument(f"--{name}", type=Path, required=True)
     parser.add_argument("--expected-source-sha256")
-    parser.add_argument("--sqlite-version")
-    parser.add_argument("--rollback", action="store_true")
     return parser
 
 
@@ -46,18 +44,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                 clip_store=args.clip_store,
                 worker_state=args.worker_state,
                 expected_source_sha256=args.expected_source_sha256,
-            ),
-            rollback=args.rollback,
-            sqlite_version=(
-                None if args.sqlite_version is None else parse_sqlite_version(args.sqlite_version)
-            ),
+            )
         )
     except (OSError, sqlite3.Error, EdgeDatabaseError, SqliteRuntimeError) as error:
         print(f"EDGE_DB_COMPACT_CUTOVER_FAILED: {error}", file=sys.stderr)
         return 1
     print(
-        f"EDGE_DB_COMPACT_CUTOVER_OK live={result.live} current={result.current_version} "
-        f"source_sha256={result.source_sha256 or '-'}"
+        f"EDGE_DB_COMPACT_CUTOVER_OK live={result.live} rows={result.source_rows} "
+        f"source_sha256={result.source_sha256} receipt_sha256={result.receipt_sha256}"
     )
     return 0
 

@@ -8,9 +8,16 @@ from pathlib import Path
 
 import pytest
 
+from backend.app.edge_db import compact_cutover
 from backend.app.edge_db.migrator import migrate_database
 from backend.app.features.connection.store import ConnectionSettingsStore
 from backend.app.shared.dashboard_credentials import DashboardCredentialsStore
+
+
+@pytest.fixture
+def supported_compact_cutover_sqlite(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Inject a safe runtime only through the private library seam."""
+    monkeypatch.setattr(compact_cutover, "_runtime_sqlite_version", lambda: (3, 51, 3))
 
 
 @pytest.fixture(autouse=True)
@@ -177,11 +184,10 @@ def stub_rtsp_hostname_resolution(monkeypatch: pytest.MonkeyPatch) -> Iterator[N
         try:
             return (str(ipaddress.ip_address(host)),)
         except ValueError:
-            pass
-        if host == "localhost" or host.endswith(".localhost"):
-            return ("127.0.0.1",)
-        # Well-known public unicast (Google DNS); not special-use/private.
-        return ("8.8.8.8",)
+            if host == "localhost" or host.endswith(".localhost"):
+                return ("127.0.0.1",)
+            # Well-known public unicast (Google DNS); not special-use/private.
+            return ("8.8.8.8",)
 
     monkeypatch.setattr(rtsp_url_policy, "resolve_host_a_aaaa", _stub)
     yield
