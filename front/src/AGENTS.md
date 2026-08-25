@@ -59,6 +59,11 @@ partially materialized namespace and permanently drop real exports
 (`No "x" export is defined on the "y" mock`). `withOverrides` forwards reads to the live namespace
 at access time instead of copying it.
 
+Its Proxy target is a fresh extensible null-prototype facade, never `actual`. A real namespace owns
+a non-configurable `Symbol.toStringTag`, so proxying `actual` directly and rewriting descriptors to
+`configurable: true` makes `Object.getOwnPropertyDescriptor(s)` throw, and an override-only key
+makes `ownKeys` throw on a non-extensible target. Keep the facade.
+
 ## Where to look
 
 - Route or query key → `app/dashboardLocation.ts`, then the page under `app/pages/`.

@@ -1,5 +1,4 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import * as clientModule from '@/shared/api/client';
 import { bedZoneRecognitionFailureDetail, browseClipStorage, cameraDuplicateDetail, cameraProbeFailureDetail, createCamera, deleteClip, fetchCameraOverlay, fetchCameras, fetchClipArtifacts, fetchClips, fetchClipStorage, fetchDetectionSettings, fetchRuntimeSettings, fetchStatus, fetchSystem, getApiBase, getCameraSnapshotUrl, getCameraStreamUrl, loginDashboard, logoutDashboard, recognizeBedZone, saveClipStorageLocation, saveConnection, saveDetectionSettings, saveRuntimeSettings, setCameraOverlay, testCamera, testConnection, updateCamera, updateCameraDecodeBackend } from '@/shared/api/client';
 import { HttpError } from '@/shared/api/http';
 import type { DetectionSettings } from '@/shared/api/client';
@@ -507,7 +506,11 @@ describe('api client contracts', () => {
     ['controlClipDerivative'],
     ['requestClipDerivative'],
     ['setClipLabel'],
-  ])('exports no retired %s client', (name) => {
+  ])('exports no retired %s client', async (name) => {
+    // Resolved dynamically rather than via a second top-level `import * as`: two top-level
+    // `__vite_ssr_import__` requests for one module let the named-import binding observe the
+    // namespace while it is still materializing, which surfaces as `x is not a function`.
+    const clientModule = await import('@/shared/api/client');
     const exported = Object.keys(clientModule);
     // Positive control first: a bare `not.toContain` would also pass against an empty namespace,
     // so assert the module really is loaded before trusting the absence assertion.
