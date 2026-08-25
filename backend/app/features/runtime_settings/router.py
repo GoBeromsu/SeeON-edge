@@ -7,6 +7,9 @@ from typing import ClassVar
 from fastapi import APIRouter, HTTPException, Request, status
 from pydantic import BaseModel, ConfigDict, Field
 
+from backend.app.features.audit.catalog import AuditAction, empty_detail
+from backend.app.features.audit.http import append_transactional
+from backend.app.features.audit.store import AuditEvent, utc_now
 from backend.app.features.runtime_settings.store import (
     RuntimeSettingsVersionConflict,
     get_runtime_settings_store,
@@ -43,11 +46,16 @@ def put_runtime_settings(
     payload: RuntimeSettingsUpdateRequest,
     request: Request,
 ) -> dict[str, object]:
-    _authorize(request)
+    actor = _authorize(request)
+    event = AuditEvent(
+        occurred_at=utc_now(), actor_id=actor, action=AuditAction.RUNTIME_SETTINGS_UPDATE,
+        target_id="runtime-settings", detail=empty_detail(AuditAction.RUNTIME_SETTINGS_UPDATE),
+    )
     try:
         setting = get_runtime_settings_store(request.app).set_clip_export_enabled(
             payload.clip_export_enabled,
             expected_version=payload.expected_version,
+            after_write=lambda connection: append_transactional(request, connection, event),
         )
     except RuntimeSettingsVersionConflict as exc:
         raise HTTPException(
@@ -60,8 +68,8 @@ def put_runtime_settings(
     return setting.as_dict()
 
 
-def _authorize(request: Request) -> None:
-    authorize_dashboard(request)
+def _authorize(request: Request) -> str:
+    return authorize_dashboard(request)
 
 
 __all__ = ["RuntimeSettingsResponse", "router"]

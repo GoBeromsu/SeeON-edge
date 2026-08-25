@@ -6,7 +6,15 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from backend.app.features.clips.storage_location_store import ClipStorageLocationStore
+from tests_support.compact_authority_db import prepare_compact_database
+
+
+@pytest.fixture(autouse=True)
+def _compact_database(tmp_path: Path) -> None:
+    prepare_compact_database(tmp_path / "catalog.sqlite3")
 
 
 def test_get_defaults_to_the_empty_string_mount_root_when_nothing_selected(

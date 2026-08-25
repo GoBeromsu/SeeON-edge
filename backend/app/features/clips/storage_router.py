@@ -27,6 +27,9 @@ from typing import Annotated, ClassVar
 from fastapi import APIRouter, FastAPI, HTTPException, Query, Request, status
 from pydantic import BaseModel, ConfigDict
 
+from backend.app.features.audit.catalog import AuditAction, empty_detail
+from backend.app.features.audit.http import append_transactional
+from backend.app.features.audit.store import AuditEvent, utc_now
 from backend.app.features.clips.storage_location_store import ClipStorageLocationStore
 from backend.app.features.clips.store import CLIP_STORE_DIR_ENV, DEFAULT_CLIP_STORE_DIR
 from backend.app.shared.dashboard_auth import authorize_dashboard
@@ -102,7 +105,7 @@ def put_clip_storage_location(
     payload: ClipStorageLocationRequest,
     request: Request,
 ) -> dict[str, object]:
-    _authorize(request)
+    actor = _authorize(request)
     segments = _validate_relative_path(payload.path)
     try:
         # Existence + directory-ness check only; the listing itself is
@@ -112,7 +115,14 @@ def put_clip_storage_location(
     except FileNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="path not found") from exc
     selected = "/".join(segments)
-    _location_store(request.app).put(selected)
+    event = AuditEvent(
+        occurred_at=utc_now(), actor_id=actor, action=AuditAction.CLIP_STORAGE_UPDATE,
+        target_id=selected or "clip-store", detail=empty_detail(AuditAction.CLIP_STORAGE_UPDATE),
+    )
+    _location_store(request.app).put(
+        selected,
+        after_write=lambda connection: append_transactional(request, connection, event),
+    )
     return _storage_snapshot(request.app)
 
 
@@ -213,8 +223,8 @@ def _location_store(app: FastAPI) -> ClipStorageLocationStore:
     return store
 
 
-def _authorize(request: Request) -> None:
-    authorize_dashboard(request)
+def _authorize(request: Request) -> str:
+    return authorize_dashboard(request)
 
 
 __all__ = ["router"]

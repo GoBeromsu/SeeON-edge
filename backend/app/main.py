@@ -11,6 +11,11 @@ from fastapi import APIRouter, FastAPI
 from fastapi.staticfiles import StaticFiles
 
 from backend.app.core.config import get_settings
+from backend.app.features.audit.http import (
+    AuditUnavailableError,
+    audit_unavailable_handler,
+)
+from backend.app.features.audit.router import router as audit_router
 from backend.app.features.auth.router import router as auth_router
 from backend.app.features.cameras.bed_zone_router import router as bed_zone_router
 from backend.app.features.cameras.router import router as cameras_router
@@ -44,6 +49,7 @@ def create_app(*, lifespan: LifespanFactory | None = serving_lifespan) -> FastAP
         version="0.2.0",
         lifespan=lifespan,
     )
+    app.add_exception_handler(AuditUnavailableError, audit_unavailable_handler)
     # relay 토큰의 유일한 출처는 `app.state.edge_relay_token`이다. 인증
     # 호출부는 이 값만 읽는다(env를 다시 읽지 않는다). 여기서 채워 두면
     # lifespan이 도는 서빙 경로와 lifespan 없이 만드는 테스트 경로가 같은
@@ -54,6 +60,7 @@ def create_app(*, lifespan: LifespanFactory | None = serving_lifespan) -> FastAP
 
     api_router = APIRouter()
     api_router.include_router(health_routes.router)
+    api_router.include_router(audit_router)
     api_router.include_router(auth_router)
     api_router.include_router(status_router)
     api_router.include_router(models_router)

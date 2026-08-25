@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from backend.app.edge_db.migrator import migrate_database
 from backend.app.features.cameras.edge_topology_sync_state import (
     EdgeTopologySyncStateStore,
     PendingTopologySnapshot,
@@ -30,6 +31,7 @@ from contracts.edge_provisioning_v1 import (
     TopologyMutationResult,
     TopologySuccessEnvelope,
 )
+from tests_support.compact_authority_db import seed_enrollment
 
 PRINCIPAL = MachinePrincipal("c72bd9a7-3e04-47ba-a8cd-a56e54f98152", 3)
 CONFIRMATION_ID = "0197f671-3a31-7a6c-a6e4-83ed412de81b"
@@ -64,6 +66,12 @@ class _Client:
 
 
 def _registry(path: Path) -> CameraRegistryStore:
+    migrate_database(path)
+    seed_enrollment(
+        path,
+        edge_installation_id=PRINCIPAL.edge_installation_id,
+        enrollment_generation=PRINCIPAL.enrollment_generation,
+    )
     store = CameraRegistryStore(path)
     store.create_floor(edge_ref="floor-1", name="First", order_index=1)
     store.create_room(edge_ref="room-101", floor_edge_ref="floor-1", name="101")
@@ -299,7 +307,7 @@ def test_changed_local_server_revision_fails_confirmation_cas(tmp_path: Path) ->
     path = tmp_path / "catalog.sqlite3"
     coordinator, _registry_store, client, _expected = _primed(path)
     with sqlite3.connect(path) as connection:
-        connection.execute("UPDATE edge_topology_sync_state SET server_revision = 9 WHERE id = 1")
+        connection.execute("UPDATE edge_site SET topology_server_revision = 9 WHERE id = 1")
 
     # When
     result = _confirm(coordinator)

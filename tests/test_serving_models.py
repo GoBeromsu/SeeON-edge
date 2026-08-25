@@ -6,11 +6,14 @@ from fastapi.testclient import TestClient
 
 from backend.app.features.cameras.store import CameraRegistryStore
 from backend.app.main import create_app, no_lifespan
+from tests_support.compact_authority_db import prepare_compact_database
 
 
 def test_models_reports_gateway_metadata_only(tmp_path: Path) -> None:
     app = create_app(lifespan=no_lifespan)
-    store = CameraRegistryStore(tmp_path / "catalog.sqlite3")
+    registry_path = tmp_path / "catalog.sqlite3"
+    prepare_compact_database(registry_path)
+    store = CameraRegistryStore(registry_path)
     store.create(
         camera_id="camera-1",
         label="c1",

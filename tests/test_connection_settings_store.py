@@ -7,25 +7,24 @@ import pytest
 
 from backend.app.core.config import reject_retired_backend_environment
 from backend.app.edge_db import EDGE_DATABASE_PATH
+from backend.app.edge_db.migrator import migrate_database
 from backend.app.features.connection import store as connection_store_module
 from backend.app.features.connection.store import (
     API_BACKEND_BASE_URL_ENV,
+    API_BACKEND_CONFIG_URL_ENV,
+    API_BACKEND_EVENTS_URL_ENV,
     API_CONNECTION_SETTINGS_PATH_ENV,
     DEFAULT_CONNECTION_SETTINGS_PATH,
     ConnectionSettings,
     ConnectionSettingsStore,
-)
-from backend.app.lifespan import (
-    API_BACKEND_CONFIG_URL_ENV,
-    API_BACKEND_EVENTS_URL_ENV,
-    EDGE_FACILITY_TOKEN_ENV,
 )
 
 _production_from_env = ConnectionSettingsStore.from_env
 
 
 @pytest.fixture(autouse=True)
-def clear_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+def clear_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    migrate_database(tmp_path / "connection_settings.sqlite3")
     for name in (
         API_CONNECTION_SETTINGS_PATH_ENV,
         API_BACKEND_EVENTS_URL_ENV,
@@ -40,6 +39,17 @@ def clear_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
 
 def _store(tmp_path: Path) -> ConnectionSettingsStore:
     return ConnectionSettingsStore(tmp_path / "connection_settings.sqlite3")
+
+
+def _enrollment() -> dict[str, str | int]:
+    return {
+        "facility_code": "NH-1234",
+        "client_installation_ref": "install-1",
+        "facility_id": "facility-1",
+        "facility_token": "token-1",
+        "edge_installation_id": "edge-1",
+        "enrollment_generation": 1,
+    }
 
 
 class TestFromEnv:
@@ -101,24 +111,20 @@ class TestLoadPrecedence:
         assert settings.facility_token is None
         assert settings.updated_at is None
 
-    def test_legacy_saved_row_remains_readable_despite_retired_env(
+    def test_hub_url_cannot_be_persisted(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setenv(API_BACKEND_EVENTS_URL_ENV, "https://env.example/events")
-        monkeypatch.setenv("EDGE_FACILITY_TOKEN", "env-token")
         store = _store(tmp_path)
 
-        _ = store.save(
-            {"events_url": "https://saved.example/events", "facility_token": "saved-token"}
-        )
-        settings = store.load()
+        with pytest.raises(ValueError, match="events_url"):
+            store.save({"events_url": "https://saved.example/events"})
 
-        assert settings.events_url == "https://saved.example/events"
-        assert settings.facility_token == "saved-token"
+        assert store.load().events_url is None
 
     def test_saved_row_wins_across_new_store_instances(self, tmp_path: Path) -> None:
         path = tmp_path / "connection_settings.sqlite3"
-        _ = ConnectionSettingsStore(path).save({"facility_id": "facility-1"})
+        _ = ConnectionSettingsStore(path).save(_enrollment())
 
         reloaded = ConnectionSettingsStore(path).load()
 
@@ -145,16 +151,13 @@ class TestLoadPrecedence:
     def test_unsaved_identity_does_not_fall_back_to_env_after_a_save(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.setenv(EDGE_FACILITY_TOKEN_ENV, "token-from-env")
+        monkeypatch.setenv("EDGE_FACILITY_TOKEN", "token-from-env")
         store = _store(tmp_path)
 
-        _ = store.save({"events_url": "https://saved.example/events"})
-        settings = store.load()
+        with pytest.raises(ValueError, match="events_url"):
+            store.save({"events_url": "https://saved.example/events"})
 
-        assert settings.events_url == "https://saved.example/events"
-        # Neither facility_id nor facility_token has an env seed/gap-fill:
-        # both are DB-only, so saving an unrelated field (events_url) must
-        # not cause the env-set token to leak in.
+        settings = store.load()
         assert settings.facility_id is None
         assert settings.facility_token is None
 
@@ -202,12 +205,13 @@ class TestLoadBaseUrlPrecedence:
         monkeypatch.setenv(API_BACKEND_BASE_URL_ENV, "https://backend.example")
         store = _store(tmp_path)
 
-        _ = store.save(
-            {
-                "events_url": "https://saved.example/events",
-                "config_url": "https://saved.example/ml-config",
-            }
-        )
+        with pytest.raises(ValueError, match="config_url, events_url"):
+            store.save(
+                {
+                    "events_url": "https://saved.example/events",
+                    "config_url": "https://saved.example/ml-config",
+                }
+            )
         settings = store.load()
 
         assert settings.events_url == "https://backend.example/api/v1/events"
@@ -217,35 +221,27 @@ class TestLoadBaseUrlPrecedence:
 class TestSavePartialUpdate:
     def test_partial_save_preserves_other_fields(self, tmp_path: Path) -> None:
         store = _store(tmp_path)
-        _ = store.save(
-            {
-                "events_url": "https://backend.example/events",
-                "config_url": "https://backend.example/ml-config",
-                "facility_id": "facility-42",
-                "facility_token": "token-abcd",
-            }
-        )
+        _ = store.save(_enrollment())
 
         _ = store.save({"facility_id": "facility-99"})
         settings = store.load()
 
         assert settings.facility_id == "facility-99"
-        assert settings.events_url == "https://backend.example/events"
-        assert settings.config_url == "https://backend.example/ml-config"
-        assert settings.facility_token == "token-abcd"
+        assert settings.events_url is None
+        assert settings.config_url is None
+        assert settings.facility_token == "token-1"
 
     def test_explicit_none_clears_a_saved_field(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setenv("API_FACILITY_ID", "facility-from-env")
         store = _store(tmp_path)
-        _ = store.save({"facility_id": "facility-saved"})
+        _ = store.save(_enrollment())
 
-        _ = store.save({"facility_id": None})
-        settings = store.load()
+        with pytest.raises(ValueError, match="runtime enrollment fields"):
+            store.save({"facility_id": None})
 
-        # Cleared DB field stays None even when env API_FACILITY_ID is set.
-        assert settings.facility_id is None
+        assert store.load().facility_id == "facility-1"
 
     def test_unknown_field_raises(self, tmp_path: Path) -> None:
         with pytest.raises(ValueError, match="unknown connection setting field"):
@@ -255,14 +251,14 @@ class TestSavePartialUpdate:
         store = _store(tmp_path)
         assert store.load().updated_at is None
 
-        settings = store.save({"facility_id": "facility-1"})
+        settings = store.save(_enrollment())
 
         assert settings.updated_at is not None
         assert settings.updated_at.endswith("Z")
 
     def test_updated_at_advances_on_subsequent_save(self, tmp_path: Path) -> None:
         store = _store(tmp_path)
-        first = store.save({"facility_id": "facility-1"})
+        first = store.save(_enrollment())
         second = store.save({"facility_id": "facility-2"})
 
         assert first.updated_at is not None
@@ -322,9 +318,7 @@ class TestApiPrefixNormalization:
 
         assert settings.events_url == "https://backend.example/api/v1/events"
 
-    def test_empty_base_stays_none(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_empty_base_stays_none(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv(API_BACKEND_BASE_URL_ENV, "   ")
 
         settings = _store(tmp_path).load()
@@ -343,9 +337,7 @@ def test_compose_edge_persists_only_the_central_connection_database() -> None:
     # would hide a service that mounts edge-state somewhere else, which is the
     # disagreement this test exists to catch.
     mount_lines = [
-        line
-        for line in compose.splitlines()
-        if line.strip().startswith("- edge-state:")
+        line for line in compose.splitlines() if line.strip().startswith("- edge-state:")
     ]
     assert mount_lines, "no service mounts edge-state"
 

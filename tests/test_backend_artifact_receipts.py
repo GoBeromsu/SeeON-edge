@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import sqlite3
+from collections.abc import Callable
 from pathlib import Path
 from typing import BinaryIO
 
@@ -32,6 +33,7 @@ from backend.app.features.evidence.relay_projection import RelayEvent, RelayEvid
 from backend.app.features.runtime_settings.store import RuntimeSettingsStore
 from backend.app.main import create_app, no_lifespan
 from shared.events.evidence_export_contract import ClipReceipt
+from tests_support.compact_authority_db import prepare_compact_database
 
 TOKEN = "relay-token"
 EVENT_ID = "00000000-0000-4000-8000-000000000001"
@@ -168,7 +170,9 @@ def _client(tmp_path: Path, store: ArtifactReceiptStore) -> TestClient:
     app.state.artifact_receipt_store = store
     app.state.clip_store_root = tmp_path / "clip-store"
     app.state.clip_store = ClipStore(app.state.clip_store_root)
-    registry = CameraRegistryStore(tmp_path / "catalog.sqlite3")
+    database = tmp_path / "catalog.sqlite3"
+    prepare_compact_database(database)
+    registry = CameraRegistryStore(database)
     registry.create(
         camera_id="camera-1",
         label="Camera 1",
@@ -179,7 +183,7 @@ def _client(tmp_path: Path, store: ArtifactReceiptStore) -> TestClient:
     )
     app.state.camera_registry = registry
     app.state.backend_evidence_client = LocalBackend()
-    settings = RuntimeSettingsStore(tmp_path / "catalog.sqlite3")
+    settings = RuntimeSettingsStore(database)
     settings.set_clip_export_enabled(True)
     app.state.runtime_settings_store = settings
     return TestClient(app)
@@ -347,6 +351,8 @@ def test_real_route_rejects_media_swap_before_compact_commit(
         compact_store: CompactArtifactReceiptStore,
         receipt: ArtifactReceipt,
         route_verified: VerifiedArtifact,
+        *,
+        after_write: Callable[[sqlite3.Connection], None] | None = None,
     ) -> ArtifactReceipt:
         nonlocal observed_inode, verified_handle
         verified_handle = route_verified.handle
@@ -365,7 +371,9 @@ def test_real_route_rejects_media_swap_before_compact_commit(
                 raise AssertionError(unreachable)
         if media.exists():
             observed_inode = media.stat().st_ino
-        return original_commit(compact_store, receipt, route_verified)
+        return original_commit(
+            compact_store, receipt, route_verified, after_write=after_write
+        )
 
     monkeypatch.setattr(
         CompactArtifactReceiptStore,
@@ -502,10 +510,14 @@ def test_real_route_valid_compact_receipt_commits_and_closes_descriptor(
             self,
             receipt: ArtifactReceipt,
             route_verified: VerifiedArtifact,
+            *,
+            after_write: Callable[[sqlite3.Connection], None] | None = None,
         ) -> ArtifactReceipt:
             nonlocal captured_handle
             captured_handle = route_verified.handle
-            return super().commit_verified(receipt, route_verified)
+            return super().commit_verified(
+                receipt, route_verified, after_write=after_write
+            )
 
     store = ObservedStore(
         database,

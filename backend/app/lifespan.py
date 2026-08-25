@@ -11,7 +11,7 @@ import sys
 import urllib.request
 from collections.abc import AsyncIterator
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import AsyncExitStack, asynccontextmanager
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from threading import Lock
@@ -21,9 +21,14 @@ from fastapi import FastAPI
 
 from backend.app.core.config import reject_retired_backend_environment
 from backend.app.edge_db import EDGE_DATABASE_PATH
+from backend.app.features.audit.http import AuditUnavailableError
+from backend.app.features.audit.startup import (
+    close_audit_session,
+    configure_audit_readiness,
+)
 from backend.app.features.cameras.store import CameraRegistryStore
 from backend.app.features.clips.catalog import CatalogStore
-from backend.app.features.clips.listing_runtime import maintain_clip_listing
+from backend.app.features.clips.deletion_lifecycle import reconcile_pending_clip_deletions
 from backend.app.features.status.backend_heartbeat_relay import (
     effective_relay_interval_sec,
     get_heartbeat_relay_state,
@@ -35,11 +40,7 @@ from backend.app.shared.backend_client_bundle import (
     BackendClientBundle,
     backend_client_bundle,
 )
-from backend.app.shared.backend_mapping import (
-    BackendCameraMapper,
-    derive_edge_cameras_endpoint,
-    mark_backend_status,
-)
+from backend.app.shared.backend_mapping import mark_backend_status
 from backend.app.shared.state_dir import resolve_state_dir
 from contracts.worker_config import (
     PulledCameraConfig,
@@ -54,17 +55,6 @@ from shared.events.edge_ingest_client import (
 
 API_BACKEND_EVENTS_URL_ENV = "API_BACKEND_EVENTS_URL"
 API_EDGE_RELAY_TOKEN_ENV = "API_EDGE_RELAY_TOKEN"
-# Shared secret for the ml-api -> backend Event API bearer auth (issue #552).
-# Name matches the backend's EdgeFacilityTokenGuard config key exactly so the
-# same value can be copied verbatim across the edge and host env files.
-EDGE_FACILITY_TOKEN_ENV = "EDGE_FACILITY_TOKEN"  # scope-fidelity: name-only
-# Retained as a name-only constant for tests/docs that assert the env key is
-# no longer an admission authority. Production code must not read this env.
-API_FACILITY_ID_ENV = "API_FACILITY_ID"  # scope-fidelity: name-only
-# Same name-only retention as the two constants above: the retired ml-config
-# URL is asserted by tests/docs as no longer being an authority, and no
-# production code reads it.
-API_BACKEND_CONFIG_URL_ENV = "API_BACKEND_CONFIG_URL"  # scope-fidelity: name-only
 API_BACKEND_INGEST_TIMEOUT_SEC_ENV = "API_BACKEND_INGEST_TIMEOUT_SEC"
 API_HEARTBEAT_STALE_AFTER_SEC_ENV = "API_HEARTBEAT_STALE_AFTER_SEC"
 API_BACKEND_CONFIG_REFRESH_SEC_ENV = "API_BACKEND_CONFIG_REFRESH_SEC"
@@ -88,9 +78,18 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     logger.info("ml-api state directory resolved to %s", resolve_state_dir("ml-api"))
     _load_config(app)
 
+    audit_healthy = configure_audit_readiness(app, EDGE_DATABASE_PATH)
+    if audit_healthy:
+        try:
+            app.state.clip_deletion_reconciliation = reconcile_pending_clip_deletions(
+                app, EDGE_DATABASE_PATH
+            )
+        except AuditUnavailableError:
+            audit_healthy = False
+
     if not isinstance(getattr(app.state, "heartbeat_store", None), HeartbeatStore):
         app.state.heartbeat_store = HeartbeatStore(
-            stale_after_sec=_heartbeat_stale_after_sec(), database_path=EDGE_DATABASE_PATH
+            stale_after_sec=_heartbeat_stale_after_sec()
         )
     if not isinstance(getattr(app.state, "runtime_status_store", None), RuntimeStatusStore):
         app.state.runtime_status_store = RuntimeStatusStore()
@@ -154,13 +153,15 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.backend_heartbeat_relay_executor = None
         app.state.backend_heartbeat_relay_task = None
 
-    clip_listing_stack = AsyncExitStack()
-    await clip_listing_stack.enter_async_context(maintain_clip_listing(app))
-    app.state.readiness = {"ready": True, "status": "ready"}
+    app.state.readiness = (
+        {"ready": True, "status": "ready"}
+        if audit_healthy
+        else {"ready": False, "status": "degraded", "reason": "audit unavailable"}
+    )
     try:
         yield
     finally:
-        await clip_listing_stack.aclose()
+        close_audit_session(app)
         refresh_stop.set()
         refresh_task = app.state.backend_config_refresh_task
         try:
@@ -234,7 +235,6 @@ def apply_connection_settings(app: FastAPI) -> None:
             "backend_client_bundle",
             "backend_ingest_client",
             "backend_evidence_client",
-            "backend_camera_mapper",
         ):
             if hasattr(app.state, attribute):
                 delattr(app.state, attribute)
@@ -266,11 +266,6 @@ def apply_connection_settings(app: FastAPI) -> None:
         bearer_token=settings.facility_token,
         timeout_sec=timeout_sec,
     )
-    camera_mapper = BackendCameraMapper(
-        endpoint=derive_edge_cameras_endpoint(settings.events_url),
-        token=settings.facility_token,
-        timeout_sec=timeout_sec,
-    )
     bundle = BackendClientBundle(
         facility_code=settings.facility_code,
         client_installation_ref=settings.client_installation_ref,
@@ -282,12 +277,10 @@ def apply_connection_settings(app: FastAPI) -> None:
         config_url=settings.config_url,
         ingest_client=ingest_client,
         evidence_client=evidence_client,
-        camera_mapper=camera_mapper,
     )
     app.state.backend_client_bundle = bundle
     app.state.backend_ingest_client = bundle.ingest_client
     app.state.backend_evidence_client = bundle.evidence_client
-    app.state.backend_camera_mapper = bundle.camera_mapper
     app.state.backend_configured = True
 
 

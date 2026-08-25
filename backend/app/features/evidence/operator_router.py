@@ -9,6 +9,9 @@ from fastapi import APIRouter, HTTPException, Query, Request, status
 from pydantic import BaseModel, ConfigDict, Field
 
 from backend.app.edge_db import EDGE_DATABASE_PATH
+from backend.app.features.audit.catalog import AuditAction, empty_detail
+from backend.app.features.audit.http import append_governed, append_transactional
+from backend.app.features.audit.store import AuditEvent
 from backend.app.features.evidence.record_store import (
     CentralEvidenceQuery,
     CentralEvidenceReviewStore,
@@ -44,11 +47,14 @@ def list_incidents(
     request: Request,
     filters: Annotated[IncidentListQuery, Query()],
 ) -> dict[str, object]:
-    _authorize(request)
+    actor = _authorize(request)
     try:
         incidents, next_cursor = _query(request).list(limit=filters.limit, cursor=filters.cursor)
     except ValueError as error:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(error)) from error
+    append_governed(
+        request, actor_id=actor, action=AuditAction.INCIDENT_LIST, target_id="incidents"
+    )
     return {
         "incidents": [_summary_response(value) for value in incidents],
         "pagination": {
@@ -64,10 +70,14 @@ def get_incident(
     incident_id: str,
     request: Request,
 ) -> dict[str, object]:
-    _authorize(request)
+    actor = _authorize(request)
     summary = _query(request).get(incident_id)
     if summary is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="incident not found")
+    append_governed(
+        request, actor_id=actor, action=AuditAction.INCIDENT_DETAIL,
+        target_id=summary.incident_id,
+    )
     return _summary_response(summary)
 
 
@@ -81,6 +91,11 @@ def review_incident(
     summary = _query(request).get(incident_id)
     if summary is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="incident not found")
+    event = AuditEvent(
+        occurred_at=datetime.now(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+        actor_id=actor, action=AuditAction.INCIDENT_REVIEW, target_id=summary.incident_id,
+        detail=empty_detail(AuditAction.INCIDENT_REVIEW),
+    )
     try:
         _reviews(request).update(
             incident_id=summary.incident_id,
@@ -89,6 +104,7 @@ def review_incident(
             reviewed_at=datetime.now(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
             disposition=ReviewDisposition(payload.disposition),
             notes=payload.notes,
+            after_write=lambda connection: append_transactional(request, connection, event),
         )
     except EvidenceReviewConflictError as error:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
@@ -116,7 +132,6 @@ def _summary_response(summary: CentralEvidenceSummary) -> dict[str, object]:
         "primary_clip_id": summary.primary_clip_id,
         "primary_artifact_state": summary.primary_artifact_state,
         "snapshot_artifact_state": summary.snapshot_artifact_state,
-        "derivative_state": summary.derivative_state,
         "event_delivery_state": summary.event_delivery_state,
         "clip_publish_state": summary.clip_publish_state,
         "retention_state": summary.retention_state,

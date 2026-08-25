@@ -7,11 +7,14 @@ from fastapi.testclient import TestClient
 from backend.app.features.auth import router as auth_router
 from backend.app.features.cameras.store import CameraRegistryStore
 from backend.app.main import create_app, no_lifespan
+from tests_support.compact_authority_db import prepare_compact_database
 
 
 def _client(tmp_path):
     app = create_app(lifespan=no_lifespan)
-    app.state.camera_registry = CameraRegistryStore(tmp_path / "catalog.sqlite3")
+    registry_path = tmp_path / "catalog.sqlite3"
+    prepare_compact_database(registry_path)
+    app.state.camera_registry = CameraRegistryStore(registry_path)
     app.state.dashboard_username = "operator"
     app.state.dashboard_password = "correct-horse"
     return TestClient(app)
@@ -23,9 +26,7 @@ def test_auth_204_routes_declare_no_response_model() -> None:
     # "Status code 204 must not have a response body" at import. Pinning
     # response_model=None keeps the router importable across the supported floor.
     no_content_routes = [
-        route
-        for route in auth_router.router.routes
-        if getattr(route, "status_code", None) == 204
+        route for route in auth_router.router.routes if getattr(route, "status_code", None) == 204
     ]
     assert no_content_routes
     for route in no_content_routes:

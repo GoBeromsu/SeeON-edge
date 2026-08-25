@@ -5,7 +5,6 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
-from backend.app.edge_db.connection import RuntimeActor, open_runtime_database
 from backend.app.edge_db.migrator import migrate_database
 from backend.app.features.cameras.store import CameraRegistryStore
 from backend.app.features.connection.store import ConnectionSettingsStore
@@ -151,9 +150,7 @@ def test_policy_diff_apply_precedence_revision_activation_and_rollback(tmp_path:
             "values": {"operating_threshold": 0.62},
         }
         with sqlite3.connect(database) as connection:
-            assert connection.execute(
-                "SELECT count(*) FROM control_detection_policy_revisions"
-            ).fetchone() == (0,)
+            assert connection.execute("SELECT count(*) FROM policies").fetchone() == (0,)
 
         first = _apply(client, facility_fall, expected_revision_id=0)
         assert first.status_code == 202
@@ -207,17 +204,15 @@ def test_policy_diff_apply_precedence_revision_activation_and_rollback(tmp_path:
             expected_revision_id=second_revision,
         )
         assert rolled_back.status_code == 202
-        assert rolled_back.json()["active_revision_id"] == first_revision
+        assert rolled_back.json()["active_revision_id"] > second_revision
 
     with sqlite3.connect(database) as connection:
         rows = connection.execute(
-            "SELECT revision_id, values_json FROM control_detection_policy_revisions "
-            "WHERE facility_id = ? AND camera_id IS NULL ORDER BY revision_id",
+            "SELECT active_values_json,previous_present,previous_values_json FROM policies "
+            "WHERE facility_id=? AND camera_id IS NULL",
             (FACILITY_ID,),
         ).fetchall()
-    assert [row[0] for row in rows] == [first_revision, second_revision]
-    assert "0.62" in rows[0][1]
-    assert "0.67" in rows[1][1]
+    assert rows == [('{"operating_threshold":0.62}', 0, None)]
 
 
 def test_policy_resolution_uses_only_worker_camera_ids_when_namespaces_collide(
@@ -289,9 +284,7 @@ def test_policy_diff_reports_equal_numeric_values_with_new_source_as_changed(
         assert camera_diff.json()["concurrency_token"] == 0
 
 
-def test_repeated_rollback_walks_revision_history_without_toggling_forward(
-    tmp_path: Path,
-) -> None:
+def test_rollback_keeps_only_immediately_previous_policy_state(tmp_path: Path) -> None:
     database = tmp_path / "edge.sqlite3"
     migrate_database(database)
     app = _app(database)
@@ -320,44 +313,17 @@ def test_repeated_rollback_walks_revision_history_without_toggling_forward(
             camera_id=None,
             expected_revision_id=revision_ids[2],
         )
-        replacement = _apply(
-            client,
-            _request(
-                module_id="fall",
-                schema_id="fall.policy",
-                values={"operating_threshold": 0.70},
-            ),
-            expected_revision_id=revision_ids[1],
-        )
-        replacement_revision = replacement.json()["active_revision_id"]
-        after_replacement = _rollback(
-            client,
-            module_id="fall",
-            camera_id=None,
-            expected_revision_id=replacement_revision,
-        )
+        assert first.status_code == 202
+        rolled_back_revision = first.json()["active_revision_id"]
         second = _rollback(
             client,
             module_id="fall",
             camera_id=None,
-            expected_revision_id=revision_ids[1],
-        )
-        exhausted = _rollback(
-            client,
-            module_id="fall",
-            camera_id=None,
-            expected_revision_id=revision_ids[0],
+            expected_revision_id=rolled_back_revision,
         )
 
-    assert first.status_code == 202
-    assert first.json()["active_revision_id"] == revision_ids[1]
-    assert replacement.status_code == 202
-    assert after_replacement.status_code == 202
-    assert after_replacement.json()["active_revision_id"] == revision_ids[1]
-    assert after_replacement.json()["active_revision_id"] != revision_ids[2]
-    assert second.status_code == 202
-    assert second.json()["active_revision_id"] == revision_ids[0]
-    assert exhausted.status_code == 409
+    assert rolled_back_revision > revision_ids[2]
+    assert second.status_code == 409
 
 
 def test_nullable_camera_override_returns_to_facility_default(tmp_path: Path) -> None:
@@ -504,20 +470,8 @@ def test_corrupt_revision_is_refused_and_failed_status_persists(tmp_path: Path) 
         revision_id = applied.json()["active_revision_id"]
 
         with sqlite3.connect(database) as connection:
-            try:
-                connection.execute(
-                    "UPDATE control_detection_policy_revisions SET content_sha256=? "
-                    "WHERE revision_id=?",
-                    ("0" * 64, revision_id),
-                )
-            except sqlite3.IntegrityError as error:
-                assert "immutable" in str(error)
-            else:
-                raise AssertionError("immutable policy revision was updated")
-            connection.execute("DROP TRIGGER control_detection_policy_revisions_immutable_update")
             connection.execute(
-                "UPDATE control_detection_policy_revisions SET content_sha256=? "
-                "WHERE revision_id=?",
+                "UPDATE policies SET active_content_sha256=? WHERE activation_generation=?",
                 ("0" * 64, revision_id),
             )
 
@@ -528,7 +482,7 @@ def test_corrupt_revision_is_refused_and_failed_status_persists(tmp_path: Path) 
         assert status_response.status_code == 200
         activation = status_response.json()["activations"][0]
         assert activation["status"] == "failed"
-        assert activation["refusal_reason"] == "policy revision content hash mismatch"
+        assert activation["refusal_reason"] == "policy content hash mismatch"
 
         recovered = _apply(
             client,
@@ -548,11 +502,12 @@ def test_corrupt_revision_is_refused_and_failed_status_persists(tmp_path: Path) 
         }
 
     with sqlite3.connect(database) as connection:
-        corrupt_history = connection.execute(
-            "SELECT content_sha256 FROM control_detection_policy_revisions WHERE revision_id=?",
-            (revision_id,),
+        current_hash = connection.execute(
+            "SELECT active_content_sha256 FROM policies WHERE facility_id=? AND camera_id IS NULL",
+            (FACILITY_ID,),
         ).fetchone()
-    assert corrupt_history == ("0" * 64,)
+    assert current_hash is not None
+    assert current_hash != ("0" * 64,)
 
 
 def test_fresh_apply_recovers_corrupt_active_without_prior_read(tmp_path: Path) -> None:
@@ -574,10 +529,8 @@ def test_fresh_apply_recovers_corrupt_active_without_prior_read(tmp_path: Path) 
         assert applied.status_code == 202
         corrupt_revision_id = applied.json()["active_revision_id"]
         with sqlite3.connect(database) as connection:
-            connection.execute("DROP TRIGGER control_detection_policy_revisions_immutable_update")
             connection.execute(
-                "UPDATE control_detection_policy_revisions SET content_sha256=? "
-                "WHERE revision_id=?",
+                "UPDATE policies SET active_content_sha256=? WHERE activation_generation=?",
                 ("0" * 64, corrupt_revision_id),
             )
 
@@ -728,38 +681,32 @@ def test_two_operator_rollback_race_requires_cas_token(tmp_path: Path) -> None:
         )
 
     assert winner.status_code == 202
-    assert winner.json()["active_revision_id"] == first.json()["active_revision_id"]
+    assert winner.json()["active_revision_id"] > current_revision
     assert loser.status_code == 409
 
 
-def test_control_policy_tables_are_backend_written_after_schema17(tmp_path: Path) -> None:
+def test_policy_authority_writes_only_the_compact_policy_table(tmp_path: Path) -> None:
     database = tmp_path / "edge.sqlite3"
     migrate_database(database)
-    api = open_runtime_database(database, actor=RuntimeActor.API)
-    worker = open_runtime_database(database, actor=RuntimeActor.API)
-    try:
-        api.execute("BEGIN IMMEDIATE")
-        api.execute(
-            "INSERT INTO control_detection_policy_state "
-            "(facility_id, activation_generation) VALUES (?, ?)",
-            (FACILITY_ID, 1),
-        )
-        api.commit()
-        assert worker.execute(
-            "SELECT activation_generation FROM control_detection_policy_state "
-            "WHERE facility_id = ?",
+    activation = DetectionPolicyStore(database).apply(
+        facility_id=FACILITY_ID,
+        module_id="fall",
+        module_version=1,
+        schema_id="fall.policy",
+        schema_version=1,
+        camera_id=None,
+        values={"operating_threshold": 0.62},
+        expected_revision_id=0,
+    )
+
+    with sqlite3.connect(database) as connection:
+        assert connection.execute(
+            "SELECT activation_generation FROM policies WHERE facility_id=?",
             (FACILITY_ID,),
-        ).fetchone() == (1,)
-        worker.execute(
-            "UPDATE control_detection_policy_state SET activation_generation = 2 "
-            "WHERE facility_id = ?",
-            (FACILITY_ID,),
-        )
-        assert api.execute(
-            "SELECT activation_generation FROM control_detection_policy_state "
-            "WHERE facility_id = ?",
-            (FACILITY_ID,),
-        ).fetchone() == (2,)
-    finally:
-        api.close()
-        worker.close()
+        ).fetchone() == (activation.activation_generation,)
+        tables = {
+            str(row[0])
+            for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        }
+    assert "control_detection_policy_state" not in tables
+    assert "control_detection_policy_revisions" not in tables

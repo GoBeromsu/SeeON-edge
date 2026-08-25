@@ -19,6 +19,12 @@ from backend.app.features.cameras.store import (
     is_valid_floor,
     parse_legacy_floor,
 )
+from tests_support.compact_authority_db import prepare_compact_database
+
+
+@pytest.fixture(autouse=True)
+def _compact_camera_database(tmp_path: Path) -> None:
+    prepare_compact_database(tmp_path / "catalog.sqlite3")
 
 
 def test_parse_legacy_floor_passes_none_through_untouched() -> None:

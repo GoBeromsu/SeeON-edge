@@ -38,7 +38,7 @@ class TraceStore:
 
     Decision basis is deliberately not durable here: admitted events carry it in
     their delivery-queue EVENT envelope. This cache exists only to support
-    best-effort annotated derivatives while the worker process is alive.
+    process-local replay while the worker process is alive.
     """
 
     def __init__(self, cache_key: Path) -> None:

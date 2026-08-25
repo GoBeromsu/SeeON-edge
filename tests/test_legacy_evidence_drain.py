@@ -34,6 +34,7 @@ from tests_support.alert_amplification_runtime import (
     ServedFixture,
     free_port,
 )
+from tests_support.compact_authority_db import prepare_compact_database
 
 _EDGE_EVENT_ID = "00000000-0000-4000-8000-0000000000e2"
 _DETECTED_AT = "2026-08-22T00:00:00Z"
@@ -63,7 +64,9 @@ class _RelayServer:
     def __init__(self, tmp_path: Path, database: Path, hub_origin: str) -> None:
         app = create_app(lifespan=no_lifespan)
         app.state.edge_relay_token = RELAY_TOKEN
-        registry = CameraRegistryStore(Path(tempfile.mkdtemp()) / "registry.sqlite3")
+        registry_path = Path(tempfile.mkdtemp()) / "registry.sqlite3"
+        prepare_compact_database(registry_path)
+        registry = CameraRegistryStore(registry_path)
         registry.create(
             camera_id=CAMERA_ID,
             label=CAMERA_ID,
@@ -312,12 +315,20 @@ def test_documented_schema16_drains_clear_every_schema17_gate_blocker(
     relay_database = tmp_path / "relay.sqlite3"
     migrate_database(relay_database)
     with ServedFixture() as hub, _RelayServer(tmp_path, relay_database, hub.origin) as relay:
-        assert _drain_cli().main(
-            ["--database", str(database), "--relay-url", relay.origin, "--relay-token", RELAY_TOKEN]
-        ) == 0
-    assert _clip_recovery_cli().main(
-        ["--database", str(database), "--clip-store", str(store)]
-    ) == 0
+        assert (
+            _drain_cli().main(
+                [
+                    "--database",
+                    str(database),
+                    "--relay-url",
+                    relay.origin,
+                    "--relay-token",
+                    RELAY_TOKEN,
+                ]
+            )
+            == 0
+        )
+    assert _clip_recovery_cli().main(["--database", str(database), "--clip-store", str(store)]) == 0
 
     assert migrate_database(database).current_version == 17
     with sqlite3.connect(database) as connection:

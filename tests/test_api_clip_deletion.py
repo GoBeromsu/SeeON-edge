@@ -10,6 +10,7 @@ convergence, audit events, and the real backend-to-worker control seam.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 from pathlib import Path
@@ -19,8 +20,10 @@ import pytest
 from fastapi.testclient import TestClient
 
 from backend.app.edge_db.migrator import migrate_database
+from backend.app.features.audit.catalog import AuditAction
+from backend.app.features.audit.store import AuditEvent, AuditRecord, AuditStore
 from backend.app.features.clips import artifacts as artifact_module
-from backend.app.features.clips.audit_log import AuditLogStore
+from backend.app.features.clips.deletion_lifecycle import reconcile_pending_clip_deletions
 from backend.app.main import create_app, no_lifespan
 from worker.pipeline.output.evidence.clip_maintenance import ClipMaintenance
 from worker.pipeline.output.evidence.clip_recorder_models import (
@@ -31,8 +34,8 @@ from worker.pipeline.output.live_view import LatestFrameStore
 from worker.pipeline.output.mjpeg_server import MjpegServer, MjpegServerConfig
 from worker.runtime.clip_deletion_control import ClipDeletionControlService
 
-NOW = "2026-08-13T00:00:00Z"
-LATER = "2026-08-13T00:00:01Z"
+NOW = "2026-05-01T00:00:00Z"
+LATER = "2026-05-01T00:00:01Z"
 
 
 def _write_finalized_clip(store_dir: Path, clip_id: str) -> Path:
@@ -71,39 +74,17 @@ def _login(client: TestClient) -> None:
 
 def _worker_server(database: Path, store_dir: Path) -> MjpegServer:
     del database
-    config = ClipRecorderConfig(store_dir=store_dir)
-    retention: dict[str, str] = {}
-
-    def begin(clip_id: str) -> bool:
-        if retention.get(clip_id) == "PURGED":
-            return False
-        retention[clip_id] = "PENDING"
-        return True
-
-    def complete(clip_id: str) -> None:
-        retention[clip_id] = "PURGED"
-
-    def fail(clip_id: str, reason: str) -> None:
-        del reason
-        retention[clip_id] = "FAILED"
-
-    def retention_state(clip_id: str) -> str | None:
-        return retention.get(clip_id)
-
     import shutil
 
     maintenance = ClipMaintenance(
-        config,
+        ClipRecorderConfig(store_dir=store_dir),
         ClipRecorderStats(),
         is_clip_held=lambda _clip_id: False,
         disk_usage_provider=lambda _path: shutil.disk_usage(store_dir),
-        begin_clip_purge=begin,
-        complete_clip_purge=complete,
-        fail_clip_purge=fail,
     )
     control = ClipDeletionControlService(
+        preflight_clip=maintenance.preflight_clip,
         delete_clip=maintenance.purge_clip,
-        retention_state=retention_state,
     )
     server = MjpegServer(
         LatestFrameStore(),
@@ -114,14 +95,59 @@ def _worker_server(database: Path, store_dir: Path) -> MjpegServer:
     return server
 
 
-def _seed_published_clip(database: Path, clip_id: str = "clip-a") -> None:
+def _seed_published_clip(database: Path, store_dir: Path, clip_id: str = "clip-a") -> None:
+    manifest = store_dir / "clips" / clip_id / "manifest.json"
+    media = manifest.with_name("clip.mp4")
+    manifest_bytes = manifest.read_bytes()
+    media_bytes = media.read_bytes()
+    incident_id = f"incident:{clip_id}"
     with sqlite3.connect(database) as connection:
         connection.execute(
-            "INSERT INTO evidence_clips (clip_id,local_state,state_version,publish_state) "
-            "VALUES (?,'VERIFIED',2,'PUBLISHED')",
-            (clip_id,),
+            "INSERT INTO incidents(incident_id,edge_event_id,facility_id,camera_id,event_type,"
+            "probability,detected_at,lifecycle_state,provenance_state,"
+            "provenance_missing_reason,review_version,revision,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,1.0,?,'OPEN','MISSING','NOT_RECORDED',0,1,?,?)",
+            (incident_id, "event-a", "facility-a", "camera-a", "fall", NOW, NOW, NOW),
         )
-        connection.commit()
+        connection.execute(
+            "INSERT INTO clips(clip_id,camera_id,event_facet,started_at,duration_ms,codec,"
+            "mime_type,manifest_relpath,media_relpath,manifest_sha256,media_sha256,"
+            "manifest_size_bytes,media_size_bytes,local_state,publish_state,published_at,"
+            "retention_state,revision,created_at,updated_at) "
+            "VALUES (?,?,?,?,1000,'h264','video/mp4',?,?,?,?,?,?,'AVAILABLE','PUBLISHED',?,"
+            "'RETAINED',1,?,?)",
+            (
+                clip_id,
+                "camera-a",
+                "fall",
+                NOW,
+                f"clips/{clip_id}/manifest.json",
+                f"clips/{clip_id}/clip.mp4",
+                hashlib.sha256(manifest_bytes).hexdigest(),
+                hashlib.sha256(media_bytes).hexdigest(),
+                len(manifest_bytes),
+                len(media_bytes),
+                NOW,
+                NOW,
+                NOW,
+            ),
+        )
+        connection.execute(
+            "INSERT INTO artifacts(incident_id,kind,artifact_id,clip_id,state,contained_relpath,"
+            "content_sha256,size_bytes,mime_type,codec,revision,created_at,updated_at) "
+            "VALUES (?,'PRIMARY_CLIP',?,?, 'AVAILABLE',?,?,?,?, 'h264',1,?,?)",
+            (
+                incident_id,
+                f"primary:{clip_id}",
+                clip_id,
+                f"clips/{clip_id}/clip.mp4",
+                hashlib.sha256(media_bytes).hexdigest(),
+                len(media_bytes),
+                "video/mp4",
+                NOW,
+                NOW,
+            ),
+        )
 
 
 def _wire_worker_origin(monkeypatch: pytest.MonkeyPatch, server: MjpegServer) -> None:
@@ -193,17 +219,55 @@ def test_delete_unknown_clip_reports_truthful_missing_status(
     assert response.json() == {"clip_id": "never-existed", "status": "MISSING"}
 
 
-def test_delete_reaches_real_worker_purges_and_is_idempotent(
+def test_backend_commits_pending_and_request_audit_before_worker_filesystem_delete(
     clip_store: Path,
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
 ) -> None:
     database = artifact_module.EDGE_DATABASE_PATH
     migrate_database(database)
-    _seed_published_clip(database)
+    _seed_published_clip(database, clip_store)
+    observed: list[tuple[str, list[tuple[str]]]] = []
+
+    def worker_delete(_request: object, clip_id: str) -> dict[str, object]:
+        with sqlite3.connect(database) as connection:
+            state = connection.execute(
+                "SELECT retention_state FROM clips WHERE clip_id = ?", (clip_id,)
+            ).fetchone()
+            actions = connection.execute(
+                "SELECT action FROM audit_events WHERE target_id = ? ORDER BY audit_id",
+                (clip_id,),
+            ).fetchall()
+        assert state is not None
+        observed.append((str(state[0]), [(str(action),) for (action,) in actions]))
+        return {"clip_id": clip_id, "status": "PURGED"}
+
+    monkeypatch.setattr(
+        "backend.app.features.clips.router.preflight_clip_deletion",
+        lambda _request, clip_id: {"clip_id": clip_id, "status": "READY"},
+    )
+    monkeypatch.setattr(
+        "backend.app.features.clips.router.control_clip_deletion", worker_delete
+    )
+    app = create_app(lifespan=no_lifespan)
+    with TestClient(app) as client:
+        _login(client)
+        response = client.request(
+            "DELETE", "/api/v1/clips/clip-a", json={"confirm_clip_id": "clip-a"}
+        )
+
+    assert response.status_code == 202
+    assert observed == [("PENDING", [("clip.delete.request",)])]
+
+
+def test_delete_reaches_real_worker_purges_and_is_idempotent(
+    clip_store: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database = artifact_module.EDGE_DATABASE_PATH
+    migrate_database(database)
+    _seed_published_clip(database, clip_store)
     server = _worker_server(database, clip_store)
     _wire_worker_origin(monkeypatch, server)
-    audit_path = tmp_path / "labels" / "audit.jsonl"
 
     app = create_app(lifespan=no_lifespan)
     app.state.edge_relay_token = "relay-token"
@@ -225,22 +289,34 @@ def test_delete_reaches_real_worker_purges_and_is_idempotent(
         server.stop()
 
     assert not (clip_store / "clips" / "clip-a").exists()
-    entries = AuditLogStore(audit_path).list_entries()
-    delete_entries = [entry for entry in entries if entry["clip_id"] == "clip-a"]
-    actions = [entry["action"] for entry in delete_entries]
-    assert actions == ["clip-delete-completed"]
+    with sqlite3.connect(database) as connection:
+        assert connection.execute(
+            "SELECT retention_state FROM clips WHERE clip_id='clip-a'"
+        ).fetchone() == ("PURGED",)
+        assert connection.execute(
+            "SELECT state FROM artifacts WHERE clip_id='clip-a' AND kind='PRIMARY_CLIP'"
+        ).fetchone() == ("PURGED",)
+        actions = connection.execute(
+            "SELECT action FROM audit_events WHERE target_id='clip-a' ORDER BY audit_id"
+        ).fetchall()
+    assert actions == [("clip.delete.request",), ("clip.delete.complete",)]
 
 
 def test_delete_worker_control_failure_is_reported_and_audited(
     clip_store: Path,
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
 ) -> None:
+    database = artifact_module.EDGE_DATABASE_PATH
+    migrate_database(database)
+    _seed_published_clip(database, clip_store)
+    monkeypatch.setattr(
+        "backend.app.features.clips.router.preflight_clip_deletion",
+        lambda _request, clip_id: {"clip_id": clip_id, "status": "READY"},
+    )
     monkeypatch.setattr(
         "backend.app.features.clips.deletion_control.get_settings",
         lambda: SimpleNamespace(worker_stream_origin="", worker_stream_timeout_s=2.0),
     )
-    audit_path = tmp_path / "labels" / "audit.jsonl"
 
     with TestClient(create_app(lifespan=no_lifespan)) as client:
         _login(client)
@@ -249,9 +325,163 @@ def test_delete_worker_control_failure_is_reported_and_audited(
         )
 
     assert response.status_code == 503
-    entries = AuditLogStore(audit_path).list_entries()
-    actions = [entry["action"] for entry in entries if entry["clip_id"] == "clip-a"]
-    assert actions == ["clip-delete-failed"]
+    with sqlite3.connect(artifact_module.EDGE_DATABASE_PATH) as connection:
+        actions = connection.execute(
+            "SELECT action FROM audit_events WHERE target_id='clip-a'"
+        ).fetchall()
+    assert actions == [("clip.delete.request",)]
+    with sqlite3.connect(database) as connection:
+        assert connection.execute(
+            "SELECT retention_state FROM clips WHERE clip_id='clip-a'"
+        ).fetchone() == ("PENDING",)
+    assert (clip_store / "clips" / "clip-a").exists()
+
+
+def test_hold_preflight_leaves_state_files_and_audit_untouched(
+    clip_store: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database = artifact_module.EDGE_DATABASE_PATH
+    migrate_database(database)
+    _seed_published_clip(database, clip_store)
+    monkeypatch.setattr(
+        "backend.app.features.clips.router.preflight_clip_deletion",
+        lambda _request, clip_id: {"clip_id": clip_id, "status": "HELD"},
+    )
+    monkeypatch.setattr(
+        "backend.app.features.clips.router.control_clip_deletion",
+        lambda *_args: pytest.fail("held preflight must not issue destructive command"),
+    )
+
+    with TestClient(create_app(lifespan=no_lifespan)) as client:
+        _login(client)
+        response = client.request(
+            "DELETE", "/api/v1/clips/clip-a", json={"confirm_clip_id": "clip-a"}
+        )
+
+    assert response.status_code == 202
+    assert response.json() == {"clip_id": "clip-a", "status": "HELD"}
+    with sqlite3.connect(database) as connection:
+        assert connection.execute(
+            "SELECT retention_state FROM clips WHERE clip_id='clip-a'"
+        ).fetchone() == ("RETAINED",)
+        assert connection.execute(
+            "SELECT COUNT(*) FROM audit_events WHERE target_id='clip-a'"
+        ).fetchone() == (0,)
+    assert (clip_store / "clips" / "clip-a" / "clip.mp4").is_file()
+
+
+def test_request_audit_full_rolls_back_pending_and_never_commands_worker(
+    clip_store: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database = artifact_module.EDGE_DATABASE_PATH
+    migrate_database(database)
+    _seed_published_clip(database, clip_store)
+
+    class FullAuditStore(AuditStore):
+        def append(
+            self,
+            event: AuditEvent,
+            *,
+            connection: sqlite3.Connection | None = None,
+        ) -> AuditRecord:
+            del event, connection
+            raise sqlite3.OperationalError("database or disk is full")
+
+    monkeypatch.setattr(
+        "backend.app.features.clips.router.preflight_clip_deletion",
+        lambda _request, clip_id: {"clip_id": clip_id, "status": "READY"},
+    )
+    monkeypatch.setattr(
+        "backend.app.features.clips.router.control_clip_deletion",
+        lambda *_args: pytest.fail("uncommitted intent must never command deletion"),
+    )
+    app = create_app(lifespan=no_lifespan)
+    with TestClient(app) as client:
+        _login(client)
+        app.state.audit_store = FullAuditStore(database)
+        response = client.request(
+            "DELETE", "/api/v1/clips/clip-a", json={"confirm_clip_id": "clip-a"}
+        )
+
+    assert response.status_code == 503
+    with sqlite3.connect(database) as connection:
+        assert connection.execute(
+            "SELECT retention_state FROM clips WHERE clip_id='clip-a'"
+        ).fetchone() == ("RETAINED",)
+        assert connection.execute(
+            "SELECT COUNT(*) FROM audit_events WHERE target_id='clip-a'"
+        ).fetchone() == (0,)
+    assert (clip_store / "clips" / "clip-a").is_dir()
+
+
+def test_post_delete_completion_failure_reconciles_once_on_startup(
+    clip_store: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database = artifact_module.EDGE_DATABASE_PATH
+    migrate_database(database)
+    _seed_published_clip(database, clip_store)
+    server = _worker_server(database, clip_store)
+    _wire_worker_origin(monkeypatch, server)
+
+    class CompletionFullAuditStore(AuditStore):
+        fail_completion = True
+
+        def append(
+            self,
+            event: AuditEvent,
+            *,
+            connection: sqlite3.Connection | None = None,
+        ) -> AuditRecord:
+            if self.fail_completion and event.action is AuditAction.CLIP_DELETE_COMPLETE:
+                raise sqlite3.OperationalError("database or disk is full")
+            return super().append(event, connection=connection)
+
+    app = create_app(lifespan=no_lifespan)
+    app.state.edge_relay_token = "relay-token"
+    store = CompletionFullAuditStore(database)
+    app.state.audit_store = store
+    try:
+        with TestClient(app) as client:
+            _login(client)
+            response = client.request(
+                "DELETE", "/api/v1/clips/clip-a", json={"confirm_clip_id": "clip-a"}
+            )
+    finally:
+        server.stop()
+
+    assert response.status_code == 503
+    assert not (clip_store / "clips" / "clip-a").exists()
+    with sqlite3.connect(database) as connection:
+        assert connection.execute(
+            "SELECT retention_state FROM clips WHERE clip_id='clip-a'"
+        ).fetchone() == ("PENDING",)
+        assert connection.execute(
+            "SELECT action FROM audit_events WHERE target_id='clip-a' ORDER BY audit_id"
+        ).fetchall() == [("clip.delete.request",)]
+
+    store.fail_completion = False
+    monkeypatch.setattr(
+        "backend.app.features.clips.deletion_lifecycle.preflight_clip_deletion",
+        lambda _app, clip_id: {"clip_id": clip_id, "status": "MISSING"},
+    )
+    first = reconcile_pending_clip_deletions(app, database)
+    second = reconcile_pending_clip_deletions(app, database)
+
+    assert first.completed == ("clip-a",)
+    assert second.completed == ()
+    with sqlite3.connect(database) as connection:
+        assert connection.execute(
+            "SELECT retention_state FROM clips WHERE clip_id='clip-a'"
+        ).fetchone() == ("PURGED",)
+        assert connection.execute(
+            "SELECT action FROM audit_events WHERE target_id='clip-a' ORDER BY audit_id"
+        ).fetchall() == [
+            ("clip.delete.request",),
+            ("clip.delete.complete",),
+        ]
 
 
 def test_delete_response_is_strictly_typed(clip_store: Path) -> None:

@@ -1,34 +1,17 @@
 from __future__ import annotations
 
-import json
 import sqlite3
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from pydantic import JsonValue, TypeAdapter
-
-from backend.app.shared.sqlite_bootstrap import connect_catalog_store
+from backend.app.edge_db.configuration import open_configuration_database, utc_now
 from contracts.edge_provisioning_v1 import (
     MachinePrincipal,
     MutationCounts,
     TopologyMutationResult,
     TopologySuccessEnvelope,
-    parse_topology_success_envelope,
 )
-
-_RESPONSE_ADAPTER = TypeAdapter(dict[str, JsonValue])
-
-_SCHEMA = """
-CREATE TABLE IF NOT EXISTS edge_topology_confirmation_preview (
- id INTEGER PRIMARY KEY CHECK (id = 1), confirmation_id TEXT NOT NULL, digest TEXT NOT NULL,
- expires_at TEXT NOT NULL, snapshot_id TEXT NOT NULL, client_revision INTEGER NOT NULL,
- server_revision INTEGER NOT NULL, registry_version INTEGER NOT NULL,
- edge_installation_id TEXT NOT NULL, enrollment_generation INTEGER NOT NULL,
- cameras INTEGER NOT NULL, rooms INTEGER NOT NULL, floors INTEGER NOT NULL,
- confirmed INTEGER NOT NULL DEFAULT 0,
- terminal_response TEXT
-) STRICT
-"""
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,30 +40,29 @@ class TopologyConfirmationStateConflictError(RuntimeError):
 
 class TopologyConfirmationStore:
     def __init__(self, path: str | Path) -> None:
-        self._connection = connect_catalog_store(Path(path), (_SCHEMA,))
-        _ensure_terminal_column(self._connection)
+        self._connection = open_configuration_database(Path(path))
 
     def save(
-        self, response: TopologySuccessEnvelope, principal: MachinePrincipal, registry_version: int
+        self,
+        response: TopologySuccessEnvelope,
+        principal: MachinePrincipal,
+        registry_version: int,
+        *,
+        connection: sqlite3.Connection | None = None,
     ) -> None:
+        active = self._connection if connection is None else connection
         preview = response.omissions
         if preview is None:
-            self._connection.execute("DELETE FROM edge_topology_confirmation_preview WHERE id = 1")
+            self._clear(active)
             return
-        self._connection.execute(
-            "INSERT INTO edge_topology_confirmation_preview ("
-            "id,confirmation_id,digest,expires_at,snapshot_id,client_revision,"
-            "server_revision,registry_version,edge_installation_id,enrollment_generation,"
-            "cameras,rooms,floors,confirmed,terminal_response) "
-            "VALUES (1,?,?,?,?,?,?,?,?,?,?,?,?,0,NULL) "
-            "ON CONFLICT(id) DO UPDATE SET confirmation_id=excluded.confirmation_id, "
-            "digest=excluded.digest, expires_at=excluded.expires_at, "
-            "snapshot_id=excluded.snapshot_id, client_revision=excluded.client_revision, "
-            "server_revision=excluded.server_revision, registry_version=excluded.registry_version, "
-            "edge_installation_id=excluded.edge_installation_id, "
-            "enrollment_generation=excluded.enrollment_generation, cameras=excluded.cameras, "
-            "rooms=excluded.rooms, floors=excluded.floors, confirmed=0, "
-            "terminal_response=NULL",
+        cursor = active.execute(
+            "UPDATE edge_site SET topology_confirmation_id=?,topology_confirmation_digest=?,"
+            "topology_confirmation_expires_at=?,topology_confirmation_snapshot_id=?,"
+            "topology_confirmation_client_revision=?,topology_confirmation_server_revision=?,"
+            "topology_confirmation_registry_version=?,topology_confirmation_cameras=?,"
+            "topology_confirmation_rooms=?,topology_confirmation_floors=?,"
+            "topology_confirmation_confirmed=0,topology_confirmation_result=NULL,updated_at=? "
+            "WHERE id=1 AND edge_installation_id=? AND enrollment_generation=?",
             (
                 preview.confirmation_id,
                 preview.digest,
@@ -89,120 +71,131 @@ class TopologyConfirmationStore:
                 response.client_revision,
                 response.server_revision,
                 registry_version,
-                principal.edge_installation_id,
-                principal.enrollment_generation,
                 len(preview.cameras),
                 len(preview.rooms),
                 len(preview.floors),
+                utc_now(),
+                principal.edge_installation_id,
+                principal.enrollment_generation,
             ),
         )
+        if cursor.rowcount != 1:
+            raise TopologyConfirmationStateConflictError
 
     def load(self) -> TopologyConfirmationPreview | None:
-        row = self._connection.execute(
-            "SELECT * FROM edge_topology_confirmation_preview WHERE id = 1"
-        ).fetchone()
-        if row is None:
+        row = self._connection.execute(_SELECT).fetchone()
+        if row is None or row[0] is None:
             return None
+        principal = MachinePrincipal(str(row[12]), int(row[13]))
+        terminal = None
+        if row[10] is not None:
+            terminal = TopologySuccessEnvelope(
+                str(row[3]), int(row[4]), int(row[11]), _decode_result(str(row[10])), None
+            )
         return TopologyConfirmationPreview(
+            str(row[0]),
             str(row[1]),
             str(row[2]),
             str(row[3]),
-            str(row[4]),
+            int(row[4]),
             int(row[5]),
             int(row[6]),
+            principal,
             int(row[7]),
-            MachinePrincipal(str(row[8]), int(row[9])),
-            int(row[10]),
-            int(row[11]),
-            int(row[12]),
-            _parse_terminal_response(row[14]),
+            int(row[8]),
+            int(row[9]),
+            terminal,
         )
 
     def complete(
         self,
         preview: TopologyConfirmationPreview,
         response: TopologySuccessEnvelope,
+        *,
+        after_write: Callable[[sqlite3.Connection], None] | None = None,
     ) -> None:
-        encoded = json.dumps(
-            _success_body(response), ensure_ascii=False, separators=(",", ":"), sort_keys=True
-        )
+        encoded = _encode_result(response.result)
         self._connection.execute("BEGIN IMMEDIATE")
-        with self._connection:
-            preview_update = self._connection.execute(
-                "UPDATE edge_topology_confirmation_preview SET confirmed = 1, "
-                "terminal_response = ? "
-                "WHERE id = 1 AND confirmation_id = ? AND digest = ? "
-                "AND client_revision = ? AND server_revision = ? AND terminal_response IS NULL",
+        completed = False
+        try:
+            cursor = self._connection.execute(
+                "UPDATE edge_site SET topology_confirmation_confirmed=1,"
+                "topology_confirmation_result=?,topology_server_revision=?,updated_at=? WHERE id=1 "
+                "AND topology_confirmation_id=? AND topology_confirmation_digest=? "
+                "AND topology_confirmation_client_revision=? "
+                "AND topology_confirmation_server_revision=? "
+                "AND topology_confirmation_result IS NULL",
                 (
                     encoded,
+                    response.server_revision,
+                    utc_now(),
                     preview.confirmation_id,
                     preview.digest,
                     preview.client_revision,
                     preview.server_revision,
                 ),
             )
-            state_update = self._connection.execute(
-                "UPDATE edge_topology_sync_state SET server_revision = ? WHERE id = 1 "
-                "AND edge_installation_id = ? AND enrollment_generation = ? "
-                "AND last_client_revision = ? AND server_revision = ?",
-                (
-                    response.server_revision,
-                    preview.principal.edge_installation_id,
-                    preview.principal.enrollment_generation,
-                    preview.client_revision,
-                    preview.server_revision,
-                ),
-            )
-            if preview_update.rowcount != 1 or state_update.rowcount != 1:
-                raise TopologyConfirmationStateConflictError
+            _require_updated(cursor)
+            if after_write is not None:
+                after_write(self._connection)
+            completed = True
+        finally:
+            self._connection.execute("COMMIT" if completed else "ROLLBACK")
 
-
-def _ensure_terminal_column(connection: sqlite3.Connection) -> None:
-    columns = {
-        str(row[1])
-        for row in connection.execute(
-            "PRAGMA table_info(edge_topology_confirmation_preview)"
-        ).fetchall()
-    }
-    if "terminal_response" not in columns:
+    def _clear(self, connection: sqlite3.Connection) -> None:
         connection.execute(
-            "ALTER TABLE edge_topology_confirmation_preview ADD COLUMN terminal_response TEXT"
+            "UPDATE edge_site SET topology_confirmation_id=NULL,"
+            "topology_confirmation_digest=NULL,topology_confirmation_expires_at=NULL,"
+            "topology_confirmation_snapshot_id=NULL,topology_confirmation_client_revision=NULL,"
+            "topology_confirmation_server_revision=NULL,topology_confirmation_registry_version=NULL,"
+            "topology_confirmation_cameras=NULL,topology_confirmation_rooms=NULL,"
+            "topology_confirmation_floors=NULL,topology_confirmation_confirmed=NULL,"
+            "topology_confirmation_result=NULL,updated_at=? WHERE id=1",
+            (utc_now(),),
         )
 
 
-def _parse_terminal_response(value: str | None) -> TopologySuccessEnvelope | None:
-    if value is None:
-        return None
-    return parse_topology_success_envelope(_RESPONSE_ADAPTER.validate_json(str(value)))
+def _require_updated(cursor: sqlite3.Cursor) -> None:
+    if cursor.rowcount != 1:
+        raise TopologyConfirmationStateConflictError
 
 
-def _counts_body(counts: MutationCounts) -> dict[str, JsonValue]:
-    return {
-        "created": counts.created,
-        "updated": counts.updated,
-        "unchanged": counts.unchanged,
-        "reactivated": counts.reactivated,
-        "deactivated": counts.deactivated,
-    }
+_SELECT = (
+    "SELECT topology_confirmation_id,topology_confirmation_digest,"
+    "topology_confirmation_expires_at,topology_confirmation_snapshot_id,"
+    "topology_confirmation_client_revision,topology_confirmation_server_revision,"
+    "topology_confirmation_registry_version,topology_confirmation_cameras,"
+    "topology_confirmation_rooms,topology_confirmation_floors,"
+    "topology_confirmation_result,topology_server_revision,"
+    "edge_installation_id,enrollment_generation "
+    "FROM edge_site WHERE id=1"
+)
 
 
-def _result_body(result: TopologyMutationResult) -> dict[str, JsonValue]:
-    return {
-        "floors": _counts_body(result.floors),
-        "rooms": _counts_body(result.rooms),
-        "cameras": _counts_body(result.cameras),
-    }
+def _encode_result(result: TopologyMutationResult) -> str:
+    counts = (result.floors, result.rooms, result.cameras)
+    return ";".join(
+        ",".join(
+            str(value)
+            for value in (
+                count.created,
+                count.updated,
+                count.unchanged,
+                count.reactivated,
+                count.deactivated,
+            )
+        )
+        for count in counts
+    )
 
 
-def _success_body(response: TopologySuccessEnvelope) -> dict[str, JsonValue]:
-    return {
-        "schemaVersion": 1,
-        "snapshotId": response.snapshot_id,
-        "clientRevision": response.client_revision,
-        "serverRevision": response.server_revision,
-        "result": _result_body(response.result),
-        "omissions": None,
-    }
+def _decode_result(encoded: str) -> TopologyMutationResult:
+    groups = tuple(
+        MutationCounts(*(int(value) for value in group.split(","))) for group in encoded.split(";")
+    )
+    if len(groups) != 3:
+        raise sqlite3.DatabaseError("stored topology confirmation result is malformed")
+    return TopologyMutationResult(groups[0], groups[1], groups[2])
 
 
 __all__ = [

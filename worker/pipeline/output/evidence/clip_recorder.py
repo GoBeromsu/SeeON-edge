@@ -189,6 +189,10 @@ class ClipRecorder:
     def rotate_once(self, *, timeout: float = 5.0) -> bool:
         return self.flush(timeout=timeout)
 
+    def preflight_clip_deletion(self, clip_id: str) -> PurgeResult | None:
+        """Check hold and containment without deleting worker-owned bytes."""
+        return self._maintenance.preflight_clip(clip_id)
+
     def delete_clip(self, clip_id: str) -> PurgeResult:
         """Operator-requested deletion of one finalized primary clip.
 

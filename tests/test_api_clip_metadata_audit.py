@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 
-from backend.app.features.clips.audit_log import AuditLogStore
 from backend.app.main import create_app, no_lifespan
 
 
@@ -57,19 +57,24 @@ def test_successful_metadata_read_appends_clip_scoped_audit(clip_env: Path) -> N
         response = client.get(f"/api/v1/clips/{clip_id}/metadata")
 
     assert response.status_code == 200
-    entries = AuditLogStore.from_env().list_entries()
-    assert [(entry["actor"], entry["action"], entry["clip_id"]) for entry in entries] == [
-        ("admin", "metadata-view", clip_id)
-    ]
+    with sqlite3.connect(clip_env / ".central-fixture" / "edge.sqlite3") as connection:
+        rows = connection.execute(
+            "SELECT actor_id,action,target_id FROM audit_events WHERE action='clip.detail'"
+        ).fetchall()
+    assert rows == [("admin", "clip.detail", clip_id)]
 
 
-def test_missing_metadata_read_does_not_append_success_audit() -> None:
+def test_missing_metadata_read_does_not_append_success_audit(clip_env: Path) -> None:
     with TestClient(create_app(lifespan=no_lifespan)) as client:
         _login(client)
         response = client.get("/api/v1/clips/missing/metadata")
 
     assert response.status_code == 404
-    assert AuditLogStore.from_env().list_entries() == []
+    with sqlite3.connect(clip_env / ".central-fixture" / "edge.sqlite3") as connection:
+        count = connection.execute(
+            "SELECT COUNT(*) FROM audit_events WHERE action='clip.detail'"
+        ).fetchone()[0]
+    assert count == 0
 
 
 def test_unauthorized_metadata_read_does_not_append_success_audit(clip_env: Path) -> None:
@@ -80,4 +85,6 @@ def test_unauthorized_metadata_read_does_not_append_success_audit(clip_env: Path
         response = client.get(f"/api/v1/clips/{clip_id}/metadata")
 
     assert response.status_code == 401
-    assert AuditLogStore.from_env().list_entries() == []
+    with sqlite3.connect(clip_env / ".central-fixture" / "edge.sqlite3") as connection:
+        count = connection.execute("SELECT COUNT(*) FROM audit_events").fetchone()[0]
+    assert count == 0

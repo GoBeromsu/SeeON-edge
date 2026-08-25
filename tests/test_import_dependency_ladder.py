@@ -18,6 +18,10 @@ FIXTURE_PACKAGES: Final = (
     "backend.app.routes",
     "backend.app.main",
     "backend.app.lifespan",
+    "backend.app.edge_db",
+    "backend.app.edge_db.compatibility",
+    "backend.app.edge_db.schema18_manifest",
+    "backend.app.edge_db.schema",
     "contracts",
     "shared",
     "shared.events",
@@ -110,6 +114,11 @@ def test_contracts_types_interfaces_dependency_ladder_is_allowed(tmp_path: Path)
             id="domains-to-pipeline-output",
         ),
         pytest.param("worker.pipeline.bus", "worker.runtime", id="pipeline-to-runtime"),
+        pytest.param(
+            "backend.app.edge_db.compatibility",
+            "backend.app.edge_db.schema",
+            id="compatibility-to-ddl-ledger",
+        ),
     ],
 )
 def test_worker_firewall_rejects_forbidden_imports(
@@ -125,3 +134,33 @@ def test_worker_firewall_rejects_forbidden_imports(
     assert result.returncode != 0, result.stdout
     assert source_module in result.stdout
     assert target_module in result.stdout
+
+
+DDL_LEDGER_CONTRACT_NAME: Final = (
+    "schema-18 runtime compatibility stays free of the v1-v18 DDL ledger"
+)
+
+
+def test_named_contract_breaks_when_compatibility_imports_ddl_ledger(
+    tmp_path: Path,
+) -> None:
+    # Given: a fixture where the serving compatibility leaf imports the v1-v18
+    # DDL ledger module -- the exact regression the named contract must catch.
+    fixture_root = tmp_path / "ddl-ledger"
+    _write_import_fixture(
+        fixture_root,
+        ("backend.app.edge_db.compatibility", "backend.app.edge_db.schema"),
+    )
+
+    # When: import-linter runs the real contract set against the fixture.
+    result = _lint_fixture(fixture_root)
+
+    # Then: the named contract is reported BROKEN for that exact chain -- so
+    # removing or weakening the contract (its source/forbidden pair) drops the
+    # name from the broken section and fails this test.
+    assert result.returncode != 0, result.stdout
+    broken_section = result.stdout.partition("Broken contracts")[2]
+    assert DDL_LEDGER_CONTRACT_NAME in broken_section, result.stdout
+    assert "backend.app.edge_db.compatibility -> backend.app.edge_db.schema" in (
+        result.stdout
+    ), result.stdout

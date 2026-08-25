@@ -509,9 +509,13 @@ def test_store_publishes_idempotent_manifest_envelopes_without_runtime_ddl(tmp_p
         assert connection.execute("PRAGMA user_version").fetchone() == (
             CURRENT_SCHEMA_RANGE.maximum,
         )
-        assert connection.execute(
-            "SELECT count(*) FROM runtime_manifest_contents"
-        ).fetchone() == (0,)
+        tables = {
+            str(row[0])
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+            )
+        }
+        assert "runtime_manifest_contents" not in tables
 
 
 def test_manifest_publish_contains_canonical_manifest_reference(tmp_path: Path) -> None:

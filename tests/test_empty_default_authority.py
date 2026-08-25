@@ -20,8 +20,8 @@ from backend.app.features.connection.store import (
     ConnectionSettingsStore,
 )
 from backend.app.features.status.heartbeat_store import HeartbeatStore
-from backend.app.lifespan import API_FACILITY_ID_ENV, EDGE_FACILITY_TOKEN_ENV
 from backend.app.main import create_app, no_lifespan
+from tests_support.compact_authority_db import prepare_compact_database
 from worker.runtime.config.pull_models import BackendWorkerConfigPayload
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -30,6 +30,12 @@ PRODUCTION_ROOTS = (
     REPO_ROOT / "worker",
     REPO_ROOT / "shared",
 )
+
+
+@pytest.fixture(autouse=True)
+def _compact_databases(tmp_path: Path) -> None:
+    for name in ("connection.sqlite3", "catalog.sqlite3", "empty.sqlite3"):
+        prepare_compact_database(tmp_path / name)
 
 
 def _client_with_registry(tmp_path: Path, *, camera_id: str = "cam-1") -> TestClient:
@@ -58,9 +64,9 @@ class TestConnectionFacilityDbOnly:
     def test_env_facility_id_does_not_seed_load(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.setenv(API_FACILITY_ID_ENV, "facility-from-env")
+        monkeypatch.setenv("API_FACILITY_ID", "facility-from-env")
         monkeypatch.setenv(API_BACKEND_BASE_URL_ENV, "https://api.example.com")
-        monkeypatch.delenv(EDGE_FACILITY_TOKEN_ENV, raising=False)
+        monkeypatch.delenv("EDGE_FACILITY_TOKEN", raising=False)
         store = ConnectionSettingsStore(tmp_path / "connection.sqlite3")
         settings = store.load()
         assert settings.facility_id is None
@@ -76,7 +82,6 @@ class TestConnectionFacilityDbOnly:
             "from_env",
             classmethod(lambda cls: store),
         )
-        store.save({"events_url": "https://api.example.com/api/v1/events"})
         app = create_app(lifespan=no_lifespan)
         client = TestClient(app)
         login = client.post(
@@ -85,7 +90,16 @@ class TestConnectionFacilityDbOnly:
         assert login.status_code == 204
         body = client.get("/api/v1/connection").json()
         assert body["configured"] is False
-        store.save({"facility_id": "fac-1", "facility_token": "tok-secret"})
+        store.save(
+            {
+                "facility_code": "NH-7H2K9M4QXP",
+                "client_installation_ref": "aa83ea3f-6e5f-4f45-a401-fb36c38835b6",
+                "facility_id": "fac-1",
+                "facility_token": "tok-secret",
+                "edge_installation_id": "edge-1",
+                "enrollment_generation": 1,
+            }
+        )
         body = client.get("/api/v1/connection").json()
         assert body["configured"] is True
 

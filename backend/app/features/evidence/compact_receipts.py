@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import sqlite3
 import stat
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -49,13 +50,20 @@ class CompactArtifactReceiptStore:
         self._clip_store = ClipStore(clip_root)
         self._hooks = hooks or CompactReceiptHooks()
 
-    def commit(self, receipt: ArtifactReceipt) -> ArtifactReceipt:
+    def commit(
+        self,
+        receipt: ArtifactReceipt,
+        *,
+        after_write: Callable[[sqlite3.Connection], None] | None = None,
+    ) -> ArtifactReceipt:
         located = self._clip_store.locate_manifest(receipt.artifact_id)
         if located is None:
             raise ArtifactReceiptVerificationError("clip manifest is missing")
         opened = self._open_media(located.manifest_path.parent / "clip.mp4")
         try:
-            return self.commit_verified(receipt, verified_artifact(opened.handle))
+            return self.commit_verified(
+                receipt, verified_artifact(opened.handle), after_write=after_write
+            )
         finally:
             opened.handle.close()
 
@@ -63,6 +71,8 @@ class CompactArtifactReceiptStore:
         self,
         receipt: ArtifactReceipt,
         route_verified: VerifiedArtifact,
+        *,
+        after_write: Callable[[sqlite3.Connection], None] | None = None,
     ) -> ArtifactReceipt:
         located = self._clip_store.locate_manifest(receipt.artifact_id)
         if located is None:
@@ -100,6 +110,8 @@ class CompactArtifactReceiptStore:
                         "verified descriptor changed during transaction"
                     )
                 self._verify_current_path(media_path, final_verified.identity)
+                if after_write is not None:
+                    after_write(connection)
         finally:
             connection.close()
         return ArtifactReceipt(

@@ -10,6 +10,13 @@ from dataclasses import dataclass, field
 from fastapi import APIRouter, HTTPException, Request, Response, status
 from pydantic import BaseModel, ConfigDict, Field
 
+from backend.app.features.audit.catalog import AuditAction, empty_detail
+from backend.app.features.audit.http import (
+    AuditUnavailableError,
+    append_governed,
+    append_transactional,
+)
+from backend.app.features.audit.store import AuditEvent, utc_now
 from backend.app.shared.dashboard_auth import (
     DASHBOARD_SESSION_COOKIE,
     DashboardSessionStore,
@@ -132,16 +139,31 @@ def login(payload: DashboardLoginRequest, request: Request, response: Response) 
             detail="invalid dashboard credentials",
         )
     _LOGIN_THROTTLE.clear(key)
+    try:
+        append_governed(
+            request, actor_id=payload.username, action=AuditAction.AUTH_LOGIN,
+            target_id=payload.username,
+        )
+    except AuditUnavailableError:
+        sessions.revoke(token)
+        raise
     _set_session_cookie(response, request, sessions, token)
 
 
 @router.get("/session", status_code=status.HTTP_204_NO_CONTENT, response_model=None)
 def session(request: Request) -> None:
-    authorize_dashboard(request)
+    actor = authorize_dashboard(request)
+    append_governed(
+        request, actor_id=actor, action=AuditAction.AUTH_SESSION_READ, target_id=actor
+    )
 
 
 @router.delete("/session", status_code=status.HTTP_204_NO_CONTENT, response_model=None)
 def logout(request: Request, response: Response) -> None:
+    actor = authorize_dashboard(request)
+    append_governed(
+        request, actor_id=actor, action=AuditAction.AUTH_LOGOUT, target_id=actor
+    )
     dashboard_sessions(request).revoke(request.cookies.get(DASHBOARD_SESSION_COOKIE))
     response.delete_cookie(DASHBOARD_SESSION_COOKIE, path="/", samesite="strict")
 
@@ -150,11 +172,17 @@ def logout(request: Request, response: Response) -> None:
 def update_credentials(
     payload: DashboardCredentialsUpdateRequest, request: Request, response: Response
 ) -> None:
-    authorize_dashboard(request)
+    actor = authorize_dashboard(request)
+    event = AuditEvent(
+        occurred_at=utc_now(), actor_id=actor, action=AuditAction.CREDENTIAL_ROTATE,
+        target_id=payload.username or actor,
+        detail=empty_detail(AuditAction.CREDENTIAL_ROTATE),
+    )
     token = rotate_dashboard_credentials(
         request,
         new_username=payload.username,
         new_password=payload.new_password,
+        after_write=lambda connection: append_transactional(request, connection, event),
     )
     _set_session_cookie(response, request, dashboard_sessions(request), token)
 

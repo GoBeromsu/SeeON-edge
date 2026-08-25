@@ -693,7 +693,7 @@ def test_bed_zone_recognize_runner_failure_returns_503() -> None:
 def test_media_endpoints_require_relay_token_no_wrong_correct(
     path_builder: object,
 ) -> None:
-    """Security finding #3: stream/snapshot/bed-zone match probe/derivative/delete
+    """Security finding #3: stream/snapshot/bed-zone match probe/delete
     constant-time relay-token auth (``_authorized_probe``).
     """
     store = LatestFrameStore()

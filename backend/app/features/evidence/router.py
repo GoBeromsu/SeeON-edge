@@ -16,6 +16,14 @@ from fastapi import APIRouter, Header, HTTPException, Request, status
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from backend.app.edge_db import EDGE_DATABASE_PATH
+from backend.app.features.audit.catalog import (
+    AuditAction,
+    AuditActorType,
+    AuditAuthMechanism,
+    empty_detail,
+)
+from backend.app.features.audit.http import AuditUnavailableError, append_transactional
+from backend.app.features.audit.store import AuditEvent, utc_now
 from backend.app.features.clips.store import CLIP_STORE_DIR_ENV, DEFAULT_CLIP_STORE_DIR
 from backend.app.features.evidence.compact_receipts import CompactArtifactReceiptStore
 from backend.app.features.evidence.receipt_store import (
@@ -218,9 +226,26 @@ def export_clip(
             receipt = ArtifactReceipt(clip_id, payload.sha256, payload.size_bytes)
             receipt_store = _receipt_store(request)
             if isinstance(receipt_store, CompactArtifactReceiptStore):
-                _ = receipt_store.commit_verified(receipt, media)
+                _ = receipt_store.commit_verified(
+                    receipt,
+                    media,
+                    after_write=lambda connection: append_transactional(
+                        request,
+                        connection,
+                        AuditEvent(
+                            occurred_at=utc_now(), actor_id="worker-relay",
+                            action=AuditAction.EVIDENCE_RECEIPT, target_id=clip_id,
+                            detail=empty_detail(AuditAction.EVIDENCE_RECEIPT),
+                            actor_type=AuditActorType.SERVICE,
+                            auth_mechanism=AuditAuthMechanism.RELAY_TOKEN,
+                        ),
+                    ),
+                )
             else:
                 _ = receipt_store.commit(receipt)
+        except AuditUnavailableError:
+            media.handle.close()
+            raise
         except ArtifactReceiptVerificationError as exc:
             media.handle.close()
             raise HTTPException(
