@@ -39,6 +39,8 @@ ENV UV_LINK_MODE=copy \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PATH="/app/.venv/bin:${PATH}" \
+    GST_PLUGIN_PATH=/opt/nvidia/deepstream/deepstream/lib/gst-plugins \
+    LD_LIBRARY_PATH="/opt/nvidia/deepstream/deepstream/lib:${LD_LIBRARY_PATH}" \
     SEEON_DEEPSTREAM_MANIFEST=/opt/seeon/deepstream-manifest.json \
     SEEON_DEEPSTREAM_FIRST_FAULT=/var/lib/seeon-state/deepstream-first-fault.json
 
@@ -80,7 +82,8 @@ RUN apt-get update \
     && test ! -e /usr/bin/g++ \
     && test ! -d /opt/nvidia/deepstream/deepstream/sources \
     && ffmpeg -version \
-    && test -f /usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc
+    && test -f /usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc \
+    && test -f /opt/nvidia/deepstream/deepstream/lib/gst-plugins/libnvdsgst_multistream.so
 
 COPY pyproject.toml uv.lock ./
 RUN --mount=type=cache,target=/root/.cache/uv \

@@ -186,6 +186,21 @@ def test_relay_stub_serves_current_release_identity(
     }
 
 
+def test_browser_evidence_authenticates_upstream_before_accepting_screenshot() -> None:
+    script = Path("scripts/qa/deepstream_canary_browser.mjs").read_text(
+        encoding="utf-8"
+    )
+
+    assert "--extra-headers=" not in script
+    assert '"X-Edge-Relay-Token": token' in script
+    assert "upstreamStatus === 200" in script
+    assert "frameDelivered" in script
+    assert '"content-type": "image/jpeg"' in script
+    assert "upstream.destroy()" in script
+    assert 'stdio: "ignore"' in script
+    assert "setTimeout(resolveHold" not in script
+
+
 def test_live_rung_refuses_without_authorization_before_docker(tmp_path: Path) -> None:
     # Given: a requested facility rung without an owner artifact.
     evidence = tmp_path / "unauthorized"

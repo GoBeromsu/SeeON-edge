@@ -29,3 +29,19 @@ def test_native_build_has_fail_closed_sanitizer_ctest_lane() -> None:
     assert "-fsanitize=address,undefined" in cmake
     assert "build-sanitized" in dockerfile
     assert "ctest --test-dir build-sanitized --output-on-failure" in dockerfile
+
+
+def test_runtime_image_exposes_and_inspects_deepstream_plugins() -> None:
+    dockerfile = (REPOSITORY_ROOT / "Dockerfile.edge").read_text(encoding="utf-8")
+    runtime = dockerfile.split(" AS runtime", maxsplit=1)[1]
+
+    assert (
+        "GST_PLUGIN_PATH=/opt/nvidia/deepstream/deepstream/lib/gst-plugins"
+        in runtime
+    )
+    assert "/opt/nvidia/deepstream/deepstream/lib:${LD_LIBRARY_PATH}" in runtime
+    assert (
+        "test -f /opt/nvidia/deepstream/deepstream/lib/gst-plugins/"
+        "libnvdsgst_multistream.so"
+        in runtime
+    )

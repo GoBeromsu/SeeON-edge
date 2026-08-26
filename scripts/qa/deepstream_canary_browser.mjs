@@ -3,6 +3,7 @@
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { createServer, request as httpRequest } from "node:http";
 import { resolve } from "node:path";
 
 const [cameraId, outputDir, clipPath, viewerUrl] = process.argv.slice(2);
@@ -58,22 +59,95 @@ if (!attachment) {
 }
 const { consumer, frame } = attachment;
 
-const browser = spawnSync(
-  chromium,
-  [
-    "--headless=new",
-    "--no-sandbox",
-    "--run-all-compositor-stages-before-draw",
-    "--virtual-time-budget=5000",
-    `--extra-headers=${JSON.stringify({ "X-Edge-Relay-Token": token })}`,
-    `--screenshot=${screenshot}`,
-    "--window-size=1280,720",
-    viewer,
-  ],
-  { encoding: "utf8", timeout: 30_000 },
-);
-await new Promise((resolveHold) => setTimeout(resolveHold, 11_000));
+let upstreamStatus = null;
+let frameDelivered = false;
+const proxy = createServer((request, response) => {
+  if (request.url !== `/stream/${cameraId}`) {
+    response.writeHead(404);
+    response.end();
+    return;
+  }
+  const upstream = httpRequest(
+    new URL(viewer),
+    { headers: { "X-Edge-Relay-Token": token } },
+    (upstreamResponse) => {
+      upstreamStatus = upstreamResponse.statusCode ?? null;
+      if (upstreamStatus !== 200) {
+        response.writeHead(upstreamStatus ?? 502, upstreamResponse.headers);
+        upstreamResponse.pipe(response);
+        return;
+      }
+      let received = Buffer.alloc(0);
+      let sent = false;
+      upstreamResponse.on("data", (chunk) => {
+        if (sent) return;
+        received = Buffer.concat([received, chunk]);
+        const start = received.indexOf(Buffer.from([0xff, 0xd8]));
+        const end = received.indexOf(
+          Buffer.from([0xff, 0xd9]),
+          Math.max(0, start + 2),
+        );
+        if (start < 0 || end <= start) return;
+        sent = true;
+        const authenticatedFrame = received.subarray(start, end + 2);
+        response.writeHead(200, {
+          "content-type": "image/jpeg",
+          "content-length": authenticatedFrame.length,
+        });
+        response.end(authenticatedFrame, () => {
+          frameDelivered = true;
+          upstream.destroy();
+        });
+      });
+      upstreamResponse.once("end", () => {
+        if (!sent) response.destroy(new Error("authenticated MJPEG frame missing"));
+      });
+    },
+  );
+  upstream.once("error", (error) => response.destroy(error));
+  upstream.end();
+});
+await new Promise((resolveListen, rejectListen) => {
+  proxy.once("error", rejectListen);
+  proxy.listen(0, "127.0.0.1", resolveListen);
+});
+const proxyAddress = proxy.address();
+if (!proxyAddress || typeof proxyAddress === "string") {
+  console.error("browser proxy did not bind an IPv4 port");
+  process.exit(1);
+}
+const browserViewer = `http://127.0.0.1:${proxyAddress.port}/stream/${cameraId}`;
+const browserExit = await new Promise((resolveExit) => {
+  const browser = spawn(
+    chromium,
+    [
+      "--headless=new",
+      "--no-sandbox",
+      "--run-all-compositor-stages-before-draw",
+      "--virtual-time-budget=5000",
+      `--screenshot=${screenshot}`,
+      "--window-size=1280,720",
+      browserViewer,
+    ],
+    { stdio: "ignore" },
+  );
+  let settled = false;
+  const finish = (status) => {
+    if (settled) return;
+    settled = true;
+    clearTimeout(timeout);
+    resolveExit(status);
+  };
+  const timeout = setTimeout(() => {
+    browser.kill("SIGKILL");
+    finish(null);
+  }, 30_000);
+  browser.once("error", () => finish(null));
+  browser.once("close", (status) => finish(status));
+});
 consumer.kill("SIGTERM");
+proxy.closeAllConnections();
+await new Promise((resolveClose) => proxy.close(resolveClose));
 
 const probe = spawnSync(
   "ffprobe",
@@ -81,13 +155,18 @@ const probe = spawnSync(
   { encoding: "utf8", timeout: 15_000 },
 );
 const clip = readFileSync(clipPath);
-const viewerOk = browser.status === 0 && existsSync(screenshot);
+const viewerOk =
+  browserExit === 0 &&
+  upstreamStatus === 200 &&
+  frameDelivered &&
+  existsSync(screenshot);
 const receipt = {
   schema_version: 1,
   camera_id: cameraId,
   mjpeg_frame_sha256: createHash("sha256").update(frame).digest("hex"),
   viewer_ok: viewerOk,
-  viewer_exit: browser.status,
+  viewer_exit: browserExit,
+  viewer_http_status: upstreamStatus,
   screenshot_sha256: viewerOk ? createHash("sha256").update(readFileSync(screenshot)).digest("hex") : null,
   derivative_playable: probe.status === 0 && probe.stdout.trim().length > 0,
   derivative_sha256: createHash("sha256").update(clip).digest("hex"),
