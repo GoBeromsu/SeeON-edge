@@ -8,6 +8,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
+from shared.release_identity import (
+    EDGE_DATABASE_FORMAT_IDENTITY,
+    EDGE_DATABASE_SCHEMA_VERSION,
+)
 from worker.tools.deepstream_canary.report import JsonValue, canonical_json, write_receipt_manifest
 
 PROJECT_NAME: Final = "seeon-ds-canary"
@@ -118,6 +122,8 @@ def render_compose(request: RenderRequest) -> tuple[Path, str]:
     template = BASE_COMPOSE.read_text(encoding="utf-8")
     replacements = {
         "CANARY_WORKER_IMAGE": request.worker_image,
+        "CANARY_EDGE_DATABASE_SCHEMA_VERSION": str(EDGE_DATABASE_SCHEMA_VERSION),
+        "CANARY_EDGE_DATABASE_FORMAT_IDENTITY": EDGE_DATABASE_FORMAT_IDENTITY,
         **{name: str(path) for name, path in paths.items()},
     }
     for name, value in replacements.items():

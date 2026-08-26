@@ -11,6 +11,8 @@ services:
       CANARY_RECEIPT_DIR: /receipts
       CANARY_WORKER_CONFIG_DIR: /configs
       CANARY_ACTIVE_CONFIG: /receipts/active-config
+      CANARY_EDGE_DATABASE_SCHEMA_VERSION: ${CANARY_EDGE_DATABASE_SCHEMA_VERSION}
+      CANARY_EDGE_DATABASE_FORMAT_IDENTITY: ${CANARY_EDGE_DATABASE_FORMAT_IDENTITY}
     volumes:
       - ${CANARY_ASSET_DIR}/relay_stub.py:/relay_stub.py:ro
       - ${CANARY_RECEIPT_DIR}:/receipts:rw

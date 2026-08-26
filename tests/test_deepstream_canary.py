@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import os
+import runpy
 import subprocess
 import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -138,6 +141,49 @@ def test_cli_renders_isolated_zero_and_loopback_compose(tmp_path: Path) -> None:
         timeout=30,
     )
     assert compose_check.returncode == 0, compose_check.stderr
+
+
+def test_relay_stub_serves_current_release_identity(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from shared.release_identity import (
+        EDGE_DATABASE_FORMAT_IDENTITY,
+        EDGE_DATABASE_SCHEMA_VERSION,
+    )
+
+    monkeypatch.setenv("CANARY_RELAY_TOKEN", "test-token")
+    monkeypatch.setenv("CANARY_RECEIPT_DIR", str(tmp_path / "receipts"))
+    monkeypatch.setenv("CANARY_WORKER_CONFIG_DIR", str(tmp_path / "configs"))
+    monkeypatch.setenv("CANARY_ACTIVE_CONFIG", str(tmp_path / "active-config"))
+    monkeypatch.setenv(
+        "CANARY_EDGE_DATABASE_SCHEMA_VERSION",
+        str(EDGE_DATABASE_SCHEMA_VERSION),
+    )
+    monkeypatch.setenv(
+        "CANARY_EDGE_DATABASE_FORMAT_IDENTITY",
+        EDGE_DATABASE_FORMAT_IDENTITY,
+    )
+    relay = runpy.run_path("scripts/qa/deepstream-canary/relay_stub.py")
+    response: dict[str, int] = {}
+    body = io.BytesIO()
+    handler = SimpleNamespace(
+        path="/health/release-identity",
+        headers={},
+        send_response=lambda status: response.update(status=status),
+        send_error=lambda status: response.update(status=status),
+        send_header=lambda _name, _value: None,
+        end_headers=lambda: None,
+        wfile=body,
+    )
+
+    relay["RelayHandler"].do_GET(handler)
+
+    assert response == {"status": 200}
+    assert json.loads(body.getvalue()) == {
+        "edge_database_format_identity": EDGE_DATABASE_FORMAT_IDENTITY,
+        "edge_database_schema_version": EDGE_DATABASE_SCHEMA_VERSION,
+    }
 
 
 def test_live_rung_refuses_without_authorization_before_docker(tmp_path: Path) -> None:

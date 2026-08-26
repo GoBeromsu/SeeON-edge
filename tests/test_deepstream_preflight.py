@@ -107,8 +107,13 @@ def _probe(command: tuple[str, ...], timeout: float) -> str:
     assert timeout > 0
     if command[0] == "nvidia-smi":
         return "595.84|12.0\n"
-    if command[:2] == ("nvcc", "--version"):
-        return "Build cuda_13.2.r13.2/compiler.0_0\n"
+    if command == (
+        "dpkg-query",
+        "-W",
+        "-f=${Version}\\n",
+        "cuda-cudart-13-2",
+    ):
+        return "13.2.51-1\n"
     if command[0] == "dpkg-query":
         return "10.13.3.9-1+cuda13.2\n"
     if command[0] == "gst-inspect-1.0":
@@ -142,6 +147,32 @@ def test_preflight_accepts_pinned_manifest_after_explicit_engine_cache_step(
         "inference": "ok",
     }
     assert set(receipt["engines"]) == {"bed", "person", "pose"}
+
+
+def test_preflight_refuses_missing_cuda_runtime_package(tmp_path: Path) -> None:
+    manifest = _manifest(tmp_path)
+    prepare_engine_cache(manifest)
+    _build_plan(manifest)
+
+    def missing_cuda_runtime(command: tuple[str, ...], timeout: float) -> str:
+        if command == (
+            "dpkg-query",
+            "-W",
+            "-f=${Version}\\n",
+            "cuda-cudart-13-2",
+        ):
+            raise FileNotFoundError("cuda-cudart-13-2")
+        return _probe(command, timeout)
+
+    with pytest.raises(DeepStreamPreflightError) as excinfo:
+        run_deepstream_preflight(
+            manifest,
+            command_runner=missing_cuda_runtime,
+            mount_is_read_only=lambda _path: True,
+        )
+
+    assert excinfo.value.code == "cuda_version_mismatch"
+    assert "cuda-cudart-13-2" in excinfo.value.detail
 
 
 def test_preflight_refuses_unbuilt_plan_cache_before_warmup(tmp_path: Path) -> None:

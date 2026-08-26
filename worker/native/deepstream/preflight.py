@@ -201,7 +201,10 @@ def _run_deepstream_preflight(
         raise DeepStreamPreflightError("manifest_invalid", "runtime must be an object")
     gpu = _probe_gpu(runtime, command_runner)
     _expect_command_version(
-        command_runner, ("nvcc", "--version"), str(runtime["cuda"]), "cuda_version_mismatch"
+        command_runner,
+        ("dpkg-query", "-W", "-f=${Version}\\n", "cuda-cudart-13-2"),
+        str(runtime["cuda"]),
+        "cuda_version_mismatch",
     )
     _expect_command_version(
         command_runner,

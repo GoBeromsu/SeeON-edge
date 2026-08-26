@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import time
 from http import HTTPStatus
@@ -20,6 +21,12 @@ TOKEN: Final = os.environ["CANARY_RELAY_TOKEN"]
 RECEIPTS: Final = Path(os.environ["CANARY_RECEIPT_DIR"])
 WORKER_CONFIG_DIR: Final = Path(os.environ["CANARY_WORKER_CONFIG_DIR"])
 ACTIVE_CONFIG: Final = Path(os.environ["CANARY_ACTIVE_CONFIG"])
+EDGE_DATABASE_SCHEMA_VERSION: Final = int(
+    os.environ["CANARY_EDGE_DATABASE_SCHEMA_VERSION"]
+)
+EDGE_DATABASE_FORMAT_IDENTITY: Final = os.environ[
+    "CANARY_EDGE_DATABASE_FORMAT_IDENTITY"
+]
 MAX_BODY: Final = 2 * 1024 * 1024
 
 
@@ -29,6 +36,18 @@ class RelayHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802
         if self.path == "/health/live":
             body = b'{"status":"ok"}\n'
+        elif self.path == "/health/release-identity":
+            body = (
+                json.dumps(
+                    {
+                        "edge_database_format_identity": EDGE_DATABASE_FORMAT_IDENTITY,
+                        "edge_database_schema_version": EDGE_DATABASE_SCHEMA_VERSION,
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                + "\n"
+            ).encode()
         elif self.path == "/api/v1/cameras/worker-config":
             if self.headers.get("X-Edge-Relay-Token", "") != TOKEN:
                 self.send_error(HTTPStatus.UNAUTHORIZED)
