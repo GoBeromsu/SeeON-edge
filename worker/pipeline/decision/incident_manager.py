@@ -39,7 +39,7 @@ class IncidentConfigurationError(ValueError):
         return f"cooldown_sec must be non-negative, received {self.cooldown_sec}"
 
 
-@dataclass(slots=True)  # noqa: MUTABLE_OK - owns per-camera cooldown state
+@dataclass(slots=True)  # policy: MUTABLE_OK - owns per-camera cooldown state
 class IncidentManager:
     cooldown_sec: float = 30.0
     identity_path: Path | None = None

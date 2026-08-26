@@ -261,7 +261,9 @@ def test_race_loss_with_corrupt_stored_lkg_clears_current_and_returns_fresh(
     assert str(store.database_path) in error
 
 
-def test_offline_without_lkg_falls_back_to_yaml(tmp_path: Path) -> None:
+def test_offline_without_lkg_falls_back_to_yaml(
+    tmp_path: Path, packaged_lstm_artifact: Path
+) -> None:
     store = WorkerConfigLkgStore(tmp_path / "worker-config.sqlite3")
 
     def offline(_request: urllib.request.Request, _timeout: float) -> FakeResponse:

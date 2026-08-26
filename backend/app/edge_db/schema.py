@@ -1,6 +1,6 @@
 """Forward-only DDL ledger owned exclusively by the edge DB migrator."""
+# policy: SIZE_OK — immutable v1-v18 statement ledger; historical bytes stay here.
 
-# noqa: SIZE_OK — immutable v1-v18 statement ledger; historical bytes stay here.
 
 from __future__ import annotations
 

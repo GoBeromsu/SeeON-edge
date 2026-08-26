@@ -46,7 +46,7 @@ def _input() -> DecisionInput:
     )
 
 
-@dataclass(slots=True)  # noqa: MUTABLE_OK - test changes scripted events between frames
+@dataclass(slots=True)  # policy: MUTABLE_OK - test changes scripted events between frames
 class _StaticDecider:
     events: tuple[BusinessEvent, ...]
 
@@ -55,7 +55,7 @@ class _StaticDecider:
         return self.events
 
 
-@dataclass(slots=True)  # noqa: MUTABLE_OK - output probe records observable calls
+@dataclass(slots=True)  # policy: MUTABLE_OK - output probe records observable calls
 class _OutputProbe:
     clips: list[str] = field(default_factory=list)
     snapshots: list[str] = field(default_factory=list)

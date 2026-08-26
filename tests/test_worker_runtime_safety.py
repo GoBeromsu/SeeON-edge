@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-import sqlite3
+import base64
+import json
 import subprocess
 import sys
 import textwrap
@@ -11,11 +12,12 @@ from typing import cast
 
 import pytest
 
+from shared.events.delivery_queue import DeliveryQueue
 from worker.adapters.model.errors import FatalAcceleratorError
 from worker.adapters.model.warmup import warmup_to_ready
 from worker.runtime import bootstrap
 from worker.runtime.faults import FaultHandler
-from worker.runtime.faults.record import WORKER_STATE_DB_FILENAME, FirstFaultRecord
+from worker.runtime.faults.record import FirstFaultRecord
 from worker.runtime.lease import GpuLease, GpuLeaseUnavailableError
 from worker.runtime.profile.registry import VerifyResult
 from worker.runtime.watchdog import WATCHDOG_STAGE, InferenceWatchdog
@@ -240,17 +242,10 @@ def test_watchdog_subprocess_hard_exits_with_fatal_accelerator_code(tmp_path: Pa
     )
 
     assert completed.returncode == 4
-    connection = sqlite3.connect(tmp_path / WORKER_STATE_DB_FILENAME)
-    try:
-        cursor = connection.execute(
-            "SELECT stage, exit_code, camera_id FROM faults WHERE id = 1"
-        )
-        stage, exit_code, camera_id = cursor.fetchone()
-    finally:
-        connection.close()
-    assert stage == WATCHDOG_STAGE
-    assert exit_code == 4
-    assert camera_id == "camera-a"
+    fault = _durable_fault_payload(tmp_path)
+    assert fault["stage"] == WATCHDOG_STAGE
+    assert fault["exit_code"] == 4
+    assert fault["camera_id"] == "camera-a"
 
 
 @pytest.mark.real_stack
@@ -289,6 +284,7 @@ def test_watchdog_detects_a_genuinely_hanging_extractor_inside_the_real_composit
 
         import numpy as np
 
+        import worker.pipeline.inference_coordinator as coordinator_module
         import worker.runtime.worker as worker_module
         from contracts.frame import Frame
         from worker.domains.registry import DETECTION_MODULE_REGISTRY
@@ -364,6 +360,10 @@ def test_watchdog_detects_a_genuinely_hanging_extractor_inside_the_real_composit
                     return _HangingPoseRunner()
                 return _FakeRunner(task)
 
+            def infer_batch(self, task, frames, **_options):
+                runner = self.create(task)
+                return tuple(runner(frame) for frame in frames)
+
 
         class _OneFramePushLoop:
             \"\"\"Fake ingest loop: the only faked seam. Publishes exactly one
@@ -419,6 +419,7 @@ def test_watchdog_detects_a_genuinely_hanging_extractor_inside_the_real_composit
         # inside `_initialize_models`), so reassigning it here is picked up
         # without touching `WorkerRuntime.__init__`, which has no deadline seam.
         worker_module.InferenceWatchdog = _ShortDeadlineWatchdog
+        coordinator_module.INFERENCE_DEADLINE_SEC = 0.2
 
 
         def _fall_via_serving(self, _device):
@@ -471,18 +472,22 @@ def test_watchdog_detects_a_genuinely_hanging_extractor_inside_the_real_composit
     )
 
     assert completed.returncode == 4, f"stdout={completed.stdout!r} stderr={completed.stderr!r}"
-    connection = sqlite3.connect(tmp_path / WORKER_STATE_DB_FILENAME)
-    try:
-        cursor = connection.execute(
-            "SELECT stage, exit_code, camera_id, task FROM faults WHERE id = 1"
-        )
-        stage, exit_code, camera_id, task = cursor.fetchone()
-    finally:
-        connection.close()
-    assert stage == WATCHDOG_STAGE
-    assert exit_code == 4
-    assert camera_id == "camera-a"
-    assert task == "pose"
+    fault = _durable_fault_payload(tmp_path)
+    assert fault["stage"] == WATCHDOG_STAGE
+    assert fault["exit_code"] == 4
+    assert fault["camera_id"] == "camera-a"
+    assert fault["task"] == "pose"
+
+
+def _durable_fault_payload(state_dir: Path) -> dict[str, object]:
+    entries = tuple(DeliveryQueue(state_dir / "delivery-queue").entries())
+    assert len(entries) == 1
+    assert entries[0]["event_type"] == "runtime.fault"
+    encoded = entries[0]["values_b64"]
+    assert isinstance(encoded, str)
+    payload = json.loads(base64.b64decode(encoded))
+    assert isinstance(payload, dict)
+    return payload
 
 
 def _raise_warmup() -> None:

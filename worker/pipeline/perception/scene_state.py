@@ -19,7 +19,7 @@ class BedRegionCacheCounterSnapshot(TypedDict):
     scheduled_empty: int
 
 
-@dataclass(slots=True)  # noqa: MUTABLE_OK
+@dataclass(slots=True)  # policy: MUTABLE_OK
 class BedRegionCacheCounters:
     """Mutable telemetry counters owned by one camera's scene state."""
 
@@ -39,7 +39,7 @@ class BedRegionCacheCounters:
         }
 
 
-@dataclass(slots=True)  # noqa: MUTABLE_OK
+@dataclass(slots=True)  # policy: MUTABLE_OK
 class SceneState:
     """Mutable per-camera owner of the latest observation and bounded bed cache."""
 

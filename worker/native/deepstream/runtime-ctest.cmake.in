@@ -1,0 +1,16 @@
+# Relocatable runtime smoke suite. CTest executes relative paths from this directory.
+add_test(seeon-deepstream-ipc-test "bin/seeon-deepstream-ipc-test")
+add_test(
+  seeon-deepstream-wire-cross-language-test
+  "/usr/bin/python3"
+  "data/perception_wire_cross_language_test.py"
+  "bin/seeon-deepstream-ipc-test"
+)
+add_test(seeon-deepstream-source-runtime-test "bin/seeon-deepstream-source-runtime-test")
+add_test(
+  seeon-deepstream-source-runtime-gstreamer-test
+  "bin/seeon-deepstream-source-runtime-gstreamer-test"
+)
+add_test(seeon-deepstream-child-commands-test "bin/seeon-deepstream-child-commands-test")
+add_test(seeon-deepstream-au-parser-test "bin/seeon-deepstream-au-parser-test")
+add_test(seeon-deepstream-au-transport-test "bin/seeon-deepstream-au-transport-test")

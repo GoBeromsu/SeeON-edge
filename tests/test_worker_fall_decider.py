@@ -20,7 +20,7 @@ class _Metadata:
     mode: Literal["sequence"] = "sequence"
 
 
-@dataclass(slots=True)  # noqa: MUTABLE_OK - records predictions for assertions
+@dataclass(slots=True)  # policy: MUTABLE_OK - records predictions for assertions
 class _Model:
     probabilities: tuple[float, ...]
     metadata: _Metadata = field(default_factory=_Metadata)

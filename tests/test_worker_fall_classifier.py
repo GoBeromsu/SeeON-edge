@@ -19,7 +19,7 @@ class _Metadata:
     mode: Literal["features", "sequence"]
 
 
-@dataclass(slots=True)  # noqa: MUTABLE_OK - records model inputs for assertions
+@dataclass(slots=True)  # policy: MUTABLE_OK - records model inputs for assertions
 class _Model:
     metadata: _Metadata
     probabilities: tuple[float, ...]

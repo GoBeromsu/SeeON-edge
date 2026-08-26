@@ -20,7 +20,7 @@ JsonObject: TypeAlias = dict[str, object]
 HealthMap: TypeAlias = dict[tuple[str, str], DetectionHealth]
 
 
-@dataclass(slots=True)  # noqa: MUTABLE_OK
+@dataclass(slots=True)  # policy: MUTABLE_OK
 class LatestLatency:
     """Process-local first-attempt latency totals. Mutation is the purpose."""
 
@@ -50,14 +50,14 @@ class LatestLatency:
         return None if latency is None else deepcopy(latency)
 
 
-def require_int(value: object, *, field: str) -> int:  # noqa: OBJECT_OK, GENERIC_ERR_OK
+def require_int(value: object, *, field: str) -> int:  # policy: OBJECT_OK, GENERIC_ERR_OK
     parsed = optional_int(value, field=field)
     if parsed is None:
-        raise TypeError(f"runtime status payload has invalid {field}")  # noqa: GENERIC_ERR_OK
+        raise TypeError(f"runtime status payload has invalid {field}")  # policy: GENERIC_ERR_OK
     return parsed
 
 
-def optional_int(value: object, *, field: str) -> int | None:  # noqa: OBJECT_OK, GENERIC_ERR_OK
+def optional_int(value: object, *, field: str) -> int | None:  # policy: OBJECT_OK, GENERIC_ERR_OK
     if value is None:
         return None
     if isinstance(value, bool):

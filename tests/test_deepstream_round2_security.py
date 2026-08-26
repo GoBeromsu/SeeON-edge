@@ -11,6 +11,7 @@ from typing import cast
 import pytest
 
 import worker.runtime.deepstream as dark_runtime
+import worker.runtime.deepstream.fault as fault_module
 from worker.native.deepstream.control import (
     ChildControlError,
     ControlIdentity,
@@ -39,6 +40,65 @@ def test_first_fault_returns_record_actually_persisted(tmp_path: Path) -> None:
         path, category="xid", exit_code=4, worker_boot_id=_BOOT, child_instance_id=_CHILD
     )
     assert first.category == second.category == "cuda"
+
+
+def test_first_fault_publication_is_atomic_for_concurrent_writers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "private" / "fault.json"
+    first_writer_entered = threading.Event()
+    release_first_writer = threading.Event()
+    real_fdopen = fault_module.os.fdopen
+    delayed = False
+
+    def controlled_fdopen(descriptor: int, mode: str, *args, **kwargs):
+        nonlocal delayed
+        if mode == "wb" and not delayed:
+            delayed = True
+            first_writer_entered.set()
+            assert release_first_writer.wait(timeout=2.0)
+        return real_fdopen(descriptor, mode, *args, **kwargs)
+
+    monkeypatch.setattr(fault_module.os, "fdopen", controlled_fdopen)
+    results = []
+    errors: list[Exception] = []
+
+    def write_first() -> None:
+        try:
+            results.append(
+                persist_first_fault(
+                    path,
+                    category="cuda",
+                    exit_code=4,
+                    worker_boot_id=_BOOT,
+                    child_instance_id=_CHILD,
+                )
+            )
+        except Exception as error:  # noqa: BLE001 - test-thread boundary
+            errors.append(error)
+
+    thread = threading.Thread(target=write_first)
+    thread.start()
+    assert first_writer_entered.wait(timeout=2.0)
+    try:
+        results.append(
+            persist_first_fault(
+                path,
+                category="xid",
+                exit_code=4,
+                worker_boot_id=_BOOT,
+                child_instance_id=_CHILD,
+            )
+        )
+    finally:
+        release_first_writer.set()
+        thread.join(timeout=2.0)
+
+    assert not thread.is_alive()
+    assert errors == []
+    assert len(results) == 2
+    assert results[0] == results[1]
 
 
 def test_first_fault_refuses_symlink_target(tmp_path: Path) -> None:

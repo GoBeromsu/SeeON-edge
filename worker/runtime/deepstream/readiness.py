@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-import select
+import selectors
 import subprocess
 
 
@@ -13,7 +13,9 @@ def wait_for_ready(
     timeout_sec: float,
 ) -> bool:
     try:
-        readable, _, _ = select.select([ready_fd], [], [], timeout_sec)
+        with selectors.DefaultSelector() as selector:
+            selector.register(ready_fd, selectors.EVENT_READ)
+            readable = selector.select(timeout_sec)
         if not readable or process.poll() is not None:
             return False
         return os.read(ready_fd, 1) == b"R"

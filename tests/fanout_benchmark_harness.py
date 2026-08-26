@@ -22,6 +22,7 @@ No worker product code is modified or monkeypatched.
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -426,6 +427,8 @@ class WorkerRun:
     ) -> None:
         state_dir.mkdir(parents=True, exist_ok=True)
         clip_store_dir.mkdir(parents=True, exist_ok=True)
+        self._cuda_visible_devices_present = "CUDA_VISIBLE_DEVICES" in os.environ
+        self._cuda_visible_devices = os.environ.get("CUDA_VISIBLE_DEVICES")
         self.runtime = WorkerRuntime(
             config,
             env={"ML_WORKER_PROFILE": profile, CLIP_STORE_DIR_ENV: str(clip_store_dir)},
@@ -481,6 +484,14 @@ class WorkerRun:
     def stop(self, *, timeout: float = 60.0) -> None:
         self.runtime.stop()
         self.thread.join(timeout=timeout)
+        # Ultralytics' CPU device selection writes CUDA_VISIBLE_DEVICES="".
+        # That process-global mutation belongs to this local benchmark run and
+        # must not hide the GPU from later real-stack contracts in the suite.
+        if self._cuda_visible_devices_present:
+            assert self._cuda_visible_devices is not None
+            os.environ["CUDA_VISIBLE_DEVICES"] = self._cuda_visible_devices
+        else:
+            os.environ.pop("CUDA_VISIBLE_DEVICES", None)
 
 
 @final

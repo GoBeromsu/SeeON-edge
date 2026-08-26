@@ -43,19 +43,20 @@ def test_packaged_lstm_metadata_declares_the_artifact_identity() -> None:
     assert metadata["preprocessing_identity"] == "legacy-coco17-xyc-frame-normalized-zero-fill-v1"
 
 
-def test_packaged_lstm_manifest_loads_the_owner_declared_training_fps() -> None:
+def test_packaged_lstm_manifest_loads_the_owner_declared_training_fps(
+    packaged_lstm_artifact: Path,
+) -> None:
     """The owner-declared 30fps training rate must survive manifest loading.
 
     ``training_fps`` is what makes the train-vs-admission temporal-scale gap
     auditable (30-frame window ~= 1s at training rate vs ~6s at the edge's
     5fps pose admission). A silent drop of the field from metadata.yaml --
     or a loader change that stops parsing it -- would erase that record
-    without any other test noticing. Reads the packaged artifact directory
-    rather than a tmp fixture on purpose: the assertion is about the value
-    this repo actually ships. CI-safe because it needs only metadata.yaml,
-    not the weights blob.
+    without any other test noticing. The typed fixture copies the tracked
+    metadata bytes and generates valid deterministic weights because the real
+    loader correctly refuses an incomplete artifact.
     """
-    manifest = LstmFallManifest.from_artifact_dir(_PACKAGED_ARTIFACT_DIR)
+    manifest = LstmFallManifest.from_artifact_dir(packaged_lstm_artifact)
 
     assert manifest.training_fps == 30.0
 

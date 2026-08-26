@@ -3,7 +3,7 @@ from __future__ import annotations
 import base64
 import json
 import os
-import select
+import selectors
 import signal
 import subprocess
 import sys
@@ -42,11 +42,20 @@ def _worker_main(urls: tuple[str, ...]) -> int:
                     camera_id,
                     url,
                     open_timeout_ms=5_000,
-                    read_timeout_ms=2_000,
+                    read_timeout_ms=10_000,
                 )
             )
             session.set_stream_identity("real-stack-boot", 1)
             sessions.append(session)
+        # A spawned child is not yet a ready decoder: CUDA initialization and
+        # the first packet write happen asynchronously. Prove every child can
+        # produce a frame before publishing readiness, so the parent never
+        # races a just-spawned or already-defunct ffmpeg process.
+        for session in sessions:
+            frame = session.read()
+            if frame is None:
+                raise RuntimeError("NVDEC child produced no frame before readiness")
+            frame.release()
         _emit({"event": "ready", "worker_pid": os.getpid()})
         command = sys.stdin.readline().strip()
         if command.startswith("SLOW "):
@@ -148,16 +157,46 @@ def _read_document(process: subprocess.Popen[str], *, timeout: float) -> dict[st
     stdout = process.stdout
     if stdout is None:
         raise RuntimeError("worker helper stdout is unavailable")
-    readable, _, _ = select.select((stdout,), (), (), timeout)
+    with selectors.DefaultSelector() as selector:
+        selector.register(stdout, selectors.EVENT_READ)
+        readable = selector.select(timeout)
     if not readable:
         raise TimeoutError(f"worker helper emitted no state within {timeout}s")
     line = stdout.readline()
     if not line:
         stderr = "" if process.stderr is None else process.stderr.read()
         raise RuntimeError(
-            f"worker helper exited early with code {process.poll()}: {stderr[-1_000:]}"
+            f"worker helper exited early with code {process.poll()}: {stderr[-4_000:]}"
         )
     return json.loads(line)
+
+
+def test_read_document_supports_a_stdout_descriptor_above_fd_setsize() -> None:
+    # Given: enough owned descriptors to force the helper pipe above select()'s FD_SETSIZE.
+    descriptors = [os.open(os.devnull, os.O_RDONLY) for _ in range(1_100)]
+    process: subprocess.Popen[str] | None = None
+    try:
+        process = subprocess.Popen(
+            [sys.executable, "-c", 'print("{\\\"event\\\":\\\"ready\\\"}", flush=True)'],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        assert process.stdout is not None
+        assert process.stdout.fileno() > 1_024
+
+        # When: the bounded reader waits through the platform selector.
+        document = _read_document(process, timeout=5.0)
+
+        # Then: high descriptor numbers remain readable without select() range failure.
+        assert document == {"event": "ready"}
+        assert process.wait(timeout=5.0) == 0
+    finally:
+        if process is not None and process.poll() is None:
+            process.terminate()
+            _ = process.wait(timeout=5.0)
+        for descriptor in descriptors:
+            os.close(descriptor)
 
 
 def _independent_demux(
@@ -312,7 +351,7 @@ def test_nvdec_packet_tee_real_stack(tmp_path: Path) -> None:
             bufsize=1,
         )
         try:
-            ready = _read_document(process, timeout=20.0)
+            ready = _read_document(process, timeout=30.0)
             assert ready == {"event": "ready", "worker_pid": process.pid}
             ps_output = subprocess.run(
                 ("ps", "-ww", "-o", "pid,ppid,comm,args", "--ppid", str(process.pid)),

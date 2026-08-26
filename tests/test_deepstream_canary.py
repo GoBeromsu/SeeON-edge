@@ -145,7 +145,16 @@ def test_live_rung_refuses_without_authorization_before_docker(tmp_path: Path) -
     evidence = tmp_path / "unauthorized"
 
     # When: the operator requests rung 1.
-    result = _run_cli("run", "--rungs", "1", "--evidence-dir", str(evidence))
+    result = _run_cli(
+        "run",
+        "--rungs",
+        "1",
+        "--evidence-dir",
+        str(evidence),
+        "--render-only",
+        "--worker-image",
+        "seeon-edge@sha256:" + "b" * 64,
+    )
 
     # Then: the request fails closed and records the refusal.
     assert result.returncode == 2

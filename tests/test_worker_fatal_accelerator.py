@@ -8,15 +8,12 @@ from __future__ import annotations
 import threading
 import time as time_module
 from dataclasses import dataclass
-from multiprocessing.connection import Connection
 from pathlib import Path
 from typing import final
 
 import numpy as np
 import pytest
 
-from backend.app.edge_db.connection import RuntimeActor, open_runtime_database
-from backend.app.edge_db.migrator import migrate_database
 from shared.events.delivery_queue import DeliveryQueue
 from worker.adapters.model.errors import FatalAcceleratorError, ModelInputError
 from worker.adapters.model.yolo_api import (
@@ -160,18 +157,12 @@ def test_persist_first_fault_admits_exactly_one_queue_record(tmp_path: Path) -> 
     assert wrote_second is False  # second call is a no-op
 
     queue = DeliveryQueue(tmp_path / "delivery-queue")
-    deadline = time_module.monotonic() + 1.0
-    while time_module.monotonic() < deadline:
-        entries = tuple(queue.entries())
-        if entries:
-            break
-    else:
-        pytest.fail("first-fault queue entry was not durably admitted")
+    entries = tuple(queue.entries())
     assert len(entries) == 1
     assert entries[0]["event_type"] == "runtime.fault"
 
 
-def test_persist_first_fault_degrades_to_false_when_database_parent_is_uncreatable(
+def test_persist_first_fault_degrades_to_false_when_queue_parent_is_uncreatable(
     tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -192,7 +183,7 @@ def test_persist_first_fault_degrades_to_false_when_database_parent_is_uncreatab
     with caplog.at_level("WARNING"):
         written = persist_first_fault(rec, state_dir=state_dir)
 
-    assert written is True
+    assert written is False
 
 
 def test_persist_first_fault_is_independent_of_the_delivery_queue(tmp_path: Path) -> None:
@@ -210,36 +201,19 @@ def test_persist_first_fault_is_independent_of_the_delivery_queue(tmp_path: Path
     assert elapsed < 1.0
 
 
-def _hold_edge_worker_write(database: str, channel: Connection) -> None:
-    """Child process: hold BEGIN IMMEDIATE until the parent signals release."""
-    connection = open_runtime_database(Path(database), actor=RuntimeActor.API)
-    try:
-        connection.execute("BEGIN IMMEDIATE")
-        channel.send("LOCKED")
-        assert channel.recv() == "RELEASE"
-        connection.rollback()
-        channel.send("RELEASED")
-    finally:
-        connection.close()
-        channel.close()
-
-
-def test_persist_first_fault_writes_to_production_named_edge_sqlite(
+def test_persist_first_fault_writes_to_production_delivery_queue(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Production path resolves EDGE_DATABASE_PATH (edge.sqlite3) and must
-    upsert the faults row through the central runtime writer ownership."""
+    """The production state-dir default must publish into its delivery queue."""
     import worker.runtime.faults.record as mod
 
     mod._written = False  # noqa: SLF001
 
-    database_path = tmp_path / "edge-state" / "edge.sqlite3"
-    migrate_database(database_path)
     monkeypatch.setattr(mod, "resolve_state_dir", lambda: tmp_path)
 
     rec = _record(camera_id="cam-edge-1", exception_message="CUDA error: edge path")
-    wrote_first = persist_first_fault(rec)  # state_dir defaults -> EDGE_DATABASE_PATH
+    wrote_first = persist_first_fault(rec)
     wrote_second = persist_first_fault(rec)
 
     assert wrote_first is True
@@ -253,11 +227,7 @@ def test_persist_first_fault_returns_immediately_under_held_queue_lock(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """Production edge.sqlite3 must use BusyPolicy.ZERO_WAIT via
-    best_effort_zero_wait_write: under a real held SQLite write lock the
-    fatal path returns immediately (no default 5s bound), logs truthfully,
-    and leaves the faults table untouched. Synchronization uses pipe
-    barriers only -- no sleeps."""
+    """A held delivery-queue lock must make fatal admission fail immediately."""
     import worker.runtime.faults.record as mod
 
     mod._written = False  # noqa: SLF001
@@ -280,8 +250,9 @@ def test_persist_first_fault_returns_immediately_under_held_queue_lock(
         fcntl.flock(holder.fileno(), fcntl.LOCK_UN)
         holder.close()
 
-    assert written is True
+    assert written is False
     assert elapsed < 1.0  # near-immediate; must never wait the default 5s bound
+    assert "queue admission lock_unavailable" in caplog.text
 
 
 def test_persist_first_fault_includes_frame_hash(tmp_path: Path) -> None:

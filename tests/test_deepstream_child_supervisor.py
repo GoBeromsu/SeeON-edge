@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import os
 import uuid
 from pathlib import Path
 
 import pytest
 
 import worker.runtime.deepstream.supervisor as supervisor
+from worker.runtime.deepstream.readiness import wait_for_ready
 from worker.runtime.deepstream.source_control import SourceReadinessError
 from worker.runtime.lease import GpuLease, GpuLeaseUnavailableError
 
@@ -68,6 +70,25 @@ def test_supervisor_uses_ready_fd_not_misleading_stdout(tmp_path: Path) -> None:
     child.stop()
     child.stop()
     assert child.pid is None
+
+
+def test_ready_handshake_supports_a_descriptor_above_fd_setsize() -> None:
+    descriptors = [os.open(os.devnull, os.O_RDONLY) for _ in range(1_100)]
+    ready_fd, writer_fd = os.pipe()
+
+    class RunningProcess:
+        @staticmethod
+        def poll() -> None:
+            return None
+
+    try:
+        assert ready_fd > 1_024
+        _ = os.write(writer_fd, b"R")
+        assert wait_for_ready(ready_fd, RunningProcess(), 1.0) is True  # type: ignore[arg-type]
+    finally:
+        os.close(writer_fd)
+        for descriptor in descriptors:
+            os.close(descriptor)
 
 
 def test_au_rebuild_failure_enters_real_fatal_path(tmp_path: Path) -> None:

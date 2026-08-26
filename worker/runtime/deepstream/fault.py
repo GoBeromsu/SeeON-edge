@@ -65,24 +65,31 @@ def persist_first_fault(
         fault_time_iso=datetime.now(UTC).isoformat().replace("+00:00", "Z"),
     )
     encoded = json.dumps(asdict(record), sort_keys=True, separators=(",", ":")).encode() + b"\n"
+    temporary = path.parent / f".{path.name}.{uuid.uuid4().hex}.tmp"
+    descriptor = os.open(
+        temporary,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+        0o600,
+    )
     try:
-        descriptor = os.open(
-            path,
-            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
-            0o600,
-        )
-    except FileExistsError:
-        return _read_existing(path)
-    with os.fdopen(descriptor, "wb") as fault_file:
-        _ = fault_file.write(encoded)
-        fault_file.flush()
-        _ = os.fsync(fault_file.fileno())
+        with os.fdopen(descriptor, "wb") as fault_file:
+            _ = fault_file.write(encoded)
+            fault_file.flush()
+            _ = os.fsync(fault_file.fileno())
+        try:
+            os.link(temporary, path, follow_symlinks=False)
+        except FileExistsError:
+            persisted = _read_existing(path)
+        else:
+            persisted = record
+    finally:
+        temporary.unlink(missing_ok=True)
     directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
     try:
         _ = os.fsync(directory)
     finally:
         os.close(directory)
-    return _read_existing(path)
+    return persisted
 
 
 def persist_child_fault(config: ChildConfig, category: str) -> DarkFirstFault:

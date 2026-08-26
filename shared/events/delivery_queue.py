@@ -42,6 +42,7 @@ class AdmissionFault(StrEnum):
     ENTRY_CAPACITY = "entry_capacity"
     BYTE_CAPACITY = "byte_capacity"
     CONFLICT = "conflict"
+    LOCK_UNAVAILABLE = "lock_unavailable"
 
 
 @dataclass(frozen=True, slots=True)
@@ -162,7 +163,7 @@ class DeliveryQueueCapacitySnapshot:
 class DeliveryQueue:
     """A bounded queue whose published entry files are its only durable state."""
 
-    def __init__(self, directory: Path) -> None:
+    def __init__(self, directory: Path, *, recover: bool = True) -> None:
         self._directory = directory
         created = not directory.exists()
         self._directory.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -175,9 +176,15 @@ class DeliveryQueue:
         self._thread_lock = threading.Lock()
         self._lock_path = self._directory / ".delivery-queue.lock"
         self._lock_path.touch(mode=0o600, exist_ok=True)
-        with self._locked():
-            self._remove_orphan_temps()
-            self._count, self._bytes = self._scan_totals()
+        if recover:
+            with self._locked():
+                self._remove_orphan_temps()
+                self._count, self._bytes = self._scan_totals()
+        else:
+            # Capacity is re-derived under the queue lock by admission. Fatal
+            # callers skip blocking recovery so they can use the zero-wait path.
+            self._count = 0
+            self._bytes = 0
 
     @property
     def accepted_count(self) -> int:
@@ -226,26 +233,39 @@ class DeliveryQueue:
         payload = _serialize(entry)
         target = self._entry_path(entry.entry_id)
         with self._locked():
-            self._count, self._bytes = self._scan_totals()
-            if target.exists():
-                if target.read_bytes() == payload:
-                    return AdmissionResult(accepted=True, already_admitted=True)
-                return AdmissionResult(False, AdmissionFault.CONFLICT)
-            if self._count >= MAX_ACCEPTED_ENTRIES:
-                return AdmissionResult(False, AdmissionFault.ENTRY_CAPACITY)
-            if self._bytes + len(payload) > MAX_ACCEPTED_BYTES:
-                return AdmissionResult(False, AdmissionFault.BYTE_CAPACITY)
-            temporary = self._directory / f".{uuid.uuid4().hex}.tmp"
-            try:
-                _write_durable(temporary, payload)
-                os.replace(temporary, target)
-                _fsync_directory(self._directory)
-            finally:
-                if temporary.exists():
-                    temporary.unlink()
-            self._count += 1
-            self._bytes += len(payload)
-            return AdmissionResult(True)
+            return self._admit_unlocked(payload, target)
+
+    def try_admit_nonblocking(self, entry: DeliveryEntry) -> AdmissionResult:
+        """Attempt one durable admission without waiting for either queue lock."""
+        payload = _serialize(entry)
+        target = self._entry_path(entry.entry_id)
+        with self._try_locked() as acquired:
+            if not acquired:
+                return AdmissionResult(False, AdmissionFault.LOCK_UNAVAILABLE)
+            return self._admit_unlocked(payload, target)
+
+    def _admit_unlocked(self, payload: bytes, target: Path) -> AdmissionResult:
+        self._remove_orphan_temps()
+        self._count, self._bytes = self._scan_totals()
+        if target.exists():
+            if target.read_bytes() == payload:
+                return AdmissionResult(accepted=True, already_admitted=True)
+            return AdmissionResult(False, AdmissionFault.CONFLICT)
+        if self._count >= MAX_ACCEPTED_ENTRIES:
+            return AdmissionResult(False, AdmissionFault.ENTRY_CAPACITY)
+        if self._bytes + len(payload) > MAX_ACCEPTED_BYTES:
+            return AdmissionResult(False, AdmissionFault.BYTE_CAPACITY)
+        temporary = self._directory / f".{uuid.uuid4().hex}.tmp"
+        try:
+            _write_durable(temporary, payload)
+            os.replace(temporary, target)
+            _fsync_directory(self._directory)
+        finally:
+            if temporary.exists():
+                temporary.unlink()
+        self._count += 1
+        self._bytes += len(payload)
+        return AdmissionResult(True)
 
     def acknowledge(self, entry_id: str) -> bool:
         """Delete exactly one committed entry; no event cascade is possible."""
@@ -411,6 +431,25 @@ class DeliveryQueue:
                 finally:
                     fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
+    @contextmanager
+    def _try_locked(self) -> Iterator[bool]:
+        if not self._thread_lock.acquire(blocking=False):
+            yield False
+            return
+        try:
+            with self._lock_path.open("a+b") as lock_file:
+                try:
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    yield False
+                    return
+                try:
+                    yield True
+                finally:
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+        finally:
+            self._thread_lock.release()
+
     def _published_paths(self) -> Iterator[Path]:
         yield from self._directory.glob(f"*{_ENTRY_SUFFIX}")
 
@@ -419,9 +458,11 @@ class DeliveryQueue:
         return len(paths), sum(path.stat().st_size for path in paths)
 
     def _remove_orphan_temps(self) -> None:
-        for path in self._directory.glob(".*.tmp"):
+        orphans = tuple(self._directory.glob(".*.tmp"))
+        for path in orphans:
             path.unlink()
-        _fsync_directory(self._directory)
+        if orphans:
+            _fsync_directory(self._directory)
 
     def _entry_path(self, entry_id: str) -> Path:
         return self._directory / f"{entry_id}{_ENTRY_SUFFIX}"

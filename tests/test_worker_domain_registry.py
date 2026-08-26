@@ -35,7 +35,7 @@ class _Metadata:
     mode: Literal["sequence"] = "sequence"
 
 
-@dataclass(slots=True)  # noqa: MUTABLE_OK - records model calls for assertions
+@dataclass(slots=True)  # policy: MUTABLE_OK - records model calls for assertions
 class _FallModel:
     metadata: _Metadata = field(default_factory=_Metadata)
     operating_threshold: float = 0.5

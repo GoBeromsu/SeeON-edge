@@ -66,13 +66,19 @@ std::vector<std::uint8_t> encode(const AuEnvelope& envelope, bool gap) {
   std::vector<std::uint8_t> bytes(sizeof(header) + header.body_size);
   std::memcpy(bytes.data(), &header, sizeof(header));
   auto* output = bytes.data() + sizeof(header);
-  std::memcpy(output, envelope.camera.data(), header.camera_size);
-  output += header.camera_size;
-  std::memcpy(output, unit.parser_caps.data(), header.caps_size);
-  output += header.caps_size;
-  if (!gap) {
+  if (header.camera_size > 0) {
+    std::memcpy(output, envelope.camera.data(), header.camera_size);
+    output += header.camera_size;
+  }
+  if (header.caps_size > 0) {
+    std::memcpy(output, unit.parser_caps.data(), header.caps_size);
+    output += header.caps_size;
+  }
+  if (!gap && header.codec_data_size > 0) {
     std::memcpy(output, unit.codec_data.data(), header.codec_data_size);
     output += header.codec_data_size;
+  }
+  if (!gap && header.payload_size > 0) {
     std::memcpy(output, unit.payload.data(), header.payload_size);
   }
   return bytes;

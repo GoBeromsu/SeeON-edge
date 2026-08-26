@@ -25,6 +25,7 @@ Assertions covered:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
 import subprocess
@@ -57,6 +58,7 @@ from e2e_worker_relay_fixtures import (
 )
 
 import worker.runtime.worker as worker_module
+from shared.rtsp_url_policy import ALLOW_LOCAL_RTSP_ENV
 from worker.adapters.decode.cpu_av.adapter import CpuAvAdapter
 from worker.domains.bed_exit.detector import BedExitMonitor
 from worker.domains.bed_exit.schema import BedExitEvent, BedExitFrame
@@ -142,6 +144,10 @@ def _run_scenario(
     state_dir = tmp_path / "state"
     clip_store_dir = tmp_path / "clips"
     monkeypatch.setenv("ML_WORKER_EVENT_CLIP_EXPORT_ENABLED", "1")
+    # The worker enforces destination admission again at connect time. This
+    # fixture intentionally owns its loopback MediaMTX endpoint, so opt into
+    # the policy's fixture-only local destination flag for this scenario.
+    monkeypatch.setenv(ALLOW_LOCAL_RTSP_ENV, "1")
     # WorkerRuntime's explicit clip-store constructor seam defaults to the
     # production root. Keep the real SnapshotStore/evidence path active while
     # confining this local process to its scenario-owned temporary directory.
@@ -204,7 +210,7 @@ def test_night_bed_exit_reaches_relay_with_heartbeat_status_and_finalized_clip(
         # person runner and had to opt into box_source="person" to reach it,
         # a configuration production can never resolve to, so the test never
         # exercised the path the worker actually ships.
-    ) as (live_backend, _handle, clip_store_dir):
+    ) as (live_backend, handle, clip_store_dir):
         wait_until(
             lambda: live_backend.ingest_client.heartbeats >= 1,
             timeout=20.0,
@@ -231,7 +237,7 @@ def test_night_bed_exit_reaches_relay_with_heartbeat_status_and_finalized_clip(
         assert len(alerts) == 1
         assert alerts[0].edge_event_id is not None
         assert alerts[0].probability == 1.0
-        _assert_alert_carries_audit_and_snapshot(alerts[0])
+        _assert_alert_carries_durable_snapshot(alerts[0], handle, clip_store_dir)
 
         clip_path = _wait_for_finalized_clip(clip_store_dir, timeout=15.0)
         _assert_h264_yuv420p_faststart(clip_path)
@@ -249,7 +255,7 @@ def test_fall_reaches_relay_once_despite_two_rising_edges(
         facility_id=FALL_FACILITY_ID,
         domains={"fall": {}},
         serving_client=_fall_serving_client(),
-    ) as (live_backend, _handle, _clip_store_dir):
+    ) as (live_backend, handle, clip_store_dir):
         wait_until(
             lambda: live_backend.ingest_client.heartbeats >= 1,
             timeout=20.0,
@@ -279,7 +285,7 @@ def test_fall_reaches_relay_once_despite_two_rising_edges(
         ]
         assert len(alerts) == 1
         assert alerts[0].edge_event_id is not None
-        _assert_alert_carries_audit_and_snapshot(alerts[0])
+        _assert_alert_carries_durable_snapshot(alerts[0], handle, clip_store_dir)
 
 
 def test_daytime_bed_exit_is_suppressed_before_relay(
@@ -331,18 +337,34 @@ def test_daytime_bed_exit_is_suppressed_before_relay(
         )
 
 
-def _assert_alert_carries_audit_and_snapshot(alert: RecordedAlert) -> None:
-    """AlertEvidenceAttacher (worker/pipeline/output/evidence_attacher.py) is
-    unconditionally wired into every camera's pump (worker/runtime/worker.py
-    ``_build_camera``), so every admitted event should carry a real audit
-    envelope and a bounded JPEG snapshot rendered from the actual decoded
-    frame by the time it reaches the relay.
+def _assert_alert_carries_durable_snapshot(
+    alert: RecordedAlert,
+    handle: WorkerRunHandle,
+    clip_store_dir: Path,
+) -> None:
+    """Prove the event attacher rendered and durably published its JPEG.
+
+    Snapshot bytes no longer travel inline with the alert. The event sink
+    stages them in ``SnapshotStore`` and exports an immutable attachment
+    reference separately, so checking the recorded backend-alert kwargs would
+    assert the retired transport rather than the shipped evidence contract.
     """
     assert alert.audit is not None
     assert alert.audit.get("detector_version") == "worker-domain-detectors-v1"
     assert "clock_source" in alert.audit
-    assert alert.snapshot_bytes is not None
-    assert len(alert.snapshot_bytes) > 0
+    assert alert.snapshot_bytes is None
+    snapshots = tuple(
+        snapshot
+        for snapshot in handle.snapshot_store.identity_records()
+        if snapshot.edge_event_id == alert.edge_event_id
+    )
+    assert len(snapshots) == 1
+    snapshot = snapshots[0]
+    snapshot_bytes = (clip_store_dir / snapshot.path).read_bytes()
+    assert snapshot_bytes.startswith(b"\xff\xd8")
+    assert snapshot_bytes.endswith(b"\xff\xd9")
+    assert len(snapshot_bytes) == snapshot.size_bytes
+    assert hashlib.sha256(snapshot_bytes).hexdigest() == snapshot.sha256
 
 
 def _wait_for_finalized_clip(store_dir: Path, *, timeout: float) -> Path:

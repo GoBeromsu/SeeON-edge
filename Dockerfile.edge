@@ -7,6 +7,7 @@ FROM nvcr.io/nvidia/deepstream@sha256:f6fa0247da9290979cbb05749e7da9435d089c93db
 
 WORKDIR /src
 COPY worker/native/deepstream/CMakeLists.txt ./CMakeLists.txt
+COPY worker/native/deepstream/runtime-ctest.cmake.in ./runtime-ctest.cmake.in
 COPY worker/native/deepstream/src ./src
 RUN test -d /opt/nvidia/deepstream/deepstream/sources \
     && find /opt/nvidia/deepstream/deepstream/sources -type f -name 'nvds*.h' -print -quit | grep -q . \
@@ -14,6 +15,11 @@ RUN test -d /opt/nvidia/deepstream/deepstream/sources \
     && cmake --build build --parallel \
     && ctest --test-dir build --output-on-failure \
     && cmake --install build --prefix /opt/seeon-native \
+    && cmake -S . -B build-sanitized \
+        -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+        -DSEEON_ENABLE_SANITIZERS=ON \
+    && cmake --build build-sanitized --parallel \
+    && ctest --test-dir build-sanitized --output-on-failure \
     && sha256sum \
         /opt/seeon-native/bin/seeon-deepstream-preflight \
         /opt/seeon-native/bin/seeon-deepstream-child
@@ -25,6 +31,8 @@ FROM nvcr.io/nvidia/deepstream@sha256:f6fa0247da9290979cbb05749e7da9435d089c93db
 COPY --from=uv-bin /usr/local/bin/uv /usr/local/bin/uv
 COPY --from=deepstream-native-build /opt/seeon-native/bin/seeon-deepstream-preflight /usr/local/bin/seeon-deepstream-preflight
 COPY --from=deepstream-native-build /opt/seeon-native/bin/seeon-deepstream-child /usr/local/bin/seeon-deepstream-child
+COPY --from=deepstream-native-build /opt/seeon-native/native-build /opt/seeon/native-build
+RUN ctest --test-dir /opt/seeon/native-build --output-on-failure
 
 ENV UV_LINK_MODE=copy \
     UV_PYTHON_DOWNLOADS=never \
@@ -54,7 +62,23 @@ RUN apt-get update \
         libx264-164 \
         libx265-199 \
         vainfo \
-    && rm -rf /var/lib/apt/lists/* \
+    && apt-get purge -y --auto-remove \
+        build-essential \
+        cpp \
+        cpp-13 \
+        cuda-crt-13-2 \
+        cuda-nvcc-13-2 \
+        cuda-tileiras-13-2 \
+        g++ \
+        g++-13 \
+        gcc \
+        gcc-13 \
+        libtool \
+    && rm -rf \
+        /opt/nvidia/deepstream/deepstream/sources \
+        /var/lib/apt/lists/* \
+    && test ! -e /usr/bin/g++ \
+    && test ! -d /opt/nvidia/deepstream/deepstream/sources \
     && ffmpeg -version \
     && test -f /usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc
 

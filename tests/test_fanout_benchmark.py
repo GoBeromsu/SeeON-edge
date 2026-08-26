@@ -81,7 +81,7 @@ REPO_ROOT: Final = Path(__file__).resolve().parent.parent
 STREAM_COUNTS: Final = (1, 2, 4, 8, 13)
 DEFAULT_STREAMS: Final = "1,2"
 DEFAULT_DURATION_SEC: Final = 60.0
-DEFAULT_PROFILE: Final = "nvidia-host-bridge"
+DEFAULT_PROFILE: Final = "cpu"
 SAMPLE_INTERVAL_SEC: Final = 2.0
 # Bounded: a run that never takes a frame off an inference lane within this
 # window is the #312 stall signature, recorded as such -- never waited out.
@@ -149,6 +149,10 @@ def test_fanout_benchmark(
     label = os.environ.get("BENCH_LABEL", "")
     camera_fps_raw = os.environ.get("BENCH_CAMERA_FPS")
     camera_fps = None if camera_fps_raw is None else float(camera_fps_raw)
+    cuda_visibility_before = (
+        "CUDA_VISIBLE_DEVICES" in os.environ,
+        os.environ.get("CUDA_VISIBLE_DEVICES"),
+    )
     metrics = RunMetrics()
     latencies: list[float] = []
     viewers: list[LiveViewViewer] = []
@@ -200,6 +204,10 @@ def test_fanout_benchmark(
     finally:
         coordinator_logger.removeHandler(work_item_log)
 
+    assert (
+        "CUDA_VISIBLE_DEVICES" in os.environ,
+        os.environ.get("CUDA_VISIBLE_DEVICES"),
+    ) == cuda_visibility_before
     metrics.pose_latencies_ms = latencies
     metrics.notes["viewers"] = [viewer.report() for viewer in viewers]
     if plan is not None:
@@ -298,7 +306,9 @@ def _git_revision() -> str | None:
 
 @pytest.mark.real_stack
 def test_fanout_benchmark_fails_fast_on_dead_rtsp_port(
-    tmp_path: Path, relay: StubRelay, allow_loopback_rtsp: None
+    tmp_path: Path,
+    relay: StubRelay,
+    allow_loopback_rtsp: None,
 ) -> None:
     """A dead RTSP port must produce a bounded diagnostic, never a hang.
 

@@ -42,11 +42,12 @@ jobs:
           build-args: |
             SOURCE_REVISION=${{ github.sha }}
           tags: eldercare-fall-ml-worker:ci
-          # Same cache scope as edge-images.yml's ml-worker build so PR runs
-          # and release publishes warm each other's layer cache instead of
-          # each starting cold on the CUDA wheel layer.
+          # Consume the release build's cache, but do not export it here. The
+          # DeepStream image has multi-gigabyte layers: exporting mode=max
+          # after the image was already built and loaded took longer than the
+          # build itself and exhausted this gate's timeout before boot smoke.
+          # edge-images.yml remains the single cache writer.
           cache-from: type=gha,scope=edge-ml-worker
-          cache-to: type=gha,scope=edge-ml-worker,mode=max
 
       - name: Boot smoke test — worker process actually imports and starts
         # A successful build only proves the image assembles; it does not

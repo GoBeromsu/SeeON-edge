@@ -63,7 +63,7 @@ def _splitmix64_signed_units(seed: int, count: int) -> np.ndarray:
     return values
 
 
-@dataclass(slots=True)  # noqa: MUTABLE_OK - owns a live subprocess conversation
+@dataclass(slots=True)  # policy: MUTABLE_OK - owns a live subprocess conversation
 class _Driver:
     stdin: IO[str]
     stdout: IO[str]

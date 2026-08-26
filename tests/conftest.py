@@ -7,11 +7,24 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
+from lstm_test_artifact import write_test_lstm_artifact
 
 from backend.app.edge_db import compact_cutover
 from backend.app.edge_db.migrator import migrate_database
 from backend.app.features.connection.store import ConnectionSettingsStore
 from backend.app.shared.dashboard_credentials import DashboardCredentialsStore
+
+
+@pytest.fixture
+def packaged_lstm_artifact(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> Path:
+    """Route packaged-default tests to a valid per-test real LSTM artifact."""
+    import worker.runtime.config.local_env as local_env
+
+    artifact = write_test_lstm_artifact(tmp_path / "models/fall/lstm")
+    monkeypatch.setattr(local_env, "_DEFAULT_ARTIFACT_DIR", str(artifact))
+    return artifact
 
 
 @pytest.fixture

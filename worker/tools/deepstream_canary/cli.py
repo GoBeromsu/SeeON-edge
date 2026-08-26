@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import secrets
 import sys
 from datetime import UTC, datetime
@@ -13,12 +14,18 @@ from typing import Final, final
 
 from pydantic import ValidationError
 
+from worker.tools.deepstream_canary import image_admission
 from worker.tools.deepstream_canary.authorization import (
     AuthorizationRequest,
     CanaryAuthorizationError,
     authorize_rungs,
 )
 from worker.tools.deepstream_canary.compose import RenderRequest, render_compose
+from worker.tools.deepstream_canary.image_admission import (
+    WorkerImageAdmission,
+    WorkerImageAdmissionError,
+    WorkerImageBinding,
+)
 from worker.tools.deepstream_canary.models import AuthorizationArtifact, CanaryMode, GatePolicy
 from worker.tools.deepstream_canary.report import JsonValue, canonical_json, write_once
 from worker.tools.deepstream_canary.runner import (
@@ -35,9 +42,6 @@ from worker.tools.deepstream_canary.safety import (
     refuse_mount_overlap,
 )
 
-DEFAULT_WORKER_IMAGE: Final = (
-    "seeon-edge@sha256:23b9cc63520aef5106d828b6db8f481db66aeaaead66b66c61b509135ace33ad"
-)
 POLICY_PATH: Final = Path("scripts/qa/deepstream-canary/gate-policy.v1.json")
 SUPPORT_IMAGE_DIGESTS: Final = (
     "sha256:2c941e860699f878900b0edc2403613c234d4b32eda3cc9fa7036991a2a63c4a",
@@ -56,7 +60,8 @@ class RunArguments(argparse.Namespace):
     evidence_dir: Path = Path()
     mode: str = CanaryMode.COMMISSIONING
     authorization: Path | None = None
-    worker_image: str = DEFAULT_WORKER_IMAGE
+    worker_image: str | None = None
+    expected_revision: str | None = None
     model_dir: Path = Path("models")
     engine_cache_source: Path | None = None
     policy: Path = POLICY_PATH
@@ -73,7 +78,10 @@ def _parser() -> argparse.ArgumentParser:
     _ = run.add_argument("--evidence-dir", type=Path, required=True)
     _ = run.add_argument("--mode", choices=tuple(CanaryMode), default=CanaryMode.COMMISSIONING)
     _ = run.add_argument("--authorization", type=Path)
-    _ = run.add_argument("--worker-image", default=DEFAULT_WORKER_IMAGE)
+    _ = run.add_argument("--worker-image", default=os.environ.get("CANARY_WORKER_IMAGE"))
+    _ = run.add_argument(
+        "--expected-revision", default=os.environ.get("CANARY_EXPECTED_REVISION")
+    )
     _ = run.add_argument("--model-dir", type=Path, default=Path("models"))
     _ = run.add_argument("--engine-cache-source", type=Path)
     _ = run.add_argument("--policy", type=Path, default=POLICY_PATH)
@@ -99,14 +107,11 @@ def _load_authorization(path: Path | None) -> AuthorizationArtifact | None:
     return AuthorizationArtifact.model_validate_json(path.read_bytes())
 
 
-def _image_digest(image: str) -> str:
-    marker = "@sha256:"
-    if marker not in image:
-        raise CanaryArgumentError("worker image must be digest-pinned")
-    digest = image.split(marker, maxsplit=1)[1]
-    if len(digest) != 64 or any(character not in "0123456789abcdef" for character in digest):
-        raise CanaryArgumentError("worker image digest is invalid")
-    return f"sha256:{digest}"
+def _admit_worker_image(request: WorkerImageAdmission) -> WorkerImageBinding:
+    try:
+        return image_admission.admit_worker_image(request)
+    except WorkerImageAdmissionError as error:
+        raise CanaryArgumentError(str(error)) from error
 
 
 def _rung_durations(rungs: tuple[str, ...], policy: GatePolicy) -> tuple[tuple[str, int], ...]:
@@ -128,6 +133,13 @@ def _rung_durations(rungs: tuple[str, ...], policy: GatePolicy) -> tuple[tuple[s
 
 
 def _run(arguments: RunArguments) -> int:
+    binding = _admit_worker_image(
+        WorkerImageAdmission(
+            image=arguments.worker_image,
+            expected_revision=arguments.expected_revision,
+            render_only=arguments.render_only,
+        )
+    )
     evidence_dir: Path = arguments.evidence_dir
     evidence_dir.mkdir(parents=True, mode=0o700, exist_ok=False)
     rungs = _parse_rungs(arguments.rungs)
@@ -136,7 +148,7 @@ def _run(arguments: RunArguments) -> int:
     policy_content = policy_path.read_bytes()
     policy = GatePolicy.model_validate_json(policy_content)
     policy_digest = hashlib.sha256(policy_content).hexdigest()
-    worker_image: str = arguments.worker_image
+    worker_image = binding.image
     camera_ids = tuple(item.strip() for item in arguments.camera_ids.split(",") if item.strip())
     live_rungs = tuple(int(item) for item in rungs if item.isdigit())
     artifact = _load_authorization(arguments.authorization)
@@ -144,7 +156,7 @@ def _run(arguments: RunArguments) -> int:
         rungs=live_rungs,
         mode=mode,
         appliance_id=arguments.appliance_id,
-        worker_image_digest=_image_digest(worker_image),
+        worker_image_digest=binding.digest,
         camera_ids=camera_ids,
         now=datetime.now(UTC),
         minimum_projected_slack_mib=policy.minimum_gpu_slack_mib,
@@ -169,10 +181,12 @@ def _run(arguments: RunArguments) -> int:
                 "schema_version": 1,
                 "requested_rungs": requested_rungs,
                 "policy_sha256": policy_digest,
+                "worker_image": binding.image,
+                "worker_image_digest": binding.digest,
+                "expected_revision": binding.revision,
             }
         ),
     )
-    refuse_existing_project()
     maximum = max((int(item) for item in rungs if item.isdigit()), default=0)
     camera_count = max(maximum, 1 if "loopback" in rungs else 0)
     relay_token = secrets.token_urlsafe(48)
@@ -189,6 +203,7 @@ def _run(arguments: RunArguments) -> int:
     print(json.dumps({"compose_sha256": compose_digest, "project": "seeon-ds-canary"}))
     if arguments.render_only:
         return 0
+    refuse_existing_project()
     baseline = capture_live_snapshot()
     write_once(evidence_dir / "raw" / "live-baseline.json", encode_live_snapshot(baseline))
     if mode is CanaryMode.COMMISSIONING and baseline.healthy_runtime_camera_ids:
@@ -223,7 +238,7 @@ def _run(arguments: RunArguments) -> int:
             mode=mode,
             rungs=rungs,
             artifacts=ExecutionArtifactSources(
-                worker_image=_image_digest(worker_image),
+                worker_image=binding.digest,
                 support_images=SUPPORT_IMAGE_DIGESTS,
                 gate_policy=policy_digest,
                 compose=compose_digest,

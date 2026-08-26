@@ -11,7 +11,7 @@ project `seeon-ds-canary`; it does not authorize facility cameras.
   `worker.runtime.lease.GpuLease` against its isolated canary state directory;
   that lease does not protect the live worker.
 - Refuse an existing canary project, overlapping live mounts, and a worker image
-  without a SHA-256 digest.
+  not explicitly bound as `repository@sha256` to the expected OCI source revision.
 - `commissioning` refuses healthy live runtime cameras. `shared-host-smoke` is
   coexistence-only and always produces `claim_eligible=false`.
 - The default pre-facility invocation explicitly requests `zero,loopback` and
@@ -40,7 +40,8 @@ conditions. `PASS` is capacity-claim eligible only in commissioning mode;
 
 ## Commands
 
-Default gate:
+Default gate (with `CANARY_WORKER_IMAGE=repository@sha256:<digest>` and
+`CANARY_EXPECTED_REVISION=<40-hex revision>` set):
 `uv run python -m worker.tools.deepstream_canary run --rungs zero,loopback --evidence-dir <new-dir>`.
 Verify immutable receipts:
 `uv run python scripts/qa/verify_deepstream_delivery.py canary --evidence-root <dir> --output <green.json>`;

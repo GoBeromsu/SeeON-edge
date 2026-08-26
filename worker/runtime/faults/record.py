@@ -82,24 +82,15 @@ def persist_first_fault(record: FirstFaultRecord, *, state_dir: Path | None = No
         LOGGER.warning("first-fault record unavailable: %s", error)
         return False
 
-    # Queue admission may wait on a cross-process writer. Fatal handling must
-    # never wait for that lock, so the exit path only starts a daemon attempt.
-    threading.Thread(
-        target=_admit_fault,
-        args=(directory, entry),
-        name="first-fault-delivery",
-        daemon=True,
-    ).start()
-    return True
-
-
-def _admit_fault(directory: Path, entry: EventEntry) -> None:
     try:
-        result = DeliveryQueue(directory).try_admit(entry)
-        if not result.accepted:
-            LOGGER.warning("first-fault record unavailable: queue admission %s", result.fault)
+        result = DeliveryQueue(directory, recover=False).try_admit_nonblocking(entry)
     except Exception as error:  # noqa: BLE001
         LOGGER.warning("first-fault record unavailable: %s", error)
+        return False
+    if not result.accepted:
+        LOGGER.warning("first-fault record unavailable: queue admission %s", result.fault)
+        return False
+    return True
 
 
 def _fault_entry(record: FirstFaultRecord) -> EventEntry:

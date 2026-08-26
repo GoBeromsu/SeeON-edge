@@ -295,7 +295,9 @@ def test_lkg_restore_path_preserves_locally_sourced_models_and_clip(tmp_path: Pa
     assert stale.config.clip.enabled is True
 
 
-def test_pull_with_yaml_dev_mjpeg_enabled_survives_the_pull(tmp_path: Path) -> None:
+def test_pull_with_yaml_dev_mjpeg_enabled_survives_the_pull(
+    tmp_path: Path, packaged_lstm_artifact: Path
+) -> None:
     """Issue #113: ``BackendWorkerConfigPayload.to_worker_config()`` never
     threaded ``dev_mjpeg`` through a relay pull, so an explicit local
     ``dev_mjpeg.enabled: true`` was silently reset to the pydantic default
@@ -337,7 +339,9 @@ def test_pull_with_yaml_dev_mjpeg_enabled_survives_the_pull(tmp_path: Path) -> N
     assert snapshot.config.dev_mjpeg.port == 8090
 
 
-def test_pull_with_no_yaml_dev_mjpeg_leaves_it_disabled_for_env_fallback() -> None:
+def test_pull_with_no_yaml_dev_mjpeg_leaves_it_disabled_for_env_fallback(
+    packaged_lstm_artifact: Path,
+) -> None:
     """The default (no local YAML, or YAML silent on ``dev_mjpeg``) must keep
     resolving to ``None`` here so ``WorkerRuntime._resolve_mjpeg_config``'s
     existing ``ML_WORKER_DEV_MJPEG*`` env fallback is left untouched -- this

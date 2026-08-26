@@ -11,6 +11,7 @@ pkg_check_modules(
 )
 
 set(SEEON_WARNINGS -Wall -Wextra -Wpedantic -Werror)
+option(SEEON_ENABLE_SANITIZERS "Run pure native tests with ASan and UBSan" OFF)
 # Bit-stable float behavior for the parity-pinned perception math.
 set(SEEON_FP_FLAGS -ffp-contract=off)
 
@@ -165,6 +166,59 @@ if(BUILD_TESTING)
   target_compile_features(seeon-deepstream-au-transport-test PRIVATE cxx_std_20)
   target_compile_options(seeon-deepstream-au-transport-test PRIVATE ${SEEON_WARNINGS})
   add_test(NAME seeon-deepstream-au-transport-test COMMAND seeon-deepstream-au-transport-test)
+
+  set(
+    SEEON_NATIVE_TEST_TARGETS
+    seeon-deepstream-ipc-test
+    seeon-deepstream-source-runtime-test
+    seeon-deepstream-source-runtime-gstreamer-test
+    seeon-deepstream-native-perception-driver
+    seeon-deepstream-child-commands-test
+    seeon-deepstream-au-parser-test
+    seeon-deepstream-au-transport-test
+  )
+  if(SEEON_ENABLE_SANITIZERS)
+    foreach(target IN LISTS SEEON_NATIVE_TEST_TARGETS)
+      target_compile_options(
+        ${target} PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer
+      )
+      target_link_options(${target} PRIVATE -fsanitize=address,undefined)
+    endforeach()
+    set_tests_properties(
+      seeon-deepstream-ipc-test
+      seeon-deepstream-wire-cross-language-test
+      seeon-deepstream-source-runtime-test
+      seeon-deepstream-source-runtime-gstreamer-test
+      seeon-deepstream-child-commands-test
+      seeon-deepstream-au-parser-test
+      seeon-deepstream-au-transport-test
+      PROPERTIES
+        ENVIRONMENT
+          "ASAN_OPTIONS=detect_leaks=1:halt_on_error=1;UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1"
+    )
+  endif()
+
+  configure_file(
+    runtime-ctest.cmake.in runtime-ctest/CTestTestfile.cmake COPYONLY
+  )
+  install(
+    TARGETS
+      seeon-deepstream-ipc-test
+      seeon-deepstream-source-runtime-test
+      seeon-deepstream-source-runtime-gstreamer-test
+      seeon-deepstream-child-commands-test
+      seeon-deepstream-au-parser-test
+      seeon-deepstream-au-transport-test
+    RUNTIME DESTINATION native-build/bin
+  )
+  install(
+    FILES ${CMAKE_CURRENT_BINARY_DIR}/runtime-ctest/CTestTestfile.cmake
+    DESTINATION native-build
+  )
+  install(
+    FILES src/perception_wire_cross_language_test.py
+    DESTINATION native-build/data
+  )
 endif()
 
 install(TARGETS seeon-deepstream-preflight seeon-deepstream-child RUNTIME DESTINATION bin)

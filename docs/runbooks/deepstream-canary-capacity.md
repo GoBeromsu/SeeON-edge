@@ -18,9 +18,14 @@ and is advisory, so it does **not** protect the production worker.
 
 Never load `compose.edge.yaml`, read `.env.edge.prod`, reuse a live mount, or
 supply facility RTSP URLs for the default run. Confirm Docker, NVIDIA runtime,
-FFmpeg, Chromium, models, and the digest-pinned worker image are present. The
-harness refuses an existing `seeon-ds-canary` project, mount overlap, and a
-non-digest worker image. All published ports bind `127.0.0.1`.
+FFmpeg, Chromium, models, and the digest-pinned worker image are present. A real
+run requires `CANARY_WORKER_IMAGE=repository@sha256:<digest>` and
+`CANARY_EXPECTED_REVISION=<40-character source revision>` (or the equivalent
+CLI flags). Before Compose, the harness inspects that exact repository digest
+and refuses a missing/mismatched OCI `org.opencontainers.image.revision` label.
+Render-only fixtures may use an explicit fixture digest without Docker inspect.
+The harness refuses an existing `seeon-ds-canary` project, mount overlap, and a
+mutable/tag-only worker image. All published ports bind `127.0.0.1`.
 
 ## Default pre-facility gate
 
@@ -28,6 +33,8 @@ Choose a directory that does not exist. Previous runs are immutable and must
 never be reused.
 
 ```sh
+export CANARY_WORKER_IMAGE='<repository>@sha256:<immutable digest>'
+export CANARY_EXPECTED_REVISION='<intended 40-character Git revision>'
 uv run python -m worker.tools.deepstream_canary run \
   --rungs zero,loopback \
   --evidence-dir .omo/evidence/deepstream-nvidia-worker-migration/task-8-canary-default
