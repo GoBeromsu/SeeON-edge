@@ -174,10 +174,13 @@ def test_floor_crud_emits_one_event_driven_sync_trigger(
     registry_path = tmp_path / "catalog.sqlite3"
     prepare_compact_database(registry_path)
     app.state.camera_registry = CameraRegistryStore(registry_path)
-    calls: list[int] = []
+    calls: list[tuple[bool, bool]] = []
     from backend.app.features.cameras import router as router_module
 
-    monkeypatch.setattr(router_module, "sync_camera_roster", lambda _app: calls.append(1))
+    def capture_sync(_app, *, _force: bool = False, _refresh: bool = False) -> None:
+        calls.append((_force, _refresh))
+
+    monkeypatch.setattr(router_module, "sync_camera_roster", capture_sync)
 
     # When
     with TestClient(app) as client:
@@ -194,4 +197,4 @@ def test_floor_crud_emits_one_event_driven_sync_trigger(
 
     # Then
     assert response.status_code == 201
-    assert calls == [1]
+    assert calls == [(True, True)]

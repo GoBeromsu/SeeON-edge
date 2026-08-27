@@ -622,7 +622,10 @@ def _trigger_roster_sync(app: FastAPI) -> None:
     never raises, but this still guards against a future change there.
     """
     try:
-        sync_camera_roster(app)
+        # A CRUD event is the operator's explicit retry signal. Refreshing the
+        # Hub revision here is what clears a durable CONFLICT pause; a plain
+        # retry returns early forever and leaves new cameras unpublished.
+        sync_camera_roster(app, _force=True, _refresh=True)
     except Exception:  # noqa: BLE001, S110 - a roster-sync bug must never surface here
         pass
 
