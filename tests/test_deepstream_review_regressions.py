@@ -349,3 +349,56 @@ def test_uri_boundary_rejects_file_scheme_and_preserves_rtsp_quotes() -> None:
     credentialed_uri = "rtsp://user:p'ass" + chr(64) + "camera.example/live"
     parsed = parser(credentialed_uri)
     assert parsed.encode() == b"rtsp://user:p'ass" + bytes((64,)) + b"camera.example/live"
+
+
+def test_native_path_heartbeats_periodically_not_once_at_construction() -> None:
+    """A streaming camera must keep reporting liveness (#426).
+
+    The native path built a throwaway HeartbeatReporter per camera and called
+    mark_ready exactly once, at source construction. Nothing retained the
+    reporter, so no further heartbeat could ever fire and its 30s rate limiter
+    was moot. The dashboard renders a camera's snapshot only while its status
+    is 'online', so thirteen cameras that were streaming and detecting
+    correctly showed an operator nothing but grey tiles.
+    """
+    import threading
+    import time
+    from types import SimpleNamespace
+
+    from worker.runtime.worker import NativeHeartbeatLoop
+
+    sent: list[str] = []
+
+    class _Pump:
+        def __init__(self, camera_id: str) -> None:
+            self.camera_id = camera_id
+            self.processed_count = 0
+
+    pump = _Pump("cam-a")
+    stalled = _Pump("cam-b")
+    loop = NativeHeartbeatLoop(
+        SimpleNamespace(),
+        [SimpleNamespace(camera_id="cam-a"), SimpleNamespace(camera_id="cam-b")],
+        [pump, stalled],
+        tick_sec=0.02,
+    )
+    loop._reporters = {  # noqa: SLF001 - substituting the relay boundary
+        "cam-a": SimpleNamespace(mark_ready=sent.append),
+        "cam-b": SimpleNamespace(mark_ready=sent.append),
+    }
+
+    thread = threading.Thread(target=loop.run, daemon=True)
+    thread.start()
+    deadline = time.monotonic() + 3.0
+    while time.monotonic() < deadline and sent.count("cam-a") < 3:
+        pump.processed_count += 1
+        time.sleep(0.02)
+    loop.stop()
+    thread.join(timeout=2.0)
+
+    assert sent.count("cam-a") >= 3, (
+        f"a streaming camera must heartbeat repeatedly, saw {sent.count('cam-a')}"
+    )
+    assert "cam-b" not in sent, (
+        "a camera whose pump never advanced must not be reported live"
+    )

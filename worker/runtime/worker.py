@@ -725,6 +725,75 @@ def _production_gpu_status(*, probe_python_cuda: bool = True) -> RelayGpuPayload
 
 
 @final
+class NativeHeartbeatLoop:
+    """Periodic per-camera liveness for the nvidia path.
+
+    On the host path the ingest lifecycle calls ``mark_ready`` on every READY
+    transition, so liveness keeps flowing for as long as frames do. The native
+    path has no such transition after construction: it reported liveness once,
+    from a throwaway reporter, and never again (#426). The consequence is not
+    cosmetic - the dashboard renders a camera's snapshot only while its status
+    is ``online``, so thirteen cameras that were streaming and detecting
+    correctly showed an operator nothing but grey tiles.
+
+    Liveness here is observed, not assumed: a camera is reported ready only
+    when its pump's ``processed_count`` advanced since the previous tick, so a
+    stalled camera stops heartbeating instead of being pinned online by a
+    timer.
+
+    This deliberately runs off the decision path. The policy pump is the sole
+    consumer of a capacity-one metadata slot; blocking I/O inside it stalls
+    fall detection and overwrites frames.
+    """
+
+    def __init__(
+        self,
+        worker: WorkerConfig,
+        cameras: Sequence[CameraRuntimeConfig],
+        pumps: Sequence[NativePolicyPump],
+        *,
+        tick_sec: float = 5.0,
+    ) -> None:
+        by_id = {camera.camera_id: camera for camera in cameras}
+        self._pumps = tuple(pump for pump in pumps if pump.camera_id in by_id)
+        self._reporters = {
+            pump.camera_id: HeartbeatReporter(worker, by_id[pump.camera_id])
+            for pump in self._pumps
+        }
+        # The reporter rate-limits to camera.heartbeat_interval_sec on its own,
+        # so ticking faster only shortens how long a newly live camera waits to
+        # appear; it does not increase relay traffic.
+        self._tick_sec = tick_sec
+        # Seeded from the live counter, not from a sentinel below zero: a
+        # camera that has processed nothing must not be reported live by the
+        # very first tick.
+        self._seen: dict[str, int] = {
+            pump.camera_id: pump.processed_count for pump in self._pumps
+        }
+        self._stop = threading.Event()
+
+    def run(self) -> None:
+        while not self._stop.wait(self._tick_sec):
+            for pump in self._pumps:
+                camera_id = pump.camera_id
+                processed = pump.processed_count
+                advanced = processed > self._seen[camera_id]
+                self._seen[camera_id] = processed
+                if not advanced:
+                    continue
+                try:
+                    self._reporters[camera_id].mark_ready(camera_id)
+                except FatalAcceleratorError:
+                    raise
+                except Exception:  # noqa: BLE001 - relay I/O is a non-fatal boundary
+                    LOGGER.warning(
+                        "native heartbeat failed: camera_id=%s", camera_id, exc_info=True
+                    )
+
+    def stop(self) -> None:
+        self._stop.set()
+
+@final
 class WorkerRuntime:
     """Own process-wide models and camera-local mutable pipeline state."""
 
@@ -1615,6 +1684,17 @@ class WorkerRuntime:
         self._native_policy_pumps = tuple(pumps)
         for pump in pumps:
             handler.register_loop(pump)
+        # Periodic liveness. Without this the native path heartbeats once per
+        # camera at construction and the dashboard shows every camera offline
+        # forever while it streams and detects normally (#426).
+        heartbeat = NativeHeartbeatLoop(self.config, self.config.cameras, pumps)
+        self._native_heartbeat = heartbeat
+        handler.register_loop(heartbeat)
+        heartbeat_thread = threading.Thread(
+            target=heartbeat.run, name="native-heartbeat", daemon=True
+        )
+        heartbeat_thread.start()
+        self._native_heartbeat_thread = heartbeat_thread
         self._supervisor = ingest.IngestSupervisor(
             pumps,
             restart_check=self._restart_check,

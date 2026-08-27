@@ -2460,3 +2460,68 @@ def test_probe_keeps_auth_classification_when_worker_answers(
     assert body["error_class"] == "auth"
     # worker가 실제로 검사했으므로 "검사 불가"가 아니다.
     assert "probe_unavailable" not in body
+
+
+def test_roster_projection_does_not_duplicate_a_locally_registered_camera() -> None:
+    """A room already on screen must not also appear as an offline ghost.
+
+    A local registration carries its room under room_location_id from the
+    moment it is bound; space_id is only filled once topology sync has run
+    against the Hub. Matching on space_id alone failed for every locally
+    registered camera on an edge whose sync had not completed, so each roster
+    row was emitted as a second, permanently offline tile for a room that was
+    already streaming. An operator saw thirteen live rooms and twelve dead
+    duplicates of the same rooms.
+    """
+    from backend.app.features.cameras.router import _public_snapshot
+
+    class _RosterCamera:
+        def __init__(self, camera_id: str, space_id: str, label: str) -> None:
+            self.camera_id = camera_id
+            self.space_id = space_id
+            self.label = label
+            self.space_name = label
+            self.floor_name = "2층"
+            self.created_at = "2026-01-01T00:00:00Z"
+
+    class _Pulled:
+        cameras = (
+            _RosterCamera("hub-208", "sp_208", "01 208호"),
+            _RosterCamera("hub-209", "sp_209", "02 209호"),
+        )
+
+    class _App:
+        class state:  # noqa: N801 - mimics FastAPI app.state
+            pass
+
+    snapshot = {
+        "registry_version": 1,
+        "cameras": [
+            {
+                "id": "local-208",
+                "label": "01 208호",
+                "space_id": None,
+                "room_location_id": "sp_208",
+                "room_edge_ref": "sp_208",
+                "edge_ref": "cam_sp_208",
+                "backend_camera_id": None,
+                "rtsp_url": "rtsp://x/1",
+            },
+            {
+                "id": "local-209",
+                "label": "02 209호",
+                "space_id": None,
+                "room_location_id": "sp_209",
+                "room_edge_ref": "sp_209",
+                "edge_ref": "cam_sp_209",
+                "backend_camera_id": None,
+                "rtsp_url": "rtsp://x/2",
+            },
+        ],
+    }
+
+    result = _public_snapshot(_App(), snapshot, _Pulled(), None)
+    cameras = result["cameras"]
+    labels = [camera.get("label") for camera in cameras]
+    assert len(cameras) == 2, f"expected no ghost tiles, got {labels}"
+    assert sorted(labels) == ["01 208호", "02 209호"], labels
