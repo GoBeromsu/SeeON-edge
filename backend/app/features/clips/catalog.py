@@ -487,7 +487,7 @@ def _utc_timestamp(value: object, path: Path) -> datetime:
     if not isinstance(value, str):
         raise TypeError(f"invalid manifest timestamp: {path}")
     try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(value)
     except ValueError as exc:
         raise ValueError(f"invalid manifest timestamp: {path}") from exc
     if parsed.tzinfo is None or parsed.utcoffset() != UTC.utcoffset(parsed):
@@ -593,9 +593,12 @@ def _column_values(table: str, payload: dict[str, Any]) -> tuple[Any, ...]:
     values: list[Any] = []
     for column in _TABLE_COLUMNS[table]:
         value = payload.get(column)
-        if column == "size_bytes" and (isinstance(value, bool) or not isinstance(value, int)):
-            value = None
-        elif column != "size_bytes" and not isinstance(value, str):
+        well_typed = (
+            isinstance(value, int) and not isinstance(value, bool)
+            if column == "size_bytes"
+            else isinstance(value, str)
+        )
+        if not well_typed:
             value = None
         values.append(value)
     return tuple(values)
@@ -915,12 +918,12 @@ class CatalogStore:
 
 __all__ = [
     "CatalogConflictError",
-    "CatalogSchemaNewerThanSupportedError",
-    "StrictManifest",
     "CatalogRecord",
-    "sanitized_camera_payload",
-    "strict_manifest_records",
-    "strict_camera_snapshot",
+    "CatalogSchemaNewerThanSupportedError",
     "CatalogStore",
+    "StrictManifest",
     "get_catalog_store",
+    "sanitized_camera_payload",
+    "strict_camera_snapshot",
+    "strict_manifest_records",
 ]

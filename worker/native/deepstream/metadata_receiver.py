@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import socket
 import threading
 from dataclasses import dataclass
@@ -112,18 +113,14 @@ class MetadataReceiver:
         self._stopping.set()
         receiver, self._socket = self._socket, None
         if receiver is not None:
-            try:
+            with contextlib.suppress(OSError):
                 receiver.shutdown(socket.SHUT_RD)
-            except OSError:
-                pass
         if self._thread is not None:
             self._thread.join(timeout=1.0)
             self._thread = None
         if receiver is not None:
-            try:
+            with contextlib.suppress(OSError):
                 receiver.close()
-            except OSError:
-                pass
 
     def __exit__(
         self,
@@ -137,7 +134,7 @@ class MetadataReceiver:
 
 __all__ = [
     "MetadataPullFailure",
-    "MetadataPuller",
     "MetadataPullStopped",
+    "MetadataPuller",
     "MetadataReceiver",
 ]

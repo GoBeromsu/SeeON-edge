@@ -10,7 +10,7 @@ import numpy as np
 import pytest
 from numpy.typing import NDArray
 
-import worker.adapters.model.sklearn_fall as sklearn_fall
+from worker.adapters.model import sklearn_fall
 from worker.adapters.model.registry import UnknownModelTaskError, default_registry
 from worker.adapters.model.sklearn_fall import (
     DEFAULT_OPERATING_THRESHOLD,

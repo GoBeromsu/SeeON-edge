@@ -143,8 +143,8 @@ def _simplify_polygon(
         values = values[indices]
     return tuple(
         (
-            int(round(float(values[index, 0]))),
-            int(round(float(values[index, 1]))),
+            round(float(values[index, 0])),
+            round(float(values[index, 1])),
         )
         for index in range(values.shape[0])
     )
@@ -219,10 +219,10 @@ __all__ = [
     "BED_MODEL_CONFIDENCE",
     "BED_MODEL_PATH",
     "BED_NMS_IOU_THRESHOLD",
+    "COCO_BED_CLASS_ID",
     "BedBox",
     "BedInstance",
     "BedPolygon",
-    "COCO_BED_CLASS_ID",
     "YoloBedSegRunner",
     "dedupe_bed_boxes",
 ]

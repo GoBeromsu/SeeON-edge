@@ -118,22 +118,21 @@ class ClipDeletionLifecycle:
         try:
             with closing(
                 open_runtime_database(self.database_path, actor=RuntimeActor.API)
-            ) as connection:
-                with write_transaction(connection):
-                    row = connection.execute(
-                        "SELECT retention_state FROM clips WHERE clip_id = ?", (clip_id,)
-                    ).fetchone()
-                    if row is None:
-                        return None
-                    current = str(row[0])
-                    if current != expected:
-                        return current
-                    if completion:
-                        changed = connection.execute(
-                            update, (timestamp, timestamp, clip_id)
-                        ).rowcount
-                        connection.execute(
-                            """
+            ) as connection, write_transaction(connection):
+                row = connection.execute(
+                    "SELECT retention_state FROM clips WHERE clip_id = ?", (clip_id,)
+                ).fetchone()
+                if row is None:
+                    return None
+                current = str(row[0])
+                if current != expected:
+                    return current
+                if completion:
+                    changed = connection.execute(
+                        update, (timestamp, timestamp, clip_id)
+                    ).rowcount
+                    connection.execute(
+                        """
                             UPDATE artifacts
                             SET state = 'PURGED', reason = 'CLIP_PURGED',
                                 contained_relpath = NULL, codec = NULL,
@@ -142,35 +141,35 @@ class ClipDeletionLifecycle:
                               AND state IN ('AVAILABLE','UNAVAILABLE','CORRUPT')
                               AND artifact_id IS NOT NULL
                             """,
-                            (timestamp, clip_id),
-                        )
-                        transitioned = "PURGED"
-                    else:
-                        changed = connection.execute(
-                            update, (timestamp, timestamp, timestamp, clip_id)
-                        ).rowcount
-                        transitioned = "PENDING"
-                    if changed != 1:
-                        raise sqlite3.IntegrityError("clip retention transition lost")
-                    self._audit_store().append(
-                        AuditEvent(
-                            occurred_at=timestamp,
-                            actor_id=actor_id,
-                            action=action,
-                            target_id=clip_id,
-                            detail=empty_detail(action),
-                            actor_type=(
-                                AuditActorType.SYSTEM if system else AuditActorType.USER
-                            ),
-                            auth_mechanism=(
-                                AuditAuthMechanism.INTERNAL
-                                if system
-                                else AuditAuthMechanism.DASHBOARD_SESSION
-                            ),
-                        ),
-                        connection=connection,
+                        (timestamp, clip_id),
                     )
-                    return transitioned
+                    transitioned = "PURGED"
+                else:
+                    changed = connection.execute(
+                        update, (timestamp, timestamp, timestamp, clip_id)
+                    ).rowcount
+                    transitioned = "PENDING"
+                if changed != 1:
+                    raise sqlite3.IntegrityError("clip retention transition lost")
+                self._audit_store().append(
+                    AuditEvent(
+                        occurred_at=timestamp,
+                        actor_id=actor_id,
+                        action=action,
+                        target_id=clip_id,
+                        detail=empty_detail(action),
+                        actor_type=(
+                            AuditActorType.SYSTEM if system else AuditActorType.USER
+                        ),
+                        auth_mechanism=(
+                            AuditAuthMechanism.INTERNAL
+                            if system
+                            else AuditAuthMechanism.DASHBOARD_SESSION
+                        ),
+                    ),
+                    connection=connection,
+                )
+                return transitioned
         except (OSError, sqlite3.Error, EdgeDatabaseError) as error:
             raise AuditUnavailableError from error
 

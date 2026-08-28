@@ -658,7 +658,6 @@ def test_clip_enabled_initializes_delivery_exactly_once_through_the_recorder_hoo
 
         def preflight_clip_deletion(self, clip_id: str) -> None:
             del clip_id
-            return None
 
         def delete_clip(self, clip_id: str) -> object:
             raise AssertionError("clip deletion is not exercised by this composition test")
@@ -814,7 +813,6 @@ def test_recorder_start_success_reports_available_clip_recorder_status(
 
         def preflight_clip_deletion(self, clip_id: str) -> None:
             del clip_id
-            return None
 
         def delete_clip(self, clip_id: str) -> object:
             raise AssertionError("clip deletion is not exercised by this composition test")

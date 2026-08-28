@@ -33,9 +33,10 @@ class SceneValue:
             isinstance(self.value, bool) or not math.isfinite(float(self.value))
         ):
             raise ValueError("overlay numeric values must be finite")
-        if (self.value is None) != (self.semantics is not ObservationSemantics.PRESENT):
-            if self.semantics is not ObservationSemantics.STALE or self.value is None:
-                raise ValueError("overlay value and observation semantics disagree")
+        disagrees = (self.value is None) != (self.semantics is not ObservationSemantics.PRESENT)
+        stale_with_value = self.semantics is ObservationSemantics.STALE and self.value is not None
+        if disagrees and not stale_with_value:
+            raise ValueError("overlay value and observation semantics disagree")
         if self.semantics is ObservationSemantics.PRESENT and self.reason is not None:
             raise ValueError("present overlay values cannot have a missing reason")
         if self.semantics is not ObservationSemantics.PRESENT and not self.reason:

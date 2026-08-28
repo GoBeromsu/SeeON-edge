@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-import worker.adapters.encode.packet_remuxer as packet_remuxer
+from worker.adapters.encode import packet_remuxer
 from worker.adapters.encode.adapter_errors import ClipRemuxError
 from worker.adapters.encode.models import ClipArtifact
 from worker.pipeline.output.evidence.clip_recording import (

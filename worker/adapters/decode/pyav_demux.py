@@ -64,9 +64,26 @@ class PyAvPacketDemuxer:
             raise RuntimeError("packet-preserving ingest requires exactly one video stream")
         self.video = videos[0]
         self._configuration: SourceStreamConfiguration | None = None
+        self._observed_descriptors: tuple[SourceStreamDescriptor, ...] | None = None
+        self._observed_id = ""
         self._arrival_index = 0
         self._last_dts: dict[int, Fraction] = {}
         self.packet_drop_count = 0
+
+    def _observed_configuration_id(self) -> str:
+        """Configuration id of the streams as they look right now.
+
+        The id is a pure function of the stream descriptors, so it is only
+        recomputed (sorting, hashing, JSON) when a descriptor actually changes
+        rather than on every demuxed packet.
+        """
+        descriptors = tuple(_descriptor(stream) for stream in self.streams)
+        if descriptors != self._observed_descriptors:
+            self._observed_id = SourceStreamConfiguration.from_streams(
+                list(descriptors)
+            ).configuration_id
+            self._observed_descriptors = descriptors
+        return self._observed_id
 
     def run(
         self,
@@ -84,9 +101,7 @@ class PyAvPacketDemuxer:
             payload = bytes(packet)
             if packet.dts is None or not payload:
                 continue
-            observed_id = SourceStreamConfiguration.from_streams(
-                [_descriptor(stream) for stream in self.streams]
-            ).configuration_id
+            observed_id = self._observed_configuration_id()
             if (
                 self._configuration is not None
                 and observed_id != self._configuration.configuration_id

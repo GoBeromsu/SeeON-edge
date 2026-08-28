@@ -268,7 +268,7 @@ class RelayEvidenceClient:
 
     def send_snapshot_attachment(
         self, payload: Mapping[str, PayloadValue]
-    ) -> None | DeliveryFailure:
+    ) -> DeliveryFailure | None:
         path = "api/v1/relay/snapshot-attachments"
         result = bounded_request(
             join_http_url(self.base_url, path),
@@ -286,7 +286,7 @@ class RelayEvidenceClient:
 
     def send_snapshot_disposition(
         self, payload: Mapping[str, PayloadValue]
-    ) -> None | DeliveryFailure:
+    ) -> DeliveryFailure | None:
         path = "api/v1/relay/snapshot-dispositions"
         result = bounded_request(
             join_http_url(self.base_url, path),
@@ -433,7 +433,7 @@ def _backend_reason(claim: ClaimedClipRequest) -> str:
 
 def _parse_relay_acceptance(
     result: tuple[int, Mapping[str, str], bytes] | DeliveryFailure,
-) -> None | DeliveryFailure:
+) -> DeliveryFailure | None:
     if isinstance(result, DeliveryFailure):
         return result
     status, headers, body = result

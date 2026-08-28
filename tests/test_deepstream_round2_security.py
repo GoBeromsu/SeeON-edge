@@ -151,7 +151,7 @@ def test_transport_child_command_has_no_gpu_id_argument(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    import worker.runtime.deepstream.transport as transport
+    from worker.runtime.deepstream import transport
 
     captured: list[transport.SpawnRequest] = []
 
@@ -177,7 +177,7 @@ def test_transport_closes_socketpair_after_partial_initialization_failure(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    import worker.runtime.deepstream.transport as transport
+    from worker.runtime.deepstream import transport
 
     real_socketpair = socket.socketpair
     created: list[socket.socket] = []

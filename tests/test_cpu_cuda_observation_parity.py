@@ -36,8 +36,8 @@ class _ProbabilityModel:
 
 
 def _normalized_observation(mean_rgb: tuple[float, float, float]) -> FrameObservation:
-    x_offset = int(round(mean_rgb[0])) % 5
-    y_offset = int(round(mean_rgb[1])) % 5
+    x_offset = round(mean_rgb[0]) % 5
+    y_offset = round(mean_rgb[1]) % 5
     pose = tuple((20 + x_offset + index, 30 + y_offset + index, 0.9) for index in range(17))
     return build_frame_observation(
         raw_boxes=((10, 10, 80, 100, 0.95),),

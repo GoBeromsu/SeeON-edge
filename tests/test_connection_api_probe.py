@@ -13,7 +13,6 @@ from tests_support.connection_api import (
     response_json,
     run_server,
 )
-from tests_support.connection_api import clear_env as clear_env
 
 _PAYLOAD = {
     "facility_code": "NH-7H2K9M4QXP",

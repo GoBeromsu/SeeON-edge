@@ -232,10 +232,10 @@ def _require_int(data: dict[str, object], key: str) -> int:
 
 
 __all__ = [
-    "WORKER_CONFIG_PATH",
-    "WORKER_RESTART_PATH",
     "CONFIG_VERSION_KEY",
     "RESTART_EPOCH_KEY",
+    "WORKER_CONFIG_PATH",
+    "WORKER_RESTART_PATH",
     "PulledCameraConfig",
     "PulledNightWindow",
     "PulledWorkerConfig",

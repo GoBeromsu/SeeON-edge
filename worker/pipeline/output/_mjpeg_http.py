@@ -405,6 +405,23 @@ def build_http_server(
                 return
             self._write_status_json(HTTPStatus.OK, payload)
 
+        def _read_json_object(self, limit: int) -> dict[str, object] | None:
+            """Bounded JSON object body, or None when absent, oversized, or malformed."""
+            raw_length = self.headers.get("Content-Length")
+            if raw_length is None:
+                return None
+            try:
+                length = int(raw_length)
+            except ValueError:
+                return None
+            if length <= 0 or length > limit:
+                return None
+            try:
+                payload: object = json.loads(self.rfile.read(length).decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                return None
+            return payload if isinstance(payload, dict) else None
+
         def _write_status_json(self, http_status: HTTPStatus, payload: object) -> None:
             body = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
             self.send_response(http_status)
@@ -414,20 +431,8 @@ def build_http_server(
             self.wfile.write(body)
 
         def _read_mode_body(self) -> OverlayMode | None:
-            raw_length = self.headers.get("Content-Length")
-            if raw_length is None:
-                return None
-            try:
-                length = int(raw_length)
-            except ValueError:
-                return None
-            if length <= 0 or length > MAX_POSE_BODY_BYTES:
-                return None
-            try:
-                payload: object = json.loads(self.rfile.read(length).decode("utf-8"))
-            except (UnicodeDecodeError, json.JSONDecodeError):
-                return None
-            if not isinstance(payload, dict) or len(payload) != 1:
+            payload = self._read_json_object(MAX_POSE_BODY_BYTES)
+            if payload is None or len(payload) != 1:
                 return None
             for key, value in payload.items():
                 if key != "mode":
@@ -437,46 +442,17 @@ def build_http_server(
             return None
 
         def _read_replay_body(self) -> dict[str, object] | None:
-            raw_length = self.headers.get("Content-Length")
-            if raw_length is None:
-                return None
-            try:
-                length = int(raw_length)
-            except ValueError:
-                return None
-            if length <= 0 or length > MAX_REPLAY_BODY_BYTES:
-                return None
-            try:
-                payload: object = json.loads(self.rfile.read(length).decode("utf-8"))
-            except (UnicodeDecodeError, json.JSONDecodeError):
-                return None
-            if not isinstance(payload, dict) or set(payload) != {"trace", "module_id", "policy"}:
+            payload = self._read_json_object(MAX_REPLAY_BODY_BYTES)
+            if payload is None or set(payload) != {"trace", "module_id", "policy"}:
                 return None
             return payload
 
         def _write_mode_json(self, mode: OverlayMode) -> None:
-            body = json.dumps({"mode": mode}, separators=(",", ":")).encode("utf-8")
-            self.send_response(HTTPStatus.OK)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
+            self._write_status_json(HTTPStatus.OK, {"mode": mode})
 
         def _read_probe_url(self) -> str | None:
-            raw_length = self.headers.get("Content-Length")
-            if raw_length is None:
-                return None
-            try:
-                length = int(raw_length)
-            except ValueError:
-                return None
-            if length <= 0 or length > MAX_PROBE_BODY_BYTES:
-                return None
-            try:
-                payload = json.loads(self.rfile.read(length).decode("utf-8"))
-            except (UnicodeDecodeError, json.JSONDecodeError):
-                return None
-            if not isinstance(payload, dict):
+            payload = self._read_json_object(MAX_PROBE_BODY_BYTES)
+            if payload is None:
                 return None
             rtsp_url = payload.get("rtsp_url")
             if not isinstance(rtsp_url, str) or rtsp_url.strip() == "":
@@ -484,16 +460,7 @@ def build_http_server(
             return rtsp_url
 
         def _write_json(self, payload: MjpegProbePayload) -> None:
-            body = json.dumps(
-                payload,
-                separators=(",", ":"),
-                sort_keys=True,
-            ).encode("utf-8")
-            self.send_response(HTTPStatus.OK)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
+            self._write_status_json(HTTPStatus.OK, payload)
 
         def _write_part(self, frame: LatestFrame) -> None:
             self.wfile.write(b"--" + BOUNDARY + b"\r\n")

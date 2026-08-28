@@ -155,7 +155,7 @@ def test_box_and_keypoint_inverses_match_reference_when_padding_is_odd(
         affine = letterbox_affine(height, width)
         for _ in range(25):
             raw = rng.uniform(-8.0, 648.0, size=4)
-            x1, y1 = sorted((raw[0], raw[2]))
+            x1, _ = sorted((raw[0], raw[2]))
             y_pair = sorted((raw[1], raw[3]))
             driver.send(
                 f"INVBOX {height} {width} {float(x1).hex()} {float(y_pair[0]).hex()} "

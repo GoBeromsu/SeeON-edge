@@ -166,12 +166,12 @@ class FFmpegThumbnailGenerator:
 
 
 __all__ = [
-    "FFmpegThumbnailGenerator",
     "MAX_THUMBNAIL_BYTES",
     "THUMBNAIL_FILENAME",
     "THUMBNAIL_HEIGHT",
     "THUMBNAIL_TIMEOUT_SECONDS",
     "THUMBNAIL_WIDTH",
+    "FFmpegThumbnailGenerator",
     "ThumbnailCommandResult",
     "ThumbnailGenerationError",
     "ThumbnailPayloadError",

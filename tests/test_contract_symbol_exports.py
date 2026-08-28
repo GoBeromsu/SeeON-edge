@@ -43,13 +43,13 @@ def _exported_symbols(module_relpath: str) -> set[str]:
 
 
 def test_runner_contract_exports_tagged_result_symbols() -> None:
-    assert EXPECTED_RUNNER_CONTRACT_SYMBOLS <= _exported_symbols("contracts/runner.py")
+    assert _exported_symbols("contracts/runner.py") >= EXPECTED_RUNNER_CONTRACT_SYMBOLS
 
 
 def test_tracker_contract_exports_protocol_symbol() -> None:
-    assert EXPECTED_TRACKER_CONTRACT_SYMBOLS <= _exported_symbols("contracts/tracker.py")
+    assert _exported_symbols("contracts/tracker.py") >= EXPECTED_TRACKER_CONTRACT_SYMBOLS
 
 
 def test_worker_config_contract_exports_pull_symbols() -> None:
     exported = _exported_symbols("contracts/worker_config.py")
-    assert EXPECTED_WORKER_CONFIG_CONTRACT_SYMBOLS <= exported
+    assert exported >= EXPECTED_WORKER_CONFIG_CONTRACT_SYMBOLS

@@ -116,15 +116,17 @@ def _extract_poses(result: YoloResult) -> PoseDetections:
                     f"received {len(person_points)}"
                 ),
             )
-        points: list[tuple[int, int, float]] = []
-        for point_index, point in enumerate(person_points):
-            confidence = (
-                1.0
-                if confidence_values is None
-                else float(confidence_values[person_index][point_index])
+        person_confidences = None if confidence_values is None else confidence_values[person_index]
+        poses.append(
+            tuple(
+                (
+                    int(point[0]),
+                    int(point[1]),
+                    1.0 if person_confidences is None else float(person_confidences[point_index]),
+                )
+                for point_index, point in enumerate(person_points)
             )
-            points.append((int(point[0]), int(point[1]), confidence))
-        poses.append(tuple(points))
+        )
     return tuple(poses)
 
 

@@ -13,11 +13,11 @@ from worker.runtime.deepstream.supervisor import (
 )
 
 __all__ = [
+    "FATAL_CHILD_EXIT_CODE",
     "ChildConfig",
     "DarkRunRequest",
     "DarkSource",
     "DeepStreamChildSupervisor",
-    "FATAL_CHILD_EXIT_CODE",
     "SourceReadinessError",
     "SourceSnapshot",
     "SourceState",

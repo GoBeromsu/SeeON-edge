@@ -118,7 +118,7 @@ class SourceRegistry:
             raise SourceRegistryError(
                 "raw live descriptors are not accepted; reference an allowlisted source_id instead"
             )
-        if ".." in Path(value).parts or value.startswith("/") or value.startswith("~"):
+        if ".." in Path(value).parts or value.startswith(("/", "~")):
             raise SourceRegistryError(
                 "raw paths and traversal are not accepted; reference a registered source_id instead"
             )

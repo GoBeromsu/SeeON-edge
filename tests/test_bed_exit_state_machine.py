@@ -588,7 +588,7 @@ def test_e16_bed_pose_features_are_plain_scalars_and_domains_have_no_numpy() -> 
     for path in (_REPO_ROOT / "worker" / "domains").rglob("*.py"):
         for line_no, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
             stripped = line.lstrip()
-            if stripped.startswith("import numpy") or stripped.startswith("from numpy"):
+            if stripped.startswith(("import numpy", "from numpy")):
                 offenders.append(f"{path.relative_to(_REPO_ROOT)}:{line_no}")
     assert offenders == []
 

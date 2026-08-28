@@ -6,7 +6,7 @@ import sqlite3
 from dataclasses import astuple, dataclass
 from typing import TypeAlias
 
-SqliteValue: TypeAlias = None | int | float | str | bytes
+SqliteValue: TypeAlias = int | float | str | bytes | None
 
 
 @dataclass(frozen=True, slots=True)

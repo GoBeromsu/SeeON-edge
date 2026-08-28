@@ -56,7 +56,7 @@ def test_cpu_still_render_is_byte_deterministic_with_cjk_label() -> None:
     )
     scene = replace(
         scene,
-        labels=scene.labels + (SceneLabel("낙상 감지", (20.0, 170.0), (0, 0, 255), 50),),
+        labels=(*scene.labels, SceneLabel("낙상 감지", (20.0, 170.0), (0, 0, 255), 50)),
     )
     packet = FramePacket(
         "camera-a",

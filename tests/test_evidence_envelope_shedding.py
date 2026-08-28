@@ -101,11 +101,11 @@ def _incidents(database: Path) -> list[dict[str, object]]:
 
 
 def test_required_alert_field_source_tracks_relay_model() -> None:
-    assert limits.REQUIRED_ALERT_FIELDS == frozenset(
+    assert frozenset(
         name
         for name, model_field in RelayAlertRequest.model_fields.items()
         if model_field.is_required()
-    )
+    ) == limits.REQUIRED_ALERT_FIELDS
 
 
 def test_oversized_event_is_shed_off_wire_and_delivered_to_incident_projection(

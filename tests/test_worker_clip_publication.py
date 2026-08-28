@@ -12,9 +12,9 @@ from pathlib import Path
 
 import pytest
 
-import worker.pipeline.output.evidence.clip_publication as clip_publication
 from backend.app.features.clips.catalog import strict_manifest_records
 from backend.app.features.clips.store import ClipStore
+from worker.pipeline.output.evidence import clip_publication
 from worker.pipeline.output.evidence.clip_identity import ClipIdAllocator, ClipReservation
 from worker.pipeline.output.evidence.clip_publication import (
     ClipPublicationMetadata,

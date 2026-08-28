@@ -21,9 +21,9 @@ class BoundedFrameBus:
         "_closed",
         "_lock",
         "_subscriptions",
+        "evidence",
         "inference",
         "live",
-        "evidence",
     )
 
     def __init__(

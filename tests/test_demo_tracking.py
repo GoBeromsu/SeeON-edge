@@ -42,7 +42,7 @@ class TestIou:
     def test_half_overlap_both_same_size(self) -> None:
         # a: [0,0]->[100,100]; b: [50,0]->[150,100]
         # intersection: [50,0]->[100,100] = 50*100 = 5 000
-        # union: 10 000 + 10 000 − 5 000 = 15 000  →  IoU = 1/3
+        # union: 10 000 + 10 000 - 5 000 = 15 000  →  IoU = 1/3
         a = _box(0, 0, 100, 100)
         b = _box(50, 0, 150, 100)
         assert iou(a, b) == pytest.approx(1.0 / 3.0, rel=1e-5)

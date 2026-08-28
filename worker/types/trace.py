@@ -197,12 +197,12 @@ class DecisionTraceSnapshot:
 
 
 __all__ = [
+    "TRACE_FLOAT_DECIMAL_PLACES",
     "DecisionTraceMissingReason",
     "DecisionTraceReason",
     "DecisionTraceSnapshot",
     "DecisionTraceState",
     "DecisionTraceValueName",
     "NumericTraceValue",
-    "TRACE_FLOAT_DECIMAL_PLACES",
     "canonical_trace_number",
 ]

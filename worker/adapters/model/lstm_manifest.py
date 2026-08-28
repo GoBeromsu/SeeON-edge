@@ -21,7 +21,7 @@ SUPPORTED_PREPROCESSING_IDENTITIES: Final = frozenset(
     {CURRENT_PREPROCESSING_IDENTITY, LEGACY_PREPROCESSING_IDENTITY}
 )
 YamlValue: TypeAlias = (
-    str | int | float | bool | None | list["YamlValue"] | dict[str, "YamlValue"]
+    str | int | float | bool | list["YamlValue"] | dict[str, "YamlValue"] | None
 )
 
 
@@ -142,14 +142,14 @@ class LstmFallManifest:
         if self.schema_version not in (LEGACY_SCHEMA_VERSION, CURRENT_SCHEMA_VERSION):
             message = (
                 f"unsupported schema_version {self.schema_version}; supported versions are "
-                + f"{LEGACY_SCHEMA_VERSION} and {CURRENT_SCHEMA_VERSION}"
+                f"{LEGACY_SCHEMA_VERSION} and {CURRENT_SCHEMA_VERSION}"
             )
             raise ModelLoadError(message)
         if self.preprocessing_identity not in SUPPORTED_PREPROCESSING_IDENTITIES:
             message = (
                 "unsupported preprocessing_identity "
-                + f"{self.preprocessing_identity!r}; expected one of "
-                + f"{sorted(SUPPORTED_PREPROCESSING_IDENTITIES)!r}"
+                f"{self.preprocessing_identity!r}; expected one of "
+                f"{sorted(SUPPORTED_PREPROCESSING_IDENTITIES)!r}"
             )
             raise ModelLoadError(message)
         if (
@@ -158,7 +158,7 @@ class LstmFallManifest:
         ):
             message = (
                 "schema_version 2 requires preprocessing_identity "
-                + f"{CURRENT_PREPROCESSING_IDENTITY!r}"
+                f"{CURRENT_PREPROCESSING_IDENTITY!r}"
             )
             raise ModelLoadError(message)
         for artifact_path in (
@@ -274,7 +274,7 @@ __all__ = [
     "KPT_VECTOR_DIM",
     "LEGACY_PREPROCESSING_IDENTITY",
     "LEGACY_SCHEMA_VERSION",
+    "SUPPORTED_PREPROCESSING_IDENTITIES",
     "LstmFallManifest",
     "LstmMetadata",
-    "SUPPORTED_PREPROCESSING_IDENTITIES",
 ]

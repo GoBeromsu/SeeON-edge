@@ -39,6 +39,7 @@ _LEFT_ANKLE: Final = 15
 _RIGHT_ANKLE: Final = 16
 _TORSO_INDICES: Final = (_LEFT_SHOULDER, _RIGHT_SHOULDER, _LEFT_HIP, _RIGHT_HIP)
 _LOWER_INDICES: Final = (_LEFT_KNEE, _RIGHT_KNEE, _LEFT_ANKLE, _RIGHT_ANKLE)
+_ALL_INDICES: Final = tuple(range(_KEYPOINT_COUNT))
 _CONF_GATE: Final = DEFAULT_FALL_CONFIDENCE_THRESHOLD
 _ZERO_AREA: Final = 1e-9
 
@@ -289,7 +290,7 @@ def _against_polygon(
         inside[valid] = _points_inside(points[valid], polygon)
     torso_in_frac = _group_fraction(valid, inside, _TORSO_INDICES)
     lower_in_frac = _group_fraction(valid, inside, _LOWER_INDICES)
-    keypoint_in_frac = _group_fraction(valid, inside, tuple(range(_KEYPOINT_COUNT)))
+    keypoint_in_frac = _group_fraction(valid, inside, _ALL_INDICES)
 
     min_xy = polygon.min(axis=0)
     max_xy = polygon.max(axis=0)

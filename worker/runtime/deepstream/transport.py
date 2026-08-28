@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
 import socket
 import subprocess
@@ -55,10 +56,8 @@ def _close_sockets(sockets: list[socket.socket]) -> None:
 
 def _close_fds(descriptors: list[int]) -> None:
     for descriptor in descriptors:
-        try:
+        with contextlib.suppress(OSError):
             os.close(descriptor)
-        except OSError:
-            pass
 
 
 # The kernel default (~200 KiB) holds well under a second of fleet video, so

@@ -27,7 +27,7 @@ def _shell_commands(path: Path) -> str:
 def _runbook_gate_sql() -> str:
     text = RUNBOOK.read_text(encoding="utf-8")
     match = re.search(
-        r"(SELECT EXISTS\(SELECT 1 FROM evidence_events.*?)\\\"\\\"\\\"", text, re.S
+        r"(SELECT EXISTS\(SELECT 1 FROM evidence_events.*?)\\\"\\\"\\\"", text, re.DOTALL
     )
     assert match, "schema-18 runbook is missing an executable drain predicate"
     return match.group(1).replace('\\"', '"').strip()
@@ -69,7 +69,7 @@ def test_schema18_runbook_commands_match_cli_help_and_compose() -> None:
     assert "--rollback" in help_text
     assert "down -v" not in commands
     assert "archive delete" not in commands.lower()
-    assert not re.search(r"\b(?:CREATE|ALTER|DROP)\s+(?:TABLE|INDEX)\b", commands, re.I)
+    assert not re.search(r"\b(?:CREATE|ALTER|DROP)\s+(?:TABLE|INDEX)\b", commands, re.IGNORECASE)
 
 
 def test_worker_rollback_runbook_orders_inventory_then_cutover() -> None:

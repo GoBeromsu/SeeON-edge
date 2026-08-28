@@ -124,4 +124,4 @@ class LegacyEvidenceDrain:
             connection.close()
 
 
-__all__ = ["LegacyDrainResult", "LegacyEvidenceDrain", "LegacyEventTransport"]
+__all__ = ["LegacyDrainResult", "LegacyEventTransport", "LegacyEvidenceDrain"]

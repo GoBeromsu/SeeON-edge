@@ -126,8 +126,7 @@ class CudaOverlaySceneRenderer:
         elapsed_ms = max(0.0, (self._clock() - started) * 1000.0)
         self._frames_rendered += 1
         self._render_time_ms_total += elapsed_ms
-        annotated = FrameLease.from_device(annotated_handle, lease.descriptor)
-        return annotated
+        return FrameLease.from_device(annotated_handle, lease.descriptor)
 
 
 __all__ = [

@@ -198,7 +198,6 @@ def test_real_camera_pump_captures_before_emitting_the_admitted_event(
     class _Subscription:
         def take(self, timeout_sec: float | None = None) -> None:
             del timeout_sec
-            return None
 
     writer = BoundedTraceWriter(tmp_path / "detail-cache", TraceRetentionPolicy.testing())
     writer.start()

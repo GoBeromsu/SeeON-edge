@@ -174,8 +174,8 @@ def probe_vaapi_capability(
 
 
 __all__ = [
-    "VaapiCapability",
     "ProbeRunner",
+    "VaapiCapability",
     "ffprobe_args",
     "ffprobe_binary",
     "probe_stream_dimensions",

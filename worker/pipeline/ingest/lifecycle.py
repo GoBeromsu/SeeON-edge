@@ -559,10 +559,9 @@ def _logging_boundary() -> Generator[None]:
 
 
 def _safe_log_detail_of(error: BaseException) -> object:
-    detail: object = None
     with _logging_boundary():
-        detail = getattr(error, "safe_log_detail", None)
-    return detail
+        return getattr(error, "safe_log_detail", None)
+    return None  # reached only when _logging_boundary swallowed the property failure
 
 
 def _visible_decode_detail(error: BaseException) -> str:

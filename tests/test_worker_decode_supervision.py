@@ -98,7 +98,7 @@ class _Session:
 
     def __init__(
         self,
-        outcomes: list[FramePacket | Exception | None | float],
+        outcomes: list[FramePacket | Exception | float | None],
         clock: _FakeClock,
     ) -> None:
         self._outcomes = list(outcomes)
@@ -635,11 +635,11 @@ def test_oserror_from_safe_log_detail_does_not_abort_supervision(
     bus.on_publish = lambda _packet: loop.stop()
     with caplog.at_level("WARNING", logger="worker.pipeline.ingest.lifecycle"):
         loop.run()
-    message = [
+    message = next(
         record.getMessage()
         for record in caplog.records
         if "camera decode respawn:" in record.getMessage()
-    ][0]
+    )
     assert "detail=NvdecUnavailableError: cuvid decode failed: codec not supported" in message
     assert "safe_log_detail oserror" not in message
     assert reporter.categories["camera-a"] == "_OSErrorSafe"
@@ -705,11 +705,11 @@ def test_safe_detail_is_found_four_cause_links_below_the_wrapper(
     with caplog.at_level("WARNING", logger="worker.pipeline.ingest.lifecycle"):
         loop.run()
 
-    message = [
+    message = next(
         record.getMessage()
         for record in caplog.records
         if "camera decode respawn:" in record.getMessage()
-    ][0]
+    )
     assert "detail=NvdecUnavailableError: cuvid four links down" in message
     assert reporter.categories["camera-a"] == "RuntimeError"
 

@@ -12,7 +12,7 @@ from worker.pipeline.output.evidence.evidence_metadata import (
 )
 from worker.pipeline.output.evidence.evidence_outbox_types import ClipId, EdgeEventId
 
-JsonValue: TypeAlias = str | int | float | bool | None | list["JsonValue"] | dict[str, "JsonValue"]
+JsonValue: TypeAlias = str | int | float | bool | list["JsonValue"] | dict[str, "JsonValue"] | None
 
 
 class PublicationStage(StrEnum):
@@ -83,10 +83,10 @@ class ClipPublicationConflictError(Exception):
 
 
 __all__ = [
-    "JsonValue",
     "ClipPublicationConflictError",
     "ClipPublicationMetadata",
     "ClipTimeOrigin",
+    "JsonValue",
     "PublicationBarrier",
     "PublicationStage",
     "PublishedClip",

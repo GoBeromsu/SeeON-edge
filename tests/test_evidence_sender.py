@@ -74,7 +74,7 @@ def test_event_is_sent_before_optional_snapshot_entries(tmp_path: Path) -> None:
     transport = Transport()
     assert _sender(tmp_path, transport).run_once() is SenderStep.EVENT_ACKED
     assert transport.calls == ["event:event-a"]
-    assert tuple(DeliveryQueue(tmp_path).entries())[0]["kind"] == "SNAPSHOT_ATTACHMENT"
+    assert next(iter(DeliveryQueue(tmp_path).entries()))["kind"] == "SNAPSHOT_ATTACHMENT"
 
 
 def test_retry_keeps_the_unacknowledged_event_durable(tmp_path: Path) -> None:

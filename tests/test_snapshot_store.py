@@ -34,7 +34,7 @@ _DescriptorIdentity = tuple[int, int, int]
 
 def _path_of_fd(descriptor: int) -> str:
     """Resolve an open descriptor back to its path, on Linux or macOS."""
-    if _FD_DIR == Path("/proc/self/fd"):
+    if Path("/proc/self/fd") == _FD_DIR:
         return os.readlink(f"/proc/self/fd/{descriptor}")
     raw: bytes = fcntl.fcntl(descriptor, fcntl.F_GETPATH, bytes(1024))
     return raw.rstrip(b"\x00").decode()
@@ -264,7 +264,7 @@ def test_snapshot_store_tolerates_concurrent_shared_directory_creation(
         *args: object,
         **kwargs: object,
     ) -> None:
-        if path == shared_root or path == ".snapshot-locks":
+        if path in (shared_root, ".snapshot-locks"):
             barrier.wait(timeout=5)
         original_mkdir(path, *args, **kwargs)
 

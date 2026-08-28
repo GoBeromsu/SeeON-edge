@@ -37,7 +37,7 @@ def _packaged_image_revision(path: Path) -> tuple[bool, str | None]:
         return False, None
     except (OSError, UnicodeError):
         return True, None
-    candidate = raw[:-1] if raw.endswith("\n") else raw
+    candidate = raw.removesuffix("\n")
     return True, candidate if _is_valid_source_revision(candidate) else None
 
 

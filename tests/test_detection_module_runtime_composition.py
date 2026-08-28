@@ -400,7 +400,7 @@ def test_production_shared_component_semantics_are_equal_on_cpu_and_nvidia() -> 
         )
 
     assert semantics_by_profile[0] == semantics_by_profile[1]
-    assert set(component_id for component_id, _, _ in semantics_by_profile[0]) == {
+    assert {component_id for component_id, _, _ in semantics_by_profile[0]} == {
         "pose",
         "bed",
         "fall-classifier",

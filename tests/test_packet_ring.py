@@ -381,15 +381,13 @@ def test_selection_failure_names_which_predicate_rejected_the_window(
     ring = SourcePacketRing("camera-1", PacketRingLimits(64, 4_096, 60.0))
     _append_gop(ring, start=0, stop=12)
     # When: a trigger from a different camera
-    with caplog.at_level(logging.WARNING):
-        with pytest.raises(PacketSelectionError):
-            with ring.select(
-                trigger_epoch=StreamEpoch("boot-1", "camera-OTHER", 1),
-                trigger_pts=Fraction(7),
-                pre_seconds=Fraction(2),
-                post_seconds=Fraction(3),
-            ):
-                pass
+    with caplog.at_level(logging.WARNING), pytest.raises(PacketSelectionError), ring.select(
+        trigger_epoch=StreamEpoch("boot-1", "camera-OTHER", 1),
+        trigger_pts=Fraction(7),
+        pre_seconds=Fraction(2),
+        post_seconds=Fraction(3),
+    ):
+        pass
     # Then
     lines = [record.getMessage() for record in caplog.records]
     failure = next(line for line in lines if "packet selection failed:" in line)
@@ -408,15 +406,13 @@ def test_missing_keyframe_failure_reports_the_discriminating_counts(
     ring = SourcePacketRing("camera-1", PacketRingLimits(64, 4_096, 60.0))
     _append_gop(ring, start=0, stop=12)
     # When: trigger far before any packet, so no video packet precedes it
-    with caplog.at_level(logging.WARNING):
-        with pytest.raises(PacketSelectionError):
-            with ring.select(
-                trigger_epoch=StreamEpoch("boot-1", "camera-1", 1),
-                trigger_pts=Fraction(-5),
-                pre_seconds=Fraction(2),
-                post_seconds=Fraction(3),
-            ):
-                pass
+    with caplog.at_level(logging.WARNING), pytest.raises(PacketSelectionError), ring.select(
+        trigger_epoch=StreamEpoch("boot-1", "camera-1", 1),
+        trigger_pts=Fraction(-5),
+        pre_seconds=Fraction(2),
+        post_seconds=Fraction(3),
+    ):
+        pass
     # Then
     lines = [record.getMessage() for record in caplog.records]
     failure = next(line for line in lines if "packet selection failed:" in line)
@@ -438,14 +434,13 @@ def test_epoch_skew_is_reported_as_its_own_reason_not_as_a_missing_keyframe() ->
     _append_gop(ring, start=0, stop=12)
     ring.roll_epoch(StreamEpoch("boot-1", "camera-1", 1))
     # When: the trigger names a newer epoch than the ring holds
-    with pytest.raises(PacketSelectionError) as caught:
-        with ring.select(
-            trigger_epoch=StreamEpoch("boot-1", "camera-1", 2),
-            trigger_pts=Fraction(7),
-            pre_seconds=Fraction(2),
-            post_seconds=Fraction(3),
-        ):
-            pass
+    with pytest.raises(PacketSelectionError) as caught, ring.select(
+        trigger_epoch=StreamEpoch("boot-1", "camera-1", 2),
+        trigger_pts=Fraction(7),
+        pre_seconds=Fraction(2),
+        post_seconds=Fraction(3),
+    ):
+        pass
     # Then
     assert caught.value.reason is PacketTruncationReason.STREAM_EPOCH_MISMATCH
     assert caught.value.reason is not PacketTruncationReason.KEYFRAME_UNAVAILABLE

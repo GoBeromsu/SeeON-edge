@@ -459,7 +459,7 @@ def _measured_run(
         # even when an identity-derived finding remains reportable.
         "order_dependent_claims_eligible": order_evidence_valid,
         "promotion_eligible": order_evidence_valid
-        and result.outcome.value not in {"판정 불가"},
+        and result.outcome.value != "판정 불가",
         "frontend_display_tested": False,
         "human_adjudication_used": False,
     }
@@ -861,7 +861,7 @@ def _epoch_seconds(value: str | None) -> float | None:
     if value is None:
         return None
     try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+        return datetime.fromisoformat(value).timestamp()
     except ValueError:
         return None
 

@@ -204,9 +204,8 @@ def test_evidence_error_survives_contextlib_reraise_with_message_intact() -> Non
     """
     error = ClipEvidenceError(EvidenceReasonCode.FINALIZE_FAILED, "ffprobe unavailable")
 
-    with pytest.raises(ClipEvidenceError) as captured:
-        with _passthrough_scope():
-            raise error
+    with pytest.raises(ClipEvidenceError) as captured, _passthrough_scope():
+        raise error
 
     # The original exception object propagates, not a TypeError from __setattr__.
     assert captured.value is error

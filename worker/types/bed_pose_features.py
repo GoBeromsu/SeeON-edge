@@ -38,7 +38,7 @@ EMPTY_FRAME_BED_POSE_FEATURES = FrameBedPoseFeatures()
 
 
 __all__ = [
-    "BedPoseFeatures",
     "EMPTY_FRAME_BED_POSE_FEATURES",
+    "BedPoseFeatures",
     "FrameBedPoseFeatures",
 ]

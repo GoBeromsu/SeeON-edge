@@ -51,7 +51,7 @@ _SENSITIVE_TERMS = (
     "traceback",
 )
 _REDACTED = "[REDACTED]"
-SqliteValue: TypeAlias = None | int | float | str | bytes
+SqliteValue: TypeAlias = int | float | str | bytes | None
 SensitiveValue: TypeAlias = str | bytes
 
 
@@ -222,9 +222,7 @@ def _redact_value(value: JsonValue, aliases: tuple[str, ...]) -> JsonValue:
     if (
         value in aliases
         or value.startswith("/")
-        or lowered.startswith("bearer ")
-        or lowered.startswith("cookie=")
-        or lowered.startswith("session=")
+        or lowered.startswith(("bearer ", "cookie=", "session="))
     ):
         return _REDACTED
     return value

@@ -95,8 +95,10 @@ def validate_runtime_profile_descriptor(
                     (
                         f"runtime profile edge {edge.source_stage!r}->{edge.target_stage!r}",
                         "source endpoint does not match its effective memory step:",
-                        f"declared {edge.source.memory_kind.value}/"
-                        f"{edge.source.pixel_format.value},",
+                        (
+                            f"declared {edge.source.memory_kind.value}/"
+                            f"{edge.source.pixel_format.value},"
+                        ),
                         "expected",
                         f"{expected_source.memory_kind.value}/{expected_source.pixel_format.value}",
                     )
@@ -109,8 +111,10 @@ def validate_runtime_profile_descriptor(
                     (
                         f"runtime profile edge {edge.source_stage!r}->{edge.target_stage!r}",
                         "target endpoint does not match its effective memory step:",
-                        f"declared {edge.target.memory_kind.value}/"
-                        f"{edge.target.pixel_format.value},",
+                        (
+                            f"declared {edge.target.memory_kind.value}/"
+                            f"{edge.target.pixel_format.value},"
+                        ),
                         "expected",
                         f"{expected_target.memory_kind.value}/{expected_target.pixel_format.value}",
                     )
@@ -181,8 +185,8 @@ HOST_VALIDATED_CAPABILITY_GRAPH = validate_capability_graph(HOST_PIPELINE_PROFIL
 
 
 __all__ = [
-    "CapabilityMismatchError",
     "HOST_VALIDATED_CAPABILITY_GRAPH",
+    "CapabilityMismatchError",
     "ValidatedCapabilityEdge",
     "ValidatedCapabilityGraph",
     "validate_capability_graph",

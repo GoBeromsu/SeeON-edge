@@ -188,7 +188,6 @@ def test_hostile_jpeg_dimensions_are_rejected_before_decode(
     def record_decode(*_args, **_kwargs):
         nonlocal decoded
         decoded = True
-        return None
 
     monkeypatch.setattr(artifact.cv2, "imdecode", record_decode)
 

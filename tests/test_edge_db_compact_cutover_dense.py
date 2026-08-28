@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import itertools
 import json
 import sqlite3
 from pathlib import Path
@@ -229,7 +230,7 @@ def test_dense_all_72_table_fixture_reconciles_bidirectionally(tmp_path: Path) -
     assert json.loads(audits[0][4])["safe"] == {"preserved": [1, "yes"]}
     assert audits[0][5] == "0" * 64
     assert all(
-        current[5] == previous[6] for previous, current in zip(audits, audits[1:], strict=False)
+        current[5] == previous[6] for previous, current in itertools.pairwise(audits)
     )
     hash_keys = (
         "occurred_at",

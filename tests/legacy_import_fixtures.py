@@ -9,7 +9,7 @@ from typing import TypeAlias
 
 from backend.app.edge_db.importer import LegacyDatabasePaths
 
-SqliteValue: TypeAlias = None | int | float | str | bytes
+SqliteValue: TypeAlias = int | float | str | bytes | None
 
 
 def _catalog(path: Path) -> None:

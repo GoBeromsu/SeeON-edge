@@ -321,10 +321,10 @@ def _new_token_snapshots() -> tuple[DecisionTraceSnapshot, ...]:
 
 def test_baseline_closed_vocabularies_remain_intact() -> None:
     """Pin the pre-extension membership so persisted tokens cannot silently vanish."""
-    assert BASELINE_REASONS <= _values(DecisionTraceReason)
-    assert BASELINE_STATES <= _values(DecisionTraceState)
-    assert BASELINE_VALUE_NAMES <= _values(DecisionTraceValueName)
-    assert BASELINE_MISSING_REASONS <= _values(DecisionTraceMissingReason)
+    assert _values(DecisionTraceReason) >= BASELINE_REASONS
+    assert _values(DecisionTraceState) >= BASELINE_STATES
+    assert _values(DecisionTraceValueName) >= BASELINE_VALUE_NAMES
+    assert _values(DecisionTraceMissingReason) >= BASELINE_MISSING_REASONS
 
 
 def test_baseline_vocabularies_are_exactly_the_pre_extension_sets() -> None:
@@ -441,10 +441,10 @@ def test_new_tokens_round_trip_through_trace_adapter_and_writer(tmp_path: Path) 
         seen_value_names.update(snapshot.missing_values)
         seen_missing_reasons.update(snapshot.missing_values.values())
 
-    assert BED_EXIT_REASONS <= seen_reasons
-    assert BED_EXIT_STATES <= seen_states
-    assert BED_EXIT_VALUE_NAMES <= seen_value_names
-    assert BED_EXIT_MISSING_REASONS <= seen_missing_reasons
+    assert seen_reasons >= BED_EXIT_REASONS
+    assert seen_states >= BED_EXIT_STATES
+    assert seen_value_names >= BED_EXIT_VALUE_NAMES
+    assert seen_missing_reasons >= BED_EXIT_MISSING_REASONS
 
     database = tmp_path / "edge.sqlite3"
     _seed(database)
@@ -475,7 +475,7 @@ def test_new_tokens_round_trip_through_trace_adapter_and_writer(tmp_path: Path) 
 
     assert recovered_reasons == seen_reasons
     assert recovered_states == seen_states
-    assert BED_EXIT_VALUE_NAMES <= recovered_value_names
+    assert recovered_value_names >= BED_EXIT_VALUE_NAMES
     assert recovered_missing_reasons == seen_missing_reasons
     recovered_by_key = {
         (

@@ -13,7 +13,6 @@ from tests_support.connection_api import (
     response_json,
     run_server,
 )
-from tests_support.connection_api import clear_env as clear_env
 
 
 def test_connection_test_classifies_rejected_token_without_leaking_it(

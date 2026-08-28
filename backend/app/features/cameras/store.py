@@ -221,13 +221,13 @@ class CameraRegistryStore(CameraLocationOperations):
 
 
 __all__ = [
-    "CameraRegistryStore",
-    "CameraStatus",
     "DEFAULT_FLOOR",
-    "DuplicateCameraError",
     "FLOOR_MAX",
     "FLOOR_MIN",
     "FLOOR_VALUES",
+    "CameraRegistryStore",
+    "CameraStatus",
+    "DuplicateCameraError",
     "ProbeResult",
     "floor_label",
     "is_valid_floor",

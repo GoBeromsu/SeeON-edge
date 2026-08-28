@@ -128,29 +128,27 @@ def _parse_identity(payload: object) -> PerceptionFrameIdentity | PerceptionFram
 def _parse_boxes(payload: object) -> tuple[PersonBox, ...]:
     if not isinstance(payload, Sequence) or isinstance(payload, (str, bytes)):
         return ()
-    boxes: list[PersonBox] = []
-    for item in payload:
-        if isinstance(item, Mapping):
-            boxes.append(
-                PersonBox(
-                    x1=int(item["x1"]),  # type: ignore[arg-type]
-                    y1=int(item["y1"]),  # type: ignore[arg-type]
-                    x2=int(item["x2"]),  # type: ignore[arg-type]
-                    y2=int(item["y2"]),  # type: ignore[arg-type]
-                    confidence=float(item["confidence"]),  # type: ignore[arg-type]
-                )
-            )
-    return tuple(boxes)
+    return tuple(
+        PersonBox(
+            x1=int(item["x1"]),  # type: ignore[arg-type]
+            y1=int(item["y1"]),  # type: ignore[arg-type]
+            x2=int(item["x2"]),  # type: ignore[arg-type]
+            y2=int(item["y2"]),  # type: ignore[arg-type]
+            confidence=float(item["confidence"]),  # type: ignore[arg-type]
+        )
+        for item in payload
+        if isinstance(item, Mapping)
+    )
 
 
 def _parse_poses(payload: object) -> tuple[tuple[Keypoint, ...], ...]:
     if not isinstance(payload, Sequence) or isinstance(payload, (str, bytes)):
         return ()
-    poses: list[tuple[Keypoint, ...]] = []
-    for row in payload:
-        if isinstance(row, Sequence) and not isinstance(row, (str, bytes)):
-            poses.append(_pose_row(row))
-    return tuple(poses)
+    return tuple(
+        _pose_row(row)
+        for row in payload
+        if isinstance(row, Sequence) and not isinstance(row, (str, bytes))
+    )
 
 
 def _parse_regions(payload: object) -> tuple[BedRegion, ...]:

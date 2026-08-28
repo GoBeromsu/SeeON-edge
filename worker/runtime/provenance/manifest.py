@@ -358,7 +358,7 @@ def _canonical_polygon(
 
 
 def _numeric_policy_content(values: Mapping[str, int | float]) -> dict[str, JsonValue]:
-    return {key: value for key, value in values.items()}
+    return dict(values)
 
 
 __all__ = [

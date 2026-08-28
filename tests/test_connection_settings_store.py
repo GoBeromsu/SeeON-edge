@@ -54,7 +54,7 @@ def _enrollment() -> dict[str, str | int]:
 
 class TestFromEnv:
     def test_default_path_is_the_central_edge_database(self) -> None:
-        assert DEFAULT_CONNECTION_SETTINGS_PATH == str(EDGE_DATABASE_PATH)
+        assert str(EDGE_DATABASE_PATH) == DEFAULT_CONNECTION_SETTINGS_PATH
         assert Path(DEFAULT_CONNECTION_SETTINGS_PATH).name == "edge.sqlite3"
 
     def test_from_env_uses_the_isolated_central_path(self) -> None:

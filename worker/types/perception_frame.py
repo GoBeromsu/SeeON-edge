@@ -275,14 +275,14 @@ def assemble_perception_frame(
 
 
 __all__ = [
+    "LEGACY_ASSOCIATION_STRATEGY",
+    "PERSON_BOX_CUE_SOURCE",
     "AssociationResult",
     "BedRegion",
     "BedRegionChannel",
     "ChannelState",
     "HumanPoseChannel",
     "Keypoint",
-    "LEGACY_ASSOCIATION_STRATEGY",
-    "PERSON_BOX_CUE_SOURCE",
     "PerceptionFrameFailure",
     "PerceptionFrameFailureCode",
     "PerceptionFrameIdentity",

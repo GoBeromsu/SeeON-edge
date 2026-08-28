@@ -64,9 +64,8 @@ def test_lifespan_boot_logs_resolved_state_directory(
     record of where lifespan boot resolved state to."""
     app = create_app()
 
-    with caplog.at_level("INFO"):
-        with TestClient(app):
-            pass
+    with caplog.at_level("INFO"), TestClient(app):
+        pass
 
     expected = f"ml-api state directory resolved to {resolve_state_dir('ml-api')}"
     assert any(record.getMessage() == expected for record in caplog.records)

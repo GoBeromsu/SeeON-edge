@@ -89,6 +89,6 @@ __all__ = [
     "EmittedEvent",
     "EventApiPayload",
     "EventLifecycle",
-    "build_emitted_event",
     "build_audit_envelope",
+    "build_emitted_event",
 ]

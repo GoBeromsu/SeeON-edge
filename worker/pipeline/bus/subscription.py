@@ -38,10 +38,7 @@ class BoundedSubscription:
         try:
             with self._condition:
                 self._published += 1
-                if self._closed:
-                    self._dropped += 1
-                    release_after = packet
-                elif len(self._queue) >= self.capacity and not self.latest_only:
+                if self._closed or (len(self._queue) >= self.capacity and not self.latest_only):
                     self._dropped += 1
                     release_after = packet
                 else:

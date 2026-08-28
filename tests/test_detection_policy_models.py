@@ -38,12 +38,12 @@ def test_versioned_policy_parser_returns_typed_numeric_values() -> None:
         hold_frames=4,
         grace_frames=7,
     )
-    assert FALL_POLICY_V1_DEFAULT == FallPolicyV1(operating_threshold=0.5)
-    assert BED_EXIT_POLICY_V1_DEFAULT == BedExitPolicyV1(
+    assert FallPolicyV1(operating_threshold=0.5) == FALL_POLICY_V1_DEFAULT
+    assert BedExitPolicyV1(
         min_containment=0.35,
         hold_frames=2,
         grace_frames=3,
-    )
+    ) == BED_EXIT_POLICY_V1_DEFAULT
 
 
 @pytest.mark.parametrize(

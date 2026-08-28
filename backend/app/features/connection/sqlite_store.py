@@ -158,7 +158,7 @@ _RESET_TOPOLOGY_SQL: Final = (
 
 
 def _empty_data() -> ConnectionData:
-    return {key: None for key in COLUMNS}
+    return dict.fromkeys(COLUMNS)
 
 
 __all__ = [
@@ -169,7 +169,7 @@ __all__ = [
     "ConnectionData",
     "ConnectionStoreBackup",
     "ConnectionStoreDatabase",
-    "ConnectionWriteHook",
     "ConnectionValue",
+    "ConnectionWriteHook",
     "utc_now_iso",
 ]

@@ -119,14 +119,64 @@ exclude = [".scratch", ".venv"]
 #   S110/S112  try-except-pass / try-except-continue
 #   TRY  tryceratops — TRY002 vanilla raise, TRY400 logging.exception in handlers
 [tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B", "BLE", "S110", "S112", "TRY", "TID", "FAST"]
+select = [
+    "E", "F", "I", "UP", "B", "BLE", "S110", "S112", "TRY", "TID", "FAST",
+    # Simplification set (mechanical /simplify): each rule below is either
+    # autofixable or a one-line rewrite with no behavior change.
+    "SIM",      # flake8-simplify — contextlib.suppress, collapsible ifs, ternaries
+    "C4",       # flake8-comprehensions — redundant list()/dict() comprehensions
+    "PIE",      # flake8-pie — startswith(tuple), duplicate class fields
+    "RET",      # flake8-return — `x = ...; return x`, redundant `return None`
+    "PERF",     # perflint — manual list building that should be a comprehension
+    "RUF",      # ruff-specific — sorted __all__, `X | None` ordering, int(int)
+    "SLF",      # private-member access across module boundaries
+    "FURB",     # refurb — removesuffix, fromisoformat("...Z") on py311
+    "ISC",      # implicit string concatenation — explicit `+` between literals
+    "PLR0402",  # `import a.b as b` -> `from a import b`
+    "PLR1711",  # useless trailing `return`
+    "PLR1714",  # `a == x or a == y` -> `a in (x, y)`
+    "PLR5501",  # `else: if` -> `elif`
+    "PLC0207",  # `.split(sep)[0]` without maxsplit
+]
 # FAST (FastAPI rules) enabled with the backend vertical-slice; Header/Query deps
 # use typing.Annotated (FAST002).
 # TRY003 (no long messages outside exception class) is ignored deliberately:
 # informative inline `raise ValueError(f"...")` messages ARE the explicit-refusal
 # style this codebase wants; demanding a custom exception class per message
 # discourages raising. All other TRY rules stay on.
-ignore = ["TRY003"]
+# RUF100 (unused noqa) is ignored deliberately: this repo's `# noqa: BLE001 - <reason>`
+# on boundary catches is documentation of *why* the catch is broad, kept even where
+# BLE001 happens not to fire (e.g. the handler logs via `.exception`); the RUF100
+# autofix strips the reason along with the code.
+ignore = ["TRY003", "RUF100"]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests poke at private members by design; a `# noqa: SLF001` per line adds nothing.
+# RUF009/RUF012 (call / mutable value as class default) and RUF043 (regex-ambiguous
+# pytest.raises match) are test-fixture idioms, not production code.
+# The non-autofixable simplifications (PERF401 manual list build, SIM102/105/113/117
+# nested if / try-pass / enumerate / nested with) were applied to worker/ by hand;
+# the remaining hits in tests, scripts and backend are scoped out of that pass and
+# left for their own PR rather than edited in bulk here.
+"tests/**" = ["SLF001", "RUF009", "RUF012", "RUF043", "PERF401", "SIM102", "SIM105", "SIM113", "SIM117"]
+"tests_support/**" = ["RUF012", "PERF401", "SIM102"]
+"scripts/**" = ["SLF001", "PERF401"]
+"backend/**" = ["SIM102", "SIM105", "SIM117"]
+# Literals here are split on purpose so the repository privacy scan does not match
+# its own fixtures; joining them (ISC001) makes the scan fail.
+"tests/test_public_repository_privacy.py" = ["ISC001", "ISC004"]
+# backend edge_db reaches into sibling-module privates for the store/cutover handshake.
+"backend/app/edge_db/**" = ["SLF001"]
+# ISC004 (unparenthesized implicit concatenation in a collection) catches missing
+# commas; these files hold deliberate multi-line SQL / fixture literals in lists.
+"backend/app/edge_db/schema.py" = ["ISC004"]
+"tests/compact_cutover_dense_fixture.py" = ["ISC004"]
+"tests/test_edge_db_schema18_constraints.py" = ["ISC004"]
+"tests/test_worker_architecture_docs.py" = ["ISC004"]
+"tests/test_edge_db_migrations.py" = ["ISC004"]
+# contracts/event.py is vendored byte-for-byte from fall-ml-v2 and pinned by
+# tests/test_worker_event_payload_boundary.py; its __all__ order is not ours to sort.
+"contracts/event.py" = ["RUF022"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]

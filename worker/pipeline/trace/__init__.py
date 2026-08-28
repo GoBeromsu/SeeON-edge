@@ -18,9 +18,9 @@ from worker.pipeline.trace.writer import (
 )
 
 __all__ = [
+    "DEFAULT_TRACE_RETENTION_POLICY",
     "AnalysisTrace",
     "BoundedTraceWriter",
-    "DEFAULT_TRACE_RETENTION_POLICY",
     "DecisionTrace",
     "DetailUnavailableReason",
     "OptionalNumber",

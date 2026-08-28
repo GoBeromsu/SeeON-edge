@@ -8,7 +8,7 @@ import pytest
 import torch
 import yaml
 
-import worker.adapters.model.torch_lstm_fall as torch_lstm_fall
+from worker.adapters.model import torch_lstm_fall
 from worker.adapters.model.torch_lstm_fall import (
     CURRENT_PREPROCESSING_IDENTITY,
     LstmFallManifest,

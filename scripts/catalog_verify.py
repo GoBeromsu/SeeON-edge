@@ -94,7 +94,7 @@ def _canonical_utc_timestamp(value: object) -> bool:
     if not isinstance(value, str):
         return False
     try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(value)
     except ValueError:
         return False
     if parsed.tzinfo is None or parsed.utcoffset() != UTC.utcoffset(parsed):
@@ -142,7 +142,7 @@ def _validate_snapshot_payload(snapshot: dict[str, Any]) -> None:
         raise ValueError("snapshot media declaration is invalid")
     camera_key = hashlib.sha256(camera_id.encode("utf-8")).hexdigest()[:16]
     snapshot_key = hashlib.sha256(snapshot_id.encode("utf-8")).hexdigest()
-    date = datetime.fromisoformat(captured_at.replace("Z", "+00:00")).date().isoformat()
+    date = datetime.fromisoformat(captured_at).date().isoformat()
     expected_path = f"snapshots/{camera_key}/{date}/{snapshot_key}.jpg"
     if snapshot["path"] != expected_path:
         raise ValueError("snapshot path does not match its identity")

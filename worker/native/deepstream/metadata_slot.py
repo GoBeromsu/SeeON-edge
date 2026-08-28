@@ -115,8 +115,7 @@ class LatestMetadataSlot:
         with self._condition:
             if not self._condition.wait_for(accepted, timeout=timeout_sec):
                 raise TimeoutError("metadata binding deadline elapsed")
-            result = self._latest[token.binding.camera_id]
-        return result
+            return self._latest[token.binding.camera_id]
 
     def publish(self, metadata: MetadataFrame) -> bool:
         camera_id = metadata.identity.camera_id

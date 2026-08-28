@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-import worker.pipeline.output.evidence.clip_maintenance as clip_maintenance
+from worker.pipeline.output.evidence import clip_maintenance
 from worker.pipeline.output.evidence.clip_recorder_models import (
     ClipRecorderConfig,
     ClipRecorderStats,

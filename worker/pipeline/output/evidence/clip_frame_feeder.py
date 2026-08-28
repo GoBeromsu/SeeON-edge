@@ -81,4 +81,4 @@ class ClipFrameFeeder:
         self.fed_count += 1
 
 
-__all__ = ["ClipFrameFeeder", "DEFAULT_POLL_TIMEOUT_SEC"]
+__all__ = ["DEFAULT_POLL_TIMEOUT_SEC", "ClipFrameFeeder"]

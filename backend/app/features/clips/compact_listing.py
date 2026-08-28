@@ -294,7 +294,7 @@ def _hash_regular(root: Path, path: Path) -> tuple[str, int]:
 
 def _valid_timestamp(value: str) -> bool:
     try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(value)
     except ValueError:
         return False
     return parsed.tzinfo is not None and value.endswith("Z") and 20 <= len(value) <= 30

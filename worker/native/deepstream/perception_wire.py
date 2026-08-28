@@ -47,19 +47,21 @@ _KEYPOINT: Final = struct.Struct("<iid")
 _POINT: Final = struct.Struct("<ii")
 
 
+_STATE_CODES: Final = {
+    ChannelState.INFERRED: 1,
+    ChannelState.INFERRED_EMPTY: 2,
+    ChannelState.SKIPPED: 3,
+}
+_STATES_BY_CODE: Final = {code: state for state, code in _STATE_CODES.items()}
+
+
 def _state_code(state: ChannelState) -> int:
-    return {
-        ChannelState.INFERRED: 1,
-        ChannelState.INFERRED_EMPTY: 2,
-        ChannelState.SKIPPED: 3,
-    }[state]
+    return _STATE_CODES[state]
 
 
 def _state(value: int) -> ChannelState:
     try:
-        return {1: ChannelState.INFERRED, 2: ChannelState.INFERRED_EMPTY, 3: ChannelState.SKIPPED}[
-            value
-        ]
+        return _STATES_BY_CODE[value]
     except KeyError as error:
         raise PerceptionWireError("channel_state", str(value)) from error
 

@@ -130,7 +130,7 @@ def test_backend_production_tree_has_no_dead_backend_symbols() -> None:
 def test_active_clip_and_audit_routes_remain_registered() -> None:
     app = create_app(lifespan=no_lifespan)
     registered = {route.path for route in app.routes if isinstance(route, APIRoute)}
-    assert ACTIVE_CLIP_PATHS <= registered
+    assert registered >= ACTIVE_CLIP_PATHS
     assert "/api/v1/clips/{clip_id}/analysis" not in registered
     assert "/api/v1/relay/analysis-traces" not in registered
 

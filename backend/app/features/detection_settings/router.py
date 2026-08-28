@@ -401,4 +401,4 @@ def _authorize(request: Request) -> str:
     return authorize_dashboard(request)
 
 
-__all__ = ["router", "DetectionSettingsResponse", "current_settings_snapshot"]
+__all__ = ["DetectionSettingsResponse", "current_settings_snapshot", "router"]

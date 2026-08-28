@@ -5,7 +5,7 @@ from __future__ import annotations
 import sqlite3
 from typing import TypeAlias
 
-SqliteValue: TypeAlias = None | int | float | str | bytes
+SqliteValue: TypeAlias = int | float | str | bytes | None
 
 
 def project_policies(source: sqlite3.Connection, target: sqlite3.Connection) -> None:

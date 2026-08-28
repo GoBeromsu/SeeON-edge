@@ -10,6 +10,7 @@ exit boundary from an independent thread after a deadline.
 """
 from __future__ import annotations
 
+import contextlib
 import os
 import threading
 from collections.abc import Callable
@@ -80,10 +81,8 @@ class FaultHandler:
 
         # 2. Stop every camera loop so no further inference is scheduled.
         for loop in self._loops:
-            try:
+            with contextlib.suppress(Exception):
                 loop.stop()
-            except Exception:  # noqa: BLE001 S110
-                pass
 
         # 3. Hard exit.  os._exit bypasses atexit handlers and Python shutdown
         #    so CUDA context cleanup cannot accidentally restart inference.

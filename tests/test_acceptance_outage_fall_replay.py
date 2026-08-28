@@ -99,7 +99,6 @@ class _SingleFallResult:
 class _NoClipRecorder:
     def on_event(self, trigger_packet: FramePacket, event: object, **_: object) -> None:
         del trigger_packet, event
-        return None
 
 
 def _packet() -> FramePacket:
@@ -205,7 +204,7 @@ def _stage_scripted_fall(queue_directory: Path) -> str:
     sink = EvidenceEventSink(
         stager=stager,
         recorder=_NoClipRecorder(),
-        now=lambda: datetime.fromisoformat(_DETECTED_AT.replace("Z", "+00:00")).astimezone(UTC),
+        now=lambda: datetime.fromisoformat(_DETECTED_AT).astimezone(UTC),
         snapshot_store=SnapshotStore(snapshot_root),
     )
     pump = CameraPipelinePump(

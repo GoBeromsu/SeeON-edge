@@ -203,7 +203,7 @@ class DeliveryQueue:
         """Return one locked, filesystem-derived view of queue capacity."""
         with self._locked():
             paths = tuple(self._published_paths())
-            by_kind = {kind: 0 for kind in EntryKind}
+            by_kind = dict.fromkeys(EntryKind, 0)
             for path in paths:
                 entry = json.loads(path.read_bytes())
                 kind = EntryKind(entry["kind"])
@@ -423,13 +423,12 @@ class DeliveryQueue:
 
     @contextmanager
     def _locked(self) -> Iterator[None]:
-        with self._thread_lock:
-            with self._lock_path.open("a+b") as lock_file:
-                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
-                try:
-                    yield
-                finally:
-                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+        with self._thread_lock, self._lock_path.open("a+b") as lock_file:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
     @contextmanager
     def _try_locked(self) -> Iterator[bool]:
@@ -522,7 +521,15 @@ def _fsync_directory(directory: Path) -> None:
 
 
 __all__ = [
-    "AdmissionFault", "AdmissionResult", "DeliveryEntry", "DeliveryQueue",
-    "DeliveryQueueCapacitySnapshot", "EntryKind", "EventEntry", "MAX_ACCEPTED_BYTES",
-    "MAX_ACCEPTED_ENTRIES", "SnapshotAttachmentEntry", "SnapshotDispositionEntry",
+    "MAX_ACCEPTED_BYTES",
+    "MAX_ACCEPTED_ENTRIES",
+    "AdmissionFault",
+    "AdmissionResult",
+    "DeliveryEntry",
+    "DeliveryQueue",
+    "DeliveryQueueCapacitySnapshot",
+    "EntryKind",
+    "EventEntry",
+    "SnapshotAttachmentEntry",
+    "SnapshotDispositionEntry",
 ]

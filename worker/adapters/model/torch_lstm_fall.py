@@ -11,8 +11,8 @@ from typing import Final, Protocol, TypeAlias, final, runtime_checkable
 
 import numpy as np
 import torch
-import torch.nn as nn
 from numpy.typing import NDArray
+from torch import nn
 from typing_extensions import override
 
 from worker.adapters.model.artifact import verify_artifact_digest
@@ -166,7 +166,7 @@ class LstmFallRunner:
         if sequence.shape != self.manifest.input_shape:
             message = (
                 "unexpected input shape: "
-                + f"expected {self.manifest.input_shape}, received {sequence.shape}"
+                f"expected {self.manifest.input_shape}, received {sequence.shape}"
             )
             raise ModelLoadError(message)
         with torch.no_grad():
@@ -203,7 +203,7 @@ def _validate_expected_identity(
     if schema_version is not None and manifest.schema_version != schema_version:
         message = (
             f"artifact schema_version {manifest.schema_version} does not match configured "
-            + f"schema_version {schema_version}"
+            f"schema_version {schema_version}"
         )
         raise ModelLoadError(message)
     if (
@@ -212,8 +212,8 @@ def _validate_expected_identity(
     ):
         message = (
             "artifact preprocessing_identity "
-            + f"{manifest.preprocessing_identity!r} does not match configured "
-            + f"preprocessing_identity {preprocessing_identity!r}"
+            f"{manifest.preprocessing_identity!r} does not match configured "
+            f"preprocessing_identity {preprocessing_identity!r}"
         )
         raise ModelLoadError(message)
 
@@ -269,11 +269,11 @@ __all__ = [
     "CURRENT_SCHEMA_VERSION",
     "LEGACY_PREPROCESSING_IDENTITY",
     "LEGACY_SCHEMA_VERSION",
+    "SUPPORTED_PREPROCESSING_IDENTITIES",
     "LstmFallManifest",
     "LstmFallRunner",
     "LstmMetadata",
     "ModelLoadError",
-    "SUPPORTED_PREPROCESSING_IDENTITIES",
     "build_lstm_module",
     "build_lstm_module_from_arch",
 ]

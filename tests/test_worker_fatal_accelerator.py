@@ -34,24 +34,24 @@ from worker.runtime.faults.record import (
 
 
 def _record(**kwargs) -> FirstFaultRecord:
-    defaults = dict(
-        pid=1,
-        boot_time_iso="2026-01-01T00:00:00Z",
-        profile="cuda",
-        task="pose",
-        stage="inference",
-        camera_id="cam-1",
-        frame_index=42,
-        pts=1.0,
-        frame_shape=(480, 640, 3),
-        frame_hash_sha256=None,
-        model_artifact_digest="abc123",
-        invocation_seq=1,
-        exception_type="RuntimeError",
-        exception_message="CUDA error: device-side assert triggered",
-        exit_code=4,
-        fault_time_iso="2026-01-01T00:00:01Z",
-    )
+    defaults = {
+        "pid": 1,
+        "boot_time_iso": "2026-01-01T00:00:00Z",
+        "profile": "cuda",
+        "task": "pose",
+        "stage": "inference",
+        "camera_id": "cam-1",
+        "frame_index": 42,
+        "pts": 1.0,
+        "frame_shape": (480, 640, 3),
+        "frame_hash_sha256": None,
+        "model_artifact_digest": "abc123",
+        "invocation_seq": 1,
+        "exception_type": "RuntimeError",
+        "exception_message": "CUDA error: device-side assert triggered",
+        "exit_code": 4,
+        "fault_time_iso": "2026-01-01T00:00:01Z",
+    }
     defaults.update(kwargs)
     return FirstFaultRecord(**defaults)
 

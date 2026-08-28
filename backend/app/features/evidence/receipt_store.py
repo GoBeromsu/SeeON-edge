@@ -151,11 +151,11 @@ def verify_artifact(path: Path, receipt: ArtifactReceipt) -> None:
 __all__ = [
     "ArtifactReceipt",
     "ArtifactReceiptConflictError",
-    "CatalogArtifactReceiptStore",
-    "VerifiedArtifact",
-    "verified_artifact",
     "ArtifactReceiptPersistenceError",
     "ArtifactReceiptStore",
     "ArtifactReceiptVerificationError",
+    "CatalogArtifactReceiptStore",
+    "VerifiedArtifact",
+    "verified_artifact",
     "verify_artifact",
 ]

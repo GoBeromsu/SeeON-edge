@@ -47,18 +47,18 @@ from worker.adapters.model.yolo_person import YoloPersonRunner
 from worker.adapters.model.yolo_pose import YoloPoseRunner
 
 __all__ = [
+    "CURRENT_PREPROCESSING_IDENTITY",
+    "CURRENT_SCHEMA_VERSION",
     "DEFAULT_FALL_MODEL_FAMILY_REGISTRY",
     "DEFAULT_REGISTRY",
     "DEFAULT_WARMUP_FRAME",
-    "CURRENT_PREPROCESSING_IDENTITY",
-    "CURRENT_SCHEMA_VERSION",
+    "LEGACY_PREPROCESSING_IDENTITY",
+    "LEGACY_SCHEMA_VERSION",
     "FallDetector",
     "FallModelConfigLike",
     "FallModelFactory",
     "FallModelFamilyRegistry",
     "InProcessServingClient",
-    "LEGACY_PREPROCESSING_IDENTITY",
-    "LEGACY_SCHEMA_VERSION",
     "LstmFallManifest",
     "LstmFallRunner",
     "LstmMetadata",

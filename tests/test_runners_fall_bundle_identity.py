@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-import worker.adapters.model.torch_lstm_fall as torch_lstm_fall
+from worker.adapters.model import torch_lstm_fall
 from worker.adapters.model.errors import ModelLoadError
 from worker.adapters.model.torch_lstm_fall import (
     CURRENT_PREPROCESSING_IDENTITY,

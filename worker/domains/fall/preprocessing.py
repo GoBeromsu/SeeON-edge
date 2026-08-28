@@ -72,12 +72,13 @@ def extract_window_features(
         else:
             features.extend((0.0, 0.0))
 
+    valid_keypoints_by_frame = [
+        [keypoint for keypoint in range(_KEYPOINT_COUNT) if valid[frame_index][keypoint]]
+        for frame_index in range(frame_count)
+    ]
     centroid_x: list[float] = []
     centroid_y: list[float] = []
-    for frame_index in range(frame_count):
-        valid_keypoints = [
-            keypoint for keypoint in range(_KEYPOINT_COUNT) if valid[frame_index][keypoint]
-        ]
+    for frame_index, valid_keypoints in enumerate(valid_keypoints_by_frame):
         if valid_keypoints:
             denominator = float(len(valid_keypoints))
             centroid_x.append(
@@ -101,10 +102,7 @@ def extract_window_features(
     features.append(max(step_distances) if step_distances else 0.0)
 
     aspect_ratios: list[float] = []
-    for frame_index in range(frame_count):
-        valid_keypoints = [
-            keypoint for keypoint in range(_KEYPOINT_COUNT) if valid[frame_index][keypoint]
-        ]
+    for frame_index, valid_keypoints in enumerate(valid_keypoints_by_frame):
         if len(valid_keypoints) >= 2:
             frame_x = [window[frame_index][keypoint][0] for keypoint in valid_keypoints]
             frame_y = [window[frame_index][keypoint][1] for keypoint in valid_keypoints]

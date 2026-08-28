@@ -33,7 +33,7 @@ def _runbook_gate_sql() -> str:
     """Extract the SELECT the runbook embeds for the operator's gate check."""
     text = _RUNBOOK.read_text(encoding="utf-8")
     match = re.search(
-        r"(SELECT EXISTS\(SELECT 1 FROM evidence_events.*?)\\\"\\\"\\\"", text, re.S
+        r"(SELECT EXISTS\(SELECT 1 FROM evidence_events.*?)\\\"\\\"\\\"", text, re.DOTALL
     )
     assert match, (
         "could not find the gate predicate in the runbook; the operator has no "

@@ -8,8 +8,7 @@ from dataclasses import replace
 
 import pytest
 
-import worker.native.deepstream.ipc as ipc
-import worker.native.deepstream.metadata as metadata
+from worker.native.deepstream import ipc, metadata
 
 
 def _frame(*, camera: str = "camera-a", generation: int = 3, epoch: int = 7, seq: int = 1):

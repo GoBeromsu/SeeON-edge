@@ -52,7 +52,6 @@ class _TopologyHandler(BaseHTTPRequestHandler):
 
     def log_message(self, format: str, *args: object) -> None:
         _ = format, args
-        return
 
 
 @pytest.fixture(autouse=True)

@@ -12,7 +12,7 @@ EXPECTED_FEATURE_DIM: Final = 45
 DEFAULT_OPERATING_THRESHOLD: Final = 0.09
 
 JsonValue: TypeAlias = (
-    str | int | float | bool | None | list["JsonValue"] | dict[str, "JsonValue"]
+    str | int | float | bool | list["JsonValue"] | dict[str, "JsonValue"] | None
 )
 
 

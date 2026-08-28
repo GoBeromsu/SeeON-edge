@@ -212,15 +212,15 @@ def _write_au_index(path: Path, packets: tuple[SourcePacket, ...]) -> tuple[str,
     digest, size = hashlib.sha256(), 0
     with path.open("xb") as output:
         records = [b"SAUI1" + len(packets).to_bytes(4, "little")]
-        for packet in packets:
-            records.append(
-                struct.pack(
-                    "<QIqqq?Q", packet.arrival_index, packet.stream_index, packet.pts,
-                    packet.dts, packet.duration, packet.is_keyframe, packet.epoch.stream_epoch,
-                )
-                + bytes.fromhex(packet.configuration.configuration_id)
-                + hashlib.sha256(packet.payload).digest()
+        records.extend(
+            struct.pack(
+                "<QIqqq?Q", packet.arrival_index, packet.stream_index, packet.pts,
+                packet.dts, packet.duration, packet.is_keyframe, packet.epoch.stream_epoch,
             )
+            + bytes.fromhex(packet.configuration.configuration_id)
+            + hashlib.sha256(packet.payload).digest()
+            for packet in packets
+        )
         for record in records:
             _ = output.write(record)
             digest.update(record)

@@ -238,4 +238,4 @@ def _store(app: FastAPI) -> BedZoneStore:
     return store
 
 
-__all__ = ["router", "BedZonePayload", "BedZoneRecognizeResponse"]
+__all__ = ["BedZonePayload", "BedZoneRecognizeResponse", "router"]

@@ -297,7 +297,7 @@ def _compare_snapshot(
         if base_snap.values.get(name) != cand_snap.values.get(name):
             detail = (
                 f"snapshot[{index}] {name} baseline={base_snap.values.get(name)!r} "
-                + f"candidate={cand_snap.values.get(name)!r}"
+                f"candidate={cand_snap.values.get(name)!r}"
             )
             mismatches.append(FrameMismatch(frame_key, MismatchReason.VALUE_DIFFERS, detail))
     missing_keys = set(base_snap.missing_values) | set(cand_snap.missing_values)
@@ -305,8 +305,8 @@ def _compare_snapshot(
         if base_snap.missing_values.get(name) != cand_snap.missing_values.get(name):
             detail = (
                 f"snapshot[{index}] {name} "
-                + f"baseline={base_snap.missing_values.get(name)!r} "
-                + f"candidate={cand_snap.missing_values.get(name)!r}"
+                f"baseline={base_snap.missing_values.get(name)!r} "
+                f"candidate={cand_snap.missing_values.get(name)!r}"
             )
             mismatches.append(
                 FrameMismatch(frame_key, MismatchReason.MISSING_VALUE_DIFFERS, detail)

@@ -238,7 +238,7 @@ def _validate_review_input(
     if not actor_id or len(actor_id) > 128 or "\x00" in actor_id:
         raise ValueError("invalid actor_id")
     try:
-        parsed = datetime.fromisoformat(reviewed_at.replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(reviewed_at)
     except ValueError as error:
         raise ValueError("invalid reviewed_at") from error
     if parsed.tzinfo is None or len(reviewed_at) > 30:

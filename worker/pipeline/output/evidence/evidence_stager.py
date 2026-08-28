@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
-from enum import StrEnum
 from pathlib import Path
 from typing import Final
 
@@ -23,24 +22,10 @@ from worker.pipeline.output.evidence.evidence_metadata import (
     RUNTIME_MANIFEST_SHA256_KEY,
     validate_runtime_manifest_sha256,
 )
-
-
-class RuntimeManifestReferenceFailure(StrEnum):
-    """Legacy provenance result vocabulary retained at the public seam."""
-
-    MISSING = "missing"
-    UNAVAILABLE = "unavailable"
-
-
-class RuntimeManifestReferenceError(RuntimeError):
-    """A caller requested unavailable manifest provenance."""
-
-    def __init__(
-        self, manifest_sha256: str, failure: RuntimeManifestReferenceFailure
-    ) -> None:
-        self.manifest_sha256 = manifest_sha256
-        self.failure = failure
-        super().__init__(f"runtime manifest reference {manifest_sha256} is {failure.value}")
+from worker.pipeline.output.evidence.runtime_manifest_reference import (
+    RuntimeManifestReferenceError,
+    RuntimeManifestReferenceFailure,
+)
 
 
 @dataclass(frozen=True, slots=True, init=False)

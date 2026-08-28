@@ -228,9 +228,9 @@ class CameraPipelinePump:
                     self._untraced_events,
                     exc_info=True,
                 )
+        emit_for_frame = getattr(self._sink, "emit_for_frame", None)
         for position, event in enumerate(events):
             attached = self._attach_evidence(event, packet, result.observation)
-            emit_for_frame = getattr(self._sink, "emit_for_frame", None)
             try:
                 if emit_for_frame is None:
                     self._sink.emit(attached)
@@ -325,4 +325,4 @@ class CameraPipelinePump:
         )
 
 
-__all__ = ["CameraPipelinePump", "DEFAULT_POLL_TIMEOUT_SEC"]
+__all__ = ["DEFAULT_POLL_TIMEOUT_SEC", "CameraPipelinePump"]

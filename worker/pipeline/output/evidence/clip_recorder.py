@@ -18,13 +18,11 @@ from worker.pipeline.output.evidence.clip_maintenance import (
     finalized_clips,
 )
 from worker.pipeline.output.evidence.clip_recorder_models import (
-    ActiveClip,
     ClipRecorderConfig,
     ClipRecorderStats,
     EpochRollMessage,
     EventMessage,
     FlushMessage,
-    FrameMessage,
     RecorderMessage,
 )
 from worker.pipeline.output.evidence.clip_recorder_services import ClipRecorderServices
@@ -256,10 +254,6 @@ class ClipRecorder:
         if not done.wait(timeout=5.0):
             raise RuntimeError("epoch roll active clip seal timed out")
 
-    def _handle_frame(self, message: FrameMessage) -> None:
-        if self._actor is not None:
-            self._actor.handle_frame(message)
-
     def _handle_event(self, message: EventMessage) -> None:
         if self._actor is not None:
             self._actor.handle_event(message)
@@ -274,9 +268,6 @@ class ClipRecorder:
         self._maintenance.rotate(force=force)
 
 
-_ActiveClip = ActiveClip
-_EventMessage = EventMessage
-_FrameMessage = FrameMessage
 _finalized_clips = finalized_clips
 
 __all__ = ["ClipRecorder", "ClipRecorderConfig", "ClipRecorderServices"]

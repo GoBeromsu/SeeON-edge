@@ -34,7 +34,7 @@ EDGE_SERVICES: Final = {
     *EDGE_RUNTIME_SERVICES,
 }
 ComposeValue: TypeAlias = (
-    str | int | float | bool | None | list["ComposeValue"] | dict[str, "ComposeValue"]
+    str | int | float | bool | list["ComposeValue"] | dict[str, "ComposeValue"] | None
 )
 
 
@@ -51,7 +51,7 @@ def _compose_tag(
     if isinstance(node, yaml.ScalarNode):
         return loader.construct_scalar(node)
     if isinstance(node, yaml.SequenceNode):
-        return [item for item in loader.construct_sequence(node)]
+        return list(loader.construct_sequence(node))
     if isinstance(node, yaml.MappingNode):
         return {str(key): value for key, value in loader.construct_mapping(node).items()}
     return None

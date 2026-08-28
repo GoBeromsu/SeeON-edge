@@ -33,7 +33,7 @@ DASHBOARD_LOGIN: Mapping[str, JsonValue] = {
 TEST_TIMEOUT_ENV = "ML_API_CONNECTION_TEST_TIMEOUT_S"
 
 JsonValue: TypeAlias = (
-    str | int | float | bool | None | list["JsonValue"] | dict[str, "JsonValue"]
+    str | int | float | bool | list["JsonValue"] | dict[str, "JsonValue"] | None
 )
 
 

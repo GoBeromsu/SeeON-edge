@@ -468,9 +468,9 @@ __all__ = [
     "ML_WORKER_FALL_MODEL_TYPE_ENV",
     "ML_WORKER_FALL_MODEL_WEIGHTS_ENV",
     "ML_WORKER_FALL_MODEL_WINDOW_ENV",
-    "reject_retired_worker_environment",
     "clip_recording_config_from_environment",
     "fall_model_config_from_environment",
+    "reject_retired_worker_environment",
     "resolve_local_overrides",
     "worker_models_config_from_environment",
 ]

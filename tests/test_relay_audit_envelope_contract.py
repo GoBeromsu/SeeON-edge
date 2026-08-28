@@ -170,7 +170,7 @@ def test_real_audit_producer_chain_validates_against_relay_envelope(tmp_path: Pa
 
 
 def test_relay_audit_field_source_tracks_relay_model() -> None:
-    assert limits.RELAY_AUDIT_FIELDS == frozenset(RelayAuditEnvelope.model_fields)
+    assert frozenset(RelayAuditEnvelope.model_fields) == limits.RELAY_AUDIT_FIELDS
 
 
 def test_undeclared_key_from_domain_event_does_not_reach_relay(

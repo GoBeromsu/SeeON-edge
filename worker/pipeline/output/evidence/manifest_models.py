@@ -263,7 +263,7 @@ def normalized_timestamp(value: str) -> str:
 
 def parse_utc(value: str) -> datetime:
     try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(value)
     except ValueError as exc:
         raise PydanticCustomError("utc_timestamp", "timestamp is invalid") from exc
     if parsed.tzinfo is None or parsed.utcoffset() is None:

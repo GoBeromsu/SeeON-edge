@@ -296,14 +296,14 @@ class DeepStreamChildSupervisor:
 
 
 __all__ = [
+    "FATAL_CHILD_EXIT_CODE",
     "ChildConfig",
     "ChildFatalError",
     "ChildStartupError",
     "DarkChildConfigError",
     "DeepStreamChildSupervisor",
-    "FATAL_CHILD_EXIT_CODE",
+    "PrivatePathError",
     "SharedSupervisorResources",
     "configured_dark_supervisors",
-    "PrivatePathError",
     "validate_private_directory",
 ]

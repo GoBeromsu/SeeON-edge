@@ -59,7 +59,7 @@ def test_import_preserves_owned_data_and_forward_migrates_outbox(
                 "SELECT name FROM sqlite_schema WHERE type IN ('table','index')"
             )
         }
-        assert {row for row in database.execute("SELECT edge_event_id FROM evidence_events")} == {
+        assert set(database.execute("SELECT edge_event_id FROM evidence_events")) == {
             ("event:ordinary/%2F",)
         }
         assert "operator_only" not in event_columns

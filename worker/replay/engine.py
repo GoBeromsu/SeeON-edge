@@ -162,8 +162,8 @@ def replay_camera(
     if definition.policy_schema.qualified_id != expected_schema:
         message = (
             f"policy schema {expected_schema} does not match "
-            + f"module {definition.qualified_id!r} schema "
-            + f"{definition.policy_schema.qualified_id!r}"
+            f"module {definition.qualified_id!r} schema "
+            f"{definition.policy_schema.qualified_id!r}"
         )
         raise ReplayConfigurationError(message)
     shared_components: dict[str, object] = {}

@@ -23,6 +23,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final
 
+from worker.native.deepstream.export import artifact_sha256
+
 PLAN_PREFIX: Final = "c7"
 PLAN_IDENTITY_FILENAME: Final = ".identity.json"
 REQUIRED_MODELS: Final = frozenset({"bed", "person", "pose"})
@@ -58,14 +60,6 @@ class EnginePlan:
     builder: str
 
 
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as source:
-        for chunk in iter(lambda: source.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
 def resolve_plan(manifest: Mapping[str, Any]) -> EnginePlan:
     """Compute the content-addressed cache directory for this host's weights."""
     plan = manifest.get("engine_plan")
@@ -97,7 +91,7 @@ def resolve_plan(manifest: Mapping[str, Any]) -> EnginePlan:
         weight_path = weights[name]
         if not weight_path.is_file():
             raise EngineCacheError("engine_weight_missing", str(weight_path))
-        fingerprint.update(f"{name}:{_sha256(weight_path)}\n".encode())
+        fingerprint.update(f"{name}:{artifact_sha256(weight_path)}\n".encode())
     fingerprint.update(f"{exporter}|{precision}|{builder}\n".encode())
     plan_key = fingerprint.hexdigest()
     cache_root = Path(str(manifest["engine_cache"]["path"]))
@@ -126,7 +120,7 @@ def verify_plan_cache(manifest: Mapping[str, Any]) -> Path:
         raise EngineCacheError("engine_identity_mismatch", "identity names are stale")
     for name, digest in identity.items():
         engine = plan.cache_dir / f"{name}.engine"
-        if not engine.is_file() or _sha256(engine) != digest:
+        if not engine.is_file() or artifact_sha256(engine) != digest:
             raise EngineCacheError("engine_identity_mismatch", name)
     return plan.cache_dir
 
@@ -159,7 +153,7 @@ def build_plan_cache(
             if not engine_path.is_file():
                 raise EngineCacheError("engine_build_failed", name)
             engine_path.chmod(0o444)
-            identity[name] = _sha256(engine_path)
+            identity[name] = artifact_sha256(engine_path)
     identity_path = plan.cache_dir / PLAN_IDENTITY_FILENAME
     encoded = json.dumps(identity, sort_keys=True, separators=(",", ":")) + "\n"
     with tempfile.NamedTemporaryFile(

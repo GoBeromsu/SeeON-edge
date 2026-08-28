@@ -19,7 +19,7 @@ RELAY_ALERTS_PATH: Final = "/api/v1/relay/alerts"
 RELAY_HEARTBEAT_PATH: Final = "/api/v1/relay/heartbeat"
 
 ConfigValue: TypeAlias = (
-    str | int | float | bool | None | list["ConfigValue"] | dict[str, "ConfigValue"]
+    str | int | float | bool | list["ConfigValue"] | dict[str, "ConfigValue"] | None
 )
 
 
@@ -183,9 +183,11 @@ class WorkerConfig(BaseModel):
             for index, camera in enumerate(raw_cameras):
                 if not isinstance(camera, dict):
                     continue
-                for name in ("ingest_key_id", "ingest_secret"):
-                    if name in camera:
-                        legacy_fields.append(f"cameras.{index}.{name}")
+                legacy_fields.extend(
+                    f"cameras.{index}.{name}"
+                    for name in ("ingest_key_id", "ingest_secret")
+                    if name in camera
+                )
         if legacy_fields:
             raise ConfigValidationError(
                 "worker config must use relay only; backend ingest fields are forbidden: "

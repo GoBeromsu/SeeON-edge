@@ -156,7 +156,7 @@ def _matches_request(
 
 
 def _expired(expires_at: str) -> bool:
-    parsed = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
+    parsed = datetime.fromisoformat(expires_at)
     return parsed <= datetime.now(UTC)
 
 

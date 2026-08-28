@@ -29,4 +29,4 @@ def test_migration_commands_enforce_migrator_api_worker_order() -> None:
         commands.index(worker)
     )
     assert "down -v" not in commands
-    assert not re.search(r"\b(?:CREATE|ALTER|DROP)\s+(?:TABLE|INDEX)\b", commands, re.I)
+    assert not re.search(r"\b(?:CREATE|ALTER|DROP)\s+(?:TABLE|INDEX)\b", commands, re.IGNORECASE)

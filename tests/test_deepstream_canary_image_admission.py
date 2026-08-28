@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-import worker.tools.deepstream_canary.cli as cli
+from worker.tools.deepstream_canary import cli
 
 DIGEST = "b" * 64
 REVISION = "1" * 40

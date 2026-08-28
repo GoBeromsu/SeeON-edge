@@ -93,7 +93,7 @@ def test_machine_inventory_accounts_for_every_historical_compose_example_key() -
     assert isinstance(entries, list)
     by_name = {entry["name"]: entry for entry in entries}
 
-    assert HISTORICAL_COMPOSE_EXAMPLE_KEYS <= set(by_name)
+    assert set(by_name) >= HISTORICAL_COMPOSE_EXAMPLE_KEYS
     assert all(
         entry["category"]
         in {

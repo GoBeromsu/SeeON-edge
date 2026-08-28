@@ -8,8 +8,11 @@ from pathlib import Path
 import pytest
 
 from backend.app.features.connection.store import API_BACKEND_BASE_URL_ENV
-from tests_support.connection_api import EnrollmentVerifyHandler, response_json, run_server
-from tests_support.connection_api import clear_env as clear_env
+from tests_support.connection_api import (
+    EnrollmentVerifyHandler,
+    response_json,
+    run_server,
+)
 from tests_support.connection_api import connection_client as _client
 from tests_support.connection_api import connection_store as _store
 from tests_support.connection_api import login as _login

@@ -40,4 +40,4 @@ class ClipDeletionControlService:
         return self._locks[hash(clip_id) % LOCK_STRIPES]
 
 
-__all__ = ["ClipDeletionControlService", "LOCK_STRIPES"]
+__all__ = ["LOCK_STRIPES", "ClipDeletionControlService"]

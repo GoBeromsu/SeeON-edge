@@ -153,7 +153,7 @@ def _pose(
         if index in points:
             x_coordinate, y_coordinate = points[index]
             keypoints.append(
-                (int(round(x_coordinate * scale)), int(round(y_coordinate * scale)), confidence)
+                (round(x_coordinate * scale), round(y_coordinate * scale), confidence)
             )
         else:
             keypoints.append((0, 0, 0.0))
@@ -433,6 +433,6 @@ def test_domains_have_no_direct_numpy_import() -> None:
     for path in (_REPO_ROOT / "worker" / "domains").rglob("*.py"):
         for line_no, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
             stripped = line.lstrip()
-            if stripped.startswith("import numpy") or stripped.startswith("from numpy"):
+            if stripped.startswith(("import numpy", "from numpy")):
                 offenders.append(f"{path.relative_to(_REPO_ROOT)}:{line_no}:{line.rstrip()}")
     assert offenders == []

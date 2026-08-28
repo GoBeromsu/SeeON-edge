@@ -627,7 +627,7 @@ def _streams_ready(server: MediaMtxProcess, path_names: Sequence[str]) -> bool:
                 "-rtsp_transport", "tcp", "-select_streams", "v:0",
                 "-show_entries", "stream=codec_type", "-of", "json",
                 server.rtsp_url(name),
-            ],  # fmt: skip
+            ],
             capture_output=True,
             text=True,
             timeout=20.0,

@@ -44,4 +44,4 @@ def test_default_registry_has_pose_bed_person_factories_without_loading_models()
 
 
 def test_sklearn_fall_default_models_dir_points_to_ml_models_root() -> None:
-    assert MODELS_DIR == Path(__file__).resolve().parents[1] / "models"
+    assert Path(__file__).resolve().parents[1] / "models" == MODELS_DIR

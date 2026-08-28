@@ -35,6 +35,7 @@ is still meaningful even if the specific device-name query fails.
 
 from __future__ import annotations
 
+import contextlib
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, TypeAlias
@@ -98,10 +99,9 @@ def probe_nvml_gpu_status(*, importer: NvmlImporter = _import_pynvml) -> NvmlGpu
     try:
         return _read_gpu_status(pynvml)
     finally:
-        try:
+        # Shutdown failure must not mask a successful read.
+        with contextlib.suppress(Exception):
             pynvml.nvmlShutdown()
-        except Exception:  # noqa: BLE001,S110 - shutdown failure must not mask a successful read
-            pass
 
 
 def _read_gpu_status(pynvml: Any) -> NvmlGpuStatus:

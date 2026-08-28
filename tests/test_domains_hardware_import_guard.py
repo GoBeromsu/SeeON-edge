@@ -61,7 +61,7 @@ def _imported_dotted_names(tree: ast.Module) -> tuple[str, ...]:
 
 
 def _is_banned_import(dotted_name: str) -> bool:
-    root = dotted_name.split(".")[0]
+    root = dotted_name.split(".", maxsplit=1)[0]
     return root in _BANNED_ROOT_MODULES or "cuda" in dotted_name.lower()
 
 

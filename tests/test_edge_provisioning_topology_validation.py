@@ -118,14 +118,19 @@ def test_manifest_parser_allows_same_ref_across_entity_kinds() -> None:
     floor_id = "f1111111-1111-4111-8111-111111111111"
     room_id = "a2222222-2222-4222-8222-222222222222"
     manifest: list[JsonRecord] = [
-        dict(kind="FLOOR", edgeRef="shared", canonicalId=floor_id, parentCanonicalId=None),
-        dict(kind="ROOM", edgeRef="shared", canonicalId=room_id, parentCanonicalId=floor_id),
-        dict(
-            kind="CAMERA",
-            edgeRef="shared",
-            canonicalId="b3333333-3333-4333-8333-333333333333",
-            parentCanonicalId=room_id,
-        ),
+        {"kind": "FLOOR", "edgeRef": "shared", "canonicalId": floor_id, "parentCanonicalId": None},
+        {
+            "kind": "ROOM",
+            "edgeRef": "shared",
+            "canonicalId": room_id,
+            "parentCanonicalId": floor_id,
+        },
+        {
+            "kind": "CAMERA",
+            "edgeRef": "shared",
+            "canonicalId": "b3333333-3333-4333-8333-333333333333",
+            "parentCanonicalId": room_id,
+        },
     ]
 
     assert len(parse_topology_manifest(manifest)) == 3
@@ -135,14 +140,19 @@ def test_manifest_parser_accepts_hub_cuid_canonical_ids() -> None:
     floor_id = "cm0floor00000nz5t44td921i"
     room_id = "cm0room000000nz5t44td921i"
     manifest: list[JsonRecord] = [
-        dict(kind="FLOOR", edgeRef="shared", canonicalId=floor_id, parentCanonicalId=None),
-        dict(kind="ROOM", edgeRef="shared", canonicalId=room_id, parentCanonicalId=floor_id),
-        dict(
-            kind="CAMERA",
-            edgeRef="shared",
-            canonicalId="cm0camera0000nz5t44td921i",
-            parentCanonicalId=room_id,
-        ),
+        {"kind": "FLOOR", "edgeRef": "shared", "canonicalId": floor_id, "parentCanonicalId": None},
+        {
+            "kind": "ROOM",
+            "edgeRef": "shared",
+            "canonicalId": room_id,
+            "parentCanonicalId": floor_id,
+        },
+        {
+            "kind": "CAMERA",
+            "edgeRef": "shared",
+            "canonicalId": "cm0camera0000nz5t44td921i",
+            "parentCanonicalId": room_id,
+        },
     ]
 
     assert len(parse_topology_manifest(manifest)) == 3
@@ -150,12 +160,12 @@ def test_manifest_parser_accepts_hub_cuid_canonical_ids() -> None:
 
 def test_manifest_parser_rejects_missing_parent_relationship() -> None:
     manifest: list[JsonRecord] = [
-        dict(
-            kind="ROOM",
-            edgeRef="room-201",
-            canonicalId="a2222222-2222-4222-8222-222222222222",
-            parentCanonicalId="b3333333-3333-4333-8333-333333333333",
-        )
+        {
+            "kind": "ROOM",
+            "edgeRef": "room-201",
+            "canonicalId": "a2222222-2222-4222-8222-222222222222",
+            "parentCanonicalId": "b3333333-3333-4333-8333-333333333333",
+        }
     ]
 
     with pytest.raises(ContractViolation):

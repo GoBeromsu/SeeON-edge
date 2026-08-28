@@ -46,9 +46,6 @@ class WarmupModel(Protocol):
 ModelAdapter: TypeAlias = RunnerProtocol
 RunnerFactory: TypeAlias = Callable[..., ModelAdapter]
 
-_MODEL_TASKS: Final = ("pose", "person", "bed", "fall")
-
-
 class EmptyModelTaskError(ValueError):
     def __init__(self) -> None:
         super().__init__("task must be non-empty")

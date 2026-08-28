@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-import worker.runtime.deepstream.supervisor as supervisor
+from worker.runtime.deepstream import supervisor
 from worker.runtime.deepstream.readiness import wait_for_ready
 from worker.runtime.deepstream.source_control import SourceReadinessError
 from worker.runtime.lease import GpuLease, GpuLeaseUnavailableError
@@ -128,7 +128,6 @@ def test_supervisor_refuses_before_spawn_when_python_gpu_lease_is_held(tmp_path:
     )
 
     # When / Then
-    with GpuLease.acquire(lease_state):
-        with pytest.raises(GpuLeaseUnavailableError):
-            child.start()
+    with GpuLease.acquire(lease_state), pytest.raises(GpuLeaseUnavailableError):
+        child.start()
     assert child.pid is None

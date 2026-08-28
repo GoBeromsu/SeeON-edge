@@ -131,14 +131,13 @@ def test_source_candidate_preimage_must_match(tmp_path: Path) -> None:
     with sqlite3.connect(candidate) as connection:
         connection.execute("CREATE TABLE extra_preimage (id INTEGER PRIMARY KEY)")
         connection.commit()
-    with deployment_lock(candidate.parent) as lock:
-        with pytest.raises(CompactCutoverSourceError):
-            issue_compact_cutover_authorization(
-                lock,
-                source=source,
-                candidate=candidate,
-                reconciliation=RECONCILIATION,
-            )
+    with deployment_lock(candidate.parent) as lock, pytest.raises(CompactCutoverSourceError):
+        issue_compact_cutover_authorization(
+            lock,
+            source=source,
+            candidate=candidate,
+            reconciliation=RECONCILIATION,
+        )
 
 
 def test_authorized_candidate_upgrade_populates_row18_provenance(tmp_path: Path) -> None:

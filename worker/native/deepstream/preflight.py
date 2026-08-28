@@ -8,7 +8,6 @@ before model construction or camera activation.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import shutil
@@ -20,6 +19,7 @@ from pathlib import Path
 from typing import Any, Final, Never
 
 from worker.native.deepstream.engine_cache import EngineCacheError, verify_plan_cache
+from worker.native.deepstream.export import artifact_sha256
 
 CommandRunner = Callable[[tuple[str, ...], float], str]
 MountProbe = Callable[[Path], bool]
@@ -38,14 +38,6 @@ class DeepStreamPreflightError(RuntimeError):
 
     def __str__(self) -> str:
         return f"{self.code}: {self.detail}"
-
-
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as source:
-        for chunk in iter(lambda: source.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def _load_manifest(path: Path) -> dict[str, Any]:
@@ -82,7 +74,7 @@ def prepare_engine_cache(manifest_path: Path | str) -> dict[str, str]:
     identity = _engine_identity(manifest)
     for raw in cache["engines"]:
         source = Path(raw["source"])
-        if not source.is_file() or _sha256(source) != raw["sha256"]:
+        if not source.is_file() or artifact_sha256(source) != raw["sha256"]:
             raise DeepStreamPreflightError(
                 "engine_source_mismatch", f"engine source identity failed for {raw['name']}"
             )
@@ -231,7 +223,7 @@ def _run_deepstream_preflight(
             "plugin_version_mismatch",
         )
         path = Path(plugin["path"])
-        if not path.is_file() or _sha256(path) != plugin["sha256"]:
+        if not path.is_file() or artifact_sha256(path) != plugin["sha256"]:
             raise DeepStreamPreflightError(
                 "plugin_digest_mismatch", f"plugin identity failed for {element}"
             )
@@ -247,7 +239,7 @@ def _run_deepstream_preflight(
     if not isinstance(native, dict):
         raise DeepStreamPreflightError("manifest_invalid", "native must be an object")
     native_path = Path(native["path"])
-    if not native_path.is_file() or _sha256(native_path) != native["sha256"]:
+    if not native_path.is_file() or artifact_sha256(native_path) != native["sha256"]:
         raise DeepStreamPreflightError("native_digest_mismatch", str(native_path))
     cache = manifest["engine_cache"]
     cache_path = Path(cache["path"])
@@ -261,7 +253,7 @@ def _run_deepstream_preflight(
         raise DeepStreamPreflightError("engine_identity_mismatch", "cache manifest is stale")
     for name, digest in expected_identity.items():
         engine = cache_path / f"{name}.engine"
-        if not engine.is_file() or _sha256(engine) != digest:
+        if not engine.is_file() or artifact_sha256(engine) != digest:
             raise DeepStreamPreflightError("engine_identity_mismatch", name)
     # C7: the three inference engines are content-addressed by the engine_plan
     # (weights + exporter + precision + builder). The deploy host builds them

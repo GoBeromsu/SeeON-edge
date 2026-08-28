@@ -27,7 +27,9 @@ def test_the_project_name_is_required_and_never_defaulted() -> None:
     """`:?` not `:-`. A default is what makes the wrong bind silent."""
     compose = _COMPOSE.read_text(encoding="utf-8")
 
-    match = re.search(r"^name:\s*\$\{COMPOSE_PROJECT_NAME(?P<expansion>[^}]*)\}", compose, re.M)
+    match = re.search(
+        r"^name:\s*\$\{COMPOSE_PROJECT_NAME(?P<expansion>[^}]*)\}", compose, re.MULTILINE
+    )
     assert match, "compose.edge.yaml does not pin the project name to COMPOSE_PROJECT_NAME"
 
     expansion = match.group("expansion")
@@ -61,7 +63,9 @@ def test_the_state_volume_is_not_declared_external_or_renamed() -> None:
     assert len(volumes_section) == 2, "compose.edge.yaml declares no volumes section"
 
     body = volumes_section[1]
-    edge_state = re.search(r"^  edge-state:(?P<body>.*?)(?=^  \S|\Z)", body, re.M | re.S)
+    edge_state = re.search(
+        r"^  edge-state:(?P<body>.*?)(?=^  \S|\Z)", body, re.MULTILINE | re.DOTALL
+    )
     assert edge_state, "edge-state volume is no longer declared"
 
     declaration = edge_state.group("body")

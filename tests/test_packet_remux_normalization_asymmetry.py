@@ -37,7 +37,7 @@ from fractions import Fraction
 
 import pytest
 
-import worker.adapters.encode.packet_remuxer as packet_remuxer
+from worker.adapters.encode import packet_remuxer
 from worker.types.source_packet import (
     SourcePacket,
     SourceStreamConfiguration,

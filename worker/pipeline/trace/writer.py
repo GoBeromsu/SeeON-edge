@@ -471,7 +471,7 @@ class BoundedTraceWriter:
 
 
 __all__ = [
-    "BoundedTraceWriter",
     "DEFAULT_TRACE_RETENTION_POLICY",
+    "BoundedTraceWriter",
     "TraceRetentionPolicy",
 ]

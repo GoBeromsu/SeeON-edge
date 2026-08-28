@@ -288,9 +288,9 @@ __all__ = [
     "TraceTruncation",
     "TraceWriterStats",
     "content_id",
-    "trace_frame_row_count",
-    "trace_frame_size_bytes",
     "require_component_qualified",
     "require_qualified",
     "require_sha256",
+    "trace_frame_row_count",
+    "trace_frame_size_bytes",
 ]

@@ -340,8 +340,8 @@ def _classify_or_reraise(exc: Exception, *, task: str, camera_id: str) -> None:
 
 
 __all__ = [
-    "YoloArtifactError",
     "YoloArray",
+    "YoloArtifactError",
     "YoloBoxes",
     "YoloForwardError",
     "YoloKeypoints",

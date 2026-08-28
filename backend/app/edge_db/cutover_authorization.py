@@ -49,14 +49,14 @@ class _CutoverTicket:
     """Single-use binding of a verified candidate to one authentic lock."""
 
     __slots__ = (
-        "_lock",
         "_candidate",
-        "_dev",
-        "_ino",
-        "_digest",
-        "_source_hash",
-        "_recon_hash",
         "_consumed",
+        "_dev",
+        "_digest",
+        "_ino",
+        "_lock",
+        "_recon_hash",
+        "_source_hash",
     )
 
     def __init__(

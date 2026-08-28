@@ -71,7 +71,7 @@ class AlertEvidenceAttacher:
             audit[RUNTIME_MANIFEST_SHA256_KEY] = self.runtime_manifest_sha256
         return replace(
             event,
-            audit=None if not audit else audit,
+            audit=audit or None,
             snapshot_jpeg=snapshot_jpeg,
         )
 

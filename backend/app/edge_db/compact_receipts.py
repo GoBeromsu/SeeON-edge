@@ -17,7 +17,7 @@ from backend.app.edge_db.compact_receipt_context import (
     require_map_target,
 )
 
-SqliteValue: TypeAlias = None | int | float | str | bytes
+SqliteValue: TypeAlias = int | float | str | bytes | None
 
 
 def canonical_json(payload: dict[str, str | int | list[str] | None]) -> str:

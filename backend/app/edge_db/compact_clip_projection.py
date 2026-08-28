@@ -5,7 +5,7 @@ from __future__ import annotations
 import sqlite3
 from typing import TypeAlias
 
-SqliteValue: TypeAlias = None | int | float | str | bytes
+SqliteValue: TypeAlias = int | float | str | bytes | None
 
 
 def _facet(value: SqliteValue) -> str:

@@ -164,7 +164,7 @@ def _run(arguments: RunArguments) -> int:
     try:
         authorize_rungs(request, artifact)
     except CanaryAuthorizationError as error:
-        rung_values: list[JsonValue] = [item for item in rungs]
+        rung_values: list[JsonValue] = list(rungs)
         refusal: dict[str, JsonValue] = {
             "schema_version": 1,
             "code": error.code,
@@ -173,7 +173,7 @@ def _run(arguments: RunArguments) -> int:
         write_once(evidence_dir / "authorization-refusal.json", canonical_json(refusal))
         print(str(error), file=sys.stderr)
         return 2
-    requested_rungs: list[JsonValue] = [item for item in rungs]
+    requested_rungs: list[JsonValue] = list(rungs)
     write_once(
         evidence_dir / "run-request.json",
         canonical_json(

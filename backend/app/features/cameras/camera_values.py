@@ -186,13 +186,13 @@ def _status(value: object) -> CameraStatus:
 
 
 __all__ = [
-    "CameraRegistryData",
-    "CameraStatus",
     "DEFAULT_FLOOR",
-    "DuplicateCameraError",
     "FLOOR_MAX",
     "FLOOR_MIN",
     "FLOOR_VALUES",
+    "CameraRegistryData",
+    "CameraStatus",
+    "DuplicateCameraError",
     "ProbeResult",
     "floor_label",
     "is_valid_floor",

@@ -163,6 +163,12 @@ def _nal_length_size(codec_data: bytes, codec_name: str) -> int:
 
 
 __all__ = [
-    "AuCodec", "AuEnvelope", "AuFrameError", "AuFraming", "AuKind",
-    "MAX_AU_FRAME_BYTES", "receive_envelope", "stream_configuration",
+    "MAX_AU_FRAME_BYTES",
+    "AuCodec",
+    "AuEnvelope",
+    "AuFrameError",
+    "AuFraming",
+    "AuKind",
+    "receive_envelope",
+    "stream_configuration",
 ]

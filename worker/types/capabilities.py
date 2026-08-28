@@ -75,10 +75,10 @@ HOST_PIPELINE_PROFILE = PipelineProfile(
 
 
 __all__ = [
-    "ConverterCapabilities",
-    "FrameCapability",
     "HOST_PIPELINE_PROFILE",
     "HOST_RGB",
+    "ConverterCapabilities",
+    "FrameCapability",
     "PipelineProfile",
     "StageCapabilities",
 ]

@@ -123,7 +123,7 @@ def test_renderer_displays_decision_semantics_and_cjk_without_pseudoglyph_cells(
     scene = _scene()
     scene = replace(
         scene,
-        labels=scene.labels + (SceneLabel("낙상 감지", (2.0, 178.0), (0, 0, 255), 50),),
+        labels=(*scene.labels, SceneLabel("낙상 감지", (2.0, 178.0), (0, 0, 255), 50)),
     )
     image = np.zeros((180, 320, 3), dtype=np.uint8)
 

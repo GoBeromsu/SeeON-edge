@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
 import stat
 from pathlib import Path
@@ -30,10 +31,8 @@ class SnapshotFiles:
                 output.write(content)
                 output.flush()
                 os.fsync(output.fileno())
-            try:
+            with contextlib.suppress(FileNotFoundError):
                 self._reject_symlink(directory, relative.name)
-            except FileNotFoundError:
-                pass
             os.replace(
                 temporary,
                 relative.name,
@@ -75,10 +74,8 @@ class SnapshotFiles:
         destination_directory = self._open_directory(destination_relative.parent, create=True)
         try:
             self._reject_symlink(source_directory, source_relative.name)
-            try:
+            with contextlib.suppress(FileNotFoundError):
                 self._reject_symlink(destination_directory, destination_relative.name)
-            except FileNotFoundError:
-                pass
             os.replace(
                 source_relative.name,
                 destination_relative.name,
@@ -116,10 +113,8 @@ class SnapshotFiles:
                 except FileNotFoundError:
                     if not create:
                         raise
-                    try:
+                    with contextlib.suppress(FileExistsError):
                         os.mkdir(component, mode=0o700, dir_fd=descriptor)
-                    except FileExistsError:
-                        pass
                 child = os.open(
                     component,
                     os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
@@ -146,10 +141,8 @@ class SnapshotFiles:
         try:
             root_stat = os.lstat(self.store_dir)
         except FileNotFoundError:
-            try:
+            with contextlib.suppress(FileExistsError):
                 self.store_dir.mkdir(mode=0o700)
-            except FileExistsError:
-                pass
             root_stat = os.lstat(self.store_dir)
         if stat.S_ISLNK(root_stat.st_mode) or not stat.S_ISDIR(root_stat.st_mode):
             raise ValueError(f"snapshot store root is not a directory: {self.store_dir}")

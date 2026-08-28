@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from enum import StrEnum, unique
 from typing import Literal, NotRequired, TypeAlias, TypedDict, final
 
-JsonValue: TypeAlias = str | int | float | bool | None | list["JsonValue"] | dict[str, "JsonValue"]
+JsonValue: TypeAlias = str | int | float | bool | list["JsonValue"] | dict[str, "JsonValue"] | None
 JsonRecord: TypeAlias = dict[str, JsonValue]
 TopologyKind: TypeAlias = Literal["FLOOR", "ROOM", "CAMERA"]
 
@@ -216,16 +216,16 @@ class ErrorEnvelopeBody(TypedDict):
 
 __all__ = [
     "ContractViolation",
+    "EdgeErrorCode",
     "EnrollmentVerification",
     "EnrollmentVerificationBody",
     "EnrollmentVerificationResult",
-    "EdgeErrorCode",
     "ErrorDetailBody",
     "ErrorEnvelope",
     "ErrorEnvelopeBody",
+    "FacilityIdentity",
     "JsonRecord",
     "JsonValue",
-    "FacilityIdentity",
     "MachinePrincipal",
     "MachinePrincipalBody",
     "MutationCounts",
@@ -239,9 +239,9 @@ __all__ = [
     "TopologyFloorBody",
     "TopologyKind",
     "TopologyManifestEntry",
+    "TopologyMutationResult",
     "TopologyRoom",
     "TopologyRoomBody",
     "TopologySnapshot",
-    "TopologyMutationResult",
     "TopologySuccessEnvelope",
 ]

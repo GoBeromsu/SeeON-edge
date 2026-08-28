@@ -473,8 +473,8 @@ def _registry_with_ghost_bed_exit() -> object:
     bed_exit = registry.get("bed_exit")
     ghost_bed_exit = replace(
         bed_exit,
-        component_bindings=bed_exit.component_bindings
-        + (
+        component_bindings=(
+            *bed_exit.component_bindings,
             ComponentBinding(
                 component_id="ghost",
                 component_kind="extractor",
@@ -486,7 +486,7 @@ def _registry_with_ghost_bed_exit() -> object:
                 warmup_required=True,
             ),
         ),
-        schedule_rules=bed_exit.schedule_rules + (ScheduleRule("ghost", "camera-frame-stride"),),
+        schedule_rules=(*bed_exit.schedule_rules, ScheduleRule("ghost", "camera-frame-stride")),
     )
     definitions = tuple(
         ghost_bed_exit if definition.module_id == "bed_exit" else definition

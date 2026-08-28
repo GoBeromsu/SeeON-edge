@@ -70,7 +70,7 @@ _REBUILD_TABLES: Final = frozenset(
     }
 )
 _CAMERA_LIST = TypeAdapter(list[dict[str, JsonValue]])
-SqliteValue: TypeAlias = None | int | float | str | bytes
+SqliteValue: TypeAlias = int | float | str | bytes | None
 
 
 @dataclass(frozen=True, slots=True)

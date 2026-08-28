@@ -113,6 +113,9 @@ class DeepStreamControlClient:
         if reply.kind is not MessageKind.EPOCH_STARTED:
             raise ChildControlError("source_not_started", reply.kind.name)
         self._epochs[camera_id] = reply.stream_epoch
+        return self._binding(camera_id, reply)
+
+    def _binding(self, camera_id: str, reply: ControlMessage) -> SourceBinding:
         return SourceBinding(
             worker_boot_id=str(self._identity.worker_boot_id),
             child_instance_id=str(self._identity.child_instance_id),
@@ -133,14 +136,7 @@ class DeepStreamControlClient:
         if reply.kind is not MessageKind.EPOCH_STARTED:
             raise ChildControlError("epoch_not_started", reply.kind.name)
         self._epochs[camera_id] = reply.stream_epoch
-        return SourceBinding(
-            worker_boot_id=str(self._identity.worker_boot_id),
-            child_instance_id=str(self._identity.child_instance_id),
-            camera_id=camera_id,
-            source_generation=reply.source_generation,
-            stream_epoch=reply.stream_epoch,
-            transform_id=self._identity.transform_id,
-        )
+        return self._binding(camera_id, reply)
 
     def inject_source_eos(self, camera_id: str) -> None:
         _ = self.request(self._message(MessageKind.INJECT_SOURCE_EOS, camera_id))

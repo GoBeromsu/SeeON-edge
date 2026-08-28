@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import socket
 import threading
 import uuid
@@ -49,10 +50,8 @@ class NativeFailureReceiver:
 
     def close(self) -> None:
         self._stopping.set()
-        try:
+        with contextlib.suppress(OSError):
             self._receiver.shutdown(socket.SHUT_RD)
-        except OSError:
-            pass
         self._receiver.close()
         self._thread.join(timeout=1.0)
 

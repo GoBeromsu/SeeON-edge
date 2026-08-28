@@ -11,7 +11,7 @@ from typing import Final, TypeAlias
 
 from backend.app.edge_db.legacy_import_snapshot import LegacyImportError, SourceSnapshot
 
-SqliteValue: TypeAlias = None | int | float | str | bytes
+SqliteValue: TypeAlias = int | float | str | bytes | None
 ImportProgress = Callable[[str, str], None]
 _RETIRED_LEGACY_TABLES: Final = frozenset({"system_test_runs"})
 _TABLE_PRIORITY: Final = {

@@ -46,11 +46,11 @@ class EvidenceTransport(Protocol):
 
     def send_snapshot_attachment(
         self, payload: dict[str, object]
-    ) -> None | DeliveryFailure: ...
+    ) -> DeliveryFailure | None: ...
 
     def send_snapshot_disposition(
         self, payload: dict[str, object]
-    ) -> None | DeliveryFailure: ...
+    ) -> DeliveryFailure | None: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -256,7 +256,7 @@ class EvidenceSender:
         self._deferred.discard(entry_id)
         return _acknowledged_step(entry)
 
-    def _send(self, entry: dict[str, object]) -> None | EventReceipt | DeliveryFailure:
+    def _send(self, entry: dict[str, object]) -> EventReceipt | DeliveryFailure | None:
         match entry["kind"]:
             case "EVENT":
                 self._warn_shed_detail(entry)

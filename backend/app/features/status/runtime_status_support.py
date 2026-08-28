@@ -28,7 +28,7 @@ class LatestLatency:
 
     def record(self, facility_id: str, detected_at: str, received_at: float) -> None:
         try:
-            detected = datetime.fromisoformat(detected_at.replace("Z", "+00:00")).timestamp()
+            detected = datetime.fromisoformat(detected_at).timestamp()
         except ValueError:
             return
         elapsed = received_at - detected

@@ -38,7 +38,6 @@ import av
 import numpy as np
 import pytest
 
-import worker.adapters.encode.packet_remuxer as packet_remuxer
 from contracts.frame import Frame
 from worker.adapters.decode.nvdec_cuvid.models import NvdecCuvidConfig
 from worker.adapters.decode.pyav_nvdec import NvdecPacketTeeSession
@@ -46,6 +45,7 @@ from worker.adapters.decode.pyav_preserving import (
     PyAvPreservingAdapter,
     PyAvPreservingSession,
 )
+from worker.adapters.encode import packet_remuxer
 from worker.adapters.encode.packet_remuxer import REMUX_METHOD, PyAvPacketRemuxer
 from worker.pipeline.output.evidence.clip_recorder import ClipRecorder
 from worker.pipeline.output.evidence.clip_recorder_models import ClipRecorderConfig

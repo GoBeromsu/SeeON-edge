@@ -104,4 +104,4 @@ class NativeCanaryTelemetry:
         self._timestamp_discontinuities = 0
 
 
-__all__ = ["NativeCanaryTelemetry", "TELEMETRY_ENV", "WINDOW_SECONDS"]
+__all__ = ["TELEMETRY_ENV", "WINDOW_SECONDS", "NativeCanaryTelemetry"]

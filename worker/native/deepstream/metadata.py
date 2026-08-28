@@ -16,8 +16,8 @@ __all__ = [
     "AcceptanceToken",
     "LatestMetadataSlot",
     "MetadataPullFailure",
-    "MetadataPuller",
     "MetadataPullStopped",
+    "MetadataPuller",
     "MetadataReceiver",
     "SourceBinding",
 ]

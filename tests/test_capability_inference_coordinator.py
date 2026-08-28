@@ -984,7 +984,7 @@ def test_zero_ready_cycle_preserves_fairness_cursor_and_waits_once() -> None:
         first = [camera_id for camera_id, _seq in client.batches[0]]
         assert first == [f"camera-{index}" for index in range(16)]
         _release_results(lanes)
-        for _camera_id, (source, _results) in lanes.items():
+        for (source, _results) in lanes.values():
             leftover = source.take(timeout_sec=0)
             if leftover is not None:
                 leftover.release()

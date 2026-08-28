@@ -24,13 +24,13 @@ from backend.app.shared.dashboard_credentials import DashboardCredentialsStore
 from contracts.edge_provisioning_v1 import MachinePrincipal
 
 CAMERA_STORE_EXPORTS = [
-    "CameraRegistryStore",
-    "CameraStatus",
     "DEFAULT_FLOOR",
-    "DuplicateCameraError",
     "FLOOR_MAX",
     "FLOOR_MIN",
     "FLOOR_VALUES",
+    "CameraRegistryStore",
+    "CameraStatus",
+    "DuplicateCameraError",
     "ProbeResult",
     "floor_label",
     "is_valid_floor",

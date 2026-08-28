@@ -295,20 +295,24 @@ def _component_state(
     return "executed"
 
 
+def _unavailable(detail: str) -> tuple[DecisionTraceSnapshot, ...]:
+    return (
+        DecisionTraceSnapshot(
+            reason="trace-unavailable",
+            previous_state="unknown",
+            current_state="unknown",
+            triggered=False,
+            track_id=None,
+            bed_id=None,
+            missing_values={"decision_state": detail},
+        ),
+    )
+
+
 def _snapshots(identity: TraceIdentity) -> tuple[DecisionTraceSnapshot, ...]:
     provider = identity.snapshot_provider
     if provider is None:
-        return (
-            DecisionTraceSnapshot(
-                reason="trace-unavailable",
-                previous_state="unknown",
-                current_state="unknown",
-                triggered=False,
-                track_id=None,
-                bed_id=None,
-                missing_values={"decision_state": "adapter-not-provided"},
-            ),
-        )
+        return _unavailable("adapter-not-provided")
     value = provider()
     if isinstance(value, DecisionTraceSnapshot):
         return (value,)
@@ -318,17 +322,7 @@ def _snapshots(identity: TraceIdentity) -> tuple[DecisionTraceSnapshot, ...]:
         if value:
             raise TraceContractError("trace adapter returned an unvalidated value")
     if (isinstance(value, tuple | Mapping)) and not value:
-        return (
-            DecisionTraceSnapshot(
-                reason="trace-unavailable",
-                previous_state="unknown",
-                current_state="unknown",
-                triggered=False,
-                track_id=None,
-                bed_id=None,
-                missing_values={"decision_state": "adapter-returned-no-data"},
-            ),
-        )
+        return _unavailable("adapter-returned-no-data")
     raise TraceContractError("trace adapter returned an unvalidated value")
 
 

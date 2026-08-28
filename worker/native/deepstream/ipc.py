@@ -57,18 +57,23 @@ def encode_message(message: ControlMessage) -> bytes:
 def decode_control_message(data: bytes) -> ControlMessage:
     if len(data) < _HEADER.size:
         raise IpcProtocolError("short_header", str(len(data)))
-    magic = data[0:4]
-    version, kind_value = data[4], data[5]
-    body_size = int.from_bytes(data[8:12], "little")
-    generation = int.from_bytes(data[12:16], "little")
-    epoch = int.from_bytes(data[16:24], "little")
-    pts = int.from_bytes(data[24:32], "little")
-    sequence = int.from_bytes(data[32:40], "little")
-    publish_sequence = int.from_bytes(data[40:48], "little")
-    request_id = int.from_bytes(data[48:56], "little")
-    boot_bytes, child_bytes = data[56:72], data[72:88]
-    camera_size = int.from_bytes(data[88:90], "little")
-    transform_size = int.from_bytes(data[90:92], "little")
+    (
+        magic,
+        version,
+        kind_value,
+        _reserved,
+        body_size,
+        generation,
+        epoch,
+        pts,
+        sequence,
+        publish_sequence,
+        request_id,
+        boot_bytes,
+        child_bytes,
+        camera_size,
+        transform_size,
+    ) = _HEADER.unpack_from(data)
     if magic != _MAGIC or version != PROTOCOL_VERSION:
         raise IpcProtocolError("protocol_mismatch", f"magic={magic!r} version={version}")
     if len(data) != _HEADER.size + body_size:
@@ -130,12 +135,12 @@ def decode_metadata(data: bytes) -> MetadataFrame:
 
 
 __all__ = [
+    "PROTOCOL_VERSION",
     "ControlMessage",
     "IpcProtocolError",
     "MessageKind",
     "MetadataCounters",
     "MetadataFrame",
-    "PROTOCOL_VERSION",
     "decode_control_message",
     "decode_metadata",
     "encode_message",

@@ -17,7 +17,6 @@ from types import MappingProxyType
 from typing import Any, Final, Protocol, TypeAlias, cast, final, runtime_checkable
 
 import worker.pipeline.ingest.lifecycle as ingest
-import worker.runtime.bootstrap as bootstrap
 import worker.runtime.telemetry.runtime_status_sender as runtime_status_sender_module
 from contracts.decode_diagnostics import DecodeSelection
 from contracts.observation import BoundingBox
@@ -111,6 +110,7 @@ from worker.pipeline.output.mjpeg_server import (
 from worker.pipeline.output.overlay import OverlayMode, OverlayRenderer
 from worker.pipeline.perception import GreedyIouTracker, SceneState
 from worker.pipeline.trace import BoundedTraceWriter, TraceCapture, TraceIdentity
+from worker.runtime import bootstrap
 from worker.runtime.clip_deletion_control import ClipDeletionControlService
 from worker.runtime.config import (
     RELAY_HEARTBEAT_PATH,
@@ -1459,17 +1459,7 @@ class WorkerRuntime:
         self._compose_evidence_export(boot)
         if self._packet_repository is None:
             clip_config = ClipRecorderConfig(store_dir=self._resolved_clip_store_dir())
-            self._packet_repository = PacketRingRepository(
-                tuple(camera.camera_id for camera in self.config.cameras),
-                per_camera_limits=PacketRingLimits(
-                    clip_config.packet_ring_max_packets,
-                    clip_config.packet_ring_max_bytes_per_camera,
-                    clip_config.pre_event_seconds
-                    + clip_config.post_event_seconds
-                    + clip_config.finalize_grace_seconds,
-                ),
-                global_max_bytes=clip_config.packet_ring_global_max_bytes,
-            )
+            self._packet_repository = self._build_packet_repository(clip_config)
         manifest = Path(self._env[MANIFEST_ENV])
         loaded_manifest = json.loads(manifest.read_text(encoding="utf-8"))
         engine_cache = verify_plan_cache(loaded_manifest)
@@ -2300,17 +2290,7 @@ class WorkerRuntime:
                     "evidence delivery failed to initialize under the clip-store lock"
                 ) from exc
 
-        packet_repository = PacketRingRepository(
-            tuple(camera.camera_id for camera in self.config.cameras),
-            per_camera_limits=PacketRingLimits(
-                clip_config.packet_ring_max_packets,
-                clip_config.packet_ring_max_bytes_per_camera,
-                clip_config.pre_event_seconds
-                + clip_config.post_event_seconds
-                + clip_config.finalize_grace_seconds,
-            ),
-            global_max_bytes=clip_config.packet_ring_global_max_bytes,
-        )
+        packet_repository = self._build_packet_repository(clip_config)
         self._packet_repository = packet_repository
         recorder = ClipRecorder(
             clip_config,
@@ -2598,11 +2578,18 @@ class WorkerRuntime:
             definitions=MappingProxyType(definitions),
         )
 
-    def _build_decision_stage(
-        self, camera: CameraRuntimeConfig, tracker: GreedyIouTracker
-    ) -> tuple[EventAggregator, Mapping[str, Mapping[str, object]], Mapping[str, Decider]]:
-        plan = self._preflight_camera_graph(camera, tracker)
-        return plan.decision, plan.domain_audit, plan.domain_deciders
+    def _build_packet_repository(self, clip_config: ClipRecorderConfig) -> PacketRingRepository:
+        return PacketRingRepository(
+            tuple(camera.camera_id for camera in self.config.cameras),
+            per_camera_limits=PacketRingLimits(
+                clip_config.packet_ring_max_packets,
+                clip_config.packet_ring_max_bytes_per_camera,
+                clip_config.pre_event_seconds
+                + clip_config.post_event_seconds
+                + clip_config.finalize_grace_seconds,
+            ),
+            global_max_bytes=clip_config.packet_ring_global_max_bytes,
+        )
 
     def _build_decider(
         self,

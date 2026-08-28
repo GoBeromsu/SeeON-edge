@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import itertools
 import json
 import os
 import selectors
@@ -282,9 +283,7 @@ def test_slow_frame_consumer_does_not_freeze_evidence_ring(tmp_path: Path) -> No
             assert presentation_times[-1] > presentation_times[0]
             assert sum(
                 later > earlier
-                for earlier, later in zip(
-                    presentation_times, presentation_times[1:], strict=False
-                )
+                for earlier, later in itertools.pairwise(presentation_times)
             ) >= 4
             assert result["overflow_count"] > 0
             print(
