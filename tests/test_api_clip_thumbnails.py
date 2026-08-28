@@ -198,3 +198,27 @@ def test_thumbnail_endpoint_rejects_missing_symlink_and_duplicate_clip_ids(
     assert missing.status_code == 404
     assert symlink.status_code == 404
     assert duplicate.status_code == 409
+
+
+def test_head_thumbnail_answers_with_the_get_header_section_and_no_body(
+    clip_env: Path,
+) -> None:
+    """Same #452 gap as the video route: FastAPI does not synthesise HEAD."""
+    _write_clip(clip_env, "clip-head", thumbnail=True)
+
+    with TestClient(create_app(lifespan=no_lifespan)) as client:
+        unauthorized = client.head("/api/v1/clips/clip-head/thumbnail")
+        _login(client)
+        head = client.head("/api/v1/clips/clip-head/thumbnail")
+        get = client.get("/api/v1/clips/clip-head/thumbnail")
+        missing = client.head("/api/v1/clips/clip-absent/thumbnail")
+
+    assert unauthorized.status_code == 401
+    assert head.status_code == get.status_code == 200
+    assert head.content == b""
+    assert get.content == JPEG
+    for header in ("content-type", "content-length", "cache-control"):
+        assert head.headers[header] == get.headers[header]
+    assert head.headers["content-type"] == "image/jpeg"
+    assert head.headers["content-length"] == str(len(JPEG))
+    assert missing.status_code == 404

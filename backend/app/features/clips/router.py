@@ -48,6 +48,7 @@ from backend.app.features.evidence.receipt_store import (
     verify_artifact,
 )
 from backend.app.shared.dashboard_auth import authorize_dashboard
+from backend.app.shared.head_response import HEAD_METHODS, drop_body_for_head
 
 
 @dataclass(frozen=True, slots=True)
@@ -256,7 +257,13 @@ def delete_clip(
     )
 
 
-@router.get("/clips/{clip_id}/video")
+# HEAD answers with the GET header section and no body (issue #452): a
+# player probes content-type/length/accept-ranges before it opens a clip,
+# and FastAPI does not synthesise HEAD from GET. One endpoint serves both
+# so the headers, the receipt gate, the range handling and the audit trail
+# cannot drift between the methods; OpenedFileResponse suppresses the file
+# reads for HEAD, so the probe stays cheap.
+@router.api_route("/clips/{clip_id}/video", methods=HEAD_METHODS)
 def clip_video(
     clip_id: str,
     request: Request,
@@ -325,7 +332,7 @@ def clip_video(
     return response
 
 
-@router.get("/clips/{clip_id}/thumbnail")
+@router.api_route("/clips/{clip_id}/thumbnail", methods=HEAD_METHODS)
 def clip_thumbnail(
     clip_id: str,
     request: Request,
@@ -343,10 +350,17 @@ def clip_thumbnail(
     append_governed(
         request, actor_id=actor, action=AuditAction.CLIP_THUMBNAIL, target_id=clip_id
     )
-    return Response(
-        content=content,
-        media_type="image/jpeg",
-        headers={"Cache-Control": "private, no-store"},
+    # A thumbnail's Content-Length is only knowable from the bytes themselves
+    # (they arrive through one bounded, containment-checked read), so HEAD runs
+    # the identical path and drops the body last -- headers stay byte-identical
+    # to the GET, and the read stays capped at MAX_THUMBNAIL_BYTES.
+    return drop_body_for_head(
+        request,
+        Response(
+            content=content,
+            media_type="image/jpeg",
+            headers={"Cache-Control": "private, no-store"},
+        ),
     )
 
 

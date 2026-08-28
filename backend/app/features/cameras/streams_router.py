@@ -18,6 +18,7 @@ from starlette.background import BackgroundTask
 from backend.app.core.config import get_settings
 from backend.app.features.cameras.store import CameraRegistryStore
 from backend.app.shared.dashboard_auth import authorize_dashboard
+from backend.app.shared.head_response import HEAD_METHODS, drop_body_for_head
 
 router = APIRouter(tags=["streams"])
 
@@ -124,7 +125,12 @@ async def camera_stream(
             await client.aclose()
 
 
-@router.get("/streams/{camera_id}/snapshot")
+# HEAD carries the GET header section and no body (issue #452, same gap as
+# the clip media routes). Not applied to GET /streams/{camera_id} above:
+# that response is an unbounded multipart/x-mixed-replace stream with no
+# Content-Length to report, and answering a HEAD would mean opening an
+# upstream MJPEG connection that never ends.
+@router.api_route("/streams/{camera_id}/snapshot", methods=HEAD_METHODS)
 def camera_snapshot(
     camera_id: str,
     request: Request,
@@ -161,7 +167,13 @@ def camera_snapshot(
     finally:
         upstream.close()
 
-    return Response(content=body, media_type=content_type, headers={"Cache-Control": "no-store"})
+    # The worker only serves whole frames, so the upstream fetch is what
+    # tells us the content type and length; HEAD shares that one path and
+    # drops the body last, keeping the headers identical to the GET.
+    return drop_body_for_head(
+        request,
+        Response(content=body, media_type=content_type, headers={"Cache-Control": "no-store"}),
+    )
 
 
 @router.get("/streams/{camera_id}/pose")

@@ -778,3 +778,43 @@ def test_pose_get_preserves_upstream_404_and_503(
 
     assert response.status_code == code
     assert response.json()["detail"] == "worker stream unavailable"
+
+
+def test_head_snapshot_answers_with_the_get_header_section_and_no_body(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The snapshot proxy shared the clip routes' #452 HEAD gap."""
+    body = b"\xff\xd8camera-jpeg\xff\xd9"
+
+    class JpegResponse(FiniteStreamResponse):
+        headers: dict[str, str] = {"Content-Type": "image/jpeg"}
+
+    def fake_urlopen(request: urllib.request.Request, timeout: float) -> JpegResponse:
+        del request, timeout
+        return JpegResponse(body)
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+    with TestClient(create_app(lifespan=NO_LIFESPAN)) as client:
+        unauthorized = client.head("/api/v1/streams/cam_sp_201/snapshot")
+        _login(client)
+        head = client.head("/api/v1/streams/cam_sp_201/snapshot")
+        get = client.get("/api/v1/streams/cam_sp_201/snapshot")
+
+    assert unauthorized.status_code == 401
+    assert head.status_code == get.status_code == 200
+    assert head.content == b""
+    assert get.content == body
+    for header in ("content-type", "content-length", "cache-control"):
+        assert head.headers[header] == get.headers[header]
+    assert head.headers["content-type"] == "image/jpeg"
+    assert head.headers["content-length"] == str(len(body))
+
+
+def test_head_is_not_offered_on_the_unbounded_mjpeg_stream() -> None:
+    """No Content-Length exists for a stream that never ends."""
+    with TestClient(create_app(lifespan=NO_LIFESPAN)) as client:
+        _login(client)
+        response = client.head("/api/v1/streams/cam_sp_201")
+
+    assert response.status_code == 405

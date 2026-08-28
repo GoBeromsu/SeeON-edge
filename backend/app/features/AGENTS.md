@@ -52,6 +52,10 @@ and return 409 with the current row. Dashboard routes call
 `authorize_dashboard`. Worker routes call `relay.auth.authorize_relay`.
 New slices do not borrow `cameras.router._authorize`. Body caps stay on
 relay `BoundedBodyRoute`; add a suffix entry, do not copy the class.
+A route that serves bytes registers `methods=HEAD_METHODS` (`shared/head_response.py`) -- FastAPI never synthesises HEAD from GET, so a
+bare `@router.get` 404s the probe a player sends before it opens the media.
+One endpoint serves both methods so headers cannot drift; drop the body last
+with `drop_body_for_head`, and never read a file a HEAD will not send.
 API actor writes only the compact application tables. Never INSERT retired
 `control_*`, `qa_*`, `runtime_*`, `evidence_*`, or `derivative_*` families.
 Auth has no SQLite row; sessions live in

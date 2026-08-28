@@ -70,7 +70,23 @@ class OpenedFileResponse(Response):
         )
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        del scope, receive
+        del receive
+        if scope["type"] == "http" and scope["method"].upper() == "HEAD":
+            # RFC 9110 section 9.3.2: same header section as the GET, no body.
+            # A clip is whole-file evidence, so reading it to throw the bytes
+            # away would make a HEAD as expensive as playback -- exactly what a
+            # player issues one to avoid. Close the pinned descriptor and send
+            # the headers the GET path already computed.
+            self._opened.handle.close()
+            await send(
+                {
+                    "type": "http.response.start",
+                    "status": self.status_code,
+                    "headers": self.raw_headers,
+                }
+            )
+            await send({"type": "http.response.body", "body": b"", "more_body": False})
+            return
         with self._opened.handle as source:
             await send(
                 {

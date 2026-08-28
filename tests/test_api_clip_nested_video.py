@@ -4,7 +4,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
-from typing import BinaryIO
+from typing import BinaryIO, cast
 
 import pytest
 from fastapi.testclient import TestClient
@@ -317,3 +317,148 @@ def test_bytes_that_disagree_with_their_receipt_are_still_refused(clip_env: Path
 
     assert response.status_code == 409
     assert response.json()["detail"] == "clip video receipt verification failed"
+
+
+class _CountingHandle:
+    """Wraps a clip descriptor and counts the reads served through it."""
+
+    def __init__(self, inner: BinaryIO) -> None:
+        self._inner = inner
+        self.reads = 0
+
+    def read(self, *args: int) -> bytes:
+        self.reads += 1
+        return self._inner.read(*args)
+
+    def seek(self, *args: int) -> int:
+        return self._inner.seek(*args)
+
+    def close(self) -> None:
+        self._inner.close()
+
+    @property
+    def closed(self) -> bool:
+        return self._inner.closed
+
+    def __enter__(self) -> _CountingHandle:
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        self.close()
+
+
+def _count_video_reads(monkeypatch: pytest.MonkeyPatch) -> list[_CountingHandle]:
+    handles: list[_CountingHandle] = []
+    original_open = ClipStore.open_located_video
+
+    def observed_open(self: ClipStore, located: LocatedClip) -> OpenedRegularFile:
+        opened = original_open(self, located)
+        handle = _CountingHandle(opened.handle)
+        handles.append(handle)
+        return OpenedRegularFile(cast(BinaryIO, handle), opened.path, opened.size_bytes)
+
+    monkeypatch.setattr(ClipStore, "open_located_video", observed_open)
+    return handles
+
+
+def test_head_video_answers_with_the_get_header_section_and_no_body(
+    clip_env: Path,
+) -> None:
+    """A player probes the clip before it opens one; HEAD must not 404 (#452)."""
+    clip_id = "clip-head-contract"
+    _write_clip(clip_env, Path(), clip_id, f"clips/{clip_id}/clip.mp4")
+
+    with TestClient(create_app(lifespan=no_lifespan)) as client:
+        _login(client)
+        head = client.head(f"/api/v1/clips/{clip_id}/video")
+        get = client.get(f"/api/v1/clips/{clip_id}/video")
+
+    assert head.status_code == get.status_code == 200
+    assert head.content == b""
+    assert get.content == VIDEO
+    for header in ("content-type", "content-length", "accept-ranges", "cache-control"):
+        assert head.headers[header] == get.headers[header]
+    assert head.headers["content-type"].startswith("video/mp4")
+    assert head.headers["content-length"] == str(len(VIDEO))
+    assert head.headers["accept-ranges"] == "bytes"
+
+
+def test_head_video_reads_no_clip_bytes_and_releases_the_descriptor(
+    clip_env: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A HEAD that streamed the file would cost exactly what it exists to avoid."""
+    clip_id = "clip-head-cheap"
+    _write_clip(clip_env, Path(), clip_id, f"clips/{clip_id}/clip.mp4")
+    handles = _count_video_reads(monkeypatch)
+
+    with TestClient(create_app(lifespan=no_lifespan)) as client:
+        _login(client)
+        head = client.head(f"/api/v1/clips/{clip_id}/video")
+        head_reads = [handle.reads for handle in handles]
+        get = client.get(f"/api/v1/clips/{clip_id}/video")
+
+    assert head.status_code == 200
+    assert get.status_code == 200
+    assert head_reads == [0]
+    assert handles[-1].reads > 0
+    assert all(handle.closed for handle in handles)
+
+
+def test_head_video_matches_get_on_missing_clips_and_ranges(clip_env: Path) -> None:
+    clip_id = "clip-head-errors"
+    _write_clip(clip_env, Path(), clip_id, f"clips/{clip_id}/clip.mp4")
+
+    with TestClient(create_app(lifespan=no_lifespan)) as client:
+        _login(client)
+        unauthorized_client = TestClient(create_app(lifespan=no_lifespan))
+        unauthorized = unauthorized_client.head(f"/api/v1/clips/{clip_id}/video")
+        missing = client.head("/api/v1/clips/clip-absent/video")
+        partial = client.head(
+            f"/api/v1/clips/{clip_id}/video",
+            headers={"Range": "bytes=2-5"},
+        )
+        unsatisfiable = client.head(
+            f"/api/v1/clips/{clip_id}/video",
+            headers={"Range": "bytes=99-"},
+        )
+        malformed = client.head(
+            f"/api/v1/clips/{clip_id}/video",
+            headers={"Range": "items=broken"},
+        )
+
+    assert unauthorized.status_code == 401
+    assert missing.status_code == 404
+    assert partial.status_code == 206
+    assert partial.content == b""
+    assert partial.headers["content-range"] == f"bytes 2-5/{len(VIDEO)}"
+    assert partial.headers["content-length"] == "4"
+    assert unsatisfiable.status_code == 416
+    assert unsatisfiable.headers["content-range"] == f"bytes */{len(VIDEO)}"
+    assert malformed.status_code == 400
+
+
+def test_get_video_range_handling_is_unchanged_by_head_support(clip_env: Path) -> None:
+    clip_id = "clip-head-get-regression"
+    _write_clip(clip_env, Path(), clip_id, f"clips/{clip_id}/clip.mp4")
+
+    with TestClient(create_app(lifespan=no_lifespan)) as client:
+        _login(client)
+        full = client.get(f"/api/v1/clips/{clip_id}/video")
+        partial = client.get(
+            f"/api/v1/clips/{clip_id}/video",
+            headers={"Range": "bytes=2-5"},
+        )
+        suffix = client.get(
+            f"/api/v1/clips/{clip_id}/video",
+            headers={"Range": "bytes=-3"},
+        )
+
+    assert full.status_code == 200
+    assert full.content == VIDEO
+    assert partial.status_code == 206
+    assert partial.content == VIDEO[2:6]
+    assert partial.headers["content-range"] == f"bytes 2-5/{len(VIDEO)}"
+    assert suffix.status_code == 206
+    assert suffix.content == VIDEO[-3:]
+    assert suffix.headers["content-range"] == f"bytes 7-9/{len(VIDEO)}"
