@@ -1,9 +1,5 @@
 from __future__ import annotations
 
-import json
-import os
-import re
-import subprocess
 from pathlib import Path
 from typing import Final, TypeAlias
 
@@ -304,93 +300,6 @@ def test_api_image_does_not_copy_worker_package() -> None:
     dockerfile = (REPO_ROOT / "Dockerfile.backend").read_text(encoding="utf-8")
 
     assert "COPY edge" not in dockerfile
-
-
-def test_rtsp_script_surface_uses_reusable_worker_names() -> None:
-    scripts_dir = REPO_ROOT / "scripts"
-    smoke_script = scripts_dir / "ml-worker-rtsp-smoke.sh"
-
-    assert (scripts_dir / "ml-worker-nursing-home-backend-e2e.sh").exists()
-    assert smoke_script.exists()
-    assert not (scripts_dir / "ml-edge-four-rtsp-smoke.sh").exists()
-    assert not (scripts_dir / "ml-edge-four-mock-rtsp-e2e.sh").exists()
-    assert not (scripts_dir / "ml-edge-four-mock-rtsp-ingest-e2e.sh").exists()
-
-    smoke_source = smoke_script.read_text(encoding="utf-8")
-    e2e_source = (scripts_dir / "ml-worker-nursing-home-backend-e2e.sh").read_text(encoding="utf-8")
-    assert "load_worker_config" in smoke_source
-    assert "expected exactly 4 cameras" not in smoke_source
-    assert "ml-edge-four" not in smoke_source
-    assert "NURSING_HOME_RTSP_URL" in e2e_source
-    assert "rtsp-loop-video.sh" not in e2e_source
-
-
-def test_real_rtsp_bedexit_script_uses_runtime_authorities_without_static_yaml(
-    tmp_path: Path,
-) -> None:
-    script = REPO_ROOT / "scripts/ml-worker-real-rtsp-bedexit-e2e.sh"
-    source = script.read_text(encoding="utf-8")
-    environment = {
-        **os.environ,
-        "RELAY_URL": "http://127.0.0.1:8000",
-        "RELAY_TOKEN": "relay-secret-1",
-        "E2E_DASHBOARD_USERNAME": "operator-secret-name",
-        "E2E_DASHBOARD_PASSWORD": "dashboard-secret-1",
-        "E2E_FACILITY_ID": "facility-1",
-        "E2E_CAMERA_ID": "camera-1",
-        "E2E_RESIDENT_ID": "resident-1",
-        "BED_EXIT_RTSP_URL": "rtsp://camera-user:camera-secret@camera-1.local/trackID=2",
-        "EVIDENCE_DIR": str(tmp_path / "evidence"),
-        "ML_EDGE_E2E_TMP_ROOT": str(tmp_path / "runtime"),
-    }
-
-    before = tuple(tmp_path.iterdir())
-    completed = subprocess.run(
-        [str(script), "--dry-run"],
-        check=True,
-        cwd=REPO_ROOT,
-        env=environment,
-        capture_output=True,
-        text=True,
-        stdin=subprocess.DEVNULL,
-        timeout=30,
-    )
-
-    assert tuple(tmp_path.iterdir()) == before
-    assert "/api/v1/cameras" in source
-    assert "/api/v1/detection-settings" in source
-    assert "/api/v1/relay/config" in source
-    assert "--config" not in source
-    assert "--render-config" not in source
-    assert not re.search(r"(?m)^\s*(?:cameras|models|domains|clip):\s*$", source)
-    assert "python -m worker" in source
-
-    assert json.loads(completed.stdout) == {
-        "mode": "dry-run",
-        "authority": {
-            "camera_registry": "http://127.0.0.1:8000/api/v1/cameras",
-            "detection_settings": "http://127.0.0.1:8000/api/v1/detection-settings",
-            "worker_config": "http://127.0.0.1:8000/api/v1/relay/config",
-        },
-        "worker_yaml": False,
-        "facility_id": "facility-1",
-        "camera_id": "camera-1",
-        "resident_id": "resident-1",
-        "rtsp_url": "rtsp://<redacted>",
-        "frames_per_pass": 3200,
-        "expected_detection_timezone": "Asia/Seoul",
-    }
-
-    output = completed.stdout + completed.stderr
-    for secret in (
-        "relay-secret-1",
-        "operator-secret-name",
-        "dashboard-secret-1",
-        "camera-user",
-        "camera-secret",
-        "camera-1.local",
-    ):
-        assert secret not in output
 
 
 def test_repo_does_not_own_rtsp_generation_surface() -> None:

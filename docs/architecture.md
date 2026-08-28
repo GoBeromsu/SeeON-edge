@@ -466,18 +466,18 @@ Bash 5.3.15 writes a heredoc body into a pipe before exec'ing the reader, so a
 body over `PIPE_BUF` blocks forever against a pipe nobody is draining — bash
 never execs the command. The boundary is exact: on macOS (`PIPE_BUF` 512) a
 512-byte body passes and 513 hangs; bash 3.2.57 stages heredocs in a temp file
-and is unaffected at any size. Four bash scripts under `scripts/` pin
-`#!/bin/bash` for this reason, which on macOS resolves to 3.2.57.
+and is unaffected at any size. The bash scripts under `scripts/` that pin
+`#!/bin/bash` do so for this reason, which on macOS resolves to 3.2.57.
 
 **That pin does not help on Linux.** There `PIPE_BUF` is 4096 and `/bin/bash` is
-itself a modern bash, so only the threshold moves. Measured at 4096, one script
-is exposed on a Linux edge host: `ml-worker-single-rtsp-bedexit-e2e.sh:139`
-carries a 7162-byte heredoc. Moving that body into a file is the durable fix.
+itself a modern bash, so only the threshold moves. Any heredoc body large enough
+to cross the platform `PIPE_BUF` is exposed on a Linux edge host; moving such a
+body into a file is the durable fix.
 
 `tests/test_shell_script_heredoc_contract.py` enforces the rule at the 512-byte
-threshold. CI is unaffected: the only script a test executes is
-`ml-worker-real-rtsp-bedexit-e2e.sh --render-config`, whose two heredocs on that
-path are 527 B and 797 B, both under the Linux threshold. Tracked in
+threshold. It is a general contract: it walks every remaining `scripts/**/*.sh`
+rather than naming individual scripts, so it keeps holding as the script surface
+changes. Tracked in
 [#9](https://github.com/SeniorAILab/eldercare-fall-ml-v2/issues/9), which
 carries the reproduction and the measured size census.
 

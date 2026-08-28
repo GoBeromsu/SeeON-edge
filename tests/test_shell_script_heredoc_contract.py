@@ -6,9 +6,10 @@ atomic and returns immediately; anything larger blocks until someone drains the
 pipe -- and the only would-be reader has not been exec'd yet. Bash deadlocks
 against itself: no output, no exit, forever.
 
-That is not hypothetical. It hung `ml-worker-real-rtsp-bedexit-e2e.sh` for
-operators and, through a contract test with no timeout, hung the entire pytest
-run. bash 3.2.57 stages heredocs in a temp file and is unaffected at any size.
+That is not hypothetical. It hung a since-removed real-RTSP e2e harness for
+operators and, through a since-removed contract test that ran it with no
+timeout, hung the entire pytest run. bash 3.2.57 stages heredocs in a temp
+file and is unaffected at any size.
 
 The instances were fixed by pinning `#!/bin/bash`. This test stops the next one
 from being added: a script that grows a heredoc past 512 bytes while still
