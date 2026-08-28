@@ -182,15 +182,36 @@ deleted.
 `docs/releases/<tag>.md` (when present), then the commit range since the
 previous `seeon-edge-v*` tag, then a pointer to the image digests.
 
-**The release event is what publishes the images.** The GitHub Release created
-by `release.yml` is not a prerelease, deliberately. `edge-images.yml` runs
-`on: release: types: [published]` and is gated on
-`github.event.release.prerelease == false`; publishing the release is therefore
-what builds and pushes `ml-api` and `ml-worker` to GHCR at the full commit SHA
-and uploads the `edge-ml-image-refs-<sha>` artifact carrying both `@sha256:`
-digests. A prerelease would create a release that publishes nothing. Take the
-two digest-pinned references from that artifact (or the run's step summary) —
-they are what `.env.edge.prod` pins.
+**Creating the release is what publishes the images — but not via the
+`release:` trigger.** `edge-images.yml` does carry
+`on: release: types: [published]`, and that trigger does **not** fire for a
+release `release.yml` creates. GitHub's rule: *"With the exception of
+`workflow_dispatch` and `repository_dispatch`, other `GITHUB_TOKEN`-triggered
+events do not create workflow runs at all."* The first release
+(`seeon-edge-v0.1.0`) proved it — the release was published and no image run
+started.
+
+So the release job dispatches `edge-images.yml` itself, on the tag
+(`gh workflow run edge-images.yml --ref "$TAG" -f ref="$TAG"`), which is the
+documented exception. Dispatching on the tag means the images are built from
+the released commit, never from whatever `main` has drifted to. The `release:`
+trigger stays in place for a release published by a human or a PAT.
+
+The release is still not a prerelease, deliberately: `edge-images.yml` is gated
+on `github.event.release.prerelease == false`, and a prerelease also reads to
+every operator as "do not deploy this".
+
+That run pushes `ml-api` and `ml-worker` to GHCR at the full commit SHA and
+uploads the `edge-ml-image-refs-<sha>` artifact carrying both `@sha256:`
+digests. Take the two digest-pinned references from that artifact (or the run's
+step summary) — they are what `.env.edge.prod` pins.
+
+If a release is ever published by hand, or the dispatch step fails, publish the
+images manually for the tag:
+
+```sh
+gh workflow run edge-images.yml --ref seeon-edge-v0.1.0 -f ref=seeon-edge-v0.1.0
+```
 
 The full sequence:
 
@@ -198,8 +219,9 @@ The full sequence:
 python3 scripts/release_guard.py --tag seeon-edge-v0.1.0   # carriers agree
 git tag -a seeon-edge-v0.1.0 -m "SeeON Edge v0.1.0"        # on the merge commit
 git push origin seeon-edge-v0.1.0
-gh run watch "$(gh run list --workflow=release.yml --limit 1 --json databaseId -q '.[0].databaseId')"
-gh run watch "$(gh run list --workflow=edge-images.yml --limit 1 --json databaseId -q '.[0].databaseId')"
+gh run watch "$(gh run list --workflow=release.yml --event=push --limit 1 --json databaseId -q '.[0].databaseId')"
+# the release job dispatches edge-images.yml; watch that run and take the digests
+gh run watch "$(gh run list --workflow=edge-images.yml --event=workflow_dispatch --limit 1 --json databaseId -q '.[0].databaseId')"
 gh run download <edge-images run id> -n "edge-ml-image-refs-<sha>"
 ```
 

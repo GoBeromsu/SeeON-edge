@@ -134,7 +134,7 @@ def test_release_write_scope_lives_only_on_the_job_that_creates_the_release() ->
     jobs = _jobs(workflow)
     assert set(jobs) == {"guard", "release"}
     assert "permissions" not in jobs["guard"]
-    assert jobs["release"]["permissions"] == {"contents": "write"}
+    assert jobs["release"]["permissions"] == {"actions": "write", "contents": "write"}
     # The release job runs only behind the guard, only on a tag, and never on a
     # rehearsal.
     assert jobs["release"]["needs"] == "guard"
@@ -171,6 +171,31 @@ def test_the_release_is_not_a_prerelease_because_that_is_what_publishes_images()
     assert "github.event.release.prerelease == false" in str(
         _jobs(images)["publish"]["if"]
     )
+
+
+def test_the_release_job_dispatches_the_image_build_itself() -> None:
+    """The `release:` trigger cannot fire for a release this workflow creates.
+
+    GitHub: "With the exception of `workflow_dispatch` and `repository_dispatch`,
+    other `GITHUB_TOKEN`-triggered events do not create workflow runs at all."
+    The release job therefore dispatches edge-images.yml explicitly, on the tag,
+    so the images are built from the released commit. Without this step a
+    release reports success and publishes nothing.
+    """
+    workflow = _workflow(RELEASE_WORKFLOW)
+    steps = _jobs(workflow)["release"]["steps"]  # type: ignore[index]
+    dispatch = [
+        step
+        for step in steps
+        if "gh workflow run edge-images.yml" in str(step.get("run", ""))
+    ]
+    assert len(dispatch) == 1, steps
+    run = str(dispatch[0]["run"])
+    # Dispatched on the tag AND building the tag: the sealed commit, not main.
+    assert '--ref "$TAG"' in run
+    assert '-f ref="$TAG"' in run
+    # Dispatching a workflow needs `actions: write`, and it is granted.
+    assert _jobs(workflow)["release"]["permissions"]["actions"] == "write"  # type: ignore[index]
 
 
 def test_database_format_identity_is_not_treated_as_the_product_version() -> None:

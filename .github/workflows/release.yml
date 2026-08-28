@@ -5,12 +5,25 @@ name: Release
 # composes the notes, and creates the GitHub Release itself. A human never
 # clicks "Draft a new release" -- doing so would skip the carrier guard below.
 #
-# Why the release must NOT be a prerelease: `.github/workflows/edge-images.yml`
-# runs `on: release: types: [published]` and is gated on
-# `github.event.release.prerelease == false`. Publishing this release is what
-# builds and pushes `ml-api` and `ml-worker` to GHCR at the full commit SHA and
-# uploads the `edge-ml-image-refs-<sha>` artifact holding both `@sha256:`
-# digests. A prerelease would create a release that publishes nothing.
+# Publishing the images: `.github/workflows/edge-images.yml` builds and pushes
+# `ml-api` and `ml-worker` to GHCR at the full commit SHA and uploads the
+# `edge-ml-image-refs-<sha>` artifact holding both `@sha256:` digests. It has an
+# `on: release: types: [published]` trigger, but THAT TRIGGER DOES NOT FIRE FOR
+# A RELEASE THIS WORKFLOW CREATES, and the first release proved it: a release
+# created with the default GITHUB_TOKEN raises no event that starts another run.
+# GitHub's rule, verbatim: "With the exception of `workflow_dispatch` and
+# `repository_dispatch`, other `GITHUB_TOKEN`-triggered events do not create
+# workflow runs at all."
+#
+# So the release job dispatches edge-images.yml explicitly, using the one
+# documented exception. The `release:` trigger stays where it is -- it still
+# fires for a release published by a human or a PAT -- and edge-images.yml's
+# `concurrency` group keys on the tag, so the explicit dispatch and a
+# hypothetical `release:` run of the same tag cannot both build.
+#
+# The release must still NOT be a prerelease: edge-images.yml is gated on
+# `github.event.release.prerelease == false`, and a prerelease also reads to
+# every operator as "do not deploy this".
 #
 # `workflow_dispatch` runs the same pipeline as a REHEARSAL: the guard and the
 # notes really run, and the release is not created. It is the way to find out
@@ -97,6 +110,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
+      # `contents: write` creates the release; `actions: write` dispatches
+      # edge-images.yml, which is the only way the images get published (see
+      # the GITHUB_TOKEN rule in the header).
+      actions: write
       contents: write
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -125,3 +142,23 @@ jobs:
             --notes-file release-notes.md \
             --verify-tag \
             --latest
+
+      - name: Publish the edge images for this tag
+        # Not belt-and-braces: this is the ONLY thing that publishes them. The
+        # `release: published` trigger on edge-images.yml never fires for the
+        # release created above, because GITHUB_TOKEN-raised events do not start
+        # workflow runs -- `workflow_dispatch` is one of the two documented
+        # exceptions, which is exactly what this step uses.
+        #
+        # Dispatched on the tag, so edge-images.yml runs the workflow file as it
+        # exists in the released commit and checks out that same commit
+        # (`DEPLOY_REF` is `inputs.ref`). The images are therefore built from the
+        # sealed SHA, never from whatever main has drifted to.
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          gh workflow run edge-images.yml --ref "$TAG" -f ref="$TAG"
+          echo "Dispatched edge-images.yml for $TAG. Both digest-pinned refs land in"
+          echo "the run's step summary and in the edge-ml-image-refs-<sha> artifact."
