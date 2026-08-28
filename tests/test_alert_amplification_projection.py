@@ -17,7 +17,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from backend.app.edge_db.migrator import migrate_database
+from backend.app.edge_db.bootstrap import bootstrap_database
 from backend.app.features.evidence.record_store import CentralEvidenceQuery
 from backend.app.features.evidence.relay_projection import RelayEvidenceProjection
 from backend.app.main import create_app, no_lifespan
@@ -59,7 +59,7 @@ def _event(edge_event_id: str = _EDGE_EVENT_ID) -> dict[str, object]:
 
 def _migrated(tmp_path: Path) -> Path:
     database = tmp_path / "edge.sqlite3"
-    migrate_database(database)
+    bootstrap_database(database)
     return database
 
 

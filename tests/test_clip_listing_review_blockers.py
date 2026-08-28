@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from backend.app.edge_db.migrator import migrate_database
+from backend.app.edge_db.bootstrap import bootstrap_database
 from backend.app.features.clips.store import ClipStore
 from backend.app.main import create_app, no_lifespan
 
@@ -71,7 +71,7 @@ def test_runtime_open_on_migrated_edge_database_executes_no_ddl(
     tmp_path: Path,
 ) -> None:
     path = tmp_path / "edge.sqlite3"
-    migrate_database(path)
+    bootstrap_database(path)
     from backend.app.edge_db.connection import RuntimeActor, open_runtime_database
 
     connection = open_runtime_database(path, actor=RuntimeActor.API)

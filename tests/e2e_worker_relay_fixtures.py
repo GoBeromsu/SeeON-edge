@@ -46,7 +46,7 @@ import uvicorn
 from numpy.typing import NDArray
 
 import worker.runtime.worker as worker_module
-from backend.app.edge_db.migrator import migrate_database
+from backend.app.edge_db.bootstrap import bootstrap_database
 from backend.app.features.cameras.store import CameraRegistryStore
 from backend.app.features.clips.catalog import CatalogStore
 from backend.app.features.status.runtime_status_store import (
@@ -423,7 +423,7 @@ class LiveBackend:
         # Shares the backend-owned current-schema edge database with the
         # runtime-status and clip catalog stores below.
         database_path = state_dir / "edge.sqlite3"
-        _ = migrate_database(database_path)
+        _ = bootstrap_database(database_path)
         registry = CameraRegistryStore(database_path)
         for camera_id, entry in camera_inventory.items():
             facility_id = entry.get("facility_id")

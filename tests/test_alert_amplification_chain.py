@@ -24,7 +24,7 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
-from backend.app.edge_db.migrator import migrate_database
+from backend.app.edge_db.bootstrap import bootstrap_database
 from backend.app.features.evidence.record_store import CentralEvidenceQuery
 from backend.app.main import create_app, no_lifespan
 from tests_support.alert_amplification_harness import (
@@ -130,7 +130,7 @@ def test_one_transition_yields_one_edge_backend_and_incident_identity(
 ) -> None:
     identity_path = tmp_path / "identities.jsonl"
     database = tmp_path / "edge.sqlite3"
-    migrate_database(database)
+    bootstrap_database(database)
 
     edge_event_id = _admit(identity_path, _transition("onset-1"), now_sec=100.0)
     stager = _stage_incident(tmp_path / "delivery-queue", edge_event_id)
@@ -182,7 +182,7 @@ def test_refire_fault_produces_two_edge_ids_for_one_physical_onset(
 ) -> None:
     identity_path = tmp_path / "identities.jsonl"
     database = tmp_path / "edge.sqlite3"
-    migrate_database(database)
+    bootstrap_database(database)
 
     # Test-only refire fault: the same physical onset is admitted under two
     # distinct source identities, which is exactly what worker refire looks

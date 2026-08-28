@@ -10,7 +10,7 @@ from urllib.request import Request, urlopen
 
 import pytest
 
-from backend.app.edge_db.migrator import migrate_database
+from backend.app.edge_db.bootstrap import bootstrap_database
 from shared.detection_policies import BedExitPolicyV1, FallPolicyV1, make_effective_policy
 from worker.pipeline.output.live_view import LatestFrameStore
 from worker.pipeline.output.mjpeg_server import MjpegServer, MjpegServerConfig
@@ -180,7 +180,7 @@ def test_packaged_replay_command_posts_without_persisting(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     database = tmp_path / "edge.sqlite3"
-    migrate_database(database)
+    bootstrap_database(database)
     trace_path = tmp_path / "trace.json"
     _ = trace_path.write_text(json.dumps(_trace()), encoding="utf-8")
     server = MjpegServer(LatestFrameStore(), MjpegServerConfig(port=0, probe_token=_TOKEN))
@@ -209,7 +209,7 @@ def test_packaged_replay_command_posts_without_persisting(
 
 def test_packaged_replay_command_missing_input_does_not_open_sqlite(tmp_path: Path) -> None:
     database = tmp_path / "edge.sqlite3"
-    migrate_database(database)
+    bootstrap_database(database)
     status = _replay_command().main(  # type: ignore[attr-defined]
         [
             "--database", str(database),
@@ -229,7 +229,7 @@ def test_packaged_replay_command_refuses_truncated_input_without_persisting(
     tmp_path: Path,
 ) -> None:
     database = tmp_path / "edge.sqlite3"
-    migrate_database(database)
+    bootstrap_database(database)
     trace = _trace()
     truncation = trace["truncation"]
     assert isinstance(truncation, dict)

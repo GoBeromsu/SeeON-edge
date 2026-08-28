@@ -7,7 +7,7 @@ from threading import Barrier
 
 from fastapi.testclient import TestClient
 
-from backend.app.edge_db.migrator import migrate_database
+from backend.app.edge_db.bootstrap import bootstrap_database
 from backend.app.features.evidence.record_store import (
     CentralEvidenceQuery,
     CentralEvidenceReviewStore,
@@ -80,7 +80,7 @@ def _insert_incident(
 
 def _database(tmp_path: Path, *, artifact_state: str | None = None) -> Path:
     database = tmp_path / "edge.sqlite3"
-    migrate_database(database)
+    bootstrap_database(database)
     with sqlite3.connect(database) as connection:
         connection.execute("PRAGMA foreign_keys = ON")
         _insert_incident(connection, artifact_state=artifact_state)

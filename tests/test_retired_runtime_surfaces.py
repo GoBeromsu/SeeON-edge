@@ -8,8 +8,8 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
+from backend.app.edge_db.bootstrap import bootstrap_database
 from backend.app.edge_db.compact_schema import COMPACT_APPLICATION_TABLES
-from backend.app.edge_db.migrator import migrate_database
 from backend.app.main import create_app
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -109,7 +109,7 @@ def test_reintroducing_status_sqlite_fails_this_named_boundary() -> None:
 
 def test_schema18_runtime_has_no_telemetry_qa_or_listing_tables(tmp_path: Path) -> None:
     database = tmp_path / "edge.sqlite3"
-    migrate_database(database)
+    bootstrap_database(database)
     with sqlite3.connect(database) as connection:
         tables = {
             str(row[0])
@@ -140,7 +140,7 @@ def test_authorizer_denies_telemetry_ddl(tmp_path: Path) -> None:
     from backend.app.edge_db.connection import RuntimeActor, open_runtime_database
 
     database = tmp_path / "edge.sqlite3"
-    migrate_database(database)
+    bootstrap_database(database)
     connection = open_runtime_database(database, actor=RuntimeActor.API)
     try:
         with pytest.raises(sqlite3.DatabaseError):

@@ -164,5 +164,5 @@ clip recorder는 부팅 시 **1회** sweep/rotate/admit 순서로 실행되도�
   등 설정이 부팅 시 1회만 반영되는 함정.
 - [`docs/operations/clip-retention-policy.md`](clip-retention-policy.md) —
   clip 보존/삭제 정책 상세.
-- [`docs/runbooks/worker-migration-rollback.md`](../runbooks/worker-migration-rollback.md) —
-  clip 저장소 볼륨을 실수로 삭제하지 않기 위한 규칙.
+- [`docs/architecture.md`](../architecture.md) "Image rollback preserves the state
+  volume" — 상태/clip 볼륨을 실수로 삭제하지 않기 위한 규칙.

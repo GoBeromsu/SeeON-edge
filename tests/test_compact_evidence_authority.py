@@ -8,8 +8,8 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
+from backend.app.edge_db.bootstrap import bootstrap_database
 from backend.app.edge_db.configuration import open_configuration_database
-from backend.app.edge_db.migrator import migrate_database
 from backend.app.features.cameras import store as camera_store_module
 from backend.app.features.cameras.store import CameraRegistryStore
 from backend.app.features.evidence.record_store import CentralEvidenceQuery
@@ -28,7 +28,7 @@ SNAPSHOT_BYTES = b"jpeg-snapshot"
 
 def _database(tmp_path: Path) -> Path:
     path = tmp_path / "edge.sqlite3"
-    migrate_database(path)
+    bootstrap_database(path)
     return path
 
 

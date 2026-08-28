@@ -202,30 +202,25 @@ type = "independence"
 modules = ["backend", "worker"]
 
 [[tool.importlinter.contracts]]
+# The create-only bootstrap is the sole module that executes DDL. Runtime
+# packages open an already-bootstrapped schema-18 database and never reach it.
 name = "runtime packages cannot import edge database DDL"
 type = "forbidden"
 source_modules = ["backend", "worker"]
-forbidden_modules = ["backend.app.edge_db.migrator", "backend.app.edge_db.schema"]
+forbidden_modules = ["backend.app.edge_db.bootstrap"]
 
 [[tool.importlinter.contracts]]
-# Serving/runtime schema-compatibility validates the schema-18 identity/table
-# manifest from current-schema DDL alone. The historical v1-v18 DDL ledger stays
-# migrator-only; the runtime schema check must never pull it into an API/worker
-# process. The broad contract above uses the whole `backend` package as source,
-# which does not catch intra-edge_db chains; this one pins the exact serving leaf.
-name = "schema-18 runtime compatibility stays free of the v1-v18 DDL ledger"
+# Serving/runtime schema-compatibility validates the schema-18 structural
+# manifest from current-schema DDL alone. The broad contract above uses the
+# whole `backend` package as source, which does not catch intra-edge_db chains;
+# this one pins the exact serving leaf.
+name = "schema-18 runtime compatibility stays free of the bootstrap DDL owner"
 type = "forbidden"
 source_modules = [
     "backend.app.edge_db.compatibility",
     "backend.app.edge_db.schema18_manifest",
 ]
-forbidden_modules = [
-    "backend.app.edge_db.schema",
-    "backend.app.edge_db.migrator",
-    "backend.app.edge_db.application_schema",
-    "backend.app.edge_db.evidence_backfill",
-    "backend.app.edge_db.review_migration",
-]
+forbidden_modules = ["backend.app.edge_db.bootstrap"]
 
 [[tool.importlinter.contracts]]
 name = "contracts is a leaf (imports nothing internal)"

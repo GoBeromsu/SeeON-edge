@@ -235,7 +235,7 @@ backfill rollback.
 
 Use the matching prior reference recorded in step 2. To roll back the worker,
 set only `ML_WORKER_IMAGE` to that prior `@sha256:` reference and run the direct
-single-service sequence in [worker-migration-rollback.md](worker-migration-rollback.md).
+single-service sequence in [edge-redeploy-identity-continuity.md](edge-redeploy-identity-continuity.md).
 To roll back `ml-api` or its frontend, use the same selected `EDGE_DC` form with
 `ML_API_IMAGE`, `pull ml-api`, `up -d --no-deps ml-api`, and an exact
 `docker inspect .Config.Image` comparison to the recorded API reference.

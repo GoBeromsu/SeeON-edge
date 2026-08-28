@@ -29,7 +29,7 @@ def test_backend_image_declares_frontend_build_arguments() -> None:
     assert "VITE_ML_API_RELAY_TOKEN" not in dockerfile
 
 
-def test_backend_image_includes_the_legacy_evidence_drain_script() -> None:
+def test_backend_image_includes_the_ops_scripts() -> None:
     dockerfile = (ROOT / "Dockerfile.backend").read_text(encoding="utf-8")
 
     assert "COPY scripts/ops ./scripts/ops" in dockerfile

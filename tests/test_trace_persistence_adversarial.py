@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from backend.app.edge_db.migrator import migrate_database
+from backend.app.edge_db.bootstrap import bootstrap_database
 from shared.events.delivery_queue import DeliveryQueue, EventEntry
 from worker.pipeline.trace import (
     AnalysisTrace,
@@ -45,7 +45,7 @@ def _manifest(*camera_ids: str) -> AppliedRuntimeManifest:
 
 
 def _seed(database: Path, *bindings: tuple[str, str]) -> None:
-    migrate_database(database)
+    bootstrap_database(database)
     store = AppliedRuntimeManifestStore(database)
     for boot_id, camera_id in bindings:
         store.persist(

@@ -1131,9 +1131,9 @@ def test_status_keeps_unknown_camera_beside_known_mapped_camera(
 
 def test_latency_is_latest_memory_only_and_missing_after_restart(tmp_path: Path) -> None:
     database = tmp_path / "edge.sqlite3"
-    from backend.app.edge_db.migrator import migrate_database
+    from backend.app.edge_db.bootstrap import bootstrap_database
 
-    migrate_database(database)
+    bootstrap_database(database)
     store = RuntimeStatusStore()
     store.record_latency("facility-1", "1970-01-01T00:00:00Z", received_at=10.0)
     store.record_latency("facility-1", "1970-01-01T00:00:00Z", received_at=20.0)

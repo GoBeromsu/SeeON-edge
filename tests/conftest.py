@@ -9,8 +9,7 @@ from pathlib import Path
 import pytest
 from lstm_test_artifact import write_test_lstm_artifact
 
-from backend.app.edge_db import compact_cutover
-from backend.app.edge_db.migrator import migrate_database
+from backend.app.edge_db.bootstrap import bootstrap_database
 from backend.app.features.connection.store import ConnectionSettingsStore
 from backend.app.shared.dashboard_credentials import DashboardCredentialsStore
 
@@ -27,18 +26,12 @@ def packaged_lstm_artifact(
     return artifact
 
 
-@pytest.fixture
-def supported_compact_cutover_sqlite(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Inject a safe runtime only through the private library seam."""
-    monkeypatch.setattr(compact_cutover, "_runtime_sqlite_version", lambda: (3, 51, 3))
-
-
 @pytest.fixture(autouse=True)
 def isolate_central_edge_database(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> Iterator[None]:
     database = tmp_path / ".central-fixture" / "edge.sqlite3"
-    migrate_database(database)
+    bootstrap_database(database)
     modules = (
         "backend.app.lifespan",
         "backend.app.features.audit.store",

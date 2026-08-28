@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from backend.app.edge_db.migrator import migrate_database
+from backend.app.edge_db.bootstrap import bootstrap_database
 from backend.app.features.cameras.edge_topology_sync_state import (
     EdgeTopologySyncStateStore,
     PendingTopologySnapshot,
@@ -37,7 +37,7 @@ PRINCIPAL = MachinePrincipal("c72bd9a7-3e04-47ba-a8cd-a56e54f98152", 1)
 @pytest.fixture(autouse=True)
 def _enrolled_compact_database(tmp_path: Path) -> None:
     path = tmp_path / "catalog.sqlite3"
-    migrate_database(path)
+    bootstrap_database(path)
     ConnectionSettingsStore(path).save(
         {
             "facility_code": "NH-1234",
@@ -52,7 +52,7 @@ def _enrolled_compact_database(tmp_path: Path) -> None:
 
 def _ready_registry(path: Path) -> CameraRegistryStore:
     if not path.exists():
-        migrate_database(path)
+        bootstrap_database(path)
         ConnectionSettingsStore(path).save(
             {
                 "facility_code": "NH-1234",

@@ -14,7 +14,7 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from backend.app.core.config import get_settings
-from backend.app.edge_db.migrator import migrate_database
+from backend.app.edge_db.bootstrap import bootstrap_database
 from backend.app.features.cameras.router import _authorize_worker
 from backend.app.features.cameras.store import CameraRegistryStore, public_camera
 from backend.app.features.status.heartbeat_store import get_heartbeat_store
@@ -37,8 +37,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 @pytest.fixture(autouse=True)
 def _migrated_compact_databases(tmp_path: Path) -> None:
-    migrate_database(tmp_path / "catalog.sqlite3")
-    migrate_database(tmp_path / "connection-settings.sqlite3")
+    bootstrap_database(tmp_path / "catalog.sqlite3")
+    bootstrap_database(tmp_path / "connection-settings.sqlite3")
 
 
 # Dashboard auth now always resolves to a session store (persisted file > env
@@ -2004,7 +2004,7 @@ def test_list_cameras_status_matches_heartbeat_under_either_local_or_backend_id(
         app = create_app(lifespan=no_lifespan)
         app.state.edge_relay_token = "relay-token"
         database = tmp_path / str(uuid.uuid4()) / "edge.sqlite3"
-        migrate_database(database)
+        bootstrap_database(database)
         store = app.state.camera_registry = CameraRegistryStore(database)
         store.create(
             camera_id="loc-12",

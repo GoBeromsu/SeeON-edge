@@ -19,7 +19,7 @@ from types import SimpleNamespace
 import pytest
 from fastapi.testclient import TestClient
 
-from backend.app.edge_db.migrator import migrate_database
+from backend.app.edge_db.bootstrap import bootstrap_database
 from backend.app.features.audit.catalog import AuditAction
 from backend.app.features.audit.store import AuditEvent, AuditRecord, AuditStore
 from backend.app.features.clips import artifacts as artifact_module
@@ -198,7 +198,7 @@ def test_delete_unknown_clip_reports_truthful_missing_status(
     duplicate request against an already-purged (and now file-absent) clip.
     """
     database = artifact_module.EDGE_DATABASE_PATH
-    migrate_database(database)
+    bootstrap_database(database)
     server = _worker_server(database, clip_store)
     _wire_worker_origin(monkeypatch, server)
 
@@ -224,7 +224,7 @@ def test_backend_commits_pending_and_request_audit_before_worker_filesystem_dele
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     database = artifact_module.EDGE_DATABASE_PATH
-    migrate_database(database)
+    bootstrap_database(database)
     _seed_published_clip(database, clip_store)
     observed: list[tuple[str, list[tuple[str]]]] = []
 
@@ -264,7 +264,7 @@ def test_delete_reaches_real_worker_purges_and_is_idempotent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     database = artifact_module.EDGE_DATABASE_PATH
-    migrate_database(database)
+    bootstrap_database(database)
     _seed_published_clip(database, clip_store)
     server = _worker_server(database, clip_store)
     _wire_worker_origin(monkeypatch, server)
@@ -307,7 +307,7 @@ def test_delete_worker_control_failure_is_reported_and_audited(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     database = artifact_module.EDGE_DATABASE_PATH
-    migrate_database(database)
+    bootstrap_database(database)
     _seed_published_clip(database, clip_store)
     monkeypatch.setattr(
         "backend.app.features.clips.router.preflight_clip_deletion",
@@ -342,7 +342,7 @@ def test_hold_preflight_leaves_state_files_and_audit_untouched(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     database = artifact_module.EDGE_DATABASE_PATH
-    migrate_database(database)
+    bootstrap_database(database)
     _seed_published_clip(database, clip_store)
     monkeypatch.setattr(
         "backend.app.features.clips.router.preflight_clip_deletion",
@@ -376,7 +376,7 @@ def test_request_audit_full_rolls_back_pending_and_never_commands_worker(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     database = artifact_module.EDGE_DATABASE_PATH
-    migrate_database(database)
+    bootstrap_database(database)
     _seed_published_clip(database, clip_store)
 
     class FullAuditStore(AuditStore):
@@ -421,7 +421,7 @@ def test_post_delete_completion_failure_reconciles_once_on_startup(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     database = artifact_module.EDGE_DATABASE_PATH
-    migrate_database(database)
+    bootstrap_database(database)
     _seed_published_clip(database, clip_store)
     server = _worker_server(database, clip_store)
     _wire_worker_origin(monkeypatch, server)

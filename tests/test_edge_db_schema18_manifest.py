@@ -5,9 +5,9 @@ from pathlib import Path
 
 import pytest
 
+from backend.app.edge_db.bootstrap import bootstrap_database
 from backend.app.edge_db.compatibility import SchemaLedgerError
 from backend.app.edge_db.connection import RuntimeActor, open_runtime_database
-from backend.app.edge_db.migrator import migrate_database
 from backend.app.edge_db.schema18_manifest import (
     compile_schema18_manifest,
     read_schema18_manifest,
@@ -16,7 +16,7 @@ from backend.app.edge_db.schema18_manifest import (
 
 def _fresh(tmp_path: Path) -> Path:
     database = tmp_path / "edge.sqlite3"
-    migrate_database(database)
+    bootstrap_database(database)
     return database
 
 

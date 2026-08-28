@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from backend.app.edge_db.bootstrap import bootstrap_database
 from backend.app.edge_db.compatibility import EdgeDatabaseError
 from backend.app.edge_db.connection import (
     RuntimeActor,
@@ -17,7 +18,6 @@ from backend.app.edge_db.connection import (
     open_runtime_database,
     write_transaction,
 )
-from backend.app.edge_db.migrator import migrate_database
 
 
 def _hold_worker_write(database: str, channel: Connection) -> None:
@@ -64,7 +64,7 @@ def _hold_runtime_open(database: str, actor: str, channel: Connection) -> None:
 
 
 def _prepare_database(path: Path) -> None:
-    migrate_database(path)
+    bootstrap_database(path)
     connection = sqlite3.connect(path)
     try:
         connection.execute(
@@ -94,7 +94,7 @@ def test_public_migration_refuses_while_runtime_holds_deployment_lock(
 
     try:
         with pytest.raises(EdgeDatabaseError, match="deployment lock.*running runtime"):
-            migrate_database(database_path)
+            bootstrap_database(database_path)
     finally:
         parent_channel.send("CLOSE")
         assert parent_channel.poll(10), f"{actor.value} runtime did not close"
@@ -132,7 +132,7 @@ def test_module_cli_refuses_while_runtime_holds_deployment_lock(tmp_path: Path) 
     assert runtime.exitcode == 0
     assert completed.returncode == 1
     assert completed.stdout == ""
-    assert "EDGE_DB_MIGRATION_FAILED" in completed.stderr
+    assert "EDGE_DB_BOOTSTRAP_FAILED" in completed.stderr
     assert "deployment lock" in completed.stderr
     assert "running runtime" in completed.stderr
 

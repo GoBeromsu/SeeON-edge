@@ -9,12 +9,10 @@ restart that replaced the container.
 
 That voids the guarantee this entire release unit exists to provide: the durable
 delivery queue replaced runtime SQLite precisely so evidence survives a backend
-outage. It also made the pre-v17 filesystem gate decorative, because the
-inventory service scanned a volume nothing had ever written to and always
-reported clear.
+outage.
 
-The three views must agree: what the worker is told to use, what Compose mounts
-for it, and what the inventory gate scans.
+The two views must agree: what the worker is told to use and what Compose mounts
+for it.
 """
 
 from __future__ import annotations
@@ -25,8 +23,6 @@ from pathlib import Path
 _ROOT = Path(__file__).resolve().parents[1]
 _COMPOSE = (_ROOT / "compose.edge.yaml").read_text(encoding="utf-8")
 
-#: The subdirectory `DurableEvidenceStager` and the inventory gate both use.
-_QUEUE_SUBDIR = "delivery-queue"
 
 
 def _service_block(name: str) -> str:
@@ -57,43 +53,6 @@ def test_the_worker_is_told_to_use_its_mounted_state_volume() -> None:
     assert match.group(1) == mounted, (
         f"ml-worker is told to use {match.group(1)!r} but its worker-local-state "
         f"volume is mounted at {mounted!r}; the queue would not be on the volume"
-    )
-
-
-def test_the_inventory_gate_scans_the_same_volume_the_worker_writes() -> None:
-    """A gate reading a different volume always reports clear."""
-    worker_block = _service_block("ml-worker")
-    inventory_block = _service_block("edge-filesystem-inventory")
-
-    # Same volume, mounted in both services. The container paths may differ; the
-    # volume identity is what makes the gate see the worker's queue.
-    _mount_target(worker_block, "worker-local-state")
-    inventory_target = _mount_target(inventory_block, "worker-local-state")
-
-    from backend.app.edge_db.inventory import DEFAULT_RUNTIME_STATE_DIR
-
-    assert str(DEFAULT_RUNTIME_STATE_DIR) == inventory_target, (
-        f"the inventory gate scans {DEFAULT_RUNTIME_STATE_DIR} but its "
-        f"worker-local-state volume is mounted at {inventory_target}; it would "
-        f"inspect an empty directory and wave the cutover through"
-    )
-
-
-def test_both_ends_agree_on_where_the_queue_lives_inside_the_volume() -> None:
-    """Same volume is not enough; they must look at the same subdirectory."""
-    from backend.app.edge_db import inventory as inventory_module
-    from worker.runtime.worker import _delivery_queue_dir
-
-    probe = Path("/probe-state")
-    assert _delivery_queue_dir(probe) == probe / _QUEUE_SUBDIR, (
-        "the worker's queue directory helper changed shape; the inventory gate "
-        "would scan the wrong subdirectory"
-    )
-    assert _QUEUE_SUBDIR in inventory_module.__doc__ or _QUEUE_SUBDIR in (
-        (_ROOT / "backend/app/edge_db/inventory.py").read_text(encoding="utf-8")
-    ), (
-        f"the inventory gate does not reference {_QUEUE_SUBDIR!r}, so it is not "
-        f"scanning the directory the worker writes"
     )
 
 

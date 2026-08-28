@@ -149,10 +149,10 @@ def test_persisted_analysis_recovery_is_retired() -> None:
 def test_schema18_does_not_grow_runtime_analysis_tables(tmp_path: Path) -> None:
     import sqlite3
 
-    from backend.app.edge_db.migrator import migrate_database
+    from backend.app.edge_db.bootstrap import bootstrap_database
 
     database = tmp_path / "edge.sqlite3"
-    migrate_database(database)
+    bootstrap_database(database)
     with sqlite3.connect(database) as connection:
         tables = {
             str(row[0])

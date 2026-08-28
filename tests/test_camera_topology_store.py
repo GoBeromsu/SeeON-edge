@@ -5,7 +5,7 @@ import sqlite3
 
 import pytest
 
-from backend.app.edge_db.migrator import migrate_database
+from backend.app.edge_db.bootstrap import bootstrap_database
 from backend.app.features.cameras.store import CameraRegistryStore
 from backend.app.features.cameras.topology import TopologyConflictError, TopologyErrorCode
 from contracts.edge_provisioning_models import EdgeErrorCode
@@ -13,7 +13,7 @@ from contracts.edge_provisioning_models import EdgeErrorCode
 
 @pytest.fixture(autouse=True)
 def _migrated_compact_database(tmp_path) -> None:
-    migrate_database(tmp_path / "catalog.sqlite3")
+    bootstrap_database(tmp_path / "catalog.sqlite3")
 
 
 def test_topology_identity_survives_rename_and_restart(tmp_path) -> None:

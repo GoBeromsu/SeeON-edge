@@ -1,22 +1,18 @@
-"""Schema compatibility policy shared by DDL-free API and worker runtimes."""
+"""Schema-18 compatibility guard shared by every DDL-free runtime connection."""
 
 from __future__ import annotations
 
 import sqlite3
-from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Final
 
-from backend.app.edge_db.ownership import COMPACT_APPLICATION_TABLES, TABLE_FAMILIES
+from backend.app.edge_db.ownership import COMPACT_APPLICATION_TABLES
 from backend.app.edge_db.schema18_manifest import (
     compile_schema18_manifest,
     read_schema18_manifest,
 )
-from shared.release_identity import (
-    EDGE_DATABASE_FORMAT_IDENTITY,
-    EDGE_DATABASE_SCHEMA_VERSION,
-)
+from shared.release_identity import EDGE_DATABASE_SCHEMA_VERSION
 
 
 class EdgeDatabaseError(RuntimeError):
@@ -25,11 +21,18 @@ class EdgeDatabaseError(RuntimeError):
 
 @dataclass(slots=True)
 class MigrationRequiredError(EdgeDatabaseError):
+    """The database is absent or below schema 18; only a fresh bootstrap can create it."""
+
     found: int
     minimum: int
 
     def __str__(self) -> str:
-        return f"edge database schema {self.found} requires migration to at least {self.minimum}"
+        if self.found == 0:
+            return f"edge database is not bootstrapped; schema {self.minimum} is required"
+        return (
+            f"edge database schema {self.found} is below required {self.minimum} "
+            "and no migration path exists"
+        )
 
 
 @dataclass(slots=True)
@@ -42,11 +45,7 @@ class NewerSchemaError(EdgeDatabaseError):
 
 
 class SchemaLedgerError(EdgeDatabaseError):
-    """The version marker and machine-readable schema ledger disagree."""
-
-
-class OwnershipMapError(EdgeDatabaseError):
-    """The on-disk table-family writer map differs from the compiled contract."""
+    """The version marker and the on-disk schema disagree with the compiled contract."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,111 +66,21 @@ class CompatibilityDisposition(StrEnum):
 
 MigrationIdentity = tuple[int, str, str]
 
-# Runtime-safe canonical identities are deliberately separate from schema.py's
-# DDL. The migrator and tests reject drift between this registry and the actual
-# migration objects; runtime packages never need to import migration statements.
-CANONICAL_MIGRATION_LEDGER: Final[tuple[MigrationIdentity, ...]] = (
-    (
-        1,
-        "edge_database_foundation",
-        "a4b4147ac858c3bdc9c4438e14b8165258e6d032c93f588aeda0067e4fdb20a5",
-    ),
-    (
-        2,
-        "single_edge_application_schema",
-        "201bbc542e31350e3fdb76c57972b0d2b2e15aa70a9614ea959e2fb078e6123f",
-    ),
-    (
-        3,
-        "initialize_clip_listing_generation",
-        "61189f418332f22918587b0f72395caef504b77bb93da08bf3d8a4979f613e08",
-    ),
-    (
-        4,
-        "versioned_numeric_detection_policies",
-        "50021b0d36d25508cfdc9931f58e5f27a409c7b9b7757f70623dec76bd99dc35",
-    ),
-    (
-        5,
-        "applied_runtime_provenance_manifests",
-        "57bbf42982b9c02307b87b4fbe04de6d25779c91178c6ca55a30b5ffd8b8ed57",
-    ),
-    (
-        6,
-        "bounded_analysis_decision_traces",
-        "083dbb6457739d46e36248df9a65d1c505a49596395e0ae27eb1b3e43a306819",
-    ),
-    (
-        7,
-        "trace_persistence_integrity_and_bounds",
-        "0296bbe4fa10eb324a606051ad57d05cd7415ece47c1643960761ab70e1a670a",
-    ),
-    (
-        8,
-        "truthful_trace_component_states",
-        "f2190fb59a685aa60a13e439d90787bc489b3a27754168a7dbecdf568456a93d",
-    ),
-    (
-        9,
-        "authoritative_central_evidence_records",
-        "c698903ad864a78ef134a91084afe9cf91488bf5c53141b72e3c6465305c0319",
-    ),
-    (
-        10,
-        "versioned_operator_evidence_reviews",
-        "e52017eb2f393d4d654f60f1d1c7ac16bb441e069d9da86ce9265d439ca8ddc0",
-    ),
-    (
-        11,
-        "exhaustive_evidence_unavailable_reasons",
-        "0b00e127d29bfd60202e96cd242d8926902e6e0f9bd4cec01eaf5b75eacdf257",
-    ),
-    (
-        12,
-        "retire_legacy_system_test_operator_state",
-        "5bb3aca4d85ef7f0f448747dd6b6903c768d69c9be157da12e26c3dea095ff92",
-    ),
-    (
-        13,
-        "canonical_overlay_scenes_and_derivatives",
-        "f77b5154932bfb8ecbe0fd1dd63a906c0d6f90e3541c347fc049a37cbc32809d",
-    ),
-    (
-        14,
-        "still_video_derivative_lifecycle",
-        "dcdf072bda75f38169ca796e9b1d7c66c0c2e8a507b54c1eca590431ba073845",
-    ),
-    (
-        15,
-        "internal_replay_qa",
-        "c29d47b081fc8920e5b0ca77bff51913cb38d6dd8f353df9b847dccb9d95d375",
-    ),
-    (
-        16,
-        "live_runtime_clip_export_settings",
-        "a2a515c71e1ca57d62c423ed88c95ddec6a1bd5d4c22c6e02d4494312f4b8270",
-    ),
-    (
-        17,
-        "backend_only_application_ownership",
-        "5bcd20e69f38bc5af6280099f5d8a7740a44027de3dae392dbaa0135d7935fa1",
-    ),
-    (
-        18,
-        "strict_ten_table_application_schema",
-        "d43dbc02e395e3df5117f7dc96814a87299f949cac7195cc72fb950d60964c9c",
-    ),
+# The frozen ledger identity of schema 18. The checksum is the historical
+# release value every deployed schema-18 database already records; it is a
+# constant, not a hash of the current DDL, so it stays stable across the
+# retirement of the v1-v18 migration ledger.
+SCHEMA_18_IDENTITY: Final[MigrationIdentity] = (
+    EDGE_DATABASE_SCHEMA_VERSION,
+    "strict_ten_table_application_schema",
+    "d43dbc02e395e3df5117f7dc96814a87299f949cac7195cc72fb950d60964c9c",
 )
 
-# Explicit rolling-version matrix. Both runtimes require the complete cutover schema.
+# Explicit rolling-version matrix: exactly one schema is supported.
 CURRENT_SCHEMA_RANGE: Final = SchemaCompatibility(
     minimum=EDGE_DATABASE_SCHEMA_VERSION,
     maximum=EDGE_DATABASE_SCHEMA_VERSION,
 )
-# The migration runbook drains schema-16 evidence before applying schema 17.  This
-# range is deliberately private to that one maintenance operation; serving stays
-# pinned to CURRENT_SCHEMA_RANGE.
-LEGACY_EVIDENCE_DRAIN_SCHEMA_RANGE: Final = SchemaCompatibility(minimum=16, maximum=17)
 COMPATIBILITY_MATRIX: Final = (
     ("database_version < minimum", CompatibilityDisposition.MIGRATION_REQUIRED),
     ("minimum <= database_version <= maximum", CompatibilityDisposition.COMPATIBLE),
@@ -193,10 +102,8 @@ def classify_schema(
 def verify_runtime_schema(
     connection: sqlite3.Connection,
     compatibility: SchemaCompatibility = CURRENT_SCHEMA_RANGE,
-    *,
-    expected_migrations: Sequence[MigrationIdentity] = CANONICAL_MIGRATION_LEDGER,
 ) -> int:
-    """Verify version, ledger continuity, format identity, and writer ownership."""
+    """Verify the version marker, the schema-18 ledger row, and the structural contract."""
     row = connection.execute("PRAGMA user_version").fetchone()
     version = 0 if row is None else int(row[0])
     disposition = classify_schema(version, compatibility)
@@ -211,44 +118,16 @@ def verify_runtime_schema(
         ).fetchall()
     except sqlite3.Error as error:
         raise SchemaLedgerError("edge database schema ledger is missing or unreadable") from error
+    # A freshly bootstrapped database records only the schema-18 row; a database
+    # that reached schema 18 through the retired migration ledger also carries
+    # the historical rows 1-17. Both are schema 18: the newest row must be the
+    # frozen identity and nothing may sit beyond it.
+    if not ledger or tuple(ledger[-1]) != SCHEMA_18_IDENTITY:
+        raise SchemaLedgerError("applied schema ledger does not end at schema 18")
+    if [int(entry[0]) for entry in ledger] != sorted({int(entry[0]) for entry in ledger}):
+        raise SchemaLedgerError("applied schema ledger is not a strict version sequence")
 
-    expected_ledger = list(expected_migrations[:version])
-    if ledger != expected_ledger:
-        raise SchemaLedgerError("applied migration ledger differs from this migrator")
-
-    if version == 18 and len(expected_migrations) == EDGE_DATABASE_SCHEMA_VERSION:
-        _verify_compact_application_tables(connection)
-        return version
-    if version >= 18:
-        return version
-
-    try:
-        format_row = connection.execute(
-            "SELECT value FROM schema_metadata WHERE key = 'format'"
-        ).fetchone()
-        families = connection.execute(
-            "SELECT prefix, writer, purpose FROM schema_table_families ORDER BY prefix"
-        ).fetchall()
-    except sqlite3.Error as error:
-        raise SchemaLedgerError("edge database schema ledger is missing or unreadable") from error
-
-    if format_row != (EDGE_DATABASE_FORMAT_IDENTITY,):
-        raise SchemaLedgerError("edge database format identity is invalid")
-
-    expected_families = sorted(
-        (family.prefix, family.writer.value, family.purpose) for family in TABLE_FAMILIES
-    )
-    if version < 17:
-        expected_families = [
-            (
-                prefix,
-                "worker" if prefix in {"runtime_", "evidence_", "derivative_"} else writer,
-                "applied worker runtime state" if prefix == "runtime_" else purpose,
-            )
-            for prefix, writer, purpose in expected_families
-        ]
-    if families != expected_families:
-        raise OwnershipMapError("edge database table-family ownership map is invalid")
+    _verify_compact_application_tables(connection)
     return version
 
 
@@ -275,16 +154,14 @@ def _verify_compact_application_tables(connection: sqlite3.Connection) -> None:
 
 
 __all__ = [
-    "CANONICAL_MIGRATION_LEDGER",
     "COMPATIBILITY_MATRIX",
     "CURRENT_SCHEMA_RANGE",
-    "LEGACY_EVIDENCE_DRAIN_SCHEMA_RANGE",
+    "SCHEMA_18_IDENTITY",
     "CompatibilityDisposition",
     "EdgeDatabaseError",
     "MigrationIdentity",
     "MigrationRequiredError",
     "NewerSchemaError",
-    "OwnershipMapError",
     "SchemaCompatibility",
     "SchemaLedgerError",
     "classify_schema",

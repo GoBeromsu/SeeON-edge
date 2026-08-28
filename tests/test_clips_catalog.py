@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 from fastapi import FastAPI
 
-from backend.app.edge_db.migrator import migrate_database
+from backend.app.edge_db.bootstrap import bootstrap_database
 from backend.app.features.cameras.store import CameraRegistryStore
 from backend.app.features.clips import catalog as catalog_module
 from backend.app.features.clips.catalog import (
@@ -688,7 +688,7 @@ def test_catalog_migration_from_v2_adds_v3_tables_without_touching_legacy_camera
 
 def test_camera_registry_and_credentials_share_externally_migrated_schema18(tmp_path) -> None:
     path = tmp_path / "edge.sqlite3"
-    migrate_database(path)
+    bootstrap_database(path)
 
     camera_store = CameraRegistryStore(path)
     camera_store.create(

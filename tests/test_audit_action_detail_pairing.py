@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from backend.app.edge_db.migrator import migrate_database
+from backend.app.edge_db.bootstrap import bootstrap_database
 from backend.app.features.audit.catalog import AuditAction, empty_detail
 from backend.app.features.audit.store import (
     AuditEvent,
@@ -17,7 +17,7 @@ from backend.app.features.audit.store import (
 
 def test_action_detail_pairing_rejects_a_different_valid_action(tmp_path: Path) -> None:
     path = tmp_path / "wrong-detail.sqlite3"
-    migrate_database(path)
+    bootstrap_database(path)
     event = AuditEvent(
         utc_now(),
         "test",

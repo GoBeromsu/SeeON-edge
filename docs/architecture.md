@@ -25,37 +25,59 @@ The backend alone owns `/var/lib/seeon-state/edge.sqlite3`; the database,
 `0700` local directory and the database is `0600`. The runtime slot has no
 database mount and never opens, migrates, or repairs a SQLite database.
 
-Only the one-shot `python -m backend.app.edge_db.compact_cutover` migrator executes DDL
-or advances `PRAGMA user_version`. Backend connections verify the machine-readable
-migration ledger and ownership map, enable foreign keys, use WAL with
-`synchronous=FULL` and a fixed 5000 ms busy timeout, and are guarded by a SQLite
-authorizer that rejects DDL and unauthorized writes. Transactions are short:
-never hold one across hash, fsync, HTTP, or other external work.
+### Schema 18 is the sole schema; bootstrap is create-only
+
+There is exactly one edge database schema: schema 18, the compact ten-table
+contract in `backend/app/edge_db/compact_schema_ddl.py`. The v1-v18 migration
+ledger, the schema-17 to schema-18 cutover, the legacy state import, and the
+drain and inventory gates were retired (2026-08-28); nothing migrates a database
+any more.
+
+Only the one-shot `python -m backend.app.edge_db` bootstrap
+(`backend/app/edge_db/bootstrap.py`, run by the `edge-db-migrator` compose
+service before `ml-api`) executes DDL or sets `PRAGMA user_version`. Its
+contract:
+
+| `edge.sqlite3` on the `edge-state` volume | Bootstrap behavior |
+| --- | --- |
+| absent or empty | create schema 18 in one transaction, record the single `schema_migrations` row, `user_version = 18`, print `EDGE_DB_BOOTSTRAP_OK ... created=true` |
+| schema 18 | verify the ledger row, the ten STRICT tables, and the structural manifest; mutate nothing; print `EDGE_DB_BOOTSTRAP_OK ... created=false` |
+| any other `user_version` | refuse with `EDGE_DB_BOOTSTRAP_FAILED` and leave the file byte-identical; there is no upgrade path |
+| `user_version = 0` but tables exist | refuse; never bootstrap over foreign data |
+
+The bootstrap holds the exclusive `deployment.lock` that every runtime
+connection takes shared, so it refuses while a runtime is open and runtimes
+refuse while it runs. A database that reached schema 18 through the retired
+ledger (rows 1-17 plus 18 in `schema_migrations`) is accepted: the newest row
+must be the frozen schema-18 identity and nothing may sit beyond it.
+
+Backend connections verify that contract on open, enable foreign keys, use WAL
+with `synchronous=FULL` and a fixed 5000 ms busy timeout, and are guarded by a
+SQLite authorizer that rejects DDL and unauthorized writes. Transactions are
+short: never hold one across hash, fsync, HTTP, or other external work.
 
 | Table | Sole writer |
 | --- | --- |
-| `schema_migrations` | one-shot migrator |
-| compact application tables | backend API |
+| `schema_migrations` | one-shot bootstrap |
+| the nine application tables | backend API |
 
-Schema compatibility is an explicit inclusive range, not an optimistic open.
-Schema 18 is the compact ten-table contract. Registration refuses to apply
-schema 18 while undrained schema-17 evidence remains, emits
-`EDGE_DB_DRAIN_INCOMPLETE`, and leaves the schema-17 database byte-identical.
+Schema compatibility is an explicit inclusive range, `18..18`:
 
 | Database version relative to binary range | Runtime behavior |
 | --- | --- |
-| below minimum | refuse; migrator required |
-| minimum through maximum | open read/write with ownership guard, no DDL |
+| below minimum (including no database) | refuse; bootstrap required |
+| 18 | open read/write with ownership guard, no DDL |
 | above maximum | refuse; binary is too old |
 
-The central database is forward-only and requires the complete cutover schema.
-Temporary SYSTEM_TEST operator-only rows and their `system_test_runs` mapping are
-retired on the same forward-only path as released main outbox schema 9: legacy
-worker snapshots may still contain them, but the central migrator and stopped-
-runtime importer purge operator-only events (and dependent central projections)
-while preserving ordinary evidence, clips, config/fault rows, and clip-deletion
-reasons. No runtime CLI flag, relay route, or sender API retains executable
-SYSTEM_TEST authority.
+### Image rollback preserves the state volume
+
+Rollback is binary-only and image-digest based. Pin the previous `@sha256:`
+digests in `ML_API_IMAGE` / `ML_WORKER_IMAGE`, never a mutable tag, and restart
+in the fixed order `edge-db-migrator` -> `ml-api` (healthy) -> `ml-worker`. The
+previous images must support schema 18; there is no older schema to fall back
+to. Never run `down -v`, never delete the `edge-state` volume, and never repair
+`edge.sqlite3` with direct SQL. The redeploy sequence itself is in
+[`docs/runbooks/edge-redeploy-identity-continuity.md`](runbooks/edge-redeploy-identity-continuity.md).
 
 ## Layers
 
@@ -262,7 +284,7 @@ is a loud failure, per ADR-0002.
 | Evidence delivery enabled but misconfigured or unable to initialise | global | worker refuses to start rather than run with alerts stranded in the local outbox (ADR-0003) |
 
 Rollback of a bad worker image is image-digest based; see
-[`docs/runbooks/worker-migration-rollback.md`](runbooks/worker-migration-rollback.md).
+[Image rollback preserves the state volume](#image-rollback-preserves-the-state-volume).
 
 ## Source-to-target ownership
 
@@ -573,7 +595,7 @@ may be presented as fixing one. Host driver and CUDA faults are handled by
 
 - [`docs/decisions/`](decisions/) — decision records, index in
   [`decisions/README.md`](decisions/README.md)
-- [`docs/runbooks/worker-migration-rollback.md`](runbooks/worker-migration-rollback.md)
-  — image-digest rollback with volume preservation
+- [`docs/runbooks/edge-redeploy-identity-continuity.md`](runbooks/edge-redeploy-identity-continuity.md)
+  — redeploy with the same state volume and camera identity
 - [`worker/AGENTS.md`](../worker/AGENTS.md) — worker package rules and the
   per-layer import ceilings

@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from backend.app.edge_db.migrator import migrate_database
+from backend.app.edge_db.bootstrap import bootstrap_database
 from backend.app.features.cameras.store import CameraRegistryStore
 from backend.app.main import create_app, no_lifespan
 from backend.app.shared.dashboard_auth import (
@@ -23,7 +23,7 @@ from backend.app.shared.dashboard_credentials import (
 
 @pytest.fixture(autouse=True)
 def _migrated_compact_database(tmp_path: Path) -> None:
-    migrate_database(tmp_path / "catalog.sqlite3")
+    bootstrap_database(tmp_path / "catalog.sqlite3")
 
 
 def _app(tmp_path, **state):

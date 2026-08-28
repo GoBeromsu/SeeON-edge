@@ -11,7 +11,7 @@ from typing import BinaryIO
 import pytest
 from fastapi.testclient import TestClient
 
-from backend.app.edge_db.migrator import migrate_database
+from backend.app.edge_db.bootstrap import bootstrap_database
 from backend.app.features.cameras.store import CameraRegistryStore
 from backend.app.features.clips.catalog import CatalogStore
 from backend.app.features.clips.compact_listing import CompactClipListing, CompactClipQuery
@@ -218,7 +218,7 @@ def test_compact_receipt_commits_clip_and_primary_artifact(tmp_path: Path) -> No
     data = b"verified video"
     _media(tmp_path, data)
     database = tmp_path / "edge.sqlite3"
-    migrate_database(database)
+    bootstrap_database(database)
     RelayEvidenceProjection(database).project_event(
         RelayEvent(
             edge_event_id="event-1",
@@ -259,7 +259,7 @@ def test_compact_receipt_rejects_equal_size_different_hash_without_partial_state
     assert len(actual) == len(declared)
     _media(tmp_path, actual)
     database = tmp_path / "edge.sqlite3"
-    migrate_database(database)
+    bootstrap_database(database)
     store = CompactArtifactReceiptStore(database, tmp_path / "clip-store")
 
     # When: the compact store independently binds the receipt to current bytes.
@@ -280,7 +280,7 @@ def test_compact_receipt_failure_does_not_promote_existing_waiting_clip(
     declared = b"bogus-media!"
     _media(tmp_path, actual)
     database = tmp_path / "edge.sqlite3"
-    migrate_database(database)
+    bootstrap_database(database)
     listing = CompactClipListing(database)
     listing.rebuild_and_page(
         ClipStore(tmp_path / "clip-store"),
@@ -317,7 +317,7 @@ def test_compact_receipt_rejects_untrusted_media_path_without_partial_state(
     else:
         media.unlink()
     database = tmp_path / "edge.sqlite3"
-    migrate_database(database)
+    bootstrap_database(database)
 
     # When/Then: no untrusted pathname can produce publication state.
     with pytest.raises(ArtifactReceiptVerificationError):
@@ -338,7 +338,7 @@ def test_real_route_rejects_media_swap_before_compact_commit(
     replacement = b"tampered bytes"
     assert len(original) == len(replacement)
     database = tmp_path / "edge.sqlite3"
-    migrate_database(database)
+    bootstrap_database(database)
     store = CompactArtifactReceiptStore(database, tmp_path / "clip-store")
     client = _client(tmp_path, store)
     media = _media(tmp_path, original)
@@ -405,7 +405,7 @@ def test_real_route_rejects_swap_after_preflight_before_transaction(
     original = b"verified video"
     replacement = b"tampered bytes"
     database = tmp_path / "edge.sqlite3"
-    migrate_database(database)
+    bootstrap_database(database)
     media = _media(tmp_path, original)
     inode_proof: tuple[int, int] | None = None
 
@@ -448,7 +448,7 @@ def test_real_route_rolls_back_swap_during_receipt_transaction(
     original = b"verified video"
     replacement = b"tampered bytes"
     database = tmp_path / "edge.sqlite3"
-    migrate_database(database)
+    bootstrap_database(database)
     media = _media(tmp_path, original)
     inode_proof: tuple[int, int] | None = None
 
@@ -500,7 +500,7 @@ def test_real_route_valid_compact_receipt_commits_and_closes_descriptor(
     # Given: valid bytes remain on the same pathname for both transaction guards.
     data = b"verified video"
     database = tmp_path / "edge.sqlite3"
-    migrate_database(database)
+    bootstrap_database(database)
     media = _media(tmp_path, data)
     hook_order: list[str] = []
     captured_handle: BinaryIO | None = None

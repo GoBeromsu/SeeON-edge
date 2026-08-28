@@ -1,5 +1,5 @@
-"""Run the one-shot edge database migrator."""
+"""Run the one-shot create-only schema-18 bootstrap."""
 
-from backend.app.edge_db.migrator import main
+from backend.app.edge_db.bootstrap import main
 
 raise SystemExit(main())

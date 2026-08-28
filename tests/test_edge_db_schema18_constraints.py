@@ -7,8 +7,8 @@ from pathlib import Path
 
 import pytest
 
+from backend.app.edge_db.bootstrap import bootstrap_database
 from backend.app.edge_db.functions import audit_record_hash, register_edge_db_functions
-from backend.app.edge_db.migrator import migrate_database
 
 TS = "2026-08-24T00:00:00Z"
 HASH_A = "ab" * 32
@@ -17,7 +17,7 @@ HASH_B = "cd" * 32
 
 def _db(tmp_path: Path) -> sqlite3.Connection:
     path = tmp_path / "edge.sqlite3"
-    migrate_database(path)
+    bootstrap_database(path)
     connection = sqlite3.connect(path)
     connection.execute("PRAGMA foreign_keys = ON")
     register_edge_db_functions(connection)

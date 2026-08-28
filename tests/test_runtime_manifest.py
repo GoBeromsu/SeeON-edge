@@ -8,8 +8,8 @@ from pathlib import Path
 import pytest
 import yaml
 
+from backend.app.edge_db.bootstrap import bootstrap_database
 from backend.app.edge_db.compatibility import CURRENT_SCHEMA_RANGE
-from backend.app.edge_db.migrator import migrate_database
 from shared.detection_policies import default_policy_bundle, make_effective_policy
 from shared.events.delivery_queue import DeliveryQueue
 from worker.domains import DETECTION_MODULE_REGISTRY
@@ -476,7 +476,7 @@ def test_manifest_queue_preserves_opaque_camera_identity_bytes(
     assert serialized_id.encode("utf-8") == camera_id.encode("utf-8")
 
     database = tmp_path / "edge.sqlite3"
-    migrate_database(database)
+    bootstrap_database(database)
     store = AppliedRuntimeManifestStore(database)
     store.persist(
         manifest,
@@ -494,7 +494,7 @@ def test_manifest_queue_preserves_opaque_camera_identity_bytes(
 
 def test_store_publishes_idempotent_manifest_envelopes_without_runtime_ddl(tmp_path: Path) -> None:
     database = tmp_path / "edge.sqlite3"
-    migrate_database(database)
+    bootstrap_database(database)
     manifest = _manifest()
     store = AppliedRuntimeManifestStore(database)
 
@@ -520,7 +520,7 @@ def test_store_publishes_idempotent_manifest_envelopes_without_runtime_ddl(tmp_p
 
 def test_manifest_publish_contains_canonical_manifest_reference(tmp_path: Path) -> None:
     database = tmp_path / "edge.sqlite3"
-    migrate_database(database)
+    bootstrap_database(database)
     manifest = _manifest()
     AppliedRuntimeManifestStore(database).persist(
         manifest,
@@ -552,7 +552,7 @@ def test_event_stager_rejects_noncanonical_runtime_manifest_identity(
 
 def test_store_refuses_boot_identity_reuse_for_different_manifest(tmp_path: Path) -> None:
     database = tmp_path / "edge.sqlite3"
-    migrate_database(database)
+    bootstrap_database(database)
     store = AppliedRuntimeManifestStore(database)
     store.persist(_manifest(), boot_instance_id="boot:fixed", applied_at="2026-08-13T00:00:00Z")
 

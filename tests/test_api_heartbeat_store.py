@@ -5,7 +5,7 @@ import sqlite3
 import threading
 from pathlib import Path
 
-from backend.app.edge_db.migrator import migrate_database
+from backend.app.edge_db.bootstrap import bootstrap_database
 from backend.app.features.status.heartbeat_store import NEVER_SEEN, ONLINE, STALE, HeartbeatStore
 
 
@@ -160,7 +160,7 @@ def test_one_hundred_heartbeat_ids_are_memory_only_and_lost_on_restart(
     tmp_path: Path,
 ) -> None:
     database = tmp_path / "edge.sqlite3"
-    migrate_database(database)
+    bootstrap_database(database)
     store = HeartbeatStore(stale_after_sec=90.0, clock=_Clock(1_000.0))
     for index in range(100):
         store.record(f"cam-{index}", f"fac-{index}", received_at=1_000.0)

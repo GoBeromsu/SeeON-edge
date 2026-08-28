@@ -5,8 +5,8 @@ from pathlib import Path
 
 import pytest
 
+from backend.app.edge_db.bootstrap import bootstrap_database
 from backend.app.edge_db.connection import RuntimeActor, open_runtime_database
-from backend.app.edge_db.migrator import migrate_database
 from backend.app.features.evidence.record_store import CentralEvidenceQuery
 
 COMPACT_EVIDENCE_TABLES = ("incidents", "artifacts", "clips")
@@ -26,7 +26,7 @@ def test_central_evidence_schema_has_owned_strict_records_and_integrity_guards(
     tmp_path: Path,
 ) -> None:
     database = tmp_path / "edge.sqlite3"
-    migrate_database(database)
+    bootstrap_database(database)
 
     with sqlite3.connect(database) as connection:
         tables = {
@@ -62,7 +62,7 @@ def test_central_evidence_schema_has_owned_strict_records_and_integrity_guards(
 
 def test_backend_central_evidence_query_is_privacy_bounded(tmp_path: Path) -> None:
     database = tmp_path / "edge.sqlite3"
-    migrate_database(database)
+    bootstrap_database(database)
     with sqlite3.connect(database) as connection:
         connection.execute(
             """

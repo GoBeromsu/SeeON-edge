@@ -5,7 +5,7 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
-from backend.app.edge_db.migrator import migrate_database
+from backend.app.edge_db.bootstrap import bootstrap_database
 from backend.app.features.cameras.store import CameraRegistryStore
 from backend.app.features.connection.store import ConnectionSettingsStore
 from backend.app.features.detection_settings.policy_store import DetectionPolicyStore
@@ -120,7 +120,7 @@ def _rollback(
 
 def test_policy_diff_apply_precedence_revision_activation_and_rollback(tmp_path: Path) -> None:
     database = tmp_path / "edge.sqlite3"
-    migrate_database(database)
+    bootstrap_database(database)
     app = _app(database)
     facility_fall = _request(
         module_id="fall",
@@ -219,7 +219,7 @@ def test_policy_resolution_uses_only_worker_camera_ids_when_namespaces_collide(
     tmp_path: Path,
 ) -> None:
     database = tmp_path / "edge.sqlite3"
-    migrate_database(database)
+    bootstrap_database(database)
     app = _app(database)
     second_worker_id = "worker-camera/second:opaque"
     app.state.camera_registry.create(
@@ -258,7 +258,7 @@ def test_policy_diff_reports_equal_numeric_values_with_new_source_as_changed(
     tmp_path: Path,
 ) -> None:
     database = tmp_path / "edge.sqlite3"
-    migrate_database(database)
+    bootstrap_database(database)
     app = _app(database)
     facility_default = _request(
         module_id="fall",
@@ -286,7 +286,7 @@ def test_policy_diff_reports_equal_numeric_values_with_new_source_as_changed(
 
 def test_rollback_keeps_only_immediately_previous_policy_state(tmp_path: Path) -> None:
     database = tmp_path / "edge.sqlite3"
-    migrate_database(database)
+    bootstrap_database(database)
     app = _app(database)
 
     with TestClient(app) as client:
@@ -328,7 +328,7 @@ def test_rollback_keeps_only_immediately_previous_policy_state(tmp_path: Path) -
 
 def test_nullable_camera_override_returns_to_facility_default(tmp_path: Path) -> None:
     database = tmp_path / "edge.sqlite3"
-    migrate_database(database)
+    bootstrap_database(database)
     app = _app(database)
 
     with TestClient(app) as client:
@@ -385,7 +385,7 @@ def test_api_rejects_malformed_nonfinite_unknown_cross_field_and_unknown_camera(
     tmp_path: Path,
 ) -> None:
     database = tmp_path / "edge.sqlite3"
-    migrate_database(database)
+    bootstrap_database(database)
     app = _app(database)
 
     invalid = (
@@ -452,7 +452,7 @@ def test_api_rejects_malformed_nonfinite_unknown_cross_field_and_unknown_camera(
 
 def test_corrupt_revision_is_refused_and_failed_status_persists(tmp_path: Path) -> None:
     database = tmp_path / "edge.sqlite3"
-    migrate_database(database)
+    bootstrap_database(database)
     app = _app(database)
 
     with TestClient(app) as client:
@@ -512,7 +512,7 @@ def test_corrupt_revision_is_refused_and_failed_status_persists(tmp_path: Path) 
 
 def test_fresh_apply_recovers_corrupt_active_without_prior_read(tmp_path: Path) -> None:
     database = tmp_path / "edge.sqlite3"
-    migrate_database(database)
+    bootstrap_database(database)
     app = _app(database)
 
     with TestClient(app) as client:
@@ -557,7 +557,7 @@ def test_two_operator_first_facility_apply_race_uses_generation_zero_token(
     tmp_path: Path,
 ) -> None:
     database = tmp_path / "edge.sqlite3"
-    migrate_database(database)
+    bootstrap_database(database)
     app = _app(database)
     operator_a = _request(
         module_id="fall",
@@ -596,7 +596,7 @@ def test_two_operator_inherited_camera_apply_race_uses_token_zero(
     tmp_path: Path,
 ) -> None:
     database = tmp_path / "edge.sqlite3"
-    migrate_database(database)
+    bootstrap_database(database)
     app = _app(database)
     facility = _request(
         module_id="fall",
@@ -640,7 +640,7 @@ def test_two_operator_inherited_camera_apply_race_uses_token_zero(
 
 def test_two_operator_rollback_race_requires_cas_token(tmp_path: Path) -> None:
     database = tmp_path / "edge.sqlite3"
-    migrate_database(database)
+    bootstrap_database(database)
     app = _app(database)
 
     with TestClient(app) as client:
@@ -687,7 +687,7 @@ def test_two_operator_rollback_race_requires_cas_token(tmp_path: Path) -> None:
 
 def test_policy_authority_writes_only_the_compact_policy_table(tmp_path: Path) -> None:
     database = tmp_path / "edge.sqlite3"
-    migrate_database(database)
+    bootstrap_database(database)
     activation = DetectionPolicyStore(database).apply(
         facility_id=FACILITY_ID,
         module_id="fall",

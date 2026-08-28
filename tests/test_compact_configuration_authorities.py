@@ -6,8 +6,8 @@ from pathlib import Path
 
 import pytest
 
+from backend.app.edge_db.bootstrap import bootstrap_database
 from backend.app.edge_db.configuration import open_configuration_database
-from backend.app.edge_db.migrator import migrate_database
 from backend.app.features.cameras.bed_zone_store import BedZoneStore
 from backend.app.features.cameras.edge_topology_sync_state import EdgeTopologySyncStateStore
 from backend.app.features.cameras.store import CameraRegistryStore
@@ -59,7 +59,7 @@ COMPACT_TABLES = {
 
 def _database(tmp_path: Path) -> Path:
     database = tmp_path / "edge.sqlite3"
-    migrate_database(database)
+    bootstrap_database(database)
     return database
 
 

@@ -7,7 +7,7 @@ import pytest
 
 from backend.app.core.config import reject_retired_backend_environment
 from backend.app.edge_db import EDGE_DATABASE_PATH
-from backend.app.edge_db.migrator import migrate_database
+from backend.app.edge_db.bootstrap import bootstrap_database
 from backend.app.features.connection import store as connection_store_module
 from backend.app.features.connection.store import (
     API_BACKEND_BASE_URL_ENV,
@@ -24,7 +24,7 @@ _production_from_env = ConnectionSettingsStore.from_env
 
 @pytest.fixture(autouse=True)
 def clear_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
-    migrate_database(tmp_path / "connection_settings.sqlite3")
+    bootstrap_database(tmp_path / "connection_settings.sqlite3")
     for name in (
         API_CONNECTION_SETTINGS_PATH_ENV,
         API_BACKEND_EVENTS_URL_ENV,

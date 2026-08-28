@@ -6,7 +6,7 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
-from backend.app.edge_db.migrator import migrate_database
+from backend.app.edge_db.bootstrap import bootstrap_database
 from backend.app.features.cameras.edge_topology_sync_state import (
     EdgeTopologySyncStateStore,
     PendingTopologySnapshot,
@@ -57,7 +57,7 @@ class _Client:
 
 
 def _app_client(path: Path) -> tuple[TestClient, _Client]:
-    migrate_database(path)
+    bootstrap_database(path)
     seed_enrollment(
         path,
         edge_installation_id=PRINCIPAL.edge_installation_id,

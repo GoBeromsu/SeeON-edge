@@ -9,7 +9,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from backend.app.edge_db.migrator import migrate_database
+from backend.app.edge_db.bootstrap import bootstrap_database
 from contracts.frame import Frame
 from contracts.observation import (
     BedRegionCacheState,
@@ -231,7 +231,7 @@ def _capture(snapshots: tuple[DecisionTraceSnapshot, ...]) -> TraceCapture:
 
 
 def _seed(database: Path) -> None:
-    migrate_database(database)
+    bootstrap_database(database)
     AppliedRuntimeManifestStore(database).persist(
         AppliedRuntimeManifest(
             1,

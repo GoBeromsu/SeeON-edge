@@ -4,7 +4,7 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
-from backend.app.edge_db.migrator import migrate_database
+from backend.app.edge_db.bootstrap import bootstrap_database
 from backend.app.features.cameras.store import CameraRegistryStore
 from backend.app.features.connection.store import ConnectionSettingsStore
 from backend.app.features.detection_settings.policy_store import DetectionPolicyStore
@@ -35,7 +35,7 @@ def test_policy_restart_requires_matching_worker_ack_before_pending_becomes_appl
     tmp_path: Path,
 ) -> None:
     database = tmp_path / "edge.sqlite3"
-    migrate_database(database)
+    bootstrap_database(database)
     app = create_app(lifespan=no_lifespan)
     app.state.edge_relay_token = "restart-relay-token"
     app.state.camera_registry = CameraRegistryStore(database)

@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from backend.app.edge_db.migrator import migrate_database
+from backend.app.edge_db.bootstrap import bootstrap_database
 from backend.app.features.audit.catalog import AuditAction, empty_detail
 from backend.app.features.audit.store import AuditEvent, AuditStore, utc_now
 from backend.app.features.cameras.edge_topology_sync_state import (
@@ -60,7 +60,7 @@ def _count(path: Path, action: AuditAction) -> int:
 
 
 def _sync_fixture(path: Path) -> tuple[TopologyRetryCoordinator, EdgeTopologySyncStateStore]:
-    migrate_database(path)
+    bootstrap_database(path)
     seed_enrollment(
         path,
         edge_installation_id=_PRINCIPAL.edge_installation_id,
@@ -146,7 +146,7 @@ def test_connection_sync_audit_is_one_atomic_operation(tmp_path: Path) -> None:
 
 
 def _confirmation_fixture(path: Path):
-    migrate_database(path)
+    bootstrap_database(path)
     seed_enrollment(
         path,
         edge_installation_id=_PRINCIPAL.edge_installation_id,
@@ -198,7 +198,7 @@ def _event(edge_event_id: str) -> RelayEvent:
 
 def test_snapshot_actions_share_projection_transactions(tmp_path: Path) -> None:
     path = tmp_path / "relay.sqlite3"
-    migrate_database(path)
+    bootstrap_database(path)
     projection = RelayEvidenceProjection(path)
     projection.project_event(_event("event-attach"))
     projection.attach_snapshot(
@@ -249,7 +249,7 @@ def _media(tmp_path: Path, data: bytes) -> Path:
 
 def test_evidence_receipt_audit_rolls_back_compact_facts(tmp_path: Path) -> None:
     path = tmp_path / "receipt.sqlite3"
-    migrate_database(path)
+    bootstrap_database(path)
     data = b"verified video"
     media_path = _media(tmp_path, data)
     receipt = ArtifactReceipt("clip-1", hashlib.sha256(data).hexdigest(), len(data))
@@ -263,7 +263,7 @@ def test_evidence_receipt_audit_rolls_back_compact_facts(tmp_path: Path) -> None
     assert _count(path, AuditAction.EVIDENCE_RECEIPT) == 1
 
     fault_path = tmp_path / "receipt-fault.sqlite3"
-    migrate_database(fault_path)
+    bootstrap_database(fault_path)
     fault_store = CompactArtifactReceiptStore(fault_path, tmp_path / "clip-store")
     with media_path.open("rb") as handle, pytest.raises(sqlite3.DatabaseError):
         fault_store.commit_verified(

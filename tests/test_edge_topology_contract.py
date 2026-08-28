@@ -30,7 +30,6 @@ EDGE_MODEL_FETCH_SERVICE: Final = "edge-model-fetch"
 MODELS_VOLUME: Final = "worker-models"
 
 EDGE_SERVICES: Final = {
-    "edge-filesystem-inventory",
     "edge-db-migrator",
     EDGE_MODEL_FETCH_SERVICE,
     *EDGE_OPS_SERVICES,
@@ -125,7 +124,7 @@ def test_edge_worker_runtime_status_environment_contract() -> None:
     assert "API_FACILITY_ID" not in worker_environment
 
 
-def test_edge_compose_contains_inventory_migrator_api_and_worker() -> None:
+def test_edge_compose_contains_migrator_api_and_worker() -> None:
     services = _compose_services(EDGE_COMPOSE_FILE)
 
     assert set(services) == EDGE_SERVICES, sorted(services)
@@ -133,43 +132,21 @@ def test_edge_compose_contains_inventory_migrator_api_and_worker() -> None:
 
 def test_edge_db_migrator_owns_schema_lifecycle_before_runtime_start() -> None:
     services = _compose_services(EDGE_COMPOSE_FILE)
-    inventory = services["edge-filesystem-inventory"]
     migrator = services["edge-db-migrator"]
     api_depends_on = _mapping_field(services["ml-api"], "depends_on")
     worker_depends_on = _mapping_field(services["ml-worker"], "depends_on")
 
-    assert inventory["restart"] == "no"
-    assert inventory["command"] == ["python", "-m", "backend.app.edge_db.inventory"]
-    assert "edge-state:/var/lib/seeon-state:ro" in _list_field(inventory, "volumes")
-    assert "worker-local-state:/var/lib/seeon-worker-state:ro" in _list_field(
-        inventory, "volumes"
-    )
-    assert any(
-        str(volume).endswith(":/var/lib/clip-store:ro")
-        for volume in _list_field(inventory, "volumes")
-    )
-    assert migrator["depends_on"] == {
-        "edge-filesystem-inventory": {"condition": "service_completed_successfully"}
-    }
+    assert "depends_on" not in migrator
     assert migrator["restart"] == "no"
+    # Create-only: the bootstrap mounts nothing but the one state volume it
+    # creates schema 18 in. There is no legacy state to import or gate on.
+    assert _list_field(migrator, "volumes") == ["edge-state:/var/lib/seeon-state"]
     assert migrator["command"] == [
         "python",
         "-m",
-        "backend.app.edge_db.compact_cutover",
-        "--source",
+        "backend.app.edge_db",
+        "--database",
         "/var/lib/seeon-state/edge.sqlite3",
-        "--live",
-        "/var/lib/seeon-state/edge.sqlite3",
-        "--archive",
-        "/var/lib/seeon-state/edge-v17-archive.sqlite3",
-        "--candidate",
-        "/var/lib/seeon-state/edge-v18-candidate.sqlite3",
-        "--receipt",
-        "/var/lib/seeon-state/schema18-cutover-receipts.jsonl",
-        "--clip-store",
-        "/var/lib/clip-store",
-        "--worker-state",
-        "/var/lib/seeon-worker-state",
     ]
     assert api_depends_on == {"edge-db-migrator": {"condition": "service_completed_successfully"}}
     # The worker waits on both the healthy API and a verified models volume.
@@ -207,7 +184,10 @@ def test_edge_model_fetch_owns_the_models_volume_before_worker_start() -> None:
     worker_volumes = _list_field(services["ml-worker"], "volumes")
     assert f"{MODELS_VOLUME}:/app/models:ro" in worker_volumes
     assert not any(str(volume).startswith("./models") for volume in worker_volumes)
-    for service_name in ("ml-api", "edge-db-migrator", "edge-filesystem-inventory"):
+    # Every service other than the fetcher (writer) and the worker (reader) stays
+    # off the models volume. Derived from compose so retiring a service cannot
+    # silently drop it from this check.
+    for service_name in sorted(set(services) - {"edge-model-fetch", "ml-worker"}):
         volumes = _list_field(services[service_name], "volumes")
         assert not any("/app/models" in str(volume) for volume in volumes), (
             f"{service_name} must not mount the models volume"
@@ -348,8 +328,6 @@ def test_edge_runtime_state_volumes_follow_backend_ownership() -> None:
     )
     assert set(compose.get("volumes", {})) == {
         "edge-state",
-        "ml-api-state",
-        "ml-worker-state",
         "worker-engine-cache",
         "worker-local-state",
         MODELS_VOLUME,

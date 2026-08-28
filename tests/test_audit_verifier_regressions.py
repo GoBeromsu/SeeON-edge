@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from backend.app.edge_db.migrator import migrate_database
+from backend.app.edge_db.bootstrap import bootstrap_database
 from backend.app.features.audit.catalog import AuditAction, AuditDetailError, empty_detail
 from backend.app.features.audit.store import AuditEvent, AuditStore, AuditVerificationError
 from backend.app.main import create_app, no_lifespan
@@ -108,7 +108,7 @@ def test_incremental_checkpoint_is_bound_to_database_file_identity(tmp_path: Pat
     audit = AuditStore(_database_path())
     checkpoint = audit.verify()
     replacement = tmp_path / "replacement.sqlite3"
-    migrate_database(replacement)
+    bootstrap_database(replacement)
 
     # When: a valid-looking different file replaces the checkpointed path.
     os.replace(replacement, _database_path())

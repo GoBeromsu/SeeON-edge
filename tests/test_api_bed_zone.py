@@ -21,7 +21,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from backend.app.core.config import get_settings
-from backend.app.edge_db.migrator import migrate_database
+from backend.app.edge_db.bootstrap import bootstrap_database
 from backend.app.features.cameras.bed_zone_store import BedZoneStore
 from backend.app.features.cameras.store import CameraRegistryStore
 from backend.app.main import LifespanFactory, create_app, no_lifespan
@@ -32,7 +32,7 @@ RECOGNIZE_PATH = "/api/v1/cameras/camera-1/bed-zone/recognize"
 
 @pytest.fixture(autouse=True)
 def _migrated_compact_database(tmp_path: Path) -> None:
-    migrate_database(tmp_path / "catalog.sqlite3")
+    bootstrap_database(tmp_path / "catalog.sqlite3")
 
 
 def _login(client: TestClient) -> None:

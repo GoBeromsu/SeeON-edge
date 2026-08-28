@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from backend.app.edge_db.migrator import migrate_database
+from backend.app.edge_db.bootstrap import bootstrap_database
 from backend.app.features.detection_settings.store import (
     DetectionSettingsStore,
     DomainDetectionSetting,
@@ -17,7 +17,7 @@ from backend.app.features.detection_settings.store import (
 
 @pytest.fixture(autouse=True)
 def _migrated_compact_database(tmp_path: Path) -> None:
-    migrate_database(tmp_path / "catalog.sqlite3")
+    bootstrap_database(tmp_path / "catalog.sqlite3")
 
 
 def test_get_all_is_empty_for_a_fresh_store(tmp_path: Path) -> None:

@@ -297,7 +297,7 @@ $DC logs --tail 200 ml-worker
 
 - [`docs/architecture.md`](../architecture.md) — 워커 레이어, 엔트리포인트, 장애
   매트릭스.
-- [`docs/runbooks/worker-migration-rollback.md`](worker-migration-rollback.md) —
+- [`docs/runbooks/edge-redeploy-identity-continuity.md`](edge-redeploy-identity-continuity.md) —
   이 배포가 잘못됐을 때 되돌리는 절차. 볼륨 보존 규칙은 여기와 동일하다.
 - 이슈 #217, #218, #219, #220, #226, #238 — 이 문서의 표/판단 트리가 인용하는
   원본 근거.

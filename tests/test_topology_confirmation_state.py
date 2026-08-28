@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from backend.app.edge_db.migrator import migrate_database
+from backend.app.edge_db.bootstrap import bootstrap_database
 from backend.app.features.cameras.edge_topology_sync_state import EdgeTopologySyncStateStore
 from backend.app.features.cameras.topology_confirmation_state import TopologyConfirmationStore
 from backend.app.features.connection.store import ConnectionSettingsStore
@@ -26,7 +26,7 @@ DIGEST = "a" * 64
 @pytest.fixture(autouse=True)
 def _enrolled_compact_database(tmp_path: Path) -> None:
     path = tmp_path / "catalog.sqlite3"
-    migrate_database(path)
+    bootstrap_database(path)
     ConnectionSettingsStore(path).save(
         {
             "facility_code": "NH-1234",

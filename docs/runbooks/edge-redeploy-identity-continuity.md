@@ -3,7 +3,8 @@
 이미지를 교체하거나 스택을 다시 세울 때 **카메라 신원(Hub 매핑)을 잃지 않기 위한 절차**다.
 GPU 프로파일 전환, Dockerfile 변경, 호스트 이전 모두 이 절차를 따른다.
 
-`worker-migration-rollback.md` 는 스키마와 DB 마이그레이션을 다룬다. 이 문서는 그
+스키마는 18 하나뿐이며 `edge-db-migrator` 는 빈 볼륨에 schema 18 을 만들기만 한다
+(`docs/architecture.md` 의 "Schema 18 is the sole schema" 절). 이 문서는 그
 위에 있는 문제 — **DB 는 멀쩡한데 Hub 가 카메라를 못 알아보는 상태** — 를 다룬다.
 
 ## 왜 필요한가
@@ -58,15 +59,14 @@ docker compose -f compose.edge.yaml -f compose.edge.<profile>.yaml up -d --pull 
 
 ### 3. 순서를 지킨다
 
-`edge-filesystem-inventory` → `edge-db-migrator` → `ml-api`(healthy) →
-`ml-worker`. compose 의존성이 이를 강제한다. inventory 는 schema 18 이전에
-worker delivery queue 와 clip staging 을 비운 상태인지 확인하며, schema 18 이후에는
-대기 envelope 를 backend 가 drain 할 수 있도록 통과한다.
+`edge-db-migrator` → `ml-api`(healthy) → `ml-worker`. compose 의존성이 이를
+강제한다. migrator 는 create-only 다: 빈 볼륨이면 schema 18 을 만들고, 이미 schema 18
+이면 검증만 하고, 그 외 버전이면 `EDGE_DB_BOOTSTRAP_FAILED` 로 거부한다.
 
-워커가 떠 있는 상태로 migrator 를 돌리면 다음으로 실패한다.
+API 가 떠 있는 상태로 migrator 를 돌리면 다음으로 실패한다.
 
 ```
-EDGE_DB_IMPORT_FAILED: edge deployment lock is held by a running runtime
+EDGE_DB_BOOTSTRAP_FAILED: edge deployment lock is held by a running runtime
 ```
 
 이는 정상 동작이다. 워커를 먼저 정지한 뒤 다시 올린다.

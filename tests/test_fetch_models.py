@@ -354,7 +354,7 @@ def test_hf_token_goes_only_to_huggingface_and_is_never_logged(tmp_path: Path) -
         retry=_no_sleep_policy(),
         log=lines.append,
     )
-    by_url = {url: headers for url, headers in source.calls}
+    by_url = dict(source.calls)
     assert by_url[manifest.artifacts[0].url]["Authorization"] == f"Bearer {token}"
     assert "Authorization" not in by_url[manifest.artifacts[1].url]
     assert token not in "\n".join(lines)

@@ -113,23 +113,6 @@ def test_compose_mounts_central_state_at_baked_path(compose: dict, service: str)
     assert target == EXPECTED_EDGE_STATE_DIR
 
 
-def test_only_migrator_mounts_released_legacy_state_volumes(compose: dict) -> None:
-    assert (
-        _compose_named_volume_target(compose, "edge-db-migrator", "ml-api-state")
-        == "/var/lib/legacy-api-state"
-    )
-    assert (
-        _compose_named_volume_target(compose, "edge-db-migrator", "ml-worker-state")
-        == "/var/lib/legacy-worker-state"
-    )
-
-    for service in ("ml-api", "ml-worker"):
-        volumes = compose["services"][service]["volumes"]
-        assert not any(
-            str(volume).startswith(("ml-api-state:", "ml-worker-state:")) for volume in volumes
-        )
-
-
 def test_compose_no_longer_sets_ml_worker_state_dir_env() -> None:
     text = (ROOT / "compose.edge.yaml").read_text(encoding="utf-8")
     assert "ML_WORKER_STATE_DIR" not in text, (

@@ -12,7 +12,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import shared.events.envelope_limits as limits
-from backend.app.edge_db.migrator import migrate_database
+from backend.app.edge_db.bootstrap import bootstrap_database
 from backend.app.features.evidence.record_store import CentralEvidenceQuery
 from backend.app.features.relay.router import RelayAlertRequest
 from backend.app.main import create_app, no_lifespan
@@ -113,7 +113,7 @@ def test_oversized_event_is_shed_off_wire_and_delivered_to_incident_projection(
 ) -> None:
     queue_directory = tmp_path / "delivery-queue"
     database = tmp_path / "edge.sqlite3"
-    migrate_database(database)
+    bootstrap_database(database)
     stager = _stager(queue_directory)
     stager.stage(_event())
 

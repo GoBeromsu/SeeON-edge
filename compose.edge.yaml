@@ -11,26 +11,12 @@
 # it from the directory name, and this host already carries three similarly
 # named state volumes -- `edge_edge-state`, `seeon-edge-wt-alert-api_edge-state`
 # and `seeon-prod-edge-state`. Running from a checkout named `SeeON-edge` would
-# silently bind `seeon-edge_edge-state`, an empty volume, so a cutover would
-# migrate a fresh database while the live one sat untouched and the operator saw
+# silently bind `seeon-edge_edge-state`, an empty volume, so the bootstrap would
+# create a fresh database while the live one sat untouched and the operator saw
 # a clean success. Failing closed here makes that impossible.
 name: ${COMPOSE_PROJECT_NAME:?COMPOSE_PROJECT_NAME is required so the stack binds the intended edge-state volume}
 
 services:
-  edge-filesystem-inventory:
-    image: ${ML_API_IMAGE:?ML_API_IMAGE is required in edge prod}
-    build: !reset null
-    pull_policy: always
-    restart: "no"
-    volumes:
-      - edge-state:/var/lib/seeon-state:ro
-      - worker-local-state:/var/lib/seeon-worker-state:ro
-      - ${CLIP_STORE_HOST_DIR:?edge requires host clip-store dir}:/var/lib/clip-store:ro
-    command:
-      - python
-      - -m
-      - backend.app.edge_db.inventory
-
   # One-shot operator tool. The worker image has no scripts/ops and the backend
   # image has no writable worker-state mount, so without this service the
   # documented requeue command cannot be run anywhere -- a gate the operator
@@ -50,6 +36,9 @@ services:
       - --state-dir
       - /var/lib/seeon-state
 
+  # Create-only schema bootstrap. Schema 18 is the only schema: on an empty
+  # edge-state volume this creates it, on an existing one it verifies the file
+  # already is schema 18 and refuses anything else. It never migrates.
   edge-db-migrator:
     image: ${ML_API_IMAGE:?ML_API_IMAGE is required in edge prod}
     build: !reset null
@@ -60,35 +49,14 @@ services:
       options:
         max-size: "10m"
         max-file: "5"
-    depends_on:
-      edge-filesystem-inventory:
-        condition: service_completed_successfully
     volumes:
       - edge-state:/var/lib/seeon-state
-      - worker-local-state:/var/lib/seeon-worker-state:ro
-      - ${CLIP_STORE_HOST_DIR:?edge requires host clip-store dir}:/var/lib/clip-store:ro
-      # Released state volumes remain rollback evidence and are writable only
-      # before cutover. The migrator checkpoints/backs them up, then reads them.
-      - ml-api-state:/var/lib/legacy-api-state
-      - ml-worker-state:/var/lib/legacy-worker-state
     command:
       - python
       - -m
-      - backend.app.edge_db.compact_cutover
-      - --source
+      - backend.app.edge_db
+      - --database
       - /var/lib/seeon-state/edge.sqlite3
-      - --live
-      - /var/lib/seeon-state/edge.sqlite3
-      - --archive
-      - /var/lib/seeon-state/edge-v17-archive.sqlite3
-      - --candidate
-      - /var/lib/seeon-state/edge-v18-candidate.sqlite3
-      - --receipt
-      - /var/lib/seeon-state/schema18-cutover-receipts.jsonl
-      - --clip-store
-      - /var/lib/clip-store
-      - --worker-state
-      - /var/lib/seeon-worker-state
 
   ml-api:
     image: ${ML_API_IMAGE:?ML_API_IMAGE is required in edge prod}
@@ -241,6 +209,3 @@ volumes:
   worker-engine-cache: {}
   # Pinned external model artifacts; written only by edge-model-fetch.
   worker-models: {}
-  # Read-only rollback boundary for the one-time import; runtimes never mount these.
-  ml-api-state: {}
-  ml-worker-state: {}

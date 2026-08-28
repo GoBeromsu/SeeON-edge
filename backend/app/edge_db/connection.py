@@ -13,7 +13,6 @@ from typing import Final
 
 from backend.app.edge_db.compatibility import (
     CURRENT_SCHEMA_RANGE,
-    LEGACY_EVIDENCE_DRAIN_SCHEMA_RANGE,
     EdgeDatabaseError,
     MigrationRequiredError,
     SchemaCompatibility,
@@ -156,31 +155,9 @@ def _runtime_authorizer(actor: RuntimeActor) -> Authorizer:
     return authorize
 
 
-def _legacy_evidence_drain_authorizer(
-    action: int,
-    argument_one: str | None,
-    argument_two: str | None,
-    database: str | None,
-    source: str | None,
-) -> int:
-    """Permit the schema-16 drain to update only its evidence queue rows."""
-    del argument_two, database, source
-    if action in _DDL_ACTIONS:
-        return sqlite3.SQLITE_DENY
-    if action in (sqlite3.SQLITE_INSERT, sqlite3.SQLITE_UPDATE, sqlite3.SQLITE_DELETE):
-        return (
-            sqlite3.SQLITE_OK if argument_one == "evidence_events" else sqlite3.SQLITE_DENY
-        )
-    if action == sqlite3.SQLITE_PRAGMA:
-        pragma = "" if argument_one is None else argument_one.lower()
-        if pragma not in _READ_PRAGMAS:
-            return sqlite3.SQLITE_DENY
-    return sqlite3.SQLITE_OK
-
-
 def _require_wal(journal_row: tuple[object, ...] | None) -> None:
     if journal_row != ("wal",):
-        raise EdgeDatabaseError("edge database must be migrated into WAL mode before runtime")
+        raise EdgeDatabaseError("edge database must be bootstrapped into WAL mode before runtime")
 
 
 def open_runtime_database(
@@ -191,14 +168,14 @@ def open_runtime_database(
     busy_policy: BusyPolicy = BusyPolicy.BOUNDED_WAIT,
     check_same_thread: bool = True,
 ) -> sqlite3.Connection:
-    """Open an already-migrated database without creating or migrating schema."""
+    """Open an already-bootstrapped schema-18 database without touching its schema."""
     if not path.is_file():
         raise MigrationRequiredError(found=0, minimum=compatibility.minimum)
     timeout_ms = 0 if busy_policy is BusyPolicy.ZERO_WAIT else NORMAL_BUSY_TIMEOUT_MS
     try:
         lock_descriptor = _acquire_runtime_lock(path)
     except BlockingIOError as error:
-        raise EdgeDatabaseError("edge deployment migration is in progress") from error
+        raise EdgeDatabaseError("edge database bootstrap is in progress") from error
     try:
         connection = sqlite3.connect(
             path,
@@ -221,38 +198,6 @@ def open_runtime_database(
         register_edge_db_functions(connection)
         verify_runtime_schema(connection, compatibility)
         connection.set_authorizer(_runtime_authorizer(actor))
-        secure_database_files(path)
-    except (OSError, sqlite3.Error, EdgeDatabaseError):
-        connection.close()
-        raise
-    return connection
-
-
-def open_legacy_evidence_drain_database(path: Path) -> sqlite3.Connection:
-    """Open the pre-cutover schema solely for the legacy evidence drain."""
-    if not path.is_file():
-        raise MigrationRequiredError(
-            found=0, minimum=LEGACY_EVIDENCE_DRAIN_SCHEMA_RANGE.minimum
-        )
-    try:
-        lock_descriptor = _acquire_runtime_lock(path)
-    except BlockingIOError as error:
-        raise EdgeDatabaseError("edge deployment migration is in progress") from error
-    try:
-        connection = sqlite3.connect(path, isolation_level=None, factory=_RuntimeConnection)
-    except BaseException:
-        fcntl.flock(lock_descriptor, fcntl.LOCK_UN)
-        os.close(lock_descriptor)
-        raise
-    connection._deployment_lock_descriptor = lock_descriptor
-    try:
-        connection.execute(f"PRAGMA busy_timeout = {NORMAL_BUSY_TIMEOUT_MS}")
-        connection.execute("PRAGMA foreign_keys = ON")
-        connection.execute("PRAGMA synchronous = FULL")
-        journal_row = connection.execute("PRAGMA journal_mode").fetchone()
-        _require_wal(journal_row)
-        verify_runtime_schema(connection, LEGACY_EVIDENCE_DRAIN_SCHEMA_RANGE)
-        connection.set_authorizer(_legacy_evidence_drain_authorizer)
         secure_database_files(path)
     except (OSError, sqlite3.Error, EdgeDatabaseError):
         connection.close()
@@ -307,7 +252,6 @@ __all__ = [
     "NestedTransactionError",
     "RuntimeActor",
     "best_effort_zero_wait_write",
-    "open_legacy_evidence_drain_database",
     "open_runtime_database",
     "write_transaction",
 ]

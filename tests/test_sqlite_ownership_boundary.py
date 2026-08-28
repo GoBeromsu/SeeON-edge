@@ -172,42 +172,36 @@ def test_backend_only_sqlite_cutover_is_atomic() -> None:
     assert not (ROOT / "shared" / "edge_db").exists()
     assert scan_slot() == frozenset()
 
-    schema = (database_package / "schema.py").read_text()
     compatibility = (database_package / "compatibility.py").read_text()
     compose = (ROOT / "compose.edge.yaml").read_text()
-    assert "EDGE_DB_DRAIN_INCOMPLETE" in schema
     assert "EDGE_DATABASE_SCHEMA_VERSION" in compatibility
     assert "worker-local-state:/var/lib/seeon-state" in compose
     assert "edge-state:/var/lib/seeon-state" in compose
 
-    # Structural, not textual. `"SCHEMA_V17 = Migration(" in schema` passes even
-    # if the migration is defined and never registered, which is precisely the
-    # half-landed state this test exists to forbid.
-    from backend.app.edge_db.compatibility import CURRENT_SCHEMA_RANGE  # noqa: PLC0415
-    from backend.app.edge_db.schema import MIGRATIONS  # noqa: PLC0415
+    from backend.app.edge_db.compatibility import (  # noqa: PLC0415
+        CURRENT_SCHEMA_RANGE,
+        SCHEMA_18_IDENTITY,
+    )
     from shared.release_identity import EDGE_DATABASE_SCHEMA_VERSION  # noqa: PLC0415
 
-    versions = [migration.version for migration in MIGRATIONS]
     assert (
         CURRENT_SCHEMA_RANGE.minimum
         == CURRENT_SCHEMA_RANGE.maximum
         == EDGE_DATABASE_SCHEMA_VERSION
-        == max(versions)
+        == SCHEMA_18_IDENTITY[0]
     ), (
-        "the backend compatibility range, shared release identity, and production "
-        "migration registry must identify the same schema release"
+        "the backend compatibility range, shared release identity, and schema-18 "
+        "ledger identity must identify the same schema release"
     )
-    assert versions == sorted(versions), "migration registry is not in version order"
-    assert len(versions) == len(set(versions)), "migration registry has duplicate versions"
 
-    # Packaging is part of the same unit: the ops commands the cutover runbook
-    # names must ship in the image that runs them, and the runtime image must
-    # still carry neither them nor the database package.
+    # Packaging is part of the same unit: the ops commands the runbooks name
+    # must ship in the image that runs them, and the runtime image must still
+    # carry neither them nor the database package.
     backend_image = (ROOT / "Dockerfile.backend").read_text()
     runtime_image = (ROOT / "Dockerfile.edge").read_text()
     assert "COPY scripts/ops" in backend_image, (
-        "the API image does not ship scripts/ops, so the documented cutover "
-        "commands do not exist in the image the runbook tells an operator to use"
+        "the API image does not ship scripts/ops, so the documented ops "
+        "commands do not exist in the image the runbooks tell an operator to use"
     )
     assert "COPY backend" not in runtime_image, (
         "the runtime image copies the backend package, which would carry the "

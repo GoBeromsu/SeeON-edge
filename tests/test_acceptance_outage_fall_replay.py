@@ -12,7 +12,7 @@ from pathlib import Path
 import numpy as np
 from fastapi.testclient import TestClient
 
-from backend.app.edge_db.migrator import migrate_database
+from backend.app.edge_db.bootstrap import bootstrap_database
 from backend.app.features.cameras.store import CameraRegistryStore
 from backend.app.features.evidence.record_store import CentralEvidenceQuery
 from backend.app.features.evidence.relay_projection import RelayEvidenceProjection
@@ -285,7 +285,7 @@ def test_fall_survives_outage_and_replays_with_terminal_snapshot_absence(tmp_pat
     assert event_path.is_file()
 
     database = tmp_path / "edge.sqlite3"
-    migrate_database(database)
+    bootstrap_database(database)
     with _relay_client(tmp_path, database) as relay:
         transport.client = relay
         sender = EvidenceSender(queue_directory, sender_config, transport=transport)
@@ -339,7 +339,7 @@ def test_replayed_fall_keeps_decision_envelope(
     assert decision_trace == _DECISION_ENVELOPE
 
     database = tmp_path / "edge.sqlite3"
-    migrate_database(database)
+    bootstrap_database(database)
     transport = _RelayTransport()
     sender_config = SenderConfig("http://relay.test", RELAY_TOKEN, "room-camera")
     with _relay_client(tmp_path, database) as relay:

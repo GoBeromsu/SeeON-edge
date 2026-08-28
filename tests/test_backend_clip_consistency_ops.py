@@ -11,9 +11,8 @@ from pathlib import Path
 
 import pytest
 
-from backend.app.edge_db.migrator import migrate_database
+from backend.app.edge_db.bootstrap import bootstrap_database
 from backend.app.edge_db.ownership import Writer, writer_for_table
-from backend.app.edge_db.schema import SCHEMA_VERSION
 from backend.app.features.clips import consistency_ops
 from backend.app.features.clips.consistency_ops import (
     ClipConsistencyError,
@@ -21,6 +20,7 @@ from backend.app.features.clips.consistency_ops import (
     inspect_finalized_clip,
     repair_clip_consistency,
 )
+from shared.release_identity import EDGE_DATABASE_SCHEMA_VERSION
 
 
 def _layout(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
@@ -33,7 +33,7 @@ def _layout(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
     (store / "clips" / ".staging").mkdir(mode=0o755)
     maintenance.mkdir(mode=0o700)
     database = state / "edge.sqlite3"
-    migrate_database(database)
+    bootstrap_database(database)
     return database, store, maintenance, maintenance / "quiescence.json"
 
 
@@ -128,7 +128,9 @@ def test_dry_run_does_not_mutate_and_invalid_manifest_refuses(
     assert {"clips", "incidents", "artifacts"} <= tables
     assert tables.isdisjoint({"evidence_events", "evidence_clips", "clip_events"})
     with sqlite3.connect(database) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone() == (SCHEMA_VERSION,)
+        assert connection.execute("PRAGMA user_version").fetchone() == (
+            EDGE_DATABASE_SCHEMA_VERSION,
+        )
 
     with pytest.raises(ClipConsistencyError, match="schema_drift"):
         repair_clip_consistency(_request(database, store, maintenance, receipt))

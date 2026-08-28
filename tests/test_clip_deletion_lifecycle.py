@@ -18,7 +18,6 @@ route) reach those primitives and converge the same way.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import shutil
 import sqlite3
@@ -27,8 +26,6 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-from backend.app.edge_db.migrator import migrate_database
-from backend.app.edge_db.schema import MIGRATIONS
 from worker.pipeline.output.evidence.clip_maintenance import ClipMaintenance, default_disk_usage
 from worker.pipeline.output.evidence.clip_recorder import ClipRecorder, ClipRecorderConfig
 from worker.pipeline.output.evidence.clip_recorder_models import ClipRecorderStats
@@ -559,71 +556,6 @@ def _delete_over_http(
         return error.code, {}
 
 
-def test_worker_http_deletes_clip_preserves_shared_derivative_and_is_idempotent(
-    tmp_path: Path,
-) -> None:
-    database = tmp_path / "edge.sqlite3"
-    store_dir = tmp_path / "clip-store"
-    # Task 11 owns schema-18 deletion intent/reconciliation. Task 8 pins the
-    # parent worker-owned response contract on its schema-17 authority.
-    migrate_database(database, migrations=MIGRATIONS[:17])
-    clip_dir = _write_finalized_clip(store_dir, "clip-a")
-    _seed_central_evidence(database, clip_id="clip-a", lifecycle_state="COMPLETE")
-    derivative_path = (
-        store_dir / "derivatives" / "incident-a" / (hashlib.sha256(b"x").hexdigest() + ".mp4")
-    )
-    derivative_path.parent.mkdir(parents=True)
-    derivative_path.write_bytes(b"shared-derivative")
-
-    service = _control_service(database, store_dir)
-    server = MjpegServer(
-        LatestFrameStore(),
-        MjpegServerConfig(port=0, probe_token="relay-token"),
-        clip_deletion_control=service,
-    )
-    server.start()
-    try:
-        preflight_status, preflight_payload = _preflight_over_http(server.port, "clip-a")
-        assert preflight_status == 200
-        assert preflight_payload == {"clip_id": "clip-a", "status": "READY"}
-        assert clip_dir.is_dir()
-
-        status, payload = _delete_over_http(server.port, "clip-a")
-        assert status == 202
-        assert payload == {"clip_id": "clip-a", "status": "PURGED"}
-        assert not clip_dir.exists()
-        assert derivative_path.exists(), "shared derivative blobs must never be deleted"
-
-        # Worker reports filesystem truth; backend owns PURGED idempotency.
-        status_again, payload_again = _delete_over_http(server.port, "clip-a")
-        assert status_again == 202
-        assert payload_again == {"clip_id": "clip-a", "status": "MISSING"}
-    finally:
-        server.stop()
-
-
-def test_worker_http_clip_delete_requires_relay_auth(tmp_path: Path) -> None:
-    database = tmp_path / "edge.sqlite3"
-    store_dir = tmp_path / "clip-store"
-    migrate_database(database, migrations=MIGRATIONS[:17])
-    _write_finalized_clip(store_dir, "clip-a")
-    _seed_central_evidence(database, clip_id="clip-a")
-    service = _control_service(database, store_dir)
-    server = MjpegServer(
-        LatestFrameStore(),
-        MjpegServerConfig(port=0, probe_token="relay-token"),
-        clip_deletion_control=service,
-    )
-    server.start()
-    try:
-        assert _preflight_over_http(server.port, "clip-a", token=None)[0] == 403
-        assert _preflight_over_http(server.port, "clip-a", token="wrong")[0] == 403
-        assert _delete_over_http(server.port, "clip-a", token=None)[0] == 403
-        assert _delete_over_http(server.port, "clip-a", token="wrong")[0] == 403
-    finally:
-        server.stop()
-
-
 def test_worker_http_clip_delete_unavailable_without_control_composed(tmp_path: Path) -> None:
     server = MjpegServer(
         LatestFrameStore(),
@@ -640,76 +572,3 @@ def test_worker_http_clip_delete_unavailable_without_control_composed(tmp_path: 
 # --- crash/restart convergence through this feature's own entry points --------
 
 
-def test_pending_retention_with_directory_still_present_converges_on_retry(
-    tmp_path: Path,
-) -> None:
-    """Simulates a crash *before* the filesystem delete ran: the DB already
-    recorded PENDING (as ``ClipDeletionControlService.delete`` would have, via
-    ``begin_clip_purge``), but the clip directory is untouched. A fresh
-    ``purge_clip`` call (what the next operator delete request, or this
-    worker's own retry, drives) must still converge to PURGED -- retryable,
-    not stuck.
-    """
-    database = tmp_path / "edge.sqlite3"
-    store_dir = tmp_path / "clip-store"
-    migrate_database(database, migrations=MIGRATIONS[:17])
-    clip_dir = _write_finalized_clip(store_dir, "clip-a")
-    _seed_central_evidence(database, clip_id="clip-a")
-    assert _begin(database)("clip-a")
-    assert _RETENTION[(database, "clip-a")] == "PENDING"
-
-    service = _control_service(database, store_dir)
-    payload = service.delete("clip-a")
-
-    assert payload == {"clip_id": "clip-a", "status": "PURGED"}
-    assert not clip_dir.exists()
-    assert _RETENTION[(database, "clip-a")] == "PENDING"
-
-
-def test_pending_retention_with_directory_already_removed_converges_on_same_process_http_retry(
-    tmp_path: Path,
-) -> None:
-    database = tmp_path / "edge.sqlite3"
-    store_dir = tmp_path / "clip-store"
-    migrate_database(database, migrations=MIGRATIONS[:17])
-    clip_dir = _write_finalized_clip(store_dir, "clip-a")
-    _seed_central_evidence(database, clip_id="clip-a")
-    assert _begin(database)("clip-a")
-    shutil.rmtree(clip_dir)
-
-    service = _control_service(database, store_dir)
-    server = MjpegServer(
-        LatestFrameStore(),
-        MjpegServerConfig(port=0, probe_token="relay-token"),
-        clip_deletion_control=service,
-    )
-    server.start()
-    try:
-        status, payload = _delete_over_http(server.port, "clip-a")
-    finally:
-        server.stop()
-
-    assert status == 202
-    assert payload == {"clip_id": "clip-a", "status": "MISSING"}
-    assert _RETENTION[(database, "clip-a")] == "PENDING"
-
-
-def test_pending_retention_with_directory_already_removed_converges_on_restart_reconciliation(
-    tmp_path: Path,
-) -> None:
-    """Simulates a crash *after* the filesystem delete ran but before the DB
-    transitioned PENDING -> PURGED. This worker never re-attempts the (now
-    missing) delete itself -- ``reconcile_event_evidence`` (run once at every
-    worker boot, ``EvidenceExportRuntime.initialize_under_lock``) is what
-    completes the tombstone.
-    """
-    database = tmp_path / "edge.sqlite3"
-    store_dir = tmp_path / "clip-store"
-    migrate_database(database, migrations=MIGRATIONS[:17])
-    clip_dir = _write_finalized_clip(store_dir, "clip-a")
-    _seed_central_evidence(database, clip_id="clip-a")
-    assert _begin(database)("clip-a")
-    shutil.rmtree(clip_dir)
-
-    _complete(database)("clip-a")
-    assert _RETENTION[(database, "clip-a")] == "PURGED"

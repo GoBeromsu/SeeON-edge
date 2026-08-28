@@ -5,13 +5,13 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-from backend.app.edge_db.migrator import migrate_database
+from backend.app.edge_db.bootstrap import bootstrap_database
 
 TS = "2026-08-24T00:00:00Z"
 
 
 def prepare_compact_database(path: Path) -> Path:
-    migrate_database(path)
+    bootstrap_database(path)
     return path
 
 

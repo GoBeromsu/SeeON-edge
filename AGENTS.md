@@ -50,7 +50,7 @@ infra fails fast (ADR-0002). The worker is an RTSP client only.
 | Evidence | `worker/pipeline/output/evidence/` | Clip recorder, packet ring, snapshot store, durable stager, filesystem delivery queue. |
 | Dashboard | `front/src/app/App.tsx` | `AuthGate` + `Dashboard`. Pages: events, operations, settings. |
 | Event wire | `shared/events/` | Schemas and `edge_ingest_client.py` (facts + heartbeats to the Event API). |
-| SQLite foundation | `backend/app/edge_db/` | Schema, migrator, and ownership. The backend writes every application table family; the migrator alone writes `schema_*`. |
+| SQLite foundation | `backend/app/edge_db/` | Schema 18 (the only schema), the create-only bootstrap, and ownership. The backend writes the nine application tables; the bootstrap alone writes `schema_migrations`. |
 | Native media child | `worker/native/deepstream/` | C++ RTSP/NVDEC/TensorRT/association plus the Python contract for `nvidia`; boot verifies engines and never builds them. |
 | Child supervision | `worker/runtime/deepstream/` | Python PID-1 supervisor, inherited IPC, restart-based source lifecycle, and CPU-only policy pump. |
 | Canary harness | `worker/tools/deepstream_canary/` | Host-side isolated qualification tool; excluded from the production worker image and path. |

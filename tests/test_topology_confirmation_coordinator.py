@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from backend.app.edge_db.migrator import migrate_database
+from backend.app.edge_db.bootstrap import bootstrap_database
 from backend.app.features.cameras.edge_topology_sync_state import (
     EdgeTopologySyncStateStore,
     PendingTopologySnapshot,
@@ -66,7 +66,7 @@ class _Client:
 
 
 def _registry(path: Path) -> CameraRegistryStore:
-    migrate_database(path)
+    bootstrap_database(path)
     seed_enrollment(
         path,
         edge_installation_id=PRINCIPAL.edge_installation_id,
