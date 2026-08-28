@@ -60,6 +60,33 @@ Publish only through `.github/workflows/edge-images.yml` for the sealed SHA.
 Download the exact-SHA artifact and compare both digests with the seal before
 updating the deployment receipt.
 
+### What the image workflow builds and when
+
+`edge-images.yml` is the single build path for both images. Exactly two images
+exist: `Dockerfile.backend` -> `ml-api` (front + backend; the one-shot
+migrator/consistency services run the same image) and `Dockerfile.edge` ->
+`ml-worker`. Models are never baked into either image.
+
+| Event                 | Builds both | Boot smoke | Pushes to GHCR | Tags pushed                          | Writes build cache |
+|-----------------------|-------------|------------|----------------|--------------------------------------|--------------------|
+| `pull_request`        | yes         | yes        | never          | none                                 | no (read-only)     |
+| `push` to `main`      | yes         | yes        | yes            | `<full-sha>`, `main-<12-char sha>`   | yes (`mode=max`)   |
+| `release` (published) | yes         | yes        | yes            | `<full-sha>`                         | yes (`mode=max`)   |
+| `workflow_dispatch`   | yes         | yes        | yes            | `<full-sha>`                         | yes (`mode=max`)   |
+
+`main-<short-sha>` is a staging tag for trying a pre-release build on a bench
+device. It is not a deployment reference: the seal and `.env.edge.prod` pin
+`@sha256:` digests only, never a tag. Every run prints both digests in the job
+step summary and exposes them as job outputs (`ml-api-digest`,
+`ml-worker-digest`, `deploy-sha`); the `edge-ml-image-refs-<sha>` artifact is
+uploaded only by runs that pushed, because a digest that was never pushed
+cannot be pulled.
+
+Cache: `type=gha` scoped per image (`edge-ml-api`, `edge-ml-worker`). Pull
+requests only read it. `uv sync` / `pnpm i --frozen-lockfile` layers sit before
+the source `COPY` in both Dockerfiles, so a code-only change re-runs only the
+copy and the image-identity layers.
+
 The host updater owns image replacement. It must run under the deployment lock,
 preserve volumes, and reject a concurrent updater. Do not run `docker compose
 down -v`, edit Python on the host, or place enrollment identity in the env file.

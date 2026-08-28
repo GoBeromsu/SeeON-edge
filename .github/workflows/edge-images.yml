@@ -1,17 +1,38 @@
 name: Edge ML Images
 
+# Single build path for the two edge images:
+#
+#   Dockerfile.backend -> ml-api    (front + backend; also the one-shot
+#                                    migrator/consistency services)
+#   Dockerfile.edge    -> ml-worker (DeepStream runtime)
+#
+# Models are NOT baked into either image (scripts/fetch-models.sh owns that).
+#
+# Every pull_request and every push to main builds BOTH images once, loads the
+# ml-worker image into the runner's daemon and boots it (`--check-config`),
+# which is what actually catches a broken image (the httpx incident in #195:
+# the image built fine and died at boot). This replaces the separate
+# edge-worker-image.yml gate, which built Dockerfile.edge a second time with
+# its own cache scope.
+#
+# Publish policy:
+#   pull_request     -> build + boot smoke only. Never pushes, never logs in.
+#   push to main     -> also pushes the staging tag `main-<short-sha>` (plus
+#                       the full-SHA tag) and writes the BuildKit cache, so
+#                       PR builds hit a cache refreshed on every merge instead
+#                       of only on release (#365 had release as the sole
+#                       cache writer).
+#   release          -> pushes the full-SHA tag for the sealed SHA; this is
+#   workflow_dispatch   the path docs/runbooks/edge-image-publish.md pins.
+#
+# Every run exposes both image digests as job outputs and in the step
+# summary so operators pin `@sha256:` (runbook rule); pushing runs also
+# upload the `edge-ml-image-refs-<sha>.env` artifact the runbook consumes.
+
 on:
-  # (#365) Publishing is release-driven. There is deliberately NO `push:
-  # branches: [main]` trigger: the edge unit pins locally-built images
-  # (`ML_WORKER_IMAGE=local/fall-ml-worker:<sha>` in .env.edge.prod), so a
-  # publish on every main push burned ~9.77GB of build and GHCR storage for
-  # an artifact nothing ever pulled. Use a published release for the normal
-  # path, or workflow_dispatch to publish an arbitrary ref on demand.
-  #
-  # This does NOT reduce per-commit verification: edge-worker-image.yml still
-  # builds Dockerfile.edge on every PR and push to main and runs the boot
-  # smoke test, which is what actually catches a broken image (see the httpx
-  # incident in #195 - the image built fine and died at boot).
+  pull_request:
+  push:
+    branches: [main]
   release:
     types: [published]
   workflow_dispatch:
@@ -22,8 +43,9 @@ on:
         default: main
 
 concurrency:
-  group: edge-ml-images-${{ github.event.release.tag_name || inputs.ref || github.ref_name }}
-  cancel-in-progress: false
+  group: edge-ml-images-${{ github.event.release.tag_name || inputs.ref || github.event.pull_request.number || github.ref }}
+  # Superseded PR pushes are cancelled; release/dispatch/main runs are not.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
@@ -31,25 +53,58 @@ permissions:
 
 jobs:
   publish:
-    name: Publish edge ML image refs
-    if: github.event_name == 'workflow_dispatch' || github.event.release.prerelease == false
+    name: Build edge ML images + boot smoke
+    # Prereleases never publish (unchanged); PR / main / dispatch always run.
+    if: github.event_name != 'release' || github.event.release.prerelease == false
     runs-on: ubuntu-latest
+    # Writing the mode=max cache for the multi-gigabyte DeepStream layers is
+    # slower than the build itself, so only the pushing paths (which export
+    # cache) get the long budget; PRs stay on the boot-smoke gate budget.
+    timeout-minutes: ${{ github.event_name == 'pull_request' && 25 || 60 }}
     env:
       DEPLOY_REF: ${{ github.event.release.tag_name || inputs.ref || github.sha }}
       IMAGE_NAMESPACE: ghcr.io/seniorailab/eldercare-fall-ml
+      # PRs never push. Everything else (main push, release, dispatch) does.
+      PUSH_IMAGES: ${{ github.event_name != 'pull_request' }}
+    outputs:
+      ml-api-digest: ${{ steps.build-api.outputs.digest }}
+      ml-worker-digest: ${{ steps.build-worker.outputs.digest }}
+      deploy-sha: ${{ steps.resolve.outputs.sha }}
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ env.DEPLOY_REF }}
           fetch-depth: 0
+          persist-credentials: false
 
-      - name: Resolve deploy SHA
-        run: echo "DEPLOY_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+      - name: Resolve deploy SHA and image tags
+        id: resolve
+        # Tag scheme:
+        #   always      <full 40-hex sha>           (what the seal pins)
+        #   main push   main-<12-char short sha>    (staging tag for operators
+        #                                            trying a pre-release build)
+        # PR tags exist only in the runner's daemon (never pushed).
+        run: |
+          set -euo pipefail
+          DEPLOY_SHA="$(git rev-parse HEAD)"
+          SHORT_SHA="$(git rev-parse --short=12 HEAD)"
+          echo "DEPLOY_SHA=$DEPLOY_SHA" >> "$GITHUB_ENV"
+          echo "sha=$DEPLOY_SHA" >> "$GITHUB_OUTPUT"
+          echo "SHORT_SHA=$SHORT_SHA" >> "$GITHUB_ENV"
+          for image in ml-api ml-worker; do
+            tags="$IMAGE_NAMESPACE/$image:$DEPLOY_SHA"
+            if [ "${GITHUB_EVENT_NAME}" = "push" ]; then
+              tags="$tags,$IMAGE_NAMESPACE/$image:main-$SHORT_SHA"
+            fi
+            var="$(printf '%s' "$image" | tr 'a-z-' 'A-Z_')_TAGS"
+            echo "$var=$tags" >> "$GITHUB_ENV"
+          done
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
       - name: Login to GitHub Container Registry
+        if: env.PUSH_IMAGES == 'true'
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -62,14 +117,13 @@ jobs:
         with:
           context: .
           file: Dockerfile.backend
-          push: true
+          push: ${{ env.PUSH_IMAGES == 'true' }}
           build-args: |
             VITE_ML_API_BASE_URL=/api/v1
             SOURCE_REVISION=${{ env.DEPLOY_SHA }}
-          tags: |
-            ${{ env.IMAGE_NAMESPACE }}/ml-api:${{ env.DEPLOY_SHA }}
+          tags: ${{ env.ML_API_TAGS }}
           cache-from: type=gha,scope=edge-ml-api
-          cache-to: type=gha,scope=edge-ml-api,mode=max
+          cache-to: ${{ env.PUSH_IMAGES == 'true' && 'type=gha,scope=edge-ml-api,mode=max' || '' }}
 
       - name: Build and push ml-worker image
         id: build-worker
@@ -77,13 +131,38 @@ jobs:
         with:
           context: .
           file: Dockerfile.edge
-          push: true
+          # `load` puts the same build result into the runner's daemon for the
+          # boot smoke below; `push` additionally exports it to GHCR on the
+          # publishing paths. One build, two exporters -- Dockerfile.edge is
+          # never built twice for one commit.
+          load: true
+          push: ${{ env.PUSH_IMAGES == 'true' }}
           build-args: |
             SOURCE_REVISION=${{ env.DEPLOY_SHA }}
-          tags: |
-            ${{ env.IMAGE_NAMESPACE }}/ml-worker:${{ env.DEPLOY_SHA }}
+          tags: ${{ env.ML_WORKER_TAGS }}
           cache-from: type=gha,scope=edge-ml-worker
-          cache-to: type=gha,scope=edge-ml-worker,mode=max
+          # PRs consume the cache but never export it: exporting mode=max for
+          # the DeepStream layers took longer than the build and blew the gate
+          # timeout before the boot smoke ran. main/release/dispatch are the
+          # cache writers.
+          cache-to: ${{ env.PUSH_IMAGES == 'true' && 'type=gha,scope=edge-ml-worker,mode=max' || '' }}
+
+      - name: Boot smoke test — worker process actually imports and starts
+        # A successful build only proves the image assembles; it does not
+        # prove the interpreter can import the worker's module graph (the
+        # httpx incident: image built fine, container died at boot with
+        # ModuleNotFoundError). `--check-config` is the entrypoint's own
+        # no-side-effect boot path (worker/runtime/AGENTS.md) -- it forces
+        # every top-level import in worker/__main__.py's module graph to
+        # resolve before returning, without a relay pull or any disk write.
+        # The relay URL is fixed in-code now (RELAY_URL is retired); only
+        # RELAY_TOKEN is required and it only needs to be well-formed, not
+        # reachable.
+        run: |
+          docker run --rm \
+            -e RELAY_TOKEN=ci-boot-smoke-test \
+            "$IMAGE_NAMESPACE/ml-worker:$DEPLOY_SHA" \
+            python -m worker --check-config
 
       - name: Write edge image env artifact
         run: |
@@ -92,14 +171,22 @@ jobs:
             printf 'ML_WORKER_IMAGE=%s/ml-worker@%s\n' "$IMAGE_NAMESPACE" '${{ steps.build-worker.outputs.digest }}'
           } > edge-ml-image-refs.env
           {
-            printf '### Edge ML image refs\n\n'
-            printf 'Use these digest-pinned refs in `.env.edge.prod` on the edge device:\n\n'
+            printf '### Edge ML image refs (%s, `%s`)\n\n' "$GITHUB_EVENT_NAME" "$DEPLOY_SHA"
+            if [ "$PUSH_IMAGES" = "true" ]; then
+              printf 'Pushed tags:\n\n```\n%s\n%s\n```\n\n' "$ML_API_TAGS" "$ML_WORKER_TAGS"
+              printf 'Use these digest-pinned refs in `.env.edge.prod` on the edge device:\n\n'
+            else
+              printf 'Pull request build: nothing was pushed. Digests below are the local build result only.\n\n'
+            fi
             printf '```dotenv\n'
             cat edge-ml-image-refs.env
             printf '```\n'
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload edge image refs
+        # Only pushed digests are resolvable from a registry; a PR artifact
+        # would invite pinning a digest nothing can pull.
+        if: env.PUSH_IMAGES == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: edge-ml-image-refs-${{ env.DEPLOY_SHA }}

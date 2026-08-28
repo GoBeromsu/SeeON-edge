@@ -11,7 +11,6 @@ from worker.runtime.config.pull_models import BackendWorkerConfigPayload
 REPO_ROOT: Final = Path(__file__).resolve().parents[1]
 EDGE_COMPOSE_FILE: Final = "compose.edge.yaml"
 EDGE_IMAGES_WORKFLOW: Final = ".github/workflows/edge-images.yml"
-EDGE_WORKER_IMAGE_WORKFLOW: Final = ".github/workflows/edge-worker-image.yml"
 EDGE_PREFLIGHT_SCRIPT: Final = "scripts/edge-preflight/check-nvidia-runtime.sh"
 EDGE_RUNTIME_SERVICES: Final = {
     "ml-api": "Dockerfile.backend",
@@ -205,6 +204,10 @@ def test_edge_image_release_workflow_publishes_digest_env_artifact() -> None:
     assert isinstance(triggers, dict)
     assert "release" in triggers
     assert "workflow_dispatch" in triggers
+    # One build path: PRs and main pushes build both images in this workflow
+    # too (the separate edge-worker-image.yml gate is folded in).
+    assert "pull_request" in triggers
+    assert triggers["push"] == {"branches": ["main"]}
 
     permissions = workflow.get("permissions")
     assert isinstance(permissions, dict)
@@ -220,15 +223,52 @@ def test_edge_image_release_workflow_publishes_digest_env_artifact() -> None:
     assert "ML_API_IMAGE=" in source
     assert "ML_WORKER_IMAGE=" in source
     assert "edge-ml-image-refs.env" in source
+    # Digests are job outputs so a downstream job can pin `@sha256:` without
+    # parsing the artifact.
+    outputs = workflow["jobs"]["publish"]["outputs"]
+    assert outputs["ml-api-digest"] == "${{ steps.build-api.outputs.digest }}"
+    assert outputs["ml-worker-digest"] == "${{ steps.build-worker.outputs.digest }}"
 
 
-def test_edge_worker_image_gate_does_not_export_the_release_cache() -> None:
-    source = (REPO_ROOT / EDGE_WORKER_IMAGE_WORKFLOW).read_text(encoding="utf-8")
+def test_edge_image_workflow_never_pushes_from_pull_requests() -> None:
+    # Publish policy is unchanged: release/dispatch (and now main) push;
+    # pull requests never log in, push, or upload a pinnable artifact.
+    source = (REPO_ROOT / EDGE_IMAGES_WORKFLOW).read_text(encoding="utf-8")
+    workflow = _workflow(EDGE_IMAGES_WORKFLOW)
+    job = workflow["jobs"]["publish"]
 
-    assert _workflow(EDGE_WORKER_IMAGE_WORKFLOW)
-    assert "load: true" in source
-    assert "cache-from: type=gha,scope=edge-ml-worker" in source
-    assert "cache-to:" not in source
+    assert job["env"]["PUSH_IMAGES"] == "${{ github.event_name != 'pull_request' }}"
+    steps = {step.get("name"): step for step in job["steps"]}
+    assert steps["Login to GitHub Container Registry"]["if"] == "env.PUSH_IMAGES == 'true'"
+    assert steps["Upload edge image refs"]["if"] == "env.PUSH_IMAGES == 'true'"
+    for name in ("Build and push ml-api image", "Build and push ml-worker image"):
+        assert steps[name]["with"]["push"] == "${{ env.PUSH_IMAGES == 'true' }}"
+    # Staging tag on main pushes only; the full-SHA tag is always present.
+    assert 'if [ "${GITHUB_EVENT_NAME}" = "push" ]' in source
+    assert "main-$SHORT_SHA" in source
+    assert "$IMAGE_NAMESPACE/$image:$DEPLOY_SHA" in source
+
+
+def test_edge_worker_boot_smoke_runs_on_the_single_build() -> None:
+    # The boot smoke moved from edge-worker-image.yml into the publish job:
+    # Dockerfile.edge is built once per commit (load + push exporters) and
+    # PRs consume the cache without exporting it (the mode=max export of the
+    # DeepStream layers is what exhausted the old gate's timeout).
+    source = (REPO_ROOT / EDGE_IMAGES_WORKFLOW).read_text(encoding="utf-8")
+    workflow = _workflow(EDGE_IMAGES_WORKFLOW)
+    worker_step = next(
+        step
+        for step in workflow["jobs"]["publish"]["steps"]
+        if step.get("name") == "Build and push ml-worker image"
+    )
+
+    assert not (REPO_ROOT / ".github/workflows/edge-worker-image.yml").exists()
+    assert worker_step["with"]["load"] == "true"  # BaseLoader keeps scalars as text
+    assert worker_step["with"]["cache-from"] == "type=gha,scope=edge-ml-worker"
+    assert worker_step["with"]["cache-to"] == (
+        "${{ env.PUSH_IMAGES == 'true' && 'type=gha,scope=edge-ml-worker,mode=max' || '' }}"
+    )
+    assert source.count("file: Dockerfile.edge") == 1
     assert "docker run --rm" in source
     assert "python -m worker --check-config" in source
 
