@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import stat
 from dataclasses import dataclass
 from pathlib import Path
 from typing import final
@@ -37,6 +38,26 @@ class LocatedClip:
     @property
     def recording_root(self) -> Path:
         return self.manifest_path.parent.parent.parent
+
+
+@dataclass(frozen=True, slots=True)
+class ScannedManifest:
+    """One ``manifest.json`` found by a single walk of the store, unparsed.
+
+    Only ``stat`` facts are carried so a listing can decide, against the
+    catalogue, whether the file needs to be read at all.
+    """
+
+    clip_id: str
+    manifest_path: Path
+    size_bytes: int
+    mtime_ns: int
+
+    def located(self) -> LocatedClip | None:
+        manifest = read_manifest_file(self.manifest_path)
+        if manifest is None or not manifest.finalized or manifest.clip_id != self.clip_id:
+            return None
+        return LocatedClip(manifest, self.manifest_path)
 
 
 @final
@@ -84,6 +105,52 @@ class ClipStore:
         accumulate many unrelated directories over time.
         """
         return discover_manifest_paths(self.root)
+
+    def scan_manifests(self) -> list[ScannedManifest]:
+        """Walk every bounded ``clips`` root once and ``stat`` each manifest.
+
+        This is the whole filesystem cost of a listing request: one directory
+        listing per clips root plus one ``stat`` per clip, no manifest parsing.
+        A clip id present under more than one layout is read to decide which
+        copy is the finalized one; two finalized copies are the same
+        ``DuplicateClipIdError`` that ``locate_manifest`` raises.
+        """
+        by_id: dict[str, list[ScannedManifest]] = {}
+        for clips_root in bounded_clip_roots(self.root):
+            try:
+                entries = list(os.scandir(clips_root))
+            except OSError:
+                continue
+            for entry in entries:
+                if not is_valid_clip_id(entry.name):
+                    continue
+                manifest_path = clips_root / entry.name / "manifest.json"
+                try:
+                    manifest_stat = manifest_path.stat()
+                except OSError:
+                    continue
+                if not stat.S_ISREG(manifest_stat.st_mode):
+                    continue
+                by_id.setdefault(entry.name, []).append(
+                    ScannedManifest(
+                        entry.name,
+                        manifest_path,
+                        manifest_stat.st_size,
+                        manifest_stat.st_mtime_ns,
+                    )
+                )
+        scanned: list[ScannedManifest] = []
+        for clip_id, candidates in by_id.items():
+            if len(candidates) == 1:
+                scanned.append(candidates[0])
+                continue
+            finalized = [item for item in candidates if item.located() is not None]
+            if len(finalized) > 1:
+                raise DuplicateClipIdError(
+                    clip_id, tuple(item.manifest_path for item in finalized)
+                )
+            scanned.extend(finalized)
+        return scanned
 
     def get_manifest(self, clip_id: str) -> ClipManifest | None:
         located = self.locate_manifest(clip_id)
@@ -188,6 +255,7 @@ __all__ = [
     "ClipStore",
     "DuplicateClipIdError",
     "LocatedClip",
+    "ScannedManifest",
     "default_label_store_dir",
     "is_valid_clip_id",
 ]

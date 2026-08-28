@@ -1,10 +1,24 @@
-"""Transactional manifest reconciliation over schema-18 ``clips``."""
+"""Catalogue-first clip listing with bounded, incremental manifest reconciliation.
+
+A page is served from schema-18 ``clips``. Before a cursor-less page the store
+is walked exactly once (``ClipStore.scan_manifests``: one directory listing per
+clips root plus one ``stat`` per manifest). Clips whose catalogued manifest
+path/size and media path/size still match the filesystem are trusted without
+reading a byte; everything else -- new clips, rewritten manifests, resized or
+moved media -- is examined in full (manifest parsed and hashed, media hashed or
+its stored hash reused, thumbnail hashed) up to ``EXAMINE_BUDGET`` clips per
+request, newest first, and the remainder is picked up by later requests.
+Deleted clips are always reconciled: the walk is complete, so a catalogued clip
+with no manifest on disk is removed (or parked UNAVAILABLE when an artifact
+still references it) on the very next request.
+"""
 
 from __future__ import annotations
 
 import base64
 import binascii
 import hashlib
+import stat
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -12,8 +26,11 @@ from pathlib import Path
 from backend.app.edge_db.connection import RuntimeActor, open_runtime_database, write_transaction
 from backend.app.features.clips.descriptor_files import open_contained_regular_file
 from backend.app.features.clips.listing import effective_event_type
-from backend.app.features.clips.manifest import ClipManifest
-from backend.app.features.clips.store import ClipStore, DuplicateClipIdError
+from backend.app.features.clips.manifest import ClipManifest, read_manifest_file
+from backend.app.features.clips.store import ClipStore, LocatedClip, ScannedManifest
+
+EXAMINE_BUDGET = 200
+"""Upper bound on clips read and hashed per cursor-less listing request."""
 
 
 class CompactClipConflictError(RuntimeError):
@@ -30,18 +47,38 @@ class CompactClipQuery:
 
 @dataclass(frozen=True, slots=True)
 class CompactClipPage:
-    manifests: tuple[ClipManifest, ...]
+    clips: tuple[LocatedClip, ...]
     total: int
     has_more: bool
     next_cursor: str | None
     event_type_counts: dict[str, int]
 
+    @property
+    def manifests(self) -> tuple[ClipManifest, ...]:
+        return tuple(item.manifest for item in self.clips)
+
 
 @dataclass(frozen=True, slots=True)
 class _PreparedClip:
-    manifest: ClipManifest
+    located: LocatedClip
     values: tuple[str | int | None, ...]
     identity: tuple[str, str | None, int | None]
+
+
+@dataclass(frozen=True, slots=True)
+class _CataloguedClip:
+    manifest_relpath: str | None
+    manifest_size_bytes: int | None
+    media_relpath: str | None
+    media_sha256: str | None
+    media_size_bytes: int | None
+    local_state: str
+
+
+@dataclass(frozen=True, slots=True)
+class _Reconciliation:
+    prepared: tuple[_PreparedClip, ...]
+    removed_ids: frozenset[str]
 
 
 class CompactClipListing:
@@ -57,38 +94,33 @@ class CompactClipListing:
     ) -> CompactClipPage:
         connection = open_runtime_database(self.database_path, actor=RuntimeActor.API)
         try:
-            prepared = (
+            reconciliation = (
                 None if query.cursor is not None
-                else _prepare(store, _known_media(connection))
+                else _reconcile_incrementally(store, _catalogued(connection))
             )
             with write_transaction(connection):
-                if prepared is not None:
-                    _reconcile(connection, prepared)
+                if reconciliation is not None:
+                    _apply(connection, reconciliation)
                 page_rows, total, facets = _page_rows(connection, query)
         finally:
             connection.close()
         prepared_by_id = (
-            {} if prepared is None
-            else {item.manifest.clip_id: item.manifest for item in prepared}
+            {} if reconciliation is None
+            else {item.located.manifest.clip_id: item.located for item in reconciliation.prepared}
         )
-        visible: list[ClipManifest] = []
+        visible: list[LocatedClip] = []
         for row in page_rows[: query.limit]:
             clip_id = str(row[0])
-            manifest = prepared_by_id.get(clip_id)
-            if manifest is None:
-                located = store.locate_manifest(clip_id)
-                if located is None:
-                    raise CompactClipConflictError(
-                        f"visible clip {clip_id} disappeared during pagination"
-                    )
-                manifest = located.manifest
-            visible.append(manifest)
+            located = prepared_by_id.get(clip_id)
+            if located is None:
+                located = _located_from_row(store, clip_id, row[2])
+            visible.append(located)
         next_cursor = None
         if len(page_rows) > query.limit:
             last = page_rows[query.limit - 1]
             next_cursor = _format_cursor(str(last[1]), str(last[0]))
         return CompactClipPage(
-            manifests=tuple(visible),
+            clips=tuple(visible),
             total=total,
             has_more=len(page_rows) > query.limit,
             next_cursor=next_cursor,
@@ -96,86 +128,126 @@ class CompactClipListing:
         )
 
 
-_KnownMedia = dict[str, tuple[str | None, str | None, int | None]]
+def _located_from_row(store: ClipStore, clip_id: str, manifest_relpath: object) -> LocatedClip:
+    """Read a visible page row's manifest at its catalogued path (no store walk)."""
+    if isinstance(manifest_relpath, str):
+        manifest_path = store.root / manifest_relpath
+        manifest = read_manifest_file(manifest_path)
+        if (
+            manifest is not None
+            and manifest.finalized
+            and manifest.clip_id == clip_id
+            and manifest_path.parent.name == clip_id
+        ):
+            return LocatedClip(manifest, manifest_path)
+    raise CompactClipConflictError(f"visible clip {clip_id} disappeared during pagination")
 
 
-def _known_media(connection) -> _KnownMedia:
-    """Catalogued ``(media_relpath, media_sha256, media_size_bytes)`` per clip.
-
-    Read once per rebuild so that media already verified by an earlier
-    reconcile is not re-hashed on every listing: with thousands of clips the
-    full re-read costs minutes of I/O per ``GET /clips``, which starved the
-    dashboard of any listing at all. A clip whose media path or byte size
-    differs from the catalogued row is still hashed in full below, so a
-    changed or replaced file keeps tripping the immutable-content conflict.
-    """
+def _catalogued(connection) -> dict[str, _CataloguedClip]:
+    """Every catalogued clip's cheap identity facts, read once per request."""
     rows = connection.execute(
-        "SELECT clip_id, media_relpath, media_sha256, media_size_bytes FROM clips "
-        "WHERE media_sha256 IS NOT NULL"
+        "SELECT clip_id, manifest_relpath, manifest_size_bytes, media_relpath, "
+        "media_sha256, media_size_bytes, local_state FROM clips"
     ).fetchall()
     return {
-        str(row[0]): (row[1], row[2], None if row[3] is None else int(row[3]))
+        str(row[0]): _CataloguedClip(
+            row[1],
+            None if row[2] is None else int(row[2]),
+            row[3],
+            row[4],
+            None if row[5] is None else int(row[5]),
+            str(row[6]),
+        )
         for row in rows
     }
 
 
-def _prepare(store: ClipStore, known: _KnownMedia | None = None) -> tuple[_PreparedClip, ...]:
+def _reconcile_incrementally(
+    store: ClipStore, catalogued: dict[str, _CataloguedClip]
+) -> _Reconciliation:
+    scanned = store.scan_manifests()
+    scanned_ids = {item.clip_id for item in scanned}
+    removed: set[str] = set(catalogued) - scanned_ids
+    candidates = [
+        item for item in scanned
+        if not _unchanged(store.root, item, catalogued.get(item.clip_id))
+    ]
+    candidates.sort(key=lambda item: (item.mtime_ns, item.clip_id), reverse=True)
     prepared: list[_PreparedClip] = []
-    seen: set[str] = set()
-    known = {} if known is None else known
-    for manifest in store.list_manifests():
-        if manifest.clip_id in seen:
-            store.locate_manifest(manifest.clip_id)
-            raise DuplicateClipIdError(manifest.clip_id, ())
-        seen.add(manifest.clip_id)
-        located = store.locate_manifest(manifest.clip_id)
-        if located is None or not _valid_timestamp(manifest.started_at):
+    for item in candidates[:EXAMINE_BUDGET]:
+        located = item.located()
+        if located is None or not _valid_timestamp(located.manifest.started_at):
+            # Not (or no longer) a finalized, well-formed clip: filesystem truth
+            # says there is nothing to list, exactly as if the manifest were gone.
+            if item.clip_id in catalogued:
+                removed.add(item.clip_id)
             continue
-        manifest_path = located.manifest_path
-        manifest_hash, manifest_size = _hash_regular(store.root, manifest_path)
-        manifest_relpath = manifest_path.relative_to(store.root).as_posix()
-        try:
-            media_path = store.resolve_located_video_path(located)
-            media_hash, media_size = _media_identity(
-                store.root, media_path, known.get(manifest.clip_id)
-            )
-        except (FileNotFoundError, ValueError):
-            media_path = None
-            media_hash = None
-            media_size = None
-        local_state = "AVAILABLE" if media_path is not None else "CORRUPT"
-        local_reason = None if media_path is not None else "MEDIA_MISSING"
-        media_relpath = (
-            None if media_path is None else media_path.relative_to(store.root).as_posix()
-        )
-        thumbnail_path = manifest_path.parent / "thumbnail.jpg"
-        try:
-            thumbnail_hash, thumbnail_size = _hash_regular(store.root, thumbnail_path)
-            thumbnail_relpath = thumbnail_path.relative_to(store.root).as_posix()
-        except FileNotFoundError:
-            thumbnail_hash = None
-            thumbnail_size = None
-            thumbnail_relpath = None
-        values: tuple[str | int | None, ...] = (
-            manifest.clip_id, manifest.camera_id, effective_event_type(manifest),
-            manifest.started_at, max(1, round(manifest.duration_s * 1000)),
-            manifest.codec or None, "video/mp4", manifest_relpath, media_relpath,
-            thumbnail_relpath, manifest_hash, media_hash, thumbnail_hash,
-            manifest_size, media_size, thumbnail_size, local_state, local_reason,
-            manifest.started_at, manifest.started_at,
-        )
-        prepared.append(
-            _PreparedClip(manifest, values, (manifest_hash, media_hash, media_size))
-        )
-    return tuple(prepared)
+        prepared.append(_prepare_clip(store, located, catalogued.get(item.clip_id)))
+    return _Reconciliation(tuple(prepared), frozenset(removed))
 
 
-def _reconcile(connection, prepared: tuple[_PreparedClip, ...]) -> None:
-    present_ids = {item.manifest.clip_id for item in prepared}
-    existing_ids = {
-        str(row[0]) for row in connection.execute("SELECT clip_id FROM clips").fetchall()
-    }
-    for clip_id in existing_ids - present_ids:
+def _unchanged(root: Path, item: ScannedManifest, row: _CataloguedClip | None) -> bool:
+    """Trust a catalogued clip when manifest and media path/size still match."""
+    if row is None or row.local_state != "AVAILABLE" or row.media_relpath is None:
+        return False
+    if row.manifest_relpath != item.manifest_path.relative_to(root).as_posix():
+        return False
+    if row.manifest_size_bytes != item.size_bytes:
+        return False
+    return _regular_size(root / row.media_relpath) == row.media_size_bytes
+
+
+def _regular_size(path: Path) -> int | None:
+    try:
+        path_stat = path.stat()
+    except OSError:
+        return None
+    return path_stat.st_size if stat.S_ISREG(path_stat.st_mode) else None
+
+
+def _prepare_clip(
+    store: ClipStore, located: LocatedClip, row: _CataloguedClip | None
+) -> _PreparedClip:
+    manifest = located.manifest
+    manifest_path = located.manifest_path
+    manifest_hash, manifest_size = _hash_regular(store.root, manifest_path)
+    manifest_relpath = manifest_path.relative_to(store.root).as_posix()
+    known = (
+        None if row is None else (row.media_relpath, row.media_sha256, row.media_size_bytes)
+    )
+    try:
+        media_path = store.resolve_located_video_path(located)
+        media_hash, media_size = _media_identity(store.root, media_path, known)
+    except (FileNotFoundError, ValueError):
+        media_path = None
+        media_hash = None
+        media_size = None
+    local_state = "AVAILABLE" if media_path is not None else "CORRUPT"
+    local_reason = None if media_path is not None else "MEDIA_MISSING"
+    media_relpath = (
+        None if media_path is None else media_path.relative_to(store.root).as_posix()
+    )
+    thumbnail_path = manifest_path.parent / "thumbnail.jpg"
+    try:
+        thumbnail_hash, thumbnail_size = _hash_regular(store.root, thumbnail_path)
+        thumbnail_relpath = thumbnail_path.relative_to(store.root).as_posix()
+    except FileNotFoundError:
+        thumbnail_hash = None
+        thumbnail_size = None
+        thumbnail_relpath = None
+    values: tuple[str | int | None, ...] = (
+        manifest.clip_id, manifest.camera_id, effective_event_type(manifest),
+        manifest.started_at, max(1, round(manifest.duration_s * 1000)),
+        manifest.codec or None, "video/mp4", manifest_relpath, media_relpath,
+        thumbnail_relpath, manifest_hash, media_hash, thumbnail_hash,
+        manifest_size, media_size, thumbnail_size, local_state, local_reason,
+        manifest.started_at, manifest.started_at,
+    )
+    return _PreparedClip(located, values, (manifest_hash, media_hash, media_size))
+
+
+def _apply(connection, reconciliation: _Reconciliation) -> None:
+    for clip_id in sorted(reconciliation.removed_ids):
         referenced = connection.execute(
             "SELECT 1 FROM artifacts WHERE clip_id = ? LIMIT 1",
             (clip_id,),
@@ -197,15 +269,14 @@ def _reconcile(connection, prepared: tuple[_PreparedClip, ...]) -> None:
                 """,
                 (clip_id,),
             )
-    for item in prepared:
+    for item in reconciliation.prepared:
+        clip_id = item.located.manifest.clip_id
         existing = connection.execute(
             "SELECT manifest_sha256, media_sha256, media_size_bytes FROM clips WHERE clip_id = ?",
-            (item.manifest.clip_id,),
+            (clip_id,),
         ).fetchone()
         if existing is not None and tuple(existing) != item.identity:
-            raise CompactClipConflictError(
-                f"clip {item.manifest.clip_id} immutable content changed"
-            )
+            raise CompactClipConflictError(f"clip {clip_id} immutable content changed")
         if existing is None:
             connection.execute(_INSERT_CLIP, item.values)
 
@@ -229,7 +300,8 @@ def _page_rows(connection, query: CompactClipQuery):
         page_predicates.append("(started_at < ? OR (started_at = ? AND clip_id < ?))")
         page_params.extend((started_at, started_at, clip_id))
     rows = connection.execute(
-        "SELECT clip_id, started_at FROM clips WHERE " + " AND ".join(page_predicates)
+        "SELECT clip_id, started_at, manifest_relpath FROM clips WHERE "
+        + " AND ".join(page_predicates)
         + " ORDER BY started_at DESC, clip_id DESC LIMIT ?",
         (*page_params, query.limit + 1),
     ).fetchall()
@@ -316,6 +388,7 @@ def _parse_cursor(cursor: str) -> tuple[str, str]:
 
 
 __all__ = [
+    "EXAMINE_BUDGET",
     "CompactClipConflictError",
     "CompactClipListing",
     "CompactClipPage",

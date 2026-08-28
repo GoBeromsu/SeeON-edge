@@ -108,11 +108,11 @@ def list_clips(
         ) from exc
     clips = [
         clip_response(
-            manifest,
-            resolved_video_size(store, manifest),
-            store.thumbnail_available(manifest.clip_id),
+            located.manifest,
+            resolved_video_size(store, located),
+            store.thumbnail_available(located),
         )
-        for manifest in page.manifests
+        for located in page.clips
     ]
     response = ListClipsResponse(
         clips=clips,
