@@ -56,6 +56,20 @@ docker build --platform linux/amd64 -f Dockerfile.edge \
   -t "local/ml-worker:$SEALED_ML_SHA" .
 ```
 
+Neither image carries model weights. Models are a pinned external artifact:
+`worker/tools/fetch_models/manifest.json` names every file, its upstream
+(Hugging Face `Berom0227/eldercare-fall-models` at a 40-hex revision for the
+LSTM fall model; `ultralytics/assets` release `v8.4.0` for the YOLO pose,
+person, and bed weights), its size, and its SHA-256. The one-shot
+`edge-model-fetch` compose service runs `python -m worker.tools.fetch_models`
+from the sealed worker image into the `worker-models` named volume on every
+`up`; `ml-worker` starts only after it exits 0, so a hash mismatch or a broken
+pin holds the worker back instead of loading an unverified weight. Changing a
+weight means changing the manifest in the sealed SHA, never editing the volume
+by hand. The optional `HF_TOKEN` in `.env.edge.prod` reaches this service
+only; leave it empty for the public pins. There is no host `./models` bind
+mount any more.
+
 Publish only through `.github/workflows/edge-images.yml` for the sealed SHA.
 Download the exact-SHA artifact and compare both digests with the seal before
 updating the deployment receipt.
@@ -102,7 +116,10 @@ sh scripts/ops/cloud-enrollment-smoke.sh \
 ```
 
 The wrapper verifies independently anchored plan, seal, host-key, and execution
-receipt bytes before invoking the updater. After both services restart it parses
+receipt bytes before invoking the updater. On restart, `edge-model-fetch` must
+show `done: 7 file(s) verified, nothing to do` (or `fetched N file(s)` on a
+fresh volume) in `docker compose logs edge-model-fetch` before `ml-worker`
+is considered up. After both services restart it parses
 the actual `/api/v1/status` and `/api/v1/system` schemas, verifies running image
 references, scans rendered Compose for facility identity residue, and revalidates
 the complete post-restart state. Enrollment then occurs through local versioned

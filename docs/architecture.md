@@ -195,6 +195,20 @@ Sharing a per-camera row across cameras is a correctness bug, not an
 optimisation: it leaks one resident's motion history into another's fall
 decision.
 
+## Model artifacts
+
+Model weights are a pinned external artifact owned by the worker side, never
+part of an image and never a host bind mount. `worker/tools/fetch_models/
+manifest.json` pins each file to an upstream revision (Hugging Face commit or
+GitHub release tag), a byte size, and a SHA-256; the one-shot `edge-model-fetch`
+compose service runs `python -m worker.tools.fetch_models` from the worker
+image into the `worker-models` named volume before `ml-worker` starts, skips
+files that already verify, and exits non-zero on any mismatch. `ml-worker`
+mounts that volume read-only at `/app/models`; `ml-api` does not mount it at
+all. `worker/tools/` is out-of-band operator tooling, not a worker entrypoint:
+import-linter forbids every runtime layer from importing it, and the fetcher is
+stdlib-only so it runs before torch or any adapter is loaded.
+
 ## Entrypoint
 
 The canonical and only command is:

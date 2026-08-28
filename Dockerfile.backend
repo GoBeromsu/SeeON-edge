@@ -37,7 +37,6 @@ COPY shared ./shared
 COPY backend ./backend
 COPY scripts/ops ./scripts/ops
 COPY --from=front-build /src/front/dist /app/front
-RUN mkdir -p /app/models/fall /app/models/pose /app/models/bed
 # State dir is image-owned (matches backend/app/shared/state_dir.py's resolver
 # for the root container user); deliberately no VOLUME here to avoid
 # anonymous-volume sprawl and derived-image RUN neutralization —

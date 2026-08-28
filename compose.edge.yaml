@@ -126,9 +126,9 @@ services:
       # Facility identity/token and camera roster are intentionally absent:
       # dashboard enrollment + camera_registry are their only authorities.
     volumes:
-      # Fixed image-adjacent model root; model selection/policy comes from the
-      # versioned worker config, never from environment variables.
-      - ./models:/app/models:ro
+      # No model mount: the backend never reads /app/models. Models are a
+      # worker-owned artifact provisioned into the `worker-models` volume by
+      # edge-model-fetch below.
       - edge-state:/var/lib/seeon-state
       - ${CLIP_STORE_HOST_DIR:?edge requires host clip-store dir}:/var/lib/clip-store:ro
     depends_on:
@@ -150,6 +150,37 @@ services:
       interval: 30s
       timeout: 5s
       retries: 3
+
+  # One-shot model provisioning, owned by the worker side. Models stay OUT of
+  # the images: this service pulls every artifact listed in the committed
+  # worker/tools/fetch_models/manifest.json from its pinned upstream (Hugging
+  # Face revision / GitHub release tag), verifies size + SHA-256 of every
+  # file, and lands them in the `worker-models` named volume. Idempotent --
+  # a volume that already verifies is a no-op -- and it exits non-zero on any
+  # mismatch, which holds ml-worker back via depends_on below. Mirrors the
+  # edge-db-migrator pattern: same image as the runtime it prepares.
+  edge-model-fetch:
+    image: ${ML_WORKER_IMAGE:?ML_WORKER_IMAGE is required in edge prod}
+    build: !reset null
+    pull_policy: always
+    restart: "no"
+    logging:
+      driver: local
+      options:
+        max-size: "10m"
+        max-file: "5"
+    environment:
+      # Optional Hugging Face token for rate-limited or gated pulls. Sent to
+      # Hugging Face sources only and never logged; leave empty for public.
+      HF_TOKEN: ${HF_TOKEN:-}
+    volumes:
+      - worker-models:/app/models:rw
+    command:
+      - python
+      - -m
+      - worker.tools.fetch_models
+      - --dest
+      - /app/models
 
   ml-worker:
     image: ${ML_WORKER_IMAGE:?ML_WORKER_IMAGE is required in edge prod}
@@ -178,7 +209,10 @@ services:
       # static YAML config are intentionally absent. The versioned config
       # endpoint backed by dashboard/DB state owns those values.
     volumes:
-      - ./models:/app/models:ro
+      # Fixed image-adjacent model root, populated by edge-model-fetch. Model
+      # selection/policy comes from the versioned worker config, never from
+      # environment variables.
+      - worker-models:/app/models:ro
       # Engines are prepared explicitly from the image-pinned manifest. Runtime
       # preflight verifies this writable cache and never writes beside models.
       - worker-engine-cache:/var/cache/seeon/tensorrt:rw
@@ -187,6 +221,8 @@ services:
     depends_on:
       ml-api:
         condition: service_healthy
+      edge-model-fetch:
+        condition: service_completed_successfully
     command:
       - python
       - -m
@@ -203,6 +239,8 @@ volumes:
   edge-state: {}
   worker-local-state: {}
   worker-engine-cache: {}
+  # Pinned external model artifacts; written only by edge-model-fetch.
+  worker-models: {}
   # Read-only rollback boundary for the one-time import; runtimes never mount these.
   ml-api-state: {}
   ml-worker-state: {}

@@ -288,3 +288,11 @@ name = "worker runtime is the sole composition root"
 type = "forbidden"
 source_modules = ["worker.types", "worker.interfaces", "worker.adapters", "worker.pipeline", "worker.domains"]
 forbidden_modules = ["worker.runtime"]
+
+[[tool.importlinter.contracts]]
+# worker/AGENTS.md: tools/ are out-of-band operator entrypoints (canary
+# harness, model provisioning). The production worker never imports them.
+name = "worker tools stay out of the production import graph"
+type = "forbidden"
+source_modules = ["worker.types", "worker.interfaces", "worker.adapters", "worker.pipeline", "worker.domains", "worker.runtime"]
+forbidden_modules = ["worker.tools"]

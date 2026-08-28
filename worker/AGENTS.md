@@ -18,10 +18,11 @@ Run `uv run --group lint lint-imports` for the configured contracts. A forbidden
 | `native/deepstream/` | native child + Python wire/preflight seam | `types` |
 | `runtime/` | composition root | everything |
 | `tools/deepstream_canary/` | host-side operator qualification tool | out of the production import graph |
+| `tools/fetch_models/` | pinned model provisioning (`edge-model-fetch`) | stdlib only; out of the production import graph |
 
 Order: `runtime -> pipeline -> domains -> adapters -> interfaces -> types -> contracts`.
 `native/deepstream/` is a parallel worker-internal leaf with a types-only ceiling,
-not another rung in that order. `tools/deepstream_canary/` is out-of-band.
+not another rung in that order. `tools/` is out-of-band; import-linter forbids every worker layer from importing it.
 `contracts` contains cross-instance L0 data only. Worker-internal ports and envelopes live under `worker/`; never duplicate or shadow a vendored type, including `contracts/AGENTS.md`.
 Shared leaves are scope-owned: `detection_policies`, `events`, and
 `rtsp_url_policy`. Worker never imports `backend` or database modules. The
@@ -61,6 +62,7 @@ Read the nearest `AGENTS.md` before changing that package.
 | `runtime/deepstream/` | one-child Python supervision, metadata admission, source lifecycle, per-camera `NativePolicyPump` |
 | `runtime/bootstrap.py` | named stages |
 | `tools/deepstream_canary/` | isolated canary harness, off the production worker path |
+| `tools/fetch_models/` | manifest-pinned model download + SHA-256 verify into `/app/models` |
 | `runtime/profile/` | canonical backend/memory descriptor; `nvidia` routes to the native media plane |
 
 New seam: Protocol plus two implementations, or one plus a test double.

@@ -161,6 +161,19 @@ docker compose ... config | grep -i nvidia   # 아무것도 안 나와야 한다
 죽여라 — `pkill -f 'python -m worker'` 는 그 패턴이 자기 SSH 명령줄에도 들어 있어서
 자기 세션을 끊는다.
 
+모델 가중치는 이미지에도, 호스트 `./models` 에도 없다. `up` 마다 원샷
+`edge-model-fetch` 서비스가 워커 이미지로 `python -m worker.tools.fetch_models`
+를 돌려 `worker/tools/fetch_models/manifest.json` 에 고정된 리비전/SHA-256 대로
+`worker-models` 네임드 볼륨을 채우고, `ml-worker` 는 그게 0 으로 끝나야 뜬다.
+두 번째 `up` 부터는 검증만 하고 아무것도 받지 않는다. 엣지가 huggingface.co 와
+github.com 에 HTTPS 로 나갈 수 있어야 하며, 공개 핀이므로 `HF_TOKEN` 은 비워 둔다.
+
+```bash
+scripts/edge.sh run "cd '<repo>' && docker compose ... logs edge-model-fetch | tail -12"
+# 마지막 줄이 `done: 7 file(s) verified, nothing to do` 또는 `fetched N file(s)` 여야 한다.
+# `FAILED: ... sha256 mismatch` / `HTTP 404` 면 핀이나 네트워크 문제 — 볼륨을 손으로 채우지 말 것.
+```
+
 기동 후 확인:
 
 ```bash

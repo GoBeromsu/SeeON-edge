@@ -148,6 +148,15 @@
       "behavior": "retired token key; backend startup rejects injection"
     },
     {
+      "name": "HF_TOKEN",
+      "category": "secret/bootstrap",
+      "authority": "deployment env",
+      "behavior": "optional Hugging Face token consumed only by the one-shot edge-model-fetch service; empty for public pulls; never logged",
+      "compose": true,
+      "example": true,
+      "service_environment": true
+    },
+    {
       "name": "ML_API_DETECTION_TZ",
       "category": "mutable policy",
       "authority": "versioned DB/worker config detection window tz",
@@ -194,8 +203,8 @@
     {
       "name": "ML_MODELS_DIR",
       "category": "fixed internal topology",
-      "authority": "fixed ./models to /app/models mount",
-      "behavior": "retired compose interpolation"
+      "authority": "fixed worker-models named volume at /app/models, provisioned by edge-model-fetch",
+      "behavior": "retired compose interpolation; models are a pinned external artifact, not a host bind mount"
     },
     {
       "name": "ML_RTSP_ALLOW_LOCAL_DESTINATIONS",

@@ -22,9 +22,17 @@ EDGE_RUNTIME_SERVICES: Final = {
 #: worker-state mount.
 EDGE_OPS_SERVICES: Final = {"edge-refused-evidence"}
 
+#: One-shot model provisioner on the worker image. Models are a pinned external
+#: artifact, never baked into an image or bind-mounted from the checkout: this
+#: service fills the `worker-models` volume from the committed manifest and
+#: gates ml-worker through depends_on.
+EDGE_MODEL_FETCH_SERVICE: Final = "edge-model-fetch"
+MODELS_VOLUME: Final = "worker-models"
+
 EDGE_SERVICES: Final = {
     "edge-filesystem-inventory",
     "edge-db-migrator",
+    EDGE_MODEL_FETCH_SERVICE,
     *EDGE_OPS_SERVICES,
     *EDGE_RUNTIME_SERVICES,
 }
@@ -164,7 +172,48 @@ def test_edge_db_migrator_owns_schema_lifecycle_before_runtime_start() -> None:
         "/var/lib/seeon-worker-state",
     ]
     assert api_depends_on == {"edge-db-migrator": {"condition": "service_completed_successfully"}}
-    assert worker_depends_on == {"ml-api": {"condition": "service_healthy"}}
+    # The worker waits on both the healthy API and a verified models volume.
+    assert worker_depends_on == {
+        "ml-api": {"condition": "service_healthy"},
+        EDGE_MODEL_FETCH_SERVICE: {"condition": "service_completed_successfully"},
+    }
+
+
+def test_edge_model_fetch_owns_the_models_volume_before_worker_start() -> None:
+    """Owner decision 2026-08-28: models stay out of the images and are fetched
+    at a pinned revision by a worker-side one-shot, mirroring edge-db-migrator.
+    The backend never reads /app/models (Lane D), so only the worker mounts it."""
+    services = _compose_services(EDGE_COMPOSE_FILE)
+    fetch = services[EDGE_MODEL_FETCH_SERVICE]
+
+    assert "ML_WORKER_IMAGE" in str(fetch["image"]), "same image as the runtime it prepares"
+    assert fetch["pull_policy"] == "always"
+    assert fetch["restart"] == "no"
+    assert "profiles" not in fetch, "must run on every `up`, not behind an opt-in profile"
+    assert fetch["command"] == [
+        "python",
+        "-m",
+        "worker.tools.fetch_models",
+        "--dest",
+        "/app/models",
+    ]
+    assert _list_field(fetch, "volumes") == [f"{MODELS_VOLUME}:/app/models:rw"]
+    assert set(_mapping_field(fetch, "environment")) == {"HF_TOKEN"}, (
+        "only the optional HF token crosses into the fetcher; no relay secret, no profile"
+    )
+    assert _mapping_field(fetch, "environment")["HF_TOKEN"] == "${HF_TOKEN:-}"
+    assert "depends_on" not in fetch, "model provisioning is independent of the database cutover"
+
+    worker_volumes = _list_field(services["ml-worker"], "volumes")
+    assert f"{MODELS_VOLUME}:/app/models:ro" in worker_volumes
+    assert not any(str(volume).startswith("./models") for volume in worker_volumes)
+    for service_name in ("ml-api", "edge-db-migrator", "edge-filesystem-inventory"):
+        volumes = _list_field(services[service_name], "volumes")
+        assert not any("/app/models" in str(volume) for volume in volumes), (
+            f"{service_name} must not mount the models volume"
+        )
+        assert "HF_TOKEN" not in _mapping_field(services[service_name], "environment")
+    assert "HF_TOKEN" not in _mapping_field(services["ml-worker"], "environment")
 
 
 def test_edge_services_pin_release_images_with_dockerfiles_for_build() -> None:
@@ -303,6 +352,7 @@ def test_edge_runtime_state_volumes_follow_backend_ownership() -> None:
         "ml-worker-state",
         "worker-engine-cache",
         "worker-local-state",
+        MODELS_VOLUME,
     }
     for runtime_name in EDGE_RUNTIME_SERVICES:
         runtime_volumes = _list_field(services[runtime_name], "volumes")

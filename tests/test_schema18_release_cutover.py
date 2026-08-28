@@ -130,7 +130,12 @@ def test_compose_orders_inventory_candidate_cutover_api_worker() -> None:
     assert api["depends_on"] == {
         "edge-db-migrator": {"condition": "service_completed_successfully"}
     }
-    assert worker["depends_on"] == {"ml-api": {"condition": "service_healthy"}}
+    # The worker also waits on the verified models volume (edge-model-fetch);
+    # the database cutover ordering above is unchanged by that.
+    assert worker["depends_on"] == {
+        "ml-api": {"condition": "service_healthy"},
+        "edge-model-fetch": {"condition": "service_completed_successfully"},
+    }
 
 
 def test_cli_help_matches_compose_and_runbook_flags() -> None:

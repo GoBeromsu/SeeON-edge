@@ -60,3 +60,6 @@ services:
       context: .
       dockerfile: Dockerfile.edge
     pull_policy: never
+  # Same locally built worker tag; never try to pull it from GHCR.
+  edge-model-fetch:
+    pull_policy: never

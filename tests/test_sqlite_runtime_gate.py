@@ -21,7 +21,8 @@ BOUNDED_LOG_BLOCK = (
     '        max-size: "10m"\n'
     '        max-file: "5"\n'
 )
-RUNTIME_SERVICES = ("edge-db-migrator", "ml-api", "ml-worker")
+# edge-model-fetch is a one-shot like the migrator; its download log is bounded too.
+RUNTIME_SERVICES = ("edge-db-migrator", "edge-model-fetch", "ml-api", "ml-worker")
 
 
 def test_backend_image_pins_official_uv_python_digest_and_sqlite_floor() -> None:
@@ -36,7 +37,7 @@ def test_backend_image_pins_official_uv_python_digest_and_sqlite_floor() -> None
 
 def test_edge_runtime_services_bound_local_docker_logs() -> None:
     compose = COMPOSE_FILE.read_text(encoding="utf-8")
-    assert compose.count(BOUNDED_LOG_BLOCK) == 3
+    assert compose.count(BOUNDED_LOG_BLOCK) == len(RUNTIME_SERVICES)
     for name in RUNTIME_SERVICES:
         service = re.search(rf"^  {re.escape(name)}:\n(?:    .*\n)+", compose, re.MULTILINE)
         assert service is not None
