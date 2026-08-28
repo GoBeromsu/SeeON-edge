@@ -489,7 +489,7 @@ def test_rtsp_probe_returns_the_probe_result_payload_on_success(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """On success ``_rtsp_probe`` returns ``RTSPProbeResult.as_dict()``
-    untouched -- the HTTP handler's ``_sanitize_probe_payload`` is what trims
+    untouched -- the HTTP handler's ``ProbeResponse.sanitized`` is what trims
     it down for the wire, not this method."""
     runtime = _runtime(_config("camera-a"), tmp_path, {})
     result = RTSPProbeResult(

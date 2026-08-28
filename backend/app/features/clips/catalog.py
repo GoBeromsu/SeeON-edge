@@ -72,6 +72,7 @@ _MANIFEST_FIELDS = {
     "reason_code",
     "event_ref",
     "event_type",
+    "domain",
     "started_at",
     "duration_s",
     "encoder",

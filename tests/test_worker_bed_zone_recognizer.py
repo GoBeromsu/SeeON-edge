@@ -95,7 +95,7 @@ def test_bed_zone_recognizer_picks_highest_confidence_box_and_its_polygon(
 
     payload = runtime._bed_zone_recognizer(_IMAGE)  # noqa: SLF001
 
-    assert payload == {
+    assert payload.as_dict() == {
         "polygon": [[5, 5], [50, 5], [50, 50], [5, 50]],
         "image_width": 640,
         "image_height": 480,
@@ -116,7 +116,7 @@ def test_bed_zone_recognizer_falls_back_to_rectangle_when_polygon_is_empty(
 
     payload = runtime._bed_zone_recognizer(_IMAGE)  # noqa: SLF001
 
-    assert payload == {
+    assert payload.as_dict() == {
         "polygon": [[10, 20], [110, 20], [110, 220], [10, 220]],
         "image_width": 640,
         "image_height": 480,
@@ -138,7 +138,7 @@ def test_bed_zone_recognizer_accepts_a_run_method_runner_not_just_callable(
 
     payload = runtime._bed_zone_recognizer(_IMAGE)  # noqa: SLF001
 
-    assert payload["polygon"] == [[2, 2], [4, 2], [4, 4], [2, 4]]
+    assert payload.polygon == ((2, 2), (4, 2), (4, 4), (2, 4))
 
 
 def test_bed_zone_recognizer_raises_not_found_when_no_beds_detected(

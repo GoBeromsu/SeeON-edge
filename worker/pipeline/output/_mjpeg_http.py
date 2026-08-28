@@ -7,8 +7,8 @@ from collections.abc import Callable
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from socketserver import ThreadingMixIn
-from typing import Final, Literal, Protocol, TypeAlias, TypedDict
-from urllib.parse import unquote, urlsplit
+from typing import Final, Protocol, TypeAlias
+from urllib.parse import urlsplit
 
 import cv2
 import numpy as np
@@ -19,7 +19,28 @@ from shared.events.replay_wire import MAX_REPLAY_BODY_BYTES as _REPLAY_BODY_LIMI
 from shared.events.replay_wire import ReplayWireError, decode_replay_trace
 from worker.domains.fall import FallModelProtocol
 from worker.pipeline.output.live_view import LatestFrame, LatestFrameStore
-from worker.pipeline.output.overlay import OverlayMode
+from worker.pipeline.output.live_view_api import (
+    BED_ZONE_NOT_FOUND_BODY,
+    MJPEG_BOUNDARY,
+    MJPEG_MEDIA_TYPE,
+    PROBE_PATH,
+    RELAY_TOKEN_HEADER,
+    REPLAY_PATH,
+    BedZoneRecognizeResponse,
+    OverlayMode,
+    ProbeErrorClass,
+    ProbeResponse,
+    bed_zone_camera_id,
+    clip_deletion_clip_id,
+    clip_deletion_preflight_clip_id,
+    normalize_probe_error_class,
+    parse_pose_body,
+    parse_probe_request,
+    pose_body,
+    pose_camera_id,
+    snapshot_camera_id,
+    stream_camera_id,
+)
 from worker.pipeline.trace.models import (
     AnalysisTrace,
     OptionalNumber,
@@ -32,7 +53,6 @@ from worker.pipeline.trace.models import (
 )
 from worker.replay.engine import ReplayConfigurationError, ReplayRun, replay_recovered
 
-BOUNDARY: Final = b"frame"
 POLL_INTERVAL_SECONDS: Final = 0.05
 HEARTBEAT_INTERVAL_SECONDS: Final = 1.0
 MAX_PROBE_BODY_BYTES: Final = 8192
@@ -53,18 +73,6 @@ STREAM_FIRST_FRAME_TIMEOUT_SECONDS: Final = 0.5
 # already cached.
 BED_ZONE_FRAME_TIMEOUT_SECONDS: Final = 2.0
 
-OVERLAY_PREFIX: Final = "/overlay/"
-POSE_SUFFIX: Final = "/pose"
-BED_ZONE_SUFFIX: Final = "/bed-zone/recognize"
-
-ProbeErrorClass = Literal["auth", "timeout", "decode", "unsupported"]
-
-
-class BedZonePayload(TypedDict):
-    polygon: list[list[int]]
-    image_width: int
-    image_height: int
-
 
 class BedZoneNotFoundError(RuntimeError):
     """Recognition ran successfully but found no bed in the frame."""
@@ -75,7 +83,7 @@ class BedZoneNotFoundError(RuntimeError):
 # when the model finds no bed. Injected from ``worker.runtime`` -- the
 # composition root -- so this output-layer module never imports
 # ``worker.adapters`` directly, mirroring the existing ``MjpegProbe`` seam.
-BedZoneRecognizer = Callable[[Image], BedZonePayload]
+BedZoneRecognizer = Callable[[Image], BedZoneRecognizeResponse]
 
 
 class ClipDeletionControl(Protocol):
@@ -84,6 +92,8 @@ class ClipDeletionControl(Protocol):
     def delete(self, clip_id: str) -> dict[str, object]: ...
 
 
+# Raw probe result as the runtime's probe callable returns it (it may carry
+# the masked URL and a message); only ``ProbeResponse.sanitized`` reaches the wire.
 MjpegProbePayload: TypeAlias = dict[str, bool | str | int]
 
 
@@ -97,7 +107,7 @@ class MjpegProbeError(RuntimeError):
     error_class: ProbeErrorClass
 
     def __init__(self, error_class: str) -> None:
-        self.error_class = _normalize_error_class(error_class)
+        self.error_class = normalize_probe_error_class(error_class)
         super().__init__(self.error_class)
 
 
@@ -121,17 +131,19 @@ def build_http_server(
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:  # noqa: N802 - stdlib hook name
             path = urlsplit(self.path).path
-            if path.startswith("/stream/"):
-                self._handle_stream(unquote(path[len("/stream/") :]))
+            stream_id = stream_camera_id(path)
+            if stream_id is not None:
+                self._handle_stream(stream_id)
                 return
-            if path.startswith("/snapshot/"):
-                self._handle_snapshot(unquote(path[len("/snapshot/") :]))
+            snapshot_id = snapshot_camera_id(path)
+            if snapshot_id is not None:
+                self._handle_snapshot(snapshot_id)
                 return
-            pose_camera_id = _pose_camera_id(path)
-            if pose_camera_id is not None:
-                self._handle_get_pose(pose_camera_id)
+            pose_id = pose_camera_id(path)
+            if pose_id is not None:
+                self._handle_get_pose(pose_id)
                 return
-            clip_preflight_id = _clip_delete_preflight_identity(path)
+            clip_preflight_id = clip_deletion_preflight_clip_id(path)
             if clip_preflight_id is not None:
                 self._handle_clip_delete_preflight(clip_preflight_id)
                 return
@@ -139,22 +151,22 @@ def build_http_server(
 
         def do_POST(self) -> None:  # noqa: N802 - stdlib hook name
             path = urlsplit(self.path).path
-            if path == "/replay":
+            if path == REPLAY_PATH:
                 self._handle_replay()
                 return
-            if path != "/probe":
-                bed_zone_camera_id = _bed_zone_camera_id(path)
-                if bed_zone_camera_id is not None:
-                    self._handle_bed_zone_recognize(bed_zone_camera_id)
+            if path != PROBE_PATH:
+                bed_zone_id = bed_zone_camera_id(path)
+                if bed_zone_id is not None:
+                    self._handle_bed_zone_recognize(bed_zone_id)
                     return
-                pose_camera_id = _pose_camera_id(path)
-                if pose_camera_id is not None:
-                    self._handle_set_pose(pose_camera_id)
+                pose_id = pose_camera_id(path)
+                if pose_id is not None:
+                    self._handle_set_pose(pose_id)
                     return
                 self.send_error(HTTPStatus.NOT_FOUND)
                 return
             if not _authorized_probe(
-                self.headers.get("X-Edge-Relay-Token"),
+                self.headers.get(RELAY_TOKEN_HEADER),
                 probe_token,
             ):
                 self.send_error(HTTPStatus.FORBIDDEN)
@@ -163,7 +175,7 @@ def build_http_server(
             if rtsp_url is None:
                 self.send_error(HTTPStatus.BAD_REQUEST)
                 return
-            payload: MjpegProbePayload
+            payload: ProbeResponse
             try:
                 # Re-validate destination (including DNS answers) so forged
                 # internal callers cannot skip API admission and open an
@@ -174,17 +186,17 @@ def build_http_server(
                 try:
                     endpoint = assert_rtsp_endpoint_allowed(rtsp_url)
                 except ValueError:
-                    payload = {"ok": False, "error_class": "unsupported"}
+                    payload = ProbeResponse(ok=False, error_class="unsupported")
                 else:
-                    payload = _sanitize_probe_payload(probe(endpoint.original_url))
+                    payload = ProbeResponse.sanitized(probe(endpoint.original_url))
             except MjpegProbeError as exc:
-                payload = {"ok": False, "error_class": exc.error_class}
+                payload = ProbeResponse(ok=False, error_class=exc.error_class)
             except (OSError, RuntimeError, TypeError, ValueError):
-                payload = {"ok": False, "error_class": "decode"}
+                payload = ProbeResponse(ok=False, error_class="decode")
             self._write_json(payload)
 
         def _handle_replay(self) -> None:
-            if not _authorized_probe(self.headers.get("X-Edge-Relay-Token"), probe_token):
+            if not _authorized_probe(self.headers.get(RELAY_TOKEN_HEADER), probe_token):
                 self.send_error(HTTPStatus.FORBIDDEN)
                 return
             request = self._read_replay_body()
@@ -215,14 +227,14 @@ def build_http_server(
 
         def do_DELETE(self) -> None:  # noqa: N802 - stdlib hook name
             path = urlsplit(self.path).path
-            clip_id = _clip_delete_identity(path)
+            clip_id = clip_deletion_clip_id(path)
             if clip_id is not None:
                 self._handle_clip_delete(clip_id)
                 return
             self.send_error(HTTPStatus.NOT_FOUND)
 
         def _handle_clip_delete_preflight(self, clip_id: str) -> None:
-            if not _authorized_probe(self.headers.get("X-Edge-Relay-Token"), probe_token):
+            if not _authorized_probe(self.headers.get(RELAY_TOKEN_HEADER), probe_token):
                 self.send_error(HTTPStatus.FORBIDDEN)
                 return
             if clip_deletion_control is None:
@@ -236,7 +248,7 @@ def build_http_server(
             self._write_status_json(HTTPStatus.OK, payload)
 
         def _handle_clip_delete(self, clip_id: str) -> None:
-            if not _authorized_probe(self.headers.get("X-Edge-Relay-Token"), probe_token):
+            if not _authorized_probe(self.headers.get(RELAY_TOKEN_HEADER), probe_token):
                 self.send_error(HTTPStatus.FORBIDDEN)
                 return
             if clip_deletion_control is None:
@@ -264,7 +276,7 @@ def build_http_server(
             # and clip delete (security finding #3). Auth runs before any
             # viewer-counter side effect so a rejected caller never opens the
             # encode gate.
-            if not _authorized_probe(self.headers.get("X-Edge-Relay-Token"), probe_token):
+            if not _authorized_probe(self.headers.get(RELAY_TOKEN_HEADER), probe_token):
                 self.send_error(HTTPStatus.FORBIDDEN)
                 return
             # Viewer gating (#48): count this connection *before* waiting for
@@ -288,7 +300,7 @@ def build_http_server(
                 self.send_response(HTTPStatus.OK)
                 self.send_header(
                     "Content-Type",
-                    f"multipart/x-mixed-replace; boundary={BOUNDARY.decode()}",
+                    MJPEG_MEDIA_TYPE,
                 )
                 self.send_header("Cache-Control", "no-cache")
                 self.end_headers()
@@ -316,7 +328,7 @@ def build_http_server(
                 store.mark_viewer_disconnected(camera_id)
 
         def _handle_snapshot(self, camera_id: str) -> None:
-            if not _authorized_probe(self.headers.get("X-Edge-Relay-Token"), probe_token):
+            if not _authorized_probe(self.headers.get(RELAY_TOKEN_HEADER), probe_token):
                 self.send_error(HTTPStatus.FORBIDDEN)
                 return
             # Viewer gating (#48) means the cache can go stale with no stream
@@ -339,7 +351,7 @@ def build_http_server(
                 return
 
         def _handle_get_pose(self, camera_id: str) -> None:
-            if not _authorized_pose(self.headers.get("X-Edge-Relay-Token"), probe_token):
+            if not _authorized_pose(self.headers.get(RELAY_TOKEN_HEADER), probe_token):
                 self.send_error(HTTPStatus.FORBIDDEN)
                 return
             if camera_id == "" or not store.is_known(camera_id):
@@ -348,7 +360,7 @@ def build_http_server(
             self._write_mode_json(store.get_mode(camera_id))
 
         def _handle_set_pose(self, camera_id: str) -> None:
-            if not _authorized_pose(self.headers.get("X-Edge-Relay-Token"), probe_token):
+            if not _authorized_pose(self.headers.get(RELAY_TOKEN_HEADER), probe_token):
                 self.send_error(HTTPStatus.FORBIDDEN)
                 return
             if camera_id == "" or not store.is_known(camera_id):
@@ -362,7 +374,7 @@ def build_http_server(
             self._write_mode_json(mode)
 
         def _handle_bed_zone_recognize(self, camera_id: str) -> None:
-            if not _authorized_probe(self.headers.get("X-Edge-Relay-Token"), probe_token):
+            if not _authorized_probe(self.headers.get(RELAY_TOKEN_HEADER), probe_token):
                 self.send_error(HTTPStatus.FORBIDDEN)
                 return
             if camera_id == "" or not store.is_known(camera_id):
@@ -398,12 +410,12 @@ def build_http_server(
             try:
                 payload = bed_zone_recognizer(image)
             except BedZoneNotFoundError:
-                self._write_status_json(HTTPStatus.NOT_FOUND, {"error_class": "bed_not_found"})
+                self._write_status_json(HTTPStatus.NOT_FOUND, BED_ZONE_NOT_FOUND_BODY)
                 return
             except (OSError, RuntimeError, TypeError, ValueError, cv2.error):
                 self.send_error(HTTPStatus.SERVICE_UNAVAILABLE)
                 return
-            self._write_status_json(HTTPStatus.OK, payload)
+            self._write_status_json(HTTPStatus.OK, payload.as_dict())
 
         def _read_json_object(self, limit: int) -> dict[str, object] | None:
             """Bounded JSON object body, or None when absent, oversized, or malformed."""
@@ -432,14 +444,9 @@ def build_http_server(
 
         def _read_mode_body(self) -> OverlayMode | None:
             payload = self._read_json_object(MAX_POSE_BODY_BYTES)
-            if payload is None or len(payload) != 1:
+            if payload is None:
                 return None
-            for key, value in payload.items():
-                if key != "mode":
-                    return None
-                mode_value: object = value
-                return _parse_overlay_mode(mode_value)
-            return None
+            return parse_pose_body(payload)
 
         def _read_replay_body(self) -> dict[str, object] | None:
             payload = self._read_json_object(MAX_REPLAY_BODY_BYTES)
@@ -448,22 +455,19 @@ def build_http_server(
             return payload
 
         def _write_mode_json(self, mode: OverlayMode) -> None:
-            self._write_status_json(HTTPStatus.OK, {"mode": mode})
+            self._write_status_json(HTTPStatus.OK, pose_body(mode))
 
         def _read_probe_url(self) -> str | None:
             payload = self._read_json_object(MAX_PROBE_BODY_BYTES)
             if payload is None:
                 return None
-            rtsp_url = payload.get("rtsp_url")
-            if not isinstance(rtsp_url, str) or rtsp_url.strip() == "":
-                return None
-            return rtsp_url
+            return parse_probe_request(payload)
 
-        def _write_json(self, payload: MjpegProbePayload) -> None:
-            self._write_status_json(HTTPStatus.OK, payload)
+        def _write_json(self, payload: ProbeResponse) -> None:
+            self._write_status_json(HTTPStatus.OK, payload.as_dict())
 
         def _write_part(self, frame: LatestFrame) -> None:
-            self.wfile.write(b"--" + BOUNDARY + b"\r\n")
+            self.wfile.write(b"--" + MJPEG_BOUNDARY + b"\r\n")
             self.wfile.write(b"Content-Type: image/jpeg\r\n")
             self.wfile.write(f"Content-Length: {len(frame.jpeg)}\r\n\r\n".encode("ascii"))
             self.wfile.write(frame.jpeg)
@@ -473,48 +477,6 @@ def build_http_server(
             del format, args
 
     return _ThreadingHTTPServer((host, port), Handler)
-
-
-def _clip_delete_preflight_identity(path: str) -> str | None:
-    """Match the explicit non-destructive clip deletion preflight command."""
-    parts = path.split("/")
-    if len(parts) != 4 or parts[1] != "clips" or parts[3] != "deletion-preflight":
-        return None
-    clip_id = unquote(parts[2])
-    return clip_id or None
-
-
-def _clip_delete_identity(path: str) -> str | None:
-    """Match ``/clips/{clip_id}`` (only) and return the decoded clip id."""
-    parts = path.split("/")
-    if len(parts) != 3 or parts[1] != "clips":
-        return None
-    clip_id = unquote(parts[2])
-    return clip_id or None
-
-
-def _pose_camera_id(path: str) -> str | None:
-    """Match ``/overlay/{camera_id}/pose`` and return the decoded camera id.
-
-    Returns ``None`` for any other path (including an empty camera id),
-    letting callers fall through to their existing 404 handling.
-    """
-    if not path.startswith(OVERLAY_PREFIX) or not path.endswith(POSE_SUFFIX):
-        return None
-    camera_id = unquote(path[len(OVERLAY_PREFIX) : -len(POSE_SUFFIX)])
-    return camera_id or None
-
-
-def _bed_zone_camera_id(path: str) -> str | None:
-    """Match ``/overlay/{camera_id}/bed-zone/recognize`` and return the camera id.
-
-    Returns ``None`` for any other path (including an empty camera id),
-    letting callers fall through to their existing 404 handling.
-    """
-    if not path.startswith(OVERLAY_PREFIX) or not path.endswith(BED_ZONE_SUFFIX):
-        return None
-    camera_id = unquote(path[len(OVERLAY_PREFIX) : -len(BED_ZONE_SUFFIX)])
-    return camera_id or None
 
 
 def _authorized_probe(supplied: str | None, expected: str | None) -> bool:
@@ -539,50 +501,6 @@ def _authorized_pose(supplied: str | None, expected: str | None) -> bool:
     return _authorized_probe(supplied, expected)
 
 
-def _parse_overlay_mode(value: object) -> OverlayMode | None:
-    if not isinstance(value, str):
-        return None
-    if value == "none":
-        return "none"
-    if value == "bedexit":
-        return "bedexit"
-    if value == "fall":
-        return "fall"
-    return None
-
-
-def _sanitize_probe_payload(payload: MjpegProbePayload) -> MjpegProbePayload:
-    if payload.get("ok") is not True:
-        error_class = payload.get("error_class")
-        return {
-            "ok": False,
-            "error_class": _normalize_error_class(
-                error_class if isinstance(error_class, str) else None
-            ),
-        }
-    sanitized: MjpegProbePayload = {"ok": True}
-    backend = payload.get("backend")
-    width = payload.get("width")
-    height = payload.get("height")
-    if isinstance(backend, str):
-        sanitized["backend"] = backend
-    if isinstance(width, int):
-        sanitized["width"] = width
-    if isinstance(height, int):
-        sanitized["height"] = height
-    return sanitized
-
-
-def _normalize_error_class(error_class: str | None) -> ProbeErrorClass:
-    if error_class == "auth":
-        return "auth"
-    if error_class == "timeout":
-        return "timeout"
-    if error_class == "unsupported":
-        return "unsupported"
-    return "decode"
-
-
 def _recovered_trace(
     frames: tuple[dict[str, object], ...], truncation: dict[str, object]
 ) -> RecoveredCameraTrace:
@@ -605,8 +523,17 @@ def _recovered_trace(
 
 def _analysis_trace(frame: dict[str, object]) -> AnalysisTrace:
     required = {
-        "trace_id", "frame_key", "pts", "source_time", "frame_width", "frame_height",
-        "bed_region_provenance", "persons", "beds", "components", "schema_version",
+        "trace_id",
+        "frame_key",
+        "pts",
+        "source_time",
+        "frame_width",
+        "frame_height",
+        "bed_region_provenance",
+        "persons",
+        "beds",
+        "components",
+        "schema_version",
     }
     if set(frame) != required:
         raise ReplayWireError("analysis frame has undeclared or missing fields")
@@ -720,8 +647,10 @@ def _required_trace_key(value: object) -> tuple[str, str, int, int]:
 
 
 def _box(value: object, name: str) -> tuple[int, int, int, int]:
-    if not isinstance(value, list) or len(value) != 4 or any(
-        isinstance(item, bool) or not isinstance(item, int) for item in value
+    if (
+        not isinstance(value, list)
+        or len(value) != 4
+        or any(isinstance(item, bool) or not isinstance(item, int) for item in value)
     ):
         raise ReplayWireError(f"{name} is invalid")
     return value[0], value[1], value[2], value[3]
@@ -827,7 +756,6 @@ def _replay_run_payload(run: ReplayRun, truncation: dict[str, object]) -> dict[s
 __all__ = [
     "BED_ZONE_FRAME_TIMEOUT_SECONDS",
     "BedZoneNotFoundError",
-    "BedZonePayload",
     "BedZoneRecognizer",
     "ClipDeletionControl",
     "MjpegProbe",

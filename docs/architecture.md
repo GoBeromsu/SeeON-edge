@@ -121,6 +121,33 @@ work, and never duplicate or shadow a vendored type inside `worker/`.
 | `DecisionInput` | `worker/types/decision_input.py` | no |
 | `BusinessEvent` | `worker/types/business_event.py` | no |
 
+## Provider/consumer contract between backend and worker
+
+`backend` and `worker` are deployed independently and never import each
+other (import-linter keeps both directions forbidden). They still meet at two
+runtime seams -- the ml-api proxies calling the worker's live-view server on
+`ml-worker:8090` (stream, snapshot, pose overlay, bed-zone recognize, RTSP
+probe, clip-deletion preflight/command), and the `clips/<clip_id>/manifest.json`
+sidecar the worker writes and ml-api reads back.
+
+The rule for both: **each side owns its own definition of the interface, and
+a test -- not a shared module -- catches drift.** The provider owns the schema
+it serves or writes; the consumer owns the schema it expects. `contracts/` is
+the ADR-0006 byte-mirrored ML vocabulary shared with eldercare-dataset-ops,
+not an edge-internal interface package, so neither seam is defined there.
+
+| Seam | Provider (worker) | Consumer (backend) |
+| --- | --- | --- |
+| `:8090` HTTP | `worker/pipeline/output/live_view_api.py` -- route matchers, relay-token header, MJPEG media type, request/response bodies | `backend/app/features/cameras/streams_router.py`, `bed_zone_router.py`, `router.py` (probe), `backend/app/features/clips/deletion_control.py` -- path builders and response parsers |
+| `manifest.json` | `worker/pipeline/output/evidence/manifest_models.py` + `clip_manifest_payload.py` -- the fields the writer emits | `backend/app/features/clips/manifest.py` (lenient serving parser), `catalog.py` `_MANIFEST_FIELDS` (strict migration reader) |
+
+`tests/test_backend_worker_runtime_contracts.py` is the drift guard and the
+one sanctioned place that imports both packages: it publishes a manifest with
+the worker writer and parses it with both backend readers, asserts every path
+the backend builds is matched by the worker's route and by no other, and
+round-trips each worker response body (probe, pose overlay, bed zone) through
+the backend parser. A field either side adds must pass there before it ships.
+
 ## Raw-image vs numeric fan-out
 
 `FramePacket` is the only envelope permitted to carry an image. Four

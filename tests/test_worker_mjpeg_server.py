@@ -13,9 +13,9 @@ import numpy as np
 import pytest
 
 from worker.pipeline.output.live_view import LatestFrameStore
+from worker.pipeline.output.live_view_api import BedZoneRecognizeResponse
 from worker.pipeline.output.mjpeg_server import (
     BedZoneNotFoundError,
-    BedZonePayload,
     MjpegProbeError,
     MjpegServer,
     MjpegServerConfig,
@@ -99,9 +99,7 @@ def test_mjpeg_server_unknown_empty_and_stream_response() -> None:
             assert exc.code == 503
         else:  # pragma: no cover
             raise AssertionError("empty camera should 503")
-        with urllib.request.urlopen(
-            _authed_get(f"{base}/stream/camera-a"), timeout=1
-        ) as response:
+        with urllib.request.urlopen(_authed_get(f"{base}/stream/camera-a"), timeout=1) as response:
             body = response.read(64)
             assert response.status == 200
             assert b"multipart" in response.headers["Content-Type"].encode()
@@ -518,9 +516,9 @@ def test_bed_zone_recognize_no_frame_available_returns_503() -> None:
     store.register_camera("camera-a")
     recognizer_calls: list[object] = []
 
-    def recognizer(image: np.ndarray) -> BedZonePayload:
+    def recognizer(image: np.ndarray) -> BedZoneRecognizeResponse:
         recognizer_calls.append(image)
-        return {"polygon": [[0, 0]], "image_width": 1, "image_height": 1}
+        return BedZoneRecognizeResponse(polygon=((0, 0),), image_width=1, image_height=1)
 
     server = MjpegServer(
         store,
@@ -563,9 +561,9 @@ def test_bed_zone_recognize_rejects_images_outside_the_image_contract(
     def imdecode(_buffer: np.ndarray, _flags: int) -> np.ndarray:
         return decoded
 
-    def recognizer(image: np.ndarray) -> BedZonePayload:
+    def recognizer(image: np.ndarray) -> BedZoneRecognizeResponse:
         recognizer_calls.append(image)
-        return {"polygon": [[0, 0]], "image_width": 1, "image_height": 1}
+        return BedZoneRecognizeResponse(polygon=((0, 0),), image_width=1, image_height=1)
 
     monkeypatch.setattr(cv2, "imdecode", imdecode)
     server = MjpegServer(
@@ -591,13 +589,11 @@ def test_bed_zone_recognize_success_returns_polygon_and_dimensions() -> None:
     store.publish_jpeg("camera-a", _REAL_JPEG, frame_index=1)
     seen_images: list[np.ndarray] = []
 
-    def recognizer(image: np.ndarray) -> BedZonePayload:
+    def recognizer(image: np.ndarray) -> BedZoneRecognizeResponse:
         seen_images.append(image)
-        return {
-            "polygon": [[1, 2], [3, 2], [3, 4], [1, 4]],
-            "image_width": 16,
-            "image_height": 16,
-        }
+        return BedZoneRecognizeResponse(
+            polygon=((1, 2), (3, 2), (3, 4), (1, 4)), image_width=16, image_height=16
+        )
 
     server = MjpegServer(
         store,
@@ -629,7 +625,7 @@ def test_bed_zone_recognize_not_found_maps_to_structured_404() -> None:
     store = LatestFrameStore()
     store.publish_jpeg("camera-a", _REAL_JPEG, frame_index=1)
 
-    def recognizer(image: np.ndarray) -> BedZonePayload:
+    def recognizer(image: np.ndarray) -> BedZoneRecognizeResponse:
         del image
         raise BedZoneNotFoundError("no bed detected")
 
@@ -658,7 +654,7 @@ def test_bed_zone_recognize_runner_failure_returns_503() -> None:
     store = LatestFrameStore()
     store.publish_jpeg("camera-a", _REAL_JPEG, frame_index=1)
 
-    def recognizer(image: np.ndarray) -> BedZonePayload:
+    def recognizer(image: np.ndarray) -> BedZoneRecognizeResponse:
         del image
         raise RuntimeError("model exploded")
 
@@ -699,13 +695,11 @@ def test_media_endpoints_require_relay_token_no_wrong_correct(
     store = LatestFrameStore()
     store.publish_jpeg("camera-a", _REAL_JPEG, frame_index=1)
 
-    def recognizer(image: np.ndarray) -> BedZonePayload:
+    def recognizer(image: np.ndarray) -> BedZoneRecognizeResponse:
         del image
-        return {
-            "polygon": [[0, 0], [1, 0], [1, 1]],
-            "image_width": 16,
-            "image_height": 16,
-        }
+        return BedZoneRecognizeResponse(
+            polygon=((0, 0), (1, 0), (1, 1)), image_width=16, image_height=16
+        )
 
     server = MjpegServer(
         store,

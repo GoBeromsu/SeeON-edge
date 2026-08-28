@@ -268,10 +268,15 @@ def _pose_request(
     if upstream_status != status.HTTP_200_OK:
         raise _upstream_unavailable(upstream_status)
 
+    return _parse_pose_payload(raw)
+
+
+def _parse_pose_payload(raw: bytes) -> PoseOverlayResponse:
+    """The worker's ``{"mode": ...}`` body; anything else is an upstream failure."""
     try:
         parsed = json.loads(raw)
         mode = parsed["mode"]
-    except (json.JSONDecodeError, KeyError) as exc:
+    except (json.JSONDecodeError, KeyError, TypeError) as exc:
         raise _upstream_unavailable(status.HTTP_503_SERVICE_UNAVAILABLE) from exc
     if not isinstance(mode, str) or mode not in _OVERLAY_MODES:
         raise _upstream_unavailable(status.HTTP_503_SERVICE_UNAVAILABLE)

@@ -11,10 +11,13 @@ from fastapi import FastAPI, HTTPException, Request, status
 
 from backend.app.core.config import get_settings
 
+_RELAY_TOKEN_HEADER = "X-Edge-Relay-Token"
+_PREFLIGHT_SUFFIX = "/deletion-preflight"
+
 
 def preflight_clip_deletion(target: FastAPI | Request, clip_id: str) -> dict[str, object]:
     """Ask the worker to verify hold, ownership, and containment without mutation."""
-    return _command(target, clip_id, method="GET", suffix="/deletion-preflight")
+    return _command(target, clip_id, method="GET", suffix=_PREFLIGHT_SUFFIX)
 
 
 def control_clip_deletion(target: FastAPI | Request, clip_id: str) -> dict[str, object]:
@@ -36,11 +39,10 @@ def _command(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="worker clip deletion origin is not configured",
         )
-    encoded = urllib.parse.quote(clip_id, safe="")
-    url = f"{origin}/clips/{encoded}{suffix}"
+    url = f"{origin}{_clip_path(clip_id, suffix)}"
     holder = target.app if isinstance(target, Request) else target
     token = getattr(holder.state, "edge_relay_token", None)
-    headers = {"X-Edge-Relay-Token": token} if isinstance(token, str) and token else {}
+    headers = {_RELAY_TOKEN_HEADER: token} if isinstance(token, str) and token else {}
     upstream_request = urllib.request.Request(url, method=method, headers=headers)
     try:
         upstream = urllib.request.urlopen(
@@ -79,6 +81,11 @@ def _command(
             detail="worker clip deletion response is invalid",
         )
     return {str(key): value for key, value in parsed.items()}
+
+
+def _clip_path(clip_id: str, suffix: str) -> str:
+    """``/clips/{clip_id}`` (command) or ``/clips/{clip_id}/deletion-preflight``."""
+    return f"/clips/{urllib.parse.quote(clip_id, safe='')}{suffix}"
 
 
 __all__ = ["control_clip_deletion", "preflight_clip_deletion"]

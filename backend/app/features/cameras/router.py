@@ -71,6 +71,8 @@ from contracts.worker_config import PulledWorkerConfig
 from shared.rtsp_url_policy import assert_rtsp_endpoint_allowed
 
 RELAY_TOKEN_HEADER = "X-Edge-Relay-Token"
+# Worker route that camera registration delegates RTSP probing to (server-side only).
+PROBE_PATH = "/probe"
 
 router = APIRouter(prefix="/cameras", tags=["cameras"])
 
@@ -1440,7 +1442,7 @@ def _probe_rtsp_url(request: Request, rtsp_url: str) -> ProbeResult:
         return ProbeResult(ok=False, probe_unavailable=True)
     body = json.dumps({"rtsp_url": rtsp_url}, separators=(",", ":")).encode("utf-8")
     probe_request = urllib.request.Request(
-        f"{origin}/probe",
+        f"{origin}{PROBE_PATH}",
         data=body,
         headers={
             "Content-Type": "application/json",

@@ -96,10 +96,10 @@ from worker.pipeline.output.evidence.packet_ring import PacketRingLimits
 from worker.pipeline.output.evidence.snapshot_store import SnapshotStore
 from worker.pipeline.output.evidence_attacher import AlertEvidenceAttacher
 from worker.pipeline.output.live_view import LatestFrameStore, LiveViewSubscriber
+from worker.pipeline.output.live_view_api import BedZoneRecognizeResponse
 from worker.pipeline.output.live_view_pump import LatestObservationStore, LiveViewPump
 from worker.pipeline.output.mjpeg_server import (
     BedZoneNotFoundError,
-    BedZonePayload,
     MjpegProbeError,
     MjpegProbePayload,
     MjpegServer,
@@ -757,8 +757,7 @@ class NativeHeartbeatLoop:
         by_id = {camera.camera_id: camera for camera in cameras}
         self._pumps = tuple(pump for pump in pumps if pump.camera_id in by_id)
         self._reporters = {
-            pump.camera_id: HeartbeatReporter(worker, by_id[pump.camera_id])
-            for pump in self._pumps
+            pump.camera_id: HeartbeatReporter(worker, by_id[pump.camera_id]) for pump in self._pumps
         }
         # The reporter rate-limits to camera.heartbeat_interval_sec on its own,
         # so ticking faster only shortens how long a newly live camera waits to
@@ -767,9 +766,7 @@ class NativeHeartbeatLoop:
         # Seeded from the live counter, not from a sentinel below zero: a
         # camera that has processed nothing must not be reported live by the
         # very first tick.
-        self._seen: dict[str, int] = {
-            pump.camera_id: pump.processed_count for pump in self._pumps
-        }
+        self._seen: dict[str, int] = {pump.camera_id: pump.processed_count for pump in self._pumps}
         self._stop = threading.Event()
 
     def run(self) -> None:
@@ -792,6 +789,7 @@ class NativeHeartbeatLoop:
 
     def stop(self) -> None:
         self._stop.set()
+
 
 @final
 class WorkerRuntime:
@@ -1116,8 +1114,7 @@ class WorkerRuntime:
             return
         server_config = self._mjpeg_config
         if (
-            self._clip_deletion_control is not None
-            or self.fall_model is not None
+            self._clip_deletion_control is not None or self.fall_model is not None
         ) and not server_config.enabled:
             server_config = replace(server_config, enabled=True)
         self._mjpeg_server = start_optional_mjpeg_server(
@@ -1201,7 +1198,7 @@ class WorkerRuntime:
             raise MjpegProbeError(exc.error_class) from exc
         return result.as_dict()
 
-    def _bed_zone_recognizer(self, image: Image) -> BedZonePayload:
+    def _bed_zone_recognizer(self, image: Image) -> BedZoneRecognizeResponse:
         """Run one on-demand bed-segmentation pass for the recognize endpoint.
 
         Reuses the shared bed-seg runner directly (``self.shared_yolo.bed.runner``)
@@ -1255,7 +1252,11 @@ class WorkerRuntime:
                 int(coordinates[3]),
             )
             polygon = [[x1, y1], [x2, y1], [x2, y2], [x1, y2]]
-        return {"polygon": polygon, "image_width": width, "image_height": height}
+        return BedZoneRecognizeResponse(
+            polygon=tuple((point[0], point[1]) for point in polygon),
+            image_width=width,
+            image_height=height,
+        )
 
     def _start_export_sender(self) -> None:
         """Start delivering staged evidence to the relay.

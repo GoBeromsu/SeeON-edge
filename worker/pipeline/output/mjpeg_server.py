@@ -13,7 +13,6 @@ from worker.domains.fall import FallModelProtocol
 from worker.pipeline.output._mjpeg_http import (
     BED_ZONE_FRAME_TIMEOUT_SECONDS,
     BedZoneNotFoundError,
-    BedZonePayload,
     BedZoneRecognizer,
     ClipDeletionControl,
     MjpegProbe,
@@ -180,7 +179,6 @@ def _unavailable_probe(_rtsp_url: str) -> MjpegProbePayload:
 
 __all__ = [
     "BedZoneNotFoundError",
-    "BedZonePayload",
     "BedZoneRecognizer",
     "ClipDeletionControl",
     "MjpegProbe",

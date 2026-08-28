@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Final, Literal
+from typing import Final
 
 import cv2
 import numpy as np
@@ -22,12 +22,12 @@ from worker.pipeline.output._overlay_primitives import (
     draw_region,
 )
 from worker.pipeline.output._scene_renderer import render_scene
+from worker.pipeline.output.live_view_api import OverlayMode
 from worker.pipeline.output.overlay_scene import OverlaySceneBuilder
 from worker.types import FramePacket
 from worker.types.overlay_scene import OverlayScene
 
 MAX_SNAPSHOT_BYTES: Final = 200 * 1024
-OverlayMode = Literal["none", "bedexit", "fall"]
 
 
 class OverlayEncodingError(RuntimeError):
