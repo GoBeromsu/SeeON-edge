@@ -85,8 +85,107 @@ migrator/consistency services run the same image) and `Dockerfile.edge` ->
 |-----------------------|-------------|------------|----------------|--------------------------------------|--------------------|
 | `pull_request`        | yes         | yes        | never          | none                                 | no (read-only)     |
 | `push` to `main`      | yes         | yes        | yes            | `<full-sha>`, `main-<12-char sha>`   | yes (`mode=max`)   |
-| `release` (published) | yes         | yes        | yes            | `<full-sha>`                         | yes (`mode=max`)   |
-| `workflow_dispatch`   | yes         | yes        | yes            | `<full-sha>`                         | yes (`mode=max`)   |
+| `release` (published) | per image   | yes        | yes            | `<full-sha>`, `<release tag>`        | yes (`mode=max`)   |
+| `workflow_dispatch` on a release tag | per image | yes | yes       | `<full-sha>`, `<release tag>`        | yes (`mode=max`)   |
+| `workflow_dispatch` on any other ref | yes       | yes | yes       | `<full-sha>`                         | yes (`mode=max`)   |
+
+### Per-image isolation at release time
+
+A release is ONE version, and its artefact is a manifest pinning BOTH images by
+`@sha256:` — the seal. Isolation is not about versioning; it is about not
+rebuilding an image whose inputs did not move. On a run that is publishing a
+release, each image is decided independently:
+
+- **inputs changed** → build and push as usual;
+- **inputs unchanged** → do not build. The digest already published for that
+  image is given this release's tags (`docker buildx imagetools create`, which
+  copies the manifest instead of rebuilding) and re-emitted **unchanged** into
+  the seal.
+
+Reuse is not an optimisation you can get from reproducible builds. Both
+Dockerfiles take `SOURCE_REVISION` and stamp `org.opencontainers.image.revision`,
+so rebuilding an unchanged tree at a new commit still produces a **new** digest.
+The only way to keep a digest is to not rebuild it.
+
+"Publishing a release" is **not** the same as the `release` event. A release
+created by `release.yml` with the default `GITHUB_TOKEN` raises no event that
+starts another workflow run, so `release.yml` dispatches `edge-images.yml` on
+the tag instead. `RELEASE_BUILD` therefore counts both shapes: the `release`
+event (still real for a release a human or a PAT publishes) and a
+`workflow_dispatch` whose `ref` is a `seeon-edge-v*` tag. Keying reuse on the
+event alone would have made the isolation dead code that never once engaged,
+and nothing would have failed to say so —
+`test_release_isolation_keys_on_the_dispatch_not_only_the_release_event` is
+what keeps the two halves wired together.
+
+Everything else builds both: `pull_request` (that is the gate, and it is also
+what catches drift in the floating apt packages `Dockerfile.edge` installs),
+`push` to `main` (it is the BuildKit cache writer), and a dispatch on any ref
+that is not a release tag — the deliberate "rebuild this ref" escape hatch.
+
+**The inputs**, per image, are exactly what each Dockerfile copies out of the
+build context, plus the Dockerfile, plus the files that shape the context:
+
+| image | inputs |
+|---|---|
+| `ml-api` | `Dockerfile.backend`, `backend/`, `contracts/`, `front/`, `shared/`, `scripts/ops/`, `pyproject.toml`, `uv.lock` |
+| `ml-worker` | `Dockerfile.edge`, `worker/` (incl. the pinned model manifest), `contracts/`, `shared/`, `pyproject.toml`, `uv.lock` |
+| both | `.dockerignore`, `.github/workflows/edge-images.yml` |
+
+`scripts/ops/` is an `ml-api` input because `Dockerfile.backend` copies it in —
+easy to forget, so `tests/test_edge_image_isolation.py` re-derives every `COPY`
+source from both Dockerfiles and fails if the sets drift.
+
+Anything the classifier does not recognise **fails closed**: an unrecognised
+path is treated as affecting both images, so a new top-level directory costs a
+redundant rebuild rather than a silently skipped one.
+
+**The comparison base is not the previous release's commit.** It is the commit
+that actually built the digest being reused, read back from that image's own
+`org.opencontainers.image.revision` label. The two differ as soon as an image is
+reused twice: if `ml-api` was built at C1 for v0.1.0 and reused for v0.2.0, the
+digest published at v0.3.0 is still the one built at C1, so the comparison runs
+C1..C3. Comparing against v0.2.0's commit would skip everything that changed
+between C1 and C2 and reuse a genuinely stale image.
+
+**Reading the result.** The step summary and the `edge-ml-image-refs-<sha>`
+artefact state, per image, `built` or `reused`, with this release's digest and
+the previous release's digest side by side. A `reused` row shows the *same*
+digest in both columns — that is the proof it is the same artefact. A mixed
+release looks like this:
+
+| image | action | this release | previous release |
+|---|---|---|---|
+| `ml-api` | reused | `sha256:aaa…` | `sha256:aaa…` |
+| `ml-worker` | built | `sha256:fff…` | `sha256:bbb…` |
+
+The boot smoke test always runs against the image that would be deployed. When
+`ml-worker` was reused rather than rebuilt it is **pulled by digest** and booted,
+so the seal never carries a worker digest that was not booted in that run.
+
+A release build therefore builds `ml-worker` **without** `load:` and pulls it
+back by digest for the smoke. A digest that a later release may reuse has to be an OCI
+index (see below), and the docker exporter cannot export a manifest list, so the
+two are mutually exclusive on that path. Every other event keeps the cheap local
+load. A consequence worth knowing: `ml-worker` digests published *before* this
+landed are plain manifests and cannot be reused — the guard below detects that
+and rebuilds, and the next release publishes an index that later releases can
+reuse.
+
+Two failure modes are deliberately loud rather than silent:
+
+- `imagetools create` preserves a digest when the source manifest is an OCI
+  index (what `docker/build-push-action` pushes when it attaches provenance) but
+  **re-wraps a plain manifest** into a new index under a new digest. The re-tag
+  is therefore always re-inspected, and a changed digest fails the release
+  instead of landing in the seal labelled "reused".
+- Every way of *not* knowing — no previous tag, a reference the registry does
+  not resolve, a missing or unusable revision label, a label naming a commit
+  this repository does not have — resolves to "build".
+
+To see the plan before tagging, run the release rehearsal
+(`gh workflow run release.yml -f rehearsal=true`); it prints the per-image plan
+and publishes nothing.
 
 `main-<short-sha>` is a staging tag for trying a pre-release build on a bench
 device. It is not a deployment reference: the seal and `.env.edge.prod` pin

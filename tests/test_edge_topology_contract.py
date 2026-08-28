@@ -269,10 +269,18 @@ def test_edge_image_release_workflow_publishes_digest_env_artifact() -> None:
     assert "ML_WORKER_IMAGE=" in source
     assert "edge-ml-image-refs.env" in source
     # Digests are job outputs so a downstream job can pin `@sha256:` without
-    # parsing the artifact.
+    # parsing the artifact. They come from the resolve step rather than straight
+    # off a build, because a release may REUSE an already-published digest
+    # instead of building (docs/runbooks/edge-image-publish.md, "Per-image
+    # isolation at release time"). The build digests are still what that step
+    # consumes on the build path -- asserted above.
     outputs = workflow["jobs"]["publish"]["outputs"]
-    assert outputs["ml-api-digest"] == "${{ steps.build-api.outputs.digest }}"
-    assert outputs["ml-worker-digest"] == "${{ steps.build-worker.outputs.digest }}"
+    assert outputs["ml-api-digest"] == "${{ steps.digests.outputs.ml-api }}"
+    assert outputs["ml-worker-digest"] == "${{ steps.digests.outputs.ml-worker }}"
+    # Whether each image was built or reused travels with the digests, so a
+    # reviewer never has to infer it from the digest alone.
+    assert outputs["ml-api-origin"] == "${{ steps.digests.outputs.ml-api-origin }}"
+    assert outputs["ml-worker-origin"] == "${{ steps.digests.outputs.ml-worker-origin }}"
 
 
 def test_edge_image_workflow_never_pushes_from_pull_requests() -> None:
@@ -308,7 +316,17 @@ def test_edge_worker_boot_smoke_runs_on_the_single_build() -> None:
     )
 
     assert not (REPO_ROOT / ".github/workflows/edge-worker-image.yml").exists()
-    assert worker_step["with"]["load"] == "true"  # BaseLoader keeps scalars as text
+    # Loaded into the runner's daemon on every event EXCEPT a release. A
+    # release's digest is the one a later release may reuse, so it must be
+    # pushed as an OCI index (provenance attached), and the docker exporter
+    # cannot export a manifest list -- the two exporters are mutually exclusive
+    # there. See docs/runbooks/edge-image-publish.md.
+    assert worker_step["with"]["load"] == "${{ env.RELEASE_BUILD != 'true' }}"
+    assert worker_step["with"]["provenance"] == "${{ env.RELEASE_BUILD == 'true' }}"
+    # ...and the boot smoke must therefore still reach the image on the path
+    # where it was NOT loaded: it pulls the exact digest this run pins.
+    assert "docker pull" in source
+    assert '$IMAGE_NAMESPACE/ml-worker@$ML_WORKER_DIGEST' in source
     assert worker_step["with"]["cache-from"] == "type=gha,scope=edge-ml-worker"
     assert worker_step["with"]["cache-to"] == (
         "${{ env.PUSH_IMAGES == 'true' && 'type=gha,scope=edge-ml-worker,mode=max' || '' }}"
@@ -316,6 +334,53 @@ def test_edge_worker_boot_smoke_runs_on_the_single_build() -> None:
     assert source.count("file: Dockerfile.edge") == 1
     assert "docker run --rm" in source
     assert "python -m worker --check-config" in source
+
+
+def test_a_publishing_run_never_records_an_empty_digest() -> None:
+    """The seal must never carry `ml-api@` with nothing after it.
+
+    A pull request builds ml-api with no exporter (no push, no load), so buildx
+    reports no digest -- which the artifact used to interpolate straight into
+    `ML_API_IMAGE=.../ml-api@`, advertising an unpullable ref. That is harmless
+    only because a PR uploads no artifact. On a run that DOES publish, an empty
+    digest means the build did not export what the release is about to pin, and
+    it has to fail loudly instead.
+    """
+    source = (REPO_ROOT / EDGE_IMAGES_WORKFLOW).read_text(encoding="utf-8")
+    assert 'raise SystemExit(f"{image} was built but exported no digest")' in source
+    assert 'if os.environ.get("PUSH_IMAGES") == "true":' in source
+    # ...and the reused branch has the same shape: no digest, no release.
+    assert (
+        'raise SystemExit(f"{image} was reused but no published digest was recorded")'
+        in source
+    )
+
+
+def test_release_isolation_keys_on_the_dispatch_not_only_the_release_event() -> None:
+    """A release's images arrive by dispatch, so reuse must recognise that.
+
+    release.yml cannot rely on the `release` event to publish the images: a
+    release it creates with the default GITHUB_TOKEN raises no event that starts
+    a workflow run, so it dispatches this workflow on the tag instead (#460).
+    Keying reuse on `github.event_name == 'release'` alone would therefore be
+    dead code -- the isolation would never once engage on a real release, and
+    nothing would fail to say so. RELEASE_BUILD has to count both shapes.
+    """
+    workflow = _workflow(EDGE_IMAGES_WORKFLOW)
+    release_build = workflow["jobs"]["publish"]["env"]["RELEASE_BUILD"]
+    assert "github.event_name == 'release'" in release_build, release_build
+    assert "workflow_dispatch" in release_build, release_build
+    assert "startsWith(inputs.ref, 'seeon-edge-v')" in release_build, release_build
+
+    # ...and the tag the seal is cut for comes from whichever shape it was.
+    release_tag = workflow["jobs"]["publish"]["env"]["RELEASE_TAG"]
+    assert "github.event.release.tag_name" in release_tag, release_tag
+    assert "inputs.ref" in release_tag, release_tag
+
+    # The release workflow really does dispatch this workflow on the tag; if
+    # that step were dropped, the reuse path above would go dormant again.
+    release_source = (REPO_ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+    assert "gh workflow run edge-images.yml" in release_source
 
 
 def test_legacy_multi_target_ml_dockerfile_is_removed() -> None:

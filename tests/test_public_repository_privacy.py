@@ -1268,6 +1268,12 @@ _CACHE_GATE_SUFFIX = " || '' }}"
 _NOT_A_PULL_REQUEST = "${{ github.event_name != 'pull_request' }}"
 _NOT_A_PULL_REQUEST_IF = "github.event_name != 'pull_request'"
 
+#: Shell markers for a step that writes to the container registry without a
+#: `push:` input. Per-image release isolation adds a tag to an already-published
+#: manifest instead of rebuilding it; that is a registry write and needs the
+#: same gate as a push.
+_REGISTRY_WRITE_MARKERS = ("imagetools create", "edge_image_plan.py retag", "docker push")
+
 #: The only (workflow, job) pair permitted to hold a write scope while its
 #: workflow is reachable from `pull_request`, and the exact scopes it may hold.
 #: `permissions:` accepts no expression (GitHub community discussion #53915) and
@@ -1372,7 +1378,7 @@ def _assert_token_consumers_are_gated(
     assert isinstance(env, dict), (name, job_name)
     assert env.get("PUSH_IMAGES") == _NOT_A_PULL_REQUEST, (name, job_name, env)
 
-    logins = uploads = pushes = exports = 0
+    logins = uploads = pushes = exports = retags = 0
     for step in _steps(job):
         uses = str(step.get("uses", ""))
         with_ = step.get("with") or {}
@@ -1394,14 +1400,26 @@ def _assert_token_consumers_are_gated(
             # to it. Gated, this collapses to the empty string on a PR run.
             assert cache_to.startswith(_CACHE_GATE_PREFIX), (name, step.get("name"), cache_to)
             assert cache_to.endswith(_CACHE_GATE_SUFFIX), (name, step.get("name"), cache_to)
+        # Per-image release isolation re-tags an already-published digest rather
+        # than rebuilding it. That writes to the registry just as a `push:`
+        # does, so it is a token consumer and carries the same gate. It is a
+        # `run:` step, so the `with:`-shaped checks above cannot see it.
+        if any(marker in str(step.get("run", "")) for marker in _REGISTRY_WRITE_MARKERS):
+            retags += 1
+            assert _PUSH_GATE in str(step.get("if", "")), (
+                name,
+                step.get("name"),
+                step.get("if"),
+            )
 
-    # Non-vacuous: these are the four token-spending shapes this job contains --
-    # one registry login, one artifact upload, two `push:` inputs and two
-    # `cache-to` exports. Deleting a gate cannot pass by deleting its step.
-    assert (logins, uploads, pushes, exports) == (1, 1, 2, 2), (
+    # Non-vacuous: these are the token-spending shapes this job contains -- one
+    # registry login, one artifact upload, two `push:` inputs, two `cache-to`
+    # exports and two digest re-tags. Deleting a gate cannot pass by deleting
+    # its step.
+    assert (logins, uploads, pushes, exports, retags) == (1, 1, 2, 2, 2), (
         name,
         job_name,
-        (logins, uploads, pushes, exports),
+        (logins, uploads, pushes, exports, retags),
     )
 
 
@@ -1451,6 +1469,69 @@ def test_pull_request_workflows_grant_no_write_scope_they_can_spend() -> None:
         _assert_write_permissions_stay_off_the_pull_request_path(name, workflow)
 
 
+#: The publish job's steps, in order, as (step name fragment, `uses` prefix or
+#: None for a `run:` step). The tests below address steps by index, and an index
+#: that silently points at the wrong step still "passes" -- it just stops
+#: testing anything. Pinning the sequence turns a reorder into a failure here
+#: instead of into a quiet hole there.
+_PUBLISH_STEP_SEQUENCE: tuple[tuple[str, str | None], ...] = (
+    ("", "actions/checkout@"),
+    ("Resolve deploy SHA", None),
+    ("Set up Docker Buildx", "docker/setup-buildx-action@"),
+    ("Login to GitHub Container Registry", "docker/login-action@"),
+    ("Decide, per image", None),
+    ("Build and push ml-api", "docker/build-push-action@"),
+    ("Build and push ml-worker", "docker/build-push-action@"),
+    ("Re-tag the published ml-api", None),
+    ("Re-tag the published ml-worker", None),
+    ("Resolve the digests", None),
+    ("Boot smoke test", None),
+    ("Write edge image env artifact", None),
+    ("Upload edge image refs", "actions/upload-artifact@"),
+)
+
+
+def test_edge_image_publish_step_sequence_is_pinned() -> None:
+    steps = _steps(_jobs(_workflow("edge-images.yml"))["publish"])
+    assert len(steps) == len(_PUBLISH_STEP_SEQUENCE), len(steps)
+    for index, (fragment, uses_prefix) in enumerate(_PUBLISH_STEP_SEQUENCE):
+        step = steps[index]
+        assert fragment in str(step.get("name", "")), (index, step.get("name"))
+        if uses_prefix is None:
+            assert "uses" not in step, (index, step.get("uses"))
+        else:
+            assert str(step.get("uses", "")).startswith(uses_prefix), (index, step.get("uses"))
+
+
+def test_the_required_edge_image_check_is_never_gated_off() -> None:
+    """The gate must report on every pull request.
+
+    Branch protection scores a REQUIRED check that never reports as green, so a
+    `paths:` filter on the trigger or an `if:` that can exclude a pull request
+    from the publish job would silently disable the gate rather than fail it.
+    Per-image isolation therefore decides INSIDE the job -- this test is what
+    stops the decision from migrating out to a filter.
+    """
+    workflow = _workflow("edge-images.yml")
+    triggers = workflow["on"]
+    assert isinstance(triggers, dict)
+    pull_request = triggers["pull_request"]
+    # `pull_request:` carries no filters. A `paths:`/`paths-ignore:` key here
+    # would stop the required check from reporting on the PRs it filtered out,
+    # and branch protection would score that silence as a pass. (BaseLoader
+    # renders an empty trigger body as `''`.)
+    if isinstance(pull_request, dict):
+        assert not {"paths", "paths-ignore"} & set(pull_request), pull_request
+    else:
+        assert pull_request in ("", None), repr(pull_request)
+
+    condition = str(_jobs(workflow)["publish"].get("if", ""))
+    # The only `if:` this job may carry is the prerelease exclusion, which
+    # cannot be true on a pull_request run.
+    assert "pull_request" not in condition, condition
+    assert "prerelease" in condition, condition
+
+
 def test_edge_image_workflow_is_reachable_from_pull_request() -> None:
     # The premise of everything above: this workflow really does execute a
     # fork's Dockerfiles on `pull_request`, and it really is the job that holds
@@ -1470,8 +1551,8 @@ def test_edge_image_workflow_is_reachable_from_pull_request() -> None:
         ("edge-images.yml", "publish", 0, "actions/checkout@v4"),
         ("edge-images.yml", "publish", 2, "docker/setup-buildx-action@v3"),
         ("edge-images.yml", "publish", 3, "docker/login-action@v3"),
-        ("edge-images.yml", "publish", 4, "docker/build-push-action@v6"),
-        ("edge-images.yml", "publish", 8, "actions/upload-artifact@v4"),
+        ("edge-images.yml", "publish", 5, "docker/build-push-action@v6"),
+        ("edge-images.yml", "publish", 12, "actions/upload-artifact@v4"),
         # A branch ref is worse: it moves on every upstream push.
         ("edge-images.yml", "publish", 0, "actions/checkout@main"),
         # A 40-char string that is not hex must not pass for a commit.
@@ -1494,12 +1575,12 @@ def test_pull_request_pin_policy_rejects_an_unpinned_action(
     [
         # Ungated: a fork PR would export into the cross-branch BuildKit cache
         # that later trusted runs on main restore from.
-        (4, "type=gha,scope=edge-ml-api,mode=max"),
-        (5, "type=gha,scope=edge-ml-worker,mode=max"),
+        (5, "type=gha,scope=edge-ml-api,mode=max"),
+        (6, "type=gha,scope=edge-ml-worker,mode=max"),
         # Gated on the wrong side of the condition.
-        (5, "${{ env.PUSH_IMAGES == 'false' && 'type=gha,mode=max' || '' }}"),
+        (6, "${{ env.PUSH_IMAGES == 'false' && 'type=gha,mode=max' || '' }}"),
         # Right prefix, but the fallback exports anyway.
-        (5, "${{ env.PUSH_IMAGES == 'true' && 'type=gha,mode=max' || 'type=gha' }}"),
+        (6, "${{ env.PUSH_IMAGES == 'true' && 'type=gha,mode=max' || 'type=gha' }}"),
     ],
 )
 def test_edge_image_policy_rejects_an_ungated_cache_export(
@@ -1560,10 +1641,14 @@ def test_edge_image_policy_rejects_a_write_scope_on_a_second_job() -> None:
         # Logging in to ghcr.io on a PR run is the whole thing the gate stops.
         (3, "if", "always()"),
         # Pushing an image built from a PR's own Dockerfile.
-        (4, "push", "true"),
         (5, "push", "true"),
+        (6, "push", "true"),
+        # Re-tagging a published digest is a registry write with no `push:`
+        # input, so it needs the gate just as much as a build does.
+        (7, "if", "always()"),
+        (8, "if", "env.BUILD_ML_WORKER != 'true'"),
         # An artifact upload on a PR run publishes an unpullable digest.
-        (8, "if", "always()"),
+        (12, "if", "always()"),
     ],
 )
 def test_edge_image_policy_rejects_an_ungated_token_consumer(

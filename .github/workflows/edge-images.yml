@@ -22,12 +22,50 @@ name: Edge ML Images
 #                       PR builds hit a cache refreshed on every merge instead
 #                       of only on release (#365 had release as the sole
 #                       cache writer).
-#   release          -> pushes the full-SHA tag for the sealed SHA; this is
-#   workflow_dispatch   the path docs/runbooks/edge-image-publish.md pins.
+#   release          -> pushes the full-SHA tag and the release tag for the
+#   workflow_dispatch   sealed SHA; this is the path
+#                       docs/runbooks/edge-image-publish.md pins.
+#
+# ---------------------------------------------------------------------------
+# Per-image release isolation
+# ---------------------------------------------------------------------------
+#
+# A release is ONE version whose artefact is a manifest pinning BOTH images by
+# `@sha256:` -- the seal. Isolation is not about versioning; it is about not
+# rebuilding an image whose inputs did not move.
+#
+# It cannot be about reproducibility. Both Dockerfiles take `SOURCE_REVISION`
+# and stamp `org.opencontainers.image.revision`, so rebuilding an UNCHANGED tree
+# at a new commit still yields a NEW digest. So isolation comes from not
+# building at all: when an image's inputs are unchanged since the commit that
+# built the currently published digest, that digest is given the new release's
+# tags (`docker buildx imagetools create`, which copies the manifest rather than
+# rebuilding) and re-emitted unchanged into the seal.
+#
+# The comparison base is NOT the previous release's commit. It is the commit
+# that actually built the digest being reused, read back from that image's own
+# `org.opencontainers.image.revision` label. Those differ as soon as an image is
+# reused twice, and using the release commit would skip everything that changed
+# in between. scripts/edge_image_plan.py owns the whole decision, including
+# every "then build" fallback; tests/test_edge_image_isolation.py owns the
+# input sets and proves them against both Dockerfiles' COPY instructions.
+#
+# Only a run that is PUBLISHING A RELEASE reuses -- which is not the same as
+# the `release` event. release.yml dispatches this workflow on the release tag,
+# because a release it creates with GITHUB_TOKEN raises no event that starts a
+# run (#460). So `RELEASE_BUILD` below counts both shapes: the `release` event,
+# and a dispatch whose ref is a `seeon-edge-v*` tag. A pull_request must
+# exercise real builds (that is the gate, and it is also what catches drift in
+# the floating apt packages Dockerfile.edge installs); a push to main is the
+# BuildKit cache writer (#365); and a dispatch on any other ref stays the
+# deliberate "rebuild this ref" escape hatch. The decision is made INSIDE the
+# job and printed on every run, including the runs that do not reuse -- see the
+# hard constraint below.
 #
 # Every run exposes both image digests as job outputs and in the step
 # summary so operators pin `@sha256:` (runbook rule); pushing runs also
-# upload the `edge-ml-image-refs-<sha>.env` artifact the runbook consumes.
+# upload the `edge-ml-image-refs-<sha>.env` artifact the runbook consumes,
+# which states per image whether it was built or reused, and from where.
 #
 # No `merge_group:` trigger, deliberately. This repository has no merge queue
 # enabled, and adding the trigger here would not be harmless: PUSH_IMAGES is
@@ -75,10 +113,16 @@ jobs:
     # gate into a silent pass, which is the exact failure mode `ci-ok` exists
     # to prevent. The boundary is enforced on the token's consumers instead:
     # every step that can spend it -- registry login, both `push:` inputs, both
-    # `cache-to` exports and the artifact upload -- is gated on PUSH_IMAGES,
-    # which is exactly `github.event_name != 'pull_request'`. That gate is
-    # asserted step by step in tests/test_public_repository_privacy.py, which
-    # also fails if any other job in this file gains a write scope.
+    # `cache-to` exports, both digest re-tags and the artifact upload -- is
+    # gated on PUSH_IMAGES, which is exactly
+    # `github.event_name != 'pull_request'`. That gate is asserted step by step
+    # in tests/test_public_repository_privacy.py, which also fails if any other
+    # job in this file gains a write scope.
+    #
+    # The same reasoning is why per-image isolation is decided INSIDE this job
+    # rather than with `paths:` filters or an `if:` on the job: a required check
+    # that does not report is a required check that passes. The job always runs,
+    # always reports, and prints which images it decided to build.
     #
     # On a fork pull request GitHub caps GITHUB_TOKEN at read-only whatever
     # this block says, so the grant is only ever live for same-repo branch PRs.
@@ -94,14 +138,37 @@ jobs:
       IMAGE_NAMESPACE: ghcr.io/seniorailab/eldercare-fall-ml
       # PRs never push. Everything else (main push, release, dispatch) does.
       PUSH_IMAGES: ${{ github.event_name != 'pull_request' }}
+      # "This run is publishing a release." That is NOT the same as the
+      # `release` event. A release created by release.yml with the default
+      # GITHUB_TOKEN raises no event that starts a workflow run (GitHub's rule,
+      # quoted in release.yml's header; the first release proved it), so
+      # release.yml dispatches this workflow on the tag instead. Keying reuse on
+      # `github.event_name == 'release'` alone would therefore never once be
+      # true in practice, and the isolation would silently never engage.
+      #
+      # Both shapes count: the `release` event (still real for a release a human
+      # or a PAT publishes) and a dispatch whose ref is a release tag.
+      RELEASE_TAG: >-
+        ${{ github.event.release.tag_name
+            || (startsWith(inputs.ref, 'seeon-edge-v') && inputs.ref)
+            || '' }}
+      RELEASE_BUILD: >-
+        ${{ github.event_name == 'release'
+            || (github.event_name == 'workflow_dispatch'
+                && startsWith(inputs.ref, 'seeon-edge-v')) }}
     outputs:
-      ml-api-digest: ${{ steps.build-api.outputs.digest }}
-      ml-worker-digest: ${{ steps.build-worker.outputs.digest }}
+      ml-api-digest: ${{ steps.digests.outputs.ml-api }}
+      ml-worker-digest: ${{ steps.digests.outputs.ml-worker }}
+      ml-api-origin: ${{ steps.digests.outputs.ml-api-origin }}
+      ml-worker-origin: ${{ steps.digests.outputs.ml-worker-origin }}
       deploy-sha: ${{ steps.resolve.outputs.sha }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           ref: ${{ env.DEPLOY_REF }}
+          # Full history AND tags: the isolation decision diffs against the
+          # commit that built the published image, and finds the previous
+          # release by walking `seeon-edge-v*` tags.
           fetch-depth: 0
           persist-credentials: false
 
@@ -111,6 +178,10 @@ jobs:
         #   always      <full 40-hex sha>           (what the seal pins)
         #   main push   main-<12-char short sha>    (staging tag for operators
         #                                            trying a pre-release build)
+        #   release     <release tag>               (so the NEXT release can find
+        #                                            this one's digest in the
+        #                                            registry and decide whether
+        #                                            it still applies)
         # PR tags exist only in the runner's daemon (never pushed).
         run: |
           set -euo pipefail
@@ -123,6 +194,9 @@ jobs:
             tags="$IMAGE_NAMESPACE/$image:$DEPLOY_SHA"
             if [ "${GITHUB_EVENT_NAME}" = "push" ]; then
               tags="$tags,$IMAGE_NAMESPACE/$image:main-$SHORT_SHA"
+            fi
+            if [ -n "$RELEASE_TAG" ]; then
+              tags="$tags,$IMAGE_NAMESPACE/$image:$RELEASE_TAG"
             fi
             var="$(printf '%s' "$image" | tr 'a-z-' 'A-Z_')_TAGS"
             echo "$var=$tags" >> "$GITHUB_ENV"
@@ -139,13 +213,59 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ github.token }}
 
+      - name: Decide, per image, whether to build or reuse
+        # This step ALWAYS runs and always prints its verdict for both images,
+        # on every event including pull_request. Deciding here rather than with
+        # `paths:` filters is deliberate: a `paths:`-filtered required check
+        # never reports, and branch protection scores a check that never
+        # reports as green.
+        run: |
+          set -euo pipefail
+          for image in ml-api ml-worker; do
+            var="BUILD_$(printf '%s' "$image" | tr 'a-z-' 'A-Z_')"
+            if python3 scripts/edge_image_plan.py plan \
+                 --image "$image" \
+                 --head "$DEPLOY_SHA" \
+                 --release-tag "${RELEASE_TAG:-none}" \
+                 --repo "$IMAGE_NAMESPACE/$image" \
+                 --reuse-eligible "$RELEASE_BUILD" \
+                 --json-out "plan-$image.json" \
+                 | tee "plan-$image.txt"; then
+              build="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["build"])' "plan-$image.json")"
+            else
+              # A decision that could not be made is not a reason to skip a
+              # build; it is a reason to build.
+              printf '%s: BUILD -- the planner failed, so nothing is reused\n' "$image" \
+                | tee "plan-$image.txt"
+              printf '{"image": "%s", "build": true, "reason": "the planner failed"}\n' "$image" \
+                > "plan-$image.json"
+              build=True
+            fi
+            if [ "$build" = "True" ]; then
+              echo "$var=true" >> "$GITHUB_ENV"
+            else
+              echo "$var=false" >> "$GITHUB_ENV"
+            fi
+          done
+          {
+            printf '### Per-image build plan (`%s`)\n\n```\n' "$GITHUB_EVENT_NAME"
+            cat plan-ml-api.txt plan-ml-worker.txt
+            printf '```\n'
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Build and push ml-api image
         id: build-api
+        if: env.BUILD_ML_API == 'true'
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           context: .
           file: Dockerfile.backend
           push: ${{ env.PUSH_IMAGES == 'true' }}
+          # An OCI index (attestation attached) is what lets a later release
+          # re-tag this digest without changing it: `imagetools create` copies
+          # an index byte for byte, but re-wraps a plain manifest in a NEW index
+          # under a new digest. Verified against a real registry, both ways.
+          provenance: true
           build-args: |
             VITE_ML_API_BASE_URL=/api/v1
             SOURCE_REVISION=${{ env.DEPLOY_SHA }}
@@ -155,6 +275,7 @@ jobs:
 
       - name: Build and push ml-worker image
         id: build-worker
+        if: env.BUILD_ML_WORKER == 'true'
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           context: .
@@ -163,8 +284,19 @@ jobs:
           # boot smoke below; `push` additionally exports it to GHCR on the
           # publishing paths. One build, two exporters -- Dockerfile.edge is
           # never built twice for one commit.
-          load: true
+          #
+          # Except on a release, where the two exporters are mutually
+          # exclusive: a release's digest is the one a LATER release may reuse,
+          # and re-tagging only preserves a digest when the manifest is an OCI
+          # index, which means attaching provenance -- and the docker exporter
+          # cannot export a manifest list ("docker exporter does not currently
+          # support exporting manifest lists"). So a release pushes the index
+          # and the boot smoke pulls it back by digest, which is in any case
+          # stronger evidence: it boots the bytes that were actually published.
+          # Every other event keeps the cheap local load.
+          load: ${{ env.RELEASE_BUILD != 'true' }}
           push: ${{ env.PUSH_IMAGES == 'true' }}
+          provenance: ${{ env.RELEASE_BUILD == 'true' }}
           build-args: |
             SOURCE_REVISION=${{ env.DEPLOY_SHA }}
           tags: ${{ env.ML_WORKER_TAGS }}
@@ -174,6 +306,88 @@ jobs:
           # timeout before the boot smoke ran. main/release/dispatch are the
           # cache writers.
           cache-to: ${{ env.PUSH_IMAGES == 'true' && 'type=gha,scope=edge-ml-worker,mode=max' || '' }}
+
+      - name: Re-tag the published ml-api digest
+        # Token-spending: adds a tag in the registry. Gated on PUSH_IMAGES like
+        # every other consumer of the token. Reachable only when the step above
+        # was skipped because ml-api's inputs did not change.
+        if: env.PUSH_IMAGES == 'true' && env.BUILD_ML_API != 'true'
+        run: |
+          set -euo pipefail
+          digest="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["previous_digest"])' plan-ml-api.json)"
+          for tag in "$DEPLOY_SHA" ${RELEASE_TAG:+"$RELEASE_TAG"}; do
+            python3 scripts/edge_image_plan.py retag \
+              --repo "$IMAGE_NAMESPACE/ml-api" --digest "$digest" --tag "$tag"
+          done
+
+      - name: Re-tag the published ml-worker digest
+        if: env.PUSH_IMAGES == 'true' && env.BUILD_ML_WORKER != 'true'
+        run: |
+          set -euo pipefail
+          digest="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["previous_digest"])' plan-ml-worker.json)"
+          for tag in "$DEPLOY_SHA" ${RELEASE_TAG:+"$RELEASE_TAG"}; do
+            python3 scripts/edge_image_plan.py retag \
+              --repo "$IMAGE_NAMESPACE/ml-worker" --digest "$digest" --tag "$tag"
+          done
+
+      - name: Resolve the digests this release pins
+        id: digests
+        # One place decides what goes in the seal, whether the digest came from
+        # a build or from a re-tag. A reused digest MUST equal the digest the
+        # previous release published -- `retag` re-inspects the registry and
+        # fails if `imagetools create` changed it, so by here they are equal.
+        env:
+          BUILT_ML_API: ${{ steps.build-api.outputs.digest }}
+          BUILT_ML_WORKER: ${{ steps.build-worker.outputs.digest }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os
+
+          outputs, environment = [], []
+          for image in ("ml-api", "ml-worker"):
+              var = image.replace("-", "_").upper()
+              plan = json.load(open(f"plan-{image}.json"))
+              built = os.environ.get(f"BUILT_{var}", "")
+              previous = plan.get("previous_digest") or ""
+              if plan["build"]:
+                  if not built:
+                      # A pull request build has no exporter for ml-api (no
+                      # push, no load), so buildx reports no digest -- expected,
+                      # and there is nothing pullable to name. On a publishing
+                      # run the same emptiness is a real failure, and used to be
+                      # written into the artifact as `ml-api@` with no digest.
+                      if os.environ.get("PUSH_IMAGES") == "true":
+                          raise SystemExit(f"{image} was built but exported no digest")
+                      digest, action = "(not exported on a pull request build)", "built"
+                      origin = f"built from {os.environ['DEPLOY_SHA']}, not exported"
+                  else:
+                      digest, action = built, "built"
+                      origin = f"built from {os.environ['DEPLOY_SHA']}"
+              else:
+                  if not previous:
+                      raise SystemExit(f"{image} was reused but no published digest was recorded")
+                  # Reuse republishes the SAME manifest; `retag` already
+                  # re-inspected the registry and failed if buildx changed it,
+                  # so this digest is byte-identical to the previous release's.
+                  digest, action = previous, "reused"
+                  origin = (
+                      f"reused from {plan['previous_tag']} "
+                      f"(originally built from {plan['base'][:12]})"
+                  )
+              outputs += [f"{image}={digest}", f"{image}-origin={origin}"]
+              environment += [
+                  f"{var}_DIGEST={digest}",
+                  f"{var}_ORIGIN={origin}",
+                  f"{var}_ACTION={action}",
+                  f"{var}_PREVIOUS={previous or '(none)'}",
+              ]
+
+          for name, lines in (("GITHUB_OUTPUT", outputs), ("GITHUB_ENV", environment)):
+              with open(os.environ[name], "a", encoding="utf-8") as handle:
+                  handle.write("\n".join(lines) + "\n")
+          print("\n".join(outputs))
+          PY
 
       - name: Boot smoke test — worker process actually imports and starts
         # A successful build only proves the image assembles; it does not
@@ -186,20 +400,52 @@ jobs:
         # The relay URL is fixed in-code now (RELAY_URL is retired); only
         # RELAY_TOKEN is required and it only needs to be well-formed, not
         # reachable.
+        #
+        # This runs against the image that would actually be deployed. When
+        # ml-worker was reused rather than rebuilt, the built image is not in
+        # the runner's daemon, so the reused digest is PULLED and smoked --
+        # the seal never carries a worker digest that was not booted in this
+        # run.
         run: |
+          set -euo pipefail
+          if [ "$BUILD_ML_WORKER" = "true" ] && [ "$RELEASE_BUILD" != "true" ]; then
+            # Built and loaded into this runner's daemon by the step above.
+            SMOKE_REF="$IMAGE_NAMESPACE/ml-worker:$DEPLOY_SHA"
+          else
+            # Either reused, or built on a release (which pushes an index and
+            # does not load). Both cases pull the exact bytes this run pins.
+            SMOKE_REF="$IMAGE_NAMESPACE/ml-worker@$ML_WORKER_DIGEST"
+            docker pull "$SMOKE_REF"
+          fi
+          echo "boot smoke target: $SMOKE_REF"
           docker run --rm \
             -e RELAY_TOKEN=ci-boot-smoke-test \
-            "$IMAGE_NAMESPACE/ml-worker:$DEPLOY_SHA" \
+            "$SMOKE_REF" \
             python -m worker --check-config
 
       - name: Write edge image env artifact
         run: |
+          set -euo pipefail
           {
-            printf 'ML_API_IMAGE=%s/ml-api@%s\n' "$IMAGE_NAMESPACE" '${{ steps.build-api.outputs.digest }}'
-            printf 'ML_WORKER_IMAGE=%s/ml-worker@%s\n' "$IMAGE_NAMESPACE" '${{ steps.build-worker.outputs.digest }}'
+            printf 'ML_API_IMAGE=%s/ml-api@%s\n' "$IMAGE_NAMESPACE" "$ML_API_DIGEST"
+            printf 'ML_WORKER_IMAGE=%s/ml-worker@%s\n' "$IMAGE_NAMESPACE" "$ML_WORKER_DIGEST"
+            # Per image: built or reused, and from where. An operator comparing
+            # this file with the previous release's can see which half moved
+            # without diffing digests by eye.
+            printf '# ml-api: %s [%s]; previous release digest %s\n' \
+              "$ML_API_ORIGIN" "$ML_API_ACTION" "$ML_API_PREVIOUS"
+            printf '# ml-worker: %s [%s]; previous release digest %s\n' \
+              "$ML_WORKER_ORIGIN" "$ML_WORKER_ACTION" "$ML_WORKER_PREVIOUS"
           } > edge-ml-image-refs.env
           {
             printf '### Edge ML image refs (%s, `%s`)\n\n' "$GITHUB_EVENT_NAME" "$DEPLOY_SHA"
+            printf '| image | action | this release | previous release | origin |\n'
+            printf '|---|---|---|---|---|\n'
+            printf '| `ml-api` | **%s** | `%s` | `%s` | %s |\n' \
+              "$ML_API_ACTION" "$ML_API_DIGEST" "$ML_API_PREVIOUS" "$ML_API_ORIGIN"
+            printf '| `ml-worker` | **%s** | `%s` | `%s` | %s |\n\n' \
+              "$ML_WORKER_ACTION" "$ML_WORKER_DIGEST" "$ML_WORKER_PREVIOUS" "$ML_WORKER_ORIGIN"
+            printf 'A `reused` row shows the same digest in both digest columns: that is the proof it is the same artefact, not a rebuild.\n\n'
             if [ "$PUSH_IMAGES" = "true" ]; then
               printf 'Pushed tags:\n\n```\n%s\n%s\n```\n\n' "$ML_API_TAGS" "$ML_WORKER_TAGS"
               printf 'Use these digest-pinned refs in `.env.edge.prod` on the edge device:\n\n'

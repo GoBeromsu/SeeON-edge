@@ -96,3 +96,10 @@ auto.key
 # 않되, `.claude/skills/` 는 저장소가 공유하는 운영 절차라 예외로 추적한다.
 .claude/*
 !.claude/skills/
+
+# Working files written by .github/workflows/edge-images.yml during a run.
+plan-ml-api.json
+plan-ml-api.txt
+plan-ml-worker.json
+plan-ml-worker.txt
+edge-ml-image-refs.env

@@ -87,6 +87,38 @@ jobs:
           EXPECTED_TAG="$(python3 scripts/release_guard.py --print-expected-tag)"
           echo "expected-tag=$EXPECTED_TAG" >> "$GITHUB_OUTPUT"
 
+      - name: Per-image build plan for this release
+        # Rehearsal value: an operator tagging a release wants to know, BEFORE
+        # tagging, which of the two images this release will actually rebuild.
+        # `edge-images.yml` makes the real decision (on the `release` event,
+        # against the registry); this prints the same source-side half of it
+        # from git alone, and publishes nothing.
+        #
+        # Both branches are exercised on every run: the empty range HEAD..HEAD
+        # is the "unchanged -> reuse" branch, and the range since the previous
+        # release tag is the real one.
+        env:
+          TAG: ${{ github.ref_type == 'tag' && github.ref_name || steps.guard.outputs.expected-tag }}
+        run: |
+          set -euo pipefail
+          PREVIOUS="$(python3 scripts/edge_image_plan.py previous-tag --tag "$TAG")"
+          {
+            printf '### Per-image build plan for `%s`\n\n```\n' "$TAG"
+            for image in ml-api ml-worker; do
+              printf -- '--- %s, unchanged-input branch (empty range) ---\n' "$image"
+              python3 scripts/edge_image_plan.py decide \
+                --image "$image" --base HEAD --head HEAD
+              if [ -n "$PREVIOUS" ]; then
+                printf -- '--- %s, since %s ---\n' "$image" "$PREVIOUS"
+                python3 scripts/edge_image_plan.py decide \
+                  --image "$image" --base "$PREVIOUS" --head HEAD
+              else
+                printf -- '--- %s: no previous release tag; both images will be built ---\n' "$image"
+              fi
+            done
+            printf '```\n'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
       - name: Compose the release notes
         # Run on every path, rehearsal included: a rehearsal that skipped this
         # would not prove the notes compose. A rehearsal uses the tag the tree
