@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Final, TypeAlias
 
@@ -303,37 +304,75 @@ def test_edge_image_workflow_never_pushes_from_pull_requests() -> None:
 
 
 def test_edge_worker_boot_smoke_runs_on_the_single_build() -> None:
-    # The boot smoke moved from edge-worker-image.yml into the publish job:
-    # Dockerfile.edge is built once per commit (load + push exporters) and
-    # PRs consume the cache without exporting it (the mode=max export of the
-    # DeepStream layers is what exhausted the old gate's timeout).
+    # The boot smoke moved from edge-worker-image.yml into the publish job, and
+    # then off the docker-format exporter entirely. `load: true` was what put
+    # the image in the runner's daemon so a `docker run` could boot it, and on
+    # PR run 33156001540 that exporter cost 473.7s to export plus 244.0s to
+    # import -- 84% of the whole required check -- to enable a 4.4s check. The
+    # fresh-build path now boots inside Dockerfile.edge's `bootsmoke` stage, so
+    # no exporter runs and `load:` is gone.
     source = (REPO_ROOT / EDGE_IMAGES_WORKFLOW).read_text(encoding="utf-8")
     workflow = _workflow(EDGE_IMAGES_WORKFLOW)
-    worker_step = next(
-        step
-        for step in workflow["jobs"]["publish"]["steps"]
-        if step.get("name") == "Build and push ml-worker image"
+    steps = workflow["jobs"]["publish"]["steps"]
+    worker_step = next(s for s in steps if s.get("name") == "Build and push ml-worker image")
+    stage_smoke = next(
+        s for s in steps if (s.get("with") or {}).get("target") == "bootsmoke"
     )
+    pull_smoke = next(s for s in steps if "docker pull" in str(s.get("run", "")))
 
     assert not (REPO_ROOT / ".github/workflows/edge-worker-image.yml").exists()
-    # Loaded into the runner's daemon on every event EXCEPT a release. A
-    # release's digest is the one a later release may reuse, so it must be
-    # pushed as an OCI index (provenance attached), and the docker exporter
-    # cannot export a manifest list -- the two exporters are mutually exclusive
-    # there. See docs/runbooks/edge-image-publish.md.
-    assert worker_step["with"]["load"] == "${{ env.RELEASE_BUILD != 'true' }}"
+    # BaseLoader keeps scalars as text, so an absent key is a real absence.
+    assert "load" not in worker_step["with"]
+    # The published image must name its stage: `bootsmoke` is the LAST stage in
+    # Dockerfile.edge and Docker defaults to the last stage, so an unpinned
+    # build would tag and push the smoke layer as ml-worker.
+    assert worker_step["with"]["target"] == "runtime"
+    # A release still pushes an OCI index, because a release's digest is the one
+    # a later release may reuse and re-tagging only preserves a digest when the
+    # manifest is an index. See docs/runbooks/edge-image-publish.md.
     assert worker_step["with"]["provenance"] == "${{ env.RELEASE_BUILD == 'true' }}"
-    # ...and the boot smoke must therefore still reach the image on the path
-    # where it was NOT loaded: it pulls the exact digest this run pins.
-    assert "docker pull" in source
-    assert '$IMAGE_NAMESPACE/ml-worker@$ML_WORKER_DIGEST' in source
     assert worker_step["with"]["cache-from"] == "type=gha,scope=edge-ml-worker"
     assert worker_step["with"]["cache-to"] == (
         "${{ env.PUSH_IMAGES == 'true' && 'type=gha,scope=edge-ml-worker,mode=max' || '' }}"
     )
-    assert source.count("file: Dockerfile.edge") == 1
-    assert "docker run --rm" in source
-    assert "python -m worker --check-config" in source
+
+    # Two build steps against one Dockerfile, one build graph: same file, same
+    # cache scope, and the smoke exports nothing.
+    assert source.count("file: Dockerfile.edge") == 2
+    assert stage_smoke["with"]["file"] == "Dockerfile.edge"
+    assert stage_smoke["with"]["push"] == "false"
+    assert stage_smoke["with"]["cache-from"] == "type=gha,scope=edge-ml-worker"
+    assert "cache-to" not in stage_smoke["with"]
+    assert "load" not in stage_smoke["with"]
+
+    # The reuse/release path still pulls the published bytes and boots them, so
+    # a seal never pins a worker digest that was not booted in this run.
+    assert "$IMAGE_NAMESPACE/ml-worker@$ML_WORKER_DIGEST" in str(pull_smoke["run"])
+    assert "docker run --rm" in str(pull_smoke["run"])
+    assert "python -m worker --check-config" in str(pull_smoke["run"])
+
+    # The check itself lives in the Dockerfile now, and `--network=none` is what
+    # turns "--check-config has no side effects" into something the build
+    # enforces instead of something a comment claims.
+    dockerfile = (REPO_ROOT / "Dockerfile.edge").read_text(encoding="utf-8")
+    assert "FROM runtime AS bootsmoke" in dockerfile
+    assert (
+        "RUN --network=none RELAY_TOKEN=ci-boot-smoke-test "
+        "python -m worker --check-config"
+    ) in dockerfile
+    # `bootsmoke` really is last, which is exactly why every build that keeps
+    # its output has to pass `--target runtime`.
+    stages = re.findall(r"^FROM\s+\S+\s+AS\s+(\S+)", dockerfile, re.MULTILINE)
+    assert stages[-1] == "bootsmoke", stages
+    assert "FROM bootsmoke" not in dockerfile
+    # Nothing that builds this file may rely on the default target.
+    dev_compose = (REPO_ROOT / "compose.edge.dev.yaml").read_text(encoding="utf-8")
+    assert "target: runtime" in dev_compose
+    for doc in ("AGENTS.md", "docs/runbooks/edge-image-publish.md"):
+        text = (REPO_ROOT / doc).read_text(encoding="utf-8")
+        for line in text.splitlines():
+            if "docker build" in line and "Dockerfile.edge" in line:
+                assert "--target runtime" in line, (doc, line)
 
 
 def test_a_publishing_run_never_records_an_empty_digest() -> None:

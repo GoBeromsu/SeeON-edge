@@ -50,7 +50,8 @@ boot calls `verify_plan_cache` and never builds an engine.
 
 - Build/verify cache: `uv run python -m worker.native.deepstream.engine_cache build <manifest>` / `uv run python -m worker.native.deepstream.engine_cache verify <manifest>`.
 - Standalone preflight: `uv run python -m worker.native.deepstream.preflight <manifest>`.
-- Native compile and CTest run in `docker build -f Dockerfile.edge .`.
+- Native compile and CTest run in `docker build -f Dockerfile.edge --target runtime .`.
+  (`--target` matters: the file's last stage is the CI-only `bootsmoke`.)
 - Focused: `uv run pytest -q tests/test_perception_frame_v1.py tests/test_deepstream_full_wire.py tests/test_deepstream_preflight.py tests/test_deepstream_model_parity.py tests/test_native_association_registry.py`.
 - `uv run --group lint lint-imports` checks configured contracts; the native
   types-only ceiling is checked by focused dependency tests and manual import

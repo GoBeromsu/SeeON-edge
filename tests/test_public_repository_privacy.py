@@ -809,11 +809,36 @@ def _workflow(name: str) -> dict[str, object]:
 # allowlist, and `ci-ok` is the single job branch protection points at.
 #
 # Two obvious speedups stay deliberately OFF, and this is the file that keeps
-# them off. Because the workflow runs untrusted code and the GitHub Actions
-# cache is shared across branches, a poisoned fork-PR cache entry would be
-# restored by a later trusted run on `main` (see aa5e2c0). So `actions/cache` is
-# forbidden outright and setup-uv keeps `enable-cache: false`. Neither costs
-# much: on a runner `uv sync` is ~21s and the model fetch is ~900KB / ~1s.
+# them off: `actions/cache` is forbidden outright and setup-uv keeps
+# `enable-cache: false`.
+#
+# The reason recorded in aa5e2c0 -- that a poisoned fork-PR cache entry would be
+# restored by a later trusted run on `main` -- is WRONG, and correcting it does
+# not change the policy. GitHub's cache documentation says the opposite in so
+# many words: "When a cache is created by a workflow run triggered on a pull
+# request, the cache is created for the merge ref (refs/pull/.../merge).
+# Because of this, the cache will have a limited scope and can only be restored
+# by re-runs of the pull request. It cannot be restored by the base branch or
+# other pull requests targeting that base branch." GitHub's own low-trust cache
+# hardening -- which does make `pull_request_target`, `issue_comment` and
+# `workflow_run` read-only against the default branch's cache scope -- then
+# states plainly: "The `pull_request` event is not affected."
+# (https://docs.github.com/en/actions/reference/workflows-and-actions/dependency-caching)
+# The poisoning direction the old comment described does not exist.
+#
+# The honest reasons the ban stays:
+#   * It buys a PR no wall clock. `ci-ok` is not this repository's critical
+#     path -- the required `Build edge ML images + boot smoke` check is -- so
+#     even a perfect uv cache saves 0s of PR wall clock.
+#   * There is nothing to save anyway: on a runner `uv sync` is ~21s and the
+#     model fetch is ~900KB / ~1s.
+#   * Cache capacity is already the binding constraint. The repository's Actions
+#     cache is past its 10 GB limit (10.7 GiB measured), almost all of it
+#     BuildKit blobs for the DeepStream layers, and entries are being evicted
+#     mid-run. A uv cache would evict image layers whose rebuild costs minutes
+#     to save seconds.
+#   * And a closed-world allowlist is cheaper to keep closed than to reason
+#     about per entry.
 _ACTION_PIN = re.compile(r"^[^@]+@[0-9a-f]{40}$")
 
 _CHECKOUT_STEP = {
@@ -1171,9 +1196,10 @@ def test_untrusted_ci_policy_rejects_cache_step(job: str) -> None:
     assert isinstance(target, dict)
     steps = target["steps"]
     assert isinstance(steps, list)
-    # The Actions cache is shared across branches and this workflow runs fork
-    # code, so a cache entry poisoned by a fork PR would be restored by a later
-    # trusted run on main (aa5e2c0).
+    # Not a poisoning gate (a `pull_request` run's entries are scoped to
+    # `refs/pull/<n>/merge` and no `main` run can restore them). The ban is a
+    # capacity and altitude decision -- see the block above `_ACTION_PIN` -- and
+    # this test is what keeps a step from re-introducing it by hand.
     steps.append(
         {
             "uses": "actions/cache@0000000000000000000000000000000000000000",
@@ -1273,6 +1299,28 @@ _NOT_A_PULL_REQUEST_IF = "github.event_name != 'pull_request'"
 #: manifest instead of rebuilding it; that is a registry write and needs the
 #: same gate as a push.
 _REGISTRY_WRITE_MARKERS = ("imagetools create", "edge_image_plan.py retag", "docker push")
+
+#: Dockerfile.edge's CI-only stage. The fresh-build boot smoke is a
+#: `docker/build-push-action` step like the two publishing builds, but it is NOT
+#: a token consumer and must never become one: it builds a stage that is never
+#: shipped, so its `push:` is the literal string "false" rather than the
+#: PUSH_IMAGES gate, and it exports nothing at all.
+_BOOT_SMOKE_TARGET = "bootsmoke"
+_NEVER_PUSHES = "false"
+
+#: The stage Dockerfile.edge actually ships. It is NOT that file's last stage --
+#: `bootsmoke` is -- and Docker's default target is the last stage, so a build
+#: of Dockerfile.edge that omits `target:` publishes the CI-only smoke layer as
+#: the production image. Any step here that can push must therefore name it.
+_SHIPPED_TARGET = "runtime"
+_EDGE_DOCKERFILE = "Dockerfile.edge"
+
+#: The two mutually exclusive boot-smoke shapes. A freshly built non-release
+#: image is smoked in the `bootsmoke` build stage; a reused or release digest is
+#: pulled and run. Their `if:` expressions must stay exact complements, or a run
+#: could skip both and the required check would pass having booted nothing.
+_SMOKE_STAGE_IF = "env.BUILD_ML_WORKER == 'true' && env.RELEASE_BUILD != 'true'"
+_SMOKE_PULL_IF = "env.BUILD_ML_WORKER != 'true' || env.RELEASE_BUILD == 'true'"
 
 #: The only (workflow, job) pair permitted to hold a write scope while its
 #: workflow is reachable from `pull_request`, and the exact scopes it may hold.
@@ -1378,7 +1426,7 @@ def _assert_token_consumers_are_gated(
     assert isinstance(env, dict), (name, job_name)
     assert env.get("PUSH_IMAGES") == _NOT_A_PULL_REQUEST, (name, job_name, env)
 
-    logins = uploads = pushes = exports = retags = 0
+    logins = uploads = pushes = exports = retags = smokes = 0
     for step in _steps(job):
         uses = str(step.get("uses", ""))
         with_ = step.get("with") or {}
@@ -1389,15 +1437,44 @@ def _assert_token_consumers_are_gated(
         if uses.startswith("actions/upload-artifact@"):
             uploads += 1
             assert step.get("if") == _PUSH_GATE, (name, step.get("name"), step.get("if"))
+        if with_.get("target") == _BOOT_SMOKE_TARGET:
+            # The fresh-build boot smoke. It builds a stage that is never tagged
+            # and never shipped, so it is held to a STRICTER rule than the gate:
+            # it may not push on any event, not even a publishing one.
+            # `push: "false"` as a literal is the assertion; the PUSH_IMAGES
+            # gate would be a regression here, not a fix. It must also stay free
+            # of `cache-to` (the mode=max export the builds above document at
+            # 413.3s) and of `load:` (the docker-format exporter this step
+            # exists to avoid). Retargeting it at `runtime` drops it out of this
+            # branch and into the generic `push:` check below, which its literal
+            # "false" fails.
+            smokes += 1
+            assert with_["push"] == _NEVER_PUSHES, (name, step.get("name"), with_["push"])
+            assert "cache-to" not in with_, (name, step.get("name"))
+            assert "load" not in with_, (name, step.get("name"))
+            continue
         if "push" in with_:
             pushes += 1
             assert with_["push"] == _PUSH_GATE_EXPR, (name, step.get("name"), with_["push"])
+            # A build that can reach the registry must name the stage it ships.
+            # Dockerfile.edge ends with the CI-only `bootsmoke` stage and Docker
+            # defaults to the LAST stage, so an unpinned build here would push
+            # the smoke layer as the production ml-worker image.
+            if with_.get("file") == _EDGE_DOCKERFILE:
+                assert with_.get("target") == _SHIPPED_TARGET, (
+                    name,
+                    step.get("name"),
+                    with_.get("target"),
+                )
         if "cache-to" in with_:
             exports += 1
             cache_to = str(with_["cache-to"])
-            # The BuildKit cache is shared across branches exactly like the
-            # Actions cache (aa5e2c0), so a PR must consume it and never export
-            # to it. Gated, this collapses to the empty string on a PR run.
+            # Not a poisoning gate either (a `pull_request` run's BuildKit cache
+            # is scoped to `refs/pull/<n>/merge` and no `main` run can restore
+            # it). A PR exports nothing because the export measured 413.3s on
+            # push run 33154567502, helps only the NEXT run, and evicts
+            # DeepStream blobs from a cache already past its 10 GB limit.
+            # Gated, this collapses to the empty string on a PR run.
             assert cache_to.startswith(_CACHE_GATE_PREFIX), (name, step.get("name"), cache_to)
             assert cache_to.endswith(_CACHE_GATE_SUFFIX), (name, step.get("name"), cache_to)
         # Per-image release isolation re-tags an already-published digest rather
@@ -1412,14 +1489,15 @@ def _assert_token_consumers_are_gated(
                 step.get("if"),
             )
 
-    # Non-vacuous: these are the token-spending shapes this job contains -- one
-    # registry login, one artifact upload, two `push:` inputs, two `cache-to`
-    # exports and two digest re-tags. Deleting a gate cannot pass by deleting
-    # its step.
-    assert (logins, uploads, pushes, exports, retags) == (1, 1, 2, 2, 2), (
+    # Non-vacuous: these are the shapes this job contains -- one registry login,
+    # one artifact upload, two `push:` inputs, two `cache-to` exports, two
+    # digest re-tags, and one boot-smoke build that must never grow into any of
+    # them. Deleting a gate cannot pass by deleting its step, and deleting the
+    # smoke cannot pass by leaving nothing to check.
+    assert (logins, uploads, pushes, exports, retags, smokes) == (1, 1, 2, 2, 2, 1), (
         name,
         job_name,
-        (logins, uploads, pushes, exports, retags),
+        (logins, uploads, pushes, exports, retags, smokes),
     )
 
 
@@ -1454,9 +1532,10 @@ def test_every_pull_request_workflow_pins_actions_to_a_commit() -> None:
         _count_pinned_actions(name, workflow)
         for name, workflow in _pull_request_workflows().items()
     )
-    # ci.yml (5) + edge-images.yml (6). A floor, not an equality: adding a
-    # pinned step must not have to touch this number.
-    assert pinned >= 11, pinned
+    # ci.yml (5) + edge-images.yml (7, the fresh-build boot smoke now being a
+    # pinned `docker/build-push-action` rather than a `run:`). A floor, not an
+    # equality: adding a pinned step must not have to touch this number.
+    assert pinned >= 12, pinned
 
 
 def test_no_pull_request_workflow_reads_a_secret() -> None:
@@ -1482,9 +1561,14 @@ _PUBLISH_STEP_SEQUENCE: tuple[tuple[str, str | None], ...] = (
     ("Decide, per image", None),
     ("Build and push ml-api", "docker/build-push-action@"),
     ("Build and push ml-worker", "docker/build-push-action@"),
+    # The fresh-build boot smoke: a build of Dockerfile.edge's `bootsmoke`
+    # stage, so it is an action step and not a `run:`.
+    ("Boot smoke test", "docker/build-push-action@"),
     ("Re-tag the published ml-api", None),
     ("Re-tag the published ml-worker", None),
     ("Resolve the digests", None),
+    # ...and its complement, for a reused or release digest, which has to pull
+    # the published bytes and therefore stays a `run:`.
     ("Boot smoke test", None),
     ("Write edge image env artifact", None),
     ("Upload edge image refs", "actions/upload-artifact@"),
@@ -1552,7 +1636,9 @@ def test_edge_image_workflow_is_reachable_from_pull_request() -> None:
         ("edge-images.yml", "publish", 2, "docker/setup-buildx-action@v3"),
         ("edge-images.yml", "publish", 3, "docker/login-action@v3"),
         ("edge-images.yml", "publish", 5, "docker/build-push-action@v6"),
-        ("edge-images.yml", "publish", 12, "actions/upload-artifact@v4"),
+        # The fresh-build boot smoke is an action now, so it needs the same pin.
+        ("edge-images.yml", "publish", 7, "docker/build-push-action@v6"),
+        ("edge-images.yml", "publish", 13, "actions/upload-artifact@v4"),
         # A branch ref is worse: it moves on every upstream push.
         ("edge-images.yml", "publish", 0, "actions/checkout@main"),
         # A 40-char string that is not hex must not pass for a commit.
@@ -1581,6 +1667,10 @@ def test_pull_request_pin_policy_rejects_an_unpinned_action(
         (6, "${{ env.PUSH_IMAGES == 'false' && 'type=gha,mode=max' || '' }}"),
         # Right prefix, but the fallback exports anyway.
         (6, "${{ env.PUSH_IMAGES == 'true' && 'type=gha,mode=max' || 'type=gha' }}"),
+        # The boot smoke exports nothing on any event, so even a correctly
+        # gated `cache-to` is a regression there.
+        (7, "type=gha,scope=edge-ml-worker,mode=max"),
+        (7, "${{ env.PUSH_IMAGES == 'true' && 'type=gha,scope=edge-ml-worker,mode=max' || '' }}"),
     ],
 )
 def test_edge_image_policy_rejects_an_ungated_cache_export(
@@ -1645,10 +1735,25 @@ def test_edge_image_policy_rejects_a_write_scope_on_a_second_job() -> None:
         (6, "push", "true"),
         # Re-tagging a published digest is a registry write with no `push:`
         # input, so it needs the gate just as much as a build does.
-        (7, "if", "always()"),
-        (8, "if", "env.BUILD_ML_WORKER != 'true'"),
+        (8, "if", "always()"),
+        (9, "if", "env.BUILD_ML_WORKER != 'true'"),
         # An artifact upload on a PR run publishes an unpullable digest.
-        (12, "if", "always()"),
+        (13, "if", "always()"),
+        # The boot smoke builds a stage that is never shipped. Pushing it is
+        # wrong on every event, so `push: "false"` is a literal -- gaining
+        # either `true` or the PUSH_IMAGES gate is a regression.
+        (7, "push", "true"),
+        (7, "push", _PUSH_GATE_EXPR),
+        # Retargeting the smoke at the shipped stage turns a throwaway build
+        # back into a build of the published image.
+        (7, "target", _SHIPPED_TARGET),
+        # `load:` is the docker-format exporter this whole step exists to drop.
+        (7, "load", "true"),
+        # And the mirror image on the PUBLISHING build: Dockerfile.edge's last
+        # stage is `bootsmoke`, so a pushing build that names the wrong stage
+        # publishes the CI layer.
+        (6, "target", _BOOT_SMOKE_TARGET),
+        (6, "target", "deepstream-native-build"),
     ],
 )
 def test_edge_image_policy_rejects_an_ungated_token_consumer(
@@ -1667,17 +1772,67 @@ def test_edge_image_policy_rejects_an_ungated_token_consumer(
         )
 
 
-def test_edge_image_policy_rejects_dropping_a_gated_step() -> None:
+@pytest.mark.parametrize(
+    ("step_index", "why"),
+    [
+        # Removing the login step rather than un-gating it must not read as "no
+        # ungated consumer found, therefore safe".
+        (3, "registry login"),
+        # Same for the boot smoke: deleting it is the required check silently
+        # becoming a build-only gate again, which is the #195 failure mode.
+        (7, "boot smoke"),
+    ],
+)
+def test_edge_image_policy_rejects_dropping_a_gated_step(step_index: int, why: str) -> None:
     workflow = copy.deepcopy(_workflow("edge-images.yml"))
     steps = _jobs(workflow)["publish"]["steps"]
-    # Removing the login step rather than un-gating it must not read as "no
-    # ungated consumer found, therefore safe".
-    del steps[3]
+    del steps[step_index]
 
     with pytest.raises(AssertionError):
         _assert_write_permissions_stay_off_the_pull_request_path(
             "edge-images.yml", workflow
         )
+
+
+def test_edge_image_policy_rejects_a_publishing_build_with_no_target() -> None:
+    # Deleting the pin is the dangerous edit, and the one a mutation that only
+    # ever SETS fields cannot reach: with no `target:` at all, Docker falls back
+    # to the last stage in Dockerfile.edge, which is `bootsmoke`.
+    workflow = copy.deepcopy(_workflow("edge-images.yml"))
+    worker = _jobs(workflow)["publish"]["steps"][6]
+    assert worker["with"].pop("target") == _SHIPPED_TARGET
+
+    with pytest.raises(AssertionError):
+        _assert_write_permissions_stay_off_the_pull_request_path(
+            "edge-images.yml", workflow
+        )
+
+
+def test_edge_image_boot_smoke_shapes_are_exact_complements() -> None:
+    """Every ml-worker build is smoked by exactly one of the two shapes.
+
+    A freshly built non-release image is smoked in the `bootsmoke` build stage;
+    a reused or release digest is pulled and run. If the two `if:` expressions
+    ever stopped being complements, a run could skip BOTH and the required check
+    would report green having booted nothing -- the #195 failure mode with an
+    extra step of indirection.
+    """
+    steps = _steps(_jobs(_workflow("edge-images.yml"))["publish"])
+    stage = [s for s in steps if (s.get("with") or {}).get("target") == _BOOT_SMOKE_TARGET]
+    pull = [s for s in steps if "docker pull" in str(s.get("run", ""))]
+    assert len(stage) == 1, [s.get("name") for s in stage]
+    assert len(pull) == 1, [s.get("name") for s in pull]
+    assert stage[0]["if"] == _SMOKE_STAGE_IF, stage[0].get("if")
+    assert pull[0]["if"] == _SMOKE_PULL_IF, pull[0].get("if")
+    # Both actually boot the worker, rather than merely existing.
+    assert "python -m worker --check-config" in str(pull[0]["run"])
+    # From the index, like every other assertion in this file, so a staged
+    # Dockerfile and a staged workflow are judged against each other.
+    dockerfile = next(
+        blob for relative, blob in _index_blobs() if relative == Path(_EDGE_DOCKERFILE)
+    ).decode("utf-8")
+    assert f"FROM {_SHIPPED_TARGET} AS {_BOOT_SMOKE_TARGET}" in dockerfile
+    assert "python -m worker --check-config" in dockerfile
 
 
 def test_edge_image_policy_rejects_a_push_images_flag_that_is_true_on_a_pr() -> None:

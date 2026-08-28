@@ -492,7 +492,7 @@ docker logs --tail 200 eldercare-fall-ml-ml-worker-1
 595.84 soft-reload 또는 WPR2 재부팅의 대체 절차가 아니다.
 
 ```sh
-docker build -f Dockerfile.edge -t local/fall-ml-worker:failfast .
+docker build -f Dockerfile.edge --target runtime -t local/fall-ml-worker:failfast .
 docker run --rm --gpus all local/fall-ml-worker:failfast \
   python -c "import torch; assert torch.cuda.is_available(); print('OK', torch.cuda.get_arch_list(), torch.cuda.get_device_name(0))"
 

@@ -51,7 +51,7 @@ Builds are:
 ```sh
 docker build -f Dockerfile.backend --build-arg "SOURCE_REVISION=$SEALED_ML_SHA" \
   -t "local/ml-api:$SEALED_ML_SHA" .
-docker build --platform linux/amd64 -f Dockerfile.edge \
+docker build --platform linux/amd64 -f Dockerfile.edge --target runtime \
   --build-arg "SOURCE_REVISION=$SEALED_ML_SHA" \
   -t "local/ml-worker:$SEALED_ML_SHA" .
 ```

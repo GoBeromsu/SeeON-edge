@@ -21,7 +21,7 @@ Built from `feat/nvidia-multistream-serving` @ `e2c1d37698be3cd2fe7754720e893b67
 ```sh
 cd <worktree>
 SHA=$(git rev-parse HEAD)
-docker build -f Dockerfile.edge    --build-arg SOURCE_REVISION=$SHA -t local/fall-ml-worker:e2c1d37 .
+docker build -f Dockerfile.edge --target runtime    --build-arg SOURCE_REVISION=$SHA -t local/fall-ml-worker:e2c1d37 .
 docker build -f Dockerfile.backend --build-arg SOURCE_REVISION=$SHA -t local/fall-ml-api:e2c1d37 .
 ```
 

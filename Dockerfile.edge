@@ -141,3 +141,59 @@ LABEL org.opencontainers.image.revision="${SOURCE_REVISION}" \
 ENV ML_WORKER_BUILD_REVISION="${SOURCE_REVISION}"
 
 CMD ["python", "-m", "worker"]
+
+# --- CI-only boot smoke stage -------------------------------------------------
+#
+# NOT SHIPPED -- but read the next paragraph before adding anything below it.
+#
+# THIS IS THE LAST STAGE, AND DOCKER'S DEFAULT TARGET IS THE LAST STAGE. So a
+# bare `docker build -f Dockerfile.edge .` builds THIS, not `runtime`, and would
+# ship a production image carrying the smoke layer (verified locally: 82 layers
+# against runtime's 81, and a different image ID). Every build that produces an
+# image anyone keeps therefore names its stage explicitly with
+# `--target runtime` / `target: runtime`: the ml-worker step in
+# .github/workflows/edge-images.yml, compose.edge.dev.yaml, and the build
+# commands in AGENTS.md, worker/native/deepstream/AGENTS.md and the runbooks.
+# tests/test_public_repository_privacy.py fails any PUSHING build of this file
+# that does not pin `target: runtime`, so the registry cannot receive this stage
+# by accident. Building `bootsmoke` adds exactly one layer on top of `runtime`
+# and never mutates it, so the runtime image is unaffected by this stage's
+# existence -- only by which stage a build selects.
+#
+# Why it exists. A successful build only proves the image assembles; it does not
+# prove the interpreter can import the worker's module graph. That is the #195
+# httpx incident: the image built fine and the container died at boot with
+# ModuleNotFoundError. `--check-config` is the entrypoint's own no-side-effect
+# boot path (worker/runtime/AGENTS.md) -- it forces every top-level import in
+# worker/__main__.py's module graph to resolve before returning.
+#
+# Why it is a BUILD STAGE and not a `docker run`. Running the smoke in the
+# workflow requires the built image inside the runner's daemon, i.e. `load:
+# true`, i.e. the docker-format exporter: on PR run 33156001540 that exporter
+# cost 473.7s (125.9s exporting layers + 347.9s sending tarball) plus 244.0s
+# importing to docker -- 717.7s, 89% of the 806s image step and 84% of the whole
+# 14m14s required check, to enable a 4.4s check. This stage covers the FRESH
+# BUILD path -- every pull request and every push to main. A reused or
+# release-built digest is instead pulled from the registry and booted by the
+# workflow's second smoke step, so that a release seal only ever pins bytes that
+# were actually published and booted. As a stage the same command
+# runs inside BuildKit against layers it already has, and no exporter runs at
+# all.
+#
+# Why `--network=none`. It turns "this check is side-effect free" from a comment
+# into an assertion the build enforces. With no `--config`, worker/__main__.py
+# takes the else-branch at line 321: it reads RELAY_TOKEN (line 323), refuses if
+# it is unset (lines 331-337), validates only the SHAPE of the baked relay
+# endpoint + token via `RelayConfig.model_validate` (lines 338-346), then in the
+# `--check-config` branch (line 348) does one READ-ONLY
+# `WorkerConfigLkgStore(...).load()` (line 362) and returns
+# CLEAN_SHUTDOWN_EXIT_CODE (line 380). No relay pull, no LKG write, no model
+# resolution -- `resolve_local_overrides` sits after the return, at line 382.
+# If a future edit makes the check reach the network, this stage fails the build
+# instead of silently passing. (The same contract is pinned from the Python side
+# in tests/test_worker_startup_config_resolution.py.)
+#
+# The token only has to be well-formed, not reachable: RELAY_URL is retired and
+# the endpoint is fixed in-code, so a literal placeholder is the whole input.
+FROM runtime AS bootsmoke
+RUN --network=none RELAY_TOKEN=ci-boot-smoke-test python -m worker --check-config
