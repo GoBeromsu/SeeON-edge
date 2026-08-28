@@ -251,7 +251,6 @@ export function useMjpegStream(baseUrl: string | null): MjpegStream {
       void readerRef.current?.cancel().catch(() => {});
       readerRef.current = null;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [baseUrl]);
 
   return { canvasRef, status };

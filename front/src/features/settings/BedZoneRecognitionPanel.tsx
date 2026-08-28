@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { bedZoneRecognitionFailureDetail, getCameraStreamUrl, recognizeBedZone } from '@/shared/api/client';
 import type { BedZone } from '@/shared/api/client';
-import { useMjpegStream } from '@/features/operations/useMjpegStream';
+import { useMjpegStream } from '@/shared/api/useMjpegStream';
 
 type BedZoneRecognitionPanelProps = {
   cameraId: string;

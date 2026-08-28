@@ -64,7 +64,6 @@ export function EdgeSetupWizard({ connectionResource, camerasResource }: Props):
       .finally(() => { if (active) setTopologyLoading(false); });
     return () => { active = false; };
     // 최초 1회만 로드하며, 이후에는 각 단계의 액션(동기화/확정)이 명시적으로 reloadTopology를 호출한다.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   function retryTopology(): void {

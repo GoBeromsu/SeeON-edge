@@ -1,19 +1,19 @@
 # features/: domain slices
 
-One folder, one capability. `app/pages/` composes these. Parent already names the folders and the three frozen seams. This file is the in-slice contract.
+One folder, one capability. `app/pages/` composes these. Parent already names the folders and the two frozen seams. This file is the in-slice contract.
 
 ## Ownership
 
-- `operations/`: live wall + room detail. Owns MJPEG (`useMjpegStream`), snapshot queue, overlay fetch/set, floor/liveness sort (`operationsModel`), room clip history. `ClipPlayerModal` plays that history. No delete, no artifacts.
+- `operations/`: live wall + room detail. Owns the live wall (MJPEG hook lives in `shared/api/useMjpegStream`), snapshot queue, overlay fetch/set, floor/liveness sort (`operationsModel`), room clip history. `ClipPlayerModal` plays that history. No delete, no artifacts.
 - `events/`: clip catalog + incident review. Owns filters, keyset pager, `useEventsPage` / `useClipMetadata`, `eventTypes` facets (`bed-exit` / `fall` / `other`). `ClipPlaybackModal` is the evidence surface: one clean `<video>`, artifact state, delete. There is no analysis, annotated, or derivative view.
-- `settings/`: registry writes and site policy. `CameraSection` orchestrates table + register + edit + delete. Its `DetectionSettingsCard` is the global schedule editor (`saveDetectionSettings`). Also clip storage/export, policy evidence, processing status, bed-zone panel.
+- `settings/`: registry writes and site policy. `CameraSection` orchestrates table + register + edit + delete. Its `DetectionSettingsCard` is the global schedule editor (`saveDetectionSettings`). Also clip storage/export, policy evidence, processing status, bed-zone panel (live canvas via `shared/api/useMjpegStream`).
 - `connection/`: 3-step wizard + `ConnectionSettingsPanel`. `wizardSteps.ts` is pure and server-state only (`enrolled`, camera total, `dirty_registry_version`, `readiness_error`, `preview.confirmed`). SettingsPage mounts the wizard. No page of its own.
 - `cameras/`: topology widgets only. Pairing list, structure editor, confirm dialog. No wizard progress, no registry table. Wizard steps 2 and 3 consume them.
 - `account-settings/`: single-admin username/password rotate. `App` mounts the modal. Already-authed `PUT` credentials. No current-password field.
 
 ## Allowed deps
 
-- `@/shared/api/*`: client, types, http, polling hooks, topology client, session URL builders.
+- `@/shared/api/*`: client, types, http, polling hooks, `useMjpegStream`, topology client, session URL builders.
 - `@/shared/ui/*`: AccessibleDialog, Toast, StatusBadge, ClipThumbnail, AutoplayVideo, AuthGate.
 - `@/shared/format/*`: bytes, uuid. Use `generateUuidV4`, never `crypto.randomUUID`.
 - `@/app/dashboardLocation` types and helpers, only through each slice's `use*Location`.
@@ -23,7 +23,9 @@ Forbidden: sibling slices except the frozen seams below. `App.tsx`. A second fet
 
 ## Frozen crossings
 
-Do not add a fourth. Lift a new shared widget to `shared/ui` or `shared/api`.
+Do not add a third. Lift a new shared widget to `shared/ui` or `shared/api`.
+
+Enforced by `front/eslint.config.js` (`no-restricted-imports`, one override per slice; `pnpm --dir front lint`). Only the two seams below are allowlisted (`ALLOWED_SEAMS`); every other `@/features/<sibling>` import, any `../` import, `@/app/App`, and anything under `backend/` or `worker/` is a lint error. A new seam means editing that allowlist in the same PR as this file.
 
 `connection` -> `cameras` (one way):
 - Step 2 `CameraSyncStep` mounts `CameraPairingList` + `TopologyStructureEditor`, then `syncTopology()`.
@@ -34,8 +36,7 @@ Do not add a fourth. Lift a new shared widget to `shared/ui` or `shared/api`.
 - `RoomDetail` reuses `CameraEditModal` / `DeleteCameraDialog`. Same sibling-dialog rule as `CameraSection`: edit never confirms its own delete. Nested `AccessibleDialog` inerts the first dialog.
 - Room `DetectionSettingsCard` is read-only. It imports `DOMAIN_LABELS`, `DOMAIN_ORDER`, `formatDomainSchedule` from `settings/detectionSettingsForm`. Gear calls `navigateToPage('settings')`. Global `GET /detection-settings` is not per-camera. Don't import the settings editor card.
 
-`settings` -> `operations`:
-- `BedZoneRecognitionPanel` reuses `useMjpegStream` (live canvas, not a still). Recognition is `POST /cameras/{id}/bed-zone/recognize` on a 2s interval while the session is active. Polygon overlay is a sibling `<svg>`. Drawing on the MJPEG canvas loses the next frame.
+`settings` no longer imports `operations`. `BedZoneRecognitionPanel` takes `useMjpegStream` from `shared/api` (live canvas, not a still). Recognition is `POST /cameras/{id}/bed-zone/recognize` on a 2s interval while the session is active. Polygon overlay is a sibling `<svg>`. Drawing on the MJPEG canvas loses the next frame.
 
 Same-named cards stay separate files. operations card = status + overlay + navigate. settings card = editor. Don't merge by import.
 
@@ -59,7 +60,7 @@ Page suites live under `app/pages/`, not here.
 - A new feature->feature import "just this once."
 - Client-remembered wizard step. Refresh must land on server-known `enrolled` / topology / preview.
 - Treating zero cameras + a clean `dirty_registry_version` as step-2 success.
-- Copying `useMjpegStream` into settings, or an `<img multipart>` live tile.
+- Copying `useMjpegStream` into a slice (it lives in `shared/api`), or an `<img multipart>` live tile.
 - Seeding or importing cameras in the browser. Registry writes go through the API.
 - Showing clip-store paths, RTSP secrets, or Hub credentials.
 - Pinning Korean prose in a test unless it is a sentinel or `data-testid`.

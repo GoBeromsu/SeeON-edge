@@ -2,7 +2,7 @@ import { createElement } from 'react';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { extractFrame, parseBoundary, useMjpegStream, type MjpegStream } from '@/features/operations/useMjpegStream';
+import { extractFrame, parseBoundary, useMjpegStream, type MjpegStream } from '@/shared/api/useMjpegStream';
 
 /** worker `_mjpeg_http.py:364-371` `_write_part` 의 와이어 포맷 그대로 파트 하나를 만든다. */
 function encodePart(jpeg: Uint8Array<ArrayBuffer>, boundary = 'frame'): Uint8Array<ArrayBuffer> {
@@ -82,7 +82,6 @@ function mount(baseUrl: string | null): { root: Root; current: () => MjpegStream
 
 async function flushMicrotasks(times = 3): Promise<void> {
   for (let i = 0; i < times; i += 1) {
-    // eslint-disable-next-line no-await-in-loop
     await act(async () => { await Promise.resolve(); });
   }
 }
@@ -111,10 +110,8 @@ describe('useMjpegStream', () => {
 
     // 하트비트가 1초마다 오므로 2.5초 동안 계속 프레임을 흘려보내면 재연결이 없어야 한다.
     for (let elapsed = 0; elapsed < 2_500; elapsed += 1_000) {
-      // eslint-disable-next-line no-await-in-loop
       await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
       streams[0].push(encodePart(new Uint8Array([1, 2, 3])));
-      // eslint-disable-next-line no-await-in-loop
       await flushMicrotasks();
     }
 

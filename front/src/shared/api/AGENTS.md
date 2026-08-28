@@ -10,6 +10,7 @@ HTTP + DTO boundary. Features call this. Screens stay out.
 - `*Normalizer.ts` + `normalizerFields.ts`: parse or throw. Barrel is `normalizers.ts`.
 - `http.ts` + `session.ts`: `requestJson`, `HttpError`, 401/403 bus, `getApiBase()`, media URLs.
 - `usePollingResource.ts`: shared poller plus named resource hooks.
+- `useMjpegStream.ts`: `fetch` + canvas MJPEG hook (Content-Length framed parts, 3s stall reconnect, backoff). Used by operations `LiveStreamPanel` and settings `BedZoneRecognitionPanel`.
 
 ## client.ts
 All traffic goes through `requestJson`. Paths are `/api/v1`-relative. Encode ids.
@@ -56,7 +57,7 @@ Worker relay tokens, RTSP secrets, clip-store paths, and Hub credentials stay ou
 Connection test may send unsaved form values. Persist is a separate `PUT`.
 
 ## tests
-Colocate: `client.test.ts`, `normalizers.test.ts`, `usePollingResource.test.tsx`, `topologyClient.test.ts`, `clipPagination.test.ts`, `clipThumbnail.test.ts`.
+Colocate: `client.test.ts`, `normalizers.test.ts`, `usePollingResource.test.tsx`, `useMjpegStream.test.ts`, `topologyClient.test.ts`, `clipPagination.test.ts`, `clipThumbnail.test.ts`.
 Client tests reject contract-invalid 200 envelopes. Normalizer tests stay table-style.
 Polling tests use `createRoot` + `act`. Subscribe, act, then await. No `sleep`.
 Assert URLs, statuses, and DTO fields. Don't pin Korean copy unless it's a sentinel.
