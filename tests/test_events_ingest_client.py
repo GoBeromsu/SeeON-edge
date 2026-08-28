@@ -262,9 +262,7 @@ def test_edge_ingest_client_send_alert_receipt_calls_on_accepted_with_wall_clock
 
         # Then: it completes without TypeError, and on_accepted receives a
         # single wall-clock timestamp bounded by the surrounding calls.
-        assert result == EventReceipt(
-            "accepted", "00000000-0000-4000-8000-000000000099", "event-1"
-        )
+        assert result == EventReceipt("accepted", "00000000-0000-4000-8000-000000000099", "event-1")
         assert len(accepted_values) == 1
         assert isinstance(accepted_values[0], float)
         assert before <= accepted_values[0] <= after
@@ -277,3 +275,33 @@ def _run_server(server: ThreadingHTTPServer) -> Thread:
     thread = Thread(target=server.serve_forever, daemon=True)
     thread.start()
     return thread
+
+
+def test_edge_ingest_client_skips_snapshot_put_for_a_local_accept_receipt(monkeypatch) -> None:
+    """accepted_local has no upstream id; there is no `{event_id}/snapshot` to PUT to."""
+    from shared.events import edge_ingest_client as module
+
+    class _LocalAcceptBackend:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        def send_event_payload(self, payload, edge_event_id, on_accepted=None):  # noqa: ANN001
+            del payload
+            return EventReceipt("accepted_local", edge_event_id, "")
+
+    puts: list[str] = []
+    monkeypatch.setattr(module, "BackendEvidenceClient", _LocalAcceptBackend)
+    monkeypatch.setattr(EdgeIngestClient, "_put_snapshot", lambda self, url, data: puts.append(url))
+    client = EdgeIngestClient(events_url="http://relay/events", camera_id="camera-1")
+
+    result = client.send_alert_receipt(
+        edge_event_id="edge-1",
+        event_type="fall",
+        detected_at="2026-06-23T12:00:00.000Z",
+        probability=0.9,
+        snapshot_bytes=b"jpeg",
+    )
+
+    assert isinstance(result, EventReceipt)
+    assert result.status == "accepted_local"
+    assert puts == []

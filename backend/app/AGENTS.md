@@ -63,7 +63,7 @@ Connection and runtime settings load through their slice `from_env()` helpers. A
 - Do not assemble camera loops, detectors, or worker runtime in `lifespan.py`.
 - Do not seed cameras from env, YAML, or a pulled backend roster.
 - Do not re-read `API_EDGE_RELAY_TOKEN`. `app.state` is the only source.
-- Hub ingest needs a Hub-issued `backend_camera_id`. Skip egress until that mapping exists; keep the local catalog / heartbeat write anyway.
+- Hub ingest needs a Hub-issued `backend_camera_id`. Skip egress until that mapping exists; keep the local catalog / heartbeat write anyway. Answer the worker `accepted_local` only when something local actually persisted the alert; that receipt is terminal and the alert is never pushed later.
 - Stamp `/relay/heartbeat` `received_at` after auth, before binding and before egress. Local liveness is edge truth even when registry or Hub fails.
 - Wire models stay out of `contracts`. Feature state stays out of `shared/`.
 - `core/` and `shared/` cannot import `features`, `routes`, `main`, or `lifespan`. `worker` is import-forbidden. Relay HTTP only.

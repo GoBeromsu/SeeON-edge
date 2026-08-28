@@ -57,7 +57,11 @@ class LegacyEvidenceDrain:
                 if result.edge_event_id != edge_event_id:
                     retryable += 1
                     continue
-                self._acknowledge(str(edge_event_id), result.event_id)
+                # An accepted_local receipt carries no upstream id: the relay
+                # persisted the row itself and will never push it. Store NULL,
+                # not "" -- the compact schema CHECKs backend_event_id length
+                # and gates "delivered upstream" on IS NOT NULL.
+                self._acknowledge(str(edge_event_id), result.event_id or None)
                 delivered += 1
             elif result.disposition is not DeliveryDisposition.RETRY:
                 delivery_state = (

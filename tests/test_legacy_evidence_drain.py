@@ -431,3 +431,24 @@ def test_legacy_drain_cli_coexists_with_relay_runtime_lock(tmp_path: Path) -> No
         assert connection.execute(
             "SELECT state, delivery_state FROM evidence_events"
         ).fetchone() == ("ACKED", "ACKED")
+
+
+def test_legacy_drain_named_local_accept_acks_with_null_backend_event_id(tmp_path: Path) -> None:
+    """An accepted_local receipt carries no upstream id. The row is delivered
+    (the relay persisted it), but backend_event_id must be NULL, not "": the
+    compact schema CHECKs its length and gates "reached upstream" on IS NOT NULL."""
+    database = _schema16_database(tmp_path)
+    _insert_pending(database)
+
+    result = LegacyEvidenceDrain(
+        database,
+        _FixedTransport(
+            EventReceipt(status="accepted_local", edge_event_id=_EDGE_EVENT_ID, event_id="")
+        ),
+    ).run()
+
+    assert result.delivered == 1
+    with sqlite3.connect(database) as connection:
+        assert connection.execute(
+            "SELECT state, delivery_state, backend_event_id FROM evidence_events"
+        ).fetchone() == ("ACKED", "ACKED", None)

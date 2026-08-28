@@ -9,6 +9,7 @@ import json
 import logging
 import sqlite3
 from collections.abc import Callable, Coroutine
+from dataclasses import dataclass
 from typing import Annotated, Any, NotRequired, Protocol, TypedDict
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response, status
@@ -293,9 +294,7 @@ class RelaySnapshotAttachmentRequest(BaseModel):
         max_length=envelope_limits.SHA256_MAX_CHARS,
         pattern=r"^[0-9a-f]{64}$",
     )
-    media_reference: str = Field(
-        min_length=1, max_length=envelope_limits.MEDIA_REFERENCE_MAX_CHARS
-    )
+    media_reference: str = Field(min_length=1, max_length=envelope_limits.MEDIA_REFERENCE_MAX_CHARS)
     size_bytes: int = Field(ge=0, le=envelope_limits.SNAPSHOT_SIZE_BYTES_MAX)
     mime_type: str = Field(min_length=1, max_length=envelope_limits.MIME_TYPE_MAX_CHARS)
     audit: RelayAuditEnvelope | None = None
@@ -308,9 +307,7 @@ class RelaySnapshotDispositionRequest(BaseModel):
 
     edge_event_id: str = Field(min_length=1, max_length=envelope_limits.EDGE_EVENT_ID_MAX_CHARS)
     snapshot_id: str = Field(min_length=1, max_length=envelope_limits.SNAPSHOT_ID_MAX_CHARS)
-    disposition: str = Field(
-        min_length=1, max_length=envelope_limits.DISPOSITION_MAX_CHARS
-    )
+    disposition: str = Field(min_length=1, max_length=envelope_limits.DISPOSITION_MAX_CHARS)
     reason: str = Field(min_length=1, max_length=envelope_limits.DISPOSITION_REASON_MAX_CHARS)
     audit: RelayAuditEnvelope | None = None
 
@@ -578,7 +575,7 @@ def relay_alert(
             extra={"local_camera_id": payload.camera_id},
         )
         return _alert_response(
-            _local_accept_body(payload, projected=projected, catalog_error=catalog_result),
+            _local_accept_body(payload, projected=projected, catalog_failure=catalog_result),
             catalog_result,
         )
     canonical_camera_id = bound_camera_id
@@ -586,7 +583,7 @@ def relay_alert(
     if client is None:
         # Registry-bound local accept; cloud only when store built a client.
         return _alert_response(
-            _local_accept_body(payload, projected=projected, catalog_error=catalog_result),
+            _local_accept_body(payload, projected=projected, catalog_failure=catalog_result),
             catalog_result,
         )
     alert_kwargs: _AlertKwargs = {
@@ -736,8 +733,10 @@ def _project_relay_event(request: Request, payload: RelayAlertRequest) -> bool:
                 request,
                 connection,
                 AuditEvent(
-                    occurred_at=audit_now(), actor_id="worker-relay",
-                    action=AuditAction.RELAY_ALERT, target_id=str(payload.edge_event_id),
+                    occurred_at=audit_now(),
+                    actor_id="worker-relay",
+                    action=AuditAction.RELAY_ALERT,
+                    target_id=str(payload.edge_event_id),
                     detail=empty_detail(AuditAction.RELAY_ALERT),
                     actor_type=AuditActorType.SERVICE,
                     auth_mechanism=AuditAuthMechanism.RELAY_TOKEN,
@@ -758,9 +757,7 @@ def _project_relay_event(request: Request, payload: RelayAlertRequest) -> bool:
     return True
 
 
-def _project_snapshot_attachment(
-    request: Request, payload: RelaySnapshotAttachmentRequest
-) -> bool:
+def _project_snapshot_attachment(request: Request, payload: RelaySnapshotAttachmentRequest) -> bool:
     try:
         projection = _relay_evidence_projection(request)
         if projection is None:
@@ -776,7 +773,8 @@ def _project_snapshot_attachment(
                 request,
                 connection,
                 AuditEvent(
-                    occurred_at=audit_now(), actor_id="worker-relay",
+                    occurred_at=audit_now(),
+                    actor_id="worker-relay",
                     action=AuditAction.RELAY_SNAPSHOT_ATTACHMENT,
                     target_id=payload.snapshot_id,
                     detail=empty_detail(AuditAction.RELAY_SNAPSHOT_ATTACHMENT),
@@ -818,7 +816,8 @@ def _project_snapshot_disposition(
                 request,
                 connection,
                 AuditEvent(
-                    occurred_at=audit_now(), actor_id="worker-relay",
+                    occurred_at=audit_now(),
+                    actor_id="worker-relay",
                     action=AuditAction.RELAY_SNAPSHOT_DISPOSITION,
                     target_id=payload.snapshot_id,
                     detail=empty_detail(AuditAction.RELAY_SNAPSHOT_DISPOSITION),
@@ -906,7 +905,25 @@ def relay_runtime_status(
     return RelayRuntimeStatusResponse(accepted=True, generation=result.generation)
 
 
-def _record_catalog(request: Request, payload: RelayAlertRequest) -> str | None:
+@dataclass(frozen=True, slots=True)
+class CatalogFailure:
+    """Why the local catalog did not record an alert, and whether retrying can help.
+
+    ``permanent_status`` is the HTTP status the relay should answer with when
+    this failure is the reason it cannot accept a receipt-tracked alert
+    locally: a payload the catalog will never fit (422) or an idempotency
+    conflict (409) is the same on every retry, so the worker must be told to
+    stop rather than loop forever (#431). ``None`` means transient -- the
+    store could not be opened or the write failed operationally -- and the
+    worker should keep its copy and retry.
+    """
+
+    reason: str
+    permanent_status: int | None = None
+
+
+def _record_catalog(request: Request, payload: RelayAlertRequest) -> CatalogFailure | None:
+    permanent_status: int | None = None
     try:
         event = payload.model_dump(
             exclude={"attempt_ordinal", "snapshot_jpeg_base64"}, exclude_none=True
@@ -919,11 +936,13 @@ def _record_catalog(request: Request, payload: RelayAlertRequest) -> str | None:
             # it observable to local operators.
             request.app.state.catalog_error = rejection_reason
             logger.warning("catalog record skipped: %s", rejection_reason)
-            return rejection_reason
+            return CatalogFailure(rejection_reason, status.HTTP_422_UNPROCESSABLE_CONTENT)
 
         store = get_catalog_store(request.app)
         if store is None:
-            return getattr(request.app.state, "catalog_error", "catalog unavailable")
+            return CatalogFailure(
+                getattr(request.app.state, "catalog_error", "catalog unavailable")
+            )
 
         records: list[tuple[str, str, dict[str, Any]]] = []
         if payload.edge_event_id is not None:
@@ -935,6 +954,7 @@ def _record_catalog(request: Request, payload: RelayAlertRequest) -> str | None:
             store.record_many(tuple(records))
     except CatalogConflictError:
         reason = "catalog idempotency conflict"
+        permanent_status = status.HTTP_409_CONFLICT
     except (OSError, sqlite3.Error) as exc:
         reason = f"catalog operational failure: {exc}"
     except Exception as exc:  # noqa: BLE001 - auxiliary catalog failures must never block alert egress
@@ -944,7 +964,7 @@ def _record_catalog(request: Request, payload: RelayAlertRequest) -> str | None:
 
     request.app.state.catalog_error = reason
     logger.warning("catalog record skipped: %s", reason)
-    return reason
+    return CatalogFailure(reason, permanent_status)
 
 
 def _catalog_payload_rejection_reason(event: dict[str, Any]) -> str | None:
@@ -971,7 +991,7 @@ def _local_accept_body(
     payload: RelayAlertRequest,
     *,
     projected: bool,
-    catalog_error: str | None,
+    catalog_failure: CatalogFailure | None,
 ) -> dict[str, str]:
     """Name a deliberate local accept so the worker can stop retrying it.
 
@@ -991,28 +1011,52 @@ def _local_accept_body(
     block a safety alert from reaching the backend (#183, #202) because there
     the upstream push carries durability -- here there is no upstream push.
 
+    The refusal must also say whether retrying can help. A transient failure
+    (store unopenable, write error) is a 503: the worker keeps its copy and
+    retries. A payload the catalog can never fit, or an idempotency conflict, is
+    the same on every attempt; answering 503 there would recreate #431 with a
+    permanent poison entry, so those carry the 4xx the failure already named
+    and the worker dead-letters the entry instead of looping.
+
+    Trade-off, stated deliberately: a terminal local accept means the alert is
+    never pushed to the Hub later, even once a mapping or client appears. Before
+    #431 the event did eventually reach the Hub, at the price of the queue
+    behind it never draining. Local persistence plus a live queue was chosen
+    over eventual upstream delivery; the projection row is the record to
+    re-drain if that is ever wanted.
+
     Workers that sent no edge_event_id are not tracking receipts, keep their own
     copy regardless, and get the prior body unchanged.
     """
     if payload.edge_event_id is None:
         return {"status": "accepted"}
-    if not projected and catalog_error is not None:
+    if not projected and catalog_failure is not None:
+        if catalog_failure.permanent_status is not None:
+            raise HTTPException(
+                status_code=catalog_failure.permanent_status,
+                detail=(
+                    "edge-local persistence rejected this alert and it is not being "
+                    f"pushed upstream; retrying cannot help ({catalog_failure.reason})"
+                ),
+            )
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=(
                 "edge-local persistence failed and this alert is not being "
-                f"pushed upstream; retry required ({catalog_error})"
+                f"pushed upstream; retry required ({catalog_failure.reason})"
             ),
         )
     return {"status": "accepted_local", "edge_event_id": payload.edge_event_id}
 
 
-def _alert_response(response: dict[str, str], catalog_error: str | None) -> dict[str, str]:
-    if catalog_error is not None:
+def _alert_response(
+    response: dict[str, str], catalog_failure: CatalogFailure | None
+) -> dict[str, str]:
+    if catalog_failure is not None:
         return {
             **response,
             "catalog": "not_recorded",
-            "catalog_reason": catalog_error,
+            "catalog_reason": catalog_failure.reason,
         }
     return response
 
@@ -1176,9 +1220,7 @@ def _optional_backend_ingest_client(
 
     Missing client means unconfigured cloud path: local accept still OK.
     """
-    client: BackendIngestClient | None = getattr(
-        request.app.state, "backend_ingest_client", None
-    )
+    client: BackendIngestClient | None = getattr(request.app.state, "backend_ingest_client", None)
     if client is None:
         return None
     for_camera = getattr(client, "for_camera", None)

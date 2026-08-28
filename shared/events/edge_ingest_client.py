@@ -133,7 +133,9 @@ class EdgeIngestClient:
         if isinstance(result, EventReceipt):
             if on_accepted is not None and accepted_at is not None:
                 on_accepted(accepted_at)
-            if snapshot_bytes is not None:
+            # An accepted_local receipt has no upstream id, so there is no
+            # snapshot resource to PUT to; `{events_url}//snapshot` is not one.
+            if snapshot_bytes is not None and result.event_id != "":
                 self._put_snapshot(
                     _join_url(self.events_url, f"{result.event_id}/snapshot"), snapshot_bytes
                 )

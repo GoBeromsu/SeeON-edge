@@ -14,7 +14,11 @@ Lifespan pre-builds `camera_registry`, in-memory `heartbeat_store`, and
 `runtime_status_store`. Clip listing is compact-authority on request. Other
 stores may lazy-open so `no_lifespan` tests still boot. Catalog is optional:
 `get_catalog_store` returns `None` and sets `catalog_error` when the file
-cannot open. Relay still accepts the alert.
+cannot open. Relay still accepts the alert when the Hub push carries
+durability. On the local-accept path (no Hub mapping / no client) a
+receipt-tracked alert with neither projection nor catalog is refused
+instead -- 503 if retrying can help, 409/422 if it cannot -- because a
+terminal receipt deletes the worker's only other copy (`_local_accept_body`).
 ## Cross-slice graph
 
 Read or call. Do not construct the other slice's store.

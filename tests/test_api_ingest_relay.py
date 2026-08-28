@@ -804,3 +804,87 @@ def test_relay_latency_excludes_failed_and_retried_delivery(tmp_path) -> None:
     assert retry_client.app.state.runtime_status_store._latency_for_facility("facility-1") is None
     assert retried.status_code == 202
     assert retry_client.app.state.runtime_status_store._latency_for_facility("facility-1") is None
+
+
+def _unmapped_client_without_projection(monkeypatch, tmp_path: Path) -> TestClient:
+    """A relay that cannot persist anything locally and will never push upstream.
+
+    The camera has no Hub mapping (so the local-accept path is taken), the
+    compact projection is absent (no edge database), and the catalog is asked to
+    open under a path whose parent is a regular file, so it cannot be created.
+    """
+    from backend.app.features.clips import catalog as catalog_module
+    from backend.app.features.relay import router as relay_router
+
+    monkeypatch.setattr(relay_router, "EDGE_DATABASE_PATH", tmp_path / "missing" / "edge.sqlite3")
+    (tmp_path / "not-a-dir").write_bytes(b"")
+    monkeypatch.setattr(
+        catalog_module, "_catalog_path", lambda: tmp_path / "not-a-dir" / "catalog.sqlite3"
+    )
+    app = create_app(lifespan=no_lifespan)
+    app.state.edge_relay_token = "relay-token"
+    registry_path = tmp_path / "registry.sqlite3"
+    prepare_compact_database(registry_path)
+    store = CameraRegistryStore(registry_path)
+    store.create(
+        camera_id="camera-1",
+        label="camera-1",
+        rtsp_url="rtsp://example/camera-1",
+        space_id=None,
+        status="online",
+        backend_camera_id=None,
+    )
+    app.state.camera_registry = store
+    app.state.backend_ingest_client = FakeBackendIngestClient()
+    return TestClient(app)
+
+
+def test_local_accept_with_no_persistence_anywhere_is_a_retryable_refusal(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """A terminal receipt deletes the worker's only other copy, so it may only be
+    issued once something local holds the alert. With neither projection nor
+    catalog, the relay must refuse with a 503 the worker classifies as RETRY."""
+    with _unmapped_client_without_projection(monkeypatch, tmp_path) as client:
+        response = client.post(
+            "/api/v1/relay/alerts",
+            json=_alert_payload(edge_event_id="00000000-0000-4000-8000-000000000040"),
+            headers={"X-Edge-Relay-Token": "relay-token"},
+        )
+
+    assert response.status_code == 503
+    assert "retry required" in response.json()["detail"]
+
+
+def test_local_accept_with_a_payload_the_catalog_can_never_hold_is_permanent(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """Review of the 503 guard: a catalog size/depth rejection is identical on
+    every retry. Answering 503 there would recreate #431 as a permanent poison
+    entry, so the refusal must be a 4xx the worker classifies as PERMANENT."""
+    evidence: dict[str, object] = {}
+    current = evidence
+    for _ in range(MAX_CATALOG_PAYLOAD_DEPTH):
+        child: dict[str, object] = {}
+        current["child"] = child
+        current = child
+
+    with _unmapped_client_without_projection(monkeypatch, tmp_path) as client:
+        response = client.post(
+            "/api/v1/relay/alerts",
+            json=_alert_payload(
+                edge_event_id="00000000-0000-4000-8000-000000000041", evidence=evidence
+            ),
+            headers={"X-Edge-Relay-Token": "relay-token"},
+        )
+
+    assert response.status_code == 422
+    assert "retrying cannot help" in response.json()["detail"]
+    from shared.events.evidence_http_transport import parse_event_result
+
+    classified = parse_event_result(
+        (response.status_code, {}, response.content),
+        "00000000-0000-4000-8000-000000000041",
+    )
+    assert isinstance(classified, DeliveryFailure)
+    assert classified.disposition is DeliveryDisposition.PERMANENT
