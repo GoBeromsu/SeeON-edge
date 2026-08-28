@@ -4,6 +4,12 @@ name: CI
 # once for `pull_request`, on the identical commit. Restricting `push` to main
 # leaves exactly one run per PR plus one post-merge run on main, halving CI
 # compute without losing a single check.
+#
+# No `merge_group:` trigger: this repository has no merge queue enabled, and
+# adding the trigger would make every queued batch run the full suite again
+# (`ci-ok` is already required on the PR). If a merge queue is ever turned on,
+# `merge_group` MUST be added here or the required `ci-ok` check will never
+# report for a queued batch and the queue will stall.
 on:
   push:
     branches: [main]
@@ -22,6 +28,8 @@ jobs:
   # Needs no uv, no apt, no models -- only the checked-out tree and docker.
   secrets:
     runs-on: ubuntu-latest
+    # Reads the tree and runs one container; a run that outlives this is hung.
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -40,6 +48,8 @@ jobs:
   # install and the model download buy this job nothing.
   lint:
     runs-on: ubuntu-latest
+    # uv sync + four static checks; measured well under 3 minutes.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -85,6 +95,9 @@ jobs:
   # SHARD_TOTAL runners by test file, which needs no new dependency in uv.lock.
   test:
     runs-on: ubuntu-latest
+    # A shard is ~5 minutes of the 4-way split; 30 bounds a wedged shard
+    # without tripping on a slow runner.
+    timeout-minutes: 30
     strategy:
       # One shard's failure must not hide the others' results.
       fail-fast: false
@@ -129,18 +142,41 @@ jobs:
       # Sharding is a deterministic round-robin over the sorted tracked test
       # files. It adds no dependency to uv.lock (pytest-split/pytest-xdist would),
       # is stable across runs, and `ci-ok` fails if any shard collects nothing.
+      #
+      # File discovery mirrors pytest's own `python_files` default
+      # (`test_*.py` and `*_test.py`, at any depth) rather than the narrower
+      # `tests/test_*.py` this shard started with: the old pathspec silently
+      # dropped `tests/foo_test.py` and `tests/unit/test_x.py` out of EVERY
+      # shard while `ci-ok` stayed green. The equality of this partition with
+      # the tracked tree is asserted in tests/test_public_repository_privacy.py
+      # (test_shard_partition_is_an_exact_cover_of_the_suite), so the two
+      # definitions cannot drift apart unnoticed.
+      #
+      # `${{ matrix.shard }}` is passed through `env:` instead of being
+      # interpolated into the script body: expression interpolation splices
+      # text into the shell source before bash ever parses it, and `$SHARD`
+      # is a value the shell reads rather than code it compiles.
       - name: Run test shard ${{ matrix.shard }} of 4
+        env:
+          SHARD: ${{ matrix.shard }}
         run: |
           mapfile -t shard_files < <(
-            git ls-files 'tests/test_*.py' | sort |
-              awk -v shard="${{ matrix.shard }}" -v total="$SHARD_TOTAL" \
+            git ls-files -- '*.py' |
+              grep -E '(^|/)(test_[^/]*|[^/]*_test)\.py$' |
+              # A CTest fixture, not a pytest module: CMakeLists.txt runs it as
+              # `python perception_wire_cross_language_test.py <binary>`. It
+              # matches pytest's default glob but defines no test function, so
+              # pytest collects zero tests from it.
+              grep -vxF 'worker/native/deepstream/src/perception_wire_cross_language_test.py' |
+              LC_ALL=C sort |
+              awk -v shard="$SHARD" -v total="$SHARD_TOTAL" \
                 'NR % total == shard % total'
           )
           if [ "${#shard_files[@]}" -eq 0 ]; then
-            echo "shard ${{ matrix.shard }} collected no test files" >&2
+            echo "shard $SHARD collected no test files" >&2
             exit 1
           fi
-          echo "shard ${{ matrix.shard }}/$SHARD_TOTAL: ${#shard_files[@]} files"
+          echo "shard $SHARD/$SHARD_TOTAL: ${#shard_files[@]} files"
           uv run pytest -q -m "not real_stack and not heavy and not integration" \
             "${shard_files[@]}"
 
@@ -149,6 +185,8 @@ jobs:
   # cancelled job pass silently under `if: always()`.
   ci-ok:
     runs-on: ubuntu-latest
+    # Reads `needs` results and exits; it does no work of its own.
+    timeout-minutes: 5
     needs: [secrets, lint, test]
     if: always()
     steps:

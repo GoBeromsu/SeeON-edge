@@ -238,15 +238,31 @@ def test_edge_image_release_workflow_publishes_digest_env_artifact() -> None:
     assert "pull_request" in triggers
     assert triggers["push"] == {"branches": ["main"]}
 
+    # `packages: write` is granted on the publishing job, not workflow-wide, so
+    # a job added to this file later starts read-only. The workflow runs on
+    # `pull_request` and `permissions:` takes no expression, so the grant cannot
+    # be event-scoped; tests/test_public_repository_privacy.py is what asserts
+    # every step able to spend the token stays gated on PUSH_IMAGES.
     permissions = workflow.get("permissions")
     assert isinstance(permissions, dict)
-    assert permissions["contents"] == "read"
-    assert permissions["packages"] == "write"
+    assert permissions == {"contents": "read"}
+    assert workflow["jobs"]["publish"]["permissions"] == {
+        "contents": "read",
+        "packages": "write",
+    }
 
     assert "file: Dockerfile.backend" in source
     assert "file: Dockerfile.edge" in source
-    assert "docker/build-push-action@v6" in source
-    assert "actions/upload-artifact@v4" in source
+    # Actions are pinned to immutable commits (a tag is a pointer the upstream
+    # owner can move), with the released version kept in a trailing comment.
+    assert (
+        "docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2"
+        in source
+    )
+    assert (
+        "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2"
+        in source
+    )
     assert "steps.build-api.outputs.digest" in source
     assert "steps.build-worker.outputs.digest" in source
     assert "ML_API_IMAGE=" in source
