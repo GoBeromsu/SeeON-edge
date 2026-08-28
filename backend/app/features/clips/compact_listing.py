@@ -55,9 +55,12 @@ class CompactClipListing:
         store: ClipStore,
         query: CompactClipQuery,
     ) -> CompactClipPage:
-        prepared = None if query.cursor is not None else _prepare(store)
         connection = open_runtime_database(self.database_path, actor=RuntimeActor.API)
         try:
+            prepared = (
+                None if query.cursor is not None
+                else _prepare(store, _known_media(connection))
+            )
             with write_transaction(connection):
                 if prepared is not None:
                     _reconcile(connection, prepared)
@@ -93,9 +96,33 @@ class CompactClipListing:
         )
 
 
-def _prepare(store: ClipStore) -> tuple[_PreparedClip, ...]:
+_KnownMedia = dict[str, tuple[str | None, str | None, int | None]]
+
+
+def _known_media(connection) -> _KnownMedia:
+    """Catalogued ``(media_relpath, media_sha256, media_size_bytes)`` per clip.
+
+    Read once per rebuild so that media already verified by an earlier
+    reconcile is not re-hashed on every listing: with thousands of clips the
+    full re-read costs minutes of I/O per ``GET /clips``, which starved the
+    dashboard of any listing at all. A clip whose media path or byte size
+    differs from the catalogued row is still hashed in full below, so a
+    changed or replaced file keeps tripping the immutable-content conflict.
+    """
+    rows = connection.execute(
+        "SELECT clip_id, media_relpath, media_sha256, media_size_bytes FROM clips "
+        "WHERE media_sha256 IS NOT NULL"
+    ).fetchall()
+    return {
+        str(row[0]): (row[1], row[2], None if row[3] is None else int(row[3]))
+        for row in rows
+    }
+
+
+def _prepare(store: ClipStore, known: _KnownMedia | None = None) -> tuple[_PreparedClip, ...]:
     prepared: list[_PreparedClip] = []
     seen: set[str] = set()
+    known = {} if known is None else known
     for manifest in store.list_manifests():
         if manifest.clip_id in seen:
             store.locate_manifest(manifest.clip_id)
@@ -109,7 +136,9 @@ def _prepare(store: ClipStore) -> tuple[_PreparedClip, ...]:
         manifest_relpath = manifest_path.relative_to(store.root).as_posix()
         try:
             media_path = store.resolve_located_video_path(located)
-            media_hash, media_size = _hash_regular(store.root, media_path)
+            media_hash, media_size = _media_identity(
+                store.root, media_path, known.get(manifest.clip_id)
+            )
         except (FileNotFoundError, ValueError):
             media_path = None
             media_hash = None
@@ -226,6 +255,28 @@ INSERT INTO clips (
 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
           'WAITING', 'RETAINED', 1, ?, ?)
 """
+
+
+def _media_identity(
+    root: Path,
+    media_path: Path,
+    catalogued: tuple[str | None, str | None, int | None] | None,
+) -> tuple[str, int]:
+    """Reuse the catalogued media hash when the file is byte-for-byte the same size.
+
+    The catalogue row is the durable receipt of a hash this process already
+    computed over these bytes; re-reading every clip on every listing is what
+    made ``GET /clips`` unusable on a populated store. Anything not matching the
+    receipt (unknown clip, moved path, different size) is hashed in full.
+    """
+    if catalogued is not None:
+        relpath, sha256, size_bytes = catalogued
+        if sha256 is not None and relpath == media_path.relative_to(root).as_posix():
+            opened = open_contained_regular_file(root, media_path)
+            opened.handle.close()
+            if opened.size_bytes == size_bytes:
+                return sha256, opened.size_bytes
+    return _hash_regular(root, media_path)
 
 
 def _hash_regular(root: Path, path: Path) -> tuple[str, int]:
