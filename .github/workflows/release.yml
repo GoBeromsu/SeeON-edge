@@ -1,0 +1,127 @@
+name: Release
+
+# Cutting a release is pushing an annotated tag `seeon-edge-v<semver>`. That
+# push is the whole trigger: this workflow guards the tag against the tree,
+# composes the notes, and creates the GitHub Release itself. A human never
+# clicks "Draft a new release" -- doing so would skip the carrier guard below.
+#
+# Why the release must NOT be a prerelease: `.github/workflows/edge-images.yml`
+# runs `on: release: types: [published]` and is gated on
+# `github.event.release.prerelease == false`. Publishing this release is what
+# builds and pushes `ml-api` and `ml-worker` to GHCR at the full commit SHA and
+# uploads the `edge-ml-image-refs-<sha>` artifact holding both `@sha256:`
+# digests. A prerelease would create a release that publishes nothing.
+#
+# `workflow_dispatch` runs the same pipeline as a REHEARSAL: the guard and the
+# notes really run, and the release is not created. It is the way to find out
+# that a carrier is out of step before a tag exists to be deleted.
+#
+# This workflow is not reachable from `pull_request`, so it is outside the
+# closed-world policy tests/test_public_repository_privacy.py enforces on
+# ci.yml and edge-images.yml. Every `uses:` is pinned to a full 40-hex commit
+# SHA anyway: the policy is what this repository does, not only what a test can
+# currently see, and adding a `pull_request` trigger here later must not
+# silently introduce an unpinned action.
+
+on:
+  push:
+    tags:
+      - "seeon-edge-v*"
+  workflow_dispatch:
+    inputs:
+      rehearsal:
+        description: "Rehearsal run: guard the carriers and compose the notes, create no GitHub Release"
+        required: false
+        default: true
+        type: boolean
+
+# Workflow-wide default. `contents: write` is granted to the single job that
+# creates the release, so any job added to this file later starts read-only.
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  guard:
+    name: Guard the tag against every version carrier
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Every version carrier agrees with the tag
+        id: guard
+        # On a tag push the tag is compared against the tree. On a rehearsal
+        # there is no tag, so only carrier lockstep is checked and the expected
+        # tag is printed -- which is exactly what an operator needs before
+        # tagging. `scripts/release_guard.py` names every carrier and explains
+        # why EDGE_DATABASE_FORMAT_IDENTITY is not one of them.
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            python3 scripts/release_guard.py --tag "$GITHUB_REF_NAME"
+          else
+            python3 scripts/release_guard.py
+          fi
+          # Assigned first so `set -e` catches a failure here, rather than
+          # letting a command substitution fail inside an `echo` argument.
+          EXPECTED_TAG="$(python3 scripts/release_guard.py --print-expected-tag)"
+          echo "expected-tag=$EXPECTED_TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Compose the release notes
+        # Run on every path, rehearsal included: a rehearsal that skipped this
+        # would not prove the notes compose. A rehearsal uses the tag the tree
+        # expects, so it composes exactly what the real release would.
+        env:
+          TAG: ${{ github.ref_type == 'tag' && github.ref_name || steps.guard.outputs.expected-tag }}
+        run: |
+          set -euo pipefail
+          python3 scripts/release_notes.py --tag "$TAG" --head HEAD > release-notes.md
+          {
+            printf '### Release notes for `%s`\n\n' "$TAG"
+            cat release-notes.md
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  release:
+    name: Create the GitHub Release
+    needs: guard
+    # A rehearsal stops here, and so does any dispatch that is not sitting on a
+    # release tag. Only a `seeon-edge-v*` tag push reaches `gh release create`.
+    if: github.ref_type == 'tag' && inputs.rehearsal != true
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Create the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          VERSION="${TAG#seeon-edge-v}"
+          python3 scripts/release_notes.py --tag "$TAG" > release-notes.md
+          # Idempotent: a re-run of a release that already exists is a no-op
+          # rather than a failure. `--verify-tag` refuses to invent a tag that
+          # is not in the repository. No `--prerelease`, deliberately -- see the
+          # header: a prerelease would publish no images.
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "release $TAG already exists; leaving it alone"
+            exit 0
+          fi
+          gh release create "$TAG" \
+            --title "SeeON Edge v$VERSION" \
+            --notes-file release-notes.md \
+            --verify-tag \
+            --latest

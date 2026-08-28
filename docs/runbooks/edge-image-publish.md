@@ -125,6 +125,84 @@ references, scans rendered Compose for facility identity residue, and revalidate
 the complete post-restart state. Enrollment then occurs through local versioned
 connection APIs, never through env mutation.
 
+## Cutting a release
+
+A release is cut by pushing an annotated tag, never by clicking "Draft a new
+release" in the GitHub UI — the UI path skips the guard below.
+
+**Tag scheme.** `seeon-edge-v<semver>`, e.g. `seeon-edge-v0.1.0`. Pushing a tag
+matching `seeon-edge-v*` triggers `.github/workflows/release.yml`, which is the
+only thing that creates a GitHub Release here.
+
+**The version-carrier guard.** `scripts/release_guard.py` runs first and reads
+the product version out of every file that states one:
+
+```
+pyproject.toml
+backend/pyproject.toml
+worker/pyproject.toml
+shared/pyproject.toml
+front/package.json
+```
+
+All five must be identical, and the tag must be exactly `seeon-edge-v` plus
+that version. A mismatch fails the run and prints every carrier with its value,
+so the file that is out of step is named rather than guessed. Bring the
+carriers into lockstep and retag; do not weaken the guard.
+
+`EDGE_DATABASE_FORMAT_IDENTITY = 'seeon-edge-v1'` in
+`front/src/shared/releaseIdentity.ts` is **not** a version carrier. It is the
+on-disk database *format* identity (paired with
+`EDGE_DATABASE_SCHEMA_VERSION`), it only coincidentally spells like the tag,
+and it moves when the SQLite format lineage changes — never when the product
+ships. Bumping it to match a release tag would tell every edge device its
+existing database belongs to a different lineage. The same goes for the
+torch/CUDA/ultralytics versions reported by
+`worker/runtime/provenance/environment.py` and
+`worker/native/deepstream/export.py`: those are other people's versions.
+
+Check the carriers locally before tagging:
+
+```sh
+python3 scripts/release_guard.py --tag seeon-edge-v0.1.0
+```
+
+**Rehearsal.** `release.yml` also accepts `workflow_dispatch` with a
+`rehearsal` boolean (default `true`). A rehearsal runs the same guard and
+composes the same notes, and creates no release:
+
+```sh
+gh workflow run release.yml -f rehearsal=true
+```
+
+Use it to find a carrier that is out of step *before* a tag exists to be
+deleted.
+
+**Release notes.** `scripts/release_notes.py` composes them: the hand-written
+`docs/releases/<tag>.md` (when present), then the commit range since the
+previous `seeon-edge-v*` tag, then a pointer to the image digests.
+
+**The release event is what publishes the images.** The GitHub Release created
+by `release.yml` is not a prerelease, deliberately. `edge-images.yml` runs
+`on: release: types: [published]` and is gated on
+`github.event.release.prerelease == false`; publishing the release is therefore
+what builds and pushes `ml-api` and `ml-worker` to GHCR at the full commit SHA
+and uploads the `edge-ml-image-refs-<sha>` artifact carrying both `@sha256:`
+digests. A prerelease would create a release that publishes nothing. Take the
+two digest-pinned references from that artifact (or the run's step summary) —
+they are what `.env.edge.prod` pins.
+
+The full sequence:
+
+```sh
+python3 scripts/release_guard.py --tag seeon-edge-v0.1.0   # carriers agree
+git tag -a seeon-edge-v0.1.0 -m "SeeON Edge v0.1.0"        # on the merge commit
+git push origin seeon-edge-v0.1.0
+gh run watch "$(gh run list --workflow=release.yml --limit 1 --json databaseId -q '.[0].databaseId')"
+gh run watch "$(gh run list --workflow=edge-images.yml --limit 1 --json databaseId -q '.[0].databaseId')"
+gh run download <edge-images run id> -n "edge-ml-image-refs-<sha>"
+```
+
 ## Runtime enrollment and topology
 
 The technician enters only facility code and one-time token. The local API
