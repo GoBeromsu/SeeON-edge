@@ -178,7 +178,13 @@ def test_unmapped_relay_alert_is_locally_accepted_on_real_http_surface(
             headers={"X-Edge-Relay-Token": "relay-token"},
         )
 
-    # Then: local atomic acceptance does not require an upstream camera id.
+    # Then: local atomic acceptance does not require an upstream camera id, and
+    # it says so by name. The bare {"status": "accepted"} this used to pin was
+    # unactionable for the sender: it needs a receipt echoing its edge_event_id,
+    # an absent one is indistinguishable from a mangled response, so it retried
+    # this event forever and every newer event queued behind it never left the
+    # edge (#431). The backend is the only party that knows the push was
+    # deliberately skipped, so the backend is the party that must state it.
     assert response.status_code == 202
-    assert response.json() == {"status": "accepted"}
+    assert response.json() == {"status": "accepted_local", "edge_event_id": EVENT_ID}
     assert CentralEvidenceQuery(database).get(EVENT_ID) is not None

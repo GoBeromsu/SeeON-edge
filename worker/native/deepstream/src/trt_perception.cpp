@@ -1,5 +1,12 @@
 #include "trt_perception.hpp"
 
+#include "workspace_pool.hpp"
+
+#include <atomic>
+#include <chrono>
+#include <cstdio>
+#include <vector>
+
 #include <NvInfer.h>
 #include <cuda_runtime_api.h>
 
@@ -29,11 +36,40 @@ Logger& logger() {
   return instance;
 }
 
+// Shared, read-only after load. The engine holds the weights; every concurrent
+// inference needs its own execution context, but they all bind against this.
 struct EngineSlot {
   std::unique_ptr<nvinfer1::ICudaEngine> engine;
-  std::unique_ptr<nvinfer1::IExecutionContext> context;
   std::string input_name;
   std::vector<std::string> output_names;
+};
+
+// Everything one concurrent inference needs that cannot be shared: an execution
+// context per engine, its own CUDA stream, and its own device/host buffers.
+// The engines stay shared, so an extra workspace costs activation memory and
+// buffers - not another copy of the weights.
+struct Workspace {
+  std::unique_ptr<nvinfer1::IExecutionContext> pose_context;
+  std::unique_ptr<nvinfer1::IExecutionContext> person_context;
+  std::unique_ptr<nvinfer1::IExecutionContext> bed_context;
+  cudaStream_t stream = nullptr;
+  float* device_input = nullptr;
+  float* device_pose = nullptr;
+  float* device_person = nullptr;
+  float* device_bed = nullptr;
+  float* device_bed_prototypes = nullptr;
+  std::vector<float> host_pose;
+  std::vector<float> host_person;
+  std::vector<float> host_bed;
+  std::vector<float> host_bed_prototypes;
+
+  ~Workspace() {
+    for (float* pointer : {device_input, device_pose, device_person, device_bed,
+                           device_bed_prototypes}) {
+      if (pointer != nullptr) cudaFree(pointer);
+    }
+    if (stream != nullptr) cudaStreamDestroy(stream);
+  }
 };
 
 bool read_file(const std::string& path, std::vector<char>* bytes) {
@@ -50,6 +86,20 @@ constexpr std::size_t kPersonOutput = 300ULL * 6ULL;
 constexpr std::size_t kBedOutput = 300ULL * 38ULL;
 constexpr std::size_t kBedPrototypes = 32ULL * 160ULL * 160ULL;
 
+// How many inferences may run concurrently.
+//
+// A single execution context serializes every camera: GPU work measured at
+// ~5.0ms per call caps a 13-camera deployment at 15.4fps against a 15fps
+// target, and the stack measured 11.3fps. TensorRT execution contexts can run
+// concurrently on separate streams, so the pool overlaps compute with the
+// host/device copies and the per-call tensor binding.
+//
+// Four is a deliberate, named capacity rather than a fall-through default:
+// raising it trades GPU memory (roughly 8.3MB of buffers plus one set of
+// TensorRT activation memory per workspace) for concurrency, and the engines
+// themselves are shared so the weights are not duplicated.
+constexpr std::size_t kInferenceWorkspaces = 4;
+
 }  // namespace
 
 class TrtPerception::Impl {
@@ -58,25 +108,8 @@ class TrtPerception::Impl {
   EngineSlot pose;
   EngineSlot person;
   EngineSlot bed;
-  cudaStream_t stream = nullptr;
-  float* device_input = nullptr;
-  float* device_pose = nullptr;
-  float* device_person = nullptr;
-  float* device_bed = nullptr;
-  float* device_bed_prototypes = nullptr;
-  std::vector<float> host_input;
-  std::vector<float> host_pose;
-  std::vector<float> host_person;
-  std::vector<float> host_bed;
-  std::vector<float> host_bed_prototypes;
-
-  ~Impl() {
-    for (float* pointer : {device_input, device_pose, device_person, device_bed,
-                           device_bed_prototypes}) {
-      if (pointer != nullptr) cudaFree(pointer);
-    }
-    if (stream != nullptr) cudaStreamDestroy(stream);
-  }
+  std::vector<std::unique_ptr<Workspace>> workspaces;
+  BoundedPool<Workspace> pool;
 
   bool load_engine(const std::string& path, EngineSlot* slot, std::string* error) {
     std::vector<char> bytes;
@@ -87,11 +120,6 @@ class TrtPerception::Impl {
     slot->engine.reset(runtime->deserializeCudaEngine(bytes.data(), bytes.size()));
     if (slot->engine == nullptr) {
       *error = "engine_deserialize_failed: " + path;
-      return false;
-    }
-    slot->context.reset(slot->engine->createExecutionContext());
-    if (slot->context == nullptr) {
-      *error = "engine_context_failed: " + path;
       return false;
     }
     const int tensors = slot->engine->getNbIOTensors();
@@ -113,47 +141,54 @@ class TrtPerception::Impl {
     return true;
   }
 
-  bool run_engine(EngineSlot* slot, int tensor_height, int tensor_width,
-                  float* device_rows, std::size_t rows_capacity, float* host_rows,
-                  float* device_extra, std::size_t extra_capacity, float* host_extra,
-                  std::string* error) {
+  static bool run_engine(const EngineSlot& slot, nvinfer1::IExecutionContext* context,
+                         Workspace& workspace, int tensor_height, int tensor_width,
+                         float* device_rows, std::size_t rows_capacity, float* host_rows,
+                         float* device_extra, std::size_t extra_capacity,
+                         float* host_extra, std::string* error) {
     nvinfer1::Dims4 shape{1, 3, tensor_height, tensor_width};
-    if (!slot->context->setInputShape(slot->input_name.c_str(), shape)) {
+    if (!context->setInputShape(slot.input_name.c_str(), shape)) {
       *error = "engine_input_shape_rejected";
       return false;
     }
-    if (!slot->context->setTensorAddress(slot->input_name.c_str(), device_input)) {
+    if (!context->setTensorAddress(slot.input_name.c_str(), workspace.device_input)) {
       *error = "engine_input_bind_failed";
       return false;
     }
-    if (!slot->context->setTensorAddress(slot->output_names[0].c_str(), device_rows)) {
+    if (!context->setTensorAddress(slot.output_names[0].c_str(), device_rows)) {
       *error = "engine_output_bind_failed";
       return false;
     }
-    if (slot->output_names.size() > 1) {
+    if (slot.output_names.size() > 1) {
       if (device_extra == nullptr ||
-          !slot->context->setTensorAddress(slot->output_names[1].c_str(), device_extra)) {
+          !context->setTensorAddress(slot.output_names[1].c_str(), device_extra)) {
         *error = "engine_prototype_bind_failed";
         return false;
       }
     }
-    if (!slot->context->enqueueV3(stream)) {
+    if (!context->enqueueV3(workspace.stream)) {
       *error = "engine_enqueue_failed";
       return false;
     }
+    // After enqueueV3 the workspace's buffers belong to the GPU until the
+    // stream drains. The lease returns them to the pool on any false, so a
+    // failure past this point must synchronize first or the next lessee
+    // overwrites device_input under a kernel that is still reading it.
     if (cudaMemcpyAsync(host_rows, device_rows, rows_capacity * sizeof(float),
-                        cudaMemcpyDeviceToHost, stream) != cudaSuccess) {
+                        cudaMemcpyDeviceToHost, workspace.stream) != cudaSuccess) {
+      static_cast<void>(cudaStreamSynchronize(workspace.stream));
       *error = "engine_output_copy_failed";
       return false;
     }
-    if (slot->output_names.size() > 1 && host_extra != nullptr) {
+    if (slot.output_names.size() > 1 && host_extra != nullptr) {
       if (cudaMemcpyAsync(host_extra, device_extra, extra_capacity * sizeof(float),
-                          cudaMemcpyDeviceToHost, stream) != cudaSuccess) {
+                          cudaMemcpyDeviceToHost, workspace.stream) != cudaSuccess) {
+        static_cast<void>(cudaStreamSynchronize(workspace.stream));
         *error = "engine_prototype_copy_failed";
         return false;
       }
     }
-    if (cudaStreamSynchronize(stream) != cudaSuccess) {
+    if (cudaStreamSynchronize(workspace.stream) != cudaSuccess) {
       *error = "engine_stream_sync_failed";
       return false;
     }
@@ -178,29 +213,47 @@ std::unique_ptr<TrtPerception> TrtPerception::load(const std::string& cache_dir,
       !impl.load_engine(cache_dir + "/bed.engine", &impl.bed, error)) {
     return nullptr;
   }
-  if (cudaStreamCreate(&impl.stream) != cudaSuccess) {
-    *error = "cuda_stream_failed";
-    return nullptr;
-  }
-  const std::array<std::pair<float**, std::size_t>, 5> allocations{{
-      {&impl.device_input, kInputCapacity},
-      {&impl.device_pose, kPoseOutput},
-      {&impl.device_person, kPersonOutput},
-      {&impl.device_bed, kBedOutput},
-      {&impl.device_bed_prototypes, kBedPrototypes},
-  }};
-  for (const auto& [pointer, capacity] : allocations) {
-    if (cudaMalloc(reinterpret_cast<void**>(pointer), capacity * sizeof(float)) !=
-        cudaSuccess) {
-      *error = "cuda_alloc_failed";
+  // Build the whole pool up front. A workspace that cannot be created is a
+  // hard load failure rather than a silently smaller pool: a deployment that
+  // quietly runs at a fraction of its configured concurrency is exactly the
+  // kind of implicit degradation this change exists to remove.
+  impl.workspaces.reserve(kInferenceWorkspaces);
+  impl.pool.reserve(kInferenceWorkspaces);
+  for (std::size_t index = 0; index < kInferenceWorkspaces; ++index) {
+    auto workspace = std::make_unique<Workspace>();
+    workspace->pose_context.reset(impl.pose.engine->createExecutionContext());
+    workspace->person_context.reset(impl.person.engine->createExecutionContext());
+    workspace->bed_context.reset(impl.bed.engine->createExecutionContext());
+    if (workspace->pose_context == nullptr || workspace->person_context == nullptr ||
+        workspace->bed_context == nullptr) {
+      *error = "engine_context_failed: workspace " + std::to_string(index);
       return nullptr;
     }
+    if (cudaStreamCreate(&workspace->stream) != cudaSuccess) {
+      *error = "cuda_stream_failed: workspace " + std::to_string(index);
+      return nullptr;
+    }
+    const std::array<std::pair<float**, std::size_t>, 5> allocations{{
+        {&workspace->device_input, kInputCapacity},
+        {&workspace->device_pose, kPoseOutput},
+        {&workspace->device_person, kPersonOutput},
+        {&workspace->device_bed, kBedOutput},
+        {&workspace->device_bed_prototypes, kBedPrototypes},
+    }};
+    for (const auto& [pointer, capacity] : allocations) {
+      if (cudaMalloc(reinterpret_cast<void**>(pointer), capacity * sizeof(float)) !=
+          cudaSuccess) {
+        *error = "cuda_alloc_failed: workspace " + std::to_string(index);
+        return nullptr;
+      }
+    }
+    workspace->host_pose.resize(kPoseOutput);
+    workspace->host_person.resize(kPersonOutput);
+    workspace->host_bed.resize(kBedOutput);
+    workspace->host_bed_prototypes.resize(kBedPrototypes);
+    impl.pool.add(workspace.get());
+    impl.workspaces.push_back(std::move(workspace));
   }
-  impl.host_input.resize(kInputCapacity);
-  impl.host_pose.resize(kPoseOutput);
-  impl.host_person.resize(kPersonOutput);
-  impl.host_bed.resize(kBedOutput);
-  impl.host_bed_prototypes.resize(kBedPrototypes);
   return perception;
 }
 
@@ -264,39 +317,60 @@ bool TrtPerception::infer(const std::uint8_t* rgba, int width, int height, int s
     *error = "invalid_source_geometry";
     return false;
   }
-  std::lock_guard lock{mutex_};
-  Impl& impl = *impl_;
+  // Every camera serializes through mutex_, so whatever runs inside it sets the
+  // per-camera frame rate for the whole deployment: with N sources the rate is
+  // 1/(N * critical_section). The letterbox is pure CPU over caller-owned
+  // pixels and shares nothing with the CUDA state, so it is hoisted out of the
+  // lock and staged in a per-thread buffer. Measured on the 13-camera stack
+  // before this change: lock_wait 91.1ms, preprocess 1.6ms, gpu 4.9ms.
   const auto affine = perception::letterbox_affine(height, width);
   const std::size_t tensor_size =
       3ULL * static_cast<std::size_t>(affine.tensor_height) * affine.tensor_width;
+  thread_local std::vector<float> staging_input;
+  staging_input.resize(tensor_size);
+  const auto t_wait0 = std::chrono::steady_clock::now();
   preprocess_rgba_to_bgr_tensor(rgba, width, height, stride, affine,
-                                impl.host_input.data());
-  if (cudaMemcpyAsync(impl.device_input, impl.host_input.data(),
+                                staging_input.data());
+  const auto t_pre = std::chrono::steady_clock::now();
+  Impl& impl = *impl_;
+  // RAII lease: every early return below hands the workspace back, so a failing
+  // engine cannot leak pool capacity and slowly starve the deployment.
+  Workspace* leased = impl.pool.acquire();
+  const PoolLease<Workspace> lease{&impl.pool, leased};
+  Workspace& workspace = *leased;
+  const auto t_lock = std::chrono::steady_clock::now();
+  if (cudaMemcpyAsync(workspace.device_input, staging_input.data(),
                       tensor_size * sizeof(float), cudaMemcpyHostToDevice,
-                      impl.stream) != cudaSuccess) {
+                      workspace.stream) != cudaSuccess) {
     *error = "input_copy_failed";
     return false;
   }
-  if (!impl.run_engine(&impl.pose, affine.tensor_height, affine.tensor_width,
-                       impl.device_pose, kPoseOutput, impl.host_pose.data(), nullptr, 0,
-                       nullptr, error) ||
+  if (!Impl::run_engine(impl.pose, workspace.pose_context.get(), workspace,
+                        affine.tensor_height, affine.tensor_width,
+                        workspace.device_pose, kPoseOutput, workspace.host_pose.data(),
+                        nullptr, 0, nullptr, error) ||
       (run_person_engine &&
-       !impl.run_engine(&impl.person, affine.tensor_height, affine.tensor_width,
-                        impl.device_person, kPersonOutput, impl.host_person.data(),
-                        nullptr, 0, nullptr, error)) ||
-      !impl.run_engine(&impl.bed, affine.tensor_height, affine.tensor_width,
-                       impl.device_bed, kBedOutput, impl.host_bed.data(),
-                       impl.device_bed_prototypes, kBedPrototypes,
-                       impl.host_bed_prototypes.data(), error)) {
+       !Impl::run_engine(impl.person, workspace.person_context.get(), workspace,
+                         affine.tensor_height, affine.tensor_width,
+                         workspace.device_person, kPersonOutput,
+                         workspace.host_person.data(), nullptr, 0, nullptr, error)) ||
+      !Impl::run_engine(impl.bed, workspace.bed_context.get(), workspace,
+                        affine.tensor_height, affine.tensor_width, workspace.device_bed,
+                        kBedOutput, workspace.host_bed.data(),
+                        workspace.device_bed_prototypes, kBedPrototypes,
+                        workspace.host_bed_prototypes.data(), error)) {
     return false;
   }
-  const std::vector<double> pose_rows{impl.host_pose.begin(), impl.host_pose.end()};
-  const std::vector<double> bed_rows{impl.host_bed.begin(), impl.host_bed.end()};
-  const std::vector<double> prototypes{impl.host_bed_prototypes.begin(),
-                                       impl.host_bed_prototypes.end()};
+  const std::vector<double> pose_rows{workspace.host_pose.begin(),
+                                      workspace.host_pose.end()};
+  const std::vector<double> bed_rows{workspace.host_bed.begin(),
+                                     workspace.host_bed.end()};
+  const std::vector<double> prototypes{workspace.host_bed_prototypes.begin(),
+                                       workspace.host_bed_prototypes.end()};
   result->pose = perception::parse_pose_rows(pose_rows, affine);
   if (run_person_engine) {
-    const std::vector<double> person_rows{impl.host_person.begin(), impl.host_person.end()};
+    const std::vector<double> person_rows{workspace.host_person.begin(),
+                                          workspace.host_person.end()};
     result->person = perception::parse_person_rows(person_rows, affine, kPersonConfidence);
   } else {
     result->person.clear();
@@ -304,6 +378,27 @@ bool TrtPerception::infer(const std::uint8_t* rgba, int width, int height, int s
   result->bed = perception::parse_bed_rows(bed_rows, prototypes, affine, kBedConfidence);
   result->source_width = width;
   result->source_height = height;
+  {
+    // Diagnostic: attribute the inference cost. pool_wait is time spent waiting
+    // for a free workspace and is the signal that kInferenceWorkspaces is too
+    // small; gpu covers the engines plus the host-side row parsing that
+    // follows them, so total_us is the whole per-call critical path. Keeping these separable is the only reason
+    // the previous serialization was measured rather than guessed at.
+    const auto t_gpu = std::chrono::steady_clock::now();
+    static std::atomic<std::uint64_t> infer_calls{0};
+    if ((++infer_calls % 64) == 0) {
+      const auto us = [](auto a, auto b) {
+        return static_cast<long long>(
+            std::chrono::duration_cast<std::chrono::microseconds>(b - a).count());
+      };
+      std::fprintf(stderr,
+                   "seeon-infer: pool_wait_us=%lld preprocess_us=%lld gpu_us=%lld "
+                   "total_us=%lld person_engine=%d calls=%llu\n",
+                   us(t_pre, t_lock), us(t_wait0, t_pre), us(t_lock, t_gpu),
+                   us(t_wait0, t_gpu), run_person_engine ? 1 : 0,
+                   static_cast<unsigned long long>(infer_calls.load()));
+    }
+  }
   return true;
 }
 

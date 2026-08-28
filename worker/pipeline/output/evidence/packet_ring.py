@@ -18,6 +18,21 @@ from worker.types.source_packet import (
 
 _LOGGER = logging.getLogger(__name__)
 
+
+def _describe_video_pts(packet: SourcePacket) -> Fraction | None:
+    try:
+        return _safe_pts(packet)
+    except PacketSelectionError:
+        return None
+
+
+def _describe_pts(entry: _Entry) -> float | None:
+    """Best-effort PTS for a diagnostic line; never raises."""
+    try:
+        return round(_safe_pts(entry.packet), 3)
+    except PacketSelectionError:
+        return None
+
 @dataclass(frozen=True, slots=True)
 class PacketRingLimits:
     max_packets: int
@@ -105,8 +120,16 @@ class SourcePacketRing:
         self._retired_entries: deque[_Entry] = deque()
         self._total_bytes = 0
         self._active_epoch: StreamEpoch | None = None
+        # Newest video PTS admitted for the active epoch, so the alignment
+        # barrier answers in O(1) instead of rescanning the ring per packet.
+        self._newest_video_pts: Fraction | None = None
+        self._max_duration = Fraction(str(limits.max_duration_seconds))
         self._closed = False
         self._lock = threading.RLock()
+        # Signalled whenever the active epoch rolls or a packet lands, so an
+        # evidence trigger can wait for this ring to catch up with the
+        # perception plane instead of being refused for a skew it cannot see.
+        self._advanced = threading.Condition(self._lock)
 
     @property
     def active_epoch(self) -> StreamEpoch | None:
@@ -150,9 +173,53 @@ class SourcePacketRing:
                 entry.packet.size_bytes for entry in self._retired_entries
             )
             self._active_epoch = epoch
+            self._newest_video_pts = None
             self.metrics.epoch_rolls += 1
             self.metrics.evicted_packets += removed_packets
             self.metrics.evicted_bytes += removed_bytes
+            self._advanced.notify_all()
+
+    def wait_until_ready(
+        self,
+        *,
+        epoch: StreamEpoch,
+        through_pts: Fraction,
+        timeout_sec: float,
+    ) -> bool:
+        """Wait briefly for this ring's video to reach ``through_pts`` on ``epoch``.
+
+        The AU tee and the perception metadata leave the child on separate
+        sockets, so the access unit for a trigger can land a moment after the
+        frame that raised it. Waiting for that PTS is cheap and bounded.
+
+        The barrier does NOT wait for the ring to adopt ``epoch``. The ring
+        rolls only after the recorder has sealed the previous epoch's clip,
+        and that seal runs on the same actor thread this method is called
+        from; waiting here for a roll that is queued behind the caller can
+        never succeed, and every second spent doing so backs up a 128-slot
+        recorder queue fed at ~195 messages/s. So a ring on another epoch
+        returns ``False`` at once. A ring that never rolled an epoch admits
+        everything and returns ``True`` at once for the same reason.
+
+        The caller must NOT relabel the trigger on ``False``: emitting with
+        the original identity is what lets the evidence path record an honest
+        ``video_unavailable`` cause.
+        """
+
+        def state() -> bool | None:
+            if self._closed:
+                return False
+            if self._active_epoch is None:
+                return True
+            if self._active_epoch != epoch:
+                return False
+            if self._newest_video_pts is not None and self._newest_video_pts >= through_pts:
+                return True
+            return None
+
+        with self._advanced:
+            self._advanced.wait_for(lambda: state() is not None, timeout=timeout_sec)
+            return state() is True
 
     def append(self, packet: SourcePacket) -> bool:
         if packet.epoch.camera_id != self.camera_id:
@@ -171,11 +238,19 @@ class SourcePacketRing:
             entry = _Entry(packet)
             self._entries.append(entry)
             self._total_bytes += packet.size_bytes
-            if not self._trim_to_limits():
+            newest = self._newest_video_pts
+            if packet.stream.media_type == "video":
+                pts = _describe_video_pts(packet)
+                if pts is not None and (newest is None or pts > newest):
+                    newest = pts
+            if not self._trim_to_limits(newest):
                 removed = self._entries.pop()
                 self._total_bytes -= removed.packet.size_bytes
                 self._drop(packet, lease_pressure=True)
                 return False
+            if newest is not self._newest_video_pts:
+                self._newest_video_pts = newest
+                self._advanced.notify_all()
             self.metrics.accepted_packets += 1
             self.metrics.accepted_bytes += packet.size_bytes
             return True
@@ -197,13 +272,25 @@ class SourcePacketRing:
                     "packet history is closed",
                 )
             if trigger_epoch.camera_id != self.camera_id:
+                self._log_selection_failure(
+                    "trigger camera does not match packet ring",
+                    trigger_camera=trigger_epoch.camera_id,
+                    ring_camera=self.camera_id,
+                )
                 raise PacketSelectionError(
                     PacketTruncationReason.KEYFRAME_UNAVAILABLE,
                     "trigger camera does not match packet ring",
                 )
             if self._active_epoch is not None and trigger_epoch != self._active_epoch:
+                self._log_selection_failure(
+                    "trigger stream epoch is no longer active",
+                    trigger_epoch=trigger_epoch.stream_epoch,
+                    active_epoch=self._active_epoch.stream_epoch,
+                    trigger_generation=trigger_epoch.source_generation,
+                    active_generation=self._active_epoch.source_generation,
+                )
                 raise PacketSelectionError(
-                    PacketTruncationReason.KEYFRAME_UNAVAILABLE,
+                    PacketTruncationReason.STREAM_EPOCH_MISMATCH,
                     "trigger stream epoch is no longer active",
                 )
             epoch_entries = tuple(
@@ -216,6 +303,17 @@ class SourcePacketRing:
                 and _safe_pts(entry.packet) <= trigger_pts
             ]
             if not trigger_video:
+                self._log_selection_failure(
+                    "no video packet exists at or before the trigger",
+                    ring_entries=len(self._entries),
+                    epoch_entries=len(epoch_entries),
+                    epoch_video=sum(
+                        1 for e in epoch_entries if e.packet.stream.media_type == "video"
+                    ),
+                    trigger_pts=round(trigger_pts, 3),
+                    oldest_pts=_describe_pts(epoch_entries[0]) if epoch_entries else None,
+                    newest_pts=_describe_pts(epoch_entries[-1]) if epoch_entries else None,
+                )
                 raise PacketSelectionError(
                     PacketTruncationReason.KEYFRAME_UNAVAILABLE,
                     "no video packet exists at or before the trigger",
@@ -247,6 +345,29 @@ class SourcePacketRing:
                     and _safe_pts(entry.packet) <= trigger_pts
                 ]
                 if not later_keyframes:
+                    self._log_selection_failure(
+                        "no decodable keyframe exists at or before the trigger",
+                        ring_entries=len(self._entries),
+                        epoch_entries=len(epoch_entries),
+                        config_entries=len(config_entries),
+                        config_video=sum(
+                            1 for e in config_entries if e.packet.stream.media_type == "video"
+                        ),
+                        config_keyframes=sum(
+                            1
+                            for e in config_entries
+                            if e.packet.stream.media_type == "video" and e.packet.is_keyframe
+                        ),
+                        epoch_keyframes=sum(
+                            1
+                            for e in epoch_entries
+                            if e.packet.stream.media_type == "video" and e.packet.is_keyframe
+                        ),
+                        trigger_pts=round(trigger_pts, 3),
+                        requested_start=round(requested_start, 3),
+                        oldest_pts=_describe_pts(config_entries[0]) if config_entries else None,
+                        newest_pts=_describe_pts(config_entries[-1]) if config_entries else None,
+                    )
                     raise PacketSelectionError(
                         PacketTruncationReason.KEYFRAME_UNAVAILABLE,
                         "no decodable keyframe exists at or before the trigger",
@@ -261,6 +382,12 @@ class SourcePacketRing:
                 and _safe_pts(entry.packet) <= requested_end
             )
             if not end_candidates:
+                self._log_selection_failure(
+                    "keyframe selection produced no packets",
+                    config_entries=len(config_entries),
+                    selected_start=round(selected_start, 3),
+                    requested_end=round(requested_end, 3),
+                )
                 raise PacketSelectionError(
                     PacketTruncationReason.KEYFRAME_UNAVAILABLE,
                     "keyframe selection produced no packets",
@@ -352,8 +479,26 @@ class SourcePacketRing:
             )
             self._total_bytes -= released_retired_bytes
 
-    def _trim_to_limits(self) -> bool:
-        while self._over_limit():
+
+    def _log_selection_failure(self, detail: str, **facts: object) -> None:
+        """Name which selection predicate rejected the clip window.
+
+        Five distinct conditions all raise ``KEYFRAME_UNAVAILABLE``, and only
+        the reason code reaches the manifest, so an operator sees one opaque
+        code for five different faults. Rendered into the message string rather
+        than ``extra=`` because the worker's ``basicConfig`` format is
+        ``%(message)s`` only.
+        """
+        rendered = " ".join(f"{key}={value}" for key, value in facts.items())
+        _LOGGER.warning(
+            "packet selection failed: camera_id=%s detail=%s %s",
+            self.camera_id,
+            detail,
+            rendered,
+        )
+
+    def _trim_to_limits(self, newest_video_pts: Fraction | None) -> bool:
+        while self._over_limit(newest_video_pts):
             if len(self._entries) == 1 and self._retired_entries:
                 return False
             oldest = self._entries[0]
@@ -365,20 +510,21 @@ class SourcePacketRing:
             self.metrics.evicted_bytes += removed.packet.size_bytes
         return True
 
-    def _over_limit(self) -> bool:
+    def _over_limit(self, newest_video_pts: Fraction | None) -> bool:
         if len(self._entries) + len(self._retired_entries) > self.limits.max_packets:
             return True
         if self._total_bytes > self.limits.max_bytes:
             return True
-        video_times = [
-            _safe_pts(entry.packet)
-            for entry in self._entries
-            if entry.packet.stream.media_type == "video"
-        ]
-        return bool(
-            video_times
-            and video_times[-1] - video_times[0] > Fraction(str(self.limits.max_duration_seconds))
-        )
+        if newest_video_pts is None:
+            return False
+        # Oldest video entry is at (or next to) the front; the newest PTS is
+        # tracked by append. This used to recompute every entry's PTS on every
+        # append -- 2.5 ms per unit at 1000 entries, 64% of a core at fleet
+        # rate, which is what made the AU thread fall behind (#429).
+        for entry in self._entries:
+            if entry.packet.stream.media_type == "video":
+                return newest_video_pts - _safe_pts(entry.packet) > self._max_duration
+        return False
 
     def _drop(self, packet: SourcePacket, *, lease_pressure: bool) -> None:
         self.metrics.dropped_packets += 1

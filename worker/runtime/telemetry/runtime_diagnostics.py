@@ -77,6 +77,18 @@ class WorkerDiagnostics:
         self._bed_exit_scoring_by_camera: dict[str, BedExitScoringDiagnostics] = {}
         self._device_residency_by_camera: dict[str, DeviceResidencyDiagnostics] = {}
         self._decision_completed_by_camera: dict[str, int] = {}
+        # Cameras whose detection results come from a producer other than the
+        # host ``CapabilityInferenceCoordinator`` -- today the ``nvidia``
+        # profile's ``NativePolicyPump``. Registered explicitly by the
+        # composition root instead of being inferred from ``self._inference``
+        # being ``None``: that fall-through silently reported every nvidia
+        # camera as ``expected=False`` (rendered "detection disabled") no
+        # matter what the producer was actually doing.
+        self._native_detection_cameras: set[str] = set()
+        # Real attempt count for the native producer. Without it the relay
+        # payload had to synthesise admitted == completed, which pinned the
+        # backend's recent_success_rate at 1.0 and hid every failed frame.
+        self._native_attempts_by_camera: dict[str, int] = {}
         self._encoder = EncoderLifecycleSnapshot()
         self._clip_recorder = ClipRecorderStatus()
         self._clip_export = RelayClipExportPayload(enabled=False, version=0)
@@ -299,6 +311,24 @@ class WorkerDiagnostics:
                 self._decision_completed_by_camera.get(camera_id, 0) + 1
             )
 
+    def record_native_detection_attempt(self, camera_id: str) -> None:
+        """Count one perception frame the native producer took responsibility for."""
+        with self._lock:
+            self._native_attempts_by_camera[camera_id] = (
+                self._native_attempts_by_camera.get(camera_id, 0) + 1
+            )
+
+    def register_native_detection(self, camera_id: str) -> None:
+        """Declare that a non-host producer owns this camera's detection.
+
+        The composition root calls this when it activates a producer that does
+        not populate the host inference telemetry source, so the relay payload
+        reports the producer as present instead of falling through to
+        ``expected=False``.
+        """
+        with self._lock:
+            self._native_detection_cameras.add(camera_id)
+
     def record_stage_timing(self, camera_id: str, stage: str, elapsed_sec: float) -> None:
         if elapsed_sec < 0:
             raise InvalidStageTimingError(elapsed_sec)
@@ -503,6 +533,8 @@ class WorkerDiagnostics:
             }
             inference = None if self._inference is None else self._inference.snapshot()
             decision_completed_by_camera = dict(self._decision_completed_by_camera)
+            native_detection_cameras = set(self._native_detection_cameras)
+            native_attempts_by_camera = dict(self._native_attempts_by_camera)
             clip_recorder = self._clip_recorder
             clip_export = self._clip_export.copy()
             gpu = None if self._gpu is None else self._gpu.copy()
@@ -512,6 +544,8 @@ class WorkerDiagnostics:
             camera_id: _detection_for_camera(
                 inference_cameras.get(camera_id),
                 decision_completed_by_camera.get(camera_id, 0),
+                native_producer=camera_id in native_detection_cameras,
+                native_attempts=native_attempts_by_camera.get(camera_id, 0),
             )
             for camera_id in selections
         }
@@ -521,21 +555,59 @@ class WorkerDiagnostics:
 def _detection_for_camera(
     inference: CameraInferenceTelemetry | None,
     decision_completed: int,
+    *,
+    native_producer: bool,
+    native_attempts: int,
 ) -> RelayDetectionPayload:
-    if inference is None:
+    """Report detection telemetry for whichever producer owns this camera.
+
+    ``expected`` means "a detection producer is active for this camera", not
+    "the host inference coordinator exists". The backend short-circuits to
+    ``state="disabled"`` on ``expected=False`` before it looks at any counter
+    (``backend/app/features/status/detection_health.py``), so inferring the
+    answer from ``inference is None`` made every ``nvidia`` camera render as
+    "detection disabled" whether or not its ``NativePolicyPump`` was working,
+    and discarded the real ``decision_completed`` on the way out.
+
+    The native producer owns decode and inference inside the DeepStream child,
+    so it has no host-side admitted/succeeded/overwritten counts of its own.
+    The wire contract nevertheless enforces the host pipeline's stage ordering
+    (``decision_completed <= inference_succeeded <= inference_admitted``; see
+    ``RelayDetectionStatus.counters_are_ordered`` in the backend relay router)
+    and rejects the payload with HTTP 422 otherwise. For this producer the
+    three counts are definitionally equal: the child only publishes a
+    perception frame it has already inferred, and the pump completes a decision
+    for every frame it accepts. Reporting them equal satisfies the invariant
+    without inventing a number.
+    """
+    if inference is not None:
         return detection_payload(
-            expected=False,
-            inference_admitted=0,
-            inference_succeeded=0,
+            expected=True,
+            inference_admitted=inference.admitted,
+            inference_succeeded=inference.inferred,
+            inference_overwritten=inference.overwritten,
+            decision_completed=decision_completed,
+        )
+    if native_producer:
+        # ``admitted`` is the real number of frames this producer took on;
+        # ``succeeded`` collapses onto ``completed`` because a frame that
+        # reaches a decision is by definition one the child already inferred.
+        # Reporting a real ``admitted`` is what makes the backend's
+        # recent_success_rate meaningful: it drops below 1.0 when frames fail
+        # instead of being pinned at 1.0 by a synthesised count.
+        return detection_payload(
+            expected=True,
+            inference_admitted=max(native_attempts, decision_completed),
+            inference_succeeded=decision_completed,
             inference_overwritten=0,
-            decision_completed=0,
+            decision_completed=decision_completed,
         )
     return detection_payload(
-        expected=True,
-        inference_admitted=inference.admitted,
-        inference_succeeded=inference.inferred,
-        inference_overwritten=inference.overwritten,
-        decision_completed=decision_completed,
+        expected=False,
+        inference_admitted=0,
+        inference_succeeded=0,
+        inference_overwritten=0,
+        decision_completed=0,
     )
 
 

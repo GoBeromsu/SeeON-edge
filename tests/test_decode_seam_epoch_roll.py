@@ -159,7 +159,7 @@ def test_select_rejects_a_stale_epoch_after_roll(tmp_path: Path) -> None:
             pre_seconds=Fraction(10),
             post_seconds=Fraction(0),
         )
-    assert raised.value.reason is PacketTruncationReason.KEYFRAME_UNAVAILABLE
+    assert raised.value.reason is PacketTruncationReason.STREAM_EPOCH_MISMATCH
 
     current_packets = ring.snapshot()
     with ring.select(

@@ -31,7 +31,14 @@ class DeliveryFailure:
 
 @dataclass(frozen=True, slots=True)
 class EventReceipt:
-    status: Literal["accepted"]
+    # "accepted" carries an upstream id. "accepted_local" is the edge backend
+    # naming its own terminal decision: it durably recorded the event and will
+    # never push it upstream, so no upstream id will ever exist and `event_id`
+    # is empty. The edge backend is the only party that knows this; a worker
+    # cannot infer it from a missing field, because an absent id is equally
+    # consistent with a mangled response. So it must be stated, never guessed --
+    # see the two deliberate local-accept sites in the relay router.
+    status: Literal["accepted", "accepted_local"]
     edge_event_id: str
     event_id: str
 

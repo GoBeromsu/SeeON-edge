@@ -391,6 +391,10 @@ def test_runtime_status_payload_reports_registered_cameras_and_worker_status(
 def test_runtime_status_tick_reads_the_latest_applied_clip_export_policy() -> None:
     runtime = WorkerRuntime.__new__(WorkerRuntime)
     runtime.diagnostics = WorkerDiagnostics()
+    # __new__ bypasses __init__, so supply the attributes the tick reads.
+    # The nvidia media plane is absent on the host profile, and the metadata
+    # counter diagnostic is a no-op in that case.
+    runtime._nvidia_media_plane = None  # noqa: SLF001
     runtime._clip_recorder = None  # noqa: SLF001
     runtime._clip_export_policy = LiveClipExportPolicy(False, 0)  # noqa: SLF001
 
@@ -416,6 +420,10 @@ def test_refresh_clip_recorder_telemetry_reads_live_stats_into_diagnostics() -> 
     """
     runtime = WorkerRuntime.__new__(WorkerRuntime)
     runtime.diagnostics = WorkerDiagnostics()
+    # __new__ bypasses __init__, so supply the attributes the tick reads.
+    # The nvidia media plane is absent on the host profile, and the metadata
+    # counter diagnostic is a no-op in that case.
+    runtime._nvidia_media_plane = None  # noqa: SLF001
 
     class _StubRecorder:
         def __init__(self) -> None:
@@ -457,6 +465,10 @@ def test_refresh_clip_recorder_telemetry_reads_live_stats_into_diagnostics() -> 
 def test_refresh_clip_recorder_telemetry_is_a_noop_when_the_recorder_never_started() -> None:
     runtime = WorkerRuntime.__new__(WorkerRuntime)
     runtime.diagnostics = WorkerDiagnostics()
+    # __new__ bypasses __init__, so supply the attributes the tick reads.
+    # The nvidia media plane is absent on the host profile, and the metadata
+    # counter diagnostic is a no-op in that case.
+    runtime._nvidia_media_plane = None  # noqa: SLF001
     runtime.diagnostics.set_clip_recorder_status(ClipRecorderStatus(available=False))
     runtime._clip_recorder = None  # noqa: SLF001
 

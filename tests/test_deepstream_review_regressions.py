@@ -351,6 +351,28 @@ def test_uri_boundary_rejects_file_scheme_and_preserves_rtsp_quotes() -> None:
     assert parsed.encode() == b"rtsp://user:p'ass" + bytes((64,)) + b"camera.example/live"
 
 
+def test_child_stderr_is_inherited_so_media_plane_faults_reach_the_operator() -> None:
+    """The native child's stderr must not be discarded.
+
+    The child owns decode, inference, parsing and association; it is the only
+    component that can say why any of them failed. Discarding its stderr made
+    every native diagnostic invisible, including instrumentation added to
+    investigate a rebuild storm, which produced zero lines and was briefly
+    misread as evidence that the instrumented path was not involved.
+    """
+    import inspect
+    import subprocess
+
+    from worker.runtime.deepstream import transport
+
+    source = inspect.getsource(transport.spawn_process)
+    assert "stderr=None" in source, (
+        "spawn_process must inherit stderr so the child reaches the container log"
+    )
+    assert "stderr=subprocess.DEVNULL" not in source, (
+        "discarding child stderr leaves the media plane unobservable"
+    )
+    assert subprocess.DEVNULL is not None
 def test_native_path_heartbeats_periodically_not_once_at_construction() -> None:
     """A streaming camera must keep reporting liveness (#426).
 
@@ -402,3 +424,34 @@ def test_native_path_heartbeats_periodically_not_once_at_construction() -> None:
     assert "cam-b" not in sent, (
         "a camera whose pump never advanced must not be reported live"
     )
+
+
+def test_access_unit_socketpair_asks_for_wide_kernel_buffers() -> None:
+    """A stall on the drain thread must be absorbed by the kernel, not shed (#429).
+
+    The default ~200 KiB held under a second of fleet video; the child's
+    sender overflowed on every GIL stall and shed a burst across all cameras.
+    """
+    import socket
+
+    from worker.runtime.deepstream.transport import (
+        AU_SOCKET_BUFFER_BYTES,
+        widen_access_unit_buffers,
+    )
+
+    parent, child = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        before_recv = parent.getsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF)
+        before_send = child.getsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF)
+        widen_access_unit_buffers(parent, child)
+        after_recv = parent.getsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF)
+        after_send = child.getsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF)
+    finally:
+        parent.close()
+        child.close()
+    # The kernel reports roughly double the request and clamps at
+    # net.core.{rmem,wmem}_max, which CI runners set low; the request must
+    # be for the full size and the result must not have shrunk.
+    assert AU_SOCKET_BUFFER_BYTES >= 4 * 1024 * 1024
+    assert after_recv >= before_recv
+    assert after_send >= before_send

@@ -14,3 +14,4 @@ add_test(
 add_test(seeon-deepstream-child-commands-test "bin/seeon-deepstream-child-commands-test")
 add_test(seeon-deepstream-au-parser-test "bin/seeon-deepstream-au-parser-test")
 add_test(seeon-deepstream-au-transport-test "bin/seeon-deepstream-au-transport-test")
+add_test(seeon-deepstream-workspace-pool-test "bin/seeon-deepstream-workspace-pool-test")

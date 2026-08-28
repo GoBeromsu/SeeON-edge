@@ -158,6 +158,13 @@ if(BUILD_TESTING)
   target_compile_features(seeon-deepstream-child-commands-test PRIVATE cxx_std_20)
   target_compile_options(seeon-deepstream-child-commands-test PRIVATE ${SEEON_WARNINGS})
   add_test(NAME seeon-deepstream-child-commands-test COMMAND seeon-deepstream-child-commands-test)
+  add_executable(seeon-deepstream-workspace-pool-test src/workspace_pool_test.cpp)
+  target_compile_features(seeon-deepstream-workspace-pool-test PRIVATE cxx_std_20)
+  target_compile_options(seeon-deepstream-workspace-pool-test PRIVATE ${SEEON_WARNINGS})
+  find_package(Threads REQUIRED)
+  target_link_libraries(seeon-deepstream-workspace-pool-test PRIVATE Threads::Threads)
+  add_test(NAME seeon-deepstream-workspace-pool-test
+           COMMAND seeon-deepstream-workspace-pool-test)
   add_executable(seeon-deepstream-au-parser-test src/au_parser_test.cpp src/au_parser.cpp)
   target_compile_features(seeon-deepstream-au-parser-test PRIVATE cxx_std_20)
   target_compile_options(seeon-deepstream-au-parser-test PRIVATE ${SEEON_WARNINGS})
@@ -176,6 +183,7 @@ if(BUILD_TESTING)
     seeon-deepstream-child-commands-test
     seeon-deepstream-au-parser-test
     seeon-deepstream-au-transport-test
+    seeon-deepstream-workspace-pool-test
   )
   if(SEEON_ENABLE_SANITIZERS)
     foreach(target IN LISTS SEEON_NATIVE_TEST_TARGETS)
@@ -192,6 +200,7 @@ if(BUILD_TESTING)
       seeon-deepstream-child-commands-test
       seeon-deepstream-au-parser-test
       seeon-deepstream-au-transport-test
+      seeon-deepstream-workspace-pool-test
       PROPERTIES
         ENVIRONMENT
           "ASAN_OPTIONS=detect_leaks=1:halt_on_error=1;UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1"
@@ -209,6 +218,7 @@ if(BUILD_TESTING)
       seeon-deepstream-child-commands-test
       seeon-deepstream-au-parser-test
       seeon-deepstream-au-transport-test
+      seeon-deepstream-workspace-pool-test
     RUNTIME DESTINATION native-build/bin
   )
   install(

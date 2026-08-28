@@ -191,3 +191,87 @@ def test_native_policy_uses_child_association_and_image_free_evidence_trigger(
     assert diagnostics.completed == 1
     control.close()
     child.close()
+
+
+def _binding(*, generation: int, epoch: int) -> SourceBinding:
+    return SourceBinding(
+        str(_BOOT),
+        str(_CHILD),
+        "camera-a",
+        generation,
+        epoch,
+        "seeon-perception-v1",
+    )
+
+
+class _UnusedControl:
+    """Rebinding never touches the child control channel."""
+
+    def snapshot(self, camera_id: str) -> None:
+        raise AssertionError(f"control must not be used while rebinding {camera_id}")
+
+
+def _pump_for(slot: LatestMetadataSlot, binding: SourceBinding, tmp_path: Path) -> NativePolicyPump:
+    return NativePolicyPump(
+        binding,
+        NativePolicyContext(
+            slot,
+            _UnusedControl(),  # pyright: ignore[reportArgumentType]
+            SceneState("camera-a"),
+            EventAggregator((_Decider(),), IncidentManager(0.0, tmp_path / "events.jsonl")),
+            _Sink(),
+            AlertEvidenceAttacher({}),
+            _Diagnostics(),
+            90,
+        ),
+    )
+
+
+def test_pump_adopts_the_new_binding_after_a_source_rebuild(tmp_path: Path) -> None:
+    """Regression: a rebuilt source must not starve the pump forever.
+
+    ``SourceLifecycle.rebuild`` re-registers the slot with a fresh binding
+    whose ``source_generation``/``stream_epoch`` have advanced. The slot then
+    accepts frames against that new binding while the pump still matches
+    against the binding it was constructed with, so ``wait_accepted`` never
+    fires again. Nothing counts that pump-side refusal, so the symptom is a
+    clean accept tally with every frame overwritten unread and zero decisions.
+    """
+    # Given
+    slot = LatestMetadataSlot()
+    original = _binding(generation=3, epoch=4)
+    _ = slot.register_source(original)
+    pump = _pump_for(slot, original, tmp_path)
+    rebuilt = _binding(generation=4, epoch=5)
+    _ = slot.register_source(rebuilt)
+    # When
+    pump._rebind_if_source_was_rebuilt()  # noqa: SLF001
+    # Then
+    assert pump._binding == rebuilt  # noqa: SLF001
+    assert pump.camera_id == "camera-a"
+
+
+def test_pump_keeps_its_binding_when_the_source_was_not_rebuilt(tmp_path: Path) -> None:
+    # Given
+    slot = LatestMetadataSlot()
+    original = _binding(generation=3, epoch=4)
+    _ = slot.register_source(original)
+    pump = _pump_for(slot, original, tmp_path)
+    # When
+    pump._rebind_if_source_was_rebuilt()  # noqa: SLF001
+    # Then
+    assert pump._binding == original  # noqa: SLF001
+
+
+def test_pump_keeps_its_binding_when_the_source_is_gone(tmp_path: Path) -> None:
+    """A removed source must not clear the binding out from under the pump."""
+    # Given
+    slot = LatestMetadataSlot()
+    original = _binding(generation=3, epoch=4)
+    _ = slot.register_source(original)
+    pump = _pump_for(slot, original, tmp_path)
+    slot.remove_source("camera-a")
+    # When
+    pump._rebind_if_source_was_rebuilt()  # noqa: SLF001
+    # Then
+    assert pump._binding == original  # noqa: SLF001

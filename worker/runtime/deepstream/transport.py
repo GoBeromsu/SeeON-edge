@@ -35,8 +35,16 @@ def spawn_process(request: SpawnRequest) -> subprocess.Popen[bytes]:
         env=request.environment,
         pass_fds=request.pass_fds,
         stdin=subprocess.DEVNULL,
+        # The child owns decode, inference, parsing and association, so it is
+        # the only component that can report why any of them failed. Its
+        # diagnostics - GStreamer, TensorRT, CUDA and our own - are written to
+        # stderr, and discarding that stream leaves the entire media plane
+        # unobservable to an operator. Inherit the supervisor's stderr so the
+        # child reaches the container log. stdout stays discarded: nothing in
+        # the child writes structured output there, and the IPC contract runs
+        # over inherited sockets rather than a pipe.
         stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        stderr=None,
     )
 
 
@@ -53,6 +61,18 @@ def _close_fds(descriptors: list[int]) -> None:
             pass
 
 
+# The kernel default (~200 KiB) holds well under a second of fleet video, so
+# any stall on the worker's drain thread backed up into the child's sender
+# and shed units (#429). Ask for the maximum; the kernel clamps to
+# net.core.{rmem,wmem}_max.
+AU_SOCKET_BUFFER_BYTES = 4 * 1024 * 1024
+
+
+def widen_access_unit_buffers(parent: socket.socket, child: socket.socket) -> None:
+    parent.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, AU_SOCKET_BUFFER_BYTES)
+    child.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, AU_SOCKET_BUFFER_BYTES)
+
+
 def spawn_child(config: ChildConfig) -> ChildTransport:
     sockets: list[socket.socket] = []
     descriptors: list[int] = []
@@ -63,6 +83,7 @@ def spawn_child(config: ChildConfig) -> ChildTransport:
         sockets.extend((wake_parent, wake_child))
         au_parent, au_child = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
         sockets.extend((au_parent, au_child))
+        widen_access_unit_buffers(au_parent, au_child)
         preview_parent, preview_child = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
         sockets.extend((preview_parent, preview_child))
         failure_parent, failure_child = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)

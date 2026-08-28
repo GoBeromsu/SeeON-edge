@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from fractions import Fraction
 
 import pytest
@@ -361,3 +362,166 @@ def test_close_releases_memory_and_rejects_new_packets_or_leases() -> None:
             post_seconds=Fraction(0),
         )
     assert raised.value.reason is PacketTruncationReason.RING_CLOSED
+
+
+def test_selection_failure_names_which_predicate_rejected_the_window(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Five conditions share one reason code; the log must disambiguate them.
+
+    ``KEYFRAME_UNAVAILABLE`` is raised by a camera mismatch, a rolled epoch, an
+    absent video packet, an absent keyframe, and an empty tail selection. Only
+    the code reaches the manifest, so an operator sees one opaque value for
+    five different faults. Rendered into the message string because the
+    worker's ``basicConfig`` format is ``%(message)s`` only.
+    """
+    # Given
+    import logging
+
+    ring = SourcePacketRing("camera-1", PacketRingLimits(64, 4_096, 60.0))
+    _append_gop(ring, start=0, stop=12)
+    # When: a trigger from a different camera
+    with caplog.at_level(logging.WARNING):
+        with pytest.raises(PacketSelectionError):
+            with ring.select(
+                trigger_epoch=StreamEpoch("boot-1", "camera-OTHER", 1),
+                trigger_pts=Fraction(7),
+                pre_seconds=Fraction(2),
+                post_seconds=Fraction(3),
+            ):
+                pass
+    # Then
+    lines = [record.getMessage() for record in caplog.records]
+    failure = next(line for line in lines if "packet selection failed:" in line)
+    assert "camera_id=camera-1" in failure
+    assert "trigger camera does not match packet ring" in failure
+    assert "trigger_camera=camera-OTHER" in failure
+
+
+def test_missing_keyframe_failure_reports_the_discriminating_counts(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The keyframe branch must say whether candidates existed and why none matched."""
+    # Given
+    import logging
+
+    ring = SourcePacketRing("camera-1", PacketRingLimits(64, 4_096, 60.0))
+    _append_gop(ring, start=0, stop=12)
+    # When: trigger far before any packet, so no video packet precedes it
+    with caplog.at_level(logging.WARNING):
+        with pytest.raises(PacketSelectionError):
+            with ring.select(
+                trigger_epoch=StreamEpoch("boot-1", "camera-1", 1),
+                trigger_pts=Fraction(-5),
+                pre_seconds=Fraction(2),
+                post_seconds=Fraction(3),
+            ):
+                pass
+    # Then
+    lines = [record.getMessage() for record in caplog.records]
+    failure = next(line for line in lines if "packet selection failed:" in line)
+    for field in ("ring_entries=", "epoch_entries=", "epoch_video=", "trigger_pts="):
+        assert field in failure
+
+
+def test_epoch_skew_is_reported_as_its_own_reason_not_as_a_missing_keyframe() -> None:
+    """An inter-plane epoch skew must not masquerade as KEYFRAME_UNAVAILABLE.
+
+    On the live nvidia stack 90% of clip failures took this branch while the
+    manifest showed only KEYFRAME_UNAVAILABLE, which is shared with four
+    unrelated conditions. Measurement had already shown the cameras emit a
+    keyframe about once per second and the ring is many times oversized, so the
+    code was actively misleading: selection never reached keyframe search.
+    """
+    # Given
+    ring = SourcePacketRing("camera-1", PacketRingLimits(64, 4_096, 60.0))
+    _append_gop(ring, start=0, stop=12)
+    ring.roll_epoch(StreamEpoch("boot-1", "camera-1", 1))
+    # When: the trigger names a newer epoch than the ring holds
+    with pytest.raises(PacketSelectionError) as caught:
+        with ring.select(
+            trigger_epoch=StreamEpoch("boot-1", "camera-1", 2),
+            trigger_pts=Fraction(7),
+            pre_seconds=Fraction(2),
+            post_seconds=Fraction(3),
+        ):
+            pass
+    # Then
+    assert caught.value.reason is PacketTruncationReason.STREAM_EPOCH_MISMATCH
+    assert caught.value.reason is not PacketTruncationReason.KEYFRAME_UNAVAILABLE
+
+
+def test_wait_until_ready_returns_true_once_the_ring_holds_the_epoch() -> None:
+    """The evidence barrier must release as soon as the ring catches up."""
+    # Given
+    ring = SourcePacketRing("camera-1", PacketRingLimits(64, 4_096, 60.0))
+    epoch = StreamEpoch("boot-1", "camera-1", 1)
+    ring.roll_epoch(epoch)
+    _append_gop(ring, start=0, stop=8)
+    # When
+    ready = ring.wait_until_ready(epoch=epoch, through_pts=Fraction(5), timeout_sec=0.5)
+    # Then
+    assert ready is True
+
+
+def test_wait_until_ready_returns_at_once_when_the_ring_is_on_another_epoch() -> None:
+    """The barrier must not wait for an epoch roll.
+
+    The ring rolls only after the recorder seals the previous epoch's clip on
+    the actor thread -- the thread that calls this. Waiting here for that roll
+    can never succeed and stalls a 128-slot queue fed at ~195 messages/s, so
+    the barrier reports the skew immediately instead of burning its timeout.
+    """
+    # Given
+    ring = SourcePacketRing("camera-1", PacketRingLimits(64, 4_096, 60.0))
+    ring.roll_epoch(StreamEpoch("boot-1", "camera-1", 1))
+    _append_gop(ring, start=0, stop=8)
+    # When: the trigger carries the next epoch
+    started = time.monotonic()
+    ready = ring.wait_until_ready(
+        epoch=StreamEpoch("boot-1", "camera-1", 2),
+        through_pts=Fraction(5),
+        timeout_sec=2.0,
+    )
+    # Then
+    assert ready is False
+    assert time.monotonic() - started < 0.5
+
+
+def test_wait_until_ready_times_out_when_video_has_not_reached_the_trigger_pts() -> None:
+    """Right epoch is not enough: the AU for the event must have landed."""
+    # Given
+    ring = SourcePacketRing("camera-1", PacketRingLimits(64, 4_096, 60.0))
+    epoch = StreamEpoch("boot-1", "camera-1", 1)
+    ring.roll_epoch(epoch)
+    _append_gop(ring, start=0, stop=4)
+    # When: the event sits past the newest retained packet
+    ready = ring.wait_until_ready(epoch=epoch, through_pts=Fraction(99), timeout_sec=0.2)
+    # Then
+    assert ready is False
+
+
+def test_wait_until_ready_does_not_block_a_ring_that_never_adopted_an_epoch() -> None:
+    """Regression: the barrier stalled every CPU-path clip for its full timeout.
+
+    ``append`` and ``select`` both treat a ring with no active epoch as
+    unconstrained: the pyav decode path never calls ``roll_epoch``, so every
+    packet is admitted and the trigger's epoch is never compared. The barrier
+    compared ``None != epoch`` instead, waited its whole timeout, and by then
+    a ring sized to pre+post seconds had evicted the trigger. The real-stack
+    e2e clip test went from passing on main to KEYFRAME_UNAVAILABLE.
+    """
+    # Given: a ring that admits packets without ever having rolled an epoch
+    ring = SourcePacketRing("camera-1", PacketRingLimits(64, 4_096, 60.0))
+    _append_gop(ring, start=0, stop=8)
+    assert ring.active_epoch is None
+    # When
+    started = time.monotonic()
+    ready = ring.wait_until_ready(
+        epoch=StreamEpoch("boot-1", "camera-1", 1),
+        through_pts=Fraction(5),
+        timeout_sec=2.0,
+    )
+    # Then: aligned immediately, exactly as select would treat it
+    assert ready is True
+    assert time.monotonic() - started < 0.5

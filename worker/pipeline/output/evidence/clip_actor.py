@@ -196,6 +196,18 @@ class ClipActor:
                         evidence_reason(reason_code),
                     )
                     self._stats.video_unavailable_clips += 1
+                    # A fall clip with no footage is the evidence failing, so
+                    # say why in the message body. basicConfig renders
+                    # %(message)s only, so extra= would reach no operator.
+                    LOGGER.warning(
+                        "clip published without video: camera_id=%s clip_id=%s "
+                        "reason=%s detail=%s truncation=%s",
+                        camera_id,
+                        active.reservation.clip_id,
+                        reason_code.name,
+                        detail_reason,
+                        ",".join(truncation_reasons) or "none",
+                    )
                 case unreachable:
                     assert_never(unreachable)
             published = True

@@ -242,7 +242,7 @@ class ClipRecorder:
     def _run(self) -> None:
         actor = self._actor
         if actor is not None:
-            run_actor_loop(actor, self._queue, self._stop_event, lambda: self._rotate(force=True))
+            run_actor_loop(actor, self._queue, self._stop_event, self._rotate)
 
     def _on_epoch_roll(self, previous: StreamEpoch, current: StreamEpoch) -> None:
         thread = self._thread

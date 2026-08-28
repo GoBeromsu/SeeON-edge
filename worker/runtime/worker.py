@@ -1688,13 +1688,11 @@ class WorkerRuntime:
         # camera at construction and the dashboard shows every camera offline
         # forever while it streams and detects normally (#426).
         heartbeat = NativeHeartbeatLoop(self.config, self.config.cameras, pumps)
-        self._native_heartbeat = heartbeat
         handler.register_loop(heartbeat)
         heartbeat_thread = threading.Thread(
             target=heartbeat.run, name="native-heartbeat", daemon=True
         )
         heartbeat_thread.start()
-        self._native_heartbeat_thread = heartbeat_thread
         self._supervisor = ingest.IngestSupervisor(
             pumps,
             restart_check=self._restart_check,
@@ -1759,6 +1757,10 @@ class WorkerRuntime:
             ),
         )
         pumps.append(pump)
+        # The native pump, not the host inference coordinator, owns this
+        # camera's detection. Declare it so the relay payload reports the
+        # producer as present instead of falling through to "disabled".
+        self.diagnostics.register_native_detection(camera.camera_id)
         HeartbeatReporter(self.config, camera).mark_ready(camera.camera_id)
 
     def _compose_inference_coordinator(
@@ -2368,6 +2370,43 @@ class WorkerRuntime:
         enabled, version = self._clip_export_policy.snapshot()
         self.diagnostics.set_clip_export_applied(enabled=enabled, version=version)
         self._refresh_clip_recorder_telemetry()
+        self._log_native_metadata_counters()
+
+    def _log_native_metadata_counters(self) -> None:
+        """Surface the native metadata slot's accept/reject tally.
+
+        ``LatestMetadataSlot`` counts exactly why a published perception frame
+        was refused -- one counter per identity field checked by ``_matches``
+        plus ``late``/``malformed``/``pull_failures`` -- and exposes them via
+        ``counters()``. Nothing read that accessor, so a pump that never
+        receives an accepted frame was indistinguishable from a child that
+        never publishes one: both present as silent logs and zero decisions.
+
+        Rendered into the message string rather than ``extra=`` because the
+        worker's ``basicConfig`` format is ``%(message)s`` only, so ``extra``
+        fields never reach an operator.
+        """
+        media_plane = self._nvidia_media_plane
+        if media_plane is None:
+            return
+        counters = media_plane.child.metadata.counters()
+        LOGGER.info(
+            "native metadata slot: accepted=%d overwritten=%d late=%d "
+            "unknown_source=%d generation_mismatch=%d epoch_mismatch=%d "
+            "boot_mismatch=%d child_mismatch=%d transform_mismatch=%d "
+            "malformed=%d pull_failures=%d",
+            counters.accepted,
+            counters.overwritten,
+            counters.late,
+            counters.unknown_source,
+            counters.generation_mismatch,
+            counters.epoch_mismatch,
+            counters.boot_mismatch,
+            counters.child_mismatch,
+            counters.transform_mismatch,
+            counters.malformed,
+            counters.pull_failures,
+        )
 
     def _refresh_clip_recorder_telemetry(self) -> None:
         """Push the clip recorder's live counters into diagnostics.

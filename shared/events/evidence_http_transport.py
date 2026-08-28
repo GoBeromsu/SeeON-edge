@@ -217,10 +217,22 @@ def normalize_http_base(value: str) -> str:
 
 def _event_receipt(body: bytes) -> EventReceipt | None:
     payload = parse_json_object(body)
-    if payload.get("status") != "accepted":
+    status_value = payload.get("status")
+    edge_id = payload.get("edge_event_id")
+    if not isinstance(edge_id, str):
         return None
-    edge_id, event_id = payload.get("edge_event_id"), payload.get("event_id")
-    if not isinstance(edge_id, str) or not isinstance(event_id, str) or not event_id:
+    if status_value == "accepted_local":
+        # The edge backend recorded the event durably and decided it will never
+        # be pushed upstream (no Hub mapping yet, or no cloud client built), so
+        # there is no upstream id to echo and demanding one retries forever.
+        # This is terminal ONLY because the backend said so by name: an absent
+        # or unrecognized status still falls through to MALFORMED_RECEIPT, which
+        # is what a genuinely mangled response deserves.
+        return EventReceipt("accepted_local", edge_id, "")
+    if status_value != "accepted":
+        return None
+    event_id = payload.get("event_id")
+    if not isinstance(event_id, str) or not event_id:
         return None
     return EventReceipt("accepted", edge_id, event_id)
 

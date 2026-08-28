@@ -17,6 +17,7 @@ from worker.pipeline.output.evidence.clip_recording import (
     ClipWindow,
 )
 from worker.pipeline.output.evidence.packet_repository import PacketRingRepository
+from worker.pipeline.output.evidence.packet_ring import PacketTruncationReason
 from worker.types import BusinessEvent, FrameKey, FramePacket
 from worker.types.source_packet import (
     PacketSelectionError,
@@ -24,6 +25,12 @@ from worker.types.source_packet import (
     SourceStreamConfiguration,
     StreamEpoch,
 )
+
+# Bounded wait for the AU ring to adopt a trigger's epoch. Finalize already
+# runs after the post-event window, so this is off the ingestion hot path.
+# Bounded by the recorder queue: this wait runs on the actor thread, and the
+# 128-slot queue behind it fills in well under a second at fleet load.
+_RING_ALIGNMENT_TIMEOUT_SEC = 0.25
 
 LOGGER: Final = logging.getLogger(__name__)
 
@@ -107,22 +114,33 @@ class PacketClipRecordingCoordinator:
             pre_seconds = trigger_pts - Fraction(str(window_bounds[0]))
             post_seconds = Fraction(str(window_bounds[1])) - trigger_pts
         try:
-            selection = self._repository.ring(camera_id).select(
-                trigger_epoch=epoch,
-                trigger_pts=trigger_pts,
-                pre_seconds=max(pre_seconds, Fraction()),
-                post_seconds=max(post_seconds, Fraction()),
-            )
+            ring = self._repository.ring(camera_id)
         except ValueError:
             return ClipUnavailable(
                 clip_id,
                 ClipReasonCode.REMUX_FAILED,
                 "SOURCE_PACKET_RING_UNAVAILABLE",
             )
+        # Let the access unit for the trigger land; see wait_until_ready for
+        # why this never waits on an epoch roll.
+        ring.wait_until_ready(
+            epoch=epoch,
+            through_pts=trigger_pts,
+            timeout_sec=_RING_ALIGNMENT_TIMEOUT_SEC,
+        )
+        try:
+            selection = ring.select(
+                trigger_epoch=epoch,
+                trigger_pts=trigger_pts,
+                pre_seconds=max(pre_seconds, Fraction()),
+                post_seconds=max(post_seconds, Fraction()),
+            )
         except PacketSelectionError as exc:
             return ClipUnavailable(
                 clip_id,
-                ClipReasonCode.REMUX_FAILED,
+                ClipReasonCode.STREAM_EPOCH_MISMATCH
+                if exc.reason is PacketTruncationReason.STREAM_EPOCH_MISMATCH
+                else ClipReasonCode.REMUX_FAILED,
                 exc.reason.value,
             )
         # Detach everything the remux needs, then release the ring lease BEFORE

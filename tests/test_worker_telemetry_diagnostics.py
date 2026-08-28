@@ -438,3 +438,261 @@ def test_geometry_log_excludes_rtsp_credentials_and_frame_payload(
     assert "password" not in dumped
     assert "array(" not in dumped
     assert "uint8" not in dumped
+
+
+def _detection_of(payload: object, camera_id: str) -> dict[str, object]:
+    cameras = payload["cameras"]  # pyright: ignore[reportIndexIssue]
+    for camera in cameras:
+        if camera["camera_id"] == camera_id:
+            return camera["detection"]
+    raise AssertionError(f"camera {camera_id} missing from relay payload")
+
+
+def test_camera_without_any_detection_producer_reports_expected_false() -> None:
+    """No producer at all is the only case that may claim 'disabled'.
+
+    The backend short-circuits to ``state="disabled"`` on ``expected=False``
+    before reading a single counter, so this flag must mean "nobody is
+    producing detections for this camera".
+    """
+    # Given
+    diagnostics = WorkerDiagnostics()
+    diagnostics.update_decode("camera-a", _selection())
+    # When
+    detection = _detection_of(diagnostics.to_payload("facility-1", None, 1), "camera-a")
+    # Then
+    assert detection["expected"] is False
+    assert detection["decision_completed"] == 0
+
+
+def test_native_producer_reports_expected_true_and_real_decision_count() -> None:
+    """Regression: the nvidia pump's progress must survive the relay projection.
+
+    ``_detection_for_camera`` used to infer "no producer" from the host
+    inference source being ``None``, which is always the case under
+    ``ML_WORKER_PROFILE=nvidia``. Every nvidia camera therefore reported
+    ``expected=False`` with ``decision_completed`` forced to 0, and the
+    dashboard rendered "detection disabled" no matter how well the
+    ``NativePolicyPump`` was running.
+    """
+    # Given
+    diagnostics = WorkerDiagnostics()
+    diagnostics.update_decode("camera-a", _selection())
+    diagnostics.register_native_detection("camera-a")
+    diagnostics.record_detection_completed("camera-a")
+    diagnostics.record_detection_completed("camera-a")
+    # When
+    detection = _detection_of(diagnostics.to_payload("facility-1", None, 1), "camera-a")
+    # Then
+    assert detection["expected"] is True
+    assert detection["decision_completed"] == 2
+    # The wire contract enforces decision_completed <= inference_succeeded <=
+    # inference_admitted and 422s otherwise. The child only publishes frames it
+    # already inferred and the pump completes a decision for each accepted
+    # frame, so for this producer the three counts are equal.
+    assert detection["inference_admitted"] == 2
+    assert detection["inference_succeeded"] == 2
+
+
+def test_native_producer_with_no_completions_still_reports_expected_true() -> None:
+    """A registered-but-idle producer is not the same as no producer.
+
+    Reporting ``expected=False`` here would hide a dead pump behind the same
+    badge as an intentionally disabled camera.
+    """
+    # Given
+    diagnostics = WorkerDiagnostics()
+    diagnostics.update_decode("camera-a", _selection())
+    diagnostics.register_native_detection("camera-a")
+    # When
+    detection = _detection_of(diagnostics.to_payload("facility-1", None, 1), "camera-a")
+    # Then
+    assert detection["expected"] is True
+    assert detection["decision_completed"] == 0
+
+
+def test_host_inference_path_is_unchanged_by_native_registration() -> None:
+    # Given
+    diagnostics = WorkerDiagnostics()
+    diagnostics.update_decode("camera-a", _selection())
+    diagnostics.register_inference(_InferenceSource(_mixed_geometry_inference()))
+    diagnostics.record_detection_completed("camera-a")
+    # When
+    detection = _detection_of(diagnostics.to_payload("facility-1", None, 1), "camera-a")
+    # Then
+    assert detection["expected"] is True
+    assert detection["decision_completed"] == 1
+
+
+def test_native_producer_counters_satisfy_the_wire_ordering_invariant() -> None:
+    """Regression: the backend 422s a payload that breaks counter ordering.
+
+    ``RelayDetectionStatus.counters_are_ordered`` requires
+    ``decision_completed <= inference_succeeded <= inference_admitted``.
+    Reporting a real ``decision_completed`` alongside zero admitted/succeeded
+    made every runtime-status POST fail with HTTP 422 once the native pump
+    completed its first decision, which silently stopped all telemetry.
+    """
+    # Given
+    diagnostics = WorkerDiagnostics()
+    diagnostics.update_decode("camera-a", _selection())
+    diagnostics.register_native_detection("camera-a")
+    for _ in range(5):
+        diagnostics.record_detection_completed("camera-a")
+    # When
+    detection = _detection_of(diagnostics.to_payload("facility-1", None, 1), "camera-a")
+    # Then
+    assert detection["decision_completed"] <= detection["inference_succeeded"]
+    assert detection["inference_succeeded"] <= detection["inference_admitted"]
+    assert detection["decision_completed"] == 5
+
+
+def test_native_producer_payload_validates_against_the_backend_relay_model() -> None:
+    """Cross-boundary contract: the worker payload must satisfy the backend model.
+
+    The per-field unit assertions above cannot catch a schema rejection. This
+    validates the real emitted payload against the backend's own Pydantic model
+    so a counter-ordering or extra-field regression fails here instead of
+    silently 422-ing every runtime-status POST in production.
+    """
+    # Given
+    from backend.app.features.relay.router import RelayDetectionStatus
+
+    diagnostics = WorkerDiagnostics()
+    diagnostics.update_decode("camera-a", _selection())
+    diagnostics.register_native_detection("camera-a")
+    for _ in range(3):
+        diagnostics.record_detection_completed("camera-a")
+    # When
+    detection = _detection_of(diagnostics.to_payload("facility-1", None, 1), "camera-a")
+    validated = RelayDetectionStatus.model_validate(detection)
+    # Then
+    assert validated.expected is True
+    assert validated.decision_completed == 3
+
+
+def test_idle_native_producer_payload_also_validates() -> None:
+    # Given
+    from backend.app.features.relay.router import RelayDetectionStatus
+
+    diagnostics = WorkerDiagnostics()
+    diagnostics.update_decode("camera-a", _selection())
+    diagnostics.register_native_detection("camera-a")
+    # When
+    detection = _detection_of(diagnostics.to_payload("facility-1", None, 1), "camera-a")
+    validated = RelayDetectionStatus.model_validate(detection)
+    # Then
+    assert validated.expected is True
+    assert validated.decision_completed == 0
+
+
+def test_metadata_slot_counters_render_into_the_log_message_not_extra(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Rejection reasons must be greppable in the rendered message.
+
+    The worker's ``basicConfig`` format is ``%(message)s`` only, so anything
+    passed via ``extra=`` never reaches an operator. Regression guard for the
+    observability gap that made "child never publishes" and "child publishes
+    but every frame is rejected" indistinguishable.
+    """
+    # Given
+    import logging
+
+    from worker.native.deepstream.metadata_slot import LatestMetadataSlot
+    from worker.runtime import worker as worker_module
+
+    slot = LatestMetadataSlot()
+    slot.mark_malformed()
+    slot.mark_pull_failure()
+    slot.mark_pull_failure()
+
+    class _Child:
+        metadata = slot
+
+    class _MediaPlane:
+        child = _Child()
+
+    class _Runtime:
+        _nvidia_media_plane = _MediaPlane()
+        _log_native_metadata_counters = worker_module.WorkerRuntime._log_native_metadata_counters
+
+    # When
+    with caplog.at_level(logging.INFO, logger=worker_module.LOGGER.name):
+        _Runtime._log_native_metadata_counters(_Runtime())  # pyright: ignore[reportArgumentType]
+    # Then
+    rendered = [record.getMessage() for record in caplog.records]
+    assert any("native metadata slot:" in message for message in rendered)
+    line = next(message for message in rendered if "native metadata slot:" in message)
+    assert "malformed=1" in line
+    assert "pull_failures=2" in line
+    for field in (
+        "accepted",
+        "overwritten",
+        "late",
+        "unknown_source",
+        "generation_mismatch",
+        "epoch_mismatch",
+        "boot_mismatch",
+        "child_mismatch",
+        "transform_mismatch",
+    ):
+        assert f"{field}=" in line
+
+
+def test_metadata_counter_logging_is_a_no_op_without_the_nvidia_media_plane(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Given
+    import logging
+
+    from worker.runtime import worker as worker_module
+
+    class _Runtime:
+        _nvidia_media_plane = None
+        _log_native_metadata_counters = worker_module.WorkerRuntime._log_native_metadata_counters
+
+    # When
+    with caplog.at_level(logging.INFO, logger=worker_module.LOGGER.name):
+        _Runtime._log_native_metadata_counters(_Runtime())  # pyright: ignore[reportArgumentType]
+    # Then
+    assert not [r for r in caplog.records if "native metadata slot:" in r.getMessage()]
+
+
+def test_native_producer_reports_real_attempts_so_success_rate_is_meaningful() -> None:
+    """Regression: synthesising admitted == completed pinned success rate at 1.0.
+
+    The backend computes ``recent_success_rate`` as completed_delta over
+    admitted_delta, so reporting the two as equal made every native camera look
+    perfectly healthy no matter how many frames failed. ``admitted`` must be the
+    real attempt count.
+    """
+    # Given
+    diagnostics = WorkerDiagnostics()
+    diagnostics.update_decode("camera-a", _selection())
+    diagnostics.register_native_detection("camera-a")
+    for _ in range(5):
+        diagnostics.record_native_detection_attempt("camera-a")
+    for _ in range(3):
+        diagnostics.record_detection_completed("camera-a")
+    # When
+    detection = _detection_of(diagnostics.to_payload("facility-1", None, 1), "camera-a")
+    # Then
+    assert detection["inference_admitted"] == 5
+    assert detection["decision_completed"] == 3
+    # ordering invariant the backend enforces still holds
+    assert detection["decision_completed"] <= detection["inference_succeeded"]
+    assert detection["inference_succeeded"] <= detection["inference_admitted"]
+
+
+def test_native_attempts_never_fall_below_completions() -> None:
+    """A completion without a recorded attempt must not break the wire contract."""
+    # Given
+    diagnostics = WorkerDiagnostics()
+    diagnostics.update_decode("camera-a", _selection())
+    diagnostics.register_native_detection("camera-a")
+    diagnostics.record_detection_completed("camera-a")
+    # When
+    detection = _detection_of(diagnostics.to_payload("facility-1", None, 1), "camera-a")
+    # Then
+    assert detection["inference_admitted"] >= detection["decision_completed"]

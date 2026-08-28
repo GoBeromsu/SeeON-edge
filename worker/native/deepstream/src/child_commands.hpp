@@ -24,6 +24,11 @@ struct SourceSlot {
   std::uint64_t epoch;
   std::uint64_t source_sequence = 0;
   std::uint64_t last_inference_source_time_ns = 0;
+  // Pacing diagnostics: the effective inference rate sits well below the
+  // configured target and no resource is saturated, so the admit/skip ratio
+  // has to be measurable rather than inferred.
+  std::uint64_t pace_skips = 0;
+  std::uint64_t pace_admits = 0;
   std::optional<ipc::Message> latest;
   PipelineBindingPtr binding;
   // Per-source association state; a fresh instance on add and on every epoch

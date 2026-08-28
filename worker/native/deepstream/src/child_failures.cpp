@@ -23,7 +23,11 @@ ServerState::ServerState(const ChildOptions& options_value)
                  std::vector<std::uint8_t> jpeg) {
             static_cast<void>(preview_sender.publish(camera, pts, std::move(jpeg)));
           }),
-      au_sender(options_value.au_fd, 128, kMaxAuFrameBytes),
+      // 2048 units is ~8 s of fleet traffic. At 128 (~0.5 s) every GIL stall
+      // on the worker's drain thread overflowed this queue and shed a burst
+      // across all thirteen cameras (#429); the 32 MiB byte budget still caps
+      // memory.
+      au_sender(options_value.au_fd, 2048, kMaxAuFrameBytes),
       preview_sender(options_value.preview_fd),
       failure_fd(eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK)) {}
 

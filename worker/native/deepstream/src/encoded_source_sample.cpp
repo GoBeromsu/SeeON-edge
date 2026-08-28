@@ -2,15 +2,23 @@
 
 #include "au_parser.hpp"
 
+#include <cstdio>
+
 #ifdef SEEON_HAS_GSTREAMER
 #include <string_view>
 #include <utility>
 
 namespace seeon {
 namespace {
-void parser_failure(EncodedSourceContext* context) {
+void parser_failure(EncodedSourceContext* context, const char* reason) {
   bool expected = false;
   if (context->parser_failure_latched.compare_exchange_strong(expected, true)) {
+    // Four unrelated conditions latch this one "parser" category, and only the
+    // category reaches the Python supervisor. Naming the branch is what made
+    // the metadata-slot and clip-selection failures diagnosable; do the same
+    // here so a rebuild storm can be attributed instead of guessed at.
+    std::fprintf(stderr, "seeon-parser-failure: camera=%s reason=%s\n",
+                 context->camera.c_str(), reason);
     context->failures({context->camera, "parser", FailureScope::kSourceLocal});
   }
 }
@@ -39,7 +47,7 @@ GstFlowReturn on_encoded_sample(GstAppSink* sink, gpointer raw) {
   GstBuffer* buffer = gst_sample_get_buffer(sample);
   GstMapInfo mapped{};
   if (!GST_BUFFER_PTS_IS_VALID(buffer) || !gst_buffer_map(buffer, &mapped, GST_MAP_READ)) {
-    parser_failure(context);
+    parser_failure(context, "invalid_pts_or_map");
     gst_sample_unref(sample);
     return GST_FLOW_OK;
   }
@@ -69,7 +77,7 @@ GstFlowReturn on_encoded_sample(GstAppSink* sink, gpointer raw) {
   if (!configuration.empty()) context->codec_data = configuration;
   else configuration = context->codec_data;
   if (!keyframe.has_value() || alignment == nullptr || std::string_view{alignment} != "au") {
-    parser_failure(context);
+    parser_failure(context, "no_vcl_nal_or_alignment");
   } else {
     bool timeline_valid = true;
     gint width = 0;
@@ -102,7 +110,7 @@ GstFlowReturn on_encoded_sample(GstAppSink* sink, gpointer raw) {
       pending.duration = dts - pending.dts;
       if (pending.duration <= 0) {
         timeline_valid = false;
-        parser_failure(context);
+        parser_failure(context, "pending_duration_nonpositive");
       } else {
         context->last_duration = pending.duration;
         emit(context, std::move(pending));
@@ -128,7 +136,7 @@ void flush_pending_access_unit(EncodedSourceContext* context) {
   auto pending = std::move(*context->pending_duration);
   context->pending_duration.reset();
   if (context->last_duration <= 0) {
-    parser_failure(context);
+    parser_failure(context, "last_duration_nonpositive");
     return;
   }
   pending.duration = context->last_duration;

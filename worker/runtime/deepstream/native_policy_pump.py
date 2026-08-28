@@ -31,6 +31,8 @@ class NativeEventSink(Protocol):
 class NativeDiagnostics(Protocol):
     def update_measured_fps(self, camera_id: str, measured_fps: float | None) -> None: ...
     def record_detection_completed(self, camera_id: str) -> None: ...
+    def record_native_detection_attempt(self, camera_id: str) -> None: ...
+
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,12 +72,44 @@ class NativePolicyPump:
     def camera_id(self) -> str:
         return self._binding.camera_id
 
+    def _rebind_if_source_was_rebuilt(self) -> None:
+        """Adopt the slot's current binding after a source rebuild.
+
+        ``SourceLifecycle.rebuild`` asks the child for a fresh binding and
+        re-registers it on the slot, which advances ``source_generation`` and
+        ``stream_epoch``. The slot then keeps accepting frames against that new
+        binding, but this pump was constructed with the pre-rebuild binding and
+        ``wait_accepted`` matches against whatever binding its token carries --
+        so without this the pump silently starves forever while the slot
+        reports a clean accept tally and every frame is overwritten unread.
+
+        Nothing counts the pump-side refusal (``wait_accepted`` is a predicate,
+        not a publish path), which is why this failure presented as "the child
+        never publishes" for a long time.
+        """
+        current = self._metadata.expected_binding(self.camera_id)
+        if current is None or current == self._binding:
+            return
+        previous = self._binding
+        self._binding = current
+        LOGGER.info(
+            "native policy pump rebound after source rebuild: camera_id=%s "
+            "generation %d->%d epoch %d->%d",
+            current.camera_id,
+            previous.source_generation,
+            current.source_generation,
+            previous.stream_epoch,
+            current.stream_epoch,
+        )
+
     def run(self) -> None:
         token = self._metadata.subscribe(self._binding)
         while not self._stop.is_set():
             try:
                 frame = self._metadata.wait_accepted(token, timeout_sec=0.5)
             except TimeoutError:
+                self._rebind_if_source_was_rebuilt()
+                token = AcceptanceToken(self._binding, token.native_publish_sequence)
                 continue
             token = AcceptanceToken(self._binding, frame.native_publish_sequence)
             if self._canary_telemetry is not None:
@@ -84,6 +118,7 @@ class NativePolicyPump:
                     frame.source_time_ns,
                     frame.native_publish_sequence,
                 )
+            self._diagnostics.record_native_detection_attempt(self.camera_id)
             try:
                 self._process(frame)
             except (ChildControlError, OSError, ValueError, RuntimeError):

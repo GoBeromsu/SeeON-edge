@@ -13,6 +13,11 @@ namespace {
 constexpr std::array<char, 4> kMagic{'S', 'A', 'U', '1'};
 constexpr std::uint8_t kAccessUnit = 1;
 constexpr std::uint8_t kGap = 2;
+
+std::size_t envelope_bytes(const AuEnvelope& envelope) {
+  return envelope.camera.size() + envelope.unit.parser_caps.size() +
+         envelope.unit.payload.size() + envelope.unit.codec_data.size();
+}
 #pragma pack(push, 1)
 struct Header {
   std::array<char, 4> magic;
@@ -120,15 +125,77 @@ AuSender::AuSender(int descriptor, std::size_t max_items, std::size_t max_bytes)
 AuSender::~AuSender() { stop(); }
 
 bool AuSender::enqueue(AuEnvelope envelope) {
-  const auto size = envelope.camera.size() + envelope.unit.parser_caps.size() +
-                    envelope.unit.payload.size() + envelope.unit.codec_data.size();
+  const auto size = envelope_bytes(envelope);
   std::lock_guard lock{mutex_};
   if (stopped_) return false;
-  if (gap_.has_value() || size > kMaxAuFrameBytes || size > max_bytes_ ||
-      envelope.camera.size() > UINT16_MAX || envelope.unit.parser_caps.size() > UINT16_MAX ||
-      queue_.size() >= max_items_ || bytes_ + size > max_bytes_) {
+  // Validity limits are absolute: an envelope that cannot legally be framed is
+  // refused outright and is never eligible for reservation, because a reserved
+  // unit is later emitted as an ordinary access unit and would otherwise
+  // bypass the very limit that rejected it.
+  // Identity fields that overflow the wire's uint16 lengths cannot be encoded
+  // even as a gap marker, so such an envelope is dropped outright below.
+  const bool identity_too_long = envelope.camera.size() > UINT16_MAX ||
+                                 envelope.unit.parser_caps.size() > UINT16_MAX;
+  const bool invalid = size > kMaxAuFrameBytes || size > max_bytes_ || identity_too_long;
+  const auto existing = transitions_.find(envelope.camera);
+  // No ordering barrier is needed for a camera with a pending reservation:
+  // run() sends the reservation before anything in queue_, re-checking on
+  // every wake, so a unit admitted now always follows it on the wire.
+  const bool congested =
+      gap_.has_value() || queue_.size() >= max_items_ || bytes_ + size > max_bytes_;
+  if (invalid || congested) {
     ++dropped_;
-    if (!gap_.has_value()) gap_ = std::move(envelope);
+    // A unit that opens a stream epoch is reserved rather than destroyed, but
+    // only when it is legally framable and was refused for congestion. A
+    // reservation is later emitted as an ORDINARY access unit, so admitting an
+    // invalid one here would bypass the limit that rejected it.
+    //
+    // Held per camera and keyed by (generation, epoch) so a higher generation
+    // wins even though its epoch restarts at 1 - this sender is shared by every
+    // camera, so a scalar epoch comparison could not express that. Delivering
+    // it as an ordinary unit is what makes it effective: the receiver adopts an
+    // epoch from a normal sequence-1 unit and discards gap markers before
+    // adoption.
+    if (!invalid && envelope.sequence == 1) {
+      const bool newer =
+          existing == transitions_.end() ||
+          std::make_pair(envelope.generation, envelope.epoch) >
+              std::make_pair(existing->second.generation, existing->second.epoch);
+      // Budget the projected total AFTER replacement. Charging the newcomer
+      // before crediting the reservation it replaces would reject a newer
+      // transition that plainly fits, and it would then fall through to the
+      // gap slot - which the receiver discards before adoption, reintroducing
+      // exactly the stranding this reservation exists to prevent.
+      std::size_t replaced = 0;
+      if (existing != transitions_.end()) replaced = envelope_bytes(existing->second);
+      // Reservations need their own allowance, not a share of the queue's.
+      // A transition is refused precisely BECAUSE the queue is full or its
+      // bytes are exhausted, so budgeting it against the same total would make
+      // it unreservable in exactly the situation the reservation exists for.
+      //
+      // The allowance is deliberately small - an eighth of the aggregate - so
+      // queued bytes plus reserved bytes are capped at max_bytes_ * 9/8 rather
+      // than the 2x a second full budget would permit. That is a bound on
+      // those two pools only: gap_, the envelope the sender has popped and is
+      // still writing, and its encoded copy are all uncharged, so it is not a
+      // whole-sender ceiling. And fitting within the 1/8 makes a transition
+      // ELIGIBLE, not guaranteed: the allowance is aggregate across cameras
+      // and may already be consumed, and reservation still depends on the
+      // refusal and newness conditions above.
+      const std::size_t transition_allowance = max_bytes_ / 8;
+      const std::size_t projected = transition_bytes_ - replaced + size;
+      if (newer && projected <= transition_allowance) {
+        transition_bytes_ = projected;
+        transitions_[envelope.camera] = std::move(envelope);
+        ready_.notify_one();
+        return false;
+      }
+      if (!newer) {
+        ready_.notify_one();
+        return false;
+      }
+    }
+    if (!gap_.has_value() && !identity_too_long) gap_ = std::move(envelope);
     ready_.notify_one();
     return false;
   }
@@ -144,12 +211,25 @@ void AuSender::run() {
     bool gap = false;
     {
       std::unique_lock lock{mutex_};
-      ready_.wait(lock, [this] { return stopped_ || gap_.has_value() || !queue_.empty(); });
-      if (stopped_ && !gap_.has_value() && queue_.empty()) return;
-      if (!queue_.empty()) {
+      ready_.wait(lock, [this] {
+        return stopped_ || gap_.has_value() || !queue_.empty() || !transitions_.empty();
+      });
+      if (stopped_ && !gap_.has_value() && queue_.empty() && transitions_.empty()) return;
+      if (!transitions_.empty()) {
+        // First, ahead of the queue and the gap, and as an ordinary unit: the
+        // receiver adopts an epoch from a normal sequence-1 access unit, never
+        // from a gap marker. A reservation exists because the sender is
+        // congested, so draining it only once the queue empties starves that
+        // camera for as long as the other twelve keep the queue non-empty.
+        // Units of the superseded epoch still queued behind it are dropped by
+        // the receiver as debris, which is what they are.
+        const auto first = transitions_.begin();
+        envelope = std::move(first->second);
+        transition_bytes_ -= envelope_bytes(envelope);
+        transitions_.erase(first);
+      } else if (!queue_.empty()) {
         envelope = std::move(queue_.front());
-        bytes_ -= envelope.camera.size() + envelope.unit.parser_caps.size() +
-                  envelope.unit.payload.size() + envelope.unit.codec_data.size();
+        bytes_ -= envelope_bytes(envelope);
         queue_.pop_front();
       } else {
         envelope = std::move(*gap_);
@@ -162,6 +242,8 @@ void AuSender::run() {
       stopped_ = true;
       queue_.clear();
       gap_.reset();
+      transitions_.clear();
+      transition_bytes_ = 0;
       return;
     }
   }

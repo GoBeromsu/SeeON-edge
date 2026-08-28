@@ -17,6 +17,13 @@ class PacketTruncationReason(StrEnum):
     CONFIGURATION_CHANGED = "CONFIGURATION_CHANGED"
     TIMESTAMP_DISCONTINUITY = "TIMESTAMP_DISCONTINUITY"
     RING_CLOSED = "RING_CLOSED"
+    # The trigger names a different stream epoch than the packet ring is
+    # holding. This is an inter-plane skew, not a missing keyframe: the
+    # perception plane advances its epoch before the AU ring does, so a clip
+    # request can arrive labelled with an epoch the ring has not adopted yet.
+    # Reporting it as KEYFRAME_UNAVAILABLE made the manifest undiagnosable,
+    # because that code is shared with four unrelated conditions.
+    STREAM_EPOCH_MISMATCH = "STREAM_EPOCH_MISMATCH"
 
 
 @dataclass(frozen=True, slots=True)
