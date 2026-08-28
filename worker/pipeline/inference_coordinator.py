@@ -164,15 +164,15 @@ class CapabilityInferenceCoordinator:
         if not selected:
             return 0
         self._cursor = (start + scanned) % len(lanes)
-        buckets: dict[tuple[int, int], list[tuple[_CameraLane, FramePacket]]] = {}
-        for lane, packet in selected:
-            self._telemetry.observe_geometry(
-                camera_id=lane.camera_id, geometry=(packet.width, packet.height)
-            )
-            buckets.setdefault((packet.height, packet.width), []).append((lane, packet))
         pending = {id(packet): packet for _lane, packet in selected}
         published = 0
         try:
+            buckets: dict[tuple[int, int], list[tuple[_CameraLane, FramePacket]]] = {}
+            for lane, packet in selected:
+                self._telemetry.observe_geometry(
+                    camera_id=lane.camera_id, geometry=(packet.width, packet.height)
+                )
+                buckets.setdefault((packet.height, packet.width), []).append((lane, packet))
             for geometry, items in buckets.items():
                 started_at = self._clock()
                 try:
@@ -212,10 +212,12 @@ class CapabilityInferenceCoordinator:
                         "pose work item failed: error=%s geometry=%sx%s cameras=%s",
                         type(error).__name__, *geometry, cameras,
                     )
-        except FatalAcceleratorError:
+        finally:
+            # Any exit that leaves a packet un-published and un-released would leak
+            # its lease: telemetry failures, a fatal accelerator error, or a
+            # BaseException (KeyboardInterrupt/SystemExit) unwinding the thread.
             for packet in pending.values():
                 packet.release()
-            raise
         return published
 
     def _forward(self, frames: Sequence[FramePacket]) -> tuple[RunnerResult, ...]:
