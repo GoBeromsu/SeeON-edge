@@ -328,20 +328,61 @@ gh run download <edge-images run id> -n "edge-ml-image-refs-<sha>"
 Record the deployed tuple as one atomic receipt:
 
 ```
-(ml-api image digest, ml-worker image digest, LSTM bundle SHA-256)
+(ml-worker image digest,
+ fall/lstm/model.pt sha256=889075695884742475b9713e3b86ba67085bb96979b64c51756ea3fd715ab57a,
+ fall/lstm/metadata.upstream.json sha256=c0870223db642f9e773256ff90a52d9c3021aaf4e6981281d6e69772003b0f66,
+ fall/lstm/metadata.yaml sha256=3f6aca78bf535d02873c753cd0600510bde8860d698af32479505d3856e3d509,
+ fall/lstm/arch.json sha256=541100998c5627be4126dc3aed63a1546fc5f5a4862ceb9b1041de57e83de43b,
+ fall.v1, fall.policy.v1, [30,51])
 ```
 
-Read all three values back from the running deployment and the admitted model
-bundle; each must exactly equal the sealed receipt before declaring the
-deployment healthy. The active tuple remains LSTM, `fall.v1`, `fall.policy.v1`,
-with temporal input `[30,51]`; a dark candidate is not an active module or
-policy.
+This is a flat, shipped LSTM artifact set, not a synthetic "bundle SHA-256".
+`model.pt` and `metadata.upstream.json` are the pinned artifacts in
+`worker/tools/fetch_models/manifest.json`; `metadata.yaml` and `arch.json` are
+the byte-identified sidecars that the fetcher installs alongside them. Read
+the running worker reference and all four files back exactly as follows, and
+compare the output to the receipt before declaring the deployment healthy:
 
-Rollback replaces the API image, worker image, and LSTM bundle reference
-together with the previous recorded tuple. Do not roll back only one image or
-only the bundle. Never delete content-addressed model bundles, and never use
-`docker compose down -v`: retention is required for an atomic rollback to the
-previous LSTM tuple.
+```sh
+dc() {
+  docker compose --env-file .env.edge.prod -f compose.edge.yaml -f compose.edge.nvidia.yaml "$@"
+}
+worker_id="$(dc ps -q ml-worker)"
+test -n "$worker_id"
+docker inspect --format 'ml-worker image: {{.Config.Image}}' "$worker_id"
+dc run --rm --no-deps --entrypoint python ml-worker -c '
+import hashlib
+from pathlib import Path
+for path in (
+    Path("/app/models/fall/lstm/model.pt"),
+    Path("/app/models/fall/lstm/metadata.upstream.json"),
+    Path("/app/models/fall/lstm/metadata.yaml"),
+    Path("/app/models/fall/lstm/arch.json"),
+):
+    print(f"{path.relative_to('/app/models')} sha256={hashlib.sha256(path.read_bytes()).hexdigest()}")
+'
+```
+
+The active contract remains LSTM, `fall.v1`, `fall.policy.v1`, and temporal
+input `[30,51]`. A content-addressed GRU candidate remains dark and inert: it
+is not an active module or policy and is never part of this receipt.
+
+For rollback, use the previous **worker image** and the complete previous flat
+LSTM artifact/sidecar receipt as one atomic tuple. Fetch with that worker image,
+read the tuple back, then recreate only `ml-worker`:
+
+```sh
+PREVIOUS_WORKER_IMAGE='ghcr.io/seniorailab/eldercare-fall-ml/ml-worker@sha256:<previous-digest>'
+ML_WORKER_IMAGE="$PREVIOUS_WORKER_IMAGE" dc pull ml-worker
+ML_WORKER_IMAGE="$PREVIOUS_WORKER_IMAGE" dc run --rm --no-deps edge-model-fetch
+ML_WORKER_IMAGE="$PREVIOUS_WORKER_IMAGE" dc up -d --no-deps --force-recreate ml-worker
+```
+
+Run the readback block again with `ML_WORKER_IMAGE="$PREVIOUS_WORKER_IMAGE"`
+in its environment. Do not restart `ml-api` or any other service. Never use
+`docker compose down -v`, delete model files or content-addressed candidates,
+or hand-edit the model volume: retention and `edge-model-fetch` are required
+for an atomic rollback.
 
 ## Runtime enrollment and topology
 

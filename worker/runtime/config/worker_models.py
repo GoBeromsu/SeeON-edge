@@ -87,6 +87,7 @@ class FallCandidateBundleConfig(BaseModel):
 
     models_root: Path
     desired: DesiredModelBundle
+    observed_worker_image_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
 
     @field_validator("models_root")
     @classmethod

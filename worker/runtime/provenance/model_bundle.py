@@ -34,6 +34,10 @@ _IDENTITY_FIELDS: Final = (
     "restart",
     "worker",
 )
+_RUNTIME_IDENTITY_FIELDS: Final = ("worker", "config", "restart")
+_STATIC_IDENTITY_FIELDS: Final = tuple(
+    field for field in _IDENTITY_FIELDS if field not in _RUNTIME_IDENTITY_FIELDS
+)
 
 
 class ModelBundleAdmissionError(RuntimeError):
@@ -56,7 +60,7 @@ class DesiredModelBundle:
                 "desired identities must contain exactly the required fields"
             )
         _canonical_json(identities)
-        object.__setattr__(self, "identities", MappingProxyType(identities))
+        object.__setattr__(self, "identities", _freeze(identities))
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,7 +71,74 @@ class ModelBundleProof:
     applied: Mapping[str, object]
 
 
-def admit_model_bundle(models_root: Path, desired: DesiredModelBundle) -> ModelBundleProof:
+@dataclass(frozen=True, slots=True)
+class RuntimeModelObservations:
+    worker_image_digest: str
+    config_revision: str
+    restart_revision: str
+
+    def __post_init__(self) -> None:
+        for value in (self.worker_image_digest, self.config_revision, self.restart_revision):
+            if _BUNDLE_RE.fullmatch(value) is None:
+                raise ModelBundleAdmissionError("runtime observation identity is invalid")
+
+    @property
+    def identities(self) -> Mapping[str, str]:
+        return MappingProxyType(
+            {
+                "worker": self.worker_image_digest,
+                "config": self.config_revision,
+                "restart": self.restart_revision,
+            }
+        )
+
+
+def desired_model_bundle_from_selection_document(raw: object) -> DesiredModelBundle:
+    """Parse the frozen G001 desired selection document without importing tools."""
+    if not isinstance(raw, Mapping) or raw.get("schema_version") != 1:
+        raise ModelBundleAdmissionError("selection document schema mismatch")
+    bundle_path = raw.get("bundle_path")
+    bundle_sha256 = raw.get("bundle_payload_digest")
+    if bundle_path != f"bundles/{bundle_sha256}" or not isinstance(bundle_sha256, str):
+        raise ModelBundleAdmissionError("selection document bundle path mismatch")
+    dataset = raw.get("dataset_publication")
+    if not isinstance(dataset, Mapping):
+        raise ModelBundleAdmissionError("selection document dataset is missing")
+    try:
+        identities = {
+            "dataset": dataset["payload_digest"],
+            "evaluation": raw["evaluation_receipt_digest"],
+            "field": raw["field_evaluation_receipt_digest"],
+            "seed": raw["selected_deployment_seed"],
+            "rule": raw["selected_deployment_seed_rule_digest"],
+            "calibration": raw["calibration_digest"],
+            "conformance": raw["conformance_digest"],
+            "class": raw["class_order_digest"],
+            "input": raw["input_contract_digest"],
+            "policy": raw["fall_policy_v2_digest"],
+            "config": raw["config_revision"],
+            "restart": raw["restart_revision"],
+            "worker": raw["worker_image_digest"],
+        }
+    except KeyError as exc:
+        raise ModelBundleAdmissionError("selection document identity is missing") from exc
+    return DesiredModelBundle(bundle_sha256, identities)
+
+
+def runtime_revision_digest(kind: str, integer: int) -> str:
+    if (
+        not isinstance(kind, str)
+        or not kind
+        or not isinstance(integer, int)
+        or isinstance(integer, bool)
+    ):
+        raise ModelBundleAdmissionError("runtime revision input is invalid")
+    return hashlib.sha256(_canonical_json({"kind": kind, "revision": integer}).encode()).hexdigest()
+
+
+def admit_model_bundle(
+    models_root: Path, desired: DesiredModelBundle, observations: RuntimeModelObservations
+) -> ModelBundleProof:
     """Verify one published bundle without mutating it or selecting an alternative.
 
     Call this before model construction/warmup.  Any failed comparison is fatal.
@@ -97,28 +168,27 @@ def admit_model_bundle(models_root: Path, desired: DesiredModelBundle) -> ModelB
     identities = payload.get("identities")
     if not isinstance(identities, dict):
         raise ModelBundleAdmissionError("bundle identities missing")
-    for field in _IDENTITY_FIELDS:
+    for field in _STATIC_IDENTITY_FIELDS:
         if identities.get(field) != desired.identities[field]:
             raise ModelBundleAdmissionError(f"{field} identity mismatch")
-    if set(identities) != set(_IDENTITY_FIELDS):
+    if set(identities) != set(_STATIC_IDENTITY_FIELDS):
         raise ModelBundleAdmissionError("bundle identities contain unknown fields")
     _validate_bundle_identity(document, desired.bundle_sha256)
     observed_members = _verify_members(root, members)
     _verify_exact_tree(root, {"manifest.json", *observed_members})
-    observed = MappingProxyType(
+    frozen_static = _freeze(dict(identities))
+    observed = _freeze(
         {
             "bundle_sha256": desired.bundle_sha256,
             "members": tuple(observed_members),
-            "identities": MappingProxyType(dict(identities)),
+            "identities": frozen_static,
         }
     )
-    # Applied is derived exclusively from desired state, never from a bundle claim.
-    applied = MappingProxyType(
-        {
-            "bundle_sha256": desired.bundle_sha256,
-            "identities": MappingProxyType(dict(desired.identities)),
-        }
-    )
+    applied_identities = {**dict(identities), **observations.identities}
+    for field in _IDENTITY_FIELDS:
+        if applied_identities[field] != desired.identities[field]:
+            raise ModelBundleAdmissionError(f"{field} identity mismatch")
+    applied = _freeze({"bundle_sha256": desired.bundle_sha256, "identities": applied_identities})
     return ModelBundleProof(observed=observed, applied=applied)
 
 
@@ -253,9 +323,20 @@ def _canonical_json(value: object) -> str:
         raise ModelBundleAdmissionError("bundle manifest contains non-JSON values") from exc
 
 
+def _freeze(value: object) -> object:
+    if isinstance(value, Mapping):
+        return MappingProxyType({key: _freeze(member) for key, member in value.items()})
+    if isinstance(value, (list, tuple)):
+        return tuple(_freeze(member) for member in value)
+    return value
+
+
 __all__ = [
     "DesiredModelBundle",
     "ModelBundleAdmissionError",
     "ModelBundleProof",
+    "RuntimeModelObservations",
     "admit_model_bundle",
+    "desired_model_bundle_from_selection_document",
+    "runtime_revision_digest",
 ]

@@ -163,7 +163,9 @@ from worker.runtime.provenance import (
 from worker.runtime.provenance.environment import collect_runtime_environment_facts
 from worker.runtime.provenance.model_bundle import (
     ModelBundleProof,
+    RuntimeModelObservations,
     admit_model_bundle,
+    runtime_revision_digest,
 )
 from worker.runtime.state_dir import resolve_state_dir
 from worker.runtime.telemetry.runtime_diagnostics import WorkerDiagnostics
@@ -1430,25 +1432,31 @@ class WorkerRuntime:
             return
         if self.config.models.box_source != "pose":
             raise RuntimeError("fall candidate bundle requires box_source=pose")
-        self._candidate_admission = admit_model_bundle(candidate.models_root, candidate.desired)
+        self._candidate_admission = admit_model_bundle(
+            candidate.models_root,
+            candidate.desired,
+            RuntimeModelObservations(
+                worker_image_digest=candidate.observed_worker_image_digest,
+                config_revision=runtime_revision_digest("config", self.config.version),
+                restart_revision=runtime_revision_digest("restart", self._restart_generation),
+            ),
+        )
         self._log_fall_candidate_startup(self._candidate_admission)
 
     def _log_fall_candidate_startup(self, admission: ModelBundleProof | None) -> None:
         configured = self.config.models.fall
+        desired = (
+            "none" if admission is None else self.config.models.candidate.desired.bundle_sha256
+        )
+        observed = "none" if admission is None else str(admission.observed["bundle_sha256"])
+        match = admission is not None and observed == desired
         LOGGER.info(
-            "fall candidate startup telemetry",
-            extra={
-                "desired": None if admission is None else self.config.models.candidate.desired,
-                "observed": None if admission is None else admission.observed,
-                "match": False
-                if admission is None
-                else admission.observed["bundle_sha256"]
-                == self.config.models.candidate.desired.bundle_sha256,
-                "active_fall_type": None if configured is None else configured.type,
-                "active_module": "fall.v1",
-                "active_policy": "fall.policy.v1",
-                "candidate_status": "disabled",
-            },
+            "fall candidate startup desired=%s observed=%s match=%s "
+            "active=%s/fall.v1/fall.policy.v1 candidate=disabled",
+            desired,
+            observed,
+            match,
+            "none" if configured is None else configured.type,
         )
 
     def _initialize_nvidia_media_plane(self, boot: BootContext) -> SharedComponentGraph:

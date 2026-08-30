@@ -96,6 +96,14 @@ def test_pose_bbox56_fixture_rules_and_native_parity() -> None:
             (*keypoints[:-1], (float("nan"), 1, 0.9)), (20, 10, 180, 90), 200, 100
         )
     )
+    assert all(
+        value == 0.0
+        for value in pose_bbox56_row(((1, 1), *keypoints[1:]), (20, 10, 180, 90), 200, 100)
+    )
+    assert all(
+        value == 0.0
+        for value in pose_bbox56_row(((1, 1, 0.9, 99), *keypoints[1:]), (20, 10, 180, 90), 200, 100)
+    )
 
 
 def test_pose_bbox56_tracks_are_sorted() -> None:

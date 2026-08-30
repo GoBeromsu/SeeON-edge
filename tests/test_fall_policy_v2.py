@@ -4,7 +4,11 @@ from __future__ import annotations
 
 import pytest
 
-from worker.domains.fall import FallPolicyDeciderV2, FallV2Probabilities
+from worker.domains.fall import (
+    FallPolicyDeciderV2,
+    FallV2Probabilities,
+    FallWindowClassifierV2,
+)
 
 
 def _probability(transition: float, fallen: float = 0.0) -> FallV2Probabilities:
@@ -59,10 +63,64 @@ def test_recovery_requires_five_joint_clear_scores() -> None:
 def test_eviction_reconnects_with_a_new_generation() -> None:
     decider = FallPolicyDeciderV2(camera_id="camera", facility_id="facility")
     _update(decider, _probability(0.0), 0)
+    decider.update({}, (), frame_index=44, time_sec=44.0)
+    assert decider.generation_for(7) == 0
     decider.update({}, (), frame_index=45, time_sec=45.0)
+    assert decider.generation_for(7) is None
 
     _update(decider, _probability(0.0), 46)
     assert decider.generation_for(7) == 1
+
+
+def test_nonlive_track_cannot_confirm_an_alert_and_reconnect_before_ttl_keeps_generation() -> None:
+    decider = FallPolicyDeciderV2(camera_id="camera", facility_id="facility")
+    for frame in range(2):
+        assert _update(decider, _probability(0.7), frame) == ()
+
+    # A score associated with an absent identity is not a camera-OR candidate.
+    assert decider.update({7: _probability(1.0)}, (), frame_index=2, time_sec=2.0) == ()
+    assert decider.generation_for(7) == 0
+
+    event = _update(decider, _probability(0.7), 3)[0]
+    assert event.identity == "7:0"
+
+
+class _RecordingModel:
+    def __init__(self) -> None:
+        self.windows: list[tuple[tuple[float, ...], ...]] = []
+
+    def predict(self, features: object) -> FallV2Probabilities:
+        assert isinstance(features, tuple)
+        self.windows.append(features)
+        return _probability(0.0)
+
+
+def test_missing_live_coasts_until_exact_ttl_then_reconnect_zero_fills_fresh_window() -> None:
+    model = _RecordingModel()
+    classifier = FallWindowClassifierV2(model)
+    row = (0.25,) * 56
+
+    for _ in range(30):
+        classifier.update({7: row}, (7,))
+    assert model.windows[-1] == (row,) * 30
+
+    # The first 44 absent ticks preserve the same resident and coast its row.
+    for _ in range(44):
+        classifier.update({}, ())
+    assert classifier.probabilities_for(7) is not None
+    classifier.update({7: None}, (7,))
+    assert model.windows[-1] == (row,) * 30
+
+    # Tick 45 after that reconnect is the exact expiration boundary.
+    for _ in range(45):
+        classifier.update({}, ())
+    assert classifier.probabilities_for(7) is None
+
+    # The reused number has no row history. Its new window is zero-filled and
+    # therefore cannot carry a stale transition onset from the prior resident.
+    for _ in range(30):
+        classifier.update({7: None}, (7,))
+    assert model.windows[-1] == ((0.0,) * 56,) * 30
 
 
 def test_release_reopens_only_the_exact_failed_onset() -> None:

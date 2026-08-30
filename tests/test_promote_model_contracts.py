@@ -2,6 +2,10 @@ from __future__ import annotations
 
 import pytest
 
+from worker.runtime.provenance.model_bundle import (
+    desired_model_bundle_from_selection_document,
+    runtime_revision_digest,
+)
 from worker.tools.promote_model.contracts import (
     ContractError,
     canonical_digest,
@@ -107,6 +111,16 @@ def test_canonical_identity_is_key_order_independent() -> None:
     assert canonical_json_bytes({"b": 2, "a": 1}) == b'{"a":1,"b":2}'
     assert canonical_digest({"b": 2, "a": 1}) == canonical_digest({"a": 1, "b": 2})
     assert parse_model_selection(desired_raw()).digest == canonical_digest(desired_raw())
+
+
+def test_runtime_admission_selection_parser_preserves_g001_identity_projection() -> None:
+    desired = desired_model_bundle_from_selection_document(desired_raw())
+    assert desired.bundle_sha256 == BUNDLE_PAYLOAD_DIGEST
+    assert desired.identities["dataset"] == DATASET_PAYLOAD_DIGEST
+    assert desired.identities["worker"] == WORKER_IMAGE_DIGEST
+    assert desired.identities["config"] == CONFIG_REVISION_DIGEST
+    assert desired.identities["restart"] == RESTART_REVISION_DIGEST
+    assert runtime_revision_digest("restart", 4) == runtime_revision_digest("restart", 4)
 
 
 @pytest.mark.parametrize(

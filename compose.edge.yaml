@@ -170,6 +170,11 @@ services:
       # export is a dashboard runtime setting and is never projected here.
       RELAY_TOKEN: ${API_EDGE_RELAY_TOKEN:?edge worker requires a deployment-unique relay token}
       ML_WORKER_PROFILE: ${ML_WORKER_PROFILE:?set cpu-host|nvidia|intel-vaapi-host|apple-mps-host (legacy cpu|igpu|mps accepted)}
+      # A sealed candidate is image-owned and remains dark. Empty selection
+      # leaves admission disabled; no relay payload can select it.
+      FALL_CANDIDATE_SELECTION_PATH: ${FALL_CANDIDATE_SELECTION_PATH:-}
+      FALL_CANDIDATE_MODELS_ROOT: ${FALL_CANDIDATE_MODELS_ROOT:-/app/models}
+      ML_WORKER_IMAGE: ${ML_WORKER_IMAGE:?ML_WORKER_IMAGE is required in edge prod}
       # Same RTSP destination policy as ml-api (worker probe path).
       ML_RTSP_ALLOW_PRIVATE_DESTINATIONS: ${ML_RTSP_ALLOW_PRIVATE_DESTINATIONS:-0}
       ML_RTSP_ALLOW_LOCAL_DESTINATIONS: ${ML_RTSP_ALLOW_LOCAL_DESTINATIONS:-0}

@@ -67,6 +67,11 @@ class FallPolicyDeciderV2:
         self._evict_stale(live_ids, frame_index)
         candidates: list[tuple[float, int, BusinessEvent]] = []
         for track_id in sorted(live_ids):
+            existing_state = self._states.get(track_id)
+            if existing_state is not None:
+                # Classifier warming/stride gaps are still a live tracker
+                # observation. They must not turn into a synthetic reconnect.
+                existing_state.last_seen_frame = frame_index
             probability = probabilities_by_track.get(track_id)
             if probability is None:
                 continue

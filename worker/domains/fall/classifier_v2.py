@@ -17,6 +17,8 @@ from worker.types import FallModelInput
 _WINDOW_FRAMES = 30
 _STRIDE_FRAMES = 5
 _ROW_WIDTH = 56
+_TRACK_TTL_FRAMES = 45
+_ZERO_ROW = (0.0,) * _ROW_WIDTH
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,6 +50,7 @@ class FallWindowClassifierV2:
     _buffers: dict[int, deque[tuple[float, ...]]] = field(default_factory=dict, init=False)
     _last_rows: dict[int, tuple[float, ...]] = field(default_factory=dict, init=False)
     _last_probabilities: dict[int, FallV2Probabilities] = field(default_factory=dict, init=False)
+    _last_seen_frames: dict[int, int] = field(default_factory=dict, init=False)
     _frame_counter: int = field(default=0, init=False)
 
     def update(
@@ -57,28 +60,32 @@ class FallWindowClassifierV2:
     ) -> Mapping[int, FallV2Probabilities]:
         """Append one row per live track and return predictions due this tick.
 
-        A missing row coasts by repeating that track's previous valid row.  An
+        A missing row coasts by repeating that track's previous valid row. A
+        temporarily absent track also coasts through the shared 45-frame TTL:
+        it retains its window but is not returned as a live prediction. An
         unknown or malformed row cannot become model input and is treated like a
-        missing row.  Tracks outside ``live_track_ids`` are discarded here; the
-        policy owns their longer-lived TTL and generation state.
+        missing row. After exact TTL expiry all classifier state is evicted, so
+        a reused numeric id starts a zero-filled fresh window.
         """
+        self._frame_counter += 1
         live_ids = frozenset(live_track_ids)
         for track_id in live_ids:
             row = _valid_row(rows_by_track.get(track_id))
             if row is not None:
                 self._last_rows[track_id] = row
             else:
-                row = self._last_rows.get(track_id)
-            if row is not None:
-                self._buffer_for(track_id).append(row)
+                row = self._last_rows.get(track_id, _ZERO_ROW)
+            self._buffer_for(track_id).append(row)
+            self._last_seen_frames[track_id] = self._frame_counter
 
         for track_id in tuple(self._buffers):
-            if track_id not in live_ids:
-                del self._buffers[track_id]
-                self._last_rows.pop(track_id, None)
-                self._last_probabilities.pop(track_id, None)
+            if track_id in live_ids:
+                continue
+            if self._frame_counter - self._last_seen_frames[track_id] >= _TRACK_TTL_FRAMES:
+                self._evict(track_id)
+                continue
+            self._buffer_for(track_id).append(self._last_rows.get(track_id, _ZERO_ROW))
 
-        self._frame_counter += 1
         if self._frame_counter % _STRIDE_FRAMES:
             return {}
 
@@ -108,6 +115,12 @@ class FallWindowClassifierV2:
             buffer = deque(maxlen=_WINDOW_FRAMES)
             self._buffers[track_id] = buffer
         return buffer
+
+    def _evict(self, track_id: int) -> None:
+        del self._buffers[track_id]
+        self._last_rows.pop(track_id, None)
+        self._last_probabilities.pop(track_id, None)
+        del self._last_seen_frames[track_id]
 
 
 def _valid_row(value: Sequence[float] | None) -> tuple[float, ...] | None:

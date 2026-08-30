@@ -8,17 +8,13 @@ import math
 import struct
 from pathlib import Path
 
+from worker.domains.fall.pose_bbox56 import PoseBbox56Track, pose_bbox56_tracks
+
 _EDGE_ROOT = Path(__file__).resolve().parents[1]
 _POSE_FIXTURE = _EDGE_ROOT / "tests" / "fixtures_fall_pose_bbox56_v1.json"
 _POLICY_FIXTURE = _EDGE_ROOT / "tests" / "fixtures_fall_policy_v2.json"
 _POSE_SHA256 = "72d7e911acf39c7183bcdf10fad3c066dd93b7a45b7d28bef1950e1bf85b3a9c"
 _POLICY_SHA256 = "9234acebd07f7494bc107d0471eff52ae08cb46b75ecfa47d9c709f4e16ea1b7"
-_SIBLING_POSE_FIXTURES = (
-    Path(
-        "/home/seniorsailab/beomsukoh/seeon-dataset-pipeline-private/fixtures/pose-bbox56-v1.json"
-    ),
-    Path("/home/seniorsailab/beomsukoh/seeon-model-training-private/fixtures/pose-bbox56-v1.json"),
-)
 
 
 def _canonical_bytes(value: object) -> bytes:
@@ -43,14 +39,53 @@ def _float32(value: float) -> float:
     return struct.unpack("!f", struct.pack("!f", value))[0]
 
 
-def test_pose_fixture_is_canonical_and_identical_across_available_roots() -> None:
+def test_pose_fixture_is_canonical() -> None:
     payload, fixture = _load(_POSE_FIXTURE)
 
     assert payload == _canonical_bytes(fixture)
     assert hashlib.sha256(payload).hexdigest() == _POSE_SHA256
-    for sibling in _SIBLING_POSE_FIXTURES:
-        if sibling.exists():
-            assert sibling.read_bytes() == payload
+
+
+def test_pose_fixture_raw_cases_match_executable_transform() -> None:
+    _, fixture = _load(_POSE_FIXTURE)
+    tolerance = float(fixture["comparison"]["absolute_tolerance"])
+    for case in fixture["raw_cases"]:
+        frame = case["frame"]
+        tracks = tuple(
+            PoseBbox56Track(
+                track_id=person["track_id"],
+                keypoints=tuple(
+                    tuple(float(value) for value in point) for point in person["keypoints"]
+                ),
+                bbox=(
+                    None
+                    if person["bbox"] is None
+                    else tuple(float(value) for value in person["bbox"])
+                ),
+            )
+            for person in case["persons"]
+        )
+        actual = pose_bbox56_tracks(tracks, frame["width"], frame["height"])
+        expected_rows = case.get("expected_rows")
+        if expected_rows is not None:
+            assert [track_id for track_id, _ in actual] == [
+                expected["track_id"] for expected in expected_rows
+            ]
+            for (_, row), expected in zip(actual, expected_rows, strict=True):
+                assert len(row) == 56
+                assert all(
+                    abs(value - expected_value) <= tolerance
+                    for value, expected_value in zip(row, expected["row"], strict=True)
+                )
+        elif not tracks:
+            assert actual == ()
+        else:
+            expected_windows = case["expected_windows"]
+            for (_, row), expected in zip(actual, expected_windows, strict=True):
+                assert all(
+                    abs(value - expected_value) <= tolerance
+                    for value, expected_value in zip(row, expected["rows"][-1], strict=True)
+                )
 
 
 def test_pose_vector_contract_and_negative_cases() -> None:

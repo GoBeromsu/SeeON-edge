@@ -4,6 +4,7 @@ import math
 import struct
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
+from numbers import Real
 from typing import Final, TypeAlias
 
 COCO17_KEYPOINTS: Final = 17
@@ -38,6 +39,12 @@ def pose_bbox56_row(
     if len(keypoints) != COCO17_KEYPOINTS or len(bbox) != 4:
         return zero
     try:
+        if any(
+            len(point) != 3
+            or any(not isinstance(value, Real) or isinstance(value, bool) for value in point)
+            for point in keypoints
+        ):
+            return zero
         values = tuple(float(value) for point in keypoints for value in point)
         x1, y1, x2, y2 = (float(value) for value in bbox)
     except (TypeError, ValueError):
