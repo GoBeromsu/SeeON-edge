@@ -107,9 +107,19 @@ class UnknownFallModelTypeError(Exception):
     def __str__(self) -> str:
         known = ", ".join(self.known_types) if self.known_types else "(none registered)"
         return (
-            f"unknown fall model type {self.requested_type!r}; "
-            f"known fall model families: {known}"
+            f"unknown fall model type {self.requested_type!r}; known fall model families: {known}"
         )
+
+
+@dataclass(slots=True)
+class DisabledFallModelTypeError(Exception):
+    """Raised when a known-but-dark model family is requested for activation."""
+
+    requested_type: str
+
+    @override
+    def __str__(self) -> str:
+        return f"fall model type {self.requested_type!r} is registered but disabled"
 
 
 class FallModelFamilyRegistry:
@@ -117,16 +127,28 @@ class FallModelFamilyRegistry:
 
     def __init__(self) -> None:
         self._factories: dict[str, FallModelFactory] = {}
+        self._disabled_types: set[str] = set()
 
     def register(self, model_type: str, factory: FallModelFactory) -> None:
         if not model_type:
             raise ValueError("model_type must be non-empty")
+        if model_type in self._disabled_types:
+            raise ValueError(f"model_type {model_type!r} is disabled")
         self._factories[model_type] = factory
+
+    def register_disabled(self, model_type: str) -> None:
+        if not model_type:
+            raise ValueError("model_type must be non-empty")
+        if model_type in self._factories:
+            raise ValueError(f"model_type {model_type!r} is active")
+        self._disabled_types.add(model_type)
 
     def create(self, model_type: str, config: FallModelConfigLike, device: str) -> FallModel:
         return self.get_factory(model_type)(config, device)
 
     def get_factory(self, model_type: str) -> FallModelFactory:
+        if model_type in self._disabled_types:
+            raise DisabledFallModelTypeError(model_type)
         factory = self._factories.get(model_type)
         if factory is None:
             raise UnknownFallModelTypeError(model_type, self.types())
@@ -150,6 +172,7 @@ def default_fall_model_family_registry() -> FallModelFamilyRegistry:
     """Build the default registry: today, only the "lstm" family."""
     registry = FallModelFamilyRegistry()
     registry.register("lstm", _create_lstm_fall_model)
+    registry.register_disabled("gru")
     return registry
 
 
@@ -157,6 +180,7 @@ DEFAULT_FALL_MODEL_FAMILY_REGISTRY: Final = default_fall_model_family_registry()
 
 __all__ = [
     "DEFAULT_FALL_MODEL_FAMILY_REGISTRY",
+    "DisabledFallModelTypeError",
     "FallModelConfigLike",
     "FallModelFactory",
     "FallModelFamilyRegistry",

@@ -44,6 +44,7 @@ from worker.adapters.model import warmup_to_ready
 from worker.adapters.model.errors import FatalAcceleratorError
 from worker.adapters.model.fall_family_registry import (
     DEFAULT_FALL_MODEL_FAMILY_REGISTRY,
+    DisabledFallModelTypeError,
     UnknownFallModelTypeError,
 )
 from worker.domains import (
@@ -160,6 +161,13 @@ from worker.runtime.provenance import (
     build_applied_runtime_manifest,
 )
 from worker.runtime.provenance.environment import collect_runtime_environment_facts
+from worker.runtime.provenance.model_bundle import (
+    ModelBundleProof,
+    RuntimeModelObservations,
+    admit_model_bundle,
+    runtime_revision_digest,
+)
+from worker.runtime.provenance.store import AppliedRuntimeManifestStore
 from worker.runtime.state_dir import resolve_state_dir
 from worker.runtime.telemetry.runtime_diagnostics import WorkerDiagnostics
 from worker.runtime.telemetry.runtime_status_sender import (
@@ -952,6 +960,8 @@ class WorkerRuntime:
         self._nvidia_media_plane: NvidiaMediaPlane | None = None
         self._nvidia_plans: Mapping[str, CameraDetectionPlan] = MappingProxyType({})
         self._native_policy_pumps: tuple[NativePolicyPump, ...] = ()
+        self._candidate_admission: ModelBundleProof | None = None
+        self._dark_candidate_runner: object | None = None
 
     def _resolve_mjpeg_config(self) -> MjpegServerConfig:
         """Settle the live view's two switches into one answer.
@@ -1380,6 +1390,7 @@ class WorkerRuntime:
 
     def _initialize_models(self, boot: BootContext) -> SharedComponentGraph:
         self._boot = boot
+        self._admit_dark_fall_candidate()
         self.fault_handler = FaultHandler(
             boot.profile.name, hard_exit=self._hard_exit, state_dir=self._state_dir
         )
@@ -1414,6 +1425,69 @@ class WorkerRuntime:
                 bed=bed,
             )
         return graph
+
+    def _admit_dark_fall_candidate(self) -> None:
+        """Verify a dark candidate before any model warmup or camera starts."""
+        candidate = self.config.models.candidate
+        if candidate is None:
+            self._log_fall_candidate_startup(None)
+            return
+        if self.config.models.box_source != "pose":
+            raise RuntimeError("fall candidate bundle requires box_source=pose")
+        self._candidate_admission = admit_model_bundle(
+            candidate.models_root,
+            candidate.desired,
+            RuntimeModelObservations(
+                worker_image_digest=candidate.observed_worker_image_digest,
+                config_revision=runtime_revision_digest("config", self.config.version),
+                restart_revision=runtime_revision_digest("restart", self._restart_generation),
+            ),
+        )
+        self._dark_candidate_runner = self._construct_dark_candidate_runner(candidate)
+        self._log_fall_candidate_startup(self._candidate_admission)
+
+    def _construct_dark_candidate_runner(self, candidate: object) -> object:
+        """Construct the admitted GRU only as a dark readiness check."""
+        from worker.adapters.model.torch_gru_fall import GruFallRunner
+
+        models_root = candidate.models_root
+        desired = candidate.desired
+        runner = GruFallRunner.from_artifact_dir(
+            models_root / "bundles" / desired.bundle_sha256,
+            device="cpu",
+        )
+        runner.warmup()
+        manifest = runner.manifest
+        expected = desired.identities
+        class_identity = hashlib.sha256(
+            json.dumps(list(manifest.class_order), separators=(",", ":")).encode()
+        ).hexdigest()
+        actual = {
+            "class": class_identity,
+            "input": manifest.input_digest,
+            "policy": manifest.policy_digest,
+            "calibration": manifest.calibration_digest,
+            "conformance": manifest.conformance_digest,
+        }
+        if any(actual[key] != expected[key] for key in actual):
+            raise RuntimeError("dark GRU candidate manifest identities do not match admission")
+        return runner
+
+    def _log_fall_candidate_startup(self, admission: ModelBundleProof | None) -> None:
+        configured = self.config.models.fall
+        desired = (
+            "none" if admission is None else self.config.models.candidate.desired.bundle_sha256
+        )
+        observed = "none" if admission is None else str(admission.observed["bundle_sha256"])
+        match = admission is not None and observed == desired
+        LOGGER.info(
+            "fall candidate startup desired=%s observed=%s match=%s "
+            "active=%s/fall.v1/fall.policy.v1 candidate=disabled",
+            desired,
+            observed,
+            match,
+            "none" if configured is None else configured.type,
+        )
 
     def _initialize_nvidia_media_plane(self, boot: BootContext) -> SharedComponentGraph:
         """Compose native engines and the CPU-only temporal policy before sources."""
@@ -1539,7 +1613,7 @@ class WorkerRuntime:
             raise RuntimeError("fall model must be explicitly configured; refusing to boot")
         try:
             return DEFAULT_FALL_MODEL_FAMILY_REGISTRY.create(configured.type, configured, device)
-        except UnknownFallModelTypeError as exc:
+        except (DisabledFallModelTypeError, UnknownFallModelTypeError) as exc:
             raise RuntimeError(str(exc)) from exc
 
     def _warm_models(self) -> tuple[str, ...]:
@@ -1844,13 +1918,76 @@ class WorkerRuntime:
                 detector_version=DETECTOR_VERSION,
                 environment=self._environment_facts_factory(boot, self._build_revision),
                 edge_database_schema_version=EDGE_DATABASE_SCHEMA_VERSION,
+                dark_model_candidate=self._dark_model_candidate_manifest_content(),
+            )
+            AppliedRuntimeManifestStore(self._state_dir / "runtime-manifest").persist(
+                self._runtime_manifest,
+                boot_instance_id=self._boot_instance_id,
+                applied_at=datetime.now(UTC).isoformat(),
             )
         except Exception:  # noqa: BLE001 - provenance must not stop camera activation
             self._runtime_manifest = None
+            if self._candidate_admission is not None:
+                raise
             LOGGER.warning(
                 "runtime provenance could not be applied; continuing without it",
                 exc_info=True,
             )
+
+    def _dark_model_candidate_manifest_content(self) -> Mapping[str, object] | None:
+        """Project admitted dark-candidate proof only; never select it."""
+        admission = self._candidate_admission
+        candidate = self.config.models.candidate
+        if admission is None or candidate is None or candidate.desired.selection is None:
+            return None
+        observed = admission.observed
+        applied = admission.applied
+        members = observed.get("members")
+        receipts = observed.get("receipts")
+        identities = observed.get("identities")
+        applied_identities = applied.get("identities")
+        if (
+            not isinstance(members, tuple)
+            or not isinstance(receipts, tuple)
+            or not isinstance(identities, Mapping)
+            or not isinstance(applied_identities, Mapping)
+        ):
+            raise TypeError("admitted dark candidate proof is incomplete")
+        selection = candidate.desired.selection
+        return {
+            "desired_selection_digest": candidate.desired.selection.digest,
+            "observed": {
+                "bundle_sha256": observed["bundle_sha256"],
+                "member_set_sha256": hashlib.sha256(
+                    json.dumps(
+                        {"members": members, "receipts": receipts},
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode()
+                ).hexdigest(),
+                "static_identities": {
+                    "dataset": {
+                        "repo": selection.dataset_publication.hf_repo,
+                        "revision": selection.dataset_publication.hf_revision,
+                        "payload_digest": selection.dataset_publication.payload_digest,
+                    },
+                    "evaluation": selection.evaluation_receipt_digest,
+                    "field": selection.field_evaluation_receipt_digest,
+                    "seed": selection.selected_deployment_seed,
+                    "rule": selection.selected_deployment_seed_rule_digest,
+                    "calibration": selection.calibration_digest,
+                    "conformance": selection.conformance_digest,
+                    "class": selection.class_order_digest,
+                    "input": selection.input_contract_digest,
+                    "policy": selection.fall_policy_v2_digest,
+                },
+            },
+            "runtime_observations": {
+                key: applied_identities[key] for key in ("worker", "config", "restart")
+            },
+            "match": True,
+            "candidate_status": "disabled",
+        }
 
     def _append_built_camera(
         self,

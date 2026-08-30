@@ -8,6 +8,7 @@ fetch reproducible.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from collections.abc import Mapping
@@ -65,6 +66,54 @@ class Manifest:
     sources: Mapping[str, Source]
     artifacts: tuple[Artifact, ...]
     sidecars: tuple[str, ...]
+    bundles: tuple[Bundle, ...] = ()
+
+
+@dataclass(frozen=True)
+class Bundle:
+    """A content-addressed payload collection plus external receipt descriptors.
+
+    Loader-specific required member names are a runtime admission concern; this
+    generic provisioning schema preserves every declared payload artifact.
+    """
+
+    sha256: str
+    members: tuple[Artifact, ...]
+    payload: Mapping[str, object]
+    receipts: tuple[Artifact, ...] = ()
+
+    @property
+    def canonical_payload(self) -> str:
+        return canonical_json(
+            {
+                "members": [
+                    {"path": member.path, "sha256": member.sha256, "size": member.size}
+                    for member in self.members
+                ],
+                "payload": self.payload,
+            }
+        )
+
+    @property
+    def manifest_bytes(self) -> bytes:
+        return (
+            canonical_json(
+                {
+                    "bundle_sha256": self.sha256,
+                    "members": [
+                        {"path": member.path, "sha256": member.sha256, "size": member.size}
+                        for member in self.members
+                    ],
+                    "payload": self.payload,
+                    "receipts": [
+                        {"path": receipt.path, "sha256": receipt.sha256, "size": receipt.size}
+                        for receipt in self.receipts
+                    ],
+                    "schema_version": 1,
+                }
+            )
+            + "\n"
+        ).encode()
 
 
 def _require(mapping: Mapping[str, object], key: str, where: str) -> object:
@@ -124,6 +173,55 @@ def _parse_artifact(index: int, raw: object, sources: Mapping[str, Source]) -> A
     )
 
 
+def canonical_json(value: object) -> str:
+    """Return the sole serialization accepted for content-addressed payloads."""
+    try:
+        return json.dumps(
+            value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False
+        )
+    except (TypeError, ValueError) as exc:
+        raise ManifestError(f"bundle payload must be JSON data: {exc}") from exc
+
+
+def _parse_bundle(index: int, raw: object, sources: Mapping[str, Source]) -> Bundle:
+    where = f"bundles[{index}]"
+    if not isinstance(raw, Mapping):
+        raise ManifestError(f"{where}: must be an object")
+    sha256 = _require(raw, "sha256", where)
+    if not isinstance(sha256, str) or _SHA256_RE.fullmatch(sha256) is None:
+        raise ManifestError(f"{where}: sha256 must be 64 lowercase hex characters")
+    raw_members = _require(raw, "members", where)
+    if not isinstance(raw_members, list) or not raw_members:
+        raise ManifestError(f"{where}: members must be a non-empty list")
+    members = tuple(
+        _parse_artifact(member_index, member, sources)
+        for member_index, member in enumerate(raw_members)
+    )
+    paths = [member.path for member in members]
+    raw_receipts = raw.get("receipts", [])
+    if not isinstance(raw_receipts, list):
+        raise ManifestError(f"{where}: receipts must be a list")
+    if raw_receipts == [] and "receipts" in raw:
+        raise ManifestError(f"{where}: receipts must be non-empty when present")
+    receipts = tuple(
+        _parse_artifact(receipt_index, receipt, sources)
+        for receipt_index, receipt in enumerate(raw_receipts)
+    )
+    receipt_paths = [receipt.path for receipt in receipts]
+    if len(paths) != len(set(paths)) or len(receipt_paths) != len(set(receipt_paths)):
+        raise ManifestError(f"{where}: duplicate member paths")
+    if set(paths) & set(receipt_paths):
+        raise ManifestError(f"{where}: receipt paths overlap payload members")
+    payload = _require(raw, "payload", where)
+    if not isinstance(payload, Mapping):
+        raise ManifestError(f"{where}: payload must be an object")
+    bundle = Bundle(sha256=sha256, members=members, payload=dict(payload), receipts=receipts)
+    actual = hashlib.sha256(bundle.canonical_payload.encode()).hexdigest()
+    if actual != sha256:
+        raise ManifestError(f"{where}: sha256 does not match canonical members and payload")
+    return bundle
+
+
 def parse_manifest(raw: object) -> Manifest:
     if not isinstance(raw, Mapping):
         raise ManifestError("manifest must be a JSON object")
@@ -150,7 +248,14 @@ def parse_manifest(raw: object) -> Manifest:
     duplicates = sorted({path for path in paths if paths.count(path) > 1})
     if duplicates:
         raise ManifestError(f"manifest: duplicate destination paths {duplicates}")
-    return Manifest(sources=sources, artifacts=artifacts, sidecars=sidecars)
+    raw_bundles = raw.get("bundles", [])
+    if not isinstance(raw_bundles, list):
+        raise ManifestError("manifest: bundles must be a list")
+    bundles = tuple(_parse_bundle(index, value, sources) for index, value in enumerate(raw_bundles))
+    bundle_hashes = [bundle.sha256 for bundle in bundles]
+    if len(bundle_hashes) != len(set(bundle_hashes)):
+        raise ManifestError("manifest: duplicate bundle identities")
+    return Manifest(sources=sources, artifacts=artifacts, sidecars=sidecars, bundles=bundles)
 
 
 def load_manifest(path: Path = MANIFEST_PATH) -> Manifest:

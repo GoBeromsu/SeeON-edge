@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
-from shared.events.delivery_queue import DeliveryQueue, EventEntry
 from worker.runtime.provenance.models import (
     AppliedRuntimeManifest,
     AppliedRuntimeManifestError,
@@ -21,7 +21,7 @@ class AppliedRuntimeRecord:
 
 @dataclass(frozen=True, slots=True)
 class ProvenanceRetentionPolicy:
-    """Backend owns canonical manifest retention; retained for constructor shape."""
+    """Bounded local retention for immutable applied-manifest records."""
 
     max_boots: int = 512
     max_boots_per_camera: int = 128
@@ -35,14 +35,16 @@ DEFAULT_PROVENANCE_RETENTION_POLICY = ProvenanceRetentionPolicy()
 
 
 class AppliedRuntimeManifestStore:
-    """Publish applied manifests for backend-owned canonical retention."""
+    """Persist local provenance without sending it through the alert queue."""
 
     def __init__(
         self,
         database_path: Path,
         retention: ProvenanceRetentionPolicy = DEFAULT_PROVENANCE_RETENTION_POLICY,
     ) -> None:
-        self.directory = database_path.parent / "delivery-queue"
+        self.directory = database_path.parent / "runtime-provenance"
+        self._latest_path = database_path.parent / "applied-runtime-manifest.json"
+        self._retention = retention
 
     def persist(
         self,
@@ -53,48 +55,89 @@ class AppliedRuntimeManifestStore:
     ) -> AppliedRuntimeRecord:
         if not boot_instance_id or not applied_at:
             raise AppliedRuntimeManifestError("boot instance and applied time must be resolved")
-        entry = _manifest_entry(manifest, boot_instance_id, applied_at)
-        result = DeliveryQueue(self.directory).try_admit(entry)
-        if not result.accepted:
-            raise AppliedRuntimeManifestError(
-                f"runtime manifest queue admission failed: {result.fault}"
-            )
-        return AppliedRuntimeRecord(manifest.sha256, boot_instance_id, applied_at)
-
-
-def _manifest_entry(
-    manifest: AppliedRuntimeManifest, boot_instance_id: str, applied_at: str
-) -> EventEntry:
-    payload = json.dumps(
-        {
+        record = {
             "applied_at": applied_at,
             "boot_instance_id": boot_instance_id,
             "canonical_json": manifest.canonical_json,
-            "manifest_schema_version": manifest.schema_version,
             "manifest_sha256": manifest.sha256,
-        },
+        }
+        payload = _canonical_bytes(record)
+        self.directory.mkdir(parents=True, mode=0o700, exist_ok=True)
+        _fsync_directory(self.directory.parent)
+        record_path = (
+            self.directory / f"{hashlib.sha256(boot_instance_id.encode()).hexdigest()}.json"
+        )
+        if record_path.exists():
+            try:
+                existing = record_path.read_bytes()
+            except OSError as exc:
+                raise AppliedRuntimeManifestError("runtime manifest record is unavailable") from exc
+            if existing != payload:
+                raise AppliedRuntimeManifestError(
+                    "runtime manifest boot identity conflicts with prior record"
+                )
+        else:
+            _atomic_write(record_path, payload)
+        self._write_latest_readback(payload)
+        self._prune_records()
+        return AppliedRuntimeRecord(manifest.sha256, boot_instance_id, applied_at)
+
+    def _write_latest_readback(self, payload: bytes) -> None:
+        _atomic_write(self._latest_path, payload)
+
+    def _prune_records(self) -> None:
+        records = sorted(
+            self.directory.glob("*.json"),
+            key=_record_order,
+            reverse=True,
+        )
+        for path in records[self._retention.max_boots :]:
+            path.unlink()
+        _fsync_directory(self.directory)
+
+
+def _canonical_bytes(value: object) -> bytes:
+    return json.dumps(
+        value,
         sort_keys=True,
         separators=(",", ":"),
-        ensure_ascii=True,
-    ).encode()
-    identity = hashlib.sha256(
-        boot_instance_id.encode()
-    ).hexdigest()
-    return EventEntry(
-        edge_event_id=f"manifest-{identity}",
-        event_type="runtime.manifest",
-        detected_at=_safe_text(applied_at),
-        camera_id="runtime",
-        facility_id="local",
-        decision_trace=b"",
-        values=payload,
-    )
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
 
 
-def _safe_text(value: str) -> str:
-    if value.isascii() and value.isprintable():
-        return value
-    return hashlib.sha256(value.encode()).hexdigest()
+def _record_order(path: Path) -> tuple[str, str]:
+    try:
+        content = json.loads(path.read_bytes())
+        applied_at = content.get("applied_at")
+    except (OSError, ValueError, TypeError):
+        applied_at = ""
+    return (applied_at if isinstance(applied_at, str) else "", path.name)
+
+
+def _atomic_write(path: Path, payload: bytes) -> None:
+    path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        os.chmod(path, 0o600)
+        _fsync_directory(path.parent)
+    except OSError:
+        temporary.unlink(missing_ok=True)
+        raise
+
+
+def _fsync_directory(directory: Path) -> None:
+    descriptor = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
 
 
 __all__ = [

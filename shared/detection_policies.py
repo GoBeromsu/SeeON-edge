@@ -28,6 +28,46 @@ class FallPolicyV1:
 
 
 @dataclass(frozen=True, slots=True)
+class FallPolicyV2:
+    """Frozen inactive fall-candidate temporal policy, not a policy document."""
+
+    transition_threshold: float = 0.7
+    transition_votes: int = 3
+    transition_window: int = 5
+    fallen_threshold: float = 0.8
+    fallen_consecutive: int = 3
+    recovery_transition_max: float = 0.4
+    recovery_fallen_max: float = 0.5
+    recovery_consecutive: int = 5
+    track_ttl_frames: int = 45
+    cooldown_frames: int = 90
+
+    def __post_init__(self) -> None:
+        for name in (
+            "transition_threshold",
+            "fallen_threshold",
+            "recovery_transition_max",
+            "recovery_fallen_max",
+        ):
+            value = getattr(self, name)
+            if not isinstance(value, float) or not math.isfinite(value) or not 0.0 <= value <= 1.0:
+                raise ValueError(f"{name} must be a finite probability in [0, 1]")
+        for name in (
+            "transition_votes",
+            "transition_window",
+            "fallen_consecutive",
+            "recovery_consecutive",
+            "track_ttl_frames",
+            "cooldown_frames",
+        ):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                raise ValueError(f"{name} must be a positive integer")
+        if self.transition_votes > self.transition_window:
+            raise ValueError("transition_votes must not exceed transition_window")
+
+
+@dataclass(frozen=True, slots=True)
 class BedExitPolicyV1:
     min_containment: float
     hold_frames: int

@@ -11,6 +11,9 @@ from __future__ import annotations
 
 import hashlib
 import os
+import shutil
+import stat
+import tempfile
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -22,7 +25,7 @@ from worker.tools.fetch_models.http_source import (
     RetryPolicy,
     SourceError,
 )
-from worker.tools.fetch_models.manifest import SIDECAR_ROOT, Artifact, Manifest
+from worker.tools.fetch_models.manifest import SIDECAR_ROOT, Artifact, Bundle, Manifest
 
 HF_TOKEN_ENV: Final = "HF_TOKEN"
 PART_SUFFIX: Final = ".part"
@@ -166,6 +169,107 @@ def place_sidecar(relative: str, root: Path, sidecar_root: Path = SIDECAR_ROOT) 
     return FetchResult(relative, "sidecar-written", expected)
 
 
+def _fsync_directory(path: Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _write_bytes(path: Path, data: bytes) -> None:
+    with path.open("wb") as handle:
+        handle.write(data)
+        handle.flush()
+        os.fsync(handle.fileno())
+
+
+def _verify_bundle_tree(bundle: Bundle, directory: Path) -> None:
+    """Reject every shape other than the exact, immutable published tree."""
+    info = directory.lstat()
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+        raise VerificationError(f"bundle {bundle.sha256}: unsafe bundle root")
+    artifacts = (*bundle.members, *bundle.receipts)
+    expected_files = {artifact.path for artifact in artifacts} | {"manifest.json"}
+    expected_directories = {
+        parent.as_posix()
+        for artifact in artifacts
+        for parent in Path(artifact.path).parents
+        if parent != Path(".")
+    }
+    found_files: set[str] = set()
+    found_directories: set[str] = set()
+    for path in directory.rglob("*"):
+        relative = path.relative_to(directory).as_posix()
+        info = path.lstat()
+        if stat.S_ISLNK(info.st_mode) or not (path.is_dir() or stat.S_ISREG(info.st_mode)):
+            raise VerificationError(f"bundle {bundle.sha256}: unsafe member {relative}")
+        if stat.S_ISREG(info.st_mode):
+            found_files.add(relative)
+        else:
+            found_directories.add(relative)
+    if found_files != expected_files or found_directories != expected_directories:
+        expected_tree = (
+            f"files {sorted(expected_files)}, directories {sorted(expected_directories)}"
+        )
+        found_tree = f"files {sorted(found_files)}, directories {sorted(found_directories)}"
+        raise VerificationError(
+            f"bundle {bundle.sha256}: tree mismatch (expected {expected_tree}; got {found_tree})"
+        )
+    manifest = directory / "manifest.json"
+    if not manifest.is_file() or manifest.read_bytes() != bundle.manifest_bytes:
+        raise VerificationError(f"bundle {bundle.sha256}: manifest is not canonical")
+    for artifact in artifacts:
+        path = directory / artifact.path
+        if not _matches(path, artifact.size, artifact.sha256):
+            raise VerificationError(f"bundle {bundle.sha256}: member mismatch {artifact.path}")
+
+
+def fetch_bundle(
+    bundle: Bundle,
+    root: Path,
+    source: ByteSource,
+    *,
+    env: Mapping[str, str],
+    retry: RetryPolicy,
+    log: Callable[[str], None] = lambda _message: None,
+) -> FetchReport:
+    """Fetch a bundle into a private sibling, then atomically publish its tree."""
+    bundles_root = root / "bundles"
+    destination = bundles_root / bundle.sha256
+    if destination.exists() or destination.is_symlink():
+        _verify_bundle_tree(bundle, destination)
+        return FetchReport(
+            [
+                FetchResult(artifact.path, "present", artifact.sha256)
+                for artifact in (*bundle.members, *bundle.receipts)
+            ]
+        )
+
+    bundles_root.mkdir(parents=True, exist_ok=True)
+    staging = Path(tempfile.mkdtemp(prefix=f".{bundle.sha256}.", dir=bundles_root))
+    report = FetchReport()
+    try:
+        for member in bundle.members:
+            result = fetch_artifact(member, staging, source, env=env, retry=retry, log=log)
+            report.results.append(result)
+        for receipt in bundle.receipts:
+            result = fetch_artifact(receipt, staging, source, env=env, retry=retry, log=log)
+            report.results.append(result)
+        _write_bytes(staging / "manifest.json", bundle.manifest_bytes)
+        _verify_bundle_tree(bundle, staging)
+        for path in staging.rglob("*"):
+            if path.is_dir():
+                _fsync_directory(path)
+        _fsync_directory(staging)
+        os.replace(staging, destination)
+        _fsync_directory(bundles_root)
+    except BaseException:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
+    return report
+
+
 def fetch_all(
     manifest: Manifest,
     root: Path,
@@ -188,4 +292,9 @@ def fetch_all(
         result = place_sidecar(relative, root, sidecar_root)
         log(f"{result.outcome:16} {result.sha256}  {result.path}")
         report.results.append(result)
+    for bundle in manifest.bundles:
+        bundle_report = fetch_bundle(bundle, root, source, env=env, retry=retry, log=log)
+        for result in bundle_report.results:
+            log(f"{result.outcome:16} {result.sha256}  bundles/{bundle.sha256}/{result.path}")
+        report.results.extend(bundle_report.results)
     return report

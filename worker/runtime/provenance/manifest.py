@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping, Sequence
 from math import isfinite
 from types import MappingProxyType
@@ -33,6 +34,8 @@ BED_ZONE_COORDINATE_SCHEMA_VERSION = 1
 BED_ZONE_COORDINATE_SPACE = "source-image-pixels"
 SCHEDULE_INTERVAL_BASIS = "ingested-frame-index"
 _EFFECTIVE_DECODE_BACKENDS = frozenset({"cpu", "opencv", "nvdec", "vaapi"})
+_DATASET_REPOSITORY = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$")
+_DATASET_REVISION = re.compile(r"^[0-9a-f]{40}$")
 
 
 def build_applied_camera_state(
@@ -95,6 +98,7 @@ def build_applied_runtime_manifest(
     detector_version: str,
     environment: RuntimeEnvironmentFacts,
     edge_database_schema_version: int,
+    dark_model_candidate: Mapping[str, object] | None = None,
 ) -> AppliedRuntimeManifest:
     """Freeze only independently resolved state after profile, model, and policy gates."""
     if config_version < 0 or restart_generation < 0:
@@ -132,7 +136,102 @@ def build_applied_runtime_manifest(
             for camera in sorted(cameras, key=lambda camera: camera.camera_id)
         ],
     }
+    if dark_model_candidate is not None:
+        content["dark_model_candidate"] = _plain_dark_model_candidate(dark_model_candidate)
     return AppliedRuntimeManifest.from_content(content)
+
+
+def _plain_dark_model_candidate(candidate: Mapping[str, object]) -> dict[str, JsonValue]:
+    """Accept only the non-authoritative, digest-only dark-candidate proof."""
+    expected = {
+        "desired_selection_digest",
+        "observed",
+        "runtime_observations",
+        "match",
+        "candidate_status",
+    }
+    if set(candidate) != expected:
+        raise AppliedRuntimeManifestError("dark candidate proof has unexpected fields")
+    if candidate["candidate_status"] != "disabled" or candidate["match"] is not True:
+        raise AppliedRuntimeManifestError("dark candidate proof is not an admitted disabled match")
+    plain = _plain_json(candidate)
+    if not isinstance(plain, dict):
+        raise AppliedRuntimeManifestError("dark candidate proof is invalid")
+    for digest in (
+        plain["desired_selection_digest"],
+        plain["observed"]["bundle_sha256"],
+        plain["runtime_observations"]["worker"],
+        plain["runtime_observations"]["config"],
+        plain["runtime_observations"]["restart"],
+    ):
+        if not isinstance(digest, str):
+            raise AppliedRuntimeManifestError("dark candidate proof digest is invalid")
+        require_sha256(digest, "dark candidate proof")
+    observed = plain["observed"]
+    if not isinstance(observed, dict) or set(observed) != {
+        "bundle_sha256",
+        "member_set_sha256",
+        "static_identities",
+    }:
+        raise AppliedRuntimeManifestError("dark candidate observed proof is invalid")
+    require_sha256(observed["member_set_sha256"], "dark candidate member set")
+    static = observed["static_identities"]
+    if not isinstance(static, dict) or set(static) != {
+        "dataset",
+        "evaluation",
+        "field",
+        "seed",
+        "rule",
+        "calibration",
+        "conformance",
+        "class",
+        "input",
+        "policy",
+    }:
+        raise AppliedRuntimeManifestError("dark candidate static identities are invalid")
+    dataset = static["dataset"]
+    if not isinstance(dataset, dict) or set(dataset) != {"repo", "revision", "payload_digest"}:
+        raise AppliedRuntimeManifestError("dark candidate dataset identity is invalid")
+    if (
+        not isinstance(dataset["repo"], str)
+        or _DATASET_REPOSITORY.fullmatch(dataset["repo"]) is None
+        or not isinstance(dataset["revision"], str)
+        or _DATASET_REVISION.fullmatch(dataset["revision"]) is None
+    ):
+        raise AppliedRuntimeManifestError("dark candidate dataset identity is invalid")
+    require_sha256(dataset["payload_digest"], "dark candidate dataset payload")
+    if not isinstance(static["seed"], str) or not static["seed"]:
+        raise AppliedRuntimeManifestError("dark candidate seed identity is invalid")
+    for key in (
+        "evaluation",
+        "field",
+        "rule",
+        "calibration",
+        "conformance",
+        "class",
+        "input",
+        "policy",
+    ):
+        identity = static[key]
+        if not isinstance(identity, str):
+            raise AppliedRuntimeManifestError("dark candidate static identity is invalid")
+        require_sha256(identity, "dark candidate static identity")
+    return plain
+
+
+def _plain_json(value: object) -> JsonValue:
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, Mapping):
+        plain: dict[str, JsonValue] = {}
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise AppliedRuntimeManifestError("dark candidate proof key is invalid")
+            plain[key] = _plain_json(item)
+        return plain
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        return [_plain_json(item) for item in value]
+    raise AppliedRuntimeManifestError("dark candidate proof is not plain JSON")
 
 
 def _verified_component_identities(

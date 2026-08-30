@@ -14,6 +14,7 @@ from worker.domains.registry import DOMAIN_REGISTRY
 from worker.runtime.config.camera_models import CameraRuntimeConfig, RelayConfig
 from worker.runtime.config.domain_models import DomainsConfig
 from worker.runtime.config.errors import ConfigValidationError, WorkerConfigError
+from worker.runtime.provenance.model_bundle import DesiredModelBundle
 
 RELAY_ALERTS_PATH: Final = "/api/v1/relay/alerts"
 RELAY_HEARTBEAT_PATH: Final = "/api/v1/relay/heartbeat"
@@ -79,16 +80,40 @@ class FallModelConfig(BaseModel):
         return self
 
 
+class FallCandidateBundleConfig(BaseModel):
+    """A sealed dark-candidate bundle, never an active fall-model selection."""
+
+    model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True, extra="forbid")
+
+    models_root: Path
+    desired: DesiredModelBundle
+    observed_worker_image_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+    @field_validator("models_root")
+    @classmethod
+    def _expand_models_root(cls, value: Path) -> Path:
+        return Path(os.path.expanduser(str(value))).resolve()
+
+
 class WorkerModelsConfig(BaseModel):
     model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True, extra="forbid")
 
     fall: FallModelConfig | None = None
+    # Candidate admission only verifies the sealed bundle before camera
+    # activation. It does not select, construct, warm, or register GRU.
+    candidate: FallCandidateBundleConfig | None = None
     # Issue #44: which extraction module's boxes are authoritative for the
     # person bounding box consumed downstream. Explicit and defaulted (never
     # an implicit dict-insertion-order winner) -- "pose" only schedules and
     # provisions the pose model; "person" additionally schedules/provisions
     # the person model and its boxes take over in the merge stage.
     box_source: Literal["pose", "person"] = "pose"
+
+    @model_validator(mode="after")
+    def _validate_candidate_box_source(self) -> WorkerModelsConfig:
+        if self.candidate is not None and self.box_source != "pose":
+            raise ConfigValidationError("fall candidate bundle requires box_source=pose")
+        return self
 
 
 class DevMjpegConfig(BaseModel):
@@ -250,6 +275,7 @@ __all__ = [
     "ClipRecordingConfig",
     "ConfigValue",
     "DevMjpegConfig",
+    "FallCandidateBundleConfig",
     "FallModelConfig",
     "WorkerConfig",
     "WorkerConfigError",

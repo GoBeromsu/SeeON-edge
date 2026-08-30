@@ -323,6 +323,122 @@ gh run watch "$(gh run list --workflow=release.yml --event=push --limit 1 --json
 gh run watch "$(gh run list --workflow=edge-images.yml --event=workflow_dispatch --limit 1 --json databaseId -q '.[0].databaseId')"
 gh run download <edge-images run id> -n "edge-ml-image-refs-<sha>"
 ```
+### Exact readback and rollback
+
+Record the deployed tuple as one atomic receipt:
+
+```
+(ml-worker image digest,
+ fall/lstm/model.pt sha256=889075695884742475b9713e3b86ba67085bb96979b64c51756ea3fd715ab57a,
+ fall/lstm/metadata.upstream.json sha256=c0870223db642f9e773256ff90a52d9c3021aaf4e6981281d6e69772003b0f66,
+ fall/lstm/metadata.yaml sha256=3f6aca78bf535d02873c753cd0600510bde8860d698af32479505d3856e3d509,
+ fall/lstm/arch.json sha256=541100998c5627be4126dc3aed63a1546fc5f5a4862ceb9b1041de57e83de43b,
+ fall.v1, fall.policy.v1, [30,51])
+```
+
+This is a flat, shipped LSTM artifact set, not a synthetic "bundle SHA-256".
+`model.pt` and `metadata.upstream.json` are the pinned artifacts in
+`worker/tools/fetch_models/manifest.json`; `metadata.yaml` and `arch.json` are
+the byte-identified sidecars that the fetcher installs alongside them. Read
+the configured worker reference separately from the container's immutable image
+ID, then attest that ID's repository digest and source revision. Compare all of
+them to the sealed receipt before declaring the deployment healthy:
+
+```sh
+dc() {
+  docker compose --env-file .env.edge.prod -f compose.edge.yaml -f compose.edge.nvidia.yaml "$@"
+}
+worker_id="$(dc ps -q ml-worker)"
+test -n "$worker_id"
+configured_ref="$(docker inspect --format '{{.Config.Image}}' "$worker_id")"
+image_id="$(docker inspect --format '{{.Image}}' "$worker_id")"
+printf 'ml-worker configured reference: %s\nml-worker immutable image ID: %s\n' \
+  "$configured_ref" "$image_id"
+docker image inspect --format \
+  'RepoDigests={{json .RepoDigests}} source_revision={{index .Config.Labels "org.opencontainers.image.revision"}}' \
+  "$image_id"
+dc run --rm --no-deps --entrypoint python ml-worker -c '
+import hashlib
+from pathlib import Path
+for path in (
+    Path("/app/models/fall/lstm/model.pt"),
+    Path("/app/models/fall/lstm/metadata.upstream.json"),
+    Path("/app/models/fall/lstm/metadata.yaml"),
+    Path("/app/models/fall/lstm/arch.json"),
+):
+    print(f"{path.relative_to('/app/models')} sha256={hashlib.sha256(path.read_bytes()).hexdigest()}")
+'
+```
+
+The worker has dual mounts of the same model volume. `/app/models` preserves
+the active flat LSTM artifacts; `/models` is reserved for candidate bundles at
+`/models/bundles/<digest>`. This Phase 6 image intentionally ships neither
+`/app/model-selection.json` nor a real candidate bundle because G004/G005
+human/Hugging Face evidence is blocked. Dark support is unreachable by default
+and no candidate receipt is fabricated.
+
+A later G005-green sealed image may bake both the image-owned
+`/app/model-selection.json` and its real bundle. Its bundle payload is limited
+to explicit payload members. Evaluation and field receipts are externally
+hashed, non-recursive receipts: verify their recorded digests as identities,
+but do not walk them as nested bundle payloads. That later image must fail
+closed before assignment if LSTM admission or dark-GRU admission fails, then
+perform `admit → construct → warm → persist` while the candidate remains
+disabled. Candidate persistence failure is fatal. It does not activate, retain,
+or promote the candidate automatically.
+
+Runtime provenance is dedicated local state, never an alert payload. Each boot
+writes an immutable mode-0600 record under
+`/var/lib/seeon-state/runtime-provenance/`; an atomic mode-0600 latest readback
+is published at `/var/lib/seeon-state/applied-runtime-manifest.json`. Runtime
+provenance never enters the alert `DeliveryQueue` or relay. Verify the
+directory, immutable per-boot record, latest readback, and their hashes:
+
+```sh
+dc exec -T ml-worker python -c '
+import hashlib
+import json
+from pathlib import Path
+state = Path("/var/lib/seeon-state")
+records = state / "runtime-provenance"
+latest = state / "applied-runtime-manifest.json"
+assert records.is_dir()
+assert records.stat().st_mode & 0o777 == 0o700
+assert latest.stat().st_mode & 0o777 == 0o600
+record_paths = tuple(records.glob("*.json"))
+assert record_paths
+for path in (*record_paths, latest):
+    assert path.stat().st_mode & 0o777 == 0o600
+    receipt = json.loads(path.read_text())
+    canonical = receipt["canonical_json"]
+    assert hashlib.sha256(canonical.encode()).hexdigest() == receipt["manifest_sha256"]
+    assert json.dumps(json.loads(canonical), separators=(",", ":"), sort_keys=True) == canonical
+print(latest.read_text())
+'
+```
+
+The active contract remains LSTM, `fall.v1`, `fall.policy.v1`, and temporal
+input `[30,51]`. A future admitted content-addressed GRU candidate remains
+dark and inert: it is not an active module or policy and is never part of the
+LSTM receipt.
+
+For rollback, use the previous **worker image** and the complete previous flat
+LSTM artifact/sidecar receipt as one atomic tuple. Fetch with that worker image,
+read the tuple back, then recreate only `ml-worker`:
+
+```sh
+PREVIOUS_WORKER_IMAGE='ghcr.io/seniorailab/eldercare-fall-ml/ml-worker@sha256:<previous-digest>'
+ML_WORKER_IMAGE="$PREVIOUS_WORKER_IMAGE" dc pull ml-worker
+ML_WORKER_IMAGE="$PREVIOUS_WORKER_IMAGE" dc run --rm --no-deps edge-model-fetch
+ML_WORKER_IMAGE="$PREVIOUS_WORKER_IMAGE" dc up -d --no-deps --force-recreate ml-worker
+```
+
+Run the readback block again with `ML_WORKER_IMAGE="$PREVIOUS_WORKER_IMAGE"`
+in its environment. Do not restart `ml-api` or any other service. Never use
+`docker compose down -v`, delete model files or content-addressed candidates,
+or hand-edit the model volume: retention and `edge-model-fetch` are required
+for an atomic rollback. This procedure does not retain or promote candidates
+automatically. Candidate activation and Phase 7 are outside this runbook.
 
 ## Runtime enrollment and topology
 

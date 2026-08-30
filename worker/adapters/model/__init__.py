@@ -6,6 +6,13 @@ from worker.adapters.model.fall_family_registry import (
     UnknownFallModelTypeError,
     default_fall_model_family_registry,
 )
+from worker.adapters.model.gru_manifest import (
+    GRU_CLASS_ORDER,
+    GRU_INPUT_DIM,
+    GRU_SCHEMA_VERSION,
+    GRU_WINDOW,
+    GruFallManifest,
+)
 from worker.adapters.model.in_process import InProcessServingClient
 from worker.adapters.model.registry import (
     DEFAULT_REGISTRY,
@@ -20,6 +27,7 @@ from worker.adapters.model.sklearn_fall import (
     ModelInputError,
     ModelMetadata,
 )
+from worker.adapters.model.torch_gru_fall import GruFallRunner
 from worker.adapters.model.torch_lstm_fall import (
     CURRENT_PREPROCESSING_IDENTITY,
     CURRENT_SCHEMA_VERSION,
@@ -52,12 +60,18 @@ __all__ = [
     "DEFAULT_FALL_MODEL_FAMILY_REGISTRY",
     "DEFAULT_REGISTRY",
     "DEFAULT_WARMUP_FRAME",
+    "GRU_CLASS_ORDER",
+    "GRU_INPUT_DIM",
+    "GRU_SCHEMA_VERSION",
+    "GRU_WINDOW",
     "LEGACY_PREPROCESSING_IDENTITY",
     "LEGACY_SCHEMA_VERSION",
     "FallDetector",
     "FallModelConfigLike",
     "FallModelFactory",
     "FallModelFamilyRegistry",
+    "GruFallManifest",
+    "GruFallRunner",
     "InProcessServingClient",
     "LstmFallManifest",
     "LstmFallRunner",

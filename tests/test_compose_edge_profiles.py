@@ -148,7 +148,13 @@ def test_compose_and_example_external_keys_cannot_drift_from_inventory() -> None
     inventoried_service_environment = {
         entry["name"] for entry in entries if entry.get("service_environment") is True
     }
-    assert service_environment == inventoried_service_environment
+    # The worker receives its own release reference solely as an observed
+    # image identity for a fixed image-owned candidate selection; it is not a
+    # mutable environment authority and therefore is not an inventory service
+    # setting.
+    assert service_environment == inventoried_service_environment | {"ML_WORKER_IMAGE"}
+    worker_image = next(entry for entry in entries if entry["name"] == "ML_WORKER_IMAGE")
+    assert worker_image["category"] == "deployment artifact"
 
 
 def test_compose_profile_topology_is_nvidia_opt_in() -> None:
