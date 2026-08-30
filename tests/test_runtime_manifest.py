@@ -11,7 +11,6 @@ import yaml
 from backend.app.edge_db.bootstrap import bootstrap_database
 from backend.app.edge_db.compatibility import CURRENT_SCHEMA_RANGE
 from shared.detection_policies import default_policy_bundle, make_effective_policy
-from shared.events.delivery_queue import DeliveryQueue
 from worker.domains import DETECTION_MODULE_REGISTRY
 from worker.domains.module_definition import SharedComponentIdentity
 from worker.pipeline.output.evidence.evidence_stager import DurableEvidenceStager
@@ -551,7 +550,7 @@ def test_nvidia_manifest_requires_verified_driver_and_runtime_facts() -> None:
         )
 
 
-def test_manifest_queue_preserves_opaque_camera_identity_bytes(
+def test_local_manifest_record_preserves_opaque_camera_identity_bytes(
     tmp_path: Path,
 ) -> None:
     camera_id = " \u2007camera/\u1100\u1161/e\u0301 "
@@ -570,13 +569,11 @@ def test_manifest_queue_preserves_opaque_camera_identity_bytes(
         boot_instance_id="boot:opaque-camera",
         applied_at="2026-08-13T00:00:00Z",
     )
-    entries = tuple(DeliveryQueue(database.parent / "delivery-queue").entries())
-    assert len(entries) == 1
-    import base64
-
-    values = json.loads(base64.b64decode(str(entries[0]["values_b64"])))
-    queued_camera = json.loads(values["canonical_json"])["cameras"][0]["camera_id"]
-    assert queued_camera.encode() == camera_id.encode()
+    record = next((database.parent / "runtime-provenance").glob("*.json"))
+    persisted_camera = json.loads(json.loads(record.read_text())["canonical_json"])["cameras"][0][
+        "camera_id"
+    ]
+    assert persisted_camera.encode() == camera_id.encode()
 
 
 def test_store_publishes_idempotent_manifest_envelopes_without_runtime_ddl(tmp_path: Path) -> None:
@@ -586,12 +583,19 @@ def test_store_publishes_idempotent_manifest_envelopes_without_runtime_ddl(tmp_p
     store = AppliedRuntimeManifestStore(database)
 
     first = store.persist(manifest, boot_instance_id="boot:one", applied_at="2026-08-13T00:00:00Z")
+    repeated = store.persist(
+        manifest, boot_instance_id="boot:one", applied_at="2026-08-13T00:00:00Z"
+    )
     second = store.persist(manifest, boot_instance_id="boot:two", applied_at="2026-08-13T00:01:00Z")
 
-    assert first.manifest_sha256 == second.manifest_sha256 == manifest.sha256
-    entries = tuple(DeliveryQueue(database.parent / "delivery-queue").entries())
-    assert len(entries) == 2
-    assert {entry["kind"] for entry in entries} == {"EVENT"}
+    assert (
+        first.manifest_sha256
+        == repeated.manifest_sha256
+        == second.manifest_sha256
+        == manifest.sha256
+    )
+    assert len(tuple((database.parent / "runtime-provenance").glob("*.json"))) == 2
+    assert not (database.parent / "delivery-queue").exists()
     with sqlite3.connect(database) as connection:
         assert connection.execute("PRAGMA user_version").fetchone() == (
             CURRENT_SCHEMA_RANGE.maximum,
@@ -609,7 +613,7 @@ def test_store_publishes_idempotent_manifest_envelopes_without_runtime_ddl(tmp_p
         assert (database.parent / "applied-runtime-manifest.json").stat().st_mode & 0o777 == 0o600
 
 
-def test_manifest_publish_contains_canonical_manifest_reference(tmp_path: Path) -> None:
+def test_manifest_readback_contains_canonical_manifest_reference(tmp_path: Path) -> None:
     database = tmp_path / "edge.sqlite3"
     bootstrap_database(database)
     manifest = _manifest()
@@ -618,10 +622,7 @@ def test_manifest_publish_contains_canonical_manifest_reference(tmp_path: Path) 
         boot_instance_id="boot:event",
         applied_at="2026-08-13T00:00:00Z",
     )
-    import base64
-
-    entry = next(DeliveryQueue(database.parent / "delivery-queue").entries())
-    values = json.loads(base64.b64decode(str(entry["values_b64"])))
+    values = json.loads((database.parent / "applied-runtime-manifest.json").read_text())
     assert values["manifest_sha256"] == manifest.sha256
     assert values["canonical_json"] == manifest.canonical_json
 
@@ -647,7 +648,7 @@ def test_store_refuses_boot_identity_reuse_for_different_manifest(tmp_path: Path
     store = AppliedRuntimeManifestStore(database)
     store.persist(_manifest(), boot_instance_id="boot:fixed", applied_at="2026-08-13T00:00:00Z")
 
-    with pytest.raises(AppliedRuntimeManifestError, match="queue admission failed: conflict"):
+    with pytest.raises(AppliedRuntimeManifestError, match="boot identity conflicts"):
         store.persist(
             _manifest(cameras=_cameras(threshold=0.72)),
             boot_instance_id="boot:fixed",

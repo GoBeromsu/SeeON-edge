@@ -313,14 +313,22 @@ def test_publish_runbook_records_flat_lstm_rollback_artifacts() -> None:
         "closed before assignment",
         "admit → construct → warm → persist",
         "while the candidate remains",
-        "The durable queue remains canonical.",
+        "Candidate persistence failure is fatal.",
+        "Runtime provenance is dedicated local state, never an alert payload.",
+        "/var/lib/seeon-state/runtime-provenance/",
+        "immutable mode-0600 record",
+        "atomic mode-0600 latest readback",
         "/var/lib/seeon-state/applied-runtime-manifest.json",
+        "provenance never enters the alert `DeliveryQueue` or relay.",
+        "records.stat().st_mode & 0o777 == 0o700",
+        "assert record_paths",
         "st_mode & 0o777 == 0o600",
         'receipt["manifest_sha256"]',
         "canonical_json",
         "Candidate activation and Phase 7 are outside this runbook.",
     ):
         assert assertion in runbook
+    assert "The durable queue remains canonical." not in runbook
 
 
 def test_unadmitted_candidate_never_projects_to_the_durable_manifest() -> None:

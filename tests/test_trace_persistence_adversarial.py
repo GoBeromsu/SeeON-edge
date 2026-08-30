@@ -111,7 +111,6 @@ def _policy(**changes: object) -> TraceRetentionPolicy:
     return replace(TraceRetentionPolicy.testing(), **values)
 
 
-
 def test_sqlite_contention_waits_without_losing_accepted_event_trace(tmp_path: Path) -> None:
     database = tmp_path / "edge.sqlite3"
     _seed(database, ("boot-a", "camera-a"))
@@ -324,7 +323,7 @@ def test_stop_drains_accepted_work_and_rejects_every_later_submission(tmp_path: 
     assert writer.stats().rejected_frames == 1
 
 
-def test_provenance_history_is_published_for_backend_retention(tmp_path: Path) -> None:
+def test_provenance_history_is_retained_locally_within_bound(tmp_path: Path) -> None:
     database = tmp_path / "edge.sqlite3"
     store = AppliedRuntimeManifestStore(
         database,
@@ -337,7 +336,6 @@ def test_provenance_history_is_published_for_backend_retention(tmp_path: Path) -
             applied_at=f"2026-08-13T00:00:0{index}Z",
         )
 
-    entries = tuple(DeliveryQueue(tmp_path / "delivery-queue").entries())
-    assert len(entries) == 3
-    assert {entry["event_type"] for entry in entries} == {"runtime.manifest"}
-    assert all(entry["values_b64"] for entry in entries)
+    records = tuple((tmp_path / "runtime-provenance").glob("*.json"))
+    assert len(records) == 2
+    assert not (tmp_path / "delivery-queue").exists()

@@ -384,25 +384,36 @@ hashed, non-recursive receipts: verify their recorded digests as identities,
 but do not walk them as nested bundle payloads. That later image must fail
 closed before assignment if LSTM admission or dark-GRU admission fails, then
 perform `admit → construct → warm → persist` while the candidate remains
-disabled. It does not activate, retain, or promote the candidate automatically.
+disabled. Candidate persistence failure is fatal. It does not activate, retain,
+or promote the candidate automatically.
 
-The durable queue remains canonical. Read
-`/var/lib/seeon-state/applied-runtime-manifest.json` and verify its mode is
-0600, its `manifest_sha256` matches the SHA-256 of its `canonical_json`, and
-that `canonical_json` is canonical JSON:
+Runtime provenance is dedicated local state, never an alert payload. Each boot
+writes an immutable mode-0600 record under
+`/var/lib/seeon-state/runtime-provenance/`; an atomic mode-0600 latest readback
+is published at `/var/lib/seeon-state/applied-runtime-manifest.json`. Runtime
+provenance never enters the alert `DeliveryQueue` or relay. Verify the
+directory, immutable per-boot record, latest readback, and their hashes:
 
 ```sh
 dc exec -T ml-worker python -c '
 import hashlib
 import json
 from pathlib import Path
-path = Path("/var/lib/seeon-state/applied-runtime-manifest.json")
-assert path.stat().st_mode & 0o777 == 0o600
-receipt = json.loads(path.read_text())
-canonical = receipt["canonical_json"]
-assert hashlib.sha256(canonical.encode()).hexdigest() == receipt["manifest_sha256"]
-assert json.dumps(json.loads(canonical), separators=(",", ":"), sort_keys=True) == canonical
-print(receipt)
+state = Path("/var/lib/seeon-state")
+records = state / "runtime-provenance"
+latest = state / "applied-runtime-manifest.json"
+assert records.is_dir()
+assert records.stat().st_mode & 0o777 == 0o700
+assert latest.stat().st_mode & 0o777 == 0o600
+record_paths = tuple(records.glob("*.json"))
+assert record_paths
+for path in (*record_paths, latest):
+    assert path.stat().st_mode & 0o777 == 0o600
+    receipt = json.loads(path.read_text())
+    canonical = receipt["canonical_json"]
+    assert hashlib.sha256(canonical.encode()).hexdigest() == receipt["manifest_sha256"]
+    assert json.dumps(json.loads(canonical), separators=(",", ":"), sort_keys=True) == canonical
+print(latest.read_text())
 '
 ```
 
