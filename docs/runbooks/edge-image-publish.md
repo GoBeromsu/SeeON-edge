@@ -323,6 +323,25 @@ gh run watch "$(gh run list --workflow=release.yml --event=push --limit 1 --json
 gh run watch "$(gh run list --workflow=edge-images.yml --event=workflow_dispatch --limit 1 --json databaseId -q '.[0].databaseId')"
 gh run download <edge-images run id> -n "edge-ml-image-refs-<sha>"
 ```
+### Exact readback and rollback
+
+Record the deployed tuple as one atomic receipt:
+
+```
+(ml-api image digest, ml-worker image digest, LSTM bundle SHA-256)
+```
+
+Read all three values back from the running deployment and the admitted model
+bundle; each must exactly equal the sealed receipt before declaring the
+deployment healthy. The active tuple remains LSTM, `fall.v1`, `fall.policy.v1`,
+with temporal input `[30,51]`; a dark candidate is not an active module or
+policy.
+
+Rollback replaces the API image, worker image, and LSTM bundle reference
+together with the previous recorded tuple. Do not roll back only one image or
+only the bundle. Never delete content-addressed model bundles, and never use
+`docker compose down -v`: retention is required for an atomic rollback to the
+previous LSTM tuple.
 
 ## Runtime enrollment and topology
 

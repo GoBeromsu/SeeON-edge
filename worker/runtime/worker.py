@@ -44,6 +44,7 @@ from worker.adapters.model import warmup_to_ready
 from worker.adapters.model.errors import FatalAcceleratorError
 from worker.adapters.model.fall_family_registry import (
     DEFAULT_FALL_MODEL_FAMILY_REGISTRY,
+    DisabledFallModelTypeError,
     UnknownFallModelTypeError,
 )
 from worker.domains import (
@@ -160,6 +161,10 @@ from worker.runtime.provenance import (
     build_applied_runtime_manifest,
 )
 from worker.runtime.provenance.environment import collect_runtime_environment_facts
+from worker.runtime.provenance.model_bundle import (
+    ModelBundleProof,
+    admit_model_bundle,
+)
 from worker.runtime.state_dir import resolve_state_dir
 from worker.runtime.telemetry.runtime_diagnostics import WorkerDiagnostics
 from worker.runtime.telemetry.runtime_status_sender import (
@@ -952,6 +957,7 @@ class WorkerRuntime:
         self._nvidia_media_plane: NvidiaMediaPlane | None = None
         self._nvidia_plans: Mapping[str, CameraDetectionPlan] = MappingProxyType({})
         self._native_policy_pumps: tuple[NativePolicyPump, ...] = ()
+        self._candidate_admission: ModelBundleProof | None = None
 
     def _resolve_mjpeg_config(self) -> MjpegServerConfig:
         """Settle the live view's two switches into one answer.
@@ -1380,6 +1386,7 @@ class WorkerRuntime:
 
     def _initialize_models(self, boot: BootContext) -> SharedComponentGraph:
         self._boot = boot
+        self._admit_dark_fall_candidate()
         self.fault_handler = FaultHandler(
             boot.profile.name, hard_exit=self._hard_exit, state_dir=self._state_dir
         )
@@ -1414,6 +1421,35 @@ class WorkerRuntime:
                 bed=bed,
             )
         return graph
+
+    def _admit_dark_fall_candidate(self) -> None:
+        """Verify a dark candidate before any model warmup or camera starts."""
+        candidate = self.config.models.candidate
+        if candidate is None:
+            self._log_fall_candidate_startup(None)
+            return
+        if self.config.models.box_source != "pose":
+            raise RuntimeError("fall candidate bundle requires box_source=pose")
+        self._candidate_admission = admit_model_bundle(candidate.models_root, candidate.desired)
+        self._log_fall_candidate_startup(self._candidate_admission)
+
+    def _log_fall_candidate_startup(self, admission: ModelBundleProof | None) -> None:
+        configured = self.config.models.fall
+        LOGGER.info(
+            "fall candidate startup telemetry",
+            extra={
+                "desired": None if admission is None else self.config.models.candidate.desired,
+                "observed": None if admission is None else admission.observed,
+                "match": False
+                if admission is None
+                else admission.observed["bundle_sha256"]
+                == self.config.models.candidate.desired.bundle_sha256,
+                "active_fall_type": None if configured is None else configured.type,
+                "active_module": "fall.v1",
+                "active_policy": "fall.policy.v1",
+                "candidate_status": "disabled",
+            },
+        )
 
     def _initialize_nvidia_media_plane(self, boot: BootContext) -> SharedComponentGraph:
         """Compose native engines and the CPU-only temporal policy before sources."""
@@ -1539,7 +1575,7 @@ class WorkerRuntime:
             raise RuntimeError("fall model must be explicitly configured; refusing to boot")
         try:
             return DEFAULT_FALL_MODEL_FAMILY_REGISTRY.create(configured.type, configured, device)
-        except UnknownFallModelTypeError as exc:
+        except (DisabledFallModelTypeError, UnknownFallModelTypeError) as exc:
             raise RuntimeError(str(exc)) from exc
 
     def _warm_models(self) -> tuple[str, ...]:

@@ -7,7 +7,13 @@ from worker.domains.fall.classifier import (
     FallModelProtocol,
     FallWindowClassifier,
 )
+from worker.domains.fall.classifier_v2 import (
+    FallV2ModelProtocol,
+    FallV2Probabilities,
+    FallWindowClassifierV2,
+)
 from worker.domains.fall.detector import FallEventLatch, FallLatchStatus
+from worker.domains.fall.policy_v2 import FallPolicyDeciderV2, FallPolicyV2
 from worker.domains.fall.schema import FallEvent
 
 __all__ = [
@@ -16,5 +22,10 @@ __all__ = [
     "FallLatchStatus",
     "FallModelMetadataProtocol",
     "FallModelProtocol",
+    "FallPolicyDeciderV2",
+    "FallPolicyV2",
+    "FallV2ModelProtocol",
+    "FallV2Probabilities",
     "FallWindowClassifier",
+    "FallWindowClassifierV2",
 ]

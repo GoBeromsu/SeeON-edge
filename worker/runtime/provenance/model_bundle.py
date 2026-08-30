@@ -1,0 +1,252 @@
+"""Read-only admission for content-addressed model bundles.
+
+This module deliberately has no dependency on ``worker.tools``: provisioning and
+runtime admission have opposite authority and lifecycle boundaries.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import re
+import stat
+from collections.abc import Mapping
+from dataclasses import dataclass
+from pathlib import Path
+from types import MappingProxyType
+from typing import Final
+
+_BUNDLE_RE: Final = re.compile(r"^[0-9a-f]{64}$")
+_RELATIVE_RE: Final = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*(/[A-Za-z0-9][A-Za-z0-9._-]*)*$")
+_IDENTITY_FIELDS: Final = (
+    "dataset",
+    "evaluation",
+    "field",
+    "seed",
+    "rule",
+    "calibration",
+    "conformance",
+    "class",
+    "input",
+    "policy",
+    "config",
+    "restart",
+    "worker",
+)
+
+
+class ModelBundleAdmissionError(RuntimeError):
+    """A model bundle is unsafe or does not exactly satisfy desired state."""
+
+
+@dataclass(frozen=True, slots=True)
+class DesiredModelBundle:
+    """The configured desired state; no on-disk value can expand this authority."""
+
+    bundle_sha256: str
+    identities: Mapping[str, object]
+
+    def __post_init__(self) -> None:
+        if _BUNDLE_RE.fullmatch(self.bundle_sha256) is None:
+            raise ModelBundleAdmissionError("desired bundle identity is invalid")
+        identities = dict(self.identities)
+        if set(identities) != set(_IDENTITY_FIELDS):
+            raise ModelBundleAdmissionError(
+                "desired identities must contain exactly the required fields"
+            )
+        _canonical_json(identities)
+        object.__setattr__(self, "identities", MappingProxyType(identities))
+
+
+@dataclass(frozen=True, slots=True)
+class ModelBundleProof:
+    """Immutable observed and applied facts, suitable for later provenance output."""
+
+    observed: Mapping[str, object]
+    applied: Mapping[str, object]
+
+
+def admit_model_bundle(models_root: Path, desired: DesiredModelBundle) -> ModelBundleProof:
+    """Verify one published bundle without mutating it or selecting an alternative.
+
+    Call this before model construction/warmup.  Any failed comparison is fatal.
+    """
+    _require_directory(models_root, "models root")
+    bundles_root = models_root / "bundles"
+    _require_directory(bundles_root, "bundles root")
+    root = bundles_root / desired.bundle_sha256
+    _require_directory(root, "bundle root")
+    _require_below(bundles_root, root)
+    manifest_path = root / "manifest.json"
+    raw = _read_regular(manifest_path, "manifest")
+    try:
+        document = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ModelBundleAdmissionError("bundle manifest is invalid JSON") from exc
+    if not isinstance(document, dict) or _canonical_json(document).encode() + b"\n" != raw:
+        raise ModelBundleAdmissionError("bundle manifest is not canonical")
+    if document.get("schema_version") != 1:
+        raise ModelBundleAdmissionError("bundle manifest schema mismatch")
+    if document.get("bundle_sha256") != desired.bundle_sha256:
+        raise ModelBundleAdmissionError("bundle identity mismatch")
+    members = document.get("members")
+    payload = document.get("payload")
+    if not isinstance(members, list) or not isinstance(payload, dict):
+        raise ModelBundleAdmissionError("bundle manifest shape mismatch")
+    identities = payload.get("identities")
+    if not isinstance(identities, dict):
+        raise ModelBundleAdmissionError("bundle identities missing")
+    for field in _IDENTITY_FIELDS:
+        if identities.get(field) != desired.identities[field]:
+            raise ModelBundleAdmissionError(f"{field} identity mismatch")
+    if set(identities) != set(_IDENTITY_FIELDS):
+        raise ModelBundleAdmissionError("bundle identities contain unknown fields")
+    _validate_bundle_identity(document, desired.bundle_sha256)
+    observed_members = _verify_members(root, members)
+    _verify_exact_tree(root, {"manifest.json", *observed_members})
+    observed = MappingProxyType(
+        {
+            "bundle_sha256": desired.bundle_sha256,
+            "members": tuple(observed_members),
+            "identities": MappingProxyType(dict(identities)),
+        }
+    )
+    # Applied is derived exclusively from desired state, never from a bundle claim.
+    applied = MappingProxyType(
+        {
+            "bundle_sha256": desired.bundle_sha256,
+            "identities": MappingProxyType(dict(desired.identities)),
+        }
+    )
+    return ModelBundleProof(observed=observed, applied=applied)
+
+
+def _validate_bundle_identity(document: Mapping[str, object], expected: str) -> None:
+    members = document["members"]
+    payload = document["payload"]
+    if not isinstance(members, list) or not isinstance(payload, dict):
+        raise ModelBundleAdmissionError("bundle manifest shape mismatch")
+    canonical_members: list[dict[str, object]] = []
+    for member in members:
+        if not isinstance(member, dict):
+            raise ModelBundleAdmissionError("bundle member is invalid")
+        try:
+            canonical_members.append(
+                {"path": member["path"], "sha256": member["sha256"], "size": member["size"]}
+            )
+        except KeyError as exc:
+            raise ModelBundleAdmissionError("bundle member is invalid") from exc
+    actual = hashlib.sha256(
+        _canonical_json({"members": canonical_members, "payload": payload}).encode()
+    ).hexdigest()
+    if actual != expected:
+        raise ModelBundleAdmissionError("bundle content identity mismatch")
+
+
+def _verify_members(root: Path, members: list[object]) -> tuple[str, ...]:
+    paths: list[str] = []
+    for member in members:
+        if not isinstance(member, dict):
+            raise ModelBundleAdmissionError("bundle member is invalid")
+        path = member.get("path")
+        size = member.get("size")
+        digest = member.get("sha256")
+        if (
+            not isinstance(path, str)
+            or _RELATIVE_RE.fullmatch(path) is None
+            or path == "manifest.json"
+            or not isinstance(size, int)
+            or isinstance(size, bool)
+            or size < 0
+            or not isinstance(digest, str)
+            or _BUNDLE_RE.fullmatch(digest) is None
+            or path in paths
+        ):
+            raise ModelBundleAdmissionError("bundle member is invalid")
+        member_path = root / path
+        _require_below(root, member_path)
+        content = _read_regular(member_path, f"member {path}")
+        if len(content) != size or hashlib.sha256(content).hexdigest() != digest:
+            raise ModelBundleAdmissionError(f"member mismatch: {path}")
+        paths.append(path)
+    if not paths:
+        raise ModelBundleAdmissionError("bundle members missing")
+    return tuple(paths)
+
+
+def _verify_exact_tree(root: Path, expected: set[str]) -> None:
+    found: set[str] = set()
+    for path in root.rglob("*"):
+        relative = path.relative_to(root).as_posix()
+        info = path.lstat()
+        if stat.S_ISLNK(info.st_mode) or not (
+            stat.S_ISREG(info.st_mode) or stat.S_ISDIR(info.st_mode)
+        ):
+            raise ModelBundleAdmissionError(f"bundle contains unsafe path: {relative}")
+        if stat.S_ISREG(info.st_mode):
+            found.add(relative)
+    if found != expected:
+        raise ModelBundleAdmissionError("bundle tree contains missing or extra files")
+
+
+def _require_directory(path: Path, label: str) -> None:
+    try:
+        info = path.lstat()
+    except OSError as exc:
+        raise ModelBundleAdmissionError(f"{label} is unavailable") from exc
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+        raise ModelBundleAdmissionError(f"{label} is not a regular directory")
+
+
+def _read_regular(path: Path, label: str) -> bytes:
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        try:
+            info = os.fstat(descriptor)
+            if not stat.S_ISREG(info.st_mode):
+                raise ModelBundleAdmissionError(f"{label} is not a regular file")
+            chunks: list[bytes] = []
+            while chunk := os.read(descriptor, 1 << 20):
+                chunks.append(chunk)
+            return b"".join(chunks)
+        finally:
+            os.close(descriptor)
+    except ModelBundleAdmissionError:
+        raise
+    except OSError as exc:
+        raise ModelBundleAdmissionError(f"{label} is unavailable") from exc
+
+
+def _require_below(root: Path, path: Path) -> None:
+    try:
+        resolved_root = root.resolve(strict=True)
+        if os.path.commonpath((str(resolved_root), str(path.resolve(strict=False)))) != str(
+            resolved_root
+        ):
+            raise ModelBundleAdmissionError("bundle path escapes its root")
+        relative = path.relative_to(root)
+        current = root
+        for part in relative.parts:
+            current = current / part
+            if current.exists() and stat.S_ISLNK(current.lstat().st_mode):
+                raise ModelBundleAdmissionError("bundle contains symlink path")
+    except OSError as exc:
+        raise ModelBundleAdmissionError("bundle path is unavailable") from exc
+
+
+def _canonical_json(value: object) -> str:
+    try:
+        return json.dumps(
+            value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False
+        )
+    except (TypeError, ValueError) as exc:
+        raise ModelBundleAdmissionError("bundle manifest contains non-JSON values") from exc
+
+
+__all__ = [
+    "DesiredModelBundle",
+    "ModelBundleAdmissionError",
+    "ModelBundleProof",
+    "admit_model_bundle",
+]

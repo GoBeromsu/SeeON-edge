@@ -25,6 +25,7 @@ from worker.tools.fetch_models.fetcher import (
     VerificationError,
     fetch_all,
     fetch_artifact,
+    fetch_bundle,
     sha256_of,
 )
 from worker.tools.fetch_models.http_source import (
@@ -38,6 +39,7 @@ from worker.tools.fetch_models.manifest import (
     SIDECAR_ROOT,
     Manifest,
     ManifestError,
+    canonical_json,
     load_manifest,
     parse_manifest,
 )
@@ -126,6 +128,40 @@ def _fake_for(manifest: Manifest) -> FakeSource:
 
 def _no_sleep_policy(attempts: int = 3) -> RetryPolicy:
     return RetryPolicy(attempts=attempts, sleep=lambda _s: None, rng=random.Random(0))
+
+
+def _bundle_manifest() -> Manifest:
+    raw = _manifest_dict(sidecars=[])
+    members = [
+        {
+            "path": "weights/model.bin",
+            "source": "hf",
+            "remote_path": "bundle/model.bin",
+            "size": len(WEIGHT),
+            "sha256": _sha(WEIGHT),
+        },
+        {
+            "path": "metadata.json",
+            "source": "gh",
+            "remote_path": "bundle/metadata.json",
+            "size": len(UPSTREAM),
+            "sha256": _sha(UPSTREAM),
+        },
+    ]
+    payload = {"identities": {"dataset": "fixture"}}
+    identity = _sha(
+        canonical_json(
+            {
+                "members": [
+                    {"path": member["path"], "sha256": member["sha256"], "size": member["size"]}
+                    for member in members
+                ],
+                "payload": payload,
+            }
+        ).encode()
+    )
+    raw["bundles"] = [{"sha256": identity, "members": members, "payload": payload}]
+    return parse_manifest(raw)
 
 
 # --- manifest -------------------------------------------------------------
@@ -392,6 +428,46 @@ def test_missing_bundled_sidecar_is_a_failure(tmp_path: Path) -> None:
             retry=_no_sleep_policy(),
             sidecar_root=tmp_path / "empty",
         )
+
+
+def test_bundle_is_atomically_published_and_then_a_noop(tmp_path: Path) -> None:
+    manifest = _bundle_manifest()
+    bundle = manifest.bundles[0]
+    source = FakeSource(
+        {member.url: body for member, body in zip(bundle.members, (WEIGHT, UPSTREAM), strict=True)}
+    )
+
+    first = fetch_bundle(bundle, tmp_path, source, env={}, retry=_no_sleep_policy())
+    published = tmp_path / "bundles" / bundle.sha256
+    assert [result.outcome for result in first.results] == ["fetched", "fetched"]
+    assert (published / "weights/model.bin").read_bytes() == WEIGHT
+    assert (published / "manifest.json").read_bytes() == bundle.manifest_bytes
+    assert not list((tmp_path / "bundles").glob(f".{bundle.sha256}.*"))
+
+    second = fetch_bundle(bundle, tmp_path, source, env={}, retry=_no_sleep_policy())
+    assert second.is_noop
+    assert len(source.calls) == 2
+
+
+def test_bundle_failure_cleans_staging_and_never_publishes(tmp_path: Path) -> None:
+    manifest = _bundle_manifest()
+    bundle = manifest.bundles[0]
+    source = FakeSource({member.url: b"\x00" * member.size for member in bundle.members})
+
+    with pytest.raises(VerificationError, match="sha256 mismatch"):
+        fetch_bundle(bundle, tmp_path, source, env={}, retry=_no_sleep_policy())
+    assert not (tmp_path / "bundles" / bundle.sha256).exists()
+    assert not list((tmp_path / "bundles").glob(f".{bundle.sha256}.*"))
+
+
+def test_existing_mismatched_bundle_is_never_overwritten(tmp_path: Path) -> None:
+    bundle = _bundle_manifest().bundles[0]
+    existing = tmp_path / "bundles" / bundle.sha256
+    existing.mkdir(parents=True)
+    (existing / "unexpected").write_text("no", encoding="utf-8")
+
+    with pytest.raises(VerificationError, match="tree mismatch"):
+        fetch_bundle(bundle, tmp_path, FakeSource({}), env={}, retry=_no_sleep_policy())
 
 
 # --- attempts env + CLI ---------------------------------------------------
