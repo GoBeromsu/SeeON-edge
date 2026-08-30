@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import pytest
 
 from worker.domains.fall import (
@@ -121,6 +124,35 @@ def test_missing_live_coasts_until_exact_ttl_then_reconnect_zero_fills_fresh_win
     for _ in range(30):
         classifier.update({7: None}, (7,))
     assert model.windows[-1] == ((0.0,) * 56,) * 30
+
+
+def test_committed_reconnect_after_eviction_case_preloads_a_fresh_generation_window() -> None:
+    fixture = json.loads((Path(__file__).parent / "fixtures_fall_pose_bbox56_v1.json").read_text())
+    reconnect_case = next(
+        case for case in fixture["raw_cases"] if case["case_id"] == "reconnect-after-eviction"
+    )
+    representative_rows = tuple(tuple(row) for row in reconnect_case["expected_windows"][0]["rows"])
+    reconnect_row = representative_rows[-1]
+    model = _RecordingModel()
+    classifier = FallWindowClassifierV2(model)
+
+    # Align the initial live observation so the exact reconnect tick is stride
+    # due: 3 idle ticks + first live tick + 45 absent ticks + reconnect tick.
+    for _ in range(3):
+        classifier.update({}, ())
+    classifier.update({7: reconnect_row}, (7,))
+    assert classifier.generation_for(7) == 0
+    for _ in range(45):
+        classifier.update({}, ())
+    assert classifier.generation_for(7) is None
+
+    due = classifier.update({7: reconnect_row}, (7,))
+
+    assert classifier.generation_for(7) == 1
+    assert due[7] == _probability(0.0)
+    assert len(model.windows[-1]) == 30
+    assert model.windows[-1][:29] == ((0.0,) * 56,) * 29
+    assert model.windows[-1][-1] == reconnect_row
 
 
 def test_release_reopens_only_the_exact_failed_onset() -> None:

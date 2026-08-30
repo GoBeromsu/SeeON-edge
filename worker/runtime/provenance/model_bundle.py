@@ -17,6 +17,8 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Final
 
+from contracts.model_selection import ContractError, parse_model_selection
+
 _BUNDLE_RE: Final = re.compile(r"^[0-9a-f]{64}$")
 _RELATIVE_RE: Final = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*(/[A-Za-z0-9][A-Za-z0-9._-]*)*$")
 _IDENTITY_FIELDS: Final = (
@@ -94,35 +96,29 @@ class RuntimeModelObservations:
 
 
 def desired_model_bundle_from_selection_document(raw: object) -> DesiredModelBundle:
-    """Parse the frozen G001 desired selection document without importing tools."""
-    if not isinstance(raw, Mapping) or raw.get("schema_version") != 1:
-        raise ModelBundleAdmissionError("selection document schema mismatch")
-    bundle_path = raw.get("bundle_path")
-    bundle_sha256 = raw.get("bundle_payload_digest")
-    if bundle_path != f"bundles/{bundle_sha256}" or not isinstance(bundle_sha256, str):
-        raise ModelBundleAdmissionError("selection document bundle path mismatch")
-    dataset = raw.get("dataset_publication")
-    if not isinstance(dataset, Mapping):
-        raise ModelBundleAdmissionError("selection document dataset is missing")
+    """Map the one canonical G001 selection parser into admission identities."""
     try:
-        identities = {
-            "dataset": dataset["payload_digest"],
-            "evaluation": raw["evaluation_receipt_digest"],
-            "field": raw["field_evaluation_receipt_digest"],
-            "seed": raw["selected_deployment_seed"],
-            "rule": raw["selected_deployment_seed_rule_digest"],
-            "calibration": raw["calibration_digest"],
-            "conformance": raw["conformance_digest"],
-            "class": raw["class_order_digest"],
-            "input": raw["input_contract_digest"],
-            "policy": raw["fall_policy_v2_digest"],
-            "config": raw["config_revision"],
-            "restart": raw["restart_revision"],
-            "worker": raw["worker_image_digest"],
-        }
-    except KeyError as exc:
-        raise ModelBundleAdmissionError("selection document identity is missing") from exc
-    return DesiredModelBundle(bundle_sha256, identities)
+        selection = parse_model_selection(raw)
+    except ContractError as exc:
+        raise ModelBundleAdmissionError(str(exc)) from exc
+    return DesiredModelBundle(
+        selection.bundle_payload_digest,
+        {
+            "dataset": selection.dataset_publication.payload_digest,
+            "evaluation": selection.evaluation_receipt_digest,
+            "field": selection.field_evaluation_receipt_digest,
+            "seed": selection.selected_deployment_seed,
+            "rule": selection.selected_deployment_seed_rule_digest,
+            "calibration": selection.calibration_digest,
+            "conformance": selection.conformance_digest,
+            "class": selection.class_order_digest,
+            "input": selection.input_contract_digest,
+            "policy": selection.fall_policy_v2_digest,
+            "config": selection.config_revision,
+            "restart": selection.restart_revision,
+            "worker": selection.worker_image_digest,
+        },
+    )
 
 
 def runtime_revision_digest(kind: str, integer: int) -> str:

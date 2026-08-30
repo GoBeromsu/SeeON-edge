@@ -152,6 +152,12 @@ def test_pose_vector_contract_and_negative_cases() -> None:
         "infinity-rejection",
     ):
         assert cases[case_id]["expected_rows"][0]["row"] == [0.0] * 56
+    reconnect = cases["reconnect-after-eviction"]
+    reconnect_window = reconnect["expected_windows"][0]
+    reconnect_rows = reconnect_window["rows"]
+    assert "zero-fills prior temporal positions" in reconnect["window_rule"]
+    assert all(row == [0.0] * 56 for row in reconnect_rows[:-1])
+    assert len(reconnect_rows[-1]) == 56
 
 
 def test_policy_fixture_freezes_fall_v2_surface_and_state_transitions() -> None:

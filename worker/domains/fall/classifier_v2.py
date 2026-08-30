@@ -51,6 +51,9 @@ class FallWindowClassifierV2:
     _last_rows: dict[int, tuple[float, ...]] = field(default_factory=dict, init=False)
     _last_probabilities: dict[int, FallV2Probabilities] = field(default_factory=dict, init=False)
     _last_seen_frames: dict[int, int] = field(default_factory=dict, init=False)
+    _generations: dict[int, int] = field(default_factory=dict, init=False)
+    _next_generations: dict[int, int] = field(default_factory=dict, init=False)
+    _reconnect_ids: set[int] = field(default_factory=set, init=False)
     _frame_counter: int = field(default=0, init=False)
 
     def update(
@@ -64,8 +67,9 @@ class FallWindowClassifierV2:
         temporarily absent track also coasts through the shared 45-frame TTL:
         it retains its window but is not returned as a live prediction. An
         unknown or malformed row cannot become model input and is treated like a
-        missing row. After exact TTL expiry all classifier state is evicted, so
-        a reused numeric id starts a zero-filled fresh window.
+        missing row. After exact TTL expiry all classifier state is evicted. A
+        reused numeric id then immediately receives an inferable window of 29
+        zero rows plus its current row; ordinary first startup remains warming.
         """
         self._frame_counter += 1
         live_ids = frozenset(live_track_ids)
@@ -109,10 +113,19 @@ class FallWindowClassifierV2:
     def probabilities_for(self, track_id: int) -> FallV2Probabilities | None:
         return self._last_probabilities.get(track_id)
 
+    def generation_for(self, track_id: int) -> int | None:
+        return self._generations.get(track_id)
+
     def _buffer_for(self, track_id: int) -> deque[tuple[float, ...]]:
         buffer = self._buffers.get(track_id)
         if buffer is None:
             buffer = deque(maxlen=_WINDOW_FRAMES)
+            if track_id in self._reconnect_ids:
+                buffer.extend((_ZERO_ROW,) * (_WINDOW_FRAMES - 1))
+                self._reconnect_ids.remove(track_id)
+            generation = self._next_generations.get(track_id, 0)
+            self._next_generations[track_id] = generation + 1
+            self._generations[track_id] = generation
             self._buffers[track_id] = buffer
         return buffer
 
@@ -121,6 +134,8 @@ class FallWindowClassifierV2:
         self._last_rows.pop(track_id, None)
         self._last_probabilities.pop(track_id, None)
         del self._last_seen_frames[track_id]
+        del self._generations[track_id]
+        self._reconnect_ids.add(track_id)
 
 
 def _valid_row(value: Sequence[float] | None) -> tuple[float, ...] | None:

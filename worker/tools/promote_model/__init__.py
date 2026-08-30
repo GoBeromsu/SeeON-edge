@@ -1,6 +1,6 @@
 """Out-of-band, stdlib-only promotion contract validation."""
 
-from worker.tools.promote_model.contracts import (
+from contracts.model_selection import (
     AppliedModelSelection,
     ContractError,
     ModelSelection,

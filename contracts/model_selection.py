@@ -459,3 +459,21 @@ def validate_applied_against_desired(
             "applied-model-selection mismatch reasons must equal exact identity mismatches"
         )
     return mismatches
+
+
+__all__ = [
+    "MODEL_FAMILY",
+    "SCHEMA_VERSION",
+    "AppliedModelSelection",
+    "ContractError",
+    "DatasetPublication",
+    "ModelSelection",
+    "canonical_digest",
+    "canonical_json_bytes",
+    "compare_desired_to_applied",
+    "parse_applied_model_selection",
+    "parse_model_selection",
+    "validate_applied_against_desired",
+    "validate_evaluation_receipt_identity",
+    "validate_field_receipt_identity",
+]

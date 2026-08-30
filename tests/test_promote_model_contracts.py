@@ -2,11 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from worker.runtime.provenance.model_bundle import (
-    desired_model_bundle_from_selection_document,
-    runtime_revision_digest,
-)
-from worker.tools.promote_model.contracts import (
+from contracts.model_selection import (
     ContractError,
     canonical_digest,
     canonical_json_bytes,
@@ -16,6 +12,10 @@ from worker.tools.promote_model.contracts import (
     validate_applied_against_desired,
     validate_evaluation_receipt_identity,
     validate_field_receipt_identity,
+)
+from worker.runtime.provenance.model_bundle import (
+    desired_model_bundle_from_selection_document,
+    runtime_revision_digest,
 )
 
 WORKER_IMAGE_DIGEST = "a" * 64

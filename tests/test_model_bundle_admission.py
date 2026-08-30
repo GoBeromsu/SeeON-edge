@@ -177,6 +177,7 @@ def test_runtime_observation_mismatch_is_fatal(tmp_path: Path, field: str, attri
 def test_selection_parser_and_revision_digest_are_canonical() -> None:
     raw = {
         "schema_version": 1,
+        "model_family": "gru-pose-bbox",
         "bundle_path": f"bundles/{'a' * 64}",
         "bundle_payload_digest": "a" * 64,
         "dataset_publication": _DATASET_PUBLICATION,
@@ -195,3 +196,38 @@ def test_selection_parser_and_revision_digest_are_canonical() -> None:
     }
     assert desired_model_bundle_from_selection_document(raw).bundle_sha256 == "a" * 64
     assert runtime_revision_digest("config", 7) == runtime_revision_digest("config", 7)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda raw: raw.pop("model_family"),
+        lambda raw: raw.update(model_family="lstm"),
+        lambda raw: raw["dataset_publication"].update(hf_repo="invalid"),
+        lambda raw: raw.update(evaluation_receipt_digest="not-a-digest"),
+        lambda raw: raw.update(selected_deployment_seed=""),
+    ],
+)
+def test_selection_parser_rejects_every_shared_contract_violation(mutation: object) -> None:
+    raw = {
+        "schema_version": 1,
+        "model_family": "gru-pose-bbox",
+        "bundle_path": f"bundles/{'a' * 64}",
+        "bundle_payload_digest": "a" * 64,
+        "dataset_publication": dict(_DATASET_PUBLICATION),
+        "evaluation_receipt_digest": _IDENTITIES["evaluation"],
+        "field_evaluation_receipt_digest": _IDENTITIES["field"],
+        "selected_deployment_seed": _IDENTITIES["seed"],
+        "selected_deployment_seed_rule_digest": _IDENTITIES["rule"],
+        "calibration_digest": _IDENTITIES["calibration"],
+        "conformance_digest": _IDENTITIES["conformance"],
+        "class_order_digest": _IDENTITIES["class"],
+        "input_contract_digest": _IDENTITIES["input"],
+        "fall_policy_v2_digest": _IDENTITIES["policy"],
+        "config_revision": _IDENTITIES["config"],
+        "restart_revision": _IDENTITIES["restart"],
+        "worker_image_digest": _IDENTITIES["worker"],
+    }
+    mutation(raw)  # type: ignore[operator]
+    with pytest.raises(ModelBundleAdmissionError):
+        desired_model_bundle_from_selection_document(raw)
