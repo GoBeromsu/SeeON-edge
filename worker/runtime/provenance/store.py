@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -59,7 +60,38 @@ class AppliedRuntimeManifestStore:
             raise AppliedRuntimeManifestError(
                 f"runtime manifest queue admission failed: {result.fault}"
             )
+        self._write_latest_readback(
+            manifest, boot_instance_id=boot_instance_id, applied_at=applied_at
+        )
         return AppliedRuntimeRecord(manifest.sha256, boot_instance_id, applied_at)
+
+    def _write_latest_readback(
+        self, manifest: AppliedRuntimeManifest, *, boot_instance_id: str, applied_at: str
+    ) -> None:
+        self.directory.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+        path = self.directory.parent / "applied-runtime-manifest.json"
+        temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+        payload = json.dumps(
+            {
+                "applied_at": applied_at,
+                "boot_instance_id": boot_instance_id,
+                "canonical_json": manifest.canonical_json,
+                "manifest_sha256": manifest.sha256,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            with os.fdopen(descriptor, "wb") as handle:
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, path)
+            os.chmod(path, 0o600)
+        except OSError:
+            temporary.unlink(missing_ok=True)
+            raise
 
 
 def _manifest_entry(
@@ -77,9 +109,7 @@ def _manifest_entry(
         separators=(",", ":"),
         ensure_ascii=True,
     ).encode()
-    identity = hashlib.sha256(
-        boot_instance_id.encode()
-    ).hexdigest()
+    identity = hashlib.sha256(boot_instance_id.encode()).hexdigest()
     return EventEntry(
         edge_event_id=f"manifest-{identity}",
         event_type="runtime.manifest",

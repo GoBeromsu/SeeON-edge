@@ -370,28 +370,46 @@ for path in (
 '
 ```
 
-`/app/model-selection.json` is fixed and image-owned; never provide, replace,
-or bind-mount a host selection document. Its selected candidate location is
-`/models/bundles/<digest>`. The bundle payload is limited to its explicit
-payload members. Evaluation and field receipts are externally hashed,
-non-recursive receipts: verify their recorded digests as identities, but do not
-walk them as nested bundle payloads.
+The worker has dual mounts of the same model volume. `/app/models` preserves
+the active flat LSTM artifacts; `/models` is reserved for candidate bundles at
+`/models/bundles/<digest>`. This Phase 6 image intentionally ships neither
+`/app/model-selection.json` nor a real candidate bundle because G004/G005
+human/Hugging Face evidence is blocked. Dark support is unreachable by default
+and no candidate receipt is fabricated.
 
-Worker startup must fail closed before assignment when LSTM admission or the
-dark GRU candidate's admission/warmup fails. On a successful startup, read the
-durable applied manifest and require the recorded `desired`, `observed`,
-`match`, and `candidate_status=disabled` fields:
+A later G005-green sealed image may bake both the image-owned
+`/app/model-selection.json` and its real bundle. Its bundle payload is limited
+to explicit payload members. Evaluation and field receipts are externally
+hashed, non-recursive receipts: verify their recorded digests as identities,
+but do not walk them as nested bundle payloads. That later image must fail
+closed before assignment if LSTM admission or dark-GRU admission fails, then
+perform `admit → construct → warm → persist` while the candidate remains
+disabled. It does not activate, retain, or promote the candidate automatically.
+
+The durable queue remains canonical. Read
+`/var/lib/seeon-state/applied-runtime-manifest.json` and verify its mode is
+0600, its `manifest_sha256` matches the SHA-256 of its `canonical_json`, and
+that `canonical_json` is canonical JSON:
 
 ```sh
 dc exec -T ml-worker python -c '
+import hashlib
+import json
 from pathlib import Path
-print(Path("/var/lib/seeon-state/applied-model-manifest.json").read_text())
+path = Path("/var/lib/seeon-state/applied-runtime-manifest.json")
+assert path.stat().st_mode & 0o777 == 0o600
+receipt = json.loads(path.read_text())
+canonical = receipt["canonical_json"]
+assert hashlib.sha256(canonical.encode()).hexdigest() == receipt["manifest_sha256"]
+assert json.dumps(json.loads(canonical), separators=(",", ":"), sort_keys=True) == canonical
+print(receipt)
 '
 ```
 
 The active contract remains LSTM, `fall.v1`, `fall.policy.v1`, and temporal
-input `[30,51]`. A content-addressed GRU candidate remains dark and inert: it
-is not an active module or policy and is never part of this receipt.
+input `[30,51]`. A future admitted content-addressed GRU candidate remains
+dark and inert: it is not an active module or policy and is never part of the
+LSTM receipt.
 
 For rollback, use the previous **worker image** and the complete previous flat
 LSTM artifact/sidecar receipt as one atomic tuple. Fetch with that worker image,

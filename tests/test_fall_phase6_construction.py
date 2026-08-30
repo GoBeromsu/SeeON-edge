@@ -287,7 +287,7 @@ def test_publish_runbook_records_flat_lstm_rollback_artifacts() -> None:
     assert "Do not restart `ml-api` or any other service." in runbook
     assert "docker compose down -v" in runbook
     assert "hand-edit the model volume" in runbook
-    assert "GRU candidate remains dark and inert" in runbook
+    assert "/var/lib/seeon-state/applied-model-manifest.json" not in runbook
     image_attestation = " ".join(
         (
             "RepoDigests={{json .RepoDigests}}",
@@ -298,14 +298,26 @@ def test_publish_runbook_records_flat_lstm_rollback_artifacts() -> None:
         'configured_ref="$(docker inspect --format \'{{.Config.Image}}\' "$worker_id")"',
         'image_id="$(docker inspect --format \'{{.Image}}\' "$worker_id")"',
         image_attestation,
-        "/app/model-selection.json",
+        "dual mounts of the same model volume",
+        "/app/models",
         "/models/bundles/<digest>",
-        "Evaluation and field receipts are externally hashed",
+        "intentionally ships neither",
+        "/app/model-selection.json",
+        "nor a real candidate bundle",
+        "human/Hugging Face evidence is blocked",
+        "Dark support is unreachable by default",
+        "no candidate receipt is fabricated",
+        "A later G005-green sealed image may bake both",
+        "Evaluation and field receipts are externally",
         "non-recursive receipts",
-        "fail closed before assignment",
-        "dark GRU candidate's admission/warmup",
-        "candidate_status=disabled",
-        "/var/lib/seeon-state/applied-model-manifest.json",
+        "closed before assignment",
+        "admit → construct → warm → persist",
+        "while the candidate remains",
+        "The durable queue remains canonical.",
+        "/var/lib/seeon-state/applied-runtime-manifest.json",
+        "st_mode & 0o777 == 0o600",
+        'receipt["manifest_sha256"]',
+        "canonical_json",
         "Candidate activation and Phase 7 are outside this runbook.",
     ):
         assert assertion in runbook

@@ -184,6 +184,8 @@ services:
       # selection/policy comes from the versioned worker config, never from
       # environment variables.
       - worker-models:/models:ro
+      # Keep the deployed LSTM's existing artifact path unchanged.
+      - worker-models:/app/models:ro
       # Engines are prepared explicitly from the image-pinned manifest. Runtime
       # preflight verifies this writable cache and never writes beside models.
       - worker-engine-cache:/var/cache/seeon/tensorrt:rw

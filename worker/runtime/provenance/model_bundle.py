@@ -50,7 +50,17 @@ _BUNDLE_IDENTITY_FIELDS: Final = tuple(
     for field in _IDENTITY_FIELDS
     if field not in (*_RUNTIME_IDENTITY_FIELDS, *_RECEIPT_IDENTITY_FIELDS)
 )
-_REQUIRED_MEMBERS: Final = frozenset({"model.pt", "arch.json", "metadata.yaml"})
+_REQUIRED_MEMBERS: Final = frozenset(
+    {
+        "model.pt",
+        "arch.json",
+        "metadata.yaml",
+        "input-contract.json",
+        "fall-policy-v2.json",
+        "calibration.json",
+        "conformance.json",
+    }
+)
 _REQUIRED_RECEIPTS: Final = frozenset({"evaluation-receipt.json", "field-evaluation-receipt.json"})
 
 

@@ -167,6 +167,7 @@ from worker.runtime.provenance.model_bundle import (
     admit_model_bundle,
     runtime_revision_digest,
 )
+from worker.runtime.provenance.store import AppliedRuntimeManifestStore
 from worker.runtime.state_dir import resolve_state_dir
 from worker.runtime.telemetry.runtime_diagnostics import WorkerDiagnostics
 from worker.runtime.telemetry.runtime_status_sender import (
@@ -1919,8 +1920,15 @@ class WorkerRuntime:
                 edge_database_schema_version=EDGE_DATABASE_SCHEMA_VERSION,
                 dark_model_candidate=self._dark_model_candidate_manifest_content(),
             )
+            AppliedRuntimeManifestStore(self._state_dir / "runtime-manifest").persist(
+                self._runtime_manifest,
+                boot_instance_id=self._boot_instance_id,
+                applied_at=datetime.now(UTC).isoformat(),
+            )
         except Exception:  # noqa: BLE001 - provenance must not stop camera activation
             self._runtime_manifest = None
+            if self._candidate_admission is not None:
+                raise
             LOGGER.warning(
                 "runtime provenance could not be applied; continuing without it",
                 exc_info=True,
@@ -1945,6 +1953,7 @@ class WorkerRuntime:
             or not isinstance(applied_identities, Mapping)
         ):
             raise TypeError("admitted dark candidate proof is incomplete")
+        selection = candidate.desired.selection
         return {
             "desired_selection_digest": candidate.desired.selection.digest,
             "observed": {
@@ -1956,7 +1965,22 @@ class WorkerRuntime:
                         separators=(",", ":"),
                     ).encode()
                 ).hexdigest(),
-                "static_identities": dict(identities),
+                "static_identities": {
+                    "dataset": {
+                        "repo": selection.dataset_publication.hf_repo,
+                        "revision": selection.dataset_publication.hf_revision,
+                        "payload_digest": selection.dataset_publication.payload_digest,
+                    },
+                    "evaluation": selection.evaluation_receipt_digest,
+                    "field": selection.field_evaluation_receipt_digest,
+                    "seed": selection.selected_deployment_seed,
+                    "rule": selection.selected_deployment_seed_rule_digest,
+                    "calibration": selection.calibration_digest,
+                    "conformance": selection.conformance_digest,
+                    "class": selection.class_order_digest,
+                    "input": selection.input_contract_digest,
+                    "policy": selection.fall_policy_v2_digest,
+                },
             },
             "runtime_observations": {
                 key: applied_identities[key] for key in ("worker", "config", "restart")

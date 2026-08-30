@@ -57,6 +57,10 @@ def _bundle(
         "model.pt": b"weights",
         "arch.json": b"{}",
         "metadata.yaml": b"metadata\n",
+        "input-contract.json": b'{"input":"pose-bbox"}\n',
+        "fall-policy-v2.json": b'{"policy":"fall-v2"}\n',
+        "calibration.json": b'{"calibration":"v1"}\n',
+        "conformance.json": b'{"conformance":"v1"}\n',
     }
     members = [
         {"path": path, "size": len(content), "sha256": hashlib.sha256(content).hexdigest()}
@@ -160,6 +164,15 @@ def test_admission_returns_immutable_observed_and_desired_applied_proof(tmp_path
     proof = admit_model_bundle(models_root, desired, _observations())
 
     assert proof.observed["bundle_sha256"] == desired.bundle_sha256
+    assert set(proof.observed["members"]) == {
+        "model.pt",
+        "arch.json",
+        "metadata.yaml",
+        "input-contract.json",
+        "fall-policy-v2.json",
+        "calibration.json",
+        "conformance.json",
+    }
     assert proof.applied["identities"] == desired.identities
     with pytest.raises(TypeError):
         proof.applied["bundle_sha256"] = "x"  # type: ignore[index]
@@ -215,6 +228,15 @@ def test_admission_requires_one_newline_after_canonical_receipt_json(tmp_path: P
     receipt.write_bytes(receipt.read_bytes() + b"\n")
 
     with pytest.raises(ModelBundleAdmissionError, match="member mismatch"):
+        admit_model_bundle(models_root, desired, _observations())
+
+
+def test_admission_rejects_missing_gru_loader_member_before_runner(tmp_path: Path) -> None:
+    models_root, desired = _bundle(tmp_path)
+    root = models_root / "bundles" / desired.bundle_sha256
+    (root / "calibration.json").unlink()
+
+    with pytest.raises(ModelBundleAdmissionError, match="unavailable"):
         admit_model_bundle(models_root, desired, _observations())
 
 

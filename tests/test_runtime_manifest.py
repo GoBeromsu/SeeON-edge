@@ -232,7 +232,22 @@ def test_dark_candidate_proof_is_deterministic_plain_and_non_authoritative() -> 
         "observed": {
             "bundle_sha256": "b" * 64,
             "member_set_sha256": "c" * 64,
-            "static_identities": {"dataset": "d" * 64},
+            "static_identities": {
+                "dataset": {
+                    "repo": "org/dataset",
+                    "revision": "a" * 40,
+                    "payload_digest": "d" * 64,
+                },
+                "evaluation": "e" * 64,
+                "field": "f" * 64,
+                "seed": "deployment-seed-v1",
+                "rule": "1" * 64,
+                "calibration": "2" * 64,
+                "conformance": "3" * 64,
+                "class": "4" * 64,
+                "input": "5" * 64,
+                "policy": "6" * 64,
+            },
         },
         "runtime_observations": {
             "worker": "e" * 64,
@@ -588,6 +603,10 @@ def test_store_publishes_idempotent_manifest_envelopes_without_runtime_ddl(tmp_p
             )
         }
         assert "runtime_manifest_contents" not in tables
+        readback = json.loads((database.parent / "applied-runtime-manifest.json").read_text())
+        assert readback["manifest_sha256"] == manifest.sha256
+        assert readback["canonical_json"] == manifest.canonical_json
+        assert (database.parent / "applied-runtime-manifest.json").stat().st_mode & 0o777 == 0o600
 
 
 def test_manifest_publish_contains_canonical_manifest_reference(tmp_path: Path) -> None:

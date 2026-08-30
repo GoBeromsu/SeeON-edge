@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping, Sequence
 from math import isfinite
 from types import MappingProxyType
@@ -33,6 +34,8 @@ BED_ZONE_COORDINATE_SCHEMA_VERSION = 1
 BED_ZONE_COORDINATE_SPACE = "source-image-pixels"
 SCHEDULE_INTERVAL_BASIS = "ingested-frame-index"
 _EFFECTIVE_DECODE_BACKENDS = frozenset({"cpu", "opencv", "nvdec", "vaapi"})
+_DATASET_REPOSITORY = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$")
+_DATASET_REVISION = re.compile(r"^[0-9a-f]{40}$")
 
 
 def build_applied_camera_state(
@@ -173,9 +176,43 @@ def _plain_dark_model_candidate(candidate: Mapping[str, object]) -> dict[str, Js
         raise AppliedRuntimeManifestError("dark candidate observed proof is invalid")
     require_sha256(observed["member_set_sha256"], "dark candidate member set")
     static = observed["static_identities"]
-    if not isinstance(static, dict) or not static:
+    if not isinstance(static, dict) or set(static) != {
+        "dataset",
+        "evaluation",
+        "field",
+        "seed",
+        "rule",
+        "calibration",
+        "conformance",
+        "class",
+        "input",
+        "policy",
+    }:
         raise AppliedRuntimeManifestError("dark candidate static identities are invalid")
-    for identity in static.values():
+    dataset = static["dataset"]
+    if not isinstance(dataset, dict) or set(dataset) != {"repo", "revision", "payload_digest"}:
+        raise AppliedRuntimeManifestError("dark candidate dataset identity is invalid")
+    if (
+        not isinstance(dataset["repo"], str)
+        or _DATASET_REPOSITORY.fullmatch(dataset["repo"]) is None
+        or not isinstance(dataset["revision"], str)
+        or _DATASET_REVISION.fullmatch(dataset["revision"]) is None
+    ):
+        raise AppliedRuntimeManifestError("dark candidate dataset identity is invalid")
+    require_sha256(dataset["payload_digest"], "dark candidate dataset payload")
+    if not isinstance(static["seed"], str) or not static["seed"]:
+        raise AppliedRuntimeManifestError("dark candidate seed identity is invalid")
+    for key in (
+        "evaluation",
+        "field",
+        "rule",
+        "calibration",
+        "conformance",
+        "class",
+        "input",
+        "policy",
+    ):
+        identity = static[key]
         if not isinstance(identity, str):
             raise AppliedRuntimeManifestError("dark candidate static identity is invalid")
         require_sha256(identity, "dark candidate static identity")

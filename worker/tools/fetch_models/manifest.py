@@ -71,7 +71,11 @@ class Manifest:
 
 @dataclass(frozen=True)
 class Bundle:
-    """A content-addressed collection which is published as one unit."""
+    """A content-addressed payload collection plus external receipt descriptors.
+
+    Loader-specific required member names are a runtime admission concern; this
+    generic provisioning schema preserves every declared payload artifact.
+    """
 
     sha256: str
     members: tuple[Artifact, ...]

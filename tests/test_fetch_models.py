@@ -135,19 +135,29 @@ def _bundle_manifest() -> Manifest:
     raw = _manifest_dict(sidecars=[])
     members = [
         {
-            "path": "weights/model.bin",
+            "path": "model.pt",
             "source": "hf",
             "remote_path": "bundle/model.bin",
             "size": len(WEIGHT),
             "sha256": _sha(WEIGHT),
         },
-        {
-            "path": "metadata.json",
-            "source": "gh",
-            "remote_path": "bundle/metadata.json",
-            "size": len(UPSTREAM),
-            "sha256": _sha(UPSTREAM),
-        },
+        *[
+            {
+                "path": path,
+                "source": "gh",
+                "remote_path": f"bundle/{path}",
+                "size": len(WEIGHT),
+                "sha256": _sha(WEIGHT),
+            }
+            for path in (
+                "arch.json",
+                "metadata.yaml",
+                "input-contract.json",
+                "fall-policy-v2.json",
+                "calibration.json",
+                "conformance.json",
+            )
+        ],
     ]
     payload = {"identities": {"dataset": "fixture"}}
     identity = _sha(
@@ -184,8 +194,7 @@ def _bundle_source(bundle: Bundle) -> FakeSource:
             for artifact, body in zip(
                 (*bundle.members, *bundle.receipts),
                 (
-                    WEIGHT,
-                    UPSTREAM,
+                    *((WEIGHT,) * len(bundle.members)),
                     canonical_json({"bundle_payload_digest": bundle.sha256}).encode(),
                 ),
                 strict=True,
@@ -467,18 +476,17 @@ def test_bundle_is_atomically_published_and_then_a_noop(tmp_path: Path) -> None:
 
     first = fetch_bundle(bundle, tmp_path, source, env={}, retry=_no_sleep_policy())
     published = tmp_path / "bundles" / bundle.sha256
-    assert [result.outcome for result in first.results] == ["fetched", "fetched", "fetched"]
-    assert (published / "weights/model.bin").read_bytes() == WEIGHT
+    assert [result.outcome for result in first.results] == ["fetched"] * 8
+    assert (published / "model.pt").read_bytes() == WEIGHT
     assert (published / "manifest.json").read_bytes() == bundle.manifest_bytes
     assert (published / "receipts/evaluation.json").read_bytes() == canonical_json(
         {"bundle_payload_digest": bundle.sha256}
     ).encode()
-    assert (published / "weights").is_dir(), "declared nested member parent is part of the tree"
     assert not list((tmp_path / "bundles").glob(f".{bundle.sha256}.*"))
 
     second = fetch_bundle(bundle, tmp_path, source, env={}, retry=_no_sleep_policy())
     assert second.is_noop
-    assert len(source.calls) == 3
+    assert len(source.calls) == 8
 
 
 def test_bundle_failure_cleans_staging_and_never_publishes(tmp_path: Path) -> None:
