@@ -89,7 +89,9 @@ def test_each_desired_identity_mismatch_is_fatal_before_admission(
         admit_model_bundle(models_root, desired)
 
 
-def test_admission_rejects_extra_file_and_noncanonical_manifest(tmp_path: Path) -> None:
+def test_admission_rejects_extra_file_empty_directory_and_noncanonical_manifest(
+    tmp_path: Path,
+) -> None:
     models_root, desired = _bundle(tmp_path)
     root = models_root / "bundles" / desired.bundle_sha256
     (root / "extra").write_text("unexpected", encoding="utf-8")
@@ -97,6 +99,11 @@ def test_admission_rejects_extra_file_and_noncanonical_manifest(tmp_path: Path) 
         admit_model_bundle(models_root, desired)
 
     (root / "extra").unlink()
+    (root / "empty").mkdir()
+    with pytest.raises(ModelBundleAdmissionError, match="tree contains"):
+        admit_model_bundle(models_root, desired)
+
+    (root / "empty").rmdir()
     raw = (root / "manifest.json").read_text(encoding="utf-8")
     (root / "manifest.json").write_text(raw + " ", encoding="utf-8")
     with pytest.raises(ModelBundleAdmissionError, match="not canonical"):

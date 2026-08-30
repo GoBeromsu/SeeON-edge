@@ -442,6 +442,7 @@ def test_bundle_is_atomically_published_and_then_a_noop(tmp_path: Path) -> None:
     assert [result.outcome for result in first.results] == ["fetched", "fetched"]
     assert (published / "weights/model.bin").read_bytes() == WEIGHT
     assert (published / "manifest.json").read_bytes() == bundle.manifest_bytes
+    assert (published / "weights").is_dir(), "declared nested member parent is part of the tree"
     assert not list((tmp_path / "bundles").glob(f".{bundle.sha256}.*"))
 
     second = fetch_bundle(bundle, tmp_path, source, env={}, retry=_no_sleep_policy())
@@ -468,6 +469,19 @@ def test_existing_mismatched_bundle_is_never_overwritten(tmp_path: Path) -> None
 
     with pytest.raises(VerificationError, match="tree mismatch"):
         fetch_bundle(bundle, tmp_path, FakeSource({}), env={}, retry=_no_sleep_policy())
+
+
+def test_existing_bundle_with_extra_empty_directory_is_rejected(tmp_path: Path) -> None:
+    manifest = _bundle_manifest()
+    bundle = manifest.bundles[0]
+    source = FakeSource(
+        {member.url: body for member, body in zip(bundle.members, (WEIGHT, UPSTREAM), strict=True)}
+    )
+    fetch_bundle(bundle, tmp_path, source, env={}, retry=_no_sleep_policy())
+    (tmp_path / "bundles" / bundle.sha256 / "empty").mkdir()
+
+    with pytest.raises(VerificationError, match="tree mismatch"):
+        fetch_bundle(bundle, tmp_path, source, env={}, retry=_no_sleep_policy())
 
 
 # --- attempts env + CLI ---------------------------------------------------

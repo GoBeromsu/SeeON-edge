@@ -176,7 +176,14 @@ def _verify_members(root: Path, members: list[object]) -> tuple[str, ...]:
 
 
 def _verify_exact_tree(root: Path, expected: set[str]) -> None:
-    found: set[str] = set()
+    expected_directories = {
+        parent.as_posix()
+        for relative in expected
+        for parent in Path(relative).parents
+        if parent != Path(".")
+    }
+    found_files: set[str] = set()
+    found_directories: set[str] = set()
     for path in root.rglob("*"):
         relative = path.relative_to(root).as_posix()
         info = path.lstat()
@@ -185,9 +192,11 @@ def _verify_exact_tree(root: Path, expected: set[str]) -> None:
         ):
             raise ModelBundleAdmissionError(f"bundle contains unsafe path: {relative}")
         if stat.S_ISREG(info.st_mode):
-            found.add(relative)
-    if found != expected:
-        raise ModelBundleAdmissionError("bundle tree contains missing or extra files")
+            found_files.add(relative)
+        else:
+            found_directories.add(relative)
+    if found_files != expected or found_directories != expected_directories:
+        raise ModelBundleAdmissionError("bundle tree contains missing or extra filesystem nodes")
 
 
 def _require_directory(path: Path, label: str) -> None:

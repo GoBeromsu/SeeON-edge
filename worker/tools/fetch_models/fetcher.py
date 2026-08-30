@@ -189,19 +189,31 @@ def _verify_bundle_tree(bundle: Bundle, directory: Path) -> None:
     info = directory.lstat()
     if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
         raise VerificationError(f"bundle {bundle.sha256}: unsafe bundle root")
-    expected = {member.path for member in bundle.members} | {"manifest.json"}
-    found: set[str] = set()
+    expected_files = {member.path for member in bundle.members} | {"manifest.json"}
+    expected_directories = {
+        parent.as_posix()
+        for member in bundle.members
+        for parent in Path(member.path).parents
+        if parent != Path(".")
+    }
+    found_files: set[str] = set()
+    found_directories: set[str] = set()
     for path in directory.rglob("*"):
         relative = path.relative_to(directory).as_posix()
         info = path.lstat()
         if stat.S_ISLNK(info.st_mode) or not (path.is_dir() or stat.S_ISREG(info.st_mode)):
             raise VerificationError(f"bundle {bundle.sha256}: unsafe member {relative}")
-        if path.is_file():
-            found.add(relative)
-    if found != expected:
+        if stat.S_ISREG(info.st_mode):
+            found_files.add(relative)
+        else:
+            found_directories.add(relative)
+    if found_files != expected_files or found_directories != expected_directories:
+        expected_tree = (
+            f"files {sorted(expected_files)}, directories {sorted(expected_directories)}"
+        )
+        found_tree = f"files {sorted(found_files)}, directories {sorted(found_directories)}"
         raise VerificationError(
-            f"bundle {bundle.sha256}: tree mismatch "
-            f"(expected {sorted(expected)}, got {sorted(found)})"
+            f"bundle {bundle.sha256}: tree mismatch (expected {expected_tree}; got {found_tree})"
         )
     manifest = directory / "manifest.json"
     if not manifest.is_file() or manifest.read_bytes() != bundle.manifest_bytes:
