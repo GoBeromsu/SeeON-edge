@@ -322,10 +322,8 @@ def parse_applied_model_selection(raw: object) -> AppliedModelSelection:
 def _receipt_identity(raw: object, where: str, *, field: bool) -> Mapping[str, object]:
     value = _object(raw, where)
     expected = {
-        "receipt_digest",
         "bundle_payload_digest",
         "dataset_payload_digest",
-        "evaluation_receipt_digest",
         "calibration_digest",
         "conformance_digest",
         "class_order_digest",
@@ -334,6 +332,7 @@ def _receipt_identity(raw: object, where: str, *, field: bool) -> Mapping[str, o
     }
     if field:
         expected |= {
+            "evaluation_receipt_digest",
             "status",
             "selected_deployment_seed",
             "selected_deployment_seed_rule_digest",
@@ -354,7 +353,6 @@ def _require_receipt_matches(
     expected = {
         "bundle_payload_digest": desired.bundle_payload_digest,
         "dataset_payload_digest": desired.dataset_publication.payload_digest,
-        "evaluation_receipt_digest": desired.evaluation_receipt_digest,
         "calibration_digest": desired.calibration_digest,
         "conformance_digest": desired.conformance_digest,
         "class_order_digest": desired.class_order_digest,
@@ -363,12 +361,10 @@ def _require_receipt_matches(
     }
     if field:
         expected |= {
-            "receipt_digest": desired.field_evaluation_receipt_digest,
+            "evaluation_receipt_digest": desired.evaluation_receipt_digest,
             "selected_deployment_seed": desired.selected_deployment_seed,
             "selected_deployment_seed_rule_digest": (desired.selected_deployment_seed_rule_digest),
         }
-    else:
-        expected |= {"receipt_digest": desired.evaluation_receipt_digest}
     mismatches = sorted(
         key for key, expected_value in expected.items() if receipt[key] != expected_value
     )
@@ -380,20 +376,18 @@ def _require_receipt_matches(
 
 def validate_evaluation_receipt_identity(desired: ModelSelection, raw: object) -> None:
     """Require an evaluation receipt to bind every immutable desired identity."""
-    _require_receipt_matches(
-        desired,
-        _receipt_identity(raw, "evaluation-receipt", field=False),
-        field=False,
-    )
+    receipt = _receipt_identity(raw, "evaluation-receipt", field=False)
+    if canonical_digest(receipt) != desired.evaluation_receipt_digest:
+        raise ContractError("evaluation receipt external digest does not match desired selection")
+    _require_receipt_matches(desired, receipt, field=False)
 
 
 def validate_field_receipt_identity(desired: ModelSelection, raw: object) -> None:
     """Refuse absent, red, or differently-bound selected-seed field evidence."""
-    _require_receipt_matches(
-        desired,
-        _receipt_identity(raw, "field-evaluation-receipt", field=True),
-        field=True,
-    )
+    receipt = _receipt_identity(raw, "field-evaluation-receipt", field=True)
+    if canonical_digest(receipt) != desired.field_evaluation_receipt_digest:
+        raise ContractError("field receipt external digest does not match desired selection")
+    _require_receipt_matches(desired, receipt, field=True)
 
 
 def compare_desired_to_applied(

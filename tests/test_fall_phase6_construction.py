@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -82,39 +84,31 @@ def test_candidate_selection_is_only_reachable_through_a_pinned_local_image(
         local_env, "desired_model_bundle_from_selection_document", lambda raw: _desired()
     )
 
-    candidate = local_env.fall_candidate_bundle_config_from_environment(
-        {
-            "FALL_CANDIDATE_SELECTION_PATH": str(selection),
-            "FALL_CANDIDATE_MODELS_ROOT": "/app/models",
-            "ML_WORKER_IMAGE": "registry.test/ml-worker@sha256:" + "b" * 64,
-        }
+    candidate = local_env.fall_candidate_config_from_environment(
+        {"ML_WORKER_IMAGE": "registry.test/ml-worker@sha256:" + "b" * 64},
+        selection_path=selection,
+        models_root=Path("/models"),
     )
 
     assert candidate is not None
-    assert candidate.models_root == Path("/app/models")
+    assert candidate.models_root == Path("/models")
     assert candidate.observed_worker_image_digest == "b" * 64
 
 
 @pytest.mark.parametrize(
     "environment",
     (
-        {"FALL_CANDIDATE_SELECTION_PATH": "/sealed/candidate.json"},
-        {
-            "FALL_CANDIDATE_SELECTION_PATH": "/sealed/candidate.json",
-            "FALL_CANDIDATE_MODELS_ROOT": "/app/models",
-        },
-        {
-            "FALL_CANDIDATE_SELECTION_PATH": "/sealed/candidate.json",
-            "FALL_CANDIDATE_MODELS_ROOT": "/app/models",
-            "ML_WORKER_IMAGE": "registry.test/ml-worker:mutable",
-        },
+        {},
+        {"ML_WORKER_IMAGE": "registry.test/ml-worker:mutable"},
     ),
 )
 def test_candidate_selection_refuses_incomplete_or_mutable_environment(
-    environment: dict[str, str],
+    environment: dict[str, str], tmp_path: Path
 ) -> None:
+    selection = tmp_path / "candidate.json"
+    selection.write_text("{}", encoding="utf-8")
     with pytest.raises(WorkerConfigError):
-        local_env.fall_candidate_bundle_config_from_environment(environment)
+        local_env.fall_candidate_config_from_environment(environment, selection_path=selection)
 
 
 def test_candidate_selection_refuses_noncanonical_json(tmp_path: Path) -> None:
@@ -122,13 +116,111 @@ def test_candidate_selection_refuses_noncanonical_json(tmp_path: Path) -> None:
     selection.write_text("{ }\n", encoding="utf-8")
 
     with pytest.raises(WorkerConfigError, match="canonical JSON"):
-        local_env.fall_candidate_bundle_config_from_environment(
-            {
-                "FALL_CANDIDATE_SELECTION_PATH": str(selection),
-                "FALL_CANDIDATE_MODELS_ROOT": "/app/models",
-                "ML_WORKER_IMAGE": "registry.test/ml-worker@sha256:" + "b" * 64,
-            }
+        local_env.fall_candidate_config_from_environment(
+            {"ML_WORKER_IMAGE": "registry.test/ml-worker@sha256:" + "b" * 64},
+            selection_path=selection,
         )
+
+
+def test_candidate_environment_cannot_select_a_missing_image_document(
+    tmp_path: Path,
+) -> None:
+    assert (
+        local_env.fall_candidate_config_from_environment(
+            {
+                "FALL_CANDIDATE_SELECTION_PATH": str(tmp_path / "forged.json"),
+                "FALL_CANDIDATE_MODELS_ROOT": "/forged",
+                "ML_WORKER_IMAGE": "registry.test/ml-worker@sha256:" + "b" * 64,
+            },
+            selection_path=tmp_path / "missing-image-document.json",
+        )
+        is None
+    )
+
+
+def test_admitted_dark_gru_is_constructed_warmed_and_never_becomes_active(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from worker.adapters.model import torch_gru_fall
+
+    class FakeRunner:
+        def __init__(self) -> None:
+            self.manifest = SimpleNamespace(
+                class_order=("background", "fall_transition", "fallen"),
+                input_digest="i" * 64,
+                policy_digest="p" * 64,
+                calibration_digest="c" * 64,
+                conformance_digest="n" * 64,
+            )
+            self.warmups = 0
+
+        def warmup(self) -> None:
+            self.warmups += 1
+
+    runner = FakeRunner()
+    class_digest = hashlib.sha256(
+        json.dumps(list(runner.manifest.class_order), separators=(",", ":")).encode()
+    ).hexdigest()
+    desired = DesiredModelBundle(
+        "a" * 64,
+        {
+            **dict(_desired().identities),
+            "class": class_digest,
+            "input": "i" * 64,
+            "policy": "p" * 64,
+            "calibration": "c" * 64,
+            "conformance": "n" * 64,
+        },
+    )
+    calls: list[tuple[Path, str]] = []
+    monkeypatch.setattr(
+        torch_gru_fall.GruFallRunner,
+        "from_artifact_dir",
+        classmethod(lambda _cls, path, device: calls.append((path, device)) or runner),
+    )
+    runtime = object.__new__(WorkerRuntime)
+    runtime.fall_model = "active-lstm"
+
+    actual = runtime._construct_dark_candidate_runner(  # noqa: SLF001
+        SimpleNamespace(models_root=Path("/models"), desired=desired)
+    )
+
+    assert actual is runner
+    assert calls == [(Path("/models") / "bundles" / ("a" * 64), "cpu")]
+    assert runner.warmups == 1
+    assert runtime.fall_model == "active-lstm"
+
+
+def test_dark_gru_identity_failure_is_fatal_before_active_assignment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from worker.adapters.model import torch_gru_fall
+
+    monkeypatch.setattr(
+        torch_gru_fall.GruFallRunner,
+        "from_artifact_dir",
+        classmethod(
+            lambda _cls, _path, device: SimpleNamespace(
+                manifest=SimpleNamespace(
+                    class_order=("bad", "order", "x"),
+                    input_digest="0" * 64,
+                    policy_digest="0" * 64,
+                    calibration_digest="0" * 64,
+                    conformance_digest="0" * 64,
+                ),
+                warmup=lambda: None,
+            )
+        ),
+    )
+    runtime = object.__new__(WorkerRuntime)
+    runtime.fall_model = "active-lstm"
+
+    with pytest.raises(RuntimeError, match="manifest identities"):
+        runtime._construct_dark_candidate_runner(  # noqa: SLF001
+            SimpleNamespace(models_root=Path("/models"), desired=_desired())
+        )
+
+    assert runtime.fall_model == "active-lstm"
 
 
 def test_candidate_startup_telemetry_is_message_visible_and_digest_redacted(
@@ -196,3 +288,32 @@ def test_publish_runbook_records_flat_lstm_rollback_artifacts() -> None:
     assert "docker compose down -v" in runbook
     assert "hand-edit the model volume" in runbook
     assert "GRU candidate remains dark and inert" in runbook
+    image_attestation = " ".join(
+        (
+            "RepoDigests={{json .RepoDigests}}",
+            'source_revision={{index .Config.Labels "org.opencontainers.image.revision"}}',
+        )
+    )
+    for assertion in (
+        'configured_ref="$(docker inspect --format \'{{.Config.Image}}\' "$worker_id")"',
+        'image_id="$(docker inspect --format \'{{.Image}}\' "$worker_id")"',
+        image_attestation,
+        "/app/model-selection.json",
+        "/models/bundles/<digest>",
+        "Evaluation and field receipts are externally hashed",
+        "non-recursive receipts",
+        "fail closed before assignment",
+        "dark GRU candidate's admission/warmup",
+        "candidate_status=disabled",
+        "/var/lib/seeon-state/applied-model-manifest.json",
+        "Candidate activation and Phase 7 are outside this runbook.",
+    ):
+        assert assertion in runbook
+
+
+def test_unadmitted_candidate_never_projects_to_the_durable_manifest() -> None:
+    runtime = object.__new__(WorkerRuntime)
+    runtime._candidate_admission = None
+    runtime.config = SimpleNamespace(models=SimpleNamespace(candidate=object()))
+
+    assert runtime._dark_model_candidate_manifest_content() is None  # noqa: SLF001

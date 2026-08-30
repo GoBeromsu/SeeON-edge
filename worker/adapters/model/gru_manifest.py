@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from pathlib import Path
 from types import ModuleType
@@ -14,6 +15,11 @@ GRU_INPUT_DIM: Final = 56
 GRU_CLASS_ORDER: Final = ("background", "fall_transition", "fallen")
 GRU_SCHEMA_VERSION: Final = 1
 GRU_PREPROCESSING_IDENTITY: Final = "coco17-xyc-plus-pose-head-xyxy-valid-f32-v1"
+GRU_CALIBRATION_SCHEMA_VERSION: Final = 1
+GRU_TRANSITION_RULE: Final = "m-of-n-3-of-5-v1"
+GRU_FALLEN_RULE: Final = "consecutive-3-v1"
+GRU_TRANSITION_THRESHOLD: Final = 0.7
+GRU_FALLEN_THRESHOLD: Final = 0.8
 YamlValue: TypeAlias = str | int | float | bool | list["YamlValue"] | dict[str, "YamlValue"] | None
 
 
@@ -39,6 +45,11 @@ class GruFallManifest:
     class_order: tuple[str, str, str]
     schema_version: int
     preprocessing_identity: str
+    calibration_schema_version: int
+    transition_rule: str
+    fallen_rule: str
+    transition_threshold: float
+    fallen_threshold: float
     artifact_digest: str
     architecture_digest: str
     input_digest: str
@@ -84,6 +95,11 @@ class GruFallManifest:
             "class_order",
             "schema_version",
             "preprocessing_identity",
+            "calibration_schema_version",
+            "transition_rule",
+            "fallen_rule",
+            "transition_threshold",
+            "fallen_threshold",
             "artifact_digest",
             "architecture_digest",
             "input_digest",
@@ -119,6 +135,11 @@ class GruFallManifest:
             preprocessing_identity=_required_string(
                 raw["preprocessing_identity"], "preprocessing_identity"
             ),
+            calibration_schema_version=_schema_version(raw["calibration_schema_version"]),
+            transition_rule=_required_string(raw["transition_rule"], "transition_rule"),
+            fallen_rule=_required_string(raw["fallen_rule"], "fallen_rule"),
+            transition_threshold=_threshold(raw["transition_threshold"], "transition_threshold"),
+            fallen_threshold=_threshold(raw["fallen_threshold"], "fallen_threshold"),
             artifact_digest=_digest(raw["artifact_digest"], "artifact_digest"),
             architecture_digest=_digest(raw["architecture_digest"], "architecture_digest"),
             input_digest=_digest(raw["input_digest"], "input_digest"),
@@ -138,6 +159,18 @@ class GruFallManifest:
             raise ModelLoadError(f"class_order must be {list(GRU_CLASS_ORDER)!r}")
         if self.preprocessing_identity != GRU_PREPROCESSING_IDENTITY:
             raise ModelLoadError("unsupported preprocessing_identity")
+        if self.calibration_schema_version != GRU_CALIBRATION_SCHEMA_VERSION:
+            raise ModelLoadError(
+                f"calibration_schema_version must be {GRU_CALIBRATION_SCHEMA_VERSION}"
+            )
+        if self.transition_rule != GRU_TRANSITION_RULE:
+            raise ModelLoadError(f"transition_rule must be {GRU_TRANSITION_RULE!r}")
+        if self.fallen_rule != GRU_FALLEN_RULE:
+            raise ModelLoadError(f"fallen_rule must be {GRU_FALLEN_RULE!r}")
+        if self.transition_threshold != GRU_TRANSITION_THRESHOLD:
+            raise ModelLoadError(f"transition_threshold must be {GRU_TRANSITION_THRESHOLD}")
+        if self.fallen_threshold != GRU_FALLEN_THRESHOLD:
+            raise ModelLoadError(f"fallen_threshold must be {GRU_FALLEN_THRESHOLD}")
         if self.metadata != "metadata.yaml":
             raise ModelLoadError("metadata must be metadata.yaml")
         for path in self.bundle_paths:
@@ -235,6 +268,15 @@ def _schema_version(value: YamlValue) -> int:
     return value
 
 
+def _threshold(value: YamlValue, name: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ModelLoadError(f"{name} must be numeric")
+    parsed = float(value)
+    if not math.isfinite(parsed) or not 0.0 <= parsed <= 1.0:
+        raise ModelLoadError(f"{name} must be finite and between 0 and 1")
+    return parsed
+
+
 def _digest(value: YamlValue, name: str) -> str:
     digest = _required_string(value, name)
     if len(digest) != 64 or any(character not in "0123456789abcdef" for character in digest):
@@ -243,10 +285,15 @@ def _digest(value: YamlValue, name: str) -> str:
 
 
 __all__ = [
+    "GRU_CALIBRATION_SCHEMA_VERSION",
     "GRU_CLASS_ORDER",
+    "GRU_FALLEN_RULE",
+    "GRU_FALLEN_THRESHOLD",
     "GRU_INPUT_DIM",
     "GRU_PREPROCESSING_IDENTITY",
     "GRU_SCHEMA_VERSION",
+    "GRU_TRANSITION_RULE",
+    "GRU_TRANSITION_THRESHOLD",
     "GRU_WINDOW",
     "GruFallManifest",
 ]

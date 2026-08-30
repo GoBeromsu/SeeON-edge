@@ -62,10 +62,10 @@ ML_WORKER_FALL_MODEL_PREPROCESSING_IDENTITY_ENV: Final = (
     "ML_WORKER_FALL_MODEL_PREPROCESSING_IDENTITY"
 )
 ML_WORKER_CLIP_RECORDING_ENABLED_ENV: Final = "ML_WORKER_CLIP_RECORDING_ENABLED"
-FALL_CANDIDATE_SELECTION_PATH_ENV: Final = "FALL_CANDIDATE_SELECTION_PATH"
-FALL_CANDIDATE_MODELS_ROOT_ENV: Final = "FALL_CANDIDATE_MODELS_ROOT"
 ML_WORKER_IMAGE_ENV: Final = "ML_WORKER_IMAGE"
 _IMAGE_DIGEST_RE: Final = re.compile(r"^.+@sha256:[0-9a-f]{64}$")
+FALL_CANDIDATE_SELECTION_PATH: Final = Path("/app/model-selection.json")
+FALL_CANDIDATE_MODELS_ROOT: Final = Path("/models")
 
 _RETIRED_WORKER_ENV: Final = frozenset(
     {
@@ -406,30 +406,27 @@ def fall_model_config_from_environment(
         raise WorkerConfigError(f"invalid fall model environment configuration: {error}") from error
 
 
-def fall_candidate_bundle_config_from_environment(
+def fall_candidate_config_from_environment(
     environ: Mapping[str, str] | None = None,
+    *,
+    selection_path: Path = FALL_CANDIDATE_SELECTION_PATH,
+    models_root: Path = FALL_CANDIDATE_MODELS_ROOT,
 ) -> FallCandidateBundleConfig | None:
     """Load the sealed, image-owned dark candidate without selecting it."""
     env = os.environ if environ is None else environ
-    selection_path = env.get(FALL_CANDIDATE_SELECTION_PATH_ENV, "").strip()
-    if not selection_path:
+    if not selection_path.exists():
         return None
-    models_root = _required_str(
-        FALL_CANDIDATE_MODELS_ROOT_ENV,
-        env,
-        because=f"when {FALL_CANDIDATE_SELECTION_PATH_ENV} is set",
-    )
     worker_image = _required_str(
         ML_WORKER_IMAGE_ENV,
         env,
-        because=f"when {FALL_CANDIDATE_SELECTION_PATH_ENV} is set",
+        because="when the image-owned fall candidate selection exists",
     )
     if _IMAGE_DIGEST_RE.fullmatch(worker_image) is None:
         raise WorkerConfigError(
             f"{ML_WORKER_IMAGE_ENV} must be an image reference pinned by sha256"
         )
     try:
-        raw_selection = Path(selection_path).read_bytes()
+        raw_selection = selection_path.read_bytes()
         selection_document = json.loads(raw_selection)
         canonical_selection = json.dumps(
             selection_document,
@@ -442,7 +439,7 @@ def fall_candidate_bundle_config_from_environment(
             raise WorkerConfigError("fall candidate selection must be canonical JSON")
         desired = desired_model_bundle_from_selection_document(selection_document)
         return FallCandidateBundleConfig(
-            models_root=Path(models_root),
+            models_root=models_root,
             desired=desired,
             observed_worker_image_digest=worker_image.rsplit("@", 1)[-1].removeprefix("sha256:"),
         )
@@ -455,7 +452,7 @@ def worker_models_config_from_environment(
 ) -> WorkerModelsConfig:
     return WorkerModelsConfig(
         fall=fall_model_config_from_environment(environ),
-        candidate=fall_candidate_bundle_config_from_environment(environ),
+        candidate=fall_candidate_config_from_environment(environ),
     )
 
 
@@ -516,8 +513,8 @@ def resolve_local_overrides(
 
 
 __all__ = [
-    "FALL_CANDIDATE_MODELS_ROOT_ENV",
-    "FALL_CANDIDATE_SELECTION_PATH_ENV",
+    "FALL_CANDIDATE_MODELS_ROOT",
+    "FALL_CANDIDATE_SELECTION_PATH",
     "ML_WORKER_CLIP_RECORDING_ENABLED_ENV",
     "ML_WORKER_FALL_MODEL_ARCHITECTURE_ENV",
     "ML_WORKER_FALL_MODEL_ARTIFACT_DIR_ENV",
@@ -530,7 +527,7 @@ __all__ = [
     "ML_WORKER_FALL_MODEL_WINDOW_ENV",
     "ML_WORKER_IMAGE_ENV",
     "clip_recording_config_from_environment",
-    "fall_candidate_bundle_config_from_environment",
+    "fall_candidate_config_from_environment",
     "fall_model_config_from_environment",
     "reject_retired_worker_environment",
     "resolve_local_overrides",

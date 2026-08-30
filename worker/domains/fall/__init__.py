@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from shared.detection_policies import FallPolicyV2
 from worker.domains.fall.classifier import (
     FallModelMetadataProtocol,
     FallModelProtocol,
@@ -13,7 +14,7 @@ from worker.domains.fall.classifier_v2 import (
     FallWindowClassifierV2,
 )
 from worker.domains.fall.detector import FallEventLatch, FallLatchStatus
-from worker.domains.fall.policy_v2 import FallPolicyDeciderV2, FallPolicyV2
+from worker.domains.fall.policy_v2 import FallPolicyDeciderV2
 from worker.domains.fall.schema import FallEvent
 
 __all__ = [

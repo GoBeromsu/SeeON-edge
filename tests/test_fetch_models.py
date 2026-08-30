@@ -37,6 +37,7 @@ from worker.tools.fetch_models.http_source import (
 from worker.tools.fetch_models.manifest import (
     MANIFEST_PATH,
     SIDECAR_ROOT,
+    Bundle,
     Manifest,
     ManifestError,
     canonical_json,
@@ -160,8 +161,37 @@ def _bundle_manifest() -> Manifest:
             }
         ).encode()
     )
-    raw["bundles"] = [{"sha256": identity, "members": members, "payload": payload}]
+    receipt = canonical_json({"bundle_payload_digest": identity}).encode()
+    receipts = [
+        {
+            "path": "receipts/evaluation.json",
+            "source": "gh",
+            "remote_path": "bundle/evaluation.json",
+            "size": len(receipt),
+            "sha256": _sha(receipt),
+        }
+    ]
+    raw["bundles"] = [
+        {"sha256": identity, "members": members, "payload": payload, "receipts": receipts}
+    ]
     return parse_manifest(raw)
+
+
+def _bundle_source(bundle: Bundle) -> FakeSource:
+    return FakeSource(
+        {
+            artifact.url: body
+            for artifact, body in zip(
+                (*bundle.members, *bundle.receipts),
+                (
+                    WEIGHT,
+                    UPSTREAM,
+                    canonical_json({"bundle_payload_digest": bundle.sha256}).encode(),
+                ),
+                strict=True,
+            )
+        }
+    )
 
 
 # --- manifest -------------------------------------------------------------
@@ -433,27 +463,30 @@ def test_missing_bundled_sidecar_is_a_failure(tmp_path: Path) -> None:
 def test_bundle_is_atomically_published_and_then_a_noop(tmp_path: Path) -> None:
     manifest = _bundle_manifest()
     bundle = manifest.bundles[0]
-    source = FakeSource(
-        {member.url: body for member, body in zip(bundle.members, (WEIGHT, UPSTREAM), strict=True)}
-    )
+    source = _bundle_source(bundle)
 
     first = fetch_bundle(bundle, tmp_path, source, env={}, retry=_no_sleep_policy())
     published = tmp_path / "bundles" / bundle.sha256
-    assert [result.outcome for result in first.results] == ["fetched", "fetched"]
+    assert [result.outcome for result in first.results] == ["fetched", "fetched", "fetched"]
     assert (published / "weights/model.bin").read_bytes() == WEIGHT
     assert (published / "manifest.json").read_bytes() == bundle.manifest_bytes
+    assert (published / "receipts/evaluation.json").read_bytes() == canonical_json(
+        {"bundle_payload_digest": bundle.sha256}
+    ).encode()
     assert (published / "weights").is_dir(), "declared nested member parent is part of the tree"
     assert not list((tmp_path / "bundles").glob(f".{bundle.sha256}.*"))
 
     second = fetch_bundle(bundle, tmp_path, source, env={}, retry=_no_sleep_policy())
     assert second.is_noop
-    assert len(source.calls) == 2
+    assert len(source.calls) == 3
 
 
 def test_bundle_failure_cleans_staging_and_never_publishes(tmp_path: Path) -> None:
     manifest = _bundle_manifest()
     bundle = manifest.bundles[0]
-    source = FakeSource({member.url: b"\x00" * member.size for member in bundle.members})
+    source = FakeSource(
+        {artifact.url: b"\x00" * artifact.size for artifact in (*bundle.members, *bundle.receipts)}
+    )
 
     with pytest.raises(VerificationError, match="sha256 mismatch"):
         fetch_bundle(bundle, tmp_path, source, env={}, retry=_no_sleep_policy())
@@ -474,14 +507,81 @@ def test_existing_mismatched_bundle_is_never_overwritten(tmp_path: Path) -> None
 def test_existing_bundle_with_extra_empty_directory_is_rejected(tmp_path: Path) -> None:
     manifest = _bundle_manifest()
     bundle = manifest.bundles[0]
-    source = FakeSource(
-        {member.url: body for member, body in zip(bundle.members, (WEIGHT, UPSTREAM), strict=True)}
-    )
+    source = _bundle_source(bundle)
     fetch_bundle(bundle, tmp_path, source, env={}, retry=_no_sleep_policy())
     (tmp_path / "bundles" / bundle.sha256 / "empty").mkdir()
 
     with pytest.raises(VerificationError, match="tree mismatch"):
         fetch_bundle(bundle, tmp_path, source, env={}, retry=_no_sleep_policy())
+
+
+def test_receipts_are_non_recursive_and_part_of_exact_bundle_tree(tmp_path: Path) -> None:
+    bundle = _bundle_manifest().bundles[0]
+    assert bundle.sha256 == _sha(bundle.canonical_payload.encode())
+    assert bundle.receipts[0].sha256 not in bundle.canonical_payload
+    assert b'"receipts"' in bundle.manifest_bytes
+    assert bundle.manifest_bytes == _bundle_manifest().bundles[0].manifest_bytes
+
+    fetch_bundle(bundle, tmp_path, _bundle_source(bundle), env={}, retry=_no_sleep_policy())
+    published = tmp_path / "bundles" / bundle.sha256
+    receipt = published / "receipts/evaluation.json"
+    receipt.write_bytes(b"\x00" * bundle.receipts[0].size)
+    with pytest.raises(VerificationError, match="member mismatch"):
+        fetch_bundle(bundle, tmp_path, FakeSource({}), env={}, retry=_no_sleep_policy())
+
+
+def test_bundle_receipts_must_be_nonempty_unique_and_disjoint() -> None:
+    bundle = _bundle_manifest().bundles[0]
+    raw = _manifest_dict(
+        bundles=[
+            {
+                "sha256": bundle.sha256,
+                "members": [
+                    {
+                        "path": member.path,
+                        "source": member.source.name,
+                        "remote_path": member.remote_path,
+                        "size": member.size,
+                        "sha256": member.sha256,
+                    }
+                    for member in bundle.members
+                ],
+                "payload": dict(bundle.payload),
+                "receipts": [],
+            }
+        ]
+    )
+    with pytest.raises(ManifestError, match="non-empty"):
+        parse_manifest(raw)
+
+
+def test_missing_receipt_or_cross_tree_receipt_fails_without_publish(tmp_path: Path) -> None:
+    bundle = _bundle_manifest().bundles[0]
+    missing = _bundle_source(bundle)
+    missing.bodies.pop(bundle.receipts[0].url)
+    with pytest.raises(SourceError):
+        fetch_bundle(bundle, tmp_path, missing, env={}, retry=_no_sleep_policy())
+    assert not (tmp_path / "bundles" / bundle.sha256).exists()
+    assert not list((tmp_path / "bundles").glob(f".{bundle.sha256}.*"))
+
+    raw = _manifest_dict(sidecars=[])
+    member = {
+        "path": "same.json",
+        "source": "hf",
+        "remote_path": "same.json",
+        "size": len(WEIGHT),
+        "sha256": _sha(WEIGHT),
+    }
+    raw["bundles"] = [
+        {
+            "sha256": _sha(canonical_json({"members": [member], "payload": {}}).encode()),
+            "members": [member],
+            "receipts": [member],
+            "payload": {},
+        }
+    ]
+    with pytest.raises(ManifestError, match="overlap"):
+        parse_manifest(raw)
 
 
 # --- attempts env + CLI ---------------------------------------------------

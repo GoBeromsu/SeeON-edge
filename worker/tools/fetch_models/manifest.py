@@ -76,6 +76,7 @@ class Bundle:
     sha256: str
     members: tuple[Artifact, ...]
     payload: Mapping[str, object]
+    receipts: tuple[Artifact, ...] = ()
 
     @property
     def canonical_payload(self) -> str:
@@ -100,6 +101,10 @@ class Bundle:
                         for member in self.members
                     ],
                     "payload": self.payload,
+                    "receipts": [
+                        {"path": receipt.path, "sha256": receipt.sha256, "size": receipt.size}
+                        for receipt in self.receipts
+                    ],
                     "schema_version": 1,
                 }
             )
@@ -189,12 +194,24 @@ def _parse_bundle(index: int, raw: object, sources: Mapping[str, Source]) -> Bun
         for member_index, member in enumerate(raw_members)
     )
     paths = [member.path for member in members]
-    if len(paths) != len(set(paths)):
+    raw_receipts = raw.get("receipts", [])
+    if not isinstance(raw_receipts, list):
+        raise ManifestError(f"{where}: receipts must be a list")
+    if raw_receipts == [] and "receipts" in raw:
+        raise ManifestError(f"{where}: receipts must be non-empty when present")
+    receipts = tuple(
+        _parse_artifact(receipt_index, receipt, sources)
+        for receipt_index, receipt in enumerate(raw_receipts)
+    )
+    receipt_paths = [receipt.path for receipt in receipts]
+    if len(paths) != len(set(paths)) or len(receipt_paths) != len(set(receipt_paths)):
         raise ManifestError(f"{where}: duplicate member paths")
+    if set(paths) & set(receipt_paths):
+        raise ManifestError(f"{where}: receipt paths overlap payload members")
     payload = _require(raw, "payload", where)
     if not isinstance(payload, Mapping):
         raise ManifestError(f"{where}: payload must be an object")
-    bundle = Bundle(sha256=sha256, members=members, payload=dict(payload))
+    bundle = Bundle(sha256=sha256, members=members, payload=dict(payload), receipts=receipts)
     actual = hashlib.sha256(bundle.canonical_payload.encode()).hexdigest()
     if actual != sha256:
         raise ManifestError(f"{where}: sha256 does not match canonical members and payload")

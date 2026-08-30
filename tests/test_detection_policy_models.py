@@ -7,13 +7,35 @@ import pytest
 from shared.detection_policies import (
     BED_EXIT_POLICY_V1_DEFAULT,
     FALL_POLICY_V1_DEFAULT,
+    LATEST_POLICY_VERSIONS,
     BedExitPolicyV1,
     FallPolicyV1,
+    FallPolicyV2,
     PolicyDocumentError,
     make_effective_policy,
     parse_effective_policy,
     parse_policy_values,
 )
+
+
+def test_fall_v2_is_shared_frozen_authority_but_not_an_active_policy_version() -> None:
+    assert FallPolicyV2() == FallPolicyV2(
+        transition_threshold=0.7,
+        transition_votes=3,
+        transition_window=5,
+        fallen_threshold=0.8,
+        fallen_consecutive=3,
+        recovery_transition_max=0.4,
+        recovery_fallen_max=0.5,
+        recovery_consecutive=5,
+        track_ttl_frames=45,
+        cooldown_frames=90,
+    )
+    assert LATEST_POLICY_VERSIONS["fall"] == 1
+    with pytest.raises(ValueError, match="transition_votes"):
+        FallPolicyV2(transition_votes=6)
+    with pytest.raises(ValueError, match="track_ttl_frames"):
+        FallPolicyV2(track_ttl_frames=0)
 
 
 def test_versioned_policy_parser_returns_typed_numeric_values() -> None:
@@ -39,11 +61,14 @@ def test_versioned_policy_parser_returns_typed_numeric_values() -> None:
         grace_frames=7,
     )
     assert FallPolicyV1(operating_threshold=0.5) == FALL_POLICY_V1_DEFAULT
-    assert BedExitPolicyV1(
-        min_containment=0.35,
-        hold_frames=2,
-        grace_frames=3,
-    ) == BED_EXIT_POLICY_V1_DEFAULT
+    assert (
+        BedExitPolicyV1(
+            min_containment=0.35,
+            hold_frames=2,
+            grace_frames=3,
+        )
+        == BED_EXIT_POLICY_V1_DEFAULT
+    )
 
 
 @pytest.mark.parametrize(

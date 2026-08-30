@@ -142,13 +142,13 @@ services:
       # Hugging Face sources only and never logged; leave empty for public.
       HF_TOKEN: ${HF_TOKEN:-}
     volumes:
-      - worker-models:/app/models:rw
+      - worker-models:/models:rw
     command:
       - python
       - -m
       - worker.tools.fetch_models
       - --dest
-      - /app/models
+      - /models
 
   ml-worker:
     image: ${ML_WORKER_IMAGE:?ML_WORKER_IMAGE is required in edge prod}
@@ -170,10 +170,8 @@ services:
       # export is a dashboard runtime setting and is never projected here.
       RELAY_TOKEN: ${API_EDGE_RELAY_TOKEN:?edge worker requires a deployment-unique relay token}
       ML_WORKER_PROFILE: ${ML_WORKER_PROFILE:?set cpu-host|nvidia|intel-vaapi-host|apple-mps-host (legacy cpu|igpu|mps accepted)}
-      # A sealed candidate is image-owned and remains dark. Empty selection
-      # leaves admission disabled; no relay payload can select it.
-      FALL_CANDIDATE_SELECTION_PATH: ${FALL_CANDIDATE_SELECTION_PATH:-}
-      FALL_CANDIDATE_MODELS_ROOT: ${FALL_CANDIDATE_MODELS_ROOT:-/app/models}
+      # The actual digest-pinned image identity is observed only when its
+      # optional image-owned selection document exists.
       ML_WORKER_IMAGE: ${ML_WORKER_IMAGE:?ML_WORKER_IMAGE is required in edge prod}
       # Same RTSP destination policy as ml-api (worker probe path).
       ML_RTSP_ALLOW_PRIVATE_DESTINATIONS: ${ML_RTSP_ALLOW_PRIVATE_DESTINATIONS:-0}
@@ -185,7 +183,7 @@ services:
       # Fixed image-adjacent model root, populated by edge-model-fetch. Model
       # selection/policy comes from the versioned worker config, never from
       # environment variables.
-      - worker-models:/app/models:ro
+      - worker-models:/models:ro
       # Engines are prepared explicitly from the image-pinned manifest. Runtime
       # preflight verifies this writable cache and never writes beside models.
       - worker-engine-cache:/var/cache/seeon/tensorrt:rw

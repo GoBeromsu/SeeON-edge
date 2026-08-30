@@ -21,8 +21,6 @@ from worker.runtime.provenance.model_bundle import (
 WORKER_IMAGE_DIGEST = "a" * 64
 BUNDLE_PAYLOAD_DIGEST = "b" * 64
 DATASET_PAYLOAD_DIGEST = "c" * 64
-EVALUATION_RECEIPT_DIGEST = "d" * 64
-FIELD_RECEIPT_DIGEST = "e" * 64
 SEED_RULE_DIGEST = "f" * 64
 CALIBRATION_DIGEST = "1" * 64
 CONFORMANCE_DIGEST = "2" * 64
@@ -32,6 +30,30 @@ FALL_POLICY_DIGEST = "5" * 64
 CONFIG_REVISION_DIGEST = "6" * 64
 RESTART_REVISION_DIGEST = "7" * 64
 MISMATCH_DIGEST = "8" * 64
+
+
+def _evaluation_document() -> dict[str, object]:
+    return {
+        "bundle_payload_digest": BUNDLE_PAYLOAD_DIGEST,
+        "dataset_payload_digest": DATASET_PAYLOAD_DIGEST,
+        "calibration_digest": CALIBRATION_DIGEST,
+        "conformance_digest": CONFORMANCE_DIGEST,
+        "class_order_digest": CLASS_ORDER_DIGEST,
+        "input_contract_digest": INPUT_CONTRACT_DIGEST,
+        "fall_policy_v2_digest": FALL_POLICY_DIGEST,
+    }
+
+
+EVALUATION_RECEIPT_DIGEST = canonical_digest(_evaluation_document())
+FIELD_RECEIPT_DIGEST = canonical_digest(
+    {
+        **_evaluation_document(),
+        "evaluation_receipt_digest": EVALUATION_RECEIPT_DIGEST,
+        "status": "green",
+        "selected_deployment_seed": "seed-0004",
+        "selected_deployment_seed_rule_digest": SEED_RULE_DIGEST,
+    }
+)
 
 
 def desired_raw() -> dict[str, object]:
@@ -61,22 +83,11 @@ def desired_raw() -> dict[str, object]:
 
 
 def evaluation_receipt() -> dict[str, object]:
-    return {
-        "receipt_digest": EVALUATION_RECEIPT_DIGEST,
-        "bundle_payload_digest": BUNDLE_PAYLOAD_DIGEST,
-        "dataset_payload_digest": DATASET_PAYLOAD_DIGEST,
-        "evaluation_receipt_digest": EVALUATION_RECEIPT_DIGEST,
-        "calibration_digest": CALIBRATION_DIGEST,
-        "conformance_digest": CONFORMANCE_DIGEST,
-        "class_order_digest": CLASS_ORDER_DIGEST,
-        "input_contract_digest": INPUT_CONTRACT_DIGEST,
-        "fall_policy_v2_digest": FALL_POLICY_DIGEST,
-    }
+    return _evaluation_document()
 
 
 def field_receipt() -> dict[str, object]:
     return {
-        "receipt_digest": FIELD_RECEIPT_DIGEST,
         "status": "green",
         "bundle_payload_digest": BUNDLE_PAYLOAD_DIGEST,
         "dataset_payload_digest": DATASET_PAYLOAD_DIGEST,
@@ -164,10 +175,18 @@ def test_field_receipt_must_be_present_green_and_identity_bound() -> None:
     with pytest.raises(ContractError):
         validate_field_receipt_identity(desired, wrong_seed)
 
+    missing_evaluation_binding = field_receipt()
+    missing_evaluation_binding.pop("evaluation_receipt_digest")
+    with pytest.raises(ContractError):
+        validate_field_receipt_identity(desired, missing_evaluation_binding)
+
 
 def test_sidecar_and_evaluation_receipts_cannot_drift_from_desired() -> None:
     desired = parse_model_selection(desired_raw())
     evaluation = evaluation_receipt()
+    assert "receipt_digest" not in evaluation
+    assert "evaluation_receipt_digest" not in evaluation
+    assert canonical_digest(evaluation) == desired.evaluation_receipt_digest
     validate_evaluation_receipt_identity(desired, evaluation)
 
     evaluation["calibration_digest"] = MISMATCH_DIGEST
@@ -175,6 +194,8 @@ def test_sidecar_and_evaluation_receipts_cannot_drift_from_desired() -> None:
         validate_evaluation_receipt_identity(desired, evaluation)
 
     field = field_receipt()
+    assert "receipt_digest" not in field
+    assert canonical_digest(field) == desired.field_evaluation_receipt_digest
     field["evaluation_receipt_digest"] = MISMATCH_DIGEST
     with pytest.raises(ContractError):
         validate_field_receipt_identity(desired, field)

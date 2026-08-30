@@ -17,7 +17,14 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Final
 
-from contracts.model_selection import ContractError, parse_model_selection
+from contracts.model_selection import (
+    ContractError,
+    ModelSelection,
+    canonical_json_bytes,
+    parse_model_selection,
+    validate_evaluation_receipt_identity,
+    validate_field_receipt_identity,
+)
 
 _BUNDLE_RE: Final = re.compile(r"^[0-9a-f]{64}$")
 _RELATIVE_RE: Final = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*(/[A-Za-z0-9][A-Za-z0-9._-]*)*$")
@@ -37,9 +44,14 @@ _IDENTITY_FIELDS: Final = (
     "worker",
 )
 _RUNTIME_IDENTITY_FIELDS: Final = ("worker", "config", "restart")
-_STATIC_IDENTITY_FIELDS: Final = tuple(
-    field for field in _IDENTITY_FIELDS if field not in _RUNTIME_IDENTITY_FIELDS
+_RECEIPT_IDENTITY_FIELDS: Final = ("evaluation", "field")
+_BUNDLE_IDENTITY_FIELDS: Final = tuple(
+    field
+    for field in _IDENTITY_FIELDS
+    if field not in (*_RUNTIME_IDENTITY_FIELDS, *_RECEIPT_IDENTITY_FIELDS)
 )
+_REQUIRED_MEMBERS: Final = frozenset({"model.pt", "arch.json", "metadata.yaml"})
+_REQUIRED_RECEIPTS: Final = frozenset({"evaluation-receipt.json", "field-evaluation-receipt.json"})
 
 
 class ModelBundleAdmissionError(RuntimeError):
@@ -52,6 +64,7 @@ class DesiredModelBundle:
 
     bundle_sha256: str
     identities: Mapping[str, object]
+    selection: ModelSelection | None = None
 
     def __post_init__(self) -> None:
         if _BUNDLE_RE.fullmatch(self.bundle_sha256) is None:
@@ -118,6 +131,7 @@ def desired_model_bundle_from_selection_document(raw: object) -> DesiredModelBun
             "restart": selection.restart_revision,
             "worker": selection.worker_image_digest,
         },
+        selection,
     )
 
 
@@ -158,29 +172,37 @@ def admit_model_bundle(
     if document.get("bundle_sha256") != desired.bundle_sha256:
         raise ModelBundleAdmissionError("bundle identity mismatch")
     members = document.get("members")
+    receipts = document.get("receipts")
     payload = document.get("payload")
-    if not isinstance(members, list) or not isinstance(payload, dict):
+    if (
+        not isinstance(members, list)
+        or not isinstance(receipts, list)
+        or not isinstance(payload, dict)
+    ):
         raise ModelBundleAdmissionError("bundle manifest shape mismatch")
     identities = payload.get("identities")
     if not isinstance(identities, dict):
         raise ModelBundleAdmissionError("bundle identities missing")
-    for field in _STATIC_IDENTITY_FIELDS:
+    for field in _BUNDLE_IDENTITY_FIELDS:
         if identities.get(field) != desired.identities[field]:
             raise ModelBundleAdmissionError(f"{field} identity mismatch")
-    if set(identities) != set(_STATIC_IDENTITY_FIELDS):
+    if set(identities) != set(_BUNDLE_IDENTITY_FIELDS):
         raise ModelBundleAdmissionError("bundle identities contain unknown fields")
     _validate_bundle_identity(document, desired.bundle_sha256)
     observed_members = _verify_members(root, members)
-    _verify_exact_tree(root, {"manifest.json", *observed_members})
-    frozen_static = _freeze(dict(identities))
+    observed_receipts = _verify_members(root, receipts)
+    receipt_identities = _verify_required_members(root, members, receipts, desired)
+    _verify_exact_tree(root, {"manifest.json", *observed_members, *observed_receipts})
+    frozen_static = _freeze({**dict(identities), **receipt_identities})
     observed = _freeze(
         {
             "bundle_sha256": desired.bundle_sha256,
             "members": tuple(observed_members),
+            "receipts": tuple(observed_receipts),
             "identities": frozen_static,
         }
     )
-    applied_identities = {**dict(identities), **observations.identities}
+    applied_identities = {**dict(identities), **receipt_identities, **observations.identities}
     for field in _IDENTITY_FIELDS:
         if applied_identities[field] != desired.identities[field]:
             raise ModelBundleAdmissionError(f"{field} identity mismatch")
@@ -239,6 +261,34 @@ def _verify_members(root: Path, members: list[object]) -> tuple[str, ...]:
     if not paths:
         raise ModelBundleAdmissionError("bundle members missing")
     return tuple(paths)
+
+
+def _verify_required_members(
+    root: Path, members: list[object], receipts: list[object], desired: DesiredModelBundle
+) -> Mapping[str, str]:
+    if desired.selection is None:
+        return MappingProxyType({})
+    by_path = {member["path"]: member for member in members if isinstance(member, dict)}
+    by_receipt = {member["path"]: member for member in receipts if isinstance(member, dict)}
+    if set(by_path) != _REQUIRED_MEMBERS or set(by_receipt) != _REQUIRED_RECEIPTS:
+        raise ModelBundleAdmissionError("bundle required members mismatch")
+    observed: dict[str, str] = {}
+    for path, validator in (
+        ("evaluation-receipt.json", validate_evaluation_receipt_identity),
+        ("field-evaluation-receipt.json", validate_field_receipt_identity),
+    ):
+        try:
+            raw = _read_regular(root / path, path)
+            receipt = json.loads(raw)
+            if canonical_json_bytes(receipt) + b"\n" != raw:
+                raise ModelBundleAdmissionError(f"{path} is not canonical JSON")
+            validator(desired.selection, receipt)
+            observed["evaluation" if path == "evaluation-receipt.json" else "field"] = (
+                hashlib.sha256(canonical_json_bytes(receipt)).hexdigest()
+            )
+        except (ContractError, json.JSONDecodeError) as exc:
+            raise ModelBundleAdmissionError(f"{path} is not a valid desired-bound receipt") from exc
+    return MappingProxyType(observed)
 
 
 def _verify_exact_tree(root: Path, expected: set[str]) -> None:

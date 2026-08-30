@@ -24,20 +24,41 @@ def _digest(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def _bundle(root: Path) -> Path:
+def _bundle(root: Path, *, temperature: float = 1.0) -> Path:
     root.mkdir()
     arch = root / "arch.json"
     arch.write_text(json.dumps({"hidden": 4, "layers": 1, "dropout": 0.0}), encoding="utf-8")
     weights = root / "model.pt"
-    torch.save(build_gru_module(hidden=4, layers=1, dropout=0.0).state_dict(), weights)
+    module = build_gru_module(hidden=4, layers=1, dropout=0.0)
+    with torch.no_grad():
+        for parameter in module.parameters():
+            parameter.zero_()
+        module.fc.bias.copy_(torch.tensor((0.0, 1.0, 2.0)))
+    torch.save(module.state_dict(), weights)
     files = {
         "input_contract": "input.json",
         "policy": "policy.json",
         "calibration": "calibration.json",
         "conformance": "conformance.json",
     }
-    for name in files.values():
-        (root / name).write_text("{}", encoding="utf-8")
+    (root / files["input_contract"]).write_text("{}", encoding="utf-8")
+    (root / files["policy"]).write_text("{}", encoding="utf-8")
+    (root / files["conformance"]).write_text("{}", encoding="utf-8")
+    calibration_path = root / files["calibration"]
+    calibration_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "class_order": ["background", "fall_transition", "fallen"],
+                "temperature": temperature,
+                "transition_threshold": 0.7,
+                "fallen_threshold": 0.8,
+                "transition_rule": "m-of-n-3-of-5-v1",
+                "fallen_rule": "consecutive-3-v1",
+            }
+        ),
+        encoding="utf-8",
+    )
     metadata = {
         "type": "gru",
         "framework": "pytorch",
@@ -51,6 +72,11 @@ def _bundle(root: Path) -> Path:
         "class_order": ["background", "fall_transition", "fallen"],
         "schema_version": 1,
         "preprocessing_identity": "coco17-xyc-plus-pose-head-xyxy-valid-f32-v1",
+        "calibration_schema_version": 1,
+        "transition_rule": "m-of-n-3-of-5-v1",
+        "fallen_rule": "consecutive-3-v1",
+        "transition_threshold": 0.7,
+        "fallen_threshold": 0.8,
         "artifact_digest": _digest(weights),
         "architecture_digest": _digest(arch),
         "input_digest": _digest(root / files["input_contract"]),
@@ -131,6 +157,17 @@ def test_gru_runner_verifies_bundle_warms_up_and_returns_softmax(tmp_path: Path)
         runner.predict(np.full((30, 56), np.nan, dtype=np.float32))
 
 
+def test_gru_runner_applies_calibration_temperature(tmp_path: Path) -> None:
+    cold = GruFallRunner.from_artifact_dir(_bundle(tmp_path / "cold", temperature=1.0))
+    warm = GruFallRunner.from_artifact_dir(_bundle(tmp_path / "warm", temperature=2.0))
+    inputs = np.zeros((30, 56), dtype=np.float32)
+    cold_probabilities = cold.predict(inputs)
+    warm_probabilities = warm.predict(inputs)
+    assert cold.class_order == ("background", "fall_transition", "fallen")
+    assert cold_probabilities[2] > warm_probabilities[2]
+    assert warm_probabilities[0] > cold_probabilities[0]
+
+
 def test_gru_runner_rejects_manifest_extra_fields_and_digest_mismatch(tmp_path: Path) -> None:
     root = _bundle(tmp_path / "gru")
     metadata_path = root / "metadata.yaml"
@@ -143,4 +180,28 @@ def test_gru_runner_rejects_manifest_extra_fields_and_digest_mismatch(tmp_path: 
     metadata["artifact_digest"] = "0" * 64
     metadata_path.write_text(yaml.safe_dump(metadata), encoding="utf-8")
     with pytest.raises(ModelLoadError, match="digest"):
+        GruFallRunner.from_artifact_dir(root)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("class_order", ["fallen", "fall_transition", "background"]),
+        ("transition_threshold", 0.6),
+        ("fallen_rule", "consecutive-2-v1"),
+    ),
+)
+def test_gru_runner_rejects_calibration_identity_drift(
+    tmp_path: Path, field: str, value: object
+) -> None:
+    root = _bundle(tmp_path / "gru")
+    calibration_path = root / "calibration.json"
+    calibration = json.loads(calibration_path.read_text(encoding="utf-8"))
+    calibration[field] = value
+    calibration_path.write_text(json.dumps(calibration), encoding="utf-8")
+    metadata_path = root / "metadata.yaml"
+    metadata = yaml.safe_load(metadata_path.read_text(encoding="utf-8"))
+    metadata["calibration_digest"] = _digest(calibration_path)
+    metadata_path.write_text(yaml.safe_dump(metadata), encoding="utf-8")
+    with pytest.raises(ModelLoadError, match="calibration"):
         GruFallRunner.from_artifact_dir(root)

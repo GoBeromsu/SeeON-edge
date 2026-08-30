@@ -6,24 +6,9 @@ from collections import deque
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 
+from shared.detection_policies import FallPolicyV2
 from worker.domains.fall.classifier_v2 import FallV2Probabilities
 from worker.types import BusinessEvent
-
-
-@dataclass(frozen=True, slots=True)
-class FallPolicyV2:
-    """Frozen V2 temporal thresholds; this is not a deploy-time configuration."""
-
-    transition_threshold: float = 0.7
-    transition_votes: int = 3
-    transition_window: int = 5
-    fallen_threshold: float = 0.8
-    fallen_consecutive: int = 3
-    recovery_transition_max: float = 0.4
-    recovery_fallen_max: float = 0.5
-    recovery_consecutive: int = 5
-    track_ttl_frames: int = 45
-    cooldown_frames: int = 90
 
 
 @dataclass(slots=True)
@@ -37,6 +22,7 @@ class _TrackState:
     initialized: bool = False
     alert_event: BusinessEvent | None = None
     alert_frame: int | None = None
+    transition_sequence: int | None = None
 
 
 @dataclass(slots=True)
@@ -50,9 +36,16 @@ class FallPolicyDeciderV2:
 
     camera_id: str
     facility_id: str
+    boot_id: str
+    stream_epoch: str
     policy: FallPolicyV2 = field(default_factory=FallPolicyV2)
     _states: dict[int, _TrackState] = field(default_factory=dict, init=False)
     _next_generations: dict[int, int] = field(default_factory=dict, init=False)
+    _next_transition_sequence: int = field(default=1, init=False)
+
+    def __post_init__(self) -> None:
+        if not self.boot_id or not self.stream_epoch:
+            raise ValueError("boot_id and stream_epoch must be non-empty immutable identities")
 
     def update(
         self,
@@ -177,7 +170,10 @@ class FallPolicyDeciderV2:
         event = BusinessEvent(
             domain="fall",
             event_type="fall",
-            identity=f"{track_id}:{state.generation}",
+            identity=(
+                f"{self.boot_id}:{self.stream_epoch}:{track_id}:"
+                f"{state.generation}:{self._sequence_for(state)}"
+            ),
             camera_id=self.camera_id,
             facility_id=self.facility_id,
             time_sec=time_sec,
@@ -187,6 +183,15 @@ class FallPolicyDeciderV2:
         state.alert_event = event
         state.alert_frame = frame_index
         return event
+
+    def _sequence_for(self, state: _TrackState) -> int:
+        sequence = state.transition_sequence
+        if sequence is not None:
+            return sequence
+        sequence = self._next_transition_sequence
+        self._next_transition_sequence += 1
+        state.transition_sequence = sequence
+        return sequence
 
 
 __all__ = ["FallPolicyDeciderV2", "FallPolicyV2"]

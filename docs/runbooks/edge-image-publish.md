@@ -340,8 +340,9 @@ This is a flat, shipped LSTM artifact set, not a synthetic "bundle SHA-256".
 `model.pt` and `metadata.upstream.json` are the pinned artifacts in
 `worker/tools/fetch_models/manifest.json`; `metadata.yaml` and `arch.json` are
 the byte-identified sidecars that the fetcher installs alongside them. Read
-the running worker reference and all four files back exactly as follows, and
-compare the output to the receipt before declaring the deployment healthy:
+the configured worker reference separately from the container's immutable image
+ID, then attest that ID's repository digest and source revision. Compare all of
+them to the sealed receipt before declaring the deployment healthy:
 
 ```sh
 dc() {
@@ -349,7 +350,13 @@ dc() {
 }
 worker_id="$(dc ps -q ml-worker)"
 test -n "$worker_id"
-docker inspect --format 'ml-worker image: {{.Config.Image}}' "$worker_id"
+configured_ref="$(docker inspect --format '{{.Config.Image}}' "$worker_id")"
+image_id="$(docker inspect --format '{{.Image}}' "$worker_id")"
+printf 'ml-worker configured reference: %s\nml-worker immutable image ID: %s\n' \
+  "$configured_ref" "$image_id"
+docker image inspect --format \
+  'RepoDigests={{json .RepoDigests}} source_revision={{index .Config.Labels "org.opencontainers.image.revision"}}' \
+  "$image_id"
 dc run --rm --no-deps --entrypoint python ml-worker -c '
 import hashlib
 from pathlib import Path
@@ -360,6 +367,25 @@ for path in (
     Path("/app/models/fall/lstm/arch.json"),
 ):
     print(f"{path.relative_to('/app/models')} sha256={hashlib.sha256(path.read_bytes()).hexdigest()}")
+'
+```
+
+`/app/model-selection.json` is fixed and image-owned; never provide, replace,
+or bind-mount a host selection document. Its selected candidate location is
+`/models/bundles/<digest>`. The bundle payload is limited to its explicit
+payload members. Evaluation and field receipts are externally hashed,
+non-recursive receipts: verify their recorded digests as identities, but do not
+walk them as nested bundle payloads.
+
+Worker startup must fail closed before assignment when LSTM admission or the
+dark GRU candidate's admission/warmup fails. On a successful startup, read the
+durable applied manifest and require the recorded `desired`, `observed`,
+`match`, and `candidate_status=disabled` fields:
+
+```sh
+dc exec -T ml-worker python -c '
+from pathlib import Path
+print(Path("/var/lib/seeon-state/applied-model-manifest.json").read_text())
 '
 ```
 
@@ -382,7 +408,8 @@ Run the readback block again with `ML_WORKER_IMAGE="$PREVIOUS_WORKER_IMAGE"`
 in its environment. Do not restart `ml-api` or any other service. Never use
 `docker compose down -v`, delete model files or content-addressed candidates,
 or hand-edit the model volume: retention and `edge-model-fetch` are required
-for an atomic rollback.
+for an atomic rollback. This procedure does not retain or promote candidates
+automatically. Candidate activation and Phase 7 are outside this runbook.
 
 ## Runtime enrollment and topology
 

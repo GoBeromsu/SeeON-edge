@@ -41,15 +41,116 @@ class _GruNet(nn.Module):
 
 
 @final
+class GruCalibration:
+    schema_version: int
+    class_order: tuple[str, str, str]
+    temperature: float
+    transition_threshold: float
+    fallen_threshold: float
+    transition_rule: str
+    fallen_rule: str
+
+    def __init__(
+        self,
+        *,
+        schema_version: int,
+        class_order: tuple[str, str, str],
+        temperature: float,
+        transition_threshold: float,
+        fallen_threshold: float,
+        transition_rule: str,
+        fallen_rule: str,
+    ) -> None:
+        self.schema_version = schema_version
+        self.class_order = class_order
+        self.temperature = temperature
+        self.transition_threshold = transition_threshold
+        self.fallen_threshold = fallen_threshold
+        self.transition_rule = transition_rule
+        self.fallen_rule = fallen_rule
+
+    @classmethod
+    def from_path(cls, path: Path, manifest: GruFallManifest) -> GruCalibration:
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            raise ModelLoadError(f"cannot read calibration.json at {path}") from exc
+        required = {
+            "schema_version",
+            "class_order",
+            "temperature",
+            "transition_threshold",
+            "fallen_threshold",
+            "transition_rule",
+            "fallen_rule",
+        }
+        if not isinstance(raw, dict) or set(raw) != required:
+            raise ModelLoadError("calibration.json must contain exactly its required fields")
+        schema_version = raw["schema_version"]
+        class_order = raw["class_order"]
+        temperature = raw["temperature"]
+        thresholds = (raw["transition_threshold"], raw["fallen_threshold"])
+        rules = (raw["transition_rule"], raw["fallen_rule"])
+        if not isinstance(schema_version, int) or isinstance(schema_version, bool):
+            raise ModelLoadError("calibration schema_version must be an integer")
+        if (
+            not isinstance(class_order, list)
+            or len(class_order) != 3
+            or not all(isinstance(value, str) for value in class_order)
+        ):
+            raise ModelLoadError("calibration class_order must contain three strings")
+        if isinstance(temperature, bool) or not isinstance(temperature, (int, float)):
+            raise ModelLoadError("calibration temperature must be numeric")
+        parsed_temperature = float(temperature)
+        if not math.isfinite(parsed_temperature) or parsed_temperature <= 0.0:
+            raise ModelLoadError("calibration temperature must be finite and positive")
+        if any(
+            isinstance(value, bool) or not isinstance(value, (int, float)) for value in thresholds
+        ):
+            raise ModelLoadError("calibration thresholds must be numeric")
+        parsed_thresholds = tuple(float(value) for value in thresholds)
+        if not all(math.isfinite(value) and 0.0 <= value <= 1.0 for value in parsed_thresholds):
+            raise ModelLoadError("calibration thresholds must be finite and between 0 and 1")
+        if not all(isinstance(value, str) for value in rules):
+            raise ModelLoadError("calibration rules must be strings")
+        calibration = cls(
+            schema_version=schema_version,
+            class_order=(class_order[0], class_order[1], class_order[2]),
+            temperature=parsed_temperature,
+            transition_threshold=parsed_thresholds[0],
+            fallen_threshold=parsed_thresholds[1],
+            transition_rule=rules[0],
+            fallen_rule=rules[1],
+        )
+        if (
+            calibration.schema_version != manifest.calibration_schema_version
+            or calibration.class_order != manifest.class_order
+            or calibration.transition_threshold != manifest.transition_threshold
+            or calibration.fallen_threshold != manifest.fallen_threshold
+            or calibration.transition_rule != manifest.transition_rule
+            or calibration.fallen_rule != manifest.fallen_rule
+        ):
+            raise ModelLoadError("calibration.json does not match manifest calibration identity")
+        return calibration
+
+
+@final
 class GruFallRunner:
     """Closed three-class GRU runner; construction verifies every bundle member."""
 
     name: Final = "fall-detector"
     version: Final = "gru"
 
-    def __init__(self, manifest: GruFallManifest, module: nn.Module, device: str = "cpu") -> None:
+    def __init__(
+        self,
+        manifest: GruFallManifest,
+        calibration: GruCalibration,
+        module: nn.Module,
+        device: str = "cpu",
+    ) -> None:
         self.manifest = manifest
         self.class_order = manifest.class_order
+        self.calibration = calibration
         try:
             self.device = torch.device(device)
             self.model: nn.Module = module.to(self.device).eval()
@@ -62,13 +163,14 @@ class GruFallRunner:
     def from_artifact_dir(cls, artifact_dir: str | Path, device: str = "cpu") -> GruFallRunner:
         manifest = GruFallManifest.from_artifact_dir(artifact_dir)
         _verify_bundle(manifest)
+        calibration = GruCalibration.from_path(manifest.calibration_path, manifest)
         module = build_gru_module_from_arch(manifest.architecture_path)
         state_dict = _load_state_dict(manifest.weights_path)
         try:
             module.load_state_dict(state_dict, strict=True)
         except RuntimeError as exc:
             raise ModelLoadError(f"cannot load GRU model state_dict: {exc}") from exc
-        runner = cls(manifest, module, device=device)
+        runner = cls(manifest, calibration, module, device=device)
         runner.warmup()
         return runner
 
@@ -90,7 +192,12 @@ class GruFallRunner:
                 raise ModelLoadError(
                     f"GRU model must return shape (1, 3), received {tuple(logits.shape)}"
                 )
-            probabilities = torch.softmax(logits, dim=1).detach().cpu().numpy()[0]
+            probabilities = (
+                torch.softmax(logits / self.calibration.temperature, dim=1)
+                .detach()
+                .cpu()
+                .numpy()[0]
+            )
         if probabilities.shape != (3,) or not np.isfinite(probabilities).all():
             raise ModelLoadError("GRU model returned non-finite probabilities")
         output = tuple(float(value) for value in probabilities)
@@ -152,6 +259,7 @@ def _load_state_dict(path: Path) -> StateDict:
 
 
 __all__ = [
+    "GruCalibration",
     "GruFallManifest",
     "GruFallRunner",
     "ModelLoadError",

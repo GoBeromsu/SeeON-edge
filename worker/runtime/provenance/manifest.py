@@ -95,6 +95,7 @@ def build_applied_runtime_manifest(
     detector_version: str,
     environment: RuntimeEnvironmentFacts,
     edge_database_schema_version: int,
+    dark_model_candidate: Mapping[str, object] | None = None,
 ) -> AppliedRuntimeManifest:
     """Freeze only independently resolved state after profile, model, and policy gates."""
     if config_version < 0 or restart_generation < 0:
@@ -132,7 +133,68 @@ def build_applied_runtime_manifest(
             for camera in sorted(cameras, key=lambda camera: camera.camera_id)
         ],
     }
+    if dark_model_candidate is not None:
+        content["dark_model_candidate"] = _plain_dark_model_candidate(dark_model_candidate)
     return AppliedRuntimeManifest.from_content(content)
+
+
+def _plain_dark_model_candidate(candidate: Mapping[str, object]) -> dict[str, JsonValue]:
+    """Accept only the non-authoritative, digest-only dark-candidate proof."""
+    expected = {
+        "desired_selection_digest",
+        "observed",
+        "runtime_observations",
+        "match",
+        "candidate_status",
+    }
+    if set(candidate) != expected:
+        raise AppliedRuntimeManifestError("dark candidate proof has unexpected fields")
+    if candidate["candidate_status"] != "disabled" or candidate["match"] is not True:
+        raise AppliedRuntimeManifestError("dark candidate proof is not an admitted disabled match")
+    plain = _plain_json(candidate)
+    if not isinstance(plain, dict):
+        raise AppliedRuntimeManifestError("dark candidate proof is invalid")
+    for digest in (
+        plain["desired_selection_digest"],
+        plain["observed"]["bundle_sha256"],
+        plain["runtime_observations"]["worker"],
+        plain["runtime_observations"]["config"],
+        plain["runtime_observations"]["restart"],
+    ):
+        if not isinstance(digest, str):
+            raise AppliedRuntimeManifestError("dark candidate proof digest is invalid")
+        require_sha256(digest, "dark candidate proof")
+    observed = plain["observed"]
+    if not isinstance(observed, dict) or set(observed) != {
+        "bundle_sha256",
+        "member_set_sha256",
+        "static_identities",
+    }:
+        raise AppliedRuntimeManifestError("dark candidate observed proof is invalid")
+    require_sha256(observed["member_set_sha256"], "dark candidate member set")
+    static = observed["static_identities"]
+    if not isinstance(static, dict) or not static:
+        raise AppliedRuntimeManifestError("dark candidate static identities are invalid")
+    for identity in static.values():
+        if not isinstance(identity, str):
+            raise AppliedRuntimeManifestError("dark candidate static identity is invalid")
+        require_sha256(identity, "dark candidate static identity")
+    return plain
+
+
+def _plain_json(value: object) -> JsonValue:
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, Mapping):
+        plain: dict[str, JsonValue] = {}
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise AppliedRuntimeManifestError("dark candidate proof key is invalid")
+            plain[key] = _plain_json(item)
+        return plain
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        return [_plain_json(item) for item in value]
+    raise AppliedRuntimeManifestError("dark candidate proof is not plain JSON")
 
 
 def _verified_component_identities(

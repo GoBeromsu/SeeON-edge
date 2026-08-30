@@ -52,34 +52,100 @@ def _canonical(value: object) -> bytes:
 def _bundle(
     tmp_path: Path, identities: dict[str, object] | None = None
 ) -> tuple[Path, DesiredModelBundle]:
-    identities = dict(_IDENTITIES if identities is None else identities)
-    content = b"weights"
-    member = {
-        "path": "weights/model.bin",
-        "size": len(content),
-        "sha256": hashlib.sha256(content).hexdigest(),
+    observed = dict(_IDENTITIES if identities is None else identities)
+    member_bytes = {
+        "model.pt": b"weights",
+        "arch.json": b"{}",
+        "metadata.yaml": b"metadata\n",
     }
+    members = [
+        {"path": path, "size": len(content), "sha256": hashlib.sha256(content).hexdigest()}
+        for path, content in member_bytes.items()
+    ]
     payload = {
         "identities": {
             key: value
-            for key, value in identities.items()
-            if key not in {"worker", "config", "restart"}
+            for key, value in observed.items()
+            if key not in {"worker", "config", "restart", "evaluation", "field"}
         }
     }
     digest = hashlib.sha256(
         json.dumps(
-            {"members": [member], "payload": payload}, sort_keys=True, separators=(",", ":")
+            {"members": members, "payload": payload}, sort_keys=True, separators=(",", ":")
         ).encode()
     ).hexdigest()
+    evaluation = {
+        "bundle_payload_digest": digest,
+        "dataset_payload_digest": _IDENTITIES["dataset"],
+        "calibration_digest": _IDENTITIES["calibration"],
+        "conformance_digest": _IDENTITIES["conformance"],
+        "class_order_digest": _IDENTITIES["class"],
+        "input_contract_digest": _IDENTITIES["input"],
+        "fall_policy_v2_digest": _IDENTITIES["policy"],
+    }
+    evaluation_bytes = _canonical(evaluation)
+    desired_identities = dict(_IDENTITIES)
+    desired_identities["evaluation"] = hashlib.sha256(
+        evaluation_bytes.removesuffix(b"\n")
+    ).hexdigest()
+    field = {
+        **evaluation,
+        "evaluation_receipt_digest": desired_identities["evaluation"],
+        "status": "green",
+        "selected_deployment_seed": _IDENTITIES["seed"],
+        "selected_deployment_seed_rule_digest": _IDENTITIES["rule"],
+    }
+    field_bytes = _canonical(field)
+    desired_identities["field"] = hashlib.sha256(field_bytes.removesuffix(b"\n")).hexdigest()
+    receipts = [
+        {
+            "path": "evaluation-receipt.json",
+            "size": len(evaluation_bytes),
+            "sha256": hashlib.sha256(evaluation_bytes).hexdigest(),
+        },
+        {
+            "path": "field-evaluation-receipt.json",
+            "size": len(field_bytes),
+            "sha256": hashlib.sha256(field_bytes).hexdigest(),
+        },
+    ]
     root = tmp_path / "models" / "bundles" / digest
-    (root / "weights").mkdir(parents=True)
-    (root / member["path"]).write_bytes(content)
+    root.mkdir(parents=True)
+    for path, content in member_bytes.items():
+        (root / path).write_bytes(content)
+    (root / "evaluation-receipt.json").write_bytes(evaluation_bytes)
+    (root / "field-evaluation-receipt.json").write_bytes(field_bytes)
     (root / "manifest.json").write_bytes(
         _canonical(
-            {"bundle_sha256": digest, "members": [member], "payload": payload, "schema_version": 1}
+            {
+                "bundle_sha256": digest,
+                "members": members,
+                "payload": payload,
+                "receipts": receipts,
+                "schema_version": 1,
+            }
         )
     )
-    return tmp_path / "models", DesiredModelBundle(digest, _IDENTITIES)
+    selection_raw = {
+        "schema_version": 1,
+        "model_family": "gru-pose-bbox",
+        "worker_image_digest": desired_identities["worker"],
+        "bundle_path": f"bundles/{digest}",
+        "bundle_payload_digest": digest,
+        "dataset_publication": _DATASET_PUBLICATION,
+        "evaluation_receipt_digest": desired_identities["evaluation"],
+        "field_evaluation_receipt_digest": desired_identities["field"],
+        "selected_deployment_seed": desired_identities["seed"],
+        "selected_deployment_seed_rule_digest": desired_identities["rule"],
+        "calibration_digest": desired_identities["calibration"],
+        "conformance_digest": desired_identities["conformance"],
+        "class_order_digest": desired_identities["class"],
+        "input_contract_digest": desired_identities["input"],
+        "fall_policy_v2_digest": desired_identities["policy"],
+        "config_revision": desired_identities["config"],
+        "restart_revision": desired_identities["restart"],
+    }
+    return tmp_path / "models", desired_model_bundle_from_selection_document(selection_raw)
 
 
 def _observations() -> RuntimeModelObservations:
@@ -103,7 +169,10 @@ def test_admission_returns_immutable_observed_and_desired_applied_proof(tmp_path
         desired.identities["dataset"] = "other"  # type: ignore[index]
 
 
-@pytest.mark.parametrize("field", sorted(_IDENTITIES))
+@pytest.mark.parametrize(
+    "field",
+    sorted(set(_IDENTITIES) - {"evaluation", "field"}),
+)
 def test_each_desired_identity_mismatch_is_fatal_before_admission(
     tmp_path: Path, field: str
 ) -> None:
@@ -139,10 +208,20 @@ def test_admission_rejects_extra_file_empty_directory_and_noncanonical_manifest(
         admit_model_bundle(models_root, desired, _observations())
 
 
+def test_admission_requires_one_newline_after_canonical_receipt_json(tmp_path: Path) -> None:
+    models_root, desired = _bundle(tmp_path)
+    root = models_root / "bundles" / desired.bundle_sha256
+    receipt = root / "evaluation-receipt.json"
+    receipt.write_bytes(receipt.read_bytes() + b"\n")
+
+    with pytest.raises(ModelBundleAdmissionError, match="member mismatch"):
+        admit_model_bundle(models_root, desired, _observations())
+
+
 def test_admission_rejects_symlink_and_member_path_escape(tmp_path: Path) -> None:
     models_root, desired = _bundle(tmp_path)
     root = models_root / "bundles" / desired.bundle_sha256
-    (root / "link").symlink_to(root / "weights/model.bin")
+    (root / "link").symlink_to(root / "model.pt")
     with pytest.raises(ModelBundleAdmissionError, match="unsafe path"):
         admit_model_bundle(models_root, desired, _observations())
 
@@ -194,7 +273,9 @@ def test_selection_parser_and_revision_digest_are_canonical() -> None:
         "restart_revision": _IDENTITIES["restart"],
         "worker_image_digest": _IDENTITIES["worker"],
     }
-    assert desired_model_bundle_from_selection_document(raw).bundle_sha256 == "a" * 64
+    desired = desired_model_bundle_from_selection_document(raw)
+    assert desired.bundle_sha256 == "a" * 64
+    assert desired.selection is not None
     assert runtime_revision_digest("config", 7) == runtime_revision_digest("config", 7)
 
 

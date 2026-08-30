@@ -112,6 +112,7 @@ def test_edge_worker_runtime_status_environment_contract() -> None:
     assert set(worker_environment) == {
         "RELAY_TOKEN",
         "ML_WORKER_PROFILE",
+        "ML_WORKER_IMAGE",
         "ML_RTSP_ALLOW_PRIVATE_DESTINATIONS",
         "ML_RTSP_ALLOW_LOCAL_DESTINATIONS",
     }
@@ -173,9 +174,9 @@ def test_edge_model_fetch_owns_the_models_volume_before_worker_start() -> None:
         "-m",
         "worker.tools.fetch_models",
         "--dest",
-        "/app/models",
+        "/models",
     ]
-    assert _list_field(fetch, "volumes") == [f"{MODELS_VOLUME}:/app/models:rw"]
+    assert _list_field(fetch, "volumes") == [f"{MODELS_VOLUME}:/models:rw"]
     assert set(_mapping_field(fetch, "environment")) == {"HF_TOKEN"}, (
         "only the optional HF token crosses into the fetcher; no relay secret, no profile"
     )
@@ -183,14 +184,14 @@ def test_edge_model_fetch_owns_the_models_volume_before_worker_start() -> None:
     assert "depends_on" not in fetch, "model provisioning is independent of the database cutover"
 
     worker_volumes = _list_field(services["ml-worker"], "volumes")
-    assert f"{MODELS_VOLUME}:/app/models:ro" in worker_volumes
+    assert f"{MODELS_VOLUME}:/models:ro" in worker_volumes
     assert not any(str(volume).startswith("./models") for volume in worker_volumes)
     # Every service other than the fetcher (writer) and the worker (reader) stays
     # off the models volume. Derived from compose so retiring a service cannot
     # silently drop it from this check.
     for service_name in sorted(set(services) - {"edge-model-fetch", "ml-worker"}):
         volumes = _list_field(services[service_name], "volumes")
-        assert not any("/app/models" in str(volume) for volume in volumes), (
+        assert not any("/models" in str(volume) for volume in volumes), (
             f"{service_name} must not mount the models volume"
         )
         assert "HF_TOKEN" not in _mapping_field(services[service_name], "environment")
@@ -256,14 +257,8 @@ def test_edge_image_release_workflow_publishes_digest_env_artifact() -> None:
     assert "file: Dockerfile.edge" in source
     # Actions are pinned to immutable commits (a tag is a pointer the upstream
     # owner can move), with the released version kept in a trailing comment.
-    assert (
-        "docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2"
-        in source
-    )
-    assert (
-        "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2"
-        in source
-    )
+    assert "docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2" in source
+    assert "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2" in source
     assert "steps.build-api.outputs.digest" in source
     assert "steps.build-worker.outputs.digest" in source
     assert "ML_API_IMAGE=" in source
@@ -315,9 +310,7 @@ def test_edge_worker_boot_smoke_runs_on_the_single_build() -> None:
     workflow = _workflow(EDGE_IMAGES_WORKFLOW)
     steps = workflow["jobs"]["publish"]["steps"]
     worker_step = next(s for s in steps if s.get("name") == "Build and push ml-worker image")
-    stage_smoke = next(
-        s for s in steps if (s.get("with") or {}).get("target") == "bootsmoke"
-    )
+    stage_smoke = next(s for s in steps if (s.get("with") or {}).get("target") == "bootsmoke")
     pull_smoke = next(s for s in steps if "docker pull" in str(s.get("run", "")))
 
     assert not (REPO_ROOT / ".github/workflows/edge-worker-image.yml").exists()
@@ -357,8 +350,7 @@ def test_edge_worker_boot_smoke_runs_on_the_single_build() -> None:
     dockerfile = (REPO_ROOT / "Dockerfile.edge").read_text(encoding="utf-8")
     assert "FROM runtime AS bootsmoke" in dockerfile
     assert (
-        "RUN --network=none RELAY_TOKEN=ci-boot-smoke-test "
-        "python -m worker --check-config"
+        "RUN --network=none RELAY_TOKEN=ci-boot-smoke-test python -m worker --check-config"
     ) in dockerfile
     # `bootsmoke` really is last, which is exactly why every build that keeps
     # its output has to pass `--target runtime`.
@@ -389,10 +381,7 @@ def test_a_publishing_run_never_records_an_empty_digest() -> None:
     assert 'raise SystemExit(f"{image} was built but exported no digest")' in source
     assert 'if os.environ.get("PUSH_IMAGES") == "true":' in source
     # ...and the reused branch has the same shape: no digest, no release.
-    assert (
-        'raise SystemExit(f"{image} was reused but no published digest was recorded")'
-        in source
-    )
+    assert 'raise SystemExit(f"{image} was reused but no published digest was recorded")' in source
 
 
 def test_release_isolation_keys_on_the_dispatch_not_only_the_release_event() -> None:

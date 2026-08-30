@@ -960,6 +960,7 @@ class WorkerRuntime:
         self._nvidia_plans: Mapping[str, CameraDetectionPlan] = MappingProxyType({})
         self._native_policy_pumps: tuple[NativePolicyPump, ...] = ()
         self._candidate_admission: ModelBundleProof | None = None
+        self._dark_candidate_runner: object | None = None
 
     def _resolve_mjpeg_config(self) -> MjpegServerConfig:
         """Settle the live view's two switches into one answer.
@@ -1441,7 +1442,35 @@ class WorkerRuntime:
                 restart_revision=runtime_revision_digest("restart", self._restart_generation),
             ),
         )
+        self._dark_candidate_runner = self._construct_dark_candidate_runner(candidate)
         self._log_fall_candidate_startup(self._candidate_admission)
+
+    def _construct_dark_candidate_runner(self, candidate: object) -> object:
+        """Construct the admitted GRU only as a dark readiness check."""
+        from worker.adapters.model.torch_gru_fall import GruFallRunner
+
+        models_root = candidate.models_root
+        desired = candidate.desired
+        runner = GruFallRunner.from_artifact_dir(
+            models_root / "bundles" / desired.bundle_sha256,
+            device="cpu",
+        )
+        runner.warmup()
+        manifest = runner.manifest
+        expected = desired.identities
+        class_identity = hashlib.sha256(
+            json.dumps(list(manifest.class_order), separators=(",", ":")).encode()
+        ).hexdigest()
+        actual = {
+            "class": class_identity,
+            "input": manifest.input_digest,
+            "policy": manifest.policy_digest,
+            "calibration": manifest.calibration_digest,
+            "conformance": manifest.conformance_digest,
+        }
+        if any(actual[key] != expected[key] for key in actual):
+            raise RuntimeError("dark GRU candidate manifest identities do not match admission")
+        return runner
 
     def _log_fall_candidate_startup(self, admission: ModelBundleProof | None) -> None:
         configured = self.config.models.fall
@@ -1888,6 +1917,7 @@ class WorkerRuntime:
                 detector_version=DETECTOR_VERSION,
                 environment=self._environment_facts_factory(boot, self._build_revision),
                 edge_database_schema_version=EDGE_DATABASE_SCHEMA_VERSION,
+                dark_model_candidate=self._dark_model_candidate_manifest_content(),
             )
         except Exception:  # noqa: BLE001 - provenance must not stop camera activation
             self._runtime_manifest = None
@@ -1895,6 +1925,45 @@ class WorkerRuntime:
                 "runtime provenance could not be applied; continuing without it",
                 exc_info=True,
             )
+
+    def _dark_model_candidate_manifest_content(self) -> Mapping[str, object] | None:
+        """Project admitted dark-candidate proof only; never select it."""
+        admission = self._candidate_admission
+        candidate = self.config.models.candidate
+        if admission is None or candidate is None or candidate.desired.selection is None:
+            return None
+        observed = admission.observed
+        applied = admission.applied
+        members = observed.get("members")
+        receipts = observed.get("receipts")
+        identities = observed.get("identities")
+        applied_identities = applied.get("identities")
+        if (
+            not isinstance(members, tuple)
+            or not isinstance(receipts, tuple)
+            or not isinstance(identities, Mapping)
+            or not isinstance(applied_identities, Mapping)
+        ):
+            raise TypeError("admitted dark candidate proof is incomplete")
+        return {
+            "desired_selection_digest": candidate.desired.selection.digest,
+            "observed": {
+                "bundle_sha256": observed["bundle_sha256"],
+                "member_set_sha256": hashlib.sha256(
+                    json.dumps(
+                        {"members": members, "receipts": receipts},
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode()
+                ).hexdigest(),
+                "static_identities": dict(identities),
+            },
+            "runtime_observations": {
+                key: applied_identities[key] for key in ("worker", "config", "restart")
+            },
+            "match": True,
+            "candidate_status": "disabled",
+        }
 
     def _append_built_camera(
         self,

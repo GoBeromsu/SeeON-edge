@@ -189,11 +189,12 @@ def _verify_bundle_tree(bundle: Bundle, directory: Path) -> None:
     info = directory.lstat()
     if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
         raise VerificationError(f"bundle {bundle.sha256}: unsafe bundle root")
-    expected_files = {member.path for member in bundle.members} | {"manifest.json"}
+    artifacts = (*bundle.members, *bundle.receipts)
+    expected_files = {artifact.path for artifact in artifacts} | {"manifest.json"}
     expected_directories = {
         parent.as_posix()
-        for member in bundle.members
-        for parent in Path(member.path).parents
+        for artifact in artifacts
+        for parent in Path(artifact.path).parents
         if parent != Path(".")
     }
     found_files: set[str] = set()
@@ -218,10 +219,10 @@ def _verify_bundle_tree(bundle: Bundle, directory: Path) -> None:
     manifest = directory / "manifest.json"
     if not manifest.is_file() or manifest.read_bytes() != bundle.manifest_bytes:
         raise VerificationError(f"bundle {bundle.sha256}: manifest is not canonical")
-    for member in bundle.members:
-        path = directory / member.path
-        if not _matches(path, member.size, member.sha256):
-            raise VerificationError(f"bundle {bundle.sha256}: member mismatch {member.path}")
+    for artifact in artifacts:
+        path = directory / artifact.path
+        if not _matches(path, artifact.size, artifact.sha256):
+            raise VerificationError(f"bundle {bundle.sha256}: member mismatch {artifact.path}")
 
 
 def fetch_bundle(
@@ -239,7 +240,10 @@ def fetch_bundle(
     if destination.exists() or destination.is_symlink():
         _verify_bundle_tree(bundle, destination)
         return FetchReport(
-            [FetchResult(member.path, "present", member.sha256) for member in bundle.members]
+            [
+                FetchResult(artifact.path, "present", artifact.sha256)
+                for artifact in (*bundle.members, *bundle.receipts)
+            ]
         )
 
     bundles_root.mkdir(parents=True, exist_ok=True)
@@ -248,6 +252,9 @@ def fetch_bundle(
     try:
         for member in bundle.members:
             result = fetch_artifact(member, staging, source, env=env, retry=retry, log=log)
+            report.results.append(result)
+        for receipt in bundle.receipts:
+            result = fetch_artifact(receipt, staging, source, env=env, retry=retry, log=log)
             report.results.append(result)
         _write_bytes(staging / "manifest.json", bundle.manifest_bytes)
         _verify_bundle_tree(bundle, staging)
