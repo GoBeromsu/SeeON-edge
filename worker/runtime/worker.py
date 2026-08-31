@@ -2504,6 +2504,11 @@ class WorkerRuntime:
         except Exception:  # noqa: BLE001 - clip recording is a non-fatal camera boundary
             packet_repository.close()
             self._packet_repository = None
+            # Without a recorder there is no sidecar consumer either; leaving
+            # the scene repository open would let the pumps fill a ring nobody
+            # ever selects from.
+            scene_repository.close()
+            self._scene_repository = None
             LOGGER.warning("clip recorder failed to start; clips disabled", exc_info=True)
             # Fail-visible: clips are always-on by default, so a start failure
             # must surface through runtime diagnostics (`/status`) rather than
