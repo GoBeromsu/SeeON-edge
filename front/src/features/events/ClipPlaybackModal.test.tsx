@@ -16,6 +16,8 @@ const baseClip: Clip = {
   video_available: true,
   thumbnail_available: true,
   video_error: null,
+  scene_available: false,
+  scene_frame_count: null,
 };
 
 function render(clip: Clip | null, open = true, onClose = vi.fn()) {
@@ -80,13 +82,14 @@ describe('ClipPlaybackModal', () => {
     vi.unstubAllGlobals();
   });
 
-  it('renders no retired analysis, annotated, or derivative control', async () => {
+  it('renders no retired annotated or derivative control when no sidecar is available', async () => {
     render(baseClip);
     await act(async () => Promise.resolve());
 
     expect(dialog().querySelector('[aria-label="증거 보기 선택"]')).toBeNull();
     expect(dialog().querySelector('[aria-label="파생 증거 제어"]')).toBeNull();
     expect(dialog().querySelector('[aria-label="적용 실행 증명"]')).toBeNull();
+    expect(dialog().querySelector('input[type="checkbox"]')).toBeNull();
     expect(dialog().querySelectorAll('[aria-pressed]')).toHaveLength(0);
   });
 

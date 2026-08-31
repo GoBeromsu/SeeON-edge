@@ -5,6 +5,7 @@ import {
   normalizeCameraResponse,
   normalizeCameraTestResult,
   normalizeClipsResponse,
+  normalizeClipScene,
   normalizeClipStorageBrowse,
   normalizeClipStorageInfo,
   normalizeConnectionTestResult,
@@ -24,6 +25,7 @@ import type {
   CameraTestResult,
   CleanArtifactState,
   Clip,
+  ClipScene,
   ClipArtifacts,
   ClipDeleteResult,
   ClipStorageBrowseResult,
@@ -58,6 +60,7 @@ export type {
   CameraHeartbeat,
   CameraTestResult,
   Clip,
+  ClipScene,
   ClipDeleteResult,
   ClipDeleteStatus,
   ClipStorageBrowseEntry,
@@ -101,6 +104,7 @@ export {
   getApiBase,
   getCameraSnapshotUrl,
   getCameraStreamUrl,
+  getClipSceneUrl,
 } from '@/shared/api/session';
 
 export async function loginDashboard(username: string, password: string): Promise<void> {
@@ -380,6 +384,10 @@ function normalizeClipArtifacts(value: unknown): ClipArtifacts {
 
 export async function fetchClipArtifacts(clipId: string, signal?: AbortSignal): Promise<ClipArtifacts> {
   return normalizeClipArtifacts(await requestJson(`/clips/${encodeURIComponent(clipId)}/artifacts`, { signal }));
+}
+
+export async function fetchClipScene(clipId: string, signal?: AbortSignal): Promise<ClipScene | null> {
+  return normalizeClipScene(await requestJson(`/clips/${encodeURIComponent(clipId)}/scene`, { signal }));
 }
 
 const CLIP_DELETE_STATUSES = new Set<ClipDeleteResult['status']>([
