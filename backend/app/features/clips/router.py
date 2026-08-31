@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import sqlite3
 from dataclasses import dataclass
 from typing import Annotated
@@ -23,9 +24,11 @@ from backend.app.features.clips.deletion_control import (
     preflight_clip_deletion,
 )
 from backend.app.features.clips.deletion_lifecycle import ClipDeletionLifecycle
+from backend.app.features.clips.descriptor_files import read_bounded_regular_file
 from backend.app.features.clips.manifest import is_valid_clip_id
 from backend.app.features.clips.media_response import media_response, media_type
 from backend.app.features.clips.responses import clip_response, resolved_video_size
+from backend.app.features.clips.scene_files import MAX_SCENE_INDEX_BYTES
 from backend.app.features.clips.schemas import (
     CleanArtifactState,
     ClipArtifactViewsResponse,
@@ -112,6 +115,7 @@ def list_clips(
             located.manifest,
             resolved_video_size(store, located),
             store.thumbnail_available(located),
+            store.scene_available(located),
         )
         for located in page.clips
     ]
@@ -145,6 +149,7 @@ def get_clip_metadata(
         manifest,
         resolved_video_size(store, located),
         store.thumbnail_available(located),
+        store.scene_available(located),
     )
     append_governed(
         request, actor_id=actor, action=AuditAction.CLIP_DETAIL, target_id=manifest.clip_id
@@ -362,6 +367,52 @@ def clip_thumbnail(
             headers={"Cache-Control": "private, no-store"},
         ),
     )
+
+
+@router.api_route("/clips/{clip_id}/scene", methods=HEAD_METHODS)
+def clip_scene(
+    clip_id: str,
+    request: Request,
+) -> Response:
+    _authorize(request)
+    store = _clip_store(request)
+    located = _get_located_clip_or_404(request, clip_id)
+    opened = store.resolve_scene_index(located)
+    if opened is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="clip scene not available",
+        )
+    headers = {
+        "Cache-Control": "private, no-store",
+        "Content-Length": str(opened.size_bytes),
+    }
+    try:
+        if request.method == "HEAD":
+            return drop_body_for_head(
+                request,
+                Response(content=b"", media_type="application/json", headers=headers),
+            )
+        try:
+            content = read_bounded_regular_file(
+                store.root, opened.path, MAX_SCENE_INDEX_BYTES
+            )
+        except FileNotFoundError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="clip scene not available",
+            ) from exc
+    finally:
+        opened.handle.close()
+    claim = located.manifest.scene_index
+    if claim is None or len(content) != claim.size_bytes or (
+        hashlib.sha256(content).hexdigest() != claim.sha256
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="clip scene not available",
+        )
+    return Response(content=content, media_type="application/json", headers=headers)
 
 
 def _get_located_clip_or_404(request: Request, clip_id: str) -> LocatedClip:

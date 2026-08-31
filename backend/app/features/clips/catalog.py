@@ -399,7 +399,7 @@ def _validate_scene_index_claim(scene_index: dict[str, Any], path: Path) -> None
     sha256 = scene_index.get("sha256")
     if not isinstance(sha256, str) or _SHA256_RE.fullmatch(sha256) is None:
         raise ValueError(f"invalid manifest scene index digest: {path}")
-    for field in ("size_bytes", "frame_count"):
+    for field in ("size_bytes", "count"):
         value = scene_index.get(field)
         if not isinstance(value, int) or isinstance(value, bool) or value < 0:
             raise ValueError(f"invalid manifest scene index {field}: {path}")
