@@ -94,6 +94,8 @@ from worker.pipeline.output.evidence.evidence_runtime import EvidenceExportRunti
 from worker.pipeline.output.evidence.evidence_stager import DurableEvidenceStager
 from worker.pipeline.output.evidence.packet_repository import PacketRingRepository
 from worker.pipeline.output.evidence.packet_ring import PacketRingLimits
+from worker.pipeline.output.evidence.scene_repository import SceneRingRepository
+from worker.pipeline.output.evidence.scene_ring import SceneRingLimits
 from worker.pipeline.output.evidence.snapshot_store import SnapshotStore
 from worker.pipeline.output.evidence_attacher import AlertEvidenceAttacher
 from worker.pipeline.output.live_view import LatestFrameStore, LiveViewSubscriber
@@ -109,6 +111,7 @@ from worker.pipeline.output.mjpeg_server import (
     start_optional_mjpeg_server,
 )
 from worker.pipeline.output.overlay import OverlayMode, OverlayRenderer
+from worker.pipeline.output.scene_decisions import SceneDecisionProvider
 from worker.pipeline.perception import GreedyIouTracker, SceneState
 from worker.pipeline.trace import BoundedTraceWriter, TraceCapture, TraceIdentity
 from worker.runtime import bootstrap
@@ -897,6 +900,7 @@ class WorkerRuntime:
         self.cameras: tuple[CameraRuntimeContext, ...] = ()
         self._clip_recorder: ClipRecorder | None = None
         self._packet_repository: PacketRingRepository | None = None
+        self._scene_repository: SceneRingRepository | None = None
         self._evidence_export_runtime: EvidenceExportRuntime | None = None
         self._clip_deletion_control: ClipDeletionControlService | None = None
         self._runtime_status_sender: RuntimeStatusSender | None = None
@@ -1535,6 +1539,13 @@ class WorkerRuntime:
         if self._packet_repository is None:
             clip_config = ClipRecorderConfig(store_dir=self._resolved_clip_store_dir())
             self._packet_repository = self._build_packet_repository(clip_config)
+        if self._scene_repository is None:
+            self._scene_repository = self._build_scene_repository()
+            self._packet_repository.subscribe_epoch_roll(
+                lambda _previous, current: self._scene_repository.roll_epoch(
+                    current.camera_id, current.stream_epoch
+                )
+            )
         manifest = Path(self._env[MANIFEST_ENV])
         loaded_manifest = json.loads(manifest.read_text(encoding="utf-8"))
         engine_cache = verify_plan_cache(loaded_manifest)
@@ -1555,6 +1566,7 @@ class WorkerRuntime:
             child,
             NvidiaMediaResources(
                 self._packet_repository,
+                self._scene_repository,
                 self._live_frames,
                 self._hard_exit,
             ),
@@ -1819,6 +1831,10 @@ class WorkerRuntime:
                 attacher,
                 self.diagnostics,
                 plan.schedule.get("bed", self.temporal_profile.decision_interval_frames("bed")),
+                scene_sink=self._scene_repository,
+                scene_decisions=SceneDecisionProvider(
+                    self._build_trace_identities(camera.camera_id, plan)
+                ),
             ),
         )
         pumps.append(pump)
@@ -2192,6 +2208,16 @@ class WorkerRuntime:
                 camera_id,
             )
             return None
+        identities = self._build_trace_identities(camera_id, plan)
+        return TraceCapture(identities) if identities else None
+
+    def _build_trace_identities(
+        self, camera_id: str, plan: CameraDetectionPlan
+    ) -> tuple[TraceIdentity, ...]:
+        manifest = self._runtime_manifest
+        graph = self._shared_graph
+        if manifest is None or graph is None:
+            return ()
         shared_digests = {
             identity.component_id: identity.artifact_digest for identity in graph.identities
         }
@@ -2231,7 +2257,7 @@ class WorkerRuntime:
                     snapshot_provider=snapshots,
                 )
             )
-        return TraceCapture(tuple(identities))
+        return tuple(identities)
 
     def _max_frames_completion_check(self) -> bool:
         """True once every camera's pump has processed its frame cap.
@@ -2429,10 +2455,17 @@ class WorkerRuntime:
                 ) from exc
 
         packet_repository = self._build_packet_repository(clip_config)
+        scene_repository = self._build_scene_repository()
+        packet_repository.subscribe_epoch_roll(
+            lambda _previous, current: scene_repository.roll_epoch(
+                current.camera_id, current.stream_epoch
+            )
+        )
         self._packet_repository = packet_repository
+        self._scene_repository = scene_repository
         recorder = ClipRecorder(
             clip_config,
-            services=default_services(clip_config, packet_repository),
+            services=default_services(clip_config, packet_repository, scene_repository),
             # Holds are backend intent now. The slot keeps no hold index, so it
             # reports nothing as locally held and never initiates a deletion of
             # its own. Deletion arrives as an authorized backend command that
@@ -2727,6 +2760,12 @@ class WorkerRuntime:
                 + clip_config.finalize_grace_seconds,
             ),
             global_max_bytes=clip_config.packet_ring_global_max_bytes,
+        )
+
+    def _build_scene_repository(self) -> SceneRingRepository:
+        return SceneRingRepository(
+            tuple(camera.camera_id for camera in self.config.cameras),
+            per_camera_limits=SceneRingLimits(),
         )
 
     def _build_decider(

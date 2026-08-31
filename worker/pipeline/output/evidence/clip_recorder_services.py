@@ -14,6 +14,7 @@ from worker.pipeline.output.evidence.clip_recorder_models import ClipRecorderCon
 from worker.pipeline.output.evidence.clip_recording import ClipWindow
 from worker.pipeline.output.evidence.packet_recording import PacketClipRecordingCoordinator
 from worker.pipeline.output.evidence.packet_repository import PacketRingRepository
+from worker.pipeline.output.evidence.scene_repository import SceneRingRepository
 
 
 class RecorderCoordinator(RecordingCoordinator, Protocol):
@@ -26,11 +27,13 @@ class ClipRecorderServices:
     publisher: ClipPublicationPort
     encoder_name: str
     repository: PacketRingRepository | None = None
+    scene_repository: SceneRingRepository | None = None
 
 
 def default_services(
     config: ClipRecorderConfig,
     repository: PacketRingRepository,
+    scene_repository: SceneRingRepository | None = None,
 ) -> ClipRecorderServices:
     """Build the sole production clean-clip path: source packet stream copy."""
     coordinator = PacketClipRecordingCoordinator(
@@ -55,6 +58,7 @@ def default_services(
         ),
         "source-packet-remux",
         repository,
+        scene_repository,
     )
 
 
