@@ -41,6 +41,8 @@ cue. It creates `NativeEvidenceTrigger` and calls
 `decision.update`, including the configured CPU fall LSTM and temporal policy.
 It never invokes a Python tracker on the `nvidia` runtime path, although
 preflighted `CameraDetectionPlan` objects still contain an unused tracker.
+The pump also feeds the evidence scene sink with that same image-free scene
+metadata; it never receives decoded frames or pixels for sidecar generation.
 
 `NativeAuReceiver` feeds the shared `PacketRingRepository` and
 requests a source rebuild on AU discontinuity. `NativePreviewReceiver` feeds
