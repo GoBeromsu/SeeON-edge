@@ -8,6 +8,7 @@ import logging
 import os
 import shutil
 from collections.abc import Mapping
+from dataclasses import replace
 from pathlib import Path
 from typing import Final, final
 
@@ -32,6 +33,8 @@ from worker.pipeline.output.evidence.evidence_manifest import (
     unavailable_manifest,
 )
 from worker.pipeline.output.evidence.evidence_outbox_types import EvidenceReasonCode
+from worker.pipeline.output.evidence.manifest_media_models import SceneIndexFacts
+from worker.pipeline.output.evidence.scene_index import SCENE_INDEX_FILENAME
 from worker.pipeline.output.evidence.terminal_outcome import (
     TerminalClipOutcome,
     TerminalClipState,
@@ -43,6 +46,28 @@ LOGGER: Final = logging.getLogger(__name__)
 
 def _no_barrier(_stage: PublicationStage, _path: Path) -> None:
     return
+
+
+def _scene_index_facts(path: Path) -> SceneIndexFacts:
+    data = path.read_bytes()
+    return SceneIndexFacts(
+        path=SCENE_INDEX_FILENAME,
+        sha256=hashlib.sha256(data).hexdigest(),
+        size_bytes=len(data),
+        schema=1,
+        count=_scene_frame_count(data),
+    )
+
+
+def _scene_frame_count(data: bytes) -> int:
+    try:
+        value = json.loads(data)
+        count = value["frame_count"]
+    except (UnicodeDecodeError, json.JSONDecodeError, KeyError, TypeError) as exc:
+        raise OSError("scene index is invalid") from exc
+    if not isinstance(count, int) or isinstance(count, bool) or count < 0:
+        raise OSError("scene index frame count is invalid")
+    return count
 
 
 @final
@@ -68,6 +93,10 @@ class ClipPublisher:
     ) -> PublishedClip:
         self._validate_reservation(reservation)
         video_path = self._publish_media(reservation, artifact_path)
+        metadata = replace(
+            metadata,
+            scene_index=self._publish_scene_index(reservation, metadata),
+        )
         try:
             thumbnail_path = self._thumbnail_generator.generate(
                 video_path,
@@ -203,6 +232,58 @@ class ClipPublisher:
         fsync_directory(reservation.final_dir)
         return destination
 
+    def _publish_scene_index(
+        self,
+        reservation: ClipReservation,
+        metadata: ClipPublicationMetadata,
+    ) -> SceneIndexFacts | None:
+        """Best-effort sidecar promotion; failure must never block READY media."""
+        expected = metadata.scene_index
+        if expected is None:
+            return None
+        staged = reservation.staging_dir / SCENE_INDEX_FILENAME
+        destination = reservation.final_dir / SCENE_INDEX_FILENAME
+        try:
+            if destination.exists():
+                facts = _scene_index_facts(destination)
+                if facts != expected:
+                    self._scene_warning(metadata, reservation, "HASH_CONFLICT")
+                    return None
+                fsync_file(destination)
+                fsync_directory(reservation.final_dir)
+                return facts
+            if not staged.is_file():
+                self._scene_warning(metadata, reservation, "STAGED_MISSING")
+                return None
+            facts = _scene_index_facts(staged)
+            if facts != expected:
+                self._scene_warning(metadata, reservation, "HASH_CONFLICT")
+                return None
+            fsync_file(staged)
+            os.replace(staged, destination)
+            fsync_file(destination)
+            fsync_directory(reservation.final_dir)
+        except OSError as exc:
+            self._scene_warning(metadata, reservation, "PROMOTION_FAILED", exc)
+            return None
+        else:
+            return facts
+
+    def _scene_warning(
+        self,
+        metadata: ClipPublicationMetadata,
+        reservation: ClipReservation,
+        reason: str,
+        exc: Exception | None = None,
+    ) -> None:
+        LOGGER.warning(
+            "clip scene index not published: camera_id=%s clip_id=%s reason=%s error_type=%s",
+            metadata.camera_id,
+            reservation.clip_id,
+            reason,
+            type(exc).__name__ if exc is not None else "None",
+        )
+
     def _publish_manifest(
         self,
         reservation: ClipReservation,
@@ -251,7 +332,6 @@ class ClipPublisher:
             raise ClipPublicationConflictError(reservation.clip_id, "staging path mismatch")
         if reservation.camera_id.strip() == "":
             raise ClipPublicationConflictError(reservation.clip_id, "camera id is blank")
-
 
 
 __all__ = [

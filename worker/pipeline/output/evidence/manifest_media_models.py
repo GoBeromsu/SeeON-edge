@@ -61,6 +61,29 @@ class AuIndexFacts(BaseModel):
         return self
 
 
+# Unlike the AU index, the scene index describes overlay facts rather than
+# source media, so it belongs in manifest provenance rather than SourceMediaFacts.
+class SceneIndexFacts(BaseModel):
+    model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True, extra="forbid")
+
+    schema_version: Literal[1] = Field(alias="schema")
+    path: str
+    sha256: str
+    size_bytes: int
+    count: int
+
+    @model_validator(mode="after")
+    def _valid(self) -> Self:
+        if (
+            self.path != "scene-index.json"
+            or not 0 <= self.size_bytes <= 8 * 1024 * 1024
+            or self.count < 0
+        ):
+            raise PydanticCustomError("scene_index", "scene index facts are invalid")
+        _sha256(self.sha256, "scene_index.sha256")
+        return self
+
+
 class SourceMediaFacts(BaseModel):
     model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True, extra="forbid")
 
@@ -108,4 +131,4 @@ def _sha256(value: str, field: str) -> None:
         )
 
 
-__all__ = ["SourceMediaFacts"]
+__all__ = ["AuIndexFacts", "SceneIndexFacts", "SourceMediaFacts"]

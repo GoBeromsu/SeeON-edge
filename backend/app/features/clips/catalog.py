@@ -87,6 +87,7 @@ _MANIFEST_FIELDS = {
     "source_error_reason",
     "truncation_reasons",
     "time_origin",
+    "scene_index",
 }
 
 _TABLE_KEYS = {
@@ -374,6 +375,11 @@ def _validate_source_remux_metadata(
     time_origin = payload.get("time_origin")
     if time_origin is not None and not isinstance(time_origin, dict):
         raise ValueError(f"invalid manifest time origin: {path}")
+    scene_index = payload.get("scene_index")
+    if scene_index is not None:
+        if not isinstance(scene_index, dict):
+            raise ValueError(f"invalid manifest scene index: {path}")
+        _validate_scene_index_claim(scene_index, path)
     truncations = payload.get("truncation_reasons")
     if truncations is not None and (
         not isinstance(truncations, list)
@@ -381,6 +387,22 @@ def _validate_source_remux_metadata(
         or len(set(truncations)) != len(truncations)
     ):
         raise ValueError(f"invalid manifest truncation reasons: {path}")
+
+
+def _validate_scene_index_claim(scene_index: dict[str, Any], path: Path) -> None:
+    """Minimal invariant shared with the worker writer: fixed path, schema 1,
+    lowercase sha256, bounded non-negative size and frame count."""
+    if scene_index.get("path") != "scene-index.json":
+        raise ValueError(f"invalid manifest scene index path: {path}")
+    if scene_index.get("schema") != 1:
+        raise ValueError(f"invalid manifest scene index schema: {path}")
+    sha256 = scene_index.get("sha256")
+    if not isinstance(sha256, str) or _SHA256_RE.fullmatch(sha256) is None:
+        raise ValueError(f"invalid manifest scene index digest: {path}")
+    for field in ("size_bytes", "frame_count"):
+        value = scene_index.get(field)
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            raise ValueError(f"invalid manifest scene index {field}: {path}")
 
 
 def _validate_source_media_translation(
