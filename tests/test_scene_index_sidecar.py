@@ -9,13 +9,15 @@ import pytest
 
 from contracts.observation import BoundingBox, FrameObservation
 from worker.pipeline.output.evidence.scene_index import (
-    SCENE_FRAME_MAX_BYTES,
     SCENE_INDEX_FILENAME,
     SceneIndexHeader,
+    write_scene_index,
+)
+from worker.pipeline.output.evidence.scene_wire import (
+    SCENE_FRAME_MAX_BYTES,
     SceneIndexWriteError,
     encode_scene_frame,
     encode_scene_record,
-    write_scene_index,
 )
 from worker.pipeline.output.overlay_scene import (
     BED_COLOR,

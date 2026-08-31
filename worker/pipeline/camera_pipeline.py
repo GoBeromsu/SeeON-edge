@@ -27,7 +27,7 @@ from worker.interfaces.scene_sink import SceneSink
 from worker.pipeline.analytics import CompositeExtractor
 from worker.pipeline.decision import EventAggregator
 from worker.pipeline.inference_coordinator import InferenceResultSlot
-from worker.pipeline.output.evidence.scene_index import encode_scene_record
+from worker.pipeline.output.evidence.scene_wire import encode_scene_record
 from worker.pipeline.output.overlay_scene import OverlaySceneBuilder
 from worker.pipeline.output.scene_decisions import SceneDecisionProvider
 from worker.pipeline.trace import BoundedTraceWriter, TraceCapture

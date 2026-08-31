@@ -16,7 +16,7 @@ from worker.native.deepstream.control import ChildControlError, DeepStreamContro
 from worker.native.deepstream.ipc import MetadataFrame
 from worker.native.deepstream.metadata import AcceptanceToken, LatestMetadataSlot, SourceBinding
 from worker.pipeline.decision import EventAggregator
-from worker.pipeline.output.evidence.scene_index import encode_scene_record
+from worker.pipeline.output.evidence.scene_wire import encode_scene_record
 from worker.pipeline.output.evidence_attacher import AlertEvidenceAttacher
 from worker.pipeline.output.overlay_scene import OverlaySceneBuilder
 from worker.pipeline.output.scene_decisions import SceneDecisionProvider

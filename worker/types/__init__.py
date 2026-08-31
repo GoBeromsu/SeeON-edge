@@ -27,7 +27,6 @@ from worker.types.frame_memory import (
 )
 from worker.types.frame_packet import FrameKey, FramePacket
 from worker.types.module_result import ModuleResult
-from worker.types.scene_record import SceneRecord
 from worker.types.perception_frame import (
     AssociationResult,
     BedRegion,
@@ -41,6 +40,7 @@ from worker.types.perception_frame import (
     PersonBox,
     PersonBoxChannel,
 )
+from worker.types.scene_record import SceneRecord
 from worker.types.temporal_profile import (
     CURRENT_TEMPORAL_PROFILE,
     TemporalProfile,
