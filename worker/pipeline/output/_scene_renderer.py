@@ -19,6 +19,7 @@ from worker.pipeline.output._overlay_primitives import (
     draw_dashed_region,
     draw_label,
 )
+from worker.pipeline.output.overlay_scene import POSE_COLOR, POSE_DOT_COLOR
 from worker.types.overlay_scene import (
     ObservationSemantics,
     OverlayScene,
@@ -149,9 +150,9 @@ def _draw_keypoints(
     }
     for start, end in POSE_EDGES:
         if start in known and end in known:
-            _ = cv2.line(image, known[start], known[end], _TEXT, 2, cv2.LINE_AA)
+            _ = cv2.line(image, known[start], known[end], POSE_COLOR, 2, cv2.LINE_AA)
     for index in sorted(known):
-        _ = cv2.circle(image, known[index], 2, _TEXT, -1, cv2.LINE_AA)
+        _ = cv2.circle(image, known[index], 2, POSE_DOT_COLOR, -1, cv2.LINE_AA)
 
 
 def _draw_label(

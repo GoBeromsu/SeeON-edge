@@ -77,7 +77,7 @@ class TraceCapture:
         result: CompositeResult,
         events: Sequence[BusinessEvent],
     ) -> TraceFrame:
-        snapshots_by_identity = tuple(_snapshots(identity) for identity in self.identities)
+        snapshots_by_identity = tuple(snapshots_for(identity) for identity in self.identities)
         analysis = self._analysis(packet, result, snapshots_by_identity)
         decisions: list[DecisionTrace] = []
         for identity_index, (identity, snapshots) in enumerate(
@@ -309,7 +309,7 @@ def _unavailable(detail: str) -> tuple[DecisionTraceSnapshot, ...]:
     )
 
 
-def _snapshots(identity: TraceIdentity) -> tuple[DecisionTraceSnapshot, ...]:
+def snapshots_for(identity: TraceIdentity) -> tuple[DecisionTraceSnapshot, ...]:
     provider = identity.snapshot_provider
     if provider is None:
         return _unavailable("adapter-not-provided")
@@ -354,4 +354,4 @@ def _attach_trace(
     return replace(event, audit=MappingProxyType(audit))
 
 
-__all__ = ["TraceCapture", "TraceIdentity"]
+__all__ = ["TraceCapture", "TraceIdentity", "snapshots_for"]

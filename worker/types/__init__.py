@@ -27,6 +27,7 @@ from worker.types.frame_memory import (
 )
 from worker.types.frame_packet import FrameKey, FramePacket
 from worker.types.module_result import ModuleResult
+from worker.types.scene_record import SceneRecord
 from worker.types.perception_frame import (
     AssociationResult,
     BedRegion,
@@ -83,6 +84,7 @@ __all__ = [
     "PersonBoxChannel",
     "PipelineProfile",
     "PixelFormat",
+    "SceneRecord",
     "StageCapabilities",
     "TemporalProfile",
     "TemporalProfileError",

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contracts.observation import BoundingBox, FrameObservation
 from worker.pipeline.output.overlay_scene import AppliedCameraProvenance, OverlaySceneBuilder
 from worker.pipeline.trace.models import (
     AnalysisTrace,
@@ -11,7 +12,12 @@ from worker.pipeline.trace.models import (
     TracePerson,
 )
 from worker.types import DecisionTraceSnapshot
-from worker.types.overlay_scene import ObservationSemantics, fit_scene_transform
+from worker.types.overlay_scene import (
+    ObservationSemantics,
+    SceneFrameIdentity,
+    SceneValue,
+    fit_scene_transform,
+)
 
 
 def _analysis() -> AnalysisTrace:
@@ -175,3 +181,50 @@ def test_missing_and_not_evaluated_are_never_rendered_as_zero() -> None:
     assert scene.decisions[0].score.semantics is ObservationSemantics.MISSING
     assert scene.decisions[0].semantics is ObservationSemantics.NOT_EVALUATED
     assert scene.components[1].semantics is ObservationSemantics.NOT_EVALUATED
+
+
+def test_from_observation_uses_identity_transform_and_existing_scene_vocabulary() -> None:
+    decisions = (
+        _decision(
+            "fall",
+            DecisionTraceSnapshot(
+                reason="fall-onset",
+                previous_state="clear",
+                current_state="fall",
+                triggered=True,
+                track_id=42,
+                bed_id=None,
+                values={"fall_probability": 0.82, "operating_threshold": 0.7},
+            ),
+            0,
+        ),
+    )
+    identity = SceneFrameIdentity(
+        "boot-a",
+        "camera-a",
+        3,
+        7,
+        SceneValue(12.5, ObservationSemantics.PRESENT),
+        SceneValue(100.25, ObservationSemantics.PRESENT),
+        "camera-config.v7",
+    )
+    observation = FrameObservation(
+        detections=((BoundingBox(64, 36, 192, 324, 0.91),), ()),
+        poses=(((100, 60, 0.99), (120, 80, 0.1)),),
+        regions=((BoundingBox(32, 180, 320, 350, 0.88),), ()),
+        track_ids=(42,),
+    )
+    scene = OverlaySceneBuilder().from_observation(
+        identity=identity,
+        observation=observation,
+        source_width=640,
+        source_height=360,
+        decisions=decisions,
+    )
+
+    assert scene.frame == identity
+    assert scene.transform == fit_scene_transform(640, 360, 640, 360)
+    assert scene.transform.scale_x == scene.transform.scale_y == 1.0
+    assert scene.persons[0].keypoints[1].semantics is ObservationSemantics.MISSING
+    assert scene.decisions[0].module_qualified_id == "fall.v1"
+    assert scene.labels[0].text == "FALL"
