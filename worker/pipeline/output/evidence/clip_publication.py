@@ -263,7 +263,7 @@ class ClipPublisher:
             os.replace(staged, destination)
             fsync_file(destination)
             fsync_directory(reservation.final_dir)
-        except OSError as exc:
+        except Exception as exc:  # noqa: BLE001 - sidecar reconstruction is auxiliary
             self._scene_warning(metadata, reservation, "PROMOTION_FAILED", exc)
             return None
         else:

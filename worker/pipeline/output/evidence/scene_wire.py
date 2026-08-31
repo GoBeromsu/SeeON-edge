@@ -121,6 +121,7 @@ def _bed(value) -> dict[str, object]:
         "ct": [
             {
                 "r": _value(item.ratio),
+                "rs": item.reason,
                 "s": item.state,
                 "th": _value(item.threshold),
                 "tr": _value(item.track_id),

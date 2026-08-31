@@ -10,7 +10,9 @@ export function ClipSceneOverlay({ scene, frame }: Props): JSX.Element | null {
     ...frame.bd.map((bed) => ({
       z: scene.style.z_order.bed,
       key: `bed-${bed.i}`,
-      node: <polygon points={bed.pg.map(([x, y]) => `${x},${y}`).join(' ')} fill="none" stroke={toColor(palette.bed)} strokeWidth="2" />,
+      node: bed.pg.length > 0
+        ? <polygon points={bed.pg.map(([x, y]) => `${x},${y}`).join(' ')} fill="none" stroke={toColor(palette.bed)} strokeWidth="2" />
+        : <Box box={bed.b} color={toColor(palette.bed)} />,
     })),
     ...frame.ps.map((person) => ({
       z: scene.style.z_order.person,
@@ -35,10 +37,9 @@ export function ClipSceneOverlay({ scene, frame }: Props): JSX.Element | null {
 }
 
 function Person({ person, scene }: { person: ClipSceneFrame['ps'][number]; scene: ClipScene }): JSX.Element {
-  const [x, y, width, height] = person.b;
   const keypoints = new Map(person.k?.filter((point) => point[1] !== null && point[2] !== null).map((point) => [point[0], point]) ?? []);
   return <>
-    <rect x={x} y={y} width={width} height={height} fill="none" stroke={toColor(scene.style.palette.person)} strokeWidth="2" />
+    <Box box={person.b} color={toColor(scene.style.palette.person)} />
     {scene.style.skeleton.edges.map(([from, to]) => {
       const start = keypoints.get(from);
       const end = keypoints.get(to);
@@ -46,6 +47,10 @@ function Person({ person, scene }: { person: ClipSceneFrame['ps'][number]; scene
     })}
     {[...keypoints.values()].map(([index, pointX, pointY, confidence]) => <circle key={index} cx={pointX!} cy={pointY!} r="2" fill={toColor(scene.style.palette.pose_dot)} opacity={confidence} />)}
   </>;
+}
+
+function Box({ box: [x1, y1, x2, y2], color }: { box: [number, number, number, number]; color: string }): JSX.Element {
+  return <rect x={x1} y={y1} width={x2 - x1} height={y2 - y1} fill="none" stroke={color} strokeWidth="2" />;
 }
 
 function toColor([red, green, blue]: [number, number, number]): string {

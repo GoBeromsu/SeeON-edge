@@ -961,6 +961,7 @@ class WorkerRuntime:
         self._live_view_pump_threads: tuple[threading.Thread, ...] = ()
         self._camera_debug_snapshots: dict[str, Callable[[int], tuple[Any, ...]]] = {}
         self._camera_inference_results: dict[str, InferenceResultSlot] = {}
+        self._camera_scene_decisions: dict[str, SceneDecisionProvider] = {}
         self._nvidia_media_plane: NvidiaMediaPlane | None = None
         self._nvidia_plans: Mapping[str, CameraDetectionPlan] = MappingProxyType({})
         self._native_policy_pumps: tuple[NativePolicyPump, ...] = ()
@@ -1102,6 +1103,9 @@ class WorkerRuntime:
         if self._packet_repository is not None:
             self._packet_repository.close()
             self._packet_repository = None
+        if self._scene_repository is not None:
+            self._scene_repository.close()
+            self._scene_repository = None
         if self._trace_writer is not None:
             self._trace_writer.stop()
             self._trace_writer = None
@@ -2094,6 +2098,9 @@ class WorkerRuntime:
                 None if self._runtime_manifest is None else self._runtime_manifest.sha256
             ),
         )
+        self._camera_scene_decisions[camera.camera_id] = SceneDecisionProvider(
+            self._build_trace_identities(camera.camera_id, resolved_plan)
+        )
         if self._live_view is not None:
             # Register before the server binds so a camera is never a 404 on a
             # live view that is meant to carry it.
@@ -2184,6 +2191,8 @@ class WorkerRuntime:
             # rather than failing its stage over an auxiliary capability.
             trace_capture=trace_capture,
             trace_writer=None if trace_capture is None else self._trace_writer,
+            scene_sink=self._scene_repository,
+            scene_decisions=self._camera_scene_decisions.get(camera.camera_id),
         )
 
     def _build_trace_capture(

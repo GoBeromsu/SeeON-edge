@@ -236,7 +236,7 @@ class NativePolicyPump:
         source_pts = metadata.frame.identity.source_pts
         if sink is None:
             return
-        if source_pts is None or source_pts == 0:
+        if source_pts is None:
             self.scene_pts_missing += 1
             return
         try:
@@ -270,7 +270,7 @@ class NativePolicyPump:
                     seq=frame.identity.seq,
                 )
             )
-        except (RuntimeError, ValueError, OSError):
+        except Exception:  # noqa: BLE001 - scene sidecar failure must not stop detection
             self.scene_append_failures += 1
             LOGGER.warning("native scene append failed: camera_id=%s", self.camera_id)
 

@@ -4,6 +4,7 @@ import hashlib
 import json
 from dataclasses import replace
 from fractions import Fraction
+from pathlib import Path
 
 import pytest
 
@@ -136,6 +137,19 @@ def test_canonical_compact_payload_preserves_edge_contracts(tmp_path) -> None:
         "skeleton": {"edges": [list(edge) for edge in POSE_EDGES]},
         "z_order": {"bed": 10, "decision": 40, "person": 20},
     }
+
+
+def test_writer_matches_cross_language_golden_fixture(tmp_path) -> None:
+    """The dashboard fixture is produced by this writer, not hand-authored JSON."""
+    facts = write_scene_index(tmp_path, (_record(_scene()),), header=_header())
+    assert facts is not None
+    encoded = (tmp_path / SCENE_INDEX_FILENAME).read_bytes()
+    fixture = (
+        Path(__file__).parents[1] / "front/src/shared/api/scene-index.golden.json"
+    ).read_bytes()
+
+    assert encoded == fixture
+    assert facts.sha256 == hashlib.sha256(fixture).hexdigest()
 
 
 def test_writer_rejects_unsorted_or_duplicate_pts_and_marks_size_limit(tmp_path) -> None:

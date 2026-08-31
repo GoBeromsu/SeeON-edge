@@ -3,9 +3,10 @@ from __future__ import annotations
 import socket
 import threading
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
+from contracts.observation import BoundingBox
 from worker.native.deepstream.control import ControlIdentity, DeepStreamControlClient
 from worker.native.deepstream.ipc import (
     ControlMessage,
@@ -17,7 +18,7 @@ from worker.native.deepstream.ipc import (
 from worker.native.deepstream.metadata import LatestMetadataSlot, SourceBinding
 from worker.pipeline.decision import EventAggregator, IncidentManager
 from worker.pipeline.output.evidence_attacher import AlertEvidenceAttacher
-from worker.pipeline.perception import SceneState
+from worker.pipeline.perception import SceneState, build_frame_observation
 from worker.runtime.deepstream.native_policy_pump import (
     NativePolicyContext,
     NativePolicyPump,
@@ -211,7 +212,13 @@ class _UnusedControl:
         raise AssertionError(f"control must not be used while rebinding {camera_id}")
 
 
-def _pump_for(slot: LatestMetadataSlot, binding: SourceBinding, tmp_path: Path) -> NativePolicyPump:
+def _pump_for(
+    slot: LatestMetadataSlot,
+    binding: SourceBinding,
+    tmp_path: Path,
+    *,
+    scene_sink: object | None = None,
+) -> NativePolicyPump:
     return NativePolicyPump(
         binding,
         NativePolicyContext(
@@ -223,6 +230,7 @@ def _pump_for(slot: LatestMetadataSlot, binding: SourceBinding, tmp_path: Path) 
             AlertEvidenceAttacher({}),
             _Diagnostics(),
             90,
+            scene_sink=scene_sink,  # pyright: ignore[reportArgumentType]
         ),
     )
 
@@ -275,3 +283,40 @@ def test_pump_keeps_its_binding_when_the_source_is_gone(tmp_path: Path) -> None:
     pump._rebind_if_source_was_rebuilt()  # noqa: SLF001
     # Then
     assert pump._binding == original  # noqa: SLF001
+
+
+class _ExplodingSceneSink:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def append(self, _record: object) -> None:
+        self.calls += 1
+        raise TypeError("injected sidecar failure")
+
+
+def test_scene_append_is_fail_open_for_arbitrary_exception_and_zero_pts(
+    tmp_path: Path,
+) -> None:
+    sink = _ExplodingSceneSink()
+    pump = _pump_for(
+        LatestMetadataSlot(), _binding(generation=3, epoch=4), tmp_path, scene_sink=sink
+    )
+    observation = build_frame_observation(
+        boxes=(BoundingBox(10, 20, 40, 80, 0.8),),
+        poses=(((20, 30, 0.9),),),
+        bed_boxes=(),
+        track_ids=(7,),
+    )
+
+    pump._append_scene(_metadata(), observation)  # noqa: SLF001
+    base = _metadata()
+    zero_pts = replace(
+        base,
+        frame=replace(base.frame, identity=replace(base.frame.identity, source_pts=0)),
+    )
+    pump._append_scene(zero_pts, observation)  # noqa: SLF001
+
+    assert sink.calls == 2
+    assert pump.scene_append_failures == 2
+    assert pump.scene_pts_missing == 0
+    assert pump.failure_count == 0

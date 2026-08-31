@@ -450,3 +450,36 @@ def test_scene_promotion_failure_is_fail_open_and_diagnostic(
     message = caplog.records[-1].getMessage()
     assert "camera-1" in message and "scene-failure" in message
     assert "PROMOTION_FAILED" in message and "OSError" in message
+
+
+def test_resume_with_invalid_final_scene_sidecar_publishes_ready_without_claim(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    allocator = ClipIdAllocator(tmp_path, id_factory=lambda _camera: "invalid-final-scene")
+    reservation = allocator.reserve("camera-1")
+    artifact = reservation.staging_dir / "clip.mp4"
+    artifact.write_bytes(b"derivative-media")
+    reservation.final_dir.mkdir(parents=True)
+    (reservation.final_dir / "clip.mp4").write_bytes(b"derivative-media")
+    (reservation.final_dir / "scene-index.json").write_text(
+        '{"frame_count":"bad"}\n', encoding="ascii"
+    )
+    claimed = SceneIndexFacts(
+        path="scene-index.json",
+        sha256="a" * 64,
+        size_bytes=1,
+        schema=1,
+        count=1,
+    )
+    monkeypatch.setattr(
+        "worker.pipeline.output.evidence.evidence_manifest.inspect_finalized_media",
+        lambda _path, **_kwargs: MediaFacts("a" * 64, len(b"derivative-media"), 1000),
+    )
+
+    published = ClipPublisher(tmp_path).publish_ready(
+        reservation, artifact, replace(_metadata(), scene_index=claimed)
+    )
+
+    payload = json.loads(published.manifest_path.read_text(encoding="utf-8"))
+    assert payload["state"] == "READY"
+    assert "scene_index" not in payload

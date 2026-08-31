@@ -34,7 +34,7 @@ const FRAME_KEYS = new Set(['p', 'q', 'sd', 't', 'bd', 'dc', 'lb', 'ps']);
 const PERSON_KEYS = new Set(['b', 'c', 'i', 'tr', 'tr_r', 'k']);
 const BED_KEYS = new Set(['b', 'c', 'ct', 'i', 'pg', 'pv', 'sm']);
 const LABEL_KEYS = new Set(['x', 'y', 't', 'c', 'z']);
-const CONTAINMENT_KEYS = new Set(['r', 's', 'th', 'tr']);
+const CONTAINMENT_KEYS = new Set(['r', 'rs', 's', 'th', 'tr']);
 const DECISION_KEYS = new Set(['bd', 'm', 'p', 'ps', 'rs', 'rm', 's', 'sc', 'th', 'tg', 'tr', 'e', 'cn', 'cn_t']);
 
 function isFrame(value: unknown): value is ClipSceneFrame {
@@ -68,7 +68,7 @@ function isLabel(value: unknown): boolean {
 
 function isContainment(value: unknown): boolean {
   return isRecord(value) && hasOnlyKeys(value, CONTAINMENT_KEYS)
-    && isNullableFiniteNumber(value.r) && typeof value.s === 'string'
+    && isNullableFiniteNumber(value.r) && typeof value.rs === 'string' && typeof value.s === 'string'
     && isNullableFiniteNumber(value.th) && isNullableFiniteNumber(value.tr);
 }
 
@@ -94,9 +94,9 @@ function isComponent(value: unknown): boolean {
 }
 
 function isDecisionProvenance(value: unknown): boolean {
-  return isRecord(value) && hasOnlyKeys(value, new Set(['m', 'e', 'p', 'rm']))
-    && isNonEmptyString(value.m) && isNonEmptyString(value.e)
-    && isNonEmptyString(value.p) && isNonEmptyString(value.rm);
+  return isRecord(value) && hasOnlyKeys(value, new Set(['m', 'effective_policy_id', 'policy', 'runtime_manifest_sha256']))
+    && isNonEmptyString(value.m) && isNonEmptyString(value.effective_policy_id)
+    && isNonEmptyString(value.policy) && isNonEmptyString(value.runtime_manifest_sha256);
 }
 
 function isStreamIdentity(value: unknown): boolean {
