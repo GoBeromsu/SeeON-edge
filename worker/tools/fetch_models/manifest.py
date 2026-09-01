@@ -33,14 +33,14 @@ class ManifestError(ValueError):
 class Source:
     name: str
     kind: str
-    repo: str
+    source_locator: str
     ref: str
 
     def url_for(self, remote_path: str) -> str:
         if self.kind == "huggingface":
-            return f"https://huggingface.co/{self.repo}/resolve/{self.ref}/{remote_path}"
+            return f"https://huggingface.co/{self.source_locator}/resolve/{self.ref}/{remote_path}"
         if self.kind == "github-release":
-            return f"https://github.com/{self.repo}/releases/download/{self.ref}/{remote_path}"
+            return f"https://github.com/{self.source_locator}/releases/download/{self.ref}/{remote_path}"
         raise ManifestError(f"source {self.name!r} has unsupported kind {self.kind!r}")
 
     @property
@@ -67,6 +67,7 @@ class Manifest:
     artifacts: tuple[Artifact, ...]
     sidecars: tuple[str, ...]
     bundles: tuple[Bundle, ...] = ()
+    published_bundles: tuple[PublishedBundle, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -81,6 +82,7 @@ class Bundle:
     members: tuple[Artifact, ...]
     payload: Mapping[str, object]
     receipts: tuple[Artifact, ...] = ()
+    runtime_format: str | None = None
 
     @property
     def canonical_payload(self) -> str:
@@ -109,11 +111,25 @@ class Bundle:
                         {"path": receipt.path, "sha256": receipt.sha256, "size": receipt.size}
                         for receipt in self.receipts
                     ],
+                    **(
+                        {}
+                        if self.runtime_format is None
+                        else {"runtime_format": self.runtime_format}
+                    ),
                     "schema_version": 1,
                 }
             )
             + "\n"
         ).encode()
+
+
+@dataclass(frozen=True)
+class PublishedBundle:
+    """Published model lineage, independent of the fetch transport."""
+
+    source_locator: str
+    revision: str
+    bundle_sha256: str
 
 
 def _require(mapping: Mapping[str, object], key: str, where: str) -> object:
@@ -133,7 +149,7 @@ def _parse_source(name: str, raw: object) -> Source:
     if not isinstance(raw, Mapping):
         raise ManifestError(f"{where}: must be an object")
     kind = _require(raw, "kind", where)
-    repo = _require(raw, "repo", where)
+    source_locator = _require(raw, "source_locator", where)
     if kind == "huggingface":
         ref = _require(raw, "revision", where)
         if not isinstance(ref, str) or _HEX40_RE.fullmatch(ref) is None:
@@ -144,9 +160,15 @@ def _parse_source(name: str, raw: object) -> Source:
             raise ManifestError(f"{where}: tag must be a non-empty string")
     else:
         raise ManifestError(f"{where}: unsupported kind {kind!r}")
-    if not isinstance(repo, str) or repo.count("/") != 1 or repo.startswith("/"):
-        raise ManifestError(f"{where}: repo must be 'owner/name', got {repo!r}")
-    return Source(name=name, kind=kind, repo=repo, ref=ref)
+    if (
+        not isinstance(source_locator, str)
+        or source_locator.count("/") != 1
+        or source_locator.startswith("/")
+    ):
+        raise ManifestError(
+            f"{where}: source_locator must be 'owner/name', got {source_locator!r}"
+        )
+    return Source(name=name, kind=kind, source_locator=source_locator, ref=ref)
 
 
 def _parse_artifact(index: int, raw: object, sources: Mapping[str, Source]) -> Artifact:
@@ -215,7 +237,16 @@ def _parse_bundle(index: int, raw: object, sources: Mapping[str, Source]) -> Bun
     payload = _require(raw, "payload", where)
     if not isinstance(payload, Mapping):
         raise ManifestError(f"{where}: payload must be an object")
-    bundle = Bundle(sha256=sha256, members=members, payload=dict(payload), receipts=receipts)
+    runtime_format = raw.get("runtime_format")
+    if runtime_format is not None and (not isinstance(runtime_format, str) or not runtime_format):
+        raise ManifestError(f"{where}: runtime_format must be a non-empty string")
+    bundle = Bundle(
+        sha256=sha256,
+        members=members,
+        payload=dict(payload),
+        receipts=receipts,
+        runtime_format=runtime_format,
+    )
     actual = hashlib.sha256(bundle.canonical_payload.encode()).hexdigest()
     if actual != sha256:
         raise ManifestError(f"{where}: sha256 does not match canonical members and payload")
@@ -255,7 +286,40 @@ def parse_manifest(raw: object) -> Manifest:
     bundle_hashes = [bundle.sha256 for bundle in bundles]
     if len(bundle_hashes) != len(set(bundle_hashes)):
         raise ManifestError("manifest: duplicate bundle identities")
-    return Manifest(sources=sources, artifacts=artifacts, sidecars=sidecars, bundles=bundles)
+    raw_published = raw.get("published_bundles", [])
+    if not isinstance(raw_published, list):
+        raise ManifestError("manifest: published_bundles must be a list")
+    published: list[PublishedBundle] = []
+    for index, publication in enumerate(raw_published):
+        where = f"published_bundles[{index}]"
+        if not isinstance(publication, Mapping):
+            raise ManifestError(f"{where}: must be an object")
+        if set(publication) != {"source_locator", "revision", "bundle_sha256"}:
+            raise ManifestError(f"{where}: fields must be source_locator, revision, bundle_sha256")
+        source_locator = publication["source_locator"]
+        revision = publication["revision"]
+        bundle_sha256 = publication["bundle_sha256"]
+        if not isinstance(source_locator, str) or source_locator.count("/") != 1:
+            raise ManifestError(f"{where}: source_locator must be owner/name")
+        if not isinstance(revision, str) or _HEX40_RE.fullmatch(revision) is None:
+            raise ManifestError(f"{where}: revision must be a 40-hex commit")
+        if not isinstance(bundle_sha256, str) or _SHA256_RE.fullmatch(bundle_sha256) is None:
+            raise ManifestError(f"{where}: bundle_sha256 must be 64 lowercase hex characters")
+        if not any(
+            source.source_locator == source_locator and source.ref == revision
+            for source in sources.values()
+        ):
+            raise ManifestError(f"{where}: publication must name a pinned source")
+        published.append(PublishedBundle(source_locator, revision, bundle_sha256))
+    if len({publication.bundle_sha256 for publication in published}) != len(published):
+        raise ManifestError("manifest: duplicate published bundle identities")
+    return Manifest(
+        sources=sources,
+        artifacts=artifacts,
+        sidecars=sidecars,
+        bundles=bundles,
+        published_bundles=tuple(published),
+    )
 
 
 def load_manifest(path: Path = MANIFEST_PATH) -> Manifest:

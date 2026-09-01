@@ -55,18 +55,26 @@ def _selection(bundle_sha256: str, evaluation: str, field: str) -> dict[str, obj
     }
 
 
-def _bundle(tmp_path: Path, identities: dict[str, str] | None = None) -> tuple[Path, object]:
+def _bundle(
+    tmp_path: Path,
+    identities: dict[str, str] | None = None,
+    members: dict[str, bytes] | None = None,
+) -> tuple[Path, object]:
     identities = {**_IDENTITIES, **(identities or {})}
     payload = {"identities": identities}
-    members = {
-        "model.pt": b"model",
-        "arch.json": b"{}",
-        "metadata.yaml": b"metadata",
-        "input-contract.json": b"{}",
-        "fall-policy-v2.json": b"{}",
-        "calibration.json": b"{}",
-        "conformance.json": b"{}",
-    }
+    members = (
+        {
+            "model.pt": b"model",
+            "arch.json": b"{}",
+            "metadata.yaml": b"metadata",
+            "input-contract.json": b"{}",
+            "fall-policy-v2.json": b"{}",
+            "calibration.json": b"{}",
+            "conformance.json": b"{}",
+        }
+        if members is None
+        else members
+    )
     member_records = [
         {"path": path, "sha256": hashlib.sha256(content).hexdigest(), "size": len(content)}
         for path, content in members.items()
@@ -111,8 +119,8 @@ def _bundle(tmp_path: Path, identities: dict[str, str] | None = None) -> tuple[P
         "schema_version": 1,
         "bundle_sha256": bundle_sha256,
         "runtime_format": "opaque-bundle-format",
-        "members": member_records[:7],
-        "receipts": member_records[7:],
+        "members": member_records[: len(members)],
+        "receipts": member_records[len(members) :],
         "payload": payload,
     }
     (root / "manifest.json").write_bytes(_canonical(manifest))
@@ -145,6 +153,17 @@ def test_admission_rejects_extra_bundle_member(tmp_path: Path) -> None:
     (root / "unexpected").write_text("unexpected")
     with pytest.raises(ModelBundleAdmissionError, match="bundle tree"):
         admit_model_bundle(models_root, desired)
+
+
+def test_admission_uses_manifest_declared_member_set(tmp_path: Path) -> None:
+    models_root, desired = _bundle(
+        tmp_path,
+        members={"runtime.bin": b"model", "contract.json": b"{}"},
+    )
+    assert admit_model_bundle(models_root, desired).observed["members"] == (
+        "runtime.bin",
+        "contract.json",
+    )
 
 
 def test_admission_requires_the_manifest_runtime_format(tmp_path: Path) -> None:

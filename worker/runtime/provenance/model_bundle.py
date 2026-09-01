@@ -45,18 +45,6 @@ _BUNDLE_IDENTITY_FIELDS: Final = tuple(
     for field in _IDENTITY_FIELDS
     if field not in _RECEIPT_IDENTITY_FIELDS
 )
-_REQUIRED_MEMBERS: Final = frozenset(
-    {
-        "model.pt",
-        "arch.json",
-        "metadata.yaml",
-        "input-contract.json",
-        "fall-policy-v2.json",
-        "calibration.json",
-        "conformance.json",
-    }
-)
-_REQUIRED_RECEIPTS: Final = frozenset({"evaluation-receipt.json", "field-evaluation-receipt.json"})
 
 
 class ModelBundleAdmissionError(RuntimeError):
@@ -240,26 +228,35 @@ def _verify_required_members(
 ) -> Mapping[str, str]:
     if desired.selection is None:
         return MappingProxyType({})
-    by_path = {member["path"]: member for member in members if isinstance(member, dict)}
-    by_receipt = {member["path"]: member for member in receipts if isinstance(member, dict)}
-    if set(by_path) != _REQUIRED_MEMBERS or set(by_receipt) != _REQUIRED_RECEIPTS:
-        raise ModelBundleAdmissionError("bundle required members mismatch")
+    if not members or len(receipts) != 2:
+        raise ModelBundleAdmissionError(
+            "bundle manifest must declare payload members and two receipts"
+        )
     observed: dict[str, str] = {}
-    for path, validator in (
-        ("evaluation-receipt.json", validate_evaluation_receipt_identity),
-        ("field-evaluation-receipt.json", validate_field_receipt_identity),
-    ):
+    for receipt in receipts:
+        if not isinstance(receipt, dict) or not isinstance(receipt.get("path"), str):
+            raise ModelBundleAdmissionError("bundle receipt is invalid")
+        path = receipt["path"]
         try:
             raw = _read_regular(root / path, path)
-            receipt = json.loads(raw)
-            if canonical_json_bytes(receipt) + b"\n" != raw:
+            document = json.loads(raw)
+            if canonical_json_bytes(document) + b"\n" != raw:
                 raise ModelBundleAdmissionError(f"{path} is not canonical JSON")
-            validator(desired.selection, receipt)
-            observed["evaluation" if path == "evaluation-receipt.json" else "field"] = (
-                hashlib.sha256(canonical_json_bytes(receipt)).hexdigest()
+            is_field = isinstance(document, Mapping) and "status" in document
+            validator = (
+                validate_field_receipt_identity
+                if is_field
+                else validate_evaluation_receipt_identity
             )
+            identity = "field" if is_field else "evaluation"
+            if identity in observed:
+                raise ModelBundleAdmissionError("bundle receipt identities are duplicated")
+            validator(desired.selection, document)
+            observed[identity] = hashlib.sha256(canonical_json_bytes(document)).hexdigest()
         except (ContractError, json.JSONDecodeError) as exc:
             raise ModelBundleAdmissionError(f"{path} is not a valid desired-bound receipt") from exc
+    if set(observed) != set(_RECEIPT_IDENTITY_FIELDS):
+        raise ModelBundleAdmissionError("bundle receipt identities are incomplete")
     return MappingProxyType(observed)
 
 
