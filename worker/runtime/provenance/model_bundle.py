@@ -32,23 +32,18 @@ _IDENTITY_FIELDS: Final = (
     "dataset",
     "evaluation",
     "field",
-    "seed",
-    "rule",
     "calibration",
     "conformance",
     "class",
     "input",
     "policy",
-    "config",
-    "restart",
-    "worker",
+    "members",
 )
-_RUNTIME_IDENTITY_FIELDS: Final = ("worker", "config", "restart")
 _RECEIPT_IDENTITY_FIELDS: Final = ("evaluation", "field")
 _BUNDLE_IDENTITY_FIELDS: Final = tuple(
     field
     for field in _IDENTITY_FIELDS
-    if field not in (*_RUNTIME_IDENTITY_FIELDS, *_RECEIPT_IDENTITY_FIELDS)
+    if field not in _RECEIPT_IDENTITY_FIELDS
 )
 _REQUIRED_MEMBERS: Final = frozenset(
     {
@@ -119,27 +114,23 @@ class RuntimeModelObservations:
 
 
 def desired_model_bundle_from_selection_document(raw: object) -> DesiredModelBundle:
-    """Map the one canonical G001 selection parser into admission identities."""
+    """Map the canonical selection parser into admission identities."""
     try:
         selection = parse_model_selection(raw)
     except ContractError as exc:
         raise ModelBundleAdmissionError(str(exc)) from exc
     return DesiredModelBundle(
-        selection.bundle_payload_digest,
+        selection.model_publication.bundle_sha256,
         {
             "dataset": selection.dataset_publication.payload_digest,
             "evaluation": selection.evaluation_receipt_digest,
             "field": selection.field_evaluation_receipt_digest,
-            "seed": selection.selected_deployment_seed,
-            "rule": selection.selected_deployment_seed_rule_digest,
             "calibration": selection.calibration_digest,
             "conformance": selection.conformance_digest,
-            "class": selection.class_order_digest,
-            "input": selection.input_contract_digest,
-            "policy": selection.fall_policy_v2_digest,
-            "config": selection.config_revision,
-            "restart": selection.restart_revision,
-            "worker": selection.worker_image_digest,
+            "class": selection.output_class_semantics_digest,
+            "input": selection.input_observation_schema,
+            "policy": selection.policy_digest,
+            "members": selection.bundle_members_digest,
         },
         selection,
     )
@@ -181,6 +172,11 @@ def admit_model_bundle(
         raise ModelBundleAdmissionError("bundle manifest schema mismatch")
     if document.get("bundle_sha256") != desired.bundle_sha256:
         raise ModelBundleAdmissionError("bundle identity mismatch")
+    if (
+        desired.selection is not None
+        and document.get("runtime_format") != desired.selection.runtime_format
+    ):
+        raise ModelBundleAdmissionError("bundle runtime format mismatch")
     members = document.get("members")
     receipts = document.get("receipts")
     payload = document.get("payload")
@@ -212,7 +208,7 @@ def admit_model_bundle(
             "identities": frozen_static,
         }
     )
-    applied_identities = {**dict(identities), **receipt_identities, **observations.identities}
+    applied_identities = {**dict(identities), **receipt_identities}
     for field in _IDENTITY_FIELDS:
         if applied_identities[field] != desired.identities[field]:
             raise ModelBundleAdmissionError(f"{field} identity mismatch")

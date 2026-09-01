@@ -1,39 +1,45 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://seeon.example/contracts/model-selection.schema.json",
-  "title": "Edge desired model selection",
+  "title": "Desired model selection",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema_version", "model_family", "worker_image_digest", "bundle_path", "bundle_payload_digest", "dataset_publication", "evaluation_receipt_digest", "field_evaluation_receipt_digest", "selected_deployment_seed", "selected_deployment_seed_rule_digest", "calibration_digest", "conformance_digest", "class_order_digest", "input_contract_digest", "fall_policy_v2_digest", "config_revision", "restart_revision"],
+  "required": ["schema_version", "model_publication", "bundle_members_digest", "dataset_publication", "evaluation_receipt_digest", "field_evaluation_receipt_digest", "calibration_digest", "conformance_digest", "input_observation_schema", "output_class_count", "output_class_semantics_digest", "policy_digest", "runtime_format"],
   "properties": {
     "schema_version": {"const": 1},
-    "model_family": {"const": "gru-pose-bbox"},
-    "worker_image_digest": {"$ref": "#/$defs/digest"},
-    "bundle_path": {"type": "string", "pattern": "^bundles/[0-9a-f]{64}$"},
-    "bundle_payload_digest": {"$ref": "#/$defs/digest"},
+    "model_publication": {"$ref": "#/$defs/modelPublication"},
+    "bundle_members_digest": {"$ref": "#/$defs/digest"},
     "dataset_publication": {"$ref": "#/$defs/datasetPublication"},
     "evaluation_receipt_digest": {"$ref": "#/$defs/digest"},
     "field_evaluation_receipt_digest": {"$ref": "#/$defs/digest"},
-    "selected_deployment_seed": {"type": "string", "minLength": 1},
-    "selected_deployment_seed_rule_digest": {"$ref": "#/$defs/digest"},
     "calibration_digest": {"$ref": "#/$defs/digest"},
     "conformance_digest": {"$ref": "#/$defs/digest"},
-    "class_order_digest": {"$ref": "#/$defs/digest"},
-    "input_contract_digest": {"$ref": "#/$defs/digest"},
-    "fall_policy_v2_digest": {"$ref": "#/$defs/digest"},
-    "config_revision": {"$ref": "#/$defs/digest"},
-    "restart_revision": {"$ref": "#/$defs/digest"}
+    "input_observation_schema": {"type": "string", "minLength": 1},
+    "output_class_count": {"type": "integer", "minimum": 1},
+    "output_class_semantics_digest": {"$ref": "#/$defs/digest"},
+    "policy_digest": {"$ref": "#/$defs/digest"},
+    "runtime_format": {"type": "string", "minLength": 1}
   },
   "$defs": {
     "digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
     "datasetPublication": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["hf_repo", "hf_revision", "payload_digest"],
+      "required": ["source_locator", "revision", "payload_digest"],
       "properties": {
-        "hf_repo": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$"},
-        "hf_revision": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+        "source_locator": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$"},
+        "revision": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
         "payload_digest": {"$ref": "#/$defs/digest"}
+      }
+    },
+    "modelPublication": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source_locator", "revision", "bundle_sha256"],
+      "properties": {
+        "source_locator": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$"},
+        "revision": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+        "bundle_sha256": {"$ref": "#/$defs/digest"}
       }
     }
   }
