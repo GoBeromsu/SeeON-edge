@@ -20,6 +20,10 @@ export function getClipThumbnailUrl(clipId: string): string {
   return `${getApiBase()}/clips/${encodeURIComponent(clipId)}/thumbnail`;
 }
 
+export function getClipSceneUrl(clipId: string): string {
+  return `${getApiBase()}/clips/${encodeURIComponent(clipId)}/scene`;
+}
+
 function normalizeApiBase(value: string | undefined): string {
   const configured = value?.trim() || DEFAULT_API_BASE;
   if (configured === '/') return '';

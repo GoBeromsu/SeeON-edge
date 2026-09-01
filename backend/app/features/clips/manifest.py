@@ -29,6 +29,17 @@ class ClipManifestPayload(TypedDict):
     finalized: bool
     size_bytes: int | None
     thumbnail_available: bool
+    scene_available: bool
+    scene_frame_count: int | None
+
+
+@dataclass(frozen=True, slots=True)
+class SceneIndexClaim:
+    path: str
+    sha256: str
+    size_bytes: int
+    schema: int
+    frame_count: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,6 +57,7 @@ class ClipManifest:
     finalized: bool
     size_bytes: int | None = None
     thumbnail_available: bool = False
+    scene_index: SceneIndexClaim | None = None
 
     def as_response(self) -> ClipManifestPayload:
         return {
@@ -62,6 +74,10 @@ class ClipManifest:
             "finalized": self.finalized,
             "size_bytes": self.size_bytes,
             "thumbnail_available": self.thumbnail_available,
+            "scene_available": False,
+            "scene_frame_count": (
+                None if self.scene_index is None else self.scene_index.frame_count
+            ),
         }
 
 
@@ -128,6 +144,7 @@ def _manifest_from_mapping(data: Mapping[str, JsonValue]) -> ClipManifest | None
         video_available = video_available_raw
     else:
         video_available = path is not None
+    scene_index = _scene_index_claim(data.get("scene_index"))
     return ClipManifest(
         clip_id=clip_id,
         camera_id=camera_id,
@@ -140,6 +157,7 @@ def _manifest_from_mapping(data: Mapping[str, JsonValue]) -> ClipManifest | None
         video_available=video_available,
         video_error=video_error,
         finalized=finalized,
+        scene_index=scene_index,
     )
 
 
@@ -149,8 +167,34 @@ def _text(value: JsonValue | None) -> str:
     return value.strip()
 
 
+def _scene_index_claim(value: JsonValue | None) -> SceneIndexClaim | None:
+    if not isinstance(value, Mapping):
+        return None
+    path = value.get("path")
+    sha256 = value.get("sha256")
+    size_bytes = value.get("size_bytes")
+    schema = value.get("schema")
+    frame_count = value.get("count")
+    if (
+        path != "scene-index.json"
+        or not isinstance(sha256, str)
+        or re.fullmatch(r"[0-9a-f]{64}", sha256) is None
+        or not _non_negative_int(size_bytes)
+        or size_bytes > 8 * 1024 * 1024
+        or schema != 1
+        or not _non_negative_int(frame_count)
+    ):
+        return None
+    return SceneIndexClaim(path, sha256, size_bytes, schema, frame_count)
+
+
+def _non_negative_int(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
 __all__ = [
     "ClipManifest",
+    "SceneIndexClaim",
     "discover_manifest_paths",
     "is_valid_clip_id",
     "read_manifest_file",

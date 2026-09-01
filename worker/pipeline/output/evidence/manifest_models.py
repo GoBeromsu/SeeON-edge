@@ -14,7 +14,7 @@ from worker.pipeline.output.evidence.evidence_metadata import (
     validate_runtime_manifest_sha256,
 )
 from worker.pipeline.output.evidence.evidence_outbox_types import EvidenceReasonCode
-from worker.pipeline.output.evidence.manifest_media_models import SourceMediaFacts
+from worker.pipeline.output.evidence.manifest_media_models import SceneIndexFacts, SourceMediaFacts
 
 
 class TimeOriginFacts(BaseModel):
@@ -62,6 +62,7 @@ class _ManifestProvenance(BaseModel):
     recovery_state: Literal["MEDIA_VERIFIED", "UNAVAILABLE"] | None = None
     source_media: SourceMediaFacts | None = None
     source_error_reason: str | None = None
+    scene_index: SceneIndexFacts | None = None
     truncation_reasons: tuple[str, ...] = ()
     time_origin: TimeOriginFacts | None = None
 

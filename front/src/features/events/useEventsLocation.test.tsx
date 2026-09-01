@@ -19,6 +19,8 @@ function clip(id: string, eventType: string): Clip {
     video_available: true,
     thumbnail_available: false,
     video_error: null,
+    scene_available: false,
+    scene_frame_count: null,
   };
 }
 

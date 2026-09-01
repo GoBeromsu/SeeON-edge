@@ -23,8 +23,9 @@ BED_DASHED_COLOR: Final[Color] = (128, 128, 0)
 # fall-mode per-track label colors: danger red for FALL, neutral gray for NORMAL.
 FALL_LABEL_COLOR: Final[Color] = (0, 0, 255)
 NORMAL_LABEL_COLOR: Final[Color] = (180, 180, 180)
-POSE_COLOR: Final[Color] = (80, 160, 255)
-POSE_DOT_COLOR: Final[Color] = (255, 255, 255)
+# Default for the legacy draw_pose primitive only. The public pose tokens the
+# scene renderer and sidecar writer share live in overlay_scene (single owner).
+_DRAW_POSE_DEFAULT_COLOR: Final[Color] = (80, 160, 255)
 CAPTION_TEXT_COLOR: Final[Color] = (16, 16, 16)
 CAPTION_FONT_SCALE: Final = 0.5
 CAPTION_THICKNESS: Final = 1
@@ -229,7 +230,7 @@ def draw_pose(
     image: NDArray[np.uint8],
     keypoints: tuple[tuple[int, int, float], ...],
     *,
-    color: Color = POSE_COLOR,
+    color: Color = _DRAW_POSE_DEFAULT_COLOR,
     dot_radius: int = 3,
     skeleton: bool = True,
     min_confidence: float = MIN_KEYPOINT_CONFIDENCE,
@@ -264,7 +265,6 @@ __all__ = [
     "FALL_LABEL_COLOR",
     "NORMAL_LABEL_COLOR",
     "PERSON_COLOR",
-    "POSE_DOT_COLOR",
     "draw_box",
     "draw_caption",
     "draw_dashed_region",

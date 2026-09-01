@@ -30,6 +30,8 @@ See `worker/runtime/deepstream/AGENTS.md`.
 
 `SnapshotStore` is two-phase: stage under `.snapshot-staging`, publish bytes after the event commit, then commit identity metadata. Crash leaves a named transition. Ready manifests pin sha256, size, duration, codec, and event refs. Verify those facts on recovery. Snapshot capacity drops are sink backpressure, not alert failure.
 
+`SceneRing` retains bounded, image-free scene records per camera for accepted evidence windows. Clip publication may write `scene-index.json`: canonical compact JSON in source-pixel coordinates, bound by a content-addressed manifest claim. It is metadata beside the immutable source clip, never burned pixels or a derivative video.
+
 ## Retention and deletion
 
 Hold-aware. Unpublished or incomplete incidents stay HELD. Missing hold hook treats every clip as held. `EvidenceRetention` verifies the manifest and containment, writes PENDING, deletes the dir, then PURGED. Fail closed on verify, lock, or leftover path. Operator delete and age/pressure rotate share that purge. Floor is 60 days. Disk high watermark defaults to 0.80. Stale staging sweep skips held ids. Snapshot retention uses the same tombstone-before-unlink rule.
@@ -55,6 +57,7 @@ Media never lives in rows. Path is not identity; hash and size are.
 - `tests/test_evidence_stager.py`, `tests/test_evidence_sender.py`, `tests/test_evidence_delivery_queue_restart.py`
 - `tests/test_retired_worker_dead_surfaces.py`, `tests/test_evidence_retention.py`, `tests/test_worker_clip_maintenance.py`
 - `tests/test_snapshot_store.py`
+- `tests/test_scene_ring.py`, `tests/test_scene_index_sidecar.py`, `tests/test_scene_index_claim.py`
 - Boundary: `uv run --group lint lint-imports`
 
 Keep new pure-code modules at or below 250 logical LOC. Preserve lease balance, hold-before-delete, and the SQLite-vs-bytes split whenever a handoff changes shape.

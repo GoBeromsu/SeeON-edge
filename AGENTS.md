@@ -111,7 +111,7 @@ exports: `tests/test_contract_symbol_exports.py`. Docs live in
   file surfaces: the publish-once delivery queue, a verified bounded config read
   cache, media-integrity sidecars, zero-payload lock inodes, and startup-purged
   scratch. Content-addressed
-  evidence files (`manifest.json`, snapshots) are the exception.
+  evidence files (`manifest.json`, `scene-index.json`, snapshots) are the exception.
 - 침묵하는 `extra=` 로그: `worker/__main__.py` `basicConfig` renders
   `%(message)s` only. Operator-visible fields (camera_id) must live in the
   message string. Assert `record.getMessage()`, not LogRecord extras.

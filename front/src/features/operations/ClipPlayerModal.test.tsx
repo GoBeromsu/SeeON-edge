@@ -14,6 +14,8 @@ const baseClip: Clip = {
   video_available: true,
   thumbnail_available: true,
   video_error: null,
+  scene_available: false,
+  scene_frame_count: null,
 };
 
 function render(clip: Clip | null, onClose = vi.fn()) {

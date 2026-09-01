@@ -150,6 +150,7 @@ class ClipRecorder:
                         cancel=self._admission.cancel,
                         finalized=self._on_clip_finalized,
                         encoder_name=self._services.encoder_name,
+                        scene_selector=self._services.scene_repository,
                     ),
                 )
                 self._store_lock = store_lock

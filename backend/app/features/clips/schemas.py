@@ -25,6 +25,8 @@ class ClipManifestResponse(BaseModel):
     finalized: bool
     size_bytes: int | None = Field(default=None, ge=0)
     thumbnail_available: bool = False
+    scene_available: bool = False
+    scene_frame_count: int | None = Field(default=None, ge=0)
 
 
 class ClipsPaginationResponse(BaseModel):

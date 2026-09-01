@@ -256,6 +256,40 @@ export type Clip = {
   duration_s?: number | null;
   /** Clip file size in bytes. Same optional/omitted-on-old-backend contract as duration_s — never fabricate a size for display. */
   size_bytes?: number | null;
+  scene_available: boolean;
+  scene_frame_count: number | null;
+};
+
+export type ClipSceneFrame = {
+  p: number;
+  q: number;
+  sd: boolean;
+  t: number;
+  bd: { b: [number, number, number, number]; c: number; i: number; pg: [number, number][]; pv: string; sm: string; ct: unknown[] }[];
+  dc: unknown[];
+  lb: { x: number; y: number; t: string; c: [number, number, number]; z: number }[];
+  ps: { b: [number, number, number, number]; c: number; i: number; tr: number | null; tr_r?: string; k?: [number, number | null, number | null, number][] }[];
+};
+
+export type ClipScene = {
+  camera_id: string;
+  clip_id: string;
+  components: { id: string; sm: string }[];
+  coordinate_space: 'source-pixels';
+  decision_provenance: unknown[];
+  detail_shed_frame_count: number;
+  frame_count: number;
+  frames: ClipSceneFrame[];
+  scene_index_schema_version: number;
+  scene_schema_version: number;
+  source_dimensions: [number, number];
+  stream_identity: { generation: number; stream_epoch: number; worker_boot_id: string };
+  style: {
+    palette: Record<'bed' | 'danger' | 'neutral' | 'person' | 'pose' | 'pose_dot', [number, number, number]>;
+    skeleton: { edges: [number, number][] };
+    z_order: { bed: number; decision: number; person: number };
+  };
+  time_origin: { event_pts_sec: number; media_origin_pts_sec: number; requested_end_pts_sec: number; requested_start_pts_sec: number };
 };
 
 export type HeartbeatRelayErrorClass = 'auth' | 'timeout' | 'unreachable';

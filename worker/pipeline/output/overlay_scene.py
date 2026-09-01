@@ -5,6 +5,7 @@ from typing import Final, Literal
 
 from contracts.observation import FrameObservation
 from worker.domains.bed_exit import BedExitDebugSnapshot
+from worker.pipeline.output._overlay_primitives import POSE_EDGES
 from worker.pipeline.trace.models import AnalysisTrace, DecisionTrace, OptionalNumber
 from worker.types import DecisionTraceSnapshot, FramePacket
 from worker.types.overlay_scene import (
@@ -28,6 +29,7 @@ from worker.types.overlay_scene import (
 PERSON_COLOR: Final = (0, 255, 0)
 BED_COLOR: Final = (128, 128, 0)
 POSE_COLOR: Final = (255, 255, 255)
+POSE_DOT_COLOR: Final = (255, 255, 255)
 DANGER_COLOR: Final = (0, 0, 255)
 NEUTRAL_COLOR: Final = (180, 180, 180)
 MIN_KEYPOINT_CONFIDENCE: Final = 0.2
@@ -224,6 +226,91 @@ class OverlaySceneBuilder:
             tuple(sorted(labels, key=lambda item: (item.z_order, item.text))),
         )
 
+    def from_observation(
+        self,
+        *,
+        identity: SceneFrameIdentity,
+        observation: FrameObservation,
+        source_width: int,
+        source_height: int,
+        decisions: tuple[DecisionTrace, ...],
+    ) -> OverlayScene:
+        """Build an image-free source-pixel scene from one current observation.
+
+        The caller supplies a fully formed frame identity and decisions read
+        immediately after the decider update. This path intentionally emits
+        person and decision labels only; bed status labels need live debug
+        snapshots, which are not part of this hardware-neutral input.
+        """
+        transform = fit_scene_transform(
+            source_width, source_height, source_width, source_height
+        )
+        person_decisions = _decisions_by_track(decisions)
+        persons = tuple(
+            ScenePerson(
+                index,
+                _number(track_id, "tracker-unmatched"),
+                (float(box.x1), float(box.y1), float(box.x2), float(box.y2)),
+                box.confidence,
+                tuple(
+                    _keypoint(point_index, *point)
+                    for point_index, point in enumerate(
+                        observation.keypoints[index] if index < len(observation.keypoints) else ()
+                    )
+                ),
+                PERSON_COLOR,
+                20,
+            )
+            for index, (box, track_id) in enumerate(
+                zip(
+                    observation.boxes,
+                    observation.track_ids or (None,) * len(observation.boxes),
+                    strict=True,
+                )
+            )
+        )
+        beds = tuple(
+            SceneBed(
+                index,
+                (float(box.x1), float(box.y1), float(box.x2), float(box.y2)),
+                tuple((float(x), float(y)) for x, y in (box.polygon or ())),
+                box.confidence,
+                "observed",
+                ObservationSemantics.PRESENT,
+                tuple(
+                    _containment(decision)
+                    for decision in decisions
+                    if decision.snapshot.bed_id == index
+                ),
+                BED_COLOR,
+                10,
+            )
+            for index, box in enumerate(observation.bed_boxes)
+        )
+        labels = tuple(
+            sorted(
+                (
+                    label
+                    for person in persons
+                    for label in _person_labels(
+                        person, _track_decisions(person_decisions, person.track_id)
+                    )
+                ),
+                key=lambda item: (item.z_order, item.text, item.anchor),
+            )
+        )
+        return _scene(
+            identity,
+            source_width,
+            source_height,
+            transform,
+            persons,
+            beds,
+            tuple(_decision(value) for value in decisions),
+            (),
+            labels,
+        )
+
 
 def _scene(
     frame: SceneFrameIdentity,
@@ -410,4 +497,15 @@ def _live_fall_labels(observation: FrameObservation) -> dict[int, tuple[str, tup
     return result
 
 
-__all__ = ["AppliedCameraProvenance", "OverlaySceneBuilder"]
+__all__ = [
+    "BED_COLOR",
+    "DANGER_COLOR",
+    "MIN_KEYPOINT_CONFIDENCE",
+    "NEUTRAL_COLOR",
+    "PERSON_COLOR",
+    "POSE_COLOR",
+    "POSE_DOT_COLOR",
+    "POSE_EDGES",
+    "AppliedCameraProvenance",
+    "OverlaySceneBuilder",
+]

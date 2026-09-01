@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
@@ -28,6 +29,7 @@ from worker.pipeline.output.evidence.evidence_outbox_types import (
     EdgeEventId,
     EvidenceReasonCode,
 )
+from worker.pipeline.output.evidence.manifest_media_models import SceneIndexFacts
 
 EVENT_ONE = EdgeEventId("00000000-0000-4000-8000-000000000001")
 EVENT_TWO = EdgeEventId("00000000-0000-4000-8000-000000000002")
@@ -85,23 +87,21 @@ def test_process_kill_after_manifest_reconstructs_exact_event_outcomes(tmp_path:
     killed = subprocess.run([sys.executable, "-c", script], check=False)
     assert killed.returncode == 91
     reservation = ClipReservation(
-        ClipId("killed-clip"), "camera-1",
+        ClipId("killed-clip"),
+        "camera-1",
         tmp_path / "clips/.staging/killed-clip",
         tmp_path / "clips/killed-clip",
     )
 
     publisher = ClipPublisher(tmp_path)
-    _ = publisher.publish_unavailable(
-        reservation, _metadata(), EvidenceReasonCode.ENCODER_FAILED
-    )
-    _ = publisher.publish_unavailable(
-        reservation, _metadata(), EvidenceReasonCode.ENCODER_FAILED
-    )
+    _ = publisher.publish_unavailable(reservation, _metadata(), EvidenceReasonCode.ENCODER_FAILED)
+    _ = publisher.publish_unavailable(reservation, _metadata(), EvidenceReasonCode.ENCODER_FAILED)
 
     outcomes = tuple((reservation.final_dir / "terminal-outcomes").glob("*.json"))
     assert len(outcomes) == 2
     assert {json.loads(path.read_text())["event_id"] for path in outcomes} == {
-        str(EVENT_ONE), str(EVENT_TWO)
+        str(EVENT_ONE),
+        str(EVENT_TWO),
     }
 
 
@@ -380,3 +380,106 @@ def test_ready_publication_fsyncs_before_renames_and_staging_cleanup(
         ("rmtree", "durable-clip-id", ""),
         ("fsync-directory", ".staging", ""),
     ]
+
+
+def test_ready_publication_promotes_claimed_scene_index(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    reservation = ClipIdAllocator(tmp_path, id_factory=lambda _camera: "scene-clip").reserve(
+        "camera-1"
+    )
+    artifact = reservation.staging_dir / "clip.mp4"
+    artifact.write_bytes(b"derivative-media")
+    sidecar = reservation.staging_dir / "scene-index.json"
+    sidecar.write_text('{"frame_count":1}\n', encoding="ascii")
+    contents = sidecar.read_bytes()
+    facts = SceneIndexFacts(
+        path="scene-index.json",
+        sha256=hashlib.sha256(contents).hexdigest(),
+        size_bytes=len(contents),
+        schema=1,
+        count=1,
+    )
+    monkeypatch.setattr(
+        "worker.pipeline.output.evidence.evidence_manifest.inspect_finalized_media",
+        lambda _path, **_kwargs: MediaFacts("a" * 64, len(b"derivative-media"), 1000),
+    )
+
+    published = ClipPublisher(tmp_path).publish_ready(
+        reservation, artifact, replace(_metadata(), scene_index=facts)
+    )
+
+    payload = json.loads(published.manifest_path.read_text(encoding="utf-8"))
+    assert payload["scene_index"] == facts.model_dump(by_alias=True)
+    assert (reservation.final_dir / "scene-index.json").read_bytes() == contents
+
+
+def test_scene_promotion_failure_is_fail_open_and_diagnostic(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    reservation = ClipIdAllocator(tmp_path, id_factory=lambda _camera: "scene-failure").reserve(
+        "camera-1"
+    )
+    reservation.final_dir.mkdir(parents=True)
+    staged = reservation.staging_dir / "scene-index.json"
+    staged.write_text('{"frame_count":1}\n', encoding="ascii")
+    contents = staged.read_bytes()
+    facts = SceneIndexFacts(
+        path="scene-index.json",
+        sha256=hashlib.sha256(contents).hexdigest(),
+        size_bytes=len(contents),
+        schema=1,
+        count=1,
+    )
+    real_replace = os.replace
+
+    def fail_sidecar(source: Path, target: Path) -> None:
+        if source == staged:
+            raise OSError("injected")
+        real_replace(source, target)
+
+    monkeypatch.setattr(clip_publication.os, "replace", fail_sidecar)
+
+    assert (
+        ClipPublisher(tmp_path)._publish_scene_index(
+            reservation, replace(_metadata(), scene_index=facts)
+        )
+        is None
+    )
+
+    message = caplog.records[-1].getMessage()
+    assert "camera-1" in message and "scene-failure" in message
+    assert "PROMOTION_FAILED" in message and "OSError" in message
+
+
+def test_resume_with_invalid_final_scene_sidecar_publishes_ready_without_claim(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    allocator = ClipIdAllocator(tmp_path, id_factory=lambda _camera: "invalid-final-scene")
+    reservation = allocator.reserve("camera-1")
+    artifact = reservation.staging_dir / "clip.mp4"
+    artifact.write_bytes(b"derivative-media")
+    reservation.final_dir.mkdir(parents=True)
+    (reservation.final_dir / "clip.mp4").write_bytes(b"derivative-media")
+    (reservation.final_dir / "scene-index.json").write_text(
+        '{"frame_count":"bad"}\n', encoding="ascii"
+    )
+    claimed = SceneIndexFacts(
+        path="scene-index.json",
+        sha256="a" * 64,
+        size_bytes=1,
+        schema=1,
+        count=1,
+    )
+    monkeypatch.setattr(
+        "worker.pipeline.output.evidence.evidence_manifest.inspect_finalized_media",
+        lambda _path, **_kwargs: MediaFacts("a" * 64, len(b"derivative-media"), 1000),
+    )
+
+    published = ClipPublisher(tmp_path).publish_ready(
+        reservation, artifact, replace(_metadata(), scene_index=claimed)
+    )
+
+    payload = json.loads(published.manifest_path.read_text(encoding="utf-8"))
+    assert payload["state"] == "READY"
+    assert "scene_index" not in payload
