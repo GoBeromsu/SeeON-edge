@@ -9,7 +9,6 @@ import pytest
 from contracts.model_selection import canonical_digest
 from worker.runtime.provenance.model_bundle import (
     ModelBundleAdmissionError,
-    RuntimeModelObservations,
     admit_model_bundle,
     desired_model_bundle_from_selection_document,
 )
@@ -122,13 +121,9 @@ def _bundle(tmp_path: Path, identities: dict[str, str] | None = None) -> tuple[P
     )
 
 
-def _observations() -> RuntimeModelObservations:
-    return RuntimeModelObservations("7" * 64, "8" * 64, "9" * 64)
-
-
 def test_admission_returns_immutable_content_proof(tmp_path: Path) -> None:
     models_root, desired = _bundle(tmp_path)
-    proof = admit_model_bundle(models_root, desired, _observations())
+    proof = admit_model_bundle(models_root, desired)
     assert proof.observed["bundle_sha256"] == desired.bundle_sha256
     assert proof.applied["identities"]["members"] == _IDENTITIES["members"]
     with pytest.raises(TypeError):
@@ -141,7 +136,7 @@ def test_each_bundle_identity_mismatch_is_fatal(tmp_path: Path, field: str) -> N
     observed[field] = "different" if field == "input" else "f" * 64
     models_root, desired = _bundle(tmp_path, observed)
     with pytest.raises(ModelBundleAdmissionError, match=rf"{field} identity mismatch"):
-        admit_model_bundle(models_root, desired, _observations())
+        admit_model_bundle(models_root, desired)
 
 
 def test_admission_rejects_extra_bundle_member(tmp_path: Path) -> None:
@@ -149,7 +144,7 @@ def test_admission_rejects_extra_bundle_member(tmp_path: Path) -> None:
     root = models_root / "bundles" / desired.bundle_sha256
     (root / "unexpected").write_text("unexpected")
     with pytest.raises(ModelBundleAdmissionError, match="bundle tree"):
-        admit_model_bundle(models_root, desired, _observations())
+        admit_model_bundle(models_root, desired)
 
 
 def test_admission_requires_the_manifest_runtime_format(tmp_path: Path) -> None:
@@ -160,4 +155,4 @@ def test_admission_requires_the_manifest_runtime_format(tmp_path: Path) -> None:
     manifest["runtime_format"] = "different-format"
     manifest_path.write_bytes(_canonical(manifest))
     with pytest.raises(ModelBundleAdmissionError, match="runtime format"):
-        admit_model_bundle(models_root, desired, _observations())
+        admit_model_bundle(models_root, desired)

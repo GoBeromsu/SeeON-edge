@@ -42,6 +42,7 @@ from typing import Final, Protocol, TypeAlias
 from typing_extensions import override
 
 from worker.adapters.model.registry import FallModel
+from worker.adapters.model.torch_gru_fall import GruFallRunner
 from worker.adapters.model.torch_lstm_fall import LstmFallRunner
 
 
@@ -94,6 +95,7 @@ class FallModelConfigLike(Protocol):
 
 
 FallModelFactory: TypeAlias = Callable[[FallModelConfigLike, str], FallModel]
+BundleFallModelFactory: TypeAlias = Callable[[Path, str], FallModel]
 
 
 @dataclass(slots=True)
@@ -111,44 +113,36 @@ class UnknownFallModelTypeError(Exception):
         )
 
 
-@dataclass(slots=True)
-class DisabledFallModelTypeError(Exception):
-    """Raised when a known-but-dark model family is requested for activation."""
-
-    requested_type: str
-
-    @override
-    def __str__(self) -> str:
-        return f"fall model type {self.requested_type!r} is registered but disabled"
-
-
 class FallModelFamilyRegistry:
     """Map fall-model family names (``FallModelConfig.type``) to factories."""
 
     def __init__(self) -> None:
         self._factories: dict[str, FallModelFactory] = {}
-        self._disabled_types: set[str] = set()
+        self._bundle_factories: dict[str, BundleFallModelFactory] = {}
 
     def register(self, model_type: str, factory: FallModelFactory) -> None:
         if not model_type:
             raise ValueError("model_type must be non-empty")
-        if model_type in self._disabled_types:
-            raise ValueError(f"model_type {model_type!r} is disabled")
         self._factories[model_type] = factory
 
-    def register_disabled(self, model_type: str) -> None:
-        if not model_type:
-            raise ValueError("model_type must be non-empty")
-        if model_type in self._factories:
-            raise ValueError(f"model_type {model_type!r} is active")
-        self._disabled_types.add(model_type)
+    def register_runtime_format(self, runtime_format: str, factory: BundleFallModelFactory) -> None:
+        if not runtime_format:
+            raise ValueError("runtime_format must be non-empty")
+        self._bundle_factories[runtime_format] = factory
+
+    def create_bundle(self, runtime_format: str, artifact_dir: Path, device: str) -> FallModel:
+        factory = self._bundle_factories.get(runtime_format)
+        if factory is None:
+            raise UnknownFallModelTypeError(runtime_format, self.runtime_formats())
+        return factory(artifact_dir, device)
+
+    def runtime_formats(self) -> tuple[str, ...]:
+        return tuple(sorted(self._bundle_factories))
 
     def create(self, model_type: str, config: FallModelConfigLike, device: str) -> FallModel:
         return self.get_factory(model_type)(config, device)
 
     def get_factory(self, model_type: str) -> FallModelFactory:
-        if model_type in self._disabled_types:
-            raise DisabledFallModelTypeError(model_type)
         factory = self._factories.get(model_type)
         if factory is None:
             raise UnknownFallModelTypeError(model_type, self.types())
@@ -168,11 +162,15 @@ def _create_lstm_fall_model(config: FallModelConfigLike, device: str) -> FallMod
     )
 
 
+def _create_gru_bundle_model(artifact_dir: Path, device: str) -> FallModel:
+    return GruFallRunner.from_artifact_dir(artifact_dir, device=device)
+
+
 def default_fall_model_family_registry() -> FallModelFamilyRegistry:
-    """Build the default registry: today, only the "lstm" family."""
+    """Build the packaged-model and admitted-bundle dispatch registry."""
     registry = FallModelFamilyRegistry()
     registry.register("lstm", _create_lstm_fall_model)
-    registry.register_disabled("gru")
+    registry.register_runtime_format("torchscript-gru-pose-bbox", _create_gru_bundle_model)
     return registry
 
 
@@ -180,7 +178,7 @@ DEFAULT_FALL_MODEL_FAMILY_REGISTRY: Final = default_fall_model_family_registry()
 
 __all__ = [
     "DEFAULT_FALL_MODEL_FAMILY_REGISTRY",
-    "DisabledFallModelTypeError",
+    "BundleFallModelFactory",
     "FallModelConfigLike",
     "FallModelFactory",
     "FallModelFamilyRegistry",

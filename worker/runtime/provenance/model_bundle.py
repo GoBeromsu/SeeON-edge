@@ -91,28 +91,6 @@ class ModelBundleProof:
     applied: Mapping[str, object]
 
 
-@dataclass(frozen=True, slots=True)
-class RuntimeModelObservations:
-    worker_image_digest: str
-    config_revision: str
-    restart_revision: str
-
-    def __post_init__(self) -> None:
-        for value in (self.worker_image_digest, self.config_revision, self.restart_revision):
-            if _BUNDLE_RE.fullmatch(value) is None:
-                raise ModelBundleAdmissionError("runtime observation identity is invalid")
-
-    @property
-    def identities(self) -> Mapping[str, str]:
-        return MappingProxyType(
-            {
-                "worker": self.worker_image_digest,
-                "config": self.config_revision,
-                "restart": self.restart_revision,
-            }
-        )
-
-
 def desired_model_bundle_from_selection_document(raw: object) -> DesiredModelBundle:
     """Map the canonical selection parser into admission identities."""
     try:
@@ -136,20 +114,7 @@ def desired_model_bundle_from_selection_document(raw: object) -> DesiredModelBun
     )
 
 
-def runtime_revision_digest(kind: str, integer: int) -> str:
-    if (
-        not isinstance(kind, str)
-        or not kind
-        or not isinstance(integer, int)
-        or isinstance(integer, bool)
-    ):
-        raise ModelBundleAdmissionError("runtime revision input is invalid")
-    return hashlib.sha256(_canonical_json({"kind": kind, "revision": integer}).encode()).hexdigest()
-
-
-def admit_model_bundle(
-    models_root: Path, desired: DesiredModelBundle, observations: RuntimeModelObservations
-) -> ModelBundleProof:
+def admit_model_bundle(models_root: Path, desired: DesiredModelBundle) -> ModelBundleProof:
     """Verify one published bundle without mutating it or selecting an alternative.
 
     Call this before model construction/warmup.  Any failed comparison is fatal.
@@ -208,11 +173,12 @@ def admit_model_bundle(
             "identities": frozen_static,
         }
     )
-    applied_identities = {**dict(identities), **receipt_identities}
-    for field in _IDENTITY_FIELDS:
-        if applied_identities[field] != desired.identities[field]:
-            raise ModelBundleAdmissionError(f"{field} identity mismatch")
-    applied = _freeze({"bundle_sha256": desired.bundle_sha256, "identities": applied_identities})
+    applied = _freeze(
+        {
+            "bundle_sha256": desired.bundle_sha256,
+            "identities": {**dict(identities), **receipt_identities},
+        }
+    )
     return ModelBundleProof(observed=observed, applied=applied)
 
 
@@ -387,8 +353,6 @@ __all__ = [
     "DesiredModelBundle",
     "ModelBundleAdmissionError",
     "ModelBundleProof",
-    "RuntimeModelObservations",
     "admit_model_bundle",
     "desired_model_bundle_from_selection_document",
-    "runtime_revision_digest",
 ]

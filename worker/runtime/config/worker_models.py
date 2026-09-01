@@ -80,14 +80,13 @@ class FallModelConfig(BaseModel):
         return self
 
 
-class FallCandidateBundleConfig(BaseModel):
-    """A sealed dark-candidate bundle, never an active fall-model selection."""
+class SelectedFallBundleConfig(BaseModel):
+    """An admitted selection that replaces the packaged fall model."""
 
     model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True, extra="forbid")
 
     models_root: Path
     desired: DesiredModelBundle
-    observed_worker_image_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
 
     @field_validator("models_root")
     @classmethod
@@ -99,9 +98,7 @@ class WorkerModelsConfig(BaseModel):
     model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True, extra="forbid")
 
     fall: FallModelConfig | None = None
-    # Candidate admission only verifies the sealed bundle before camera
-    # activation. It does not select, construct, warm, or register GRU.
-    candidate: FallCandidateBundleConfig | None = None
+    selected: SelectedFallBundleConfig | None = None
     # Issue #44: which extraction module's boxes are authoritative for the
     # person bounding box consumed downstream. Explicit and defaulted (never
     # an implicit dict-insertion-order winner) -- "pose" only schedules and
@@ -110,9 +107,9 @@ class WorkerModelsConfig(BaseModel):
     box_source: Literal["pose", "person"] = "pose"
 
     @model_validator(mode="after")
-    def _validate_candidate_box_source(self) -> WorkerModelsConfig:
-        if self.candidate is not None and self.box_source != "pose":
-            raise ConfigValidationError("fall candidate bundle requires box_source=pose")
+    def _validate_selected_bundle_box_source(self) -> WorkerModelsConfig:
+        if self.selected is not None and self.box_source != "pose":
+            raise ConfigValidationError("selected fall bundle requires box_source=pose")
         return self
 
 
@@ -275,8 +272,8 @@ __all__ = [
     "ClipRecordingConfig",
     "ConfigValue",
     "DevMjpegConfig",
-    "FallCandidateBundleConfig",
     "FallModelConfig",
+    "SelectedFallBundleConfig",
     "WorkerConfig",
     "WorkerConfigError",
     "WorkerModelsConfig",
