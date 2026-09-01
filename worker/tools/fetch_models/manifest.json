@@ -3,12 +3,17 @@
   "sources": {
     "eldercare-fall-models": {
       "kind": "huggingface",
-      "repo": "Berom0227/eldercare-fall-models",
+      "source_locator": "Berom0227/eldercare-fall-models",
       "revision": "d67887844bfd2e4b1ca3f3275f770b0b05e23aba"
+    },
+    "published-pose-bbox56-fall-model": {
+      "kind": "huggingface",
+      "source_locator": "Berom0227/seeon-model-v0.1.0-pose-bbox56-proxy-research",
+      "revision": "988bacc666a3e5935b70e9f546aea38a6d7e5399"
     },
     "ultralytics-assets": {
       "kind": "github-release",
-      "repo": "ultralytics/assets",
+      "source_locator": "ultralytics/assets",
       "tag": "v8.4.0"
     }
   },
@@ -47,6 +52,13 @@
       "remote_path": "yolo26m-seg.pt",
       "size": 54750385,
       "sha256": "16b636f04e8fb6a325b3370f22dc5e5535ff473e384f4d041fd28d788f6ee9f5"
+    }
+  ],
+  "published_bundles": [
+    {
+      "source_locator": "Berom0227/seeon-model-v0.1.0-pose-bbox56-proxy-research",
+      "revision": "988bacc666a3e5935b70e9f546aea38a6d7e5399",
+      "bundle_sha256": "998e060138911f3167c4fba79b96b406ff555893771c33a53bd07eaa4d77cffe"
     }
   ],
   "sidecars": [

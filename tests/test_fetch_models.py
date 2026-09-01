@@ -40,6 +40,7 @@ from worker.tools.fetch_models.manifest import (
     Bundle,
     Manifest,
     ManifestError,
+    PublishedBundle,
     canonical_json,
     load_manifest,
     parse_manifest,
@@ -63,10 +64,14 @@ def _manifest_dict(**overrides: object) -> dict[str, object]:
         "sources": {
             "hf": {
                 "kind": "huggingface",
-                "repo": "owner/models",
+                "source_locator": "owner/models",
                 "revision": "d67887844bfd2e4b1ca3f3275f770b0b05e23aba",
             },
-            "gh": {"kind": "github-release", "repo": "ultralytics/assets", "tag": "v8.4.0"},
+            "gh": {
+                "kind": "github-release",
+                "source_locator": "ultralytics/assets",
+                "tag": "v8.4.0",
+            },
         },
         "artifacts": [
             {
@@ -218,9 +223,21 @@ def test_committed_manifest_parses_and_pins_every_family_the_worker_loads() -> N
     } <= paths
     assert set(manifest.sidecars) == {"fall/lstm/arch.json", "fall/lstm/metadata.yaml"}
     hf = manifest.sources["eldercare-fall-models"]
-    assert (hf.repo, hf.ref) == (
+    assert (hf.source_locator, hf.ref) == (
         "Berom0227/eldercare-fall-models",
         "d67887844bfd2e4b1ca3f3275f770b0b05e23aba",
+    )
+    published_source = manifest.sources["published-pose-bbox56-fall-model"]
+    assert (published_source.source_locator, published_source.ref) == (
+        "Berom0227/seeon-model-v0.1.0-pose-bbox56-proxy-research",
+        "988bacc666a3e5935b70e9f546aea38a6d7e5399",
+    )
+    assert manifest.published_bundles == (
+        PublishedBundle(
+            "Berom0227/seeon-model-v0.1.0-pose-bbox56-proxy-research",
+            "988bacc666a3e5935b70e9f546aea38a6d7e5399",
+            "998e060138911f3167c4fba79b96b406ff555893771c33a53bd07eaa4d77cffe",
+        ),
     )
 
 

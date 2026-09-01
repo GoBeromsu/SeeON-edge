@@ -1,9 +1,4 @@
-"""Pure validation for immutable desired and derived applied model identities.
-
-This module deliberately does not read files, contact a registry, or import runtime
-code.  The committed model-selection document is desired authority.  An applied
-selection is only a terminal observation that can be compared with that authority.
-"""
+"""Pure validation for immutable desired and derived applied model identities."""
 
 from __future__ import annotations
 
@@ -15,11 +10,11 @@ from dataclasses import dataclass
 from typing import Final
 
 SCHEMA_VERSION: Final = 1
-MODEL_FAMILY: Final = "gru-pose-bbox"
 _SHA256_RE: Final = re.compile(r"^[0-9a-f]{64}$")
-_HF_REF_RE: Final = re.compile(r"^[0-9a-f]{40}$")
-_HF_REPO_RE: Final = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$")
-_BUNDLE_PATH_RE: Final = re.compile(r"^bundles/([0-9a-f]{64})$")
+_REVISION_RE: Final = re.compile(r"^[0-9a-f]{40}$")
+_SOURCE_LOCATOR_RE: Final = re.compile(
+    r"^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$"
+)
 _TIMESTAMP_RE: Final = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$")
 
 
@@ -29,52 +24,56 @@ class ContractError(ValueError):
 
 @dataclass(frozen=True)
 class DatasetPublication:
-    hf_repo: str
-    hf_revision: str
+    source_locator: str
+    revision: str
     payload_digest: str
 
 
 @dataclass(frozen=True)
+class ModelPublication:
+    source_locator: str
+    revision: str
+    bundle_sha256: str
+
+
+@dataclass(frozen=True)
 class ModelSelection:
-    worker_image_digest: str
-    bundle_path: str
-    bundle_payload_digest: str
+    model_publication: ModelPublication
+    bundle_members_digest: str
     dataset_publication: DatasetPublication
     evaluation_receipt_digest: str
     field_evaluation_receipt_digest: str
-    selected_deployment_seed: str
-    selected_deployment_seed_rule_digest: str
     calibration_digest: str
     conformance_digest: str
-    class_order_digest: str
-    input_contract_digest: str
-    fall_policy_v2_digest: str
-    config_revision: str
-    restart_revision: str
+    input_observation_schema: str
+    output_class_count: int
+    output_class_semantics_digest: str
+    policy_digest: str
+    runtime_format: str
 
     def as_dict(self) -> dict[str, object]:
         return {
             "schema_version": SCHEMA_VERSION,
-            "model_family": MODEL_FAMILY,
-            "worker_image_digest": self.worker_image_digest,
-            "bundle_path": self.bundle_path,
-            "bundle_payload_digest": self.bundle_payload_digest,
+            "model_publication": {
+                "source_locator": self.model_publication.source_locator,
+                "revision": self.model_publication.revision,
+                "bundle_sha256": self.model_publication.bundle_sha256,
+            },
+            "bundle_members_digest": self.bundle_members_digest,
             "dataset_publication": {
-                "hf_repo": self.dataset_publication.hf_repo,
-                "hf_revision": self.dataset_publication.hf_revision,
+                "source_locator": self.dataset_publication.source_locator,
+                "revision": self.dataset_publication.revision,
                 "payload_digest": self.dataset_publication.payload_digest,
             },
             "evaluation_receipt_digest": self.evaluation_receipt_digest,
             "field_evaluation_receipt_digest": self.field_evaluation_receipt_digest,
-            "selected_deployment_seed": self.selected_deployment_seed,
-            "selected_deployment_seed_rule_digest": (self.selected_deployment_seed_rule_digest),
             "calibration_digest": self.calibration_digest,
             "conformance_digest": self.conformance_digest,
-            "class_order_digest": self.class_order_digest,
-            "input_contract_digest": self.input_contract_digest,
-            "fall_policy_v2_digest": self.fall_policy_v2_digest,
-            "config_revision": self.config_revision,
-            "restart_revision": self.restart_revision,
+            "input_observation_schema": self.input_observation_schema,
+            "output_class_count": self.output_class_count,
+            "output_class_semantics_digest": self.output_class_semantics_digest,
+            "policy_digest": self.policy_digest,
+            "runtime_format": self.runtime_format,
         }
 
     @property
@@ -85,21 +84,18 @@ class ModelSelection:
 @dataclass(frozen=True)
 class AppliedModelSelection:
     desired_selection_digest: str
-    worker_image_digest: str
-    bundle_path: str
-    bundle_payload_digest: str
+    model_publication: ModelPublication
+    bundle_members_digest: str
     dataset_publication: DatasetPublication
     evaluation_receipt_digest: str
     field_evaluation_receipt_digest: str
-    selected_deployment_seed: str
-    selected_deployment_seed_rule_digest: str
     calibration_digest: str
     conformance_digest: str
-    class_order_digest: str
-    input_contract_digest: str
-    fall_policy_v2_digest: str
-    config_revision: str
-    restart_revision: str
+    input_observation_schema: str
+    output_class_count: int
+    output_class_semantics_digest: str
+    policy_digest: str
+    runtime_format: str
     boot_id: str
     restart_id: str
     verified_at: str
@@ -111,11 +107,7 @@ def canonical_json_bytes(value: object) -> bytes:
     """Return the one JSON encoding used when hashing a contract document."""
     try:
         encoded = json.dumps(
-            value,
-            allow_nan=False,
-            ensure_ascii=True,
-            separators=(",", ":"),
-            sort_keys=True,
+            value, allow_nan=False, ensure_ascii=True, separators=(",", ":"), sort_keys=True
         )
     except (TypeError, ValueError) as exc:
         raise ContractError(f"value is not canonical JSON: {exc}") from exc
@@ -135,9 +127,10 @@ def _object(raw: object, where: str) -> Mapping[str, object]:
 def _exact_keys(raw: Mapping[str, object], expected: frozenset[str], where: str) -> None:
     actual = frozenset(raw)
     if actual != expected:
-        missing = sorted(expected - actual)
-        unexpected = sorted(actual - expected)
-        raise ContractError(f"{where} keys differ: missing={missing}, unexpected={unexpected}")
+        raise ContractError(
+            f"{where} keys differ: missing={sorted(expected - actual)}, "
+            f"unexpected={sorted(actual - expected)}"
+        )
 
 
 def _string(raw: Mapping[str, object], key: str, where: str) -> str:
@@ -154,74 +147,77 @@ def _digest(raw: Mapping[str, object], key: str, where: str) -> str:
     return value
 
 
-def _dataset_publication(raw: object, where: str) -> DatasetPublication:
+def _publication(
+    raw: object,
+    where: str,
+    *,
+    content_key: str,
+    publication_type: type[DatasetPublication] | type[ModelPublication],
+) -> DatasetPublication | ModelPublication:
     value = _object(raw, where)
-    _exact_keys(value, frozenset({"hf_repo", "hf_revision", "payload_digest"}), where)
-    hf_repo = _string(value, "hf_repo", where)
-    if _HF_REPO_RE.fullmatch(hf_repo) is None:
-        raise ContractError(f"{where}.hf_repo must be an owner/repository name")
-    hf_revision = _string(value, "hf_revision", where)
-    if _HF_REF_RE.fullmatch(hf_revision) is None:
-        raise ContractError(f"{where}.hf_revision must be a lowercase 40-hex immutable ref")
-    return DatasetPublication(hf_repo, hf_revision, _digest(value, "payload_digest", where))
+    _exact_keys(value, frozenset({"source_locator", "revision", content_key}), where)
+    source_locator = _string(value, "source_locator", where)
+    if _SOURCE_LOCATOR_RE.fullmatch(source_locator) is None:
+        raise ContractError(f"{where}.source_locator must be an owner/repository name")
+    revision = _string(value, "revision", where)
+    if _REVISION_RE.fullmatch(revision) is None:
+        raise ContractError(f"{where}.revision must be a lowercase 40-hex immutable ref")
+    return publication_type(source_locator, revision, _digest(value, content_key, where))
 
 
-def _bundle_path(raw: Mapping[str, object], digest: str, where: str) -> str:
-    path = _string(raw, "bundle_path", where)
-    match = _BUNDLE_PATH_RE.fullmatch(path)
-    if match is None or match.group(1) != digest:
-        raise ContractError(f"{where}.bundle_path must equal bundles/<bundle_payload_digest>")
-    return path
+def _positive_integer(raw: Mapping[str, object], key: str, where: str) -> int:
+    value = raw.get(key)
+    if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+        raise ContractError(f"{where}.{key} must be a positive integer")
+    return value
+
+
+_SELECTION_KEYS: Final = frozenset(
+    {
+        "schema_version",
+        "model_publication",
+        "bundle_members_digest",
+        "dataset_publication",
+        "evaluation_receipt_digest",
+        "field_evaluation_receipt_digest",
+        "calibration_digest",
+        "conformance_digest",
+        "input_observation_schema",
+        "output_class_count",
+        "output_class_semantics_digest",
+        "policy_digest",
+        "runtime_format",
+    }
+)
 
 
 def _desired_fields(raw: Mapping[str, object], where: str) -> dict[str, object]:
-    expected = frozenset(
-        {
-            "schema_version",
-            "model_family",
-            "worker_image_digest",
-            "bundle_path",
-            "bundle_payload_digest",
-            "dataset_publication",
-            "evaluation_receipt_digest",
-            "field_evaluation_receipt_digest",
-            "selected_deployment_seed",
-            "selected_deployment_seed_rule_digest",
-            "calibration_digest",
-            "conformance_digest",
-            "class_order_digest",
-            "input_contract_digest",
-            "fall_policy_v2_digest",
-            "config_revision",
-            "restart_revision",
-        }
-    )
-    _exact_keys(raw, expected, where)
+    _exact_keys(raw, _SELECTION_KEYS, where)
     if raw.get("schema_version") != SCHEMA_VERSION:
         raise ContractError(f"{where}.schema_version must be {SCHEMA_VERSION}")
-    if raw.get("model_family") != MODEL_FAMILY:
-        raise ContractError(f"{where}.model_family must be {MODEL_FAMILY!r}")
-    bundle_payload_digest = _digest(raw, "bundle_payload_digest", where)
     return {
-        "worker_image_digest": _digest(raw, "worker_image_digest", where),
-        "bundle_path": _bundle_path(raw, bundle_payload_digest, where),
-        "bundle_payload_digest": bundle_payload_digest,
-        "dataset_publication": _dataset_publication(
-            raw.get("dataset_publication"), f"{where}.dataset_publication"
+        "model_publication": _publication(
+            raw.get("model_publication"),
+            f"{where}.model_publication",
+            content_key="bundle_sha256",
+            publication_type=ModelPublication,
+        ),
+        "bundle_members_digest": _digest(raw, "bundle_members_digest", where),
+        "dataset_publication": _publication(
+            raw.get("dataset_publication"),
+            f"{where}.dataset_publication",
+            content_key="payload_digest",
+            publication_type=DatasetPublication,
         ),
         "evaluation_receipt_digest": _digest(raw, "evaluation_receipt_digest", where),
         "field_evaluation_receipt_digest": _digest(raw, "field_evaluation_receipt_digest", where),
-        "selected_deployment_seed": _string(raw, "selected_deployment_seed", where),
-        "selected_deployment_seed_rule_digest": _digest(
-            raw, "selected_deployment_seed_rule_digest", where
-        ),
         "calibration_digest": _digest(raw, "calibration_digest", where),
         "conformance_digest": _digest(raw, "conformance_digest", where),
-        "class_order_digest": _digest(raw, "class_order_digest", where),
-        "input_contract_digest": _digest(raw, "input_contract_digest", where),
-        "fall_policy_v2_digest": _digest(raw, "fall_policy_v2_digest", where),
-        "config_revision": _digest(raw, "config_revision", where),
-        "restart_revision": _digest(raw, "restart_revision", where),
+        "input_observation_schema": _string(raw, "input_observation_schema", where),
+        "output_class_count": _positive_integer(raw, "output_class_count", where),
+        "output_class_semantics_digest": _digest(raw, "output_class_semantics_digest", where),
+        "policy_digest": _digest(raw, "policy_digest", where),
+        "runtime_format": _string(raw, "runtime_format", where),
     }
 
 
@@ -234,59 +230,12 @@ def parse_model_selection(raw: object) -> ModelSelection:
 def parse_applied_model_selection(raw: object) -> AppliedModelSelection:
     """Validate a derived applied proof without treating it as activation input."""
     value = _object(raw, "applied-model-selection")
-    expected = frozenset(
-        {
-            "schema_version",
-            "desired_selection_digest",
-            "worker_image_digest",
-            "bundle_path",
-            "bundle_payload_digest",
-            "dataset_publication",
-            "evaluation_receipt_digest",
-            "field_evaluation_receipt_digest",
-            "selected_deployment_seed",
-            "selected_deployment_seed_rule_digest",
-            "calibration_digest",
-            "conformance_digest",
-            "class_order_digest",
-            "input_contract_digest",
-            "fall_policy_v2_digest",
-            "config_revision",
-            "restart_revision",
-            "boot_id",
-            "restart_id",
-            "verified_at",
-            "status",
-            "reasons",
-        }
+    expected = _SELECTION_KEYS | frozenset(
+        {"desired_selection_digest", "boot_id", "restart_id", "verified_at", "status", "reasons"}
     )
     _exact_keys(value, expected, "applied-model-selection")
     projected = _desired_fields(
-        {
-            "schema_version": SCHEMA_VERSION,
-            "model_family": MODEL_FAMILY,
-            **{
-                key: value[key]
-                for key in (
-                    "worker_image_digest",
-                    "bundle_path",
-                    "bundle_payload_digest",
-                    "dataset_publication",
-                    "evaluation_receipt_digest",
-                    "field_evaluation_receipt_digest",
-                    "selected_deployment_seed",
-                    "selected_deployment_seed_rule_digest",
-                    "calibration_digest",
-                    "conformance_digest",
-                    "class_order_digest",
-                    "input_contract_digest",
-                    "fall_policy_v2_digest",
-                    "config_revision",
-                    "restart_revision",
-                )
-            },
-        },
-        "applied-model-selection",
+        {key: value[key] for key in _SELECTION_KEYS}, "applied-model-selection"
     )
     reasons_raw = value.get("reasons")
     if not isinstance(reasons_raw, list) or any(
@@ -299,10 +248,8 @@ def parse_applied_model_selection(raw: object) -> AppliedModelSelection:
     status = _string(value, "status", "applied-model-selection")
     if status not in {"match", "mismatch"}:
         raise ContractError("applied-model-selection.status must be match or mismatch")
-    if status == "match" and reasons:
-        raise ContractError("applied-model-selection match status cannot have reasons")
-    if status == "mismatch" and not reasons:
-        raise ContractError("applied-model-selection mismatch status requires reasons")
+    if (status == "match" and reasons) or (status == "mismatch" and not reasons):
+        raise ContractError("applied-model-selection status and reasons disagree")
     verified_at = _string(value, "verified_at", "applied-model-selection")
     if _TIMESTAMP_RE.fullmatch(verified_at) is None:
         raise ContractError("applied-model-selection.verified_at must be an RFC3339 UTC timestamp")
@@ -322,49 +269,44 @@ def parse_applied_model_selection(raw: object) -> AppliedModelSelection:
 def _receipt_identity(raw: object, where: str, *, field: bool) -> Mapping[str, object]:
     value = _object(raw, where)
     expected = {
-        "bundle_payload_digest",
+        "bundle_sha256",
+        "bundle_members_digest",
         "dataset_payload_digest",
         "calibration_digest",
         "conformance_digest",
-        "class_order_digest",
-        "input_contract_digest",
-        "fall_policy_v2_digest",
+        "input_observation_schema",
+        "output_class_count",
+        "output_class_semantics_digest",
+        "policy_digest",
     }
     if field:
-        expected |= {
-            "evaluation_receipt_digest",
-            "status",
-            "selected_deployment_seed",
-            "selected_deployment_seed_rule_digest",
-        }
+        expected |= {"evaluation_receipt_digest", "status"}
     _exact_keys(value, frozenset(expected), where)
-    for key in expected - {"status", "selected_deployment_seed"}:
+    for key in expected - {"status", "input_observation_schema", "output_class_count"}:
         _digest(value, key, where)
-    if field:
-        if value.get("status") != "green":
-            raise ContractError(f"{where}.status must be canonical green")
-        _string(value, "selected_deployment_seed", where)
+    _string(value, "input_observation_schema", where)
+    _positive_integer(value, "output_class_count", where)
+    if field and value.get("status") != "green":
+        raise ContractError(f"{where}.status must be canonical green")
     return value
 
 
 def _require_receipt_matches(
     desired: ModelSelection, receipt: Mapping[str, object], *, field: bool
 ) -> None:
-    expected = {
-        "bundle_payload_digest": desired.bundle_payload_digest,
+    expected: dict[str, object] = {
+        "bundle_sha256": desired.model_publication.bundle_sha256,
+        "bundle_members_digest": desired.bundle_members_digest,
         "dataset_payload_digest": desired.dataset_publication.payload_digest,
         "calibration_digest": desired.calibration_digest,
         "conformance_digest": desired.conformance_digest,
-        "class_order_digest": desired.class_order_digest,
-        "input_contract_digest": desired.input_contract_digest,
-        "fall_policy_v2_digest": desired.fall_policy_v2_digest,
+        "input_observation_schema": desired.input_observation_schema,
+        "output_class_count": desired.output_class_count,
+        "output_class_semantics_digest": desired.output_class_semantics_digest,
+        "policy_digest": desired.policy_digest,
     }
     if field:
-        expected |= {
-            "evaluation_receipt_digest": desired.evaluation_receipt_digest,
-            "selected_deployment_seed": desired.selected_deployment_seed,
-            "selected_deployment_seed_rule_digest": (desired.selected_deployment_seed_rule_digest),
-        }
+        expected["evaluation_receipt_digest"] = desired.evaluation_receipt_digest
     mismatches = sorted(
         key for key, expected_value in expected.items() if receipt[key] != expected_value
     )
@@ -375,7 +317,6 @@ def _require_receipt_matches(
 
 
 def validate_evaluation_receipt_identity(desired: ModelSelection, raw: object) -> None:
-    """Require an evaluation receipt to bind every immutable desired identity."""
     receipt = _receipt_identity(raw, "evaluation-receipt", field=False)
     if canonical_digest(receipt) != desired.evaluation_receipt_digest:
         raise ContractError("evaluation receipt external digest does not match desired selection")
@@ -383,7 +324,6 @@ def validate_evaluation_receipt_identity(desired: ModelSelection, raw: object) -
 
 
 def validate_field_receipt_identity(desired: ModelSelection, raw: object) -> None:
-    """Refuse absent, red, or differently-bound selected-seed field evidence."""
     receipt = _receipt_identity(raw, "field-evaluation-receipt", field=True)
     if canonical_digest(receipt) != desired.field_evaluation_receipt_digest:
         raise ContractError("field receipt external digest does not match desired selection")
@@ -393,46 +333,26 @@ def validate_field_receipt_identity(desired: ModelSelection, raw: object) -> Non
 def compare_desired_to_applied(
     desired: ModelSelection, applied: AppliedModelSelection
 ) -> tuple[str, ...]:
-    """Return exact terminal identity discrepancies; empty means an observed match."""
     expected = {
         "desired_selection_digest": desired.digest,
-        "worker_image_digest": desired.worker_image_digest,
-        "bundle_path": desired.bundle_path,
-        "bundle_payload_digest": desired.bundle_payload_digest,
-        "dataset_publication.hf_repo": desired.dataset_publication.hf_repo,
-        "dataset_publication.hf_revision": desired.dataset_publication.hf_revision,
-        "dataset_publication.payload_digest": (desired.dataset_publication.payload_digest),
-        "evaluation_receipt_digest": desired.evaluation_receipt_digest,
-        "field_evaluation_receipt_digest": (desired.field_evaluation_receipt_digest),
-        "selected_deployment_seed": desired.selected_deployment_seed,
-        "selected_deployment_seed_rule_digest": (desired.selected_deployment_seed_rule_digest),
-        "calibration_digest": desired.calibration_digest,
-        "conformance_digest": desired.conformance_digest,
-        "class_order_digest": desired.class_order_digest,
-        "input_contract_digest": desired.input_contract_digest,
-        "fall_policy_v2_digest": desired.fall_policy_v2_digest,
-        "config_revision": desired.config_revision,
-        "restart_revision": desired.restart_revision,
+        **desired.as_dict(),
     }
     actual = {
         "desired_selection_digest": applied.desired_selection_digest,
-        "worker_image_digest": applied.worker_image_digest,
-        "bundle_path": applied.bundle_path,
-        "bundle_payload_digest": applied.bundle_payload_digest,
-        "dataset_publication.hf_repo": applied.dataset_publication.hf_repo,
-        "dataset_publication.hf_revision": applied.dataset_publication.hf_revision,
-        "dataset_publication.payload_digest": (applied.dataset_publication.payload_digest),
-        "evaluation_receipt_digest": applied.evaluation_receipt_digest,
-        "field_evaluation_receipt_digest": (applied.field_evaluation_receipt_digest),
-        "selected_deployment_seed": applied.selected_deployment_seed,
-        "selected_deployment_seed_rule_digest": (applied.selected_deployment_seed_rule_digest),
-        "calibration_digest": applied.calibration_digest,
-        "conformance_digest": applied.conformance_digest,
-        "class_order_digest": applied.class_order_digest,
-        "input_contract_digest": applied.input_contract_digest,
-        "fall_policy_v2_digest": applied.fall_policy_v2_digest,
-        "config_revision": applied.config_revision,
-        "restart_revision": applied.restart_revision,
+        **ModelSelection(
+            model_publication=applied.model_publication,
+            bundle_members_digest=applied.bundle_members_digest,
+            dataset_publication=applied.dataset_publication,
+            evaluation_receipt_digest=applied.evaluation_receipt_digest,
+            field_evaluation_receipt_digest=applied.field_evaluation_receipt_digest,
+            calibration_digest=applied.calibration_digest,
+            conformance_digest=applied.conformance_digest,
+            input_observation_schema=applied.input_observation_schema,
+            output_class_count=applied.output_class_count,
+            output_class_semantics_digest=applied.output_class_semantics_digest,
+            policy_digest=applied.policy_digest,
+            runtime_format=applied.runtime_format,
+        ).as_dict(),
     }
     return tuple(key for key in expected if actual[key] != expected[key])
 
@@ -440,7 +360,6 @@ def compare_desired_to_applied(
 def validate_applied_against_desired(
     desired: ModelSelection, applied: AppliedModelSelection
 ) -> tuple[str, ...]:
-    """Validate terminal proof semantics; this function never activates anything."""
     mismatches = compare_desired_to_applied(desired, applied)
     if applied.status == "match":
         if mismatches:
@@ -456,11 +375,11 @@ def validate_applied_against_desired(
 
 
 __all__ = [
-    "MODEL_FAMILY",
     "SCHEMA_VERSION",
     "AppliedModelSelection",
     "ContractError",
     "DatasetPublication",
+    "ModelPublication",
     "ModelSelection",
     "canonical_digest",
     "canonical_json_bytes",

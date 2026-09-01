@@ -98,7 +98,7 @@ def main(argv: Sequence[str] | None = None, *, env: Mapping[str, str] | None = N
     source = _RefusingSource() if args.check else UrllibSource()
     log(f"models root: {dest}")
     for name, pinned in manifest.sources.items():
-        log(f"source {name}: {pinned.kind} {pinned.repo} @ {pinned.ref}")
+        log(f"source {name}: {pinned.kind} {pinned.source_locator} @ {pinned.ref}")
     if environment.get("HF_TOKEN", "").strip():
         log("HF_TOKEN present; sent to Hugging Face sources only")
 

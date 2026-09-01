@@ -70,6 +70,17 @@ by hand. The optional `HF_TOKEN` in `.env.edge.prod` reaches this service
 only; leave it empty for the public pins. There is no host `./models` bind
 mount any more.
 
+## Deploying an admitted model selection
+
+`/app/model-selection.json` is a deployment-owned, read-only file; it is never
+copied into `Dockerfile.edge`. To switch the running fall model, publish the
+bundle into `worker-models`, place the matching selection document on the
+deployment host, and enable the read-only selection mount in
+`compose.edge.yaml`. Restart `ml-worker` only after `edge-model-fetch` has
+verified the bundle. Removing that mount is the only normal path back to the
+packaged fallback. Replacing a model requires only the bundle and selection
+file, not an image rebuild.
+
 Publish only through `.github/workflows/edge-images.yml` for the sealed SHA.
 Download the exact-SHA artifact and compare both digests with the seal before
 updating the deployment receipt.
@@ -371,27 +382,20 @@ for path in (
 ```
 
 The worker has dual mounts of the same model volume. `/app/models` preserves
-the active flat LSTM artifacts; `/models` is reserved for candidate bundles at
-`/models/bundles/<digest>`. This Phase 6 image intentionally ships neither
-`/app/model-selection.json` nor a real candidate bundle because G004/G005
-human/Hugging Face evidence is blocked. Dark support is unreachable by default
-and no candidate receipt is fabricated.
-
-A later G005-green sealed image may bake both the image-owned
-`/app/model-selection.json` and its real bundle. Its bundle payload is limited
-to explicit payload members. Evaluation and field receipts are externally
-hashed, non-recursive receipts: verify their recorded digests as identities,
-but do not walk them as nested bundle payloads. That later image must fail
-closed before assignment if LSTM admission or dark-GRU admission fails, then
-perform `admit → construct → warm → persist` while the candidate remains
-disabled. Candidate persistence failure is fatal. It does not activate, retain,
-or promote the candidate automatically.
+the packaged LSTM artifacts; `/models` holds admitted bundles at
+`/models/bundles/<digest>`. The image ships neither a selection document nor a
+bundle. Deployment supplies a read-only selection document when it chooses an
+admitted model. Its manifest declares the payload member list; evaluation and
+field receipts are externally hashed, non-recursive receipts. A selected bundle
+must pass `admit → construct → warm → persist` before camera activation. Any
+failure refuses boot; no fallback is permitted while a selection exists.
 
 Runtime provenance is dedicated local state, never an alert payload. Each boot
 writes an immutable mode-0600 record under
 `/var/lib/seeon-state/runtime-provenance/`; an atomic mode-0600 latest readback
 is published at `/var/lib/seeon-state/applied-runtime-manifest.json`. Runtime
-provenance never enters the alert `DeliveryQueue` or relay. Verify the
+provenance content stays local; relay payloads carry only its digest reference.
+Verify the
 directory, immutable per-boot record, latest readback, and their hashes:
 
 ```sh
