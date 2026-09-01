@@ -74,6 +74,7 @@ def compose_shared_components(
     flags: Mapping[str, bool],
     pool: SharedComponentPool,
     provisioners: Mapping[str, SharedProvisioner] | None = None,
+    identity_overrides: Mapping[str, tuple[str, str]] | None = None,
     clock: Clock = perf_counter,
 ) -> SharedComponentGraph:
     """Materialize the selected graph through its declared provisioners.
@@ -114,12 +115,16 @@ def compose_shared_components(
             else ProvisionedSharedComponent(provisioned)
         )
         component = resolved.component
+        override = (
+            None if identity_overrides is None else identity_overrides.get(binding.component_id)
+        )
         artifact_digest = _verified_identity_field(
             binding,
             component,
             "artifact_digest",
             resolved.artifact_digest,
             "artifact",
+            expected=override[0] if override is not None else None,
         )
         preprocessing_identity = _verified_identity_field(
             binding,
@@ -127,6 +132,7 @@ def compose_shared_components(
             "preprocessing_identity",
             resolved.preprocessing_identity,
             "preprocessing",
+            expected=override[1] if override is not None else None,
         )
         identity = SharedComponentIdentity(
             component_id=binding.component_id,
@@ -180,8 +186,9 @@ def _verified_identity_field(
     field: str,
     provisioned: str | None,
     label: str,
+    expected: str | None = None,
 ) -> str:
-    expected = getattr(binding, field)
+    expected = getattr(binding, field) if expected is None else expected
     if not isinstance(expected, str) or not expected or "runtime-resolved" in expected:
         raise DetectionModuleActivationError(
             f"component {binding.component_id!r} has no compiled {label} identity"

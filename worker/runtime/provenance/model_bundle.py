@@ -32,36 +32,19 @@ _IDENTITY_FIELDS: Final = (
     "dataset",
     "evaluation",
     "field",
-    "seed",
-    "rule",
     "calibration",
     "conformance",
     "class",
     "input",
     "policy",
-    "config",
-    "restart",
-    "worker",
+    "members",
 )
-_RUNTIME_IDENTITY_FIELDS: Final = ("worker", "config", "restart")
 _RECEIPT_IDENTITY_FIELDS: Final = ("evaluation", "field")
 _BUNDLE_IDENTITY_FIELDS: Final = tuple(
     field
     for field in _IDENTITY_FIELDS
-    if field not in (*_RUNTIME_IDENTITY_FIELDS, *_RECEIPT_IDENTITY_FIELDS)
+    if field not in _RECEIPT_IDENTITY_FIELDS
 )
-_REQUIRED_MEMBERS: Final = frozenset(
-    {
-        "model.pt",
-        "arch.json",
-        "metadata.yaml",
-        "input-contract.json",
-        "fall-policy-v2.json",
-        "calibration.json",
-        "conformance.json",
-    }
-)
-_REQUIRED_RECEIPTS: Final = frozenset({"evaluation-receipt.json", "field-evaluation-receipt.json"})
 
 
 class ModelBundleAdmissionError(RuntimeError):
@@ -96,69 +79,30 @@ class ModelBundleProof:
     applied: Mapping[str, object]
 
 
-@dataclass(frozen=True, slots=True)
-class RuntimeModelObservations:
-    worker_image_digest: str
-    config_revision: str
-    restart_revision: str
-
-    def __post_init__(self) -> None:
-        for value in (self.worker_image_digest, self.config_revision, self.restart_revision):
-            if _BUNDLE_RE.fullmatch(value) is None:
-                raise ModelBundleAdmissionError("runtime observation identity is invalid")
-
-    @property
-    def identities(self) -> Mapping[str, str]:
-        return MappingProxyType(
-            {
-                "worker": self.worker_image_digest,
-                "config": self.config_revision,
-                "restart": self.restart_revision,
-            }
-        )
-
-
 def desired_model_bundle_from_selection_document(raw: object) -> DesiredModelBundle:
-    """Map the one canonical G001 selection parser into admission identities."""
+    """Map the canonical selection parser into admission identities."""
     try:
         selection = parse_model_selection(raw)
     except ContractError as exc:
         raise ModelBundleAdmissionError(str(exc)) from exc
     return DesiredModelBundle(
-        selection.bundle_payload_digest,
+        selection.model_publication.bundle_sha256,
         {
             "dataset": selection.dataset_publication.payload_digest,
             "evaluation": selection.evaluation_receipt_digest,
             "field": selection.field_evaluation_receipt_digest,
-            "seed": selection.selected_deployment_seed,
-            "rule": selection.selected_deployment_seed_rule_digest,
             "calibration": selection.calibration_digest,
             "conformance": selection.conformance_digest,
-            "class": selection.class_order_digest,
-            "input": selection.input_contract_digest,
-            "policy": selection.fall_policy_v2_digest,
-            "config": selection.config_revision,
-            "restart": selection.restart_revision,
-            "worker": selection.worker_image_digest,
+            "class": selection.output_class_semantics_digest,
+            "input": selection.input_observation_schema,
+            "policy": selection.policy_digest,
+            "members": selection.bundle_members_digest,
         },
         selection,
     )
 
 
-def runtime_revision_digest(kind: str, integer: int) -> str:
-    if (
-        not isinstance(kind, str)
-        or not kind
-        or not isinstance(integer, int)
-        or isinstance(integer, bool)
-    ):
-        raise ModelBundleAdmissionError("runtime revision input is invalid")
-    return hashlib.sha256(_canonical_json({"kind": kind, "revision": integer}).encode()).hexdigest()
-
-
-def admit_model_bundle(
-    models_root: Path, desired: DesiredModelBundle, observations: RuntimeModelObservations
-) -> ModelBundleProof:
+def admit_model_bundle(models_root: Path, desired: DesiredModelBundle) -> ModelBundleProof:
     """Verify one published bundle without mutating it or selecting an alternative.
 
     Call this before model construction/warmup.  Any failed comparison is fatal.
@@ -181,6 +125,11 @@ def admit_model_bundle(
         raise ModelBundleAdmissionError("bundle manifest schema mismatch")
     if document.get("bundle_sha256") != desired.bundle_sha256:
         raise ModelBundleAdmissionError("bundle identity mismatch")
+    if (
+        desired.selection is not None
+        and document.get("runtime_format") != desired.selection.runtime_format
+    ):
+        raise ModelBundleAdmissionError("bundle runtime format mismatch")
     members = document.get("members")
     receipts = document.get("receipts")
     payload = document.get("payload")
@@ -212,11 +161,12 @@ def admit_model_bundle(
             "identities": frozen_static,
         }
     )
-    applied_identities = {**dict(identities), **receipt_identities, **observations.identities}
-    for field in _IDENTITY_FIELDS:
-        if applied_identities[field] != desired.identities[field]:
-            raise ModelBundleAdmissionError(f"{field} identity mismatch")
-    applied = _freeze({"bundle_sha256": desired.bundle_sha256, "identities": applied_identities})
+    applied = _freeze(
+        {
+            "bundle_sha256": desired.bundle_sha256,
+            "identities": {**dict(identities), **receipt_identities},
+        }
+    )
     return ModelBundleProof(observed=observed, applied=applied)
 
 
@@ -278,26 +228,35 @@ def _verify_required_members(
 ) -> Mapping[str, str]:
     if desired.selection is None:
         return MappingProxyType({})
-    by_path = {member["path"]: member for member in members if isinstance(member, dict)}
-    by_receipt = {member["path"]: member for member in receipts if isinstance(member, dict)}
-    if set(by_path) != _REQUIRED_MEMBERS or set(by_receipt) != _REQUIRED_RECEIPTS:
-        raise ModelBundleAdmissionError("bundle required members mismatch")
+    if not members or len(receipts) != 2:
+        raise ModelBundleAdmissionError(
+            "bundle manifest must declare payload members and two receipts"
+        )
     observed: dict[str, str] = {}
-    for path, validator in (
-        ("evaluation-receipt.json", validate_evaluation_receipt_identity),
-        ("field-evaluation-receipt.json", validate_field_receipt_identity),
-    ):
+    for receipt in receipts:
+        if not isinstance(receipt, dict) or not isinstance(receipt.get("path"), str):
+            raise ModelBundleAdmissionError("bundle receipt is invalid")
+        path = receipt["path"]
         try:
             raw = _read_regular(root / path, path)
-            receipt = json.loads(raw)
-            if canonical_json_bytes(receipt) + b"\n" != raw:
+            document = json.loads(raw)
+            if canonical_json_bytes(document) + b"\n" != raw:
                 raise ModelBundleAdmissionError(f"{path} is not canonical JSON")
-            validator(desired.selection, receipt)
-            observed["evaluation" if path == "evaluation-receipt.json" else "field"] = (
-                hashlib.sha256(canonical_json_bytes(receipt)).hexdigest()
+            is_field = isinstance(document, Mapping) and "status" in document
+            validator = (
+                validate_field_receipt_identity
+                if is_field
+                else validate_evaluation_receipt_identity
             )
+            identity = "field" if is_field else "evaluation"
+            if identity in observed:
+                raise ModelBundleAdmissionError("bundle receipt identities are duplicated")
+            validator(desired.selection, document)
+            observed[identity] = hashlib.sha256(canonical_json_bytes(document)).hexdigest()
         except (ContractError, json.JSONDecodeError) as exc:
             raise ModelBundleAdmissionError(f"{path} is not a valid desired-bound receipt") from exc
+    if set(observed) != set(_RECEIPT_IDENTITY_FIELDS):
+        raise ModelBundleAdmissionError("bundle receipt identities are incomplete")
     return MappingProxyType(observed)
 
 
@@ -391,8 +350,6 @@ __all__ = [
     "DesiredModelBundle",
     "ModelBundleAdmissionError",
     "ModelBundleProof",
-    "RuntimeModelObservations",
     "admit_model_bundle",
     "desired_model_bundle_from_selection_document",
-    "runtime_revision_digest",
 ]
