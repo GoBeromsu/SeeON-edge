@@ -6,12 +6,15 @@ from pathlib import Path
 
 from contracts.observation import BoundingBox
 from contracts.replay_trace import ReplayRow, ReplayTraceHeader, decode_jsonl, encode_jsonl
+from shared.detection_policies import BedExitPolicyV1, make_effective_policy
+from tests_support.episode_metric import _load_rows
 from worker.native.deepstream.ipc import MetadataFrame
 from worker.native.deepstream.metadata import LatestMetadataSlot, SourceBinding
 from worker.pipeline.decision import EventAggregator, IncidentManager
 from worker.pipeline.output.evidence_attacher import AlertEvidenceAttacher
 from worker.pipeline.perception import SceneState
 from worker.pipeline.trace.replay_trace_writer import ReplayTraceWriter
+from worker.replay.engine import replay, replay_trace_frames
 from worker.runtime.deepstream.native_policy_pump import NativePolicyContext, NativePolicyPump
 from worker.runtime.telemetry.runtime_diagnostics import WorkerDiagnostics
 from worker.types import (
@@ -129,7 +132,7 @@ def test_native_pump_captures_epoch_rows_and_writer_rotates(tmp_path: Path) -> N
 
 def test_writer_hashes_untrusted_camera_ids_beneath_root(tmp_path: Path) -> None:
     row = ReplayRow(
-        "camera", 0, 0, 0, "frame", "legacy-association", (), None, None, False, 640, 360
+        "camera", 0, 0, 0, "frame", "legacy-association", (), None, None, None, False, 640, 360
     )
     for camera_id in ("a/b", "../outside", "/absolute", "카메라/../유니코드"):
         writer = ReplayTraceWriter(tmp_path, camera_id)
@@ -162,6 +165,44 @@ def test_capture_normalizes_persisted_polygon_using_its_source_size(tmp_path: Pa
         (tmp_path / f"{hashlib.sha256(b'camera-a').hexdigest()[:16]}.jsonl").read_text()
     )
     assert rows[1].bed_polygon == ((0.0, 0.0), (1.0, 0.0), (1.0, 1.0))
+
+
+def test_rotation_chain_accepts_seq_restart_at_new_boot_segment(tmp_path: Path) -> None:
+    binding = SourceBinding(str(_BOOT), str(_CHILD), "camera-a", 3, 4, "seeon-perception-v1")
+
+    def pump() -> NativePolicyPump:
+        return NativePolicyPump(
+            binding,
+            NativePolicyContext(
+                LatestMetadataSlot(), _Control(), SceneState("camera-a"),
+                EventAggregator((), IncidentManager(30.0)), _Sink(), AlertEvidenceAttacher({}),
+                WorkerDiagnostics(), 90, replay_trace=ReplayTraceWriter(tmp_path, "camera-a"),
+            ),
+        )
+
+    first = pump()
+    first._process(_metadata(epoch=4, track_id=7, generation=3))  # noqa: SLF001
+    first._process(_metadata(epoch=4, track_id=7, generation=3))  # noqa: SLF001
+    first._replay_trace._rotate()  # noqa: SLF001 - forced retained-chain boundary
+    second = pump()
+    second._process(_metadata(epoch=4, track_id=8, generation=3))  # noqa: SLF001
+    second._process(_metadata(epoch=4, track_id=8, generation=3))  # noqa: SLF001
+
+    rows, truncated = _load_rows(tmp_path)
+    assert not truncated
+    assert [(row.source_event, row.seq) for row in rows] == [
+        ("open", 0), ("frame", 1), ("frame", 2),
+        ("open", 0), ("frame", 1), ("frame", 2),
+    ]
+    frames = replay_trace_frames(rows)
+    assert [frame.boot_segment for frame in frames] == [0, 1]
+    policy = make_effective_policy(
+        module_id="bed_exit", module_version=1,
+        values=BedExitPolicyV1(min_containment=0.5, hold_frames=1, grace_frames=1),
+        source="image-default", facility_revision_id=None, camera_revision_id=None,
+    )
+    run = replay(camera_id="camera-a", rows=rows, module_id="bed_exit", policy=policy)
+    assert [frame.frame_key[2] for frame in run.frames] == [0, 1]
 
 
 def test_trace_lifecycle_uses_association_live_ids_for_shadow_and_lost(tmp_path: Path) -> None:

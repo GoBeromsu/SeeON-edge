@@ -29,6 +29,7 @@ def _row() -> ReplayRow:
         ),
         bed_polygon_id=None,
         bed_polygon=None,
+        bed_polygon_image_size=None,
         night_window_active=False,
         frame_width=1000,
         frame_height=1000,
@@ -92,12 +93,36 @@ def test_rejects_invalid_geometry_and_track_identity() -> None:
             (track, track),
             None,
             None,
+            None,
+            False,
+            640,
+            360,
+        )
+
+
+def test_rejects_tracks_on_control_rows() -> None:
+    with pytest.raises(ValueError, match="control rows"):
+        ReplayRow(
+            "cam",
+            0,
+            2,
+            0,
+            "open",
+            "legacy-association",
+            (
+                ReplayTrack(3, "new", (0.1, 0.2, 0.3, 0.4, 0.9), ((0.1, 0.2, 0.9),) * 17),
+            ),
+            None,
+            None,
+            None,
             False,
             640,
             360,
         )
     with pytest.raises(ValueError, match="exactly"):
-        ReplayRow("cam", 0, 2, 0, "frame", "legacy-association", (), "bed", None, False, 640, 360)
+        ReplayRow(
+            "cam", 0, 2, 0, "frame", "legacy-association", (), "bed", None, None, False, 640, 360
+        )
 
 
 @pytest.mark.parametrize("seq", (True, -1))
@@ -113,6 +138,7 @@ def test_rejects_invalid_seq(seq: object) -> None:
             tracks=(),
             bed_polygon_id=None,
             bed_polygon=None,
+            bed_polygon_image_size=None,
             night_window_active=False,
             frame_width=640,
             frame_height=360,

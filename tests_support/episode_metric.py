@@ -93,6 +93,12 @@ def _load_rows(
                     truncated_start = True
                 first = False
             for row in decoded:
+                if row.source_event == "open":
+                    if row.seq != 0:
+                        raise ValueError(f"trace open seq must be zero in {path.name}")
+                    previous_seq = None
+                    previous_epoch = None
+                    previous_pts = None
                 if previous_seq is not None and row.seq <= previous_seq:
                     raise ValueError(f"trace seq is not strictly increasing in {path.name}")
                 if previous_epoch is not None and row.epoch < previous_epoch:

@@ -297,7 +297,7 @@ def test_export_worksheet_and_golden_conversion_use_clip_overlap(tmp_path: Path)
                     {
                         "clip_id": f"clip-{index}",
                         "event_refs": [f"event-{index}"],
-                        "started_at": detected_at.isoformat(),
+                        "started_at": detected_at.isoformat().replace("+00:00", "Z"),
                         "duration_s": 180,
                     }
                 ),

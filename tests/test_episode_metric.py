@@ -85,7 +85,7 @@ def test_metric_accepts_pinned_fall_policy() -> None:
 def _row(pts_ns: int, source_event: str) -> ReplayRow:
     return ReplayRow(
         camera_id="fixture",
-        seq=pts_ns,
+        seq=0 if source_event == "open" else pts_ns,
         pts_ns=pts_ns,
         epoch=0,
         source_event=source_event,  # type: ignore[arg-type]
@@ -97,9 +97,12 @@ def _row(pts_ns: int, source_event: str) -> ReplayRow:
                 (0.1, 0.1, 0.2, 0.2, 0.9),
                 tuple((0.15, 0.15, 0.9) for _ in range(17)),
             ),
-        ),
+        )
+        if source_event == "frame"
+        else (),
         bed_polygon_id="bed",
         bed_polygon=((0.0, 0.0), (0.5, 0.0), (0.5, 0.5), (0.0, 0.5)),
+        bed_polygon_image_size=(1000, 1000),
         night_window_active=True,
         frame_width=1000,
         frame_height=1000,
@@ -182,16 +185,18 @@ def _run_cli(
 def _fall_rows() -> tuple[ReplayRow, ...]:
     return (
         _row(0, "open"),
-        replace(_row(1_000_000_000, "frame"), tracks=()),
-        _row(61_000_000_000, "frame"),
+        replace(_row(0, "frame"), seq=1),
+        replace(_row(1_000_000_000, "frame"), seq=2, tracks=()),
+        replace(_row(61_000_000_000, "frame"), seq=3),
     )
 
 
 def _cooldown_rows() -> tuple[ReplayRow, ...]:
     return (
         _row(0, "open"),
-        replace(_row(1_000_000_000, "frame"), tracks=()),
-        _row(2_000_000_000, "frame"),
+        replace(_row(0, "frame"), seq=1),
+        replace(_row(1_000_000_000, "frame"), seq=2, tracks=()),
+        replace(_row(2_000_000_000, "frame"), seq=3),
     )
 
 
@@ -201,7 +206,10 @@ def test_metric_cli_exact_returns_zero_for_both_domains(
     _, fixture_rows = decode_document(
         Path("tests/fixtures/replay/gap-control-v2.json").read_text()
     )
-    rows = (replace(fixture_rows[0], source_event="open"), *fixture_rows[1:])
+    rows = (
+        replace(fixture_rows[0], source_event="open", tracks=()),
+        *fixture_rows[1:],
+    )
     status, result = _run_cli(
         monkeypatch,
         tmp_path,

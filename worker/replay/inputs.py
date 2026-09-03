@@ -99,12 +99,21 @@ def replay_trace_to_decision_input(
                 confidence=confidence,
             )
         )
-        poses.append(tuple((x * width, y * height, score) for x, y, score in track.keypoints))
+        poses.append(
+            tuple(
+                (x * width, y * height, score)
+                for x, y, score in track.keypoints
+            )
+        )
         track_ids.append(track.track_id)
         live_ids.append(track.track_id)
     bed_boxes = ()
     if row is not None and row.bed_polygon is not None:
-        polygon = tuple((round(x * width), round(y * height)) for x, y in row.bed_polygon)
+        assert row.bed_polygon_image_size is not None
+        polygon_width, polygon_height = row.bed_polygon_image_size
+        polygon = tuple(
+            (round(x * polygon_width), round(y * polygon_height)) for x, y in row.bed_polygon
+        )
         xs, ys = zip(*polygon, strict=True)
         bed_boxes = (
             BoundingBox(
@@ -125,8 +134,8 @@ def replay_trace_to_decision_input(
     scene = SceneState(
         camera_id=row.camera_id if row is not None else "replay",
         persisted_bed_regions=bed_boxes,
-        bed_zone_image_width=width if bed_boxes else None,
-        bed_zone_image_height=height if bed_boxes else None,
+        bed_zone_image_width=polygon_width if bed_boxes else None,
+        bed_zone_image_height=polygon_height if bed_boxes else None,
     )
     return build_decision_input(
         observation,

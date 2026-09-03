@@ -222,6 +222,7 @@ class ReplayTraceFrame:
     """One resampled V2 replay frame; invalid rows represent a PTS gap."""
 
     stream_epoch: int
+    boot_segment: int
     seq: int
     pts_ns: int
     row: ReplayRow | None
@@ -229,23 +230,26 @@ class ReplayTraceFrame:
 
 
 def replay_trace_frames(rows: Sequence[ReplayRow]) -> tuple[ReplayTraceFrame, ...]:
-    """Group V2 track rows into frames and resample each stream epoch at 15 fps."""
-    grouped: dict[int, list[ReplayRow]] = {}
-    for row in sorted(rows, key=lambda row: row.seq):
-        if row.source_event == "lost" or (
-            row.source_event != "frame" and not row.tracks
-        ):
+    """Resample only frame rows, ordered inside explicit boot segments."""
+    grouped: dict[tuple[int, int], list[ReplayRow]] = {}
+    segment = -1
+    for row in rows:
+        if row.source_event == "open":
+            segment += 1
+        if row.source_event != "frame":
             continue
-        grouped.setdefault(row.epoch, []).append(row)
+        grouped.setdefault((max(segment, 0), row.epoch), []).append(row)
     output: list[ReplayTraceFrame] = []
-    for epoch in sorted(grouped):
-        samples = [(row.pts_ns, row) for row in sorted(grouped[epoch], key=lambda row: row.pts_ns)]
+    for (segment, epoch), group in grouped.items():
+        samples = [(row.pts_ns, row) for row in sorted(group, key=lambda row: row.seq)]
         for seq, sampled in enumerate(resample_pts(samples)):
             if sampled.valid:
                 assert sampled.value is not None
-                output.append(ReplayTraceFrame(epoch, seq, sampled.pts_ns, sampled.value, 1))
+                output.append(
+                    ReplayTraceFrame(epoch, segment, seq, sampled.pts_ns, sampled.value, 1)
+                )
             else:
-                output.append(ReplayTraceFrame(epoch, seq, sampled.pts_ns, None, 0))
+                output.append(ReplayTraceFrame(epoch, segment, seq, sampled.pts_ns, None, 0))
     return tuple(output)
 
 
@@ -284,20 +288,12 @@ def replay(
         )
         return definition.create_camera_module(context).decider
 
-    controls = iter(
-        row for row in sorted(rows, key=lambda row: row.seq) if row.source_event != "frame"
-    )
-    next_control = next(controls, None)
+    current_segment: int | None = None
     for frame in replay_trace_frames(rows):
-        while next_control is not None and (
-            frame.row is None or next_control.seq <= frame.row.seq
-        ):
-            if next_control.source_event == "open":
-                decider = new_decider()
-                previous_live_ids = set()
-            next_control = next(controls, None)
-        if decider is None:
+        if current_segment != frame.boot_segment:
             decider = new_decider()
+            previous_live_ids = set()
+            current_segment = frame.boot_segment
         assert decider is not None
         if frame.row is not None:
             window.active = frame.row.night_window_active
@@ -320,8 +316,8 @@ def replay(
             previous_live_ids = live_ids
         frames.append(
             ReplayFrameResult(
-                frame_key=("replay-trace-v2", camera_id, frame.stream_epoch, frame.seq),
-                analysis_trace_id=f"v2:{frame.stream_epoch}:{frame.seq}",
+                frame_key=("replay-trace-v2", camera_id, frame.boot_segment, frame.seq),
+                analysis_trace_id=f"v2:{frame.boot_segment}:{frame.stream_epoch}:{frame.seq}",
                 events=events,
                 snapshots=_decider_trace_snapshots(decider, definition),
                 stream_epoch=frame.stream_epoch,

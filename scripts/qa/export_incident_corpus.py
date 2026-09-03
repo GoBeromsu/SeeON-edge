@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import re
 import sqlite3
@@ -63,6 +64,23 @@ def _clip_index(clip_store: Path) -> dict[str, dict[str, object]]:
         ):
             errors.append(f"{clip_id}: invalid event_refs")
             continue
+        started_at = manifest.get("started_at")
+        duration_s = manifest.get("duration_s")
+        if (
+            not isinstance(started_at, str)
+            or not started_at.endswith("Z")
+            or not isinstance(duration_s, (int, float))
+            or isinstance(duration_s, bool)
+            or not math.isfinite(duration_s)
+            or duration_s < 0
+        ):
+            errors.append(f"{clip_id}: invalid clip timing")
+            continue
+        try:
+            datetime.fromisoformat(started_at.removesuffix("Z") + "+00:00")
+        except ValueError:
+            errors.append(f"{clip_id}: invalid clip timing")
+            continue
         clip_path = manifest_path.parent / "clip.mp4"
         if manifest.get("video_available") is False:
             # Declared by the worker (e.g. STREAM_EPOCH_MISMATCH): not a corpus
@@ -75,8 +93,8 @@ def _clip_index(clip_store: Path) -> dict[str, dict[str, object]]:
         record = {
             "clip_id": clip_id,
             "clip_path": str(clip_path),
-            "clip_started_at": manifest.get("started_at"),
-            "clip_duration_s": manifest.get("duration_s"),
+            "clip_started_at": started_at,
+            "clip_duration_s": duration_s,
         }
         for ref in refs:
             existing = index.get(ref)

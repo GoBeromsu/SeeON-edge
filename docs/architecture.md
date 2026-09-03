@@ -585,10 +585,12 @@ HTTP or SQLite warehouse.
 Native policy pumps may emit replay-trace-v2 JSONL under the trace root only
 when its environment gate is enabled. Files are named from a hashed camera id
 and remain contained beneath that root, with bounded rotations. Every row has
-unit coordinates and its frame dimensions; `seq` is the per-camera capture
-ordering authority across rotations. `open`, `reconnect`, and `lost` are
-ordered control markers: open resets replay state, reconnect retains it, and
-lost contributes no observation. Only `frame` rows enter PTS resampling.
+unit coordinates and its frame dimensions; `seq` is ordered within a boot
+segment across rotations. `open` starts a new boot segment and resets replay
+state; `reconnect` retains it, and `lost` contributes no observation. Control
+rows carry no tracks, and only `frame` rows enter PTS resampling. Persisted
+bed polygons also carry `bed_polygon_image_size`, their original image-space
+dimensions, so replay reconstructs the production geometry.
 
 This supersedes the abbreviated replay schema in the approved plan.
 

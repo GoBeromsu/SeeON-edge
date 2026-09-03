@@ -45,7 +45,14 @@ def test_reconnect_keeps_camera_local_decider_state_within_one_boot() -> None:
     assert _alerts(control) == [(200_000_001, "bed-exit")]
     assert _alerts(reconnected) == _alerts(control)
     assert [frame.stream_epoch for frame in reconnected.frames] == [0, 0, 1, 1, 1]
-    assert reconnected.boot_ids == ("epoch-0", "epoch-1")
+
+
+def test_control_rows_are_not_replay_frames() -> None:
+    _, rows = decode_document(
+        Path("tests/fixtures/replay/reconnect-axis-v2.json").read_text(encoding="utf-8")
+    )
+    frames = replay_trace_frames(rows)
+    assert all(frame.row is None or frame.row.source_event == "frame" for frame in frames)
 
 
 def test_id_switch_reports_churn_and_changes_declared_episode_outcome() -> None:

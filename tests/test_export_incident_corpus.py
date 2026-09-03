@@ -29,7 +29,7 @@ def _clip(store: Path, clip_id: str, refs: list[str], *, media: bool = True) -> 
             {
                 "clip_id": clip_id,
                 "event_refs": refs,
-                "started_at": "2026-01-01T00:00:00+00:00",
+                "started_at": "2026-01-01T00:00:00Z",
                 "duration_s": 12,
             }
         ),
@@ -52,7 +52,7 @@ def test_export_reads_only_claimed_canonical_clip_manifest(tmp_path: Path) -> No
     record = json.loads(output.read_text())
     assert record["clip_id"] == "clip-1"
     assert record["clip_path"].endswith("clips/clip-1/clip.mp4")
-    assert record["clip_started_at"] == "2026-01-01T00:00:00+00:00"
+    assert record["clip_started_at"] == "2026-01-01T00:00:00Z"
     assert record["clip_duration_s"] == 12
 
 
@@ -113,3 +113,16 @@ def test_export_validates_timestamps_before_atomically_writing(tmp_path: Path) -
     with pytest.raises(CorpusValidationError, match="invalid detected_at"):
         export(snapshot, store, output)
     assert not output.exists()
+
+
+@pytest.mark.parametrize("timing", ({"started_at": "bad"}, {"duration_s": -1}))
+def test_export_rejects_invalid_clip_timing(tmp_path: Path, timing: dict[str, object]) -> None:
+    snapshot = tmp_path / "edge.sqlite3"
+    store = tmp_path / "store"
+    _snapshot(snapshot)
+    clip = _clip(store, "clip-1", ["event-1"])
+    manifest = json.loads((clip / "manifest.json").read_text())
+    manifest.update(timing)
+    (clip / "manifest.json").write_text(json.dumps(manifest))
+    with pytest.raises(CorpusValidationError, match="invalid clip timing"):
+        export(snapshot, store, tmp_path / "out.jsonl")

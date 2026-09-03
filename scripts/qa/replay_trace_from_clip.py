@@ -74,6 +74,7 @@ def generate(
                 tracks=tracks,
                 bed_polygon_id=None,
                 bed_polygon=None,
+                bed_polygon_image_size=None,
                 night_window_active=False,
                 frame_width=width,
                 frame_height=height,

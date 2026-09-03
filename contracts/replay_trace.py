@@ -56,6 +56,7 @@ class ReplayRow:
     tracks: tuple[ReplayTrack, ...]
     bed_polygon_id: str | None
     bed_polygon: tuple[tuple[float, float], ...] | None
+    bed_polygon_image_size: tuple[int, int] | None
     night_window_active: bool
     frame_width: int
     frame_height: int
@@ -84,8 +85,16 @@ class ReplayRow:
             raise ValueError("invalid source_event")
         if self.source not in ("legacy-association", "nvdcf"):
             raise ValueError("invalid source")
-        if (self.bed_polygon_id is None) != (self.bed_polygon is None):
-            raise ValueError("bed_polygon_id must be present exactly when bed_polygon is present")
+        if not (
+            self.bed_polygon_id is None
+            and self.bed_polygon is None
+            and self.bed_polygon_image_size is None
+        ) and not (
+            self.bed_polygon_id is not None
+            and self.bed_polygon is not None
+            and self.bed_polygon_image_size is not None
+        ):
+            raise ValueError("bed polygon fields must be present exactly together")
         if self.bed_polygon_id is not None and (
             not isinstance(self.bed_polygon_id, str) or not self.bed_polygon_id
         ):
@@ -97,6 +106,16 @@ class ReplayRow:
                 if len(point) != 2:
                     raise ValueError("bed_polygon must contain at least three xy points")
                 _unit_coordinates(point)
+        if self.bed_polygon_image_size is not None and (
+            len(self.bed_polygon_image_size) != 2
+            or any(
+                isinstance(value, bool) or not isinstance(value, int) or value <= 0
+                for value in self.bed_polygon_image_size
+            )
+        ):
+            raise ValueError("bed_polygon_image_size must contain positive integers")
+        if self.source_event != "frame" and self.tracks:
+            raise ValueError("control rows must not contain tracks")
         if not isinstance(self.night_window_active, bool):
             raise TypeError("night_window_active must be boolean")
         if len({track.track_id for track in self.tracks}) != len(self.tracks):

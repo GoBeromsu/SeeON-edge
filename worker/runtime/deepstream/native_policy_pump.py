@@ -298,6 +298,7 @@ class NativePolicyPump:
                     tracks=(),
                     bed_polygon_id=None,
                     bed_polygon=None,
+                    bed_polygon_image_size=None,
                     night_window_active=False,
                     frame_width=metadata.source_width,
                     frame_height=metadata.source_height,
@@ -337,6 +338,11 @@ class NativePolicyPump:
             fallback_width=metadata.source_width,
             fallback_height=metadata.source_height,
         )
+        polygon_image_size = _persisted_polygon_image_size(
+            self._scene,
+            fallback_width=metadata.source_width,
+            fallback_height=metadata.source_height,
+        )
         self._replay_trace.append(
             ReplayRow(
                 camera_id=self.camera_id,
@@ -348,6 +354,7 @@ class NativePolicyPump:
                 tracks=tuple(current.values()) + tuple(non_observed),
                 bed_polygon_id="persisted" if polygon is not None else None,
                 bed_polygon=polygon,
+                bed_polygon_image_size=polygon_image_size,
                 night_window_active=(
                     False if self._night_window_active is None else self._night_window_active()
                 ),
@@ -374,6 +381,7 @@ class NativePolicyPump:
                     tracks=(),
                     bed_polygon_id=None,
                     bed_polygon=None,
+                    bed_polygon_image_size=None,
                     night_window_active=False,
                     frame_width=self._trace_dims[0],
                     frame_height=self._trace_dims[1],
@@ -422,6 +430,17 @@ def _persisted_polygon(
     width = scene.bed_zone_image_width or fallback_width
     height = scene.bed_zone_image_height or fallback_height
     return tuple((float(x) / width, float(y) / height) for x, y in polygon)
+
+
+def _persisted_polygon_image_size(
+    scene: SceneState, *, fallback_width: int, fallback_height: int
+) -> tuple[int, int] | None:
+    if not scene.persisted_bed_regions or scene.persisted_bed_regions[0].polygon is None:
+        return None
+    return (
+        scene.bed_zone_image_width or fallback_width,
+        scene.bed_zone_image_height or fallback_height,
+    )
 
 
 def _unit_bbox(
