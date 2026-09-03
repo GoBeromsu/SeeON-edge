@@ -65,6 +65,9 @@ data/
 
 # Generated experiments, evidence, and scratch
 artifacts/
+# Review-evidence scratch written by QA lanes; never committed (the privacy gate
+# refuses raw capture payloads, and the ultragoal gate only needs the paths).
+.artifacts/
 experiments/loop_status.json
 .scratch/
 .gjc/
