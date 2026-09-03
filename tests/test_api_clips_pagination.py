@@ -264,6 +264,6 @@ def test_single_clip_metadata_resolves_every_historical_layout(
         "finalized": True,
         "size_bytes": len(f"video:{clip_id}".encode()),
         "thumbnail_available": False,
-        "scene_available": False,
-        "scene_frame_count": None,
+        "detected_at": None,
+        "truncation_reasons": [],
     }

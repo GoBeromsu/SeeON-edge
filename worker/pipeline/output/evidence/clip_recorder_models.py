@@ -106,6 +106,7 @@ class EventMessage:
     event: BusinessEvent
     trigger_packet: EvidenceTrigger
     allow_new_clip: bool
+    detected_at: datetime
 
 
 @dataclass(frozen=True, slots=True)
@@ -127,6 +128,7 @@ RecorderMessage = FrameMessage | EventMessage | FlushMessage | EpochRollMessage
 class ActiveClip:
     __slots__ = (
         "cutoff_time_sec",
+        "detected_at",
         "event",
         "event_ref",
         "event_refs",
@@ -148,6 +150,7 @@ class ActiveClip:
         event: BusinessEvent,
         event_time_sec: float,
         cutoff_time_sec: float,
+        detected_at: datetime,
         started_at: datetime,
         start_time_sec: float,
         last_time_sec: float,
@@ -161,6 +164,7 @@ class ActiveClip:
         self.event = event
         self.event_time_sec = event_time_sec
         self.cutoff_time_sec = cutoff_time_sec
+        self.detected_at = detected_at
         self.started_at = started_at
         self.start_time_sec = start_time_sec
         self.last_time_sec = last_time_sec

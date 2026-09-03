@@ -39,6 +39,8 @@ def _write_manifest(
     event_ref: str | None = None,
     event_type: str | None = "fall",
     started_at: str = "2026-07-06T00:00:00Z",
+    detected_at: str | None = None,
+    truncation_reasons: list[str] | None = None,
     path: str | None = None,
     finalized: bool = True,
 ) -> None:
@@ -57,6 +59,10 @@ def _write_manifest(
     }
     if event_type is not None:
         payload["event_type"] = event_type
+    if detected_at is not None:
+        payload["detected_at"] = detected_at
+    if truncation_reasons is not None:
+        payload["truncation_reasons"] = truncation_reasons
     (clip_dir / "manifest.json").write_text(json.dumps(payload), encoding="utf-8")
 
 
@@ -284,6 +290,38 @@ def test_list_clips_preserves_event_type_when_event_ref_is_identity(clip_env) ->
     assert response.status_code == 200
     assert response.json()["clips"][0]["event_ref"] == "0:0"
     assert response.json()["clips"][0]["event_type"] == "bed-exit"
+
+
+def test_clip_responses_tolerate_prechange_and_detected_at_manifests(clip_env) -> None:
+    clip_store = clip_env / "clip-store"
+    _write_manifest(clip_store, "older")
+    _write_manifest(
+        clip_store,
+        "current",
+        detected_at="2026-07-06T00:00:12Z",
+        truncation_reasons=["POSTROLL_LIMIT"],
+    )
+
+    with TestClient(create_app(lifespan=no_lifespan)) as client:
+        _login(client)
+        listed = client.get("/api/v1/clips")
+        older = client.get("/api/v1/clips/older/metadata")
+        current = client.get("/api/v1/clips/current/metadata")
+
+    assert listed.status_code == older.status_code == current.status_code == 200
+    assert older.json()["detected_at"] is None
+    assert older.json()["truncation_reasons"] == []
+    assert current.json()["detected_at"] == "2026-07-06T00:00:12Z"
+    assert current.json()["truncation_reasons"] == ["POSTROLL_LIMIT"]
+
+
+def test_removed_clip_scene_route_returns_not_found(clip_env) -> None:
+    with TestClient(create_app(lifespan=no_lifespan)) as client:
+        _login(client)
+        get = client.get("/api/v1/clips/clip-1/scene")
+        head = client.head("/api/v1/clips/clip-1/scene")
+
+    assert get.status_code == head.status_code == 404
 
 
 def test_streams_manifest_video_and_appends_audit(clip_env) -> None:

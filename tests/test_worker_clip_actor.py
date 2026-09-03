@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from fractions import Fraction
 from pathlib import Path
 
@@ -37,6 +38,7 @@ from worker.types import BusinessEvent, FrameKey, FramePacket
 from worker.types.source_packet import StreamEpoch
 
 RUNTIME_MANIFEST_SHA256 = "b" * 64
+DETECTED_AT = datetime(2026, 7, 16, 1, 2, 3, tzinfo=UTC)
 
 
 def _packet(time_sec: float, *, epoch: int = 3) -> FramePacket:
@@ -96,6 +98,7 @@ def _event_message(
         event,
         trigger_packet,
         allow_new_clip,
+        DETECTED_AT,
     )
 
 

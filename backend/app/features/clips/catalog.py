@@ -87,7 +87,6 @@ _MANIFEST_FIELDS = {
     "source_error_reason",
     "truncation_reasons",
     "time_origin",
-    "scene_index",
     "detected_at",
 }
 
@@ -352,6 +351,8 @@ def _strict_manifest_from_payload(payload: dict[str, Any], path: Path) -> ClipMa
         if isinstance(payload.get("video_error"), str)
         else None,
         finalized=True,
+        detected_at=detected_at if isinstance(detected_at, str) else None,
+        truncation_reasons=tuple(payload.get("truncation_reasons") or ()),
     )
 
 
@@ -381,11 +382,6 @@ def _validate_source_remux_metadata(
     time_origin = payload.get("time_origin")
     if time_origin is not None and not isinstance(time_origin, dict):
         raise ValueError(f"invalid manifest time origin: {path}")
-    scene_index = payload.get("scene_index")
-    if scene_index is not None:
-        if not isinstance(scene_index, dict):
-            raise ValueError(f"invalid manifest scene index: {path}")
-        _validate_scene_index_claim(scene_index, path)
     truncations = payload.get("truncation_reasons")
     if truncations is not None and (
         not isinstance(truncations, list)
@@ -393,22 +389,6 @@ def _validate_source_remux_metadata(
         or len(set(truncations)) != len(truncations)
     ):
         raise ValueError(f"invalid manifest truncation reasons: {path}")
-
-
-def _validate_scene_index_claim(scene_index: dict[str, Any], path: Path) -> None:
-    """Minimal invariant shared with the worker writer: fixed path, schema 1,
-    lowercase sha256, bounded non-negative size and frame count."""
-    if scene_index.get("path") != "scene-index.json":
-        raise ValueError(f"invalid manifest scene index path: {path}")
-    if scene_index.get("schema") != 1:
-        raise ValueError(f"invalid manifest scene index schema: {path}")
-    sha256 = scene_index.get("sha256")
-    if not isinstance(sha256, str) or _SHA256_RE.fullmatch(sha256) is None:
-        raise ValueError(f"invalid manifest scene index digest: {path}")
-    for field in ("size_bytes", "count"):
-        value = scene_index.get(field)
-        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
-            raise ValueError(f"invalid manifest scene index {field}: {path}")
 
 
 def _validate_source_media_translation(
@@ -513,7 +493,7 @@ def _is_canonical_uuid4(value: object) -> bool:
 
 
 def _utc_timestamp(value: object, path: Path) -> datetime:
-    if not isinstance(value, str):
+    if not isinstance(value, str) or not value.endswith("Z"):
         raise TypeError(f"invalid manifest timestamp: {path}")
     try:
         parsed = datetime.fromisoformat(value)

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from fractions import Fraction
 from pathlib import Path
 from typing import Protocol
 
@@ -17,7 +16,7 @@ from worker.pipeline.output.evidence.evidence_outbox_types import (
     ClipId,
     EvidenceReasonCode,
 )
-from worker.types import BusinessEvent, FrameKey, FramePacket, SceneRecord
+from worker.types import BusinessEvent, FrameKey, FramePacket
 
 
 class RecordingCoordinator(Protocol):
@@ -53,18 +52,6 @@ class ClipPublicationPort(Protocol):
     ) -> PublishedClip | None: ...
 
 
-class SceneSelectionPort(Protocol):
-    def mark_active(self, camera_id: str) -> None: ...
-    def clear_active(self, camera_id: str) -> None: ...
-    def select(
-        self,
-        camera_id: str,
-        trigger_epoch: int,
-        start_pts_sec: Fraction,
-        end_pts_sec: Fraction,
-    ) -> tuple[SceneRecord, ...]: ...
-
-
 class ClipCloseHook(Protocol):
     def __call__(self, camera_id: str, clip_id: ClipId, /) -> None: ...
 
@@ -90,14 +77,10 @@ class ClipActorDependencies:
     finalized: ClipFinalizedHook | None = None
     encoder_name: str = "libx264"
     cancel: ClipCancelHook | None = None
-    # Like camera_pipeline._observation_recorder, this optional telemetry tap
-    # leaves primary evidence behavior unchanged when composition omits it.
-    scene_selector: SceneSelectionPort | None = None
 
 
 __all__ = [
     "ClipActorDependencies",
     "ClipPublicationPort",
     "RecordingCoordinator",
-    "SceneSelectionPort",
 ]

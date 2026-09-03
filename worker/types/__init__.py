@@ -40,7 +40,6 @@ from worker.types.perception_frame import (
     PersonBox,
     PersonBoxChannel,
 )
-from worker.types.scene_record import SceneRecord
 from worker.types.temporal_profile import (
     CURRENT_TEMPORAL_PROFILE,
     TemporalProfile,
@@ -84,7 +83,6 @@ __all__ = [
     "PersonBoxChannel",
     "PipelineProfile",
     "PixelFormat",
-    "SceneRecord",
     "StageCapabilities",
     "TemporalProfile",
     "TemporalProfileError",

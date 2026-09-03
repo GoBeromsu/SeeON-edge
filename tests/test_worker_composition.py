@@ -631,30 +631,6 @@ def _runtime(
     )
 
 
-def test_host_pump_composition_passes_shared_scene_sink_and_decisions(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    serving = _FakeServingClient()
-    runtime = _runtime(_config("camera-a"), serving, _LoopFactory(serving), tmp_path)
-    camera = runtime.config.cameras[0]
-    scene_sink = object()
-    scene_decisions = object()
-    captured: dict[str, object] = {}
-
-    def capture_pump(*_args: object, **kwargs: object) -> object:
-        captured.update(kwargs)
-        return object()
-
-    monkeypatch.setattr(worker_module, "CameraPipelinePump", capture_pump)
-    runtime._camera_inference_results[camera.camera_id] = object()  # pyright: ignore[reportArgumentType]
-    runtime._scene_repository = scene_sink  # pyright: ignore[reportAssignmentType]
-    runtime._camera_scene_decisions[camera.camera_id] = scene_decisions  # pyright: ignore[reportArgumentType]
-
-    _ = runtime._default_pump_factory(camera, object(), object(), object(), object())
-
-    assert captured["scene_sink"] is scene_sink
-    assert captured["scene_decisions"] is scene_decisions
-
 
 def _config(*camera_ids: str) -> WorkerConfig:
     return WorkerConfig.model_validate(

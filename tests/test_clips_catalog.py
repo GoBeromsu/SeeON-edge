@@ -158,6 +158,36 @@ def test_catalog_queries_promoted_clip_columns_in_sql(tmp_path) -> None:
         store.close()
 
 
+@pytest.mark.parametrize(
+    "detected_at",
+    [None, "2026-01-01T00:00:00Z"],
+)
+def test_strict_manifest_tolerates_both_detected_at_generations(
+    tmp_path, detected_at: str | None
+) -> None:
+    root = tmp_path / "clip-store"
+    payload = _ready_manifest()
+    if detected_at is not None:
+        payload["detected_at"] = detected_at
+    _write_manifest(root, payload)
+    store = CatalogStore.open(tmp_path / "catalog.sqlite3")
+    try:
+        [record] = catalog_module.strict_manifest_records(ClipStore(root))
+    finally:
+        store.close()
+
+    assert record.manifest.detected_at == detected_at
+
+
+def test_strict_manifest_rejects_non_utc_detected_at(tmp_path) -> None:
+    root = tmp_path / "clip-store"
+    payload = {**_ready_manifest(), "detected_at": "2026-01-01T00:00:00+00:00"}
+    _write_manifest(root, payload)
+
+    with pytest.raises(TypeError, match="invalid manifest timestamp"):
+        catalog_module.strict_manifest_records(ClipStore(root))
+
+
 def test_catalog_migrates_legacy_payload_schema_losslessly_and_idempotently(tmp_path) -> None:
     path = tmp_path / "legacy.sqlite3"
     payload = {

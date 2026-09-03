@@ -4,6 +4,7 @@ import queue
 import shutil
 import threading
 from dataclasses import dataclass
+from datetime import datetime
 from typing import final
 
 from worker.pipeline.output.evidence.clip_identity import (
@@ -80,6 +81,7 @@ class ClipAdmission:
         event: BusinessEvent,
         *,
         allow_new_clip: bool,
+        detected_at: datetime,
     ) -> str | None:
         camera_id = trigger_packet.camera_id
         if event.camera_id != camera_id:
@@ -140,6 +142,7 @@ class ClipAdmission:
                         event,
                         queued_trigger,
                         allow_new_clip,
+                        detected_at,
                     )
                 )
             except queue.Full:

@@ -28,6 +28,7 @@ describe('EventsPage', () => {
     expect(host.textContent).toContain('301호');
     expect(host.textContent).toContain('302호');
     expect(host.textContent).not.toContain('카메라 미상');
+    expect(host.textContent).not.toContain(['중앙', '인시던트'].join(' '));
   });
 
   it('filters the grid by event type on the server and restores the newest keyset page', async () => {

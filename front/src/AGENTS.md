@@ -9,7 +9,7 @@ Import that way in app, features, shared, and tests. Never `../../`.
 - `app/`: shell and URL state. `App.tsx` wraps `AuthGate` + `Dashboard` (NavBar, page switch, account modal, toasts). `dashboardLocation.ts` owns query keys (`page`, `floor`, `camera`, `event`, `clip`) and canonicalize/restore. `app/pages/` holds the three route pages: Operations, Events, Settings. Pages compose features; they do not own view widgets.
 - `features/<slice>/`: components + view logic for one capability. A slice may add its own `AGENTS.md`.
   - `operations/`: camera wall, room detail, live tiles (via `shared/api/useMjpegStream`), overlay, snapshot queue, room event history.
-  - `events/`: clip grid, incident list, filters, pager, clip playback.
+  - `events/`: clip grid, filters, pager, clean clip playback; snapshot JPEG carries burned boxes.
   - `settings/`: camera registry table/modals, detection form, clip storage/export, policy evidence, processing status, bed-zone panel.
   - `connection/`: edge setup wizard + connection settings panel.
   - `cameras/`: topology editor, pairing list, confirm dialog. Consumed by the connection wizard.

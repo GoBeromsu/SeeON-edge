@@ -93,8 +93,6 @@ from worker.pipeline.output.evidence.evidence_runtime import EvidenceExportRunti
 from worker.pipeline.output.evidence.evidence_stager import DurableEvidenceStager
 from worker.pipeline.output.evidence.packet_repository import PacketRingRepository
 from worker.pipeline.output.evidence.packet_ring import PacketRingLimits
-from worker.pipeline.output.evidence.scene_repository import SceneRingRepository
-from worker.pipeline.output.evidence.scene_ring import SceneRingLimits
 from worker.pipeline.output.evidence.snapshot_store import SnapshotStore
 from worker.pipeline.output.evidence_attacher import AlertEvidenceAttacher
 from worker.pipeline.output.live_view import LatestFrameStore, LiveViewSubscriber
@@ -110,7 +108,6 @@ from worker.pipeline.output.mjpeg_server import (
     start_optional_mjpeg_server,
 )
 from worker.pipeline.output.overlay import OverlayMode, OverlayRenderer
-from worker.pipeline.output.scene_decisions import SceneDecisionProvider
 from worker.pipeline.perception import GreedyIouTracker, SceneState
 from worker.pipeline.trace import BoundedTraceWriter, TraceCapture, TraceIdentity
 from worker.runtime import bootstrap
@@ -456,8 +453,9 @@ class _NullClipRecorder:
         event: BusinessEvent,
         *,
         allow_new_clip: bool = True,
+        detected_at: datetime | None = None,
     ) -> str | None:
-        del trigger_packet, event, allow_new_clip
+        del trigger_packet, event, allow_new_clip, detected_at
         return None
 
 
@@ -484,6 +482,7 @@ class _CameraClipRecorderView:
         event: BusinessEvent,
         *,
         allow_new_clip: bool = True,
+        detected_at: datetime | None = None,
     ) -> str | None:
         if trigger_packet.camera_id != self.camera_id:
             raise ValueError("trigger packet camera does not match recorder view")
@@ -491,6 +490,7 @@ class _CameraClipRecorderView:
             trigger_packet,
             event,
             allow_new_clip=allow_new_clip,
+            detected_at=detected_at,
         )
 
 
@@ -894,7 +894,6 @@ class WorkerRuntime:
         self.cameras: tuple[CameraRuntimeContext, ...] = ()
         self._clip_recorder: ClipRecorder | None = None
         self._packet_repository: PacketRingRepository | None = None
-        self._scene_repository: SceneRingRepository | None = None
         self._evidence_export_runtime: EvidenceExportRuntime | None = None
         self._clip_deletion_control: ClipDeletionControlService | None = None
         self._runtime_status_sender: RuntimeStatusSender | None = None
@@ -955,7 +954,6 @@ class WorkerRuntime:
         self._live_view_pump_threads: tuple[threading.Thread, ...] = ()
         self._camera_debug_snapshots: dict[str, Callable[[int], tuple[Any, ...]]] = {}
         self._camera_inference_results: dict[str, InferenceResultSlot] = {}
-        self._camera_scene_decisions: dict[str, SceneDecisionProvider] = {}
         self._nvidia_media_plane: NvidiaMediaPlane | None = None
         self._nvidia_plans: Mapping[str, CameraDetectionPlan] = MappingProxyType({})
         self._native_policy_pumps: tuple[NativePolicyPump, ...] = ()
@@ -1096,9 +1094,6 @@ class WorkerRuntime:
         if self._packet_repository is not None:
             self._packet_repository.close()
             self._packet_repository = None
-        if self._scene_repository is not None:
-            self._scene_repository.close()
-            self._scene_repository = None
         if self._trace_writer is not None:
             self._trace_writer.stop()
             self._trace_writer = None
@@ -1517,13 +1512,6 @@ class WorkerRuntime:
         if self._packet_repository is None:
             clip_config = ClipRecorderConfig(store_dir=self._resolved_clip_store_dir())
             self._packet_repository = self._build_packet_repository(clip_config)
-        if self._scene_repository is None:
-            self._scene_repository = self._build_scene_repository()
-            self._packet_repository.subscribe_epoch_roll(
-                lambda _previous, current: self._scene_repository.roll_epoch(
-                    current.camera_id, current.stream_epoch
-                )
-            )
         manifest = Path(self._env[MANIFEST_ENV])
         loaded_manifest = json.loads(manifest.read_text(encoding="utf-8"))
         engine_cache = verify_plan_cache(loaded_manifest)
@@ -1544,7 +1532,6 @@ class WorkerRuntime:
             child,
             NvidiaMediaResources(
                 self._packet_repository,
-                self._scene_repository,
                 self._live_frames,
                 self._hard_exit,
             ),
@@ -1823,10 +1810,6 @@ class WorkerRuntime:
                 attacher,
                 self.diagnostics,
                 plan.schedule.get("bed", self.temporal_profile.decision_interval_frames("bed")),
-                scene_sink=self._scene_repository,
-                scene_decisions=SceneDecisionProvider(
-                    self._build_trace_identities(camera.camera_id, plan)
-                ),
             ),
         )
         pumps.append(pump)
@@ -2030,9 +2013,6 @@ class WorkerRuntime:
                 None if self._runtime_manifest is None else self._runtime_manifest.sha256
             ),
         )
-        self._camera_scene_decisions[camera.camera_id] = SceneDecisionProvider(
-            self._build_trace_identities(camera.camera_id, resolved_plan)
-        )
         if self._live_view is not None:
             # Register before the server binds so a camera is never a 404 on a
             # live view that is meant to carry it.
@@ -2123,8 +2103,6 @@ class WorkerRuntime:
             # rather than failing its stage over an auxiliary capability.
             trace_capture=trace_capture,
             trace_writer=None if trace_capture is None else self._trace_writer,
-            scene_sink=self._scene_repository,
-            scene_decisions=self._camera_scene_decisions.get(camera.camera_id),
         )
 
     def _build_trace_capture(
@@ -2396,17 +2374,10 @@ class WorkerRuntime:
                 ) from exc
 
         packet_repository = self._build_packet_repository(clip_config)
-        scene_repository = self._build_scene_repository()
-        packet_repository.subscribe_epoch_roll(
-            lambda _previous, current: scene_repository.roll_epoch(
-                current.camera_id, current.stream_epoch
-            )
-        )
         self._packet_repository = packet_repository
-        self._scene_repository = scene_repository
         recorder = ClipRecorder(
             clip_config,
-            services=default_services(clip_config, packet_repository, scene_repository),
+            services=default_services(clip_config, packet_repository),
             # Holds are backend intent now. The slot keeps no hold index, so it
             # reports nothing as locally held and never initiates a deletion of
             # its own. Deletion arrives as an authorized backend command that
@@ -2436,11 +2407,6 @@ class WorkerRuntime:
         except Exception:  # noqa: BLE001 - clip recording is a non-fatal camera boundary
             packet_repository.close()
             self._packet_repository = None
-            # Without a recorder there is no sidecar consumer either; leaving
-            # the scene repository open would let the pumps fill a ring nobody
-            # ever selects from.
-            scene_repository.close()
-            self._scene_repository = None
             LOGGER.warning("clip recorder failed to start; clips disabled", exc_info=True)
             # Fail-visible: clips are always-on by default, so a start failure
             # must surface through runtime diagnostics (`/status`) rather than
@@ -2706,12 +2672,6 @@ class WorkerRuntime:
                 + clip_config.finalize_grace_seconds,
             ),
             global_max_bytes=clip_config.packet_ring_global_max_bytes,
-        )
-
-    def _build_scene_repository(self) -> SceneRingRepository:
-        return SceneRingRepository(
-            tuple(camera.camera_id for camera in self.config.cameras),
-            per_camera_limits=SceneRingLimits(),
         )
 
     def _build_decider(

@@ -40,7 +40,7 @@ Enforced by `front/eslint.config.js` (`no-restricted-imports`, one override per 
 
 Same-named cards stay separate files. operations card = status + overlay + navigate. settings card = editor. Don't merge by import.
 
-Clip modals stay separate. operations `ClipPlayerModal` = room-history playback. events `ClipPlaybackModal` = clean playback + artifacts + delete. Don't grow delete into operations.
+Clip modals stay separate. operations `ClipPlayerModal` = room-history playback. events `ClipPlaybackModal` plays the unmodified source clip with no overlay; snapshot JPEG carries burned boxes. Don't grow delete into operations.
 
 Clip paging is keyset only. `GET /clips` takes `limit` plus an opaque `cursor` and answers with `next_cursor`; the order is `(started_at DESC, clip_id DESC)`. `useEventsPage` keeps the walked cursor trail so 이전/다음 stay on exact boundaries. Never reintroduce `offset`, a page-number jump, or a client-side re-sort that ignores the clip-id tiebreak.
 

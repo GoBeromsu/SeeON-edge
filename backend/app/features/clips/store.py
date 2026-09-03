@@ -19,7 +19,6 @@ from backend.app.features.clips.manifest import (
     read_manifest_file,
     video_file_from_dir,
 )
-from backend.app.features.clips.scene_files import resolve_scene_index
 from backend.app.features.clips.thumbnail_files import (
     bounded_clip_roots,
     contained_thumbnail_path,
@@ -196,20 +195,6 @@ class ClipStore:
     def read_thumbnail(self, located: LocatedClip) -> bytes:
         thumbnail_path = located.manifest_path.parent / "thumbnail.jpg"
         return read_regular_file(self.root, thumbnail_path)
-
-    def scene_available(self, located: LocatedClip) -> bool:
-        opened = resolve_scene_index(
-            self.root, located.manifest_path, located.manifest.scene_index
-        )
-        if opened is None:
-            return False
-        opened.handle.close()
-        return True
-
-    def resolve_scene_index(self, located: LocatedClip) -> OpenedRegularFile | None:
-        return resolve_scene_index(
-            self.root, located.manifest_path, located.manifest.scene_index
-        )
 
     def resolve_video_path(self, manifest: ClipManifest) -> Path:
         located = self.locate_manifest(manifest.clip_id)

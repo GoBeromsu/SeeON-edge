@@ -3,6 +3,7 @@ from __future__ import annotations
 import queue
 import threading
 from collections.abc import Callable
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import final
 
@@ -150,7 +151,7 @@ class ClipRecorder:
                         cancel=self._admission.cancel,
                         finalized=self._on_clip_finalized,
                         encoder_name=self._services.encoder_name,
-                        scene_selector=self._services.scene_repository,
+
                     ),
                 )
                 self._store_lock = store_lock
@@ -216,11 +217,13 @@ class ClipRecorder:
         event: BusinessEvent,
         *,
         allow_new_clip: bool = True,
+        detected_at: datetime | None = None,
     ) -> str | None:
         return self._admission.accept_event(
             trigger_packet,
             event,
             allow_new_clip=allow_new_clip,
+            detected_at=datetime.now(UTC) if detected_at is None else detected_at,
         )
 
     @property

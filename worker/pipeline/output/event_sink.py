@@ -53,6 +53,7 @@ class EventClipRecorder(Protocol):
         event: BusinessEvent,
         *,
         allow_new_clip: bool = True,
+        detected_at: datetime,
     ) -> str | None: ...
 
 
@@ -86,7 +87,8 @@ class EvidenceEventSink:
             evidence["person_id"] = event.person_id
         if event.bed_id is not None:
             evidence["bed_id"] = event.bed_id
-        detected_at = self.now().isoformat().replace("+00:00", "Z")
+        detected_at_value = self.now()
+        detected_at = detected_at_value.isoformat().replace("+00:00", "Z")
         payload: WorkerEventPayload = {
             "edge_event_id": edge_event_id,
             "event_type": event.event_type,
@@ -173,7 +175,11 @@ class EvidenceEventSink:
             self._record_snapshot_disposition(
                 edge_event_id, snapshot_id, "UNAVAILABLE", "snapshot_not_provided"
             )
-        clip_id = self.recorder.on_event(trigger_packet, event)
+        clip_id = self.recorder.on_event(
+            trigger_packet,
+            event,
+            detected_at=detected_at_value,
+        )
         self.stager.complete(edge_event_id, clip_id)
 
     def _record_snapshot_disposition(

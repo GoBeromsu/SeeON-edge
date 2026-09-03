@@ -204,7 +204,9 @@ def test_default_clip_recorder_view_forwards_the_trigger_packet() -> None:
             event: BusinessEvent,
             *,
             allow_new_clip: bool = True,
+            detected_at: object | None = None,
         ) -> str | None:
+            del detected_at
             self.calls.append((trigger_packet, event, allow_new_clip))
             return "clip-xyz"
 

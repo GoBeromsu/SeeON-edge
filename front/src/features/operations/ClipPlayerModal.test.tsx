@@ -10,12 +10,12 @@ const baseClip: Clip = {
   camera_label: '301호',
   event_type: 'fall',
   created_at: '2026-08-02T03:12:00Z',
+  detected_at: null,
+  truncation_reasons: [],
   video_path: '/api/v1/clips/clip-1/video',
   video_available: true,
   thumbnail_available: true,
   video_error: null,
-  scene_available: false,
-  scene_frame_count: null,
 };
 
 function render(clip: Clip | null, onClose = vi.fn()) {

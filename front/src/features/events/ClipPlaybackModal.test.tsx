@@ -2,6 +2,7 @@ import { act } from 'react';
 import { createRoot } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ClipPlaybackModal } from '@/features/events/ClipPlaybackModal';
+import { formatClipTimestamp } from '@/features/events/formatters';
 import type { Clip } from '@/shared/api/types';
 
 const activeRoots = new Set<ReturnType<typeof createRoot>>();
@@ -12,12 +13,12 @@ const baseClip: Clip = {
   camera_label: '301호',
   event_type: 'fall',
   created_at: '2026-08-02T03:12:00Z',
+  detected_at: null,
+  truncation_reasons: [],
   video_path: '/api/v1/clips/clip-1/video',
   video_available: true,
   thumbnail_available: true,
   video_error: null,
-  scene_available: false,
-  scene_frame_count: null,
 };
 
 function render(clip: Clip | null, open = true, onClose = vi.fn()) {
@@ -133,5 +134,19 @@ describe('ClipPlaybackModal', () => {
     const rows = Array.from(dialog().querySelectorAll('dt'));
     const durationIndex = rows.findIndex((dt) => dt.textContent === '길이');
     expect(rows[durationIndex]?.nextElementSibling?.textContent).toBe('-');
+  });
+
+  it('shows the detection time, falling back to the clip start time for older manifests', () => {
+    const detectedAt = '2026-08-02T03:12:00Z';
+    const createdAt = '2026-08-02T03:11:30Z';
+    render({ ...baseClip, created_at: createdAt, detected_at: detectedAt });
+    const rows = Array.from((Array.from(document.querySelectorAll<HTMLElement>('[role="dialog"]')).at(-1) as HTMLElement).querySelectorAll('dt'));
+    const timeIndex = rows.findIndex((dt) => dt.textContent === '시간');
+    expect(rows[timeIndex]?.nextElementSibling?.textContent).toBe(formatClipTimestamp(detectedAt));
+
+    render({ ...baseClip, created_at: createdAt, detected_at: null });
+    const fallbackRows = Array.from((Array.from(document.querySelectorAll<HTMLElement>('[role="dialog"]')).at(-1) as HTMLElement).querySelectorAll('dt'));
+    const fallbackTimeIndex = fallbackRows.findIndex((dt) => dt.textContent === '시간');
+    expect(fallbackRows[fallbackTimeIndex]?.nextElementSibling?.textContent).toBe(formatClipTimestamp(createdAt));
   });
 });

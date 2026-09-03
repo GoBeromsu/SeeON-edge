@@ -122,51 +122,6 @@ describe('EventsPage bounded failure states', () => {
     expectNoRetiredRequest(fetchMock);
   });
 
-  it('reloads incidents and keeps the review dialog bounded on a stale CAS conflict', async () => {
-    resetLocation();
-    const incident = {
-      incident_id: 'incident-1', edge_event_id: 'event-1', camera_id: 'cam-1', event_type: 'fall',
-      detected_at: '2026-08-02T03:12:00Z', lifecycle_state: 'COMPLETE', revision: 3, failure_reason: null,
-      runtime_manifest_sha256: null, decision_trace_id: null, module_qualified_id: null,
-      policy_qualified_id: null, primary_clip_id: 'clip-1', primary_artifact_state: 'AVAILABLE',
-      snapshot_artifact_state: 'AVAILABLE', event_delivery_state: 'DELIVERED',
-      clip_publish_state: 'PUBLISHED', retention_state: 'RETAINED', review: null,
-    };
-    let incidentReads = 0;
-    const reviewBodies: unknown[] = [];
-    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
-      const url = String(input);
-      if (url.includes('/cameras')) return Promise.resolve(jsonResponse(cameraRegistry));
-      if (url.includes('/incident-reviews/')) {
-        reviewBodies.push(init?.body);
-        return Promise.resolve(jsonResponse({ detail: 'stale review version' }, 409));
-      }
-      if (url.includes('/incidents')) {
-        incidentReads += 1;
-        return Promise.resolve(jsonResponse({ incidents: [incident] }));
-      }
-      if (url.includes('/clips')) return Promise.resolve(jsonResponse(keysetBody([], 48, null)));
-      return Promise.reject(new Error(`unexpected fetch: ${url}`));
-    });
-    vi.stubGlobal('fetch', fetchMock);
-
-    const { host } = await renderPage();
-    const incidentCard = Array.from(host.querySelectorAll<HTMLButtonElement>('button'))
-      .find((button) => button.textContent?.includes('cam-1')) as HTMLButtonElement;
-    act(() => incidentCard.click());
-    await flush();
-
-    const readsBeforeReview = incidentReads;
-    await act(async () => { findButton(document.body, '실제 알림으로 검토').click(); });
-    await flush();
-
-    expect(reviewBodies).toEqual([JSON.stringify({ expected_version: 0, disposition: 'TRUE_POSITIVE', notes: null })]);
-    // The 409 reloads authoritative state instead of writing an optimistic review.
-    expect(incidentReads).toBeGreaterThan(readsBeforeReview);
-    expect(document.querySelector('[data-testid="incident-artifact-states"]')?.textContent).toBe('AVAILABLE / AVAILABLE');
-    expectNoRetiredControl();
-    expectNoRetiredRequest(fetchMock);
-  });
 
   it('keeps playback and the delete control when the worker holds the deletion', async () => {
     resetLocation();

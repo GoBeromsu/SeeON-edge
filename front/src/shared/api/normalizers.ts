@@ -6,7 +6,6 @@ export {
   normalizeCameraTestResult,
 } from '@/shared/api/cameraNormalizer';
 export { normalizeClip, normalizeClipPageResponse, normalizeClipsResponse } from '@/shared/api/clipNormalizer';
-export { normalizeClipScene } from '@/shared/api/clipSceneNormalizer';
 export { normalizeClipStorageBrowse, normalizeClipStorageInfo } from '@/shared/api/clipStorageNormalizer';
 export {
   normalizeConnectionTestResult,

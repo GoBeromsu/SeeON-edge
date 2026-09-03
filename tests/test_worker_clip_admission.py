@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import queue
+from datetime import UTC, datetime
 from pathlib import Path
 
 import numpy as np
@@ -15,6 +16,7 @@ from worker.pipeline.output.evidence.clip_recorder_models import (
 )
 from worker.types import BusinessEvent, FramePacket
 
+DETECTED_AT = datetime(2026, 7, 16, 1, 2, 3, tzinfo=UTC)
 RUNTIME_MANIFEST_SHA256 = "b" * 64
 
 
@@ -68,7 +70,7 @@ def test_event_uses_the_trigger_packet_not_the_latest_evidence_packet(tmp_path: 
         0.9,
         audit={"runtime_manifest_sha256": RUNTIME_MANIFEST_SHA256},
     )
-    clip_id = admission.accept_event(trigger, event, allow_new_clip=True)
+    clip_id = admission.accept_event(trigger, event, allow_new_clip=True, detected_at=DETECTED_AT)
 
     assert clip_id is not None
     message = messages.get_nowait()
@@ -86,17 +88,32 @@ def test_cross_epoch_and_generation_events_never_union(tmp_path: Path) -> None:
     messages: queue.Queue[object] = queue.Queue()
     admission = ClipAdmission(ClipRecorderConfig(store_dir=tmp_path), ClipRecorderStats(), messages)
     event = BusinessEvent(
-        "fall", "fall.detected", "event-epoch", "camera-1", "facility-1", 10.0, 0.9,
+        "fall",
+        "fall.detected",
+        "event-epoch",
+        "camera-1",
+        "facility-1",
+        10.0,
+        0.9,
         audit={"runtime_manifest_sha256": RUNTIME_MANIFEST_SHA256},
     )
     first = admission.accept_event(
-        _packet(pts=10.0, seq=1, epoch=2, generation=3), event, allow_new_clip=True
+        _packet(pts=10.0, seq=1, epoch=2, generation=3),
+        event,
+        allow_new_clip=True,
+        detected_at=DETECTED_AT,
     )
     second = admission.accept_event(
-        _packet(pts=10.1, seq=2, epoch=3, generation=3), event, allow_new_clip=True
+        _packet(pts=10.1, seq=2, epoch=3, generation=3),
+        event,
+        allow_new_clip=True,
+        detected_at=DETECTED_AT,
     )
     third = admission.accept_event(
-        _packet(pts=10.2, seq=3, epoch=3, generation=4), event, allow_new_clip=True
+        _packet(pts=10.2, seq=3, epoch=3, generation=4),
+        event,
+        allow_new_clip=True,
+        detected_at=DETECTED_AT,
     )
 
     assert first is not None

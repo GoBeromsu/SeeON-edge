@@ -11,7 +11,6 @@ from worker.pipeline.output.evidence.evidence_metadata import (
     validate_runtime_manifest_sha256,
 )
 from worker.pipeline.output.evidence.evidence_outbox_types import ClipId, EdgeEventId
-from worker.pipeline.output.evidence.manifest_media_models import SceneIndexFacts
 
 JsonValue: TypeAlias = str | int | float | bool | list["JsonValue"] | dict[str, "JsonValue"] | None
 
@@ -52,6 +51,7 @@ class ClipPublicationMetadata:
     clip_end_at: datetime
     finalized_at: datetime
     started_at: datetime
+    detected_at: datetime
     duration_s: float
     encoder: str
     runtime_manifest_sha256: str | None = None
@@ -61,7 +61,6 @@ class ClipPublicationMetadata:
     source_error_reason: str | None = None
     truncation_reasons: tuple[str, ...] = ()
     domain: str | None = None
-    scene_index: SceneIndexFacts | None = None
 
     def __post_init__(self) -> None:
         validate_runtime_manifest_sha256(self.runtime_manifest_sha256)

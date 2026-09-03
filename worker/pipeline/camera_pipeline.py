@@ -17,22 +17,16 @@ import threading
 import time
 from collections import deque
 from collections.abc import Callable
-from fractions import Fraction
 from typing import Any, Final, Protocol, final
 
 from contracts.observation import FrameObservation
 from worker.adapters.model.errors import FatalAcceleratorError
 from worker.interfaces.output import EventSink
-from worker.interfaces.scene_sink import SceneSink
 from worker.pipeline.analytics import CompositeExtractor
 from worker.pipeline.decision import EventAggregator
 from worker.pipeline.inference_coordinator import InferenceResultSlot
-from worker.pipeline.output.evidence.scene_wire import encode_scene_record
-from worker.pipeline.output.overlay_scene import OverlaySceneBuilder
-from worker.pipeline.output.scene_decisions import SceneDecisionProvider
 from worker.pipeline.trace import BoundedTraceWriter, TraceCapture
 from worker.types import BusinessEvent, FramePacket, ModuleResult
-from worker.types.overlay_scene import ObservationSemantics, SceneFrameIdentity, SceneValue
 
 LOGGER: Final = logging.getLogger(__name__)
 DEFAULT_POLL_TIMEOUT_SEC: Final = 0.5
@@ -109,8 +103,6 @@ class CameraPipelinePump:
         debug_snapshots_provider: Callable[[int], tuple[Any, ...]] | None = None,
         trace_capture: TraceCapture | None = None,
         trace_writer: BoundedTraceWriter | None = None,
-        scene_sink: SceneSink | None = None,
-        scene_decisions: SceneDecisionProvider | None = None,
     ) -> None:
         self._camera_id = camera_id
         self._untraced_events = 0
@@ -129,13 +121,9 @@ class CameraPipelinePump:
             raise ValueError("trace capture and writer must be composed together")
         self._trace_capture = trace_capture
         self._trace_writer = trace_writer
-        self._scene_sink = scene_sink
-        self._scene_decisions = scene_decisions
         self._fps_timestamps: deque[float] = deque()
         self._stop_event = threading.Event()
         self.failure_count = 0
-        self.scene_append_failures = 0
-        self.scene_pts_missing = 0
         self.processed_count = 0
 
     @property
@@ -199,7 +187,6 @@ class CameraPipelinePump:
         result = self._analytics.process(packet, prefetched_results=(pose,))
         self._observe("observation", lambda: self._record_observation(packet, result.observation))
         events = self._decision.update(result.decision_input)
-        self._observe("scene", lambda: self._record_scene(packet, result.observation))
         if self._diagnostics is not None:
             diagnostics = self._diagnostics
             self._observe(
@@ -267,44 +254,6 @@ class CameraPipelinePump:
                     for pending in events[position:]:
                         release(pending)
                 raise
-
-    def _record_scene(self, packet: FramePacket, observation: FrameObservation) -> None:
-        sink = self._scene_sink
-        if sink is None:
-            return
-        if packet.source_pts is None or packet.source_time_base is None:
-            self.scene_pts_missing += 1
-            return
-        pts = Fraction(packet.source_pts) * packet.source_time_base
-        decisions = (
-            () if self._scene_decisions is None else self._scene_decisions.current_decisions()
-        )
-        scene = OverlaySceneBuilder().from_observation(
-            identity=SceneFrameIdentity(
-                packet.worker_boot_id,
-                packet.camera_id,
-                packet.stream_epoch,
-                packet.seq,
-                SceneValue(float(pts), ObservationSemantics.PRESENT),
-                SceneValue(packet.frame.time_sec, ObservationSemantics.PRESENT),
-                "not-recorded",
-            ),
-            observation=observation,
-            source_width=packet.width,
-            source_height=packet.height,
-            decisions=decisions,
-        )
-        _ = sink.append(
-            encode_scene_record(
-                scene,
-                worker_boot_id=packet.worker_boot_id,
-                camera_id=packet.camera_id,
-                stream_epoch=packet.stream_epoch,
-                generation=packet.source_generation,
-                source_pts_sec=pts,
-                seq=packet.seq,
-            )
-        )
 
     def _record_observation(self, packet: FramePacket, observation: FrameObservation) -> None:
         """Cache this frame's observation for the live-view pump (todo 10).

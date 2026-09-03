@@ -15,7 +15,6 @@ from worker.native.deepstream.control import ChildControlError, DeepStreamContro
 from worker.native.deepstream.metadata import LatestMetadataSlot, MetadataReceiver
 from worker.pipeline.output.evidence.packet_repository import PacketRingRepository
 from worker.pipeline.output.evidence.packet_ring import PacketRingLimits
-from worker.pipeline.output.evidence.scene_repository import SceneRingRepository
 from worker.pipeline.output.live_view import LatestFrameStore
 from worker.runtime.deepstream.canary_telemetry import NativeCanaryTelemetry
 from worker.runtime.deepstream.child_monitor import ChildExitMonitor, monitor_metadata
@@ -48,7 +47,6 @@ LOGGER = logging.getLogger(__name__)
 @dataclass(frozen=True, slots=True)
 class SharedSupervisorResources:
     packet_repository: PacketRingRepository
-    scene_repository: SceneRingRepository
     preview_frames: LatestFrameStore
     bootstrap_owns_lease: bool = True
 
@@ -80,9 +78,6 @@ class DeepStreamChildSupervisor:
             if resources is None
             else resources.packet_repository
         )
-        self._scene_repository = (
-            SceneRingRepository() if resources is None else resources.scene_repository
-        )
         self._failure_receiver: NativeFailureReceiver | None = None
         self._control: DeepStreamControlClient | None = None
         self._sources: DarkSourceController | None = None
@@ -105,10 +100,6 @@ class DeepStreamChildSupervisor:
     @property
     def packet_repository(self) -> PacketRingRepository:
         return self._packet_repository
-
-    @property
-    def scene_repository(self) -> SceneRingRepository:
-        return self._scene_repository
 
     @property
     def au_receiver(self) -> NativeAuReceiver:

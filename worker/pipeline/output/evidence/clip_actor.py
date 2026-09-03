@@ -3,11 +3,9 @@ from __future__ import annotations
 import logging
 import time
 from datetime import UTC, datetime, timedelta
-from fractions import Fraction
 from typing import Final, assert_never, final
 
 from worker.adapters.encode.adapter_errors import EncoderPolicyError
-from worker.adapters.encode.models import ClipArtifact
 from worker.pipeline.output.evidence.clip_actor_metadata import (
     evidence_reason,
     publication_metadata,
@@ -29,11 +27,6 @@ from worker.pipeline.output.evidence.clip_recording import (
     ClipUnavailable,
 )
 from worker.pipeline.output.evidence.evidence_media import ClipEvidenceError
-from worker.pipeline.output.evidence.scene_index import (
-    SceneIndexHeader,
-    SceneIndexWriteError,
-    write_scene_index,
-)
 from worker.pipeline.output.evidence.terminal_outcome import TerminalOutcomeConflictError
 from worker.types.source_packet import StreamEpoch
 
@@ -107,6 +100,7 @@ class ClipActor:
             event=message.event,
             event_time_sec=event_time,
             cutoff_time_sec=event_time + self._config.post_event_seconds,
+            detected_at=message.detected_at,
             started_at=started_at,
             start_time_sec=event_time - self._config.pre_event_seconds,
             last_time_sec=self._latest_time_by_camera.get(camera_id, event_time),
@@ -115,8 +109,6 @@ class ClipActor:
             opened_monotonic=time.monotonic(),
         )
         self._active_by_camera[camera_id] = active
-        if self._dependencies.scene_selector is not None:
-            self._dependencies.scene_selector.mark_active(camera_id)
         self._stats.active_clips = len(self._active_by_camera)
         if active.last_time_sec >= active.cutoff_time_sec:
             self._finalize(active, forced=False)
@@ -175,14 +167,9 @@ class ClipActor:
             )
             match outcome:
                 case ClipReady(artifact=artifact):
-                    scene_index = self._write_scene_index(active, artifact)
                     metadata = publication_metadata(
                         active, artifact.duration_s, self._dependencies.encoder_name, artifact
                     )
-                    if scene_index is not None:
-                        from dataclasses import replace
-
-                        metadata = replace(metadata, scene_index=scene_index)
                     _ = self._dependencies.publisher.publish_ready(
                         active.reservation,
                         artifact.path,
@@ -264,59 +251,8 @@ class ClipActor:
             self._stats.active_clips = len(self._active_by_camera)
             self._dependencies.coordinator.close(camera_id)
             self._dependencies.release(camera_id, active.reservation.clip_id)
-            if self._dependencies.scene_selector is not None:
-                self._dependencies.scene_selector.clear_active(camera_id)
         if published and self._dependencies.finalized is not None:
             self._dependencies.finalized(active.reservation.clip_id)
-
-    def _write_scene_index(self, active: ActiveClip, artifact: ClipArtifact):
-        selector = self._dependencies.scene_selector
-        if selector is None:
-            return None
-        try:
-            start = max(
-                Fraction(str(active.start_time_sec)),
-                Fraction(str(artifact.selected_start_pts_sec)),
-            )
-            end = min(
-                Fraction(str(active.cutoff_time_sec)),
-                Fraction(str(artifact.selected_end_pts_sec)),
-            )
-            records = selector.select(
-                active.reservation.camera_id, artifact.stream_epoch, start, end
-            )
-            return write_scene_index(
-                active.reservation.staging_dir,
-                records,
-                header=SceneIndexHeader(
-                    str(active.reservation.clip_id),
-                    active.reservation.camera_id,
-                    artifact.worker_boot_id,
-                    artifact.stream_epoch,
-                    artifact.generation,
-                    Fraction(str(artifact.media_origin_pts_sec)),
-                    Fraction(str(active.event_time_sec)),
-                    Fraction(str(active.start_time_sec)),
-                    Fraction(str(active.cutoff_time_sec)),
-                    _source_dimensions(artifact),
-                ),
-            )
-        except (AttributeError, SceneIndexWriteError, TypeError, ValueError, OSError) as exc:
-            LOGGER.warning(
-                "clip scene index not written: camera_id=%s clip_id=%s reason=%s error_type=%s",
-                active.reservation.camera_id,
-                active.reservation.clip_id,
-                exc.reason if isinstance(exc, SceneIndexWriteError) else "WRITE_FAILED",
-                type(exc).__name__,
-            )
-            return None
-
-
-def _source_dimensions(artifact: ClipArtifact) -> tuple[int, int]:
-    for stream in artifact.streams:
-        if stream.media_type == "video" and stream.width and stream.height:
-            return stream.width, stream.height
-    raise ValueError("scene index video dimensions are unavailable")
 
 
 __all__ = ["ClipActor", "ClipActorDependencies"]

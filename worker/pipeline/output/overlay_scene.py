@@ -102,7 +102,7 @@ class OverlaySceneBuilder:
             )
             for bed in analysis.beds
         )
-        scene_decisions = tuple(_decision(value) for value in decisions)
+        rendered_decisions = tuple(_decision(value) for value in decisions)
         components = tuple(
             _component(value.qualified_id, value.observation_state) for value in analysis.components
         )
@@ -131,7 +131,7 @@ class OverlaySceneBuilder:
             resolved_transform,
             persons,
             beds,
-            scene_decisions,
+            rendered_decisions,
             components,
             labels,
         )

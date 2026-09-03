@@ -150,7 +150,7 @@ other (import-linter keeps both directions forbidden). They still meet at two
 runtime seams -- the ml-api proxies calling the worker's live-view server on
 `ml-worker:8090` (stream, snapshot, pose overlay, bed-zone recognize, RTSP
 probe, clip-deletion preflight/command), and the `clips/<clip_id>/manifest.json`
-and `scene-index.json` sidecars the worker writes and ml-api reads back.
+the worker writes and ml-api reads back.
 
 The rule for both: **each side owns its own definition of the interface, and
 a test -- not a shared module -- catches drift.** The provider owns the schema
@@ -162,15 +162,13 @@ not an edge-internal interface package, so neither seam is defined there.
 | --- | --- | --- |
 | `:8090` HTTP | `worker/pipeline/output/live_view_api.py` -- route matchers, relay-token header, MJPEG media type, request/response bodies | `backend/app/features/cameras/streams_router.py`, `bed_zone_router.py`, `router.py` (probe), `backend/app/features/clips/deletion_control.py` -- path builders and response parsers |
 | `manifest.json` | `worker/pipeline/output/evidence/manifest_models.py` + `clip_manifest_payload.py` -- the fields the writer emits | `backend/app/features/clips/manifest.py` (lenient serving parser), `catalog.py` `_MANIFEST_FIELDS` (strict migration reader) |
-| `scene-index.json` | `worker/pipeline/output/evidence/scene_index.py` -- canonical compact PTS-key scene records and manifest claim | `backend/app/features/clips/scene.py` -- bounded sidecar reader and `/clips/{id}/scene` projection; frontend disables overlays for a newer schema |
 
 `tests/test_backend_worker_runtime_contracts.py` is the drift guard and the
 one sanctioned place that imports both packages: it publishes a manifest with
 the worker writer and parses it with both backend readers, asserts every path
 the backend builds is matched by the worker's route and by no other, and
 round-trips each worker response body (probe, pose overlay, bed zone) through
-the backend parser. The scene-index contract test also verifies the manifest claim
-and reader schema drift. A field either side adds must pass there before it ships.
+the backend parser. A field either side adds must pass there before it ships.
 
 ## Raw-image vs numeric fan-out
 
@@ -583,8 +581,9 @@ worker process as a bounded in-memory writer. There is no backend analysis-trace
 HTTP or SQLite warehouse.
 
 The authenticated clip artifact projection exposes clean video plus an optional
-snapshot. There is no analysis or overlay-encoded artifact view, and no overlay
-fallback to clean playback.
+snapshot. There is no persisted analysis or overlay artifact view, and no
+overlay fallback to clean playback. Snapshot JPEG derivatives may contain
+burned overlay pixels; primary clip bytes never do.
 
 **Encoder-lifecycle work is risk reduction, not a GPU fix.** The per-camera
 encoder session, segment ring, and their instrumentation reduce the window in

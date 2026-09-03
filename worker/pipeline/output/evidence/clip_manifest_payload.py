@@ -26,6 +26,7 @@ def manifest_payload(
         {
             "event_ref": str(metadata.event_refs[0]),
             "started_at": _utc_iso(metadata.started_at),
+            "detected_at": _utc_iso(metadata.detected_at),
             "duration_s": metadata.duration_s,
             "encoder": metadata.encoder,
             "path": path,
@@ -40,9 +41,6 @@ def manifest_payload(
         "domain": metadata.domain,
         "source_media": metadata.source_media,
         "source_error_reason": metadata.source_error_reason,
-        "scene_index": (
-            None if metadata.scene_index is None else metadata.scene_index.model_dump(by_alias=True)
-        ),
     }
     payload.update({key: value for key, value in optional.items() if value is not None})
     if metadata.truncation_reasons:

@@ -244,6 +244,8 @@ export type Clip = {
   camera_label: string;
   event_type: string;
   created_at: string | null;
+  detected_at: string | null;
+  truncation_reasons: string[];
   video_path: string;
   video_available: boolean;
   thumbnail_available: boolean;
@@ -256,40 +258,6 @@ export type Clip = {
   duration_s?: number | null;
   /** Clip file size in bytes. Same optional/omitted-on-old-backend contract as duration_s — never fabricate a size for display. */
   size_bytes?: number | null;
-  scene_available: boolean;
-  scene_frame_count: number | null;
-};
-
-export type ClipSceneFrame = {
-  p: number;
-  q: number;
-  sd: boolean;
-  t: number;
-  bd: { b: [number, number, number, number]; c: number; i: number; pg: [number, number][]; pv: string; sm: string; ct: unknown[] }[];
-  dc: unknown[];
-  lb: { x: number; y: number; t: string; c: [number, number, number]; z: number }[];
-  ps: { b: [number, number, number, number]; c: number; i: number; tr: number | null; tr_r?: string; k?: [number, number | null, number | null, number][] }[];
-};
-
-export type ClipScene = {
-  camera_id: string;
-  clip_id: string;
-  components: { id: string; sm: string }[];
-  coordinate_space: 'source-pixels';
-  decision_provenance: unknown[];
-  detail_shed_frame_count: number;
-  frame_count: number;
-  frames: ClipSceneFrame[];
-  scene_index_schema_version: number;
-  scene_schema_version: number;
-  source_dimensions: [number, number];
-  stream_identity: { generation: number; stream_epoch: number; worker_boot_id: string };
-  style: {
-    palette: Record<'bed' | 'danger' | 'neutral' | 'person' | 'pose' | 'pose_dot', [number, number, number]>;
-    skeleton: { edges: [number, number][] };
-    z_order: { bed: number; decision: number; person: number };
-  };
-  time_origin: { event_pts_sec: number; media_origin_pts_sec: number; requested_end_pts_sec: number; requested_start_pts_sec: number };
 };
 
 export type HeartbeatRelayErrorClass = 'auth' | 'timeout' | 'unreachable';
@@ -408,14 +376,6 @@ export type DetectionPolicyCatalog = {
   modules: Array<{ qualified_id: string; policy_qualified_id: string; units: Record<string, string> }>;
   effective: { defaults: Record<string, EffectiveDetectionPolicy>; cameras: Record<string, Record<string, EffectiveDetectionPolicy>> };
   activations: Array<{ module_id: string; module_version: number; camera_id: string | null; active_revision_id: number | null; previous_revision_id: number | null; activation_generation: number; status: 'pending' | 'applied' | 'failed'; refusal_reason: string | null }>;
-};
-
-/** GET /clips/storage — usage + current selection under the CLIP_STORE_DIR mount root. */
-export type IncidentReview = { version: number; disposition: 'TRUE_POSITIVE' | 'FALSE_POSITIVE'; reviewed_at: string; notes: string | null };
-export type Incident = { incident_id: string; edge_event_id: string; camera_id: string; event_type: string; detected_at: string; lifecycle_state: string; revision: number; failure_reason: string | null; runtime_manifest_sha256: string | null; decision_trace_id: string | null; module_qualified_id: string | null; policy_qualified_id: string | null; primary_clip_id: string | null; primary_artifact_state: string | null; snapshot_artifact_state: string | null; event_delivery_state: string; clip_publish_state: string | null; retention_state: string | null; review: IncidentReview | null };
-export type IncidentListPage = {
-  incidents: Incident[];
-  pagination: { limit: number; next_cursor: string | null; has_more: boolean };
 };
 
 /** `GET /clips/{clip_id}/artifacts` clean-media state; the backend emits only these two values. */

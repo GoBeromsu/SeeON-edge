@@ -8,7 +8,6 @@ from dataclasses import dataclass
 from typing import final
 
 from worker.pipeline.output.evidence.packet_repository import PacketRingRepository
-from worker.pipeline.output.evidence.scene_repository import SceneRingRepository
 from worker.pipeline.output.live_view import LatestFrameStore
 from worker.runtime.deepstream.config import ChildConfig
 from worker.runtime.deepstream.errors import ChildFatalError
@@ -21,7 +20,6 @@ from worker.runtime.deepstream.supervisor import (
 @dataclass(frozen=True, slots=True)
 class NvidiaMediaResources:
     packet_repository: PacketRingRepository
-    scene_repository: SceneRingRepository
     preview_frames: LatestFrameStore
     fatal_exit: Callable[[int], None]
 
@@ -35,7 +33,6 @@ class NvidiaMediaPlane:
             config,
             SharedSupervisorResources(
                 resources.packet_repository,
-                resources.scene_repository,
                 resources.preview_frames,
             ),
         )

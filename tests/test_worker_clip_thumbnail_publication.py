@@ -50,6 +50,7 @@ def _metadata() -> ClipPublicationMetadata:
         clip_end_at=START + timedelta(seconds=10),
         finalized_at=START + timedelta(seconds=11),
         started_at=START,
+        detected_at=START + timedelta(seconds=30),
         duration_s=10.0,
         encoder="libx264",
     )
@@ -192,6 +193,7 @@ def test_expected_thumbnail_failures_publish_ready_without_log_injection(
             started_at=metadata.started_at,
             duration_s=metadata.duration_s,
             encoder=metadata.encoder,
+            detected_at=metadata.detected_at,
         )
 
         published = ClipPublisher(

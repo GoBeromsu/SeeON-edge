@@ -25,8 +25,8 @@ class ClipManifestResponse(BaseModel):
     finalized: bool
     size_bytes: int | None = Field(default=None, ge=0)
     thumbnail_available: bool = False
-    scene_available: bool = False
-    scene_frame_count: int | None = Field(default=None, ge=0)
+    detected_at: str | None = Field(default=None, min_length=1)
+    truncation_reasons: list[str] = Field(default_factory=list)
 
 
 class ClipsPaginationResponse(BaseModel):

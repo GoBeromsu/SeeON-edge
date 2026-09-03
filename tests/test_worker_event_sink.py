@@ -49,7 +49,7 @@ class _RecordingStager:
 @dataclass(slots=True)
 class _RecordingRecorder:
     clip_id: str | None
-    calls: list[tuple[str, BusinessEvent, bool]] = field(default_factory=list)
+    calls: list[tuple[str, BusinessEvent, bool, datetime | None]] = field(default_factory=list)
 
     def on_event(
         self,
@@ -57,8 +57,9 @@ class _RecordingRecorder:
         event: BusinessEvent,
         *,
         allow_new_clip: bool = True,
+        detected_at: datetime | None = None,
     ) -> str | None:
-        self.calls.append((trigger_packet.camera_id, event, allow_new_clip))
+        self.calls.append((trigger_packet.camera_id, event, allow_new_clip, detected_at))
         return self.clip_id
 
 
@@ -135,7 +136,9 @@ def test_event_sink_stages_then_binds_the_admitted_business_event() -> None:
             },
         }
     ]
-    assert recorder.calls == [("camera-1", _event(), True)]
+    assert recorder.calls == [
+        ("camera-1", _event(), True, datetime(2026, 7, 31, 12, 0, tzinfo=UTC))
+    ]
     assert stager.completions == [("event-123", "clip-123")]
     assert isinstance(sink, EventSink)
 

@@ -6,7 +6,6 @@ import { ClipGrid } from '@/features/events/ClipGrid';
 import { ClipPlaybackModal } from '@/features/events/ClipPlaybackModal';
 import { EventTypeFilterChips } from '@/features/events/EventTypeFilterChips';
 import { EventsPager } from '@/features/events/EventsPager';
-import { IncidentList } from '@/features/events/IncidentList';
 import { toEventFacet } from '@/shared/api/clipEventFacet';
 import { resolveCameraLabel } from '@/features/events/resolveCameraLabel';
 import { useClipMetadata } from '@/features/events/useClipMetadata';
@@ -144,8 +143,6 @@ export function EventsPage(): JSX.Element {
           />
         ) : null}
       </div>
-
-      <IncidentList />
 
       <ClipPlaybackModal
         clip={activeClip}

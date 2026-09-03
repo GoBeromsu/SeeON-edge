@@ -58,6 +58,7 @@ def _metadata() -> ClipPublicationMetadata:
         clip_end_at=START + timedelta(seconds=1),
         finalized_at=START + timedelta(seconds=2),
         started_at=START,
+        detected_at=START + timedelta(seconds=30),
         duration_s=1.0,
         encoder="libx264",
         # The real pipeline always sets this (BusinessEvent.domain is required);

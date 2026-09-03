@@ -7,27 +7,17 @@ import threading
 import time
 from collections import deque
 from dataclasses import dataclass
-from fractions import Fraction
 from typing import Protocol, final, runtime_checkable
 
-from contracts.observation import BoundingBox, FrameObservation
-from worker.interfaces.scene_sink import SceneSink
+from contracts.observation import BoundingBox
 from worker.native.deepstream.control import ChildControlError, DeepStreamControlClient
 from worker.native.deepstream.ipc import MetadataFrame
 from worker.native.deepstream.metadata import AcceptanceToken, LatestMetadataSlot, SourceBinding
 from worker.pipeline.decision import EventAggregator
-from worker.pipeline.output.evidence.scene_wire import encode_scene_record
 from worker.pipeline.output.evidence_attacher import AlertEvidenceAttacher
-from worker.pipeline.output.overlay_scene import OverlaySceneBuilder
-from worker.pipeline.output.scene_decisions import SceneDecisionProvider
 from worker.pipeline.perception import SceneState, build_decision_input, build_frame_observation
 from worker.runtime.deepstream.canary_telemetry import NativeCanaryTelemetry
 from worker.types import BusinessEvent, ChannelState, NativeEvidenceTrigger
-from worker.types.overlay_scene import (
-    ObservationSemantics,
-    SceneFrameIdentity,
-    SceneValue,
-)
 
 LOGGER = logging.getLogger(__name__)
 _FPS_WINDOW_SEC = 10.0
@@ -55,8 +45,6 @@ class NativePolicyContext:
     diagnostics: NativeDiagnostics
     bed_interval: int
     canary_telemetry: NativeCanaryTelemetry | None = None
-    scene_sink: SceneSink | None = None
-    scene_decisions: SceneDecisionProvider | None = None
 
 
 @final
@@ -74,14 +62,10 @@ class NativePolicyPump:
         self._diagnostics = context.diagnostics
         self._bed_interval = context.bed_interval
         self._canary_telemetry = context.canary_telemetry
-        self._scene_sink = context.scene_sink
-        self._scene_decisions = context.scene_decisions
         self._stop = threading.Event()
         self._fps: deque[float] = deque()
         self.processed_count = 0
         self.failure_count = 0
-        self.scene_append_failures = 0
-        self.scene_pts_missing = 0
 
     @property
     def camera_id(self) -> str:
@@ -203,7 +187,6 @@ class NativePolicyPump:
             track_ids=resolved_track_ids,
         )
         events = self._decision.update(decision_input)
-        self._append_scene(metadata, observation)
         trigger = NativeEvidenceTrigger(
             self.camera_id,
             frame.identity.worker_boot_id,
@@ -230,52 +213,5 @@ class NativePolicyPump:
                 self.camera_id,
                 None if elapsed <= 0 else (len(self._fps) - 1) / elapsed,
             )
-
-    def _append_scene(self, metadata: MetadataFrame, observation: FrameObservation) -> None:
-        sink = self._scene_sink
-        source_pts = metadata.frame.identity.source_pts
-        if sink is None:
-            return
-        if source_pts is None:
-            self.scene_pts_missing += 1
-            return
-        try:
-            frame = metadata.frame
-            scene = OverlaySceneBuilder().from_observation(
-                identity=SceneFrameIdentity(
-                    frame.identity.worker_boot_id,
-                    self.camera_id,
-                    frame.identity.stream_epoch,
-                    frame.identity.seq,
-                    SceneValue(source_pts / 1_000_000_000, ObservationSemantics.PRESENT),
-                    SceneValue(
-                        metadata.source_time_ns / 1_000_000_000,
-                        ObservationSemantics.PRESENT,
-                    ),
-                    "not-recorded",
-                ),
-                observation=observation,
-                source_width=metadata.source_width,
-                source_height=metadata.source_height,
-                decisions=self._current_scene_decisions(),
-            )
-            _ = sink.append(
-                encode_scene_record(
-                    scene,
-                    worker_boot_id=frame.identity.worker_boot_id,
-                    camera_id=self.camera_id,
-                    stream_epoch=frame.identity.stream_epoch,
-                    generation=metadata.source_generation,
-                    source_pts_sec=Fraction(source_pts, 1_000_000_000),
-                    seq=frame.identity.seq,
-                )
-            )
-        except Exception:  # noqa: BLE001 - scene sidecar failure must not stop detection
-            self.scene_append_failures += 1
-            LOGGER.warning("native scene append failed: camera_id=%s", self.camera_id)
-
-    def _current_scene_decisions(self):
-        return () if self._scene_decisions is None else self._scene_decisions.current_decisions()
-
 
 __all__ = ["NativeEventSink", "NativePolicyContext", "NativePolicyPump"]

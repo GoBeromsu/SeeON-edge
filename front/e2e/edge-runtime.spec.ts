@@ -316,13 +316,9 @@ test('authenticated operator can inspect qualified policy, review evidence, and 
 
   await page.goto('/?page=events');
   await expect(page.getByRole('heading', { name: '이벤트' })).toBeVisible();
-  await expect(page.getByText('중앙 인시던트')).toBeVisible();
-  await page.getByRole('button', { name: /낙상/ }).last().click();
-  await expect(page.getByTestId('incident-artifact-states')).toHaveText('AVAILABLE / AVAILABLE');
-  await page.getByRole('button', { name: '실제 알림으로 검토' }).click();
-  await expect.poll(() => backend.reviews.length).toBe(1);
-  expect(backend.reviews[0]).toMatchObject({ expected_version: 0, disposition: 'TRUE_POSITIVE' });
-  await page.getByRole('dialog').getByRole('button', { name: '닫기' }).click();
+  // The central incident review surface is retired (P0): the events page is the clip catalogue only.
+  await expect(page.getByText('중앙 인시던트')).toHaveCount(0);
+  await expect(page.getByTestId('incident-artifact-states')).toHaveCount(0);
 
   // Events surface plays the clean clip with native controls -- there is no annotated/analysis view.
   await page.getByRole('button', { name: /서울 301호.*낙상/ }).click();

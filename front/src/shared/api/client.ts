@@ -5,7 +5,6 @@ import {
   normalizeCameraResponse,
   normalizeCameraTestResult,
   normalizeClipsResponse,
-  normalizeClipScene,
   normalizeClipStorageBrowse,
   normalizeClipStorageInfo,
   normalizeConnectionTestResult,
@@ -25,7 +24,6 @@ import type {
   CameraTestResult,
   CleanArtifactState,
   Clip,
-  ClipScene,
   ClipArtifacts,
   ClipDeleteResult,
   ClipStorageBrowseResult,
@@ -41,7 +39,6 @@ import type {
   DetectionPolicyComparedPayload,
   DetectionPolicyDiff,
   DetectionPolicyRollbackInput,
-  Incident,
   OverlayMode,
   RuntimeSettings,
   RuntimeSettingsInput,
@@ -60,7 +57,6 @@ export type {
   CameraHeartbeat,
   CameraTestResult,
   Clip,
-  ClipScene,
   ClipDeleteResult,
   ClipDeleteStatus,
   ClipStorageBrowseEntry,
@@ -83,7 +79,6 @@ export type {
   DetectionPolicyRollbackInput,
   DetectionReason,
   DetectionState,
-  Incident,
   HeartbeatStatus,
   OverlayMode,
   RuntimeCameraDiagnostics,
@@ -104,7 +99,6 @@ export {
   getApiBase,
   getCameraSnapshotUrl,
   getCameraStreamUrl,
-  getClipSceneUrl,
 } from '@/shared/api/session';
 
 export async function loginDashboard(username: string, password: string): Promise<void> {
@@ -344,15 +338,6 @@ export async function rollbackDetectionPolicy(input: DetectionPolicyRollbackInpu
   await requestJson('/detection-policies/rollback', { method: 'POST', body: JSON.stringify(input) });
 }
 
-export async function fetchIncidents(signal?: AbortSignal): Promise<Incident[]> {
-  const response = await requestJson('/incidents', { signal }) as { incidents?: Incident[] };
-  return Array.isArray(response.incidents) ? response.incidents : [];
-}
-
-export async function reviewIncident(incidentId: string, input: { expected_version: number; disposition: 'TRUE_POSITIVE' | 'FALSE_POSITIVE'; notes: string | null }): Promise<Incident> {
-  return await requestJson(`/incident-reviews/${encodeURIComponent(incidentId)}`, { method: 'PUT', body: JSON.stringify(input) }) as Incident;
-}
-
 const CLEAN_ARTIFACT_STATES = new Set<CleanArtifactState>(['AVAILABLE', 'UNAVAILABLE']);
 const SNAPSHOT_ARTIFACT_STATES = new Set<NonNullable<ClipArtifacts['snapshot']>>([
   'PENDING', 'AVAILABLE', 'UNAVAILABLE', 'CORRUPT', 'PURGED',
@@ -384,10 +369,6 @@ function normalizeClipArtifacts(value: unknown): ClipArtifacts {
 
 export async function fetchClipArtifacts(clipId: string, signal?: AbortSignal): Promise<ClipArtifacts> {
   return normalizeClipArtifacts(await requestJson(`/clips/${encodeURIComponent(clipId)}/artifacts`, { signal }));
-}
-
-export async function fetchClipScene(clipId: string, signal?: AbortSignal): Promise<ClipScene | null> {
-  return normalizeClipScene(await requestJson(`/clips/${encodeURIComponent(clipId)}/scene`, { signal }));
 }
 
 const CLIP_DELETE_STATUSES = new Set<ClipDeleteResult['status']>([

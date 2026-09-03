@@ -15,12 +15,12 @@ function clip(id: string, eventType: string): Clip {
     camera_label: '301호',
     event_type: eventType,
     created_at: '2026-08-02T03:12:00Z',
+    detected_at: null,
+    truncation_reasons: [],
     video_path: `/api/v1/clips/${id}/video`,
     video_available: true,
     thumbnail_available: false,
     video_error: null,
-    scene_available: false,
-    scene_frame_count: null,
   };
 }
 

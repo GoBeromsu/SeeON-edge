@@ -51,6 +51,7 @@ def publication_metadata(
         clip_end_at=clip_end_at,
         finalized_at=finalized_at,
         started_at=active.started_at,
+        detected_at=active.detected_at,
         duration_s=duration_s,
         encoder=encoder_name,
         runtime_manifest_sha256=runtime_manifest_sha256_from_audit(active.event.audit),

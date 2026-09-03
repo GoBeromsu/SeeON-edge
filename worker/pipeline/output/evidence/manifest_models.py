@@ -14,7 +14,7 @@ from worker.pipeline.output.evidence.evidence_metadata import (
     validate_runtime_manifest_sha256,
 )
 from worker.pipeline.output.evidence.evidence_outbox_types import EvidenceReasonCode
-from worker.pipeline.output.evidence.manifest_media_models import SceneIndexFacts, SourceMediaFacts
+from worker.pipeline.output.evidence.manifest_media_models import SourceMediaFacts
 
 
 class TimeOriginFacts(BaseModel):
@@ -54,6 +54,7 @@ class _ManifestProvenance(BaseModel):
     domain: str | None = None
     decision_trace_id: str | None = None
     started_at: str | None = None
+    detected_at: str | None = None
     duration_s: float | None = None
     encoder: str | None = None
     path: str | None = None
@@ -62,7 +63,6 @@ class _ManifestProvenance(BaseModel):
     recovery_state: Literal["MEDIA_VERIFIED", "UNAVAILABLE"] | None = None
     source_media: SourceMediaFacts | None = None
     source_error_reason: str | None = None
-    scene_index: SceneIndexFacts | None = None
     truncation_reasons: tuple[str, ...] = ()
     time_origin: TimeOriginFacts | None = None
 
@@ -73,7 +73,7 @@ class _ManifestProvenance(BaseModel):
             _sha256(value, "decision_trace_id")
         return value
 
-    @field_validator("started_at")
+    @field_validator("started_at", "detected_at")
     @classmethod
     def _started_at(cls, value: str | None) -> str | None:
         return None if value is None else normalized_timestamp(value)
