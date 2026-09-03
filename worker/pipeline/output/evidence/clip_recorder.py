@@ -3,7 +3,7 @@ from __future__ import annotations
 import queue
 import threading
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import datetime
 from pathlib import Path
 from typing import final
 
@@ -217,13 +217,13 @@ class ClipRecorder:
         event: BusinessEvent,
         *,
         allow_new_clip: bool = True,
-        detected_at: datetime | None = None,
+        detected_at: datetime,
     ) -> str | None:
         return self._admission.accept_event(
             trigger_packet,
             event,
             allow_new_clip=allow_new_clip,
-            detected_at=datetime.now(UTC) if detected_at is None else detected_at,
+            detected_at=detected_at,
         )
 
     @property

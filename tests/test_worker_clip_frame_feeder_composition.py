@@ -22,6 +22,7 @@ from __future__ import annotations
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Literal, final
 
@@ -165,8 +166,9 @@ def _make_recording_clip_recorder_class(
             event: BusinessEvent,
             *,
             allow_new_clip: bool = True,
+        detected_at: datetime,
         ) -> str | None:
-            del trigger_packet, event, allow_new_clip
+            del trigger_packet, event, allow_new_clip, detected_at
             return None
 
         def preflight_clip_deletion(self, clip_id: str) -> None:

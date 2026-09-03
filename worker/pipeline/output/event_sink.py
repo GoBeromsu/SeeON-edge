@@ -88,6 +88,8 @@ class EvidenceEventSink:
         if event.bed_id is not None:
             evidence["bed_id"] = event.bed_id
         detected_at_value = self.now()
+        if detected_at_value.tzinfo is None or detected_at_value.utcoffset() is None:
+            raise ValueError("relay detected_at must be timezone-aware")
         detected_at = detected_at_value.isoformat().replace("+00:00", "Z")
         payload: WorkerEventPayload = {
             "edge_event_id": edge_event_id,

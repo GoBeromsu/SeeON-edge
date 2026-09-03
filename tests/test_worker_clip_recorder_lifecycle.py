@@ -4,6 +4,7 @@ import json
 import shutil
 import threading
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import NamedTuple
 
@@ -163,9 +164,9 @@ def test_recorder_coalesces_event_ids_and_preserves_reference_order(tmp_path: Pa
     packet = _packet(1, 1.0)
     try:
         assert recorder.on_frame(packet)
-        first = recorder.on_event(packet, _event("event-1"))
-        duplicate = recorder.on_event(packet, _event("event-1"))
-        second = recorder.on_event(packet, _event("event-2"))
+        first = recorder.on_event(packet, _event("event-1"), detected_at=datetime.now(UTC))
+        duplicate = recorder.on_event(packet, _event("event-1"), detected_at=datetime.now(UTC))
+        second = recorder.on_event(packet, _event("event-2"), detected_at=datetime.now(UTC))
         assert first is not None
         assert duplicate == first
         assert second == first
@@ -191,8 +192,8 @@ def test_event_admitted_before_finalization_stays_on_active_clip(tmp_path: Path)
     recorder.start()
     packet = _packet(1, 1.0)
     try:
-        first = recorder.on_event(packet, _event("event-1"))
-        second = recorder.on_event(packet, _event("event-2"))
+        first = recorder.on_event(packet, _event("event-1"), detected_at=datetime.now(UTC))
+        second = recorder.on_event(packet, _event("event-2"), detected_at=datetime.now(UTC))
         assert first is not None
         assert second == first
         assert recorder.on_frame(packet)
@@ -220,11 +221,15 @@ def test_event_admitted_after_finalization_starts_gets_fresh_clip_id(
     first_packet = _packet(1, 1.0)
     second_packet = _packet(2, 2.0)
     try:
-        first = recorder.on_event(first_packet, _event("event-1"))
+        first = recorder.on_event(
+            first_packet, _event("event-1"), detected_at=datetime.now(UTC)
+        )
         assert first is not None
         assert seal_started.wait(timeout=1.0)
 
-        second = recorder.on_event(second_packet, _event("event-2"))
+        second = recorder.on_event(
+            second_packet, _event("event-2"), detected_at=datetime.now(UTC)
+        )
 
         assert second is not None
         assert second != first
@@ -256,7 +261,7 @@ def test_stop_drains_full_queue_after_blocked_frame_write(tmp_path: Path) -> Non
     try:
         assert recorder.on_frame(packet)
         assert write_started.wait(timeout=1.0)
-        clip_id = recorder.on_event(packet, _event("event-1"))
+        clip_id = recorder.on_event(packet, _event("event-1"), detected_at=datetime.now(UTC))
         assert clip_id is not None
         recorder.stop(timeout=0.01)
         assert recorder._thread is not None and recorder._thread.is_alive()
@@ -280,11 +285,15 @@ def test_recorder_cleans_failed_reservation_before_retrying_event(tmp_path: Path
     first_packet = _packet(1, 1.0)
     second_packet = _packet(2, 2.0)
     try:
-        first = recorder.on_event(first_packet, _event("event-1"))
+        first = recorder.on_event(
+            first_packet, _event("event-1"), detected_at=datetime.now(UTC)
+        )
         assert first is not None
         assert recorder.flush()
         assert not (tmp_path / "clips" / ".staging" / first).exists()
-        second = recorder.on_event(second_packet, _event("event-2", 2.0))
+        second = recorder.on_event(
+            second_packet, _event("event-2", 2.0), detected_at=datetime.now(UTC)
+        )
         assert second is not None
         assert second != first
     finally:

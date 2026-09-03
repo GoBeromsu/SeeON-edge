@@ -433,7 +433,9 @@ def test_clip_recorder_finalizes_atomic_manifest_with_pre_and_post_window(
     )
     recorder.start()
     try:
-        clip_id = recorder.on_event(trigger, _event(EVENT_ONE, trigger.pts or 0.0))
+        clip_id = recorder.on_event(
+            trigger, _event(EVENT_ONE, trigger.pts or 0.0), detected_at=datetime.now(UTC)
+        )
         assert clip_id is not None
         assert recorder.flush()
     finally:
@@ -526,7 +528,9 @@ def test_clip_recorder_fsyncs_media_and_manifest_before_staging_cleanup(
     )
     recorder.start()
     try:
-        clip_id = recorder.on_event(trigger, _event(EVENT_THREE, trigger.pts or 0.0))
+        clip_id = recorder.on_event(
+            trigger, _event(EVENT_THREE, trigger.pts or 0.0), detected_at=datetime.now(UTC)
+        )
         assert clip_id is not None
         assert recorder.flush()
     finally:

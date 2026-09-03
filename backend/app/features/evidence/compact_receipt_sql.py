@@ -6,6 +6,7 @@ import hashlib
 import sqlite3
 from dataclasses import dataclass
 
+from backend.app.edge_db.configuration import utc_now
 from backend.app.features.clips.listing import effective_event_type
 from backend.app.features.clips.manifest import ClipManifest
 from backend.app.features.evidence.receipt_store import (
@@ -81,16 +82,18 @@ def commit_primary_artifact(
     incident_id: str,
     edge_event_id: str,
     projection: ClipProjection,
+    *,
+    timestamp: str | None = None,
 ) -> None:
+    timestamp = utc_now() if timestamp is None else timestamp
     clip_id = projection.receipt.artifact_id
     verified = projection.verified
     if not projection.manifest.video_available:
         _commit_primary_failure(
             connection,
             incident_id,
-            clip_id,
             projection.manifest.video_error or "PRIMARY_UNAVAILABLE",
-            projection.manifest.started_at,
+            timestamp,
         )
         return
     existing = connection.execute(
@@ -108,7 +111,7 @@ def commit_primary_artifact(
     if existing is not None:
         if tuple(existing) != expected:
             raise ArtifactReceiptConflictError("primary clip artifact conflicts")
-        _complete_incident(connection, incident_id, projection.manifest.started_at)
+        _complete_incident(connection, incident_id, timestamp)
         return
     owner = connection.execute(
         "SELECT incident_id FROM artifacts WHERE artifact_id = ?", (artifact_id,)
@@ -134,7 +137,16 @@ def commit_primary_artifact(
             projection.manifest.started_at,
         ),
     )
-    _complete_incident(connection, incident_id, projection.manifest.started_at)
+    _complete_incident(connection, incident_id, timestamp)
+
+
+def commit_unavailable_primary(
+    connection: sqlite3.Connection,
+    incident_id: str,
+    reason: str,
+    timestamp: str,
+) -> None:
+    _commit_primary_failure(connection, incident_id, reason, timestamp)
 
 
 def _primary_artifact_id(clip_id: str, edge_event_id: str) -> str:
@@ -157,7 +169,6 @@ def _complete_incident(connection: sqlite3.Connection, incident_id: str, timesta
 def _commit_primary_failure(
     connection: sqlite3.Connection,
     incident_id: str,
-    clip_id: str,
     reason: str,
     timestamp: str,
 ) -> None:
@@ -167,15 +178,15 @@ def _commit_primary_failure(
         "WHERE incident_id = ? AND kind = 'PRIMARY_CLIP'",
         (incident_id,),
     ).fetchone()
-    expected = (clip_id, "UNAVAILABLE", failure_reason)
+    expected = (None, "UNAVAILABLE", failure_reason)
     if existing is None:
         connection.execute(
             """
             INSERT INTO artifacts (
                 incident_id, kind, clip_id, state, reason, revision, created_at, updated_at
-            ) VALUES (?, 'PRIMARY_CLIP', ?, 'UNAVAILABLE', ?, 1, ?, ?)
+            ) VALUES (?, 'PRIMARY_CLIP', NULL, 'UNAVAILABLE', ?, 1, ?, ?)
             """,
-            (incident_id, clip_id, failure_reason, timestamp, timestamp),
+            (incident_id, failure_reason, timestamp, timestamp),
         )
     elif tuple(existing) != expected:
         raise ArtifactReceiptConflictError("primary clip artifact conflicts")
@@ -190,4 +201,9 @@ def _commit_primary_failure(
     )
 
 
-__all__ = ["ClipProjection", "commit_clip", "commit_primary_artifact"]
+__all__ = [
+    "ClipProjection",
+    "commit_clip",
+    "commit_primary_artifact",
+    "commit_unavailable_primary",
+]

@@ -6,6 +6,7 @@ import subprocess
 import time
 from collections.abc import Callable
 from dataclasses import replace
+from datetime import UTC, datetime
 from fractions import Fraction
 from pathlib import Path
 from typing import Any, NamedTuple
@@ -641,7 +642,9 @@ def _produce_real_event_clip(tmp_path: Path) -> _ProducedClip:
             observed: dict[int, SourcePacket] = {
                 packet.arrival_index: packet for packet in _video_packets(repository)
             }
-            clip_id = recorder.on_event(trigger, _evidence_event(trigger_pts))
+            clip_id = recorder.on_event(
+                trigger, _evidence_event(trigger_pts), detected_at=datetime.now(UTC)
+            )
             assert clip_id is not None
             assert recorder.flush(timeout=60.0)
             observed.update({packet.arrival_index: packet for packet in _video_packets(repository)})

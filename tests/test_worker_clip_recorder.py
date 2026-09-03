@@ -4,6 +4,7 @@ import json
 import shutil
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import NamedTuple
 
@@ -160,7 +161,7 @@ def test_recorder_publishes_event_and_notifies_after_manifest_exists(
     try:
         packet = _packet(1, 1.0)
         assert recorder.on_frame(packet)
-        clip_id = recorder.on_event(packet, _event("event-1"))
+        clip_id = recorder.on_event(packet, _event("event-1"), detected_at=datetime.now(UTC))
         packet.release()
         assert clip_id is not None
         assert recorder.flush()
@@ -178,7 +179,7 @@ def test_stop_drains_an_accepted_event_before_releasing_store_lock(tmp_path: Pat
     recorder.start()
 
     trigger = _packet(1, 1.0)
-    clip_id = recorder.on_event(trigger, _event("event-1"))
+    clip_id = recorder.on_event(trigger, _event("event-1"), detected_at=datetime.now(UTC))
     trigger.release()
     recorder.stop()
 

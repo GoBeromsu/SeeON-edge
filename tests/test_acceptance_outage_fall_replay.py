@@ -39,7 +39,7 @@ from worker.pipeline.output.evidence.evidence_stager import DurableEvidenceStage
 from worker.pipeline.output.evidence.snapshot_store import SnapshotStore
 from worker.pipeline.output.evidence_attacher import AlertEvidenceAttacher
 from worker.pipeline.perception import GreedyIouTracker, SceneState
-from worker.types import FallModelInput, FramePacket, ModuleResult
+from worker.types import BusinessEvent, FallModelInput, FramePacket, ModuleResult
 
 _EDGE_EVENT_ID = "00000000-0000-4000-8000-0000000000c1"
 _DETECTED_AT = "2026-08-22T00:00:00.000Z"
@@ -97,8 +97,15 @@ class _SingleFallResult:
 
 
 class _NoClipRecorder:
-    def on_event(self, trigger_packet: FramePacket, event: object, **_: object) -> None:
-        del trigger_packet, event
+    def on_event(
+        self,
+        trigger_packet: FramePacket,
+        event: BusinessEvent,
+        *,
+        allow_new_clip: bool = True,
+        detected_at: datetime,
+    ) -> None:
+        del trigger_packet, event, allow_new_clip, detected_at
 
 
 def _packet() -> FramePacket:

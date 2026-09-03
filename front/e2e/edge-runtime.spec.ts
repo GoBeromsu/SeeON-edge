@@ -36,14 +36,15 @@ const cameras = {
 /** Playable clean evidence: the events + operations surfaces must mount a real native <video>. */
 const clip = {
   clip_id: 'clip-1', camera_id: 'cam-1', event_ref: 'event-1', event_type: 'fall',
-  started_at: '2026-08-02T03:12:00Z', duration_s: 12, codec: 'h264', path: null,
+  started_at: '2026-08-02T03:11:30Z', detected_at: '2026-08-02T03:12:00Z',
+  duration_s: 12, codec: 'h264', path: null,
   video_available: true, thumbnail_available: false, video_error: null, finalized: true,
   size_bytes: 8_400_000,
 };
 
 /** Second clip shares clip-1's timestamp so the keyset page boundary can only use the clip-id tiebreak. */
 const equalTimestampClip = {
-  ...clip, clip_id: 'clip-0', event_ref: 'event-0', event_type: 'bed-exit', size_bytes: 4_200_000,
+  ...clip, clip_id: 'clip-0', event_ref: 'event-0', event_type: 'bed-exit', detected_at: undefined, size_bytes: 4_200_000,
 };
 
 const clipsByCursorDescending = [clip, equalTimestampClip];
@@ -137,8 +138,7 @@ const policy = {
   values: { threshold: 0.75 }, effective_policy_id: 'fall.v1:camera-override:8',
 };
 
-async function installOperatorBackend(page: Page): Promise<{ reviews: Array<Record<string, unknown>>; requests: Array<{ path: string; method: string; body: unknown; cursor: string | null }> }> {
-  const reviews: Array<Record<string, unknown>> = [];
+async function installOperatorBackend(page: Page): Promise<{ requests: Array<{ path: string; method: string; body: unknown; cursor: string | null }> }> {
   const requests: Array<{ path: string; method: string; body: unknown; cursor: string | null }> = [];
   let policyApplyAttempts = 0;
   await page.route('**/api/v1/**', async (route) => {
@@ -153,34 +153,18 @@ async function installOperatorBackend(page: Page): Promise<{ reviews: Array<Reco
 
     if (path.endsWith('/auth/session')) return json({});
     if (path.endsWith('/cameras')) return json(cameras);
+    if (path.endsWith('/cameras/topology')) return json({
+      registry_version: 7, dirty_registry_version: null, readiness_error: null, unmapped_camera_ids: [], floors: [],
+    });
+    if (path.endsWith('/connection/topology-preview')) return json({ preview: null });
     if (path.endsWith('/clips')) return json(clipsPage(url.searchParams.get('cursor')));
     if (path.endsWith('/artifacts')) {
       return json({ clip_id: path.split('/').at(-2), clean: 'AVAILABLE', snapshot: 'AVAILABLE' });
     }
     if (path.endsWith('/video')) return fulfillCleanMedia(route, request.headers().range);
-    if (path.endsWith('/incidents')) {
-      return json({ incidents: [{
-        incident_id: 'incident-1', edge_event_id: 'event-1', camera_id: 'cam-1', event_type: 'fall',
-        detected_at: '2026-08-02T03:12:00Z', lifecycle_state: 'COMPLETE', revision: 3,
-        failure_reason: null, runtime_manifest_sha256: 'a'.repeat(64), decision_trace_id: 'trace-한글',
-        module_qualified_id: 'fall.v1', policy_qualified_id: 'fall-policy.v1', primary_clip_id: 'clip-1',
-        primary_artifact_state: 'AVAILABLE', snapshot_artifact_state: 'AVAILABLE',
-        event_delivery_state: 'DELIVERED', clip_publish_state: 'PUBLISHED', retention_state: 'RETAINED', review: null,
-      }] });
-    }
-    if (path.endsWith('/incident-reviews/incident-1')) {
-      const body = request.postDataJSON() as Record<string, unknown>;
-      reviews.push(body);
-      return json({
-        incident_id: 'incident-1', edge_event_id: 'event-1', camera_id: 'cam-1', event_type: 'fall',
-        detected_at: '2026-08-02T03:12:00Z', lifecycle_state: 'COMPLETE', revision: 3,
-        failure_reason: null, runtime_manifest_sha256: 'a'.repeat(64), decision_trace_id: 'trace-한글',
-        module_qualified_id: 'fall.v1', policy_qualified_id: 'fall-policy.v1', primary_clip_id: 'clip-1',
-        primary_artifact_state: 'AVAILABLE', snapshot_artifact_state: 'AVAILABLE',
-        event_delivery_state: 'DELIVERED', clip_publish_state: 'PUBLISHED', retention_state: 'RETAINED',
-        review: { version: 1, disposition: body.disposition, reviewed_at: '2026-08-02T03:13:00Z', notes: null },
-      });
-    }
+    if (path.endsWith('/snapshot')) return json({});
+    if (path.endsWith('/streams/cam-1')) return json({});
+    if (path.endsWith('/streams/cam-1/pose')) return json({});
     if (path.endsWith('/detection-policies')) return json({
       activation_generation: 12,
       modules: [{ qualified_id: 'fall.v1', policy_qualified_id: 'fall-policy.v1', units: { threshold: 'score' } }],
@@ -208,9 +192,9 @@ async function installOperatorBackend(page: Page): Promise<{ reviews: Array<Reco
     if (path.endsWith('/runtime-settings')) return json({ clip_export_enabled: false, version: 0 });
     if (path.endsWith('/system')) return json({ backend: { configured: true, reachable: true, last_ok_at: null }, version: 'test' });
     if (path.endsWith('/clips/storage')) return json({ root: '/evidence', selected_path: '', total_bytes: 1, used_bytes: 0, used_pct: 0 });
-    return json({});
+    return route.abort('failed');
   });
-  return { reviews, requests };
+  return { requests };
 }
 
 type SetupBackend = { requests: Array<{ path: string; method: string; body: unknown }> };
@@ -309,7 +293,7 @@ test('three-step field setup keeps inputs local, exposes conflicts, and confirms
   expect(pageErrors).toEqual([]);
 });
 
-test('authenticated operator can inspect qualified policy, review evidence, and preserve Korean accessibility', async ({ page }) => {
+test('authenticated operator can inspect qualified policy, clean clip playback, and preserve Korean accessibility', async ({ page }) => {
   const consoleErrors = captureUnexpectedConsoleErrors(page);
   const pageErrors = capturePageErrors(page);
   const backend = await installOperatorBackend(page);
@@ -327,6 +311,10 @@ test('authenticated operator can inspect qualified policy, review evidence, and 
   await expect(eventsVideo).toHaveCount(1);
   await expect(eventsVideo).toHaveJSProperty('controls', true);
   await expect(eventsVideo).toHaveJSProperty('src', 'http://127.0.0.1:4173/api/v1/clips/clip-1/video');
+  const expectedDetectedAt = await page.evaluate(
+    () => new Date('2026-08-02T03:12:00Z').toLocaleString('ko-KR', { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }),
+  );
+  await expect(eventsDialog.locator('dt').filter({ hasText: '시간' }).locator('xpath=following-sibling::dd[1]')).toHaveText(expectedDetectedAt);
   // Real decode: HAVE_CURRENT_DATA or better, with the manifest duration read off the media itself.
   await expect.poll(() => eventsVideo.evaluate((video: HTMLVideoElement) => video.readyState)).toBeGreaterThanOrEqual(2);
   await expect.poll(() => eventsVideo.evaluate((video: HTMLVideoElement) => video.videoWidth)).toBe(320);
@@ -348,6 +336,13 @@ test('authenticated operator can inspect qualified policy, review evidence, and 
   const secondPageId = await page.locator('button[data-clip-id]').first().getAttribute('data-clip-id');
   expect(secondPageId).not.toBe(firstPageId);
   await expect(page.getByRole('button', { name: '다음 페이지' })).toBeDisabled();
+  await page.getByRole('button', { name: /서울 301호.*침대 이탈/ }).click();
+  const fallbackDialog = page.getByRole('dialog', { name: /침대 이탈/ });
+  const expectedCreatedAt = await page.evaluate(
+    () => new Date('2026-08-02T03:11:30Z').toLocaleString('ko-KR', { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }),
+  );
+  await expect(fallbackDialog.locator('dt').filter({ hasText: '시간' }).locator('xpath=following-sibling::dd[1]')).toHaveText(expectedCreatedAt);
+  await fallbackDialog.getByRole('button', { name: '닫기' }).click();
   await page.screenshot({ path: `${qaDirectory}/events-keyset-boundary.png`, fullPage: true });
   await page.getByRole('button', { name: '이전 페이지' }).click();
   await expect(page.locator(`button[data-clip-id="${firstPageId}"]`)).toHaveCount(1);
@@ -356,6 +351,7 @@ test('authenticated operator can inspect qualified policy, review evidence, and 
     .map((entry) => entry.cursor);
   expect(new Set(forwardCursors).size).toBe(forwardCursors.length);
   expect(backend.requests.filter((entry) => /\/analysis$|\/derivatives\/|\/label$|analysis-traces/.test(entry.path))).toEqual([]);
+  expect(backend.requests.filter((entry) => /\/clips\/[^/]+\/scene$/.test(entry.path))).toEqual([]);
 
   // Operations room history plays the same clean media with native controls and no delete surface.
   await page.getByRole('button', { name: '관제', exact: true }).click();

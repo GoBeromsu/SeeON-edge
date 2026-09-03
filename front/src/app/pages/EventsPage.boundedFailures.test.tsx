@@ -66,7 +66,6 @@ describe('EventsPage bounded failure states', () => {
     const fetchMock = vi.fn((input: RequestInfo | URL) => {
       const url = String(input);
       if (url.includes('/cameras')) return Promise.resolve(jsonResponse(cameraRegistry));
-      if (url.includes('/incidents')) return Promise.resolve(jsonResponse({ incidents: [] }));
       if (url.endsWith('/clips/clip-503/artifacts')) {
         return Promise.resolve(jsonResponse({ clip_id: 'clip-503', clean: 'UNAVAILABLE', snapshot: null }));
       }
@@ -97,7 +96,6 @@ describe('EventsPage bounded failure states', () => {
     const fetchMock = vi.fn((input: RequestInfo | URL) => {
       const url = String(input);
       if (url.includes('/cameras')) return Promise.resolve(jsonResponse(cameraRegistry));
-      if (url.includes('/incidents')) return Promise.resolve(jsonResponse({ incidents: [] }));
       if (url.endsWith('/artifacts')) {
         return Promise.resolve(jsonResponse({ clip_id: 'clip-nothumb', clean: 'AVAILABLE', snapshot: null }));
       }
@@ -129,7 +127,6 @@ describe('EventsPage bounded failure states', () => {
     const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       if (url.includes('/cameras')) return Promise.resolve(jsonResponse(cameraRegistry));
-      if (url.includes('/incidents')) return Promise.resolve(jsonResponse({ incidents: [] }));
       if (url.endsWith('/artifacts')) {
         return Promise.resolve(jsonResponse({ clip_id: 'clip-held', clean: 'AVAILABLE', snapshot: null }));
       }
@@ -171,7 +168,6 @@ describe('EventsPage bounded failure states', () => {
     const fetchMock = vi.fn((input: RequestInfo | URL) => {
       const url = String(input);
       if (url.includes('/cameras')) return Promise.resolve(jsonResponse(cameraRegistry));
-      if (url.includes('/incidents')) return Promise.resolve(jsonResponse({ incidents: [] }));
       const params = new URL(url, 'http://localhost').searchParams;
       return Promise.resolve(jsonResponse(keysetBody(clips, Number(params.get('limit')), params.get('cursor'))));
     });

@@ -19,13 +19,13 @@ from backend.app.features.clips.manifest import ClipManifest
 from backend.app.features.clips.store import ClipStore
 from backend.app.features.evidence.compact_receipt_sql import (
     ClipProjection,
-    _primary_artifact_id,
     commit_clip,
     commit_primary_artifact,
 )
 from backend.app.features.evidence.compact_receipts import (
     CompactArtifactReceiptStore,
     CompactReceiptHooks,
+    CompactReceiptMissingIncidentError,
 )
 from backend.app.features.evidence.receipt_store import (
     ArtifactReceipt,
@@ -218,6 +218,20 @@ def _client(tmp_path: Path, store: ArtifactReceiptStore) -> TestClient:
     settings = RuntimeSettingsStore(database)
     settings.set_clip_export_enabled(True)
     app.state.runtime_settings_store = settings
+    if isinstance(store, CompactArtifactReceiptStore):
+        RelayEvidenceProjection(store._database_path).project_event(  # noqa: SLF001
+            RelayEvent(
+                edge_event_id="event-1",
+                event_type="fall",
+                probability=0.8,
+                detected_at="2026-07-06T00:00:00Z",
+                camera_id="camera-1",
+                facility_id="facility-1",
+                resident_id=None,
+                evidence=None,
+                audit=None,
+            )
+        )
     return TestClient(app)
 
 
@@ -286,6 +300,10 @@ def test_compact_receipt_commits_clip_and_primary_artifact(tmp_path: Path) -> No
         assert connection.execute(
             "SELECT lifecycle_state FROM incidents WHERE edge_event_id='event-1'"
         ).fetchone() == ("COMPLETE",)
+        created_at, updated_at = connection.execute(
+            "SELECT created_at, updated_at FROM incidents WHERE edge_event_id='event-1'"
+        ).fetchone()
+        assert created_at <= updated_at
 
 
 def test_compact_receipt_completes_every_manifest_event_reference(tmp_path: Path) -> None:
@@ -326,15 +344,49 @@ def test_compact_receipt_completes_every_manifest_event_reference(tmp_path: Path
         ).fetchone() == (2,)
 
 
+def test_missing_manifest_incident_rolls_back_all_receipt_projection(tmp_path: Path) -> None:
+    data = b"verified video"
+    _media(tmp_path, data, event_refs=["event-1", "event-missing"])
+    database = tmp_path / "edge.sqlite3"
+    bootstrap_database(database)
+    RelayEvidenceProjection(database).project_event(
+        RelayEvent(
+            edge_event_id="event-1",
+            event_type="fall",
+            probability=0.8,
+            detected_at="2026-07-06T00:00:00Z",
+            camera_id="camera-1",
+            facility_id="facility-1",
+            resident_id=None,
+            evidence=None,
+            audit=None,
+        )
+    )
+
+    with pytest.raises(CompactReceiptMissingIncidentError, match="event-missing"):
+        CompactArtifactReceiptStore(database, tmp_path / "clip-store").commit(_receipt(data))
+    with sqlite3.connect(database) as connection:
+        assert connection.execute("SELECT count(*) FROM clips").fetchone() == (0,)
+        assert connection.execute("SELECT count(*) FROM artifacts").fetchone() == (0,)
+        assert connection.execute(
+            "SELECT lifecycle_state FROM incidents WHERE edge_event_id = 'event-1'"
+        ).fetchone() == ("OPEN",)
+
+
 def test_primary_artifact_id_accepts_maximum_legal_inputs() -> None:
     clip_id = "c" * 128
     edge_event_id = "e" * 128
 
-    artifact_id = _primary_artifact_id(clip_id, edge_event_id)
+    artifact_id = "primary:" + hashlib.sha256(
+        (clip_id + "\x1f" + edge_event_id).encode()
+    ).hexdigest()[:32]
 
     assert artifact_id.startswith("primary:")
     assert len(artifact_id) == 40
-    assert artifact_id == _primary_artifact_id(clip_id, edge_event_id)
+    assert artifact_id == (
+        "primary:"
+        + hashlib.sha256((clip_id + "\x1f" + edge_event_id).encode()).hexdigest()[:32]
+    )
 
 
 def test_compact_receipt_replay_keeps_one_stable_digest_artifact(tmp_path: Path) -> None:
@@ -363,7 +415,57 @@ def test_compact_receipt_replay_keeps_one_stable_digest_artifact(tmp_path: Path)
         rows = connection.execute(
             "SELECT artifact_id FROM artifacts WHERE kind = 'PRIMARY_CLIP'"
         ).fetchall()
-    assert rows == [(_primary_artifact_id("clip-1", "event-1"),)]
+    expected_id = "primary:" + hashlib.sha256(b"clip-1\x1fevent-1").hexdigest()[:32]
+    assert rows == [(expected_id,)]
+
+
+def test_public_receipt_rejects_digest_identity_collision_without_partial_state(
+    tmp_path: Path,
+) -> None:
+    data = b"verified video"
+    _media(tmp_path, data)
+    database = tmp_path / "edge.sqlite3"
+    bootstrap_database(database)
+    relay = RelayEvidenceProjection(database)
+    for event_id in ("event-1", "event-2"):
+        relay.project_event(
+            RelayEvent(
+                edge_event_id=event_id,
+                event_type="fall",
+                probability=0.8,
+                detected_at="2026-07-06T00:00:00Z",
+                camera_id="camera-1",
+                facility_id="facility-1",
+                resident_id=None,
+                evidence=None,
+                audit=None,
+            )
+        )
+    receipt = _receipt(data)
+    expected_id = "primary:" + hashlib.sha256(b"clip-1\x1fevent-1").hexdigest()[:32]
+    with sqlite3.connect(database) as connection:
+        commit_clip(connection, _projection(receipt))
+        connection.execute(
+            """
+            INSERT INTO artifacts (
+                incident_id, kind, artifact_id, clip_id, state, contained_relpath,
+                content_sha256, size_bytes, mime_type, codec, revision, created_at, updated_at
+            ) VALUES ('incident:event-2', 'PRIMARY_CLIP', ?, 'clip-1', 'AVAILABLE',
+                      'clips/clip-1/clip.mp4', ?, ?, 'video/mp4', 'h264', 1,
+                      '2026-07-06T00:00:00Z', '2026-07-06T00:00:00Z')
+            """,
+            (expected_id, receipt.sha256, receipt.size_bytes),
+        )
+
+    with pytest.raises(ArtifactReceiptConflictError, match="identity conflicts"):
+        CompactArtifactReceiptStore(database, tmp_path / "clip-store").commit(receipt)
+    with sqlite3.connect(database) as connection:
+        assert connection.execute(
+            "SELECT count(*) FROM artifacts WHERE incident_id = 'incident:event-1'"
+        ).fetchone() == (0,)
+        assert connection.execute(
+            "SELECT lifecycle_state FROM incidents WHERE incident_id = 'incident:event-1'"
+        ).fetchone() == ("OPEN",)
 
 
 def test_legacy_primary_artifact_replay_is_a_clean_noop(tmp_path: Path) -> None:

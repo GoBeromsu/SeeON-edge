@@ -270,6 +270,7 @@ def test_restart_reacquires_lock_and_preserves_pending_evidence(tmp_path: Path) 
                 now.timestamp(),
                 0.9,
             ),
+            detected_at=now,
         )
     finally:
         second.stop()

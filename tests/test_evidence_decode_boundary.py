@@ -30,6 +30,7 @@ from __future__ import annotations
 import json
 from collections import deque
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from fractions import Fraction
 from pathlib import Path
 from typing import Final, NamedTuple, final
@@ -539,7 +540,7 @@ def test_manifest_carries_the_truncation_reason_and_the_stream_copy_provenance(
             source_pts=source.pts[trigger_index],
             source_time_base=source.time_base,
         )
-        clip_id = recorder.on_event(trigger, _event())
+        clip_id = recorder.on_event(trigger, _event(), detected_at=datetime.now(UTC))
         assert clip_id is not None
         assert recorder.flush(timeout=20.0)
     finally:

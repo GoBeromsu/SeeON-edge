@@ -453,7 +453,7 @@ class _NullClipRecorder:
         event: BusinessEvent,
         *,
         allow_new_clip: bool = True,
-        detected_at: datetime | None = None,
+        detected_at: datetime,
     ) -> str | None:
         del trigger_packet, event, allow_new_clip, detected_at
         return None
@@ -482,7 +482,7 @@ class _CameraClipRecorderView:
         event: BusinessEvent,
         *,
         allow_new_clip: bool = True,
-        detected_at: datetime | None = None,
+        detected_at: datetime,
     ) -> str | None:
         if trigger_packet.camera_id != self.camera_id:
             raise ValueError("trigger packet camera does not match recorder view")

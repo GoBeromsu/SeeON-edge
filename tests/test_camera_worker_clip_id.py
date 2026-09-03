@@ -86,6 +86,7 @@ NOT asserted as passing behavior by any test here:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 
 import numpy as np
 
@@ -161,8 +162,12 @@ def test_null_clip_recorder_always_reports_no_bound_clip() -> None:
     # gets a bound clip id.
     packet = _packet()
     try:
-        assert recorder.on_event(packet, _event()) is None
-        assert recorder.on_event(packet, _event(), allow_new_clip=False) is None
+        detected_at = datetime(2026, 9, 3, tzinfo=UTC)
+        assert recorder.on_event(packet, _event(), detected_at=detected_at) is None
+        assert (
+            recorder.on_event(packet, _event(), allow_new_clip=False, detected_at=detected_at)
+            is None
+        )
     finally:
         packet.release()
 
@@ -183,7 +188,9 @@ def test_default_clip_recorder_degrades_to_null_when_the_shared_recorder_never_s
     assert isinstance(recorder, worker_module._NullClipRecorder)  # noqa: SLF001
     packet = _packet()
     try:
-        assert recorder.on_event(packet, _event()) is None
+        assert recorder.on_event(
+            packet, _event(), detected_at=datetime(2026, 9, 3, tzinfo=UTC)
+        ) is None
     finally:
         packet.release()
 
@@ -196,7 +203,7 @@ def test_default_clip_recorder_view_forwards_the_trigger_packet() -> None:
     # ClipRecorder instance).
     @dataclass(slots=True)
     class _FakeSharedRecorder:
-        calls: list[tuple[FramePacket, BusinessEvent, bool]] = field(default_factory=list)
+        calls: list[tuple[FramePacket, BusinessEvent, bool, datetime]] = field(default_factory=list)
 
         def on_event(
             self,
@@ -204,10 +211,9 @@ def test_default_clip_recorder_view_forwards_the_trigger_packet() -> None:
             event: BusinessEvent,
             *,
             allow_new_clip: bool = True,
-            detected_at: object | None = None,
+            detected_at: datetime,
         ) -> str | None:
-            del detected_at
-            self.calls.append((trigger_packet, event, allow_new_clip))
+            self.calls.append((trigger_packet, event, allow_new_clip, detected_at))
             return "clip-xyz"
 
     runtime = _runtime("camera-a")
@@ -223,12 +229,13 @@ def test_default_clip_recorder_view_forwards_the_trigger_packet() -> None:
     packet = _packet()
     try:
         event = _event()
-        result = view.on_event(packet, event)
+        detected_at = datetime(2026, 9, 3, tzinfo=UTC)
+        result = view.on_event(packet, event, detected_at=detected_at)
 
         # Then: the view delegates the authoritative triggering packet without
         # reducing its boot/stream/frame identity back to a camera string.
         assert result == "clip-xyz"
-        assert fake_recorder.calls == [(packet, event, True)]
+        assert fake_recorder.calls == [(packet, event, True, detected_at)]
     finally:
         packet.release()
 

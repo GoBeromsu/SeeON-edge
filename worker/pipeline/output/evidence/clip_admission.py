@@ -86,6 +86,8 @@ class ClipAdmission:
         camera_id = trigger_packet.camera_id
         if event.camera_id != camera_id:
             raise ValueError("event camera does not match trigger packet")
+        if detected_at.tzinfo is None or detected_at.utcoffset() is None:
+            raise ValueError("clip detected_at must be timezone-aware")
         _ = runtime_manifest_sha256_from_audit(event.audit)
         event_ref = str(event.identity)
         with self._lock:

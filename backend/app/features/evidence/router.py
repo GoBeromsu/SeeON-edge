@@ -291,6 +291,26 @@ def export_clip(
         )
     if isinstance(result, DeliveryFailure):
         _raise_failure(result)
+    if isinstance(payload, UnavailableClipPayload):
+        receipt_store = _receipt_store(request)
+        if isinstance(receipt_store, CompactArtifactReceiptStore):
+            try:
+                receipt_store.commit_unavailable(clip_id, payload.reason)
+            except ArtifactReceiptVerificationError as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="clip manifest unavailable",
+                ) from exc
+            except ArtifactReceiptConflictError as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="artifact receipt conflicts",
+                ) from exc
+            except (ArtifactReceiptPersistenceError, OSError, sqlite3.Error) as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="artifact receipt persistence unavailable",
+                ) from exc
     return ClipReceiptResponse(
         clip_id=result.clip_id,
         state=result.state,
