@@ -123,9 +123,7 @@ class _FakeBatchedPoseClient:
 
 def test_infer_batch_result_order_round_trips_camera_id_and_seq() -> None:
     client = _FakeBatchedPoseClient()
-    frames = tuple(
-        _packet(f"camera-{index}", seq=100 + index * 7) for index in range(1, 14)
-    )
+    frames = tuple(_packet(f"camera-{index}", seq=100 + index * 7) for index in range(1, 14))
 
     results = client.infer_batch("pose", frames)
 

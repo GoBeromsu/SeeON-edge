@@ -218,6 +218,9 @@ def _bed_exit_monitor() -> BedExitMonitor:
             night_window=NightWindow(start="21:00", end="05:00", tz="Asia/Seoul"),
         ),
         clock=lambda: datetime(2026, 7, 31, 22, 0, tzinfo=ZoneInfo("Asia/Seoul")),
+        boot_id="boot-1",
+        stream_epoch="0",
+        source_generation=0,
     )
 
 

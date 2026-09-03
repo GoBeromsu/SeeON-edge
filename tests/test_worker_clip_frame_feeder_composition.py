@@ -166,7 +166,7 @@ def _make_recording_clip_recorder_class(
             event: BusinessEvent,
             *,
             allow_new_clip: bool = True,
-        detected_at: datetime,
+            detected_at: datetime,
         ) -> str | None:
             del trigger_packet, event, allow_new_clip, detected_at
             return None

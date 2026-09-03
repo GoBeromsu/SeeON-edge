@@ -27,8 +27,11 @@ def _database_path() -> Path:
 
 def _event(action: AuditAction, target: str) -> AuditEvent:
     return AuditEvent(
-        occurred_at=utc_now(), actor_id="admin", action=action,
-        target_id=target, detail=empty_detail(action),
+        occurred_at=utc_now(),
+        actor_id="admin",
+        action=action,
+        target_id=target,
+        detail=empty_detail(action),
     )
 
 
@@ -79,9 +82,7 @@ def test_incremental_data_version_accounts_for_valid_tail_and_stays_bounded() ->
     # Then: the suffix accounts for the commit without OFFSET or an unbounded historical read.
     assert advanced.audit_id == appended.audit_id
     selects = [
-        statement.upper()
-        for statement in statements
-        if "FROM AUDIT_EVENTS" in statement.upper()
+        statement.upper() for statement in statements if "FROM AUDIT_EVENTS" in statement.upper()
     ]
     assert selects
     assert all("OFFSET" not in statement for statement in selects)
@@ -91,9 +92,7 @@ def test_incremental_data_version_accounts_for_valid_tail_and_stays_bounded() ->
 def test_rolling_keyset_cycle_detects_older_non_anchor_corruption() -> None:
     # Given: enough history that one rolling page cannot reach row 1201.
     audit = AuditStore(_database_path())
-    audit.append_batch(
-        tuple(_event(AuditAction.AUDIT_LIST, str(index)) for index in range(1_502))
-    )
+    audit.append_batch(tuple(_event(AuditAction.AUDIT_LIST, str(index)) for index in range(1_502)))
     checkpoint = audit.verify()
     with sqlite3.connect(_database_path()) as writer:
         original_schema_version = writer.execute("PRAGMA schema_version").fetchone()[0]
@@ -132,8 +131,12 @@ def test_detail_version_is_exact_uncoerced_json_integer() -> None:
     # Given/When/Then: only JSON int 1 is accepted, never bool/float/string/null.
     assert parse_detail_json(AuditAction.CLIP_LIST, '{"version":1}').json == '{"version":1}'
     for encoded in (
-        '{"version":true}', '{"version":false}', '{"version":1.0}',
-        '{"version":1.00}', '{"version":"1"}', '{"version":null}',
+        '{"version":true}',
+        '{"version":false}',
+        '{"version":1.0}',
+        '{"version":1.00}',
+        '{"version":"1"}',
+        '{"version":null}',
         '{"version":2}',
     ):
         with pytest.raises(AuditDetailError, match="version"):

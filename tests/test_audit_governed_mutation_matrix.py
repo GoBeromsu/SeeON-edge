@@ -21,9 +21,7 @@ from contracts.edge_provisioning_models import (
 class AuthorizerAuditDenyStore(AuditStore):
     """Exercise SQLite's real authorizer at the audit INSERT boundary."""
 
-    def _append(
-        self, connection: sqlite3.Connection, event: AuditEvent
-    ) -> AuditRecord:
+    def _append(self, connection: sqlite3.Connection, event: AuditEvent) -> AuditRecord:
         def authorize(
             action: int,
             arg1: str | None,
@@ -40,9 +38,7 @@ class AuthorizerAuditDenyStore(AuditStore):
 
 
 def _login(client: TestClient) -> None:
-    response = client.post(
-        "/api/v1/auth/session", json={"username": "admin", "password": "admin"}
-    )
+    response = client.post("/api/v1/auth/session", json={"username": "admin", "password": "admin"})
     assert response.status_code == 204
 
 

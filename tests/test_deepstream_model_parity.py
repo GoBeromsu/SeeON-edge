@@ -330,9 +330,7 @@ def test_comparator_reports_person_and_bed_mismatches() -> None:
     person_rows = np.asarray([[300.0, 152.0, 340.0, 232.0, 0.9, 0.0]], dtype=np.float32)
     reference = parity.parse_person_rows(person_rows, affine, confidence=0.25)
     assert parity.compare_person(reference, reference) == ()
-    empty = parity.parse_person_rows(
-        np.zeros((0, 6), dtype=np.float32), affine, confidence=0.25
-    )
+    empty = parity.parse_person_rows(np.zeros((0, 6), dtype=np.float32), affine, confidence=0.25)
     assert parity.compare_person(reference, empty)
     bed_rows = np.zeros((1, 38), dtype=np.float32)
     bed_rows[0, :6] = [300.0, 152.0, 340.0, 232.0, 0.9, 59.0]

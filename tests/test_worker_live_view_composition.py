@@ -324,9 +324,7 @@ def test_enabled_worker_binds_the_live_view_port_and_serves_its_cameras(
     # gained a matching "not started" line, so the enabled+bound path must
     # not be the one left silent.
     bound_records = [
-        record
-        for record in caplog.records
-        if "live view server bound" in record.message
+        record for record in caplog.records if "live view server bound" in record.message
     ]
     assert bound_records
     assert any("host=127.0.0.1" in record.getMessage() for record in bound_records)
@@ -559,7 +557,8 @@ def test_enabled_worker_gives_every_camera_a_live_bus_consumer(
                 is runtime._camera_debug_snapshots[pump.camera_id]  # noqa: SLF001
             )
     assert not any(
-        thread.is_alive() for thread in runtime._live_view_pump_threads  # noqa: SLF001
+        thread.is_alive()
+        for thread in runtime._live_view_pump_threads  # noqa: SLF001
     )
 
 
@@ -620,9 +619,7 @@ def _pump(
     assert packet is not None
     results = InferenceResultSlot()
     results.publish(
-        CoordinatedInference(
-            packet, ModuleResult("pose", pose_result((), ()), 0.0, "pose")
-        )
+        CoordinatedInference(packet, ModuleResult("pose", pose_result((), ()), 0.0, "pose"))
     )
     return CameraPipelinePump(
         "camera-a",

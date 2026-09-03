@@ -66,7 +66,7 @@ def _trace_from_oracle(
 
 
 def _trace_from_native(
-    frames: tuple[tuple[BoundingBox, ...] | None, ...]
+    frames: tuple[tuple[BoundingBox, ...] | None, ...],
 ) -> tuple[AssociationFrameTrace, ...]:
     strategy = build_active_association_strategy()
     traces: list[AssociationFrameTrace] = []

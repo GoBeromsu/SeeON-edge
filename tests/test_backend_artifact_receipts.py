@@ -638,9 +638,7 @@ def test_compact_receipt_failure_does_not_promote_existing_waiting_clip(
 
     # When: a same-size, wrong-hash receipt is rejected.
     with pytest.raises(ArtifactReceiptVerificationError):
-        CompactArtifactReceiptStore(database, tmp_path / "clip-store").commit(
-            _receipt(declared)
-        )
+        CompactArtifactReceiptStore(database, tmp_path / "clip-store").commit(_receipt(declared))
 
     # Then: publication remains WAITING and no PRIMARY_CLIP appears.
     with sqlite3.connect(database) as connection:
@@ -720,9 +718,7 @@ def test_real_route_rejects_media_swap_before_compact_commit(
                 raise AssertionError(unreachable)
         if media.exists():
             observed_inode = media.stat().st_ino
-        return original_commit(
-            compact_store, receipt, route_verified, after_write=after_write
-        )
+        return original_commit(compact_store, receipt, route_verified, after_write=after_write)
 
     monkeypatch.setattr(
         CompactArtifactReceiptStore,
@@ -864,9 +860,7 @@ def test_real_route_valid_compact_receipt_commits_and_closes_descriptor(
         ) -> ArtifactReceipt:
             nonlocal captured_handle
             captured_handle = route_verified.handle
-            return super().commit_verified(
-                receipt, route_verified, after_write=after_write
-            )
+            return super().commit_verified(receipt, route_verified, after_write=after_write)
 
     store = ObservedStore(
         database,
@@ -891,8 +885,7 @@ def test_real_route_valid_compact_receipt_commits_and_closes_descriptor(
     assert captured_handle is not None and captured_handle.closed
     with sqlite3.connect(database) as connection:
         stored = connection.execute(
-            "SELECT media_sha256,media_size_bytes,publish_state FROM clips "
-            "WHERE clip_id='clip-1'"
+            "SELECT media_sha256,media_size_bytes,publish_state FROM clips WHERE clip_id='clip-1'"
         ).fetchone()
     assert stored == (_receipt(data).sha256, media.stat().st_size, "PUBLISHED")
 

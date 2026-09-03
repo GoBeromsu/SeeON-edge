@@ -51,7 +51,11 @@ def test_registry_wires_v2_fall_and_bed_exit_deciders() -> None:
     )
     bed_exit = DOMAIN_REGISTRY["bed_exit"].factory(
         BedExitDomainDependencies(
-            config=BedExitConfig(camera_id="camera-1", facility_id="facility-1"), clock=_clock
+            config=BedExitConfig(camera_id="camera-1", facility_id="facility-1"),
+            clock=_clock,
+            boot_id="boot-1",
+            stream_epoch="1",
+            source_generation=0,
         )
     )
     assert isinstance(fall, FallV2DomainDecider)
@@ -63,7 +67,11 @@ def test_registry_wires_v2_fall_and_bed_exit_deciders() -> None:
 def test_bed_exit_debug_adapter_returns_snapshot() -> None:
     detector = DOMAIN_REGISTRY["bed_exit"].factory(
         BedExitDomainDependencies(
-            config=BedExitConfig(camera_id="camera-1", facility_id="facility-1"), clock=_clock
+            config=BedExitConfig(camera_id="camera-1", facility_id="facility-1"),
+            clock=_clock,
+            boot_id="boot-1",
+            stream_epoch="1",
+            source_generation=0,
         )
     )
     _ = detector.update(_empty_input())

@@ -92,9 +92,7 @@ def _centre_pixel_rgb(path: Path, tmp_path: Path) -> tuple[int, int, int]:
 
 
 def test_every_profile_encode_policy_is_an_accepted_encoder() -> None:
-    resolved = {
-        name: parse_encode_policy(spec.encode) for name, spec in PROFILE_REGISTRY.items()
-    }
+    resolved = {name: parse_encode_policy(spec.encode) for name, spec in PROFILE_REGISTRY.items()}
 
     assert resolved == {
         "cpu-host": "libx264",

@@ -81,13 +81,17 @@ def _input(person: BoundingBox, *, frame_index: int, live: tuple[int, ...] = (9,
 def test_fall_trace_records_v2_transition_confirmation() -> None:
     detector = _traceable_fall_v2(camera_id="camera-a", facility_id="facility-a")
 
-    events = detector.update(_input(BoundingBox(10, 10, 70, 90, 0.9), frame_index=1))
+    for frame_index in (1, 2):
+        assert detector.update(
+            _input(BoundingBox(10, 10, 70, 90, 0.9), frame_index=frame_index)
+        ) == ()
+    events = detector.update(_input(BoundingBox(10, 10, 70, 90, 0.9), frame_index=3))
 
     assert len(events) == 1
     trace = detector.last_trace_snapshots[0]
     assert trace.reason == "transition-confirmed"
-    assert trace.previous_state == "clear"
-    assert trace.current_state == "transition-confirmed"
+    assert trace.previous_state == "transition-candidate"
+    assert trace.current_state == "transition-candidate"
     assert trace.track_id == 9
     assert trace.values == {
         "fall_transition_probability": 0.8,
@@ -108,6 +112,9 @@ def test_bed_exit_trace_distinguishes_live_grace_from_stale_track_exit() -> None
             grace_frames=2,
         ),
         clock=lambda: datetime(2026, 8, 13, tzinfo=UTC),
+        boot_id="test-boot",
+        stream_epoch="test-epoch",
+        source_generation=0,
     )
     inside = BoundingBox(10, 10, 70, 90, 0.9)
     outside = BoundingBox(100, 10, 160, 90, 0.9)
@@ -183,12 +190,17 @@ def test_real_camera_pump_captures_before_emitting_the_admitted_event(
     tmp_path: Path,
 ) -> None:
     detector = _traceable_fall_v2(camera_id="camera-a", facility_id="facility-a")
-    decision_input = _input(BoundingBox(10, 10, 70, 90, 0.9), frame_index=1)
-    result = CompositeResult((), decision_input.observation, decision_input)
 
     class _Analytics:
+        def __init__(self) -> None:
+            self.frame_index = 0
+
         def process(self, _packet: FramePacket, **_kwargs: object) -> CompositeResult:
-            return result
+            self.frame_index += 1
+            decision_input = _input(
+                BoundingBox(10, 10, 70, 90, 0.9), frame_index=self.frame_index
+            )
+            return CompositeResult((), decision_input.observation, decision_input)
 
     class _Sink:
         def __init__(self) -> None:
@@ -217,9 +229,10 @@ def test_real_camera_pump_captures_before_emitting_the_admitted_event(
         trace_writer=writer,
     )
     try:
-        pump._pump_one(  # noqa: SLF001
-            _packet(), ModuleResult("pose", pose_result((), ()), 0.0, "pose")
-        )
+        for _ in range(3):
+            pump._pump_one(  # noqa: SLF001
+                _packet(), ModuleResult("pose", pose_result((), ()), 0.0, "pose")
+            )
     finally:
         writer.stop()
 
@@ -227,14 +240,20 @@ def test_real_camera_pump_captures_before_emitting_the_admitted_event(
     event = sink.events[0]
     assert hasattr(event, "audit") and event.audit is not None
     trace_id = event.audit["decision_trace_id"]
-    assert writer.recover_camera("camera-a").decisions[0].trace_id == trace_id
+    assert trace_id in {
+        decision.trace_id for decision in writer.recover_camera("camera-a").decisions
+    }
 
 
 def test_admitted_event_decision_basis_is_atomic_in_delivery_queue(
     tmp_path: Path,
 ) -> None:
     detector = _traceable_fall_v2(camera_id="camera-a", facility_id="facility-a")
-    decision_input = _input(BoundingBox(10, 10, 70, 90, 0.9), frame_index=1)
+    for frame_index in (1, 2):
+        assert detector.update(
+            _input(BoundingBox(10, 10, 70, 90, 0.9), frame_index=frame_index)
+        ) == ()
+    decision_input = _input(BoundingBox(10, 10, 70, 90, 0.9), frame_index=3)
     events = detector.update(decision_input)
     result = CompositeResult((), decision_input.observation, decision_input)
     writer = BoundedTraceWriter(tmp_path / "detail-cache", TraceRetentionPolicy.testing())

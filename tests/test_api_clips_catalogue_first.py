@@ -51,9 +51,7 @@ def _write_clip(
 
 def _client(app) -> TestClient:
     client = TestClient(app)
-    login = client.post(
-        "/api/v1/auth/session", json={"username": "admin", "password": "admin"}
-    )
+    login = client.post("/api/v1/auth/session", json={"username": "admin", "password": "admin"})
     assert login.status_code == 204
     return client
 
@@ -205,9 +203,7 @@ def test_changed_media_still_conflicts_and_deleted_clip_disappears(
         after_delete = client.get("/api/v1/clips", params={"limit": 10})
         assert after_delete.status_code == 200
         assert after_delete.json()["pagination"]["total"] == 3
-        assert "clip-00002" not in {
-            clip["clip_id"] for clip in after_delete.json()["clips"]
-        }
+        assert "clip-00002" not in {clip["clip_id"] for clip in after_delete.json()["clips"]}
     from backend.app.features.clips import router as router_module
 
     with sqlite3.connect(router_module.EDGE_DATABASE_PATH) as connection:

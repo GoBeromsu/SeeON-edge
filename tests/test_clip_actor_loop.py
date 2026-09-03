@@ -1,5 +1,3 @@
-
-
 def test_upkeep_runs_under_continuous_traffic_not_only_when_the_queue_drains() -> None:
     """The load-bearing case: 13 cameras never let the queue go quiet.
 
@@ -74,8 +72,7 @@ def test_upkeep_runs_under_continuous_traffic_not_only_when_the_queue_drains() -
         "queue.Empty branch cannot carry this, 13 cameras never let it fire"
     )
     assert not any(calls), (
-        "upkeep must not force a rotate; rotate()'s own interval guard is what "
-        "keeps this cheap"
+        "upkeep must not force a rotate; rotate()'s own interval guard is what keeps this cheap"
     )
     assert actor.expiries, (
         "a stalled camera's active clip could never wall-clock expire while "

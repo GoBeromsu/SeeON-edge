@@ -240,8 +240,7 @@ def test_duration_trim_stays_active_after_pts_restart_when_epoch_is_rolled() -> 
         assert ring.append(_packet(second, epoch=2, configuration=new, keyframe=True))
 
     assert [
-        (packet.epoch.stream_epoch, float(packet.presentation_time))
-        for packet in ring.snapshot()
+        (packet.epoch.stream_epoch, float(packet.presentation_time)) for packet in ring.snapshot()
     ] == [(2, 3.0), (2, 4.0), (2, 5.0)]
 
 

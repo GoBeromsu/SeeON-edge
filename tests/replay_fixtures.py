@@ -40,8 +40,6 @@ def valid_trace_payload() -> dict[str, object]:
     }
 
 
-
-
 def valid_trace_payload_with_children() -> dict[str, object]:
     """The same shape, populated with children.
 
@@ -57,9 +55,7 @@ def valid_trace_payload_with_children() -> dict[str, object]:
             "track_id": {"value": 7, "missing_reason": None},
             "box": [10.0, 20.0, 30.0, 40.0],
             "confidence": 0.91,
-            "keypoints": [
-                {"index": 0, "x": 1.0, "y": 2.0, "confidence": 0.8}
-            ],
+            "keypoints": [{"index": 0, "x": 1.0, "y": 2.0, "confidence": 0.8}],
         }
     ]
     return payload

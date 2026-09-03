@@ -299,9 +299,7 @@ def test_heartbeat_exception_is_nonfatal_and_camera_continues(
     serving = _FakeServingClient()
     loops = _LoopFactory(serving)
     exit_codes: list[int] = []
-    runtime = _runtime(
-        _config("camera-a"), serving, loops, tmp_path, hard_exit=exit_codes.append
-    )
+    runtime = _runtime(_config("camera-a"), serving, loops, tmp_path, hard_exit=exit_codes.append)
 
     runtime.run()
 
@@ -417,8 +415,11 @@ def test_camera_with_persisted_bed_zone_polygon_seeds_scene_state(
     # Issue #41: a persisted polygon is authoritative and never expires, so
     # scheduling the live bed-seg extractor on top of it would only pay its
     # cost for a result nothing ever reads.
+    # Bed segmentation never enters the per-frame schedule at all now: the
+    # persisted polygon is the only runtime bed truth, and a camera without one
+    # simply has no bed region until an operator recognizes and persists it.
     assert "bed" not in with_polygon.scheduler.task_intervals
-    assert "bed" in without_polygon.scheduler.task_intervals
+    assert "bed" not in without_polygon.scheduler.task_intervals
 
 
 def test_bed_exit_disabled_excludes_bed_from_intervals(
@@ -559,7 +560,10 @@ def test_default_box_source_schedules_pose_and_bed_without_person(
     runtime.run()
 
     intervals = runtime.cameras[0].scheduler.task_intervals
-    assert set(intervals) == {"pose", "bed"}
+    # Bed segmentation is provisioned for the on-demand recognize route but is
+    # never scheduled per frame: the persisted polygon is the only bed truth.
+    assert set(intervals) == {"pose"}
+    assert "bed" in [task for task, _runner in serving.created]
     assert "person" not in [task for task, _runner in serving.created]
 
 
@@ -568,7 +572,8 @@ def test_box_source_person_schedules_and_provisions_person(
     tmp_path: Path,
 ) -> None:
     """Issue #44: box_source="person" additionally schedules and provisions
-    the person extractor, on top of the domain-declared pose/bed set."""
+    the person extractor, on top of the domain-declared pose set (bed stays
+    provisioned but on-demand only)."""
     _stub_heartbeat_transport(monkeypatch)
     serving = _FakeServingClient()
     loops = _LoopFactory(serving)
@@ -592,7 +597,7 @@ def test_box_source_person_schedules_and_provisions_person(
     runtime.run()
 
     intervals = runtime.cameras[0].scheduler.task_intervals
-    assert set(intervals) == {"pose", "bed", "person"}
+    assert set(intervals) == {"pose", "person"}
     assert "person" in [task for task, _runner in serving.created]
 
 
@@ -617,7 +622,6 @@ def _runtime(
         clip_store_dir=state_dir / "clip-store",
         build_revision="a" * 40,
     )
-
 
 
 def _config(*camera_ids: str) -> WorkerConfig:
@@ -706,9 +710,7 @@ def test_runtime_manifest_is_applied_to_emitted_event_provenance(
     emitted = attacher.attach(
         BusinessEvent("fall", "fall.detected", "event-1", "camera-a", "facility-a", 1.0, 0.9),
         cast(FramePacket, None),  # no renderer reads the packet in this composition test
-        cast(
-            FrameObservation, None
-        ),  # no renderer reads the observation in this composition test
+        cast(FrameObservation, None),  # no renderer reads the observation in this composition test
     )
     assert emitted.audit is not None
     assert emitted.audit["runtime_manifest_sha256"] == manifest.sha256

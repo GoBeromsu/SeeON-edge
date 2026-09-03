@@ -67,9 +67,7 @@ def test_nvenc_capability_false_when_ffmpeg_query_exits_non_zero() -> None:
 
     capability = probe_nvenc_capability(runner=runner)
 
-    assert capability == NvencCapability(
-        False, "ffmpeg encoder probe failed with exit code 1"
-    )
+    assert capability == NvencCapability(False, "ffmpeg encoder probe failed with exit code 1")
 
 
 def test_nvenc_capability_false_when_ffmpeg_query_raises_unexpected_error() -> None:

@@ -76,12 +76,8 @@ def _post_queue_capacity(client: TestClient, queue: DeliveryQueue) -> dict[str, 
         )
         return (response.status_code, dict(response.headers), response.content)
 
-    transport = RelayRuntimeStatusTransport(
-        "http://relay.test", "relay-token", request=_request
-    )
-    sender = RuntimeStatusSender(
-        WorkerDiagnostics(), "facility-1", transport, delivery_queue=queue
-    )
+    transport = RelayRuntimeStatusTransport("http://relay.test", "relay-token", request=_request)
+    sender = RuntimeStatusSender(WorkerDiagnostics(), "facility-1", transport, delivery_queue=queue)
     assert sender.publish_once()
 
     body = client.get("/api/v1/status").json()
@@ -89,6 +85,7 @@ def _post_queue_capacity(client: TestClient, queue: DeliveryQueue) -> dict[str, 
     reported = facility["delivery_queue"]
     assert isinstance(reported, dict), "GET /api/v1/status did not report the queue"
     return reported
+
 
 #: Measured from the live deployment: 1143 events / 34.5 h / 13 cameras.
 OBSERVED_EVENTS_PER_CAMERA_HOUR = 2.55

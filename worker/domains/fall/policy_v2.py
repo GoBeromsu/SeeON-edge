@@ -1,4 +1,9 @@
-"""Pure temporal policy for the unregistered three-class fall candidate."""
+"""V2 fall scoring and proposal policy.
+
+V2 retains classifier votes, fallen/recovery streaks, and trace snapshots.
+It deliberately surrenders event emission, de-duplication, and identity
+minting to :mod:`worker.domains.episode`.
+"""
 
 from __future__ import annotations
 
@@ -7,6 +12,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 
 from shared.detection_policies import FallPolicyV2
+from worker.domains.episode import EpisodeAuthority, EpisodeProposal
 from worker.domains.fall.classifier_v2 import FallV2Probabilities
 from worker.domains.fall.pose_bbox56 import PoseBbox56Track, pose_bbox56_tracks
 from worker.pipeline.perception.pts_resample import PtsResampler, ResampledRow
@@ -22,16 +28,11 @@ class _TrackState:
     recovery_streak: int = 0
     fallen: bool = False
     initialized: bool = False
-    alert_event: BusinessEvent | None = None
-    alert_frame: int | None = None
-    transition_sequence: int | None = None
 
 
 def _trace_state(state: _TrackState | None) -> str:
     if state is None:
         return "unknown"
-    if state.alert_event is not None:
-        return "transition-confirmed"
     if state.fallen:
         return "fallen"
     if any(state.transition_votes):
@@ -69,7 +70,7 @@ class FallPolicyDeciderV2:
     policy: FallPolicyV2 = field(default_factory=FallPolicyV2)
     _states: dict[int, _TrackState] = field(default_factory=dict, init=False)
     _next_generations: dict[int, int] = field(default_factory=dict, init=False)
-    _next_transition_sequence: int = field(default=1, init=False)
+    _episodes: EpisodeAuthority = field(init=False)
     last_trace_snapshots: tuple[DecisionTraceSnapshot, ...] = field(default=(), init=False)
 
     def __post_init__(self) -> None:
@@ -80,6 +81,12 @@ class FallPolicyDeciderV2:
             or self.source_generation < 0
         ):
             raise ValueError("fall event identities must name a boot and source epoch")
+        self._episodes = EpisodeAuthority(
+            boot_id=self.boot_id,
+            stream_epoch=self.stream_epoch,
+            source_generation=self.source_generation,
+            fall_cooldown_frames=self.policy.cooldown_frames,
+        )
 
     def update(
         self,
@@ -126,17 +133,9 @@ class FallPolicyDeciderV2:
 
     def release_onset(self, event: object | None = None) -> None:
         """Reopen only the exact undelivered onset that this policy emitted."""
-        if not isinstance(event, BusinessEvent) or event.domain != "fall":
-            return
-        if event.camera_id != self.camera_id or event.facility_id != self.facility_id:
-            return
-        if event.person_id is None:
-            return
-        state = self._states.get(event.person_id)
-        if state is None or state.alert_event != event:
-            return
-        state.alert_event = None
-        state.alert_frame = None
+        # Admission failure is not a lifecycle transition.  The authority owns
+        # exact-once semantics and intentionally does not reopen an episode.
+        _ = event
 
     def generation_for(self, track_id: int) -> int | None:
         state = self._states.get(track_id)
@@ -162,6 +161,12 @@ class FallPolicyDeciderV2:
             if track_id in live_ids:
                 continue
             if frame_index - state.last_seen_frame >= self.policy.track_ttl_frames:
+                self._episodes.track_lost(
+                    camera_id=self.camera_id,
+                    frame_index=frame_index,
+                    time_sec=0.0,
+                    track_id=track_id,
+                )
                 del self._states[track_id]
 
     def _advance(
@@ -199,31 +204,33 @@ class FallPolicyDeciderV2:
             state.fallen_streak = 0
             state.transition_votes.clear()
 
-        if sum(state.transition_votes) < self.policy.transition_votes:
-            return None
-        if state.alert_event is not None:
-            return None
-        if (
-            state.alert_frame is not None
-            and frame_index - state.alert_frame < self.policy.cooldown_frames
-        ):
-            return None
-        event = BusinessEvent(
-            domain="fall",
-            event_type="fall",
-            identity=(
-                f"{self.boot_id}:{self.stream_epoch}:{track_id}:"
-                f"{self.source_generation}:{state.generation}:{self._sequence_for(state)}"
+        return next(
+            iter(
+                self._episodes.propose(
+                    EpisodeProposal(
+                        camera_id=self.camera_id,
+                        facility_id=self.facility_id,
+                        event_type="fall",
+                        track_id=track_id,
+                        bed_id=None,
+                        frame_index=frame_index,
+                        time_sec=time_sec,
+                        qualifying=transition,
+                        confirmed_recovery=recovering
+                        and state.recovery_streak >= self.policy.recovery_consecutive,
+                        probability=probability.fall_transition,
+                        domain="fall",
+                        generation=state.generation,
+                    )
+                )
             ),
-            camera_id=self.camera_id,
-            facility_id=self.facility_id,
-            time_sec=time_sec,
-            probability=probability.fall_transition,
-            person_id=track_id,
+            None,
         )
-        state.alert_event = event
-        state.alert_frame = frame_index
-        return event
+
+    @property
+    def track_id_switch_absorbed_total(self) -> int:
+        """Re-associations the episode authority absorbed instead of re-alerting."""
+        return self._episodes.track_id_switch_absorbed_total
 
     def _trace_snapshot(
         self,
@@ -259,16 +266,6 @@ class FallPolicyDeciderV2:
                 "transition_window": self.policy.transition_window,
             },
         )
-
-    def _sequence_for(self, state: _TrackState) -> int:
-        sequence = state.transition_sequence
-        if sequence is not None:
-            return sequence
-        sequence = self._next_transition_sequence
-        self._next_transition_sequence += 1
-        state.transition_sequence = sequence
-        return sequence
-
 
 @dataclass(slots=True)
 class FallV2DomainDecider:
@@ -324,6 +321,10 @@ class FallV2DomainDecider:
     @property
     def last_trace_snapshots(self) -> tuple[DecisionTraceSnapshot, ...]:
         return self.policy.last_trace_snapshots
+
+    @property
+    def track_id_switch_absorbed_total(self) -> int:
+        return self.policy.track_id_switch_absorbed_total
 
     def _resample(
         self,

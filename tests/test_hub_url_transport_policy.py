@@ -32,9 +32,7 @@ _CREDS = EnrollmentCredentials(
 
 
 @pytest.fixture(autouse=True)
-def production_hub_transport_contract(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def production_hub_transport_contract(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """HTTPS policy tests must not inherit the suite's insecure-HTTP opt-in."""
 
     monkeypatch.delenv(API_BACKEND_ALLOW_INSECURE_HTTP_ENV, raising=False)

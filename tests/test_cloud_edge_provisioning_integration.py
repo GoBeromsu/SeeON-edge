@@ -78,21 +78,15 @@ def test_wal_safe_restore_reenrolls_and_reconciles_server_revision() -> None:
     with sqlite3.connect(database) as connection:
         table_rows = cast(
             list[tuple[str]],
-            connection.execute(
-                "SELECT name FROM sqlite_master WHERE type = 'table'"
-            ).fetchall(),
+            connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall(),
         )
         tables = {row[0] for row in table_rows}
         assert "edge_topology_sync_state" in tables, (
             f"topology state missing from {database}: {sorted(tables)}"
         )
-        _ = connection.execute(
-            "CREATE TABLE IF NOT EXISTS task15_unrelated (value TEXT NOT NULL)"
-        )
+        _ = connection.execute("CREATE TABLE IF NOT EXISTS task15_unrelated (value TEXT NOT NULL)")
         _ = connection.execute("DELETE FROM task15_unrelated")
-        _ = connection.execute(
-            "INSERT INTO task15_unrelated(value) VALUES ('preserved')"
-        )
+        _ = connection.execute("INSERT INTO task15_unrelated(value) VALUES ('preserved')")
         state = cast(
             tuple[int] | None,
             connection.execute(
@@ -113,9 +107,7 @@ def test_wal_safe_restore_reenrolls_and_reconciles_server_revision() -> None:
     assert restored.facility_code is None
     assert restored.facility_token is None
     with sqlite3.connect(database) as connection:
-        assert connection.execute("SELECT value FROM task15_unrelated").fetchone() == (
-            "preserved",
-        )
+        assert connection.execute("SELECT value FROM task15_unrelated").fetchone() == ("preserved",)
     payload = {
         "facility_code": handoff.facilityCode,
         "facility_token": handoff.token,

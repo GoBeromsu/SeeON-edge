@@ -138,9 +138,7 @@ def test_two_cameras_keep_previewing_while_every_pose_forward_is_blocked() -> No
             )
         )
         live_pumps.append(
-            LiveViewPump(
-                camera_id, bus.live, subscriber, observations, poll_timeout_sec=0.02
-            )
+            LiveViewPump(camera_id, bus.live, subscriber, observations, poll_timeout_sec=0.02)
         )
 
     threads = [

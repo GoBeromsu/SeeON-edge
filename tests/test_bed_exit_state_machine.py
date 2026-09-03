@@ -181,6 +181,9 @@ def _monitor(
         ),
         clock=_clock_at() if clock is None else clock,
         temporal_profile=PROFILE,
+        boot_id="test-boot",
+        stream_epoch="test-epoch",
+        source_generation=0,
     )
 
 
@@ -396,9 +399,7 @@ def test_e7_track_id_reuse_must_re_serve_in_bed_dwell() -> None:
     assert _would_triggers(monitor) == (False,)
     assert _shadow_state(monitor) is BedExitState.ABSENT
 
-    first_return = monitor.update(
-        _input(frame_index=IN_BED_DWELL + 1, features=(IN_BED_FEATURES,))
-    )
+    first_return = monitor.update(_input(frame_index=IN_BED_DWELL + 1, features=(IN_BED_FEATURES,)))
     assert first_return == ()
     assert _shadow_state(monitor) is BedExitState.ABSENT
     assert monitor.last_shadow_decisions[0].would_trigger is False
@@ -479,9 +480,7 @@ def test_e11_degenerate_polygon_logs_once_across_100_calls(
             assert machine.observe(features) is None
             assert classify_posture(features) is None
     records = [
-        record
-        for record in caplog.records
-        if record.name == "worker.domains.bed_exit.geometry"
+        record for record in caplog.records if record.name == "worker.domains.bed_exit.geometry"
     ]
     assert len(records) == 1
     assert "falling back to AABB" in records[0].getMessage()
@@ -499,7 +498,6 @@ def test_e12_night_window_does_not_let_shadow_path_consume_latch() -> None:
     daytime = _drive(monitor, E1_EDGE_FEATURES, DEFAULT_DWELL, box=EDGE_BOX)
     daytime += _drive(monitor, OUT_FEATURES, OUT_DWELL, start=DEFAULT_DWELL, box=EDGE_BOX)
     assert daytime == []
-    assert monitor._latch.event_count == 0  # noqa: SLF001
     assert _shadow_state(monitor) is BedExitState.OUT_OF_BED
     assert monitor.last_shadow_trace_snapshots
 
@@ -578,9 +576,7 @@ def test_e16_bed_pose_features_are_plain_scalars_and_domains_have_no_numpy() -> 
     for item in fields(BedPoseFeatures):
         annotation = item.type
         names = str(annotation)
-        assert any(
-            candidate.__name__ in names for candidate in (int, float, bool)
-        ), names
+        assert any(candidate.__name__ in names for candidate in (int, float, bool)), names
         sample = IN_BED_FEATURES
         value = getattr(sample, item.name)
         assert type(value) in allowed or (item.name == "bed_id" and value is None)
@@ -614,9 +610,7 @@ def test_new_path_emits_zero_business_events_even_when_trigger_predicate_fires()
     )
     assert events == []
     assert all(snapshot.triggered is False for snapshot in monitor.last_trace_snapshots)
-    assert all(
-        snapshot.triggered is False for snapshot in monitor.last_shadow_trace_snapshots
-    )
+    assert all(snapshot.triggered is False for snapshot in monitor.last_shadow_trace_snapshots)
 
 
 def test_adversarial_todo6_mid_mattress_fixture_is_not_edge_sitting() -> None:

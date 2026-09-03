@@ -33,6 +33,9 @@ class _CountingMonitor(BedExitMonitor):
                 grace_frames=0,
             ),
             clock=lambda: datetime(2026, 7, 31, 12, tzinfo=UTC),
+            boot_id="boot-1",
+            stream_epoch="1",
+            source_generation=0,
         )
         self.update_count = 0
 

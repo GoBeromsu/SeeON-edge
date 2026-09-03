@@ -80,6 +80,9 @@ def _monitor(
             night_window=night_window,
         ),
         clock=clock,
+        boot_id="boot-bed-exit-schema",
+        stream_epoch="epoch-bed-exit-schema",
+        source_generation=0,
     )
 
 
@@ -253,77 +256,30 @@ def test_a_failing_shadow_evaluation_does_not_discard_the_bed_exit_event(
     )
 
 
-def test_an_unstaged_bed_exit_onset_can_be_reported_again() -> None:
-    """A bed exit whose envelope never persisted must not be lost.
-
-    Two pieces of owner state consume the onset. The latch records the
-    (person, bed) pair -- and clears itself on the next frame, which is what
-    misled an earlier investigation of mine into deleting this mechanism. The
-    one that actually matters is the bed assignment: the exit clears it, so a
-    later frame no longer counts the resident as having been in that bed and can
-    never re-derive the exit.
-    """
-    from worker.pipeline.decision.event_aggregator import EventAggregator
-    from worker.pipeline.decision.incident_manager import IncidentManager
-
+def test_bed_exit_rearms_only_after_confirmed_recovery() -> None:
+    """Repeated exits are suppressed until a contained recovery is confirmed."""
     fixed = datetime(2026, 1, 1, 13, 0, tzinfo=ZoneInfo("Asia/Seoul"))
     monitor = _monitor(clock=lambda: fixed, night_window=None, grace_frames=0)
-    aggregator = EventAggregator(
-        deciders=(monitor,), incidents=IncidentManager(cooldown_sec=300.0)
-    )
     bed = box(0, 0, 80, 100)
 
-    aggregator.update(
+    monitor.update(
         _input(person_boxes=(box(10, 10, 70, 90),), bed_boxes=(bed,), frame_index=0)
     )
-    exited = aggregator.update(
+    exited = monitor.update(
         _input(person_boxes=(box(90, 10, 150, 90),), bed_boxes=(bed,), frame_index=1)
     )
     assert len(exited) == 1, "the exit was never reported"
 
-    # The envelope failed to reach durable storage.
-    aggregator.release(exited[0])
-
-    repeated = aggregator.update(
+    repeated = monitor.update(
         _input(person_boxes=(box(90, 10, 150, 90),), bed_boxes=(bed,), frame_index=2)
     )
-
-    assert len(repeated) == 1, (
-        "the later frame reported nothing; a transient staging failure "
-        "destroyed the resident's bed exit"
+    recovered = monitor.update(
+        _input(person_boxes=(box(10, 10, 70, 90),), bed_boxes=(bed,), frame_index=3)
+    )
+    reexited = monitor.update(
+        _input(person_boxes=(box(90, 10, 150, 90),), bed_boxes=(bed,), frame_index=4)
     )
 
-
-def test_the_monitor_refuses_a_release_it_does_not_own() -> None:
-    """Fail closed on ownership, as the fall latch does."""
-    from worker.types import BusinessEvent
-
-    fixed = datetime(2026, 1, 1, 13, 0, tzinfo=ZoneInfo("Asia/Seoul"))
-    monitor = _monitor(clock=lambda: fixed, night_window=None, grace_frames=0)
-    bed = box(0, 0, 80, 100)
-    monitor.update(
-        _input(person_boxes=(box(10, 10, 70, 90),), bed_boxes=(bed,), frame_index=0)
-    )
-    monitor.update(
-        _input(person_boxes=(box(90, 10, 150, 90),), bed_boxes=(bed,), frame_index=1)
-    )
-    consumed = {key: value.bed_id for key, value in monitor._assignments.items()}  # noqa: SLF001
-
-    # Correct camera on purpose, so ONLY the domain check can refuse it.
-    monitor.release_onset(
-        BusinessEvent(
-            "fall", "x", "s", monitor._config.camera_id, "f", 1.0, 0.9,  # noqa: SLF001
-            person_id=0, bed_id=0,
-        )
-    )
-    # Correct domain, wrong camera.
-    monitor.release_onset(
-        BusinessEvent(
-            "bed_exit", "x", "s", "camera-OTHER", "f", 1.0, 0.9, person_id=0, bed_id=0
-        )
-    )
-    monitor.release_onset(None)
-
-    assert {
-        key: value.bed_id for key, value in monitor._assignments.items()  # noqa: SLF001
-    } == consumed, "the monitor acted on a release for an event it never produced"
+    assert repeated == recovered == ()
+    assert len(reexited) == 1
+    assert reexited[0].identity == "boot-bed-exit-schema:epoch-bed-exit-schema:0:0:0:2"

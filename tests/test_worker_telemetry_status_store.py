@@ -90,9 +90,7 @@ def test_ingest_reporter_preserves_source_and_processing_failure_categories() ->
     )
     status_after_processing = store.get_status("camera-1")
     reporter.mark_degraded("camera-1", category="rtsp_reconnecting")
-    reporter.emit(
-        IngestEvent("camera-1", "camera.offline", "rtsp_reconnecting", "retrying")
-    )
+    reporter.emit(IngestEvent("camera-1", "camera.offline", "rtsp_reconnecting", "retrying"))
 
     # Then
     assert status_after_processing is not None

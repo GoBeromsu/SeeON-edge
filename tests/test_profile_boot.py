@@ -91,9 +91,7 @@ def test_resolve_profile_unknown_raises() -> None:
 
 
 def test_nvidia_profile_verify_true() -> None:
-    context = resolve_boot_context(
-        {ML_WORKER_PROFILE_ENV: "nvidia"}, _deps("nvidia"), _decode_ok
-    )
+    context = resolve_boot_context({ML_WORKER_PROFILE_ENV: "nvidia"}, _deps("nvidia"), _decode_ok)
 
     assert context.device == "cuda"
     assert context.decode == "nvdec"
@@ -561,9 +559,7 @@ def test_nvidia_profile_fails_closed_on_negative_device_resident_probe() -> None
         )
     )
     with pytest.raises(ProfileVerifyError, match="no CUDA stream/event support"):
-        resolve_boot_context(
-            {ML_WORKER_PROFILE_ENV: "nvidia"}, deps, _decode_ok, _nvenc_ok
-        )
+        resolve_boot_context({ML_WORKER_PROFILE_ENV: "nvidia"}, deps, _decode_ok, _nvenc_ok)
 
 
 def test_nvidia_profile_boots_once_device_resident_probe_is_positive() -> None:
@@ -574,9 +570,7 @@ def test_nvidia_profile_boots_once_device_resident_probe_is_positive() -> None:
             )
         )
     )
-    context = resolve_boot_context(
-        {ML_WORKER_PROFILE_ENV: "nvidia"}, deps, _decode_ok, _nvenc_ok
-    )
+    context = resolve_boot_context({ML_WORKER_PROFILE_ENV: "nvidia"}, deps, _decode_ok, _nvenc_ok)
     assert context.canonical_profile == "nvidia"
     assert context.runtime_profile.device_resident_after_decode is True
     assert context.runtime_profile.concrete_stages_available is True
@@ -599,8 +593,6 @@ def test_igpu_profile_device_verify_false_still_reports_decode_gate() -> None:
         return _vaapi_ok(decode)
 
     with pytest.raises(ProfileVerifyError, match="intel-vaapi-host"):
-        resolve_boot_context(
-            {ML_WORKER_PROFILE_ENV: "igpu"}, _deps("igpu", ok=False), decode_probe
-        )
+        resolve_boot_context({ML_WORKER_PROFILE_ENV: "igpu"}, _deps("igpu", ok=False), decode_probe)
 
     assert decode_calls == ["vaapi"]

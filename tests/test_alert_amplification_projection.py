@@ -66,9 +66,7 @@ def _migrated(tmp_path: Path) -> Path:
 def _stage_and_deliver(database: Path, tmp_path: Path, edge_event_id: str = _EDGE_EVENT_ID) -> None:
     stager = _stager(tmp_path / "delivery-queue")
     stager.stage(_event(edge_event_id))
-    entry = next(
-        item for item in stager.queue.entries() if item["edge_event_id"] == edge_event_id
-    )
+    entry = next(item for item in stager.queue.entries() if item["edge_event_id"] == edge_event_id)
     payload = json.loads(base64.b64decode(str(entry["values_b64"])))
     with ServedFixture() as served:
         relay = relay_client(served.origin, tmp_path, database=database)
@@ -231,7 +229,6 @@ def test_snapshot_companions_bind_without_mutating_the_delivered_event(tmp_path:
             (f"incident:{_EDGE_EVENT_ID}",),
         ).fetchone() == ("AVAILABLE",)
         assert connection.execute(
-            "SELECT state, reason FROM artifacts "
-            "WHERE incident_id = ? AND kind = 'SNAPSHOT'",
+            "SELECT state, reason FROM artifacts WHERE incident_id = ? AND kind = 'SNAPSHOT'",
             (f"incident:{second_event_id}",),
         ).fetchone() == ("UNAVAILABLE", "UNAVAILABLE:capture_failed")

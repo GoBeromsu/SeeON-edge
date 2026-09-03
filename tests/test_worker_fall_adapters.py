@@ -53,9 +53,7 @@ def _write_bundle(
         metadata["operating_threshold"] = operating_threshold
     with (path / "model.pkl").open("wb") as model_file:
         pickle.dump(_ProbabilityModel(), model_file)
-    metadata["artifact_digest"] = hashlib.sha256(
-        (path / "model.pkl").read_bytes()
-    ).hexdigest()
+    metadata["artifact_digest"] = hashlib.sha256((path / "model.pkl").read_bytes()).hexdigest()
     _ = (path / "metadata.json").write_text(json.dumps(metadata), encoding="utf-8")
     return path
 
@@ -84,9 +82,10 @@ def test_sklearn_adapter_loads_artifact_and_preserves_feature_provenance(
     assert runner.operating_threshold == 0.37
     assert runner.name == "fall-detector"
     assert runner.version == "fixture-v1"
-    assert runner.artifact_digest == hashlib.sha256(
-        (artifact_dir / "model.pkl").read_bytes()
-    ).hexdigest()
+    assert (
+        runner.artifact_digest
+        == hashlib.sha256((artifact_dir / "model.pkl").read_bytes()).hexdigest()
+    )
 
 
 def test_sklearn_warmup_runs_one_forward_with_engineered_feature_shape(

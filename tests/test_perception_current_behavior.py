@@ -304,9 +304,7 @@ def test_bed_only_merge_cannot_create_or_evict_a_person_track() -> None:
 
 def test_bed_region_schedule_is_independent_of_pose_and_person_tracks() -> None:
     fall = next(
-        definition
-        for definition in DETECTION_MODULE_DEFINITIONS
-        if definition.module_id == "fall"
+        definition for definition in DETECTION_MODULE_DEFINITIONS if definition.module_id == "fall"
     )
     bed_exit = next(
         definition
@@ -315,9 +313,7 @@ def test_bed_region_schedule_is_independent_of_pose_and_person_tracks() -> None:
     )
     assert CURRENT_TEMPORAL_PROFILE.ingest_fps == 15.0
     assert CURRENT_TEMPORAL_PROFILE.task_intervals() == {"pose": 1, "bed": 90}
-    assert fall.required_observation_channels == frozenset(
-        {"person_boxes", "poses", "track_ids"}
-    )
+    assert fall.required_observation_channels == frozenset({"person_boxes", "poses", "track_ids"})
     assert bed_exit.required_observation_channels == frozenset(
         {"person_boxes", "poses", "track_ids", "bed_regions"}
     )
@@ -327,12 +323,15 @@ def test_bed_region_schedule_is_independent_of_pose_and_person_tracks() -> None:
         for rule in definition.schedule_rules
         if rule.component_id == "bed"
     )
-    assert bed_rule.interval_source == "temporal-profile"
-    assert bed_rule.skip_when_flag == "persisted-bed-region"
-    assert bed_rule.resolve(1, CURRENT_TEMPORAL_PROFILE) == 90
+    # Bed segmentation is on-demand: it is provisioned for the recognize route
+    # and never scheduled per frame, so it cannot be coupled to pose/person
+    # cadence at all.
+    assert bed_rule.interval_source == "on-demand"
+    assert bed_rule.skip_when_flag is None
+    assert bed_rule.resolve(1, CURRENT_TEMPORAL_PROFILE) is None
 
 
-def test_scene_state_two_scheduled_empty_cycles_expire_cache_without_touching_tracks() -> None:
+def test_scene_state_ignores_scheduled_segmentation_without_touching_tracks() -> None:
     bed = _box(0, 0, 10, 10)
     person = _box(20, 20, 40, 40)
     tracker = GreedyIouTracker(max_misses=1)
@@ -342,21 +341,9 @@ def test_scene_state_two_scheduled_empty_cycles_expire_cache_without_touching_tr
     resolved, debug = state.resolve_bed_regions(
         first, frame_index=0, bed_scheduled=True, bed_interval=90
     )
-    assert resolved.bed_boxes == (bed,)
-    assert debug.source == "fresh"
-    # resolve_bed_regions writes SceneState via update() without track_ids, so
-    # the scene cache is not the person-track owner. Tracker state is.
+    assert resolved.bed_boxes == ()
+    assert debug.source == "empty"
     assert "track_ids" not in state.resolve_bed_regions.__code__.co_varnames
 
-    empty = FrameObservation(track_ids=(0,))
-    _, first_empty = state.resolve_bed_regions(
-        empty, frame_index=90, bed_scheduled=True, bed_interval=90
-    )
-    assert first_empty.source == "empty"
-    expired, second_empty = state.resolve_bed_regions(
-        empty, frame_index=180, bed_scheduled=True, bed_interval=90
-    )
-    assert second_empty.source == "expired"
-    assert expired.bed_boxes == ()
     assert tracker.live_ids == frozenset({0})
     assert tracker.observe((person,)) == (0,)

@@ -74,9 +74,7 @@ def _write_clip(root: Path, clip_id: str) -> None:
 
 
 def _login(client: TestClient) -> None:
-    response = client.post(
-        "/api/v1/auth/session", json={"username": "admin", "password": "admin"}
-    )
+    response = client.post("/api/v1/auth/session", json={"username": "admin", "password": "admin"})
     assert response.status_code == 204
 
 
@@ -144,9 +142,7 @@ def test_valid_video_200_and_206_append_one_success_audit_each(
 
         # When: complete and satisfiable-range responses are prepared and served.
         complete = client.get("/api/v1/clips/clip-a/video")
-        partial = client.get(
-            "/api/v1/clips/clip-a/video", headers={"Range": "bytes=0-7"}
-        )
+        partial = client.get("/api/v1/clips/clip-a/video", headers={"Range": "bytes=0-7"})
 
         with sqlite3.connect(AuditStore().path) as connection:
             after = connection.execute(
@@ -192,8 +188,12 @@ def test_camera_and_topology_mutations_roll_back_with_audit_failure() -> None:
     # When: camera and location mutations reach their shared transaction callback.
     with pytest.raises(sqlite3.OperationalError, match="full"):
         store.create(
-            camera_id="camera-a", label="Camera A", rtsp_url="rtsp://example/camera-a",
-            space_id=None, status="unknown", after_write=reject,
+            camera_id="camera-a",
+            label="Camera A",
+            rtsp_url="rtsp://example/camera-a",
+            space_id=None,
+            status="unknown",
+            after_write=reject,
         )
     with pytest.raises(sqlite3.OperationalError, match="full"):
         store.create_floor(edge_ref="floor-a", name="Floor A", order_index=0, after_write=reject)
@@ -224,8 +224,12 @@ def test_review_cas_rolls_back_with_audit_failure() -> None:
     # When: the review and audit share a transaction whose append fails.
     with pytest.raises(sqlite3.OperationalError, match="full"):
         CentralEvidenceReviewStore(path).update(
-            incident_id="incident-a", expected_version=0, actor_id="admin",
-            reviewed_at=stamp, disposition=ReviewDisposition.TRUE_POSITIVE, notes=None,
+            incident_id="incident-a",
+            expected_version=0,
+            actor_id="admin",
+            reviewed_at=stamp,
+            disposition=ReviewDisposition.TRUE_POSITIVE,
+            notes=None,
             after_write=reject,
         )
 
@@ -286,8 +290,11 @@ def test_audit_router_uses_unique_descending_keyset_pages() -> None:
         parsed = AuditAction(action)
         store.append(
             AuditEvent(
-                occurred_at=utc_now(), actor_id="seed", action=parsed,
-                target_id=action, detail=empty_detail(parsed),
+                occurred_at=utc_now(),
+                actor_id="seed",
+                action=parsed,
+                target_id=action,
+                detail=empty_detail(parsed),
             )
         )
     with TestClient(app) as client:
@@ -296,9 +303,7 @@ def test_audit_router_uses_unique_descending_keyset_pages() -> None:
         # When: the caller follows the bounded keyset cursor.
         first = client.get("/api/v1/audit", params={"limit": 2})
         cursor = first.json()["next_before_id"]
-        second = client.get(
-            "/api/v1/audit", params={"limit": 2, "before_id": cursor}
-        )
+        second = client.get("/api/v1/audit", params={"limit": 2, "before_id": cursor})
 
     # Then: ordering is deterministic and pages do not overlap.
     first_ids = [event["audit_id"] for event in first.json()["events"]]

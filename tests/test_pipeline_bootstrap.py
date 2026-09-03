@@ -111,9 +111,7 @@ def test_gpu_lease_stage_fails_fast_when_lease_unavailable(tmp_path: Path) -> No
 
 def test_profile_device_stage_fails_fast_and_publishes_no_profile_on_failure() -> None:
     context = boot.BootstrapContext()
-    deps = BootDependencies(
-        {"nvidia": lambda: VerifyResult(False, "nvidia", "device", "no CUDA")}
-    )
+    deps = BootDependencies({"nvidia": lambda: VerifyResult(False, "nvidia", "device", "no CUDA")})
     stage = boot.profile_device_stage(context, {"ML_WORKER_PROFILE": "nvidia"}, deps)
 
     with pytest.raises(boot.BootstrapStageError) as exc:

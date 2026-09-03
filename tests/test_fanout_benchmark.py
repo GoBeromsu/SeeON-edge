@@ -157,9 +157,7 @@ def test_fanout_benchmark(
     latencies: list[float] = []
     viewers: list[LiveViewViewer] = []
     fanout = (
-        recorded_stream_fanout(
-            stream_count=stream_count, clip=recorded_clip, tmp_path=tmp_path
-        )
+        recorded_stream_fanout(stream_count=stream_count, clip=recorded_clip, tmp_path=tmp_path)
         if plan is None
         else recorded_streams_for_clips(
             clips=recorded_clips_for_plan(tmp_path / "geometry-clips", plan),
@@ -625,17 +623,13 @@ def assert_mixed_facility(
         f"expected {expected_camera_count} cameras, found {sorted(cameras)}"
     )
     idle = [
-        camera_id
-        for camera_id, camera in cameras.items()
-        if int(camera["pose_inferences"]) <= 0
+        camera_id for camera_id, camera in cameras.items() if int(camera["pose_inferences"]) <= 0
     ]
     assert idle == [], f"cameras did not advance pose inference: {idle}"
     notes = document["notes"]
     observed = frozenset(notes.get("compatibility_keys", ()))
     missing = expected_keys - observed
-    assert not missing, (
-        f"missing compatibility keys {sorted(missing)}; observed {sorted(observed)}"
-    )
+    assert not missing, f"missing compatibility keys {sorted(missing)}; observed {sorted(observed)}"
     assert document["errors"] == []
     assert document["pump_failures"] == 0
     assert notes.get("work_item_errors", []) == []

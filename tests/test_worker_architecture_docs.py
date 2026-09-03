@@ -109,9 +109,7 @@ def _executable_legacy_hits(text: str) -> list[str]:
         if _SOURCE_ROW.match(line):
             continue
         hits.extend(
-            pattern.pattern
-            for pattern in _EXECUTABLE_LEGACY_PATTERNS
-            if pattern.search(line)
+            pattern.pattern for pattern in _EXECUTABLE_LEGACY_PATTERNS if pattern.search(line)
         )
     return hits
 
@@ -159,9 +157,7 @@ def test_parity_ledger_pins_the_committed_baseline_commit() -> None:
 def test_every_parity_row_names_an_owner_and_a_known_disposition() -> None:
     for capability, owner, behaviour_test, disposition in _parity_ledger_rows():
         assert capability, "a parity row must name a capability"
-        matched = [
-            known for known in _PARITY_DISPOSITIONS if disposition.startswith(known)
-        ]
+        matched = [known for known in _PARITY_DISPOSITIONS if disposition.startswith(known)]
         assert matched, f"{capability} has an unknown disposition: {disposition}"
         if disposition.startswith("ported"):
             assert owner not in {"", "—"}, f"{capability} is ported without an owner"
@@ -267,6 +263,7 @@ def test_snapshot_store_evidence_is_not_claimed_to_be_platform_limited() -> None
         "and the Open gaps note needs updating"
     )
 
+
 def test_open_gaps_absence_claims_are_still_true() -> None:
     """A gap that says a file is missing must be checked, not trusted.
 
@@ -292,6 +289,7 @@ def test_open_gaps_absence_claims_are_still_true() -> None:
         f"Open gaps says these do not exist, but they do: {still_present}. "
         "Delete the entry rather than leaving a stale denial."
     )
+
 
 def test_explicit_fallback_adr_exists_and_is_indexed() -> None:
     adr = ROOT / "docs" / "decisions" / "0003-explicit-fallback-only.md"
@@ -379,9 +377,7 @@ def test_architecture_documents_state_scope_and_failure_matrix() -> None:
     state_table = text.split("## Per-camera state vs shared state", 1)[1]
     state_table = state_table.split("## Source-to-target ownership", 1)[0]
     for per_camera in ("Tracker", "SceneState", "Fall latch", "IncidentManager"):
-        row = next(
-            (line for line in state_table.splitlines() if per_camera in line), ""
-        )
+        row = next((line for line in state_table.splitlines() if per_camera in line), "")
         assert row.endswith("|"), f"{per_camera} is not a state-table row"
         assert "per camera" in row, f"{per_camera} is not scoped per camera"
 

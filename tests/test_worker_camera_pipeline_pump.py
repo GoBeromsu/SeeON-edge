@@ -142,9 +142,7 @@ def test_pump_forwards_a_coordinated_result_to_the_sink_via_real_emit() -> None:
         deciders=(_FrameEchoDecider("camera-a"),), incidents=IncidentManager()
     )
     sink = _RecordingSink()
-    pump = CameraPipelinePump(
-        "camera-a", results, analytics, decision, sink, poll_timeout_sec=0.02
-    )
+    pump = CameraPipelinePump("camera-a", results, analytics, decision, sink, poll_timeout_sec=0.02)
     sink.on_emit = lambda _event: pump.stop()
 
     _deliver(results, _packet("camera-a", 1))
@@ -165,16 +163,12 @@ def test_scheduler_gates_extraction_so_skipped_frames_never_reach_the_extractor(
     results = InferenceResultSlot()
     extractor = _RecordingExtractor("probe")
     # interval 2: frame 1 is skipped (1 % 2 != 0), frame 2 is due (2 % 2 == 0).
-    analytics = _blank_analytics(
-        "camera-a", extractors=(extractor,), task_intervals={"probe": 2}
-    )
+    analytics = _blank_analytics("camera-a", extractors=(extractor,), task_intervals={"probe": 2})
     decision = EventAggregator(
         deciders=(_FrameEchoDecider("camera-a"),), incidents=IncidentManager()
     )
     sink = _RecordingSink()
-    pump = CameraPipelinePump(
-        "camera-a", results, analytics, decision, sink, poll_timeout_sec=0.02
-    )
+    pump = CameraPipelinePump("camera-a", results, analytics, decision, sink, poll_timeout_sec=0.02)
 
     def _on_emit(_event: BusinessEvent) -> None:
         if len(sink.events) == 1:
@@ -201,7 +195,11 @@ def test_one_camera_pump_failure_does_not_stop_the_other_camera_pump(
     sink_a = _RecordingSink()
     decision_a = EventAggregator(deciders=(raising,), incidents=IncidentManager())
     pump_a = CameraPipelinePump(
-        "camera-a", results_a, _blank_analytics("camera-a"), decision_a, sink_a,
+        "camera-a",
+        results_a,
+        _blank_analytics("camera-a"),
+        decision_a,
+        sink_a,
         poll_timeout_sec=0.02,
     )
 
@@ -210,7 +208,11 @@ def test_one_camera_pump_failure_does_not_stop_the_other_camera_pump(
         deciders=(_FrameEchoDecider("camera-b"),), incidents=IncidentManager()
     )
     pump_b = CameraPipelinePump(
-        "camera-b", results_b, _blank_analytics("camera-b"), decision_b, sink_b,
+        "camera-b",
+        results_b,
+        _blank_analytics("camera-b"),
+        decision_b,
+        sink_b,
         poll_timeout_sec=0.02,
     )
 
@@ -249,7 +251,11 @@ def test_fatal_accelerator_error_propagates_out_of_run_instead_of_being_swallowe
     decision = EventAggregator(deciders=(_FatalDecider(),), incidents=IncidentManager())
     sink = _RecordingSink()
     pump = CameraPipelinePump(
-        "camera-a", results, _blank_analytics("camera-a"), decision, sink,
+        "camera-a",
+        results,
+        _blank_analytics("camera-a"),
+        decision,
+        sink,
         poll_timeout_sec=0.02,
     )
 
@@ -264,8 +270,13 @@ def test_pump_self_terminates_once_max_frames_processed() -> None:
     decision = EventAggregator(deciders=(), incidents=IncidentManager())
     sink = _RecordingSink()
     pump = CameraPipelinePump(
-        "camera-a", results, _blank_analytics("camera-a"), decision, sink,
-        poll_timeout_sec=0.02, max_frames=2,
+        "camera-a",
+        results,
+        _blank_analytics("camera-a"),
+        decision,
+        sink,
+        poll_timeout_sec=0.02,
+        max_frames=2,
     )
 
     thread = threading.Thread(target=pump.run, daemon=True)
@@ -284,16 +295,18 @@ def test_pump_without_max_frames_keeps_polling_past_what_a_cap_would_have_stoppe
     decision = EventAggregator(deciders=(), incidents=IncidentManager())
     sink = _RecordingSink()
     pump = CameraPipelinePump(
-        "camera-a", results, _blank_analytics("camera-a"), decision, sink,
+        "camera-a",
+        results,
+        _blank_analytics("camera-a"),
+        decision,
+        sink,
         poll_timeout_sec=0.02,
     )
     thread = threading.Thread(target=pump.run, daemon=True)
     thread.start()
     for frame_index in (1, 2, 3):
         _deliver(results, _packet("camera-a", frame_index))
-        assert _wait_for(
-            lambda frame_index=frame_index: pump.processed_count >= frame_index
-        )
+        assert _wait_for(lambda frame_index=frame_index: pump.processed_count >= frame_index)
     pump.stop()
     thread.join(timeout=2.0)
 
@@ -306,16 +319,18 @@ def test_supervisor_stop_joins_real_pump_threads() -> None:
     decision = EventAggregator(deciders=(), incidents=IncidentManager())
     sink = _RecordingSink()
     pump = CameraPipelinePump(
-        "camera-a", results, _blank_analytics("camera-a"), decision, sink,
+        "camera-a",
+        results,
+        _blank_analytics("camera-a"),
+        decision,
+        sink,
         poll_timeout_sec=0.02,
     )
     supervisor = IngestSupervisor([pump])
 
     supervisor.start()
     thread_name = "worker-ingest-camera-a"
-    started_thread = next(
-        thread for thread in threading.enumerate() if thread.name == thread_name
-    )
+    started_thread = next(thread for thread in threading.enumerate() if thread.name == thread_name)
     assert started_thread.is_alive()
 
     supervisor.stop(join_timeout_sec=2.0)
@@ -370,8 +385,7 @@ def test_a_failing_trace_capture_does_not_stop_the_event_reaching_the_sink() -> 
 
     assert capture.calls >= 1, "the failing capture was never exercised"
     assert len(sink.events) == 1, (
-        "the event never reached the sink; an analysis-tracing failure "
-        "suppressed a resident alert"
+        "the event never reached the sink; an analysis-tracing failure suppressed a resident alert"
     )
 
 
@@ -422,8 +436,7 @@ def test_failing_diagnostics_do_not_stop_the_event_reaching_the_sink() -> None:
 
     assert diagnostics.calls >= 1, "the failing telemetry was never exercised"
     assert len(sink.events) == 1, (
-        "the event never reached the sink; a telemetry failure suppressed a "
-        "resident alert"
+        "the event never reached the sink; a telemetry failure suppressed a resident alert"
     )
 
 
@@ -451,6 +464,7 @@ class _FallDecider:
                 probability=0.99,
             ),
         )
+
 
 def test_a_transient_staging_failure_does_not_destroy_the_fall() -> None:
     """A decision must not stay consumed unless its envelope is durable.

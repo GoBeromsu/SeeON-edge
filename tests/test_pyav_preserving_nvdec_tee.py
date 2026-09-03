@@ -337,18 +337,16 @@ def test_extradata_change_respawns_decoder_and_rolls_same_session_epoch(
             return _ExtradataChangingContainer(
                 original_open(file, *args, **kwargs),
                 change_after=6,
-                written_before_change=lambda: spawner.processes[0].wait_for_writes(
-                    1, 10.0
-                ),
+                written_before_change=lambda: spawner.processes[0].wait_for_writes(1, 10.0),
             )
         return original_open(file, *args, **kwargs)
 
     monkeypatch.setattr(preserving_module.av, "open", open_with_change)
     ring = _ring()
     spawner = _FakeSpawner()
-    session = PyAvPreservingAdapter(
-        ring, decode_backend="nvdec", process_spawner=spawner
-    ).open(_config(source))
+    session = PyAvPreservingAdapter(ring, decode_backend="nvdec", process_spawner=spawner).open(
+        _config(source)
+    )
 
     session.set_stream_identity("boot-1", 1)
     assert session.wait_demux_complete(10)
@@ -375,9 +373,9 @@ def test_subprocess_spawn_failure_is_sanitized_and_fails_open_loudly(
         raise OSError(secret)
 
     with pytest.raises(RuntimeError, match="ffmpeg spawn failed") as raised:
-        PyAvPreservingAdapter(
-            _ring(), decode_backend="nvdec", process_spawner=fail_spawn
-        ).open(config)
+        PyAvPreservingAdapter(_ring(), decode_backend="nvdec", process_spawner=fail_spawn).open(
+            config
+        )
     assert config.url not in str(raised.value)
     assert secret not in str(raised.value)
 
@@ -544,9 +542,9 @@ def test_transient_decode_silence_returns_none_within_read_boundary(
     source = tmp_path / "silent.mp4"
     _encode(source)
     spawner = _FakeSpawner(emit_frame=False)
-    session = PyAvPreservingAdapter(
-        _ring(), decode_backend="nvdec", process_spawner=spawner
-    ).open(_config(source))
+    session = PyAvPreservingAdapter(_ring(), decode_backend="nvdec", process_spawner=spawner).open(
+        _config(source)
+    )
     session.set_stream_identity("boot-1", 1)
     assert session.wait_demux_complete(10)
 
@@ -586,6 +584,7 @@ def test_current_wrappers_keep_generic_runtimeerror_and_cause_chain(
     # And: session demux wrapper keeps the same contract via the public adapter.
     source = tmp_path / "demux-wrapper.mp4"
     _encode(source)
+
     def failing_run(self: object, *args: object, **kwargs: object) -> None:
         del self, args, kwargs
         raise OSError("broken pipe")

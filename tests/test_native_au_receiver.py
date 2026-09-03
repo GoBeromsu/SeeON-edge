@@ -270,9 +270,7 @@ def test_short_avcc_codec_data_isolated_then_next_epoch_survives() -> None:
     parent, child = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
     sink = _Sink()
     gap_seen = threading.Event()
-    receiver = NativeAuReceiver(
-        parent, "boot-1", sink, lambda _camera, _category: gap_seen.set()
-    )
+    receiver = NativeAuReceiver(parent, "boot-1", sink, lambda _camera, _category: gap_seen.set())
     receiver.start()
     child.sendall(_frame(epoch=7, sequence=1, codec_data=b"\x01"))
     assert gap_seen.wait(timeout=2.0)
@@ -457,8 +455,7 @@ def test_a_reserved_transition_is_adopted_with_no_receiver_change() -> None:
 
         adopted = [p.epoch.stream_epoch for p in sink.packets]
         assert 2 in adopted, (
-            f"the receiver must ADOPT the epoch, not merely receive it; saw {adopted} "
-            f"gaps={gaps}"
+            f"the receiver must ADOPT the epoch, not merely receive it; saw {adopted} gaps={gaps}"
         )
         assert not gaps, f"adoption must not require a rebuild first: {gaps}"
 
@@ -585,7 +582,10 @@ def test_units_lost_inside_an_epoch_mark_a_hole_instead_of_rebuilding() -> None:
         assert gaps == [], f"a hole must not request a rebuild: {gaps}"
         assert [p.arrival_index for p in sink.packets] == [0, 1, 4, 5]
         assert [p.discontinuity for p in sink.packets] == [
-            None, None, "sequence_gap:3->5", None,
+            None,
+            None,
+            "sequence_gap:3->5",
+            None,
         ]
         assert [e.stream_epoch for e in sink.epochs] == [1]
     finally:

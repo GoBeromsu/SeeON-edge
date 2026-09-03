@@ -179,8 +179,6 @@ def test_recorder_coalesces_event_ids_and_preserves_reference_order(tmp_path: Pa
     assert publisher.metadata[0].event_refs == ("event-1", "event-2")
 
 
-
-
 def test_event_admitted_before_finalization_stays_on_active_clip(tmp_path: Path) -> None:
     publisher = _Publisher()
     recorder = _recorder(
@@ -221,15 +219,11 @@ def test_event_admitted_after_finalization_starts_gets_fresh_clip_id(
     first_packet = _packet(1, 1.0)
     second_packet = _packet(2, 2.0)
     try:
-        first = recorder.on_event(
-            first_packet, _event("event-1"), detected_at=datetime.now(UTC)
-        )
+        first = recorder.on_event(first_packet, _event("event-1"), detected_at=datetime.now(UTC))
         assert first is not None
         assert seal_started.wait(timeout=1.0)
 
-        second = recorder.on_event(
-            second_packet, _event("event-2"), detected_at=datetime.now(UTC)
-        )
+        second = recorder.on_event(second_packet, _event("event-2"), detected_at=datetime.now(UTC))
 
         assert second is not None
         assert second != first
@@ -245,6 +239,7 @@ def test_event_admitted_after_finalization_starts_gets_fresh_clip_id(
         ("event-1",),
         ("event-2",),
     ]
+
 
 def test_stop_drains_full_queue_after_blocked_frame_write(tmp_path: Path) -> None:
     write_started = threading.Event()
@@ -285,9 +280,7 @@ def test_recorder_cleans_failed_reservation_before_retrying_event(tmp_path: Path
     first_packet = _packet(1, 1.0)
     second_packet = _packet(2, 2.0)
     try:
-        first = recorder.on_event(
-            first_packet, _event("event-1"), detected_at=datetime.now(UTC)
-        )
+        first = recorder.on_event(first_packet, _event("event-1"), detected_at=datetime.now(UTC))
         assert first is not None
         assert recorder.flush()
         assert not (tmp_path / "clips" / ".staging" / first).exists()

@@ -247,9 +247,7 @@ def test_probe_first_frame_classifies_auth_and_masks_credentials() -> None:
         probe_first_frame(raw_url, decoder=adapter, config=config)
 
     assert error.value.error_class == "auth"
-    assert error.value.masked_url == (
-        "rtsp://***:***@camera.local/live?token=%2A%2A%2A"
-    )
+    assert error.value.masked_url == ("rtsp://***:***@camera.local/live?token=%2A%2A%2A")
     assert "operator" not in str(error.value)
     assert "s3cr3t" not in str(error.value)
     assert "plain" not in str(error.value)

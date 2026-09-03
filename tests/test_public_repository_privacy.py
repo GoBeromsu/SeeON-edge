@@ -138,13 +138,14 @@ _SYNTHETIC_RTSP_FIXTURES = {
     Path("front/src/features/cameras/AddCameraModal.test.tsx"): {
         "rtsp://operator:***@192.0.2.10:8554/live",
         "rtsp://operator:secret@192.0.2.10:8554/trackID=1?profile=main",
-        "rtsp" "://operator:camera-password@camera.local:554/"
+        "rtsp"
+        "://operator:camera-password@camera.local:554/"
         "trackID=1?profile=main&opaque-secret-token&another%2Dsecret"
         "#token=fragment-secret",
-        "rtsp" "://operator:camera-password@[invalid-host:554/"
+        "rtsp"
+        "://operator:camera-password@[invalid-host:554/"
         "trackID=1?profile=main&token=query-secret&token=second-secret",
-        "rtsp://***@[invalid-host:554/"
-        "trackID=1?profile=***&token=***&token=***",
+        "rtsp://***@[invalid-host:554/trackID=1?profile=***&token=***&token=***",
         "rtsp://operator:secret@192.0.2.10:8554/Streaming/Channels/101?subtype=0",
     },
     Path("front/src/features/cameras/cameraRegistrationForm.test.ts"): {
@@ -201,12 +202,9 @@ _SYNTHETIC_RTSP_FIXTURES = {
         "rtsp://operator:s3cr3t@camera.local/live?token=plain",
         "rtsp://user:password@host/stream",
         "rtsp://***:***@host/stream",
-        "rtsp://user:password@host/stream"
-        "?profile=main&username=admin&secret=abc#fragment-secret",
-        "rtsp://user:password@host/stream"
-        "?profile=main&username=admin&secret=abc",
-        "rtsp://***:***@host/stream"
-        "?profile=%2A%2A%2A&username=%2A%2A%2A&secret=%2A%2A%2A",
+        "rtsp://user:password@host/stream?profile=main&username=admin&secret=abc#fragment-secret",
+        "rtsp://user:password@host/stream?profile=main&username=admin&secret=abc",
+        "rtsp://***:***@host/stream?profile=%2A%2A%2A&username=%2A%2A%2A&secret=%2A%2A%2A",
     },
     Path("tests/test_catalog_verify.py"): {
         "rtsp://operator:fixture-password@192.0.2.10/s",
@@ -229,12 +227,9 @@ _SYNTHETIC_RTSP_FIXTURES = {
         "rtsp://user:secret@camera.local/live?token=abc",
         "rtsp://***:***@camera.local/live?token=%2A%2A%2A",
         "rtsp://operator:s3cr3t@camera.local/live?token=plain",
-        "rtsp://user:password@host/stream"
-        "?profile=main&username=admin&secret=abc#fragment-secret",
-        "rtsp://user:password@host/stream"
-        "?profile=main&username=admin&secret=abc",
-        "rtsp://***:***@host/stream"
-        "?profile=%2A%2A%2A&username=%2A%2A%2A&secret=%2A%2A%2A",
+        "rtsp://user:password@host/stream?profile=main&username=admin&secret=abc#fragment-secret",
+        "rtsp://user:password@host/stream?profile=main&username=admin&secret=abc",
+        "rtsp://***:***@host/stream?profile=%2A%2A%2A&username=%2A%2A%2A&secret=%2A%2A%2A",
     },
     Path("tests/test_analysis_timeline.py"): {
         # URL 모양이라는 이유만으로 컴포넌트 식별자에서 거부됨을 증명하는 픽스처.
@@ -285,14 +280,12 @@ _SYNTHETIC_RTSP_FIXTURES = {
         "rtsp://operator:s3cr3t@camera.local/live?token=plain",
     },
     Path("tests/test_public_repository_privacy.py"): {
-        "rtsps" "://operator:not-a-fixture@camera.example/stream",
-        "rtsps" "://operator:secret@camera.example/stream",
+        "rtsps://operator:not-a-fixture@camera.example/stream",
+        "rtsps://operator:secret@camera.example/stream",
     },
 }
 _TEXT_PATTERNS = {
-    "private-key": re.compile(
-        r"-----BEGIN (?:EC |OPENSSH |PGP |RSA )?PRIVATE KEY-----"
-    ),
+    "private-key": re.compile(r"-----BEGIN (?:EC |OPENSSH |PGP |RSA )?PRIVATE KEY-----"),
     "credentialed-rtsp": re.compile(
         r"rtsps?://(?P<username>[^/\s:@]+):(?P<password>[^@\s/]+)"
         r"@(?P<host>[^/\s\"']+)(?:/[^\s\"']*)?",
@@ -303,9 +296,7 @@ _TEXT_PATTERNS = {
         r"[^&#\s\"']+",
         re.IGNORECASE,
     ),
-    "github-token": re.compile(
-        r"(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})"
-    ),
+    "github-token": re.compile(r"(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})"),
     "aws-access-key": re.compile(r"(?:AKIA|ASIA)[0-9A-Z]{16}"),
     "encoded-media-data-uri": re.compile(
         r"data:[^;,\r\n]{1,128};base64,",
@@ -388,9 +379,7 @@ def _structured_document_keys(text: str) -> set[str]:
     if not significant_lines:
         return set()
     first = significant_lines[0]
-    structured_header = re.compile(
-        r"""^["']?[A-Za-z_][A-Za-z0-9_]*["']?\s*:"""
-    )
+    structured_header = re.compile(r"""^["']?[A-Za-z_][A-Za-z0-9_]*["']?\s*:""")
     collection_start = first.startswith(("{", "[", "-"))
     if first.startswith(("{", "[")):
         try:
@@ -425,8 +414,7 @@ def _looks_like_sensitive_dataset(blob: bytes) -> bool:
 
     for delimiter in (",", ";", "\t"):
         fields = {
-            field.strip().lower()
-            for field in next(csv.reader([first_line], delimiter=delimiter))
+            field.strip().lower() for field in next(csv.reader([first_line], delimiter=delimiter))
         }
         if len(fields & identity_fields) >= 2:
             return True
@@ -451,14 +439,9 @@ def _has_url_safe_or_wrapped_base64(text: str) -> bool:
         return True
 
     for block in re.split(r"\n[ \t]*\n", text):
-        payload_lines = [
-            re.sub(r"^\s*(?:#|//)\s?", "", line)
-            for line in block.splitlines()
-        ]
+        payload_lines = [re.sub(r"^\s*(?:#|//)\s?", "", line) for line in block.splitlines()]
         candidate = re.sub(r"\s+", "", "".join(payload_lines))
-        if len(candidate.rstrip("=")) >= 512 and re.fullmatch(
-            r"[A-Za-z0-9+/_-]+={0,2}", candidate
-        ):
+        if len(candidate.rstrip("=")) >= 512 and re.fullmatch(r"[A-Za-z0-9+/_-]+={0,2}", candidate):
             return True
     return False
 
@@ -472,9 +455,7 @@ def _text_violation_labels(relative: Path, text: str) -> set[str]:
         matches = list(pattern.finditer(scan_text))
         if label in {"credentialed-rtsp", "rtsp-query-secret"}:
             matches = [
-                match
-                for match in matches
-                if not _is_explicit_synthetic_rtsp(relative, match)
+                match for match in matches if not _is_explicit_synthetic_rtsp(relative, match)
             ]
         if matches:
             violations.add(label)
@@ -533,9 +514,7 @@ def _is_public_safe_structured_fixture(relative: Path, blob: bytes) -> bool:
     if not isinstance(document, dict):
         return False
     identity_keys = {"camera_id", "facility_id", "resident_id", "subject_id"}
-    outside_cameras = {
-        key: value for key, value in document.items() if key != "cameras"
-    }
+    outside_cameras = {key: value for key, value in document.items() if key != "cameras"}
     if _collect_mapping_keys(outside_cameras) & identity_keys:
         return False
     cameras = document.get("cameras")
@@ -576,10 +555,7 @@ def _is_prohibited_path(relative: Path) -> bool:
         return False
     lowered_parts = {part.lower() for part in relative.parts}
     lowered_suffixes = {suffix.lower() for suffix in relative.suffixes}
-    return bool(
-        lowered_parts & _PROHIBITED_PATH_PARTS
-        or lowered_suffixes & _PROHIBITED_SUFFIXES
-    )
+    return bool(lowered_parts & _PROHIBITED_PATH_PARTS or lowered_suffixes & _PROHIBITED_SUFFIXES)
 
 
 def test_tracked_tree_contains_no_data_or_private_binary_assets() -> None:
@@ -616,8 +592,7 @@ def test_tracked_text_contains_no_embedded_secret_or_media_payload() -> None:
         except UnicodeDecodeError:
             continue
         violations.extend(
-            f"{relative}:{label}"
-            for label in sorted(_text_violation_labels(relative, text))
+            f"{relative}:{label}" for label in sorted(_text_violation_labels(relative, text))
         )
 
     assert violations == []
@@ -643,16 +618,14 @@ def test_tracked_text_contains_no_embedded_secret_or_media_payload() -> None:
             "\n".join(["# " + "A" * 64] * 8),
             "url-safe-or-wrapped-base64",
         ),
-        ("8950" "4e470d0a1a0a" + "00" * 32, "hex-encoded-media-signature"),
+        ("89504e470d0a1a0a" + "00" * 32, "hex-encoded-media-signature"),
         (
-            "rtsps" "://operator:not-a-fixture@camera.example/stream",
+            "rtsps://operator:not-a-fixture@camera.example/stream",
             "credentialed-rtsp",
         ),
     ],
 )
-def test_text_scanner_rejects_encoded_payloads(
-    text: str, expected_label: str
-) -> None:
+def test_text_scanner_rejects_encoded_payloads(text: str, expected_label: str) -> None:
     labels = _text_violation_labels(Path("synthetic-input.txt"), text)
     assert expected_label in labels
 
@@ -679,7 +652,7 @@ def test_path_policy_rejects_case_and_double_extension_evasions(path: Path) -> N
     [
         "facility_id,resident_id\nfacility,resident".encode("utf-16le"),
         "facility_id,resident_id\nfacility,resident".encode("utf-16be"),
-        ("rtsps" "://operator:secret@camera.example/stream").encode("utf-32le"),
+        ("rtsps://operator:secret@camera.example/stream").encode("utf-32le"),
         b"safe-prefix\x00hidden",
     ],
 )
@@ -698,6 +671,7 @@ def test_control_byte_gate_rejects_alternate_encodings(blob: bytes) -> None:
 )
 def test_content_classifier_rejects_disguised_private_assets(blob: bytes) -> None:
     assert _looks_like_media_or_archive(blob) or _looks_like_sensitive_dataset(blob)
+
 
 @pytest.mark.parametrize(
     "blob",
@@ -721,16 +695,13 @@ def test_content_classifier_rejects_disguised_private_assets(blob: bytes) -> Non
         b"oid sha256:0000000000000000000000000000000000000000000000000000000000000000\n"
         b"size 1024\n",
         b"facility_id: facility\nresident_id: resident\n",
-        b'{\n  "records": [\n'
-        b'    {"facility_id": "facility", "resident_id": "resident"}\n'
-        b"  ]\n}\n",
+        b'{\n  "records": [\n    {"facility_id": "facility", "resident_id": "resident"}\n  ]\n}\n',
         b"# synthetic adversarial document\n---\nrecords:\n"
         b"  - facility_id: facility\n"
         b"    resident_id: resident\n",
         b"- facility_id: facility\n  resident_id: resident\n",
         b"{facility_id: facility, resident_id: resident}\n",
-        b'\xef\xbb\xbf"facility_id","frame_path","annotation"\n'
-        b'"facility","frame.jpg","fall"',
+        b'\xef\xbb\xbf"facility_id","frame_path","annotation"\n"facility","frame.jpg","fall"',
     ],
 )
 def test_classifier_rejects_additional_disguised_private_assets(blob: bytes) -> None:
@@ -761,18 +732,14 @@ def test_public_worker_example_allowlist_is_closed_world() -> None:
     )
 
     nested_mutation = yaml.load(blob, Loader=yaml.BaseLoader)
-    nested_mutation["private_records"] = [
-        {"facility_id": "facility", "resident_id": "resident"}
-    ]
+    nested_mutation["private_records"] = [{"facility_id": "facility", "resident_id": "resident"}]
     assert not _is_public_safe_structured_fixture(
         relative, yaml.safe_dump(nested_mutation).encode()
     )
 
 
 def test_ignore_policy_has_no_data_exception() -> None:
-    ignore_blob = next(
-        blob for relative, blob in _index_blobs() if relative == Path(".gitignore")
-    )
+    ignore_blob = next(blob for relative, blob in _index_blobs() if relative == Path(".gitignore"))
     lines = ignore_blob.decode("utf-8").splitlines()
     assert "data/" in lines
     assert not any(line.startswith("!data/") for line in lines)
@@ -875,10 +842,7 @@ _LINT_STEPS = [
     {"run": "uv run --group lint ruff check ."},
     {"run": "uv run --group lint lint-imports"},
     {
-        "name": (
-            "Scope fidelity "
-            "(no env-provisioned identity or camera roster)"
-        ),
+        "name": ("Scope fidelity (no env-provisioned identity or camera roster)"),
         "run": (
             "uv run python scripts/verify_scope_fidelity.py --fixture\n"
             "uv run python scripts/verify_scope_fidelity.py --repo\n"
@@ -956,13 +920,14 @@ _TEST_STEPS = [
         # expression text into the shell source before bash parses it; `$SHARD`
         # is a value the shell reads, never source it compiles.
         "env": {"SHARD": "${{ matrix.shard }}"},
-        "run": _SHARD_DISCOVERY + (
+        "run": _SHARD_DISCOVERY
+        + (
             'if [ "${#shard_files[@]}" -eq 0 ]; then\n'
             '  echo "shard $SHARD collected no test files" >&2\n'
             "  exit 1\n"
             "fi\n"
             'echo "shard $SHARD/$SHARD_TOTAL: ${#shard_files[@]} files"\n'
-            'uv run pytest -q -m '
+            "uv run pytest -q -m "
             '"not real_stack and not heavy and not integration" \\\n'
             '  "${shard_files[@]}"\n'
         ),
@@ -1148,9 +1113,7 @@ def test_untrusted_ci_policy_rejects_security_mutations(
         ("concurrency", {"group": "ci", "cancel-in-progress": "true"}),
     ],
 )
-def test_untrusted_ci_policy_rejects_boundary_mutations(
-    field: str, value: object
-) -> None:
+def test_untrusted_ci_policy_rejects_boundary_mutations(field: str, value: object) -> None:
     workflow = copy.deepcopy(_workflow("ci.yml"))
     workflow[field] = value
 
@@ -1230,9 +1193,7 @@ def test_untrusted_ci_policy_rejects_uv_cache_opt_in() -> None:
         ("container", "ghcr.io/example/untrusted:latest"),
     ],
 )
-def test_untrusted_ci_policy_rejects_job_mutations(
-    field: str, value: object
-) -> None:
+def test_untrusted_ci_policy_rejects_job_mutations(field: str, value: object) -> None:
     workflow = copy.deepcopy(_workflow("ci.yml"))
     jobs = workflow["jobs"]
     assert isinstance(jobs, dict)
@@ -1411,9 +1372,7 @@ def _assert_no_pull_request_secret_access(name: str, workflow: dict[str, object]
         assert "${{ secrets." not in yaml.safe_dump(job), (name, job_name)
 
 
-def _assert_token_consumers_are_gated(
-    name: str, job_name: str, job: dict[str, object]
-) -> None:
+def _assert_token_consumers_are_gated(name: str, job_name: str, job: dict[str, object]) -> None:
     """Nothing in a write-scoped job can spend the token on a pull_request run."""
     env = job.get("env")
     assert isinstance(env, dict), (name, job_name)
@@ -1666,16 +1625,12 @@ def test_pull_request_pin_policy_rejects_an_unpinned_action(
         (7, "${{ env.PUSH_IMAGES == 'true' && 'type=gha,scope=edge-ml-worker,mode=max' || '' }}"),
     ],
 )
-def test_edge_image_policy_rejects_an_ungated_cache_export(
-    step_index: int, cache_to: str
-) -> None:
+def test_edge_image_policy_rejects_an_ungated_cache_export(step_index: int, cache_to: str) -> None:
     workflow = copy.deepcopy(_workflow("edge-images.yml"))
     _jobs(workflow)["publish"]["steps"][step_index]["with"]["cache-to"] = cache_to
 
     with pytest.raises(AssertionError):
-        _assert_write_permissions_stay_off_the_pull_request_path(
-            "edge-images.yml", workflow
-        )
+        _assert_write_permissions_stay_off_the_pull_request_path("edge-images.yml", workflow)
 
 
 @pytest.mark.parametrize(
@@ -1699,9 +1654,7 @@ def test_edge_image_policy_rejects_a_widened_permission(
         _jobs(workflow)["publish"]["permissions"] = permissions
 
     with pytest.raises(AssertionError):
-        _assert_write_permissions_stay_off_the_pull_request_path(
-            "edge-images.yml", workflow
-        )
+        _assert_write_permissions_stay_off_the_pull_request_path("edge-images.yml", workflow)
 
 
 def test_edge_image_policy_rejects_a_write_scope_on_a_second_job() -> None:
@@ -1713,9 +1666,7 @@ def test_edge_image_policy_rejects_a_write_scope_on_a_second_job() -> None:
     }
 
     with pytest.raises(AssertionError):
-        _assert_write_permissions_stay_off_the_pull_request_path(
-            "edge-images.yml", workflow
-        )
+        _assert_write_permissions_stay_off_the_pull_request_path("edge-images.yml", workflow)
 
 
 @pytest.mark.parametrize(
@@ -1760,9 +1711,7 @@ def test_edge_image_policy_rejects_an_ungated_token_consumer(
         step["with"][field] = value
 
     with pytest.raises(AssertionError):
-        _assert_write_permissions_stay_off_the_pull_request_path(
-            "edge-images.yml", workflow
-        )
+        _assert_write_permissions_stay_off_the_pull_request_path("edge-images.yml", workflow)
 
 
 @pytest.mark.parametrize(
@@ -1782,9 +1731,7 @@ def test_edge_image_policy_rejects_dropping_a_gated_step(step_index: int, why: s
     del steps[step_index]
 
     with pytest.raises(AssertionError):
-        _assert_write_permissions_stay_off_the_pull_request_path(
-            "edge-images.yml", workflow
-        )
+        _assert_write_permissions_stay_off_the_pull_request_path("edge-images.yml", workflow)
 
 
 def test_edge_image_policy_rejects_a_publishing_build_with_no_target() -> None:
@@ -1796,9 +1743,7 @@ def test_edge_image_policy_rejects_a_publishing_build_with_no_target() -> None:
     assert worker["with"].pop("target") == _SHIPPED_TARGET
 
     with pytest.raises(AssertionError):
-        _assert_write_permissions_stay_off_the_pull_request_path(
-            "edge-images.yml", workflow
-        )
+        _assert_write_permissions_stay_off_the_pull_request_path("edge-images.yml", workflow)
 
 
 def test_edge_image_boot_smoke_shapes_are_exact_complements() -> None:
@@ -1833,9 +1778,7 @@ def test_edge_image_policy_rejects_a_push_images_flag_that_is_true_on_a_pr() -> 
     _jobs(workflow)["publish"]["env"]["PUSH_IMAGES"] = "true"
 
     with pytest.raises(AssertionError):
-        _assert_write_permissions_stay_off_the_pull_request_path(
-            "edge-images.yml", workflow
-        )
+        _assert_write_permissions_stay_off_the_pull_request_path("edge-images.yml", workflow)
 
 
 @pytest.mark.parametrize(
@@ -1925,18 +1868,12 @@ def _round_robin(files: list[str], total: int) -> dict[int, list[str]]:
     congruent to 0.
     """
     return {
-        shard: [
-            path
-            for index, path in enumerate(files, start=1)
-            if index % total == shard % total
-        ]
+        shard: [path for index, path in enumerate(files, start=1) if index % total == shard % total]
         for shard in range(1, total + 1)
     }
 
 
-def _assert_exact_cover(
-    expected: list[str], partition: dict[int, list[str]], total: int
-) -> None:
+def _assert_exact_cover(expected: list[str], partition: dict[int, list[str]], total: int) -> None:
     assert set(partition) == set(range(1, total + 1)), sorted(partition)
 
     assigned: list[str] = []
@@ -1961,9 +1898,7 @@ def test_shard_partition_is_an_exact_cover_of_the_suite() -> None:
     collectible = _collectible_test_files()
     # The exclusion list is closed: every name in it must still be tracked, so a
     # renamed or deleted file cannot leave a stale excuse behind.
-    assert set(collectible) >= _SHARD_EXCLUSIONS, sorted(
-        _SHARD_EXCLUSIONS - set(collectible)
-    )
+    assert set(collectible) >= _SHARD_EXCLUSIONS, sorted(_SHARD_EXCLUSIONS - set(collectible))
     expected = [path for path in collectible if path not in _SHARD_EXCLUSIONS]
     # Guard against a discovery bug that finds nothing and then "covers" it.
     assert len(expected) > 300, len(expected)
@@ -2052,11 +1987,7 @@ def test_ci_shard_discovery_really_selects_the_modelled_partition() -> None:
     `*_test.py` or a nested `tests/**/test_*.py` file is tracked.
     """
     expected = _round_robin(
-        [
-            path
-            for path in _collectible_test_files()
-            if path not in _SHARD_EXCLUSIONS
-        ],
+        [path for path in _collectible_test_files() if path not in _SHARD_EXCLUSIONS],
         _SHARD_TOTAL,
     )
 
@@ -2155,8 +2086,7 @@ def _assert_trusted_contract_drift_security(workflow: dict[str, object]) -> None
             "with": {"persist-credentials": "false"},
         },
         {
-            "uses": "astral-sh/setup-uv@"
-            "d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86",
+            "uses": "astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86",
             "with": {"enable-cache": "false", "version": "0.11.27"},
         },
         {"run": "uv sync --frozen"},
@@ -2243,9 +2173,7 @@ def test_trusted_contract_policy_rejects_security_mutations(
         ("container", "unreviewed/image:latest"),
     ],
 )
-def test_trusted_contract_policy_rejects_job_mutations(
-    field: str, value: object
-) -> None:
+def test_trusted_contract_policy_rejects_job_mutations(field: str, value: object) -> None:
     workflow = copy.deepcopy(_workflow("contract-drift.yml"))
     jobs = workflow["jobs"]
     assert isinstance(jobs, dict)
@@ -2264,9 +2192,7 @@ def test_trusted_contract_policy_rejects_job_mutations(
         ("DATASET_OPS_REPO", "/tmp/redirected"),
     ],
 )
-def test_trusted_contract_policy_rejects_environment_mutations(
-    field: str, value: str
-) -> None:
+def test_trusted_contract_policy_rejects_environment_mutations(field: str, value: str) -> None:
     workflow = copy.deepcopy(_workflow("contract-drift.yml"))
     jobs = workflow["jobs"]
     assert isinstance(jobs, dict)

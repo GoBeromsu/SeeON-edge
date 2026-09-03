@@ -71,17 +71,13 @@ def test_restart_attempts_merge_across_rows() -> None:
 
 
 def test_backend_identity_multiplication_is_detected_across_rows() -> None:
-    result = classify_rows(
-        [_row(backend=("backend-1",)), _row(backend=("backend-2",))]
-    )
+    result = classify_rows([_row(backend=("backend-1",)), _row(backend=("backend-2",))])
 
     assert result.outcome is DiagnosticOutcome.BACKEND_IDENTITY_DUPLICATION
 
 
 def test_api_incident_multiplication_is_detected_across_rows() -> None:
-    result = classify_rows(
-        [_row(incidents=("incident-1",)), _row(incidents=("incident-2",))]
-    )
+    result = classify_rows([_row(incidents=("incident-1",)), _row(incidents=("incident-2",))])
 
     assert result.outcome is DiagnosticOutcome.API_INCIDENT_DUPLICATION
 
@@ -170,9 +166,7 @@ def test_identity_findings_survive_missing_order_evidence() -> None:
     refire = classify_rows(
         [
             _row_without_order(edge="edge-1"),
-            _row_without_order(
-                edge="edge-2", backend=("backend-2",), incidents=("incident-2",)
-            ),
+            _row_without_order(edge="edge-2", backend=("backend-2",), incidents=("incident-2",)),
         ]
     )
 
@@ -257,9 +251,7 @@ def test_relation_builder_joins_fixture_and_api_by_edge_id() -> None:
         attempts={"edge-1": [1, 2]},
         backend_event_ids={"edge-1": ["backend-1"]},
         incidents=[
-            IncidentProjection(
-                "incident-1", "edge-1", "2026-08-16T00:00:00Z", "OPEN", "ACKED"
-            )
+            IncidentProjection("incident-1", "edge-1", "2026-08-16T00:00:00Z", "OPEN", "ACKED")
         ],
         terminal_states={"edge-1": "ACKED"},
         clock_order_valid=True,
@@ -386,9 +378,7 @@ def test_semantic_cleartext_assignment_rejects_missing_or_leaked_values(
 def test_package_services_require_complete_opt_in_absence() -> None:
     validate_no_insecure_http_assignments({"ml-api": {}, "ml-worker": {}})
     with pytest.raises(ValueError):
-        validate_no_insecure_http_assignments(
-            {"ml-api": {INSECURE_HTTP_ENV: "0"}}
-        )
+        validate_no_insecure_http_assignments({"ml-api": {INSECURE_HTTP_ENV: "0"}})
 
 
 def test_source_declaration_allowlist_rejects_extra_reference(tmp_path: Path) -> None:
@@ -431,9 +421,7 @@ def test_gateway_attestation_binds_file_identity_and_capabilities(tmp_path: Path
         expected_gid=os.getgid(),
         expected_mode=0o755,
         probe=probe,
-        required_capabilities=frozenset(
-            {"rtsp-publish", "rtsp-read", "config-stdin"}
-        ),
+        required_capabilities=frozenset({"rtsp-publish", "rtsp-read", "config-stdin"}),
     )
 
     assert result.sha256 == digest
@@ -696,9 +684,7 @@ class _UnstableIncidentClient(_IncidentClient):
 
 def test_incident_collector_rejects_unstable_poll() -> None:
     with pytest.raises(ValueError):
-        collect_stable_incidents(
-            _UnstableIncidentClient([]), bearer_token="dashboard-token"
-        )
+        collect_stable_incidents(_UnstableIncidentClient([]), bearer_token="dashboard-token")
 
 
 def test_tmpfs_destruction_requires_prior_identity_to_be_unreachable(

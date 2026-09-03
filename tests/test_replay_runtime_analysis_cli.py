@@ -189,9 +189,7 @@ def test_packaged_replay_cli_accepts_5000_digit_event_count(tmp_path: Path) -> N
     sys.set_int_max_str_digits(0)
     try:
         digits = "1" * 5_000
-        body = (
-            '{"reproducible": true, "event_count": ' + digits + "}"
-        ).encode()
+        body = ('{"reproducible": true, "event_count": ' + digits + "}").encode()
         assert len(body) < 6_144
         server = _serve(body)
         try:
@@ -219,7 +217,7 @@ def test_packaged_replay_cli_refuses_incomplete_chunked_transfer(tmp_path: Path)
             self.send_response(200)
             self.send_header("Transfer-Encoding", "chunked")
             self.end_headers()
-            self.wfile.write(b"20\r\n{\"reproducible\": true,\r\n")
+            self.wfile.write(b'20\r\n{"reproducible": true,\r\n')
 
         def log_message(self, format: str, *args: object) -> None:
             del format, args

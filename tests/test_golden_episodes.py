@@ -316,9 +316,7 @@ def test_export_worksheet_and_golden_conversion_use_clip_overlap(tmp_path: Path)
             writer = csv.DictWriter(handle, fieldnames=[*rows[0], "labeller"])
             writer.writeheader()
             writer.writerows({**row, "label": "real", "labeller": labeller} for row in rows)
-    assert convert(
-        [tmp_path / "a.csv", tmp_path / "b.csv"], golden, corpus, None, 5
-    ) == 100
+    assert convert([tmp_path / "a.csv", tmp_path / "b.csv"], golden, corpus, None, 5) == 100
     loaded = load_golden_episodes(golden)
     assert all(episode.corroborating_overlap_s >= 1 for episode in loaded)
 

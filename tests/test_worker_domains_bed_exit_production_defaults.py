@@ -62,6 +62,9 @@ def _monitor() -> bed_exit.BedExitMonitor:
             facility_id=FACILITY_ID,
         ),
         clock=_clock_at(),
+        boot_id="boot-bed-exit-defaults",
+        stream_epoch="epoch-bed-exit-defaults",
+        source_generation=0,
     )
 
 

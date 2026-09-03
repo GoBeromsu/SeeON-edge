@@ -18,8 +18,7 @@ def test_zero_and_loopback_canary_when_real_qa_is_authorized(tmp_path: Path) -> 
     model_dir = os.environ.get("SEEON_CANARY_MODEL_DIR")
     if worker_image is None or expected_revision is None or model_dir is None:
         pytest.skip(
-            "CANARY_WORKER_IMAGE, CANARY_EXPECTED_REVISION, and "
-            "SEEON_CANARY_MODEL_DIR are required"
+            "CANARY_WORKER_IMAGE, CANARY_EXPECTED_REVISION, and SEEON_CANARY_MODEL_DIR are required"
         )
     evidence = tmp_path / "canary"
 

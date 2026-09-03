@@ -188,9 +188,10 @@ def test_default_clip_recorder_degrades_to_null_when_the_shared_recorder_never_s
     assert isinstance(recorder, worker_module._NullClipRecorder)  # noqa: SLF001
     packet = _packet()
     try:
-        assert recorder.on_event(
-            packet, _event(), detected_at=datetime(2026, 9, 3, tzinfo=UTC)
-        ) is None
+        assert (
+            recorder.on_event(packet, _event(), detected_at=datetime(2026, 9, 3, tzinfo=UTC))
+            is None
+        )
     finally:
         packet.release()
 

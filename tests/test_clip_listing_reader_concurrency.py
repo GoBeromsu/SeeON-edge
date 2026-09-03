@@ -14,6 +14,5 @@ def test_legacy_listing_reader_fixtures_have_no_production_target() -> None:
     with pytest.raises(ModuleNotFoundError):
         importlib.import_module("backend.app.features.clips.listing_repository")
     assert not (
-        Path(__file__).resolve().parents[1]
-        / "backend/app/features/clips/listing_repository.py"
+        Path(__file__).resolve().parents[1] / "backend/app/features/clips/listing_repository.py"
     ).exists()

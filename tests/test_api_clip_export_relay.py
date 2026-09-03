@@ -335,9 +335,7 @@ def test_evidence_receipt_route_commits_canonical_action_and_detail(tmp_path: Pa
             "SELECT action,target_id,actor_type,auth_mechanism,detail_json "
             "FROM audit_events WHERE action NOT LIKE 'audit.%'"
         ).fetchall()
-    assert rows == [
-        ("evidence.receipt", "clip-1", "service", "relay_token", '{"version":1}')
-    ]
+    assert rows == [("evidence.receipt", "clip-1", "service", "relay_token", '{"version":1}')]
 
 
 def test_unavailable_relay_passes_complete_immutable_state_request(tmp_path: Path) -> None:

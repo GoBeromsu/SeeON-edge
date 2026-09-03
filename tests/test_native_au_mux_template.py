@@ -1,5 +1,3 @@
-
-
 def test_repeated_parameter_sets_do_not_change_the_configuration_signature() -> None:
     """Regression for the rebuild storm (#424).
 

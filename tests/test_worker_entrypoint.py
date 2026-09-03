@@ -81,9 +81,7 @@ def _isolate_from_default_ingest_composition(monkeypatch: pytest.MonkeyPatch) ->
     real_init = WorkerRuntime.__init__
     real_connect = socket.socket.connect
 
-    def _reject_network_connect(
-        client: socket.socket, address: tuple[str, int] | str
-    ) -> None:
+    def _reject_network_connect(client: socket.socket, address: tuple[str, int] | str) -> None:
         if client.family in (socket.AF_INET, socket.AF_INET6):
             raise AssertionError("entrypoint tests must not open network sockets")
         real_connect(client, address)

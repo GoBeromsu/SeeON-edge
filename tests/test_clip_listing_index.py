@@ -23,9 +23,7 @@ def test_clip_listing_index_module_is_absent() -> None:
 def test_http_listing_does_not_install_a_listing_index() -> None:
     app = create_app(lifespan=no_lifespan)
     with TestClient(app) as client:
-        login = client.post(
-            "/api/v1/auth/session", json={"username": "admin", "password": "admin"}
-        )
+        login = client.post("/api/v1/auth/session", json={"username": "admin", "password": "admin"})
         assert login.status_code == 204
         response = client.get("/api/v1/clips", params={"limit": 48})
     assert response.status_code == 200

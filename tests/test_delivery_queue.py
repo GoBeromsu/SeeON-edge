@@ -19,8 +19,13 @@ from shared.events.delivery_queue import (
 
 def _event(number: int) -> EventEntry:
     return EventEntry(
-        edge_event_id=f"event-{number}", event_type="fall", detected_at="2026-08-21T00:00:00Z",
-        camera_id="camera", facility_id="facility", decision_trace=b"trace", values=b"values",
+        edge_event_id=f"event-{number}",
+        event_type="fall",
+        detected_at="2026-08-21T00:00:00Z",
+        camera_id="camera",
+        facility_id="facility",
+        decision_trace=b"trace",
+        values=b"values",
     )
 
 

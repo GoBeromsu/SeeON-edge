@@ -267,9 +267,7 @@ def _loop(
         camera_id=camera_id,
         source_id=camera_id,
         make_decode_config=_decode_config,
-        policy=CapturePolicy(
-            max_failures=max_failures, max_total_reconnects=0, target_fps=1000.0
-        ),
+        policy=CapturePolicy(max_failures=max_failures, max_total_reconnects=0, target_fps=1000.0),
         decode_supervision=DecodeSupervisionPolicy(max_respawns=max_respawns),
     )
     ports = CameraIngestPorts(
@@ -319,9 +317,7 @@ def test_silence_below_the_deadline_never_respawns() -> None:
     """Silence shorter than T is normal decode jitter, not a stall."""
     # Given: a gap just under the deadline, then a frame.
     clock = _FakeClock()
-    session = _Session(
-        [None, DECODE_SILENCE_DEADLINE_SEC - 0.1, _packet("camera-a", 1)], clock
-    )
+    session = _Session([None, DECODE_SILENCE_DEADLINE_SEC - 0.1, _packet("camera-a", 1)], clock)
     adapter = _Adapter([session])
     bus, reporter = _FakeBus(), _Reporter()
     loop = _loop("camera-a", adapter, bus, reporter, clock, max_failures=100)
@@ -433,9 +429,7 @@ def test_current_exhausted_logs_keep_status_extra_and_existing_message_fields(
     """Baseline: budget-exhausted status/extra stay put; detail is still absent."""
     # Given
     clock = _FakeClock()
-    sessions = [
-        _Session([_DeadDecoderError("ffmpeg decoder exited")], clock) for _ in range(4)
-    ]
+    sessions = [_Session([_DeadDecoderError("ffmpeg decoder exited")], clock) for _ in range(4)]
     adapter = _Adapter(list(sessions))
     bus, reporter = _FakeBus(), _Reporter()
     loop = _loop("camera-a", adapter, bus, reporter, clock, max_respawns=3)
@@ -448,9 +442,7 @@ def test_current_exhausted_logs_keep_status_extra_and_existing_message_fields(
     assert reporter.states == {"camera-a": "degraded"}
     assert reporter.categories["camera-a"] == "_DeadDecoderError"
     exhausted_records = [
-        record
-        for record in caplog.records
-        if "respawn budget exhausted" in record.getMessage()
+        record for record in caplog.records if "respawn budget exhausted" in record.getMessage()
     ]
     assert len(exhausted_records) == 1
     message = exhausted_records[0].getMessage()
@@ -589,18 +581,13 @@ def test_raising_safe_log_detail_falls_back_to_unavailable(
     ]
     assert respawn_records
     message = respawn_records[0].getMessage()
-    assert (
-        "detail=NvdecUnavailableError: cuvid decode failed: codec not supported"
-        in message
-    )
+    assert "detail=NvdecUnavailableError: cuvid decode failed: codec not supported" in message
     assert "safe_log_detail boom" not in message
     assert reporter.categories["camera-a"] == "_RaisingSafe"
 
     only_raiser = _RaisingSafe("solo")
     clock = _FakeClock()
-    adapter = _Adapter(
-        [_Session([only_raiser], clock), _Session([_packet("camera-a", 2)], clock)]
-    )
+    adapter = _Adapter([_Session([only_raiser], clock), _Session([_packet("camera-a", 2)], clock)])
     bus, reporter = _FakeBus(), _Reporter()
     loop = _loop("camera-a", adapter, bus, reporter, clock)
     bus.on_publish = lambda _packet: loop.stop()
@@ -627,9 +614,7 @@ def test_oserror_from_safe_log_detail_does_not_abort_supervision(
     wrapper = _OSErrorSafe("outer")
     wrapper.__cause__ = root
     clock = _FakeClock()
-    adapter = _Adapter(
-        [_Session([wrapper], clock), _Session([_packet("camera-a", 1)], clock)]
-    )
+    adapter = _Adapter([_Session([wrapper], clock), _Session([_packet("camera-a", 1)], clock)])
     bus, reporter = _FakeBus(), _Reporter()
     loop = _loop("camera-a", adapter, bus, reporter, clock)
     bus.on_publish = lambda _packet: loop.stop()
@@ -660,9 +645,7 @@ def test_custom_exception_from_safe_log_detail_does_not_abort_supervision(
 
     only_raiser = _CustomSafe("solo")
     clock = _FakeClock()
-    adapter = _Adapter(
-        [_Session([only_raiser], clock), _Session([_packet("camera-a", 2)], clock)]
-    )
+    adapter = _Adapter([_Session([only_raiser], clock), _Session([_packet("camera-a", 2)], clock)])
     bus, reporter = _FakeBus(), _Reporter()
     loop = _loop("camera-a", adapter, bus, reporter, clock)
     bus.on_publish = lambda _packet: loop.stop()
@@ -716,9 +699,7 @@ def test_safe_detail_is_found_four_cause_links_below_the_wrapper(
     beyond = RuntimeError("beyond")
     beyond.__cause__ = wrapper
     clock = _FakeClock()
-    adapter = _Adapter(
-        [_Session([beyond], clock), _Session([_packet("camera-a", 3)], clock)]
-    )
+    adapter = _Adapter([_Session([beyond], clock), _Session([_packet("camera-a", 3)], clock)])
     bus, reporter = _FakeBus(), _Reporter()
     loop = _loop("camera-a", adapter, bus, reporter, clock)
     bus.on_publish = lambda _packet: loop.stop()
@@ -739,9 +720,7 @@ def test_respawn_backoff_grows_exponentially_and_is_capped() -> None:
     """Backoff doubles per consecutive respawn and never exceeds the cap."""
     # Given: a camera whose decode path is dead on every attempt.
     clock = _FakeClock()
-    sessions = [
-        _Session([_DeadDecoderError("ffmpeg decoder exited")], clock) for _ in range(9)
-    ]
+    sessions = [_Session([_DeadDecoderError("ffmpeg decoder exited")], clock) for _ in range(9)]
     adapter = _Adapter(list(sessions))
     bus, reporter = _FakeBus(), _Reporter()
     loop = _loop("camera-a", adapter, bus, reporter, clock, max_respawns=8)
@@ -768,9 +747,7 @@ def test_permanently_dead_camera_stops_respawning_and_stays_degraded() -> None:
     """
     # Given
     clock = _FakeClock()
-    sessions = [
-        _Session([_DeadDecoderError("ffmpeg decoder exited")], clock) for _ in range(4)
-    ]
+    sessions = [_Session([_DeadDecoderError("ffmpeg decoder exited")], clock) for _ in range(4)]
     adapter = _Adapter(list(sessions))
     bus, reporter = _FakeBus(), _Reporter()
     loop = _loop("camera-a", adapter, bus, reporter, clock, max_respawns=3)
@@ -834,9 +811,7 @@ def test_decode_supervision_never_reaches_the_fault_handler() -> None:
     ]
     adapter = _Adapter(list(sessions))
     bus, reporter = _FakeBus(), _Reporter()
-    loop = _loop(
-        "camera-a", adapter, bus, reporter, clock, max_respawns=3, max_failures=100
-    )
+    loop = _loop("camera-a", adapter, bus, reporter, clock, max_respawns=3, max_failures=100)
 
     # When
     loop.run()
@@ -972,9 +947,7 @@ def test_camera_loop_composition_populates_the_decode_backend_snapshot(
     selection/observability disagreement).
     """
     # Given: a runtime whose boot profile resolved to the cpu decode token.
-    monkeypatch.setattr(
-        ingest_composition_module, "CpuAvAdapter", lambda: _StubCpuAdapter()
-    )
+    monkeypatch.setattr(ingest_composition_module, "CpuAvAdapter", lambda: _StubCpuAdapter())
     config = _worker_config("camera-a")
     runtime = WorkerRuntime(config, serving_client=_FakeServingClient())
     runtime._boot = _boot_context_for("cpu")  # noqa: SLF001 - post-model-init state
@@ -998,9 +971,7 @@ def test_decode_backend_snapshot_is_recorded_per_camera(
 ) -> None:
     """Each composed camera gets its own entry -- no shared/global record."""
     # Given
-    monkeypatch.setattr(
-        ingest_composition_module, "CpuAvAdapter", lambda: _StubCpuAdapter()
-    )
+    monkeypatch.setattr(ingest_composition_module, "CpuAvAdapter", lambda: _StubCpuAdapter())
     runtime = WorkerRuntime(_worker_config("camera-a"), serving_client=_FakeServingClient())
     runtime._boot = _boot_context_for("cpu")  # noqa: SLF001
 

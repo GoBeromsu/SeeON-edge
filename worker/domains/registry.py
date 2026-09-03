@@ -17,7 +17,6 @@ from worker.domains.base import AuditContext, DomainAuditSnapshot
 from worker.domains.bed_exit import (
     BedExitConfig,
     BedExitDebugSnapshot,
-    BedExitLatch,
     BedExitMonitor,
     BedExitScoringRecorder,
 )
@@ -88,6 +87,9 @@ class DomainRegistration:
 class BedExitDomainDependencies:
     config: BedExitConfig
     clock: Callable[[], datetime]
+    boot_id: str
+    stream_epoch: str
+    source_generation: int
     scoring_recorder: BedExitScoringRecorder | None = None
 
 
@@ -148,6 +150,9 @@ def _build_bed_exit_compat(dependencies: object) -> BedExitMonitor:
     return BedExitMonitor(
         config=dependencies.config,
         clock=dependencies.clock,
+        boot_id=dependencies.boot_id,
+        stream_epoch=dependencies.stream_epoch,
+        source_generation=dependencies.source_generation,
         scoring_recorder=dependencies.scoring_recorder,
     )
 
@@ -213,7 +218,7 @@ def _fall_v2(context: CameraModuleContext) -> FallV2DomainDecider:
         raise TypeError("fall.v2 requires a typed fall.policy.v2 effective policy")
     model = _shared_fall_model(context)
     threshold, _source, _receipt = _effective_transition_threshold(model, resolved)
-    identity = context.camera_components.get("fall-v2-identity")
+    identity = context.camera_components.get("episode-identity")
     if not isinstance(identity, tuple) or len(identity) != 3:
         raise TypeError("fall.v2 requires runtime boot and source identities")
     boot_id, stream_epoch, source_generation = identity
@@ -263,6 +268,16 @@ def _identity_decider(state: object) -> Decider:
 
 def _bed_exit_monitor(context: CameraModuleContext) -> BedExitMonitor:
     policy = _bed_exit_policy(context)
+    identity = context.camera_components.get("episode-identity")
+    if not isinstance(identity, tuple) or len(identity) != 3:
+        raise TypeError("bed_exit.v1 requires runtime boot and source identities")
+    boot_id, stream_epoch, source_generation = identity
+    if (
+        not isinstance(boot_id, str)
+        or not isinstance(stream_epoch, str)
+        or not isinstance(source_generation, int)
+    ):
+        raise TypeError("bed_exit.v1 received invalid runtime source identities")
     return BedExitMonitor(
         config=BedExitConfig(
             camera_id=context.camera_id,
@@ -273,6 +288,9 @@ def _bed_exit_monitor(context: CameraModuleContext) -> BedExitMonitor:
             night_window=cast("DetectionWindow | None", context.detection_window),
         ),
         clock=context.clock,
+        boot_id=boot_id,
+        stream_epoch=stream_epoch,
+        source_generation=source_generation,
         scoring_recorder=cast("BedExitScoringRecorder | None", context.diagnostics),
     )
 
@@ -359,12 +377,15 @@ _BED_EXIT_V1 = DetectionModuleDefinition(
         _camera_component("containment", lambda _context: containment_ratio, "rule"),
         _camera_component("bed-assignment", lambda _context: {}),
         _camera_component("bed-exit-state", _bed_exit_monitor),
-        _camera_component("bed-exit-latch", lambda _context: BedExitLatch()),
     ),
     schedule_rules=(
         ScheduleRule("pose", "camera-frame-stride"),
         ScheduleRule("person", "camera-frame-stride"),
-        ScheduleRule("bed", "temporal-profile", skip_when_flag="persisted-bed-region"),
+        # The persisted polygon is the only runtime bed truth, so bed
+        # segmentation is never scheduled per frame: the extractor stays
+        # provisioned only for the on-demand recognize route, whose result an
+        # operator persists explicitly.
+        ScheduleRule("bed", "on-demand"),
     ),
     policy_schema=PolicySchemaIdentity("bed_exit.policy", 1),
     camera_state_factory=_bed_exit_state,

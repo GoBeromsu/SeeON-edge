@@ -105,9 +105,7 @@ def test_production_decode_probe_nvdec_false_fails_closed_without_cuda(
     monkeypatch.setattr(
         worker_module,
         "probe_nvdec_cuvid_capability",
-        lambda: NvdecCapability(
-            False, "ffmpeg has no CUDA/CUVID/NVDEC hwaccel or *_cuvid decoder"
-        ),
+        lambda: NvdecCapability(False, "ffmpeg has no CUDA/CUVID/NVDEC hwaccel or *_cuvid decoder"),
     )
 
     # When

@@ -163,6 +163,7 @@ def test_production_boot_dependencies_nvidia_fails_closed_on_plain_cuda_only_hos
     device-resident concrete stages, so its verifier must consult the
     device-resident probe -- never `probe_cuda_capability` alone.
     """
+
     def fail_preflight() -> dict[str, str]:
         raise DeepStreamPreflightError("plugin_missing", "nvstreammux unavailable")
 

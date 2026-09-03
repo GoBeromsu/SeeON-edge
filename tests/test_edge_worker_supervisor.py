@@ -166,7 +166,11 @@ def test_camera_pipeline_pump_updates_measured_fps_after_two_processed_frames() 
     )
     decision = EventAggregator(deciders=(), incidents=IncidentManager())
     pump = CameraPipelinePump(
-        "camera-1", bus.inference, analytics, decision, _NoOpSink(),
+        "camera-1",
+        bus.inference,
+        analytics,
+        decision,
+        _NoOpSink(),
         diagnostics=diagnostics,
     )
 

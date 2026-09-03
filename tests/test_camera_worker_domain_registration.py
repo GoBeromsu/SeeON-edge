@@ -95,7 +95,11 @@ def _worker_config_payload(**domains: object) -> dict[str, object]:
         "relay": {"url": "http://relay.test", "token": "relay-token"},
         "domains": domains,
         "cameras": [
-            {"camera_id": "camera-1", "facility_id": "facility-1", "rtsp_url": "rtsp://example.test/camera-1"}
+            {
+                "camera_id": "camera-1",
+                "facility_id": "facility-1",
+                "rtsp_url": "rtsp://example.test/camera-1",
+            }
         ],
     }
 

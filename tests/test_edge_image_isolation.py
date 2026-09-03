@@ -60,7 +60,10 @@ def _tracked_paths() -> list[str]:
     # whitespace invents paths that do not exist.
     out = subprocess.run(
         ("git", "ls-files", "-z"),
-        cwd=REPO_ROOT, check=True, capture_output=True, text=True,
+        cwd=REPO_ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
     ).stdout
     return [path for path in out.split("\0") if path]
 
@@ -198,7 +201,10 @@ def test_a_new_top_level_directory_is_not_silently_outside_both_sets() -> None:
 def test_an_empty_range_reuses_both_images() -> None:
     head = subprocess.run(
         ("git", "rev-parse", "HEAD"),
-        cwd=REPO_ROOT, check=True, capture_output=True, text=True,
+        cwd=REPO_ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
     ).stdout.strip()
     for image in DOCKERFILES:
         decision = decide(image, head, head)
@@ -354,9 +360,7 @@ def test_reuse_refuses_a_retag_that_changed_the_digest() -> None:
 
 def _config_with_revision(revision: str) -> str:
     """An `imagetools inspect --format '{{json .Image}}'` payload, as the CLI emits it."""
-    return json.dumps(
-        {"config": {"Labels": {"org.opencontainers.image.revision": revision}}}
-    )
+    return json.dumps({"config": {"Labels": {"org.opencontainers.image.revision": revision}}})
 
 
 def test_an_ineligible_event_always_builds() -> None:
@@ -376,8 +380,13 @@ def test_an_unresolvable_registry_reference_builds() -> None:
         raise OSError("no registry here")
 
     decision = plan(
-        ML_API, "HEAD", "seeon-edge-v9.9.9", _REPO,
-        reuse_eligible=True, run=run, previous=_PREVIOUS,
+        ML_API,
+        "HEAD",
+        "seeon-edge-v9.9.9",
+        _REPO,
+        reuse_eligible=True,
+        run=run,
+        previous=_PREVIOUS,
     )
     assert decision["build"] is True
     assert "resolves none of" in str(decision["reason"])
@@ -390,8 +399,13 @@ def test_a_missing_revision_label_builds() -> None:
         return "{}"  # an image config carrying no labels at all
 
     decision = plan(
-        ML_API, "HEAD", "seeon-edge-v9.9.9", _REPO,
-        reuse_eligible=True, run=run, previous=_PREVIOUS,
+        ML_API,
+        "HEAD",
+        "seeon-edge-v9.9.9",
+        _REPO,
+        reuse_eligible=True,
+        run=run,
+        previous=_PREVIOUS,
     )
     assert decision["build"] is True
     assert "revision label" in str(decision["reason"])
@@ -407,8 +421,13 @@ def test_a_revision_naming_an_unknown_commit_builds() -> None:
         return _config_with_revision(unknown)
 
     decision = plan(
-        ML_API, "HEAD", "seeon-edge-v9.9.9", _REPO,
-        reuse_eligible=True, run=run, previous=_PREVIOUS,
+        ML_API,
+        "HEAD",
+        "seeon-edge-v9.9.9",
+        _REPO,
+        reuse_eligible=True,
+        run=run,
+        previous=_PREVIOUS,
     )
     assert decision["build"] is True
     assert "not in this repository's history" in str(decision["reason"])
@@ -425,7 +444,10 @@ def test_the_comparison_base_is_the_build_commit_not_the_release_commit() -> Non
     """
     head = subprocess.run(
         ("git", "rev-parse", "HEAD"),
-        cwd=REPO_ROOT, check=True, capture_output=True, text=True,
+        cwd=REPO_ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
     ).stdout.strip()
 
     def run(argv: list[str]) -> str:
@@ -434,8 +456,13 @@ def test_the_comparison_base_is_the_build_commit_not_the_release_commit() -> Non
         return _config_with_revision(head)
 
     decision = plan(
-        ML_API, head, "seeon-edge-v9.9.9", _REPO,
-        reuse_eligible=True, run=run, previous=_PREVIOUS,
+        ML_API,
+        head,
+        "seeon-edge-v9.9.9",
+        _REPO,
+        reuse_eligible=True,
+        run=run,
+        previous=_PREVIOUS,
     )
     # The label named HEAD, so the range is empty and the image is reused --
     # regardless of what the previous release's own commit was.

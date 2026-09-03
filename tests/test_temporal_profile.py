@@ -158,9 +158,13 @@ def test_compile_time_and_activation_bed_interval_agree_at_15fps() -> None:
         flags=flags,
         temporal_profile=profile,
     )
-    compile_time_bed = bed_rule.resolve(1, profile)
-    assert compile_time_bed == activation.schedule["bed"]
-    assert activation.schedule["bed"] == 90
+    # The bed extractor is provisioned on-demand: its rule resolves to no
+    # interval and it never appears in the per-frame activation schedule, so
+    # compile-time validation and live activation still agree exactly.
+    assert bed_rule.resolve(1, profile) is None
+    assert "bed" not in activation.schedule
+    # The profile still declares the bed cadence for the on-demand owner.
+    assert profile.decision_interval_frames("bed") == 90
     # Production registry stays on the 5fps identity; this test must not
     # mutate the process-wide compiled graph.
     assert DETECTION_MODULE_REGISTRY is not compiled

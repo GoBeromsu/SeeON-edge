@@ -57,9 +57,7 @@ class _SpawnSpy:
 
     @property
     def encoders(self) -> list[str]:
-        return [
-            process.args[process.args.index("-c:v") + 1] for process in self.processes
-        ]
+        return [process.args[process.args.index("-c:v") + 1] for process in self.processes]
 
 
 def _packet(seq: int, *, width: int = 4, height: int = 2) -> FramePacket:

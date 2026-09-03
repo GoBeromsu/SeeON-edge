@@ -570,5 +570,3 @@ def test_worker_http_clip_delete_unavailable_without_control_composed(tmp_path: 
 
 
 # --- crash/restart convergence through this feature's own entry points --------
-
-

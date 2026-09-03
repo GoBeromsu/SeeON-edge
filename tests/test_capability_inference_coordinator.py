@@ -120,9 +120,7 @@ class _BatchClient:
         assert task == "pose"
         assert len(self.watchdog.in_flight()) == 1
         self.batches.append(tuple((frame.camera_id, frame.seq) for frame in frames))
-        self.batch_geometries.append(
-            tuple((frame.height, frame.width) for frame in frames)
-        )
+        self.batch_geometries.append(tuple((frame.height, frame.width) for frame in frames))
         if self._raise_for is not None:
             error = self._raise_for(frames)
             if error is not None:
@@ -132,13 +130,9 @@ class _BatchClient:
             count = self._result_count_for(frames)
             if count is not None:
                 return tuple(
-                    pose_result((), ((float(index), 0.0, 1.0, 1.0, 0.9),))
-                    for index in range(count)
+                    pose_result((), ((float(index), 0.0, 1.0, 1.0, 0.9),)) for index in range(count)
                 )
-        return tuple(
-            pose_result((), ((float(frame.seq), 0.0, 1.0, 1.0, 0.9),))
-            for frame in frames
-        )
+        return tuple(pose_result((), ((float(frame.seq), 0.0, 1.0, 1.0, 0.9),)) for frame in frames)
 
 
 def _packet(camera_id: str, seq: int, *, height: int = 2, width: int = 2) -> FramePacket:
@@ -164,9 +158,7 @@ def _coordinator(
     result_count_for: Callable[[Sequence[FramePacket]], int | None] | None = None,
 ):
     clock, watchdog = _Clock(), _Watchdog()
-    client = _BatchClient(
-        clock, watchdog, raise_for=raise_for, result_count_for=result_count_for
-    )
+    client = _BatchClient(clock, watchdog, raise_for=raise_for, result_count_for=result_count_for)
     coordinator = CapabilityInferenceCoordinator(client, watchdog, clock=clock)
     lanes: dict[str, tuple[_LatestSlot, InferenceResultSlot]] = {}
     for camera_id in camera_ids:
@@ -249,10 +241,7 @@ def test_homogeneous_geometry_cycle_keeps_one_model_batch(width: int, height: in
         ("camera-a", "camera-b", "camera-c")
     )
     try:
-        held = {
-            camera_id: _packet(camera_id, 7, height=height, width=width)
-            for camera_id in lanes
-        }
+        held = {camera_id: _packet(camera_id, 7, height=height, width=width) for camera_id in lanes}
         for camera_id, (source, _results) in lanes.items():
             source.publish(held[camera_id])
         assert coordinator.run_cycle() == 3
@@ -417,9 +406,7 @@ def test_nonfatal_geometry_bucket_failure_releases_only_that_bucket(
         assert snapshot.cameras["camera-c"].inferred == 1
         messages = [record.getMessage() for record in caplog.records]
         assert any(
-            "RuntimeError" in message
-            and "480x640" in message
-            and "camera-b" in message
+            "RuntimeError" in message and "480x640" in message and "camera-b" in message
             for message in messages
         )
         first.packet.release()
@@ -971,6 +958,8 @@ def test_post_decision_evidence_or_sink_error_keeps_detection_completion() -> No
             sink=_RaisingSink(),
         )
     assert sink_diagnostics.snapshot().cameras[0].decision_completed == 1
+
+
 def test_round_robin_admits_every_continuously_ready_lane_within_bounded_cycles() -> None:
     camera_ids = tuple(f"camera-{index}" for index in range(50))
     coordinator, client, _watchdog, _clock, lanes = _coordinator(camera_ids)
@@ -984,9 +973,7 @@ def test_round_robin_admits_every_continuously_ready_lane_within_bounded_cycles(
             selected = coordinator.run_cycle()
             assert 1 <= selected <= 16
             cycle_ids = [
-                camera_id
-                for batch in client.batches[before:]
-                for camera_id, _seq in batch
+                camera_id for batch in client.batches[before:] for camera_id, _seq in batch
             ]
             assert len(cycle_ids) == selected
             for camera_id in cycle_ids:
@@ -1046,7 +1033,7 @@ def test_zero_ready_cycle_preserves_fairness_cursor_and_waits_once() -> None:
         first = [camera_id for camera_id, _seq in client.batches[0]]
         assert first == [f"camera-{index}" for index in range(16)]
         _release_results(lanes)
-        for (source, _results) in lanes.values():
+        for source, _results in lanes.values():
             leftover = source.take(timeout_sec=0)
             if leftover is not None:
                 leftover.release()

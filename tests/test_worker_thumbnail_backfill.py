@@ -20,13 +20,9 @@ from worker.pipeline.output.evidence.clip_config import (
 
 
 def _backfill_module() -> ModuleType:
-    spec = importlib.util.find_spec(
-        "worker.pipeline.output.evidence.thumbnail_backfill"
-    )
+    spec = importlib.util.find_spec("worker.pipeline.output.evidence.thumbnail_backfill")
     assert spec is not None, "worker thumbnail backfill is missing"
-    return importlib.import_module(
-        "worker.pipeline.output.evidence.thumbnail_backfill"
-    )
+    return importlib.import_module("worker.pipeline.output.evidence.thumbnail_backfill")
 
 
 def _jpeg_bytes() -> bytes:
@@ -137,9 +133,7 @@ def test_backfill_refuses_active_nested_recorder_before_any_mutation(
     tmp_path: Path,
 ) -> None:
     module = _backfill_module()
-    lock_module = importlib.import_module(
-        "worker.pipeline.output.evidence.clip_store_lock"
-    )
+    lock_module = importlib.import_module("worker.pipeline.output.evidence.clip_store_lock")
     root = tmp_path / "clip-store"
     root_clip = _write_playable_clip(root, "clip-root")
     nested_root = root / "archive"
@@ -159,9 +153,7 @@ def test_concurrent_backfill_is_refused_while_first_writer_holds_lock(
     tmp_path: Path,
 ) -> None:
     module = _backfill_module()
-    lock_module = importlib.import_module(
-        "worker.pipeline.output.evidence.clip_store_lock"
-    )
+    lock_module = importlib.import_module("worker.pipeline.output.evidence.clip_store_lock")
     root = tmp_path / "clip-store"
     _write_playable_clip(root, "clip-root")
     generator = _BlockingThumbnailGenerator()

@@ -318,10 +318,10 @@ def test_preflight_reuses_the_boot_scoped_incident_manager_on_reconnect(
     camera = runtime.config.cameras[0]
 
     first = runtime._preflight_camera_graph(  # noqa: SLF001
-        camera, fall_source_identity=("boot", "1", 0)
+        camera, episode_source_identity=("boot", "1", 0)
     )
     rebuilt = runtime._preflight_camera_graph(  # noqa: SLF001
-        camera, fall_source_identity=("boot", "2", 1), incidents=first.decision.incidents
+        camera, episode_source_identity=("boot", "2", 1), incidents=first.decision.incidents
     )
 
     assert rebuilt.decision.incidents is first.decision.incidents

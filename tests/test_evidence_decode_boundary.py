@@ -177,9 +177,7 @@ def _source(
         time_base = video.time_base
         assert time_base is not None
         demuxed = [
-            packet
-            for packet in container.demux(video)
-            if packet.dts is not None and bytes(packet)
+            packet for packet in container.demux(video) if packet.dts is not None and bytes(packet)
         ]
         return _Source(
             path=path,
@@ -311,8 +309,9 @@ def test_event_clip_from_the_teed_ring_is_a_byte_true_stream_copy(tmp_path: Path
     assert payloads == expected
     assert tuple(packet.pts for packet in muxed) == source.pts[start : start + len(payloads)]
     assert tuple(packet.dts for packet in muxed) == source.dts[start : start + len(payloads)]
-    assert tuple(packet.is_keyframe for packet in muxed) == (
-        source.keyframes[start : start + len(payloads)]
+    assert (
+        tuple(packet.is_keyframe for packet in muxed)
+        == (source.keyframes[start : start + len(payloads)])
     )
     assert artifact.streams[0].timestamp_translation_ticks == 0
     assert artifact.streams[0].codec_name == source.codec_name
@@ -439,12 +438,8 @@ def test_undersized_ring_reports_history_truncation_instead_of_silent_shortening
     # Then: the shortening is reported, and the ring's eviction is counted.
     assert ring.metrics.evicted_packets == len(source.payloads) - len(retained)
     assert isinstance(outcome, ClipReady)
-    assert PacketTruncationReason.HISTORY_UNAVAILABLE.value in (
-        outcome.artifact.truncation_reasons
-    )
-    selected_span = (
-        outcome.artifact.selected_end_pts_sec - outcome.artifact.selected_start_pts_sec
-    )
+    assert PacketTruncationReason.HISTORY_UNAVAILABLE.value in (outcome.artifact.truncation_reasons)
+    selected_span = outcome.artifact.selected_end_pts_sec - outcome.artifact.selected_start_pts_sec
     assert selected_span is not None
     assert selected_span < 3.0
 
@@ -559,9 +554,7 @@ def test_manifest_carries_the_truncation_reason_and_the_stream_copy_provenance(
         f"{source.time_base.numerator}/{source.time_base.denominator}"
     )
     assert manifest["source_media"]["streams"][0]["timestamp_translation_ticks"] == 0
-    assert manifest["truncation_reasons"] == [
-        PacketTruncationReason.HISTORY_UNAVAILABLE.value
-    ]
+    assert manifest["truncation_reasons"] == [PacketTruncationReason.HISTORY_UNAVAILABLE.value]
 
 
 def test_clip_enabled_keeps_nvdec_decode_out_of_the_python_process(tmp_path: Path) -> None:

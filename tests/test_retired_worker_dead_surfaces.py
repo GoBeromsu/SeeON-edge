@@ -153,9 +153,7 @@ def test_composition_roots_do_not_reach_retired_modules() -> None:
 def test_composition_roots_still_wire_active_delivery_and_identity() -> None:
     reachable = _reachable_modules(COMPOSITION_ROOTS)
     missing = [
-        module_name
-        for module_name in ACTIVE_COMPOSITION_MODULES
-        if module_name not in reachable
+        module_name for module_name in ACTIVE_COMPOSITION_MODULES if module_name not in reachable
     ]
     assert missing == []
     worker_imports = _imported_modules(ROOT / "worker" / "runtime" / "worker.py")

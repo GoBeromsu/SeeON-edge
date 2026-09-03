@@ -51,6 +51,9 @@ def test_three_second_inference_outage_marks_bed_exit_stale_without_event_or_emp
         ),
         clock=lambda: datetime(2026, 8, 18, tzinfo=UTC),
         staleness_clock=clock,
+        boot_id="test-boot",
+        stream_epoch="test-epoch",
+        source_generation=0,
     )
     assert monitor.update(_bed_input(person, bed)) == ()
 

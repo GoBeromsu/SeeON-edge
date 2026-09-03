@@ -96,7 +96,7 @@ def _composite(
     )
 
 
-def test_composite_merges_named_results_once_and_preserves_pose_keypoints() -> None:
+def test_composite_discards_live_bed_segmentation_and_preserves_pose_keypoints() -> None:
     pose_box = (1, 2, 11, 22, 0.55)
     person_box = (100, 110, 200, 220, 0.95)
     polygon = ((300, 310), (400, 310), (400, 410), (300, 410))
@@ -124,22 +124,16 @@ def test_composite_merges_named_results_once_and_preserves_pose_keypoints() -> N
         "person",
         "bed",
     )
-    assert all(
-        abs(item.elapsed_ms - 2.0) < 1e-9
-        for item in result.module_results
-    )
+    assert all(abs(item.elapsed_ms - 2.0) < 1e-9 for item in result.module_results)
     assert result.observation.boxes == (BoundingBox(*person_box),)
-    assert result.observation.keypoints == (
-        tuple((index, index + 1, 0.8) for index in range(17)),
-    )
+    assert result.observation.keypoints == (tuple((index, index + 1, 0.8) for index in range(17)),)
     assert result.observation.track_ids == (0,)
-    assert result.observation.bed_boxes == (
-        BoundingBox(300, 310, 400, 410, 0.9, polygon),
-    )
+    # Live segmentation is not runtime bed truth; only persisted polygons reach decisions.
+    assert result.observation.bed_boxes == ()
     assert result.observation is result.decision_input.observation
     assert result.observation is composite.scene_state.latest_observation
     assert composite.scene_state.track_ids == (0,)
-    assert result.decision_input.bed_region.source == "fresh"
+    assert result.decision_input.bed_region.source == "empty"
 
 
 def test_box_source_person_merge_winner_is_person_not_pose() -> None:
@@ -227,13 +221,11 @@ def test_composite_runs_only_scheduled_extractors_and_one_pose_call_per_frame() 
     assert (pose.calls, person.calls, bed.calls) == (2, 1, 0)
 
 
-def test_bed_result_populates_scene_cache_for_unscheduled_frames() -> None:
+def test_live_bed_segmentation_is_not_cached_for_unscheduled_frames() -> None:
     bed = BoundingBox(10, 11, 20, 21, 0.9, ((10, 11), (20, 21)))
     polygon = ((10, 11), (20, 21))
     pose = _Runner(_pose_output((1, 2, 11, 22, 0.8)))
-    bed_runner = _Runner(
-        bed_result(((bed.x1, bed.y1, bed.x2, bed.y2, bed.confidence, polygon),))
-    )
+    bed_runner = _Runner(bed_result(((bed.x1, bed.y1, bed.x2, bed.y2, bed.confidence, polygon),)))
     client = _ServingClient({"pose": pose, "bed": bed_runner})
     extractors = provision_extractors(
         client,
@@ -244,10 +236,11 @@ def test_bed_result_populates_scene_cache_for_unscheduled_frames() -> None:
     fresh = composite.process(_packet(0))
     cached = composite.process(_packet(1))
 
-    assert fresh.observation.bed_boxes == (bed,)
-    assert fresh.decision_input.bed_region.source == "fresh"
-    assert cached.observation.bed_boxes == (bed,)
-    assert cached.decision_input.bed_region.source == "cached"
+    # The deleted live-segmentation cache must not leak a bed into later frames.
+    assert fresh.observation.bed_boxes == ()
+    assert fresh.decision_input.bed_region.source == "empty"
+    assert cached.observation.bed_boxes == ()
+    assert cached.decision_input.bed_region.source == "empty"
     assert bed_runner.calls == 1
 
 

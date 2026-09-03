@@ -189,14 +189,22 @@ def test_packaged_replay_command_posts_without_persisting(
     try:
         status = _replay_command().main(  # type: ignore[attr-defined]
             [
-                "--database", str(database),
-                "--camera-id", "camera-replay-http",
-                "--worker-url", f"http://127.0.0.1:{server.port}",
-                "--relay-token", _TOKEN,
-                "--module-id", "bed_exit",
-                "--policy-json", json.dumps(_payload()["policy"]),
-                "--requested-by", "test-operator",
-                "--trace-json", str(trace_path),
+                "--database",
+                str(database),
+                "--camera-id",
+                "camera-replay-http",
+                "--worker-url",
+                f"http://127.0.0.1:{server.port}",
+                "--relay-token",
+                _TOKEN,
+                "--module-id",
+                "bed_exit",
+                "--policy-json",
+                json.dumps(_payload()["policy"]),
+                "--requested-by",
+                "test-operator",
+                "--trace-json",
+                str(trace_path),
             ]
         )
     finally:
@@ -215,13 +223,20 @@ def test_packaged_replay_command_missing_input_does_not_open_sqlite(tmp_path: Pa
     bootstrap_database(database)
     status = _replay_command().main(  # type: ignore[attr-defined]
         [
-            "--database", str(database),
-            "--camera-id", "missing",
-            "--worker-url", "http://127.0.0.1:1",
-            "--relay-token", _TOKEN,
-            "--module-id", "bed_exit",
-            "--policy-json", json.dumps(_payload()["policy"]),
-            "--requested-by", "test-operator",
+            "--database",
+            str(database),
+            "--camera-id",
+            "missing",
+            "--worker-url",
+            "http://127.0.0.1:1",
+            "--relay-token",
+            _TOKEN,
+            "--module-id",
+            "bed_exit",
+            "--policy-json",
+            json.dumps(_payload()["policy"]),
+            "--requested-by",
+            "test-operator",
         ]
     )
     assert status == 2
@@ -244,14 +259,22 @@ def test_packaged_replay_command_refuses_truncated_input_without_persisting(
     try:
         status = _replay_command().main(  # type: ignore[attr-defined]
             [
-                "--database", str(database),
-                "--camera-id", "camera-replay-http",
-                "--worker-url", f"http://127.0.0.1:{server.port}",
-                "--relay-token", _TOKEN,
-                "--module-id", "bed_exit",
-                "--policy-json", json.dumps(_payload()["policy"]),
-                "--requested-by", "test-operator",
-                "--trace-json", str(trace_path),
+                "--database",
+                str(database),
+                "--camera-id",
+                "camera-replay-http",
+                "--worker-url",
+                f"http://127.0.0.1:{server.port}",
+                "--relay-token",
+                _TOKEN,
+                "--module-id",
+                "bed_exit",
+                "--policy-json",
+                json.dumps(_payload()["policy"]),
+                "--requested-by",
+                "test-operator",
+                "--trace-json",
+                str(trace_path),
             ]
         )
     finally:

@@ -11,7 +11,7 @@ _BOOT_ID = "boot-fall"
 
 
 def _policy(**overrides: object) -> FallPolicyV2:
-    values: dict[str, object] = {
+    values = {
         "transition_threshold": 0.5,
         "transition_votes": 2,
         "transition_window": 2,
@@ -24,7 +24,7 @@ def _policy(**overrides: object) -> FallPolicyV2:
         "cooldown_frames": 1,
     }
     values.update(overrides)
-    return FallPolicyV2(**values)  # type: ignore[arg-type]
+    return FallPolicyV2(**values)
 
 
 def _decider(policy: FallPolicyV2 | None = None) -> FallPolicyDeciderV2:
@@ -43,13 +43,14 @@ def test_transition_votes_emit_one_rising_edge_at_default_threshold() -> None:
     transition = FallV2Probabilities(0.5, 0.5, 0.0)
 
     assert decider.update({7: transition}, (7,), frame_index=1, time_sec=1.0) == ()
-    events = decider.update({7: transition}, (7,), frame_index=2, time_sec=2.0)
+    assert decider.update({7: transition}, (7,), frame_index=2, time_sec=2.0) == ()
+    events = decider.update({7: transition}, (7,), frame_index=3, time_sec=3.0)
 
     assert len(events) == 1
     assert events[0].domain == "fall"
     assert events[0].event_type == "fall"
     assert events[0].probability == 0.5
-    assert decider.update({7: transition}, (7,), frame_index=3, time_sec=3.0) == ()
+    assert decider.update({7: transition}, (7,), frame_index=4, time_sec=4.0) == ()
 
 
 def test_fallen_state_recovers_only_after_configured_safe_streak() -> None:
@@ -66,16 +67,22 @@ def test_fallen_state_recovers_only_after_configured_safe_streak() -> None:
     assert not decider.is_fallen(4)
 
 
-def test_releasing_exact_onset_reopens_the_policy_for_a_retry() -> None:
+def test_confirmed_recovery_rearms_the_shared_episode_authority() -> None:
     decider = _decider(_policy(transition_votes=1, transition_window=1))
     transition = FallV2Probabilities(0.5, 0.5, 0.0)
+    safe = FallV2Probabilities(0.9, 0.1, 0.1)
 
-    event = decider.update({9: transition}, (9,), frame_index=1, time_sec=1.0)[0]
-    decider.release_onset(event)
-    retry = decider.update({9: transition}, (9,), frame_index=2, time_sec=2.0)
+    assert decider.update({9: transition}, (9,), frame_index=1, time_sec=1.0) == ()
+    assert decider.update({9: transition}, (9,), frame_index=2, time_sec=2.0) == ()
+    event = decider.update({9: transition}, (9,), frame_index=3, time_sec=3.0)[0]
+    assert decider.update({9: safe}, (9,), frame_index=4, time_sec=4.0) == ()
+    assert decider.update({9: safe}, (9,), frame_index=5, time_sec=5.0) == ()
+    assert decider.update({9: transition}, (9,), frame_index=6, time_sec=6.0) == ()
+    assert decider.update({9: transition}, (9,), frame_index=7, time_sec=7.0) == ()
+    retry = decider.update({9: transition}, (9,), frame_index=8, time_sec=8.0)
 
-    assert retry[0].identity == event.identity
-    assert retry[0].time_sec == 2.0
+    assert retry[0].identity != event.identity
+    assert retry[0].time_sec == 8.0
 
 
 def test_pose_bbox56_encoder_produces_exactly_30_by_56_compatible_rows() -> None:

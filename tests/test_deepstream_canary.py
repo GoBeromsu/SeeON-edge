@@ -128,7 +128,7 @@ def test_cli_renders_isolated_zero_and_loopback_compose(tmp_path: Path) -> None:
     rendered = (evidence / "compose.rendered.yaml").read_text()
     assert "name: seeon-ds-canary" in rendered
     assert "internal: true" in rendered
-    assert '127.0.0.1:18090:8090' in rendered
+    assert "127.0.0.1:18090:8090" in rendered
     assert "publisher-01:" in rendered
     assert "ml-api" in rendered
     assert (evidence / "receipt-manifest.json").is_file()
@@ -187,9 +187,7 @@ def test_relay_stub_serves_current_release_identity(
 
 
 def test_browser_evidence_authenticates_upstream_before_accepting_screenshot() -> None:
-    script = Path("scripts/qa/deepstream_canary_browser.mjs").read_text(
-        encoding="utf-8"
-    )
+    script = Path("scripts/qa/deepstream_canary_browser.mjs").read_text(encoding="utf-8")
 
     assert "--extra-headers=" not in script
     assert '"X-Edge-Relay-Token": token' in script
@@ -342,7 +340,7 @@ def test_verifier_recomputes_pass_and_rejects_intentional_red(tmp_path: Path) ->
     # Then: clean signals pass, while a missing PTS mapping is an intentional RED.
     assert report.verdict == "PASS"
     malformed = passing.model_dump_json().replace(
-        '\"latency_ms\":{\"p50\":90.0,\"p95\":150.0,\"p99\":190.0,\"max\":220.0},',
+        '"latency_ms":{"p50":90.0,"p95":150.0,"p99":190.0,"max":220.0},',
         "",
     )
     with pytest.raises(ValueError):

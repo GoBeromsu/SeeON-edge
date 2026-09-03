@@ -152,9 +152,7 @@ def _pose(
     for index in range(_COCO17):
         if index in points:
             x_coordinate, y_coordinate = points[index]
-            keypoints.append(
-                (round(x_coordinate * scale), round(y_coordinate * scale), confidence)
-            )
+            keypoints.append((round(x_coordinate * scale), round(y_coordinate * scale), confidence))
         else:
             keypoints.append((0, 0, 0.0))
     return tuple(keypoints)

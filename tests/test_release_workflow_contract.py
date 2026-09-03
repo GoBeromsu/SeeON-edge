@@ -45,9 +45,7 @@ def _load_guard():
 
 
 def _workflow(relative: str) -> dict[str, object]:
-    loaded = yaml.load(
-        (REPO_ROOT / relative).read_text(encoding="utf-8"), Loader=yaml.BaseLoader
-    )
+    loaded = yaml.load((REPO_ROOT / relative).read_text(encoding="utf-8"), Loader=yaml.BaseLoader)
     assert isinstance(loaded, dict), relative
     return loaded
 
@@ -156,9 +154,7 @@ def test_release_workflow_pins_every_action_to_a_commit() -> None:
 def test_the_release_is_not_a_prerelease_because_that_is_what_publishes_images() -> None:
     source = (REPO_ROOT / RELEASE_WORKFLOW).read_text(encoding="utf-8")
     # Comments explain why the flag is absent, so only executable lines count.
-    executable = [
-        line for line in source.splitlines() if not line.lstrip().startswith("#")
-    ]
+    executable = [line for line in source.splitlines() if not line.lstrip().startswith("#")]
     assert any("gh release create" in line for line in executable)
     # `--prerelease` here would leave `edge-images.yml` skipped: a release that
     # publishes nothing while reporting success.
@@ -168,9 +164,7 @@ def test_the_release_is_not_a_prerelease_because_that_is_what_publishes_images()
     triggers = images["on"]
     assert isinstance(triggers, dict)
     assert triggers["release"] == {"types": ["published"]}
-    assert "github.event.release.prerelease == false" in str(
-        _jobs(images)["publish"]["if"]
-    )
+    assert "github.event.release.prerelease == false" in str(_jobs(images)["publish"]["if"])
 
 
 def test_the_release_job_dispatches_the_image_build_itself() -> None:
@@ -185,9 +179,7 @@ def test_the_release_job_dispatches_the_image_build_itself() -> None:
     workflow = _workflow(RELEASE_WORKFLOW)
     steps = _jobs(workflow)["release"]["steps"]  # type: ignore[index]
     dispatch = [
-        step
-        for step in steps
-        if "gh workflow run edge-images.yml" in str(step.get("run", ""))
+        step for step in steps if "gh workflow run edge-images.yml" in str(step.get("run", ""))
     ]
     assert len(dispatch) == 1, steps
     run = str(dispatch[0]["run"])

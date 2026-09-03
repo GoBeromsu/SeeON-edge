@@ -83,9 +83,7 @@ class _SlotVisitor(ast.NodeVisitor):
         )
         if name in _FORBIDDEN_DYNAMIC:
             for argument in node.args:
-                if isinstance(argument, ast.Constant) and isinstance(
-                    argument.value, str
-                ):
+                if isinstance(argument, ast.Constant) and isinstance(argument.value, str):
                     if forbidden := _is_forbidden_module(argument.value):
                         self.kinds.add(f"dynamic-import:{forbidden}")
         if name == "connect" and isinstance(func, ast.Attribute):

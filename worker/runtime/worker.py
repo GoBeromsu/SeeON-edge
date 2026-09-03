@@ -145,6 +145,10 @@ from worker.runtime.model_composition import (
     SharedYoloExtractors,
     compose_shared_components,
 )
+from worker.runtime.nvidia_bed_zone_recognizer import (
+    DEFAULT_BED_ZONE_RECOGNITION_TIMEOUT_S,
+    NvidiaBedZoneRecognizer,
+)
 from worker.runtime.profile.boot import BootContext
 from worker.runtime.profile.device import CudaProbe
 from worker.runtime.profile.registry import (
@@ -1130,7 +1134,9 @@ class WorkerRuntime:
             server_config,
             probe=self._rtsp_probe,
             bed_zone_recognizer=(
-                None
+                NvidiaBedZoneRecognizer(
+                    self._serving, timeout_s=DEFAULT_BED_ZONE_RECOGNITION_TIMEOUT_S
+                )
                 if self._boot is not None and self._boot.profile.name == "nvidia"
                 else self._bed_zone_recognizer
             ),
@@ -1802,7 +1808,7 @@ class WorkerRuntime:
             raise RuntimeError("native source became ready without an acceptance binding")
         plan = self._preflight_camera_graph(
             camera,
-            fall_source_identity=(
+            episode_source_identity=(
                 str(self._worker_boot_uuid),
                 str(binding.stream_epoch),
                 binding.source_generation,
@@ -1845,7 +1851,7 @@ class WorkerRuntime:
                 recreate_decision=lambda rebuilt: (
                     self._preflight_camera_graph(
                         camera,
-                        fall_source_identity=(
+                        episode_source_identity=(
                             str(self._worker_boot_uuid),
                             str(rebuilt.stream_epoch),
                             rebuilt.source_generation,
@@ -2625,7 +2631,7 @@ class WorkerRuntime:
         self,
         camera: CameraRuntimeConfig,
         tracker: GreedyIouTracker | None = None,
-        fall_source_identity: tuple[str, str, int] | None = None,
+        episode_source_identity: tuple[str, str, int] | None = None,
         incidents: IncidentManager | None = None,
     ) -> CameraDetectionPlan:
         graph = self._shared_graph
@@ -2646,10 +2652,10 @@ class WorkerRuntime:
             flags=flags,
             temporal_profile=self.temporal_profile,
         )
-        if fall_source_identity is None:
-            fall_source_identity = (str(self._worker_boot_uuid), "0", 0)
+        if episode_source_identity is None:
+            episode_source_identity = (str(self._worker_boot_uuid), "0", 0)
         camera_component_values: dict[str, object] = {
-            "fall-v2-identity": fall_source_identity,
+            "episode-identity": episode_source_identity,
         }
         if tracker is not None:
             camera_component_values["person-tracker"] = tracker
@@ -2750,7 +2756,7 @@ class WorkerRuntime:
             camera_components=MappingProxyType(
                 {
                     "person-tracker": tracker or GreedyIouTracker(),
-                    "fall-v2-identity": (str(self._worker_boot_uuid), "0", 0),
+                    "episode-identity": (str(self._worker_boot_uuid), "0", 0),
                 }
             ),
             detection_window=window,

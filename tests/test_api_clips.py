@@ -268,8 +268,7 @@ def test_compact_rebuild_rejects_changed_identity_without_mutating_row(clip_env)
     assert conflict.status_code == 503
     with sqlite3.connect(database) as connection:
         after = connection.execute(
-            "SELECT media_sha256, media_size_bytes, publish_state FROM clips "
-            "WHERE clip_id='stable'"
+            "SELECT media_sha256, media_size_bytes, publish_state FROM clips WHERE clip_id='stable'"
         ).fetchone()
     assert after == before
 
@@ -340,9 +339,7 @@ def test_streams_manifest_video_and_appends_audit(clip_env) -> None:
     assert query_video.status_code == 200
     assert query_video.content == b"video:clip-1"
     assert audit.status_code == 200
-    video_events = [
-        event for event in audit.json()["events"] if event["action"] == "clip.play"
-    ]
+    video_events = [event for event in audit.json()["events"] if event["action"] == "clip.play"]
     assert [(event["actor_id"], event["target_id"]) for event in video_events] == [
         ("admin", "clip-1"),
         ("admin", "clip-1"),
@@ -543,5 +540,3 @@ def test_list_clips_finds_manifests_under_the_root_and_subdirectory_layouts(clip
     assert response.status_code == 200
     clip_ids = {clip["clip_id"] for clip in response.json()["clips"]}
     assert clip_ids == {"clip-root", "clip-first-level", "clip-second-level"}
-
-

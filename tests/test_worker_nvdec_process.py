@@ -318,10 +318,7 @@ def test_stderr_tail_is_bounded_redacted_and_truncated() -> None:
     """Keep only an 8 KiB tail, one safe line, and at most 512 rendered chars."""
     # Given: more than 8 KiB of noise, then one long credential-bearing line.
     diagnostic = "cuvid-diagnostic"
-    last_line = (
-        ("N" * 600)
-        + f" {diagnostic} rtsp://admin:secret@camera/token=abc"
-    ).encode()
+    last_line = (("N" * 600) + f" {diagnostic} rtsp://admin:secret@camera/token=abc").encode()
     stderr = _ChunkStream([b"n" * 9000 + b"\n", last_line + b"\n"])
     child = _Child(_ChunkStream([b""]), wait_outcomes=[1], stderr=stderr)
     process = FFmpegDecodeProcess(child, frame_size=1)

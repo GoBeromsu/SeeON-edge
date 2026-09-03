@@ -267,9 +267,7 @@ def _catalog_descriptor_tuple(path: Path) -> tuple[int, int, int]:
             except OSError:
                 continue
     else:
-        output = subprocess.check_output(
-            ["lsof", "-a", "-p", str(os.getpid()), "-Fn"], text=True
-        )
+        output = subprocess.check_output(["lsof", "-a", "-p", str(os.getpid()), "-Fn"], text=True)
         lines = output.splitlines()
         descriptor_paths = [Path(line[1:]).resolve() for line in lines if line[:1] == "n"]
     for descriptor_path in descriptor_paths:

@@ -23,9 +23,7 @@ def _inspect_result(
             [
                 {
                     "RepoDigests": [f"registry.example/seeon-edge@sha256:{digest}"],
-                    "Config": {
-                        "Labels": {"org.opencontainers.image.revision": revision}
-                    },
+                    "Config": {"Labels": {"org.opencontainers.image.revision": revision}},
                 }
             ]
         ),

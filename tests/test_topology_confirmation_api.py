@@ -35,9 +35,7 @@ class _Client:
     principal = PRINCIPAL
     bearer_token = TOKEN
 
-    def __init__(
-        self, put_outcome: Callable[[PendingTopologySnapshot], TopologyPutResult]
-    ) -> None:
+    def __init__(self, put_outcome: Callable[[PendingTopologySnapshot], TopologyPutResult]) -> None:
         self.put_outcome = put_outcome
         self.confirmation: tuple[str, TopologyConfirmation] | None = None
         self.terminal: TopologyPutResult | None = None
@@ -45,9 +43,7 @@ class _Client:
     def put(self, pending: PendingTopologySnapshot) -> TopologyPutResult:
         return self.put_outcome(pending)
 
-    def confirm(
-        self, snapshot_id: str, confirmation: TopologyConfirmation
-    ) -> TopologyPutResult:
+    def confirm(self, snapshot_id: str, confirmation: TopologyConfirmation) -> TopologyPutResult:
         self.confirmation = (snapshot_id, confirmation)
         assert self.terminal is not None
         return self.terminal
@@ -116,9 +112,7 @@ def _app_client(path: Path) -> tuple[TestClient, _Client]:
 
 
 def _login(client: TestClient) -> None:
-    response = client.post(
-        "/api/v1/auth/session", json={"username": "admin", "password": "admin"}
-    )
+    response = client.post("/api/v1/auth/session", json={"username": "admin", "password": "admin"})
     assert response.status_code == 204
 
 

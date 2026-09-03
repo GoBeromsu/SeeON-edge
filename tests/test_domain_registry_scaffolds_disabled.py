@@ -63,6 +63,9 @@ def test_domain_detectors_no_longer_require_an_enabled_attribute() -> None:
         BedExitDomainDependencies(
             config=BedExitConfig(camera_id="camera-1", facility_id="facility-1"),
             clock=lambda: datetime(2026, 1, 1, tzinfo=ZoneInfo("UTC")),
+            boot_id="boot-1",
+            stream_epoch="1",
+            source_generation=0,
         )
     )
 

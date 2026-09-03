@@ -34,6 +34,28 @@ class _HighFallModel(_FallModel):
         return FallV2Probabilities(background=0.01, fall_transition=0.99, fallen=0.0)
 
 
+class _RecoveringFallModel(_FallModel):
+    """High, then clear, then high again.
+
+    A second episode may only open after a *scored* confirmed recovery -- track
+    loss is never recovery -- so a two-onset corpus needs a run of clear scores
+    between the onsets. The window count matches the policy's
+    ``recovery_consecutive`` (5) with headroom.
+    """
+
+    def __init__(self, clear_from: int, clear_until: int) -> None:
+        self._calls = 0
+        self._clear_from = clear_from
+        self._clear_until = clear_until
+
+    def predict(self, features: object) -> FallV2Probabilities:
+        del features
+        self._calls += 1
+        if self._clear_from <= self._calls <= self._clear_until:
+            return FallV2Probabilities(background=0.99, fall_transition=0.01, fallen=0.0)
+        return FallV2Probabilities(background=0.01, fall_transition=0.99, fallen=0.0)
+
+
 def _golden() -> GoldenEpisode:
     return GoldenEpisode(
         "episode",
@@ -125,6 +147,11 @@ def _write_trace(directory: Path, rows: tuple[ReplayRow, ...]) -> None:
     (directory / "trace.jsonl").write_text(encode_jsonl(ReplayTraceHeader(), list(rows)))
 
 
+def _recovering_model() -> _RecoveringFallModel:
+    """Clear scores for the recovery run that separates the two onsets."""
+    return _RecoveringFallModel(_ONSET_WINDOWS + 1, _ONSET_WINDOWS + _RECOVERY_ROWS // 5)
+
+
 def _cli_golden(event_type: str, start_ns: int, end_ns: int) -> GoldenEpisode:
     return GoldenEpisode(
         f"{event_type}-episode",
@@ -180,6 +207,8 @@ _ONSET_ROWS = 41
 # Rows without the track after an onset: past the 45-frame track TTL the V2
 # state is evicted, so the next appearance is a fresh episode.
 _ABSENT_ROWS = 50
+# 30 s of 15 fps frames clears the IncidentManager's admission cooldown.
+_COOLDOWN_CLEAR_ROWS = 15 * 31
 
 
 def _run(
@@ -200,24 +229,36 @@ def _run(
     )
 
 
-def _two_onsets(second_start_ns: int) -> tuple[ReplayRow, ...]:
+# Predictions land every stride-5 row once the 30-row window is full, so a
+# 41-row onset run scores 3 windows. The recovery run below must score at least
+# `recovery_consecutive` (5) clear windows before the next onset may open.
+_RECOVERY_ROWS = 30
+_ONSET_WINDOWS = 3
+
+
+def _two_onsets(gap_rows: int = 0) -> tuple[ReplayRow, ...]:
+    """One onset, a scored recovery run, then a second onset on the same track.
+
+    The track stays live throughout: the episode authority only re-arms on a
+    confirmed recovery, and a track that merely disappears resolves without
+    ever alerting again.
+    """
     first = _run(0, _ONSET_ROWS, first_seq=1)
-    absent = _run(
-        first[-1].pts_ns + _FRAME_NS, _ABSENT_ROWS, first_seq=len(first) + 1, tracked=False
-    )
-    second = _run(second_start_ns, _ONSET_ROWS, first_seq=len(first) + len(absent) + 1)
-    return (_row(0, "open"), *first, *absent, *second)
+    recovery_start = first[-1].pts_ns + _FRAME_NS
+    recovery = _run(recovery_start, _RECOVERY_ROWS, first_seq=len(first) + 1)
+    second_start = recovery[-1].pts_ns + (gap_rows + 1) * _FRAME_NS
+    second = _run(second_start, _ONSET_ROWS, first_seq=len(first) + len(recovery) + 1)
+    return (_row(0, "open"), *first, *recovery, *second)
 
 
 def _fall_rows() -> tuple[ReplayRow, ...]:
-    """Two onsets 61 s apart: outside the 30 s cooldown, so both alert."""
-    return _two_onsets(61_000_000_000)
+    """Two recovery-separated onsets far enough apart that both are admitted."""
+    return _two_onsets(gap_rows=_COOLDOWN_CLEAR_ROWS)
 
 
 def _cooldown_rows() -> tuple[ReplayRow, ...]:
-    """Two onsets ~9 s apart: the second is a real V2 onset the cooldown suppresses."""
-    first_end_ns = (_ONSET_ROWS + _ABSENT_ROWS) * _FRAME_NS
-    return _two_onsets(first_end_ns + _FRAME_NS)
+    """Two recovery-separated onsets inside the 30 s admission cooldown."""
+    return _two_onsets()
 
 
 def test_metric_cli_exact_returns_zero_for_both_domains(
@@ -249,7 +290,11 @@ def test_metric_cli_multi_alert_and_outside_window_return_one(
 ) -> None:
     rows = _fall_rows()
     status, result = _run_cli(
-        monkeypatch, tmp_path, rows, (_cli_golden("fall", 0, 62_000_000_000),)
+        monkeypatch,
+        tmp_path,
+        rows,
+        (_cli_golden("fall", 0, 62_000_000_000),),
+        fall_model_loader=_recovering_model,
     )
     assert status == 1
     assert result is not None
@@ -260,6 +305,7 @@ def test_metric_cli_multi_alert_and_outside_window_return_one(
         tmp_path,
         rows,
         (_cli_golden("fall", 62_000_000_000, 63_000_000_000),),
+        fall_model_loader=_recovering_model,
     )
     assert status == 1
     assert result is not None
@@ -345,6 +391,6 @@ def test_metric_reports_cooldown_suppression_for_repeated_fall_onsets() -> None:
     result = evaluate(
         _cooldown_rows(),
         (_cli_golden("fall", 0, 62_000_000_000),),
-        fall_model=_HighFallModel(),
+        fall_model=_recovering_model(),
     )
     assert result["incident_cooldown_suppressed_total"] > 0

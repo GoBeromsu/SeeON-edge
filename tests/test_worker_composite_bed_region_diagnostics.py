@@ -62,18 +62,8 @@ def test_process_without_a_recorder_does_not_touch_diagnostics() -> None:
     assert tuple(item.module_name for item in result.module_results) == ("pose",)
 
 
-def test_process_records_fresh_from_the_persisted_polygon_short_circuit() -> None:
-    """A real ``WorkerDiagnostics`` observes the persisted-polygon short-circuit.
-
-    A camera with a persisted bed polygon always resolves FRESH from a
-    zero-cost short-circuit (`scene_state.py`'s `resolve_bed_regions`) without
-    ever touching `scene_state.bed_region_counters` -- that cache-cycle
-    machinery is never engaged on this path. The recorder must read this
-    frame's actually-resolved state (`decision_input.bed_region.source`), not
-    `scene_state.bed_region_freshness` directly, or every persisted-polygon
-    camera (~10/13 of the live fleet, #207/#208) would misreport as
-    permanently EMPTY.
-    """
+def test_process_records_fresh_from_the_persisted_polygon() -> None:
+    """Diagnostics records the polygon actually supplied to decisions."""
     diagnostics = WorkerDiagnostics()
     scene = SceneState("camera-a", persisted_bed_regions=((1.0, 2.0, 3.0, 4.0),))
     composite = CompositeExtractor(
@@ -90,8 +80,6 @@ def test_process_records_fresh_from_the_persisted_polygon_short_circuit() -> Non
     assert camera.camera_id == "camera-a"
     assert camera.bed_region is not None
     assert camera.bed_region.freshness == BedRegionCacheState.FRESH
-    # Counters stay all-zero: the persisted-polygon short-circuit never
-    # engages the live-detection cache-cycle machinery they track.
     assert camera.bed_region.counters["fresh"] == 0
 
 

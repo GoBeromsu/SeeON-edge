@@ -166,7 +166,7 @@ def replay_camera(
                 camera_id=camera_id,
                 facility_id=facility_id,
                 shared_components=shared_components,
-                camera_components={"fall-v2-identity": (str(current_boot), "0", 0)},
+                camera_components={"episode-identity": (str(current_boot), "0", 0)},
                 detection_window=None,
                 clock=clock,
                 diagnostics=None,
@@ -295,7 +295,7 @@ def replay(
             camera_id=camera_id,
             facility_id=facility_id,
             shared_components=shared_components,
-            camera_components={"fall-v2-identity": (f"boot-{boot_segment}", str(stream_epoch), 0)},
+            camera_components={"episode-identity": (f"boot-{boot_segment}", str(stream_epoch), 0)},
             detection_window=window if module_id == "bed_exit" else None,
             clock=clock,
             diagnostics=None,
@@ -304,8 +304,10 @@ def replay(
         return definition.create_camera_module(context).decider
 
     current_segment: int | None = None
+    absorbed_total = 0
     for frame in replay_trace_frames(rows):
         if current_segment != frame.boot_segment:
+            absorbed_total += _absorbed_switches(decider)
             # A worker boot starts with fresh in-memory cooldown state in
             # production (one IncidentManager per camera per composition).
             decider = new_decider(frame.boot_segment, frame.stream_epoch)
@@ -349,6 +351,7 @@ def replay(
                 valid=frame.valid,
             )
         )
+    absorbed_total += _absorbed_switches(decider)
     return ReplayRun(
         camera_id=camera_id,
         module_qualified_id=definition.qualified_id,
@@ -358,7 +361,16 @@ def replay(
         boot_ids=tuple(f"boot-{segment}" for segment in sorted(set(boot_segments(rows)))),
         incident_cooldown_suppressed_total=suppressed_total,
         track_id_switch_total=switch_total,
+        # Absorbed switches are the episode authority's own count: churn the
+        # machine held inside one episode instead of raising a second alert.
+        track_id_switch_absorbed_total=absorbed_total,
     )
+
+
+def _absorbed_switches(decider: object | None) -> int:
+    """Read a decider's absorbed re-association count, if it keeps one."""
+    absorbed = getattr(decider, "track_id_switch_absorbed_total", None)
+    return absorbed if isinstance(absorbed, int) and not isinstance(absorbed, bool) else 0
 
 
 def _admit_events(

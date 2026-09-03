@@ -56,9 +56,7 @@ class _FakeDecoderProcess:
         return 0
 
 
-def _fake_process_spawner(
-    _args: tuple[str, ...], _frame_size: int
-) -> _FakeDecoderProcess:
+def _fake_process_spawner(_args: tuple[str, ...], _frame_size: int) -> _FakeDecoderProcess:
     return _FakeDecoderProcess()
 
 

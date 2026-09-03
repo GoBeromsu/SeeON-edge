@@ -114,6 +114,7 @@ def test_opencv_capability_false_when_registry_has_no_has_backend() -> None:
     assert capability.available is False
     assert "hasBackend" in capability.reason
 
+
 def test_opencv_capability_false_when_cv2_import_fails() -> None:
     def failing_importer() -> Any:
         raise ImportError("no module named cv2")

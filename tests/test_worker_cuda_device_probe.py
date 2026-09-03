@@ -43,9 +43,7 @@ class _FakeTorch:
 
 def test_cuda_capability_true_when_available() -> None:
     # Given -- a healthy CUDA install: driver initializes, kernels compiled in
-    fake_torch = _FakeTorch(
-        _FakeCuda(arch_list=("sm_90",), device_count=1, is_available=True)
-    )
+    fake_torch = _FakeTorch(_FakeCuda(arch_list=("sm_90",), device_count=1, is_available=True))
 
     # When
     capability = probe_cuda_capability(importer=lambda: fake_torch)

@@ -111,12 +111,8 @@ def test_engine_prepare_is_profiled_before_steady_capacity_gate(tmp_path: Path) 
     )
 
     # Then: engine build is explicit and does not weaken the unchanged runtime threshold.
-    engine = rendered.split("  engine-builder:", maxsplit=1)[1].split(
-        "  ml-worker:", maxsplit=1
-    )[0]
-    worker = rendered.split("  ml-worker:", maxsplit=1)[1].split(
-        "  publisher-01:", maxsplit=1
-    )[0]
+    engine = rendered.split("  engine-builder:", maxsplit=1)[1].split("  ml-worker:", maxsplit=1)[0]
+    worker = rendered.split("  ml-worker:", maxsplit=1)[1].split("  publisher-01:", maxsplit=1)[0]
     assert "profiles: [prepare]" in engine
     assert "engine-builder:" not in worker
     assert policy.engine_preparation.utilization_gate_active is False

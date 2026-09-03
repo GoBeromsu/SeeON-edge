@@ -227,6 +227,7 @@ def test_cpu_av_open_failure_never_echoes_rtsp_credentials() -> None:
     assert isinstance(captured.value.__cause__, cv2.error)
     assert "hunter2" in str(captured.value.__cause__)
 
+
 def test_cpu_av_open_characterizes_buffer_and_timeout_independently() -> None:
     """A/B characterization: which knob does the adapter actually apply?
 

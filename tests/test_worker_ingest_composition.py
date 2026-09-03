@@ -253,9 +253,7 @@ def test_compose_camera_ingest_loop_wires_the_cpu_av_adapter_and_its_config(
     camera = _camera("camera-a")
     registry = build_camera_source_registry((camera,))
 
-    loop = _compose(
-        camera, BoundedFrameBus(), _Reporter(), decode="opencv", registry=registry
-    )
+    loop = _compose(camera, BoundedFrameBus(), _Reporter(), decode="opencv", registry=registry)
 
     assert loop.camera_id == "camera-a"
     assert loop._ports.decoder is sentinel  # noqa: SLF001 - composition wiring under test
@@ -273,9 +271,7 @@ def test_compose_camera_ingest_loop_wires_the_nvdec_cuvid_adapter_and_its_config
     camera = _camera("camera-b")
     registry = build_camera_source_registry((camera,))
 
-    loop = _compose(
-        camera, BoundedFrameBus(), _Reporter(), decode="nvdec", registry=registry
-    )
+    loop = _compose(camera, BoundedFrameBus(), _Reporter(), decode="nvdec", registry=registry)
 
     assert loop._ports.decoder is sentinel  # noqa: SLF001
     resolved = registry.resolve(source_id="camera-b")
@@ -291,9 +287,7 @@ def test_compose_camera_ingest_loop_wires_the_vaapi_adapter_and_its_config(
     camera = _camera("camera-c")
     registry = build_camera_source_registry((camera,))
 
-    loop = _compose(
-        camera, BoundedFrameBus(), _Reporter(), decode="vaapi", registry=registry
-    )
+    loop = _compose(camera, BoundedFrameBus(), _Reporter(), decode="vaapi", registry=registry)
 
     assert loop._ports.decoder is sentinel  # noqa: SLF001
     resolved = registry.resolve(source_id="camera-c")
@@ -315,9 +309,7 @@ def test_compose_camera_ingest_loop_honors_a_per_camera_decode_backend_override(
     camera = _camera("camera-a").model_copy(update={"decode_backend": "opencv"})
     registry = build_camera_source_registry((camera,))
 
-    loop = _compose(
-        camera, BoundedFrameBus(), _Reporter(), decode="nvdec", registry=registry
-    )
+    loop = _compose(camera, BoundedFrameBus(), _Reporter(), decode="nvdec", registry=registry)
 
     assert loop._ports.decoder is sentinel  # noqa: SLF001
     resolved = registry.resolve(source_id="camera-a")
@@ -331,9 +323,7 @@ def test_compose_camera_ingest_loop_rejects_an_incompatible_decode_backend_overr
     registry = build_camera_source_registry((camera,))
 
     with pytest.raises(RuntimeError, match="nvdec"):
-        _compose(
-            camera, BoundedFrameBus(), _Reporter(), decode="opencv", registry=registry
-        )
+        _compose(camera, BoundedFrameBus(), _Reporter(), decode="opencv", registry=registry)
 
 
 @pytest.mark.parametrize("decode", ["opencv", "nvdec"])
@@ -371,9 +361,7 @@ def test_compose_camera_ingest_loop_without_runtime_falls_back_to_dataclass_defa
     camera = _camera("camera-a")
     registry = build_camera_source_registry((camera,))
 
-    loop = _compose(
-        camera, BoundedFrameBus(), _Reporter(), decode="opencv", registry=registry
-    )
+    loop = _compose(camera, BoundedFrameBus(), _Reporter(), decode="opencv", registry=registry)
 
     assert loop._spec.policy.max_failures == CapturePolicy().max_failures  # noqa: SLF001
     resolved = registry.resolve(source_id="camera-a")

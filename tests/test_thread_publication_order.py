@@ -95,9 +95,7 @@ def _publishes_before_start(tree: ast.AST) -> list[int]:
         ):
             offenders.append(node.lineno)
     for function in (
-        node
-        for node in ast.walk(tree)
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        node for node in ast.walk(tree) if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
     ):
         constructed, published, started = _thread_lifecycle_events(function)
         for name in constructed:
@@ -128,15 +126,12 @@ def test_the_started_thread_is_still_published(relative: str) -> None:
     tree = ast.parse(source)
     unpublished: list[int] = []
     for function in (
-        node
-        for node in ast.walk(tree)
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        node for node in ast.walk(tree) if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
     ):
         constructed, published, started = _thread_lifecycle_events(function)
         for name in constructed:
             if started.get(name) and not any(
-                publication > min(started[name])
-                for publication in published.get(name, [])
+                publication > min(started[name]) for publication in published.get(name, [])
             ):
                 unpublished.extend(started[name])
 

@@ -465,9 +465,7 @@ class WorkerRun:
         )
 
     def _any_inference_taken(self) -> bool:
-        return any(
-            camera.bus.metrics("inference").taken > 0 for camera in self.runtime.cameras
-        )
+        return any(camera.bus.metrics("inference").taken > 0 for camera in self.runtime.cameras)
 
     def total_inference_taken(self) -> int:
         """Aggregate frames pulled off every camera's inference lane.
@@ -623,9 +621,19 @@ def _streams_ready(server: MediaMtxProcess, path_names: Sequence[str]) -> bool:
     for name in path_names:
         completed = subprocess.run(  # noqa: S603 - fixed local binary, no shell
             [
-                probe, "-v", "error", "-rw_timeout", "5000000",
-                "-rtsp_transport", "tcp", "-select_streams", "v:0",
-                "-show_entries", "stream=codec_type", "-of", "json",
+                probe,
+                "-v",
+                "error",
+                "-rw_timeout",
+                "5000000",
+                "-rtsp_transport",
+                "tcp",
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "stream=codec_type",
+                "-of",
+                "json",
                 server.rtsp_url(name),
             ],
             capture_output=True,

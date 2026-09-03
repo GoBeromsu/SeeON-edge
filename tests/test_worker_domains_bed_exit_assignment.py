@@ -33,6 +33,9 @@ def _monitor(
             night_window=bed_exit.NightWindow(start="21:00", end="05:00", tz="Asia/Seoul"),
         ),
         clock=lambda: fixed,
+        boot_id=f"boot-{camera_id}",
+        stream_epoch=f"epoch-{camera_id}",
+        source_generation=0,
     )
 
 
@@ -159,16 +162,8 @@ def test_dead_observed_track_cannot_emit_after_identity_reuse() -> None:
     assert dead_track == reused_identity == ()
 
 
-def test_an_unstaged_stale_track_exit_can_be_reported_again() -> None:
-    """A track that vanished mid-exit fires from the stale path, which DELETES
-    the assignment rather than clearing its bed.
-
-    A release that only handled the cleared-bed case returned early here, so the
-    onset stayed consumed. The resident is already gone from the frame, so no
-    later frame can re-derive the exit -- the alert was lost outright. This is
-    the third distinct piece of consumed owner state in this domain, after the
-    latch record and the cleared bed.
-    """
+def test_a_released_stale_track_exit_does_not_rearm_on_track_loss() -> None:
+    """Track loss leaves an open episode unresolved, even after release."""
     from worker.pipeline.decision.event_aggregator import EventAggregator
     from worker.pipeline.decision.incident_manager import IncidentManager
 
@@ -190,7 +185,4 @@ def test_an_unstaged_stale_track_exit_can_be_reported_again() -> None:
 
     repeated = aggregator.update(_input(OUTSIDE_BED, (BED,), 3, live_track_ids=()))
 
-    assert len(repeated) == 1, (
-        "the stale-track exit stayed consumed; a transient staging failure "
-        "destroyed it and no later frame can re-derive it"
-    )
+    assert repeated == ()

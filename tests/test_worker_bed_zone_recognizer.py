@@ -14,6 +14,7 @@ idiom (``runner if callable(runner) else runner.run``) it is built to match.
 from __future__ import annotations
 
 from pathlib import Path
+from threading import Event
 from typing import Final
 
 import numpy as np
@@ -25,6 +26,13 @@ from worker.pipeline.output.mjpeg_server import BedZoneNotFoundError
 from worker.runtime.config import WorkerConfig
 from worker.runtime.lease import GpuLease
 from worker.runtime.model_composition import SharedYoloExtractors
+from worker.runtime.nvidia_bed_zone_recognizer import (
+    BedZoneRecognitionTimeoutError,
+    BedZoneRecognizerUnavailableError,
+    NvidiaBedZoneRecognizer,
+)
+from worker.runtime.profile.boot import BootContext
+from worker.runtime.profile.registry import PROFILE_REGISTRY
 from worker.runtime.worker import WorkerRuntime
 
 _IMAGE: Final[Image] = np.zeros((480, 640, 3), dtype=np.uint8)
@@ -175,3 +183,75 @@ def test_bed_zone_recognizer_raises_when_models_not_initialized(tmp_path: Path) 
 
     with pytest.raises(RuntimeError, match="before models were initialized"):
         runtime._bed_zone_recognizer(_IMAGE)  # noqa: SLF001
+
+
+def test_nvidia_composition_provisions_bed_runner_lazily_on_cpu(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class _NvidiaServingClient:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, object]] = []
+
+        def create(self, task: str, **options: object) -> object:
+            self.calls.append((task, options.get("device")))
+            return lambda _image: bed_result([(1, 2, 9, 8, 0.9, [[1, 2], [9, 2], [9, 8]])])
+
+    class _Server:
+        port = 8090
+
+    client = _NvidiaServingClient()
+    runtime = WorkerRuntime(
+        _config(),
+        env={"ML_WORKER_PROFILE": "nvidia", "ML_WORKER_DEV_MJPEG": "1"},
+        serving_client=client,
+        acquire_lease=lambda: GpuLease.acquire(tmp_path),
+        state_dir=tmp_path,
+    )
+    captured: dict[str, object] = {}
+
+    def start(*_args: object, **kwargs: object) -> _Server:
+        captured.update(kwargs)
+        return _Server()
+
+    monkeypatch.setattr("worker.runtime.worker.start_optional_mjpeg_server", start)
+    profile = PROFILE_REGISTRY["nvidia"]
+    runtime._boot = BootContext(profile, profile.device, profile.decode, profile.encode)  # noqa: SLF001
+
+    runtime._start_live_view_server()  # noqa: SLF001
+
+    recognizer = captured["bed_zone_recognizer"]
+    assert isinstance(recognizer, NvidiaBedZoneRecognizer)
+    assert client.calls == []
+    assert recognizer(_IMAGE).polygon == ((1, 2), (9, 2), (9, 8))
+    assert client.calls == [("bed", "cpu")]
+
+
+def test_nvidia_bed_recognizer_returns_typed_timeout_for_a_slow_runner() -> None:
+    release = Event()
+
+    class _SlowServingClient:
+        def create(self, task: str, **options: object) -> object:
+            assert (task, options) == ("bed", {"device": "cpu"})
+
+            def run(_image: Image) -> RunnerResult:
+                release.wait()
+                return bed_result([])
+
+            return run
+
+    recognizer = NvidiaBedZoneRecognizer(_SlowServingClient(), timeout_s=0.01)
+
+    with pytest.raises(BedZoneRecognitionTimeoutError):
+        recognizer(_IMAGE)
+    release.set()
+
+
+def test_nvidia_bed_recognizer_fails_closed_when_cpu_runner_cannot_construct() -> None:
+    class _BrokenServingClient:
+        def create(self, _task: str, **_options: object) -> object:
+            raise OSError("model artifact unavailable")
+
+    recognizer = NvidiaBedZoneRecognizer(_BrokenServingClient(), timeout_s=1)
+
+    with pytest.raises(BedZoneRecognizerUnavailableError):
+        recognizer(_IMAGE)

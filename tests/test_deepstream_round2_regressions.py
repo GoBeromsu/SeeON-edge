@@ -80,9 +80,7 @@ def test_generation_change_accepts_reset_pts_and_publish_sequence() -> None:
 
     _ = slot.register_source(_binding(generation=2, epoch=1))
 
-    assert slot.publish(
-        _frame(epoch=1, pts=1_000, sequence=1, publish_sequence=1, generation=2)
-    )
+    assert slot.publish(_frame(epoch=1, pts=1_000, sequence=1, publish_sequence=1, generation=2))
 
 
 def test_new_epoch_accepts_reset_pts_with_higher_native_publish_sequence() -> None:
@@ -165,6 +163,7 @@ def test_add_timeout_rolls_back_native_and_allows_readd() -> None:
 def test_rebuild_timeout_removes_native_and_allows_readd() -> None:
     class ReadyTimeoutReadySlot(_TimeoutThenReadySlot):
         waits: int
+
         @override
         def wait_accepted(
             self,
@@ -207,6 +206,7 @@ def test_add_and_rebuild_are_serialized_on_current_binding() -> None:
 
     class Slot(_TimeoutThenReadySlot):
         waits: int
+
         @override
         def wait_accepted(
             self,

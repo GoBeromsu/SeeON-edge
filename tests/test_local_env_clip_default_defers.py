@@ -33,11 +33,7 @@ def test_silent_env_defers_to_clip_recording_config_model_default() -> None:
 
 
 @pytest.mark.parametrize("raw,expected", [("true", True), ("false", False)])
-def test_explicit_env_value_wins_outright_over_model_default(
-    raw: str, expected: bool
-) -> None:
-    config = clip_recording_config_from_environment(
-        {ML_WORKER_CLIP_RECORDING_ENABLED_ENV: raw}
-    )
+def test_explicit_env_value_wins_outright_over_model_default(raw: str, expected: bool) -> None:
+    config = clip_recording_config_from_environment({ML_WORKER_CLIP_RECORDING_ENABLED_ENV: raw})
 
     assert config.enabled is expected

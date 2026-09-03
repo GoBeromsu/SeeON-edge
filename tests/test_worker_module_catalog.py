@@ -199,7 +199,6 @@ def test_catalog_qualifies_production_modules_components_and_model_bindings() ->
             ("containment", "rule"),
             ("bed-assignment", "state"),
             ("bed-exit-state", "state"),
-            ("bed-exit-latch", "state"),
         ),
     }
     expected_models = {

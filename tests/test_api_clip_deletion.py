@@ -245,9 +245,7 @@ def test_backend_commits_pending_and_request_audit_before_worker_filesystem_dele
         "backend.app.features.clips.router.preflight_clip_deletion",
         lambda _request, clip_id: {"clip_id": clip_id, "status": "READY"},
     )
-    monkeypatch.setattr(
-        "backend.app.features.clips.router.control_clip_deletion", worker_delete
-    )
+    monkeypatch.setattr("backend.app.features.clips.router.control_clip_deletion", worker_delete)
     app = create_app(lifespan=no_lifespan)
     with TestClient(app) as client:
         _login(client)

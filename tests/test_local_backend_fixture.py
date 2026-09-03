@@ -123,15 +123,9 @@ def test_event_contract_uses_frozen_wire_vocabulary() -> None:
     }
 
     assert client.post("/api/v1/events", headers=_AUTH, json=unknown).status_code == 422
-    assert (
-        client.post("/api/v1/events", headers=_AUTH, json=invalid_type).status_code
-        == 422
-    )
+    assert client.post("/api/v1/events", headers=_AUTH, json=invalid_type).status_code == 422
     assert client.post("/api/v1/events", headers=_AUTH, json=bed_exit).status_code == 201
-    assert (
-        client.post("/api/v1/events", headers=_AUTH, json=detection_lost).status_code
-        == 201
-    )
+    assert client.post("/api/v1/events", headers=_AUTH, json=detection_lost).status_code == 201
 
 
 def test_fault_mode_exposes_hub_identity_multiplication() -> None:

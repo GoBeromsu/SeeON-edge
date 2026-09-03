@@ -523,9 +523,7 @@ def test_finalize_failure_renders_camera_and_clip_identity(
         actor.handle_event(_event_message(failed, "event-fail"))
         actor.flush()
 
-    record = next(
-        item for item in caplog.records if "clip finalize failed" in item.getMessage()
-    )
+    record = next(item for item in caplog.records if "clip finalize failed" in item.getMessage())
     message = record.getMessage()
     assert "camera_id=cam-1" in message
     assert "clip_id=clip-fail" in message

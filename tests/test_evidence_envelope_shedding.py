@@ -44,9 +44,7 @@ class RelayTransport:
     client: TestClient
     statuses: list[int] = field(default_factory=list)
 
-    def send_event(
-        self, payload_json: str, edge_event_id: str
-    ) -> EventReceipt | DeliveryFailure:
+    def send_event(self, payload_json: str, edge_event_id: str) -> EventReceipt | DeliveryFailure:
         response = self.client.post(
             "/api/v1/relay/alerts",
             content=payload_json,
@@ -92,20 +90,26 @@ def _incidents(database: Path) -> list[dict[str, object]]:
     app = create_app(lifespan=no_lifespan)
     app.state.central_evidence_query = CentralEvidenceQuery(database)
     with TestClient(app) as client:
-        assert client.post(
-            "/api/v1/auth/session", json={"username": "admin", "password": "admin"}
-        ).status_code == 204
+        assert (
+            client.post(
+                "/api/v1/auth/session", json={"username": "admin", "password": "admin"}
+            ).status_code
+            == 204
+        )
         response = client.get("/api/v1/incidents")
     assert response.status_code == 200, response.text
     return list(response.json()["incidents"])
 
 
 def test_required_alert_field_source_tracks_relay_model() -> None:
-    assert frozenset(
-        name
-        for name, model_field in RelayAlertRequest.model_fields.items()
-        if model_field.is_required()
-    ) == limits.REQUIRED_ALERT_FIELDS
+    assert (
+        frozenset(
+            name
+            for name, model_field in RelayAlertRequest.model_fields.items()
+            if model_field.is_required()
+        )
+        == limits.REQUIRED_ALERT_FIELDS
+    )
 
 
 def test_oversized_event_is_shed_off_wire_and_delivered_to_incident_projection(

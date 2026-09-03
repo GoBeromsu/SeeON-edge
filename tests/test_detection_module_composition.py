@@ -74,7 +74,7 @@ def _context(camera_id: str, model: _FallModel | None = None) -> CameraModuleCon
         shared_components={"fall-classifier": model or _FallModel()},
         camera_components={
             "person-tracker": object(),
-            "fall-v2-identity": ("boot-1", "stream-1", 0),
+            "episode-identity": ("boot-1", "stream-1", 0),
         },
         detection_window=None,
         clock=lambda: datetime(2026, 8, 13, tzinfo=UTC),
@@ -110,7 +110,6 @@ def test_default_registry_compiles_versioned_multi_component_modules() -> None:
         "containment",
         "bed-assignment",
         "bed-exit-state",
-        "bed-exit-latch",
     }
     assert len([binding for binding in bed_exit.component_bindings if binding.model_family]) == 3
 
@@ -157,7 +156,7 @@ def _module_context(camera_id: str, module_id: str, model: _FallModel) -> Camera
         camera_id=camera_id,
         facility_id="facility-1",
         shared_components={"fall-classifier": model},
-        camera_components={"fall-v2-identity": ("boot-1", "stream-1", 0)},
+        camera_components={"episode-identity": ("boot-1", "stream-1", 0)},
         detection_window=None,
         clock=lambda: datetime(2026, 8, 13, tzinfo=UTC),
         diagnostics=None,
@@ -206,7 +205,6 @@ def test_no_camera_local_component_object_is_shared_between_cameras_in_either_mo
         "person-tracker",
         "bed-assignment",
         "bed-exit-state",
-        "bed-exit-latch",
     }
 
     for module_id, camera_modules in modules.items():
@@ -296,7 +294,9 @@ def test_compiled_modules_are_profile_independent() -> None:
         )
 
         assert activation.qualified_ids == identities
-        assert activation.schedule == {"pose": 5, "person": 5, "bed": 90}
+        # Bed segmentation is on-demand only: the persisted polygon is the sole
+        # runtime bed truth, so it never enters the per-frame schedule.
+        assert activation.schedule == {"pose": 5, "person": 5}
         assert descriptor.canonical_profile == profile_name
 
 
@@ -574,6 +574,9 @@ def test_bed_exit_missing_person_evidence_is_never_reported_as_empty() -> None:
             grace_frames=0,
         ),
         clock=lambda: datetime(2026, 8, 17, tzinfo=UTC),
+        boot_id="test-boot",
+        stream_epoch="test-epoch",
+        source_generation=0,
     )
 
     def decision(persons: tuple[BoundingBox, ...], frame_index: int) -> DecisionInput:

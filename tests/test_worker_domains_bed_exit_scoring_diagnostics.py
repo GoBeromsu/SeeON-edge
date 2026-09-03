@@ -59,6 +59,9 @@ def _monitor(
         ),
         clock=_clock_at(),
         scoring_recorder=scoring_recorder,
+        boot_id="boot-bed-exit-scoring",
+        stream_epoch="epoch-bed-exit-scoring",
+        source_generation=0,
     )
 
 

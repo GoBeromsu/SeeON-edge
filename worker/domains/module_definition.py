@@ -15,7 +15,9 @@ from worker.types import TemporalProfile
 
 ObservationChannel: TypeAlias = str
 ComponentKind: TypeAlias = Literal["extractor", "model", "state", "rule"]
-IntervalSource: TypeAlias = Literal["camera-frame-stride", "fixed", "temporal-profile"]
+IntervalSource: TypeAlias = Literal[
+    "camera-frame-stride", "fixed", "on-demand", "temporal-profile"
+]
 WindowMode: TypeAlias = Literal["external", "internal"]
 
 
@@ -106,11 +108,14 @@ class ScheduleRule:
     interval: int | None = None
     skip_when_flag: str | None = None
 
-    def resolve(self, camera_frame_stride: int, temporal_profile: TemporalProfile) -> int:
+    def resolve(self, camera_frame_stride: int, temporal_profile: TemporalProfile) -> int | None:
         # temporal_profile is required: compile-time validation and live
         # activation must name the same owner. A missing argument used to
         # fall through to CURRENT_TEMPORAL_PROFILE, so a 15fps activation
         # still validated CURRENT's 30-frame bed interval.
+        if self.interval_source == "on-demand":
+            # Provisioned for an explicit operator request, never per frame.
+            return None
         if self.interval_source == "camera-frame-stride":
             return camera_frame_stride
         if self.interval_source == "temporal-profile":

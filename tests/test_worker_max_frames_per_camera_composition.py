@@ -212,7 +212,10 @@ def test_run_returns_only_once_every_camera_pump_reaches_the_configured_cap(
     pumps: dict[str, _CountingPump] = {}
 
     def pump_factory(
-        camera: CameraRuntimeConfig, _bus: object, _analytics: object, _decision: object,
+        camera: CameraRuntimeConfig,
+        _bus: object,
+        _analytics: object,
+        _decision: object,
         _sink: object,
     ) -> _CountingPump:
         # camera-slow lags behind camera-fast: if the supervisor stopped as
@@ -241,7 +244,10 @@ def test_omitting_max_frames_per_camera_wires_no_completion_watcher(
     _stub_heartbeat_transport(monkeypatch)
 
     def pump_factory(
-        camera: CameraRuntimeConfig, _bus: object, _analytics: object, _decision: object,
+        camera: CameraRuntimeConfig,
+        _bus: object,
+        _analytics: object,
+        _decision: object,
         _sink: object,
     ) -> _CountingPump:
         # This fake self-terminates on its own (cap=1) purely so run() returns
@@ -264,7 +270,10 @@ def test_max_frames_per_camera_wires_the_runtimes_own_completion_check(
     _stub_heartbeat_transport(monkeypatch)
 
     def pump_factory(
-        camera: CameraRuntimeConfig, _bus: object, _analytics: object, _decision: object,
+        camera: CameraRuntimeConfig,
+        _bus: object,
+        _analytics: object,
+        _decision: object,
         _sink: object,
     ) -> _CountingPump:
         return _CountingPump(camera.camera_id, cap=2)
@@ -294,7 +303,10 @@ def test_max_frames_completion_check_requires_every_camera_not_just_one(
     """
 
     def pump_factory(
-        camera: CameraRuntimeConfig, _bus: object, _analytics: object, _decision: object,
+        camera: CameraRuntimeConfig,
+        _bus: object,
+        _analytics: object,
+        _decision: object,
         _sink: object,
     ) -> _CountingPump:
         return _CountingPump(camera.camera_id, cap=2)

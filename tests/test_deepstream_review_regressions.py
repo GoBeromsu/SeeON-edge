@@ -322,8 +322,18 @@ def test_reliable_failure_channel_delivers_source_and_fatal_events() -> None:
     def event(kind: MessageKind, payload: bytes) -> bytes:
         return encode_message(
             ControlMessage(
-                kind, _BOOT, _CHILD, "camera-a", 1, 1, 0, 0, 0, 0,
-                "seeon-perception-v1", payload,
+                kind,
+                _BOOT,
+                _CHILD,
+                "camera-a",
+                1,
+                1,
+                0,
+                0,
+                0,
+                0,
+                "seeon-perception-v1",
+                payload,
             )
         )
 
@@ -373,6 +383,8 @@ def test_child_stderr_is_inherited_so_media_plane_faults_reach_the_operator() ->
         "discarding child stderr leaves the media plane unobservable"
     )
     assert subprocess.DEVNULL is not None
+
+
 def test_native_path_heartbeats_periodically_not_once_at_construction() -> None:
     """A streaming camera must keep reporting liveness (#426).
 
@@ -421,9 +433,7 @@ def test_native_path_heartbeats_periodically_not_once_at_construction() -> None:
     assert sent.count("cam-a") >= 3, (
         f"a streaming camera must heartbeat repeatedly, saw {sent.count('cam-a')}"
     )
-    assert "cam-b" not in sent, (
-        "a camera whose pump never advanced must not be reported live"
-    )
+    assert "cam-b" not in sent, "a camera whose pump never advanced must not be reported live"
 
 
 def test_access_unit_socketpair_asks_for_wide_kernel_buffers() -> None:

@@ -185,7 +185,7 @@ def test_committed_reconnect_after_eviction_case_preloads_a_fresh_generation_win
     assert model.windows[-1][-1] == reconnect_row
 
 
-def test_release_reopens_only_the_exact_failed_onset() -> None:
+def test_release_does_not_reopen_an_emitted_episode() -> None:
     decider = FallPolicyDeciderV2(
         camera_id="camera",
         facility_id="facility",
@@ -198,7 +198,7 @@ def test_release_reopens_only_the_exact_failed_onset() -> None:
     event = _update(decider, _probability(0.7), 2)[0]
 
     decider.release_onset(event)
-    assert _update(decider, _probability(0.7), 3)[0].identity == event.identity
+    assert _update(decider, _probability(0.7), 3) == ()
     decider.release_onset(event)
     assert _update(decider, _probability(0.7), 4) == ()
 
@@ -241,6 +241,8 @@ def test_policy_requires_immutable_boot_and_epoch_and_binds_onset_identity() -> 
     assert _update(first, _probability(0.7), 2)[0].identity == "boot-a:epoch-a:7:0:0:1"
     assert _update(second, _probability(0.7), 2)[0].identity == "boot-b:epoch-b:7:0:0:1"
     first.update({}, (), frame_index=47, time_sec=47.0)
-    for frame in range(48, 50):
+    for frame in range(48, 53):
+        _update(first, _probability(0.1, fallen=0.1), frame)
+    for frame in range(53, 55):
         _update(first, _probability(0.7), frame)
-    assert _update(first, _probability(0.7), 50)[0].identity == "boot-a:epoch-a:7:0:1:2"
+    assert _update(first, _probability(0.7), 55)[0].identity == "boot-a:epoch-a:7:0:1:2"

@@ -316,9 +316,7 @@ def test_reconnecting_warning_log_identifies_the_camera(
         loop.run()
 
     # Then
-    reconnect_records = [
-        record for record in caplog.records if "reconnecting" in record.message
-    ]
+    reconnect_records = [record for record in caplog.records if "reconnecting" in record.message]
     assert reconnect_records, "expected a reconnecting warning to be logged"
     assert all(record.camera_id == "camera-a" for record in reconnect_records)  # type: ignore[attr-defined]
     # The console formatter only renders %(message)s, not extra fields, so
@@ -591,9 +589,9 @@ def test_stop_never_races_a_partially_started_thread_set(
 
     def patched_start(self: threading.Thread) -> None:
         if self.name == "worker-ingest-camera-b":
-            assert release_camera_b_start.wait(
-                timeout=5.0
-            ), "test never released camera-b's Thread.start()"
+            assert release_camera_b_start.wait(timeout=5.0), (
+                "test never released camera-b's Thread.start()"
+            )
         real_start(self)
 
     monkeypatch.setattr(threading.Thread, "start", patched_start)
@@ -693,9 +691,7 @@ def test_zero_loops_wait_until_stopped_unblocks_when_restart_check_fires() -> No
         calls.append(None)
         return True
 
-    supervisor = IngestSupervisor(
-        (), restart_check=restart_check, restart_poll_interval_sec=0.01
-    )
+    supervisor = IngestSupervisor((), restart_check=restart_check, restart_poll_interval_sec=0.01)
     supervisor.start()
 
     supervisor.wait_until_stopped()
@@ -925,9 +921,7 @@ def test_silent_replacement_exhausts_respawn_budget_and_stays_degraded(
     assert [event.event_type for event in reporter.events] == ["camera.offline"]
     assert all(event.category != "rtsp_reconnecting" for event in reporter.events)
     exhausted = [
-        record
-        for record in caplog.records
-        if "respawn budget exhausted" in record.getMessage()
+        record for record in caplog.records if "respawn budget exhausted" in record.getMessage()
     ]
     assert exhausted, "expected the existing respawn-budget termination log"
     assert all(f"camera_id={camera_id}" in record.getMessage() for record in exhausted)

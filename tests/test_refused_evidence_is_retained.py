@@ -72,9 +72,7 @@ def test_acknowledge_backend_refuses_to_treat_422_as_delivered(tmp_path: Path) -
 
 
 @pytest.mark.parametrize("status", [200, 201, 202, 204, 409])
-def test_genuinely_delivered_entries_are_still_removed(
-    tmp_path: Path, status: int
-) -> None:
+def test_genuinely_delivered_entries_are_still_removed(tmp_path: Path, status: int) -> None:
     """Guard the guard: retaining everything would stall the queue at its bound.
 
     409 means the backend already holds the entry, so our copy is redundant and
@@ -134,8 +132,7 @@ def test_retained_evidence_is_visible_in_the_capacity_snapshot(tmp_path: Path) -
     snapshot = _queue(tmp_path).capacity_snapshot
 
     assert snapshot.dead_lettered_count == 1, (
-        "refused evidence is invisible to the status path, so nobody learns it "
-        "needs review"
+        "refused evidence is invisible to the status path, so nobody learns it needs review"
     )
     assert snapshot.dead_lettered_bytes > 0
 
@@ -167,8 +164,7 @@ def test_retention_refuses_rather_than_evicting_when_full(
         "the earlier refused entry was evicted to make room"
     )
     assert queue.capacity_snapshot.accepted_count == 1, (
-        "the entry vanished instead of staying in the live queue where it is "
-        "counted and visible"
+        "the entry vanished instead of staying in the live queue where it is counted and visible"
     )
 
 
@@ -194,9 +190,7 @@ def test_the_operator_command_inspects_and_requeues(tmp_path: Path) -> None:
     assert inspect.returncode == 1, "retained evidence must not report all-clear"
     assert '"422": 1' in inspect.stdout
 
-    requeue = subprocess.run(
-        [*command, "--requeue"], capture_output=True, text=True, check=False
-    )
+    requeue = subprocess.run([*command, "--requeue"], capture_output=True, text=True, check=False)
     assert requeue.returncode == 0, requeue.stdout
     assert DeliveryQueue(state / "delivery-queue").capacity_snapshot.accepted_count == 1
 

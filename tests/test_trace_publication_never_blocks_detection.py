@@ -81,9 +81,7 @@ def _writer(tmp_path: Path, publisher: Any) -> BoundedTraceWriter:
     ],
     ids=["relay-refused", "network-down", "bad-response"],
 )
-def test_a_failing_publisher_does_not_kill_the_writer(
-    tmp_path: Path, error: BaseException
-) -> None:
+def test_a_failing_publisher_does_not_kill_the_writer(tmp_path: Path, error: BaseException) -> None:
     """The writer thread must survive any publisher failure."""
     publisher = _ExplodingPublisher(error)
     writer = _writer(tmp_path, publisher)
@@ -106,9 +104,7 @@ def test_a_failing_publisher_does_not_kill_the_writer(
         writer.stop()
 
 
-def test_publication_failures_are_counted_not_silent(
-    tmp_path: Path
-) -> None:
+def test_publication_failures_are_counted_not_silent(tmp_path: Path) -> None:
     """Degradation must be observable, or a dead relay looks like success."""
     publisher = _ExplodingPublisher(RuntimeError("relay down"))
     writer = _writer(tmp_path, publisher)

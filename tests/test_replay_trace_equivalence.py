@@ -188,10 +188,18 @@ def test_persisted_polygon_replay_matches_production_image_space_decision_input(
     _assert_decision_inputs_equivalent(replayed, captured.input_value)
     clock = lambda: datetime(1970, 1, 1, tzinfo=UTC)  # noqa: E731
     production_monitor = BedExitMonitor(
-        config=BedExitConfig("camera-a", "facility", hold_frames=1, grace_frames=1), clock=clock
+        config=BedExitConfig("camera-a", "facility", hold_frames=1, grace_frames=1),
+        clock=clock,
+        boot_id=str(_BOOT),
+        stream_epoch="4",
+        source_generation=3,
     )
     replay_monitor = BedExitMonitor(
-        config=BedExitConfig("camera-a", "facility", hold_frames=1, grace_frames=1), clock=clock
+        config=BedExitConfig("camera-a", "facility", hold_frames=1, grace_frames=1),
+        clock=clock,
+        boot_id=str(_BOOT),
+        stream_epoch="4",
+        source_generation=3,
     )
     assert production_monitor.update(captured.input_value) == replay_monitor.update(replayed)
 

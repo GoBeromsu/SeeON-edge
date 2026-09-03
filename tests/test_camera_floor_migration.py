@@ -112,20 +112,35 @@ def test_is_valid_floor_rejects_zero_and_out_of_range_values() -> None:
 def test_migrate_legacy_string_floors_rewrites_stored_strings_in_place(tmp_path: Path) -> None:
     store = CameraRegistryStore(tmp_path / "catalog.sqlite3")
     store.create(
-        camera_id="camera-1", label="205호", rtsp_url="rtsp://cam/1",
-        space_id=None, status="online", floor="2층",
+        camera_id="camera-1",
+        label="205호",
+        rtsp_url="rtsp://cam/1",
+        space_id=None,
+        status="online",
+        floor="2층",
     )
     store.create(
-        camera_id="camera-2", label="B1호", rtsp_url="rtsp://cam/2",
-        space_id=None, status="online", floor="B1",
+        camera_id="camera-2",
+        label="B1호",
+        rtsp_url="rtsp://cam/2",
+        space_id=None,
+        status="online",
+        floor="B1",
     )
     store.create(
-        camera_id="camera-3", label="already-int", rtsp_url="rtsp://cam/3",
-        space_id=None, status="online", floor=5,
+        camera_id="camera-3",
+        label="already-int",
+        rtsp_url="rtsp://cam/3",
+        space_id=None,
+        status="online",
+        floor=5,
     )
     store.create(
-        camera_id="camera-4", label="unset", rtsp_url="rtsp://cam/4",
-        space_id=None, status="online",
+        camera_id="camera-4",
+        label="unset",
+        rtsp_url="rtsp://cam/4",
+        space_id=None,
+        status="online",
     )
 
     version_before = store.snapshot()["registry_version"]
@@ -146,8 +161,12 @@ def test_migrate_legacy_string_floors_rewrites_stored_strings_in_place(tmp_path:
 def test_migrate_legacy_string_floors_is_idempotent(tmp_path: Path) -> None:
     store = CameraRegistryStore(tmp_path / "catalog.sqlite3")
     store.create(
-        camera_id="camera-1", label="205호", rtsp_url="rtsp://cam/1",
-        space_id=None, status="online", floor="2층",
+        camera_id="camera-1",
+        label="205호",
+        rtsp_url="rtsp://cam/1",
+        space_id=None,
+        status="online",
+        floor="2층",
     )
 
     first_pass = store.migrate_legacy_string_floors()
@@ -164,8 +183,12 @@ def test_migrate_legacy_string_floors_defaults_an_unparseable_value_and_logs(
 ) -> None:
     store = CameraRegistryStore(tmp_path / "catalog.sqlite3")
     store.create(
-        camera_id="camera-1", label="garbled", rtsp_url="rtsp://cam/1",
-        space_id=None, status="online", floor="지하 1층",
+        camera_id="camera-1",
+        label="garbled",
+        rtsp_url="rtsp://cam/1",
+        space_id=None,
+        status="online",
+        floor="지하 1층",
     )
 
     with caplog.at_level("WARNING"):

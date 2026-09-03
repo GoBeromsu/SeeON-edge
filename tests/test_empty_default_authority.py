@@ -84,9 +84,7 @@ class TestConnectionFacilityDbOnly:
         )
         app = create_app(lifespan=no_lifespan)
         client = TestClient(app)
-        login = client.post(
-            "/api/v1/auth/session", json={"username": "admin", "password": "admin"}
-        )
+        login = client.post("/api/v1/auth/session", json={"username": "admin", "password": "admin"})
         assert login.status_code == 204
         body = client.get("/api/v1/connection").json()
         assert body["configured"] is False
@@ -118,9 +116,7 @@ class TestWorkerConfigPullLocalFacility:
         assert len(config.cameras) == 1
         assert config.cameras[0].facility_id == "local"
 
-    def test_worker_config_snapshot_omits_facility_stamp(
-        self, tmp_path: Path
-    ) -> None:
+    def test_worker_config_snapshot_omits_facility_stamp(self, tmp_path: Path) -> None:
         client = _client_with_registry(tmp_path)
         response = client.get(
             "/api/v1/cameras/worker-config",
@@ -163,9 +159,7 @@ class TestRelayRegistryOnly:
         app.state.edge_relay_token = "relay-token"
         app.state.camera_registry = CameraRegistryStore(tmp_path / "empty.sqlite3")
         # Leftover inventory must not rescue unknown cameras.
-        app.state.camera_inventory = {
-            "ghost": {"camera_id": "ghost", "facility_id": "fac"}
-        }
+        app.state.camera_inventory = {"ghost": {"camera_id": "ghost", "facility_id": "fac"}}
         client = TestClient(app)
         response = client.post(
             "/api/v1/relay/alerts",
@@ -213,9 +207,7 @@ class TestRelayRegistryOnly:
 
 
 class TestStatusFromRegistry:
-    def test_never_seen_comes_from_registry_not_inventory(
-        self, tmp_path: Path
-    ) -> None:
+    def test_never_seen_comes_from_registry_not_inventory(self, tmp_path: Path) -> None:
         app = create_app(lifespan=no_lifespan)
         store = CameraRegistryStore(tmp_path / "catalog.sqlite3")
         store.create(
@@ -233,9 +225,7 @@ class TestStatusFromRegistry:
             status="online",
         )
         app.state.camera_registry = store
-        app.state.camera_inventory = {
-            "inv-ghost": {"camera_id": "inv-ghost", "facility_id": "fac"}
-        }
+        app.state.camera_inventory = {"inv-ghost": {"camera_id": "inv-ghost", "facility_id": "fac"}}
         beats = HeartbeatStore(stale_after_sec=90.0)
         beats.record("reg-a", "local")
         app.state.heartbeat_store = beats
@@ -247,9 +237,7 @@ class TestStatusFromRegistry:
 
 
 class TestLkgEmptyPull:
-    def test_successful_empty_cameras_pull_becomes_current_lkg(
-        self, tmp_path: Path
-    ) -> None:
+    def test_successful_empty_cameras_pull_becomes_current_lkg(self, tmp_path: Path) -> None:
         from worker.runtime.config.config_pull import load_worker_config_from_relay
         from worker.runtime.config.lkg_store import WorkerConfigLkgStore
 

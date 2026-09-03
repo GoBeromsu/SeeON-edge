@@ -87,10 +87,9 @@ def test_selected_bundle_is_the_single_active_fall_model(
     )
     calls: list[tuple[str, Path, str]] = []
     registry = SimpleNamespace(
-        create_bundle=lambda runtime_format, artifact_dir, device: calls.append(
-            (runtime_format, artifact_dir, device)
+        create_bundle=lambda runtime_format, artifact_dir, device: (
+            calls.append((runtime_format, artifact_dir, device)) or "selected-runner"
         )
-        or "selected-runner"
     )
     monkeypatch.setattr(worker_module, "DEFAULT_FALL_MODEL_FAMILY_REGISTRY", registry)
     runtime = object.__new__(WorkerRuntime)
@@ -104,8 +103,9 @@ def test_no_selection_uses_the_packaged_fall_model(monkeypatch: pytest.MonkeyPat
     calls: list[tuple[str, object, str]] = []
     packaged = SimpleNamespace(type="lstm")
     registry = SimpleNamespace(
-        create=lambda model_type, config, device: calls.append((model_type, config, device))
-        or "packaged-lstm"
+        create=lambda model_type, config, device: (
+            calls.append((model_type, config, device)) or "packaged-lstm"
+        )
     )
     monkeypatch.setattr(worker_module, "DEFAULT_FALL_MODEL_FAMILY_REGISTRY", registry)
     runtime = object.__new__(WorkerRuntime)

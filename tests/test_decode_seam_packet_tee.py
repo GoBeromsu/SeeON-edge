@@ -87,9 +87,7 @@ def _read_ground_truth(path: Path) -> _Media:
     try:
         video = container.streams.video[0]
         demuxed = [
-            packet
-            for packet in container.demux(video)
-            if packet.dts is not None and bytes(packet)
+            packet for packet in container.demux(video) if packet.dts is not None and bytes(packet)
         ]
         codec = video.codec_context
         return _Media(
@@ -335,6 +333,4 @@ def test_teed_packets_land_in_the_ring_byte_identically(tmp_path: Path) -> None:
     assert ring.metrics.accepted_packets == len(media.payloads)
     assert ring.metrics.dropped_packets == 0
     assert ring.total_bytes == sum(len(payload) for payload in media.payloads)
-    assert min(
-        Fraction(packet.presentation_time) for packet in snapshot
-    ) == Fraction(0)
+    assert min(Fraction(packet.presentation_time) for packet in snapshot) == Fraction(0)

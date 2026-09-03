@@ -31,9 +31,7 @@ def _event(action: AuditAction, target_id: str) -> AuditEvent:
 
 
 def _login(client: TestClient) -> None:
-    response = client.post(
-        "/api/v1/auth/session", json={"username": "admin", "password": "admin"}
-    )
+    response = client.post("/api/v1/auth/session", json={"username": "admin", "password": "admin"})
     assert response.status_code == 204
 
 
@@ -175,7 +173,8 @@ def test_runtime_settings_success_appends_exactly_one_audit_row() -> None:
 
 
 def test_invalid_video_range_appends_no_success_audit(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # Given: one ten-byte descriptor-backed clip.
     root = tmp_path / "clips"
@@ -209,9 +208,7 @@ def test_invalid_video_range_appends_no_success_audit(
             ).fetchone()[0]
 
         # When: range preparation rejects a non-overlapping request.
-        response = client.get(
-            "/api/v1/clips/range-clip/video", headers={"Range": "bytes=999-1000"}
-        )
+        response = client.get("/api/v1/clips/range-clip/video", headers={"Range": "bytes=999-1000"})
 
         with sqlite3.connect(_database_path()) as connection:
             after = connection.execute(

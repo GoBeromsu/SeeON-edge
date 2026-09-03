@@ -64,9 +64,7 @@ def test_process_without_a_watchdog_calls_extract_directly() -> None:
         calls.append(1)
         return _pose_result()
 
-    extractor = NamedExtractor(
-        module_name="pose", runner=object(), _call=call, _clock=lambda: 0.0
-    )
+    extractor = NamedExtractor(module_name="pose", runner=object(), _call=call, _clock=lambda: 0.0)
     composite = CompositeExtractor(
         extractors=(extractor,),
         scheduler=Scheduler({"pose": 1}),

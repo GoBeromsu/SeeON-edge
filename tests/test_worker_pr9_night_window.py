@@ -257,6 +257,9 @@ def test_bed_exit_monitor_live_night_window_flip_without_reconstruction() -> Non
             night_window=NightWindow(start="21:00", end="05:00", tz="UTC"),
         ),
         clock=clock,
+        boot_id="test-boot",
+        stream_epoch="test-epoch",
+        source_generation=0,
     )
 
     # Noon is outside the configured 21:00-05:00 night window: gated, no emission.
@@ -269,7 +272,7 @@ def test_bed_exit_monitor_live_night_window_flip_without_reconstruction() -> Non
     assert events[0] == BusinessEvent(
         domain="bed_exit",
         event_type="bed-exit",
-        identity="0:0",
+        identity="test-boot:test-epoch:0:0:0:1",
         camera_id="camera-1",
         facility_id="facility-1",
         time_sec=1.0,

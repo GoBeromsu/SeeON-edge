@@ -45,10 +45,7 @@ class _DecoderProcess:
 def _probe_runner(codec_name: str = "h264") -> Callable[[tuple[str, ...], float], str]:
     def run(args: tuple[str, ...], timeout_sec: float) -> str:
         del args, timeout_sec
-        return (
-            '{"streams":[{"width":2,"height":1,"codec_name":"'
-            f'{codec_name}"}}]}}'
-        )
+        return f'{{"streams":[{{"width":2,"height":1,"codec_name":"{codec_name}"}}]}}'
 
     return run
 
@@ -217,9 +214,7 @@ def test_first_frame_failure_is_masked_camera_local_and_has_no_cpu_fallback(
 
     # Then
     assert degraded == [("camera-bad", "read_failure")]
-    assert error.value.masked_url == (
-        "rtsp://***:***@camera.local/live?token=%2A%2A%2A"
-    )
+    assert error.value.masked_url == ("rtsp://***:***@camera.local/live?token=%2A%2A%2A")
     assert "operator" not in str(error.value)
     assert "s3cr3t" not in str(error.value)
     assert "plain" not in str(error.value)

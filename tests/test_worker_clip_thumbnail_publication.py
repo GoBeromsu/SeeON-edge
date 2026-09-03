@@ -227,9 +227,7 @@ def test_unknown_thumbnail_failure_is_not_swallowed(
     with pytest.raises(RuntimeError, match="unknown thumbnail bug"):
         ClipPublisher(
             tmp_path,
-            thumbnail_generator=_ThumbnailGenerator(
-                RuntimeError("unknown thumbnail bug")
-            ),
+            thumbnail_generator=_ThumbnailGenerator(RuntimeError("unknown thumbnail bug")),
         ).publish_ready(reservation, artifact, _metadata())
 
 

@@ -193,16 +193,12 @@ def test_pose_parser_matches_reference_when_scores_straddle_threshold(
             driver.send(_hex_row(row))
         assert driver.receive() == f"POSECOUNT {len(parsed.boxes)}"
         for box, pose in zip(parsed.boxes, parsed.poses, strict=True):
-            expected_box = (
-                f"POSEBOX {box[0]} {box[1]} {box[2]} {box[3]} {float(box[4]).hex()}"
-            )
+            expected_box = f"POSEBOX {box[0]} {box[1]} {box[2]} {box[3]} {float(box[4]).hex()}"
             assert _normalized_hexfloats(driver.receive()) == _normalized_hexfloats(expected_box)
             expected_points = "POSEKP " + " ".join(
                 f"{point.x} {point.y} {float(point.score).hex()}" for point in pose
             )
-            assert _normalized_hexfloats(driver.receive()) == _normalized_hexfloats(
-                expected_points
-            )
+            assert _normalized_hexfloats(driver.receive()) == _normalized_hexfloats(expected_points)
 
 
 def test_person_parser_matches_reference_when_classes_and_scores_mix(
@@ -255,9 +251,7 @@ def test_bed_parser_matches_reference_when_masks_and_polygons_resolve(
         )
         assert _normalized_hexfloats(driver.receive()) == _normalized_hexfloats(expected_box)
         polygon = region.polygon or ()
-        expected_poly = f"BEDPOLY {len(polygon)}" + "".join(
-            f" {x} {y}" for x, y in polygon
-        )
+        expected_poly = f"BEDPOLY {len(polygon)}" + "".join(f" {x} {y}" for x, y in polygon)
         assert driver.receive() == expected_poly
 
 

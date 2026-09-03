@@ -158,10 +158,7 @@ class _SilentChild:
 def _probe_runner(codec_name: str = "h264", *, width: int = 2, height: int = 1):
     def run(args: tuple[str, ...], timeout_sec: float) -> str:
         del args, timeout_sec
-        return (
-            f'{{"streams":[{{"width":{width},"height":{height},'
-            f'"codec_name":"{codec_name}"}}]}}'
-        )
+        return f'{{"streams":[{{"width":{width},"height":{height},"codec_name":"{codec_name}"}}]}}'
 
     return run
 

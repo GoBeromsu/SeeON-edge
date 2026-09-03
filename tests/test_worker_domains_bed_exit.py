@@ -45,6 +45,9 @@ def _monitor(
             night_window=bed_exit.NightWindow(start="21:00", end="05:00", tz="Asia/Seoul"),
         ),
         clock=_clock_at(),
+        boot_id="test-boot",
+        stream_epoch="test-epoch",
+        source_generation=0,
     )
 
 
@@ -74,14 +77,17 @@ def _input(
 def test_own_bed_exit_emits_once_after_grace_period() -> None:
     # Given
     monitor = _monitor(grace_frames=2)
-    assert monitor.update(
-        _input(
-            person_boxes=(IN_BED_A,),
-            bed_boxes=(BED_A,),
-            track_ids=(PERSON_ID,),
-            frame_index=0,
+    assert (
+        monitor.update(
+            _input(
+                person_boxes=(IN_BED_A,),
+                bed_boxes=(BED_A,),
+                track_ids=(PERSON_ID,),
+                frame_index=0,
+            )
         )
-    ) == ()
+        == ()
+    )
 
     # When
     before_grace = tuple(
@@ -118,7 +124,7 @@ def test_own_bed_exit_emits_once_after_grace_period() -> None:
         BusinessEvent(
             domain="bed_exit",
             event_type="bed-exit",
-            identity="7:0",
+            identity="test-boot:test-epoch:7:0:0:1",
             camera_id=CAMERA_ID,
             facility_id=FACILITY_ID,
             time_sec=3.0,

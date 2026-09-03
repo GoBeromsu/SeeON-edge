@@ -67,9 +67,7 @@ def test_probe_stream_dimensions_rejects_unusable_metadata() -> None:
         return '{"streams":[]}'
 
     with pytest.raises(VaapiUnavailableError):
-        probe_stream_dimensions(
-            VaapiConfig("camera-a", "rtsp://camera.local/live"), runner=runner
-        )
+        probe_stream_dimensions(VaapiConfig("camera-a", "rtsp://camera.local/live"), runner=runner)
 
 
 # -- probe_vaapi_capability: the boot-level VAAPI host-capability check ------

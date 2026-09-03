@@ -23,9 +23,7 @@ def _database_path() -> Path:
 
 
 def _login(client: TestClient) -> None:
-    response = client.post(
-        "/api/v1/auth/session", json={"username": "admin", "password": "admin"}
-    )
+    response = client.post("/api/v1/auth/session", json={"username": "admin", "password": "admin"})
     assert response.status_code == 204
 
 
@@ -35,8 +33,11 @@ def test_camera_probe_persisted_outcomes_append_exactly_one_typed_audit(
     app = create_app(lifespan=no_lifespan)
     store = app.state.camera_registry = CameraRegistryStore(_database_path())
     store.create(
-        camera_id="camera-a", label="A", rtsp_url="rtsp://camera.example/live",
-        space_id=None, status="offline",
+        camera_id="camera-a",
+        label="A",
+        rtsp_url="rtsp://camera.example/live",
+        space_id=None,
+        status="offline",
     )
     outcomes = iter((ProbeResult(True, width=640, height=480), ProbeResult(False, "timeout")))
     monkeypatch.setattr(
@@ -55,7 +56,8 @@ def test_camera_probe_persisted_outcomes_append_exactly_one_typed_audit(
     assert (middle - before, after - middle) == (1, 1)
     with sqlite3.connect(_database_path()) as connection:
         details = [
-            json.loads(row[0]) for row in connection.execute(
+            json.loads(row[0])
+            for row in connection.execute(
                 "SELECT detail_json FROM audit_events WHERE action='camera.probe' ORDER BY audit_id"
             )
         ]
@@ -71,8 +73,11 @@ def test_camera_probe_error_without_persistence_appends_no_success(
     app = create_app(lifespan=no_lifespan)
     store = app.state.camera_registry = CameraRegistryStore(_database_path())
     store.create(
-        camera_id="camera-a", label="A", rtsp_url="rtsp://camera.example/live",
-        space_id=None, status="offline",
+        camera_id="camera-a",
+        label="A",
+        rtsp_url="rtsp://camera.example/live",
+        space_id=None,
+        status="offline",
     )
     calls = 0
 
@@ -119,8 +124,11 @@ def test_camera_probe_audit_denial_rolls_back_persisted_outcome(
     app = create_app(lifespan=no_lifespan)
     store = app.state.camera_registry = CameraRegistryStore(_database_path())
     store.create(
-        camera_id="camera-a", label="A", rtsp_url="rtsp://camera.example/live",
-        space_id=None, status="offline",
+        camera_id="camera-a",
+        label="A",
+        rtsp_url="rtsp://camera.example/live",
+        space_id=None,
+        status="offline",
     )
     monkeypatch.setattr(
         "backend.app.features.cameras.router._probe_rtsp_url",
@@ -190,15 +198,37 @@ def test_camera_probe_production_wiring_is_covered_and_mutation_sensitive() -> N
 
     source = Path(router.__file__).read_text(encoding="utf-8")
     governed = {
-        "AUTH_LOGIN", "AUTH_SESSION_READ", "AUTH_LOGOUT", "CREDENTIAL_ROTATE",
-        "CAMERA_CREATE", "CAMERA_UPDATE", "CAMERA_DELETE", "CAMERA_PROBE",
-        "LOCATION_CREATE", "LOCATION_UPDATE", "LOCATION_DELETE", "BED_ZONE_UPDATE",
-        "CONNECTION_UPDATE", "CLIP_STORAGE_UPDATE", "DETECTION_SETTINGS_UPDATE",
-        "RUNTIME_SETTINGS_UPDATE", "POLICY_APPLY", "POLICY_ROLLBACK",
-        "INCIDENT_LIST", "INCIDENT_DETAIL", "INCIDENT_REVIEW", "CLIP_LIST",
-        "CLIP_DETAIL", "CLIP_PLAY", "CLIP_THUMBNAIL", "CLIP_ARTIFACT",
-        "CLIP_DELETE_REQUEST", "CLIP_DELETE_COMPLETE", "AUDIT_LIST",
-        "AUDIT_DETAIL", "RELAY_ALERT",
+        "AUTH_LOGIN",
+        "AUTH_SESSION_READ",
+        "AUTH_LOGOUT",
+        "CREDENTIAL_ROTATE",
+        "CAMERA_CREATE",
+        "CAMERA_UPDATE",
+        "CAMERA_DELETE",
+        "CAMERA_PROBE",
+        "LOCATION_CREATE",
+        "LOCATION_UPDATE",
+        "LOCATION_DELETE",
+        "BED_ZONE_UPDATE",
+        "CONNECTION_UPDATE",
+        "CLIP_STORAGE_UPDATE",
+        "DETECTION_SETTINGS_UPDATE",
+        "RUNTIME_SETTINGS_UPDATE",
+        "POLICY_APPLY",
+        "POLICY_ROLLBACK",
+        "INCIDENT_LIST",
+        "INCIDENT_DETAIL",
+        "INCIDENT_REVIEW",
+        "CLIP_LIST",
+        "CLIP_DETAIL",
+        "CLIP_PLAY",
+        "CLIP_THUMBNAIL",
+        "CLIP_ARTIFACT",
+        "CLIP_DELETE_REQUEST",
+        "CLIP_DELETE_COMPLETE",
+        "AUDIT_LIST",
+        "AUDIT_DETAIL",
+        "RELAY_ALERT",
     }
     production = "\n".join(
         path.read_text(encoding="utf-8")

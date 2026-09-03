@@ -155,8 +155,15 @@ def test_capture_normalizes_persisted_polygon_using_its_source_size(tmp_path: Pa
     pump = NativePolicyPump(
         binding,
         NativePolicyContext(
-            LatestMetadataSlot(), _Control(), scene, EventAggregator((), IncidentManager(30.0)),
-            _Sink(), AlertEvidenceAttacher({}), WorkerDiagnostics(), 90, replay_trace=writer,
+            LatestMetadataSlot(),
+            _Control(),
+            scene,
+            EventAggregator((), IncidentManager(30.0)),
+            _Sink(),
+            AlertEvidenceAttacher({}),
+            WorkerDiagnostics(),
+            90,
+            replay_trace=writer,
         ),
     )
     pump._process(_metadata(epoch=4, track_id=7, generation=3))  # noqa: SLF001
@@ -173,9 +180,15 @@ def test_rotation_chain_accepts_seq_restart_at_new_boot_segment(tmp_path: Path) 
         return NativePolicyPump(
             binding,
             NativePolicyContext(
-                LatestMetadataSlot(), _Control(), SceneState("camera-a"),
-                EventAggregator((), IncidentManager(30.0)), _Sink(), AlertEvidenceAttacher({}),
-                WorkerDiagnostics(), 90, replay_trace=ReplayTraceWriter(tmp_path, "camera-a"),
+                LatestMetadataSlot(),
+                _Control(),
+                SceneState("camera-a"),
+                EventAggregator((), IncidentManager(30.0)),
+                _Sink(),
+                AlertEvidenceAttacher({}),
+                WorkerDiagnostics(),
+                90,
+                replay_trace=ReplayTraceWriter(tmp_path, "camera-a"),
             ),
         )
 
@@ -192,15 +205,22 @@ def test_rotation_chain_accepts_seq_restart_at_new_boot_segment(tmp_path: Path) 
     _, second_rows = decode_jsonl((tmp_path / trace_name).read_text())
     rows = first_rows + second_rows
     assert [(row.source_event, row.seq) for row in rows] == [
-        ("open", 0), ("frame", 1), ("frame", 2),
-        ("open", 0), ("frame", 1), ("frame", 2),
+        ("open", 0),
+        ("frame", 1),
+        ("frame", 2),
+        ("open", 0),
+        ("frame", 1),
+        ("frame", 2),
     ]
     frames = replay_trace_frames(rows)
     assert [frame.boot_segment for frame in frames] == [0, 1]
     policy = make_effective_policy(
-        module_id="bed_exit", module_version=1,
+        module_id="bed_exit",
+        module_version=1,
         values=BedExitPolicyV1(min_containment=0.5, hold_frames=1, grace_frames=1),
-        source="image-default", facility_revision_id=None, camera_revision_id=None,
+        source="image-default",
+        facility_revision_id=None,
+        camera_revision_id=None,
     )
     run = replay(camera_id="camera-a", rows=rows, module_id="bed_exit", policy=policy)
     # frame_key = (boot-scoped kind, camera, stream_epoch, resampled seq): unique per boot.

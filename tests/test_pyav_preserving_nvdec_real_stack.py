@@ -178,7 +178,7 @@ def test_read_document_supports_a_stdout_descriptor_above_fd_setsize() -> None:
     process: subprocess.Popen[str] | None = None
     try:
         process = subprocess.Popen(
-            [sys.executable, "-c", 'print("{\\\"event\\\":\\\"ready\\\"}", flush=True)'],
+            [sys.executable, "-c", 'print("{\\"event\\":\\"ready\\"}", flush=True)'],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -281,10 +281,10 @@ def test_slow_frame_consumer_does_not_freeze_evidence_ring(tmp_path: Path) -> No
             presentation_times = [sample["max_presentation_time"] for sample in samples]
             assert counts[-1] > counts[0]
             assert presentation_times[-1] > presentation_times[0]
-            assert sum(
-                later > earlier
-                for earlier, later in itertools.pairwise(presentation_times)
-            ) >= 4
+            assert (
+                sum(later > earlier for earlier, later in itertools.pairwise(presentation_times))
+                >= 4
+            )
             assert result["overflow_count"] > 0
             print(
                 "SLOW_CONSUMER_RING_GROWTH "

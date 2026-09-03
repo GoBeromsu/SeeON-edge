@@ -94,8 +94,7 @@ def test_snapshot_attachment_is_idempotent_and_rebinding_conflicts(client: TestC
             "SELECT COUNT(*) FROM artifacts WHERE artifact_id='snapshot-1'"
         ).fetchone()[0]
         audit_count = connection.execute(
-            "SELECT COUNT(*) FROM audit_events "
-            "WHERE action='relay.snapshot-attachment'"
+            "SELECT COUNT(*) FROM audit_events WHERE action='relay.snapshot-attachment'"
         ).fetchone()[0]
     assert artifact_count == 1
     assert audit_count == 2

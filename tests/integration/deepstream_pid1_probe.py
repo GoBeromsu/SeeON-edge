@@ -47,6 +47,7 @@ def main() -> int:
     )
     signal_thread: threading.Thread | None = None
     if mode == "graceful":
+
         def terminate_after_start() -> None:
             if not started.wait(timeout=10.0):
                 raise RuntimeError("runner startup event absent")

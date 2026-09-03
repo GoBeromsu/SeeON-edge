@@ -80,9 +80,7 @@ def test_snapshot_store_fsyncs_each_file_before_replace_and_directory_after(
         replace(source, destination, **kwargs)
 
     monkeypatch.setattr("worker.pipeline.output.evidence.snapshot_files.os.fsync", record_fsync)
-    monkeypatch.setattr(
-        "worker.pipeline.output.evidence.snapshot_files.os.replace", record_replace
-    )
+    monkeypatch.setattr("worker.pipeline.output.evidence.snapshot_files.os.replace", record_replace)
 
     _store(store)
 
@@ -396,16 +394,13 @@ def test_snapshot_store_preserves_primary_error_when_cleanup_fails(
         del name, dir_fd
         raise OSError("cleanup interrupted")
 
-    monkeypatch.setattr(
-        "worker.pipeline.output.evidence.snapshot_files.os.replace", interrupted
-    )
-    monkeypatch.setattr(
-        "worker.pipeline.output.evidence.snapshot_files.os.unlink", cleanup_failed
-    )
+    monkeypatch.setattr("worker.pipeline.output.evidence.snapshot_files.os.replace", interrupted)
+    monkeypatch.setattr("worker.pipeline.output.evidence.snapshot_files.os.unlink", cleanup_failed)
 
     with pytest.raises(OSError, match="replace interrupted") as raised:
         _store(store)
     assert raised.value.__notes__ == ["temporary snapshot cleanup failed: cleanup interrupted"]
+
 
 @pytest.mark.parametrize(
     "path_kind",
@@ -478,9 +473,7 @@ def test_snapshot_store_rejects_symlinked_temporary_file_without_outside_writes(
     class KnownUuid:
         hex = "known"
 
-    monkeypatch.setattr(
-        "worker.pipeline.output.evidence.snapshot_files.uuid4", lambda: KnownUuid()
-    )
+    monkeypatch.setattr("worker.pipeline.output.evidence.snapshot_files.uuid4", lambda: KnownUuid())
     (staging_directory / f".{identity_key}.json.known.tmp").symlink_to(target)
 
     with pytest.raises(FileExistsError):

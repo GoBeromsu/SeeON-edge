@@ -14,7 +14,9 @@ def test_resample_jitter_duplicates_and_gaps() -> None:
         )
     )
     assert [(item.pts_ns, item.value, item.valid) for item in rows] == [
-        (10, "a", 1), (10 + CADENCE_NS, None, 0), (10 + 2 * CADENCE_NS, None, 0),
+        (10, "a", 1),
+        (10 + CADENCE_NS, None, 0),
+        (10 + 2 * CADENCE_NS, None, 0),
         (10 + 3 * CADENCE_NS, "b", 1),
     ]
 

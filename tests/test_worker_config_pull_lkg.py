@@ -43,9 +43,9 @@ def test_to_worker_config_threads_pulled_detection_windows_into_domains_config()
         "bed_exit": NightWindowConfig(start="21:00", end="06:00", tz="UTC"),
         "fall": NightWindowConfig(start="22:00", end="05:00", tz="Asia/Seoul"),
     }
-    assert worker_config.domains.resolved_detection_window(
-        "bed_exit"
-    ) == NightWindowConfig(start="21:00", end="06:00", tz="UTC")
+    assert worker_config.domains.resolved_detection_window("bed_exit") == NightWindowConfig(
+        start="21:00", end="06:00", tz="UTC"
+    )
 
 
 def test_to_worker_config_threads_bed_zone_polygon_into_camera_runtime_config() -> None:
@@ -264,8 +264,7 @@ def test_pull_worker_config_returns_none_on_urllib_error() -> None:
         raise urllib.error.URLError("offline")
 
     assert (
-        pull_worker_config("http://ml-api:8000", "token", timeout_sec=0.01, urlopen=_raise)
-        is None
+        pull_worker_config("http://ml-api:8000", "token", timeout_sec=0.01, urlopen=_raise) is None
     )
 
 

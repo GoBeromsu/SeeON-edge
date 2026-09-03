@@ -18,6 +18,9 @@ from worker.types import BusinessEvent, DecisionInput
 
 NIGHT_CAMERA_ID: Final = "camera-night-window"
 NIGHT_FACILITY_ID: Final = "facility-night-window"
+BOOT_ID: Final = "boot-night-window"
+STREAM_EPOCH: Final = "epoch-night-window"
+SOURCE_GENERATION: Final = 0
 PERSON_ID: Final = 11
 BED: Final = BoundingBox(0, 0, 80, 100, 0.99)
 IN_BED: Final = BoundingBox(10, 10, 70, 90, 0.95)
@@ -62,6 +65,9 @@ def _night_monitor(
             night_window=night_window,
         ),
         clock=clock,
+        boot_id=BOOT_ID,
+        stream_epoch=STREAM_EPOCH,
+        source_generation=SOURCE_GENERATION,
     )
 
 
@@ -103,23 +109,26 @@ def test_night_window_rejects_naive_wall_clock() -> None:
         _ = window.contains(datetime(2026, 7, 31, 22, 0))
 
 
-def test_bed_exit_latch_returns_only_rising_edges() -> None:
+def test_bed_exit_latch_tracks_observation_freshness() -> None:
     # Given
-    latch = bed_exit.BedExitLatch()
-    event = bed_exit.BedExitEvent(person_id=11, bed_id=2)
+    now = 0.0
+    latch = bed_exit.BedExitLatch(clock=lambda: now, stale_after_sec=3.0)
 
     # When
-    first = latch.update((event,), time_sec=1.0)
-    repeated = latch.update((event,), time_sec=2.0)
-    cleared = latch.update((), time_sec=3.0)
-    second = latch.update((event,), time_sec=4.0)
+    initially = latch.status_snapshot
+    latch.update()
+    now = 2.0
+    fresh = latch.status_snapshot
+    latch.coast()
+    now = 3.0
+    stale = latch.status_snapshot
 
     # Then
-    assert first == (event,)
-    assert repeated == cleared == ()
-    assert second == (event,)
-    assert latch.event_count == 2
-    assert latch.first_event_sec == 1.0
+    assert initially.stale is True
+    assert fresh.stale is False
+    assert fresh.observation_age_sec == 2.0
+    assert stale.stale is True
+    assert stale.observation_age_sec == 3.0
 
 
 def test_night_window_outside_still_populates_debug_snapshot_for_overlay() -> None:
@@ -148,13 +157,10 @@ def test_night_window_outside_still_populates_debug_snapshot_for_overlay() -> No
     assert tuple(status.occupancy for status in snapshot.statuses) == ("exit",)
 
 
-def test_night_window_does_not_let_latch_consume_a_daytime_onset() -> None:
+def test_night_window_does_not_consume_a_daytime_episode_onset() -> None:
     """A boundary exit must remain available once the clock enters the window.
 
-    The latch is rising-edge only and keyed ``(person_id, bed_id)``. If a
-    daytime onset is fed to it, ``event_count`` advances and ``_active_exits``
-    can swallow the same pair when the window opens. Suppression must happen
-    before the latch consumes the onset.
+    Suppression must happen before the episode authority receives the onset.
     """
     # Given
     now = datetime(2026, 7, 31, 13, 0, tzinfo=SEOUL)
@@ -168,10 +174,8 @@ def test_night_window_does_not_let_latch_consume_a_daytime_onset() -> None:
     # When: confirmed exit outside the window
     daytime_events = monitor.update(_decision_input(OUTSIDE, BED, 1))
 
-    # Then: suppressed, and the latch must not have consumed the onset
+    # Then: suppressed, and no episode onset has been emitted
     assert daytime_events == ()
-    assert monitor._latch.event_count == 0
-    assert monitor._latch.status_snapshot.active_exits == ()
 
     # When: the same person/bed pair exits again inside the window
     now = datetime(2026, 7, 31, 22, 0, tzinfo=SEOUL)
@@ -183,7 +187,7 @@ def test_night_window_does_not_let_latch_consume_a_daytime_onset() -> None:
         BusinessEvent(
             domain="bed_exit",
             event_type="bed-exit",
-            identity="11:0",
+            identity="boot-night-window:epoch-night-window:11:0:0:1",
             camera_id=NIGHT_CAMERA_ID,
             facility_id=NIGHT_FACILITY_ID,
             time_sec=3.0,
@@ -192,16 +196,10 @@ def test_night_window_does_not_let_latch_consume_a_daytime_onset() -> None:
             bed_id=0,
         ),
     )
-    assert monitor._latch.event_count == 1
 
 
 def test_night_window_suppressed_onset_does_not_poison_later_in_window_exit() -> None:
-    """stale_state: a gated onset must not leave `_active_exits` holding the key.
-
-    After the daytime trigger the assignment is cleared, so the next in-window
-    fire requires a fresh in-bed hold. The latch key must not still be set
-    from the suppressed onset, or that second cycle is swallowed.
-    """
+    """A gated onset must not leave the authority holding the episode open."""
     # Given
     now = datetime(2026, 7, 31, 13, 0, tzinfo=SEOUL)
 
@@ -211,7 +209,6 @@ def test_night_window_suppressed_onset_does_not_poison_later_in_window_exit() ->
     monitor = _night_monitor(clock)
     assert monitor.update(_decision_input(IN_BED, BED, 0)) == ()
     assert monitor.update(_decision_input(OUTSIDE, BED, 1)) == ()
-    assert monitor._latch.status_snapshot.active_exits == ()
 
     # When: re-assign and exit after the window opens
     now = datetime(2026, 7, 31, 22, 0, tzinfo=SEOUL)
