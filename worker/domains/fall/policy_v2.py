@@ -8,7 +8,9 @@ from dataclasses import dataclass, field
 
 from shared.detection_policies import FallPolicyV2
 from worker.domains.fall.classifier_v2 import FallV2Probabilities
-from worker.types import BusinessEvent
+from worker.domains.fall.pose_bbox56 import PoseBbox56Track, pose_bbox56_tracks
+from worker.pipeline.perception.pts_resample import PtsResampler, ResampledRow
+from worker.types import BusinessEvent, DecisionInput, DecisionTraceSnapshot
 
 
 @dataclass(slots=True)
@@ -25,6 +27,31 @@ class _TrackState:
     transition_sequence: int | None = None
 
 
+def _trace_state(state: _TrackState | None) -> str:
+    if state is None:
+        return "unknown"
+    if state.alert_event is not None:
+        return "transition-confirmed"
+    if state.fallen:
+        return "fallen"
+    if any(state.transition_votes):
+        return "transition-candidate"
+    return "clear"
+
+
+def _missing_score_snapshot(track_id: int, state: _TrackState | None) -> DecisionTraceSnapshot:
+    current = _trace_state(state)
+    return DecisionTraceSnapshot(
+        reason="score-missing",
+        previous_state=current,
+        current_state=current,
+        triggered=False,
+        track_id=track_id,
+        bed_id=None,
+        missing_values={"fall_transition_probability": "no-live-classified-track"},
+    )
+
+
 @dataclass(slots=True)
 class FallPolicyDeciderV2:
     """Camera-local lifecycle and alert policy for V2 model probabilities.
@@ -38,14 +65,21 @@ class FallPolicyDeciderV2:
     facility_id: str
     boot_id: str
     stream_epoch: str
+    source_generation: int
     policy: FallPolicyV2 = field(default_factory=FallPolicyV2)
     _states: dict[int, _TrackState] = field(default_factory=dict, init=False)
     _next_generations: dict[int, int] = field(default_factory=dict, init=False)
     _next_transition_sequence: int = field(default=1, init=False)
+    last_trace_snapshots: tuple[DecisionTraceSnapshot, ...] = field(default=(), init=False)
 
     def __post_init__(self) -> None:
-        if not self.boot_id or not self.stream_epoch:
-            raise ValueError("boot_id and stream_epoch must be non-empty immutable identities")
+        if (
+            not self.boot_id
+            or not self.stream_epoch
+            or isinstance(self.source_generation, bool)
+            or self.source_generation < 0
+        ):
+            raise ValueError("fall event identities must name a boot and source epoch")
 
     def update(
         self,
@@ -59,6 +93,7 @@ class FallPolicyDeciderV2:
         live_ids = frozenset(live_track_ids)
         self._evict_stale(live_ids, frame_index)
         candidates: list[tuple[float, int, BusinessEvent]] = []
+        snapshots: list[DecisionTraceSnapshot] = []
         for track_id in sorted(live_ids):
             existing_state = self._states.get(track_id)
             if existing_state is not None:
@@ -67,11 +102,17 @@ class FallPolicyDeciderV2:
                 existing_state.last_seen_frame = frame_index
             probability = probabilities_by_track.get(track_id)
             if probability is None:
+                snapshots.append(_missing_score_snapshot(track_id, existing_state))
                 continue
             state = self._state_for(track_id, frame_index)
+            previous_state = _trace_state(state)
             event = self._advance(track_id, state, probability, frame_index, time_sec)
+            snapshots.append(
+                self._trace_snapshot(track_id, state, previous_state, probability, event)
+            )
             if event is not None:
                 candidates.append((probability.fall_transition, track_id, event))
+        self.last_trace_snapshots = tuple(snapshots)
         if not candidates:
             return ()
         # The camera OR is resolved only within this tick.  An equal score has a
@@ -172,7 +213,7 @@ class FallPolicyDeciderV2:
             event_type="fall",
             identity=(
                 f"{self.boot_id}:{self.stream_epoch}:{track_id}:"
-                f"{state.generation}:{self._sequence_for(state)}"
+                f"{self.source_generation}:{state.generation}:{self._sequence_for(state)}"
             ),
             camera_id=self.camera_id,
             facility_id=self.facility_id,
@@ -184,6 +225,41 @@ class FallPolicyDeciderV2:
         state.alert_frame = frame_index
         return event
 
+    def _trace_snapshot(
+        self,
+        track_id: int,
+        state: _TrackState,
+        previous_state: str,
+        probability: FallV2Probabilities,
+        event: BusinessEvent | None,
+    ) -> DecisionTraceSnapshot:
+        current_state = _trace_state(state)
+        if event is not None:
+            reason = "transition-confirmed"
+        elif state.fallen and previous_state == "fallen":
+            reason = "fall-active"
+        elif not state.fallen and previous_state == "fallen":
+            reason = "fall-recovered"
+        elif any(state.transition_votes):
+            reason = "transition-candidate"
+        else:
+            reason = "below-threshold"
+        return DecisionTraceSnapshot(
+            reason=reason,
+            previous_state=previous_state,
+            current_state=current_state,
+            triggered=event is not None,
+            track_id=track_id,
+            bed_id=None,
+            values={
+                "fall_transition_probability": probability.fall_transition,
+                "fallen_probability": probability.fallen,
+                "transition_threshold": self.policy.transition_threshold,
+                "transition_votes": self.policy.transition_votes,
+                "transition_window": self.policy.transition_window,
+            },
+        )
+
     def _sequence_for(self, state: _TrackState) -> int:
         sequence = state.transition_sequence
         if sequence is not None:
@@ -194,4 +270,75 @@ class FallPolicyDeciderV2:
         return sequence
 
 
-__all__ = ["FallPolicyDeciderV2", "FallPolicyV2"]
+@dataclass(slots=True)
+class FallV2DomainDecider:
+    """Adapt the V2 row classifier and temporal policy to the domain port."""
+
+    classifier: object
+    policy: FallPolicyDeciderV2
+    _resampler: PtsResampler[dict[int, tuple[float, ...]]] = field(
+        default_factory=PtsResampler, init=False
+    )
+    resample_gap_rows_total: int = field(default=0, init=False)
+
+    def update(self, input_value: DecisionInput) -> tuple[BusinessEvent, ...]:
+        observation = input_value.observation
+        tracks = (
+            PoseBbox56Track(
+                track_id,
+                observation.keypoints[index],
+                (box.x1, box.y1, box.x2, box.y2),
+            )
+            for index, (track_id, box) in enumerate(
+                zip(observation.track_ids, observation.boxes, strict=False)
+            )
+            if track_id is not None and index < len(observation.keypoints)
+        )
+        rows = dict(pose_bbox56_tracks(tracks, input_value.frame_width, input_value.frame_height))
+        classifier = self.classifier
+        if not hasattr(classifier, "update"):
+            raise TypeError("fall.v2 classifier is invalid")
+        seconds = 0.0 if input_value.time_sec is None else input_value.time_sec
+        pts_ns = int(seconds * 1_000_000_000)
+        resampled = self._resample(pts_ns, rows)
+        if not resampled:
+            return self.policy.coast()
+        probabilities = {}
+        for row in resampled:
+            if row.valid:
+                probabilities = classifier.update(row.value, input_value.live_track_ids)
+                continue
+            zero_rows = dict.fromkeys(input_value.live_track_ids, (0.0,) * 56)
+            classifier.update(zero_rows, input_value.live_track_ids)
+            self.resample_gap_rows_total += 1
+        return self.policy.update(
+            probabilities,
+            input_value.live_track_ids,
+            frame_index=input_value.frame_index,
+            time_sec=0.0 if input_value.time_sec is None else input_value.time_sec,
+        )
+
+    def coast(self) -> tuple[BusinessEvent, ...]:
+        return self.policy.coast()
+
+    @property
+    def last_trace_snapshots(self) -> tuple[DecisionTraceSnapshot, ...]:
+        return self.policy.last_trace_snapshots
+
+    def _resample(
+        self,
+        pts_ns: int,
+        rows: dict[int, tuple[float, ...]],
+    ) -> tuple[ResampledRow[dict[int, tuple[float, ...]]], ...]:
+        """Use the shared PTS contract as the sole fall-input resampling owner.
+
+        NativePolicyPump deliberately forwards accepted native metadata at its
+        original PTS.  This adapter turns that stream into exactly one
+        66,666,667ns cadence row (or ``valid=0`` zero rows for skipped
+        buckets) before the 30-row classifier window sees it.  A decider is
+        rebuilt at every stream epoch, so the resampler origin is epoch-local.
+        """
+        return self._resampler.push(pts_ns, rows)
+
+
+__all__ = ["FallPolicyDeciderV2", "FallPolicyV2", "FallV2DomainDecider"]

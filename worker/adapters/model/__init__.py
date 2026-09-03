@@ -1,3 +1,4 @@
+from worker.adapters.model.errors import ModelLoadError
 from worker.adapters.model.fall_family_registry import (
     DEFAULT_FALL_MODEL_FAMILY_REGISTRY,
     FallModelConfigLike,
@@ -14,6 +15,7 @@ from worker.adapters.model.gru_manifest import (
     GruFallManifest,
 )
 from worker.adapters.model.in_process import InProcessServingClient
+from worker.adapters.model.pose_bbox56_bundle import PoseBbox56BundleRunner
 from worker.adapters.model.registry import (
     DEFAULT_REGISTRY,
     ModelAdapter,
@@ -28,16 +30,6 @@ from worker.adapters.model.sklearn_fall import (
     ModelMetadata,
 )
 from worker.adapters.model.torch_gru_fall import GruFallRunner
-from worker.adapters.model.torch_lstm_fall import (
-    CURRENT_PREPROCESSING_IDENTITY,
-    CURRENT_SCHEMA_VERSION,
-    LEGACY_PREPROCESSING_IDENTITY,
-    LEGACY_SCHEMA_VERSION,
-    LstmFallManifest,
-    LstmFallRunner,
-    LstmMetadata,
-    ModelLoadError,
-)
 from worker.adapters.model.warmup import (
     DEFAULT_WARMUP_FRAME,
     WarmupFrameSpec,
@@ -55,8 +47,6 @@ from worker.adapters.model.yolo_person import YoloPersonRunner
 from worker.adapters.model.yolo_pose import YoloPoseRunner
 
 __all__ = [
-    "CURRENT_PREPROCESSING_IDENTITY",
-    "CURRENT_SCHEMA_VERSION",
     "DEFAULT_FALL_MODEL_FAMILY_REGISTRY",
     "DEFAULT_REGISTRY",
     "DEFAULT_WARMUP_FRAME",
@@ -64,8 +54,6 @@ __all__ = [
     "GRU_INPUT_DIM",
     "GRU_SCHEMA_VERSION",
     "GRU_WINDOW",
-    "LEGACY_PREPROCESSING_IDENTITY",
-    "LEGACY_SCHEMA_VERSION",
     "FallDetector",
     "FallModelConfigLike",
     "FallModelFactory",
@@ -73,15 +61,13 @@ __all__ = [
     "GruFallManifest",
     "GruFallRunner",
     "InProcessServingClient",
-    "LstmFallManifest",
-    "LstmFallRunner",
-    "LstmMetadata",
     "ModelAdapter",
     "ModelInputError",
     "ModelLoadError",
     "ModelMetadata",
     "ModelOption",
     "ModelRegistry",
+    "PoseBbox56BundleRunner",
     "RunnerFactory",
     "UnknownFallModelTypeError",
     "WarmupFrameSpec",

@@ -58,9 +58,9 @@ docker build --platform linux/amd64 -f Dockerfile.edge --target runtime \
 
 Neither image carries model weights. Models are a pinned external artifact:
 `worker/tools/fetch_models/manifest.json` names every file, its upstream
-(Hugging Face `Berom0227/eldercare-fall-models` at a 40-hex revision for the
-LSTM fall model; `ultralytics/assets` release `v8.4.0` for the YOLO pose,
-person, and bed weights), its size, and its SHA-256. The one-shot
+(Hugging Face `Berom0227/seeon-model-v0.1.0-pose-bbox56-proxy-research` at a
+40-hex revision for the pose+bbox56 fall bundle; `ultralytics/assets` release
+`v8.4.0` for the YOLO pose, person, and bed weights), its size, and its SHA-256. The one-shot
 `edge-model-fetch` compose service runs `python -m worker.tools.fetch_models`
 from the sealed worker image into the `worker-models` named volume on every
 `up`; `ml-worker` starts only after it exits 0, so a hash mismatch or a broken

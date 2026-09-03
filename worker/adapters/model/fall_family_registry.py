@@ -9,7 +9,7 @@ single-value ``Literal["lstm"]``, so onboarding a new family meant editing
 both.
 
 This registry is the one-time dispatch mechanism: every family after "lstm"
-is additive -- implement ``FallModelProtocol``
+is additive -- implement ``FallV2ModelProtocol``
 (``worker/domains/fall/classifier.py``), write a factory function taking a
 ``FallModelConfigLike`` and a device string, and ``register()`` it under the
 family's ``type`` name. ``_create_fall_model`` never grows a new branch.
@@ -41,9 +41,9 @@ from typing import Final, Protocol, TypeAlias
 
 from typing_extensions import override
 
+from worker.adapters.model.pose_bbox56_bundle import PoseBbox56BundleRunner
 from worker.adapters.model.registry import FallModel
 from worker.adapters.model.torch_gru_fall import GruFallRunner
-from worker.adapters.model.torch_lstm_fall import LstmFallRunner
 
 
 class FallModelConfigLike(Protocol):
@@ -152,25 +152,22 @@ class FallModelFamilyRegistry:
         return tuple(sorted(self._factories))
 
 
-def _create_lstm_fall_model(config: FallModelConfigLike, device: str) -> FallModel:
-    return LstmFallRunner.from_artifact_dir(
-        config.artifact_dir,
-        device=device,
-        expected_schema_version=config.schema_version,
-        expected_preprocessing_identity=config.preprocessing_identity,
-        operating_threshold=config.operating_threshold,
-    )
-
-
 def _create_gru_bundle_model(artifact_dir: Path, device: str) -> FallModel:
     return GruFallRunner.from_artifact_dir(artifact_dir, device=device)
+
+def _create_pose_bbox56_bundle_model(artifact_dir: Path, device: str) -> FallModel:
+    return PoseBbox56BundleRunner.from_artifact_dir(artifact_dir, device=device)  # type: ignore[return-value]
+
+def _create_pose_bbox56_model(config: FallModelConfigLike, device: str) -> FallModel:
+    return _create_pose_bbox56_bundle_model(config.artifact_dir, device)
 
 
 def default_fall_model_family_registry() -> FallModelFamilyRegistry:
     """Build the packaged-model and admitted-bundle dispatch registry."""
     registry = FallModelFamilyRegistry()
-    registry.register("lstm", _create_lstm_fall_model)
+    registry.register("pose-bbox56-proxy-v0", _create_pose_bbox56_model)
     registry.register_runtime_format("torchscript-gru-pose-bbox", _create_gru_bundle_model)
+    registry.register_runtime_format("pose-bbox56-proxy-v0", _create_pose_bbox56_bundle_model)
     return registry
 
 

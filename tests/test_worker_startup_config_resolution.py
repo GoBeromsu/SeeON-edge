@@ -112,7 +112,7 @@ def _spy_workerruntime_config(monkeypatch: pytest.MonkeyPatch) -> list[WorkerRun
 
 def test_no_yaml_successful_pull_becomes_live_runtime_config(
     monkeypatch: pytest.MonkeyPatch,
-    packaged_lstm_artifact: Path,
+    packaged_fall_bundle: Path,
 ) -> None:
     monkeypatch.setenv("RELAY_TOKEN", "relay-token")
     pulled_config = _worker_config("pulled-camera")
@@ -144,7 +144,7 @@ def test_no_yaml_successful_pull_becomes_live_runtime_config(
 def test_no_yaml_failed_pull_with_lkg_uses_lkg_config_and_logs_stale(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
-    packaged_lstm_artifact: Path,
+    packaged_fall_bundle: Path,
 ) -> None:
     monkeypatch.setenv("RELAY_TOKEN", "relay-token")
     lkg_config = _worker_config("lkg-camera")
@@ -175,7 +175,7 @@ def test_no_yaml_failed_pull_with_lkg_uses_lkg_config_and_logs_stale(
 def test_no_yaml_failed_pull_no_lkg_exits_with_actionable_message(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
-    packaged_lstm_artifact: Path,
+    packaged_fall_bundle: Path,
 ) -> None:
     monkeypatch.setenv("RELAY_TOKEN", "relay-token")
     monkeypatch.setattr(worker_main, "load_worker_config_from_relay", lambda *_a, **_k: None)
@@ -522,7 +522,7 @@ def test_check_config_no_yaml_never_resolves_local_model_overrides(
 def test_no_yaml_no_config_message_names_both_plausible_causes(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
-    packaged_lstm_artifact: Path,
+    packaged_fall_bundle: Path,
 ) -> None:
     """Regression: a relay that is up and returns a valid payload where every
     camera lacks an `rtsp_url` (realistic mid-onboarding, cameras added in
@@ -598,7 +598,7 @@ def test_worker_config_still_rejects_a_config_missing_the_relay_section() -> Non
 
 def test_no_yaml_pull_resolving_to_zero_cameras_still_boots(
     monkeypatch: pytest.MonkeyPatch,
-    packaged_lstm_artifact: Path,
+    packaged_fall_bundle: Path,
 ) -> None:
     """Issue #150: a relay pull that resolves to a zero-camera `WorkerConfig`
     (a fresh install, or every camera still missing its RTSP URL) must reach

@@ -17,7 +17,7 @@ from contracts.runner import Image
 from shared.detection_policies import parse_effective_policy
 from shared.events.replay_wire import MAX_REPLAY_BODY_BYTES as _REPLAY_BODY_LIMIT
 from shared.events.replay_wire import ReplayWireError, decode_replay_trace
-from worker.domains.fall import FallModelProtocol
+from worker.interfaces.fall_model import FallV2ModelProtocol
 from worker.pipeline.output.live_view import LatestFrame, LatestFrameStore
 from worker.pipeline.output.live_view_api import (
     BED_ZONE_NOT_FOUND_BODY,
@@ -125,7 +125,7 @@ def build_http_server(
     probe: MjpegProbe,
     bed_zone_recognizer: BedZoneRecognizer | None = None,
     clip_deletion_control: ClipDeletionControl | None = None,
-    replay_fall_model: FallModelProtocol | None = None,
+    replay_fall_model: FallV2ModelProtocol | None = None,
     bed_zone_frame_timeout_s: float = BED_ZONE_FRAME_TIMEOUT_SECONDS,
 ) -> HTTPServer:
     class Handler(BaseHTTPRequestHandler):

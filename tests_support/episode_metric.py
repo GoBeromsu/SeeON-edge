@@ -12,13 +12,13 @@ from contracts.replay_trace import ReplayRow, decode_jsonl
 from shared.detection_policies import (
     BedExitPolicyV1,
     EffectivePolicy,
-    FallPolicyV1,
+    FallPolicyV2,
     make_effective_policy,
     parse_effective_policy,
 )
 from tests_support.golden_episodes import GoldenEpisode, load_golden_episodes
 from worker.adapters.model.fall_family_registry import DEFAULT_FALL_MODEL_FAMILY_REGISTRY
-from worker.domains.fall import FallModelProtocol
+from worker.interfaces.fall_model import FallV2ModelProtocol
 from worker.replay.engine import replay
 from worker.runtime.config.errors import WorkerConfigError
 from worker.runtime.config.local_env import fall_model_config_from_environment
@@ -39,15 +39,15 @@ def _default_fall_policy() -> EffectivePolicy:
     config = fall_model_config_from_environment()
     return make_effective_policy(
         module_id="fall",
-        module_version=1,
-        values=FallPolicyV1(operating_threshold=config.operating_threshold),
+        module_version=2,
+        values=FallPolicyV2(transition_threshold=config.operating_threshold),
         source="image-default",
         facility_revision_id=None,
         camera_revision_id=None,
     )
 
 
-def _resolve_fall_model() -> FallModelProtocol:
+def _resolve_fall_model() -> FallV2ModelProtocol:
     """Use the worker's packaged-default config and registered CPU loader."""
     try:
         config = fall_model_config_from_environment()
@@ -139,7 +139,7 @@ def evaluate(
     goldens: tuple[GoldenEpisode, ...],
     policy: EffectivePolicy | None = None,
     *,
-    fall_model: FallModelProtocol | None = None,
+    fall_model: FallV2ModelProtocol | None = None,
 ) -> dict[str, object]:
     """Run canonical replay then compare admitted alerts to labelled windows."""
     episodes = tuple(item for item in goldens if item.resolved == "real")

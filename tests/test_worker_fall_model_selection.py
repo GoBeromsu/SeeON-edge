@@ -7,38 +7,35 @@ provide (historically a random-forest classifier). "Which model ran that
 night" must never be answered by an unconfigured default, so the fallback is
 gone entirely: an operator who omits ``models.fall`` now gets a refused boot
 (``REFUSE_TO_START_EXIT_CODE``, not the generic runtime code), and the
-configured LSTM path is otherwise unchanged.
+configured packaged-bundle path is otherwise unchanged.
 
 This file covers three levels: (1) the unit-level refusal, proving it never
 even reaches the serving client; (2) the unit-level configured path, proving
-``LstmFallRunner.from_artifact_dir`` still receives exactly the arguments the
-config declares; (3) the full ``WorkerRuntime.run()`` integration path,
+``PoseBbox56BundleRunner.from_artifact_dir`` receives exactly the artifact
+the config declares and is always pinned to the CPU; (3) the full
+``WorkerRuntime.run()`` integration path,
 proving the refusal surfaces as ``SystemExit`` with the refuse-to-start code
 and activates zero cameras.
 
 Issue #65 moved the actual family dispatch behind
 ``worker.adapters.model.fall_family_registry.DEFAULT_FALL_MODEL_FAMILY_REGISTRY``
-(keyed by ``FallModelConfig.type``), so ``worker.runtime.worker`` no longer
-imports ``LstmFallRunner`` directly -- test (2) below now patches
-``LstmFallRunner.from_artifact_dir`` on the class itself (imported from its
-defining module, ``worker.adapters.model.torch_lstm_fall``), since the call
-now happens inside the registry's "lstm" factory rather than in
-``_create_fall_model``. The registry's own plug-in and
+(keyed by ``FallModelConfig.type``). The registry's own plug-in and
 unknown-type-refusal contracts are covered separately in
 ``tests/test_fall_model_family_registry.py``; this file's scope stays #43's
-none-config refusal plus the unchanged configured-LSTM behavior.
+none-config refusal plus the configured packaged-bundle behavior.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, final
+from typing import final
 
 import pytest
 
 from contracts.runner import Image, RunnerResult
-from worker.adapters.model.torch_lstm_fall import LstmFallRunner
+from tests_support.pose_bbox56_bundle_artifact import write_pose_bbox56_bundle
+from worker.adapters.model.pose_bbox56_bundle import PoseBbox56BundleRunner
+from worker.interfaces.fall_model import FallV2Probabilities
 from worker.runtime import bootstrap
 from worker.runtime.config import WorkerConfig
 from worker.runtime.lease import GpuLease
@@ -56,26 +53,19 @@ class _ForbiddenServingClient:
         raise AssertionError(f"fall model refusal must not call serving.create({task!r})")
 
 
-@dataclass(frozen=True, slots=True)
-class _FallMetadata:
-    window: int = 2
-    stride: int = 1
-    mode: Literal["sequence"] = "sequence"
-
-
 @final
 class _FakeRunner:
+    device = "cpu"
+
     def __init__(self, task: str) -> None:
         self.task = task
-        self.metadata = _FallMetadata()
-        self.operating_threshold = 0.5
         self.warmup_count = 0
 
     def __call__(self, _image: Image) -> RunnerResult:
         raise AssertionError("this test must not run model inference")
 
-    def predict(self, _features: object) -> float:
-        return 0.0
+    def predict(self, _features: object) -> FallV2Probabilities:
+        return FallV2Probabilities(background=1.0, fall_transition=0.0, fallen=0.0)
 
     def warmup(self) -> None:
         self.warmup_count += 1
@@ -130,76 +120,50 @@ def test_create_fall_model_refuses_when_unconfigured_and_never_touches_serving(
         runtime._create_fall_model("cpu")  # noqa: SLF001
 
 
-def _write_fall_artifact(path: Path) -> Path:
-    path.mkdir(parents=True)
-    (path / "model.pt").write_bytes(b"placeholder")
-    (path / "arch.json").write_text('{"hidden":4,"layers":1,"dropout":0.0}', encoding="utf-8")
-    (path / "metadata.yaml").write_text("type: lstm\n", encoding="utf-8")
-    return path
-
-
-def test_create_fall_model_uses_the_configured_lstm_artifact(
+def test_create_fall_model_uses_the_configured_bundle_artifact_on_the_cpu(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    artifact_dir = _write_fall_artifact(tmp_path / "models" / "fall" / "lstm")
+    artifact_dir = write_pose_bbox56_bundle(tmp_path / "models" / "fall" / "pose-bbox56-gru")
     config = _config(
         with_fall={
-            "type": "lstm",
+            "type": "pose-bbox56-proxy-v0",
             "framework": "pytorch",
             "mode": "sequence",
             "artifact_dir": str(artifact_dir),
             "weights": "model.pt",
             "architecture": "arch.json",
             "metadata": "metadata.yaml",
-            "window": 3,
-            "stride": 1,
-            "input_shape": [3, 51],
+            "window": 30,
+            "stride": 5,
+            "input_shape": [30, 56],
             "operating_threshold": 0.5,
             "schema_version": 2,
-            "preprocessing_identity": "v2-poses",
+            "preprocessing_identity": "coco17-xyc-plus-pose-head-xyxy-valid-f32-v1",
         }
     )
-    calls: list[tuple[Path, str, int | None, str | None, float | None]] = []
-    sentinel = object()
+    calls: list[tuple[Path, str]] = []
+    sentinel = _FakeRunner("fall")
 
-    def fake_from_artifact_dir(
-        artifact_dir: Path,
-        device: str = "cpu",
-        *,
-        expected_schema_version: int | None = None,
-        expected_preprocessing_identity: str | None = None,
-        expected_artifact_digest: str | None = None,
-        operating_threshold: float | None = None,
-    ) -> object:
-        del expected_artifact_digest
-        calls.append(
-            (
-                Path(artifact_dir),
-                device,
-                expected_schema_version,
-                expected_preprocessing_identity,
-                operating_threshold,
-            )
-        )
+    def fake_from_artifact_dir(artifact_dir: Path, device: str = "cpu") -> object:
+        calls.append((Path(artifact_dir), device))
         return sentinel
 
-    monkeypatch.setattr(LstmFallRunner, "from_artifact_dir", fake_from_artifact_dir)
+    monkeypatch.setattr(PoseBbox56BundleRunner, "from_artifact_dir", fake_from_artifact_dir)
     runtime = _runtime(config, _ForbiddenServingClient(), tmp_path)
 
-    model = runtime._create_fall_model("cuda")  # noqa: SLF001
+    model = runtime._create_fall_model("cpu")  # noqa: SLF001
 
     assert model is sentinel
     fall_config = config.models.fall
     assert fall_config is not None
-    assert calls == [
-        (
-            fall_config.artifact_dir,
-            "cuda",
-            fall_config.schema_version,
-            fall_config.preprocessing_identity,
-            fall_config.operating_threshold,
-        )
-    ]
+    assert calls == [(fall_config.artifact_dir, "cpu")]
+
+
+def test_bundle_runner_refuses_a_non_cpu_device(tmp_path: Path) -> None:
+    """P1a-AC6b: the packaged fall runner is CPU-only; a GPU request is a boot error."""
+    artifact_dir = write_pose_bbox56_bundle(tmp_path / "bundle")
+    with pytest.raises(Exception, match="pinned to cpu"):
+        PoseBbox56BundleRunner.from_artifact_dir(artifact_dir, device="cuda")
 
 
 def test_run_refuses_to_start_with_refuse_to_start_exit_code_when_fall_is_unconfigured(

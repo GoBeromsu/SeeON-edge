@@ -31,7 +31,6 @@ from worker.domains.registry import (
     EXTERNAL_DOMAIN_MODULE_IDS,
     BedExitDomainDependencies,
     DomainRegistration,
-    FallDomainDependencies,
     enabled_domains,
     list_domains,
 )
@@ -55,7 +54,6 @@ __all__ = [
     "DomainDependencyError",
     "DomainDetector",
     "DomainRegistration",
-    "FallDomainDependencies",
     "PolicySchemaIdentity",
     "ScheduleRule",
     "SharedComponentIdentity",

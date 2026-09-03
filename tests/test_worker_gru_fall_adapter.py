@@ -18,6 +18,7 @@ from worker.domains.fall.pose_bbox56 import (
     pose_bbox56_row,
     pose_bbox56_tracks,
 )
+from worker.interfaces.fall_model import FallV2Probabilities
 
 
 def _digest(path: Path) -> str:
@@ -148,9 +149,10 @@ def test_pose_bbox56_tracks_are_sorted() -> None:
 def test_gru_runner_verifies_bundle_warms_up_and_returns_softmax(tmp_path: Path) -> None:
     runner = GruFallRunner.from_artifact_dir(_bundle(tmp_path / "gru"))
     probabilities = runner.predict(np.zeros((30, 56), dtype=np.float32))
-    assert len(probabilities) == 3
-    assert all(np.isfinite(probabilities))
-    assert sum(probabilities) == pytest.approx(1.0)
+    assert isinstance(probabilities, FallV2Probabilities)
+    assert probabilities.background + probabilities.fall_transition + probabilities.fallen == (
+        pytest.approx(1.0)
+    )
     with pytest.raises(ModelLoadError, match="input shape"):
         runner.predict(np.zeros((29, 56), dtype=np.float32))
     with pytest.raises(ModelLoadError, match="non-finite"):
@@ -164,8 +166,8 @@ def test_gru_runner_applies_calibration_temperature(tmp_path: Path) -> None:
     cold_probabilities = cold.predict(inputs)
     warm_probabilities = warm.predict(inputs)
     assert cold.class_order == ("background", "fall_transition", "fallen")
-    assert cold_probabilities[2] > warm_probabilities[2]
-    assert warm_probabilities[0] > cold_probabilities[0]
+    assert cold_probabilities.fallen > warm_probabilities.fallen
+    assert warm_probabilities.background > cold_probabilities.background
 
 
 def test_gru_runner_rejects_manifest_extra_fields_and_digest_mismatch(tmp_path: Path) -> None:

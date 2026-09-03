@@ -11,7 +11,7 @@ from urllib.request import Request, urlopen
 import pytest
 
 from backend.app.edge_db.bootstrap import bootstrap_database
-from shared.detection_policies import BedExitPolicyV1, FallPolicyV1, make_effective_policy
+from shared.detection_policies import BedExitPolicyV1, FallPolicyV2, make_effective_policy
 from worker.pipeline.output.live_view import LatestFrameStore
 from worker.pipeline.output.mjpeg_server import MjpegServer, MjpegServerConfig
 
@@ -112,8 +112,8 @@ def test_fall_replay_without_the_running_model_is_a_typed_refusal() -> None:
     payload["module_id"] = "fall"
     policy = make_effective_policy(
         module_id="fall",
-        module_version=1,
-        values=FallPolicyV1(operating_threshold=0.7),
+        module_version=2,
+        values=FallPolicyV2(transition_threshold=0.7),
         source="image-default",
         facility_revision_id=None,
         camera_revision_id=None,
@@ -126,7 +126,7 @@ def test_fall_replay_without_the_running_model_is_a_typed_refusal() -> None:
             urlopen(_request(f"http://127.0.0.1:{server.port}", payload), timeout=1)
         assert refused.value.code == 422
         assert json.loads(refused.value.read()) == {
-            "detail": "module 'fall.v1' requires a fall_model for replay",
+            "detail": "module 'fall.v2' requires a fall_model for replay",
             "status": "refused",
         }
     finally:

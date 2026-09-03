@@ -490,13 +490,6 @@ def _contains_forbidden_control_bytes(blob: bytes) -> bool:
 PUBLIC_SAFE_STRUCTURED_FIXTURES = frozenset(
     {
         Path("worker/ml-worker.example.yaml"),
-        # Issue #133: small text sidecars (architecture shape + manifest)
-        # derived from the packaged default LSTM fall-detector's actual
-        # weights -- not data, not credentials, not PII. The weights
-        # themselves (model.pt) stay gitignored; only these two sidecars are
-        # tracked, carved out of the blanket `models/` ignore.
-        Path("models/fall/lstm/arch.json"),
-        Path("models/fall/lstm/metadata.yaml"),
         Path("models/pose/metadata.yaml"),
     }
 )

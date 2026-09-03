@@ -37,7 +37,7 @@ class FallModelConfig(BaseModel):
 
     # Issue #65: the fall-model family is config/metadata-driven, not code-pinned.
     # A brand-new AI model family (a different architecture, not a same-family
-    # weights version-up) is added by implementing FallModelProtocol and
+    # weights version-up) is added by implementing FallV2ModelProtocol and
     # registering a factory in
     # ``worker.adapters.model.fall_family_registry.DEFAULT_FALL_MODEL_FAMILY_REGISTRY``
     # under the same string used here -- no edits to this Literal, and no edits
@@ -72,8 +72,8 @@ class FallModelConfig(BaseModel):
 
     @model_validator(mode="after")
     def _validate_artifact_contract(self) -> FallModelConfig:
-        if self.input_shape != (self.window, 51):
-            raise ConfigValidationError("input_shape must be [window, 51]")
+        if self.input_shape != (self.window, 56):
+            raise ConfigValidationError("input_shape must be [window, 56]")
         for relative in (self.weights, self.architecture, self.metadata):
             if not (self.artifact_dir / relative).exists():
                 raise ConfigValidationError(f"missing {relative} at configured artifact directory")

@@ -23,7 +23,8 @@ from contracts.runner import Image, RunnerResult, pose_result
 from shared.detection_policies import default_policy_bundle
 from worker.domains.bed_exit.detector import BedExitMonitor
 from worker.domains.bed_exit.schema import BedExitConfig
-from worker.domains.fall import FallEventLatch
+from worker.domains.fall import FallPolicyDeciderV2, FallV2DomainDecider, FallV2Probabilities
+from worker.domains.fall.pose_bbox56 import POSE_BBOX56_PREPROCESSING_IDENTITY
 from worker.domains.module_compiler import compile_detection_module_registry
 from worker.domains.module_definition import (
     CameraModuleContext,
@@ -46,7 +47,7 @@ from worker.runtime.worker import WorkerRuntime
 from worker.types import CURRENT_TEMPORAL_PROFILE, DecisionInput, FramePacket
 
 _PACKAGED_FALL_METADATA = (
-    Path(__file__).resolve().parents[1] / "models" / "fall" / "lstm" / "metadata.yaml"
+    Path(__file__).resolve().parents[1] / "models" / "fall" / "pose-bbox56-gru" / "metadata.yaml"
 )
 
 
@@ -62,8 +63,8 @@ class _FallModel:
     metadata = _FallMetadata()
     operating_threshold = 0.5
 
-    def predict(self, _features: object) -> float:
-        return 0.0
+    def predict(self, _features: object) -> FallV2Probabilities:
+        return FallV2Probabilities(1.0, 0.0, 0.0)
 
 
 def _context(camera_id: str, model: _FallModel | None = None) -> CameraModuleContext:
@@ -71,11 +72,14 @@ def _context(camera_id: str, model: _FallModel | None = None) -> CameraModuleCon
         camera_id=camera_id,
         facility_id="facility-1",
         shared_components={"fall-classifier": model or _FallModel()},
-        camera_components={"person-tracker": object()},
+        camera_components={
+            "person-tracker": object(),
+            "fall-v2-identity": ("boot-1", "stream-1", 0),
+        },
         detection_window=None,
         clock=lambda: datetime(2026, 8, 13, tzinfo=UTC),
         diagnostics=None,
-        policy=default_policy_bundle().resolve(camera_id, "fall", 1),
+        policy=default_policy_bundle().resolve(camera_id, "fall", 2),
     )
 
 
@@ -83,9 +87,9 @@ def test_default_registry_compiles_versioned_multi_component_modules() -> None:
     fall = DETECTION_MODULE_REGISTRY.get("fall")
     bed_exit = DETECTION_MODULE_REGISTRY.get("bed_exit")
 
-    assert fall.qualified_id == "fall.v1"
+    assert fall.qualified_id == "fall.v2"
     assert bed_exit.qualified_id == "bed_exit.v1"
-    assert fall.policy_schema.qualified_id == "fall.policy.v1"
+    assert fall.policy_schema.qualified_id == "fall.policy.v2"
     assert bed_exit.policy_schema.qualified_id == "bed_exit.policy.v1"
     assert fall.event_types == frozenset({"fall"})
     assert bed_exit.event_types == frozenset({"bed-exit"})
@@ -95,9 +99,8 @@ def test_default_registry_compiles_versioned_multi_component_modules() -> None:
     assert fall_components == {
         "pose",
         "person-tracker",
-        "fall-window",
         "fall-classifier",
-        "fall-latch",
+        "fall-v2",
     }
     assert bed_exit_components == {
         "pose",
@@ -117,12 +120,13 @@ def test_compiled_fall_binding_matches_the_packaged_model_identity() -> None:
     assert isinstance(metadata, dict)
     binding = next(
         binding
-        for binding in DETECTION_MODULE_REGISTRY.get("fall", 1).shared_bindings
+        for binding in DETECTION_MODULE_REGISTRY.get("fall", 2).shared_bindings
         if binding.component_id == "fall-classifier"
     )
 
-    assert binding.artifact_digest == metadata["artifact_digest"]
-    assert binding.preprocessing_identity == metadata["preprocessing_identity"]
+    assert binding.artifact_digest is not None and len(binding.artifact_digest) == 64
+    assert binding.preprocessing_identity == POSE_BBOX56_PREPROCESSING_IDENTITY
+    assert metadata["model_family"] == "gru_source_proxy_v0"
 
 
 def test_camera_module_factories_isolate_temporal_state_while_sharing_model() -> None:
@@ -134,8 +138,10 @@ def test_camera_module_factories_isolate_temporal_state_while_sharing_model() ->
     assert first.state is not second.state
     assert first.decider is not second.decider
     assert first.camera_component_ids == second.camera_component_ids
-    assert isinstance(first.decider, FallEventLatch)
-    assert isinstance(second.decider, FallEventLatch)
+    assert isinstance(first.decider, FallV2DomainDecider)
+    assert isinstance(second.decider, FallV2DomainDecider)
+    assert isinstance(first.decider.policy, FallPolicyDeciderV2)
+    assert isinstance(second.decider.policy, FallPolicyDeciderV2)
     assert first.decider.classifier.model is second.decider.classifier.model
 
 
@@ -151,11 +157,13 @@ def _module_context(camera_id: str, module_id: str, model: _FallModel) -> Camera
         camera_id=camera_id,
         facility_id="facility-1",
         shared_components={"fall-classifier": model},
-        camera_components={},
+        camera_components={"fall-v2-identity": ("boot-1", "stream-1", 0)},
         detection_window=None,
         clock=lambda: datetime(2026, 8, 13, tzinfo=UTC),
         diagnostics=None,
-        policy=default_policy_bundle().resolve(camera_id, module_id, 1),
+        policy=default_policy_bundle().resolve(
+            camera_id, module_id, DETECTION_MODULE_REGISTRY.get(module_id).version
+        ),
     )
 
 
@@ -193,7 +201,7 @@ def test_no_camera_local_component_object_is_shared_between_cameras_in_either_mo
         )
         for module_id in modules
     }
-    assert stateful_ids["fall"] == {"person-tracker", "fall-window", "fall-latch"}
+    assert stateful_ids["fall"] == {"person-tracker", "fall-v2"}
     assert stateful_ids["bed_exit"] == {
         "person-tracker",
         "bed-assignment",

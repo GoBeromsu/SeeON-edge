@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from http.server import HTTPServer
 from typing import Final
 
-from worker.domains.fall import FallModelProtocol
+from worker.interfaces.fall_model import FallV2ModelProtocol
 from worker.pipeline.output._mjpeg_http import (
     BED_ZONE_FRAME_TIMEOUT_SECONDS,
     BedZoneNotFoundError,
@@ -45,7 +45,7 @@ class MjpegServer:
         probe: MjpegProbe | None = None,
         bed_zone_recognizer: BedZoneRecognizer | None = None,
         clip_deletion_control: ClipDeletionControl | None = None,
-        replay_fall_model: FallModelProtocol | None = None,
+        replay_fall_model: FallV2ModelProtocol | None = None,
         *,
         bed_zone_frame_timeout_s: float = BED_ZONE_FRAME_TIMEOUT_SECONDS,
     ) -> None:
@@ -104,7 +104,7 @@ MjpegServerFactory = Callable[
         MjpegProbe | None,
         BedZoneRecognizer | None,
         ClipDeletionControl | None,
-        FallModelProtocol | None,
+        FallV2ModelProtocol | None,
     ],
     MjpegServer,
 ]
@@ -148,7 +148,7 @@ def start_optional_mjpeg_server(
     probe: MjpegProbe | None = None,
     bed_zone_recognizer: BedZoneRecognizer | None = None,
     clip_deletion_control: ClipDeletionControl | None = None,
-    replay_fall_model: FallModelProtocol | None = None,
+    replay_fall_model: FallV2ModelProtocol | None = None,
     factory: MjpegServerFactory = MjpegServer,
 ) -> MjpegServer | None:
     resolved = dev_mjpeg_config() if config is None else config

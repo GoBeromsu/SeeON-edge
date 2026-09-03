@@ -1,9 +1,8 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, final
+from typing import final
 
 import numpy as np
 import pytest
@@ -12,7 +11,7 @@ from numpy.typing import NDArray
 import worker.runtime.worker as worker_module
 from contracts.runner import Image, RunnerResult
 from shared.events.evidence_http_transport import HttpResult
-from worker.domains.fall import FallEventLatch
+from worker.domains.fall import FallPolicyDeciderV2, FallV2DomainDecider, FallV2Probabilities
 from worker.domains.module_definition import ComponentBinding
 from worker.pipeline.bus import BoundedFrameBus
 from worker.pipeline.ingest.lifecycle import IngestReporter
@@ -24,19 +23,11 @@ from worker.runtime.worker import WorkerRuntime
 ServingOption = str | int | float | bool | None
 
 
-@dataclass(frozen=True, slots=True)
-class _FallMetadata:
-    window: int = 2
-    stride: int = 1
-    mode: Literal["sequence"] = "sequence"
-
-
 @final
 class _FakeRunner:
     def __init__(self, task: str) -> None:
         binding = _compiled_binding_for_task(task)
         self.task = task
-        self.metadata = _FallMetadata()
         self.operating_threshold = 0.5
         self.artifact_digest = binding.artifact_digest
         self.preprocessing_identity = binding.preprocessing_identity
@@ -44,8 +35,8 @@ class _FakeRunner:
     def __call__(self, _image: Image) -> RunnerResult:
         raise AssertionError("runner-sharing tests must not run model inference")
 
-    def predict(self, _features: NDArray[np.float32]) -> float:
-        return 0.0
+    def predict(self, _features: NDArray[np.float32]) -> FallV2Probabilities:
+        return FallV2Probabilities(1.0, 0.0, 0.0)
 
     def warmup(self) -> None:
         return None
@@ -176,12 +167,7 @@ def _runtime(
 
 @pytest.fixture(autouse=True)
 def _fall_model_via_serving_client(monkeypatch: pytest.MonkeyPatch) -> None:
-    """This composition test predates explicit fall-model configuration and
-    asserts the fall runner comes from the injected serving client (see
-    ``serving.create_calls`` below), not a real LSTM artifact on disk.
-    ``_create_fall_model`` no longer falls back to the serving client in
-    production (fail-closed boot, see ``WorkerRuntime._create_fall_model``),
-    so pin the old behavior here, scoped to this test module only."""
+    """Inject the V2 bundle runner through the serving seam."""
 
     def _fall_via_serving(self: WorkerRuntime, _device: str) -> object:
         return self._serving.create("fall")  # noqa: SLF001
@@ -218,7 +204,8 @@ def test_pose_person_bed_and_fall_runners_are_created_once_and_shared_across_fou
             for left, right in zip(camera.analytics.extractors, shared_extractors, strict=True)
         )
         fall, _bed_exit = camera.decision.deciders
-        assert isinstance(fall, FallEventLatch)
+        assert isinstance(fall, FallV2DomainDecider)
+        assert isinstance(fall.policy, FallPolicyDeciderV2)
         assert fall.classifier.model is runtime.fall_model
 
 

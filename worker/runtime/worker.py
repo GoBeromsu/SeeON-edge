@@ -56,8 +56,8 @@ from worker.domains import (
     SharedComponentIdentity,
 )
 from worker.domains.detection_window import DetectionWindow
-from worker.domains.fall import FallModelProtocol
 from worker.interfaces.decision import Decider
+from worker.interfaces.fall_model import FallV2ModelProtocol
 from worker.interfaces.output import EventSink
 from worker.interfaces.serving import ServingClient
 from worker.native.deepstream.control import ChildControlError
@@ -886,7 +886,7 @@ class WorkerRuntime:
         self._boot: BootContext | None = None
         self._supervisor: ingest.IngestSupervisor | None = None
         self.shared_yolo: SharedYoloExtractors | None = None
-        self.fall_model: FallModelProtocol | None = None
+        self.fall_model: FallV2ModelProtocol | None = None
         self._shared_component_pool = SharedComponentPool()
         self._shared_graph: SharedComponentGraph | None = None
         self._warmed_component_ids: frozenset[str] = frozenset()
@@ -1407,8 +1407,10 @@ class WorkerRuntime:
             flags=flags,
             pool=self._shared_component_pool,
             provisioners={
-                "fall-model-family-registry": lambda _binding, device: ProvisionedSharedComponent(
-                    self._create_fall_model(device),
+                # Fall inference is CPU-pinned on every profile (P1a); the
+                # boot device governs only the perception runners.
+                "fall-model-family-registry": lambda _binding, _device: ProvisionedSharedComponent(
+                    self._create_fall_model("cpu"),
                     artifact_digest=(
                         None if selection is None else selection.model_publication.bundle_sha256
                     ),
@@ -1430,7 +1432,9 @@ class WorkerRuntime:
         )
         self._shared_graph = graph
         fall_component = graph.components.get("fall-classifier")
-        self.fall_model = fall_component if isinstance(fall_component, FallModelProtocol) else None
+        self.fall_model = (
+            fall_component if isinstance(fall_component, FallV2ModelProtocol) else None
+        )
         pose = graph.components.get("pose")
         bed = graph.components.get("bed")
         person = graph.components.get("person")
@@ -1569,7 +1573,7 @@ class WorkerRuntime:
                 exc_info=True,
             )
 
-    def _create_fall_model(self, device: str) -> FallModelProtocol:
+    def _create_fall_model(self, device: str) -> FallV2ModelProtocol:
         """Construct the selected bundle or the packaged fall model.
 
         Fall model selection has no implicit fallback: an operator who omits
@@ -1631,13 +1635,18 @@ class WorkerRuntime:
             component = self._shared_graph.components[binding.component_id]
             model = component.runner if isinstance(component, NamedExtractor) else component
             if binding.warmup_required:
-                self._warm_one(cast("RunnerProtocol | FallModelProtocol", model), self._boot.device)
+                # Fall inference is CPU-pinned on every profile (P1a); only the
+                # perception runners follow the boot device.
+                self._warm_one(
+                    cast("RunnerProtocol | FallV2ModelProtocol", model),
+                    "cpu" if binding.component_id == "fall-classifier" else self._boot.device,
+                )
         self._warmed_component_ids = frozenset(
             binding.component_id for binding in required_bindings
         )
         return tuple(sorted(self._warmed_component_ids))
 
-    def _warm_one(self, model: RunnerProtocol | FallModelProtocol, device: str) -> None:
+    def _warm_one(self, model: RunnerProtocol | FallV2ModelProtocol, device: str) -> None:
         if not isinstance(model, _Warmable):
             raise TypeError("configured model does not expose warmup")
         _ = warmup_to_ready(model, device=device)
@@ -1784,6 +1793,21 @@ class WorkerRuntime:
             bed_zone_image_width=camera.bed_zone_image_width,
             bed_zone_image_height=camera.bed_zone_image_height,
         )
+        # The source binding is allocated by the native child. Compile the
+        # temporal V2 state only after it exists so its identity names the
+        # actual boot, stream epoch, and source generation.
+        _ = media_plane.child.sources.add(camera.camera_id, endpoint.pinned_url)
+        binding = media_plane.child.metadata.expected_binding(camera.camera_id)
+        if binding is None:
+            raise RuntimeError("native source became ready without an acceptance binding")
+        plan = self._preflight_camera_graph(
+            camera,
+            fall_source_identity=(
+                str(self._worker_boot_uuid),
+                str(binding.stream_epoch),
+                binding.source_generation,
+            ),
+        )
         debug_snapshots = _debug_snapshots_provider(plan.domain_deciders, plan.definitions)
         attacher = AlertEvidenceAttacher(
             domain_audit=plan.domain_audit,
@@ -1797,10 +1821,6 @@ class WorkerRuntime:
         sink = self._sink_factory(camera)
         if not isinstance(sink, NativeEventSink):
             raise TypeError("nvidia event sink lacks the native evidence trigger seam")
-        _ = media_plane.child.sources.add(camera.camera_id, endpoint.pinned_url)
-        binding = media_plane.child.metadata.expected_binding(camera.camera_id)
-        if binding is None:
-            raise RuntimeError("native source became ready without an acceptance binding")
         pump = NativePolicyPump(
             binding,
             NativePolicyContext(
@@ -1818,6 +1838,21 @@ class WorkerRuntime:
                     else ReplayTraceWriter(trace_directory, camera.camera_id)
                 ),
                 night_window_active=_night_window_active(plan.detection_windows.get("bed_exit")),
+                # A source rebuild is a reconnect inside one worker boot: the
+                # deciders restart on the new epoch identity, but the camera's
+                # IncidentManager (cooldown, identity journal) is boot-scoped
+                # and must survive, matching the replay engine's boot segments.
+                recreate_decision=lambda rebuilt: (
+                    self._preflight_camera_graph(
+                        camera,
+                        fall_source_identity=(
+                            str(self._worker_boot_uuid),
+                            str(rebuilt.stream_epoch),
+                            rebuilt.source_generation,
+                        ),
+                        incidents=plan.decision.incidents,
+                    ).decision
+                ),
             ),
         )
         pumps.append(pump)
@@ -1825,7 +1860,6 @@ class WorkerRuntime:
         # camera's detection. Declare it so the relay payload reports the
         # producer as present instead of falling through to "disabled".
         self.diagnostics.register_native_detection(camera.camera_id)
-        self.diagnostics.register_incident_manager(camera.camera_id, plan.decision.incidents)
         HeartbeatReporter(self.config, camera).mark_ready(camera.camera_id)
 
     def _compose_inference_coordinator(
@@ -2591,6 +2625,8 @@ class WorkerRuntime:
         self,
         camera: CameraRuntimeConfig,
         tracker: GreedyIouTracker | None = None,
+        fall_source_identity: tuple[str, str, int] | None = None,
+        incidents: IncidentManager | None = None,
     ) -> CameraDetectionPlan:
         graph = self._shared_graph
         if graph is None:
@@ -2610,9 +2646,14 @@ class WorkerRuntime:
             flags=flags,
             temporal_profile=self.temporal_profile,
         )
-        camera_components: Mapping[str, object] = MappingProxyType(
-            {} if tracker is None else {"person-tracker": tracker}
-        )
+        if fall_source_identity is None:
+            fall_source_identity = (str(self._worker_boot_uuid), "0", 0)
+        camera_component_values: dict[str, object] = {
+            "fall-v2-identity": fall_source_identity,
+        }
+        if tracker is not None:
+            camera_component_values["person-tracker"] = tracker
+        camera_components: Mapping[str, object] = MappingProxyType(camera_component_values)
         domain_deciders: dict[str, Decider] = {}
         domain_audit: dict[str, Mapping[str, object]] = {}
         definitions: dict[str, DetectionModuleDefinition] = {}
@@ -2648,19 +2689,27 @@ class WorkerRuntime:
             if definition.audit_adapter is not None:
                 audit_context = replace(context, camera_components=camera_components)
                 snapshot = definition.audit_adapter(audit_context)
-                domain_audit[definition.module_id] = build_audit_envelope(
+                envelope = build_audit_envelope(
                     model_version=snapshot.model_version,
                     detector_version=DETECTOR_VERSION,
                     operating_threshold=snapshot.operating_threshold,
                 )
+                if snapshot.threshold_source is not None:
+                    envelope["threshold_source"] = snapshot.threshold_source
+                if snapshot.receipt_threshold is not None:
+                    envelope["receipt_threshold"] = snapshot.receipt_threshold
+                domain_audit[definition.module_id] = envelope
         resolved_tracker = camera_components.get("person-tracker")
         if not isinstance(resolved_tracker, GreedyIouTracker):
             resolved_tracker = tracker or GreedyIouTracker()
-        incidents = IncidentManager(
-            identity_path=event_identity_path(camera.camera_id, self._state_dir)
-        )
+        if incidents is None:
+            incidents = IncidentManager(
+                identity_path=event_identity_path(camera.camera_id, self._state_dir)
+            )
         aggregator = EventAggregator(deciders=tuple(domain_deciders.values()), incidents=incidents)
         self.diagnostics.register_incident_manager(camera.camera_id, incidents)
+        if _is_confirmed_cpu_fall_runner(self.fall_model):
+            self.diagnostics.record_fall_inference_device(camera.camera_id, "cpu")
         return CameraDetectionPlan(
             tracker=resolved_tracker,
             schedule=activation.schedule,
@@ -2688,7 +2737,7 @@ class WorkerRuntime:
         self,
         name: str,
         camera: CameraRuntimeConfig,
-        fall_model: FallModelProtocol,
+        fall_model: FallV2ModelProtocol,
         tracker: GreedyIouTracker | None = None,
     ) -> Decider:
         """Compile one registered module without domain-name dispatch."""
@@ -2698,7 +2747,12 @@ class WorkerRuntime:
             camera_id=camera.camera_id,
             facility_id=camera.facility_id,
             shared_components=MappingProxyType({"fall-classifier": fall_model}),
-            camera_components=MappingProxyType({"person-tracker": tracker or GreedyIouTracker()}),
+            camera_components=MappingProxyType(
+                {
+                    "person-tracker": tracker or GreedyIouTracker(),
+                    "fall-v2-identity": (str(self._worker_boot_uuid), "0", 0),
+                }
+            ),
             detection_window=window,
             clock=lambda: datetime.now(UTC),
             diagnostics=self.diagnostics,
@@ -2722,6 +2776,14 @@ class WorkerRuntime:
 
 def _night_window_active(window: DetectionWindow | None) -> Callable[[], bool]:
     return (lambda: False) if window is None else lambda: window.contains(datetime.now(UTC))
+
+
+def _is_confirmed_cpu_fall_runner(model: FallV2ModelProtocol | None) -> bool:
+    """Report CPU policy inference only from a runner that declares CPU placement."""
+    if model is None:
+        return False
+    device = getattr(model, "device", None)
+    return str(device) == "cpu"
 
 
 __all__ = [

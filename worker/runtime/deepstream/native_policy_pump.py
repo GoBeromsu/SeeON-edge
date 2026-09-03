@@ -38,6 +38,8 @@ class NativeDiagnostics(Protocol):
     def record_track_id_switch(self, camera_id: str) -> None: ...
     def record_bed_polygon_source(self, camera_id: str, source: str) -> None: ...
     def record_replay_trace_write_failure(self, camera_id: str) -> None: ...
+    def record_resample_gap_rows(self, camera_id: str, count: int = 1) -> None: ...
+    def record_fall_inference_device(self, camera_id: str, device: str) -> None: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,6 +56,7 @@ class NativePolicyContext:
     replay_trace: ReplayTraceWriter | None = None
     # G7: composition supplies the evaluated bed-exit detection window.
     night_window_active: Callable[[], bool] | None = None
+    recreate_decision: Callable[[SourceBinding], EventAggregator] | None = None
 
 
 @final
@@ -73,6 +76,7 @@ class NativePolicyPump:
         self._canary_telemetry = context.canary_telemetry
         self._replay_trace = context.replay_trace
         self._night_window_active = context.night_window_active
+        self._recreate_decision = context.recreate_decision
         self._stop = threading.Event()
         self._fps: deque[float] = deque()
         self.processed_count = 0
@@ -110,6 +114,11 @@ class NativePolicyPump:
             return
         previous = self._binding
         self._binding = current
+        if self._recreate_decision is not None:
+            # A source rebuild starts a distinct native epoch. Recreate the
+            # camera-local V2 window/policy so no partial 30-row state crosses
+            # the boundary and every onset identity names the new generation.
+            self._decision = self._recreate_decision(current)
         LOGGER.info(
             "native policy pump rebound after source rebuild: camera_id=%s "
             "generation %d->%d epoch %d->%d",
@@ -209,7 +218,11 @@ class NativePolicyPump:
         self._record_track_id_switches(resolved_track_ids)
         self._record_bed_polygon_source(metadata)
         self._capture_replay_row(metadata, boxes, resolved_track_ids)
+        gap_rows_before = _resample_gap_rows_total(self._decision)
         events = self._decision.update(decision_input)
+        gap_rows = _resample_gap_rows_total(self._decision) - gap_rows_before
+        if gap_rows > 0:
+            self._diagnostics.record_resample_gap_rows(self.camera_id, gap_rows)
         trigger = NativeEvidenceTrigger(
             self.camera_id,
             frame.identity.worker_boot_id,
@@ -453,6 +466,19 @@ def _unit_bbox(
         box.y2 / height,
         box.confidence,
     )
+
+
+def _resample_gap_rows_total(decision: EventAggregator) -> int:
+    """Read the V2 adapter's cumulative count without coupling domains to telemetry."""
+    total = 0
+    for decider in decision.deciders:
+        target: object = decider
+        while hasattr(target, "decider"):
+            target = target.decider
+        count = getattr(target, "resample_gap_rows_total", None)
+        if isinstance(count, int):
+            total += count
+    return total
 
 
 __all__ = ["NativeEventSink", "NativePolicyContext", "NativePolicyPump"]

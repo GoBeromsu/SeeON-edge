@@ -12,13 +12,14 @@ from numpy.typing import NDArray
 
 from shared.detection_policies import (
     BED_EXIT_POLICY_V1_DEFAULT,
-    FALL_POLICY_V1_DEFAULT,
+    FALL_POLICY_V2_DEFAULT,
     PolicyDocumentError,
     default_policy_bundle,
     make_effective_policy,
 )
 from worker.domains.bed_exit import BedExitMonitor
-from worker.domains.fall import FallEventLatch
+from worker.domains.fall import FallV2DomainDecider
+from worker.interfaces.fall_model import FallV2Probabilities
 from worker.runtime.config.config_pull import ConfigSource, load_worker_config_from_relay
 from worker.runtime.config.errors import WorkerConfigError
 from worker.runtime.config.lkg_store import JsonObject, WorkerConfigLkgStore
@@ -34,12 +35,9 @@ class _Metadata:
 
 
 class _FallModel:
-    metadata = _Metadata()
-    operating_threshold = 0.99
-
-    def predict(self, features: NDArray[np.float32]) -> float:
+    def predict(self, features: NDArray[np.float32]) -> FallV2Probabilities:
         del features
-        return 0.7
+        return FallV2Probabilities(background=0.3, fall_transition=0.7, fallen=0.0)
 
 
 class _Response:
@@ -91,8 +89,8 @@ def test_worker_parses_effective_camera_override_and_keeps_modules_independent()
     camera_policies = dict(bundle.cameras["cam/opaque:alpha"])
     camera_policies["fall"] = make_effective_policy(
         module_id="fall",
-        module_version=1,
-        values=type(FALL_POLICY_V1_DEFAULT)(operating_threshold=0.73),
+        module_version=2,
+        values=type(FALL_POLICY_V2_DEFAULT)(transition_threshold=0.73),
         source="camera-override",
         facility_revision_id=4,
         camera_revision_id=9,
@@ -104,9 +102,9 @@ def test_worker_parses_effective_camera_override_and_keeps_modules_independent()
     ).to_worker_config("http://relay.invalid", "relay-token")
 
     assert config.version == 17
-    assert config.detection_policies.resolve("cam/opaque:alpha", "fall", 1).values == type(
-        FALL_POLICY_V1_DEFAULT
-    )(operating_threshold=0.73)
+    assert config.detection_policies.resolve("cam/opaque:alpha", "fall", 2).values == type(
+        FALL_POLICY_V2_DEFAULT
+    )(transition_threshold=0.73)
     assert (
         config.detection_policies.resolve("cam/opaque:alpha", "bed_exit", 1).values
         == BED_EXIT_POLICY_V1_DEFAULT
@@ -119,8 +117,8 @@ def test_camera_policy_override_uses_the_byte_exact_pulled_camera_identity() -> 
     camera_policies = dict(bundle.cameras[camera_id])
     camera_policies["fall"] = make_effective_policy(
         module_id="fall",
-        module_version=1,
-        values=type(FALL_POLICY_V1_DEFAULT)(operating_threshold=0.81),
+        module_version=2,
+        values=type(FALL_POLICY_V2_DEFAULT)(transition_threshold=0.81),
         source="camera-override",
         facility_revision_id=4,
         camera_revision_id=10,
@@ -133,11 +131,11 @@ def test_camera_policy_override_uses_the_byte_exact_pulled_camera_identity() -> 
 
     parsed_id = config.cameras[0].camera_id
     assert parsed_id.encode("utf-8") == camera_id.encode("utf-8")
-    assert config.detection_policies.resolve(parsed_id, "fall", 1).values == type(
-        FALL_POLICY_V1_DEFAULT
-    )(operating_threshold=0.81)
-    assert config.detection_policies.resolve(camera_id.strip(), "fall", 1).values == (
-        FALL_POLICY_V1_DEFAULT
+    assert config.detection_policies.resolve(parsed_id, "fall", 2).values == type(
+        FALL_POLICY_V2_DEFAULT
+    )(transition_threshold=0.81)
+    assert config.detection_policies.resolve(camera_id.strip(), "fall", 2).values == (
+        FALL_POLICY_V2_DEFAULT
     )
 
 
@@ -146,8 +144,8 @@ def test_runtime_camera_module_receives_policy_not_model_or_profile_threshold() 
     camera_policies = dict(bundle.cameras["cam/opaque:alpha"])
     camera_policies["fall"] = make_effective_policy(
         module_id="fall",
-        module_version=1,
-        values=type(FALL_POLICY_V1_DEFAULT)(operating_threshold=0.73),
+        module_version=2,
+        values=type(FALL_POLICY_V2_DEFAULT)(transition_threshold=0.73),
         source="camera-override",
         facility_revision_id=4,
         camera_revision_id=9,
@@ -172,17 +170,17 @@ def test_runtime_camera_module_receives_policy_not_model_or_profile_threshold() 
     # registered definitions; profile/device never participates in resolution.
     from worker.domains import DETECTION_MODULE_REGISTRY, CameraModuleContext
 
-    fall_definition = DETECTION_MODULE_REGISTRY.get("fall", 1)
+    fall_definition = DETECTION_MODULE_REGISTRY.get("fall", 2)
     fall_module = fall_definition.create_camera_module(
         CameraModuleContext(
             camera_id="cam/opaque:alpha",
             facility_id="facility:opaque",
             shared_components={"fall-classifier": _FallModel()},
-            camera_components={},
+            camera_components={"fall-v2-identity": ("boot", "1", 0)},
             detection_window=None,
             clock=lambda: pytest.fail("fall clock should not be called"),
             diagnostics=None,
-            policy=config.detection_policies.resolve("cam/opaque:alpha", "fall", 1),
+            policy=config.detection_policies.resolve("cam/opaque:alpha", "fall", 2),
         )
     )
     bed_definition = DETECTION_MODULE_REGISTRY.get("bed_exit", 1)
@@ -199,8 +197,8 @@ def test_runtime_camera_module_receives_policy_not_model_or_profile_threshold() 
         )
     )
 
-    assert isinstance(fall_module.decider, FallEventLatch)
-    assert fall_module.decider.classifier.operating_threshold == 0.73
+    assert isinstance(fall_module.decider, FallV2DomainDecider)
+    assert fall_module.decider.policy.policy.transition_threshold == 0.73
     assert isinstance(bed_module.decider, BedExitMonitor)
     assert bed_module.decider.config.min_containment == 0.44
     assert bed_module.decider.config.hold_frames == 5

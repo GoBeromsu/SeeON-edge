@@ -10,36 +10,14 @@ import math
 from collections import deque
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Protocol, runtime_checkable
 
-from worker.types import FallModelInput
+from worker.interfaces.fall_model import FallV2ModelProtocol, FallV2Probabilities
 
 _WINDOW_FRAMES = 30
 _STRIDE_FRAMES = 5
 _ROW_WIDTH = 56
 _TRACK_TTL_FRAMES = 45
 _ZERO_ROW = (0.0,) * _ROW_WIDTH
-
-
-@dataclass(frozen=True, slots=True)
-class FallV2Probabilities:
-    """The ordered model output: background, transition, and fallen."""
-
-    background: float
-    fall_transition: float
-    fallen: float
-
-    def __post_init__(self) -> None:
-        for value in (self.background, self.fall_transition, self.fallen):
-            if not math.isfinite(value) or not 0.0 <= value <= 1.0:
-                raise ValueError("fall v2 probabilities must be finite values in [0, 1]")
-
-
-@runtime_checkable
-class FallV2ModelProtocol(Protocol):
-    """The deliberately narrow seam between the pure domain and a GRU adapter."""
-
-    def predict(self, features: FallModelInput) -> FallV2Probabilities: ...
 
 
 @dataclass(slots=True)
@@ -147,4 +125,4 @@ def _valid_row(value: Sequence[float] | None) -> tuple[float, ...] | None:
     return row
 
 
-__all__ = ["FallV2ModelProtocol", "FallV2Probabilities", "FallWindowClassifierV2"]
+__all__ = ["FallV2Probabilities", "FallWindowClassifierV2"]

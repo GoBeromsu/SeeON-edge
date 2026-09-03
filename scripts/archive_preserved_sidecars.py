@@ -333,10 +333,7 @@ def execute(
     return manifest_path
 
 
-TRACKED: Final = (
-    Path("models/fall/lstm/arch.json"),
-    Path("models/fall/lstm/metadata.yaml"),
-)
+TRACKED: Final = ()
 UNTRACKED: Final = (
     Path("deep-interview-edge-hub-contract-identity-20260817.md"),
     Path("deep-interview-edge-hub-contract-identity-20260817-addendum.md"),

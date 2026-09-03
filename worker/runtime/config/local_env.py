@@ -102,24 +102,24 @@ def reject_retired_worker_environment(environ: Mapping[str, str]) -> None:
 
 _TRUTHY: Final = frozenset({"1", "true", "yes", "on"})
 _FALSY: Final = frozenset({"0", "false", "no", "off"})
-_DEFAULT_TYPE: Final = "lstm"
+_DEFAULT_TYPE: Final = "pose-bbox56-proxy-v0"
 _DEFAULT_WEIGHTS: Final = "model.pt"
 _DEFAULT_ARCHITECTURE: Final = "arch.json"
-# Issue #133: packaged default fall model, used when
-# ML_WORKER_FALL_MODEL_ARTIFACT_DIR is unset. Sidecars (arch.json,
-# metadata.yaml) are tracked in git at this path; model.pt is fetched
-# separately via scripts/fetch-models.sh since weights stay gitignored.
-# Values mirror worker/ml-worker.example.yaml's models.fall block and the
-# upstream Berom0227/eldercare-fall-models lstm/metadata.json this artifact
-# was derived from (operating_threshold in particular is not a placeholder).
-_DEFAULT_ARTIFACT_DIR: Final = "models/fall/lstm"
+# Packaged default fall model, used when ML_WORKER_FALL_MODEL_ARTIFACT_DIR is
+# unset: the published pose+bbox56 proxy bundle pinned in
+# worker/tools/fetch_models/manifest.json and provisioned by
+# scripts/fetch-models.sh (nothing under models/ is tracked). Values mirror
+# worker/ml-worker.example.yaml's models.fall block; the 0.5 transition
+# threshold is the owner-fixed default that a promotion-eligible receipt may
+# override (worker/domains/registry.py).
+_DEFAULT_ARTIFACT_DIR: Final = "models/fall/pose-bbox56-gru"
 _DEFAULT_WINDOW: Final = 30
 _DEFAULT_STRIDE: Final = 5
-_DEFAULT_OPERATING_THRESHOLD: Final = 0.0007872396381571889
-_DEFAULT_SCHEMA_VERSION: Final = 1
-_DEFAULT_PREPROCESSING_IDENTITY: Final = "legacy-coco17-xyc-frame-normalized-zero-fill-v1"
+_DEFAULT_OPERATING_THRESHOLD: Final = 0.5
+_DEFAULT_SCHEMA_VERSION: Final = 2
+_DEFAULT_PREPROCESSING_IDENTITY: Final = "coco17-xyc-plus-pose-head-xyxy-valid-f32-v1"
 _FETCH_MODELS_HINT: Final = (
-    "run scripts/fetch-models.sh to download the packaged default LSTM model "
+    "run scripts/fetch-models.sh to download the packaged pose+bbox56 model "
     "weights (or set ML_WORKER_FALL_MODEL_ARTIFACT_DIR to point at an "
     "already-provisioned artifact directory)"
 )
@@ -245,7 +245,7 @@ def clip_recording_config_from_environment(
 def fall_model_config_from_environment(
     environ: Mapping[str, str] | None = None,
 ) -> FallModelConfig:
-    """Build ``models.fall`` from env, defaulting to the packaged LSTM model.
+    """Build ``models.fall`` from env, defaulting to the packaged pose+bbox56 bundle.
 
     Issue #133: the worker must boot with zero env vars.
     ``ML_WORKER_FALL_MODEL_ARTIFACT_DIR`` is the on/off switch for *explicit*
@@ -390,7 +390,7 @@ def fall_model_config_from_environment(
             architecture=architecture,
             window=window,
             stride=stride,
-            input_shape=(window, 51),
+            input_shape=(window, 56),
             operating_threshold=operating_threshold,
             schema_version=schema_version,
             preprocessing_identity=preprocessing_identity,
@@ -398,7 +398,7 @@ def fall_model_config_from_environment(
     except ValidationError as error:
         if is_default:
             raise WorkerConfigError(
-                "packaged default LSTM fall model is not fully provisioned at "
+                "packaged default pose+bbox56 fall model is not fully provisioned at "
                 f"{artifact_dir!r} ({error}); {_FETCH_MODELS_HINT}"
             ) from error
         raise WorkerConfigError(f"invalid fall model environment configuration: {error}") from error

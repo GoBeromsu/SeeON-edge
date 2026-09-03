@@ -11,24 +11,24 @@ models:
     # type selects the fall-model family via a registry keyed on this string
     # (worker.adapters.model.fall_family_registry), not a code-pinned class in
     # worker.py: a brand-new family (a different architecture, not a same-
-    # family weights version-up) is added by implementing FallModelProtocol
+    # family weights version-up) is added by implementing FallV2ModelProtocol
     # and registering a factory under a new type value here -- an
-    # unregistered value refuses to boot rather than silently using lstm.
-    type: lstm
+    # unregistered value refuses to boot rather than silently selecting a model.
+    type: pose-bbox56-proxy-v0
     framework: pytorch
     mode: sequence
-    artifact_dir: ./models/fall/lstm
+    artifact_dir: ./models/fall/pose-bbox56-gru
     weights: model.pt
     # architecture is the artifact's network-definition file (e.g. arch.json
-    # for the lstm family), unrelated to the type/family selector above.
+    # for the proxy GRU family), unrelated to the type/family selector above.
     architecture: arch.json
     metadata: metadata.yaml
     window: 30
     stride: 5
-    input_shape: [30, 51]
+    input_shape: [30, 56]
     operating_threshold: 0.5
-    schema_version: 1
-    preprocessing_identity: legacy-coco17-xyc-frame-normalized-zero-fill-v1
+    schema_version: 2
+    preprocessing_identity: coco17-xyc-plus-pose-head-xyxy-valid-f32-v1
 domains:
   fall:
     enabled: true

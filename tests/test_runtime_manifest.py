@@ -6,7 +6,6 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
-import yaml
 
 from backend.app.edge_db.bootstrap import bootstrap_database
 from backend.app.edge_db.compatibility import CURRENT_SCHEMA_RANGE
@@ -28,19 +27,18 @@ from worker.runtime.provenance.models import AppliedBedZone
 from worker.runtime.provenance.store import AppliedRuntimeManifestStore
 
 _BUILD_REVISION = "1" * 40
-_PACKAGED_FALL_METADATA_PATH = (
-    Path(__file__).resolve().parents[1] / "models" / "fall" / "lstm" / "metadata.yaml"
-)
 
 
 def _packaged_fall_identity() -> tuple[str, str]:
-    metadata = yaml.safe_load(_PACKAGED_FALL_METADATA_PATH.read_text(encoding="utf-8"))
-    assert isinstance(metadata, dict)
-    artifact_digest = metadata.get("artifact_digest")
-    preprocessing_identity = metadata.get("preprocessing_identity")
-    assert isinstance(artifact_digest, str)
-    assert isinstance(preprocessing_identity, str)
-    return artifact_digest, preprocessing_identity
+    definition = DETECTION_MODULE_REGISTRY.get("fall", 2)
+    [binding] = [
+        binding
+        for binding in definition.component_bindings
+        if binding.component_id == "fall-classifier"
+    ]
+    assert binding.artifact_digest is not None
+    assert binding.preprocessing_identity is not None
+    return binding.artifact_digest, binding.preprocessing_identity
 
 
 _FALL_ARTIFACT_DIGEST, _FALL_PREPROCESSING_IDENTITY = _packaged_fall_identity()
@@ -102,10 +100,10 @@ def _cameras(*, threshold: float = 0.5) -> tuple[AppliedCameraState, ...]:
     bundle = default_policy_bundle(("camera:opaque/a", "camera:opaque/b"))
     fall = make_effective_policy(
         module_id="fall",
-        module_version=1,
+        module_version=2,
         values=replace(
-            bundle.resolve("camera:opaque/a", "fall", 1).values,
-            operating_threshold=threshold,
+            bundle.resolve("camera:opaque/a", "fall", 2).values,
+            transition_threshold=threshold,
         ),
         source="facility-default",
         facility_revision_id=17,
@@ -118,7 +116,7 @@ def _cameras(*, threshold: float = 0.5) -> tuple[AppliedCameraState, ...]:
                 camera_id=camera_id,
                 effective_decode_backend="opencv",
                 ingest_target_fps=5.0,
-                module_qualified_ids=("bed_exit.v1", "fall.v1"),
+                module_qualified_ids=("bed_exit.v1", "fall.v2"),
                 schedule={"pose": 2, "bed": 30},
                 detection_windows={"fall": None, "bed_exit": None},
                 policies={
@@ -138,7 +136,7 @@ def _persisted_bed_camera() -> AppliedCameraState:
         camera_id="camera:opaque/a",
         effective_decode_backend="opencv",
         ingest_target_fps=5.0,
-        module_qualified_ids=("bed_exit.v1", "fall.v1"),
+        module_qualified_ids=("bed_exit.v1", "fall.v2"),
         schedule={"pose": 2, "bed": 30},
         detection_windows={"fall": None, "bed_exit": None},
         policies=_cameras()[0].policies,
@@ -162,7 +160,7 @@ def _manifest(
     return build_applied_runtime_manifest(
         boot=boot,
         module_registry=DETECTION_MODULE_REGISTRY,
-        module_versions={"fall": 1, "bed_exit": 1},
+        module_versions={"fall": 2, "bed_exit": 1},
         component_identities=identities
         or _identities(
             runtime=boot.runtime_profile.effective_inference_backend,
@@ -182,7 +180,7 @@ def test_manifest_is_canonical_hashable_and_repeatable() -> None:
     second = build_applied_runtime_manifest(
         boot=_boot("cpu"),
         module_registry=DETECTION_MODULE_REGISTRY,
-        module_versions={"bed_exit": 1, "fall": 1},
+        module_versions={"bed_exit": 1, "fall": 2},
         component_identities=tuple(reversed(_identities())),
         cameras=tuple(reversed(_cameras())),
         config_version=42,
@@ -205,13 +203,12 @@ def test_manifest_is_canonical_hashable_and_repeatable() -> None:
     )
 
 
-
 def test_camera_projection_records_canonical_effective_applied_semantics() -> None:
     camera = build_applied_camera_state(
         camera_id="camera:opaque/a",
         effective_decode_backend="cpu",
         ingest_target_fps=7.5,
-        module_qualified_ids=("fall.v1", "bed_exit.v1"),
+        module_qualified_ids=("fall.v2", "bed_exit.v1"),
         schedule={"pose": 3, "bed": 30},
         detection_windows={
             "fall": AppliedDetectionWindow(start="21:00", end="06:00", timezone="UTC"),
@@ -231,7 +228,7 @@ def test_camera_projection_records_canonical_effective_applied_semantics() -> No
             "ingest_target_fps": 7.5,
             "schedule_interval_basis": "ingested-frame-index",
         },
-        "modules": ["bed_exit.v1", "fall.v1"],
+        "modules": ["bed_exit.v1", "fall.v2"],
         "schedule": {"bed": 30, "pose": 3},
         "detection_windows": {
             "bed_exit": {"end": "05:45", "start": "22:15", "timezone": "Asia/Seoul"},
@@ -364,7 +361,7 @@ def test_persisted_bed_zone_requires_source_dimensions() -> None:
             camera_id="camera:opaque/a",
             effective_decode_backend="opencv",
             ingest_target_fps=5.0,
-            module_qualified_ids=("bed_exit.v1", "fall.v1"),
+            module_qualified_ids=("bed_exit.v1", "fall.v2"),
             schedule={"pose": 2, "bed": 30},
             detection_windows={"fall": None, "bed_exit": None},
             policies=_cameras()[0].policies,

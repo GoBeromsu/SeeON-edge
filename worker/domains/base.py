@@ -18,6 +18,8 @@ class AuditContext:
 class DomainAuditSnapshot:
     model_version: str | None
     operating_threshold: float | None
+    threshold_source: str | None = None
+    receipt_threshold: float | None = None
 
 
 @dataclass(slots=True)

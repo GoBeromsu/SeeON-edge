@@ -28,6 +28,7 @@ from typing import Self, final
 
 import pytest
 
+from tests_support.pose_bbox56_bundle_artifact import write_pose_bbox56_bundle
 from worker.runtime.config import (
     ClipRecordingConfig,
     ConfigSource,
@@ -70,11 +71,7 @@ class FakeResponse:
 
 
 def _write_fall_artifact(path: Path) -> Path:
-    path.mkdir(parents=True)
-    (path / "model.pt").write_bytes(b"placeholder")
-    (path / "arch.json").write_text('{"hidden":4,"layers":1,"dropout":0.0}', encoding="utf-8")
-    (path / "metadata.yaml").write_text("type: lstm\n", encoding="utf-8")
-    return path
+    return write_pose_bbox56_bundle(path)
 
 
 def _fall_env(artifact_dir: Path) -> dict[str, str]:
@@ -109,7 +106,7 @@ def test_pull_with_fall_env_vars_set_configures_models_fall_and_clip_enabled(
     """Requirement (a): a relay pull with the fall env vars set must carry the
     configured ``models.fall``/``clip.enabled`` into the resulting
     ``WorkerConfig``, not silently drop them."""
-    artifact_dir = _write_fall_artifact(tmp_path / "models" / "fall" / "lstm")
+    artifact_dir = _write_fall_artifact(tmp_path / "models" / "fall" / "pose-bbox56-gru")
     environ = {**_fall_env(artifact_dir), ML_WORKER_CLIP_RECORDING_ENABLED_ENV: "true"}
     models, clip, dev_mjpeg = resolve_local_overrides(None, environ)
 
@@ -131,24 +128,11 @@ def test_pull_with_fall_env_vars_set_configures_models_fall_and_clip_enabled(
     assert snapshot.config.clip.enabled is True
 
 
-_PACKAGED_DEFAULT_ARTIFACT_DIR = Path(__file__).resolve().parents[1] / "models" / "fall" / "lstm"
-
-
-@pytest.mark.skipif(
-    not (_PACKAGED_DEFAULT_ARTIFACT_DIR / "model.pt").exists(),
-    reason=(
-        "packaged default LSTM weights not provisioned locally (run "
-        "scripts/fetch-models.sh); model.pt is gitignored so a fresh clone "
-        "or CI checkout has no weights to validate the packaged default "
-        "against -- the fail-closed missing-artifact path is covered "
-        "without real weights in tests/test_local_env_defaults.py"
-    ),
-)
-def test_pull_with_no_fall_config_resolves_packaged_default_lstm(
-    tmp_path: Path,
+def test_pull_with_no_fall_config_resolves_the_packaged_default_bundle(
+    tmp_path: Path, packaged_fall_bundle: Path
 ) -> None:
     """Issue #133: with no local fall configuration at all (env unset, no
-    YAML), ``models.fall`` must resolve to the packaged default LSTM model
+    YAML), ``models.fall`` must resolve to the packaged default fall bundle
     instead of staying ``None`` -- the worker boots with zero env vars using
     a default fall model rather than refusing to start. This supersedes the
     previous #43-boot-gate contract asserted here (fall must stay
@@ -159,8 +143,8 @@ def test_pull_with_no_fall_config_resolves_packaged_default_lstm(
     tests/test_local_env_defaults.py)."""
     models, clip, dev_mjpeg = resolve_local_overrides(None, {})
     assert models.fall is not None
-    assert models.fall.type == "lstm"
-    assert models.fall.artifact_dir == _PACKAGED_DEFAULT_ARTIFACT_DIR.resolve()
+    assert models.fall.type == "pose-bbox56-proxy-v0"
+    assert models.fall.artifact_dir == packaged_fall_bundle.resolve()
     # Deliberately not a literal: this test's concern is fall-model
     # resolution, not clip. Deferring to ClipRecordingConfig's own default
     # documents "env/YAML silence defers to the model default" (this
@@ -183,7 +167,7 @@ def test_pull_with_no_fall_config_resolves_packaged_default_lstm(
 
     assert snapshot is not None
     assert snapshot.config.models.fall is not None
-    assert snapshot.config.models.fall.type == "lstm"
+    assert snapshot.config.models.fall.type == "pose-bbox56-proxy-v0"
     # Same rationale as the `clip.enabled` assertion above: defers to the
     # model default rather than asserting a stale literal.
     assert snapshot.config.clip.enabled is ClipRecordingConfig().enabled
@@ -211,13 +195,13 @@ def test_local_yaml_fall_config_wins_over_env_when_both_are_set(tmp_path: Path) 
             ],
             "models": {
                 "fall": {
-                    "type": "lstm",
+                    "type": "pose-bbox56-proxy-v0",
                     "framework": "pytorch",
                     "mode": "sequence",
                     "artifact_dir": str(yaml_artifact_dir),
-                    "window": 3,
-                    "stride": 1,
-                    "input_shape": [3, 51],
+                    "window": 30,
+                    "stride": 5,
+                    "input_shape": [30, 56],
                     "operating_threshold": 0.5,
                 }
             },
@@ -255,7 +239,7 @@ def test_lkg_restore_path_preserves_locally_sourced_models_and_clip(tmp_path: Pa
     payload -> WorkerConfig conversion (``_snapshot_from_stored`` ->
     ``_snapshot_from_payload``), so locally-sourced ``models``/``clip`` must be
     re-attached there too, not only on the live-pull path."""
-    artifact_dir = _write_fall_artifact(tmp_path / "models" / "fall" / "lstm")
+    artifact_dir = _write_fall_artifact(tmp_path / "models" / "fall" / "pose-bbox56-gru")
     environ = {**_fall_env(artifact_dir), ML_WORKER_CLIP_RECORDING_ENABLED_ENV: "true"}
     models, clip, dev_mjpeg = resolve_local_overrides(None, environ)
     store = WorkerConfigLkgStore(tmp_path / "worker-state.sqlite3")
@@ -296,7 +280,7 @@ def test_lkg_restore_path_preserves_locally_sourced_models_and_clip(tmp_path: Pa
 
 
 def test_pull_with_yaml_dev_mjpeg_enabled_survives_the_pull(
-    tmp_path: Path, packaged_lstm_artifact: Path
+    tmp_path: Path, packaged_fall_bundle: Path
 ) -> None:
     """Issue #113: ``BackendWorkerConfigPayload.to_worker_config()`` never
     threaded ``dev_mjpeg`` through a relay pull, so an explicit local
@@ -340,7 +324,7 @@ def test_pull_with_yaml_dev_mjpeg_enabled_survives_the_pull(
 
 
 def test_pull_with_no_yaml_dev_mjpeg_leaves_it_disabled_for_env_fallback(
-    packaged_lstm_artifact: Path,
+    packaged_fall_bundle: Path,
 ) -> None:
     """The default (no local YAML, or YAML silent on ``dev_mjpeg``) must keep
     resolving to ``None`` here so ``WorkerRuntime._resolve_mjpeg_config``'s

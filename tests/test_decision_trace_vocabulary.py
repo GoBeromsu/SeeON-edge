@@ -140,6 +140,29 @@ BED_EXIT_MISSING_REASONS: frozenset[str] = frozenset(
         "bed-polygon-invalid",
     }
 )
+FALL_V2_REASONS: frozenset[str] = frozenset(
+    {
+        "transition-candidate",
+        "transition-confirmed",
+        "fall-recovered",
+    }
+)
+FALL_V2_STATES: frozenset[str] = frozenset(
+    {
+        "transition-candidate",
+        "transition-confirmed",
+        "fallen",
+    }
+)
+FALL_V2_VALUE_NAMES: frozenset[str] = frozenset(
+    {
+        "fall_transition_probability",
+        "fallen_probability",
+        "transition_threshold",
+        "transition_votes",
+        "transition_window",
+    }
+)
 BED_EXIT_REASONS: frozenset[str] = frozenset(
     {
         "in-bed-hold",
@@ -345,9 +368,9 @@ def test_baseline_vocabularies_are_exactly_the_pre_extension_sets() -> None:
     extra_missing = current_missing - BASELINE_MISSING_REASONS
 
     if extra_reasons | extra_states | extra_value_names | extra_missing:
-        assert extra_reasons == BED_EXIT_REASONS
-        assert extra_states == BED_EXIT_STATES
-        assert extra_value_names == BED_EXIT_VALUE_NAMES
+        assert extra_reasons == BED_EXIT_REASONS | FALL_V2_REASONS
+        assert extra_states == BED_EXIT_STATES | FALL_V2_STATES
+        assert extra_value_names == BED_EXIT_VALUE_NAMES | FALL_V2_VALUE_NAMES
         assert extra_missing == BED_EXIT_MISSING_REASONS
     else:
         assert current_reasons == BASELINE_REASONS
@@ -356,10 +379,13 @@ def test_baseline_vocabularies_are_exactly_the_pre_extension_sets() -> None:
         assert current_missing == BASELINE_MISSING_REASONS
 
 
-def test_bed_exit_tokens_are_additive_and_closed() -> None:
-    assert _values(DecisionTraceReason) == BASELINE_REASONS | BED_EXIT_REASONS
-    assert _values(DecisionTraceState) == BASELINE_STATES | BED_EXIT_STATES
-    assert _values(DecisionTraceValueName) == BASELINE_VALUE_NAMES | BED_EXIT_VALUE_NAMES
+def test_bed_exit_and_fall_v2_tokens_are_additive_and_closed() -> None:
+    assert _values(DecisionTraceReason) == BASELINE_REASONS | BED_EXIT_REASONS | FALL_V2_REASONS
+    assert _values(DecisionTraceState) == BASELINE_STATES | BED_EXIT_STATES | FALL_V2_STATES
+    assert (
+        _values(DecisionTraceValueName)
+        == BASELINE_VALUE_NAMES | BED_EXIT_VALUE_NAMES | FALL_V2_VALUE_NAMES
+    )
     assert (
         _values(DecisionTraceMissingReason) == BASELINE_MISSING_REASONS | BED_EXIT_MISSING_REASONS
     )

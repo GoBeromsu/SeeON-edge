@@ -92,6 +92,8 @@ class WorkerDiagnostics:
         self._track_id_switches_by_camera: dict[str, int] = {}
         self._replay_trace_write_failures_by_camera: dict[str, int] = {}
         self._bed_polygon_source_by_camera: dict[str, str] = {}
+        self._resample_gap_rows_by_camera: dict[str, int] = {}
+        self._fall_inference_device_by_camera: dict[str, str] = {}
         self._incident_managers: dict[str, object] = {}
         self._encoder = EncoderLifecycleSnapshot()
         self._clip_recorder = ClipRecorderStatus()
@@ -114,6 +116,20 @@ class WorkerDiagnostics:
     def set_worker_status(self, status: RelayWorkerPayload | None) -> None:
         with self._lock:
             self._worker = None if status is None else status.copy()
+
+    def record_resample_gap_rows(self, camera_id: str, count: int = 1) -> None:
+        if count < 0:
+            raise ValueError("resample gap count must be non-negative")
+        with self._lock:
+            self._resample_gap_rows_by_camera[camera_id] = (
+                self._resample_gap_rows_by_camera.get(camera_id, 0) + count
+            )
+
+    def record_fall_inference_device(self, camera_id: str, device: str) -> None:
+        if device != "cpu":
+            raise ValueError("fall inference device must be cpu")
+        with self._lock:
+            self._fall_inference_device_by_camera[camera_id] = device
 
     def register_decode(self, camera_id: str, requested: str) -> None:
         self.update_decode(
@@ -408,6 +424,8 @@ class WorkerDiagnostics:
                 self._replay_trace_write_failures_by_camera
             )
             bed_polygon_source_by_camera = dict(self._bed_polygon_source_by_camera)
+            resample_gap_rows_by_camera = dict(self._resample_gap_rows_by_camera)
+            fall_inference_device_by_camera = dict(self._fall_inference_device_by_camera)
             incident_managers = dict(self._incident_managers)
             measured_fps_by_camera = dict(self._measured_fps_by_camera)
             camera_ids = (
@@ -424,6 +442,8 @@ class WorkerDiagnostics:
                 | set(track_id_switches_by_camera)
                 | set(replay_trace_write_failures_by_camera)
                 | set(bed_polygon_source_by_camera)
+                | set(resample_gap_rows_by_camera)
+                | set(fall_inference_device_by_camera)
                 | set(incident_managers)
                 | (set() if inference is None else set(inference.cameras))
             )
@@ -463,6 +483,8 @@ class WorkerDiagnostics:
                 camera_fps_unpinned=not _is_pinned_fps(
                     measured_fps_by_camera.get(camera_id, (0.0, None))[1]
                 ),
+                resample_gap_rows_total=resample_gap_rows_by_camera.get(camera_id, 0),
+                fall_inference_device=fall_inference_device_by_camera.get(camera_id, "unknown"),
             )
             for camera_id in sorted(camera_ids)
         )

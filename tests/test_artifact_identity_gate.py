@@ -26,7 +26,7 @@ from worker.runtime.model_composition import (
 )
 
 ServingOption = object
-_SELECTION = {"fall": 1, "bed_exit": 1}
+_SELECTION = {"fall": 2, "bed_exit": 1}
 
 
 @final

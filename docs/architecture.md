@@ -413,7 +413,7 @@ feature it proves. Developer-convenience harnesses are deferred with the tools.
 | NVDEC decode probe | `worker/adapters/decode/nvdec_cuvid/probe.py` | `tests/test_worker_nvdec_probe.py` | ported |
 | CUDA device selection and verification | `worker/adapters/device/cuda/probe.py` | `tests/test_worker_cuda_device_probe.py` | ported |
 | Model registry, warmup, inference | `worker/adapters/model/registry.py`, `worker/interfaces/serving.py` | `tests/test_worker_production_boot_dependencies.py` | ported |
-| Fall interpretation and latching | `worker/domains/fall/` | `tests/test_domains_fall.py`, `tests/test_worker_fall_decider.py` | ported |
+| Fall interpretation and episode policy | `worker/domains/fall/` | `tests/test_worker_fall_decider.py`, `tests/test_fall_policy_v2.py` | ported |
 | Bed-exit interpretation and latching | `worker/domains/bed_exit/` | `tests/test_domains_bed_exit.py`, `tests/test_worker_domains_bed_exit.py` | ported |
 | Incident cooldown and duplicate suppression | `worker/pipeline/decision/incident_manager.py` | `tests/test_worker_incident_manager.py` | ported |
 | Relay heartbeat and alert egress | `shared/events/edge_ingest_client.py` | `tests/test_e2e_night_bed_exit_relay.py` | ported |

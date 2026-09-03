@@ -278,7 +278,7 @@ def test_compiler_rejects_two_output_writers_inside_one_module() -> None:
 
 def test_activation_rejects_distinct_active_writers_to_one_output_adapter() -> None:
     registry = _registry(DETECTION_MODULE_DEFINITIONS[0], _third_definition())
-    selection = {"fall": 1, "mobility_risk": 3}
+    selection = {"fall": 2, "mobility_risk": 3}
     components = registry.shared_component_ids(selection, flags={})
 
     with pytest.raises(DetectionModuleActivationError, match="output adapter.*pose"):
@@ -341,7 +341,7 @@ def test_worker_runtime_preflights_third_module_without_name_dispatch(
 
 
 def test_production_shared_component_semantics_are_equal_on_cpu_and_nvidia() -> None:
-    selection = {"fall": 1, "bed_exit": 1}
+    selection = {"fall": 2, "bed_exit": 1}
     bindings = DETECTION_MODULE_REGISTRY.shared_bindings(selection, flags={})
     by_task = {
         binding.serving_task: binding for binding in bindings if binding.serving_task is not None
@@ -420,7 +420,7 @@ def test_production_pose_binding_rejects_reported_identity_mismatch_before_pooli
     field: str,
     message: str,
 ) -> None:
-    pose = DETECTION_MODULE_REGISTRY.get("fall", 1).shared_bindings[0]
+    pose = DETECTION_MODULE_REGISTRY.get("fall", 2).shared_bindings[0]
 
     class _MismatchedPose(_Runner):
         artifact_digest = pose.artifact_digest
@@ -437,7 +437,7 @@ def test_production_pose_binding_rejects_reported_identity_mismatch_before_pooli
     with pytest.raises(DetectionModuleActivationError, match=message):
         compose_shared_components(
             DETECTION_MODULE_REGISTRY,
-            module_versions={"fall": 1},
+            module_versions={"fall": 2},
             serving_client=_ProductionServing(),
             runtime="cpu",
             device="cpu",

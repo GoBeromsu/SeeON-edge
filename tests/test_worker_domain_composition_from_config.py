@@ -1,65 +1,10 @@
-"""Closes gap 11c (.omo/research/todo30c-triage.md): "full WorkerConfig ->
-constructed detectors / emitted event" composition coverage lost when
-test_ml_worker_yaml_runtime.py was rewritten off edge.* imports.
-
-The lost tests (``test_worker_yaml_lstm_runtime_emits_fall_event``,
-``test_domain_detectors_inject_bed_exit_night_window``,
-``test_domain_detectors_leave_fall_without_time_gate``) drove
-``edge_worker._build_supervisor``/``edge_worker._domain_detectors`` end to
-end: full YAML config -> real detector construction -> a bounded run ->
-one emitted fall/bed-exit event. CameraWorker-cluster-part-1
-(tests/test_worker_composition.py, commit 50a5078) already characterizes
-*registry-level* composition (a locally-built ``DomainRegistration`` composes
-generically) and *shared-model* construction
-(``test_four_cameras_isolate_decision_state_and_share_the_fall_model``
-constructs real ``FallEventLatch``/``BedExitMonitor`` instances via
-``WorkerRuntime._build_decider`` from a full ``WorkerConfig``), but nothing
-worker-side then drives those real, config-constructed deciders with a
-``DecisionInput`` and asserts an actual emitted ``BusinessEvent`` -- the
-"...and emits an event" half of the original guarantee. That is what this
-file adds.
-
-Artifact handling: ``worker/runtime/worker.py._create_fall_model`` only
-loads real LSTM weights from disk when ``config.models.fall`` is explicitly
-set (``LstmFallRunner.from_artifact_dir(...)``); when it is left unset it now
-refuses to boot (fail-closed: no implicit fallback model). This composition
-test predates that change and still wants to exercise real decider wiring
-without a real LSTM artifact on disk, so the autouse
-``_fall_model_via_serving_client`` fixture below monkeypatches
-``_create_fall_model`` back to ``self._serving.create("fall")`` -- the same
-test-only serving seam used for pose/person/bed -- scoped to this test module
-only. Real LSTM weight loading is therefore avoidable
-entirely: this file drives a full, valid
-``WorkerConfig`` (``domains.enabled = ["fall", "bed_exit"]``, one camera)
-through the real ``WorkerRuntime.run()`` -> ``_build_decider`` path with a
-``_FakeServingClient`` (same pattern as ``test_worker_composition.py``),
-which still produces genuine ``FallEventLatch``/``BedExitMonitor``
-instances wired to a real ``FallWindowClassifier`` and a real
-``EventAggregator``/``IncidentManager`` -- only the underlying neural-net
-call is faked, exactly as the existing composition suite already does. No
-torch weights, no artifact fixtures needed; per the task's "do not force it"
-guidance, forcing real weight loading here would only exercise
-``LstmFallRunner``/``ModelLoadError`` paths that belong to
-``worker/adapters/model`` unit tests, not composition-root wiring -- out of
-scope for this gap.
-
-Both events are covered ("if cheap" per the assignment): the fall event
-needs only 2 synthetic frames (the fall model's window is 2, satisfied by
-the fake runner's ``_FallMetadata``); the bed-exit event costs 6 frames
-under ``_bed_exit_config``'s real (unconfigured) defaults
-(``hold_frames=2``, ``grace_frames=3`` -- worker/domains/bed_exit/schema.py)
--- both driven through the *same* real ``camera.decision`` aggregator that
-``WorkerRuntime`` built, proving the full chain: WorkerConfig -> real typed
-deciders via the registry -> EventAggregator -> IncidentManager -> emitted
-BusinessEvent.
-"""
+"""Worker-config composition coverage for the V2 fall and bed-exit domains."""
 
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, final
+from typing import final
 
 import numpy as np
 import pytest
@@ -75,10 +20,11 @@ from contracts.observation import (
 from contracts.runner import Image, RunnerResult
 from shared.events.evidence_http_transport import HttpResult
 from worker.domains.bed_exit import BedExitMonitor
-from worker.domains.fall import FallEventLatch
+from worker.domains.fall import FallPolicyDeciderV2, FallV2DomainDecider, FallV2Probabilities
 from worker.domains.registry import DETECTION_MODULE_REGISTRY
 from worker.pipeline.bus import BoundedFrameBus
 from worker.pipeline.ingest.lifecycle import IngestReporter
+from worker.pipeline.perception.pts_resample import CADENCE_NS
 from worker.runtime.config import CameraRuntimeConfig, WorkerConfig
 from worker.runtime.lease import GpuLease
 from worker.runtime.profile.registry import VerifyResult
@@ -86,13 +32,6 @@ from worker.runtime.worker import WorkerRuntime
 from worker.types import BusinessEvent, DecisionInput
 
 ServingOption = str | int | float | bool | None
-
-
-@dataclass(frozen=True, slots=True)
-class _FallMetadata:
-    window: int = 2
-    stride: int = 1
-    mode: Literal["sequence"] = "sequence"
 
 
 def _compiled_identity(task: str) -> tuple[str, str]:
@@ -110,15 +49,10 @@ def _compiled_identity(task: str) -> tuple[str, str]:
 
 @final
 class _FakeRunner:
-    """Same DI seam every composition test uses; ``predict`` is fixed high
-    for the "fall" task only, so a real ``FallWindowClassifier`` (wired to
-    this runner by the real ``WorkerRuntime``) reports a fall as soon as its
-    2-frame window fills -- no real model weights involved.
-    """
+    """V2 bundle seam used by the real registry-composed decider."""
 
     def __init__(self, task: str) -> None:
         self.task = task
-        self.metadata = _FallMetadata()
         self.artifact_digest, self.preprocessing_identity = _compiled_identity(task)
         self.operating_threshold = 0.5
         self.warmup_count = 0
@@ -126,8 +60,8 @@ class _FakeRunner:
     def __call__(self, _image: Image) -> RunnerResult:
         raise AssertionError("composition tests must not run model inference")
 
-    def predict(self, _features: NDArray[np.float32]) -> float:
-        return 0.99 if self.task == "fall" else 0.0
+    def predict(self, _features: NDArray[np.float32]) -> FallV2Probabilities:
+        return FallV2Probabilities(0.0, 0.99, 0.1)
 
     def warmup(self) -> None:
         self.warmup_count += 1
@@ -219,8 +153,7 @@ def _config() -> WorkerConfig:
 
 @pytest.fixture(autouse=True)
 def _fall_model_via_serving_client(monkeypatch: pytest.MonkeyPatch) -> None:
-    """See module docstring: pins the pre-fail-closed fallback behavior for
-    this test module only."""
+    """Inject the V2 bundle runner through the serving seam."""
 
     def _fall_via_serving(self: WorkerRuntime, _device: str) -> object:
         return self._serving.create("fall")  # noqa: SLF001
@@ -259,12 +192,15 @@ def test_worker_activation_uses_the_injected_clip_store(
 
 
 def _fall_frame(time_sec: float, frame_index: int) -> DecisionInput:
-    # A single live track with 17 COCO keypoints, enough to fill the fake
-    # fall model's 2-frame window; bed_region is EMPTY since these frames
-    # carry no bed/person detections for the bed-exit decider to act on.
+    # A single live track with 17 COCO keypoints. V2 requires the production
+    # 30x56 window and emits every fifth 15fps frame.
     pose = tuple((index, index + 1, 0.8) for index in range(17))
     return DecisionInput(
-        observation=FrameObservation(track_ids=(1,), poses=(pose,)),
+        observation=FrameObservation(
+            detections=((BoundingBox(0, 0, 50, 80, 0.9),), ()),
+            track_ids=(1,),
+            poses=(pose,),
+        ),
         frame_width=100,
         frame_height=100,
         live_track_ids=(1,),
@@ -305,26 +241,30 @@ def test_full_worker_config_constructs_real_deciders_and_emits_a_fall_event(
     assert len(runtime.cameras) == 1
     camera = runtime.cameras[0]
     fall, bed_exit = camera.decision.deciders
-    assert isinstance(fall, FallEventLatch)
+    assert isinstance(fall, FallV2DomainDecider)
     assert isinstance(bed_exit, BedExitMonitor)
+    assert isinstance(fall.policy, FallPolicyDeciderV2)
     # The classifier's model is the exact fall runner WorkerRuntime built
     # from this WorkerConfig via the registry -- real construction, not a
     # hand-assembled decider.
     assert fall.classifier.model is runtime.fall_model
 
-    first = camera.decision.update(_fall_frame(0.0, 0))
-    assert first == ()
+    emitted: list[BusinessEvent] = []
+    for frame_index in range(60):
+        emitted.extend(
+            camera.decision.update(
+                _fall_frame(frame_index * CADENCE_NS / 1_000_000_000, frame_index)
+            )
+        )
 
-    second = camera.decision.update(_fall_frame(1.0, 1))
-
-    assert len(second) == 1
-    event = second[0]
+    assert len(emitted) == 1
+    event = emitted[0]
     assert isinstance(event, BusinessEvent)
     assert event.domain == "fall"
     assert event.event_type == "fall"
     assert event.camera_id == "camera-1"
     assert event.facility_id == "facility-1"
-    assert event.time_sec == 1.0
+    assert event.time_sec > 0.0
 
 
 def test_full_worker_config_constructs_real_deciders_and_emits_a_bed_exit_event(
@@ -365,3 +305,30 @@ def test_full_worker_config_constructs_real_deciders_and_emits_a_bed_exit_event(
     assert event.facility_id == "facility-1"
     assert event.person_id == 0
     assert event.bed_id == 0
+
+
+def test_preflight_reuses_the_boot_scoped_incident_manager_on_reconnect(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A source rebuild recreates the V2 deciders on the new epoch identity but
+    keeps the camera's IncidentManager: cooldown is boot-scoped, exactly as the
+    replay engine models boot segments versus reconnect epochs."""
+    runtime = _build_runtime(monkeypatch, tmp_path)
+    runtime.run()
+    camera = runtime.config.cameras[0]
+
+    first = runtime._preflight_camera_graph(  # noqa: SLF001
+        camera, fall_source_identity=("boot", "1", 0)
+    )
+    rebuilt = runtime._preflight_camera_graph(  # noqa: SLF001
+        camera, fall_source_identity=("boot", "2", 1), incidents=first.decision.incidents
+    )
+
+    assert rebuilt.decision.incidents is first.decision.incidents
+    first_fall, _ = first.decision.deciders
+    rebuilt_fall, _ = rebuilt.decision.deciders
+    assert isinstance(first_fall, FallV2DomainDecider)
+    assert isinstance(rebuilt_fall, FallV2DomainDecider)
+    assert rebuilt_fall is not first_fall
+    assert (rebuilt_fall.policy.stream_epoch, rebuilt_fall.policy.source_generation) == ("2", 1)
+    assert (first_fall.policy.stream_epoch, first_fall.policy.source_generation) == ("1", 0)

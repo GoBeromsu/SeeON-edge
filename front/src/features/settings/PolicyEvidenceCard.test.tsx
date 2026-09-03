@@ -32,13 +32,13 @@ vi.mock('@/shared/ui/Toast', () => ({
 
 const fallPolicy: EffectiveDetectionPolicy = {
   module_id: 'fall',
-  module_version: 1,
+  module_version: 2,
   schema_id: 'fall.policy',
-  schema_version: 1,
+  schema_version: 2,
   source: 'facility-default',
   facility_revision_id: 4,
   camera_revision_id: null,
-  values: { operating_threshold: 0.5 },
+  values: { transition_threshold: 0.5 },
   effective_policy_id: 'fall-facility-4',
 };
 
@@ -46,7 +46,7 @@ const cameraPolicy: EffectiveDetectionPolicy = {
   ...fallPolicy,
   source: 'camera-override',
   camera_revision_id: 8,
-  values: { operating_threshold: 0.75 },
+  values: { transition_threshold: 0.75 },
   effective_policy_id: 'fall-camera-8',
 };
 
@@ -54,9 +54,9 @@ const catalog: DetectionPolicyCatalog = {
   activation_generation: 12,
   modules: [
     {
-      qualified_id: 'fall.v1',
-      policy_qualified_id: 'fall.policy.v1',
-      units: { operating_threshold: 'probability [0,1]' },
+      qualified_id: 'fall.v2',
+      policy_qualified_id: 'fall.policy.v2',
+      units: { transition_threshold: 'probability [0,1]' },
     },
   ],
   effective: {
@@ -87,17 +87,17 @@ function comparedDiff(overrides: Partial<DetectionPolicyDiff> = {}): DetectionPo
     current: fallPolicy,
     proposed: {
       ...fallPolicy,
-      values: { operating_threshold: 0.8 },
+      values: { transition_threshold: 0.8 },
       facility_revision_id: 0,
       effective_policy_id: 'proposed',
     },
     compared_payload: {
       module_id: 'fall',
-      module_version: 1,
+      module_version: 2,
       schema_id: 'fall.policy',
-      schema_version: 1,
+      schema_version: 2,
       camera_id: null,
-      values: { operating_threshold: 0.8 },
+      values: { transition_threshold: 0.8 },
     },
     concurrency_token: 4,
     ...overrides,
@@ -193,11 +193,11 @@ describe('PolicyEvidenceCard concurrency', () => {
       comparedDiff({
         compared_payload: {
           module_id: 'fall',
-          module_version: 1,
+          module_version: 2,
           schema_id: 'fall.policy',
-          schema_version: 1,
+          schema_version: 2,
           camera_id: null,
-          values: { operating_threshold: 0.8 },
+          values: { transition_threshold: 0.8 },
         },
         concurrency_token: 4,
       }),
@@ -217,11 +217,11 @@ describe('PolicyEvidenceCard concurrency', () => {
     expect(applyDetectionPolicy).toHaveBeenCalledTimes(1);
     expect(applyDetectionPolicy).toHaveBeenCalledWith({
       module_id: 'fall',
-      module_version: 1,
+      module_version: 2,
       schema_id: 'fall.policy',
-      schema_version: 1,
+      schema_version: 2,
       camera_id: null,
-      values: { operating_threshold: 0.8 },
+      values: { transition_threshold: 0.8 },
       expected_revision_id: 4,
     });
 
@@ -252,11 +252,11 @@ describe('PolicyEvidenceCard concurrency', () => {
         comparedDiff({
           compared_payload: {
             module_id: 'fall',
-            module_version: 1,
+            module_version: 2,
             schema_id: 'fall.policy',
-            schema_version: 1,
+            schema_version: 2,
             camera_id: null,
-            values: { operating_threshold: 0.8 },
+            values: { transition_threshold: 0.8 },
           },
           concurrency_token: 4,
         }),
@@ -282,7 +282,7 @@ describe('PolicyEvidenceCard concurrency', () => {
     });
     expect(rollbackDetectionPolicy).toHaveBeenCalledWith({
       module_id: 'fall',
-      module_version: 1,
+      module_version: 2,
       camera_id: 'cam-1',
       expected_revision_id: 8,
     });

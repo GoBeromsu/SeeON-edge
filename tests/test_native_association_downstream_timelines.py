@@ -10,7 +10,6 @@ fixture.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Literal
 from zoneinfo import ZoneInfo
 
 from contracts.observation import (
@@ -20,7 +19,8 @@ from contracts.observation import (
     FrameObservation,
 )
 from worker.domains.bed_exit import BedExitConfig, BedExitMonitor, NightWindow
-from worker.domains.fall import FallEventLatch
+from worker.domains.fall import FallPolicyDeciderV2, FallV2DomainDecider, FallWindowClassifierV2
+from worker.interfaces.fall_model import FallV2Probabilities
 from worker.native.deepstream.association import build_active_association_strategy
 from worker.pipeline.perception.tracker import GreedyIouTracker
 from worker.types import BusinessEvent, DecisionInput
@@ -49,29 +49,40 @@ def _person_box_channel(boxes: tuple[BoundingBox, ...]) -> PersonBoxChannel:
     return PersonBoxChannel(state=state, boxes=cues)
 
 
-class _FallModelMetadata:
-    window = 1
-    stride = 1
-    mode: Literal["features", "sequence"] = "sequence"
+_FRAME_SEC = 1 / 15
+# V2 needs a 30-row window and three stride-5 votes: the onset lands at row 40.
+_FRAMES = 41
 
 
 class _FallModel:
-    metadata = _FallModelMetadata()
-    operating_threshold = 0.5
-
-    def predict(self, features: object) -> float:
+    def predict(self, features: object) -> FallV2Probabilities:
         del features
-        return 0.9
+        return FallV2Probabilities(background=0.1, fall_transition=0.9, fallen=0.0)
 
 
-def _fall_decision_input(track_ids: tuple[int, ...], frame_index: int) -> DecisionInput:
+def _fall_decider() -> FallV2DomainDecider:
+    return FallV2DomainDecider(
+        classifier=FallWindowClassifierV2(_FallModel()),
+        policy=FallPolicyDeciderV2(
+            camera_id="camera-1",
+            facility_id="facility-1",
+            boot_id="boot-1",
+            stream_epoch="0",
+            source_generation=0,
+        ),
+    )
+
+
+def _fall_decision_input(
+    track_ids: tuple[int, ...], boxes: tuple[BoundingBox, ...], frame_index: int
+) -> DecisionInput:
     pose = tuple((90, 50, 0.9) for _ in range(17))
     return DecisionInput(
-        observation=FrameObservation(poses=(pose,), track_ids=track_ids),
+        observation=FrameObservation(detections=(boxes, ()), poses=(pose,), track_ids=track_ids),
         frame_width=200,
         frame_height=200,
         live_track_ids=track_ids,
-        time_sec=float(frame_index),
+        time_sec=frame_index * _FRAME_SEC,
         frame_index=frame_index,
         bed_region=BedRegionDebugSnapshot(BedRegionCacheState.EMPTY),
     )
@@ -81,19 +92,19 @@ def test_fall_event_timeline_is_identical_whether_oracle_or_native_supplies_trac
     boxes = (_box(70, 20, 110, 130),)
     oracle = GreedyIouTracker()
     native = build_active_association_strategy()
-    oracle_latch = FallEventLatch(_FallModel(), camera_id="camera-1", facility_id="facility-1")
-    native_latch = FallEventLatch(_FallModel(), camera_id="camera-1", facility_id="facility-1")
+    oracle_decider = _fall_decider()
+    native_decider = _fall_decider()
 
     oracle_events: list[tuple[BusinessEvent, ...]] = []
     native_events: list[tuple[BusinessEvent, ...]] = []
-    for frame_index in range(3):
+    for frame_index in range(_FRAMES):
         oracle_track_ids = oracle.observe(boxes)
         native_result = native.observe(_IDENTITY, _person_box_channel(boxes))
         oracle_events.append(
-            oracle_latch.update(_fall_decision_input(oracle_track_ids, frame_index))
+            oracle_decider.update(_fall_decision_input(oracle_track_ids, boxes, frame_index))
         )
         native_events.append(
-            native_latch.update(_fall_decision_input(native_result.track_ids, frame_index))
+            native_decider.update(_fall_decision_input(native_result.track_ids, boxes, frame_index))
         )
 
     assert tuple(oracle_events) == tuple(native_events)

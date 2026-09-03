@@ -215,18 +215,21 @@ def test_committed_manifest_parses_and_pins_every_family_the_worker_loads() -> N
     manifest = load_manifest(MANIFEST_PATH)
     paths = {artifact.path for artifact in manifest.artifacts}
     assert {
-        "fall/lstm/model.pt",
-        "fall/lstm/metadata.upstream.json",
+        "fall/pose-bbox56-gru/bundle-manifest.json",
+        "fall/pose-bbox56-gru/model.pt",
+        "fall/pose-bbox56-gru/arch.json",
+        "fall/pose-bbox56-gru/calibration.json",
+        "fall/pose-bbox56-gru/evaluation-receipt.json",
+        "fall/pose-bbox56-gru/metadata.yaml",
+        "fall/pose-bbox56-gru/conformance/pose-bbox56-v1.json",
         "pose/yolo26n-pose.pt",
         "person/yolo26n.pt",
         "bed/yolo26m-seg.pt",
     } <= paths
-    assert set(manifest.sidecars) == {"fall/lstm/arch.json", "fall/lstm/metadata.yaml"}
-    hf = manifest.sources["eldercare-fall-models"]
-    assert (hf.source_locator, hf.ref) == (
-        "Berom0227/eldercare-fall-models",
-        "d67887844bfd2e4b1ca3f3275f770b0b05e23aba",
-    )
+    # The V2 bundle is self-verifying from its own bundle-manifest.json, so no
+    # tracked sidecar copies exist any more.
+    assert manifest.sidecars == ()
+    assert not any(path.startswith("fall/lstm/") for path in paths)
     published_source = manifest.sources["published-pose-bbox56-fall-model"]
     assert (published_source.source_locator, published_source.ref) == (
         "Berom0227/seeon-model-v0.1.0-pose-bbox56-proxy-research",
@@ -250,9 +253,9 @@ def test_committed_manifest_digests_agree_with_runtime_pins() -> None:
     assert by_path["pose/yolo26n-pose.pt"] == _COMPONENT_ARTIFACT_DIGESTS["pose"]
     assert by_path["person/yolo26n.pt"] == _COMPONENT_ARTIFACT_DIGESTS["person"]
     assert by_path["bed/yolo26m-seg.pt"] == _COMPONENT_ARTIFACT_DIGESTS["bed"]
-    assert by_path["fall/lstm/model.pt"] == _COMPONENT_ARTIFACT_DIGESTS["fall-classifier"]
-    sidecar = (TRACKED_SIDECAR_DIR / "metadata.yaml").read_text(encoding="utf-8")
-    assert f'artifact_digest: "{by_path["fall/lstm/model.pt"]}"' in sidecar
+    assert (
+        by_path["fall/pose-bbox56-gru/model.pt"] == _COMPONENT_ARTIFACT_DIGESTS["fall-classifier"]
+    )
 
 
 def test_bundled_sidecars_are_byte_identical_to_tracked_models_dir() -> None:

@@ -3,37 +3,18 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import Final, Literal, Protocol, TypeAlias
+from typing import Final, Protocol, TypeAlias
 
 from contracts.runner import RunnerProtocol
 from worker.adapters.model.yolo_bed_seg import YoloBedSegRunner
 from worker.adapters.model.yolo_person import YoloPersonRunner
 from worker.adapters.model.yolo_pose import YoloPoseRunner
-from worker.types import FallModelInput
+from worker.interfaces.fall_model import FallV2ModelProtocol
 
 ModelOption: TypeAlias = str | int | float | bool | None
 
 
-class FallModelMetadata(Protocol):
-    @property
-    def window(self) -> int: ...
-
-    @property
-    def stride(self) -> int: ...
-
-    @property
-    def mode(self) -> Literal["features", "sequence"]: ...
-
-
-class FallModel(Protocol):
-    @property
-    def metadata(self) -> FallModelMetadata: ...
-
-    @property
-    def operating_threshold(self) -> float: ...
-
-    def predict(self, features: FallModelInput) -> float: ...
-
+class FallModel(FallV2ModelProtocol, Protocol):
     def warmup(self) -> None: ...
 
 
@@ -103,7 +84,7 @@ __all__ = [
     "DEFAULT_REGISTRY",
     "EmptyModelTaskError",
     "FallModel",
-    "FallModelMetadata",
+
     "ModelAdapter",
     "ModelOption",
     "ModelRegistry",

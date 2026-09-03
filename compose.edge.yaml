@@ -185,7 +185,7 @@ services:
       # Deployment owns selection, not the image. Enable this read-only bind
       # when deploying an admitted bundle; omit it for the packaged fallback.
       # - /deployment/model-selection.json:/app/model-selection.json:ro
-      # Keep the deployed LSTM's existing artifact path unchanged.
+      # The deployed pose+bbox56 bundle is mounted read-only.
       - worker-models:/app/models:ro
       # Engines are prepared explicitly from the image-pinned manifest. Runtime
       # preflight verifies this writable cache and never writes beside models.

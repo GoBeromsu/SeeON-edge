@@ -1,8 +1,5 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Literal
-
 import numpy as np
 
 from contracts.observation import BedRegionCacheState, BedRegionDebugSnapshot, FrameObservation
@@ -10,29 +7,39 @@ from worker.adapters.decode.nvdec_device.fake import (
     FakeDeviceResidentBatcher,
     fake_device_resident_pool,
 )
-from worker.domains.fall import FallEventLatch
+from worker.domains.fall import FallPolicyDeciderV2, FallV2DomainDecider, FallWindowClassifierV2
+from worker.interfaces.fall_model import FallV2Probabilities
 from worker.pipeline.perception import build_frame_observation
 from worker.types import DecisionInput, FallModelInput
 
-
-@dataclass(frozen=True, slots=True)
-class _Metadata:
-    window: int = 1
-    stride: int = 1
-    mode: Literal["features"] = "features"
+_FRAME_SEC = 1 / 15
+# 30-row window plus predictions at stride 5: three votes confirm at row 40.
+_FRAMES = 41
 
 
 class _ProbabilityModel:
-    metadata = _Metadata()
-    operating_threshold = 0.5
-
     def __init__(self, probability: float) -> None:
         self.probability = probability
         self.inputs: list[FallModelInput] = []
 
-    def predict(self, features: FallModelInput) -> float:
-        self.inputs.append(features)
-        return self.probability
+    def predict(self, features: FallModelInput) -> FallV2Probabilities:
+        self.inputs.append(tuple(tuple(row) for row in features))
+        return FallV2Probabilities(
+            background=1.0 - self.probability, fall_transition=self.probability, fallen=0.0
+        )
+
+
+def _domain(model: _ProbabilityModel) -> FallV2DomainDecider:
+    return FallV2DomainDecider(
+        classifier=FallWindowClassifierV2(model),
+        policy=FallPolicyDeciderV2(
+            camera_id="camera-parity",
+            facility_id="facility-parity",
+            boot_id="boot",
+            stream_epoch="1",
+            source_generation=0,
+        ),
+    )
 
 
 def _normalized_observation(mean_rgb: tuple[float, float, float]) -> FrameObservation:
@@ -46,14 +53,14 @@ def _normalized_observation(mean_rgb: tuple[float, float, float]) -> FrameObserv
     )
 
 
-def _decision(observation: FrameObservation) -> DecisionInput:
+def _decision(observation: FrameObservation, frame_index: int) -> DecisionInput:
     return DecisionInput(
         observation=observation,
         frame_width=100,
         frame_height=120,
         live_track_ids=(17,),
-        time_sec=4.0,
-        frame_index=4,
+        time_sec=frame_index * _FRAME_SEC,
+        frame_index=frame_index,
         bed_region=BedRegionDebugSnapshot(BedRegionCacheState.EMPTY),
     )
 
@@ -85,26 +92,19 @@ def test_fake_cpu_cuda_observation_and_domain_outputs_match_without_hidden_readb
 
     cpu_model = _ProbabilityModel(cpu_mean[0] / 255.0)
     device_model = _ProbabilityModel(device_mean[0] / 255.0)
-    cpu_domain = FallEventLatch(
-        cpu_model,
-        camera_id="camera-parity",
-        facility_id="facility-parity",
-        operating_threshold=0.5,
-    )
-    device_domain = FallEventLatch(
-        device_model,
-        camera_id="camera-parity",
-        facility_id="facility-parity",
-        operating_threshold=0.5,
-    )
+    cpu_domain = _domain(cpu_model)
+    device_domain = _domain(device_model)
 
-    cpu_events = cpu_domain.update(_decision(cpu_observation))
-    device_events = device_domain.update(_decision(device_observation))
+    cpu_events: list[object] = []
+    device_events: list[object] = []
+    for frame_index in range(_FRAMES):
+        cpu_events.extend(cpu_domain.update(_decision(cpu_observation, frame_index)))
+        device_events.extend(device_domain.update(_decision(device_observation, frame_index)))
+        assert device_domain.last_trace_snapshots == cpu_domain.last_trace_snapshots
     assert device_events == cpu_events
-    assert device_domain.last_trace_snapshots == cpu_domain.last_trace_snapshots
     assert len(device_events) == 1
-    assert len(cpu_model.inputs) == len(device_model.inputs) == 1
-    assert device_model.inputs[0] == cpu_model.inputs[0]
+    assert len(cpu_model.inputs) == len(device_model.inputs) == 3
+    assert device_model.inputs == cpu_model.inputs
     assert pool.telemetry.snapshot().d2h_transfers == 0
 
     lease.release()

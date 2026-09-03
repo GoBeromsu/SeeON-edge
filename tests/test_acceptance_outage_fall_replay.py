@@ -27,7 +27,12 @@ from shared.events.evidence_export_contract import (
 )
 from tests_support.alert_amplification_runtime import RELAY_TOKEN
 from tests_support.compact_authority_db import prepare_compact_database
-from worker.domains.fall import FallEventLatch
+from worker.domains.fall import (
+    FallPolicyDeciderV2,
+    FallV2DomainDecider,
+    FallV2Probabilities,
+    FallWindowClassifierV2,
+)
 from worker.pipeline.analytics import CompositeExtractor, NamedExtractor
 from worker.pipeline.bus import Scheduler
 from worker.pipeline.camera_pipeline import CameraPipelinePump
@@ -39,7 +44,7 @@ from worker.pipeline.output.evidence.evidence_stager import DurableEvidenceStage
 from worker.pipeline.output.evidence.snapshot_store import SnapshotStore
 from worker.pipeline.output.evidence_attacher import AlertEvidenceAttacher
 from worker.pipeline.perception import GreedyIouTracker, SceneState
-from worker.types import BusinessEvent, FallModelInput, FramePacket, ModuleResult
+from worker.types import BusinessEvent, FramePacket, ModuleResult
 
 _EDGE_EVENT_ID = "00000000-0000-4000-8000-0000000000c1"
 _DETECTED_AT = "2026-08-22T00:00:00.000Z"
@@ -47,7 +52,7 @@ _DECISION_ENVELOPE = {
     "config_version": 17,
     "detector_version": "fall-detector-2026.08",
     "model_version": "pose-model-4",
-    "operating_threshold": 0.91,
+    "operating_threshold": 0.5,
     "runtime_manifest_sha256": "a" * 64,
 }
 _CAMERA_ID = "room-camera"
@@ -55,21 +60,13 @@ _FACILITY_ID = "facility-1"
 _RUNTIME_MANIFEST = "a" * 64
 
 
-@dataclass(frozen=True, slots=True)
-class _FallMetadata:
-    window: int = 1
-    stride: int = 1
-    mode: str = "features"
-
-
 class _FallModel:
-    metadata = _FallMetadata()
-    operating_threshold = 0.7
     artifact_digest = "b" * 64
 
-    def predict(self, features: FallModelInput) -> float:
-        del features
-        return 0.97
+    def predict(self, window: tuple[tuple[float, ...], ...]) -> FallV2Probabilities:
+        assert len(window) == 30
+        assert all(len(row) == 56 for row in window)
+        return FallV2Probabilities(background=0.01, fall_transition=0.97, fallen=0.01)
 
 
 class _PoseRunner:
@@ -82,13 +79,14 @@ class _PoseRunner:
 
 
 class _SingleFallResult:
-    def __init__(self, packet: FramePacket) -> None:
-        self._packet: FramePacket | None = packet
+    def __init__(self, packets: tuple[FramePacket, ...]) -> None:
+        self._packets = iter(packets)
 
     def take(self, *, timeout_sec: float | None = None) -> CoordinatedInference | None:
         del timeout_sec
-        packet, self._packet = self._packet, None
-        if packet is None:
+        try:
+            packet = next(self._packets)
+        except StopIteration:
             return None
         return CoordinatedInference(
             packet,
@@ -108,12 +106,13 @@ class _NoClipRecorder:
         del trigger_packet, event, allow_new_clip, detected_at
 
 
-def _packet() -> FramePacket:
+def _packet(sequence: int = 7) -> FramePacket:
+    pts = 12.5 + (sequence - 7) / 15
     return FramePacket(
         camera_id=_CAMERA_ID,
-        frame=Frame(7, 12.5, np.zeros((120, 180, 3), dtype=np.uint8)),
-        pts=12.5,
-        seq=7,
+        frame=Frame(sequence, pts, np.zeros((120, 180, 3), dtype=np.uint8)),
+        pts=pts,
+        seq=sequence,
         width=180,
         height=120,
         decode_time_ms=0.25,
@@ -202,11 +201,15 @@ def _stage_scripted_fall(queue_directory: Path) -> str:
     stager = _stager(queue_directory)
     snapshot_root = queue_directory.parent / "broken-snapshot-store"
     snapshot_root.write_bytes(b"not-a-directory")
-    detector = FallEventLatch(
-        _FallModel(),
-        camera_id=_CAMERA_ID,
-        facility_id=_FACILITY_ID,
-        operating_threshold=0.7,
+    detector = FallV2DomainDecider(
+        classifier=FallWindowClassifierV2(_FallModel()),
+        policy=FallPolicyDeciderV2(
+            camera_id=_CAMERA_ID,
+            facility_id=_FACILITY_ID,
+            boot_id="acceptance-worker",
+            stream_epoch="3",
+            source_generation=0,
+        ),
     )
     sink = EvidenceEventSink(
         stager=stager,
@@ -216,11 +219,11 @@ def _stage_scripted_fall(queue_directory: Path) -> str:
     )
     pump = CameraPipelinePump(
         _CAMERA_ID,
-        _SingleFallResult(_packet()),
+        _SingleFallResult(tuple(_packet(sequence) for sequence in range(7, 52))),
         _analytics(),
         EventAggregator((detector,), IncidentManager(cooldown_sec=0.0), monotonic=lambda: 12.5),
         sink,
-        max_frames=1,
+        max_frames=45,
         evidence_attacher=AlertEvidenceAttacher(
             domain_audit={"fall": _DECISION_ENVELOPE},
             overlay_renderer=_SnapshotRenderer(),

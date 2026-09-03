@@ -13,7 +13,6 @@ event timelines the tracker's `track_ids` feed.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Literal
 from zoneinfo import ZoneInfo
 
 from contracts.observation import (
@@ -23,7 +22,8 @@ from contracts.observation import (
     FrameObservation,
 )
 from worker.domains.bed_exit import BedExitConfig, BedExitMonitor, NightWindow
-from worker.domains.fall import FallEventLatch
+from worker.domains.fall import FallPolicyDeciderV2, FallV2DomainDecider, FallWindowClassifierV2
+from worker.interfaces.fall_model import FallV2Probabilities
 from worker.pipeline.perception.features.geometry import greedy_match
 from worker.pipeline.perception.tracker import GreedyIouTracker
 from worker.types import BusinessEvent, DecisionInput
@@ -154,29 +154,27 @@ def test_oracle_reconnect_shaped_restart_is_a_fresh_instance_with_empty_state() 
 # --------------------------------------------------------------------------
 
 
-class _FallModelMetadata:
-    window = 1
-    stride = 1
-    mode: Literal["features", "sequence"] = "sequence"
+_FRAME_SEC = 1 / 15
+# V2 confirms on the third stride-5 prediction after the 30-row window fills.
+_ONSET_FRAME = 40
 
 
 class _FallModel:
-    metadata = _FallModelMetadata()
-    operating_threshold = 0.5
-
-    def predict(self, features: object) -> float:
+    def predict(self, features: object) -> FallV2Probabilities:
         del features
-        return 0.9
+        return FallV2Probabilities(background=0.1, fall_transition=0.9, fallen=0.0)
 
 
-def _fall_decision_input(track_ids: tuple[int, ...], frame_index: int) -> DecisionInput:
+def _fall_decision_input(
+    track_ids: tuple[int, ...], boxes: tuple[BoundingBox, ...], frame_index: int
+) -> DecisionInput:
     pose = tuple((90, 50, 0.9) for _ in range(17))
     return DecisionInput(
-        observation=FrameObservation(poses=(pose,), track_ids=track_ids),
+        observation=FrameObservation(detections=(boxes, ()), poses=(pose,), track_ids=track_ids),
         frame_width=200,
         frame_height=200,
         live_track_ids=track_ids,
-        time_sec=float(frame_index),
+        time_sec=frame_index * _FRAME_SEC,
         frame_index=frame_index,
         bed_region=BedRegionDebugSnapshot(BedRegionCacheState.EMPTY),
     )
@@ -185,19 +183,28 @@ def _fall_decision_input(track_ids: tuple[int, ...], frame_index: int) -> Decisi
 def test_oracle_driven_fall_timeline_emits_exactly_one_rising_edge() -> None:
     boxes = (_box(70, 20, 110, 130),)
     tracker = GreedyIouTracker()
-    latch = FallEventLatch(_FallModel(), camera_id="camera-1", facility_id="facility-1")
+    decider = FallV2DomainDecider(
+        classifier=FallWindowClassifierV2(_FallModel()),
+        policy=FallPolicyDeciderV2(
+            camera_id="camera-1",
+            facility_id="facility-1",
+            boot_id="boot-1",
+            stream_epoch="0",
+            source_generation=0,
+        ),
+    )
 
     events: list[tuple[BusinessEvent, ...]] = []
-    for frame_index in range(3):
+    for frame_index in range(_ONSET_FRAME + 20):
         track_ids = tracker.observe(boxes)
-        events.append(latch.update(_fall_decision_input(track_ids, frame_index)))
+        events.append(decider.update(_fall_decision_input(track_ids, boxes, frame_index)))
 
-    assert len(events[0]) == 1
-    assert events[0][0].event_type == "fall"
-    assert events[0][0].identity == 1
-    assert latch.last_trace_snapshots[0].track_id == 0
-    assert events[1] == ()
-    assert events[2] == ()
+    onsets = [index for index, emitted in enumerate(events) if emitted]
+    assert onsets == [_ONSET_FRAME]
+    (event,) = events[_ONSET_FRAME]
+    assert event.event_type == "fall"
+    assert event.identity == "boot-1:0:0:0:0:1"
+    assert decider.last_trace_snapshots[0].track_id == 0
 
 
 def _bed_exit_monitor() -> BedExitMonitor:

@@ -31,7 +31,7 @@ _IDENTITIES = {
 
 def _selection(bundle_sha256: str, evaluation: str, field: str) -> dict[str, object]:
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "model_publication": {
             "source_locator": "seeon/fall-model",
             "revision": "a" * 40,
@@ -52,6 +52,10 @@ def _selection(bundle_sha256: str, evaluation: str, field: str) -> dict[str, obj
         "output_class_semantics_digest": _IDENTITIES["class"],
         "policy_digest": _IDENTITIES["policy"],
         "runtime_format": "opaque-bundle-format",
+        "bundle_format": "bundle-manifest/proxy-v0",
+        "preprocessing_identity": "coco17-xyc-plus-pose-head-xyxy-valid-f32-v1",
+        "transition_threshold": 0.5,
+        "threshold_source": "default",
     }
 
 

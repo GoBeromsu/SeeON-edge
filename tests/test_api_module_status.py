@@ -5,7 +5,7 @@ from dataclasses import replace
 
 import pytest
 
-from shared.detection_policies import FallPolicyV1, default_policy_bundle, make_effective_policy
+from shared.detection_policies import FallPolicyV2, default_policy_bundle, make_effective_policy
 from worker.domains.module_compiler import (
     CompiledDetectionModuleRegistry,
     compile_detection_module_registry,
@@ -46,11 +46,11 @@ def _facts(*, nvidia: bool = False, os_name: str = "Linux") -> RuntimeEnvironmen
 
 
 def _policy(threshold: float):
-    default = default_policy_bundle((_CAMERA_ID,)).resolve(_CAMERA_ID, "fall", 1)
+    default = default_policy_bundle((_CAMERA_ID,)).resolve(_CAMERA_ID, "fall", 2)
     return make_effective_policy(
         module_id="fall",
-        module_version=1,
-        values=FallPolicyV1(operating_threshold=threshold),
+        module_version=2,
+        values=FallPolicyV2(transition_threshold=threshold),
         source=default.source,
         facility_revision_id=default.facility_revision_id,
         camera_revision_id=default.camera_revision_id,
@@ -93,7 +93,7 @@ def _identities(
 ) -> tuple[SharedComponentIdentity, ...]:
     return tuple(
         binding.identity(runtime=runtime, device=device)
-        for binding in registry.shared_bindings({"fall": 1}, flags={})
+        for binding in registry.shared_bindings({"fall": 2}, flags={})
     )
 
 
@@ -125,7 +125,7 @@ def _manifest(
         camera_id=_CAMERA_ID,
         effective_decode_backend=boot.decode,
         ingest_target_fps=5.0,
-        module_qualified_ids=("fall.v1",),
+        module_qualified_ids=("fall.v2",),
         schedule={"pose": 2},
         detection_windows={"fall": None},
         policies={"fall": policy},
@@ -136,7 +136,7 @@ def _manifest(
     return build_applied_runtime_manifest(
         boot=boot,
         module_registry=registry,
-        module_versions={"fall": 1},
+        module_versions={"fall": 2},
         component_identities=identities,
         cameras=(camera,),
         config_version=9,

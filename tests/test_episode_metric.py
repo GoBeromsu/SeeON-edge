@@ -2,7 +2,6 @@ import json
 import sys
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Literal
 
 import pytest
 
@@ -13,34 +12,26 @@ from contracts.replay_trace import (
     decode_document,
     encode_jsonl,
 )
-from shared.detection_policies import FallPolicyV1, make_effective_policy
+from shared.detection_policies import FallPolicyV2, make_effective_policy
 from tests_support import episode_metric
 from tests_support.episode_metric import _load_rows, evaluate
 from tests_support.golden_episodes import GoldenEpisode
-from worker.types import FallModelInput
+from worker.interfaces.fall_model import FallV2Probabilities
 
 
 @dataclass(frozen=True)
-class _FallMetadata:
-    window: int = 1
-    stride: int = 1
-    mode: Literal["features"] = "features"
-
-
 class _FallModel:
-    metadata = _FallMetadata()
-    operating_threshold = 0.7
     artifact_digest = "test-fall-model"
 
-    def predict(self, features: FallModelInput) -> float:
+    def predict(self, features: object) -> FallV2Probabilities:
         del features
-        return 0.0
+        return FallV2Probabilities(background=1.0, fall_transition=0.0, fallen=0.0)
 
 
 class _HighFallModel(_FallModel):
-    def predict(self, features: FallModelInput) -> float:
+    def predict(self, features: object) -> FallV2Probabilities:
         del features
-        return 0.99
+        return FallV2Probabilities(background=0.01, fall_transition=0.99, fallen=0.0)
 
 
 def _golden() -> GoldenEpisode:
@@ -72,8 +63,8 @@ def test_metric_accepts_pinned_fall_policy() -> None:
     )
     policy = make_effective_policy(
         module_id="fall",
-        module_version=1,
-        values=FallPolicyV1(operating_threshold=0.7),
+        module_version=2,
+        values=FallPolicyV2(transition_threshold=0.7),
         source="image-default",
         facility_revision_id=None,
         camera_revision_id=None,
@@ -182,41 +173,68 @@ def _run_cli(
     return status, json.loads(out.read_text()) if out.exists() else None
 
 
-def _fall_rows() -> tuple[ReplayRow, ...]:
-    return (
-        _row(0, "open"),
-        replace(_row(0, "frame"), seq=1),
-        replace(_row(1_000_000_000, "frame"), seq=2, tracks=()),
-        replace(_row(61_000_000_000, "frame"), seq=3),
+_FRAME_NS = 66_666_667
+# A V2 fall alert needs a 30-row pose+bbox56 window plus three predictions at
+# stride 5 (rows 30, 35, 40): 41 contiguous 15 fps rows per onset.
+_ONSET_ROWS = 41
+# Rows without the track after an onset: past the 45-frame track TTL the V2
+# state is evicted, so the next appearance is a fresh episode.
+_ABSENT_ROWS = 50
+
+
+def _run(
+    start_ns: int,
+    count: int,
+    *,
+    first_seq: int,
+    tracked: bool = True,
+    bbox: tuple[float, float, float, float, float] = (0.1, 0.1, 0.2, 0.2, 0.9),
+) -> tuple[ReplayRow, ...]:
+    return tuple(
+        replace(
+            _row(start_ns + index * _FRAME_NS, "frame"),
+            seq=first_seq + index,
+            tracks=(replace(_row(0, "frame").tracks[0], bbox=bbox),) if tracked else (),
+        )
+        for index in range(count)
     )
+
+
+def _two_onsets(second_start_ns: int) -> tuple[ReplayRow, ...]:
+    first = _run(0, _ONSET_ROWS, first_seq=1)
+    absent = _run(
+        first[-1].pts_ns + _FRAME_NS, _ABSENT_ROWS, first_seq=len(first) + 1, tracked=False
+    )
+    second = _run(second_start_ns, _ONSET_ROWS, first_seq=len(first) + len(absent) + 1)
+    return (_row(0, "open"), *first, *absent, *second)
+
+
+def _fall_rows() -> tuple[ReplayRow, ...]:
+    """Two onsets 61 s apart: outside the 30 s cooldown, so both alert."""
+    return _two_onsets(61_000_000_000)
 
 
 def _cooldown_rows() -> tuple[ReplayRow, ...]:
-    return (
-        _row(0, "open"),
-        replace(_row(0, "frame"), seq=1),
-        replace(_row(1_000_000_000, "frame"), seq=2, tracks=()),
-        replace(_row(2_000_000_000, "frame"), seq=3),
-    )
+    """Two onsets ~9 s apart: the second is a real V2 onset the cooldown suppresses."""
+    first_end_ns = (_ONSET_ROWS + _ABSENT_ROWS) * _FRAME_NS
+    return _two_onsets(first_end_ns + _FRAME_NS)
 
 
 def test_metric_cli_exact_returns_zero_for_both_domains(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    _, fixture_rows = decode_document(
-        Path("tests/fixtures/replay/gap-control-v2.json").read_text()
-    )
-    rows = (
-        replace(fixture_rows[0], source_event="open", tracks=()),
-        *fixture_rows[1:],
-    )
+    # One person: in the bed for 20 rows, then out of it while the fall window
+    # keeps filling -- both domains alert exactly once inside their windows.
+    inside = _run(0, 20, first_seq=1)
+    outside = _run(20 * _FRAME_NS, _ONSET_ROWS - 20, first_seq=21, bbox=(0.7, 0.7, 0.8, 0.8, 0.9))
+    rows = (_row(0, "open"), *inside, *outside)
     status, result = _run_cli(
         monkeypatch,
         tmp_path,
         rows,
         (
-            _cli_golden("fall", 0, 1_000_000_000),
-            _cli_golden("bed_exit", 0, 1_000_000_000),
+            _cli_golden("fall", 0, 3_000_000_000),
+            _cli_golden("bed_exit", 0, 3_000_000_000),
         ),
     )
     assert status == 0
@@ -281,9 +299,7 @@ def test_metric_cli_provisional_golden_returns_two_with_or_without_flag(
         assert result is None
 
 
-def test_metric_cli_bad_header_returns_two(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def test_metric_cli_bad_header_returns_two(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     traces = tmp_path / "traces"
     traces.mkdir()
     (traces / "trace.jsonl").write_text('{"version":"not-a-trace"}\n')
@@ -293,10 +309,19 @@ def test_metric_cli_bad_header_returns_two(
         episode_metric, "load_golden_episodes", lambda _: (_cli_golden("fall", 0, 1),)
     )
     monkeypatch.setattr(episode_metric, "_is_provisional", lambda _: False)
-    monkeypatch.setattr(sys, "argv", [
-        "episode_metric", "--traces", str(traces), "--golden", str(golden),
-        "--out", str(tmp_path / "out.json"),
-    ])
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "episode_metric",
+            "--traces",
+            str(traces),
+            "--golden",
+            str(golden),
+            "--out",
+            str(tmp_path / "out.json"),
+        ],
+    )
     assert episode_metric.main() == 2
 
 

@@ -16,6 +16,7 @@ from typing_extensions import override
 from worker.adapters.model.artifact import verify_artifact_digest
 from worker.adapters.model.errors import ModelLoadError
 from worker.adapters.model.gru_manifest import GRU_INPUT_DIM, GruFallManifest
+from worker.interfaces.fall_model import FallV2Probabilities
 
 StateDict: TypeAlias = Mapping[str, torch.Tensor]
 _TORCH_LOAD: Final[Callable[..., StateDict]] = torch.load
@@ -176,7 +177,7 @@ class GruFallRunner:
 
     def predict(
         self, features: Sequence[Sequence[float]] | NDArray[np.floating]
-    ) -> tuple[float, float, float]:
+    ) -> FallV2Probabilities:
         sequence = np.asarray(features, dtype=np.float32)
         if sequence.shape != self.manifest.input_shape:
             raise ModelLoadError(
@@ -200,10 +201,8 @@ class GruFallRunner:
             )
         if probabilities.shape != (3,) or not np.isfinite(probabilities).all():
             raise ModelLoadError("GRU model returned non-finite probabilities")
-        output = tuple(float(value) for value in probabilities)
-        if not math.isfinite(sum(output)):
-            raise ModelLoadError("GRU model returned non-finite probabilities")
-        return output  # type: ignore[return-value]
+        background, fall_transition, fallen = (float(value) for value in probabilities)
+        return FallV2Probabilities(background, fall_transition, fallen)
 
     def warmup(self) -> None:
         self.predict(np.zeros(self.manifest.input_shape, dtype=np.float32))

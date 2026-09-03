@@ -7,7 +7,6 @@ from pathlib import Path
 from contracts.observation import BoundingBox
 from contracts.replay_trace import ReplayRow, ReplayTraceHeader, decode_jsonl, encode_jsonl
 from shared.detection_policies import BedExitPolicyV1, make_effective_policy
-from tests_support.episode_metric import _load_rows
 from worker.native.deepstream.ipc import MetadataFrame
 from worker.native.deepstream.metadata import LatestMetadataSlot, SourceBinding
 from worker.pipeline.decision import EventAggregator, IncidentManager
@@ -188,8 +187,10 @@ def test_rotation_chain_accepts_seq_restart_at_new_boot_segment(tmp_path: Path) 
     second._process(_metadata(epoch=4, track_id=8, generation=3))  # noqa: SLF001
     second._process(_metadata(epoch=4, track_id=8, generation=3))  # noqa: SLF001
 
-    rows, truncated = _load_rows(tmp_path)
-    assert not truncated
+    trace_name = f"{hashlib.sha256(b'camera-a').hexdigest()[:16]}.jsonl"
+    _, first_rows = decode_jsonl((tmp_path / f"{trace_name}.1").read_text())
+    _, second_rows = decode_jsonl((tmp_path / trace_name).read_text())
+    rows = first_rows + second_rows
     assert [(row.source_event, row.seq) for row in rows] == [
         ("open", 0), ("frame", 1), ("frame", 2),
         ("open", 0), ("frame", 1), ("frame", 2),

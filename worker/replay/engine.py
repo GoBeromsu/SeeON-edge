@@ -1,6 +1,6 @@
 """Deterministic camera-local decider replay over persisted analysis traces.
 
-Replay re-runs exactly one compiled ``DetectionModuleDefinition`` (fall.v1 or
+Replay re-runs exactly one compiled ``DetectionModuleDefinition`` (fall.v2 or
 bed_exit.v1) against a pinned module graph, a chosen numeric policy revision,
 and a fixed time origin, driving it with ``DecisionInput`` values reconstructed
 frame-by-frame from ``AnalysisTrace`` rows already captured by the real
@@ -25,13 +25,13 @@ from datetime import UTC, datetime
 
 from contracts.replay_trace import ReplayRow
 from shared.detection_policies import EffectivePolicy
-from worker.domains.fall import FallModelProtocol
 from worker.domains.module_definition import (
     CameraModuleContext,
     DetectionModuleDefinition,
 )
 from worker.domains.registry import DETECTION_MODULE_REGISTRY
 from worker.interfaces.decision import Decider
+from worker.interfaces.fall_model import FallV2ModelProtocol
 from worker.pipeline.decision.incident_manager import IncidentManager
 from worker.pipeline.perception.pts_resample import resample_pts
 from worker.pipeline.trace.models import (
@@ -115,7 +115,7 @@ def replay_recovered(
     module_id: str,
     policy: EffectivePolicy,
     facility_id: str = "replay",
-    fall_model: FallModelProtocol | None = None,
+    fall_model: FallV2ModelProtocol | None = None,
     clock: Callable[[], datetime] = _STATIC_CLOCK,
 ) -> ReplayRun:
     """Legacy HTTP replay retained until that production endpoint is retired."""
@@ -138,7 +138,7 @@ def replay_camera(
     module_id: str,
     policy: EffectivePolicy,
     facility_id: str = "replay",
-    fall_model: FallModelProtocol | None = None,
+    fall_model: FallV2ModelProtocol | None = None,
     clock: Callable[[], datetime] = _STATIC_CLOCK,
     truncation: TraceTruncation | None = None,
 ) -> ReplayRun:
@@ -166,7 +166,7 @@ def replay_camera(
                 camera_id=camera_id,
                 facility_id=facility_id,
                 shared_components=shared_components,
-                camera_components={},
+                camera_components={"fall-v2-identity": (str(current_boot), "0", 0)},
                 detection_window=None,
                 clock=clock,
                 diagnostics=None,
@@ -273,7 +273,7 @@ def replay(
     module_id: str,
     policy: EffectivePolicy,
     facility_id: str = "replay",
-    fall_model: FallModelProtocol | None = None,
+    fall_model: FallV2ModelProtocol | None = None,
     clock: Callable[[], datetime] = _STATIC_CLOCK,
 ) -> ReplayRun:
     """Replay frame-level rows through production resampling and admission."""
@@ -288,12 +288,14 @@ def replay(
     decider: Decider | None = None
     window = _ReplayWindow()
 
-    def new_decider() -> Decider:
+    def new_decider(boot_segment: int, stream_epoch: int) -> Decider:
+        # Replay identities name the boot segment and stream epoch exactly as
+        # the runtime names the worker boot and native epoch.
         context = CameraModuleContext(
             camera_id=camera_id,
             facility_id=facility_id,
             shared_components=shared_components,
-            camera_components={},
+            camera_components={"fall-v2-identity": (f"boot-{boot_segment}", str(stream_epoch), 0)},
             detection_window=window if module_id == "bed_exit" else None,
             clock=clock,
             diagnostics=None,
@@ -306,7 +308,7 @@ def replay(
         if current_segment != frame.boot_segment:
             # A worker boot starts with fresh in-memory cooldown state in
             # production (one IncidentManager per camera per composition).
-            decider = new_decider()
+            decider = new_decider(frame.boot_segment, frame.stream_epoch)
             incident_manager.reset()
             previous_live_ids = set()
             current_segment = frame.boot_segment
@@ -387,7 +389,7 @@ def _decider_trace_snapshots(
 
 
 def _replay_components(
-    module_id: str, policy: EffectivePolicy, fall_model: FallModelProtocol | None
+    module_id: str, policy: EffectivePolicy, fall_model: FallV2ModelProtocol | None
 ) -> tuple[DetectionModuleDefinition, dict[str, object]]:
     definition = DETECTION_MODULE_REGISTRY.get(module_id)
     expected_schema = f"{policy.schema_id}.v{policy.schema_version}"
