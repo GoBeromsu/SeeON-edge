@@ -76,6 +76,8 @@ class _Sink:
 @dataclass(slots=True)
 class _Diagnostics:
     completed: int = 0
+    polygon_sources: list[str] | None = None
+    replay_trace_write_failures: int = 0
 
     def update_measured_fps(self, camera_id: str, measured_fps: float | None) -> None:
         del camera_id, measured_fps
@@ -83,6 +85,19 @@ class _Diagnostics:
     def record_detection_completed(self, camera_id: str) -> None:
         assert camera_id == "camera-a"
         self.completed += 1
+
+    def record_track_id_switch(self, camera_id: str) -> None:
+        assert camera_id == "camera-a"
+
+    def record_bed_polygon_source(self, camera_id: str, source: str) -> None:
+        assert camera_id == "camera-a"
+        if self.polygon_sources is None:
+            self.polygon_sources = []
+        self.polygon_sources.append(source)
+
+    def record_replay_trace_write_failure(self, camera_id: str) -> None:
+        assert camera_id == "camera-a"
+        self.replay_trace_write_failures += 1
 
 
 def _metadata() -> MetadataFrame:
@@ -100,7 +115,7 @@ def _metadata() -> MetadataFrame:
             PersonBoxChannel(ChannelState.INFERRED, (PersonBox(10, 20, 40, 80, 0.8),)),
             HumanPoseChannel(
                 ChannelState.INFERRED,
-                ((Keypoint(20, 30, 0.9),),),
+                (tuple(Keypoint(20, 30, 0.9) for _ in range(17)),),
             ),
             BedRegionChannel(ChannelState.INFERRED_EMPTY),
             association,
@@ -189,6 +204,7 @@ def test_native_policy_uses_child_association_and_image_free_evidence_trigger(
     assert trigger.source_generation == 3
     assert trigger.frame_key.stream_epoch == 4
     assert diagnostics.completed == 1
+    assert diagnostics.polygon_sources == ["none"]
     control.close()
     child.close()
 
@@ -209,6 +225,44 @@ class _UnusedControl:
 
     def snapshot(self, camera_id: str) -> None:
         raise AssertionError(f"control must not be used while rebinding {camera_id}")
+
+
+class _BrokenTraceWriter:
+    def append(self, row: object) -> bool:
+        del row
+        raise OSError("read-only trace volume")
+
+
+class _NoSnapshotControl:
+    def snapshot(self, camera_id: str) -> None:
+        assert camera_id == "camera-a"
+
+
+def test_trace_write_failure_does_not_block_decision_or_sink(tmp_path: Path) -> None:
+    decider = _Decider()
+    sink = _Sink()
+    diagnostics = _Diagnostics()
+    pump = NativePolicyPump(
+        _binding(generation=3, epoch=4),
+        NativePolicyContext(
+            LatestMetadataSlot(),
+            _NoSnapshotControl(),  # pyright: ignore[reportArgumentType]
+            SceneState("camera-a"),
+            EventAggregator((decider,), IncidentManager(0.0, tmp_path / "events.jsonl")),
+            sink,
+            AlertEvidenceAttacher({}),
+            diagnostics,
+            90,
+            replay_trace=_BrokenTraceWriter(),  # pyright: ignore[reportArgumentType]
+        ),
+    )
+
+    pump._process(_metadata())  # noqa: SLF001
+
+    assert decider.received is not None
+    assert sink.emitted is not None
+    assert diagnostics.completed == 1
+    assert diagnostics.replay_trace_write_failures == 1
 
 
 def _pump_for(
@@ -265,6 +319,7 @@ def test_pump_keeps_its_binding_when_the_source_was_not_rebuilt(tmp_path: Path) 
     pump._rebind_if_source_was_rebuilt()  # noqa: SLF001
     # Then
     assert pump._binding == original  # noqa: SLF001
+
 
 def test_pump_keeps_its_binding_when_the_source_is_gone(tmp_path: Path) -> None:
     """A removed source must not clear the binding out from under the pump."""

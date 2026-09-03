@@ -45,22 +45,37 @@ def generate(
             break
         result = runner.run(frame[:, :, ::-1])
         boxes = tuple(BoundingBox(*box[:4], confidence=box[4]) for box in result.boxes)
+        height, width = frame.shape[:2]
         ids = tracker.observe(boxes)
         tracks = tuple(
             ReplayTrack(
                 track_id=track_id,
                 lifecycle="new" if track_id not in seen else "tracked",
-                bbox=tuple(box),
-                keypoints=tuple(tuple(point) for point in pose),
+                bbox=(
+                    box[0] / width,
+                    box[1] / height,
+                    box[2] / width,
+                    box[3] / height,
+                    box[4],
+                ),
+                keypoints=tuple((point[0] / width, point[1] / height, point[2]) for point in pose),
             )
             for pose, box, track_id in zip(result.poses, result.boxes, ids, strict=True)
         )
         seen.update(ids)
         rows.append(
             ReplayRow(
-                camera_id=camera_id, pts_ns=pts_ns, epoch=0, source_event="frame",
-                source="legacy-association", tracks=tracks, bed_polygon_id=None,
-                bed_polygon=None, night_window_active=False,
+                camera_id=camera_id,
+                pts_ns=pts_ns,
+                epoch=0,
+                source_event="frame",
+                source="legacy-association",
+                tracks=tracks,
+                bed_polygon_id=None,
+                bed_polygon=None,
+                night_window_active=False,
+                frame_width=width,
+                frame_height=height,
             )
         )
         seq += 1

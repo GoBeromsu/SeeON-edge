@@ -3,15 +3,15 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 from dataclasses import dataclass
 from itertools import pairwise
 from pathlib import Path
 from typing import Any
 
-from scripts.qa.golden_worksheet import EPISODE_HORIZON_SEC
-
 ALLOWED_LABELS = frozenset(("real", "false", "unsure"))
+EPISODE_HORIZON_SEC = {"fall": 120, "bed_exit": 60}
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
 
@@ -36,7 +36,7 @@ def load_golden_episodes(path: Path) -> tuple[GoldenEpisode, ...]:
         raise ValueError(f"invalid golden fixture {path}") from exc
     if not isinstance(payload, dict):
         raise TypeError("golden fixture must be an object")
-    labellers = _header(payload)
+    labellers, roster = _header(payload)
     provisional = payload["provisional"]
     rows = payload.get("episodes")
     if not isinstance(rows, list):
@@ -46,15 +46,16 @@ def load_golden_episodes(path: Path) -> tuple[GoldenEpisode, ...]:
     if not provisional:
         if len(episodes) != 100:
             raise ValueError("non-provisional golden fixture must contain exactly 100 episodes")
-        cameras = {episode.camera_id for episode in episodes}
-        if any(sum(item.camera_id == camera for item in episodes) < 5 for camera in cameras):
+        if any(sum(item.camera_id == camera for item in episodes) < 5 for camera in roster):
             raise ValueError(
                 "non-provisional golden fixture needs at least five episodes per camera"
             )
+        if {episode.event_type for episode in episodes} != set(EPISODE_HORIZON_SEC):
+            raise ValueError("non-provisional golden fixture needs both event types")
     return episodes
 
 
-def _header(payload: dict[str, Any]) -> tuple[str, ...]:
+def _header(payload: dict[str, Any]) -> tuple[tuple[str, ...], tuple[str, ...]]:
     if payload.get("schema") != "golden-episodes-v1":
         raise ValueError("unsupported golden schema")
     if payload.get("horizons") != EPISODE_HORIZON_SEC:
@@ -75,9 +76,17 @@ def _header(payload: dict[str, Any]) -> tuple[str, ...]:
     provisional = payload.get("provisional")
     if not isinstance(provisional, bool):
         raise TypeError("provisional must be boolean")
+    roster = payload.get("camera_roster")
+    if (
+        not isinstance(roster, list)
+        or not all(isinstance(camera, str) and camera for camera in roster)
+        or len(set(roster)) != len(roster)
+        or (not provisional and len(roster) != 13)
+    ):
+        raise ValueError("invalid camera_roster")
     if len(labellers) < 2 and not provisional:
         raise ValueError("fewer than two labellers requires provisional=true")
-    return tuple(labellers)
+    return tuple(labellers), tuple(roster)
 
 
 def _episode(row: Any, labellers: tuple[str, ...], provisional: bool) -> GoldenEpisode:
@@ -115,8 +124,11 @@ def _episode(row: Any, labellers: tuple[str, ...], provisional: bool) -> GoldenE
         or episode.start_ns >= episode.end_ns
         or episode.resolved not in ALLOWED_LABELS
         or episode.resolution not in {"agree", "third-pass", "single"}
+        or isinstance(episode.corroborating_overlap_s, bool)
         or not isinstance(episode.corroborating_overlap_s, (int, float))
-        or episode.corroborating_overlap_s < 1
+        or not math.isfinite(episode.corroborating_overlap_s)
+        or episode.corroborating_overlap_s < 0
+        or (episode.resolved == "real" and episode.corroborating_overlap_s < 1)
     ):
         raise ValueError("invalid episode")
     values = tuple(labels[labeller] for labeller in labellers)

@@ -79,3 +79,27 @@ def test_export_requires_media_for_claimed_clip(tmp_path: Path) -> None:
 
     with pytest.raises(CorpusValidationError, match="clip-one: missing clip.mp4"):
         export(snapshot, store, tmp_path / "out.jsonl")
+
+
+def test_export_rejects_absent_clips_tree_without_creating_output(tmp_path: Path) -> None:
+    snapshot = tmp_path / "edge.sqlite3"
+    output = tmp_path / "out.jsonl"
+    _snapshot(snapshot)
+
+    with pytest.raises(CorpusValidationError, match="missing canonical clips tree"):
+        export(snapshot, tmp_path / "store", output)
+    assert not output.exists()
+
+
+def test_export_validates_timestamps_before_atomically_writing(tmp_path: Path) -> None:
+    snapshot = tmp_path / "edge.sqlite3"
+    store = tmp_path / "store"
+    output = tmp_path / "out.jsonl"
+    _snapshot(snapshot)
+    _clip(store, "clip-1", ["event-1"])
+    with sqlite3.connect(snapshot) as connection:
+        connection.execute("UPDATE incidents SET detected_at='not-a-timestamp'")
+
+    with pytest.raises(CorpusValidationError, match="invalid detected_at"):
+        export(snapshot, store, output)
+    assert not output.exists()

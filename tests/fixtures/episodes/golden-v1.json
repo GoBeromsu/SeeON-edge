@@ -5,6 +5,21 @@
     "bed_exit": 60
   },
   "corpus_sha256": null,
+  "camera_roster": [
+    "0bdd3414-6947-42a0-8e5e-796e0133fe51",
+    "19c97354-550b-4fa2-bbfa-1781da66b7e1",
+    "31c73e96-c82c-4df3-a5da-74e397169d06",
+    "324400e5-7406-4549-bc2b-49fb307c169b",
+    "3a1f2d82-ef0d-44d5-bd6d-6a7ed11857e0",
+    "4fc0230f-d232-43c8-aa33-79aba68d5c2a",
+    "62c1c28e-be14-402b-aef1-50920488e7cd",
+    "632f31a9-a317-42db-9014-e83854f1ac03",
+    "79874785-3f81-45d8-8bcf-c68ba242556a",
+    "9737eb85-35ba-4813-adbb-85671913ef31",
+    "bd260bd4-ff63-45da-b822-6c730f7e72c3",
+    "d8bfa299-d631-4698-8c98-a0de1c8fc59c",
+    "f13a913e-5a5e-4065-816c-28f5e5bd4b8b"
+  ],
   "labellers": [],
   "provisional": true,
   "note": "Owner labels pending. Generate with scripts/qa/golden_worksheet.py -> golden_labeller_html.py -> golden_from_worksheet.py; never hand-write episodes.",

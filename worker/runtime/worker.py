@@ -1817,6 +1817,7 @@ class WorkerRuntime:
                     if (trace_directory := replay_trace_directory_from_environment()) is None
                     else ReplayTraceWriter(trace_directory, camera.camera_id)
                 ),
+                night_window_active=_night_window_active(plan.detection_windows.get("bed_exit")),
             ),
         )
         pumps.append(pump)
@@ -2717,6 +2718,10 @@ class WorkerRuntime:
         if configured is None:
             return None
         return DetectionWindow(start=configured.start, end=configured.end, tz=configured.tz)
+
+
+def _night_window_active(window: DetectionWindow | None) -> Callable[[], bool]:
+    return (lambda: False) if window is None else lambda: window.contains(datetime.now(UTC))
 
 
 __all__ = [

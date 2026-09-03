@@ -6,10 +6,17 @@ import argparse
 import csv
 import hashlib
 import json
+import sys
 from datetime import datetime
+from importlib import import_module
+from math import isfinite
 from pathlib import Path
 
-from scripts.qa.golden_worksheet import EPISODE_HORIZON_SEC
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+EPISODE_HORIZON_SEC = import_module("tests_support.golden_episodes").EPISODE_HORIZON_SEC
 
 _EVENT_TYPE = {"fall": "fall", "bed-exit": "bed_exit", "bed_exit": "bed_exit"}
 _LABELS = {"real", "false", "unsure"}
@@ -33,6 +40,30 @@ def _read(path: Path) -> tuple[str, dict[str, dict[str, str]]]:
     return labellers.pop(), keyed
 
 
+def _camera_roster(rows: dict[str, dict[str, str]]) -> list[str]:
+    rosters = {row.get("camera_roster", "") for row in rows.values()}
+    if len(rosters) != 1:
+        raise ValueError("worksheet rows must have one consistent camera_roster")
+    roster = [camera for camera in rosters.pop().split(",") if camera]
+    if not roster or len(set(roster)) != len(roster):
+        raise ValueError("worksheet has invalid camera_roster")
+    return roster
+
+
+def _overlap_seconds(
+    row: dict[str, str], episode_start_ns: int, episode_end_ns: int
+) -> float:
+    try:
+        clip_start_ns = _ns(row["clip_started_at"])
+        duration_s = float(row["duration_s"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError("worksheet needs clip_started_at and finite duration_s") from exc
+    if not isfinite(duration_s) or duration_s < 0:
+        raise ValueError("worksheet needs clip_started_at and finite duration_s")
+    clip_end_ns = clip_start_ns + int(duration_s * 1_000_000_000)
+    return max(0, min(clip_end_ns, episode_end_ns) - max(clip_start_ns, episode_start_ns)) / 1e9
+
+
 def convert(
     worksheets: list[Path], output: Path, corpus: Path, third_pass: Path | None, lead_sec: float
 ) -> int:
@@ -44,6 +75,9 @@ def convert(
     ids = set(loaded[0][1])
     if any(set(rows) != ids for _, rows in loaded[1:]):
         raise ValueError("independent worksheets must cover identical episode_ids")
+    roster = _camera_roster(loaded[0][1])
+    if any(_camera_roster(rows) != roster for _, rows in loaded[1:]):
+        raise ValueError("independent worksheets must have the same camera_roster")
     third = _read(third_pass) if third_pass is not None else None
     if third is not None and third[0] in {labeller for labeller, _ in loaded}:
         raise ValueError("third pass must be independently labelled")
@@ -70,17 +104,22 @@ def convert(
             raise ValueError(f"{episode_id} has inconsistent episode identity")
         starts = [_ns(row["detected_at"]) for row in rows]
         ends = [_ns(row["last_detected_at"]) for row in rows]
+        start_ns = min(starts) - int(lead_sec * 1_000_000_000)
+        end_ns = max(ends) + EPISODE_HORIZON_SEC[event_type] * 1_000_000_000
+        overlap_s = _overlap_seconds(rows[0], start_ns, end_ns)
+        if resolved == "real" and overlap_s < 1:
+            raise ValueError(f"{episode_id} real label needs at least one second of clip overlap")
         episodes.append(
             {
                 "episode_id": episode_id,
                 "camera_id": rows[0]["camera_id"],
                 "event_type": event_type,
-                "start_ns": min(starts) - int(lead_sec * 1_000_000_000),
-                "end_ns": max(ends) + EPISODE_HORIZON_SEC[event_type] * 1_000_000_000,
+                "start_ns": start_ns,
+                "end_ns": end_ns,
                 "labels": labels,
                 "resolved": resolved,
                 "resolution": resolution,
-                "corroborating_overlap_s": 1,
+                "corroborating_overlap_s": overlap_s,
             }
         )
     if third is not None and set(third[1]) != disputed_ids:
@@ -89,6 +128,7 @@ def convert(
         "schema": "golden-episodes-v1",
         "horizons": EPISODE_HORIZON_SEC,
         "corpus_sha256": hashlib.sha256(corpus.read_bytes()).hexdigest(),
+        "camera_roster": roster,
         "labellers": labellers,
         "provisional": len(loaded) < 2,
         "episodes": episodes,

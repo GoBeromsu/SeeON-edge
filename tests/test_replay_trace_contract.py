@@ -18,10 +18,19 @@ def _row() -> ReplayRow:
         epoch=0,
         source_event="frame",
         source="legacy-association",
-        tracks=(ReplayTrack(3, "new", (1, 2, 3, 4, 0.9), ((1, 2, 0.9),) * 17),),
+        tracks=(
+            ReplayTrack(
+                3,
+                "new",
+                (0.1, 0.2, 0.3, 0.4, 0.9),
+                ((0.1, 0.2, 0.9),) * 17,
+            ),
+        ),
         bed_polygon_id=None,
         bed_polygon=None,
         night_window_active=False,
+        frame_width=1000,
+        frame_height=1000,
     )
 
 
@@ -36,3 +45,42 @@ def test_document_round_trip() -> None:
 def test_rejects_bad_track_shape() -> None:
     with pytest.raises(ValueError):
         ReplayTrack(3, "new", (), ())
+
+
+@pytest.mark.parametrize(
+    "payload",
+    (
+        (
+            '{"version":"replay-trace-v2"}\n'
+            '{"camera_id":"cam","pts_ns":true,"epoch":0,"source_event":"frame",'
+            '"source":"legacy-association","tracks":[],"bed_polygon_id":null,'
+            '"bed_polygon":null,"night_window_active":false,"frame_width":640,"frame_height":360}'
+        ),
+        (
+            '{"version":"replay-trace-v2"}\n'
+            '{"camera_id":"cam","pts_ns":1,"epoch":0,"source_event":"unknown",'
+            '"source":"legacy-association","tracks":[],"bed_polygon_id":null,'
+            '"bed_polygon":null,"night_window_active":false,"frame_width":640,"frame_height":360}'
+        ),
+        (
+            '{"version":"replay-trace-v2"}\n'
+            '{"camera_id":"cam","pts_ns":1,"epoch":0,"source_event":"frame",'
+            '"source":"legacy-association","tracks":[{"track_id":1,"lifecycle":"new",'
+            '"bbox":[0.0,0.0,1.0,1.0,NaN],"keypoints":[[0.0,0.0,1.0]]}],'
+            '"bed_polygon_id":null,"bed_polygon":null,"night_window_active":false,"frame_width":640,"frame_height":360}'
+        ),
+    ),
+)
+def test_codec_rejects_adversarial_values(payload: str) -> None:
+    with pytest.raises(ValueError, match="invalid replay trace"):
+        decode_jsonl(payload)
+
+
+def test_rejects_invalid_geometry_and_track_identity() -> None:
+    with pytest.raises(ValueError, match="bbox corners"):
+        ReplayTrack(3, "new", (0.3, 0.2, 0.1, 0.4, 0.9), ((0.1, 0.2, 0.9),) * 17)
+    track = ReplayTrack(3, "new", (0.1, 0.2, 0.3, 0.4, 0.9), ((0.1, 0.2, 0.9),) * 17)
+    with pytest.raises(ValueError, match="unique"):
+        ReplayRow("cam", 2, 0, "frame", "legacy-association", (track, track), None, None, False, 640, 360)
+    with pytest.raises(ValueError, match="exactly"):
+        ReplayRow("cam", 2, 0, "frame", "legacy-association", (), "bed", None, False, 640, 360)

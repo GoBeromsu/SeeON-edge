@@ -175,6 +175,7 @@ class CameraDiagnosticsSnapshot:
     forward_p50_sec: float = 0.0
     forward_p95_sec: float = 0.0
     track_id_switch_total: int = 0
+    replay_trace_write_failures: int = 0
     track_id_switch_absorbed_total: int = 0
     resample_gap_rows_total: int = 0
     incident_cooldown_suppressed_total: int = 0

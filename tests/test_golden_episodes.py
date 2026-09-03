@@ -33,6 +33,7 @@ def _fixture(
         "schema": "golden-episodes-v1",
         "horizons": {"fall": 120, "bed_exit": 60},
         "corpus_sha256": "0" * 64,
+        "camera_roster": [f"camera-{index}" for index in range(13)],
         "labellers": labellers,
         "provisional": provisional,
         "episodes": episodes,
@@ -61,7 +62,8 @@ def test_non_provisional_fixture_enforces_quota(tmp_path: Path) -> None:
                 start=1 + index * 1_000_000_000_000,
             ),
             "episode_id": f"episode-{index}",
-            "camera_id": f"camera-{index % 20}",
+            "camera_id": f"camera-{index % 13}",
+            "event_type": "fall" if index % 2 else "bed_exit",
         }
         for index in range(100)
     ]
@@ -150,6 +152,9 @@ def _worksheet(
                 "event_type",
                 "detected_at",
                 "last_detected_at",
+                "clip_started_at",
+                "duration_s",
+                "camera_roster",
                 "label",
                 "labeller",
             ],
@@ -162,6 +167,9 @@ def _worksheet(
                 "event_type": "fall",
                 "detected_at": detected_at,
                 "last_detected_at": detected_at,
+                "clip_started_at": "2026-01-01T00:00:00+00:00",
+                "duration_s": "30",
+                "camera_roster": "cam",
                 "label": label,
                 "labeller": labeller,
             }
@@ -182,6 +190,7 @@ def test_converter_stamps_corpus_and_uses_third_pass_with_earliest_onset(tmp_pat
     assert payload["corpus_sha256"] == hashlib.sha256(b"corpus").hexdigest()
     assert payload["episodes"][0]["resolution"] == "third-pass"
     assert payload["episodes"][0]["start_ns"] == 1_767_225_605_000_000_000
+    assert payload["episodes"][0]["corroborating_overlap_s"] == 25
 
 
 def test_worksheet_keeps_five_episodes_per_camera(tmp_path: Path) -> None:
@@ -200,7 +209,51 @@ def test_worksheet_keeps_five_episodes_per_camera(tmp_path: Path) -> None:
             )
     manifest.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
     output = tmp_path / "worksheet.csv"
-    assert build(manifest, output, limit=20) >= 10
+    assert build(manifest, output, limit=20, roster=("a", "b")) >= 10
     with output.open(encoding="utf-8", newline="") as handle:
         selected = list(csv.DictReader(handle))
     assert all(sum(row["camera_id"] == camera for row in selected) >= 5 for camera in {"a", "b"})
+
+
+def test_non_provisional_fixture_rejects_roster_shortfall_and_single_event_type(
+    tmp_path: Path,
+) -> None:
+    episodes = [
+        {
+            **_episode(
+                labels={"a": "real", "b": "real"},
+                resolved="real",
+                resolution="agree",
+                start=1 + index * 1_000_000_000_000,
+            ),
+            "episode_id": f"episode-{index}",
+            "camera_id": f"camera-{index % 12}",
+        }
+        for index in range(100)
+    ]
+    path = tmp_path / "golden.json"
+    _write(path, _fixture(episodes, ["a", "b"], provisional=False))
+    with pytest.raises(ValueError, match="five episodes"):
+        load_golden_episodes(path)
+
+    for index, episode in enumerate(episodes):
+        episode["camera_id"] = f"camera-{index % 13}"
+    _write(path, _fixture(episodes, ["a", "b"], provisional=False))
+    with pytest.raises(ValueError, match="both event types"):
+        load_golden_episodes(path)
+
+
+def test_provisional_fixture_bypasses_completion_protocol(tmp_path: Path) -> None:
+    """A provisional fixture may be incomplete while owner labels are pending."""
+    path = tmp_path / "golden.json"
+    payload = _fixture([], ["owner"], provisional=True)
+    payload["camera_roster"] = ["camera-1"]
+    _write(path, payload)
+    assert load_golden_episodes(path) == ()
+
+
+def test_worksheet_rejects_roster_camera_shortfall(tmp_path: Path) -> None:
+    manifest = tmp_path / "manifest.jsonl"
+    manifest.write_text("", encoding="utf-8")
+    with pytest.raises(ValueError, match="fewer than five"):
+        build(manifest, tmp_path / "worksheet.csv", limit=100, roster=("camera-1",))

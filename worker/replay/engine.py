@@ -144,7 +144,14 @@ def replay_camera(
 ) -> ReplayRun:
     """Legacy AnalysisTrace replay for the surviving production HTTP endpoint."""
     definition, shared_components = _replay_components(module_id, policy, fall_model)
-    reproducible, reason = assess_reproducibility(analyses, truncation)
+    # AnalysisTrace omits association liveness, so it can never reproduce the
+    # camera-local tracker state used by production.  Keep the endpoint, but
+    # make its limitation explicit rather than presenting a deterministic run.
+    _, truncation_reason = assess_reproducibility(analyses, truncation)
+    reproducible = False
+    reason = "legacy-trace-liveness"
+    if truncation_reason is not None:
+        reason = f"{reason}; {truncation_reason}"
     frames: list[ReplayFrameResult] = []
     incident_manager = IncidentManager()
     suppressed_total = 0
@@ -200,6 +207,16 @@ def replay_camera(
     )
 
 
+class _ReplayWindow:
+    """Mutable per-frame window gate matching the runtime's evaluated window."""
+
+    def __init__(self) -> None:
+        self.active = False
+
+    def contains(self, _: datetime) -> bool:
+        return self.active
+
+
 @dataclass(frozen=True, slots=True)
 class ReplayTraceFrame:
     """One resampled V2 replay frame; invalid rows represent a PTS gap."""
@@ -248,33 +265,42 @@ def replay(
     switch_total = 0
     previous_live_ids: set[int] = set()
     decider: Decider | None = None
-    initialized = False
+    window = _ReplayWindow()
+
+    def new_decider() -> Decider:
+        context = CameraModuleContext(
+            camera_id=camera_id,
+            facility_id=facility_id,
+            shared_components=shared_components,
+            camera_components={},
+            detection_window=window if module_id == "bed_exit" else None,
+            clock=clock,
+            diagnostics=None,
+            policy=policy,
+        )
+        return definition.create_camera_module(context).decider
+
     for frame in replay_trace_frames(rows):
-        if not initialized:
-            initialized = True
-            context = CameraModuleContext(
-                camera_id=camera_id,
-                facility_id=facility_id,
-                shared_components=shared_components,
-                camera_components={},
-                detection_window=None,
-                clock=clock,
-                diagnostics=None,
-                policy=policy,
-            )
-            decider = definition.create_camera_module(context).decider
+        if decider is None or (frame.row is not None and frame.row.source_event == "open"):
+            decider = new_decider()
         assert decider is not None
+        if frame.row is not None:
+            window.active = frame.row.night_window_active
         decision_input = replay_trace_to_decision_input(
             frame.row, pts_ns=frame.pts_ns, seq=frame.seq
         )
-        raw_events = decider.update(decision_input)
+        raw_events = (
+            ()
+            if frame.row is not None and frame.row.source_event == "lost"
+            else decider.update(decision_input)
+        )
         events, suppressed = _admit_events(incident_manager, raw_events)
         suppressed_total += suppressed
         if frame.row is not None:
             live_ids = {
                 track.track_id
                 for track in frame.row.tracks
-                if track.lifecycle in ("new", "tracked")
+                if track.lifecycle in ("new", "tracked", "shadow")
             }
             switch_total += sum(
                 track.lifecycle == "new" and bool(previous_live_ids - live_ids)

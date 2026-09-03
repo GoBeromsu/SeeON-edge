@@ -92,7 +92,7 @@ def test_replay_requires_relay_token_and_rejects_malformed_body() -> None:
         server.stop()
 
 
-def test_replay_returns_deterministic_result_without_a_fall_model_for_bed_exit() -> None:
+def test_legacy_replay_surfaces_tracker_liveness_non_reproducibility() -> None:
     server = MjpegServer(LatestFrameStore(), MjpegServerConfig(port=0, probe_token=_TOKEN))
     server.start()
     base = f"http://127.0.0.1:{server.port}"
@@ -101,7 +101,8 @@ def test_replay_returns_deterministic_result_without_a_fall_model_for_bed_exit()
             result = json.loads(response.read())
     finally:
         server.stop()
-    assert result["reproducible"] is True
+    assert result["reproducible"] is False
+    assert result["non_reproducible_reason"] == "legacy-trace-liveness"
     assert result["event_count"] == 0
     assert result["frames"][0]["analysis_trace_id"] == "a" * 64
 
@@ -201,9 +202,11 @@ def test_packaged_replay_command_posts_without_persisting(
     finally:
         server.stop()
     printed = json.loads(capsys.readouterr().out)
-    assert status == 0
-    assert printed["reproducible"] is True
-    assert printed["event_count"] == 0
+    assert status == 2
+    assert printed == {
+        "detail": "worker refused incomplete replay input",
+        "status": "refused",
+    }
     _assert_no_replay_tables(database)
 
 

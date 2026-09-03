@@ -236,23 +236,28 @@ def _client(tmp_path: Path, store: ArtifactReceiptStore) -> TestClient:
 
 
 def _media(
-    tmp_path: Path, data: bytes, *, event_refs: list[str] | None = None
+    tmp_path: Path,
+    data: bytes,
+    *,
+    event_refs: list[str] | None = None,
+    clip_id: str = "clip-1",
+    event_id: str = "event-1",
 ) -> Path:
-    path = tmp_path / "clip-store" / "clips" / "clip-1" / "clip.mp4"
+    path = tmp_path / "clip-store" / "clips" / clip_id / "clip.mp4"
     path.parent.mkdir(parents=True)
     path.write_bytes(data)
     (path.parent / "manifest.json").write_text(
         json.dumps(
             {
-                "clip_id": "clip-1",
+                "clip_id": clip_id,
                 "camera_id": "camera-1",
-                "event_ref": "event-1",
+                "event_ref": event_id,
                 **({"event_refs": event_refs} if event_refs is not None else {}),
                 "event_type": "fall",
                 "started_at": "2026-07-06T00:00:00Z",
                 "duration_s": 1.0,
                 "codec": "h264",
-                "path": "clips/clip-1",
+                "path": f"clips/{clip_id}",
                 "video_available": True,
                 "finalized": True,
             }
@@ -373,20 +378,39 @@ def test_missing_manifest_incident_rolls_back_all_receipt_projection(tmp_path: P
         ).fetchone() == ("OPEN",)
 
 
-def test_primary_artifact_id_accepts_maximum_legal_inputs() -> None:
+def test_primary_artifact_id_accepts_maximum_legal_inputs_via_public_receipt_path(
+    tmp_path: Path,
+) -> None:
     clip_id = "c" * 128
     edge_event_id = "e" * 128
-
-    artifact_id = "primary:" + hashlib.sha256(
-        (clip_id + "\x1f" + edge_event_id).encode()
-    ).hexdigest()[:32]
-
-    assert artifact_id.startswith("primary:")
-    assert len(artifact_id) == 40
-    assert artifact_id == (
-        "primary:"
-        + hashlib.sha256((clip_id + "\x1f" + edge_event_id).encode()).hexdigest()[:32]
+    data = b"verified video"
+    _media(tmp_path, data, clip_id=clip_id, event_id=edge_event_id)
+    database = tmp_path / "edge.sqlite3"
+    bootstrap_database(database)
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            """
+            INSERT INTO incidents (
+                incident_id, edge_event_id, facility_id, camera_id, event_type, probability,
+                detected_at, lifecycle_state, provenance_state, provenance_missing_reason,
+                review_version, revision, created_at, updated_at
+            ) VALUES (?, ?, 'facility-1', 'camera-1', 'fall', 0.8,
+                      '2026-07-06T00:00:00Z', 'OPEN', 'MISSING', 'NOT_RECORDED',
+                      0, 1, '2026-07-06T00:00:00Z', '2026-07-06T00:00:00Z')
+            """,
+            ("incident-max-input", edge_event_id),
+        )
+    CompactArtifactReceiptStore(database, tmp_path / "clip-store").commit(
+        _receipt(data, artifact_id=clip_id)
     )
+    with sqlite3.connect(database) as connection:
+        artifact_id = connection.execute(
+            "SELECT artifact_id FROM artifacts WHERE kind = 'PRIMARY_CLIP'"
+        ).fetchone()
+    # Generated once with hashlib.sha256(
+    #     ("c" * 128 + "\x1f" + "e" * 128).encode()
+    # ).hexdigest()[:32].
+    assert artifact_id == ("primary:0fb0648ada8974a9693610ced3a5e6f1",)
 
 
 def test_compact_receipt_replay_keeps_one_stable_digest_artifact(tmp_path: Path) -> None:

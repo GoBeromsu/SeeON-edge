@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import asdict, dataclass
+from math import isfinite
 from typing import Literal
 
 REPLAY_TRACE_VERSION = "replay-trace-v2"
@@ -30,6 +31,9 @@ class ReplayTrack:
             or any(len(point) != 3 for point in self.keypoints)
         ):
             raise ValueError("track requires bbox5 and COCO-17 keypoints")
+        _unit_box(self.bbox)
+        for point in self.keypoints:
+            _unit_coordinates(point)
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,18 +56,64 @@ class ReplayRow:
     bed_polygon_id: str | None
     bed_polygon: tuple[tuple[float, float], ...] | None
     night_window_active: bool
+    frame_width: int
+    frame_height: int
 
     def __post_init__(self) -> None:
-        if not self.camera_id or self.pts_ns < 0 or self.epoch < 0:
+        if any(
+            isinstance(value, bool) or not isinstance(value, int) or value <= 0
+            for value in (self.frame_width, self.frame_height)
+        ):
+            raise ValueError("frame_width and frame_height must be positive integers")
+        if (
+            not isinstance(self.camera_id, str)
+            or not self.camera_id
+            or isinstance(self.pts_ns, bool)
+            or not isinstance(self.pts_ns, int)
+            or isinstance(self.epoch, bool)
+            or not isinstance(self.epoch, int)
+            or self.pts_ns < 0
+            or self.epoch < 0
+        ):
             raise ValueError("camera_id and non-negative pts_ns/epoch are required")
         if self.source_event not in ("open", "frame", "reconnect", "lost"):
             raise ValueError("invalid source_event")
         if self.source not in ("legacy-association", "nvdcf"):
             raise ValueError("invalid source")
-        if self.bed_polygon is not None and (
-            len(self.bed_polygon) < 3 or any(len(point) != 2 for point in self.bed_polygon)
+        if (self.bed_polygon_id is None) != (self.bed_polygon is None):
+            raise ValueError("bed_polygon_id must be present exactly when bed_polygon is present")
+        if self.bed_polygon_id is not None and (
+            not isinstance(self.bed_polygon_id, str) or not self.bed_polygon_id
         ):
+            raise ValueError("invalid bed_polygon_id")
+        if self.bed_polygon is not None and len(self.bed_polygon) < 3:
             raise ValueError("bed_polygon must contain at least three xy points")
+        if self.bed_polygon is not None:
+            for point in self.bed_polygon:
+                if len(point) != 2:
+                    raise ValueError("bed_polygon must contain at least three xy points")
+                _unit_coordinates(point)
+        if not isinstance(self.night_window_active, bool):
+            raise TypeError("night_window_active must be boolean")
+        if len({track.track_id for track in self.tracks}) != len(self.tracks):
+            raise ValueError("track_id values must be unique per row")
+
+
+def _unit_box(box: tuple[float, float, float, float, float]) -> None:
+    _unit_coordinates(box)
+    if box[0] > box[2] or box[1] > box[3]:
+        raise ValueError("bbox corners must be ordered")
+
+
+def _unit_coordinates(values: tuple[float, ...]) -> None:
+    if any(
+        isinstance(value, bool)
+        or not isinstance(value, float)
+        or not isfinite(value)
+        or not 0.0 <= value <= 1.0
+        for value in values
+    ):
+        raise ValueError("coordinates and confidence must be finite unit floats")
 
 
 def encode_jsonl(header: ReplayTraceHeader, rows: list[ReplayRow]) -> str:

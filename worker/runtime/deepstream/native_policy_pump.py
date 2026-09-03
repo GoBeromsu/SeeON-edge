@@ -6,6 +6,7 @@ import logging
 import threading
 import time
 from collections import deque
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Protocol, final, runtime_checkable
 
@@ -36,6 +37,7 @@ class NativeDiagnostics(Protocol):
     def record_native_detection_attempt(self, camera_id: str) -> None: ...
     def record_track_id_switch(self, camera_id: str) -> None: ...
     def record_bed_polygon_source(self, camera_id: str, source: str) -> None: ...
+    def record_replay_trace_write_failure(self, camera_id: str) -> None: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -50,6 +52,8 @@ class NativePolicyContext:
     bed_interval: int
     canary_telemetry: NativeCanaryTelemetry | None = None
     replay_trace: ReplayTraceWriter | None = None
+    # G7: composition supplies the evaluated bed-exit detection window.
+    night_window_active: Callable[[], bool] | None = None
 
 
 @final
@@ -68,14 +72,17 @@ class NativePolicyPump:
         self._bed_interval = context.bed_interval
         self._canary_telemetry = context.canary_telemetry
         self._replay_trace = context.replay_trace
+        self._night_window_active = context.night_window_active
         self._stop = threading.Event()
         self._fps: deque[float] = deque()
         self.processed_count = 0
         self.failure_count = 0
         self._trace_epoch: tuple[int, int] | None = None
         self._trace_tracks: dict[int, ReplayTrack] = {}
-        self._trace_misses: dict[int, int] = {}
         self._live_track_misses: dict[int, int] = {}
+        self._trace_source_lost = False
+        self._trace_dims: tuple[int, int] = (1, 1)
+        self._trace_write_failure_logged = False
 
     @property
     def camera_id(self) -> str:
@@ -117,6 +124,7 @@ class NativePolicyPump:
             try:
                 frame = self._metadata.wait_accepted(token, timeout_sec=0.5)
             except TimeoutError:
+                self._capture_source_lost()
                 self._rebind_if_source_was_rebuilt()
                 token = AcceptanceToken(self._binding, token.native_publish_sequence)
                 continue
@@ -197,6 +205,7 @@ class NativePolicyPump:
             track_ids=resolved_track_ids,
         )
         self._record_track_id_switches(resolved_track_ids)
+        self._record_bed_polygon_source(metadata)
         self._capture_replay_row(metadata, boxes, resolved_track_ids)
         events = self._decision.update(decision_input)
         trigger = NativeEvidenceTrigger(
@@ -249,6 +258,19 @@ class NativePolicyPump:
         boxes: tuple[BoundingBox, ...],
         track_ids: tuple[int, ...],
     ) -> None:
+        """Keep best-effort trace persistence outside the frame-loop contract."""
+        try:
+            self._capture_replay_row_unchecked(metadata, boxes, track_ids)
+        except (OSError, ValueError, RuntimeError):
+            self._diagnostics.record_replay_trace_write_failure(self.camera_id)
+            self._log_trace_write_failure()
+
+    def _capture_replay_row_unchecked(
+        self,
+        metadata: MetadataFrame,
+        boxes: tuple[BoundingBox, ...],
+        track_ids: tuple[int, ...],
+    ) -> None:
         if self._replay_trace is None:
             return
         frame = metadata.frame
@@ -258,11 +280,10 @@ class NativePolicyPump:
             if self._trace_epoch is None
             else "reconnect"
             if current_epoch != self._trace_epoch
-            else "lost"
-            if not track_ids
             else "frame"
         )
         self._trace_epoch = current_epoch
+        self._trace_source_lost = False
         poses = frame.human_pose.poses
         current: dict[int, ReplayTrack] = {}
         for index, (track_id, box) in enumerate(zip(track_ids, boxes, strict=True)):
@@ -270,41 +291,29 @@ class NativePolicyPump:
             current[track_id] = ReplayTrack(
                 track_id=track_id,
                 lifecycle="new" if track_id not in self._trace_tracks else "tracked",
-                bbox=(box.x1, box.y1, box.x2, box.y2, box.confidence),
-                keypoints=tuple((point.x, point.y, point.score) for point in pose),
+                bbox=_unit_bbox(box, metadata.source_width, metadata.source_height),
+                keypoints=tuple(
+                    (point.x / metadata.source_width, point.y / metadata.source_height, point.score)
+                    for point in pose
+                ),
             )
-            self._trace_misses.pop(track_id, None)
-        lost: list[ReplayTrack] = []
+        non_observed: list[ReplayTrack] = []
         for track_id, previous in tuple(self._trace_tracks.items()):
             if track_id in current:
                 continue
-            misses = self._trace_misses.get(track_id, 0) + 1
-            self._trace_misses[track_id] = misses
-            lost.append(
+            lifecycle = "shadow" if track_id in frame.association.live_track_ids else "lost"
+            non_observed.append(
                 ReplayTrack(
                     track_id=track_id,
-                    lifecycle="lost",
+                    lifecycle=lifecycle,
                     bbox=previous.bbox,
                     keypoints=previous.keypoints,
                 )
             )
-            if misses > 30:
+            if lifecycle == "lost":
                 self._trace_tracks.pop(track_id, None)
-                self._trace_misses.pop(track_id, None)
         self._trace_tracks.update(current)
         polygon = _persisted_polygon(self._scene)
-        polygon_source = (
-            "persisted"
-            if polygon is not None
-            else "native-per-frame"
-            if any(region.polygon is not None for region in frame.bed_region.regions)
-            else "none"
-        )
-        self._diagnostics.record_bed_polygon_source(
-            self.camera_id,
-            polygon_source,
-        )
-        # G7 owns exposing the evaluated bed-exit detection window at this seam.
         self._replay_trace.append(
             ReplayRow(
                 camera_id=self.camera_id,
@@ -312,11 +321,58 @@ class NativePolicyPump:
                 epoch=frame.identity.stream_epoch,
                 source_event=source_event,
                 source="legacy-association",
-                tracks=tuple(current.values()) + tuple(lost),
+                tracks=tuple(current.values()) + tuple(non_observed),
                 bed_polygon_id="persisted" if polygon is not None else None,
                 bed_polygon=polygon,
-                night_window_active=False,
+                night_window_active=(
+                    False if self._night_window_active is None else self._night_window_active()
+                ),
+                frame_width=metadata.source_width,
+                frame_height=metadata.source_height,
             )
+        )
+        self._trace_dims = (metadata.source_width, metadata.source_height)
+
+    def _capture_source_lost(self) -> None:
+        if self._replay_trace is None or self._trace_epoch is None or self._trace_source_lost:
+            return
+        self._trace_source_lost = True
+        try:
+            self._replay_trace.append(
+                ReplayRow(
+                    camera_id=self.camera_id,
+                    pts_ns=0,
+                    epoch=self._trace_epoch[0],
+                    source_event="lost",
+                    source="legacy-association",
+                    tracks=(),
+                    bed_polygon_id=None,
+                    bed_polygon=None,
+                    night_window_active=False,
+                    frame_width=self._trace_dims[0],
+                    frame_height=self._trace_dims[1],
+                )
+            )
+        except (OSError, ValueError, RuntimeError):
+            self._diagnostics.record_replay_trace_write_failure(self.camera_id)
+            self._log_trace_write_failure()
+
+    def _log_trace_write_failure(self) -> None:
+        if self._trace_write_failure_logged:
+            return
+        self._trace_write_failure_logged = True
+        LOGGER.warning("replay trace write failed: camera_id=%s", self.camera_id, exc_info=True)
+
+    def _record_bed_polygon_source(self, frame: MetadataFrame) -> None:
+        polygon = _persisted_polygon(self._scene)
+        regions = frame.frame.bed_region.regions
+        self._diagnostics.record_bed_polygon_source(
+            self.camera_id,
+            "persisted"
+            if polygon is not None
+            else "native-per-frame"
+            if any(region.polygon is not None for region in regions)
+            else "none",
         )
 
 
@@ -325,5 +381,18 @@ def _persisted_polygon(scene: SceneState) -> tuple[tuple[float, float], ...] | N
         return None
     polygon = scene.persisted_bed_regions[0].polygon
     return None if polygon is None else tuple((float(x), float(y)) for x, y in polygon)
+
+
+def _unit_bbox(
+    box: BoundingBox, width: int, height: int
+) -> tuple[float, float, float, float, float]:
+    return (
+        box.x1 / width,
+        box.y1 / height,
+        box.x2 / width,
+        box.y2 / height,
+        box.confidence,
+    )
+
 
 __all__ = ["NativeEventSink", "NativePolicyContext", "NativePolicyPump"]

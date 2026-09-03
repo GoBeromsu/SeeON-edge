@@ -13,8 +13,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sqlite3
+import tempfile
 from datetime import datetime
 from pathlib import Path
 
@@ -32,7 +34,7 @@ def _clip_index(clip_store: Path) -> dict[str, dict[str, object]]:
     unavailable: list[str] = []
     clips_dir = clip_store / "clips"
     if not clips_dir.is_dir():
-        return index
+        raise CorpusValidationError(f"missing canonical clips tree: {clips_dir}")
     for manifest_path in sorted(clips_dir.glob("*/manifest.json")):
         clip_id = manifest_path.parent.name
         if manifest_path.parent.is_symlink() or manifest_path.is_symlink():
@@ -71,6 +73,7 @@ def _clip_index(clip_store: Path) -> dict[str, dict[str, object]]:
         record = {
             "clip_id": clip_id,
             "clip_path": str(clip_path),
+            "clip_started_at": manifest.get("started_at"),
             "duration_s": manifest.get("duration_s"),
         }
         for ref in refs:
@@ -90,17 +93,33 @@ def _clip_index(clip_store: Path) -> dict[str, dict[str, object]]:
 
 def export(snapshot: Path, clip_store: Path, output: Path) -> tuple[int, int, float]:
     """Write the corpus and return (incidents, incidents_with_clip, alerts/hour)."""
-    connection = sqlite3.connect(f"file:{snapshot}?mode=ro", uri=True)
-    connection.row_factory = sqlite3.Row
-    rows = connection.execute(
-        "SELECT incident_id, edge_event_id, camera_id, event_type, detected_at "
-        "FROM incidents ORDER BY detected_at"
-    ).fetchall()
+    with sqlite3.connect(f"file:{snapshot}?mode=ro", uri=True) as connection:
+        connection.row_factory = sqlite3.Row
+        rows = connection.execute(
+            "SELECT incident_id, edge_event_id, camera_id, event_type, detected_at "
+            "FROM incidents ORDER BY detected_at"
+        ).fetchall()
     clips = _clip_index(clip_store)
     records: list[dict[str, object]] = []
+    times: list[datetime] = []
     with_clip = 0
     for row in rows:
-        clip = clips.get(str(row["edge_event_id"]))
+        detected_at = row["detected_at"]
+        if not isinstance(detected_at, str) or not detected_at:
+            raise CorpusValidationError("incident has missing detected_at timestamp")
+        try:
+            times.append(_parse_time(detected_at))
+        except ValueError as exc:
+            raise CorpusValidationError(f"invalid detected_at timestamp: {detected_at}") from exc
+        required_values = (
+            row["incident_id"],
+            row["edge_event_id"],
+            row["camera_id"],
+            row["event_type"],
+        )
+        if not all(isinstance(value, str) and value for value in required_values):
+            raise CorpusValidationError("incident contains invalid required fields")
+        clip = clips.get(row["edge_event_id"])
         if clip is not None:
             with_clip += 1
         records.append(
@@ -112,14 +131,15 @@ def export(snapshot: Path, clip_store: Path, output: Path) -> tuple[int, int, fl
             }
         )
     output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(
-        "".join(json.dumps(record, separators=(",", ":")) + "\n" for record in records),
-        encoding="utf-8",
-    )
-    times = [str(row["detected_at"]) for row in rows if row["detected_at"]]
+    with tempfile.NamedTemporaryFile(
+        mode="w", encoding="utf-8", dir=output.parent, prefix=f".{output.name}.", delete=False
+    ) as handle:
+        temporary = Path(handle.name)
+        handle.writelines(json.dumps(record, separators=(",", ":")) + "\n" for record in records)
+    os.replace(temporary, output)
     if len(times) < 2:
         return len(records), with_clip, 0.0
-    span = (_parse_time(times[-1]) - _parse_time(times[0])).total_seconds() / 3600
+    span = (times[-1] - times[0]).total_seconds() / 3600
     return len(records), with_clip, len(records) / span if span else 0.0
 
 

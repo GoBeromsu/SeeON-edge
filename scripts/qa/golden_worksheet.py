@@ -13,11 +13,17 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import sys
 from collections import defaultdict
 from datetime import datetime
+from importlib import import_module
 from pathlib import Path
 
-EPISODE_HORIZON_SEC = {"fall": 120, "bed_exit": 60}
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+EPISODE_HORIZON_SEC = import_module("tests_support.golden_episodes").EPISODE_HORIZON_SEC
 LABELS = ("real", "false", "unsure")
 
 
@@ -40,6 +46,8 @@ def episodes(rows: list[dict[str, object]]) -> list[dict[str, object]]:
                 last["edge_event_ids"] = f"{last['edge_event_ids']} {row['edge_event_id']}"
                 if not last.get("clip_path") and row.get("clip_path"):
                     last["clip_path"] = row["clip_path"]
+                    last["clip_started_at"] = row.get("clip_started_at")
+                    last["duration_s"] = row.get("duration_s")
                 continue
         merged.append(
             {
@@ -51,6 +59,8 @@ def episodes(rows: list[dict[str, object]]) -> list[dict[str, object]]:
                 "incident_count": 1,
                 "edge_event_ids": str(row["edge_event_id"]),
                 "clip_path": row.get("clip_path"),
+                "clip_started_at": row.get("clip_started_at"),
+                "duration_s": row.get("duration_s"),
             }
         )
     return merged
@@ -65,7 +75,16 @@ def _spread(items: list[dict[str, object]], count: int) -> list[dict[str, object
     return [items[int(index * step)] for index in range(count)]
 
 
-def build(manifest: Path, output: Path, limit: int = 100) -> int:
+def _roster(value: str) -> tuple[str, ...]:
+    path = Path(value)
+    raw = path.read_text(encoding="utf-8") if "," not in value and path.is_file() else value
+    roster = tuple(camera.strip() for camera in raw.replace("\n", ",").split(",") if camera.strip())
+    if not roster or len(set(roster)) != len(roster):
+        raise ValueError("roster must contain unique camera ids")
+    return roster
+
+
+def build(manifest: Path, output: Path, limit: int, roster: tuple[str, ...]) -> int:
     buckets: dict[tuple[str, str], list[dict[str, object]]] = defaultdict(list)
     for line in manifest.read_text(encoding="utf-8").splitlines():
         row = json.loads(line)
@@ -78,12 +97,14 @@ def build(manifest: Path, output: Path, limit: int = 100) -> int:
     for items in candidates.values():
         for episode in items:
             by_camera[str(episode["camera_id"])].append(episode)
+    shortfall = [camera for camera in roster if len(by_camera[camera]) < 5]
+    if shortfall:
+        raise ValueError(f"roster cameras have fewer than five candidates: {', '.join(shortfall)}")
     selected = []
     # A golden corpus is only representative when every included camera has
     # at least five independently reviewable episodes.
-    for _camera_id, items in sorted(by_camera.items()):
-        if len(items) >= 5:
-            selected.extend(_spread(items, 5))
+    for camera_id in roster:
+        selected.extend(_spread(by_camera[camera_id], 5))
     selected_ids = {str(episode["episode_id"]) for episode in selected}
     keys = sorted(key for key, items in candidates.items() if items)
     if keys:
@@ -109,6 +130,9 @@ def build(manifest: Path, output: Path, limit: int = 100) -> int:
     fieldnames = [
         "episode_id",
         "clip_path",
+        "clip_started_at",
+        "duration_s",
+        "camera_roster",
         "thumbnail_path",
         "camera_id",
         "event_type",
@@ -127,6 +151,7 @@ def build(manifest: Path, output: Path, limit: int = 100) -> int:
                 {
                     **{name: episode.get(name, "") for name in fieldnames},
                     "thumbnail_path": str(Path(clip).with_name("thumbnail.jpg")),
+                    "camera_roster": ",".join(roster),
                     "label": "",
                 }
             )
@@ -140,8 +165,15 @@ def main() -> int:
     parser.add_argument("--manifest", type=Path, required=True)
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--limit", type=int, default=100)
+    parser.add_argument(
+        "--roster", required=True, help="Comma-separated camera ids or a roster file."
+    )
     args = parser.parse_args()
-    print(f"episodes={build(args.manifest, args.out, args.limit)}")
+    try:
+        print(f"episodes={build(args.manifest, args.out, args.limit, _roster(args.roster))}")
+    except (OSError, ValueError) as exc:
+        print(exc)
+        return 1
     return 0
 
 

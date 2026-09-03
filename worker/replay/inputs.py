@@ -72,11 +72,13 @@ def replay_trace_to_decision_input(
 ) -> DecisionInput:
     """Build a decider input from one declared replay-trace-v2 frame.
 
-    V2 stores normalized pose/bbox56 rows, so replay uses a fixed virtual
-    1000x1000 frame.  Feature math receives the same normalized geometry
-    without requiring source pixels or an inference adapter.
+    V2 stores unit coordinates plus the real source frame size, so replay
+    projects every fact back into the exact pixel space production observed:
+    integer boxes and polygons for the bed rasteriser, float keypoints for the
+    pose head. pose+bbox56 rows therefore round-trip byte for byte.
     """
-    width = height = 1000
+    width = row.frame_width if row is not None else 1
+    height = row.frame_height if row is not None else 1
     boxes = []
     poses = []
     track_ids = []
@@ -85,20 +87,20 @@ def replay_trace_to_decision_input(
         x1, y1, x2, y2, confidence = track.bbox
         boxes.append(
             BoundingBox(
-                round(x1),
-                round(y1),
-                round(x2),
-                round(y2),
+                round(x1 * width),
+                round(y1 * height),
+                round(x2 * width),
+                round(y2 * height),
                 confidence=confidence,
             )
         )
-        poses.append(track.keypoints)
+        poses.append(tuple((x * width, y * height, score) for x, y, score in track.keypoints))
         track_ids.append(track.track_id)
         if track.lifecycle in ("new", "tracked"):
             live_ids.append(track.track_id)
     bed_boxes = ()
     if row is not None and row.bed_polygon is not None:
-        polygon = tuple((round(x), round(y)) for x, y in row.bed_polygon)
+        polygon = tuple((round(x * width), round(y * height)) for x, y in row.bed_polygon)
         xs, ys = zip(*polygon, strict=True)
         bed_boxes = (
             BoundingBox(

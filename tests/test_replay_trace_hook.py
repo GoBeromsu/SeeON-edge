@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import hashlib
 import uuid
 from pathlib import Path
 
-from contracts.replay_trace import ReplayTraceHeader, decode_jsonl, encode_jsonl
+from contracts.replay_trace import ReplayRow, ReplayTraceHeader, decode_jsonl, encode_jsonl
 from worker.native.deepstream.ipc import MetadataFrame
 from worker.native.deepstream.metadata import LatestMetadataSlot, SourceBinding
 from worker.pipeline.decision import EventAggregator, IncidentManager
@@ -39,10 +40,16 @@ class _Sink:
         raise AssertionError(f"unexpected event {event!r} {trigger!r}")
 
 
-def _metadata(*, epoch: int, track_id: int, generation: int) -> MetadataFrame:
+def _metadata(
+    *, epoch: int, track_id: int, generation: int, live_track_ids: tuple[int, ...] | None = None
+) -> MetadataFrame:
     identity = PerceptionFrameIdentity(str(_BOOT), "camera-a", epoch, 1, 2_000_000_000)
     association = AssociationResult(
-        "legacy-greedy-bbox-iou.v1", (track_id,), (0,), identity, live_track_ids=(track_id,)
+        "legacy-greedy-bbox-iou.v1",
+        (track_id,),
+        (0,),
+        identity,
+        live_track_ids=(track_id,) if live_track_ids is None else live_track_ids,
     )
     pose = tuple(Keypoint(20, 30, 0.9) for _ in range(17))
     return MetadataFrame(
@@ -86,7 +93,8 @@ def test_native_pump_captures_epoch_rows_and_writer_rotates(tmp_path: Path) -> N
     pump._process(_metadata(epoch=4, track_id=7, generation=3))  # noqa: SLF001
     pump._process(_metadata(epoch=5, track_id=8, generation=4))  # noqa: SLF001
 
-    _, rows = decode_jsonl((tmp_path / "camera-a.jsonl").read_text())
+    trace_path = tmp_path / f"{hashlib.sha256(b'camera-a').hexdigest()[:16]}.jsonl"
+    _, rows = decode_jsonl(trace_path.read_text())
     assert [row.source_event for row in rows] == ["open", "reconnect"]
     assert [track.lifecycle for track in rows[0].tracks] == ["new"]
     assert rows[1].tracks[0].lifecycle == "new"
@@ -108,9 +116,49 @@ def test_native_pump_captures_epoch_rows_and_writer_rotates(tmp_path: Path) -> N
     bounded = ReplayTraceWriter(tmp_path / "bounded", "camera-a", max_bytes=header_size + row_size)
     assert bounded.append(row)
     assert bounded.append(row)
-    assert (tmp_path / "bounded" / "camera-a.jsonl.1").exists()
+    bounded_path = tmp_path / "bounded" / f"{hashlib.sha256(b'camera-a').hexdigest()[:16]}.jsonl"
+    assert bounded_path.with_suffix(".jsonl.1").exists()
     assert bounded.written_rows_total == 2
     assert bounded.dropped_rows_total == 0
     dropping = ReplayTraceWriter(tmp_path / "dropping", "camera-a", max_bytes=1)
     assert not dropping.append(row)
     assert dropping.dropped_rows_total == 1
+
+
+def test_writer_hashes_untrusted_camera_ids_beneath_root(tmp_path: Path) -> None:
+    row = ReplayRow("camera", 0, 0, "frame", "legacy-association", (), None, None, False, 640, 360)
+    for camera_id in ("a/b", "../outside", "/absolute", "카메라/../유니코드"):
+        writer = ReplayTraceWriter(tmp_path, camera_id)
+        assert writer.append(row)
+        expected = tmp_path / f"{hashlib.sha256(camera_id.encode()).hexdigest()[:16]}.jsonl"
+        assert expected.exists()
+        assert expected.resolve().is_relative_to(tmp_path.resolve())
+
+
+def test_trace_lifecycle_uses_association_live_ids_for_shadow_and_lost(tmp_path: Path) -> None:
+    binding = SourceBinding(str(_BOOT), str(_CHILD), "camera-a", 3, 4, "seeon-perception-v1")
+    writer = ReplayTraceWriter(tmp_path, "camera-a")
+    pump = NativePolicyPump(
+        binding,
+        NativePolicyContext(
+            LatestMetadataSlot(),
+            _Control(),  # pyright: ignore[reportArgumentType]
+            SceneState("camera-a"),
+            EventAggregator((), IncidentManager(30.0)),
+            _Sink(),  # pyright: ignore[reportArgumentType]
+            AlertEvidenceAttacher({}),
+            WorkerDiagnostics(),
+            90,
+            replay_trace=writer,
+        ),
+    )
+    pump._process(_metadata(epoch=4, track_id=7, generation=3))  # noqa: SLF001
+    pump._process(  # noqa: SLF001
+        _metadata(epoch=4, track_id=8, generation=3, live_track_ids=(7, 8))
+    )
+    pump._process(_metadata(epoch=4, track_id=8, generation=3, live_track_ids=(8,)))  # noqa: SLF001
+
+    path = tmp_path / f"{hashlib.sha256(b'camera-a').hexdigest()[:16]}.jsonl"
+    _, rows = decode_jsonl(path.read_text())
+    assert [track.lifecycle for track in rows[1].tracks] == ["new", "shadow"]
+    assert [track.lifecycle for track in rows[2].tracks] == ["tracked", "lost"]
