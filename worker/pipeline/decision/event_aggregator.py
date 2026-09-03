@@ -18,7 +18,9 @@ class EventAggregator:
     deciders: tuple[Decider, ...]
     incidents: IncidentManager
     monotonic: Callable[[], float] = time.monotonic
-    _producers: dict[str, Decider] = field(default_factory=dict, init=False)
+    _producers: dict[str, tuple[Decider, BusinessEvent]] = field(
+        default_factory=dict, init=False
+    )
 
     def update(self, input_value: DecisionInput) -> tuple[BusinessEvent, ...]:
         produced: list[tuple[BusinessEvent, Decider]] = [
@@ -45,7 +47,11 @@ class EventAggregator:
             admitted = self.incidents.admit(event, now_sec=now_sec)
             if admitted is None:
                 continue
-            self._producers[str(admitted.identity)] = decider
+            # Admission replaces the source episode identity with the durable
+            # edge identity. Keep both: IncidentManager.release needs the
+            # latter to clear its cooldown, while the producer's lifecycle
+            # authority recognizes only the former.
+            self._producers[str(admitted.identity)] = (decider, event)
             emitted.append(admitted)
         return tuple(emitted)
 
@@ -61,7 +67,7 @@ class EventAggregator:
         """
         self.incidents.release(event)
         producer = self._producers.pop(str(event.identity), None)
-        for decider in () if producer is None else (producer,):
+        for decider, source_event in () if producer is None else (producer,):
             # Reach through wrappers. Production wraps deciders (see
             # _WindowGatedDecider), and a plain getattr on the wrapper returns
             # None, so the release would silently never arrive.
@@ -75,7 +81,7 @@ class EventAggregator:
                 target = getattr(target, "decider", None)
             if target is None:
                 continue
-            target.release_onset(event)
+            target.release_onset(source_event)
 
 
 def _event_order(event: BusinessEvent) -> tuple[str, ...]:

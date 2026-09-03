@@ -254,8 +254,8 @@ def _required_extractor_names(domain_names: Sequence[str]) -> tuple[str, ...]:
 def _persisted_bed_regions(camera: CameraRuntimeConfig) -> tuple[BoundingBox, ...]:
     """Convert a pulled ``bed_zone_polygon`` into the one persisted bed region.
 
-    Empty when the camera has no persisted polygon -- ``SceneState`` then
-    falls back to its existing live-segmentation cache unchanged.
+    Empty when the camera has no persisted polygon. Runtime bed-exit decisions
+    use only persisted regions; segmentation is on-demand recognition only.
     """
     polygon = camera.bed_zone_polygon
     if not polygon:

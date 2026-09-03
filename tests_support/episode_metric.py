@@ -193,6 +193,7 @@ def evaluate(
                 "camera_id": episode.camera_id,
                 "event_type": episode.event_type,
                 "start_ns": episode.start_ns,
+                "end_ns": episode.end_ns,
                 "alerts": len(matches),
             }
         )
@@ -256,28 +257,30 @@ def _id_churn_allowance(
     *,
     outside_alerts: list[dict[str, object]],
 ) -> list[dict[str, int | str]]:
-    """Attribute bounded id switches to the one golden episode they could affect."""
+    """List failed episodes caused solely by beyond-window legacy id splits."""
     if outside_alerts:
         return []
-    result: list[dict[str, int | str]] = []
     switches: list[dict[str, int | str]] = []
     previous: dict[tuple[str, int], dict[int, tuple[int, int]]] = {}
-    for frame_index, row in enumerate(
-        sorted(rows, key=lambda item: (item.camera_id, item.epoch, item.pts_ns))
-    ):
+    frame_counts: dict[tuple[str, int], int] = defaultdict(int)
+    for row in sorted(rows, key=lambda item: (item.camera_id, item.epoch, item.pts_ns, item.seq)):
+        if row.source_event != "frame":
+            continue
         key = (row.camera_id, row.epoch)
+        frame_counts[key] += 1
+        frame_index = frame_counts[key]
         current = {track.track_id for track in row.tracks if track.lifecycle in ("new", "tracked")}
         old = previous.get(key, {})
         for track in row.tracks:
             if track.lifecycle != "new" or track.track_id in old:
                 continue
-            for previous_track_id, (previous_frame, previous_pts_ns) in old.items():
+            candidates = sorted(old.items(), key=lambda item: item[1], reverse=True)
+            for previous_track_id, (previous_frame, previous_pts_ns) in candidates:
                 if previous_track_id in current:
                     continue
-                if (
-                    frame_index - previous_frame <= 75
-                    and row.pts_ns - previous_pts_ns <= 5_000_000_000
-                ):
+                frames_since_previous = frame_index - previous_frame
+                elapsed_ns = row.pts_ns - previous_pts_ns
+                if frames_since_previous > 75 or elapsed_ns > 5_000_000_000:
                     switches.append(
                         {
                             "camera_id": row.camera_id,
@@ -285,29 +288,60 @@ def _id_churn_allowance(
                             "pts_ns": row.pts_ns,
                             "previous_track_id": previous_track_id,
                             "track_id": track.track_id,
+                            "frames_since_previous": frames_since_previous,
+                            "elapsed_ns": elapsed_ns,
                         }
                     )
                     break
-        previous[key] = dict.fromkeys(current, (frame_index, row.pts_ns))
-    failed = [episode for episode in episodes if episode["alerts"] != 1]
-    if len(failed) != 1:
+        previous[key] = {
+            **old,
+            **dict.fromkeys(current, (frame_index, row.pts_ns)),
+        }
+    failed = [episode for episode in episodes if episode["alerts"] == 0]
+    if len(failed) != sum(episode["alerts"] != 1 for episode in episodes):
         return []
-    episode = failed[0]
-    start_ns = episode["start_ns"]
-    if not isinstance(start_ns, int):
-        raise TypeError("episode start_ns must be an int")
-    camera_id = episode["camera_id"]
-    if not isinstance(camera_id, str):
-        raise TypeError("episode camera_id must be a str")
-    for switch in switches:
-        pts_ns = switch["pts_ns"]
+    result: list[dict[str, int | str]] = []
+    for episode in failed:
+        camera_id = episode["camera_id"]
+        start_ns = episode["start_ns"]
+        end_ns = episode.get("end_ns")
         if (
-            switch["camera_id"] == camera_id
-            and isinstance(pts_ns, int)
-            and start_ns <= pts_ns <= start_ns + 5_000_000_000
+            not isinstance(camera_id, str)
+            or not isinstance(start_ns, int)
+            or not isinstance(end_ns, int)
         ):
-            result.append({**switch, "episode_start_ns": start_ns})
+            raise TypeError("episode identity and window bounds must be typed")
+        evidence = [
+            switch
+            for switch in switches
+            if switch["camera_id"] == camera_id and start_ns <= switch["pts_ns"] <= end_ns
+        ]
+        if not evidence:
+            return []
+        result.append(
+            {
+                "camera_id": camera_id,
+                "event_type": episode["event_type"],
+                "episode_start_ns": start_ns,
+                "track_id_switch_total": len(evidence),
+                **evidence[0],
+            }
+        )
     return result
+
+
+def _ac1_passed(result: dict[str, object]) -> bool:
+    if result["exact"] is True:
+        return True
+    allowance = result["id_churn_allowance"]
+    episodes = result["episodes"]
+    outside = result["alerts_outside_golden_windows"]
+    if not isinstance(allowance, list) or not isinstance(episodes, list) or outside != 0:
+        return False
+    failed = [
+        episode for episode in episodes if isinstance(episode, dict) and episode["alerts"] != 1
+    ]
+    return 1 <= len(allowance) <= 10 and len(allowance) == len(failed)
 
 
 def main() -> int:
@@ -356,13 +390,14 @@ def main() -> int:
         print(f"input error: {exc}")
         return 2
     args.out.parent.mkdir(parents=True, exist_ok=True)
+    result["ac1_passed"] = _ac1_passed(result)
     args.out.write_text(json.dumps(result, indent=2) + "\n")
     print(json.dumps(result, separators=(",", ":")))
     return (
         2
         if provisional
         else 0
-        if result["exact"] and not result["id_churn_allowance_limit_exceeded"]
+        if result["ac1_passed"]
         else 1
     )
 

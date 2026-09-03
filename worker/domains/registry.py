@@ -12,7 +12,12 @@ from datetime import datetime
 from types import MappingProxyType
 from typing import Literal, Protocol, cast, runtime_checkable
 
-from shared.detection_policies import BedExitPolicyV1, EffectivePolicy, FallPolicyV2
+from shared.detection_policies import (
+    FALL_POLICY_V2_DEFAULT,
+    BedExitPolicyV1,
+    EffectivePolicy,
+    FallPolicyV2,
+)
 from worker.domains.base import AuditContext, DomainAuditSnapshot
 from worker.domains.bed_exit import (
     BedExitConfig,
@@ -217,7 +222,9 @@ def _fall_v2(context: CameraModuleContext) -> FallV2DomainDecider:
     if not isinstance(resolved, FallPolicyV2):
         raise TypeError("fall.v2 requires a typed fall.policy.v2 effective policy")
     model = _shared_fall_model(context)
-    threshold, _source, _receipt = _effective_transition_threshold(model, context.policy)
+    threshold, _source, _receipt, _unapplied = _effective_transition_threshold(
+        model, context.policy
+    )
     identity = context.camera_components.get("episode-identity")
     if not isinstance(identity, tuple) or len(identity) != 3:
         raise TypeError("fall.v2 requires runtime boot and source identities")
@@ -243,11 +250,11 @@ def _fall_v2(context: CameraModuleContext) -> FallV2DomainDecider:
 
 def _effective_transition_threshold(
     model: object, effective_policy: EffectivePolicy
-) -> tuple[float, str, float | None]:
-    """Threshold precedence: promotion receipt, image default, then policy override.
+) -> tuple[float, str, float | None, float | None]:
+    """Use an eligible receipt, otherwise the image default (P1a-AC7).
 
-    A research-only bundle (``promotion_eligible`` false) never overrides the
-    owner-fixed policy default; its receipt value is still reported for audit.
+    Returns the effective threshold, its source, the receipt value seen, and any
+    operator override that was received but not applied.
     """
     policy = effective_policy.values
     if not isinstance(policy, FallPolicyV2):
@@ -255,9 +262,19 @@ def _effective_transition_threshold(
     receipt_threshold = model.receipt_threshold if isinstance(model, _ThresholdReceipt) else None
     promotion_eligible = model.promotion_eligible if isinstance(model, _ThresholdReceipt) else False
     if promotion_eligible and receipt_threshold is not None:
-        return receipt_threshold, "receipt", receipt_threshold
-    source = "default" if effective_policy.source == "image-default" else "policy"
-    return policy.transition_threshold, source, receipt_threshold
+        return receipt_threshold, "receipt", receipt_threshold, None
+    # P1a-AC7: receipt when eligible, else the image default. The image's own
+    # fall.policy.v2 default is that default; an operator facility/camera
+    # override is not yet authoritative for this threshold, so it is reported
+    # rather than applied.
+    if effective_policy.source == "image-default":
+        return policy.transition_threshold, "default", receipt_threshold, None
+    return (
+        FALL_POLICY_V2_DEFAULT.transition_threshold,
+        "default",
+        receipt_threshold,
+        policy.transition_threshold,
+    )
 
 
 def _fall_state(context: CameraModuleContext) -> object:
@@ -311,12 +328,15 @@ def _audit_snapshot(context: CameraModuleContext) -> DomainAuditSnapshot:
     effective_policy = context.policy
     if effective_policy is None or not isinstance(effective_policy.values, FallPolicyV2):
         raise TypeError("fall.v2 requires a typed fall.policy.v2 effective policy")
-    threshold, source, receipt_threshold = _effective_transition_threshold(model, effective_policy)
+    threshold, source, receipt_threshold, unapplied = _effective_transition_threshold(
+        model, effective_policy
+    )
     return DomainAuditSnapshot(
         model_version=model_version,
         operating_threshold=threshold,
         threshold_source=source,
         receipt_threshold=receipt_threshold,
+        unapplied_policy_threshold=unapplied,
     )
 
 

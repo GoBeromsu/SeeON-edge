@@ -431,24 +431,41 @@ def _churn_rows(*, switch_pts_ns: tuple[int, ...]) -> tuple[ReplayRow, ...]:
     return tuple(rows)
 
 
-def _failed_episode() -> list[dict[str, object]]:
-    return [{"camera_id": "fixture", "event_type": "fall", "start_ns": 0, "alerts": 0}]
+def _failed_episode(*, start_ns: int = 0, end_ns: int = 10_000_000_000) -> list[dict[str, object]]:
+    return [
+        {
+            "camera_id": "fixture",
+            "event_type": "fall",
+            "start_ns": start_ns,
+            "end_ns": end_ns,
+            "alerts": 0,
+        }
+    ]
 
 
-def test_id_churn_allowance_requires_a_switch_inside_the_episode_window() -> None:
+def test_id_churn_allowance_requires_a_switch_beyond_the_reassociation_window() -> None:
+    rows = (
+        replace(_row(0, "frame"), seq=1),
+        replace(
+            _row(5_000_000_001, "frame"),
+            seq=2,
+            tracks=(replace(_row(0, "frame").tracks[0], track_id=2, lifecycle="new"),),
+        ),
+    )
     allowance = _id_churn_allowance(
-        _churn_rows(switch_pts_ns=(4_999_999_999,)),
+        rows,
         _failed_episode(),
         outside_alerts=[],
     )
 
     assert allowance[0]["track_id"] == 2
     assert allowance[0]["episode_start_ns"] == 0
+    assert allowance[0]["track_id_switch_total"] == 1
 
 
-def test_id_churn_allowance_rejects_switch_outside_the_five_second_window() -> None:
+def test_id_churn_allowance_rejects_switch_inside_the_five_second_window() -> None:
     allowance = _id_churn_allowance(
-        _churn_rows(switch_pts_ns=(5_000_000_001,)),
+        _churn_rows(switch_pts_ns=(4_999_999_999,)),
         _failed_episode(),
         outside_alerts=[],
     )
@@ -456,7 +473,7 @@ def test_id_churn_allowance_rejects_switch_outside_the_five_second_window() -> N
     assert allowance == []
 
 
-def test_id_churn_allowance_rejects_unrelated_churn_when_another_episode_failed() -> None:
+def test_id_churn_allowance_rejects_an_unrelated_failure() -> None:
     allowance = _id_churn_allowance(
         _churn_rows(switch_pts_ns=(1_000_000_000,)),
         [
@@ -469,11 +486,71 @@ def test_id_churn_allowance_rejects_unrelated_churn_when_another_episode_failed(
     assert allowance == []
 
 
-def test_id_churn_allowance_reports_an_eleventh_case_for_a_failing_metric() -> None:
-    allowance = _id_churn_allowance(
-        _churn_rows(switch_pts_ns=tuple(1_000_000_000 + index for index in range(11))),
-        _failed_episode(),
-        outside_alerts=[],
+def _nonexact_result(*, affected: int, outside: int = 0) -> dict[str, object]:
+    episodes = [
+        {
+            "camera_id": "fixture",
+            "event_type": "fall",
+            "start_ns": index,
+            "end_ns": index,
+            "alerts": 0,
+        }
+        for index in range(affected)
+    ]
+    return {
+        "exact": False,
+        "episodes": episodes,
+        "alerts_outside_golden_windows": outside,
+        "id_churn_allowance": [
+            {
+                "camera_id": "fixture",
+                "event_type": "fall",
+                "episode_start_ns": index,
+                "track_id_switch_total": 1,
+            }
+            for index in range(affected)
+        ],
+        "id_churn_allowance_limit_exceeded": affected > 10,
+    }
+
+
+@pytest.mark.parametrize(("affected", "expected_status"), [(1, 0), (10, 0), (11, 1)])
+def test_metric_cli_applies_the_bounded_churn_residual_verdict(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, affected: int, expected_status: int
+) -> None:
+    monkeypatch.setattr(
+        episode_metric, "evaluate", lambda *_args: _nonexact_result(affected=affected)
+    )
+    status, result = _run_cli(
+        monkeypatch,
+        tmp_path,
+        (_row(0, "open"),),
+        (_cli_golden("fall", 0, 1),),
     )
 
-    assert len(allowance) == 11
+    assert status == expected_status
+    assert result is not None
+    assert result["ac1_passed"] is (affected <= 10)
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        _nonexact_result(affected=0),
+        _nonexact_result(affected=1, outside=1),
+    ],
+)
+def test_metric_cli_rejects_non_churn_and_outside_window_failures(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, result: dict[str, object]
+) -> None:
+    monkeypatch.setattr(episode_metric, "evaluate", lambda *_args: result)
+    status, written = _run_cli(
+        monkeypatch,
+        tmp_path,
+        (_row(0, "open"),),
+        (_cli_golden("fall", 0, 1),),
+    )
+
+    assert status == 1
+    assert written is not None
+    assert written["ac1_passed"] is False

@@ -20,6 +20,7 @@ import pytest
 from contracts.frame import Frame
 from contracts.runner import pose_result
 from worker.adapters.model.errors import FatalAcceleratorError
+from worker.domains.fall import FallPolicyDeciderV2, FallPolicyV2, FallV2Probabilities
 from worker.pipeline.analytics import CompositeExtractor
 from worker.pipeline.bus import Scheduler
 from worker.pipeline.camera_pipeline import CameraPipelinePump
@@ -466,6 +467,32 @@ class _FallDecider:
         )
 
 
+@final
+class _EpisodeFallDecider:
+    """Port adapter exercising the production episode authority lifecycle."""
+
+    def __init__(self, camera_id: str) -> None:
+        self._policy = FallPolicyDeciderV2(
+            camera_id=camera_id,
+            facility_id=f"facility-{camera_id}",
+            boot_id="boot",
+            stream_epoch="epoch",
+            source_generation=0,
+            policy=FallPolicyV2(transition_votes=1, transition_window=1),
+        )
+
+    def update(self, input_value: DecisionInput) -> tuple[BusinessEvent, ...]:
+        return self._policy.update(
+            {7: FallV2Probabilities(0.0, 0.9, 0.0)},
+            (7,),
+            frame_index=input_value.frame_index,
+            time_sec=input_value.time_sec or 0.0,
+        )
+
+    def release_onset(self, event: BusinessEvent) -> None:
+        self._policy.release_onset(event)
+
+
 def test_a_transient_staging_failure_does_not_destroy_the_fall() -> None:
     """A decision must not stay consumed unless its envelope is durable.
 
@@ -478,7 +505,7 @@ def test_a_transient_staging_failure_does_not_destroy_the_fall() -> None:
     results = InferenceResultSlot()
     analytics = _blank_analytics("camera-a", task_intervals={"pose": 1})
     decision = EventAggregator(
-        deciders=(_FallDecider("camera-a"),),
+        deciders=(_EpisodeFallDecider("camera-a"),),
         incidents=IncidentManager(cooldown_sec=300.0),
     )
     sink = _RecordingSink()

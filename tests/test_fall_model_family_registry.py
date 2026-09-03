@@ -249,7 +249,7 @@ def test_promotion_eligible_receipt_overrides_the_policy_default_threshold(
     assert audit.threshold_source == "receipt"
 
 
-def test_operator_policy_override_is_not_audited_as_the_image_default(tmp_path: Path) -> None:
+def test_operator_policy_override_is_audited_but_not_applied(tmp_path: Path) -> None:
     artifact_dir = write_pose_bbox56_bundle(
         tmp_path / "operator-policy", receipt_threshold=0.05, promotion_eligible=False
     )
@@ -261,8 +261,10 @@ def test_operator_policy_override_is_not_audited_as_the_image_default(tmp_path: 
     assert definition.audit_adapter is not None
     audit = definition.audit_adapter(context)
 
-    assert module.decider.policy.policy.transition_threshold == pytest.approx(0.7)
-    assert audit.threshold_source == "policy"
+    assert module.decider.policy.policy.transition_threshold == pytest.approx(0.5)
+    assert audit.operating_threshold == pytest.approx(0.5)
+    assert audit.threshold_source == "default"
+    assert audit.unapplied_policy_threshold == pytest.approx(0.7)
 
 
 def test_create_fall_model_refuses_to_boot_for_an_unknown_type(

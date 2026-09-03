@@ -42,8 +42,8 @@ class CameraRuntimeConfig(BaseModel):
     decode_backend: str | None = None
     # Operator-recognized bed polygon (see the bed-zone recognize endpoint),
     # persisted backend-side and pulled down as part of the worker config.
-    # When set, it is the authoritative bed region for bed-exit -- live
-    # segmentation is only used as a fallback when this is absent.
+    # It is the authoritative bed region for bed-exit; segmentation is used
+    # only on demand to propose a polygon for persistence.
     bed_zone_polygon: tuple[tuple[int, int], ...] | None = None
     bed_zone_image_width: int | None = Field(default=None, gt=0)
     bed_zone_image_height: int | None = Field(default=None, gt=0)

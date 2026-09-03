@@ -20,6 +20,10 @@ class DomainAuditSnapshot:
     operating_threshold: float | None
     threshold_source: str | None = None
     receipt_threshold: float | None = None
+    # An operator facility/camera threshold that was received but is not yet
+    # authoritative for the fall transition threshold (P1a-AC7). Recorded so the
+    # setting is visible rather than silently dropped or silently applied.
+    unapplied_policy_threshold: float | None = None
 
 
 @dataclass(slots=True)

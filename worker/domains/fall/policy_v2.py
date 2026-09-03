@@ -161,13 +161,17 @@ class FallPolicyDeciderV2:
         for track_id, state in tuple(self._states.items()):
             if track_id in live_ids:
                 continue
+            # An OPEN episode must become available for re-association as soon
+            # as its tracker id disappears. The TTL retains classifier state;
+            # it must not delay absorbing a replacement id that can complete
+            # its scoring window well before expiry.
+            self._episodes.track_lost(
+                camera_id=self.camera_id,
+                frame_index=frame_index,
+                time_sec=time_sec,
+                track_id=track_id,
+            )
             if frame_index - state.last_seen_frame >= self.policy.track_ttl_frames:
-                self._episodes.track_lost(
-                    camera_id=self.camera_id,
-                    frame_index=frame_index,
-                    time_sec=time_sec,
-                    track_id=track_id,
-                )
                 del self._states[track_id]
 
     def _advance(
@@ -330,6 +334,9 @@ class FallV2DomainDecider:
 
     def coast(self) -> tuple[BusinessEvent, ...]:
         return self.policy.coast()
+
+    def release_onset(self, event: BusinessEvent) -> None:
+        self.policy.release_onset(event)
 
     @property
     def last_trace_snapshots(self) -> tuple[DecisionTraceSnapshot, ...]:

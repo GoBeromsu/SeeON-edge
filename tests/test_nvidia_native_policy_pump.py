@@ -6,6 +6,9 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
+import pytest
+
+from worker.domains.fall import FallPolicyDeciderV2, FallPolicyV2, FallV2Probabilities
 from worker.native.deepstream.control import ControlIdentity, DeepStreamControlClient
 from worker.native.deepstream.ipc import (
     ControlMessage,
@@ -71,6 +74,46 @@ class _Sink:
         trigger: NativeEvidenceTrigger,
     ) -> None:
         self.emitted = (event, trigger)
+
+
+@dataclass(slots=True)
+class _EpisodeDecider:
+    policy: FallPolicyDeciderV2
+
+    def update(self, input_value: DecisionInput) -> tuple[BusinessEvent, ...]:
+        return self.policy.update(
+            {7: FallV2Probabilities(0.0, 0.9, 0.0)},
+            (7,),
+            frame_index=input_value.frame_index,
+            time_sec=input_value.time_sec or 0.0,
+        )
+
+    def release_onset(self, event: BusinessEvent) -> None:
+        self.policy.release_onset(event)
+
+
+@dataclass(slots=True)
+class _FlakySink:
+    calls: int = 0
+    emitted: list[BusinessEvent] | None = None
+
+    def emit_for_frame(
+        self,
+        event: BusinessEvent,
+        trigger: NativeEvidenceTrigger,
+    ) -> None:
+        del trigger
+        self.calls += 1
+        if self.calls == 1:
+            raise RuntimeError("durable staging failed")
+        if self.emitted is None:
+            self.emitted = []
+        self.emitted.append(event)
+
+
+class _SnapshotUnavailable:
+    def snapshot(self, camera_id: str) -> None:
+        del camera_id
 
 
 @dataclass(slots=True)
@@ -215,6 +258,44 @@ def test_native_policy_uses_child_association_and_image_free_evidence_trigger(
     assert diagnostics.polygon_sources == ["none"]
     control.close()
     child.close()
+
+
+def test_native_policy_releases_a_failed_durable_admission_for_one_retry(
+    tmp_path: Path,
+) -> None:
+    decider = _EpisodeDecider(
+        FallPolicyDeciderV2(
+            camera_id="camera-a",
+            facility_id="facility-a",
+            boot_id="boot",
+            stream_epoch="epoch",
+            source_generation=3,
+            policy=FallPolicyV2(transition_votes=1, transition_window=1),
+        )
+    )
+    sink = _FlakySink()
+    pump = NativePolicyPump(
+        _binding(generation=3, epoch=4),
+        NativePolicyContext(
+            LatestMetadataSlot(),
+            _SnapshotUnavailable(),
+            SceneState("camera-a"),
+            EventAggregator((decider,), IncidentManager(300.0, tmp_path / "events.jsonl")),
+            sink,
+            AlertEvidenceAttacher({}),
+            _Diagnostics(),
+            90,
+            track_id_switch_absorbed_total=lambda _: 0,
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="durable staging failed"):
+        pump._process(_metadata())  # noqa: SLF001
+    pump._process(_metadata())  # noqa: SLF001
+
+    assert sink.calls == 2
+    assert sink.emitted is not None
+    assert len(sink.emitted) == 1
 
 
 def _binding(*, generation: int, epoch: int) -> SourceBinding:

@@ -241,12 +241,22 @@ class NativePolicyPump:
             frame.identity.source_pts or 0,
             metadata.source_time_ns / 1_000_000_000,
         )
-        for event in events:
+        for position, event in enumerate(events):
             try:
                 snapshot = self._control.snapshot(self.camera_id)
             except ChildControlError:
                 snapshot = None
-            self._sink.emit_for_frame(self._attacher.attach_native(event, snapshot), trigger)
+            try:
+                self._sink.emit_for_frame(
+                    self._attacher.attach_native(event, snapshot), trigger
+                )
+            except Exception:
+                # Admission has already consumed the onset and cooldown. A
+                # durable staging failure must restore this event and every
+                # admitted event that has not yet reached the sink.
+                for pending in events[position:]:
+                    self._decision.release(pending)
+                raise
         self._diagnostics.record_detection_completed(self.camera_id)
         now = time.monotonic()
         self._fps.append(now)

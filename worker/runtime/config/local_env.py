@@ -246,45 +246,13 @@ def clip_recording_config_from_environment(
 def fall_model_config_from_environment(
     environ: Mapping[str, str] | None = None,
 ) -> FallModelConfig:
-    """Build ``models.fall`` from env, defaulting to the packaged pose+bbox56 bundle.
+    """Build the legacy local fall config from the packaged pose+bbox56 bundle.
 
-    Issue #133: the worker must boot with zero env vars.
-    ``ML_WORKER_FALL_MODEL_ARTIFACT_DIR`` is the on/off switch for *explicit*
-    artifact configuration: unset (the out-of-the-box default) no longer
-    means "no fall model" -- it now resolves to the packaged default LSTM
-    model at ``models/fall/lstm`` (arch.json/metadata.yaml are tracked in
-    git; model.pt is fetched separately via ``scripts/fetch-models.sh``
-    since weights stay gitignored). An explicit ``ARTIFACT_DIR`` env value
-    always overrides the default outright, never blends with it.
-
-    Issue #198: ``ARTIFACT_DIR`` being unset does *not* also gate
-    ``window``/``stride``/``operating_threshold`` -- those three are read
-    from their own env vars regardless of which artifact is in play, each
-    falling back independently to the packaged manifest's value only when
-    its own env var is absent. Reading them only inside the "artifact dir is
-    explicitly set" branch (the pre-#198 behavior) meant an operator-set
-    ``ML_WORKER_FALL_MODEL_OPERATING_THRESHOLD`` was silently discarded on
-    the packaged-default path -- the only path the shipped edge topology
-    actually takes.
-
-    Once ``ML_WORKER_FALL_MODEL_ARTIFACT_DIR`` is explicitly set, the
-    artifact contract tightens: window/stride/operating_threshold become
-    *required* (not just respected-if-present) so a partially configured
-    fall model still fails loudly at boot rather than silently defaulting
-    (ADR-0002) -- issue #79 (track 2): every malformed field is collected
-    and reported together, not just the first.
-    ``framework``/``mode`` are not independent env vars: today's
-    ``FallModelConfig`` only has one valid literal for each
-    (pytorch/sequence), so there is nothing for an env var to select yet.
-    ``type`` (the model family/architecture -- #65) does have an env var,
-    ``ML_WORKER_FALL_MODEL_TYPE``, defaulting to "lstm" so existing
-    deployments are unaffected; the registry
-    (``worker.adapters.model.fall_family_registry``) fails closed at boot on
-    an unrecognized value, not here, so a typo'd family name is still
-    validated against every registered family rather than silently accepted
-    as an opaque string. ``input_shape`` is derived from ``window`` rather
-    than given its own var, since ``FallModelConfig`` already requires
-    ``input_shape == (window, 51)``.
+    The zero-environment default is ``models/fall/pose-bbox56-gru`` with a
+    30x56 input, schema version 2, and operating threshold 0.5. Production
+    model selection is the versioned worker-config authority; the local
+    ``ML_WORKER_FALL_MODEL_*`` selection keys are retired and rejected before
+    configuration is resolved.
     """
     env = os.environ if environ is None else environ
     artifact_dir_raw = env.get(ML_WORKER_FALL_MODEL_ARTIFACT_DIR_ENV, "").strip()

@@ -198,7 +198,14 @@ def test_runtime_camera_module_receives_policy_not_model_or_profile_threshold() 
     )
 
     assert isinstance(fall_module.decider, FallV2DomainDecider)
-    assert fall_module.decider.policy.policy.transition_threshold == 0.73
+    # P1a-AC7: the decision threshold is the eligible bundle receipt, else the
+    # image default 0.5. A facility/camera override is received and audited but
+    # is not yet authoritative for the fall transition threshold in P1a, so it
+    # must not silently change the decision.
+    assert fall_module.decider.policy.policy.transition_threshold == 0.5
+    assert config.detection_policies.resolve("cam/opaque:alpha", "fall", 2).values == type(
+        FALL_POLICY_V2_DEFAULT
+    )(transition_threshold=0.73)
     assert isinstance(bed_module.decider, BedExitMonitor)
     assert bed_module.decider.config.min_containment == 0.44
     assert bed_module.decider.config.hold_frames == 5

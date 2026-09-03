@@ -226,6 +226,27 @@ def test_track_switch_inside_window_is_absorbed_without_a_second_fall_alert() ->
     assert decider.track_id_switch_absorbed_total == 1
 
 
+def test_immediate_track_switch_is_absorbed_before_replacement_scores() -> None:
+    decider = FallPolicyDeciderV2(
+        camera_id="camera",
+        facility_id="facility",
+        boot_id="boot",
+        source_generation=0,
+        stream_epoch="epoch",
+    )
+    for frame in range(2):
+        assert _update(decider, _probability(0.7), frame) == ()
+    assert len(_update(decider, _probability(0.7), 2)) == 1
+
+    # The old id is absent for only one frame. The replacement can fill its
+    # confirmation window long before the 45-frame state TTL expires.
+    assert decider.update({}, (), frame_index=3, time_sec=3.0) == ()
+    assert _update(decider, _probability(0.7), 4, track=8) == ()
+    assert _update(decider, _probability(0.7), 5, track=8) == ()
+    assert _update(decider, _probability(0.7), 6, track=8) == ()
+    assert decider.track_id_switch_absorbed_total == 1
+
+
 def test_two_residents_falling_on_the_same_tick_both_emit_in_track_order() -> None:
     decider = FallPolicyDeciderV2(
         camera_id="camera",

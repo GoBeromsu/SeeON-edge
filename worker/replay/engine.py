@@ -8,12 +8,10 @@ pipeline (see ``worker.replay.inputs``). No extractor, model runner, GPU, or
 network call happens here -- only the same pure numeric decider code path
 production already runs, executed again against the frozen inputs.
 
-Camera-local decider / live-track state is recreated at every worker boot
-boundary exactly as production does after a process restart. Stream-epoch
-changes within one boot do **not** reset that state (production keeps the same
-camera module across RTSP reconnects). Truncated or mid-window recoveries are
-never silently presented as deterministic: the run is explicitly marked
-non-reproducible.
+Camera-local decider / live-track state is recreated for every ``(boot
+segment, stream epoch)`` boundary, matching production's per-stream rebuild.
+Truncated or mid-window recoveries are never silently presented as
+deterministic: the run is explicitly marked non-reproducible.
 """
 
 from __future__ import annotations
