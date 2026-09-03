@@ -1,3 +1,0 @@
-{"version":"replay-trace-v2"}
-{"source":"legacy","camera_id":"fixture","stream_epoch":0,"seq":0,"pts_ns":0,"track_id":1,"track_lifecycle":"new","pose_bbox56":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1]}
-{"source":"legacy","camera_id":"fixture","stream_epoch":0,"seq":1,"pts_ns":66666667,"track_id":2,"track_lifecycle":"new","pose_bbox56":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1]}

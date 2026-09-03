@@ -1,14 +1,14 @@
 from pathlib import Path
 
-from contracts.replay_trace import decode_jsonl
+from contracts.replay_trace import decode_document
 from shared.detection_policies import BedExitPolicyV1, make_effective_policy
-from worker.replay.engine import replay_trace, replay_trace_frames
+from worker.replay.engine import replay, replay_trace_frames
 
-FIXTURES = Path("tests_support/fixtures")
+FIXTURES = Path("tests/fixtures/replay")
 
 
 def _rows(name: str):
-    return decode_jsonl((FIXTURES / name).read_text())[1]
+    return decode_document((FIXTURES / f"{name}.json").read_text())[1]
 
 
 def _policy():
@@ -23,25 +23,34 @@ def _policy():
 
 
 def _run(name: str):
-    rows = _rows(name)
-    return replay_trace(camera_id="fixture", rows=rows, module_id="bed_exit", policy=_policy())
+    return replay(camera_id="fixture", rows=_rows(name), module_id="bed_exit", policy=_policy())
 
 
-def test_pts_gap_fixture_is_filled_by_replay_resampler() -> None:
-    frames = replay_trace_frames(_rows("replay-pts-gap-v2.jsonl"))
-    assert [frame.valid for frame in frames] == [1, 0, 0, 1]
-    assert [frame.valid for frame in _run("replay-pts-gap-v2.jsonl").frames] == [1, 0, 0, 1]
+def _alerts(run):
+    return [(frame.pts_ns, event.event_type) for frame in run.frames for event in frame.events]
 
 
-def test_reconnect_epoch_resets_the_replay_vehicle() -> None:
-    run = _run("replay-reconnect-v2.jsonl")
-    assert [frame.stream_epoch for frame in run.frames] == [0, 1]
-    assert [frame.seq for frame in run.frames] == [0, 0]
-    assert run.boot_ids == ("epoch-0", "epoch-1")
+def test_pts_gap_changes_the_full_replay_episode_outcome() -> None:
+    control = _run("gap-control-v2")
+    gap = _run("gap-axis-v2")
+    assert _alerts(control) == [(200_000_001, "bed-exit")]
+    assert _alerts(gap) == []
+    assert any(not frame.valid for frame in gap.frames)
+    assert [frame.valid for frame in replay_trace_frames(_rows("gap-axis-v2"))] == [1, 1, 0, 0, 1]
 
 
-def test_id_switch_fixture_preserves_declared_new_track() -> None:
-    frames = replay_trace_frames(_rows("replay-id-switch-v2.jsonl"))
-    assert [frame.rows[0].track_id for frame in frames] == [1, 2]
-    assert [frame.rows[0].track_lifecycle for frame in frames] == ["new", "new"]
-    assert [frame.seq for frame in _run("replay-id-switch-v2.jsonl").frames] == [0, 1]
+def test_reconnect_keeps_camera_local_decider_state_within_one_boot() -> None:
+    control = _run("reconnect-control-v2")
+    reconnected = _run("reconnect-axis-v2")
+    assert _alerts(control) == [(200_000_001, "bed-exit")]
+    assert _alerts(reconnected) == _alerts(control)
+    assert [frame.stream_epoch for frame in reconnected.frames] == [0, 0, 1, 1, 1]
+    assert reconnected.boot_ids == ("epoch-0", "epoch-1")
+
+
+def test_id_switch_reports_churn_and_changes_declared_episode_outcome() -> None:
+    control = _run("id-switch-control-v2")
+    switched = _run("id-switch-axis-v2")
+    assert _alerts(control) == [(200_000_001, "bed-exit")]
+    assert _alerts(switched) == [(266_666_668, "bed-exit")]
+    assert switched.track_id_switch_total == 1

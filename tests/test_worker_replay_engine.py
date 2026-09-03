@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Literal
 
@@ -157,9 +158,15 @@ def _capture_real_frames(
 
     class _NullRecorder:
         def on_event(
-            self, trigger_packet: object, event: object, *, allow_new_clip: bool = True
+            self,
+            trigger_packet: object,
+            event: object,
+            *,
+            allow_new_clip: bool = True,
+            detected_at: datetime,
         ) -> str | None:
-            del trigger_packet, event, allow_new_clip
+            assert detected_at.tzinfo is not None
+            del trigger_packet, event, allow_new_clip, detected_at
             return "clip-replay"
 
     sink = EvidenceEventSink(
@@ -213,9 +220,7 @@ class _SinglePacketSubscription:
         packet, self._packet = self._packet, None
         if packet is None:
             return None
-        return CoordinatedInference(
-            packet, ModuleResult("pose", self._result, 0.0, "pose")
-        )
+        return CoordinatedInference(packet, ModuleResult("pose", self._result, 0.0, "pose"))
 
     def close(self) -> None:
         self._packet = None
@@ -457,9 +462,15 @@ def _capture_bed_exit_frames(
 
     class _NullRecorder:
         def on_event(
-            self, trigger_packet: object, event: object, *, allow_new_clip: bool = True
+            self,
+            trigger_packet: object,
+            event: object,
+            *,
+            allow_new_clip: bool = True,
+            detected_at: datetime,
         ) -> str | None:
-            del trigger_packet, event, allow_new_clip
+            assert detected_at.tzinfo is not None
+            del trigger_packet, event, allow_new_clip, detected_at
             return "clip-replay-bed"
 
     sink = EvidenceEventSink(
@@ -611,6 +622,3 @@ def test_truncation_marks_run_non_reproducible(tmp_path: Path) -> None:
     clean = assess_reproducibility(recovered.frames, recovered.truncation)
     # Fresh capture with no cursor activity remains reproducible.
     assert clean[0] is True
-
-
-

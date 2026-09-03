@@ -19,9 +19,12 @@ from contracts.relay import (
 )
 from contracts.replay_trace import (
     REPLAY_TRACE_VERSION,
+    ReplayRow,
     ReplayTraceHeader,
-    ReplayTraceRow,
+    ReplayTrack,
+    decode_document,
     decode_jsonl,
+    encode_document,
     encode_jsonl,
 )
 from contracts.tracker import TrackerProtocol
@@ -60,10 +63,13 @@ __all__ = [
     "PulledWorkerConfig",
     "RelayAlertPayload",
     "RelayHeartbeatPayload",
+    "ReplayRow",
     "ReplayTraceHeader",
-    "ReplayTraceRow",
+    "ReplayTrack",
     "TrackerProtocol",
+    "decode_document",
     "decode_jsonl",
+    "encode_document",
     "encode_jsonl",
     "pose_weight_filename",
     "pose_weight_path",

@@ -89,6 +89,9 @@ class WorkerDiagnostics:
         # payload had to synthesise admitted == completed, which pinned the
         # backend's recent_success_rate at 1.0 and hid every failed frame.
         self._native_attempts_by_camera: dict[str, int] = {}
+        self._track_id_switches_by_camera: dict[str, int] = {}
+        self._bed_polygon_source_by_camera: dict[str, str] = {}
+        self._incident_managers: dict[str, object] = {}
         self._encoder = EncoderLifecycleSnapshot()
         self._clip_recorder = ClipRecorderStatus()
         self._clip_export = RelayClipExportPayload(enabled=False, version=0)
@@ -318,6 +321,23 @@ class WorkerDiagnostics:
                 self._native_attempts_by_camera.get(camera_id, 0) + 1
             )
 
+    def record_track_id_switch(self, camera_id: str) -> None:
+        with self._lock:
+            self._track_id_switches_by_camera[camera_id] = (
+                self._track_id_switches_by_camera.get(camera_id, 0) + 1
+            )
+
+    def record_bed_polygon_source(self, camera_id: str, source: str) -> None:
+        if source not in {"persisted", "native-per-frame", "none"}:
+            raise ValueError("invalid bed polygon source")
+        with self._lock:
+            self._bed_polygon_source_by_camera[camera_id] = source
+
+    def register_incident_manager(self, camera_id: str, manager: object) -> None:
+        """Expose the manager's cumulative cooldown counter in local snapshots."""
+        with self._lock:
+            self._incident_managers[camera_id] = manager
+
     def register_native_detection(self, camera_id: str) -> None:
         """Declare that a non-host producer owns this camera's detection.
 
@@ -376,6 +396,10 @@ class WorkerDiagnostics:
             bed_exit_scoring_by_camera = dict(self._bed_exit_scoring_by_camera)
             device_residency_by_camera = dict(self._device_residency_by_camera)
             decision_completed_by_camera = dict(self._decision_completed_by_camera)
+            track_id_switches_by_camera = dict(self._track_id_switches_by_camera)
+            bed_polygon_source_by_camera = dict(self._bed_polygon_source_by_camera)
+            incident_managers = dict(self._incident_managers)
+            measured_fps_by_camera = dict(self._measured_fps_by_camera)
             camera_ids = (
                 set(self._decode_by_camera)
                 | set(decode_backend_by_camera)
@@ -387,6 +411,9 @@ class WorkerDiagnostics:
                 | set(bed_exit_scoring_by_camera)
                 | set(device_residency_by_camera)
                 | set(decision_completed_by_camera)
+                | set(track_id_switches_by_camera)
+                | set(bed_polygon_source_by_camera)
+                | set(incident_managers)
                 | (set() if inference is None else set(inference.cameras))
             )
         cameras = tuple(
@@ -426,6 +453,15 @@ class WorkerDiagnostics:
                 ),
                 forward_p95_sec=(
                     0.0 if inference is None else inference.forward_p95_sec
+                ),
+                track_id_switch_total=track_id_switches_by_camera.get(camera_id, 0),
+                incident_cooldown_suppressed_total=getattr(
+                    incident_managers.get(camera_id), "cooldown_suppressed_total", 0
+                ),
+                bed_polygon_source=bed_polygon_source_by_camera.get(camera_id, "none"),
+                inference_fps=measured_fps_by_camera.get(camera_id, (0.0, None))[1],
+                camera_fps_unpinned=not _is_pinned_fps(
+                    measured_fps_by_camera.get(camera_id, (0.0, None))[1]
                 ),
             )
             for camera_id in sorted(camera_ids)
@@ -550,6 +586,10 @@ class WorkerDiagnostics:
             for camera_id in selections
         }
         return selections, measured_fps, detections, clip_recorder, clip_export, gpu, worker
+
+
+def _is_pinned_fps(value: float | None) -> bool:
+        return value is not None and 14.0 <= value <= 16.0
 
 
 def _detection_for_camera(

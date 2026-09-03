@@ -1,4 +1,4 @@
-"""Generate replay-trace-v2 JSONL from a recorded clip using the pose adapter."""
+"""Diagnostic-only offline replay trace generation; not a production capture path."""
 
 from __future__ import annotations
 
@@ -10,16 +10,20 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from contracts.observation import BoundingBox  # noqa: E402
-from contracts.replay_trace import ReplayTraceHeader, ReplayTraceRow, encode_jsonl  # noqa: E402
+from contracts.replay_trace import (  # noqa: E402
+    ReplayRow,
+    ReplayTraceHeader,
+    ReplayTrack,
+    encode_jsonl,
+)
 from worker.adapters.model.yolo_pose import YoloPoseRunner  # noqa: E402
-from worker.domains.fall.pose_bbox56 import pose_bbox56_row  # noqa: E402
 from worker.pipeline.perception.tracker import GreedyIouTracker  # noqa: E402
 
 
 def generate(
     clip: Path, output: Path, camera_id: str, device: str, max_seconds: float | None
 ) -> tuple[int, float]:
-    """Run pose inference and write an epoch-zero legacy association trace."""
+    """Diagnostic-only pose inference, never a substitute for production capture."""
     try:
         import cv2
     except ImportError as exc:
@@ -28,7 +32,7 @@ def generate(
     if not capture.isOpened():
         raise RuntimeError(f"cannot open {clip}")
     runner, tracker = YoloPoseRunner(device=device), GreedyIouTracker()
-    rows: list[ReplayTraceRow] = []
+    rows: list[ReplayRow] = []
     seen: set[int] = set()
     started = time.monotonic()
     seq = 0
@@ -42,20 +46,23 @@ def generate(
         result = runner.run(frame[:, :, ::-1])
         boxes = tuple(BoundingBox(*box[:4], confidence=box[4]) for box in result.boxes)
         ids = tracker.observe(boxes)
-        for pose, box, track_id in zip(result.poses, result.boxes, ids, strict=True):
-            rows.append(
-                ReplayTraceRow(
-                    source="legacy",
-                    camera_id=camera_id,
-                    stream_epoch=0,
-                    seq=seq,
-                    pts_ns=pts_ns,
-                    track_id=track_id,
-                    track_lifecycle="new" if track_id not in seen else "tracked",
-                    pose_bbox56=pose_bbox56_row(pose, box[:4], frame.shape[1], frame.shape[0]),
-                )
+        tracks = tuple(
+            ReplayTrack(
+                track_id=track_id,
+                lifecycle="new" if track_id not in seen else "tracked",
+                bbox=tuple(box),
+                keypoints=tuple(tuple(point) for point in pose),
             )
-            seen.add(track_id)
+            for pose, box, track_id in zip(result.poses, result.boxes, ids, strict=True)
+        )
+        seen.update(ids)
+        rows.append(
+            ReplayRow(
+                camera_id=camera_id, pts_ns=pts_ns, epoch=0, source_event="frame",
+                source="legacy-association", tracks=tracks, bed_polygon_id=None,
+                bed_polygon=None, night_window_active=False,
+            )
+        )
         seq += 1
     capture.release()
     elapsed = time.monotonic() - started
@@ -64,7 +71,7 @@ def generate(
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(description="Diagnostic-only offline trace generator.")
     parser.add_argument("--clip", type=Path, required=True)
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--camera-id", required=True)

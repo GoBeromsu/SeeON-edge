@@ -52,6 +52,7 @@ class IncidentManager:
     _identities: EventIdentityStore = field(init=False, repr=False)
     #: Alerts admitted with a fresh identity because the journal failed.
     identity_journal_failures: int = field(default=0, init=False)
+    cooldown_suppressed_total: int = field(default=0, init=False)
     last_audit_snapshot: IncidentAuditSnapshot | None = field(
         default=None,
         init=False,
@@ -97,6 +98,7 @@ class IncidentManager:
         key = self.idempotency_key(event, event_time)
         last_seen = self._last_seen.get(key)
         if last_seen is not None and event_time - last_seen < self.cooldown_sec:
+            self.cooldown_suppressed_total += 1
             return None
 
         source_identity = event.identity

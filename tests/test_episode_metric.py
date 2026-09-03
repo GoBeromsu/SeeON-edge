@@ -1,22 +1,40 @@
+from pathlib import Path
+
+from contracts.replay_trace import decode_document
 from tests_support.episode_metric import evaluate
 from tests_support.golden_episodes import GoldenEpisode
 
 
-def test_multiple_alerts_in_one_episode_are_not_exact(tmp_path) -> None:
-    (tmp_path / "alerts.jsonl").write_text(
-        '{"camera_id":"cam","event_type":"fall","pts_ns":2}\n'
-        '{"camera_id":"cam","event_type":"fall","pts_ns":3}\n'
+def _golden() -> GoldenEpisode:
+    return GoldenEpisode(
+        "episode",
+        "fixture",
+        "bed_exit",
+        0,
+        300_000_000,
+        {"a": "real"},
+        "real",
+        "single",
+        1,
     )
-    result = evaluate(tmp_path, (GoldenEpisode("cam", "fall", 1, 4, "real"),))
+
+
+def test_metric_runs_canonical_replay_rows_and_reports_gap_counter() -> None:
+    _, rows = decode_document(Path("tests/fixtures/replay/gap-axis-v2.json").read_text())
+    result = evaluate(rows, (_golden(),))
     assert result["exact"] is False
-    assert result["recall"] == 0.0
+    assert result["resample_gap_rows_total"] == 2
+    assert result["incident_cooldown_suppressed_total"] == 0
 
 
-def test_replay_run_document_supplies_real_cooldown_counter(tmp_path) -> None:
-    (tmp_path / "run.jsonl").write_text(
-        '{"incident_cooldown_suppressed_total":2,"frames":['
-        '{"pts_ns":2,"events":[{"camera_id":"cam","event_type":"fall"}]}]}\n'
+def test_metric_rejects_non_bed_exit_without_a_pinned_policy() -> None:
+    _, rows = decode_document(Path("tests/fixtures/replay/gap-axis-v2.json").read_text())
+    fall = GoldenEpisode(
+        "episode", "fixture", "fall", 0, 300_000_000, {"a": "real"}, "real", "single", 1
     )
-    result = evaluate(tmp_path, (GoldenEpisode("cam", "fall", 1, 4, "real"),))
-    assert result["exact"] is True
-    assert result["incident_cooldown_suppressed_total"] == 2
+    try:
+        evaluate(rows, (fall,))
+    except ValueError as exc:
+        assert "--policy" in str(exc)
+    else:
+        raise AssertionError("fall metrics must require a pinned policy")

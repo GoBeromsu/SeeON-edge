@@ -13,34 +13,78 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sqlite3
 from datetime import datetime
 from pathlib import Path
 
+_CLIP_ID = re.compile(r"^[A-Za-z0-9:_-]{1,128}$")
+
+
+class CorpusValidationError(ValueError):
+    """The local clip store cannot safely support a corpus export."""
+
 
 def _clip_index(clip_store: Path) -> dict[str, dict[str, object]]:
-    """Map every ``event_refs`` entry to its clip location and duration."""
+    """Map claimed event refs from the canonical clip layout to local media."""
     index: dict[str, dict[str, object]] = {}
+    errors: list[str] = []
+    unavailable: list[str] = []
     clips_dir = clip_store / "clips"
     if not clips_dir.is_dir():
         return index
     for manifest_path in sorted(clips_dir.glob("*/manifest.json")):
+        clip_id = manifest_path.parent.name
+        if manifest_path.parent.is_symlink() or manifest_path.is_symlink():
+            errors.append(f"{clip_id}: manifest must be a regular contained file")
+            continue
         try:
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
+            errors.append(f"{clip_id}: malformed manifest")
+            continue
+        if (
+            not _CLIP_ID.fullmatch(clip_id)
+            or not isinstance(manifest, dict)
+            or manifest.get("clip_id") != clip_id
+        ):
+            errors.append(f"{clip_id}: invalid clip_id")
+            continue
+        refs = manifest.get("event_refs")
+        if (
+            not isinstance(refs, list)
+            or not refs
+            or len(set(refs)) != len(refs)
+            or any(not isinstance(ref, str) or not ref for ref in refs)
+        ):
+            errors.append(f"{clip_id}: invalid event_refs")
             continue
         clip_path = manifest_path.parent / "clip.mp4"
-        if not clip_path.is_file():
+        if manifest.get("video_available") is False:
+            # Declared by the worker (e.g. STREAM_EPOCH_MISMATCH): not a corpus
+            # defect, just no media to label. Recorded, never a candidate.
+            unavailable.append(clip_id)
             continue
-        refs = manifest.get("event_refs") or [manifest.get("event_ref")]
+        if not clip_path.is_file() or clip_path.is_symlink():
+            errors.append(f"{clip_id}: missing clip.mp4")
+            continue
         record = {
-            "clip_id": manifest_path.parent.name,
+            "clip_id": clip_id,
             "clip_path": str(clip_path),
             "duration_s": manifest.get("duration_s"),
         }
         for ref in refs:
-            if isinstance(ref, str) and ref not in index:
+            existing = index.get(ref)
+            if existing is not None:
+                errors.append(
+                    f"{ref}: duplicate event_ref claimed by {existing['clip_id']} and {clip_id}"
+                )
+            else:
                 index[ref] = record
+    if errors:
+        raise CorpusValidationError("\n".join(errors))
+    if unavailable:
+        print(f"declared_unavailable_clips={len(unavailable)}")
     return index
 
 
@@ -89,7 +133,11 @@ def main() -> int:
     parser.add_argument("--clip-store", type=Path, required=True)
     parser.add_argument("--out", type=Path, required=True)
     args = parser.parse_args()
-    count, with_clip, alerts_per_hour = export(args.snapshot, args.clip_store, args.out)
+    try:
+        count, with_clip, alerts_per_hour = export(args.snapshot, args.clip_store, args.out)
+    except (CorpusValidationError, OSError, sqlite3.Error) as exc:
+        print(exc)
+        return 1
     print(f"incidents={count} with_clip={with_clip} alerts_per_hour={alerts_per_hour:.3f}")
     return 0
 

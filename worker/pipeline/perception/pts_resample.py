@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Generic, TypeVar
 
 CADENCE_NS = 66_666_667
+DEFAULT_MAX_GAP_ROWS = 900
 
 
 T = TypeVar("T")
@@ -21,8 +22,20 @@ class ResampledRow(Generic[T]):
     valid: int
 
 
+@dataclass(frozen=True, slots=True)
+class PtsGapTooLargeError(ValueError):
+    gap_rows: int
+    max_gap_rows: int
+
+    def __str__(self) -> str:
+        return f"PTS gap requires {self.gap_rows} rows; limit is {self.max_gap_rows}"
+
+
 def resample_pts(
-    rows: Iterable[tuple[int, T]], *, cadence_ns: int = CADENCE_NS
+    rows: Iterable[tuple[int, T]],
+    *,
+    cadence_ns: int = CADENCE_NS,
+    max_gap_rows: int = DEFAULT_MAX_GAP_ROWS,
 ) -> Iterator[ResampledRow[T]]:
     """Select the first row in each cadence bucket and fill missing buckets.
 
@@ -30,8 +43,8 @@ def resample_pts(
     duplicate rows are deterministically dropped; callers reset this function
     at a stream-epoch boundary.
     """
-    if cadence_ns <= 0:
-        raise ValueError("cadence_ns must be positive")
+    if cadence_ns <= 0 or max_gap_rows < 0:
+        raise ValueError("cadence_ns must be positive and max_gap_rows non-negative")
     origin: int | None = None
     next_slot: int | None = None
     last_pts: int | None = None
@@ -48,6 +61,9 @@ def resample_pts(
         slot = origin + ((pts_ns - origin) // cadence_ns) * cadence_ns
         if slot < next_slot:
             continue
+        gap_rows = (slot - next_slot) // cadence_ns
+        if gap_rows > max_gap_rows:
+            raise PtsGapTooLargeError(gap_rows, max_gap_rows)
         while next_slot < slot:
             yield ResampledRow(pts_ns=next_slot, value=None, valid=0)
             next_slot += cadence_ns
@@ -55,4 +71,10 @@ def resample_pts(
         next_slot = slot + cadence_ns
 
 
-__all__ = ["CADENCE_NS", "ResampledRow", "resample_pts"]
+__all__ = [
+    "CADENCE_NS",
+    "DEFAULT_MAX_GAP_ROWS",
+    "PtsGapTooLargeError",
+    "ResampledRow",
+    "resample_pts",
+]

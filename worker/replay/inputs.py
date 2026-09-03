@@ -19,28 +19,18 @@ from contracts.observation import (
     BoundingBox,
     FrameObservation,
 )
-from contracts.replay_trace import ReplayTraceRow
+from contracts.replay_trace import ReplayRow
 from worker.pipeline.trace.models import AnalysisTrace
 from worker.types import DecisionInput
 
 
 def analysis_trace_to_decision_input(
-    trace: AnalysisTrace,
-    *,
-    live_track_ids: tuple[int, ...],
+    trace: AnalysisTrace, *, live_track_ids: tuple[int, ...]
 ) -> DecisionInput:
-    """Rebuild the exact ``DecisionInput`` a compiled decider originally saw.
-
-    Inverse of ``worker.pipeline.trace.capture.TraceCapture._analysis``: every
-    field it read off ``FrameObservation``/``DecisionInput`` is reconstructed
-    here from the persisted, image-free row. ``track_ids`` reconstructs
-    ``OptionalNumber(None, "tracker-unmatched")`` persons as unmatched (``None``)
-    entries, exactly mirroring the original capture.
-    """
+    """Rebuild an old persisted analysis frame for the surviving HTTP replay."""
     boxes = tuple(
         BoundingBox(*person.box, confidence=person.confidence) for person in trace.persons
     )
-    labels: tuple[object, ...] = ()
     poses = tuple(
         tuple((point.x, point.y, point.confidence) for point in person.keypoints)
         for person in trace.persons
@@ -49,14 +39,12 @@ def analysis_trace_to_decision_input(
         BoundingBox(*bed.box, confidence=bed.confidence, polygon=bed.polygon or None)
         for bed in trace.beds
     )
-    track_ids = tuple(replayed_track_id(person.track_id.value) for person in trace.persons)
     observation = FrameObservation(
-        detections=(boxes, labels),
+        detections=(boxes, ()),
         poses=poses,
         regions=(bed_boxes, ()),
-        track_ids=track_ids,
+        track_ids=tuple(replayed_track_id(person.track_id.value) for person in trace.persons),
     )
-    bed_region = BedRegionDebugSnapshot(source=BedRegionCacheState(trace.bed_region_provenance))
     return DecisionInput(
         observation=observation,
         frame_width=trace.frame_width,
@@ -64,12 +52,11 @@ def analysis_trace_to_decision_input(
         live_track_ids=live_track_ids,
         time_sec=trace.source_time.value,
         frame_index=trace.frame_key[3],
-        bed_region=bed_region,
+        bed_region=BedRegionDebugSnapshot(source=BedRegionCacheState(trace.bed_region_provenance)),
     )
 
 
 def replayed_track_id(value: int | float | None) -> int | None:
-    """Narrow a persisted numeric track_id back to its stored integer type."""
     if value is None:
         return None
     if isinstance(value, bool) or not isinstance(value, int):
@@ -78,10 +65,10 @@ def replayed_track_id(value: int | float | None) -> int | None:
 
 
 def replay_trace_to_decision_input(
-    rows: tuple[ReplayTraceRow, ...],
+    row: ReplayRow | None,
     *,
-    pts_ns: int,
-    seq: int,
+    pts_ns: int | None = None,
+    seq: int = 0,
 ) -> DecisionInput:
     """Build a decider input from one declared replay-trace-v2 frame.
 
@@ -89,26 +76,44 @@ def replay_trace_to_decision_input(
     1000x1000 frame.  Feature math receives the same normalized geometry
     without requiring source pixels or an inference adapter.
     """
-    if not rows:
-        raise ValueError("a replay frame requires at least one track row")
     width = height = 1000
     boxes = []
     poses = []
     track_ids = []
     live_ids = []
-    for row in rows:
-        feature = row.pose_bbox56
-        x1, y1, x2, y2 = (value * width for value in feature[51:55])
-        boxes.append(BoundingBox(x1, y1, x2, y2, confidence=feature[55]))
-        poses.append(tuple((feature[index] * width, feature[index + 1] * height, feature[index + 2])
-                           for index in range(0, 51, 3)))
-        track_ids.append(row.track_id)
-        if row.track_lifecycle in ("new", "tracked"):
-            live_ids.append(row.track_id)
+    for track in row.tracks if row is not None else ():
+        x1, y1, x2, y2, confidence = track.bbox
+        boxes.append(
+            BoundingBox(
+                round(x1),
+                round(y1),
+                round(x2),
+                round(y2),
+                confidence=confidence,
+            )
+        )
+        poses.append(track.keypoints)
+        track_ids.append(track.track_id)
+        if track.lifecycle in ("new", "tracked"):
+            live_ids.append(track.track_id)
+    bed_boxes = ()
+    if row is not None and row.bed_polygon is not None:
+        polygon = tuple((round(x), round(y)) for x, y in row.bed_polygon)
+        xs, ys = zip(*polygon, strict=True)
+        bed_boxes = (
+            BoundingBox(
+                min(xs),
+                min(ys),
+                max(xs),
+                max(ys),
+                confidence=1.0,
+                polygon=polygon,
+            ),
+        )
     observation = FrameObservation(
         detections=(tuple(boxes), ()),
         poses=tuple(poses),
-        regions=((), ()),
+        regions=(bed_boxes, ()),
         track_ids=tuple(track_ids),
     )
     return DecisionInput(
@@ -116,9 +121,11 @@ def replay_trace_to_decision_input(
         frame_width=width,
         frame_height=height,
         live_track_ids=tuple(sorted(live_ids)),
-        time_sec=pts_ns / 1_000_000_000,
+        time_sec=(row.pts_ns if row is not None else pts_ns) / 1_000_000_000,
         frame_index=seq,
-        bed_region=BedRegionDebugSnapshot(source=BedRegionCacheState.EMPTY),
+        bed_region=BedRegionDebugSnapshot(
+            source=BedRegionCacheState.FRESH if bed_boxes else BedRegionCacheState.EMPTY
+        ),
     )
 
 

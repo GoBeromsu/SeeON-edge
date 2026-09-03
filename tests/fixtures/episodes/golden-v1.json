@@ -1,0 +1,12 @@
+{
+  "schema": "golden-episodes-v1",
+  "horizons": {
+    "fall": 120,
+    "bed_exit": 60
+  },
+  "corpus_sha256": null,
+  "labellers": [],
+  "provisional": true,
+  "note": "Owner labels pending. Generate with scripts/qa/golden_worksheet.py -> golden_labeller_html.py -> golden_from_worksheet.py; never hand-write episodes.",
+  "episodes": []
+}

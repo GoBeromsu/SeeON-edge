@@ -174,6 +174,14 @@ class CameraDiagnosticsSnapshot:
     geometry_batch_sizes: tuple[GeometryBatchHistogram, ...] = ()
     forward_p50_sec: float = 0.0
     forward_p95_sec: float = 0.0
+    track_id_switch_total: int = 0
+    track_id_switch_absorbed_total: int = 0
+    resample_gap_rows_total: int = 0
+    incident_cooldown_suppressed_total: int = 0
+    bed_polygon_source: str = "none"
+    inference_fps: float | None = None
+    camera_fps_unpinned: bool = False
+    fall_inference_device: str = "unknown"
 
 
 @dataclass(frozen=True, slots=True)

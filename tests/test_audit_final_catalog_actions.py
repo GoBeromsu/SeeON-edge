@@ -247,9 +247,29 @@ def _media(tmp_path: Path, data: bytes) -> Path:
     return path
 
 
+def _seed_incident(database: Path) -> None:
+    """A verified receipt now completes its incident, so the incident must exist."""
+    from backend.app.features.evidence.relay_projection import RelayEvent, RelayEvidenceProjection
+
+    RelayEvidenceProjection(database).project_event(
+        RelayEvent(
+            edge_event_id="event-1",
+            event_type="fall",
+            probability=0.8,
+            detected_at="2026-08-24T00:00:00Z",
+            camera_id="camera-1",
+            facility_id="facility-1",
+            resident_id=None,
+            evidence=None,
+            audit=None,
+        )
+    )
+
+
 def test_evidence_receipt_audit_rolls_back_compact_facts(tmp_path: Path) -> None:
     path = tmp_path / "receipt.sqlite3"
     bootstrap_database(path)
+    _seed_incident(path)
     data = b"verified video"
     media_path = _media(tmp_path, data)
     receipt = ArtifactReceipt("clip-1", hashlib.sha256(data).hexdigest(), len(data))
@@ -264,6 +284,7 @@ def test_evidence_receipt_audit_rolls_back_compact_facts(tmp_path: Path) -> None
 
     fault_path = tmp_path / "receipt-fault.sqlite3"
     bootstrap_database(fault_path)
+    _seed_incident(fault_path)
     fault_store = CompactArtifactReceiptStore(fault_path, tmp_path / "clip-store")
     with media_path.open("rb") as handle, pytest.raises(sqlite3.DatabaseError):
         fault_store.commit_verified(

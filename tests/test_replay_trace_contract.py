@@ -1,15 +1,38 @@
 import pytest
 
-from contracts.replay_trace import ReplayTraceHeader, ReplayTraceRow, decode_jsonl, encode_jsonl
+from contracts.replay_trace import (
+    ReplayRow,
+    ReplayTraceHeader,
+    ReplayTrack,
+    decode_document,
+    decode_jsonl,
+    encode_document,
+    encode_jsonl,
+)
 
 
-def test_jsonl_round_trip_and_float32_validation() -> None:
-    row = ReplayTraceRow("legacy", "cam", 0, 1, 2, 3, "new", (0.1,) * 56)
-    assert decode_jsonl(encode_jsonl(ReplayTraceHeader(), [row]))[1] == (row,)
+def _row() -> ReplayRow:
+    return ReplayRow(
+        camera_id="cam",
+        pts_ns=2,
+        epoch=0,
+        source_event="frame",
+        source="legacy-association",
+        tracks=(ReplayTrack(3, "new", (1, 2, 3, 4, 0.9), ((1, 2, 0.9),) * 17),),
+        bed_polygon_id=None,
+        bed_polygon=None,
+        night_window_active=False,
+    )
 
 
-def test_rejects_bad_lifecycle_and_shape() -> None:
+def test_jsonl_round_trip() -> None:
+    assert decode_jsonl(encode_jsonl(ReplayTraceHeader(), [_row()]))[1] == (_row(),)
+
+
+def test_document_round_trip() -> None:
+    assert decode_document(encode_document(ReplayTraceHeader(), [_row()]))[1] == (_row(),)
+
+
+def test_rejects_bad_track_shape() -> None:
     with pytest.raises(ValueError):
-        ReplayTraceRow("legacy", "cam", 0, 1, 2, 3, "gone", (0.0,) * 56)  # type: ignore[arg-type]
-    with pytest.raises(ValueError):
-        ReplayTraceRow("legacy", "cam", 0, 1, 2, 3, "new", ())
+        ReplayTrack(3, "new", (), ())

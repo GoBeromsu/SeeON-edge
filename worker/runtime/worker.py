@@ -110,6 +110,7 @@ from worker.pipeline.output.mjpeg_server import (
 from worker.pipeline.output.overlay import OverlayMode, OverlayRenderer
 from worker.pipeline.perception import GreedyIouTracker, SceneState
 from worker.pipeline.trace import BoundedTraceWriter, TraceCapture, TraceIdentity
+from worker.pipeline.trace.replay_trace_writer import ReplayTraceWriter
 from worker.runtime import bootstrap
 from worker.runtime.clip_deletion_control import ClipDeletionControlService
 from worker.runtime.config import (
@@ -117,6 +118,7 @@ from worker.runtime.config import (
     CameraRuntimeConfig,
     LiveClipExportPolicy,
     WorkerConfig,
+    replay_trace_directory_from_environment,
 )
 from worker.runtime.deepstream.config import ChildConfig
 from worker.runtime.deepstream.native_policy_pump import (
@@ -1810,6 +1812,11 @@ class WorkerRuntime:
                 attacher,
                 self.diagnostics,
                 plan.schedule.get("bed", self.temporal_profile.decision_interval_frames("bed")),
+                replay_trace=(
+                    None
+                    if (trace_directory := replay_trace_directory_from_environment()) is None
+                    else ReplayTraceWriter(trace_directory, camera.camera_id)
+                ),
             ),
         )
         pumps.append(pump)
@@ -1817,6 +1824,7 @@ class WorkerRuntime:
         # camera's detection. Declare it so the relay payload reports the
         # producer as present instead of falling through to "disabled".
         self.diagnostics.register_native_detection(camera.camera_id)
+        self.diagnostics.register_incident_manager(camera.camera_id, plan.decision.incidents)
         HeartbeatReporter(self.config, camera).mark_ready(camera.camera_id)
 
     def _compose_inference_coordinator(
@@ -2651,6 +2659,7 @@ class WorkerRuntime:
             identity_path=event_identity_path(camera.camera_id, self._state_dir)
         )
         aggregator = EventAggregator(deciders=tuple(domain_deciders.values()), incidents=incidents)
+        self.diagnostics.register_incident_manager(camera.camera_id, incidents)
         return CameraDetectionPlan(
             tracker=resolved_tracker,
             schedule=activation.schedule,

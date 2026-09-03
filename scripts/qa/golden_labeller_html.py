@@ -51,11 +51,17 @@ update();
 """
 
 
-def render(worksheet: Path, output: Path) -> int:
+def render(worksheet: Path, output: Path, labeller: str) -> int:
+    if not labeller.strip():
+        raise ValueError("labeller must not be empty")
     with worksheet.open(encoding="utf-8", newline="") as handle:
         reader = csv.DictReader(handle)
         fields = list(reader.fieldnames or [])
         rows = list(reader)
+    if "labeller" not in fields:
+        fields.append("labeller")
+    for row in rows:
+        row["labeller"] = labeller
     page = _PAGE.format(
         rows=json.dumps(rows, ensure_ascii=False).replace("</", "<\\/"),
         fields=json.dumps(fields),
@@ -68,8 +74,9 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=html.unescape(__doc__ or ""))
     parser.add_argument("--worksheet", type=Path, required=True)
     parser.add_argument("--out", type=Path, required=True)
+    parser.add_argument("--labeller", required=True)
     args = parser.parse_args()
-    print(f"episodes={render(args.worksheet, args.out)} html={args.out}")
+    print(f"episodes={render(args.worksheet, args.out, args.labeller)} html={args.out}")
     return 0
 
 

@@ -61,6 +61,7 @@ ML_WORKER_FALL_MODEL_PREPROCESSING_IDENTITY_ENV: Final = (
     "ML_WORKER_FALL_MODEL_PREPROCESSING_IDENTITY"
 )
 ML_WORKER_CLIP_RECORDING_ENABLED_ENV: Final = "ML_WORKER_CLIP_RECORDING_ENABLED"
+WORKER_REPLAY_TRACE_DIR_ENV: Final = "WORKER_REPLAY_TRACE_DIR"
 FALL_SELECTION_PATH: Final = Path("/app/model-selection.json")
 FALL_MODELS_ROOT: Final = Path("/models")
 
@@ -498,6 +499,15 @@ def resolve_local_overrides(
     return models, clip, dev_mjpeg
 
 
+def replay_trace_directory_from_environment(
+    environ: Mapping[str, str] | None = None,
+) -> Path | None:
+    """Return the opt-in local replay trace directory, if configured."""
+    env = os.environ if environ is None else environ
+    raw = env.get(WORKER_REPLAY_TRACE_DIR_ENV, "").strip()
+    return None if not raw else Path(raw)
+
+
 __all__ = [
     "FALL_MODELS_ROOT",
     "FALL_SELECTION_PATH",
@@ -511,9 +521,11 @@ __all__ = [
     "ML_WORKER_FALL_MODEL_TYPE_ENV",
     "ML_WORKER_FALL_MODEL_WEIGHTS_ENV",
     "ML_WORKER_FALL_MODEL_WINDOW_ENV",
+    "WORKER_REPLAY_TRACE_DIR_ENV",
     "clip_recording_config_from_environment",
     "fall_model_config_from_environment",
     "reject_retired_worker_environment",
+    "replay_trace_directory_from_environment",
     "resolve_local_overrides",
     "selected_fall_bundle_config_from_environment",
     "worker_models_config_from_environment",

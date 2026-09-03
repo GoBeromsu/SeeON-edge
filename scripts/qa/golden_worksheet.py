@@ -17,7 +17,7 @@ from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 
-HORIZON_SEC = {"fall": 120.0, "bed-exit": 60.0}
+EPISODE_HORIZON_SEC = {"fall": 120, "bed_exit": 60}
 LABELS = ("real", "false", "unsure")
 
 
@@ -29,7 +29,8 @@ def episodes(rows: list[dict[str, object]]) -> list[dict[str, object]]:
     """Merge one bucket's time-ordered incidents into episodes."""
     merged: list[dict[str, object]] = []
     for row in sorted(rows, key=lambda item: str(item["detected_at"])):
-        horizon = HORIZON_SEC.get(str(row["event_type"]), 60.0)
+        event_type = str(row["event_type"])
+        horizon = EPISODE_HORIZON_SEC.get(event_type.replace("-", "_"), 60)
         if merged:
             last = merged[-1]
             gap = (_time(row["detected_at"]) - _time(last["last_detected_at"])).total_seconds()
@@ -73,12 +74,27 @@ def build(manifest: Path, output: Path, limit: int = 100) -> int:
         key: [episode for episode in episodes(rows) if episode.get("clip_path")]
         for key, rows in buckets.items()
     }
+    by_camera: dict[str, list[dict[str, object]]] = defaultdict(list)
+    for items in candidates.values():
+        for episode in items:
+            by_camera[str(episode["camera_id"])].append(episode)
+    selected = []
+    # A golden corpus is only representative when every included camera has
+    # at least five independently reviewable episodes.
+    for _camera_id, items in sorted(by_camera.items()):
+        if len(items) >= 5:
+            selected.extend(_spread(items, 5))
+    selected_ids = {str(episode["episode_id"]) for episode in selected}
     keys = sorted(key for key, items in candidates.items() if items)
-    selected: list[dict[str, object]] = []
     if keys:
         per_bucket = max(1, limit // len(keys))
         for key in keys:
-            selected.extend(_spread(candidates[key], per_bucket))
+            selected.extend(
+                episode
+                for episode in _spread(candidates[key], per_bucket)
+                if str(episode["episode_id"]) not in selected_ids
+            )
+            selected_ids = {str(episode["episode_id"]) for episode in selected}
         remaining = limit - len(selected)
         for key in keys:
             if remaining <= 0:
