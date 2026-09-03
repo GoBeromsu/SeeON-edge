@@ -51,9 +51,7 @@ def _isolate_from_default_ingest_composition(monkeypatch: pytest.MonkeyPatch) ->
     """
     real_init = WorkerRuntime.__init__
 
-    def _init_with_fake_loop_factory(
-        self: WorkerRuntime, *args: object, **kwargs: object
-    ) -> None:
+    def _init_with_fake_loop_factory(self: WorkerRuntime, *args: object, **kwargs: object) -> None:
         kwargs.setdefault("loop_factory", _fake_loop_factory)
         real_init(self, *args, **kwargs)
 
@@ -155,9 +153,7 @@ def test_no_yaml_failed_pull_with_lkg_uses_lkg_config_and_logs_stale(
         source=ConfigSource.LKG,
         stale=True,
     )
-    monkeypatch.setattr(
-        worker_main, "load_worker_config_from_relay", lambda *_a, **_k: snapshot
-    )
+    monkeypatch.setattr(worker_main, "load_worker_config_from_relay", lambda *_a, **_k: snapshot)
     constructed = _spy_workerruntime_config(monkeypatch)
 
     with caplog.at_level(logging.INFO):
@@ -312,9 +308,7 @@ def test_check_config_no_yaml_reports_lkg_presence_read_only(
         exit_code = worker_main.main(["--check-config"])
 
     assert exit_code == 0
-    assert any(
-        "no last-known-good cache yet" in record.getMessage() for record in caplog.records
-    )
+    assert any("no last-known-good cache yet" in record.getMessage() for record in caplog.records)
 
 
 def test_no_yaml_missing_relay_token_exits_before_any_pull(
@@ -433,7 +427,7 @@ def test_yaml_set_pull_raising_validationerror_exits_with_config_error_code(
 # resolves the packaged default fall model BEFORE the relay pull. The CI
 # `Dockerfile.edge` image bakes empty model directories (weights stay
 # gitignored, mounted at runtime), so on that image this call raises
-# `WorkerConfigError` ("packaged default LSTM fall model is not fully
+# `WorkerConfigError` ("packaged default pose+bbox56 fall model is not fully
 # provisioned"). That call sits before the guarded pull, so the failure must
 # still surface as the documented CONFIG_ERROR_EXIT_CODE (2) with a logged
 # message -- not escape `main()` as a raw traceback that reports the generic
@@ -450,8 +444,8 @@ def test_no_yaml_missing_packaged_model_exits_with_config_error_code(
 
     def _raise(*_args: object, **_kwargs: object) -> object:
         raise WorkerConfigError(
-            "packaged default LSTM fall model is not fully provisioned at "
-            "'models/fall/lstm'; run scripts/fetch-models.sh"
+            "packaged default pose+bbox56 fall model is not fully provisioned at "
+            "'models/fall/pose-bbox56-gru'; run scripts/fetch-models.sh"
         )
 
     monkeypatch.setattr(worker_main, "resolve_local_overrides", _raise)
@@ -542,9 +536,7 @@ def test_no_yaml_no_config_message_names_both_plausible_causes(
 
     assert exit_code == 2
     messages = [record.getMessage() for record in caplog.records]
-    assert any(
-        "unreachable" in message and "no usable camera" in message for message in messages
-    )
+    assert any("unreachable" in message and "no usable camera" in message for message in messages)
 
 
 def test_check_config_with_yaml_never_calls_resolve_startup_config(
@@ -581,7 +573,7 @@ def test_check_config_with_yaml_never_calls_resolve_startup_config(
 
 
 def test_worker_config_accepts_zero_cameras() -> None:
-    """"카메라 없음" is a valid, bootable state -- `WorkerConfig.cameras` no
+    """ "카메라 없음" is a valid, bootable state -- `WorkerConfig.cameras` no
     longer requires at least one entry."""
     config = WorkerConfig(relay=RelayConfig(url="http://ml-api:8000", token="relay-token"))
 
@@ -589,7 +581,7 @@ def test_worker_config_accepts_zero_cameras() -> None:
 
 
 def test_worker_config_still_rejects_a_config_missing_the_relay_section() -> None:
-    """"설정 없음"/malformed config keeps failing fast -- only the camera-count
+    """ "설정 없음"/malformed config keeps failing fast -- only the camera-count
     gate was relaxed by issue #150, nothing else about `WorkerConfig`
     validation changed."""
     with pytest.raises(ValidationError):
@@ -641,3 +633,36 @@ def test_no_yaml_and_no_relay_token_still_exits_fast_with_zero_cameras_available
     monkeypatch.setattr(worker_main, "load_worker_config_from_relay", _fail)
 
     assert worker_main.main([]) == 2
+
+
+def test_packaged_fall_config_requires_the_56_wide_pose_bbox_contract(
+    packaged_fall_bundle: Path,
+) -> None:
+    """P1a-AC6c: the packaged fall contract is ``[window, 56]``.
+
+    A 51-wide bundle -- the retired legacy pose-only row -- is a typed config
+    error at boot, never a silently accepted shape, and ``framework`` stays
+    ``pytorch`` for the CPU Torch runner.
+    """
+    from pydantic import ValidationError
+
+    from worker.runtime.config.worker_models import FallModelConfig
+
+    def _config(width: int) -> FallModelConfig:
+        return FallModelConfig(
+            type="pose-bbox56-proxy-v0",
+            framework="pytorch",
+            mode="sequence",
+            artifact_dir=packaged_fall_bundle,
+            window=30,
+            stride=5,
+            input_shape=(30, width),
+            operating_threshold=0.5,
+        )
+
+    accepted = _config(56)
+    assert accepted.input_shape == (30, 56)
+    assert accepted.framework == "pytorch"
+
+    with pytest.raises(ValidationError, match=r"input_shape must be \[window, 56\]"):
+        _config(51)

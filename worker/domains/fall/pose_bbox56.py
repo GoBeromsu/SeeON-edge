@@ -7,10 +7,16 @@ from dataclasses import dataclass
 from numbers import Real
 from typing import Final, TypeAlias
 
+from contracts.model_selection import (
+    POSE_BBOX56_PREPROCESSING_IDENTITY as _CONTRACT_PREPROCESSING_IDENTITY,
+)
+
 COCO17_KEYPOINTS: Final = 17
 POSE_BBOX56_DIM: Final = 56
 POSE_BBOX56_CONFIDENCE_GATE: Final = 0.5
-POSE_BBOX56_PREPROCESSING_IDENTITY: Final = "coco17-xyc-plus-pose-head-xyxy-valid-f32-v1"
+# Contract vocabulary lives in `contracts`; this re-export keeps the domain's
+# public surface unchanged for its existing importers.
+POSE_BBOX56_PREPROCESSING_IDENTITY: Final = _CONTRACT_PREPROCESSING_IDENTITY
 
 Keypoint: TypeAlias = tuple[float, float, float]
 PoseBbox: TypeAlias = tuple[float, float, float, float]

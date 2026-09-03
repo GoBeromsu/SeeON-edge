@@ -8,6 +8,8 @@ import math
 import struct
 from pathlib import Path
 
+import pytest
+
 from worker.domains.fall.pose_bbox56 import PoseBbox56Track, pose_bbox56_tracks
 
 _EDGE_ROOT = Path(__file__).resolve().parents[1]
@@ -221,3 +223,44 @@ def test_fixtures_exclude_grayscale_and_bed_vocabulary() -> None:
 
     assert "grayscale" not in text.lower()
     assert "bed" not in text.lower()
+
+
+def test_pose_fixture_is_byte_identical_to_the_packaged_bundle_conformance() -> None:
+    """P1a-AC5: the repo's frozen fixture is the bundle's own conformance file.
+
+    The packaged bundle ships ``conformance/pose-bbox56-v1.json`` and pins its
+    sha256 in ``bundle-manifest.json``; the tracked fixture must be that exact
+    payload so the executable transform is checked against what the model was
+    published with, not a re-typed copy.
+    """
+    bundle_fixture = _EDGE_ROOT / "models/fall/pose-bbox56-gru/conformance/pose-bbox56-v1.json"
+    if not bundle_fixture.is_file():
+        pytest.skip("packaged fall bundle is not provisioned locally")
+    assert bundle_fixture.read_bytes() == _POSE_FIXTURE.read_bytes()
+
+
+def test_resampled_gap_rows_are_zero_rows_at_the_exact_cadence() -> None:
+    """P1a-AC4/AC5: a dropped 15 fps bucket becomes one ``valid=0`` zero row.
+
+    The resampler is the single owner of fall input cadence, so a gap must
+    produce the same 56-wide zero row the classifier would see for a missing
+    observation -- never a repeated or interpolated pose.
+    """
+    from worker.domains.fall.pose_bbox56 import pose_bbox56_row
+    from worker.pipeline.perception.pts_resample import CADENCE_NS, PtsResampler
+
+    zero_row = pose_bbox56_row((), None, 640, 360)
+    assert zero_row == (0.0,) * 56
+
+    resampler: PtsResampler[str] = PtsResampler()
+    assert [row.valid for row in resampler.push(0, "a")] == [1]
+    assert [row.valid for row in resampler.push(CADENCE_NS, "b")] == [1]
+    # Two buckets skipped: exactly two invalid rows, then the observed row.
+    produced = resampler.push(4 * CADENCE_NS, "c")
+    assert [(row.pts_ns, row.valid, row.value) for row in produced] == [
+        (2 * CADENCE_NS, 0, None),
+        (3 * CADENCE_NS, 0, None),
+        (4 * CADENCE_NS, 1, "c"),
+    ]
+    # A second row inside an already-emitted bucket is dropped, not duplicated.
+    assert resampler.push(4 * CADENCE_NS + 1, "d") == ()

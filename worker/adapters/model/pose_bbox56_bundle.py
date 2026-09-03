@@ -14,6 +14,7 @@ import numpy as np
 import torch
 from torch import nn
 
+from contracts.model_selection import POSE_BBOX56_PREPROCESSING_IDENTITY
 from worker.adapters.model.errors import ModelLoadError
 from worker.interfaces.fall_model import FallV2Probabilities
 
@@ -37,13 +38,23 @@ class PoseBbox56BundleRunner:
     device: Final[str] = "cpu"
 
     def __init__(
-        self, module: nn.Module, temperature: float, receipt_threshold: float | None,
+        self,
+        module: nn.Module,
+        temperature: float,
+        receipt_threshold: float | None,
         promotion_eligible: bool,
+        artifact_digest: str,
+        preprocessing_identity: str,
     ) -> None:
         self._module = module.to("cpu").eval()
         self._temperature = temperature
         self.receipt_threshold = receipt_threshold
         self.promotion_eligible = promotion_eligible
+        # The composition root verifies these against the registry's pinned
+        # component identity before any camera activates, so they must come
+        # from the bundle itself, never from a constant in this adapter.
+        self.artifact_digest = artifact_digest
+        self.preprocessing_identity = preprocessing_identity
 
     @classmethod
     def from_artifact_dir(
@@ -94,7 +105,14 @@ class PoseBbox56BundleRunner:
         )
         if not isinstance(promotion_eligible, bool):
             raise ModelLoadError("receipt promotion_eligible must be boolean")
-        runner = cls(module, temperature, receipt_threshold, promotion_eligible)
+        runner = cls(
+            module,
+            temperature,
+            receipt_threshold,
+            promotion_eligible,
+            _member_digest(manifest, "model.pt"),
+            POSE_BBOX56_PREPROCESSING_IDENTITY,
+        )
         runner.warmup()
         return runner
 
@@ -113,6 +131,17 @@ class PoseBbox56BundleRunner:
 
     def warmup(self) -> None:
         self.predict(np.zeros(_SHAPE, dtype=np.float32))
+
+
+def _member_digest(manifest: object, relative_path: str) -> str:
+    """The bundle manifest's own sha256 for one verified member."""
+    assert isinstance(manifest, dict)
+    for item in manifest["files"]:
+        if isinstance(item, dict) and item.get("relative_path") == relative_path:
+            digest = item.get("sha256")
+            if isinstance(digest, str):
+                return digest
+    raise ModelLoadError(f"bundle manifest does not list {relative_path}")
 
 
 def _read_json(path: Path) -> object:

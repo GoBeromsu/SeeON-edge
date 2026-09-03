@@ -10,6 +10,11 @@ from dataclasses import dataclass
 from typing import Final
 
 SCHEMA_VERSION: Final = 2
+# The pose+bbox56 preprocessing identity: 17 COCO keypoints as (x, y, confidence)
+# plus the pose-head bbox as (x1, y1, x2, y2, valid) in float32 -- 56 values per
+# row. Both the training publisher and the edge adapters name this exact string,
+# so it is contract vocabulary rather than a per-package constant.
+POSE_BBOX56_PREPROCESSING_IDENTITY: Final = "coco17-xyc-plus-pose-head-xyxy-valid-f32-v1"
 _SHA256_RE: Final = re.compile(r"^[0-9a-f]{64}$")
 _REVISION_RE: Final = re.compile(r"^[0-9a-f]{40}$")
 _SOURCE_LOCATOR_RE: Final = re.compile(
@@ -416,6 +421,7 @@ def validate_applied_against_desired(
 
 
 __all__ = [
+    "POSE_BBOX56_PREPROCESSING_IDENTITY",
     "SCHEMA_VERSION",
     "AppliedModelSelection",
     "ContractError",

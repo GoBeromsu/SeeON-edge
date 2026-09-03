@@ -354,8 +354,7 @@ def test_diagnostics_snapshot_carries_local_geometry_fields() -> None:
     assert cameras["camera-a"].failure_category is None
     assert cameras["camera-b"].failure_category is None
     histograms = {
-        item.geometry: dict(item.batch_sizes)
-        for item in cameras["camera-a"].geometry_batch_sizes
+        item.geometry: dict(item.batch_sizes) for item in cameras["camera-a"].geometry_batch_sizes
     }
     assert histograms == {(640, 360): {1: 1}, (640, 480): {1: 1}}
     assert cameras["camera-a"].geometry_batch_sizes == cameras["camera-b"].geometry_batch_sizes
@@ -696,3 +695,30 @@ def test_native_attempts_never_fall_below_completions() -> None:
     detection = _detection_of(diagnostics.to_payload("facility-1", None, 1), "camera-a")
     # Then
     assert detection["inference_admitted"] >= detection["decision_completed"]
+
+
+def test_runtime_status_reports_cpu_fall_inference_and_real_resample_gap_rows() -> None:
+    """P1a-AC6b/AC4: the runtime status names the fall inference device and the
+    resampler's actual dropped-bucket count per camera.
+
+    ``fall_inference_device`` defaults to ``unknown`` and is only ever recorded
+    from a runner that declares CPU placement, so the field is evidence rather
+    than a hardcoded label; a non-CPU device is refused outright.
+    """
+    diagnostics = WorkerDiagnostics()
+    diagnostics.update_decode("camera-a", _selection())
+    diagnostics.record_fall_inference_device("camera-a", "cpu")
+    diagnostics.record_resample_gap_rows("camera-a", 2)
+    diagnostics.record_resample_gap_rows("camera-a")
+
+    cameras = {camera.camera_id: camera for camera in diagnostics.snapshot().cameras}
+    assert cameras["camera-a"].fall_inference_device == "cpu"
+    assert cameras["camera-a"].resample_gap_rows_total == 3
+
+    diagnostics.update_decode("camera-b", _selection())
+    unreported = {camera.camera_id: camera for camera in diagnostics.snapshot().cameras}
+    assert unreported["camera-b"].fall_inference_device == "unknown"
+    assert unreported["camera-b"].resample_gap_rows_total == 0
+
+    with pytest.raises(ValueError, match="cpu"):
+        diagnostics.record_fall_inference_device("camera-a", "cuda")

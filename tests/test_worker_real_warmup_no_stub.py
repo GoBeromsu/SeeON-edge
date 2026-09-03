@@ -143,3 +143,87 @@ def test_example_config_fall_contract_boots_against_a_synthesized_bundle(
     runner = PoseBbox56BundleRunner.from_artifact_dir(config.models.fall.artifact_dir)
     runner.warmup()
     assert runner.device == "cpu"
+
+
+def test_fall_classifier_is_constructed_and_warmed_on_the_cpu_before_cameras(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """P1a-AC6b: fall construction and warmup are CPU-pinned on every profile.
+
+    The perception runners follow the boot device; the fall bundle is CPU-only,
+    so a boot that reports a GPU device must still construct and warm the fall
+    classifier with ``cpu`` -- and that warmup must happen before any camera
+    activates (ADR-0002).
+    """
+    import worker.runtime.worker as worker_module
+    from worker.domains import DETECTION_MODULE_REGISTRY
+    from worker.runtime.bootstrap import BootContext
+    from worker.runtime.lease import GpuLease
+    from worker.runtime.profile.registry import PROFILE_REGISTRY, VerifyResult
+
+    def _binding(task: str) -> object:
+        component_id = "fall-classifier" if task == "fall" else task
+        return next(
+            binding
+            for definition in DETECTION_MODULE_REGISTRY.definitions
+            for binding in definition.shared_bindings
+            if binding.component_id == component_id
+        )
+
+    class _Runner:
+        """Carries the registry's pinned identities so the artifact gate passes."""
+
+        device = "cpu"
+
+        def __init__(self, task: str) -> None:
+            binding = _binding(task)
+            self.artifact_digest = binding.artifact_digest
+            self.preprocessing_identity = binding.preprocessing_identity
+            self.warmup_calls = 0
+
+        def __call__(self, _image: object) -> object:
+            raise AssertionError("warmup must not run camera inference here")
+
+        def predict(self, _features: object) -> object:
+            raise AssertionError("warmup must not score a window here")
+
+        def warmup(self) -> None:
+            self.warmup_calls += 1
+
+    class _Serving:
+        def create(self, task: str, **_options: object) -> object:
+            return _Runner(task)
+
+    fall_devices: list[str] = []
+    fall_runner = _Runner("fall")
+
+    def _create_fall_model(_self: object, device: str) -> object:
+        fall_devices.append(device)
+        return fall_runner
+
+    monkeypatch.setattr(worker_module.WorkerRuntime, "_create_fall_model", _create_fall_model)
+
+    config = WorkerConfig.model_validate(
+        {
+            "version": 1,
+            "relay": {"url": "http://relay.test", "token": "relay-token"},
+            "cameras": [],
+        }
+    )
+    runtime = worker_module.WorkerRuntime(
+        config,
+        env={"ML_WORKER_PROFILE": "cpu"},
+        serving_client=_Serving(),
+        acquire_lease=lambda: GpuLease.acquire(tmp_path),
+        decode_probe=lambda _decode: VerifyResult(True, "cpu", "decode", "available"),
+    )
+    profile = PROFILE_REGISTRY["cpu"]
+    # A GPU boot device: only the perception runners may follow it.
+    boot = BootContext(profile, "cuda", profile.decode, profile.encode)
+    _ = runtime._initialize_models(boot)  # noqa: SLF001
+    warmed = runtime._warm_models()  # noqa: SLF001
+
+    assert fall_devices == ["cpu"]
+    assert "fall-classifier" in warmed
+    assert fall_runner.warmup_calls == 1
+    assert runtime.cameras == ()
