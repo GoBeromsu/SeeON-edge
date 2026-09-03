@@ -97,12 +97,15 @@ class CompactArtifactReceiptStore:
                     manifest_size=projection_facts[2],
                 )
                 commit_clip(connection, projection)
-                incident = connection.execute(
-                    "SELECT incident_id FROM incidents WHERE edge_event_id = ?",
-                    (located.manifest.event_ref,),
-                ).fetchone()
-                if incident is not None:
-                    commit_primary_artifact(connection, str(incident[0]), projection)
+                for event_ref in located.manifest.event_refs:
+                    incident = connection.execute(
+                        "SELECT incident_id, edge_event_id FROM incidents WHERE edge_event_id = ?",
+                        (event_ref,),
+                    ).fetchone()
+                    if incident is not None:
+                        commit_primary_artifact(
+                            connection, str(incident[0]), str(incident[1]), projection
+                        )
                 _run_hook(self._hooks.before_final_check)
                 final_verified = self._verify_descriptor(route_verified, receipt)
                 if final_verified.identity != transaction_verified.identity:

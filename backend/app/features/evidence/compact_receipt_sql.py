@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import sqlite3
 from dataclasses import dataclass
 
@@ -78,17 +79,27 @@ def commit_clip(connection: sqlite3.Connection, projection: ClipProjection) -> N
 def commit_primary_artifact(
     connection: sqlite3.Connection,
     incident_id: str,
+    edge_event_id: str,
     projection: ClipProjection,
 ) -> None:
     clip_id = projection.receipt.artifact_id
     verified = projection.verified
+    if not projection.manifest.video_available:
+        _commit_primary_failure(
+            connection,
+            incident_id,
+            clip_id,
+            projection.manifest.video_error or "PRIMARY_UNAVAILABLE",
+            projection.manifest.started_at,
+        )
+        return
     existing = connection.execute(
-        "SELECT artifact_id, clip_id, state, content_sha256, size_bytes "
+        "SELECT clip_id, state, content_sha256, size_bytes "
         "FROM artifacts WHERE incident_id = ? AND kind = 'PRIMARY_CLIP'",
         (incident_id,),
     ).fetchone()
+    artifact_id = _primary_artifact_id(clip_id, edge_event_id)
     expected = (
-        f"primary:{clip_id}",
         clip_id,
         "AVAILABLE",
         verified.sha256,
@@ -97,7 +108,13 @@ def commit_primary_artifact(
     if existing is not None:
         if tuple(existing) != expected:
             raise ArtifactReceiptConflictError("primary clip artifact conflicts")
+        _complete_incident(connection, incident_id, projection.manifest.started_at)
         return
+    owner = connection.execute(
+        "SELECT incident_id FROM artifacts WHERE artifact_id = ?", (artifact_id,)
+    ).fetchone()
+    if owner is not None:
+        raise ArtifactReceiptConflictError("primary clip artifact identity conflicts")
     connection.execute(
         """
         INSERT INTO artifacts (
@@ -107,7 +124,7 @@ def commit_primary_artifact(
         """,
         (
             incident_id,
-            expected[0],
+            artifact_id,
             clip_id,
             projection.media_relpath,
             verified.sha256,
@@ -116,6 +133,60 @@ def commit_primary_artifact(
             projection.manifest.started_at,
             projection.manifest.started_at,
         ),
+    )
+    _complete_incident(connection, incident_id, projection.manifest.started_at)
+
+
+def _primary_artifact_id(clip_id: str, edge_event_id: str) -> str:
+    digest = hashlib.sha256(f"{clip_id}\x1f{edge_event_id}".encode()).hexdigest()[:32]
+    return f"primary:{digest}"
+
+
+def _complete_incident(connection: sqlite3.Connection, incident_id: str, timestamp: str) -> None:
+    connection.execute(
+        """
+        UPDATE incidents
+        SET lifecycle_state = 'COMPLETE', failure_reason = NULL,
+            revision = revision + 1, updated_at = ?
+        WHERE incident_id = ? AND lifecycle_state = 'OPEN'
+        """,
+        (timestamp, incident_id),
+    )
+
+
+def _commit_primary_failure(
+    connection: sqlite3.Connection,
+    incident_id: str,
+    clip_id: str,
+    reason: str,
+    timestamp: str,
+) -> None:
+    failure_reason = reason[:64]
+    existing = connection.execute(
+        "SELECT clip_id, state, reason FROM artifacts "
+        "WHERE incident_id = ? AND kind = 'PRIMARY_CLIP'",
+        (incident_id,),
+    ).fetchone()
+    expected = (clip_id, "UNAVAILABLE", failure_reason)
+    if existing is None:
+        connection.execute(
+            """
+            INSERT INTO artifacts (
+                incident_id, kind, clip_id, state, reason, revision, created_at, updated_at
+            ) VALUES (?, 'PRIMARY_CLIP', ?, 'UNAVAILABLE', ?, 1, ?, ?)
+            """,
+            (incident_id, clip_id, failure_reason, timestamp, timestamp),
+        )
+    elif tuple(existing) != expected:
+        raise ArtifactReceiptConflictError("primary clip artifact conflicts")
+    connection.execute(
+        """
+        UPDATE incidents
+        SET lifecycle_state = 'FAILED', failure_reason = ?,
+            revision = revision + 1, updated_at = ?
+        WHERE incident_id = ? AND lifecycle_state = 'OPEN'
+        """,
+        (failure_reason, timestamp, incident_id),
     )
 
 

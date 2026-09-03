@@ -51,6 +51,7 @@ class ClipManifest:
     thumbnail_available: bool = False
     detected_at: str | None = None
     truncation_reasons: tuple[str, ...] = ()
+    event_refs: tuple[str, ...] = ()
 
     def as_response(self) -> ClipManifestPayload:
         return {
@@ -141,6 +142,7 @@ def _manifest_from_mapping(data: Mapping[str, JsonValue]) -> ClipManifest | None
     else:
         video_available = path is not None
     truncation_reasons = _truncation_reasons(data.get("truncation_reasons"))
+    event_refs = _event_refs(data.get("event_refs"), event_ref)
     return ClipManifest(
         clip_id=clip_id,
         camera_id=camera_id,
@@ -155,6 +157,7 @@ def _manifest_from_mapping(data: Mapping[str, JsonValue]) -> ClipManifest | None
         finalized=finalized,
         detected_at=detected_at,
         truncation_reasons=truncation_reasons,
+        event_refs=event_refs,
     )
 
 
@@ -180,6 +183,15 @@ def _truncation_reasons(value: JsonValue | None) -> tuple[str, ...]:
     ):
         return ()
     return tuple(value)
+
+
+def _event_refs(value: JsonValue | None, event_ref: str) -> tuple[str, ...]:
+    if not isinstance(value, list) or any(
+        not isinstance(reference, str) or not reference.strip() for reference in value
+    ):
+        return (event_ref,)
+    references = tuple(dict.fromkeys(reference.strip() for reference in value))
+    return references or (event_ref,)
 
 
 __all__ = [
