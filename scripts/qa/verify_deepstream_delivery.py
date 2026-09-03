@@ -64,9 +64,7 @@ def _canary(root: Path, policy_path: Path) -> DeliveryVerdict:
     )
     by_rung = {receipt.rung: receipt for receipt in receipts}
     findings = [
-        f"requested_rung_missing:{rung}"
-        for rung in request.requested_rungs
-        if rung not in by_rung
+        f"requested_rung_missing:{rung}" for rung in request.requested_rungs if rung not in by_rung
     ]
     if request.policy_sha256 != policy_digest:
         findings.append("run_request_policy_digest_mismatch")
@@ -114,9 +112,7 @@ def _legacy_scope(root: Path) -> tuple[tuple[str, ...], tuple[str, ...]]:
     findings.extend(f"missing:{token}" for token in required if token not in compose)
     if ".env.edge.prod" in compose:
         findings.append("production_env_reference")
-    published: list[str] = re.findall(
-        r"- [\"']?([^\n\"']+:[0-9]+:[0-9]+)[\"']?", compose
-    )
+    published: list[str] = re.findall(r"- [\"']?([^\n\"']+:[0-9]+:[0-9]+)[\"']?", compose)
     findings.extend(
         f"non_loopback_port:{port}" for port in published if not port.startswith("127.0.0.1:")
     )

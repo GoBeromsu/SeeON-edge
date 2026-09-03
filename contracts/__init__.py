@@ -17,6 +17,13 @@ from contracts.relay import (
     RelayAlertPayload,
     RelayHeartbeatPayload,
 )
+from contracts.replay_trace import (
+    REPLAY_TRACE_VERSION,
+    ReplayTraceHeader,
+    ReplayTraceRow,
+    decode_jsonl,
+    encode_jsonl,
+)
 from contracts.tracker import TrackerProtocol
 from contracts.worker_config import (
     CONFIG_VERSION_KEY,
@@ -33,6 +40,7 @@ __all__ = [
     "DEFAULT_FALL_CONFIDENCE_THRESHOLD",
     "FALL_LABEL_TEXT",
     "NORMAL_LABEL_TEXT",
+    "REPLAY_TRACE_VERSION",
     "RESTART_EPOCH_KEY",
     "WORKER_CONFIG_PATH",
     "WORKER_RESTART_PATH",
@@ -52,7 +60,11 @@ __all__ = [
     "PulledWorkerConfig",
     "RelayAlertPayload",
     "RelayHeartbeatPayload",
+    "ReplayTraceHeader",
+    "ReplayTraceRow",
     "TrackerProtocol",
+    "decode_jsonl",
+    "encode_jsonl",
     "pose_weight_filename",
     "pose_weight_path",
 ]

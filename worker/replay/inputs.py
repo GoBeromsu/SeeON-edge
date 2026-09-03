@@ -13,46 +13,15 @@ under test, not to nondeterministic extraction.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-
 from contracts.observation import (
     BedRegionCacheState,
     BedRegionDebugSnapshot,
     BoundingBox,
     FrameObservation,
 )
+from contracts.replay_trace import ReplayTraceRow
 from worker.pipeline.trace.models import AnalysisTrace
 from worker.types import DecisionInput
-
-_MAX_TRACKER_MISSES = 30
-
-
-@dataclass(slots=True)
-class _LiveTrackWindow:
-    """Deterministic replay of ``GreedyIouTracker.live_ids`` membership only.
-
-    The real tracker assigns ids from raw pixel IoU; replay does not have
-    (and must not need) pixel data. But every persisted ``TracePerson`` already
-    carries its assigned id, so only *liveness* (has this id been seen within
-    ``max_misses`` frames) needs to be replayed, not assignment.
-    """
-
-    max_misses: int = _MAX_TRACKER_MISSES
-    _misses: dict[int, int] | None = None
-
-    def __post_init__(self) -> None:
-        self._misses = {}
-
-    def update(self, seen_ids: frozenset[int]) -> tuple[int, ...]:
-        assert self._misses is not None
-        for track_id in seen_ids:
-            self._misses[track_id] = 0
-        for track_id in tuple(self._misses):
-            if track_id not in seen_ids:
-                self._misses[track_id] += 1
-                if self._misses[track_id] > self.max_misses:
-                    del self._misses[track_id]
-        return tuple(sorted(self._misses))
 
 
 def analysis_trace_to_decision_input(
@@ -108,4 +77,53 @@ def replayed_track_id(value: int | float | None) -> int | None:
     return value
 
 
-__all__ = ["_LiveTrackWindow", "analysis_trace_to_decision_input", "replayed_track_id"]
+def replay_trace_to_decision_input(
+    rows: tuple[ReplayTraceRow, ...],
+    *,
+    pts_ns: int,
+    seq: int,
+) -> DecisionInput:
+    """Build a decider input from one declared replay-trace-v2 frame.
+
+    V2 stores normalized pose/bbox56 rows, so replay uses a fixed virtual
+    1000x1000 frame.  Feature math receives the same normalized geometry
+    without requiring source pixels or an inference adapter.
+    """
+    if not rows:
+        raise ValueError("a replay frame requires at least one track row")
+    width = height = 1000
+    boxes = []
+    poses = []
+    track_ids = []
+    live_ids = []
+    for row in rows:
+        feature = row.pose_bbox56
+        x1, y1, x2, y2 = (value * width for value in feature[51:55])
+        boxes.append(BoundingBox(x1, y1, x2, y2, confidence=feature[55]))
+        poses.append(tuple((feature[index] * width, feature[index + 1] * height, feature[index + 2])
+                           for index in range(0, 51, 3)))
+        track_ids.append(row.track_id)
+        if row.track_lifecycle in ("new", "tracked"):
+            live_ids.append(row.track_id)
+    observation = FrameObservation(
+        detections=(tuple(boxes), ()),
+        poses=tuple(poses),
+        regions=((), ()),
+        track_ids=tuple(track_ids),
+    )
+    return DecisionInput(
+        observation=observation,
+        frame_width=width,
+        frame_height=height,
+        live_track_ids=tuple(sorted(live_ids)),
+        time_sec=pts_ns / 1_000_000_000,
+        frame_index=seq,
+        bed_region=BedRegionDebugSnapshot(source=BedRegionCacheState.EMPTY),
+    )
+
+
+__all__ = [
+    "analysis_trace_to_decision_input",
+    "replay_trace_to_decision_input",
+    "replayed_track_id",
+]
