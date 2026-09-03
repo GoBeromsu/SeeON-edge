@@ -171,7 +171,15 @@ def log_snapshot(snapshot: RuntimeDiagnosticsSnapshot) -> None:
             "worker.runtime.telemetry camera_id=%s failure_category=%s "
             "stage_timings=%s bus=%s encoder=%s encode=%s bed_region=%s "
             "bed_exit_scoring=%s inference=%s"
-            + (" decode_backend=%s" if decode_backend is not None else ""),
+            + (" decode_backend=%s" if decode_backend is not None else "")
+            # P1a-AC7: an operator threshold the runtime received but does not
+            # apply is named in the message itself, because basicConfig renders
+            # %(message)s only and an extra= field would be invisible.
+            + (
+                " fall_unapplied_policy_threshold=%s"
+                if camera.fall_unapplied_policy_threshold is not None
+                else ""
+            ),
             camera.camera_id,
             camera.failure_category,
             stage_timings,
@@ -182,6 +190,11 @@ def log_snapshot(snapshot: RuntimeDiagnosticsSnapshot) -> None:
             bed_exit_scoring,
             inference,
             *((decode_backend,) if decode_backend is not None else ()),
+            *(
+                (camera.fall_unapplied_policy_threshold,)
+                if camera.fall_unapplied_policy_threshold is not None
+                else ()
+            ),
             extra={
                 "camera_id": camera.camera_id,
                 "failure_category": camera.failure_category,
@@ -192,6 +205,7 @@ def log_snapshot(snapshot: RuntimeDiagnosticsSnapshot) -> None:
                 "bed_region": bed_region,
                 "bed_exit_scoring": bed_exit_scoring,
                 "inference": inference,
+                "fall_unapplied_policy_threshold": camera.fall_unapplied_policy_threshold,
             },
         )
 

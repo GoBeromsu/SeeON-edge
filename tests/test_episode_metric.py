@@ -571,7 +571,14 @@ def test_id_churn_allowance_rejects_an_unrelated_new_id_after_candidate_expiry()
     assert _id_churn_allowance(rows, _failed_episode(), outside_alerts=[]) == []
 
 
-def test_id_churn_allowance_ignores_an_ancient_stale_id_for_a_recent_split() -> None:
+def test_id_churn_allowance_fails_closed_when_the_identity_history_is_mixed() -> None:
+    """An expired unmatched predecessor makes a later pair ambiguous.
+
+    P1a-AC1 allows only episodes that fail *solely* because one person was split
+    into two ids beyond the re-association window. A camera whose history also
+    contains an unresolved disappearance has not been shown to satisfy that, so
+    the episode fails instead of consuming an allowance.
+    """
     rows = (
         replace(_row(0, "frame"), seq=1),
         replace(_row(1_000_000_000, "frame"), seq=2, tracks=()),
@@ -593,8 +600,7 @@ def test_id_churn_allowance_ignores_an_ancient_stale_id_for_a_recent_split() -> 
         outside_alerts=[],
     )
 
-    assert allowance[0]["previous_track_id"] == 2
-    assert allowance[0]["track_id"] == 3
+    assert allowance == []
 
 
 def test_id_churn_allowance_rejects_two_new_ids_for_one_disappearance() -> None:

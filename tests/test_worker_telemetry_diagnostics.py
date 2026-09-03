@@ -752,3 +752,22 @@ def test_runtime_status_reports_an_operator_threshold_that_p1a_does_not_apply() 
 
     with pytest.raises(ValueError, match="probability"):
         diagnostics.record_fall_unapplied_policy_threshold("camera-a", 1.5)
+
+
+def test_operator_log_names_the_unapplied_threshold(caplog: pytest.LogCaptureFixture) -> None:
+    import logging
+
+    diagnostics = WorkerDiagnostics()
+    diagnostics.record_stage_timing("camera-a", "ingest", 0.1)
+    diagnostics.record_fall_unapplied_policy_threshold("camera-a", 0.7)
+
+    with caplog.at_level(logging.INFO, logger="worker.runtime.telemetry.local_metrics"):
+        diagnostics.log_snapshot()
+    assert "fall_unapplied_policy_threshold=0.7" in caplog.records[-1].getMessage()
+
+    caplog.clear()
+    absent = WorkerDiagnostics()
+    absent.record_stage_timing("camera-b", "ingest", 0.1)
+    with caplog.at_level(logging.INFO, logger="worker.runtime.telemetry.local_metrics"):
+        absent.log_snapshot()
+    assert "fall_unapplied_policy_threshold" not in caplog.records[-1].getMessage()

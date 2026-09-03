@@ -263,6 +263,10 @@ def _id_churn_allowance(
     switches: list[dict[str, int | str]] = []
     live: dict[tuple[str, int], dict[int, tuple[int, int]]] = {}
     candidates: dict[tuple[str, int], dict[int, tuple[int, int]]] = {}
+    # Ids whose candidacy expired unmatched. They are no longer pairable, but
+    # they remain proof that this camera/epoch's identity history is mixed, so
+    # a later pair cannot be called unambiguous.
+    expired: dict[tuple[str, int], set[int]] = defaultdict(set)
     frame_counts: dict[tuple[str, int], int] = defaultdict(int)
     reassociation_ns = 5_000_000_000
     for row in sorted(rows, key=lambda item: (item.camera_id, item.epoch, item.pts_ns, item.seq)):
@@ -273,11 +277,18 @@ def _id_churn_allowance(
         frame_index = frame_counts[key]
         current = {track.track_id for track in row.tracks if track.lifecycle in ("new", "tracked")}
         previous_live = live.get(key, {})
+        recorded = candidates.get(key, {})
         pending = {
             track_id: seen
-            for track_id, seen in candidates.get(key, {}).items()
+            for track_id, seen in recorded.items()
             if row.pts_ns - seen[1] <= reassociation_ns
         }
+        # A predecessor whose candidacy already expired is still evidence that
+        # this camera's identity history is mixed. Dropping it here would make
+        # the remaining pair look unambiguous and hand an allowance to an
+        # episode whose failure was never shown to be a single legacy split.
+        expired[key] |= {track_id for track_id in recorded if track_id not in pending}
+        stale = expired[key]
         disappeared = {
             track_id: seen
             for track_id, seen in previous_live.items()
@@ -293,7 +304,8 @@ def _id_churn_allowance(
             if track.lifecycle == "new" and track.track_id not in previous_live
         ]
         paired_predecessor: int | None = None
-        if len(predecessors) == 1 and len(new_ids) == 1:
+        unambiguous = len(predecessors) == 1 and len(new_ids) == 1 and not stale
+        if unambiguous:
             previous_track_id, (previous_frame, previous_pts_ns) = next(
                 iter(predecessors.items())
             )
@@ -314,6 +326,10 @@ def _id_churn_allowance(
         # A new id consumes the entire contemporaneous candidacy. Retaining a
         # candidate after an ambiguous arrival would let a later id turn an
         # already ambiguous split into an allowance.
+        if new_ids:
+            # A new id consumes the whole history: whatever it resolved or
+            # failed to resolve, later arrivals start from a clean record.
+            expired[key] = set()
         candidates[key] = (
             {}
             if new_ids
@@ -321,7 +337,6 @@ def _id_churn_allowance(
                 track_id: seen
                 for track_id, seen in {**pending, **disappeared}.items()
                 if track_id != paired_predecessor
-                and row.pts_ns - seen[1] <= reassociation_ns
             }
         )
         live[key] = dict.fromkeys(current, (frame_index, row.pts_ns))
