@@ -20,6 +20,7 @@ from tests_support.golden_episodes import GoldenEpisode, load_golden_episodes
 from worker.adapters.model.fall_family_registry import DEFAULT_FALL_MODEL_FAMILY_REGISTRY
 from worker.domains.fall import FallModelProtocol
 from worker.replay.engine import replay
+from worker.runtime.config.errors import WorkerConfigError
 from worker.runtime.config.local_env import fall_model_config_from_environment
 
 
@@ -51,7 +52,7 @@ def _resolve_fall_model() -> FallModelProtocol:
     try:
         config = fall_model_config_from_environment()
         return DEFAULT_FALL_MODEL_FAMILY_REGISTRY.create(config.type, config, "cpu")
-    except (OSError, RuntimeError, ValueError, TypeError) as exc:
+    except (OSError, RuntimeError, ValueError, TypeError, WorkerConfigError) as exc:
         raise ValueError(f"fall model unavailable: {exc}") from exc
 
 
@@ -74,6 +75,7 @@ def _load_rows(
         raise ValueError("traces directory contains no JSONL files")
     truncated_start = False
     for _, segments in sorted(chains.items()):
+        previous_seq: int | None = None
         previous_epoch: int | None = None
         previous_pts: int | None = None
         first = True
@@ -91,15 +93,21 @@ def _load_rows(
                     truncated_start = True
                 first = False
             for row in decoded:
+                if previous_seq is not None and row.seq <= previous_seq:
+                    raise ValueError(f"trace seq is not strictly increasing in {path.name}")
                 if previous_epoch is not None and row.epoch < previous_epoch:
                     raise ValueError(f"trace epoch decreases in {path.name}")
                 if (
                     row.epoch == previous_epoch
                     and previous_pts is not None
                     and row.pts_ns < previous_pts
+                    and row.source_event == "frame"
                 ):
                     raise ValueError(f"trace pts decreases within epoch in {path.name}")
-                previous_epoch, previous_pts = row.epoch, row.pts_ns
+                previous_seq = row.seq
+                previous_epoch = row.epoch
+                if row.source_event == "frame":
+                    previous_pts = row.pts_ns
                 rows.append(row)
     if not rows:
         raise ValueError("traces contain no ReplayRow entries")
@@ -281,7 +289,13 @@ def main() -> int:
         result["truncated_start_allowed"] = truncated_start
         if provisional:
             result["owner_decision_required"] = True
-    except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError) as exc:
+    except WorkerConfigError as exc:
+        print(f"fall model unavailable: {exc}")
+        return 2
+    except (OSError, RuntimeError, ValueError, TypeError) as exc:
+        if str(exc).startswith("fall model unavailable:"):
+            print(str(exc))
+            return 2
         print(f"input error: {exc}")
         return 2
     args.out.parent.mkdir(parents=True, exist_ok=True)

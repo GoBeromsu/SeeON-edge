@@ -42,6 +42,8 @@ def load_golden_episodes(path: Path) -> tuple[GoldenEpisode, ...]:
     if not isinstance(rows, list):
         raise TypeError("episodes must be a list")
     episodes = tuple(_episode(row, labellers, provisional) for row in rows)
+    if any(episode.camera_id not in roster for episode in episodes):
+        raise ValueError("episode camera_id is not in camera_roster")
     _validate_windows(episodes)
     if not provisional:
         if len(episodes) != 100:

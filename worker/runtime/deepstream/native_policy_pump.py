@@ -82,6 +82,8 @@ class NativePolicyPump:
         self._live_track_misses: dict[int, int] = {}
         self._trace_source_lost = False
         self._trace_dims: tuple[int, int] = (1, 1)
+        self._trace_last_pts_ns = 0
+        self._trace_seq = 0
         self._trace_write_failure_logged = False
 
     @property
@@ -284,6 +286,23 @@ class NativePolicyPump:
         )
         self._trace_epoch = current_epoch
         self._trace_source_lost = False
+        if source_event != "frame":
+            self._replay_trace.append(
+                ReplayRow(
+                    camera_id=self.camera_id,
+                    seq=self._next_trace_seq(),
+                    pts_ns=frame.identity.source_pts or 0,
+                    epoch=frame.identity.stream_epoch,
+                    source_event=source_event,
+                    source="legacy-association",
+                    tracks=(),
+                    bed_polygon_id=None,
+                    bed_polygon=None,
+                    night_window_active=False,
+                    frame_width=metadata.source_width,
+                    frame_height=metadata.source_height,
+                )
+            )
         poses = frame.human_pose.poses
         current: dict[int, ReplayTrack] = {}
         for index, (track_id, box) in enumerate(zip(track_ids, boxes, strict=True)):
@@ -313,13 +332,18 @@ class NativePolicyPump:
             if lifecycle == "lost":
                 self._trace_tracks.pop(track_id, None)
         self._trace_tracks.update(current)
-        polygon = _persisted_polygon(self._scene)
+        polygon = _persisted_polygon(
+            self._scene,
+            fallback_width=metadata.source_width,
+            fallback_height=metadata.source_height,
+        )
         self._replay_trace.append(
             ReplayRow(
                 camera_id=self.camera_id,
+                seq=self._next_trace_seq(),
                 pts_ns=frame.identity.source_pts or 0,
                 epoch=frame.identity.stream_epoch,
-                source_event=source_event,
+                source_event="frame",
                 source="legacy-association",
                 tracks=tuple(current.values()) + tuple(non_observed),
                 bed_polygon_id="persisted" if polygon is not None else None,
@@ -332,6 +356,7 @@ class NativePolicyPump:
             )
         )
         self._trace_dims = (metadata.source_width, metadata.source_height)
+        self._trace_last_pts_ns = frame.identity.source_pts or 0
 
     def _capture_source_lost(self) -> None:
         if self._replay_trace is None or self._trace_epoch is None or self._trace_source_lost:
@@ -341,7 +366,8 @@ class NativePolicyPump:
             self._replay_trace.append(
                 ReplayRow(
                     camera_id=self.camera_id,
-                    pts_ns=0,
+                    seq=self._next_trace_seq(),
+                    pts_ns=self._trace_last_pts_ns,
                     epoch=self._trace_epoch[0],
                     source_event="lost",
                     source="legacy-association",
@@ -357,6 +383,11 @@ class NativePolicyPump:
             self._diagnostics.record_replay_trace_write_failure(self.camera_id)
             self._log_trace_write_failure()
 
+    def _next_trace_seq(self) -> int:
+        seq = self._trace_seq
+        self._trace_seq += 1
+        return seq
+
     def _log_trace_write_failure(self) -> None:
         if self._trace_write_failure_logged:
             return
@@ -364,7 +395,11 @@ class NativePolicyPump:
         LOGGER.warning("replay trace write failed: camera_id=%s", self.camera_id, exc_info=True)
 
     def _record_bed_polygon_source(self, frame: MetadataFrame) -> None:
-        polygon = _persisted_polygon(self._scene)
+        polygon = _persisted_polygon(
+            self._scene,
+            fallback_width=frame.source_width,
+            fallback_height=frame.source_height,
+        )
         regions = frame.frame.bed_region.regions
         self._diagnostics.record_bed_polygon_source(
             self.camera_id,
@@ -376,11 +411,17 @@ class NativePolicyPump:
         )
 
 
-def _persisted_polygon(scene: SceneState) -> tuple[tuple[float, float], ...] | None:
+def _persisted_polygon(
+    scene: SceneState, *, fallback_width: int, fallback_height: int
+) -> tuple[tuple[float, float], ...] | None:
     if not scene.persisted_bed_regions:
         return None
     polygon = scene.persisted_bed_regions[0].polygon
-    return None if polygon is None else tuple((float(x), float(y)) for x, y in polygon)
+    if polygon is None:
+        return None
+    width = scene.bed_zone_image_width or fallback_width
+    height = scene.bed_zone_image_height or fallback_height
+    return tuple((float(x) / width, float(y) / height) for x, y in polygon)
 
 
 def _unit_bbox(

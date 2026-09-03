@@ -1,4 +1,7 @@
-"""Build a versioned golden episode fixture from independent worksheets."""
+"""Build a versioned golden episode fixture from independent worksheets.
+
+Run with ``python -m scripts.qa.golden_from_worksheet``.
+"""
 
 from __future__ import annotations
 
@@ -6,17 +9,11 @@ import argparse
 import csv
 import hashlib
 import json
-import sys
 from datetime import datetime
-from importlib import import_module
 from math import isfinite
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[2]
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
-
-EPISODE_HORIZON_SEC = import_module("tests_support.golden_episodes").EPISODE_HORIZON_SEC
+from tests_support.golden_episodes import EPISODE_HORIZON_SEC
 
 _EVENT_TYPE = {"fall": "fall", "bed-exit": "bed_exit", "bed_exit": "bed_exit"}
 _LABELS = {"real", "false", "unsure"}
@@ -55,11 +52,11 @@ def _overlap_seconds(
 ) -> float:
     try:
         clip_start_ns = _ns(row["clip_started_at"])
-        duration_s = float(row["duration_s"])
+        duration_s = float(row["clip_duration_s"])
     except (KeyError, TypeError, ValueError) as exc:
-        raise ValueError("worksheet needs clip_started_at and finite duration_s") from exc
+        raise ValueError("worksheet needs clip_started_at and finite clip_duration_s") from exc
     if not isfinite(duration_s) or duration_s < 0:
-        raise ValueError("worksheet needs clip_started_at and finite duration_s")
+        raise ValueError("worksheet needs clip_started_at and finite clip_duration_s")
     clip_end_ns = clip_start_ns + int(duration_s * 1_000_000_000)
     return max(0, min(clip_end_ns, episode_end_ns) - max(clip_start_ns, episode_start_ns)) / 1e9
 

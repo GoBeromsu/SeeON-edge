@@ -20,6 +20,7 @@ from contracts.observation import (
     FrameObservation,
 )
 from contracts.replay_trace import ReplayRow
+from worker.pipeline.perception import SceneState, build_decision_input, build_frame_observation
 from worker.pipeline.trace.models import AnalysisTrace
 from worker.types import DecisionInput
 
@@ -84,6 +85,10 @@ def replay_trace_to_decision_input(
     track_ids = []
     live_ids = []
     for track in row.tracks if row is not None else ():
+        if track.lifecycle not in ("new", "tracked"):
+            if track.lifecycle == "shadow":
+                live_ids.append(track.track_id)
+            continue
         x1, y1, x2, y2, confidence = track.bbox
         boxes.append(
             BoundingBox(
@@ -96,8 +101,7 @@ def replay_trace_to_decision_input(
         )
         poses.append(tuple((x * width, y * height, score) for x, y, score in track.keypoints))
         track_ids.append(track.track_id)
-        if track.lifecycle in ("new", "tracked"):
-            live_ids.append(track.track_id)
+        live_ids.append(track.track_id)
     bed_boxes = ()
     if row is not None and row.bed_polygon is not None:
         polygon = tuple((round(x * width), round(y * height)) for x, y in row.bed_polygon)
@@ -112,22 +116,28 @@ def replay_trace_to_decision_input(
                 polygon=polygon,
             ),
         )
-    observation = FrameObservation(
-        detections=(tuple(boxes), ()),
+    observation = build_frame_observation(
+        boxes=tuple(boxes),
         poses=tuple(poses),
-        regions=(bed_boxes, ()),
+        bed_boxes=(),
         track_ids=tuple(track_ids),
     )
-    return DecisionInput(
-        observation=observation,
+    scene = SceneState(
+        camera_id=row.camera_id if row is not None else "replay",
+        persisted_bed_regions=bed_boxes,
+        bed_zone_image_width=width if bed_boxes else None,
+        bed_zone_image_height=height if bed_boxes else None,
+    )
+    return build_decision_input(
+        observation,
         frame_width=width,
         frame_height=height,
         live_track_ids=tuple(sorted(live_ids)),
         time_sec=(row.pts_ns if row is not None else pts_ns) / 1_000_000_000,
         frame_index=seq,
-        bed_region=BedRegionDebugSnapshot(
-            source=BedRegionCacheState.FRESH if bed_boxes else BedRegionCacheState.EMPTY
-        ),
+        scene_state=scene,
+        bed_scheduled=False,
+        bed_interval=1,
     )
 
 

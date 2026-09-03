@@ -1,10 +1,13 @@
 import csv
 import hashlib
 import json
+import sqlite3
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
 
+from scripts.qa.export_incident_corpus import export
 from scripts.qa.golden_from_worksheet import convert
 from scripts.qa.golden_worksheet import build
 from tests_support.golden_episodes import load_golden_episodes
@@ -153,7 +156,7 @@ def _worksheet(
                 "detected_at",
                 "last_detected_at",
                 "clip_started_at",
-                "duration_s",
+                "clip_duration_s",
                 "camera_roster",
                 "label",
                 "labeller",
@@ -168,7 +171,7 @@ def _worksheet(
                 "detected_at": detected_at,
                 "last_detected_at": detected_at,
                 "clip_started_at": "2026-01-01T00:00:00+00:00",
-                "duration_s": "30",
+                "clip_duration_s": "30",
                 "camera_roster": "cam",
                 "label": label,
                 "labeller": labeller,
@@ -205,6 +208,8 @@ def test_worksheet_keeps_five_episodes_per_camera(tmp_path: Path) -> None:
                     "detected_at": f"2026-01-01T00:{index * 3:02d}:00+00:00",
                     "edge_event_id": f"{camera}-{index}",
                     "clip_path": f"/{camera}-{index}.mp4",
+                    "clip_started_at": "2026-01-01T00:00:00+00:00",
+                    "clip_duration_s": 60,
                 }
             )
     manifest.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
@@ -257,3 +262,75 @@ def test_worksheet_rejects_roster_camera_shortfall(tmp_path: Path) -> None:
     manifest.write_text("", encoding="utf-8")
     with pytest.raises(ValueError, match="fewer than five"):
         build(manifest, tmp_path / "worksheet.csv", limit=100, roster=("camera-1",))
+
+
+def test_export_worksheet_and_golden_conversion_use_clip_overlap(tmp_path: Path) -> None:
+    snapshot = tmp_path / "edge.sqlite3"
+    store = tmp_path / "store"
+    corpus = tmp_path / "corpus.jsonl"
+    worksheet = tmp_path / "worksheet.csv"
+    golden = tmp_path / "golden.json"
+    connection = sqlite3.connect(snapshot)
+    connection.execute(
+        "CREATE TABLE incidents (incident_id TEXT, edge_event_id TEXT, camera_id TEXT, "
+        "event_type TEXT, detected_at TEXT)"
+    )
+    index = 0
+    for camera in range(13):
+        for episode in range(8):
+            detected_at = datetime(2026, 1, 1, tzinfo=UTC) + timedelta(minutes=episode * 3)
+            connection.execute(
+                "INSERT INTO incidents VALUES (?, ?, ?, ?, ?)",
+                (
+                    f"i{index}",
+                    f"event-{index}",
+                    f"cam-{camera}",
+                    "fall" if episode % 2 else "bed_exit",
+                    (detected_at + timedelta(seconds=10)).isoformat(),
+                ),
+            )
+            clip_dir = store / "clips" / f"clip-{index}"
+            clip_dir.mkdir(parents=True)
+            (clip_dir / "clip.mp4").write_bytes(b"clip")
+            (clip_dir / "manifest.json").write_text(
+                json.dumps(
+                    {
+                        "clip_id": f"clip-{index}",
+                        "event_refs": [f"event-{index}"],
+                        "started_at": detected_at.isoformat(),
+                        "duration_s": 180,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            index += 1
+    connection.commit()
+    connection.close()
+    roster = tuple(f"cam-{camera}" for camera in range(13))
+    assert export(snapshot, store, corpus)[:2] == (104, 104)
+    assert build(corpus, worksheet, limit=100, roster=roster) == 100
+    rows = list(csv.DictReader(worksheet.open(encoding="utf-8", newline="")))
+    for labeller in ("a", "b"):
+        labelled = tmp_path / f"{labeller}.csv"
+        with labelled.open("w", encoding="utf-8", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=[*rows[0], "labeller"])
+            writer.writeheader()
+            writer.writerows({**row, "label": "real", "labeller": labeller} for row in rows)
+    assert convert(
+        [tmp_path / "a.csv", tmp_path / "b.csv"], golden, corpus, None, 5
+    ) == 100
+    loaded = load_golden_episodes(golden)
+    assert all(episode.corroborating_overlap_s >= 1 for episode in loaded)
+
+
+def test_loader_rejects_episode_outside_header_roster(tmp_path: Path) -> None:
+    path = tmp_path / "golden.json"
+    payload = _fixture(
+        [_episode(labels={"a": "real"}, resolved="real", resolution="single")],
+        ["a"],
+        True,
+    )
+    payload["camera_roster"] = ["other-camera"]
+    _write(path, payload)
+    with pytest.raises(ValueError, match="not in camera_roster"):
+        load_golden_episodes(path)

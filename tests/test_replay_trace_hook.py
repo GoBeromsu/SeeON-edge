@@ -4,6 +4,7 @@ import hashlib
 import uuid
 from pathlib import Path
 
+from contracts.observation import BoundingBox
 from contracts.replay_trace import ReplayRow, ReplayTraceHeader, decode_jsonl, encode_jsonl
 from worker.native.deepstream.ipc import MetadataFrame
 from worker.native.deepstream.metadata import LatestMetadataSlot, SourceBinding
@@ -95,9 +96,10 @@ def test_native_pump_captures_epoch_rows_and_writer_rotates(tmp_path: Path) -> N
 
     trace_path = tmp_path / f"{hashlib.sha256(b'camera-a').hexdigest()[:16]}.jsonl"
     _, rows = decode_jsonl(trace_path.read_text())
-    assert [row.source_event for row in rows] == ["open", "reconnect"]
-    assert [track.lifecycle for track in rows[0].tracks] == ["new"]
-    assert rows[1].tracks[0].lifecycle == "new"
+    assert [row.source_event for row in rows] == ["open", "frame", "reconnect", "frame"]
+    assert [row.seq for row in rows] == [0, 1, 2, 3]
+    assert [track.lifecycle for track in rows[1].tracks] == ["new"]
+    assert rows[3].tracks[0].lifecycle == "new"
     diagnostics.update_measured_fps("camera-a", 17.0)
     diagnostics.register_incident_manager("camera-a", incidents)
     event = BusinessEvent("fall", "fall", "source", "camera-a", "facility-a", 1.0, 0.9)
@@ -126,13 +128,40 @@ def test_native_pump_captures_epoch_rows_and_writer_rotates(tmp_path: Path) -> N
 
 
 def test_writer_hashes_untrusted_camera_ids_beneath_root(tmp_path: Path) -> None:
-    row = ReplayRow("camera", 0, 0, "frame", "legacy-association", (), None, None, False, 640, 360)
+    row = ReplayRow(
+        "camera", 0, 0, 0, "frame", "legacy-association", (), None, None, False, 640, 360
+    )
     for camera_id in ("a/b", "../outside", "/absolute", "카메라/../유니코드"):
         writer = ReplayTraceWriter(tmp_path, camera_id)
         assert writer.append(row)
         expected = tmp_path / f"{hashlib.sha256(camera_id.encode()).hexdigest()[:16]}.jsonl"
         assert expected.exists()
         assert expected.resolve().is_relative_to(tmp_path.resolve())
+
+
+def test_capture_normalizes_persisted_polygon_using_its_source_size(tmp_path: Path) -> None:
+    binding = SourceBinding(str(_BOOT), str(_CHILD), "camera-a", 3, 4, "seeon-perception-v1")
+    writer = ReplayTraceWriter(tmp_path, "camera-a")
+    scene = SceneState(
+        "camera-a",
+        persisted_bed_regions=(
+            BoundingBox(0, 0, 1920, 1080, 1.0, ((0, 0), (1920, 0), (1920, 1080))),
+        ),
+        bed_zone_image_width=1920,
+        bed_zone_image_height=1080,
+    )
+    pump = NativePolicyPump(
+        binding,
+        NativePolicyContext(
+            LatestMetadataSlot(), _Control(), scene, EventAggregator((), IncidentManager(30.0)),
+            _Sink(), AlertEvidenceAttacher({}), WorkerDiagnostics(), 90, replay_trace=writer,
+        ),
+    )
+    pump._process(_metadata(epoch=4, track_id=7, generation=3))  # noqa: SLF001
+    _, rows = decode_jsonl(
+        (tmp_path / f"{hashlib.sha256(b'camera-a').hexdigest()[:16]}.jsonl").read_text()
+    )
+    assert rows[1].bed_polygon == ((0.0, 0.0), (1.0, 0.0), (1.0, 1.0))
 
 
 def test_trace_lifecycle_uses_association_live_ids_for_shadow_and_lost(tmp_path: Path) -> None:
@@ -160,5 +189,5 @@ def test_trace_lifecycle_uses_association_live_ids_for_shadow_and_lost(tmp_path:
 
     path = tmp_path / f"{hashlib.sha256(b'camera-a').hexdigest()[:16]}.jsonl"
     _, rows = decode_jsonl(path.read_text())
-    assert [track.lifecycle for track in rows[1].tracks] == ["new", "shadow"]
-    assert [track.lifecycle for track in rows[2].tracks] == ["tracked", "lost"]
+    assert [track.lifecycle for track in rows[2].tracks] == ["new", "shadow"]
+    assert [track.lifecycle for track in rows[3].tracks] == ["tracked", "lost"]

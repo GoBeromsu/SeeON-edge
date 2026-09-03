@@ -66,6 +66,7 @@ def generate(
         rows.append(
             ReplayRow(
                 camera_id=camera_id,
+                seq=len(rows),
                 pts_ns=pts_ns,
                 epoch=0,
                 source_event="frame",

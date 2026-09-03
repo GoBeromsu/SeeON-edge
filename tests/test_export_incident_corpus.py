@@ -25,7 +25,15 @@ def _clip(store: Path, clip_id: str, refs: list[str], *, media: bool = True) -> 
     directory = store / "clips" / clip_id
     directory.mkdir(parents=True)
     (directory / "manifest.json").write_text(
-        json.dumps({"clip_id": clip_id, "event_refs": refs, "duration_s": 12}), encoding="utf-8"
+        json.dumps(
+            {
+                "clip_id": clip_id,
+                "event_refs": refs,
+                "started_at": "2026-01-01T00:00:00+00:00",
+                "duration_s": 12,
+            }
+        ),
+        encoding="utf-8",
     )
     if media:
         (directory / "clip.mp4").write_bytes(b"video")
@@ -44,6 +52,8 @@ def test_export_reads_only_claimed_canonical_clip_manifest(tmp_path: Path) -> No
     record = json.loads(output.read_text())
     assert record["clip_id"] == "clip-1"
     assert record["clip_path"].endswith("clips/clip-1/clip.mp4")
+    assert record["clip_started_at"] == "2026-01-01T00:00:00+00:00"
+    assert record["clip_duration_s"] == 12
 
 
 def test_export_fails_closed_for_every_malformed_claimed_clip(tmp_path: Path) -> None:

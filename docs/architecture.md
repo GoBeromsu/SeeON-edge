@@ -580,6 +580,18 @@ renderers do not run policy or inference. Decision-trace replay stays in the
 worker process as a bounded in-memory writer. There is no backend analysis-trace
 HTTP or SQLite warehouse.
 
+### Replay trace v2
+
+Native policy pumps may emit replay-trace-v2 JSONL under the trace root only
+when its environment gate is enabled. Files are named from a hashed camera id
+and remain contained beneath that root, with bounded rotations. Every row has
+unit coordinates and its frame dimensions; `seq` is the per-camera capture
+ordering authority across rotations. `open`, `reconnect`, and `lost` are
+ordered control markers: open resets replay state, reconnect retains it, and
+lost contributes no observation. Only `frame` rows enter PTS resampling.
+
+This supersedes the abbreviated replay schema in the approved plan.
+
 The authenticated clip artifact projection exposes clean video plus an optional
 snapshot. There is no persisted analysis or overlay artifact view, and no
 overlay fallback to clean playback. Snapshot JPEG derivatives may contain

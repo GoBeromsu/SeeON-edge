@@ -125,7 +125,9 @@ def test_native_capture_and_replay_preserve_unit_observation_geometry(tmp_path: 
 
     assert decider.input_value is not None
     trace_path = tmp_path / f"{hashlib.sha256(b'camera-a').hexdigest()[:16]}.jsonl"
-    _, (row,) = decode_jsonl(trace_path.read_text())
+    _, rows = decode_jsonl(trace_path.read_text())
+    assert rows[0].source_event == "open"
+    row = rows[1]
     replayed = replay_trace_to_decision_input(row, seq=11)
     captured = decider.input_value.observation
     # Production pixel geometry round-trips exactly through unit coordinates + frame size.

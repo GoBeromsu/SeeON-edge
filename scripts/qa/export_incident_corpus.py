@@ -7,6 +7,8 @@ the lifecycle, so an ``artifacts`` join yields no clips at all.
 
 Only identity, camera, type, time and clip location leave the snapshot.
 Credentials, audit rows, RTSP URLs and review notes are never read.
+
+Run with ``python -m scripts.qa.export_incident_corpus``.
 """
 
 from __future__ import annotations
@@ -74,7 +76,7 @@ def _clip_index(clip_store: Path) -> dict[str, dict[str, object]]:
             "clip_id": clip_id,
             "clip_path": str(clip_path),
             "clip_started_at": manifest.get("started_at"),
-            "duration_s": manifest.get("duration_s"),
+            "clip_duration_s": manifest.get("duration_s"),
         }
         for ref in refs:
             existing = index.get(ref)
@@ -127,7 +129,8 @@ def export(snapshot: Path, clip_store: Path, output: Path) -> tuple[int, int, fl
             | {
                 "clip_id": clip["clip_id"] if clip else None,
                 "clip_path": clip["clip_path"] if clip else None,
-                "duration_s": clip["duration_s"] if clip else None,
+                "clip_started_at": clip["clip_started_at"] if clip else None,
+                "clip_duration_s": clip["clip_duration_s"] if clip else None,
             }
         )
     output.parent.mkdir(parents=True, exist_ok=True)

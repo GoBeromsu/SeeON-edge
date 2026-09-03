@@ -85,6 +85,7 @@ def test_metric_accepts_pinned_fall_policy() -> None:
 def _row(pts_ns: int, source_event: str) -> ReplayRow:
     return ReplayRow(
         camera_id="fixture",
+        seq=pts_ns,
         pts_ns=pts_ns,
         epoch=0,
         source_event=source_event,  # type: ignore[arg-type]

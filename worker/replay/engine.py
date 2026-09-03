@@ -231,7 +231,11 @@ class ReplayTraceFrame:
 def replay_trace_frames(rows: Sequence[ReplayRow]) -> tuple[ReplayTraceFrame, ...]:
     """Group V2 track rows into frames and resample each stream epoch at 15 fps."""
     grouped: dict[int, list[ReplayRow]] = {}
-    for row in rows:
+    for row in sorted(rows, key=lambda row: row.seq):
+        if row.source_event == "lost" or (
+            row.source_event != "frame" and not row.tracks
+        ):
+            continue
         grouped.setdefault(row.epoch, []).append(row)
     output: list[ReplayTraceFrame] = []
     for epoch in sorted(grouped):
@@ -280,8 +284,19 @@ def replay(
         )
         return definition.create_camera_module(context).decider
 
+    controls = iter(
+        row for row in sorted(rows, key=lambda row: row.seq) if row.source_event != "frame"
+    )
+    next_control = next(controls, None)
     for frame in replay_trace_frames(rows):
-        if decider is None or (frame.row is not None and frame.row.source_event == "open"):
+        while next_control is not None and (
+            frame.row is None or next_control.seq <= frame.row.seq
+        ):
+            if next_control.source_event == "open":
+                decider = new_decider()
+                previous_live_ids = set()
+            next_control = next(controls, None)
+        if decider is None:
             decider = new_decider()
         assert decider is not None
         if frame.row is not None:
@@ -289,11 +304,7 @@ def replay(
         decision_input = replay_trace_to_decision_input(
             frame.row, pts_ns=frame.pts_ns, seq=frame.seq
         )
-        raw_events = (
-            ()
-            if frame.row is not None and frame.row.source_event == "lost"
-            else decider.update(decision_input)
-        )
+        raw_events = decider.update(decision_input)
         events, suppressed = _admit_events(incident_manager, raw_events)
         suppressed_total += suppressed
         if frame.row is not None:

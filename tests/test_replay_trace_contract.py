@@ -14,6 +14,7 @@ from contracts.replay_trace import (
 def _row() -> ReplayRow:
     return ReplayRow(
         camera_id="cam",
+        seq=0,
         pts_ns=2,
         epoch=0,
         source_event="frame",
@@ -52,19 +53,19 @@ def test_rejects_bad_track_shape() -> None:
     (
         (
             '{"version":"replay-trace-v2"}\n'
-            '{"camera_id":"cam","pts_ns":true,"epoch":0,"source_event":"frame",'
+            '{"camera_id":"cam","seq":0,"pts_ns":true,"epoch":0,"source_event":"frame",'
             '"source":"legacy-association","tracks":[],"bed_polygon_id":null,'
             '"bed_polygon":null,"night_window_active":false,"frame_width":640,"frame_height":360}'
         ),
         (
             '{"version":"replay-trace-v2"}\n'
-            '{"camera_id":"cam","pts_ns":1,"epoch":0,"source_event":"unknown",'
+            '{"camera_id":"cam","seq":0,"pts_ns":1,"epoch":0,"source_event":"unknown",'
             '"source":"legacy-association","tracks":[],"bed_polygon_id":null,'
             '"bed_polygon":null,"night_window_active":false,"frame_width":640,"frame_height":360}'
         ),
         (
             '{"version":"replay-trace-v2"}\n'
-            '{"camera_id":"cam","pts_ns":1,"epoch":0,"source_event":"frame",'
+            '{"camera_id":"cam","seq":0,"pts_ns":1,"epoch":0,"source_event":"frame",'
             '"source":"legacy-association","tracks":[{"track_id":1,"lifecycle":"new",'
             '"bbox":[0.0,0.0,1.0,1.0,NaN],"keypoints":[[0.0,0.0,1.0]]}],'
             '"bed_polygon_id":null,"bed_polygon":null,"night_window_active":false,"frame_width":640,"frame_height":360}'
@@ -81,6 +82,38 @@ def test_rejects_invalid_geometry_and_track_identity() -> None:
         ReplayTrack(3, "new", (0.3, 0.2, 0.1, 0.4, 0.9), ((0.1, 0.2, 0.9),) * 17)
     track = ReplayTrack(3, "new", (0.1, 0.2, 0.3, 0.4, 0.9), ((0.1, 0.2, 0.9),) * 17)
     with pytest.raises(ValueError, match="unique"):
-        ReplayRow("cam", 2, 0, "frame", "legacy-association", (track, track), None, None, False, 640, 360)
+        ReplayRow(
+            "cam",
+            0,
+            2,
+            0,
+            "frame",
+            "legacy-association",
+            (track, track),
+            None,
+            None,
+            False,
+            640,
+            360,
+        )
     with pytest.raises(ValueError, match="exactly"):
-        ReplayRow("cam", 2, 0, "frame", "legacy-association", (), "bed", None, False, 640, 360)
+        ReplayRow("cam", 0, 2, 0, "frame", "legacy-association", (), "bed", None, False, 640, 360)
+
+
+@pytest.mark.parametrize("seq", (True, -1))
+def test_rejects_invalid_seq(seq: object) -> None:
+    with pytest.raises(ValueError):
+        ReplayRow(
+            camera_id="cam",
+            seq=seq,  # type: ignore[arg-type]
+            pts_ns=2,
+            epoch=0,
+            source_event="frame",
+            source="legacy-association",
+            tracks=(),
+            bed_polygon_id=None,
+            bed_polygon=None,
+            night_window_active=False,
+            frame_width=640,
+            frame_height=360,
+        )

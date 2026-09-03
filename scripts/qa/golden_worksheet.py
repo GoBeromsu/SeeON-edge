@@ -6,6 +6,8 @@ bed-exit 60 s). Only episodes whose first incident has a clip are candidates,
 because the labeller judges the clip. Candidates are spread evenly across each
 camera/type bucket's time span (deterministic, no randomness) so the worksheet
 is not the first hour of the corpus.
+
+Run with ``python -m scripts.qa.golden_worksheet``.
 """
 
 from __future__ import annotations
@@ -13,17 +15,12 @@ from __future__ import annotations
 import argparse
 import csv
 import json
-import sys
 from collections import defaultdict
 from datetime import datetime
-from importlib import import_module
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[2]
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
+from tests_support.golden_episodes import EPISODE_HORIZON_SEC
 
-EPISODE_HORIZON_SEC = import_module("tests_support.golden_episodes").EPISODE_HORIZON_SEC
 LABELS = ("real", "false", "unsure")
 
 
@@ -47,7 +44,7 @@ def episodes(rows: list[dict[str, object]]) -> list[dict[str, object]]:
                 if not last.get("clip_path") and row.get("clip_path"):
                     last["clip_path"] = row["clip_path"]
                     last["clip_started_at"] = row.get("clip_started_at")
-                    last["duration_s"] = row.get("duration_s")
+                    last["clip_duration_s"] = row.get("clip_duration_s")
                 continue
         merged.append(
             {
@@ -60,7 +57,7 @@ def episodes(rows: list[dict[str, object]]) -> list[dict[str, object]]:
                 "edge_event_ids": str(row["edge_event_id"]),
                 "clip_path": row.get("clip_path"),
                 "clip_started_at": row.get("clip_started_at"),
-                "duration_s": row.get("duration_s"),
+                "clip_duration_s": row.get("clip_duration_s"),
             }
         )
     return merged
@@ -88,6 +85,8 @@ def build(manifest: Path, output: Path, limit: int, roster: tuple[str, ...]) -> 
     buckets: dict[tuple[str, str], list[dict[str, object]]] = defaultdict(list)
     for line in manifest.read_text(encoding="utf-8").splitlines():
         row = json.loads(line)
+        if str(row["camera_id"]) not in roster:
+            continue
         buckets[(str(row["camera_id"]), str(row["event_type"]))].append(row)
     candidates: dict[tuple[str, str], list[dict[str, object]]] = {
         key: [episode for episode in episodes(rows) if episode.get("clip_path")]
@@ -131,7 +130,7 @@ def build(manifest: Path, output: Path, limit: int, roster: tuple[str, ...]) -> 
         "episode_id",
         "clip_path",
         "clip_started_at",
-        "duration_s",
+        "clip_duration_s",
         "camera_roster",
         "thumbnail_path",
         "camera_id",

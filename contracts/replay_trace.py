@@ -48,6 +48,7 @@ class ReplayTraceHeader:
 @dataclass(frozen=True, slots=True)
 class ReplayRow:
     camera_id: str
+    seq: int
     pts_ns: int
     epoch: int
     source_event: SourceEvent
@@ -68,14 +69,17 @@ class ReplayRow:
         if (
             not isinstance(self.camera_id, str)
             or not self.camera_id
+            or isinstance(self.seq, bool)
+            or not isinstance(self.seq, int)
             or isinstance(self.pts_ns, bool)
             or not isinstance(self.pts_ns, int)
             or isinstance(self.epoch, bool)
             or not isinstance(self.epoch, int)
+            or self.seq < 0
             or self.pts_ns < 0
             or self.epoch < 0
         ):
-            raise ValueError("camera_id and non-negative pts_ns/epoch are required")
+            raise ValueError("camera_id and non-negative seq/pts_ns/epoch are required")
         if self.source_event not in ("open", "frame", "reconnect", "lost"):
             raise ValueError("invalid source_event")
         if self.source not in ("legacy-association", "nvdcf"):
