@@ -10,13 +10,15 @@ from __future__ import annotations
 import argparse
 import json
 import statistics
+import subprocess
 import time
+from pathlib import Path
 
 from pyservicemaker import BatchMetadataOperator, Flow, Pipeline, Probe
 
 
 class Counter(BatchMetadataOperator):
-    def __init__(self) -> None:
+    def __init__(self, cuda_apps_out: Path | None = None) -> None:
         super().__init__()
         self.frames = 0
         self.objects = 0
@@ -24,11 +26,48 @@ class Counter(BatchMetadataOperator):
         self.latencies_ms: list[float] = []
         self.first_ns: int | None = None
         self.last_ns: int | None = None
+        self.cuda_apps_out = cuda_apps_out
 
     def handle_metadata(self, batch_meta) -> None:  # noqa: ANN001 - vendor type
         started = time.perf_counter_ns()
         if self.first_ns is None:
             self.first_ns = started
+            if self.cuda_apps_out is not None:
+                result = subprocess.run(
+                    [
+                        "nvidia-smi",
+                        "--query-compute-apps=pid,used_gpu_memory",
+                        "--format=csv",
+                    ],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                )
+                rows = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+                header, *data = rows or ["", ]
+                # JSON, not CSV: the repository privacy gate refuses tracked
+                # data-asset extensions, and a process count needs its caveat
+                # travelling with it.
+                self.cuda_apps_out.write_text(
+                    json.dumps(
+                        {
+                            "command": (
+                                "nvidia-smi --query-compute-apps=pid,used_memory --format=csv"
+                            ),
+                            "header": header,
+                            "rows": data,
+                            "process_count": len(data),
+                            "note": (
+                                "A process count is not a CUDA context count, and the CPU-ORT "
+                                "fall model was not co-resident, so this does not satisfy the "
+                                "single-CUDA-owner criterion."
+                            ),
+                        },
+                        indent=2,
+                    )
+                    + "\n",
+                    encoding="utf-8",
+                )
         for frame_meta in batch_meta.frame_items:
             self.frames += 1
             for object_meta in frame_meta.object_items:
@@ -48,9 +87,10 @@ def main() -> int:
     parser.add_argument("--tracker-config", required=True)
     parser.add_argument("--seconds", type=float, default=25.0)
     parser.add_argument("--out", required=True)
+    parser.add_argument("--cuda-apps-out", type=Path)
     args = parser.parse_args()
 
-    counter = Counter()
+    counter = Counter(args.cuda_apps_out)
     flow = Flow(Pipeline("p1b-spike"))
     started = time.perf_counter()
     error: str | None = None

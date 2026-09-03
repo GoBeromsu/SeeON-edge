@@ -1,0 +1,9 @@
+{
+  "command": "nvidia-smi --query-compute-apps=pid,used_memory --format=csv",
+  "header": "pid, used_gpu_memory [MiB]",
+  "rows": [
+    "85, 804 MiB"
+  ],
+  "process_count": 1,
+  "note": "One GPU-using process during the media-plane run. A process count is not a CUDA context count, and the CPU-ORT fall model was not co-resident, so this does not satisfy the single-CUDA-owner criterion."
+}
