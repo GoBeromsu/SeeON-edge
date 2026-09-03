@@ -229,16 +229,29 @@ class ReplayTraceFrame:
     valid: int
 
 
-def replay_trace_frames(rows: Sequence[ReplayRow]) -> tuple[ReplayTraceFrame, ...]:
-    """Resample only frame rows, ordered inside explicit boot segments."""
-    grouped: dict[tuple[int, int], list[ReplayRow]] = {}
+def boot_segments(rows: Sequence[ReplayRow]) -> tuple[int, ...]:
+    """Boot segment ordinal for every row, in file order.
+
+    Every ``open`` control starts a new segment. Rows that precede the first
+    ``open`` (an allowed truncated start) form their own implicit segment 0,
+    so the first explicit boot never merges with a retained tail.
+    """
+    segments: list[int] = []
     segment = -1
     for row in rows:
-        if row.source_event == "open":
+        if row.source_event == "open" or segment < 0:
             segment += 1
+        segments.append(segment)
+    return tuple(segments)
+
+
+def replay_trace_frames(rows: Sequence[ReplayRow]) -> tuple[ReplayTraceFrame, ...]:
+    """Resample only frame rows, grouped by (boot segment, stream epoch) in file order."""
+    grouped: dict[tuple[int, int], list[ReplayRow]] = {}
+    for row, segment in zip(rows, boot_segments(rows), strict=True):
         if row.source_event != "frame":
             continue
-        grouped.setdefault((max(segment, 0), row.epoch), []).append(row)
+        grouped.setdefault((segment, row.epoch), []).append(row)
     output: list[ReplayTraceFrame] = []
     for (segment, epoch), group in grouped.items():
         samples = [(row.pts_ns, row) for row in sorted(group, key=lambda row: row.seq)]
@@ -291,7 +304,10 @@ def replay(
     current_segment: int | None = None
     for frame in replay_trace_frames(rows):
         if current_segment != frame.boot_segment:
+            # A worker boot starts with fresh in-memory cooldown state in
+            # production (one IncidentManager per camera per composition).
             decider = new_decider()
+            incident_manager.reset()
             previous_live_ids = set()
             current_segment = frame.boot_segment
         assert decider is not None
@@ -316,7 +332,12 @@ def replay(
             previous_live_ids = live_ids
         frames.append(
             ReplayFrameResult(
-                frame_key=("replay-trace-v2", camera_id, frame.boot_segment, frame.seq),
+                frame_key=(
+                    f"replay-trace-v2:boot-{frame.boot_segment}",
+                    camera_id,
+                    frame.stream_epoch,
+                    frame.seq,
+                ),
                 analysis_trace_id=f"v2:{frame.boot_segment}:{frame.stream_epoch}:{frame.seq}",
                 events=events,
                 snapshots=_decider_trace_snapshots(decider, definition),
@@ -332,7 +353,7 @@ def replay(
         policy_qualified_id=definition.policy_schema.qualified_id,
         effective_policy_id=policy.effective_policy_id,
         frames=tuple(frames),
-        boot_ids=tuple(f"epoch-{item}" for item in sorted({row.epoch for row in rows})),
+        boot_ids=tuple(f"boot-{segment}" for segment in sorted(set(boot_segments(rows)))),
         incident_cooldown_suppressed_total=suppressed_total,
         track_id_switch_total=switch_total,
     )

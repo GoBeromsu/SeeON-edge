@@ -165,6 +165,8 @@ def decode_jsonl(text: str) -> tuple[ReplayTraceHeader, tuple[ReplayRow, ...]]:
             )
             if data["bed_polygon"] is not None:
                 data["bed_polygon"] = tuple(tuple(point) for point in data["bed_polygon"])
+            if data.get("bed_polygon_image_size") is not None:
+                data["bed_polygon_image_size"] = tuple(data["bed_polygon_image_size"])
             rows.append(ReplayRow(**data))
     except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
         raise ValueError("invalid replay trace JSONL") from exc

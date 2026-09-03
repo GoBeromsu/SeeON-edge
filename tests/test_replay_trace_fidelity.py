@@ -61,3 +61,78 @@ def test_id_switch_reports_churn_and_changes_declared_episode_outcome() -> None:
     assert _alerts(control) == [(200_000_001, "bed-exit")]
     assert _alerts(switched) == [(266_666_668, "bed-exit")]
     assert switched.track_id_switch_total == 1
+
+
+def _open_row(template, *, seq: int, epoch: int):
+    from dataclasses import replace
+
+    return replace(
+        template,
+        seq=seq,
+        epoch=epoch,
+        source_event="open",
+        tracks=(),
+        bed_polygon_id=None,
+        bed_polygon=None,
+        bed_polygon_image_size=None,
+    )
+
+
+def _with_open(rows):
+    """Prefix a producer-shaped open control row (fixtures start truncated)."""
+    from dataclasses import replace
+
+    first = rows[0]
+    return (
+        _open_row(first, seq=0, epoch=first.epoch),
+        *(replace(row, seq=row.seq + 1) for row in rows),
+    )
+
+
+def _rebooted(rows, *, epoch_offset: int = 0):
+    """Append the same frames again as a second boot: open(seq 0) then re-sequenced frames."""
+    from dataclasses import replace
+
+    frames = [row for row in rows if row.source_event == "frame"]
+    reboot = [_open_row(frames[0], seq=0, epoch=frames[0].epoch + epoch_offset)]
+    reboot.extend(
+        replace(row, seq=index, epoch=row.epoch + epoch_offset)
+        for index, row in enumerate(frames, start=1)
+    )
+    return tuple(rows) + tuple(reboot)
+
+
+def test_second_boot_starts_with_fresh_cooldown_and_distinct_boot_identity() -> None:
+    """Two boots that each contain the same exit episode both alert: cooldown never leaks across
+    a worker boot, boot_ids come from open rows (not epochs), and frame keys stay unique."""
+    rows = _rebooted(_with_open(_rows("reconnect-control-v2")))
+    run = replay(camera_id="fixture", rows=rows, module_id="bed_exit", policy=_policy())
+    assert run.boot_ids == ("boot-0", "boot-1")
+    assert [event.event_type for frame in run.frames for event in frame.events] == [
+        "bed-exit",
+        "bed-exit",
+    ]
+    assert run.incident_cooldown_suppressed_total == 0
+    keys = [frame.frame_key for frame in run.frames]
+    assert len(keys) == len(set(keys))
+
+
+def test_reconnect_epochs_within_one_boot_keep_unique_frame_keys_and_one_boot_id() -> None:
+    run = _run("reconnect-axis-v2")
+    keys = [frame.frame_key for frame in run.frames]
+    assert len(keys) == len(set(keys))
+    assert {key[0] for key in keys} == {"replay-trace-v2:boot-0"}
+    assert run.boot_ids == ("boot-0",)
+    assert {frame.stream_epoch for frame in run.frames} == {0, 1}
+
+
+def test_truncated_prefix_forms_its_own_segment_before_the_first_open() -> None:
+    from worker.replay.engine import boot_segments
+
+    rows = _rows("reconnect-control-v2")
+    frames_only = tuple(row for row in rows if row.source_event == "frame")
+    truncated = _rebooted(frames_only)  # no open before the retained tail
+    assert boot_segments(truncated)[: len(frames_only)] == (0,) * len(frames_only)
+    assert set(boot_segments(truncated)[len(frames_only) :]) == {1}
+    run = replay(camera_id="fixture", rows=truncated, module_id="bed_exit", policy=_policy())
+    assert run.boot_ids == ("boot-0", "boot-1")

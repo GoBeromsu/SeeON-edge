@@ -109,9 +109,7 @@ def test_rejects_tracks_on_control_rows() -> None:
             0,
             "open",
             "legacy-association",
-            (
-                ReplayTrack(3, "new", (0.1, 0.2, 0.3, 0.4, 0.9), ((0.1, 0.2, 0.9),) * 17),
-            ),
+            (ReplayTrack(3, "new", (0.1, 0.2, 0.3, 0.4, 0.9), ((0.1, 0.2, 0.9),) * 17),),
             None,
             None,
             None,
@@ -143,3 +141,19 @@ def test_rejects_invalid_seq(seq: object) -> None:
             frame_width=640,
             frame_height=360,
         )
+
+
+def test_polygon_bearing_row_round_trips_through_jsonl_with_tuple_image_size() -> None:
+    row = _row()
+    from dataclasses import replace
+
+    polygon_row = replace(
+        row,
+        bed_polygon_id="persisted",
+        bed_polygon=((0.5, 0.0), (1.0, 0.0), (1.0, 1.0), (0.5, 1.0)),
+        bed_polygon_image_size=(1920, 1080),
+    )
+    _header, decoded = decode_jsonl(encode_jsonl(ReplayTraceHeader(), [polygon_row]))
+    assert decoded == (polygon_row,)
+    assert isinstance(decoded[0].bed_polygon_image_size, tuple)
+    assert hash(decoded[0]) == hash(polygon_row)

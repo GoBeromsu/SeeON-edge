@@ -202,7 +202,12 @@ def test_rotation_chain_accepts_seq_restart_at_new_boot_segment(tmp_path: Path) 
         source="image-default", facility_revision_id=None, camera_revision_id=None,
     )
     run = replay(camera_id="camera-a", rows=rows, module_id="bed_exit", policy=policy)
-    assert [frame.frame_key[2] for frame in run.frames] == [0, 1]
+    # frame_key = (boot-scoped kind, camera, stream_epoch, resampled seq): unique per boot.
+    assert [frame.frame_key[0] for frame in run.frames] == [
+        "replay-trace-v2:boot-0",
+        "replay-trace-v2:boot-1",
+    ]
+    assert run.boot_ids == ("boot-0", "boot-1")
 
 
 def test_trace_lifecycle_uses_association_live_ids_for_shadow_and_lost(tmp_path: Path) -> None:

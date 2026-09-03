@@ -196,7 +196,7 @@ def test_persisted_polygon_replay_matches_production_image_space_decision_input(
     assert production_monitor.update(captured.input_value) == replay_monitor.update(replayed)
 
 
-def _assert_decision_inputs_equivalent(replayed: object, production: object) -> None:
+def _assert_decision_inputs_equivalent(replayed: DecisionInput, production: DecisionInput) -> None:
     """Exact equality on every integer/structural field; keypoint floats within 1e-6 px.
 
     Unit-coordinate round trips (px / W * W) can differ from the production
@@ -205,15 +205,15 @@ def _assert_decision_inputs_equivalent(replayed: object, production: object) -> 
     """
     from dataclasses import fields, replace
 
-    rep_obs = replayed.observation  # type: ignore[attr-defined]
-    prod_obs = production.observation  # type: ignore[attr-defined]
+    rep_obs = replayed.observation
+    prod_obs = production.observation
     assert len(rep_obs.poses) == len(prod_obs.poses)
     for rep_pose, prod_pose in zip(rep_obs.poses, prod_obs.poses, strict=True):
         for (rx, ry, rs), (px, py, ps) in zip(rep_pose, prod_pose, strict=True):
             assert math.isclose(rx, px, abs_tol=1e-6) and math.isclose(ry, py, abs_tol=1e-6)
             assert rs == ps
-    rep_stripped = replace(replayed, observation=replace(rep_obs, poses=prod_obs.poses))  # type: ignore[arg-type]
-    for field in fields(production):  # type: ignore[arg-type]
+    rep_stripped = replace(replayed, observation=replace(rep_obs, poses=prod_obs.poses))
+    for field in fields(production):
         if field.name == "bed_pose_features":
             rep_items = getattr(rep_stripped, field.name).items
             prod_items = getattr(production, field.name).items
