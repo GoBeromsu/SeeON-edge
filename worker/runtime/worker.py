@@ -2714,6 +2714,13 @@ class WorkerRuntime:
                     envelope["threshold_source"] = snapshot.threshold_source
                 if snapshot.receipt_threshold is not None:
                     envelope["receipt_threshold"] = snapshot.receipt_threshold
+                if snapshot.unapplied_policy_threshold is not None:
+                    # The alert envelope is a frozen wire contract, so an
+                    # operator threshold that P1a does not apply is reported on
+                    # the runtime status surface instead of silently dropped.
+                    self.diagnostics.record_fall_unapplied_policy_threshold(
+                        camera.camera_id, snapshot.unapplied_policy_threshold
+                    )
                 domain_audit[definition.module_id] = envelope
         resolved_tracker = camera_components.get("person-tracker")
         if not isinstance(resolved_tracker, GreedyIouTracker):

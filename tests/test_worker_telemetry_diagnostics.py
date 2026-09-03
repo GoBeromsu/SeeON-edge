@@ -732,3 +732,23 @@ def test_runtime_status_reports_absorbed_track_id_switches() -> None:
     camera = {camera.camera_id: camera for camera in diagnostics.snapshot().cameras}["camera-a"]
 
     assert camera.track_id_switch_absorbed_total == 3
+
+
+def test_runtime_status_reports_an_operator_threshold_that_p1a_does_not_apply() -> None:
+    """P1a-AC7: an override is neither applied nor silently dropped.
+
+    The alert envelope is a frozen wire contract, so the received-but-unapplied
+    facility/camera transition threshold surfaces on the runtime status where an
+    operator can see that their setting arrived and is not yet authoritative.
+    """
+    diagnostics = WorkerDiagnostics()
+    diagnostics.update_decode("camera-a", _selection())
+    diagnostics.record_fall_unapplied_policy_threshold("camera-a", 0.7)
+    diagnostics.update_decode("camera-b", _selection())
+
+    cameras = {camera.camera_id: camera for camera in diagnostics.snapshot().cameras}
+    assert cameras["camera-a"].fall_unapplied_policy_threshold == pytest.approx(0.7)
+    assert cameras["camera-b"].fall_unapplied_policy_threshold is None
+
+    with pytest.raises(ValueError, match="probability"):
+        diagnostics.record_fall_unapplied_policy_threshold("camera-a", 1.5)

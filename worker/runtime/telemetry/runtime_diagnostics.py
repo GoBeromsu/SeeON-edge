@@ -95,6 +95,7 @@ class WorkerDiagnostics:
         self._bed_polygon_source_by_camera: dict[str, str] = {}
         self._resample_gap_rows_by_camera: dict[str, int] = {}
         self._fall_inference_device_by_camera: dict[str, str] = {}
+        self._fall_unapplied_policy_threshold_by_camera: dict[str, float] = {}
         self._incident_managers: dict[str, object] = {}
         self._encoder = EncoderLifecycleSnapshot()
         self._clip_recorder = ClipRecorderStatus()
@@ -131,6 +132,13 @@ class WorkerDiagnostics:
             raise ValueError("fall inference device must be cpu")
         with self._lock:
             self._fall_inference_device_by_camera[camera_id] = device
+
+    def record_fall_unapplied_policy_threshold(self, camera_id: str, threshold: float) -> None:
+        """Report an operator threshold that was received but is not applied."""
+        if not 0.0 <= threshold <= 1.0:
+            raise ValueError("unapplied policy threshold must be a probability")
+        with self._lock:
+            self._fall_unapplied_policy_threshold_by_camera[camera_id] = threshold
 
     def register_decode(self, camera_id: str, requested: str) -> None:
         self.update_decode(
@@ -434,6 +442,7 @@ class WorkerDiagnostics:
             bed_polygon_source_by_camera = dict(self._bed_polygon_source_by_camera)
             resample_gap_rows_by_camera = dict(self._resample_gap_rows_by_camera)
             fall_inference_device_by_camera = dict(self._fall_inference_device_by_camera)
+            fall_unapplied_by_camera = dict(self._fall_unapplied_policy_threshold_by_camera)
             incident_managers = dict(self._incident_managers)
             measured_fps_by_camera = dict(self._measured_fps_by_camera)
             camera_ids = (
@@ -453,6 +462,7 @@ class WorkerDiagnostics:
                 | set(bed_polygon_source_by_camera)
                 | set(resample_gap_rows_by_camera)
                 | set(fall_inference_device_by_camera)
+                | set(fall_unapplied_by_camera)
                 | set(incident_managers)
                 | (set() if inference is None else set(inference.cameras))
             )
@@ -497,6 +507,7 @@ class WorkerDiagnostics:
                 ),
                 resample_gap_rows_total=resample_gap_rows_by_camera.get(camera_id, 0),
                 fall_inference_device=fall_inference_device_by_camera.get(camera_id, "unknown"),
+                fall_unapplied_policy_threshold=fall_unapplied_by_camera.get(camera_id),
             )
             for camera_id in sorted(camera_ids)
         )

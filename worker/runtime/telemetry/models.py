@@ -183,6 +183,10 @@ class CameraDiagnosticsSnapshot:
     inference_fps: float | None = None
     camera_fps_unpinned: bool = False
     fall_inference_device: str = "unknown"
+    # An operator facility/camera fall transition threshold that was received
+    # but is not authoritative in P1a (P1a-AC7: eligible receipt, else the image
+    # default). Reported so the setting is visible instead of silently dropped.
+    fall_unapplied_policy_threshold: float | None = None
 
 
 @dataclass(frozen=True, slots=True)

@@ -261,8 +261,10 @@ def _id_churn_allowance(
     if outside_alerts:
         return []
     switches: list[dict[str, int | str]] = []
-    previous: dict[tuple[str, int], dict[int, tuple[int, int]]] = {}
+    live: dict[tuple[str, int], dict[int, tuple[int, int]]] = {}
+    candidates: dict[tuple[str, int], dict[int, tuple[int, int]]] = {}
     frame_counts: dict[tuple[str, int], int] = defaultdict(int)
+    reassociation_ns = 5_000_000_000
     for row in sorted(rows, key=lambda item: (item.camera_id, item.epoch, item.pts_ns, item.seq)):
         if row.source_event != "frame":
             continue
@@ -270,33 +272,59 @@ def _id_churn_allowance(
         frame_counts[key] += 1
         frame_index = frame_counts[key]
         current = {track.track_id for track in row.tracks if track.lifecycle in ("new", "tracked")}
-        old = previous.get(key, {})
-        for track in row.tracks:
-            if track.lifecycle != "new" or track.track_id in old:
-                continue
-            candidates = sorted(old.items(), key=lambda item: item[1], reverse=True)
-            for previous_track_id, (previous_frame, previous_pts_ns) in candidates:
-                if previous_track_id in current:
-                    continue
-                frames_since_previous = frame_index - previous_frame
-                elapsed_ns = row.pts_ns - previous_pts_ns
-                if frames_since_previous > 75 or elapsed_ns > 5_000_000_000:
-                    switches.append(
-                        {
-                            "camera_id": row.camera_id,
-                            "epoch": row.epoch,
-                            "pts_ns": row.pts_ns,
-                            "previous_track_id": previous_track_id,
-                            "track_id": track.track_id,
-                            "frames_since_previous": frames_since_previous,
-                            "elapsed_ns": elapsed_ns,
-                        }
-                    )
-                    break
-        previous[key] = {
-            **old,
-            **dict.fromkeys(current, (frame_index, row.pts_ns)),
+        previous_live = live.get(key, {})
+        pending = {
+            track_id: seen
+            for track_id, seen in candidates.get(key, {}).items()
+            if row.pts_ns - seen[1] <= reassociation_ns
         }
+        disappeared = {
+            track_id: seen
+            for track_id, seen in previous_live.items()
+            if track_id not in current
+        }
+        # A directly preceding live id is evaluated even when sparse trace
+        # sampling crosses the window in one step. Older ids are only retained
+        # for the bounded re-association window above.
+        predecessors = {**pending, **disappeared}
+        new_ids = [
+            track.track_id
+            for track in row.tracks
+            if track.lifecycle == "new" and track.track_id not in previous_live
+        ]
+        paired_predecessor: int | None = None
+        if len(predecessors) == 1 and len(new_ids) == 1:
+            previous_track_id, (previous_frame, previous_pts_ns) = next(
+                iter(predecessors.items())
+            )
+            paired_predecessor = previous_track_id
+            elapsed_ns = row.pts_ns - previous_pts_ns
+            if elapsed_ns > reassociation_ns:
+                switches.append(
+                    {
+                        "camera_id": row.camera_id,
+                        "epoch": row.epoch,
+                        "pts_ns": row.pts_ns,
+                        "previous_track_id": previous_track_id,
+                        "track_id": new_ids[0],
+                        "frames_since_previous": frame_index - previous_frame,
+                        "elapsed_ns": elapsed_ns,
+                    }
+                )
+        # A new id consumes the entire contemporaneous candidacy. Retaining a
+        # candidate after an ambiguous arrival would let a later id turn an
+        # already ambiguous split into an allowance.
+        candidates[key] = (
+            {}
+            if new_ids
+            else {
+                track_id: seen
+                for track_id, seen in {**pending, **disappeared}.items()
+                if track_id != paired_predecessor
+                and row.pts_ns - seen[1] <= reassociation_ns
+            }
+        )
+        live[key] = dict.fromkeys(current, (frame_index, row.pts_ns))
     failed = [episode for episode in episodes if episode["alerts"] == 0]
     if len(failed) != sum(episode["alerts"] != 1 for episode in episodes):
         return []
@@ -316,7 +344,7 @@ def _id_churn_allowance(
             for switch in switches
             if switch["camera_id"] == camera_id and start_ns <= switch["pts_ns"] <= end_ns
         ]
-        if not evidence:
+        if len(evidence) != 1:
             return []
         result.append(
             {
@@ -336,12 +364,33 @@ def _ac1_passed(result: dict[str, object]) -> bool:
     allowance = result["id_churn_allowance"]
     episodes = result["episodes"]
     outside = result["alerts_outside_golden_windows"]
-    if not isinstance(allowance, list) or not isinstance(episodes, list) or outside != 0:
+    if (
+        not isinstance(allowance, list)
+        or not isinstance(episodes, list)
+        or outside != 0
+        or result.get("id_churn_allowance_limit_exceeded") is not False
+        or any(not isinstance(episode, dict) or "alerts" not in episode for episode in episodes)
+    ):
         return False
-    failed = [
-        episode for episode in episodes if isinstance(episode, dict) and episode["alerts"] != 1
-    ]
-    return 1 <= len(allowance) <= 10 and len(allowance) == len(failed)
+    failed = [episode for episode in episodes if episode["alerts"] != 1]
+    failed_ids = {
+        (episode.get("camera_id"), episode.get("event_type"), episode.get("start_ns"))
+        for episode in failed
+    }
+    allowance_ids = {
+        (item.get("camera_id"), item.get("event_type"), item.get("episode_start_ns"))
+        for item in allowance
+        if isinstance(item, dict)
+        and item.get("track_id_switch_total") == 1
+        and isinstance(item.get("elapsed_ns"), int)
+        and item["elapsed_ns"] > 5_000_000_000
+    }
+    return (
+        1 <= len(allowance) <= 10
+        and len(allowance) == len(failed)
+        and len(allowance_ids) == len(allowance)
+        and allowance_ids == failed_ids
+    )
 
 
 def main() -> int:

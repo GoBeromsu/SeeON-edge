@@ -507,6 +507,7 @@ def _nonexact_result(*, affected: int, outside: int = 0) -> dict[str, object]:
                 "event_type": "fall",
                 "episode_start_ns": index,
                 "track_id_switch_total": 1,
+                "elapsed_ns": 5_000_000_001,
             }
             for index in range(affected)
         ],
@@ -544,6 +545,82 @@ def test_metric_cli_rejects_non_churn_and_outside_window_failures(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, result: dict[str, object]
 ) -> None:
     monkeypatch.setattr(episode_metric, "evaluate", lambda *_args: result)
+    status, written = _run_cli(
+        monkeypatch,
+        tmp_path,
+        (_row(0, "open"),),
+        (_cli_golden("fall", 0, 1),),
+    )
+
+    assert status == 1
+    assert written is not None
+    assert written["ac1_passed"] is False
+
+
+def test_id_churn_allowance_rejects_an_unrelated_new_id_after_candidate_expiry() -> None:
+    rows = (
+        replace(_row(0, "frame"), seq=1),
+        replace(_row(1_000_000_000, "frame"), seq=2, tracks=()),
+        replace(
+            _row(6_000_000_001, "frame"),
+            seq=3,
+            tracks=(replace(_row(0, "frame").tracks[0], track_id=2, lifecycle="new"),),
+        ),
+    )
+
+    assert _id_churn_allowance(rows, _failed_episode(), outside_alerts=[]) == []
+
+
+def test_id_churn_allowance_ignores_an_ancient_stale_id_for_a_recent_split() -> None:
+    rows = (
+        replace(_row(0, "frame"), seq=1),
+        replace(_row(1_000_000_000, "frame"), seq=2, tracks=()),
+        replace(
+            _row(6_000_000_000, "frame"),
+            seq=3,
+            tracks=(replace(_row(0, "frame").tracks[0], track_id=2),),
+        ),
+        replace(
+            _row(11_000_000_001, "frame"),
+            seq=4,
+            tracks=(replace(_row(0, "frame").tracks[0], track_id=3, lifecycle="new"),),
+        ),
+    )
+
+    allowance = _id_churn_allowance(
+        rows,
+        _failed_episode(end_ns=12_000_000_000),
+        outside_alerts=[],
+    )
+
+    assert allowance[0]["previous_track_id"] == 2
+    assert allowance[0]["track_id"] == 3
+
+
+def test_id_churn_allowance_rejects_two_new_ids_for_one_disappearance() -> None:
+    rows = (
+        replace(_row(0, "frame"), seq=1),
+        replace(
+            _row(5_000_000_001, "frame"),
+            seq=2,
+            tracks=(
+                replace(_row(0, "frame").tracks[0], track_id=2, lifecycle="new"),
+                replace(_row(0, "frame").tracks[0], track_id=3, lifecycle="new"),
+            ),
+        ),
+    )
+
+    assert _id_churn_allowance(rows, _failed_episode(), outside_alerts=[]) == []
+
+
+def test_metric_cli_rejects_unattributed_zero_alert_episode(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    result = _nonexact_result(affected=1)
+    result["id_churn_allowance"] = []
+    result["id_churn_allowance_limit_exceeded"] = False
+    monkeypatch.setattr(episode_metric, "evaluate", lambda *_args: result)
+
     status, written = _run_cli(
         monkeypatch,
         tmp_path,
