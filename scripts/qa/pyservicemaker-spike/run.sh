@@ -13,7 +13,8 @@ docker run --rm --gpus all \
   "$IMAGE" \
   -lc 'pip install --quiet pyyaml &&
        mkdir -p /output/engine &&
-       cp /workspace/scripts/qa/pyservicemaker-spike/yolo26_pose_parser.cpp /workspace/scripts/qa/pyservicemaker-spike/build-parser.sh /output/engine/ &&
+       cp /workspace/scripts/qa/pyservicemaker-spike/yolo26_pose_parser.cpp /output/engine/ &&
+       cp /workspace/scripts/qa/pyservicemaker-spike/build-parser.sh /output/engine/ &&
        cd /output/engine && ./build-parser.sh &&
        cp /workspace/scripts/qa/pyservicemaker-spike/nvinfer-yolo26-pose.txt . &&
        python3 /workspace/scripts/qa/pyservicemaker-spike/spike.py --config /workspace/scripts/qa/pyservicemaker-spike/spike.yaml --output /output/'"$(basename "$OUTPUT")"

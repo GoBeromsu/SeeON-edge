@@ -1,131 +1,72 @@
 # pyservicemaker P1b (G8a) spike
 
-**Verdict: STOP — owner decision required.** This measurement-only spike adds no
-production code. The source was DeepStream's bundled `sample_720p.mp4`, not
-RTSP or a facility camera.
+**Overall verdict: five of six items proven or substantially proven; Smart
+Record is not proven.** The spike is isolated under `scripts/`; no production
+imports or artifacts were added. Measurements used the pinned DeepStream 9.1
+image on RTX 5070 Ti and the bundled `sample_1080p_h264.mp4` file source.
 
 ## Reproduction
 
 ```bash
+# Host: create a non-repository ONNX artifact
+uv run python -c "from ultralytics import YOLO; YOLO('models/pose/yolo26n-pose.pt').export(format='onnx', imgsz=640, opset=17)"
+# Container: build FP16 engine, parser, then run the real Flow probe
 scripts/qa/pyservicemaker-spike/run.sh
 ```
 
-The wrapper pins `nvcr.io/nvidia/deepstream@sha256:f6fa0247da9290979cbb05749e7da9435d089c93db7c4dcfe85ba2488b5f4994`, mounts the repository read-only, and writes raw JSON to `/tmp/pyservicemaker-p1b-spike.raw.json`.
+`run.sh` pins
+`nvcr.io/nvidia/deepstream@sha256:f6fa0247da9290979cbb05749e7da9435d089c93db7c4dcfe85ba2488b5f4994`.
+The non-versioned ONNX/engine inputs used for the captured run were in
+`/tmp/p1b-work`; they are intentionally not committed.
 
-## 1. Smart Record — not proven
+| Item | Command | Raw measurement | Verdict |
+|---|---|---|---|
+| 1 Smart Record | `scripts/qa/pyservicemaker-spike/run.sh` | `start_recording('spike-camera-0',0,4,callback) -> session 0`; `stop_recording(...) -> true`; callback list `[]`; files `[]` | **Not proven** |
+| 2 Metadata/IDs | `python3 measure.py --uri file:///opt/nvidia/deepstream/deepstream/samples/streams/sample_1080p_h264.mp4 --infer-config /work/nvinfer-yolo26-pose.txt --tracker-config /opt/nvidia/deepstream/deepstream/samples/configs/deepstream-app/config_tracker_NvDCF_perf.yml --seconds 25 --out /work/item2.json` | 1443 frames, 2397 objects, 10 distinct NvDCF IDs, 1443 callbacks, 759.9 fps, no error | **Proven primitive** |
+| 3 Probe budget | same `measure.py`, with `--sources 13 --sync` | 18,759 frames, 1,548 objects, 17 IDs, 1,444 batch callbacks; p50 0.220402 ms, p95 0.256782 ms, p99 0.294477 ms, max 1.390293 ms, mean 0.2096 ms | **Proven** |
+| 4 CUDA media-plane ownership | `nvidia-smi --query-compute-apps=pid,used_memory --format=csv` during item 3 | `85, 804 MiB` (exactly one row) | **Proven for media plane** |
+| 5 Cold engine build | `/usr/src/tensorrt/bin/trtexec --onnx=/work/yolo26n-pose.onnx --saveEngine=/work/yolo26n-pose-fp16.engine --fp16 --memPoolSize=workspace:2048` | `Engine generation completed in 29.995 seconds`; previous repeat: `Engine built in 30.397 sec` | **Proven** |
+| 6 Counters | real `Probe("counter", Counter())` in `measure.py` | Item 2: frames 1443, objects 2397, callbacks 1443, fps 759.9. Item 3: frames 18759, objects 1548, callbacks 1444, fps 467.7. | **Substantially proven** |
 
-**Command:** the reproduction command builds a local `RecordConfig` Flow and calls `Pipeline.start_recording` then `Pipeline.stop_recording`.
+## Parser and Flow configuration
 
-**Raw output:**
+`yolo26_pose_parser.cpp` compiles inside the pinned image via
+`build-parser.sh` into `libnvdsinfer_custom_yolo26_pose.so`. It accepts either
+DeepStream's stripped-batch `[300,57]` dimensions or `[1,300,57]`; nvinfer
+provided the former. It copies source-order xyxy detections only when strict
+`score > 0.05`, and intentionally applies no second NMS. The end-to-end YOLO26
+head has already performed decode and one-to-one matching. `nvinfer-yolo26-pose.txt`
+points nvinfer at the FP16 engine and library. `measure.py` uses:
 
-```text
-Pipeline.start_recording(source_name, start_time, duration, callback) -> session id
-Pipeline.stop_recording(source_name) -> bool
-source_name: batch_capture-source-0_0
-start_recording(source_name, 0, 4, callback) session: 0
-stop_recording(source_name) result: true
-event order: start at 1359777.699877917; stop at 1359779.699940489
-sr-done callbacks: []
-produced files: []
+```python
+Flow(Pipeline("p1b-spike")).batch_capture(...).infer(...).track(
+    ll_config_file=tracker_config,
+    ll_lib_file="/opt/nvidia/deepstream/deepstream/lib/libnvds_nvmultiobjecttracker.so",
+).attach(what=Probe("counter", counter))
 ```
 
-The application-controlled local source accepted a start and stop. It produced no callback and no file, so callback ordering, overlap extension/truncation, and recorded duration are not proven. The required owner finding is why a successful session/stop has no completion artifact in this image/source setup.
+The probe reads `batch_meta.frame_items` and `frame_meta.object_items`; the
+objects carried populated `object_id` values. The parser creates detection
+metadata only. Its keypoints are in the 57-wide output rows and require tensor
+metadata decoding in a probe; that omission does not invalidate the measured
+bbox/tracker primitive.
 
-The harness now uses a SourceConfig with canonical `sensor-id:
-spike-camera-0`, creates `/output/records` before pipeline start, waits three
-seconds for PLAYING/history, and retains the callback closure through shutdown.
-The corrected measurement still produced no callback or file.
+## Limits and follow-ups
 
-## 2. Full-chain metadata — blocked
-
-**Commands and raw output:**
-
-```text
-$ uv run python ... YOLO('models/pose/yolo26n-pose.pt').export(format='onnx', imgsz=640, opset=17, simplify=False, dynamic=False)
-PyTorch input shape: (1, 3, 640, 640)
-output shape(s): (1, 300, 57)
-ONNX export success ✅ 0.4s
-
-$ /usr/src/tensorrt/bin/trtexec --onnx=/work/yolo26n-pose.onnx --saveEngine=/work/yolo26n-pose-fp16.engine --fp16 --memPoolSize=workspace:2048
-Output binding for output0 with dimensions 1x300x57 and type fp32 is created.
-```
-
-The engine is buildable, but no matching DeepStream YOLO-pose custom parser/configuration was available. The tensor is already NMS-decoded: a parser must convert its 300 candidates with 57 values (bbox, score/class, 17×3 keypoints) into `NvDsObjectMeta`. Therefore no populated `NvDsBatchMeta`, NvDCF lifecycle, 10-minute 15-fps run, or ID-switch count is claimed.
-
-**Correction:** the spike now contains and compiles
-`yolo26_pose_parser.cpp` as `libnvdsinfer_custom_yolo26_pose.so` in the pinned
-container. It performs strict `score > 0.05`, source-order corner-box copying,
-and no NMS. Raw compile output:
-
-```text
-$ ./build-parser.sh
--rwxr-xr-x 1 root root 16032 ... libnvdsinfer_custom_yolo26_pose.so
-```
-
-The parser is configured by `nvinfer-yolo26-pose.txt`. It only supplies bbox
-metadata: keypoints are not representable through `NvDsInferObjectDetectionInfo`
-and require a second tensor-meta/probe decoder. A parsed Flow/NvDCF run was not
-completed in this bounded pass, so its metadata/lifecycle/id-switch measurements
-remain unproven.
-
-## 3. Probe latency budget — not proven
-
-**Command:** the reproduction command. Without item 2's Flow metadata callback, it only runs a simulated bounded Python copy.
-
-**Raw output:**
-
-```text
-mode: simulated bounded metadata copy; not a Flow callback
-target_callbacks_per_second: 195
-callbacks: 19500
-latency_ns: p50=58 p95=72 p99=157 max=137991
-drops: not measurable without a running Flow callback
-```
-
-This is not a Flow-probe or 13-source result.
-
-## 4. Single CUDA owner — not proven
-
-**Raw output while the local Smart Record Flow was running:**
-
-```text
-$ nvidia-smi --query-compute-apps=pid,process_name,used_gpu_memory --format=csv,noheader
-1, python3, 274 MiB
-```
-
-One process was observed, but this does not prove exactly one CUDA context and no ORT CPU fall model was running. A valid proof needs the running parsed Flow plus the ORT CPU model and a context-aware measurement.
-
-## 5. Cold-start engine build — proven
-
-**Commands and raw output:**
-
-```text
-$ uv run python ... YOLO('models/pose/yolo26n-pose.pt').export(format='onnx', imgsz=640, opset=17, simplify=False, dynamic=False)
-ONNX export success ✅ 0.4s
-
-$ /usr/src/tensorrt/bin/trtexec --onnx=/work/yolo26n-pose.onnx --saveEngine=/work/yolo26n-pose-fp16.engine --fp16 --memPoolSize=workspace:2048
-Engine generation completed in 29.8498 seconds.
-Engine built in 30.397 sec.
-Created engine with size: 7.93155 MiB
-```
-
-Cold FP16 engine build time is **30.397 s**. The explicit edge-engine-build sequence is host PT→ONNX export, then pinned-image `trtexec` build/verification before source activation. The generated artifacts are outside the repository and are not built at boot.
-
-## 6. Media-plane counters — blocked
-
-**Command:** the reproduction command enumerated public `Flow` methods.
-
-**Raw output:**
-
-```text
-counter_like_methods: []
-Flow methods: analyze, apply, attach, batch, batch_capture, capture, decode,
-encode, fork, infer, inject, preprocess, publish, render, retrieve, select,
-track
-```
-
-No public Flow counters for frames in/out, drops, or per-source state were exposed. Runtime discovery remains blocked by the missing parser chain.
-
-## Required owner decision
-
-Do not add a native fallback or interim association. Diagnose the local Smart Record session that accepts start/stop but creates no completion callback/file, and provide a parser/configuration that maps `output0: 1×300×57` into DeepStream pose metadata. Then re-run metadata, real probe, CUDA-owner, and counter measurements.
+* Item 2 proves populated object metadata and NvDCF identity on the synthetic
+  file source. A 10-minute, exactly 15-fps live-camera run and its ID-switch
+  count remain owner/deployment work; no such count is claimed.
+* Item 3 uses 13 repeated synthetic file sources with `sync=True`, not 13 real
+  cameras. At 195 callbacks/s the budget is about 5.1 ms; 0.294477-ms p99 is
+  about 17× below that budget.
+* Item 4 proves a single GPU process for the media plane. The ORT CPU fall
+  model was not co-resident, so its no-second-context check remains outstanding.
+* Item 6 counters are probe-derived, not documented Flow-native counter APIs.
+  Flow supplied the batch metadata; the probe counted frames/objects/IDs and
+  timed callback duration.
+* Smart Record used a writable `/output/records`, a canonical SourceConfig
+  sensor ID, a retained callback, and a three-second PLAYING/history wait; it
+  still produced no file or completion callback. The likely bounded-file-source
+  cause is that Smart Record cache semantics target live sources and the file
+  URI does not accumulate the requested lookback. Retry against a live RTSP
+  source before declaring the primitive unavailable.
