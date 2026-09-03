@@ -33,6 +33,7 @@ from typing import Final
 
 from pydantic import ValidationError
 
+from contracts.model_selection import POSE_BBOX56_PREPROCESSING_IDENTITY
 from worker.runtime.config.errors import WorkerConfigError
 from worker.runtime.config.worker_models import (
     ClipRecordingConfig,
@@ -117,7 +118,7 @@ _DEFAULT_WINDOW: Final = 30
 _DEFAULT_STRIDE: Final = 5
 _DEFAULT_OPERATING_THRESHOLD: Final = 0.5
 _DEFAULT_SCHEMA_VERSION: Final = 2
-_DEFAULT_PREPROCESSING_IDENTITY: Final = "coco17-xyc-plus-pose-head-xyxy-valid-f32-v1"
+_DEFAULT_PREPROCESSING_IDENTITY: Final = POSE_BBOX56_PREPROCESSING_IDENTITY
 _FETCH_MODELS_HINT: Final = (
     "run scripts/fetch-models.sh to download the packaged pose+bbox56 model "
     "weights (or set ML_WORKER_FALL_MODEL_ARTIFACT_DIR to point at an "

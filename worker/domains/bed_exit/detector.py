@@ -119,16 +119,10 @@ class BedExitMonitor:
             or source_generation < 0
         ):
             raise ValueError("bed-exit event identities must name a boot and source epoch")
-        # Fall currently owns its authority inside FallPolicyDeciderV2, so the
-        # registry's identity seam cannot yet share that instance. This local
-        # authority deliberately uses the same per-camera identity and sequence
-        # format; composition can inject one shared authority when fall exposes
-        # it without changing this detector's lifecycle calls.
         self._episodes = EpisodeAuthority(
             boot_id=boot_id,
             stream_epoch=stream_epoch,
             source_generation=source_generation,
-            bed_exit_grace_frames=0,
         )
         self._recovery_events: list[BedExitEvent] = []
         self._lost_track_ids: list[int] = []
@@ -150,11 +144,21 @@ class BedExitMonitor:
         self._assignments_made: int = 0
 
     @property
+    def track_id_switch_absorbed_total(self) -> int:
+        """Re-associations the episode authority absorbed instead of re-alerting."""
+        return self._episodes.track_id_switch_absorbed_total
+
+
+    @property
     def config(self) -> BedExitConfig:
         return self._config
 
     def update_night_window(self, night_window: NightWindow | None) -> None:
         self._night_window = night_window
+
+    def release_onset(self, event: BusinessEvent) -> None:
+        """Reopen only the exact bed-exit onset that failed durable staging."""
+        self._episodes.release(event)
 
     @property
     def state_machine(self) -> BedExitStateMachine:
@@ -281,6 +285,8 @@ class BedExitMonitor:
                         qualifying=True,
                         probability=1.0,
                         domain="bed_exit",
+                        confirmation_votes=1,
+                        confirmation_window=1,
                     )
                 )
             )

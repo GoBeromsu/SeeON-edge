@@ -156,7 +156,7 @@ def _create_gru_bundle_model(artifact_dir: Path, device: str) -> FallModel:
     return GruFallRunner.from_artifact_dir(artifact_dir, device=device)
 
 def _create_pose_bbox56_bundle_model(artifact_dir: Path, device: str) -> FallModel:
-    return PoseBbox56BundleRunner.from_artifact_dir(artifact_dir, device=device)  # type: ignore[return-value]
+    return PoseBbox56BundleRunner.from_artifact_dir(artifact_dir, device=device)
 
 def _create_pose_bbox56_model(config: FallModelConfigLike, device: str) -> FallModel:
     return _create_pose_bbox56_bundle_model(config.artifact_dir, device)

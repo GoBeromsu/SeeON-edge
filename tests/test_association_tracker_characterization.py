@@ -203,7 +203,7 @@ def test_oracle_driven_fall_timeline_emits_exactly_one_rising_edge() -> None:
     assert onsets == [_ONSET_FRAME]
     (event,) = events[_ONSET_FRAME]
     assert event.event_type == "fall"
-    assert event.identity == "boot-1:0:0:0:0:1"
+    assert event.identity == "boot-1:0:fall:none:0:0:0:1"
     assert decider.last_trace_snapshots[0].track_id == 0
 
 

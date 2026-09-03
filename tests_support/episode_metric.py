@@ -199,8 +199,16 @@ def evaluate(
     outside = [alert for index, alert in enumerate(alerts) if index not in matched]
     start_ns, end_ns = min(row.pts_ns for row in rows), max(row.pts_ns for row in rows)
     duration_hours = max((end_ns - start_ns) / 3_600_000_000_000, 1 / 3_600_000_000_000)
-    gap_rows = sum(1 for _, run in runs for frame in run.frames if not frame.valid) // 2
+    # The decider's resampler is the single cadence owner, so its own count is
+    # the only gap authority; counting invalid frames here double-counted the
+    # per-domain runs and needed a fudge factor to compensate.
+    gap_rows = sum(run.resample_gap_rows_total for _, run in runs)
     exact = all(item["alerts"] == 1 for item in per_episode) and not outside
+    id_churn_allowance = _id_churn_allowance(
+        rows,
+        per_episode,
+        outside_alerts=outside,
+    )
     domains = {}
     for event_type in ("fall", "bed_exit"):
         domain_episodes = [item for item in per_episode if item["event_type"] == event_type]
@@ -221,8 +229,13 @@ def evaluate(
         "incident_cooldown_suppressed_total": sum(
             run.incident_cooldown_suppressed_total for _, run in runs
         ),
+        "track_id_switch_total": sum(run.track_id_switch_total for _, run in runs),
+        "track_id_switch_absorbed_total": sum(
+            run.track_id_switch_absorbed_total for _, run in runs
+        ),
         "resample_gap_rows_total": gap_rows,
-        "id_churn_allowance": _id_churn_allowance(rows),
+        "id_churn_allowance": id_churn_allowance,
+        "id_churn_allowance_limit_exceeded": len(id_churn_allowance) > 10,
         "episodes": per_episode,
         "alerts_outside_golden_windows": len(outside),
         "domains": domains,
@@ -237,25 +250,63 @@ def _rows_by_camera(rows: tuple[ReplayRow, ...]) -> dict[str, list[ReplayRow]]:
     return grouped
 
 
-def _id_churn_allowance(rows: tuple[ReplayRow, ...]) -> list[dict[str, int | str]]:
-    """List at most ten new ids that follow a prior visible id in an epoch."""
+def _id_churn_allowance(
+    rows: tuple[ReplayRow, ...],
+    episodes: list[dict[str, object]],
+    *,
+    outside_alerts: list[dict[str, object]],
+) -> list[dict[str, int | str]]:
+    """Attribute bounded id switches to the one golden episode they could affect."""
+    if outside_alerts:
+        return []
     result: list[dict[str, int | str]] = []
-    previous: dict[tuple[str, int], set[int]] = {}
-    for row in sorted(rows, key=lambda item: (item.camera_id, item.epoch, item.pts_ns)):
+    switches: list[dict[str, int | str]] = []
+    previous: dict[tuple[str, int], dict[int, tuple[int, int]]] = {}
+    for frame_index, row in enumerate(
+        sorted(rows, key=lambda item: (item.camera_id, item.epoch, item.pts_ns))
+    ):
         key = (row.camera_id, row.epoch)
         current = {track.track_id for track in row.tracks if track.lifecycle in ("new", "tracked")}
-        old = previous.get(key, set())
+        old = previous.get(key, {})
         for track in row.tracks:
-            if track.lifecycle == "new" and old and track.track_id not in old and len(result) < 10:
-                result.append(
-                    {
-                        "camera_id": row.camera_id,
-                        "epoch": row.epoch,
-                        "pts_ns": row.pts_ns,
-                        "track_id": track.track_id,
-                    }
-                )
-        previous[key] = current
+            if track.lifecycle != "new" or track.track_id in old:
+                continue
+            for previous_track_id, (previous_frame, previous_pts_ns) in old.items():
+                if previous_track_id in current:
+                    continue
+                if (
+                    frame_index - previous_frame <= 75
+                    and row.pts_ns - previous_pts_ns <= 5_000_000_000
+                ):
+                    switches.append(
+                        {
+                            "camera_id": row.camera_id,
+                            "epoch": row.epoch,
+                            "pts_ns": row.pts_ns,
+                            "previous_track_id": previous_track_id,
+                            "track_id": track.track_id,
+                        }
+                    )
+                    break
+        previous[key] = dict.fromkeys(current, (frame_index, row.pts_ns))
+    failed = [episode for episode in episodes if episode["alerts"] != 1]
+    if len(failed) != 1:
+        return []
+    episode = failed[0]
+    start_ns = episode["start_ns"]
+    if not isinstance(start_ns, int):
+        raise TypeError("episode start_ns must be an int")
+    camera_id = episode["camera_id"]
+    if not isinstance(camera_id, str):
+        raise TypeError("episode camera_id must be a str")
+    for switch in switches:
+        pts_ns = switch["pts_ns"]
+        if (
+            switch["camera_id"] == camera_id
+            and isinstance(pts_ns, int)
+            and start_ns <= pts_ns <= start_ns + 5_000_000_000
+        ):
+            result.append({**switch, "episode_start_ns": start_ns})
     return result
 
 
@@ -307,7 +358,13 @@ def main() -> int:
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps(result, indent=2) + "\n")
     print(json.dumps(result, separators=(",", ":")))
-    return 2 if provisional else 0 if result["exact"] else 1
+    return (
+        2
+        if provisional
+        else 0
+        if result["exact"] and not result["id_churn_allowance_limit_exceeded"]
+        else 1
+    )
 
 
 if __name__ == "__main__":

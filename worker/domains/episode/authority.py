@@ -30,16 +30,18 @@ class EpisodeProposal:
     probability: float | None = None
     domain: str | None = None
     generation: int = 0
+    confirmation_votes: int = 3
+    confirmation_window: int = 5
 
 
 @dataclass(slots=True)
 class _Episode:
     state: EpisodeState = EpisodeState.NORMAL
-    votes: deque[bool] = field(default_factory=lambda: deque(maxlen=5))
-    candidate_frames: int = 0
+    votes: deque[bool] = field(default_factory=deque)
     unknown_frame: int | None = None
     unknown_time: float | None = None
     sequence: int | None = None
+    emitted_identity: str | None = None
 
 
 class EpisodeAuthority:
@@ -49,15 +51,10 @@ class EpisodeAuthority:
     resolving it. Only a scored confirmed recovery can re-arm RESOLVED.
     """
 
-    def __init__(
-        self, *, boot_id: str, stream_epoch: str, source_generation: int,
-        fall_cooldown_frames: int = 0, bed_exit_grace_frames: int = 0,
-    ) -> None:
+    def __init__(self, *, boot_id: str, stream_epoch: str, source_generation: int) -> None:
         self._boot_id = boot_id
         self._stream_epoch = stream_epoch
         self._source_generation = source_generation
-        self._fall_cooldown_frames = fall_cooldown_frames
-        self._bed_exit_grace_frames = bed_exit_grace_frames
         self._episodes: dict[tuple[str, str, int | None, int], _Episode] = {}
         self._next_sequence = 1
         self.track_id_switch_absorbed_total = 0
@@ -69,6 +66,10 @@ class EpisodeAuthority:
         return EpisodeState.NORMAL if episode is None else episode.state
 
     def propose(self, proposal: EpisodeProposal) -> tuple[BusinessEvent, ...]:
+        if proposal.confirmation_votes < 1:
+            raise ValueError("confirmation_votes must be positive")
+        if proposal.confirmation_window < proposal.confirmation_votes:
+            raise ValueError("confirmation_window must cover confirmation_votes")
         key = (proposal.camera_id, proposal.event_type, proposal.bed_id, proposal.track_id)
         episode = self._episodes.setdefault(key, _Episode())
         if episode.state is EpisodeState.UNKNOWN:
@@ -81,7 +82,6 @@ class EpisodeAuthority:
             if proposal.confirmed_recovery:
                 episode.state = EpisodeState.NORMAL
                 episode.votes.clear()
-                episode.candidate_frames = 0
             else:
                 return ()
         if episode.state is EpisodeState.OPEN:
@@ -90,23 +90,16 @@ class EpisodeAuthority:
                 # for unresolved loss/timeout, which must not re-arm.
                 episode.state = EpisodeState.NORMAL
                 episode.votes.clear()
-                episode.candidate_frames = 0
             return ()
         if not proposal.qualifying:
             episode.state = EpisodeState.NORMAL
             episode.votes.clear()
-            episode.candidate_frames = 0
             return ()
         if episode.state is EpisodeState.NORMAL:
             episode.state = EpisodeState.CANDIDATE
-            episode.votes.clear()
-            episode.candidate_frames = 0
+            episode.votes = deque(maxlen=proposal.confirmation_window)
         episode.votes.append(True)
-        episode.candidate_frames += 1
-        promoted = (
-            sum(episode.votes) >= 3 if proposal.event_type == "fall"
-            else episode.candidate_frames > self._bed_exit_grace_frames
-        )
+        promoted = sum(episode.votes) >= proposal.confirmation_votes
         if not promoted:
             return ()
         episode.state = EpisodeState.OPEN
@@ -117,9 +110,11 @@ class EpisodeAuthority:
             "bed_exit" if proposal.event_type == "bed-exit" else proposal.event_type
         )
         identity = (
-            f"{self._boot_id}:{self._stream_epoch}:{proposal.track_id}:"
+            f"{self._boot_id}:{self._stream_epoch}:{proposal.event_type}:"
+            f"{'none' if proposal.bed_id is None else proposal.bed_id}:{proposal.track_id}:"
             f"{self._source_generation}:{proposal.generation}:{sequence}"
         )
+        episode.emitted_identity = identity
         return (
             BusinessEvent(
                 domain=domain,
@@ -133,6 +128,16 @@ class EpisodeAuthority:
                 bed_id=proposal.bed_id,
             ),
         )
+
+    def release(self, event: BusinessEvent) -> None:
+        """Reopen exactly the episode whose emitted event failed durable staging."""
+        for episode in self._episodes.values():
+            if episode.emitted_identity != event.identity:
+                continue
+            episode.state = EpisodeState.NORMAL
+            episode.votes.clear()
+            episode.emitted_identity = None
+            return
 
     def track_lost(
         self,
@@ -177,6 +182,21 @@ class EpisodeAuthority:
                 camera_id == proposal.camera_id
                 and event_type == "bed-exit"
                 and bed_id == proposal.bed_id
+                and episode.state is EpisodeState.UNKNOWN
+                and self._within_reassociation(episode, proposal)
+            )
+        )
+        return bool(candidates) and self.reassociate(proposal, candidates[0])
+
+    def reassociate_fall(self, proposal: EpisodeProposal) -> bool:
+        """Absorb one unknown fall episode into a newly observed track."""
+        candidates = sorted(
+            track_id
+            for (camera_id, event_type, bed_id, track_id), episode in self._episodes.items()
+            if (
+                camera_id == proposal.camera_id
+                and event_type == "fall"
+                and bed_id is None
                 and episode.state is EpisodeState.UNKNOWN
                 and self._within_reassociation(episode, proposal)
             )

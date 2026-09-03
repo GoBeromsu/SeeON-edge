@@ -173,10 +173,15 @@ class IncidentManager:
         event_time: float | None = None,
     ) -> CooldownKey:
         del event_time
-        if event.domain == "fall":
-            return (event.camera_id, event.domain, event.event_type)
-        if event.domain == "bed_exit" and event.bed_id is not None:
-            return (event.camera_id, event.domain, event.event_type, event.bed_id)
+        # The episode authority (worker/domains/episode/) is the lifecycle
+        # owner: it already emits at most one event per episode and re-arms
+        # only on a confirmed recovery. This cooldown is overload protection
+        # for a producer that re-emits an identity it already emitted, so it
+        # keys on the episode identity. A camera-wide key would instead
+        # suppress a genuine second episode -- a different resident, or the
+        # same one after a confirmed recovery -- which is exactly the alert
+        # loss the episode machine exists to prevent. Every suppression here
+        # is therefore a defect signal, counted in cooldown_suppressed_total.
         return (event.camera_id, event.domain, event.event_type, event.identity)
 
     def reset(self) -> None:

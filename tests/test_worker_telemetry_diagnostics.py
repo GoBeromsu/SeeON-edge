@@ -722,3 +722,13 @@ def test_runtime_status_reports_cpu_fall_inference_and_real_resample_gap_rows() 
 
     with pytest.raises(ValueError, match="cpu"):
         diagnostics.record_fall_inference_device("camera-a", "cuda")
+
+
+def test_runtime_status_reports_absorbed_track_id_switches() -> None:
+    diagnostics = WorkerDiagnostics()
+    diagnostics.update_decode("camera-a", _selection())
+    diagnostics.record_track_id_switch_absorbed_total("camera-a", 3)
+
+    camera = {camera.camera_id: camera for camera in diagnostics.snapshot().cameras}["camera-a"]
+
+    assert camera.track_id_switch_absorbed_total == 3

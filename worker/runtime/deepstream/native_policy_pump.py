@@ -36,6 +36,7 @@ class NativeDiagnostics(Protocol):
     def record_detection_completed(self, camera_id: str) -> None: ...
     def record_native_detection_attempt(self, camera_id: str) -> None: ...
     def record_track_id_switch(self, camera_id: str) -> None: ...
+    def record_track_id_switch_absorbed_total(self, camera_id: str, total: int) -> None: ...
     def record_bed_polygon_source(self, camera_id: str, source: str) -> None: ...
     def record_replay_trace_write_failure(self, camera_id: str) -> None: ...
     def record_resample_gap_rows(self, camera_id: str, count: int = 1) -> None: ...
@@ -57,6 +58,7 @@ class NativePolicyContext:
     # G7: composition supplies the evaluated bed-exit detection window.
     night_window_active: Callable[[], bool] | None = None
     recreate_decision: Callable[[SourceBinding], EventAggregator] | None = None
+    track_id_switch_absorbed_total: Callable[[EventAggregator], int] | None = None
 
 
 @final
@@ -77,6 +79,10 @@ class NativePolicyPump:
         self._replay_trace = context.replay_trace
         self._night_window_active = context.night_window_active
         self._recreate_decision = context.recreate_decision
+        if context.track_id_switch_absorbed_total is None:
+            # ADR-0002: a missing seam refuses at wiring time, never mid-stream.
+            raise ValueError("native policy pump requires an absorbed-switch reader")
+        self._track_id_switch_absorbed_total = context.track_id_switch_absorbed_total
         self._stop = threading.Event()
         self._fps: deque[float] = deque()
         self.processed_count = 0
@@ -220,6 +226,9 @@ class NativePolicyPump:
         self._capture_replay_row(metadata, boxes, resolved_track_ids)
         gap_rows_before = _resample_gap_rows_total(self._decision)
         events = self._decision.update(decision_input)
+        self._diagnostics.record_track_id_switch_absorbed_total(
+            self.camera_id, self._track_id_switch_absorbed_total(self._decision)
+        )
         gap_rows = _resample_gap_rows_total(self._decision) - gap_rows_before
         if gap_rows > 0:
             self._diagnostics.record_resample_gap_rows(self.camera_id, gap_rows)
@@ -416,19 +425,8 @@ class NativePolicyPump:
         LOGGER.warning("replay trace write failed: camera_id=%s", self.camera_id, exc_info=True)
 
     def _record_bed_polygon_source(self, frame: MetadataFrame) -> None:
-        polygon = _persisted_polygon(
-            self._scene,
-            fallback_width=frame.source_width,
-            fallback_height=frame.source_height,
-        )
-        regions = frame.frame.bed_region.regions
         self._diagnostics.record_bed_polygon_source(
-            self.camera_id,
-            "persisted"
-            if polygon is not None
-            else "native-per-frame"
-            if any(region.polygon is not None for region in regions)
-            else "none",
+            self.camera_id, self._scene.bed_polygon_source
         )
 
 

@@ -56,6 +56,7 @@ from worker.domains import (
     SharedComponentIdentity,
 )
 from worker.domains.detection_window import DetectionWindow
+from worker.domains.fall import FallV2DomainDecider
 from worker.interfaces.decision import Decider
 from worker.interfaces.fall_model import FallV2ModelProtocol
 from worker.interfaces.output import EventSink
@@ -547,6 +548,14 @@ class _WindowGatedDecider:
             getattr(self.decider, "last_trace_snapshots", ()),
         )
         return events
+
+
+def _absorbed_track_id_switch_total(decision: EventAggregator) -> int:
+    for decider in decision.deciders:
+        fall_decider = decider.decider if isinstance(decider, _WindowGatedDecider) else decider
+        if isinstance(fall_decider, FallV2DomainDecider):
+            return fall_decider.track_id_switch_absorbed_total
+    raise RuntimeError("native policy decision lacks a fall V2 absorbed-switch counter")
 
 
 def _delivery_queue_dir(state_dir: Path) -> Path:
@@ -1859,6 +1868,7 @@ class WorkerRuntime:
                         incidents=plan.decision.incidents,
                     ).decision
                 ),
+                track_id_switch_absorbed_total=_absorbed_track_id_switch_total,
             ),
         )
         pumps.append(pump)

@@ -70,6 +70,9 @@ class _Diagnostics:
     def record_track_id_switch(self, camera_id: str) -> None:
         del camera_id
 
+    def record_track_id_switch_absorbed_total(self, camera_id: str, total: int) -> None:
+        del camera_id, total
+
     def record_bed_polygon_source(self, camera_id: str, source: str) -> None:
         del camera_id, source
 
@@ -123,6 +126,7 @@ def test_native_capture_and_replay_preserve_unit_observation_geometry(tmp_path: 
             _Diagnostics(),
             90,
             replay_trace=writer,
+            track_id_switch_absorbed_total=lambda _decision: 0,
         ),
     )
 
@@ -178,6 +182,7 @@ def test_persisted_polygon_replay_matches_production_image_space_decision_input(
             _Diagnostics(),
             90,
             replay_trace=writer,
+            track_id_switch_absorbed_total=lambda _decision: 0,
         ),
     )
     pump._process(_metadata())  # noqa: SLF001

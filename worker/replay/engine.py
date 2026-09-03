@@ -22,6 +22,7 @@ import json
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import Protocol, runtime_checkable
 
 from contracts.replay_trace import ReplayRow
 from shared.detection_policies import EffectivePolicy
@@ -33,7 +34,6 @@ from worker.domains.registry import DETECTION_MODULE_REGISTRY
 from worker.interfaces.decision import Decider
 from worker.interfaces.fall_model import FallV2ModelProtocol
 from worker.pipeline.decision.incident_manager import IncidentManager
-from worker.pipeline.perception.pts_resample import resample_pts
 from worker.pipeline.trace.models import (
     AnalysisTrace,
     RecoveredCameraTrace,
@@ -51,6 +51,22 @@ _STATIC_CLOCK = lambda: datetime(1970, 1, 1, tzinfo=UTC)  # noqa: E731
 
 class ReplayConfigurationError(ValueError):
     pass
+
+
+@runtime_checkable
+class ReplayDiagnostics(Protocol):
+    """Counters a replayed decider must expose for fidelity accounting."""
+
+    @property
+    def track_id_switch_absorbed_total(self) -> int: ...
+
+
+@runtime_checkable
+class FallReplayDiagnostics(ReplayDiagnostics, Protocol):
+    """Additional diagnostics required from the fall resampling owner."""
+
+    @property
+    def resample_gap_rows_total(self) -> int: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,6 +98,7 @@ class ReplayRun:
     incident_cooldown_suppressed_total: int = 0
     track_id_switch_total: int = 0
     track_id_switch_absorbed_total: int = 0
+    resample_gap_rows_total: int = 0
 
     @property
     def event_count(self) -> int:
@@ -219,7 +236,7 @@ class _ReplayWindow:
 
 @dataclass(frozen=True, slots=True)
 class ReplayTraceFrame:
-    """One resampled V2 replay frame; invalid rows represent a PTS gap."""
+    """One raw V2 source frame passed to the production decider."""
 
     stream_epoch: int
     boot_segment: int
@@ -246,23 +263,14 @@ def boot_segments(rows: Sequence[ReplayRow]) -> tuple[int, ...]:
 
 
 def replay_trace_frames(rows: Sequence[ReplayRow]) -> tuple[ReplayTraceFrame, ...]:
-    """Resample only frame rows, grouped by (boot segment, stream epoch) in file order."""
-    grouped: dict[tuple[int, int], list[ReplayRow]] = {}
+    """Return raw frame rows in source order without pre-resampling them."""
+    output: list[ReplayTraceFrame] = []
     for row, segment in zip(rows, boot_segments(rows), strict=True):
         if row.source_event != "frame":
             continue
-        grouped.setdefault((segment, row.epoch), []).append(row)
-    output: list[ReplayTraceFrame] = []
-    for (segment, epoch), group in grouped.items():
-        samples = [(row.pts_ns, row) for row in sorted(group, key=lambda row: row.seq)]
-        for seq, sampled in enumerate(resample_pts(samples)):
-            if sampled.valid:
-                assert sampled.value is not None
-                output.append(
-                    ReplayTraceFrame(epoch, segment, seq, sampled.pts_ns, sampled.value, 1)
-                )
-            else:
-                output.append(ReplayTraceFrame(epoch, segment, seq, sampled.pts_ns, None, 0))
+        output.append(
+            ReplayTraceFrame(row.epoch, segment, row.seq, row.pts_ns, row, 1)
+        )
     return tuple(output)
 
 
@@ -303,17 +311,22 @@ def replay(
         )
         return definition.create_camera_module(context).decider
 
-    current_segment: int | None = None
+    current_identity: tuple[int, int] | None = None
     absorbed_total = 0
+    gap_total = 0
     for frame in replay_trace_frames(rows):
-        if current_segment != frame.boot_segment:
-            absorbed_total += _absorbed_switches(decider)
-            # A worker boot starts with fresh in-memory cooldown state in
-            # production (one IncidentManager per camera per composition).
+        identity = (frame.boot_segment, frame.stream_epoch)
+        if current_identity != identity:
+            if decider is not None:
+                absorbed_total += _absorbed_switches(decider)
+                gap_total += _resample_gap_rows(decider, module_id)
+            # Domain modules are camera- and epoch-local. Incident admission is
+            # boot-scoped: source rebuilds replace deciders but retain cooldown.
             decider = new_decider(frame.boot_segment, frame.stream_epoch)
-            incident_manager.reset()
             previous_live_ids = set()
-            current_segment = frame.boot_segment
+            if current_identity is None or current_identity[0] != frame.boot_segment:
+                incident_manager.reset()
+            current_identity = identity
         assert decider is not None
         if frame.row is not None:
             window.active = frame.row.night_window_active
@@ -351,7 +364,9 @@ def replay(
                 valid=frame.valid,
             )
         )
-    absorbed_total += _absorbed_switches(decider)
+    if decider is not None:
+        absorbed_total += _absorbed_switches(decider)
+        gap_total += _resample_gap_rows(decider, module_id)
     return ReplayRun(
         camera_id=camera_id,
         module_qualified_id=definition.qualified_id,
@@ -364,13 +379,27 @@ def replay(
         # Absorbed switches are the episode authority's own count: churn the
         # machine held inside one episode instead of raising a second alert.
         track_id_switch_absorbed_total=absorbed_total,
+        resample_gap_rows_total=gap_total,
     )
 
 
-def _absorbed_switches(decider: object | None) -> int:
-    """Read a decider's absorbed re-association count, if it keeps one."""
-    absorbed = getattr(decider, "track_id_switch_absorbed_total", None)
-    return absorbed if isinstance(absorbed, int) and not isinstance(absorbed, bool) else 0
+def _replay_diagnostics(decider: Decider | None) -> ReplayDiagnostics:
+    if not isinstance(decider, ReplayDiagnostics):
+        raise TypeError("replay decider must implement ReplayDiagnostics")
+    return decider
+
+
+def _absorbed_switches(decider: Decider | None) -> int:
+    """Read the required replay diagnostic before replacing a decider."""
+    return _replay_diagnostics(decider).track_id_switch_absorbed_total
+
+
+def _resample_gap_rows(decider: Decider, module_id: str) -> int:
+    if module_id == "bed_exit":
+        return 0
+    if not isinstance(decider, FallReplayDiagnostics):
+        raise TypeError("fall replay decider must implement FallReplayDiagnostics")
+    return decider.resample_gap_rows_total
 
 
 def _admit_events(
@@ -425,6 +454,7 @@ def replay_run_json(run: ReplayRun) -> str:
     return json.dumps(
         {
             "incident_cooldown_suppressed_total": run.incident_cooldown_suppressed_total,
+            "resample_gap_rows_total": run.resample_gap_rows_total,
             "frames": [
                 {
                     "pts_ns": (
@@ -447,7 +477,9 @@ def replay_run_json(run: ReplayRun) -> str:
 
 
 __all__ = [
+    "FallReplayDiagnostics",
     "ReplayConfigurationError",
+    "ReplayDiagnostics",
     "ReplayFrameResult",
     "ReplayRun",
     "ReplayTraceFrame",

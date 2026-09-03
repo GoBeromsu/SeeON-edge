@@ -30,7 +30,7 @@ from typing import final
 import pytest
 
 import worker.runtime.worker as worker_module
-from shared.detection_policies import FallPolicyV2, make_effective_policy
+from shared.detection_policies import FallPolicyV2, PolicySource, make_effective_policy
 from tests_support.pose_bbox56_bundle_artifact import write_pose_bbox56_bundle
 from worker.adapters.model.fall_family_registry import (
     FallModelFamilyRegistry,
@@ -177,14 +177,19 @@ def test_create_fall_model_loads_a_fake_family_registered_purely_via_config(
     assert model is fake_model
 
 
-def _fall_module(model: object, transition_threshold: float = 0.5):
+def _fall_module(
+    model: object,
+    transition_threshold: float = 0.5,
+    *,
+    source: PolicySource = "image-default",
+):
     policy = make_effective_policy(
         module_id="fall",
         module_version=2,
         values=FallPolicyV2(transition_threshold=transition_threshold),
-        source="image-default",
-        facility_revision_id=None,
-        camera_revision_id=None,
+        source=source,
+        facility_revision_id=1 if source == "facility-default" else None,
+        camera_revision_id=1 if source == "camera-override" else None,
     )
     definition = DETECTION_MODULE_REGISTRY.get("fall", 2)
     context = CameraModuleContext(
@@ -242,6 +247,22 @@ def test_promotion_eligible_receipt_overrides_the_policy_default_threshold(
     assert module.decider.policy.policy.transition_threshold == pytest.approx(0.3)
     assert audit.operating_threshold == pytest.approx(0.3)
     assert audit.threshold_source == "receipt"
+
+
+def test_operator_policy_override_is_not_audited_as_the_image_default(tmp_path: Path) -> None:
+    artifact_dir = write_pose_bbox56_bundle(
+        tmp_path / "operator-policy", receipt_threshold=0.05, promotion_eligible=False
+    )
+    fall_config = _config("pose-bbox56-proxy-v0", artifact_dir).models.fall
+    assert fall_config is not None
+    model = default_fall_model_family_registry().create("pose-bbox56-proxy-v0", fall_config, "cpu")
+
+    definition, module, context = _fall_module(model, 0.7, source="camera-override")
+    assert definition.audit_adapter is not None
+    audit = definition.audit_adapter(context)
+
+    assert module.decider.policy.policy.transition_threshold == pytest.approx(0.7)
+    assert audit.threshold_source == "policy"
 
 
 def test_create_fall_model_refuses_to_boot_for_an_unknown_type(

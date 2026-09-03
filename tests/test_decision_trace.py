@@ -81,17 +81,14 @@ def _input(person: BoundingBox, *, frame_index: int, live: tuple[int, ...] = (9,
 def test_fall_trace_records_v2_transition_confirmation() -> None:
     detector = _traceable_fall_v2(camera_id="camera-a", facility_id="facility-a")
 
-    for frame_index in (1, 2):
-        assert detector.update(
-            _input(BoundingBox(10, 10, 70, 90, 0.9), frame_index=frame_index)
-        ) == ()
-    events = detector.update(_input(BoundingBox(10, 10, 70, 90, 0.9), frame_index=3))
+    # transition_votes=1: the first qualifying frame confirms the transition.
+    events = detector.update(_input(BoundingBox(10, 10, 70, 90, 0.9), frame_index=1))
 
     assert len(events) == 1
     trace = detector.last_trace_snapshots[0]
     assert trace.reason == "transition-confirmed"
-    assert trace.previous_state == "transition-candidate"
-    assert trace.current_state == "transition-candidate"
+    assert trace.previous_state == "clear"
+    assert trace.current_state == "transition-confirmed"
     assert trace.track_id == 9
     assert trace.values == {
         "fall_transition_probability": 0.8,
@@ -197,9 +194,7 @@ def test_real_camera_pump_captures_before_emitting_the_admitted_event(
 
         def process(self, _packet: FramePacket, **_kwargs: object) -> CompositeResult:
             self.frame_index += 1
-            decision_input = _input(
-                BoundingBox(10, 10, 70, 90, 0.9), frame_index=self.frame_index
-            )
+            decision_input = _input(BoundingBox(10, 10, 70, 90, 0.9), frame_index=self.frame_index)
             return CompositeResult((), decision_input.observation, decision_input)
 
     class _Sink:
@@ -249,11 +244,8 @@ def test_admitted_event_decision_basis_is_atomic_in_delivery_queue(
     tmp_path: Path,
 ) -> None:
     detector = _traceable_fall_v2(camera_id="camera-a", facility_id="facility-a")
-    for frame_index in (1, 2):
-        assert detector.update(
-            _input(BoundingBox(10, 10, 70, 90, 0.9), frame_index=frame_index)
-        ) == ()
-    decision_input = _input(BoundingBox(10, 10, 70, 90, 0.9), frame_index=3)
+    # transition_votes=1: the very first qualifying frame opens the episode.
+    decision_input = _input(BoundingBox(10, 10, 70, 90, 0.9), frame_index=1)
     events = detector.update(decision_input)
     result = CompositeResult((), decision_input.observation, decision_input)
     writer = BoundedTraceWriter(tmp_path / "detail-cache", TraceRetentionPolicy.testing())

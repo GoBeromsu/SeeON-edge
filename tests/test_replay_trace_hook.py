@@ -90,6 +90,7 @@ def test_native_pump_captures_epoch_rows_and_writer_rotates(tmp_path: Path) -> N
             diagnostics,
             90,
             replay_trace=writer,
+            track_id_switch_absorbed_total=lambda _decision: 0,
         ),
     )
 
@@ -164,6 +165,7 @@ def test_capture_normalizes_persisted_polygon_using_its_source_size(tmp_path: Pa
             WorkerDiagnostics(),
             90,
             replay_trace=writer,
+            track_id_switch_absorbed_total=lambda _decision: 0,
         ),
     )
     pump._process(_metadata(epoch=4, track_id=7, generation=3))  # noqa: SLF001
@@ -189,6 +191,7 @@ def test_rotation_chain_accepts_seq_restart_at_new_boot_segment(tmp_path: Path) 
                 WorkerDiagnostics(),
                 90,
                 replay_trace=ReplayTraceWriter(tmp_path, "camera-a"),
+                track_id_switch_absorbed_total=lambda _decision: 0,
             ),
         )
 
@@ -212,8 +215,12 @@ def test_rotation_chain_accepts_seq_restart_at_new_boot_segment(tmp_path: Path) 
         ("frame", 1),
         ("frame", 2),
     ]
+    # Replay no longer resamples here: it forwards each captured source row to
+    # the production decider, which owns the single 15 fps cadence. Both frames
+    # of each boot therefore survive, grouped and ordered by boot segment.
     frames = replay_trace_frames(rows)
-    assert [frame.boot_segment for frame in frames] == [0, 1]
+    assert [frame.boot_segment for frame in frames] == [0, 0, 1, 1]
+    assert [frame.seq for frame in frames] == [1, 2, 1, 2]
     policy = make_effective_policy(
         module_id="bed_exit",
         module_version=1,
@@ -226,6 +233,8 @@ def test_rotation_chain_accepts_seq_restart_at_new_boot_segment(tmp_path: Path) 
     # frame_key = (boot-scoped kind, camera, stream_epoch, resampled seq): unique per boot.
     assert [frame.frame_key[0] for frame in run.frames] == [
         "replay-trace-v2:boot-0",
+        "replay-trace-v2:boot-0",
+        "replay-trace-v2:boot-1",
         "replay-trace-v2:boot-1",
     ]
     assert run.boot_ids == ("boot-0", "boot-1")
@@ -246,6 +255,7 @@ def test_trace_lifecycle_uses_association_live_ids_for_shadow_and_lost(tmp_path:
             WorkerDiagnostics(),
             90,
             replay_trace=writer,
+            track_id_switch_absorbed_total=lambda _decision: 0,
         ),
     )
     pump._process(_metadata(epoch=4, track_id=7, generation=3))  # noqa: SLF001

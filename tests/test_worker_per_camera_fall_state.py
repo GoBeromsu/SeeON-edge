@@ -280,5 +280,5 @@ def test_v2_fall_policy_state_is_camera_local() -> None:
     event = camera_a.update({1: score}, (1,), frame_index=2, time_sec=2.0)[0]
 
     assert event.camera_id == "camera-a"
-    assert event.identity == "boot-camera-a:epoch-camera-a:1:0:0:1"
+    assert event.identity == "boot-camera-a:epoch-camera-a:fall:none:1:0:0:1"
     assert camera_b.generation_for(1) is None

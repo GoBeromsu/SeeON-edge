@@ -56,3 +56,43 @@ def test_unknown_window_expiry_resolves_and_timeout_does_not_rearm():
         is EpisodeState.RESOLVED
     )
     assert authority.propose(proposal(frame=80, time=5.4)) == ()
+
+
+def test_release_reopens_only_the_exact_failed_episode():
+    authority = EpisodeAuthority(boot_id="boot", stream_epoch="epoch", source_generation=1)
+    failed = open_episode(authority, track_id=7)[0]
+    intact = open_episode(authority, track_id=8)[0]
+
+    authority.release(failed)
+    assert authority.propose(proposal(track_id=8, frame=3, time=0.2)) == ()
+    retried = open_episode(authority, track_id=7, start=3)
+
+    assert len(retried) == 1
+    assert retried[0].identity != failed.identity
+    assert authority.propose(proposal(track_id=8, frame=4, time=0.3)) == ()
+    authority.release(failed)
+    assert authority.propose(proposal(track_id=7, frame=6, time=0.4)) == ()
+    assert intact.identity != retried[0].identity
+
+
+def test_fall_and_bed_exit_do_not_share_source_identity():
+    authority = EpisodeAuthority(boot_id="boot", stream_epoch="epoch", source_generation=1)
+    fall = open_episode(authority)[0]
+    bed_exit = authority.propose(
+        EpisodeProposal(
+            camera_id="camera-1",
+            facility_id="facility-1",
+            event_type="bed-exit",
+            track_id=7,
+            bed_id=0,
+            frame_index=2,
+            time_sec=0.2,
+            qualifying=True,
+            probability=1.0,
+            domain="bed_exit",
+            confirmation_votes=1,
+            confirmation_window=1,
+        )
+    )[0]
+
+    assert fall.identity != bed_exit.identity

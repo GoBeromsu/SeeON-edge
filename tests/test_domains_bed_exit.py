@@ -282,4 +282,30 @@ def test_bed_exit_rearms_only_after_confirmed_recovery() -> None:
 
     assert repeated == recovered == ()
     assert len(reexited) == 1
-    assert reexited[0].identity == "boot-bed-exit-schema:epoch-bed-exit-schema:0:0:0:2"
+    assert reexited[0].identity == "boot-bed-exit-schema:epoch-bed-exit-schema:bed-exit:0:0:0:0:2"
+
+
+def test_release_reopens_a_failed_bed_exit_for_one_retry() -> None:
+    fixed = datetime(2026, 1, 1, 13, 0, tzinfo=ZoneInfo("Asia/Seoul"))
+    monitor = _monitor(clock=lambda: fixed, night_window=None, grace_frames=0)
+    bed = box(0, 0, 80, 100)
+
+    failed = _own_bed_exit_events(monitor, bed)[0]
+    monitor.release_onset(failed)
+    retried = monitor.update(
+        _input(
+            person_boxes=(box(90, 10, 150, 90),),
+            bed_boxes=(bed,),
+            frame_index=2,
+        )
+    )
+
+    assert len(retried) == 1
+    assert retried[0].identity != failed.identity
+    assert monitor.update(
+        _input(
+            person_boxes=(box(90, 10, 150, 90),),
+            bed_boxes=(bed,),
+            frame_index=3,
+        )
+    ) == ()

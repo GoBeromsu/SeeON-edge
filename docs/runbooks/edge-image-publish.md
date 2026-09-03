@@ -340,14 +340,20 @@ Record the deployed tuple as one atomic receipt:
 
 ```
 (ml-worker image digest,
- fall/lstm/model.pt sha256=889075695884742475b9713e3b86ba67085bb96979b64c51756ea3fd715ab57a,
- fall/lstm/metadata.upstream.json sha256=c0870223db642f9e773256ff90a52d9c3021aaf4e6981281d6e69772003b0f66,
- fall/lstm/metadata.yaml sha256=3f6aca78bf535d02873c753cd0600510bde8860d698af32479505d3856e3d509,
- fall/lstm/arch.json sha256=541100998c5627be4126dc3aed63a1546fc5f5a4862ceb9b1041de57e83de43b,
- fall.v1, fall.policy.v1, [30,51])
+ fall/pose-bbox56-gru/arch.json sha256=ba6b7b3e83514aa9b6cea15012bb1fa96b66ef668a2ddb447635af5f97602726,
+ fall/pose-bbox56-gru/bundle-manifest.json sha256=55108ac7e1bb427d0387c29b55caa5e2019e7616e4bcd05c615c4805e85f91d6,
+ fall/pose-bbox56-gru/calibration.json sha256=0653c44577390488a84ff20388907e34a2c7a6cfe91c4c6f80b6da2ac3de1510,
+ fall/pose-bbox56-gru/conformance/pose-bbox56-v1.json sha256=72d7e911acf39c7183bcdf10fad3c066dd93b7a45b7d28bef1950e1bf85b3a9c,
+ fall/pose-bbox56-gru/evaluation-receipt.json sha256=3880181783b97708903c8c440d852cae32cc44d619128eabbf4972f255317fce,
+ fall/pose-bbox56-gru/metadata.yaml sha256=f309ca0b08bc58a790519e3df5cda0a072cd6419558e28c09c3a7c5906a5e69e,
+ fall/pose-bbox56-gru/model-card.md sha256=77c09bc3eacba53cadcaef1b8e91b5085efee38a04847908d436e431738166bd,
+ fall/pose-bbox56-gru/model.pt sha256=7bb75a2932e1a1250dc900013b2c80b220de5e23f3ea568e05f1db21d0a757e3,
+ fall.v2, fall.policy.v2, [30,56])
 ```
 
-This is a flat, shipped LSTM artifact set, not a synthetic "bundle SHA-256".
+This is the packaged pose+bbox56 bundle, pinned member by member -- not a
+synthetic "bundle SHA-256". Its own `bundle-manifest.json` is re-verified at
+load time, so a tampered member is refused before any weights are read.
 `model.pt` and `metadata.upstream.json` are the pinned artifacts in
 `worker/tools/fetch_models/manifest.json`; `metadata.yaml` and `arch.json` are
 the byte-identified sidecars that the fetcher installs alongside them. Read
@@ -372,17 +378,19 @@ dc run --rm --no-deps --entrypoint python ml-worker -c '
 import hashlib
 from pathlib import Path
 for path in (
-    Path("/app/models/fall/lstm/model.pt"),
-    Path("/app/models/fall/lstm/metadata.upstream.json"),
-    Path("/app/models/fall/lstm/metadata.yaml"),
-    Path("/app/models/fall/lstm/arch.json"),
+    Path("/app/models/fall/pose-bbox56-gru/bundle-manifest.json"),
+    Path("/app/models/fall/pose-bbox56-gru/model.pt"),
+    Path("/app/models/fall/pose-bbox56-gru/arch.json"),
+    Path("/app/models/fall/pose-bbox56-gru/calibration.json"),
+    Path("/app/models/fall/pose-bbox56-gru/evaluation-receipt.json"),
+    Path("/app/models/fall/pose-bbox56-gru/metadata.yaml"),
 ):
     print(f"{path.relative_to('/app/models')} sha256={hashlib.sha256(path.read_bytes()).hexdigest()}")
 '
 ```
 
 The worker has dual mounts of the same model volume. `/app/models` preserves
-the packaged LSTM artifacts; `/models` holds admitted bundles at
+the packaged pose+bbox56 bundle; `/models` holds admitted bundles at
 `/models/bundles/<digest>`. The image ships neither a selection document nor a
 bundle. Deployment supplies a read-only selection document when it chooses an
 admitted model. Its manifest declares the payload member list; evaluation and
@@ -421,13 +429,13 @@ print(latest.read_text())
 '
 ```
 
-The active contract remains LSTM, `fall.v1`, `fall.policy.v1`, and temporal
-input `[30,51]`. A future admitted content-addressed GRU candidate remains
-dark and inert: it is not an active module or policy and is never part of the
-LSTM receipt.
+The active contract is the packaged pose+bbox56 proxy bundle, `fall.v2`,
+`fall.policy.v2`, and temporal input `[30,56]` scored on the CPU. An admitted
+content-addressed candidate bundle remains dark and inert until it is selected:
+it is not an active module or policy and is never part of the packaged receipt.
 
 For rollback, use the previous **worker image** and the complete previous flat
-LSTM artifact/sidecar receipt as one atomic tuple. Fetch with that worker image,
+bundle receipt as one atomic tuple. Fetch with that worker image,
 read the tuple back, then recreate only `ml-worker`:
 
 ```sh

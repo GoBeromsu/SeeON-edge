@@ -14,7 +14,7 @@ from contracts.replay_trace import (
 )
 from shared.detection_policies import FallPolicyV2, make_effective_policy
 from tests_support import episode_metric
-from tests_support.episode_metric import _load_rows, evaluate
+from tests_support.episode_metric import _id_churn_allowance, _load_rows, evaluate
 from tests_support.golden_episodes import GoldenEpisode
 from worker.interfaces.fall_model import FallV2Probabilities
 
@@ -387,10 +387,93 @@ def test_metric_cli_refuses_unavailable_fall_model(
     assert "fall model unavailable" in capsys.readouterr().out
 
 
-def test_metric_reports_cooldown_suppression_for_repeated_fall_onsets() -> None:
+def test_two_recovery_separated_onsets_are_both_admitted_without_cooldown_suppression() -> None:
+    """P1a-AC2: a genuine second episode is never suppressed.
+
+    The episode authority is the lifecycle owner, so two onsets separated by a
+    scored confirmed recovery are two distinct episodes even inside the 30 s
+    admission window. The cooldown is overload protection keyed on the emitted
+    identity, so every suppression it reports is a defect signal -- and here
+    there must be none.
+    """
     result = evaluate(
         _cooldown_rows(),
         (_cli_golden("fall", 0, 62_000_000_000),),
         fall_model=_recovering_model(),
     )
-    assert result["incident_cooldown_suppressed_total"] > 0
+    assert result["incident_cooldown_suppressed_total"] == 0
+    assert result["episodes"][0]["alerts"] == 2  # type: ignore[index]
+
+
+def _churn_rows(*, switch_pts_ns: tuple[int, ...]) -> tuple[ReplayRow, ...]:
+    rows: list[ReplayRow] = []
+    for index, pts_ns in enumerate(switch_pts_ns):
+        rows.extend(
+            (
+                replace(
+                    _row(pts_ns - _FRAME_NS, "frame"),
+                    seq=index * 2 + 1,
+                    tracks=(replace(_row(0, "frame").tracks[0], track_id=index * 2 + 1),),
+                ),
+                replace(
+                    _row(pts_ns, "frame"),
+                    seq=index * 2 + 2,
+                    tracks=(
+                        replace(
+                            _row(0, "frame").tracks[0],
+                            track_id=index * 2 + 2,
+                            lifecycle="new",
+                        ),
+                    ),
+                ),
+            )
+        )
+    return tuple(rows)
+
+
+def _failed_episode() -> list[dict[str, object]]:
+    return [{"camera_id": "fixture", "event_type": "fall", "start_ns": 0, "alerts": 0}]
+
+
+def test_id_churn_allowance_requires_a_switch_inside_the_episode_window() -> None:
+    allowance = _id_churn_allowance(
+        _churn_rows(switch_pts_ns=(4_999_999_999,)),
+        _failed_episode(),
+        outside_alerts=[],
+    )
+
+    assert allowance[0]["track_id"] == 2
+    assert allowance[0]["episode_start_ns"] == 0
+
+
+def test_id_churn_allowance_rejects_switch_outside_the_five_second_window() -> None:
+    allowance = _id_churn_allowance(
+        _churn_rows(switch_pts_ns=(5_000_000_001,)),
+        _failed_episode(),
+        outside_alerts=[],
+    )
+
+    assert allowance == []
+
+
+def test_id_churn_allowance_rejects_unrelated_churn_when_another_episode_failed() -> None:
+    allowance = _id_churn_allowance(
+        _churn_rows(switch_pts_ns=(1_000_000_000,)),
+        [
+            *_failed_episode(),
+            {"camera_id": "other", "event_type": "fall", "start_ns": 0, "alerts": 0},
+        ],
+        outside_alerts=[],
+    )
+
+    assert allowance == []
+
+
+def test_id_churn_allowance_reports_an_eleventh_case_for_a_failing_metric() -> None:
+    allowance = _id_churn_allowance(
+        _churn_rows(switch_pts_ns=tuple(1_000_000_000 + index for index in range(11))),
+        _failed_episode(),
+        outside_alerts=[],
+    )
+
+    assert len(allowance) == 11

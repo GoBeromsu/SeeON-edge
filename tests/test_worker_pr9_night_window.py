@@ -272,7 +272,7 @@ def test_bed_exit_monitor_live_night_window_flip_without_reconstruction() -> Non
     assert events[0] == BusinessEvent(
         domain="bed_exit",
         event_type="bed-exit",
-        identity="test-boot:test-epoch:0:0:0:1",
+        identity="test-boot:test-epoch:bed-exit:0:0:0:0:1",
         camera_id="camera-1",
         facility_id="facility-1",
         time_sec=1.0,

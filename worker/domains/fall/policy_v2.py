@@ -9,11 +9,11 @@ from __future__ import annotations
 
 from collections import deque
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from shared.detection_policies import FallPolicyV2
 from worker.domains.episode import EpisodeAuthority, EpisodeProposal
-from worker.domains.fall.classifier_v2 import FallV2Probabilities
+from worker.domains.fall.classifier_v2 import FallV2Probabilities, FallWindowClassifierV2
 from worker.domains.fall.pose_bbox56 import PoseBbox56Track, pose_bbox56_tracks
 from worker.pipeline.perception.pts_resample import PtsResampler, ResampledRow
 from worker.types import BusinessEvent, DecisionInput, DecisionTraceSnapshot
@@ -30,12 +30,19 @@ class _TrackState:
     initialized: bool = False
 
 
-def _trace_state(state: _TrackState | None) -> str:
+def _trace_state(state: _TrackState | None, episode_state: str | None = None) -> str:
+    """Name the lifecycle state the episode authority actually holds.
+
+    The authority owns promotion, so an OPEN episode must trace as confirmed
+    even though this decider's own vote deque is only the proposal input.
+    """
     if state is None:
         return "unknown"
+    if episode_state == "open":
+        return "transition-confirmed"
     if state.fallen:
         return "fallen"
-    if any(state.transition_votes):
+    if episode_state == "candidate" or any(state.transition_votes):
         return "transition-candidate"
     return "clear"
 
@@ -85,7 +92,6 @@ class FallPolicyDeciderV2:
             boot_id=self.boot_id,
             stream_epoch=self.stream_epoch,
             source_generation=self.source_generation,
-            fall_cooldown_frames=self.policy.cooldown_frames,
         )
 
     def update(
@@ -96,10 +102,10 @@ class FallPolicyDeciderV2:
         frame_index: int,
         time_sec: float,
     ) -> tuple[BusinessEvent, ...]:
-        """Advance live tracks and emit at most one deterministic camera alert."""
+        """Advance live tracks and emit every newly opened episode in track order."""
         live_ids = frozenset(live_track_ids)
-        self._evict_stale(live_ids, frame_index)
-        candidates: list[tuple[float, int, BusinessEvent]] = []
+        self._evict_stale(live_ids, frame_index, time_sec)
+        emitted: list[BusinessEvent] = []
         snapshots: list[DecisionTraceSnapshot] = []
         for track_id in sorted(live_ids):
             existing_state = self._states.get(track_id)
@@ -112,30 +118,23 @@ class FallPolicyDeciderV2:
                 snapshots.append(_missing_score_snapshot(track_id, existing_state))
                 continue
             state = self._state_for(track_id, frame_index)
-            previous_state = _trace_state(state)
+            previous_state = _trace_state(state, self._episode_state(track_id))
             event = self._advance(track_id, state, probability, frame_index, time_sec)
             snapshots.append(
                 self._trace_snapshot(track_id, state, previous_state, probability, event)
             )
             if event is not None:
-                candidates.append((probability.fall_transition, track_id, event))
+                emitted.append(event)
         self.last_trace_snapshots = tuple(snapshots)
-        if not candidates:
-            return ()
-        # The camera OR is resolved only within this tick.  An equal score has a
-        # stable, resident-independent tie break.
-        _, _, winner = max(candidates, key=lambda candidate: (candidate[0], -candidate[1]))
-        return (winner,)
+        return tuple(emitted)
 
     def coast(self) -> tuple[BusinessEvent, ...]:
         """A classifier gap never changes temporal counters or emits an event."""
         return ()
 
-    def release_onset(self, event: object | None = None) -> None:
+    def release_onset(self, event: BusinessEvent) -> None:
         """Reopen only the exact undelivered onset that this policy emitted."""
-        # Admission failure is not a lifecycle transition.  The authority owns
-        # exact-once semantics and intentionally does not reopen an episode.
-        _ = event
+        self._episodes.release(event)
 
     def generation_for(self, track_id: int) -> int | None:
         state = self._states.get(track_id)
@@ -156,7 +155,9 @@ class FallPolicyDeciderV2:
         self._states[track_id] = state
         return state
 
-    def _evict_stale(self, live_ids: frozenset[int], frame_index: int) -> None:
+    def _evict_stale(
+        self, live_ids: frozenset[int], frame_index: int, time_sec: float
+    ) -> None:
         for track_id, state in tuple(self._states.items()):
             if track_id in live_ids:
                 continue
@@ -164,7 +165,7 @@ class FallPolicyDeciderV2:
                 self._episodes.track_lost(
                     camera_id=self.camera_id,
                     frame_index=frame_index,
-                    time_sec=0.0,
+                    time_sec=time_sec,
                     track_id=track_id,
                 )
                 del self._states[track_id]
@@ -177,6 +178,24 @@ class FallPolicyDeciderV2:
         frame_index: int,
         time_sec: float,
     ) -> BusinessEvent | None:
+        proposal = EpisodeProposal(
+            camera_id=self.camera_id,
+            facility_id=self.facility_id,
+            event_type="fall",
+            track_id=track_id,
+            bed_id=None,
+            frame_index=frame_index,
+            time_sec=time_sec,
+            qualifying=probability.fall_transition >= self.policy.transition_threshold,
+            confirmed_recovery=False,
+            probability=probability.fall_transition,
+            domain="fall",
+            generation=state.generation,
+            confirmation_votes=self.policy.transition_votes,
+            confirmation_window=self.policy.transition_window,
+        )
+        if not state.initialized:
+            _ = self._episodes.reassociate_fall(proposal)
         # A person first observed already fallen has internal state, but no
         # synthetic transition alert.
         if not state.initialized:
@@ -185,7 +204,7 @@ class FallPolicyDeciderV2:
                 state.fallen = True
                 return None
 
-        transition = probability.fall_transition >= self.policy.transition_threshold
+        transition = proposal.qualifying
         state.transition_votes.append(transition)
         if probability.fallen >= self.policy.fallen_threshold:
             state.fallen_streak += 1
@@ -204,33 +223,25 @@ class FallPolicyDeciderV2:
             state.fallen_streak = 0
             state.transition_votes.clear()
 
-        return next(
-            iter(
-                self._episodes.propose(
-                    EpisodeProposal(
-                        camera_id=self.camera_id,
-                        facility_id=self.facility_id,
-                        event_type="fall",
-                        track_id=track_id,
-                        bed_id=None,
-                        frame_index=frame_index,
-                        time_sec=time_sec,
-                        qualifying=transition,
-                        confirmed_recovery=recovering
-                        and state.recovery_streak >= self.policy.recovery_consecutive,
-                        probability=probability.fall_transition,
-                        domain="fall",
-                        generation=state.generation,
-                    )
-                )
+        proposal = replace(
+            proposal,
+            confirmed_recovery=(
+                recovering and state.recovery_streak >= self.policy.recovery_consecutive
             ),
-            None,
         )
+        return next(iter(self._episodes.propose(proposal)), None)
 
     @property
     def track_id_switch_absorbed_total(self) -> int:
         """Re-associations the episode authority absorbed instead of re-alerting."""
         return self._episodes.track_id_switch_absorbed_total
+
+    def _episode_state(self, track_id: int) -> str:
+        return str(
+            self._episodes.state_for(
+                camera_id=self.camera_id, event_type="fall", bed_id=None, track_id=track_id
+            )
+        )
 
     def _trace_snapshot(
         self,
@@ -240,7 +251,7 @@ class FallPolicyDeciderV2:
         probability: FallV2Probabilities,
         event: BusinessEvent | None,
     ) -> DecisionTraceSnapshot:
-        current_state = _trace_state(state)
+        current_state = _trace_state(state, self._episode_state(track_id))
         if event is not None:
             reason = "transition-confirmed"
         elif state.fallen and previous_state == "fallen":
@@ -276,6 +287,7 @@ class FallV2DomainDecider:
     _resampler: PtsResampler[dict[int, tuple[float, ...]]] = field(
         default_factory=PtsResampler, init=False
     )
+    _last_pts_ns: int | None = field(default=None, init=False)
     resample_gap_rows_total: int = field(default=0, init=False)
 
     def update(self, input_value: DecisionInput) -> tuple[BusinessEvent, ...]:
@@ -292,11 +304,12 @@ class FallV2DomainDecider:
             if track_id is not None and index < len(observation.keypoints)
         )
         rows = dict(pose_bbox56_tracks(tracks, input_value.frame_width, input_value.frame_height))
+        seconds = 0.0 if input_value.time_sec is None else input_value.time_sec
+        pts_ns = int(seconds * 1_000_000_000)
+        self._reset_on_pts_rollback(pts_ns)
         classifier = self.classifier
         if not hasattr(classifier, "update"):
             raise TypeError("fall.v2 classifier is invalid")
-        seconds = 0.0 if input_value.time_sec is None else input_value.time_sec
-        pts_ns = int(seconds * 1_000_000_000)
         resampled = self._resample(pts_ns, rows)
         if not resampled:
             return self.policy.coast()
@@ -326,6 +339,14 @@ class FallV2DomainDecider:
     def track_id_switch_absorbed_total(self) -> int:
         return self.policy.track_id_switch_absorbed_total
 
+    def _reset_on_pts_rollback(self, pts_ns: int) -> None:
+        if self._last_pts_ns is not None and pts_ns < self._last_pts_ns:
+            if not isinstance(self.classifier, FallWindowClassifierV2):
+                raise TypeError("fall.v2 classifier must support stream-epoch reset")
+            self._resampler = PtsResampler()
+            self.classifier = FallWindowClassifierV2(self.classifier.model)
+        self._last_pts_ns = pts_ns
+
     def _resample(
         self,
         pts_ns: int,
@@ -337,7 +358,7 @@ class FallV2DomainDecider:
         original PTS.  This adapter turns that stream into exactly one
         66,666,667ns cadence row (or ``valid=0`` zero rows for skipped
         buckets) before the 30-row classifier window sees it.  A decider is
-        rebuilt at every stream epoch, so the resampler origin is epoch-local.
+        reset at a PTS rollback, so the host path cannot retain an old epoch.
         """
         return self._resampler.push(pts_ns, rows)
 

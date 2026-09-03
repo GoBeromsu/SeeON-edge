@@ -90,6 +90,7 @@ class WorkerDiagnostics:
         # backend's recent_success_rate at 1.0 and hid every failed frame.
         self._native_attempts_by_camera: dict[str, int] = {}
         self._track_id_switches_by_camera: dict[str, int] = {}
+        self._track_id_switches_absorbed_by_camera: dict[str, int] = {}
         self._replay_trace_write_failures_by_camera: dict[str, int] = {}
         self._bed_polygon_source_by_camera: dict[str, str] = {}
         self._resample_gap_rows_by_camera: dict[str, int] = {}
@@ -344,6 +345,12 @@ class WorkerDiagnostics:
                 self._track_id_switches_by_camera.get(camera_id, 0) + 1
             )
 
+    def record_track_id_switch_absorbed_total(self, camera_id: str, total: int) -> None:
+        if isinstance(total, bool) or total < 0:
+            raise ValueError("absorbed track id switch total must be non-negative")
+        with self._lock:
+            self._track_id_switches_absorbed_by_camera[camera_id] = total
+
     def record_replay_trace_write_failure(self, camera_id: str) -> None:
         with self._lock:
             self._replay_trace_write_failures_by_camera[camera_id] = (
@@ -420,6 +427,7 @@ class WorkerDiagnostics:
             device_residency_by_camera = dict(self._device_residency_by_camera)
             decision_completed_by_camera = dict(self._decision_completed_by_camera)
             track_id_switches_by_camera = dict(self._track_id_switches_by_camera)
+            track_id_switches_absorbed_by_camera = dict(self._track_id_switches_absorbed_by_camera)
             replay_trace_write_failures_by_camera = dict(
                 self._replay_trace_write_failures_by_camera
             )
@@ -440,6 +448,7 @@ class WorkerDiagnostics:
                 | set(device_residency_by_camera)
                 | set(decision_completed_by_camera)
                 | set(track_id_switches_by_camera)
+                | set(track_id_switches_absorbed_by_camera)
                 | set(replay_trace_write_failures_by_camera)
                 | set(bed_polygon_source_by_camera)
                 | set(resample_gap_rows_by_camera)
@@ -474,6 +483,9 @@ class WorkerDiagnostics:
                 forward_p50_sec=(0.0 if inference is None else inference.forward_p50_sec),
                 forward_p95_sec=(0.0 if inference is None else inference.forward_p95_sec),
                 track_id_switch_total=track_id_switches_by_camera.get(camera_id, 0),
+                track_id_switch_absorbed_total=track_id_switches_absorbed_by_camera.get(
+                    camera_id, 0
+                ),
                 replay_trace_write_failures=replay_trace_write_failures_by_camera.get(camera_id, 0),
                 incident_cooldown_suppressed_total=getattr(
                     incident_managers.get(camera_id), "cooldown_suppressed_total", 0

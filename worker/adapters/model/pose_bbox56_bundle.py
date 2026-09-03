@@ -6,7 +6,6 @@ import hashlib
 import json
 import math
 import pickle
-from collections.abc import Sequence
 from pathlib import Path
 from typing import Final
 
@@ -17,6 +16,7 @@ from torch import nn
 from contracts.model_selection import POSE_BBOX56_PREPROCESSING_IDENTITY
 from worker.adapters.model.errors import ModelLoadError
 from worker.interfaces.fall_model import FallV2Probabilities
+from worker.types import FallModelInput
 
 _SHAPE: Final = (30, 56)
 
@@ -116,7 +116,7 @@ class PoseBbox56BundleRunner:
         runner.warmup()
         return runner
 
-    def predict(self, features: Sequence[Sequence[float]]) -> FallV2Probabilities:
+    def predict(self, features: FallModelInput) -> FallV2Probabilities:
         values = np.asarray(features, dtype=np.float32)
         if values.shape != _SHAPE or not np.isfinite(values).all():
             raise ModelLoadError("pose-bbox56 input must be finite shape (30, 56)")

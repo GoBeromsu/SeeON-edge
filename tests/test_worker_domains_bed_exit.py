@@ -124,7 +124,7 @@ def test_own_bed_exit_emits_once_after_grace_period() -> None:
         BusinessEvent(
             domain="bed_exit",
             event_type="bed-exit",
-            identity="test-boot:test-epoch:7:0:0:1",
+            identity="test-boot:test-epoch:bed-exit:0:7:0:0:1",
             camera_id=CAMERA_ID,
             facility_id=FACILITY_ID,
             time_sec=3.0,
@@ -134,6 +134,63 @@ def test_own_bed_exit_emits_once_after_grace_period() -> None:
         ),
     )
     assert repeated == ()
+
+
+def test_release_reopens_a_failed_stale_exit_after_the_track_reassociates() -> None:
+    monitor = _monitor(grace_frames=1)
+    assert monitor.update(
+        _input(
+            person_boxes=(IN_BED_A,),
+            bed_boxes=(BED_A,),
+            track_ids=(PERSON_ID,),
+            frame_index=0,
+        )
+    ) == ()
+    assert monitor.update(
+        _input(
+            person_boxes=(OUTSIDE_BEDS,),
+            bed_boxes=(BED_A,),
+            track_ids=(PERSON_ID,),
+            frame_index=1,
+        )
+    ) == ()
+    failed = monitor.update(
+        _input(
+            person_boxes=(),
+            bed_boxes=(BED_A,),
+            track_ids=(),
+            frame_index=2,
+        )
+    )[0]
+
+    monitor.release_onset(failed)
+    assert monitor.update(
+        _input(
+            person_boxes=(IN_BED_A,),
+            bed_boxes=(BED_A,),
+            track_ids=(PERSON_ID,),
+            frame_index=3,
+        )
+    ) == ()
+    assert monitor.update(
+        _input(
+            person_boxes=(OUTSIDE_BEDS,),
+            bed_boxes=(BED_A,),
+            track_ids=(PERSON_ID,),
+            frame_index=4,
+        )
+    ) == ()
+    retried = monitor.update(
+        _input(
+            person_boxes=(OUTSIDE_BEDS,),
+            bed_boxes=(BED_A,),
+            track_ids=(PERSON_ID,),
+            frame_index=5,
+        )
+    )
+
+    assert len(retried) == 1
+    assert retried[0].identity != failed.identity
 
 
 def test_cross_bed_movement_never_emits_or_reassigns() -> None:

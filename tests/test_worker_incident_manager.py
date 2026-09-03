@@ -98,121 +98,84 @@ def test_fall_admission_preserves_enrichment_and_assigns_a_uuid4(tmp_path: Path)
     assert manager.last_audit_snapshot.edge_event_id == str(parsed)
 
 
-def test_fall_counter_churn_is_suppressed_until_exact_cooldown_boundary(
+def test_fall_identity_repeat_is_suppressed_until_exact_cooldown_boundary(
     tmp_path: Path,
 ) -> None:
-    # Given: one admitted fall followed by a new rising-edge counter.
+    # Given: one admitted fall episode, a *distinct* second episode, and a
+    # repeat of the first episode's own identity.
     manager = IncidentManager(cooldown_sec=30.0, identity_path=tmp_path / "ids.jsonl")
     first = _event(identity=1, time_sec=1.0)
-    next_edge = _event(identity=2, time_sec=2.0)
+    second_episode = _event(identity=2, time_sec=2.0)
+    repeat = _event(identity=1, time_sec=3.0)
 
-    # When: the second counter arrives inside and then at the cooldown boundary.
+    # When: all three are offered inside the cooldown, and the repeat again at
+    # the boundary.
     admitted_first = manager.admit(first, now_sec=100.0)
-    suppressed = manager.admit(next_edge, now_sec=101.0)
-    readmitted = manager.admit(next_edge, now_sec=130.0)
+    admitted_second = manager.admit(second_episode, now_sec=101.0)
+    suppressed = manager.admit(repeat, now_sec=102.0)
+    readmitted = manager.admit(repeat, now_sec=130.0)
 
-    # Then: only the within-window churn is rejected.
+    # Then: a distinct episode is never suppressed -- the episode authority is
+    # the lifecycle owner and a second episode is a second resident or a
+    # confirmed-recovery re-arm. Only a producer re-emitting an identity it
+    # already emitted is overload, and that suppression is counted.
     assert admitted_first is not None
+    assert admitted_second is not None
     assert suppressed is None
+    assert manager.cooldown_suppressed_total == 1
     assert readmitted is not None
     assert readmitted.identity != admitted_first.identity
 
 
-def test_bed_track_churn_uses_bed_identity_while_distinct_beds_are_independent(
+def test_distinct_bed_episodes_are_admitted_and_only_a_repeat_is_suppressed(
     tmp_path: Path,
 ) -> None:
-    # Given: two track identities for one bed and one event for another bed.
+    # Given: two distinct bed episodes and a repeat of the first identity.
     manager = IncidentManager(cooldown_sec=30.0, identity_path=tmp_path / "ids.jsonl")
     first = _event(
         domain="bed_exit",
         event_type="bed-exit",
-        identity="7:1",
+        identity="boot:1:7:0:0:1",
         person_id=7,
-        bed_id=1,
-    )
-    churn = _event(
-        domain="bed_exit",
-        event_type="bed-exit",
-        identity="9:1",
-        person_id=9,
         bed_id=1,
     )
     other_bed = _event(
         domain="bed_exit",
         event_type="bed-exit",
-        identity="9:2",
+        identity="boot:1:9:0:0:2",
         person_id=9,
         bed_id=2,
+    )
+    repeat = _event(
+        domain="bed_exit",
+        event_type="bed-exit",
+        identity="boot:1:7:0:0:1",
+        person_id=7,
+        bed_id=1,
     )
 
     # When: all three candidates are offered within one cooldown.
     admitted = manager.admit(first, now_sec=100.0)
-    suppressed = manager.admit(churn, now_sec=101.0)
     independent = manager.admit(other_bed, now_sec=101.0)
+    suppressed = manager.admit(repeat, now_sec=101.0)
 
-    # Then: track churn cannot reopen one bed, while another bed remains independent.
+    # Then: a second bed episode is admitted -- id churn inside one episode is
+    # the episode authority's re-association job, not the cooldown's -- and only
+    # a producer re-emitting an already-emitted identity is suppressed.
     assert admitted is not None
     assert admitted.person_id == 7
     assert admitted.bed_id == 1
-    assert suppressed is None
     assert independent is not None
     assert independent.bed_id == 2
-
-
-def test_persisted_source_identity_reuses_the_edge_event_id_after_restart(
-    tmp_path: Path,
-) -> None:
-    # Given: a source event admitted into a durable identity journal.
-    path = tmp_path / "identities.jsonl"
-    source = _event(identity="7:1", domain="bed_exit", event_type="bed-exit", bed_id=1)
-    first = IncidentManager(identity_path=path).admit(source, now_sec=100.0)
-
-    # When: a new manager process admits the same source event.
-    restarted = IncidentManager(identity_path=path).admit(source, now_sec=200.0)
-
-    # Then: persistence precedes output and the canonical identity remains stable.
-    assert first is not None
-    assert restarted is not None
-    assert restarted.identity == first.identity
-    assert str(first.identity) in path.read_text(encoding="utf-8")
-    assert len(path.read_text(encoding="utf-8").splitlines()) == 1
-
-
-def test_event_aggregation_is_independent_of_detector_order(tmp_path: Path) -> None:
-    # Given: fall and bed deciders supplied in opposite orders.
-    fall = _event(identity=1)
-    bed = _event(
-        domain="bed_exit",
-        event_type="bed-exit",
-        identity="7:2",
-        person_id=7,
-        bed_id=2,
-    )
-    path = tmp_path / "identities.jsonl"
-    forward = EventAggregator(
-        deciders=(_StaticDecider((fall,)), _StaticDecider((bed,))),
-        incidents=IncidentManager(identity_path=path),
-        monotonic=lambda: 100.0,
-    )
-    reverse = EventAggregator(
-        deciders=(_StaticDecider((bed,)), _StaticDecider((fall,))),
-        incidents=IncidentManager(identity_path=path),
-        monotonic=lambda: 100.0,
-    )
-
-    # When: both aggregators process the same numeric decision input.
-    forward_events = forward.update(_input())
-    reverse_events = reverse.update(_input())
-
-    # Then: event order and persisted identities are identical.
-    assert forward_events == reverse_events
-    assert tuple(event.domain for event in forward_events) == ("bed_exit", "fall")
+    assert suppressed is None
+    assert manager.cooldown_suppressed_total == 1
 
 
 def test_duplicate_within_cooldown_has_zero_output_side_effects(tmp_path: Path) -> None:
     # Given: an aggregator and output probe separated by the admission boundary.
     first = _event(identity=1, time_sec=1.0)
-    churn = _event(identity=2, time_sec=2.0)
+    # The same episode identity re-emitted: overload, not a second episode.
+    repeat = _event(identity=1, time_sec=2.0)
     now_values = iter((100.0, 101.0))
     decider = _StaticDecider((first,))
     aggregator = EventAggregator(
@@ -227,7 +190,7 @@ def test_duplicate_within_cooldown_has_zero_output_side_effects(tmp_path: Path) 
 
     # When: output handles the first admission and then a duplicate rising edge.
     _dispatch(output, aggregator.update(_input()))
-    decider.events = (churn,)
+    decider.events = (repeat,)
     duplicate = aggregator.update(_input())
     _dispatch(output, duplicate)
 

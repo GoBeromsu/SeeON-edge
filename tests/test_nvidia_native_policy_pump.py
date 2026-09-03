@@ -78,6 +78,7 @@ class _Diagnostics:
     completed: int = 0
     polygon_sources: list[str] | None = None
     replay_trace_write_failures: int = 0
+    absorbed_switch_totals: list[int] | None = None
 
     def update_measured_fps(self, camera_id: str, measured_fps: float | None) -> None:
         del camera_id, measured_fps
@@ -88,6 +89,12 @@ class _Diagnostics:
 
     def record_track_id_switch(self, camera_id: str) -> None:
         assert camera_id == "camera-a"
+
+    def record_track_id_switch_absorbed_total(self, camera_id: str, total: int) -> None:
+        assert camera_id == "camera-a"
+        if self.absorbed_switch_totals is None:
+            self.absorbed_switch_totals = []
+        self.absorbed_switch_totals.append(total)
 
     def record_bed_polygon_source(self, camera_id: str, source: str) -> None:
         assert camera_id == "camera-a"
@@ -186,6 +193,7 @@ def test_native_policy_uses_child_association_and_image_free_evidence_trigger(
             AlertEvidenceAttacher({}),
             diagnostics,
             90,
+            track_id_switch_absorbed_total=lambda _: 0,
         ),
     )
 
@@ -254,6 +262,7 @@ def test_trace_write_failure_does_not_block_decision_or_sink(tmp_path: Path) -> 
             diagnostics,
             90,
             replay_trace=_BrokenTraceWriter(),  # pyright: ignore[reportArgumentType]
+            track_id_switch_absorbed_total=lambda _: 0,
         ),
     )
 
@@ -281,6 +290,7 @@ def _pump_for(
             AlertEvidenceAttacher({}),
             _Diagnostics(),
             90,
+            track_id_switch_absorbed_total=lambda _: 0,
         ),
     )
 

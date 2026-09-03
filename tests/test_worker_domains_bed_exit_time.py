@@ -187,7 +187,7 @@ def test_night_window_does_not_consume_a_daytime_episode_onset() -> None:
         BusinessEvent(
             domain="bed_exit",
             event_type="bed-exit",
-            identity="boot-night-window:epoch-night-window:11:0:0:1",
+            identity="boot-night-window:epoch-night-window:bed-exit:0:11:0:0:1",
             camera_id=NIGHT_CAMERA_ID,
             facility_id=NIGHT_FACILITY_ID,
             time_sec=3.0,

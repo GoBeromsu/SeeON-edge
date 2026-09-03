@@ -42,7 +42,7 @@ def test_transition_confirmation_emits_once_with_deterministic_camera_winner() -
 
     assert event.event_type == "fall"
     assert event.person_id == 7
-    assert event.identity == "boot:epoch:7:0:0:1"
+    assert event.identity == "boot:epoch:fall:none:7:0:0:1"
     assert event.probability == 0.7
     assert _update(decider, _probability(0.9), 3) == ()
 
@@ -115,7 +115,7 @@ def test_nonlive_track_cannot_confirm_an_alert_and_reconnect_before_ttl_keeps_ge
     assert decider.generation_for(7) == 0
 
     event = _update(decider, _probability(0.7), 3)[0]
-    assert event.identity == "boot:epoch:7:0:0:1"
+    assert event.identity == "boot:epoch:fall:none:7:0:0:1"
 
 
 class _RecordingModel:
@@ -185,7 +185,7 @@ def test_committed_reconnect_after_eviction_case_preloads_a_fresh_generation_win
     assert model.windows[-1][-1] == reconnect_row
 
 
-def test_release_does_not_reopen_an_emitted_episode() -> None:
+def test_release_reopens_only_the_exact_failed_onset() -> None:
     decider = FallPolicyDeciderV2(
         camera_id="camera",
         facility_id="facility",
@@ -201,6 +201,47 @@ def test_release_does_not_reopen_an_emitted_episode() -> None:
     assert _update(decider, _probability(0.7), 3) == ()
     decider.release_onset(event)
     assert _update(decider, _probability(0.7), 4) == ()
+    retried = _update(decider, _probability(0.7), 5)
+    assert len(retried) == 1
+    assert retried[0].identity != event.identity
+    assert _update(decider, _probability(0.7), 6) == ()
+
+
+def test_track_switch_inside_window_is_absorbed_without_a_second_fall_alert() -> None:
+    decider = FallPolicyDeciderV2(
+        camera_id="camera",
+        facility_id="facility",
+        boot_id="boot",
+        source_generation=0,
+        stream_epoch="epoch",
+    )
+    for frame in range(3):
+        _update(decider, _probability(0.7), frame)
+
+    decider.update({}, (), frame_index=47, time_sec=3.0)
+
+    assert decider.update(
+        {8: _probability(0.7)}, (8,), frame_index=48, time_sec=3.1
+    ) == ()
+    assert decider.track_id_switch_absorbed_total == 1
+
+
+def test_two_residents_falling_on_the_same_tick_both_emit_in_track_order() -> None:
+    decider = FallPolicyDeciderV2(
+        camera_id="camera",
+        facility_id="facility",
+        boot_id="boot",
+        source_generation=0,
+        stream_epoch="epoch",
+    )
+    probabilities = {7: _probability(0.7), 8: _probability(0.8)}
+    for frame in range(2):
+        assert decider.update(probabilities, (7, 8), frame_index=frame, time_sec=float(frame)) == ()
+
+    events = decider.update(probabilities, (7, 8), frame_index=2, time_sec=2.0)
+
+    assert [event.person_id for event in events] == [7, 8]
+    assert len({event.identity for event in events}) == 2
 
 
 def test_rejects_nonfinite_or_wrong_arity_outputs() -> None:
@@ -238,11 +279,11 @@ def test_policy_requires_immutable_boot_and_epoch_and_binds_onset_identity() -> 
         _update(first, _probability(0.7), frame)
         _update(second, _probability(0.7), frame)
 
-    assert _update(first, _probability(0.7), 2)[0].identity == "boot-a:epoch-a:7:0:0:1"
-    assert _update(second, _probability(0.7), 2)[0].identity == "boot-b:epoch-b:7:0:0:1"
+    assert _update(first, _probability(0.7), 2)[0].identity == "boot-a:epoch-a:fall:none:7:0:0:1"
+    assert _update(second, _probability(0.7), 2)[0].identity == "boot-b:epoch-b:fall:none:7:0:0:1"
     first.update({}, (), frame_index=47, time_sec=47.0)
     for frame in range(48, 53):
         _update(first, _probability(0.1, fallen=0.1), frame)
     for frame in range(53, 55):
         _update(first, _probability(0.7), frame)
-    assert _update(first, _probability(0.7), 55)[0].identity == "boot-a:epoch-a:7:0:1:2"
+    assert _update(first, _probability(0.7), 55)[0].identity == "boot-a:epoch-a:fall:none:7:0:1:2"
