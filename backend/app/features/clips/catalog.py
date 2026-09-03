@@ -88,6 +88,7 @@ _MANIFEST_FIELDS = {
     "truncation_reasons",
     "time_origin",
     "scene_index",
+    "detected_at",
 }
 
 _TABLE_KEYS = {
@@ -307,6 +308,11 @@ def _strict_manifest_from_payload(payload: dict[str, Any], path: Path) -> ClipMa
         _utc_timestamp(payload.get("finalized_at"), path),
     )
     _utc_timestamp(payload.get("started_at"), path)
+    # Reader tolerance staged ahead of the worker writer (P0-AC7): an optional
+    # RFC3339-Z event time; older manifests without it stay valid.
+    detected_at = payload.get("detected_at")
+    if detected_at is not None:
+        _utc_timestamp(detected_at, path)
     if timestamps != tuple(sorted(timestamps)):
         raise ValueError(f"manifest timestamps are unordered: {path}")
     duration_s = payload.get("duration_s")
