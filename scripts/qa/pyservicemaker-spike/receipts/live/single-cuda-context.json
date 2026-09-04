@@ -1,0 +1,12 @@
+{
+  "test": "tests/test_flow_single_cuda_context.py",
+  "ran_in": "seeon-ml-worker-flow:dev (pinned DeepStream 9.1 base) on an RTX 5070 Ti",
+  "result": "3 passed",
+  "asserts": [
+    "no CUDA context is current on the calling thread before or after a device-to-host tensor copy",
+    "the flow packages import neither torch nor cupy",
+    "the image ships no CUDAExecutionProvider for ONNX Runtime",
+    "the device primary context state is unchanged by loading ORT"
+  ],
+  "limit": "The driver exposes primary-context state and the current context per thread; it cannot enumerate every context a process holds. Combined with the no-other-CUDA-client import assert and the single GPU process observed by nvidia-smi, this is the strongest available form of P1b-AC7."
+}
