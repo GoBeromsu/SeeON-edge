@@ -68,18 +68,23 @@ def _audit_id(value: SqlValue) -> int:
 
 def _response(row: tuple[SqlValue, ...]) -> AuditEventResponse:
     return AuditEventResponse(
-        audit_id=_audit_id(row[0]), occurred_at=str(row[1]), recorded_at=str(row[2]),
-        actor_type=str(row[3]), actor_id=str(row[4]), action=AuditAction(str(row[5])),
-        target_type=str(row[6]), target_id=str(row[7]), outcome=str(row[8]),
-        detail_json=None if row[9] is None else str(row[9]), previous_hash=str(row[10]),
+        audit_id=_audit_id(row[0]),
+        occurred_at=str(row[1]),
+        recorded_at=str(row[2]),
+        actor_type=str(row[3]),
+        actor_id=str(row[4]),
+        action=AuditAction(str(row[5])),
+        target_type=str(row[6]),
+        target_id=str(row[7]),
+        outcome=str(row[8]),
+        detail_json=None if row[9] is None else str(row[9]),
+        previous_hash=str(row[10]),
         record_hash=str(row[11]),
     )
 
 
 @router.get("", response_model=AuditListResponse)
-def list_audit(
-    request: Request, filters: Annotated[AuditListQuery, Query()]
-) -> AuditListResponse:
+def list_audit(request: Request, filters: Annotated[AuditListQuery, Query()]) -> AuditListResponse:
     actor = authorize_dashboard(request)
     try:
         with closing(

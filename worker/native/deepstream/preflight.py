@@ -267,9 +267,7 @@ def _run_deepstream_preflight(
     )
     timeout = float(manifest["warmup"]["timeout_seconds"])
     try:
-        warmup_text = command_runner(
-            (str(native_path), "--warmup", str(plan_cache_dir)), timeout
-        )
+        warmup_text = command_runner((str(native_path), "--warmup", str(plan_cache_dir)), timeout)
         # nvstreammux writes its EOS diagnostic to stdout. Only the final,
         # exact native receipt is authoritative; earlier success-like text is not.
         warmup = json.loads(warmup_text.strip().splitlines()[-1])

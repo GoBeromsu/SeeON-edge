@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -14,6 +15,18 @@ from pydantic import JsonValue, TypeAdapter, ValidationError
 _CLIP_ID_RE = re.compile(r"^[A-Za-z0-9:_-]{1,128}$")
 _MEDIA_SUFFIXES = {".mp4", ".mov", ".m4v", ".webm", ".mkv"}
 _MANIFEST_PAYLOAD = TypeAdapter(dict[str, JsonValue])
+_EXTENSION_BOUNDARIES = {"none", "extension_bounded", "extension_raced"}
+
+
+class ExtensionContributorPayload(TypedDict):
+    event_ref: str
+    detected_at: str
+
+
+class ClipExtensionPayload(TypedDict):
+    contributors: list[ExtensionContributorPayload]
+    duration_s: float
+    boundary: str
 
 
 class ClipManifestPayload(TypedDict):
@@ -32,6 +45,20 @@ class ClipManifestPayload(TypedDict):
     thumbnail_available: bool
     detected_at: str | None
     truncation_reasons: list[str]
+    extension: ClipExtensionPayload | None
+
+
+@dataclass(frozen=True, slots=True)
+class ExtensionContributor:
+    event_ref: str
+    detected_at: str
+
+
+@dataclass(frozen=True, slots=True)
+class ClipExtension:
+    contributors: tuple[ExtensionContributor, ...]
+    duration_s: float
+    boundary: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,6 +79,7 @@ class ClipManifest:
     detected_at: str | None = None
     truncation_reasons: tuple[str, ...] = ()
     event_refs: tuple[str, ...] = ()
+    extension: ClipExtension | None = None
 
     def as_response(self) -> ClipManifestPayload:
         return {
@@ -70,6 +98,21 @@ class ClipManifest:
             "thumbnail_available": self.thumbnail_available,
             "detected_at": self.detected_at,
             "truncation_reasons": list(self.truncation_reasons),
+            "extension": (
+                {
+                    "contributors": [
+                        {
+                            "event_ref": contributor.event_ref,
+                            "detected_at": contributor.detected_at,
+                        }
+                        for contributor in self.extension.contributors
+                    ],
+                    "duration_s": self.extension.duration_s,
+                    "boundary": self.extension.boundary,
+                }
+                if self.extension is not None
+                else None
+            ),
         }
 
 
@@ -143,6 +186,9 @@ def _manifest_from_mapping(data: Mapping[str, JsonValue]) -> ClipManifest | None
         video_available = path is not None
     truncation_reasons = _truncation_reasons(data.get("truncation_reasons"))
     event_refs = _event_refs(data.get("event_refs"), event_ref)
+    extension = _extension(data.get("extension"))
+    if data.get("extension") is not None and extension is None:
+        return None
     return ClipManifest(
         clip_id=clip_id,
         camera_id=camera_id,
@@ -158,6 +204,7 @@ def _manifest_from_mapping(data: Mapping[str, JsonValue]) -> ClipManifest | None
         detected_at=detected_at,
         truncation_reasons=truncation_reasons,
         event_refs=event_refs,
+        extension=extension,
     )
 
 
@@ -194,8 +241,52 @@ def _event_refs(value: JsonValue | None, event_ref: str) -> tuple[str, ...]:
     return references or (event_ref,)
 
 
+def _extension(value: JsonValue | None) -> ClipExtension | None:
+    if not isinstance(value, dict) or set(value) != {
+        "contributors",
+        "duration_s",
+        "boundary",
+    }:
+        return None
+    boundary = value["boundary"]
+    duration_s = value["duration_s"]
+    contributors = value["contributors"]
+    if (
+        not isinstance(boundary, str)
+        or boundary not in _EXTENSION_BOUNDARIES
+        or isinstance(duration_s, bool)
+        or not isinstance(duration_s, int | float)
+        or not math.isfinite(duration_s)
+        or duration_s < 0
+        or not isinstance(contributors, list)
+        or not contributors
+    ):
+        return None
+    parsed_contributors: list[ExtensionContributor] = []
+    for contributor in contributors:
+        if not isinstance(contributor, dict) or set(contributor) != {"event_ref", "detected_at"}:
+            return None
+        event_ref = contributor["event_ref"]
+        detected_at = contributor["detected_at"]
+        if not isinstance(event_ref, str) or not event_ref.strip():
+            return None
+        parsed_detected_at = _optional_rfc3339_z(detected_at)
+        if parsed_detected_at is None:
+            return None
+        parsed_contributors.append(
+            ExtensionContributor(event_ref=event_ref, detected_at=parsed_detected_at)
+        )
+    return ClipExtension(
+        contributors=tuple(parsed_contributors),
+        duration_s=float(duration_s),
+        boundary=boundary,
+    )
+
+
 __all__ = [
+    "ClipExtension",
     "ClipManifest",
+    "ExtensionContributor",
     "discover_manifest_paths",
     "is_valid_clip_id",
     "read_manifest_file",

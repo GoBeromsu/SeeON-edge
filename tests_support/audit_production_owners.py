@@ -114,8 +114,7 @@ def assert_owner_catalog_complete(owners: ActionOwners) -> None:
     if set(owners) != set(AuditAction):
         raise AuditOwnerCatalogError("audit production owner catalog is incomplete")
     invalid = any(
-        not values or any(not callable(owner) for owner in values)
-        for values in owners.values()
+        not values or any(not callable(owner) for owner in values) for values in owners.values()
     )
     if invalid:
         raise AuditOwnerCatalogError("audit production owner catalog contains an invalid owner")

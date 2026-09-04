@@ -99,12 +99,7 @@ def replay_trace_to_decision_input(
                 confidence=confidence,
             )
         )
-        poses.append(
-            tuple(
-                (x * width, y * height, score)
-                for x, y, score in track.keypoints
-            )
-        )
+        poses.append(tuple((x * width, y * height, score) for x, y, score in track.keypoints))
         track_ids.append(track.track_id)
         live_ids.append(track.track_id)
     bed_boxes = ()

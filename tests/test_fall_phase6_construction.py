@@ -37,7 +37,7 @@ def _desired() -> DesiredModelBundle:
 
 def test_runtime_format_registry_is_active_and_fail_closed() -> None:
     registry = default_fall_model_family_registry()
-    assert "torchscript-gru-pose-bbox" in registry.runtime_formats()
+    assert "pose-bbox56-onnx-v0" in registry.runtime_formats()
     with pytest.raises(UnknownFallModelTypeError):
         registry.create_bundle("unknown-format", Path("/bundle"), "cpu")
 

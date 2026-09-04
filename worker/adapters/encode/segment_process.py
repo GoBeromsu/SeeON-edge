@@ -69,9 +69,7 @@ class _StderrDrain:
         self._chunks: deque[bytes] = deque()
         self._tail_len = 0
         self._lock = threading.Lock()
-        self._thread = threading.Thread(
-            target=self._run, name="ffmpeg-stderr-drain", daemon=True
-        )
+        self._thread = threading.Thread(target=self._run, name="ffmpeg-stderr-drain", daemon=True)
         self._thread.start()
 
     def _run(self) -> None:
@@ -214,9 +212,7 @@ def spawn_encoder_process(args: tuple[str, ...]) -> EncoderProcess:
             bufsize=0,
         )
     except OSError as exc:
-        raise EncoderStartError(
-            f"failed to start ffmpeg encoder ({type(exc).__name__})"
-        ) from exc
+        raise EncoderStartError(f"failed to start ffmpeg encoder ({type(exc).__name__})") from exc
     return _PopenEncoderProcess(process)
 
 

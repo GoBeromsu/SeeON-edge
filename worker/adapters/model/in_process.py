@@ -78,9 +78,7 @@ class InProcessBatchServingClient:
             return ()
         images = validated_batch_images(
             task,
-            tuple(
-                (packet.camera_id, packet.borrow_host_frame().image) for packet in ordered
-            ),
+            tuple((packet.camera_id, packet.borrow_host_frame().image) for packet in ordered),
         )
         runner = self.create(task, **kwargs)
         if not isinstance(runner, _BatchRunner):

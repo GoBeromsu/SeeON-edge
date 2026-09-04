@@ -145,8 +145,7 @@ class CsvSegmentIndex:
         return tuple(
             segment
             for segment in self._segments_by_path.values()
-            if segment.end_time_sec >= local_start
-            and segment.start_time_sec <= local_end
+            if segment.end_time_sec >= local_start and segment.start_time_sec <= local_end
         )
 
     def _to_local(self, start_time_sec: float, end_time_sec: float) -> tuple[float, float]:

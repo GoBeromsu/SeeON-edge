@@ -168,9 +168,7 @@ def test_a_released_stale_track_exit_does_not_rearm_on_track_loss() -> None:
     from worker.pipeline.decision.incident_manager import IncidentManager
 
     monitor = _monitor(camera_id="camera-lost-mid-exit", hold_frames=1, grace_frames=2)
-    aggregator = EventAggregator(
-        deciders=(monitor,), incidents=IncidentManager(cooldown_sec=300.0)
-    )
+    aggregator = EventAggregator(deciders=(monitor,), incidents=IncidentManager(cooldown_sec=300.0))
     aggregator.update(_input(IN_BED, (BED,), 0))
     aggregator.update(_input(OUTSIDE_BED, (BED,), 1))
 

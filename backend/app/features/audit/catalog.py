@@ -99,23 +99,46 @@ _PROBE: Final = AuditDetailKind.PROBE
 _SESSION: Final = AuditDetailKind.SESSION
 _RECOVERY: Final = AuditDetailKind.RECOVERY
 ACTION_DETAIL_CATALOG: Final = (
-    *(AuditDetailDeclaration(action, 1, _EMPTY) for action in (
-        AuditAction.AUTH_LOGIN, AuditAction.AUTH_SESSION_READ, AuditAction.AUTH_LOGOUT,
-        AuditAction.CREDENTIAL_ROTATE, AuditAction.CAMERA_CREATE, AuditAction.CAMERA_UPDATE,
-        AuditAction.CAMERA_DELETE, AuditAction.LOCATION_CREATE,
-        AuditAction.LOCATION_UPDATE, AuditAction.LOCATION_DELETE, AuditAction.BED_ZONE_UPDATE,
-        AuditAction.CONNECTION_UPDATE, AuditAction.CONNECTION_SYNC,
-        AuditAction.TOPOLOGY_CONFIRM, AuditAction.CLIP_STORAGE_UPDATE,
-        AuditAction.DETECTION_SETTINGS_UPDATE, AuditAction.RUNTIME_SETTINGS_UPDATE,
-        AuditAction.POLICY_APPLY, AuditAction.POLICY_ROLLBACK, AuditAction.INCIDENT_LIST,
-        AuditAction.INCIDENT_DETAIL, AuditAction.INCIDENT_REVIEW, AuditAction.CLIP_LIST,
-        AuditAction.CLIP_DETAIL, AuditAction.CLIP_PLAY, AuditAction.CLIP_THUMBNAIL,
-        AuditAction.CLIP_ARTIFACT, AuditAction.CLIP_DELETE_REQUEST,
-        AuditAction.CLIP_DELETE_COMPLETE,
-        AuditAction.EVIDENCE_RECEIPT, AuditAction.AUDIT_LIST, AuditAction.AUDIT_DETAIL,
-        AuditAction.RELAY_ALERT, AuditAction.RELAY_SNAPSHOT_ATTACHMENT,
-        AuditAction.RELAY_SNAPSHOT_DISPOSITION,
-    )),
+    *(
+        AuditDetailDeclaration(action, 1, _EMPTY)
+        for action in (
+            AuditAction.AUTH_LOGIN,
+            AuditAction.AUTH_SESSION_READ,
+            AuditAction.AUTH_LOGOUT,
+            AuditAction.CREDENTIAL_ROTATE,
+            AuditAction.CAMERA_CREATE,
+            AuditAction.CAMERA_UPDATE,
+            AuditAction.CAMERA_DELETE,
+            AuditAction.LOCATION_CREATE,
+            AuditAction.LOCATION_UPDATE,
+            AuditAction.LOCATION_DELETE,
+            AuditAction.BED_ZONE_UPDATE,
+            AuditAction.CONNECTION_UPDATE,
+            AuditAction.CONNECTION_SYNC,
+            AuditAction.TOPOLOGY_CONFIRM,
+            AuditAction.CLIP_STORAGE_UPDATE,
+            AuditAction.DETECTION_SETTINGS_UPDATE,
+            AuditAction.RUNTIME_SETTINGS_UPDATE,
+            AuditAction.POLICY_APPLY,
+            AuditAction.POLICY_ROLLBACK,
+            AuditAction.INCIDENT_LIST,
+            AuditAction.INCIDENT_DETAIL,
+            AuditAction.INCIDENT_REVIEW,
+            AuditAction.CLIP_LIST,
+            AuditAction.CLIP_DETAIL,
+            AuditAction.CLIP_PLAY,
+            AuditAction.CLIP_THUMBNAIL,
+            AuditAction.CLIP_ARTIFACT,
+            AuditAction.CLIP_DELETE_REQUEST,
+            AuditAction.CLIP_DELETE_COMPLETE,
+            AuditAction.EVIDENCE_RECEIPT,
+            AuditAction.AUDIT_LIST,
+            AuditAction.AUDIT_DETAIL,
+            AuditAction.RELAY_ALERT,
+            AuditAction.RELAY_SNAPSHOT_ATTACHMENT,
+            AuditAction.RELAY_SNAPSHOT_DISPOSITION,
+        )
+    ),
     AuditDetailDeclaration(AuditAction.CAMERA_PROBE, 1, _PROBE),
     AuditDetailDeclaration(AuditAction.AUDIT_SESSION_START, 1, _SESSION),
     AuditDetailDeclaration(AuditAction.AUDIT_SESSION_CLOSE, 1, _SESSION),
@@ -137,9 +160,26 @@ assert_catalog_complete(ACTION_DETAIL_CATALOG)
 _CATALOG: Final = {declaration.action: declaration for declaration in ACTION_DETAIL_CATALOG}
 _FORBIDDEN_CLASSES: Final = frozenset(
     {
-        "raw", "resident", "pose", "keypoint", "token", "password", "credential",
-        "session", "cookie", "request", "response", "traceback", "path", "media",
-        "bytes", "secret", "authorization", "rtsp", "image", "frame",
+        "raw",
+        "resident",
+        "pose",
+        "keypoint",
+        "token",
+        "password",
+        "credential",
+        "session",
+        "cookie",
+        "request",
+        "response",
+        "traceback",
+        "path",
+        "media",
+        "bytes",
+        "secret",
+        "authorization",
+        "rtsp",
+        "image",
+        "frame",
     }
 )
 
@@ -193,15 +233,15 @@ def _encode(
         AuditDetailKind.RECOVERY: frozenset({"version", "failure_code", "ended_at"}),
     }[declaration.kind]
     version = raw.get("version")
-    if (
-        frozenset(raw) != allowed
-        or type(version) is not int
-        or version != declaration.version
-    ):
+    if frozenset(raw) != allowed or type(version) is not int or version != declaration.version:
         raise AuditDetailError(f"detail fields/version are not registered for {action.value}")
     if declaration.kind is AuditDetailKind.PROBE:
         if type(raw.get("ok")) is not bool or raw.get("error_class") not in {
-            None, "timeout", "decode", "auth", "unsupported",
+            None,
+            "timeout",
+            "decode",
+            "auth",
+            "unsupported",
         }:
             raise AuditDetailError("camera probe detail values are invalid")
     if declaration.kind is AuditDetailKind.RECOVERY:
@@ -238,9 +278,19 @@ def _forbidden(value: str) -> bool:
 
 
 __all__ = [
-    "ACTION_DETAIL_CATALOG", "MAX_DETAIL_BYTES", "AuditAction", "AuditActorType",
-    "AuditAuthMechanism", "AuditDetail", "AuditDetailDeclaration", "AuditDetailError",
-    "AuditDetailKind", "assert_catalog_complete", "camera_probe_detail", "empty_detail",
+    "ACTION_DETAIL_CATALOG",
+    "MAX_DETAIL_BYTES",
+    "AuditAction",
+    "AuditActorType",
+    "AuditAuthMechanism",
+    "AuditDetail",
+    "AuditDetailDeclaration",
+    "AuditDetailError",
+    "AuditDetailKind",
+    "assert_catalog_complete",
+    "camera_probe_detail",
+    "empty_detail",
     "parse_detail_json",
-    "recovery_detail", "session_detail",
+    "recovery_detail",
+    "session_detail",
 ]

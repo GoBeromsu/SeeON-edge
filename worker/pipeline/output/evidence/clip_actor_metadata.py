@@ -38,9 +38,14 @@ def publication_metadata(
     time_origin = None
     if artifact is not None and artifact.media_origin_pts_sec is not None:
         time_origin = ClipTimeOrigin(
-            artifact.worker_boot_id, artifact.camera_id, artifact.stream_epoch,
-            artifact.generation, artifact.media_origin_pts_sec, active.event_time_sec,
-            active.start_time_sec, active.cutoff_time_sec,
+            artifact.worker_boot_id,
+            artifact.camera_id,
+            artifact.stream_epoch,
+            artifact.generation,
+            artifact.media_origin_pts_sec,
+            active.event_time_sec,
+            active.start_time_sec,
+            active.cutoff_time_sec,
         )
     source_media = _source_media(artifact)
     return ClipPublicationMetadata(

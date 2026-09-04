@@ -94,11 +94,7 @@ class EventIdentityStore:
         self, records: dict[str, _PersistedIdentity], now: float
     ) -> dict[str, _PersistedIdentity]:
         cutoff = now - self._retention_sec
-        eligible = [
-            record
-            for record in records.values()
-            if cutoff <= record.recorded_at <= now
-        ]
+        eligible = [record for record in records.values() if cutoff <= record.recorded_at <= now]
         eligible.sort(key=lambda record: (record.recorded_at, record.source_key), reverse=True)
         retained: dict[str, _PersistedIdentity] = {}
         size = 0

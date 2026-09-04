@@ -61,7 +61,11 @@ def _validate_deletion_payload(
     payload: dict[str, object], clip_id: str, *, allow_ready: bool
 ) -> _DeletionCommandResult:
     allowed = {
-        "PURGED", "HELD", "MISSING", "UNVERIFIABLE", "DELETE_FAILED",
+        "PURGED",
+        "HELD",
+        "MISSING",
+        "UNVERIFIABLE",
+        "DELETE_FAILED",
         "VERIFICATION_FAILED",
     }
     if allow_ready:
@@ -126,9 +130,7 @@ def list_clips(
         ),
         event_type_counts=dict(page.event_type_counts),
     )
-    append_governed(
-        request, actor_id=actor, action=AuditAction.CLIP_LIST, target_id="clips"
-    )
+    append_governed(request, actor_id=actor, action=AuditAction.CLIP_LIST, target_id="clips")
     return response
 
 
@@ -347,9 +349,7 @@ def clip_thumbnail(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="clip thumbnail not found",
         ) from exc
-    append_governed(
-        request, actor_id=actor, action=AuditAction.CLIP_THUMBNAIL, target_id=clip_id
-    )
+    append_governed(request, actor_id=actor, action=AuditAction.CLIP_THUMBNAIL, target_id=clip_id)
     # A thumbnail's Content-Length is only knowable from the bytes themselves
     # (they arrive through one bounded, containment-checked read), so HEAD runs
     # the identical path and drops the body last -- headers stay byte-identical

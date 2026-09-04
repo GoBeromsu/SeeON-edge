@@ -4,7 +4,7 @@
 (``worker/runtime/worker.py``) construct every model backend with
 ``device=boot.device`` -- when the resolved profile is ``mps`` that is the
 literal string ``"mps"`` passed straight into ``torch``-backed adapters
-(``worker/adapters/model/torch_gru_fall.py``, ``yolo_*.py``). This probe
+(``yolo_*.py``). This probe
 answers, before any lease is held or model is constructed, whether that
 ``device="mps"`` call can possibly succeed in this process -- it is the
 composition root's real signal for the ``profile_device`` bootstrap stage

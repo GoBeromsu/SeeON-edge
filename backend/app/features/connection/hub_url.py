@@ -65,9 +65,7 @@ def hub_url_transport_allowed(url: str, *, allow_insecure_http: bool | None = No
     if is_loopback_host(host):
         return True
     permitted = (
-        allow_insecure_http
-        if allow_insecure_http is not None
-        else allow_insecure_http_from_env()
+        allow_insecure_http if allow_insecure_http is not None else allow_insecure_http_from_env()
     )
     return bool(permitted)
 

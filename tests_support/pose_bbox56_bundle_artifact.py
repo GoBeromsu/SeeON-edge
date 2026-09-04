@@ -20,6 +20,17 @@ from torch import nn
 PREPROCESSING_IDENTITY_DIGEST = "6ab6d8165fe11a374446e36c8448ff1dae32946a23715e0bb0c22d2a234877bb"
 
 
+class _ProxyGru(nn.Module):
+    def __init__(self, encoder: nn.GRU, classifier: nn.Linear) -> None:
+        super().__init__()
+        self.encoder = encoder
+        self.classifier = classifier
+
+    def forward(self, window: torch.Tensor) -> torch.Tensor:
+        _, hidden = self.encoder(window)
+        return self.classifier(hidden[-1])
+
+
 def write_pose_bbox56_bundle(
     root: Path,
     *,
@@ -40,6 +51,14 @@ def write_pose_bbox56_bundle(
         **{f"classifier.{key}": value for key, value in classifier.state_dict().items()},
     }
     torch.save(state, root / "model.pt")
+    torch.onnx.export(
+        _ProxyGru(encoder, classifier).eval(),
+        torch.zeros((1, 30, 56), dtype=torch.float32),
+        root / "model.onnx",
+        input_names=["window"],
+        opset_version=17,
+        dynamo=False,
+    )
     arch = {
         "class_order": ["non_fall", "fall_transition_proxy"],
         "dropout": 0.0,
@@ -81,6 +100,7 @@ def write_pose_bbox56_bundle(
         "calibration.json",
         "evaluation-receipt.json",
         "metadata.yaml",
+        "model.onnx",
         "model.pt",
     ]
     files = []

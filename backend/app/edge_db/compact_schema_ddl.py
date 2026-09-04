@@ -1,7 +1,6 @@
 """CREATE statements for the schema 18 ten-table contract."""
 # policy: SIZE_OK — pure DDL ledger; splitting it would hide the contract.
 
-
 from __future__ import annotations
 
 from typing import Final

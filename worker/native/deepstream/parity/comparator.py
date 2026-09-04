@@ -45,9 +45,7 @@ class ParityMismatch:
         )
 
 
-def _count_mismatch(
-    channel: str, reference: int, candidate: int
-) -> tuple[ParityMismatch, ...]:
+def _count_mismatch(channel: str, reference: int, candidate: int) -> tuple[ParityMismatch, ...]:
     if reference == candidate:
         return ()
     return (
@@ -140,9 +138,7 @@ def compare_pose(reference: ParsedPose, candidate: ParsedPose) -> tuple[ParityMi
     return tuple(mismatches)
 
 
-def compare_person(
-    reference: ParsedPerson, candidate: ParsedPerson
-) -> tuple[ParityMismatch, ...]:
+def compare_person(reference: ParsedPerson, candidate: ParsedPerson) -> tuple[ParityMismatch, ...]:
     mismatches = list(_count_mismatch("person", len(reference.boxes), len(candidate.boxes)))
     if mismatches:
         return tuple(mismatches)

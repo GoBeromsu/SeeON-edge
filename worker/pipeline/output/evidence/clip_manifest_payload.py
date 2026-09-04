@@ -58,6 +58,8 @@ def manifest_payload(
             "requested_end_pts_sec": origin.requested_end_pts_sec,
             "event_media_time_ms": origin.event_media_time_ms,
         }
+    if metadata.extension is not None:
+        payload["extension"] = metadata.extension.model_dump(mode="json")
     return payload
 
 

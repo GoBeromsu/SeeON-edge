@@ -84,11 +84,7 @@ def _response_from_result(image: Image, result: BedRunnerResult) -> BedZoneRecog
     coordinates = cast("Sequence[float]", best_box[:5])
     polygon_field = best_box[5] if len(best_box) > 5 else ()
     polygon = (
-        [
-            [int(point[0]), int(point[1])]
-            for point in polygon_field
-            if isinstance(point, Sequence)
-        ]
+        [[int(point[0]), int(point[1])] for point in polygon_field if isinstance(point, Sequence)]
         if isinstance(polygon_field, Sequence)
         else []
     )

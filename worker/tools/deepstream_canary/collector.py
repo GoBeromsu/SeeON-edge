@@ -80,9 +80,7 @@ def _timeline(root: Path, rung: str) -> tuple[TimelineEntry, ...]:
     for kind, path in paths:
         if path.is_file():
             playable = _playable(path) if kind in {"event", "derivative"} else True
-            entries.append(
-                TimelineEntry(kind=kind, sha256=_sha256(path), playable=playable)
-            )
+            entries.append(TimelineEntry(kind=kind, sha256=_sha256(path), playable=playable))
     return tuple(entries)
 
 
@@ -106,15 +104,11 @@ def collect_recorded_telemetry(request: CollectionRequest) -> Path:
             decision_window_counts=tuple(item.decision_count for item in windows),
             decision_window_seconds=10.0,
             latency_samples_ms=tuple(
-                latency
-                for item in windows
-                for latency in item.latency_samples_ms
+                latency for item in windows for latency in item.latency_samples_ms
             ),
             au_gaps=0,
             config_discontinuities=0,
-            timestamp_discontinuities=sum(
-                item.timestamp_discontinuities for item in windows
-            ),
+            timestamp_discontinuities=sum(item.timestamp_discontinuities for item in windows),
             metadata_published=sum(item.metadata_published for item in windows),
             metadata_overwritten=sum(item.metadata_overwritten for item in windows),
             event_evidence_parity=parity,

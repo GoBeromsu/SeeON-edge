@@ -163,9 +163,7 @@ class CameraIngestSpec(Generic[_DecodeConfigT]):
     source_id: str
     make_decode_config: _DecodeConfigFactory[_DecodeConfigT]
     policy: CapturePolicy = field(default_factory=CapturePolicy)
-    decode_supervision: DecodeSupervisionPolicy = field(
-        default_factory=DecodeSupervisionPolicy
-    )
+    decode_supervision: DecodeSupervisionPolicy = field(default_factory=DecodeSupervisionPolicy)
 
 
 @dataclass(frozen=True, slots=True)
@@ -192,9 +190,7 @@ class CameraIngestLoop(Generic[_DecodeConfigT]):
         self._ready = False
         self._offline = False
         self._clock = clock
-        self._respawn_wait = (
-            self._stop_event.wait if respawn_wait is None else respawn_wait
-        )
+        self._respawn_wait = self._stop_event.wait if respawn_wait is None else respawn_wait
 
     @property
     def camera_id(self) -> str:
@@ -293,9 +289,7 @@ class CameraIngestLoop(Generic[_DecodeConfigT]):
         policy = self._spec.policy
         source = RTSPSource(
             decode_config,
-            _SilenceWatchingAdapter(
-                self._ports.decoder, self.camera_id, clock=self._clock
-            ),
+            _SilenceWatchingAdapter(self._ports.decoder, self.camera_id, clock=self._clock),
             max_failures=policy.max_failures,
             reconnect_initial_backoff_sec=policy.reconnect_initial_backoff_sec,
             reconnect_max_backoff_sec=policy.reconnect_max_backoff_sec,

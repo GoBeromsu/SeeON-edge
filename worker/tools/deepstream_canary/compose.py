@@ -38,13 +38,13 @@ def _publisher_block(camera_count: int, worker_image: str, corpus_dir: Path) -> 
             f"  publisher-{index:02d}:\n"
             f"    image: {worker_image}\n"
             "    pull_policy: never\n"
-            "    restart: \"no\"\n"
+            '    restart: "no"\n'
             "    depends_on:\n      mediamtx:\n        condition: service_healthy\n"
             "    networks: [canary]\n"
             f"    volumes:\n      - {corpus_dir}:/corpus:ro\n"
-            "    command: [ffmpeg, -re, -stream_loop, \"-1\", "
-            f"-itsoffset, \"0.{offset_ms:03d}\", -i, /corpus/loopback.mp4, "
-            "-map, \"0:v:0\", -c:v, copy, -f, rtsp, -rtsp_transport, tcp, "
+            '    command: [ffmpeg, -re, -stream_loop, "-1", '
+            f'-itsoffset, "0.{offset_ms:03d}", -i, /corpus/loopback.mp4, '
+            '-map, "0:v:0", -c:v, copy, -f, rtsp, -rtsp_transport, tcp, '
             f"rtsp://mediamtx:8554/{camera}]\n"
             "    cap_drop: [ALL]\n"
             "    security_opt: [no-new-privileges:true]\n"
@@ -116,9 +116,7 @@ def render_compose(request: RenderRequest) -> tuple[Path, str]:
     _ = zero_config.chmod(0o444)
     _ = workload_config.chmod(0o444)
     _ = paths["CANARY_RECEIPT_DIR"].chmod(0o777)
-    (paths["CANARY_RECEIPT_DIR"] / "active-config").write_text(
-        "zero\n", encoding="utf-8"
-    )
+    (paths["CANARY_RECEIPT_DIR"] / "active-config").write_text("zero\n", encoding="utf-8")
     template = BASE_COMPOSE.read_text(encoding="utf-8")
     replacements = {
         "CANARY_WORKER_IMAGE": request.worker_image,

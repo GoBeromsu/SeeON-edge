@@ -150,9 +150,7 @@ def _raw_boxes(boxes: BoxOutput) -> tuple[RawBox, ...]:
     for box in boxes:
         if len(box) < 5:
             raise RunnerResultShapeError("box", "expected five coordinates")
-        converted.append(
-            (int(box[0]), int(box[1]), int(box[2]), int(box[3]), float(box[4]))
-        )
+        converted.append((int(box[0]), int(box[1]), int(box[2]), int(box[3]), float(box[4])))
     return tuple(converted)
 
 
@@ -172,10 +170,7 @@ def _pose_row(row: PosePersonInput) -> Pose:
     if _is_nested_pose(row):
         if len(row) != 17 or any(len(point) != 3 for point in row):
             raise RunnerResultShapeError("pose", "expected 17 x/y/confidence points")
-        return tuple(
-            (int(point[0]), int(point[1]), float(point[2]))
-            for point in row
-        )
+        return tuple((int(point[0]), int(point[1]), float(point[2])) for point in row)
     raise RunnerResultShapeError("pose", "expected flattened or nested numeric values")
 
 

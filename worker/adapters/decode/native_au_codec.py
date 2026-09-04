@@ -99,9 +99,17 @@ def stream_configuration(envelope: AuEnvelope) -> SourceStreamConfiguration:
         case unreachable:
             assert_never(unreachable)
     descriptor = SourceStreamDescriptor(
-        0, "video", codec_name, "avc1" if codec_name == "h264" else "hvc1",
-        envelope.time_base, envelope.codec_data, envelope.width, envelope.height,
-        stream_format=stream_format, alignment="au", nal_length_size=nal_length_size,
+        0,
+        "video",
+        codec_name,
+        "avc1" if codec_name == "h264" else "hvc1",
+        envelope.time_base,
+        envelope.codec_data,
+        envelope.width,
+        envelope.height,
+        stream_format=stream_format,
+        alignment="au",
+        nal_length_size=nal_length_size,
         parser_caps_sha256=hashlib.sha256(envelope.parser_caps.encode()).hexdigest(),
     )
     return SourceStreamConfiguration.from_streams(
@@ -142,16 +150,26 @@ def _decode(header: bytes, body: bytes, camera: str) -> AuEnvelope:
         raise ValueError("native AU body framing invalid")
     caps_end, codec_end = camera_size + caps_size, camera_size + caps_size + codec_size
     return AuEnvelope(
-        kind, codec, framing, bool(header[11]),
-        int.from_bytes(header[12:16], "little"), int.from_bytes(header[16:24], "little"),
+        kind,
+        codec,
+        framing,
+        bool(header[11]),
+        int.from_bytes(header[12:16], "little"),
+        int.from_bytes(header[16:24], "little"),
         int.from_bytes(header[24:32], "little"),
         int.from_bytes(header[32:40], "little", signed=True),
         int.from_bytes(header[40:48], "little", signed=True),
         int.from_bytes(header[48:56], "little", signed=True),
-        Fraction(int.from_bytes(header[56:60], "little", signed=True),
-                 int.from_bytes(header[60:64], "little", signed=True)),
-        int.from_bytes(header[64:68], "little"), int.from_bytes(header[68:72], "little"),
-        camera, body[camera_size:caps_end].decode(), body[caps_end:codec_end], body[codec_end:],
+        Fraction(
+            int.from_bytes(header[56:60], "little", signed=True),
+            int.from_bytes(header[60:64], "little", signed=True),
+        ),
+        int.from_bytes(header[64:68], "little"),
+        int.from_bytes(header[68:72], "little"),
+        camera,
+        body[camera_size:caps_end].decode(),
+        body[caps_end:codec_end],
+        body[codec_end:],
     )
 
 

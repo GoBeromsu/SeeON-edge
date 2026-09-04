@@ -108,9 +108,7 @@ def _camera_checks(receipt: RungReceipt, policy: GatePolicy) -> Iterable[GateChe
             "true",
         )
         yield _check(f"{prefix}.preview", camera.preview_ok, camera.preview_ok, "true")
-        yield _check(
-            f"{prefix}.derivative", camera.derivative_ok, camera.derivative_ok, "true"
-        )
+        yield _check(f"{prefix}.derivative", camera.derivative_ok, camera.derivative_ok, "true")
 
 
 def evaluate_receipt(receipt: RungReceipt, policy: GatePolicy) -> GateReport:

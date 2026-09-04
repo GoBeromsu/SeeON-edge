@@ -289,8 +289,7 @@ def reject_legacy_conflicts(spec: ProfileSpec, env: Mapping[str, str]) -> None:
         configured = env.get(key)
         if configured and configured not in ("auto", spec.decode):
             message = (
-                f"{key}={configured!r} conflicts with profile "
-                f"{spec.name!r} decode {spec.decode!r}"
+                f"{key}={configured!r} conflicts with profile {spec.name!r} decode {spec.decode!r}"
             )
             raise ProfileVerifyError(message)
 

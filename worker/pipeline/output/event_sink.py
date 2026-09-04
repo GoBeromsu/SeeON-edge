@@ -188,9 +188,7 @@ class EvidenceEventSink:
         self, edge_event_id: str, snapshot_id: str, disposition: str, reason: str
     ) -> None:
         try:
-            self.stager.record_snapshot_disposition(
-                edge_event_id, snapshot_id, disposition, reason
-            )
+            self.stager.record_snapshot_disposition(edge_event_id, snapshot_id, disposition, reason)
         except Exception:  # noqa: BLE001 - event remains authoritative
             LOGGER.exception(
                 "snapshot disposition admission failed: edge_event_id=%s", edge_event_id

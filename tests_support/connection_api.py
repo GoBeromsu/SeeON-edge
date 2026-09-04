@@ -32,9 +32,7 @@ DASHBOARD_LOGIN: Mapping[str, JsonValue] = {
 }
 TEST_TIMEOUT_ENV = "ML_API_CONNECTION_TEST_TIMEOUT_S"
 
-JsonValue: TypeAlias = (
-    str | int | float | bool | list["JsonValue"] | dict[str, "JsonValue"] | None
-)
+JsonValue: TypeAlias = str | int | float | bool | list["JsonValue"] | dict[str, "JsonValue"] | None
 
 
 class ConnectionTestClient(Protocol):
@@ -73,9 +71,7 @@ def login(client: ConnectionTestClient) -> None:
 def connection_client(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, test_timeout_s: float = 0.3
 ) -> ConnectionTestClient:
-    monkeypatch.setenv(
-        API_CONNECTION_SETTINGS_PATH_ENV, str(tmp_path / "connection_settings.json")
-    )
+    monkeypatch.setenv(API_CONNECTION_SETTINGS_PATH_ENV, str(tmp_path / "connection_settings.json"))
     monkeypatch.setenv(TEST_TIMEOUT_ENV, str(test_timeout_s))
     get_settings.cache_clear()
     app = create_app(lifespan=no_lifespan)
@@ -83,12 +79,8 @@ def connection_client(
     return cast(ConnectionTestClient, TestClient(app))
 
 
-def connection_store(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> ConnectionSettingsStore:
-    monkeypatch.setenv(
-        API_CONNECTION_SETTINGS_PATH_ENV, str(tmp_path / "connection_settings.json")
-    )
+def connection_store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> ConnectionSettingsStore:
+    monkeypatch.setenv(API_CONNECTION_SETTINGS_PATH_ENV, str(tmp_path / "connection_settings.json"))
     return ConnectionSettingsStore.from_env()
 
 

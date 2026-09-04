@@ -30,9 +30,7 @@ def run_ffmpeg_remux(args: tuple[str, ...]) -> int:
             stderr=subprocess.DEVNULL,
         )
     except OSError as exc:
-        raise ClipRemuxError(
-            f"failed to start ffmpeg remux ({type(exc).__name__})"
-        ) from exc
+        raise ClipRemuxError(f"failed to start ffmpeg remux ({type(exc).__name__})") from exc
     return completed.returncode
 
 
@@ -115,8 +113,7 @@ class FFmpegConcatFinalizer:
             raise ClipRemuxError("ffmpeg concat remux failed", returncode=returncode)
 
         duration_s = sum(
-            max(0.0, segment.end_time_sec - segment.start_time_sec)
-            for segment in segments
+            max(0.0, segment.end_time_sec - segment.start_time_sec) for segment in segments
         )
         first_segment = segments[0]
         return ClipArtifact(

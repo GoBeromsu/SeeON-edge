@@ -10,6 +10,7 @@ The exception TYPE (FatalAcceleratorError) lives in worker.adapters.model.errors
 that worker.pipeline.ingest.lifecycle can import it without breaking the import-linter
 contract "worker runtime is the sole composition root".
 """
+
 from __future__ import annotations
 
 from worker.runtime.faults.handler import FATAL_ACCELERATOR_EXIT_CODE, FaultHandler

@@ -138,7 +138,7 @@ def _container_snapshot(
             "docker",
             "inspect",
             "-f",
-            f"{{{{index .Config.Labels \"{PROJECT_LABEL}\"}}}}",
+            f'{{{{index .Config.Labels "{PROJECT_LABEL}"}}}}',
             container_id,
         )
     )
@@ -154,9 +154,7 @@ def _container_snapshot(
             container_id,
         )
     )
-    mounts = tuple(
-        sorted(Path(line).resolve() for line in mount_text.splitlines() if line)
-    )
+    mounts = tuple(sorted(Path(line).resolve() for line in mount_text.splitlines() if line))
     return LiveContainer(
         container_id=container_id,
         restart_count=restart_count,
@@ -232,9 +230,7 @@ def capture_live_snapshot() -> LiveSnapshot:
 
 
 def encode_live_snapshot(snapshot: LiveSnapshot) -> bytes:
-    attributed = {
-        pid for container in snapshot.containers for pid in container.gpu_pids
-    }
+    attributed = {pid for container in snapshot.containers for pid in container.gpu_pids}
     return canonical_json(
         {
             "schema_version": 1,
@@ -248,9 +244,7 @@ def encode_live_snapshot(snapshot: LiveSnapshot) -> bytes:
                 for container in snapshot.containers
             ],
             "unattributed_gpu_processes": [
-                line
-                for line in snapshot.gpu_processes
-                if _gpu_pid(line) not in attributed
+                line for line in snapshot.gpu_processes if _gpu_pid(line) not in attributed
             ],
         }
     )

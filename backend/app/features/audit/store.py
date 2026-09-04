@@ -140,26 +140,47 @@ class AuditStore:
             "actor_id,auth_mechanism,action,target_type,target_id,outcome,reason,request_id,"
             "interaction_id,detail_json,previous_hash,record_hash,retention_class,hold_reference) "
             "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            tuple(insert_values[key] for key in (
-                "occurred_at", "recorded_at", "clock_quality", "actor_type", "actor_id",
-                "auth_mechanism", "action", "target_type", "target_id", "outcome", "reason",
-                "request_id", "interaction_id", "detail_json", "previous_hash", "record_hash",
-                "retention_class", "hold_reference",
-            )),
+            tuple(
+                insert_values[key]
+                for key in (
+                    "occurred_at",
+                    "recorded_at",
+                    "clock_quality",
+                    "actor_type",
+                    "actor_id",
+                    "auth_mechanism",
+                    "action",
+                    "target_type",
+                    "target_id",
+                    "outcome",
+                    "reason",
+                    "request_id",
+                    "interaction_id",
+                    "detail_json",
+                    "previous_hash",
+                    "record_hash",
+                    "retention_class",
+                    "hold_reference",
+                )
+            ),
         )
         audit_id = cursor.lastrowid
         if audit_id is None:
             raise AuditVerificationError("audit insert did not return an identity")
         return AuditRecord(
-            audit_id=audit_id, occurred_at=event.occurred_at,
-            recorded_at=recorded_at, actor_id=event.actor_id, action=event.action,
-            target_type=_target_type(event.action), target_id=event.target_id,
-            detail=event.detail, previous_hash=previous_hash, record_hash=record_hash,
+            audit_id=audit_id,
+            occurred_at=event.occurred_at,
+            recorded_at=recorded_at,
+            actor_id=event.actor_id,
+            action=event.action,
+            target_type=_target_type(event.action),
+            target_id=event.target_id,
+            detail=event.detail,
+            previous_hash=previous_hash,
+            record_hash=record_hash,
         )
 
-    def verify(
-        self, checkpoint: VerificationCheckpoint | None = None
-    ) -> VerificationCheckpoint:
+    def verify(self, checkpoint: VerificationCheckpoint | None = None) -> VerificationCheckpoint:
         try:
             if checkpoint is None:
                 with closing(open_runtime_database(self.path, actor=RuntimeActor.API)):
@@ -171,8 +192,11 @@ class AuditStore:
                 try:
                     observed_version = _observer_data_version(connection)
                     verified = verify_connection(
-                        connection, checkpoint, identity,
-                        observer_id=self._verifier_id, data_version=observed_version,
+                        connection,
+                        checkpoint,
+                        identity,
+                        observer_id=self._verifier_id,
+                        data_version=observed_version,
                     )
                     connection.execute("COMMIT")
                     return verified
@@ -202,7 +226,10 @@ class AuditStore:
         if self._verifier_connection is None:
             uri = self.path.resolve().as_uri() + "?mode=ro"
             self._verifier_connection = sqlite3.connect(
-                uri, uri=True, check_same_thread=False, isolation_level=None,
+                uri,
+                uri=True,
+                check_same_thread=False,
+                isolation_level=None,
             )
             self._verifier_connection.execute("PRAGMA query_only=ON")
             self._verifier_identity = identity
@@ -215,6 +242,12 @@ class AuditStore:
 
 
 __all__ = [
-    "GENESIS_HASH", "MAX_AUDIT_ROWS", "AuditEvent", "AuditRecord", "AuditStore",
-    "AuditVerificationError", "VerificationCheckpoint", "utc_now",
+    "GENESIS_HASH",
+    "MAX_AUDIT_ROWS",
+    "AuditEvent",
+    "AuditRecord",
+    "AuditStore",
+    "AuditVerificationError",
+    "VerificationCheckpoint",
+    "utc_now",
 ]

@@ -156,13 +156,9 @@ def build_export_manifest(
     max_batch: int = MAX_DYNAMIC_BATCH,
 ) -> dict[str, Any]:
     """Bind one exported artifact to the parser that is allowed to read it."""
-    outputs: list[dict[str, Any]] = [
-        {"name": spec.output_name, "shape": list(spec.output_shape)}
-    ]
+    outputs: list[dict[str, Any]] = [{"name": spec.output_name, "shape": list(spec.output_shape)}]
     if spec.prototype_name is not None and spec.prototype_shape is not None:
-        outputs.append(
-            {"name": spec.prototype_name, "shape": list(spec.prototype_shape)}
-        )
+        outputs.append({"name": spec.prototype_name, "shape": list(spec.prototype_shape)})
     return {
         "schema_version": MANIFEST_SCHEMA_VERSION,
         "task": spec.task,

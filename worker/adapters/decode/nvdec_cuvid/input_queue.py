@@ -25,9 +25,7 @@ class DecoderInputQueue:
 
     def __init__(self, process: DecoderProcess) -> None:
         self._process = process
-        self._packets: queue.Queue[SourcePacket] = queue.Queue(
-            maxsize=_INPUT_QUEUE_CAPACITY
-        )
+        self._packets: queue.Queue[SourcePacket] = queue.Queue(maxsize=_INPUT_QUEUE_CAPACITY)
         self._timings: list[tuple[Fraction, int, SourcePacket]] = []
         self._stop = threading.Event()
         self._lock = threading.Lock()
@@ -115,9 +113,7 @@ class DecoderInputQueue:
     def _withdraw_timing(self, packet: SourcePacket) -> None:
         """Drop a timing whose packet never reached the decoder."""
         with self._lock:
-            remaining = [
-                entry for entry in self._timings if entry[1] != packet.arrival_index
-            ]
+            remaining = [entry for entry in self._timings if entry[1] != packet.arrival_index]
             if len(remaining) != len(self._timings):
                 self._timings = remaining
                 heapq.heapify(self._timings)

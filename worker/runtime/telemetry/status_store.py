@@ -115,7 +115,7 @@ class StatusStore:
         *,
         detail: str | None = None,
         timestamp: float | None = None,
-        ) -> None:
+    ) -> None:
         with self._lock:
             _ = self.set_status(
                 camera_id,
@@ -140,7 +140,7 @@ class StatusStore:
         *,
         detail: str | None = None,
         timestamp: float | None = None,
-        ) -> None:
+    ) -> None:
         with self._lock:
             _ = self.set_status(
                 camera_id,
@@ -164,9 +164,7 @@ class StatusStore:
     def snapshot(self) -> StatusSnapshot:
         with self._lock:
             return StatusSnapshot(
-                cameras=tuple(
-                    self._statuses[camera_id] for camera_id in sorted(self._statuses)
-                ),
+                cameras=tuple(self._statuses[camera_id] for camera_id in sorted(self._statuses)),
                 ops_events=tuple(self._ops_events),
             )
 

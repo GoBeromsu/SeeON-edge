@@ -325,9 +325,7 @@ def runtime_descriptor_for(
         effective_converters=effective_converters,
         effective_edges=effective_edges,
         degraded_reasons=degraded_reasons,
-        device_resident_after_decode=(
-            spec.name == "nvidia" and decode == "nvdec"
-        ),
+        device_resident_after_decode=(spec.name == "nvidia" and decode == "nvdec"),
         concrete_stages_available=spec.concrete_stages_available,
     )
 
@@ -405,9 +403,7 @@ def default_decode_probe(
 
 
 def default_encode_probe() -> VerifyResult:
-    return VerifyResult(
-        False, "cuda", "encode", "h264_nvenc capability probe is not configured"
-    )
+    return VerifyResult(False, "cuda", "encode", "h264_nvenc capability probe is not configured")
 
 
 __all__ = [

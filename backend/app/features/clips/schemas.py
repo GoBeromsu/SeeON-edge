@@ -7,6 +7,22 @@ from typing import ClassVar, Literal, Self, TypeAlias
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 ClipEventType: TypeAlias = Literal["fall", "bed-exit", "other"]
+ClipExtensionBoundary: TypeAlias = Literal["none", "extension_bounded", "extension_raced"]
+
+
+class ClipExtensionContributorResponse(BaseModel):
+    model_config: ClassVar[ConfigDict] = ConfigDict(extra="forbid")
+
+    event_ref: str = Field(min_length=1)
+    detected_at: str = Field(min_length=1)
+
+
+class ClipExtensionResponse(BaseModel):
+    model_config: ClassVar[ConfigDict] = ConfigDict(extra="forbid")
+
+    contributors: list[ClipExtensionContributorResponse]
+    duration_s: float = Field(ge=0)
+    boundary: ClipExtensionBoundary
 
 
 class ClipManifestResponse(BaseModel):
@@ -27,6 +43,7 @@ class ClipManifestResponse(BaseModel):
     thumbnail_available: bool = False
     detected_at: str | None = Field(default=None, min_length=1)
     truncation_reasons: list[str] = Field(default_factory=list)
+    extension: ClipExtensionResponse | None = None
 
 
 class ClipsPaginationResponse(BaseModel):

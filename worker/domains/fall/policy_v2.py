@@ -155,9 +155,7 @@ class FallPolicyDeciderV2:
         self._states[track_id] = state
         return state
 
-    def _evict_stale(
-        self, live_ids: frozenset[int], frame_index: int, time_sec: float
-    ) -> None:
+    def _evict_stale(self, live_ids: frozenset[int], frame_index: int, time_sec: float) -> None:
         for track_id, state in tuple(self._states.items()):
             if track_id in live_ids:
                 continue
@@ -281,6 +279,7 @@ class FallPolicyDeciderV2:
                 "transition_window": self.policy.transition_window,
             },
         )
+
 
 @dataclass(slots=True)
 class FallV2DomainDecider:

@@ -114,11 +114,15 @@ class VaapiSession:
         if len(payload) != self._frame_size:
             self.close()
             raise VaapiReadError(self._frame_size, len(payload))
-        image = np.frombuffer(payload, dtype=np.uint8).reshape(
-            self._dimensions.height,
-            self._dimensions.width,
-            _RGB_CHANNELS,
-        ).copy()
+        image = (
+            np.frombuffer(payload, dtype=np.uint8)
+            .reshape(
+                self._dimensions.height,
+                self._dimensions.width,
+                _RGB_CHANNELS,
+            )
+            .copy()
+        )
         if self._first_frame_at is None:
             self._first_frame_at = finished_at
         pts = max(0.0, finished_at - self._first_frame_at)

@@ -9,9 +9,7 @@ from worker.types import CURRENT_TEMPORAL_PROFILE
 class Scheduler:
     """Deterministic per-frame task scheduler."""
 
-    task_intervals: dict[str, int] = field(
-        default_factory=CURRENT_TEMPORAL_PROFILE.task_intervals
-    )
+    task_intervals: dict[str, int] = field(default_factory=CURRENT_TEMPORAL_PROFILE.task_intervals)
 
     def tasks_for_frame(self, frame_index: int) -> tuple[str, ...]:
         due: list[str] = []

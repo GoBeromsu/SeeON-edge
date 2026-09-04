@@ -138,22 +138,28 @@ def test_own_bed_exit_emits_once_after_grace_period() -> None:
 
 def test_release_reopens_a_failed_stale_exit_after_the_track_reassociates() -> None:
     monitor = _monitor(grace_frames=1)
-    assert monitor.update(
-        _input(
-            person_boxes=(IN_BED_A,),
-            bed_boxes=(BED_A,),
-            track_ids=(PERSON_ID,),
-            frame_index=0,
+    assert (
+        monitor.update(
+            _input(
+                person_boxes=(IN_BED_A,),
+                bed_boxes=(BED_A,),
+                track_ids=(PERSON_ID,),
+                frame_index=0,
+            )
         )
-    ) == ()
-    assert monitor.update(
-        _input(
-            person_boxes=(OUTSIDE_BEDS,),
-            bed_boxes=(BED_A,),
-            track_ids=(PERSON_ID,),
-            frame_index=1,
+        == ()
+    )
+    assert (
+        monitor.update(
+            _input(
+                person_boxes=(OUTSIDE_BEDS,),
+                bed_boxes=(BED_A,),
+                track_ids=(PERSON_ID,),
+                frame_index=1,
+            )
         )
-    ) == ()
+        == ()
+    )
     failed = monitor.update(
         _input(
             person_boxes=(),
@@ -164,22 +170,28 @@ def test_release_reopens_a_failed_stale_exit_after_the_track_reassociates() -> N
     )[0]
 
     monitor.release_onset(failed)
-    assert monitor.update(
-        _input(
-            person_boxes=(IN_BED_A,),
-            bed_boxes=(BED_A,),
-            track_ids=(PERSON_ID,),
-            frame_index=3,
+    assert (
+        monitor.update(
+            _input(
+                person_boxes=(IN_BED_A,),
+                bed_boxes=(BED_A,),
+                track_ids=(PERSON_ID,),
+                frame_index=3,
+            )
         )
-    ) == ()
-    assert monitor.update(
-        _input(
-            person_boxes=(OUTSIDE_BEDS,),
-            bed_boxes=(BED_A,),
-            track_ids=(PERSON_ID,),
-            frame_index=4,
+        == ()
+    )
+    assert (
+        monitor.update(
+            _input(
+                person_boxes=(OUTSIDE_BEDS,),
+                bed_boxes=(BED_A,),
+                track_ids=(PERSON_ID,),
+                frame_index=4,
+            )
         )
-    ) == ()
+        == ()
+    )
     retried = monitor.update(
         _input(
             person_boxes=(OUTSIDE_BEDS,),

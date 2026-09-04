@@ -222,9 +222,7 @@ def probe_nvdec_cuvid_capability(
 
     if _CUVID_DECODER_PATTERN.search(decoders):
         return NvdecCapability(True, "ffmpeg CUVID decoder is available")
-    return NvdecCapability(
-        False, "ffmpeg has no CUDA/CUVID/NVDEC hwaccel or *_cuvid decoder"
-    )
+    return NvdecCapability(False, "ffmpeg has no CUDA/CUVID/NVDEC hwaccel or *_cuvid decoder")
 
 
 __all__ = [

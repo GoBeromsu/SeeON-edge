@@ -233,8 +233,10 @@ def export_clip(
                         request,
                         connection,
                         AuditEvent(
-                            occurred_at=utc_now(), actor_id="worker-relay",
-                            action=AuditAction.EVIDENCE_RECEIPT, target_id=clip_id,
+                            occurred_at=utc_now(),
+                            actor_id="worker-relay",
+                            action=AuditAction.EVIDENCE_RECEIPT,
+                            target_id=clip_id,
                             detail=empty_detail(AuditAction.EVIDENCE_RECEIPT),
                             actor_type=AuditActorType.SERVICE,
                             auth_mechanism=AuditAuthMechanism.RELAY_TOKEN,

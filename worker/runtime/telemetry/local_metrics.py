@@ -83,9 +83,7 @@ def log_snapshot(snapshot: RuntimeDiagnosticsSnapshot) -> None:
             None
             if camera.decode_backend is None
             else {
-                "requested_profile_decode": (
-                    camera.decode_backend.requested_profile_decode
-                ),
+                "requested_profile_decode": (camera.decode_backend.requested_profile_decode),
                 "resolved_backend": camera.decode_backend.resolved_backend,
                 "actual_adapter_class": camera.decode_backend.actual_adapter_class,
             }
@@ -125,12 +123,8 @@ def log_snapshot(snapshot: RuntimeDiagnosticsSnapshot) -> None:
             None
             if camera.bed_exit_scoring is None
             else {
-                "max_containment_observed": (
-                    camera.bed_exit_scoring.max_containment_observed
-                ),
-                "grace_positive_transitions": (
-                    camera.bed_exit_scoring.grace_positive_transitions
-                ),
+                "max_containment_observed": (camera.bed_exit_scoring.max_containment_observed),
+                "grace_positive_transitions": (camera.bed_exit_scoring.grace_positive_transitions),
                 "assignments_made": camera.bed_exit_scoring.assignments_made,
                 "updated_at_sec": camera.bed_exit_scoring.updated_at_sec,
             }

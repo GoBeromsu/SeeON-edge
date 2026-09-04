@@ -153,7 +153,7 @@ def test_registry_get_factory_raises_for_unregistered_type_naming_known_families
 def test_default_registry_only_registers_the_packaged_pose_bbox56_family() -> None:
     registry = default_fall_model_family_registry()
     assert registry.types() == ("pose-bbox56-proxy-v0",)
-    assert registry.runtime_formats() == ("pose-bbox56-proxy-v0", "torchscript-gru-pose-bbox")
+    assert registry.runtime_formats() == ("pose-bbox56-onnx-v0", "pose-bbox56-proxy-v0")
 
 
 def test_create_fall_model_loads_a_fake_family_registered_purely_via_config(

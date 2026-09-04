@@ -116,8 +116,11 @@ def put_clip_storage_location(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="path not found") from exc
     selected = "/".join(segments)
     event = AuditEvent(
-        occurred_at=utc_now(), actor_id=actor, action=AuditAction.CLIP_STORAGE_UPDATE,
-        target_id=selected or "clip-store", detail=empty_detail(AuditAction.CLIP_STORAGE_UPDATE),
+        occurred_at=utc_now(),
+        actor_id=actor,
+        action=AuditAction.CLIP_STORAGE_UPDATE,
+        target_id=selected or "clip-store",
+        detail=empty_detail(AuditAction.CLIP_STORAGE_UPDATE),
     )
     _location_store(request.app).put(
         selected,

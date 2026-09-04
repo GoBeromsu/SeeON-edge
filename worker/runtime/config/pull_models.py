@@ -365,9 +365,7 @@ class BackendWorkerConfigPayload(BaseModel):
         # for yet -- and must boot with an empty usable roster rather than
         # reject the pull.
         if self.cameras and not resolved_cameras:
-            raise WorkerConfigError(
-                "worker config declared cameras but none of them parsed"
-            )
+            raise WorkerConfigError("worker config declared cameras but none of them parsed")
         detection_windows: dict[str, NightWindowConfig | None] = {
             domain: NightWindowConfig(start=window.start, end=window.end, tz=window.tz)
             for domain, window in self.resolved_detection_windows.items()

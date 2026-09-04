@@ -48,8 +48,11 @@ def put_runtime_settings(
 ) -> dict[str, object]:
     actor = _authorize(request)
     event = AuditEvent(
-        occurred_at=utc_now(), actor_id=actor, action=AuditAction.RUNTIME_SETTINGS_UPDATE,
-        target_id="runtime-settings", detail=empty_detail(AuditAction.RUNTIME_SETTINGS_UPDATE),
+        occurred_at=utc_now(),
+        actor_id=actor,
+        action=AuditAction.RUNTIME_SETTINGS_UPDATE,
+        target_id="runtime-settings",
+        detail=empty_detail(AuditAction.RUNTIME_SETTINGS_UPDATE),
     )
     try:
         setting = get_runtime_settings_store(request.app).set_clip_export_enabled(

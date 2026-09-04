@@ -199,7 +199,5 @@ class AuthorizationArtifact(BaseModel):
     issue: str = Field(pattern=r"^https://github\.com/SeniorAILab/SeeON-edge/issues/[0-9]+$")
     expires_at: datetime
     authorized_rungs: tuple[Literal[1, 4, 8, 13], ...]
-    eight_pass_report_sha256: str | None = Field(
-        default=None, pattern=r"^[0-9a-f]{64}$"
-    )
+    eight_pass_report_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     projected_slack_mib: float = Field(ge=0)

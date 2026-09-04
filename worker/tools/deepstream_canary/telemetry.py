@@ -112,8 +112,7 @@ def build_rung_receipt(
         CameraSignals(
             camera_id=camera.camera_id,
             fps_windows=tuple(
-                count / camera.decision_window_seconds
-                for count in camera.decision_window_counts
+                count / camera.decision_window_seconds for count in camera.decision_window_counts
             ),
             latency_ms=LatencySignals(
                 p50=_percentile(camera.latency_samples_ms, 0.50),

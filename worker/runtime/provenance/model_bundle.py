@@ -41,9 +41,7 @@ _IDENTITY_FIELDS: Final = (
 )
 _RECEIPT_IDENTITY_FIELDS: Final = ("evaluation", "field")
 _BUNDLE_IDENTITY_FIELDS: Final = tuple(
-    field
-    for field in _IDENTITY_FIELDS
-    if field not in _RECEIPT_IDENTITY_FIELDS
+    field for field in _IDENTITY_FIELDS if field not in _RECEIPT_IDENTITY_FIELDS
 )
 
 

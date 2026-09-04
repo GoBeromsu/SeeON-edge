@@ -105,8 +105,7 @@ def probe_opencv_ffmpeg_capability(*, importer: Cv2Importer = _import_cv2) -> Op
     if backend_id is None:
         return OpenCvCapability(
             False,
-            "OpenCV build exposes no CAP_FFMPEG constant, so the FFMPEG backend "
-            "cannot be verified",
+            "OpenCV build exposes no CAP_FFMPEG constant, so the FFMPEG backend cannot be verified",
         )
 
     try:

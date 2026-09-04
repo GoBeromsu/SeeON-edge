@@ -44,13 +44,9 @@ class EvidenceTransport(Protocol):
         self, payload_json: str, edge_event_id: str
     ) -> EventReceipt | DeliveryFailure: ...
 
-    def send_snapshot_attachment(
-        self, payload: dict[str, object]
-    ) -> DeliveryFailure | None: ...
+    def send_snapshot_attachment(self, payload: dict[str, object]) -> DeliveryFailure | None: ...
 
-    def send_snapshot_disposition(
-        self, payload: dict[str, object]
-    ) -> DeliveryFailure | None: ...
+    def send_snapshot_disposition(self, payload: dict[str, object]) -> DeliveryFailure | None: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -136,9 +132,7 @@ class EvidenceSender:
         if not undeferred:
             self._deferred.clear()
             undeferred = candidates
-        return next(
-            (item for item in undeferred if item["kind"] == "EVENT"), undeferred[0]
-        )
+        return next((item for item in undeferred if item["kind"] == "EVENT"), undeferred[0])
 
     def run_once(self) -> SenderStep:
         queue = DeliveryQueue(self.queue_directory)
@@ -260,9 +254,7 @@ class EvidenceSender:
         match entry["kind"]:
             case "EVENT":
                 self._warn_shed_detail(entry)
-                return self._transport.send_event(
-                    _payload(entry), str(entry["edge_event_id"])
-                )
+                return self._transport.send_event(_payload(entry), str(entry["edge_event_id"]))
             case "SNAPSHOT_ATTACHMENT":
                 return self._transport.send_snapshot_attachment(_media_payload(entry))
             case "SNAPSHOT_DISPOSITION":

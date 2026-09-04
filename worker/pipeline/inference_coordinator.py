@@ -210,7 +210,9 @@ class CapabilityInferenceCoordinator:
                     cameras = ",".join(lane.camera_id for lane, _packet in items)
                     LOGGER.exception(
                         "pose work item failed: error=%s geometry=%sx%s cameras=%s",
-                        type(error).__name__, *geometry, cameras,
+                        type(error).__name__,
+                        *geometry,
+                        cameras,
                     )
         finally:
             # Any exit that leaves a packet un-published and un-released would leak
@@ -265,8 +267,11 @@ class CapabilityInferenceCoordinator:
             for lane in self._lanes
         }
         return InferenceTelemetrySnapshot(
-            cameras, counters.batch_sizes, counters.forward_p50_sec,
-            counters.forward_p95_sec, counters.geometry_batch_sizes,
+            cameras,
+            counters.batch_sizes,
+            counters.forward_p50_sec,
+            counters.forward_p95_sec,
+            counters.geometry_batch_sizes,
         )
 
     def _wait(self, timeout_sec: float) -> None:

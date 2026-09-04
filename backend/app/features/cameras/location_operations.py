@@ -25,7 +25,11 @@ class CameraLocationOperations:
     _statuses: dict[str, CameraStatus]
 
     def create_floor(
-        self, *, edge_ref: str, name: str, order_index: int,
+        self,
+        *,
+        edge_ref: str,
+        name: str,
+        order_index: int,
         after_write: TransactionHook | None = None,
     ) -> None:
         with self._lock, camera_transaction(self._connection) as connection:
@@ -37,7 +41,11 @@ class CameraLocationOperations:
                 after_write(connection)
 
     def update_floor(
-        self, edge_ref: str, *, name: str, order_index: int,
+        self,
+        edge_ref: str,
+        *,
+        name: str,
+        order_index: int,
         after_write: TransactionHook | None = None,
     ) -> bool:
         with self._lock, camera_transaction(self._connection) as connection:
@@ -47,19 +55,24 @@ class CameraLocationOperations:
             self._finish_mutation(connection, changed, after_write)
             return changed
 
-    def delete_floor(
-        self, edge_ref: str, *, after_write: TransactionHook | None = None
-    ) -> bool:
+    def delete_floor(self, edge_ref: str, *, after_write: TransactionHook | None = None) -> bool:
         return self._location_mutation(self._topology.delete_floor, edge_ref, after_write)
 
     def create_room(
-        self, *, edge_ref: str, floor_edge_ref: str, name: str,
+        self,
+        *,
+        edge_ref: str,
+        floor_edge_ref: str,
+        name: str,
         legacy_canonical_space_id: str | None = None,
         after_write: TransactionHook | None = None,
     ) -> None:
         with self._lock, camera_transaction(self._connection) as connection:
             self._topology.create_room(
-                connection, edge_ref=edge_ref, floor_edge_ref=floor_edge_ref, name=name,
+                connection,
+                edge_ref=edge_ref,
+                floor_edge_ref=floor_edge_ref,
+                name=name,
                 legacy_canonical_space_id=legacy_canonical_space_id,
             )
             record_registry_mutation(connection)
@@ -74,9 +87,7 @@ class CameraLocationOperations:
             self._finish_mutation(connection, changed, after_write)
             return changed
 
-    def delete_room(
-        self, edge_ref: str, *, after_write: TransactionHook | None = None
-    ) -> bool:
+    def delete_room(self, edge_ref: str, *, after_write: TransactionHook | None = None) -> bool:
         return self._location_mutation(self._topology.delete_room, edge_ref, after_write)
 
     def topology_snapshot(self) -> RegistryTopologySnapshot:
@@ -93,7 +104,9 @@ class CameraLocationOperations:
             return migrate_legacy_floors(connection)
 
     def _location_mutation(
-        self, operation: Callable[[sqlite3.Connection, str], bool], edge_ref: str,
+        self,
+        operation: Callable[[sqlite3.Connection, str], bool],
+        edge_ref: str,
         after_write: TransactionHook | None,
     ) -> bool:
         with self._lock, camera_transaction(self._connection) as connection:

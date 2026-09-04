@@ -116,9 +116,12 @@ class ClipDeletionLifecycle:
     ) -> str | None:
         timestamp = utc_now()
         try:
-            with closing(
-                open_runtime_database(self.database_path, actor=RuntimeActor.API)
-            ) as connection, write_transaction(connection):
+            with (
+                closing(
+                    open_runtime_database(self.database_path, actor=RuntimeActor.API)
+                ) as connection,
+                write_transaction(connection),
+            ):
                 row = connection.execute(
                     "SELECT retention_state FROM clips WHERE clip_id = ?", (clip_id,)
                 ).fetchone()
@@ -128,9 +131,7 @@ class ClipDeletionLifecycle:
                 if current != expected:
                     return current
                 if completion:
-                    changed = connection.execute(
-                        update, (timestamp, timestamp, clip_id)
-                    ).rowcount
+                    changed = connection.execute(update, (timestamp, timestamp, clip_id)).rowcount
                     connection.execute(
                         """
                             UPDATE artifacts
@@ -158,9 +159,7 @@ class ClipDeletionLifecycle:
                         action=action,
                         target_id=clip_id,
                         detail=empty_detail(action),
-                        actor_type=(
-                            AuditActorType.SYSTEM if system else AuditActorType.USER
-                        ),
+                        actor_type=(AuditActorType.SYSTEM if system else AuditActorType.USER),
                         auth_mechanism=(
                             AuditAuthMechanism.INTERNAL
                             if system
@@ -182,9 +181,7 @@ class ClipDeletionLifecycle:
         return store
 
 
-def reconcile_pending_clip_deletions(
-    app: FastAPI, database_path: Path
-) -> ReconciliationReport:
+def reconcile_pending_clip_deletions(app: FastAPI, database_path: Path) -> ReconciliationReport:
     """Complete only worker-verified missing PENDING clips during backend startup."""
     lifecycle = ClipDeletionLifecycle(database_path, app)
     completed: list[str] = []

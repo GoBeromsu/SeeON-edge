@@ -33,6 +33,7 @@ def _describe_pts(entry: _Entry) -> float | None:
     except PacketSelectionError:
         return None
 
+
 @dataclass(frozen=True, slots=True)
 class PacketRingLimits:
     max_packets: int
@@ -165,13 +166,9 @@ class SourcePacketRing:
                 raise ValueError("packet ring epoch cannot move backwards")
             removed_packets = len(self._entries)
             removed_bytes = sum(entry.packet.size_bytes for entry in self._entries)
-            self._retired_entries.extend(
-                entry for entry in self._entries if entry.lease_count > 0
-            )
+            self._retired_entries.extend(entry for entry in self._entries if entry.lease_count > 0)
             self._entries.clear()
-            self._total_bytes = sum(
-                entry.packet.size_bytes for entry in self._retired_entries
-            )
+            self._total_bytes = sum(entry.packet.size_bytes for entry in self._retired_entries)
             self._active_epoch = epoch
             self._newest_video_pts = None
             self.metrics.epoch_rolls += 1
@@ -228,10 +225,7 @@ class SourcePacketRing:
             if (
                 self._closed
                 or packet.size_bytes > self.limits.max_bytes
-                or (
-                    self._active_epoch is not None
-                    and packet.epoch != self._active_epoch
-                )
+                or (self._active_epoch is not None and packet.epoch != self._active_epoch)
             ):
                 self._drop(packet, lease_pressure=False)
                 return False
@@ -454,13 +448,9 @@ class SourcePacketRing:
     def close(self) -> None:
         with self._lock:
             self._closed = True
-            self._retired_entries.extend(
-                entry for entry in self._entries if entry.lease_count > 0
-            )
+            self._retired_entries.extend(entry for entry in self._entries if entry.lease_count > 0)
             self._entries.clear()
-            self._total_bytes = sum(
-                entry.packet.size_bytes for entry in self._retired_entries
-            )
+            self._total_bytes = sum(entry.packet.size_bytes for entry in self._retired_entries)
 
     def _release(self, entries: tuple[_Entry, ...]) -> None:
         with self._lock:
@@ -470,15 +460,12 @@ class SourcePacketRing:
                 entry.lease_count -= 1
             self.metrics.active_leases -= 1
             released_retired_bytes = sum(
-                entry.packet.size_bytes
-                for entry in self._retired_entries
-                if entry.lease_count == 0
+                entry.packet.size_bytes for entry in self._retired_entries if entry.lease_count == 0
             )
             self._retired_entries = deque(
                 entry for entry in self._retired_entries if entry.lease_count > 0
             )
             self._total_bytes -= released_retired_bytes
-
 
     def _log_selection_failure(self, detail: str, **facts: object) -> None:
         """Name which selection predicate rejected the clip window.

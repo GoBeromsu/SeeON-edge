@@ -150,7 +150,6 @@ class IncidentManager:
     ) -> BusinessEvent | None:
         return self.admit(event, now_sec=now_sec)
 
-
     def release(self, event: BusinessEvent, *, now_sec: float | None = None) -> None:
         """Undo the consumption of a decision whose envelope was never admitted.
 

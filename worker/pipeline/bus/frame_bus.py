@@ -38,9 +38,7 @@ class BoundedFrameBus:
         self._subscriptions: dict[str, BoundedSubscription] = {}
         self.inference = self.subscribe("inference", capacity=1, latest_only=True)
         self.live = self.subscribe("live", capacity=1, latest_only=True)
-        self.evidence = self.subscribe(
-            "evidence", capacity=evidence_capacity, latest_only=False
-        )
+        self.evidence = self.subscribe("evidence", capacity=evidence_capacity, latest_only=False)
 
     def subscribe(
         self,

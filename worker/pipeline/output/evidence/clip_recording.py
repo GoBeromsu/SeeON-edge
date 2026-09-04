@@ -85,8 +85,7 @@ def _windowed_duration_s(
     return sum(
         max(
             0.0,
-            min(segment.end_time_sec, end_time_sec)
-            - max(segment.start_time_sec, start_time_sec),
+            min(segment.end_time_sec, end_time_sec) - max(segment.start_time_sec, start_time_sec),
         )
         for segment in segments
     )
@@ -243,9 +242,7 @@ class ClipRecordingCoordinator:
             return ClipUnavailable(clip_id, ClipReasonCode.STREAM_EPOCH_MISMATCH)
 
         start_time_sec, end_time_sec = (
-            self._window.bounds(event_time_sec)
-            if window_bounds is None
-            else window_bounds
+            self._window.bounds(event_time_sec) if window_bounds is None else window_bounds
         )
         try:
             segments = session.select_segments(

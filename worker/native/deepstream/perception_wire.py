@@ -183,7 +183,11 @@ def decode_perception_wire(payload: bytes, expected: PerceptionFrameIdentity) ->
     regions: list[BedRegion] = []
     for _ in range(reader.u16()):
         x1, y1, x2, y2, confidence = (
-            reader.i32(), reader.i32(), reader.i32(), reader.i32(), reader.f64()
+            reader.i32(),
+            reader.i32(),
+            reader.i32(),
+            reader.i32(),
+            reader.f64(),
         )
         polygon = tuple((reader.i32(), reader.i32()) for _ in range(reader.u16()))
         regions.append(BedRegion(x1, y1, x2, y2, confidence, polygon or None))

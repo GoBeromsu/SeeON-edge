@@ -251,8 +251,7 @@ def test_a_failing_shadow_evaluation_does_not_discard_the_bed_exit_event(
     events = _own_bed_exit_events(monitor, bed)
 
     assert len(events) == 1, (
-        "the bed-exit event was discarded because a non-authoritative shadow "
-        "evaluation raised"
+        "the bed-exit event was discarded because a non-authoritative shadow evaluation raised"
     )
 
 
@@ -262,9 +261,7 @@ def test_bed_exit_rearms_only_after_confirmed_recovery() -> None:
     monitor = _monitor(clock=lambda: fixed, night_window=None, grace_frames=0)
     bed = box(0, 0, 80, 100)
 
-    monitor.update(
-        _input(person_boxes=(box(10, 10, 70, 90),), bed_boxes=(bed,), frame_index=0)
-    )
+    monitor.update(_input(person_boxes=(box(10, 10, 70, 90),), bed_boxes=(bed,), frame_index=0))
     exited = monitor.update(
         _input(person_boxes=(box(90, 10, 150, 90),), bed_boxes=(bed,), frame_index=1)
     )
@@ -302,10 +299,13 @@ def test_release_reopens_a_failed_bed_exit_for_one_retry() -> None:
 
     assert len(retried) == 1
     assert retried[0].identity != failed.identity
-    assert monitor.update(
-        _input(
-            person_boxes=(box(90, 10, 150, 90),),
-            bed_boxes=(bed,),
-            frame_index=3,
+    assert (
+        monitor.update(
+            _input(
+                person_boxes=(box(90, 10, 150, 90),),
+                bed_boxes=(bed,),
+                frame_index=3,
+            )
         )
-    ) == ()
+        == ()
+    )

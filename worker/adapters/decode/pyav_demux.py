@@ -178,9 +178,7 @@ def stream_descriptor(stream: Stream) -> SourceStreamDescriptor:
     return _descriptor(stream)
 
 
-def _configuration(
-    streams: tuple[Stream, ...], mux_template: bytes
-) -> SourceStreamConfiguration:
+def _configuration(streams: tuple[Stream, ...], mux_template: bytes) -> SourceStreamConfiguration:
     return SourceStreamConfiguration.from_streams(
         [_descriptor(stream) for stream in streams],
         mux_template=mux_template,

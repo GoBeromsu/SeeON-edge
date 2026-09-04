@@ -15,9 +15,7 @@ from worker.types import TemporalProfile
 
 ObservationChannel: TypeAlias = str
 ComponentKind: TypeAlias = Literal["extractor", "model", "state", "rule"]
-IntervalSource: TypeAlias = Literal[
-    "camera-frame-stride", "fixed", "on-demand", "temporal-profile"
-]
+IntervalSource: TypeAlias = Literal["camera-frame-stride", "fixed", "on-demand", "temporal-profile"]
 WindowMode: TypeAlias = Literal["external", "internal"]
 
 

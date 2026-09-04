@@ -137,8 +137,11 @@ def recognize_bed_zone(
             request,
             connection,
             AuditEvent(
-                occurred_at=audit_now(), actor_id=actor, action=AuditAction.BED_ZONE_UPDATE,
-                target_id=camera_id, detail=empty_detail(AuditAction.BED_ZONE_UPDATE),
+                occurred_at=audit_now(),
+                actor_id=actor,
+                action=AuditAction.BED_ZONE_UPDATE,
+                target_id=camera_id,
+                detail=empty_detail(AuditAction.BED_ZONE_UPDATE),
             ),
         ),
     )

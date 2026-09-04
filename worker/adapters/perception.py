@@ -256,15 +256,12 @@ class PythonInferencePerceptionAdapter:
             raw_tracks = association_payload.get("track_ids", ())
             raw_indexes = association_payload.get("selected_cue_indexes", ())
             association = AssociationResult(
-                strategy=str(
-                    association_payload.get("strategy", LEGACY_ASSOCIATION_STRATEGY)
-                ),
+                strategy=str(association_payload.get("strategy", LEGACY_ASSOCIATION_STRATEGY)),
                 track_ids=tuple(int(item) for item in raw_tracks)  # type: ignore[arg-type]
                 if isinstance(raw_tracks, Sequence) and not isinstance(raw_tracks, (str, bytes))
                 else (),
                 selected_cue_indexes=tuple(int(item) for item in raw_indexes)  # type: ignore[arg-type]
-                if isinstance(raw_indexes, Sequence)
-                and not isinstance(raw_indexes, (str, bytes))
+                if isinstance(raw_indexes, Sequence) and not isinstance(raw_indexes, (str, bytes))
                 else (),
                 identity=association_identity,
                 cue_source=str(association_payload.get("cue_source", PERSON_BOX_CUE_SOURCE)),

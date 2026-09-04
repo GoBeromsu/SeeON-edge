@@ -95,9 +95,7 @@ class CompositeExtractor:
         bed_region_recorder: BedRegionRecorder | None = None,
     ) -> None:
         frozen_extractors = tuple(extractors)
-        ensure_unique_module_names(
-            tuple(extractor.module_name for extractor in frozen_extractors)
-        )
+        ensure_unique_module_names(tuple(extractor.module_name for extractor in frozen_extractors))
         self.extractors: tuple[NamedExtractor, ...] = frozen_extractors
         self.scheduler: Scheduler = scheduler
         self.tracker: GreedyIouTracker = tracker
@@ -244,6 +242,8 @@ class CompositeExtractor:
             observation=final_observation,
             decision_input=decision_input,
         )
+
+
 __all__ = [
     "BedRegionRecorder",
     "CompositeExtractor",

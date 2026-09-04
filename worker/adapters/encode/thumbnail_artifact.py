@@ -100,11 +100,7 @@ def publish_thumbnail(payload: bytes, path: Path) -> None:
         operation = "temporary create"
         temporary_descriptor = os.open(
             temporary_name,
-            os.O_WRONLY
-            | os.O_CLOEXEC
-            | os.O_CREAT
-            | os.O_EXCL
-            | os.O_NOFOLLOW,
+            os.O_WRONLY | os.O_CLOEXEC | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
             0o600,
             dir_fd=directory_descriptor,
         )
@@ -129,11 +125,7 @@ def publish_thumbnail(payload: bytes, path: Path) -> None:
     finally:
         if temporary_descriptor is not None:
             os.close(temporary_descriptor)
-        if (
-            temporary_created
-            and temporary_name is not None
-            and directory_descriptor is not None
-        ):
+        if temporary_created and temporary_name is not None and directory_descriptor is not None:
             with suppress(OSError):
                 os.unlink(temporary_name, dir_fd=directory_descriptor)
         if directory_descriptor is not None:

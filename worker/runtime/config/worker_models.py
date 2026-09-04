@@ -45,7 +45,7 @@ class FallModelConfig(BaseModel):
     # refuses to boot (fail-closed, ADR-0002); this field only rejects empty
     # strings, the registry decides which values are actually valid.
     type: str = Field(min_length=1)
-    framework: Literal["pytorch"]
+    framework: Literal["pytorch", "onnxruntime"]
     mode: Literal["sequence"]
     artifact_dir: Path
     weights: str = Field(default="model.pt", min_length=1)
@@ -77,6 +77,8 @@ class FallModelConfig(BaseModel):
         for relative in (self.weights, self.architecture, self.metadata):
             if not (self.artifact_dir / relative).exists():
                 raise ConfigValidationError(f"missing {relative} at configured artifact directory")
+        if self.framework == "onnxruntime" and not (self.artifact_dir / "model.onnx").exists():
+            raise ConfigValidationError("missing model.onnx at configured artifact directory")
         return self
 
 

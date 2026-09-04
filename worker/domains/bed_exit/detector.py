@@ -148,7 +148,6 @@ class BedExitMonitor:
         """Re-associations the episode authority absorbed instead of re-alerting."""
         return self._episodes.track_id_switch_absorbed_total
 
-
     @property
     def config(self) -> BedExitConfig:
         return self._config
@@ -170,14 +169,18 @@ class BedExitMonitor:
         _ = self._state_machine.coast()
         freshness = self._latch.status_snapshot
         previous = self.last_debug_snapshot
-        statuses = () if previous is None else tuple(
-            BedStatus(
-                bed_id=status.bed_id,
-                box=status.box,
-                occupancy="covered",
-                person_id=status.person_id,
+        statuses = (
+            ()
+            if previous is None
+            else tuple(
+                BedStatus(
+                    bed_id=status.bed_id,
+                    box=status.box,
+                    occupancy="covered",
+                    person_id=status.person_id,
+                )
+                for status in previous.statuses
             )
-            for status in previous.statuses
         )
         self.last_debug_snapshot = BedExitDebugSnapshot(
             frame_index=frame_index,
@@ -190,9 +193,6 @@ class BedExitMonitor:
             observation_age_sec=freshness.observation_age_sec,
         )
         return ()
-
-
-
 
     def update(self, input_value: DecisionInput) -> tuple[BusinessEvent, ...]:
         observation = input_value.observation
@@ -417,9 +417,7 @@ class BedExitMonitor:
                             bed_id=assignment.bed_id,
                             frame_index=input_value.frame_index,
                             time_sec=(
-                                0.0
-                                if input_value.time_sec is None
-                                else input_value.time_sec
+                                0.0 if input_value.time_sec is None else input_value.time_sec
                             ),
                             qualifying=False,
                             probability=1.0,
@@ -555,11 +553,7 @@ class BedExitMonitor:
                 bed_id=bed_id,
                 box=bed_box,
                 occupancy=(
-                    "exit"
-                    if bed_id in exit_beds
-                    else "occupied"
-                    if bed_id in occupied
-                    else "empty"
+                    "exit" if bed_id in exit_beds else "occupied" if bed_id in occupied else "empty"
                 ),
                 person_id=occupied.get(bed_id),
             )
@@ -637,6 +631,7 @@ class BedExitMonitor:
         snapshots = tuple(item.snapshot for item in decisions) + tuple(extra)
         self.last_shadow_trace_snapshots = snapshots
         return snapshots
+
 
 def _bed_region_is_usable(source: BedRegionCacheState) -> bool:
     return source in (BedRegionCacheState.FRESH, BedRegionCacheState.CACHED)

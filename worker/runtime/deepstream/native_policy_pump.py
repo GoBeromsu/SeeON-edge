@@ -247,9 +247,7 @@ class NativePolicyPump:
             except ChildControlError:
                 snapshot = None
             try:
-                self._sink.emit_for_frame(
-                    self._attacher.attach_native(event, snapshot), trigger
-                )
+                self._sink.emit_for_frame(self._attacher.attach_native(event, snapshot), trigger)
             except Exception:
                 # Admission has already consumed the onset and cooldown. A
                 # durable staging failure must restore this event and every
@@ -435,9 +433,7 @@ class NativePolicyPump:
         LOGGER.warning("replay trace write failed: camera_id=%s", self.camera_id, exc_info=True)
 
     def _record_bed_polygon_source(self, frame: MetadataFrame) -> None:
-        self._diagnostics.record_bed_polygon_source(
-            self.camera_id, self._scene.bed_polygon_source
-        )
+        self._diagnostics.record_bed_polygon_source(self.camera_id, self._scene.bed_polygon_source)
 
 
 def _persisted_polygon(

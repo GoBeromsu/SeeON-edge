@@ -54,9 +54,7 @@ class PacketRingRepository:
             if ring is not None:
                 ring.close()
 
-    def subscribe_epoch_roll(
-        self, listener: Callable[[StreamEpoch, StreamEpoch], None]
-    ) -> None:
+    def subscribe_epoch_roll(self, listener: Callable[[StreamEpoch, StreamEpoch], None]) -> None:
         with self._lock:
             self._epoch_listeners.append(listener)
 

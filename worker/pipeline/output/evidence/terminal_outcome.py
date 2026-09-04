@@ -54,8 +54,10 @@ def commit_corrupt_terminal_outcome(clip_dir: Path, outcome: TerminalClipOutcome
     if outcome.state is not TerminalClipState.CORRUPT:
         raise ValueError("corrupt terminal transition requires CORRUPT state")
     outcome = TerminalClipOutcome(
-        outcome.clip_id, tuple(dict.fromkeys(outcome.event_ids)),
-        outcome.state, outcome.manifest_sha256,
+        outcome.clip_id,
+        tuple(dict.fromkeys(outcome.event_ids)),
+        outcome.state,
+        outcome.manifest_sha256,
     )
     aggregate = _replace_path(clip_dir / "terminal-outcome.json", _aggregate_payload(outcome))
     event_dir = clip_dir / "terminal-outcomes"
@@ -125,6 +127,9 @@ def _write_replace(destination: Path, payload: bytes, *, exclusive: bool) -> Non
 
 
 __all__ = [
-    "TerminalClipOutcome", "TerminalClipState", "TerminalOutcomeConflictError",
-    "commit_corrupt_terminal_outcome", "commit_terminal_outcome",
+    "TerminalClipOutcome",
+    "TerminalClipState",
+    "TerminalOutcomeConflictError",
+    "commit_corrupt_terminal_outcome",
+    "commit_terminal_outcome",
 ]

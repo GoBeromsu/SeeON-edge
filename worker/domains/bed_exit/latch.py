@@ -37,6 +37,7 @@ class BedExitLatch:
 
     def update(self) -> None:
         self._freshness.observe()
+
     def coast(self) -> None:
         """Retain the last freshness observation during a gap."""
 

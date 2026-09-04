@@ -61,9 +61,7 @@ class _RetentionManifest(BaseModel):
     path: str | None = None
     media_relpath: str | None = None
     video_available: bool | None = None
-    local_state: Literal[
-        "AWAITING_FINALIZE", "VERIFIED", "UNAVAILABLE", "CORRUPT"
-    ] | None = None
+    local_state: Literal["AWAITING_FINALIZE", "VERIFIED", "UNAVAILABLE", "CORRUPT"] | None = None
     state: Literal["READY", "UNAVAILABLE"] | None = None
 
 
@@ -298,9 +296,7 @@ def _open_regular_file(directory: int, name: str) -> int:
 def _validate_manifest(manifest: _RetentionManifest, clip_id: str) -> None:
     if manifest.clip_id != clip_id:
         raise ValueError("manifest clip identity differs from governed directory")
-    finalized_v2 = (
-        manifest.manifest_schema_version == 2 and manifest.finalized_at is not None
-    )
+    finalized_v2 = manifest.manifest_schema_version == 2 and manifest.finalized_at is not None
     if not manifest.finalized and not finalized_v2:
         raise ValueError("manifest is not finalized")
     if manifest.local_state == "CORRUPT":

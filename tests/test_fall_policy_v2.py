@@ -220,9 +220,7 @@ def test_track_switch_inside_window_is_absorbed_without_a_second_fall_alert() ->
 
     decider.update({}, (), frame_index=47, time_sec=3.0)
 
-    assert decider.update(
-        {8: _probability(0.7)}, (8,), frame_index=48, time_sec=3.1
-    ) == ()
+    assert decider.update({8: _probability(0.7)}, (8,), frame_index=48, time_sec=3.1) == ()
     assert decider.track_id_switch_absorbed_total == 1
 
 

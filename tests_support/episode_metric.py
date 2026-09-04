@@ -218,8 +218,7 @@ def evaluate(
             "episodes": len(domain_episodes),
             "alerts": sum(alert["event_type"] == event_type for alert in alerts),
             "alerts_outside_golden_windows": len(domain_outside),
-            "exact": all(item["alerts"] == 1 for item in domain_episodes)
-            and not domain_outside,
+            "exact": all(item["alerts"] == 1 for item in domain_episodes) and not domain_outside,
             "effective_policy_id": policies[event_type].effective_policy_id,
         }
     return {
@@ -290,9 +289,7 @@ def _id_churn_allowance(
         expired[key] |= {track_id for track_id in recorded if track_id not in pending}
         stale = expired[key]
         disappeared = {
-            track_id: seen
-            for track_id, seen in previous_live.items()
-            if track_id not in current
+            track_id: seen for track_id, seen in previous_live.items() if track_id not in current
         }
         # A directly preceding live id is evaluated even when sparse trace
         # sampling crosses the window in one step. Older ids are only retained
@@ -306,9 +303,7 @@ def _id_churn_allowance(
         paired_predecessor: int | None = None
         unambiguous = len(predecessors) == 1 and len(new_ids) == 1 and not stale
         if unambiguous:
-            previous_track_id, (previous_frame, previous_pts_ns) = next(
-                iter(predecessors.items())
-            )
+            previous_track_id, (previous_frame, previous_pts_ns) = next(iter(predecessors.items()))
             paired_predecessor = previous_track_id
             elapsed_ns = row.pts_ns - previous_pts_ns
             if elapsed_ns > reassociation_ns:
@@ -457,13 +452,7 @@ def main() -> int:
     result["ac1_passed"] = _ac1_passed(result)
     args.out.write_text(json.dumps(result, indent=2) + "\n")
     print(json.dumps(result, separators=(",", ":")))
-    return (
-        2
-        if provisional
-        else 0
-        if result["ac1_passed"]
-        else 1
-    )
+    return 2 if provisional else 0 if result["ac1_passed"] else 1
 
 
 if __name__ == "__main__":

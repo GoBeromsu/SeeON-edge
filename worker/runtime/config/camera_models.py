@@ -99,9 +99,7 @@ class CameraRuntimeConfig(BaseModel):
             return None
         normalized = value.strip().lower()
         if normalized not in SUPPORTED_DECODE_BACKENDS:
-            raise ConfigValidationError(
-                "decode_backend must be one of auto, nvdec, opencv, cpu"
-            )
+            raise ConfigValidationError("decode_backend must be one of auto, nvdec, opencv, cpu")
         return normalized
 
     @model_validator(mode="after")

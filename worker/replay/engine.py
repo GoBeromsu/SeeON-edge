@@ -266,9 +266,7 @@ def replay_trace_frames(rows: Sequence[ReplayRow]) -> tuple[ReplayTraceFrame, ..
     for row, segment in zip(rows, boot_segments(rows), strict=True):
         if row.source_event != "frame":
             continue
-        output.append(
-            ReplayTraceFrame(row.epoch, segment, row.seq, row.pts_ns, row, 1)
-        )
+        output.append(ReplayTraceFrame(row.epoch, segment, row.seq, row.pts_ns, row, 1))
     return tuple(output)
 
 

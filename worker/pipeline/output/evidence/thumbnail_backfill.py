@@ -86,8 +86,7 @@ def _backfill_locked(
             continue
         generated += 1
     missing = sum(
-        not is_valid_thumbnail(clip.manifest_path.parent / THUMBNAIL_FILENAME)
-        for clip in playable
+        not is_valid_thumbnail(clip.manifest_path.parent / THUMBNAIL_FILENAME) for clip in playable
     )
     return BackfillReport(
         scanned=len(manifest_paths),

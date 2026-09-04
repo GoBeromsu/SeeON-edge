@@ -76,9 +76,7 @@ class NvdecPacketTeeSession:
         self._error: Exception | None = None
         self._decoder_input_overflow_count = 0
         self._seq = 0
-        metadata = _metadata_from_configuration_stream(
-            stream_descriptor(self._demuxer.video)
-        )
+        metadata = _metadata_from_configuration_stream(stream_descriptor(self._demuxer.video))
         self._state = self._spawn_state(metadata)
 
     @property
@@ -88,10 +86,7 @@ class NvdecPacketTeeSession:
     @property
     def decoder_input_overflow_count(self) -> int:
         with self._condition:
-            return (
-                self._decoder_input_overflow_count
-                + self._state.decoder_input.overflow_count
-            )
+            return self._decoder_input_overflow_count + self._state.decoder_input.overflow_count
 
     def set_stream_identity(self, worker_boot_id: str, stream_epoch: int) -> None:
         with self._condition:

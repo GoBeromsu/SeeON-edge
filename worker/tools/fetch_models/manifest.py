@@ -165,9 +165,7 @@ def _parse_source(name: str, raw: object) -> Source:
         or source_locator.count("/") != 1
         or source_locator.startswith("/")
     ):
-        raise ManifestError(
-            f"{where}: source_locator must be 'owner/name', got {source_locator!r}"
-        )
+        raise ManifestError(f"{where}: source_locator must be 'owner/name', got {source_locator!r}")
     return Source(name=name, kind=kind, source_locator=source_locator, ref=ref)
 
 

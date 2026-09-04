@@ -170,10 +170,7 @@ def _merge_overlapping_beds(boxes: tuple[BedBox, ...]) -> tuple[BedBox, ...]:
     clusters: list[list[BedBox]] = []
     for box in sorted(boxes, key=lambda candidate: (*candidate[:4], -candidate[4])):
         for cluster in clusters:
-            if any(
-                _box_iou(box, existing) >= BED_MERGE_IOU_THRESHOLD
-                for existing in cluster
-            ):
+            if any(_box_iou(box, existing) >= BED_MERGE_IOU_THRESHOLD for existing in cluster):
                 cluster.append(box)
                 break
         else:

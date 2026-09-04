@@ -196,9 +196,7 @@ class _PerCameraOverlayRenderer:
         debug_snapshots: tuple[BedExitDebugSnapshot, ...] = (),
     ) -> bytes:
         mode = self._store.get_mode(packet.camera_id)
-        return OverlayRenderer(mode=mode).encode_jpeg(
-            packet, observation, debug_snapshots
-        )
+        return OverlayRenderer(mode=mode).encode_jpeg(packet, observation, debug_snapshots)
 
 
 class LiveViewSubscriber:
@@ -210,9 +208,7 @@ class LiveViewSubscriber:
         renderer: LiveViewRenderer | None = None,
     ) -> None:
         self._store = store
-        self._renderer = (
-            renderer if renderer is not None else _PerCameraOverlayRenderer(store)
-        )
+        self._renderer = renderer if renderer is not None else _PerCameraOverlayRenderer(store)
 
     def publish(
         self,

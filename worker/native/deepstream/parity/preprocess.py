@@ -93,14 +93,11 @@ def preprocess_batch(
     """
     if not frames:
         return np.zeros((0, 3, 0, 0), dtype=np.float32)
-    tensors = tuple(
-        preprocess_tensor(frame, channel_order=channel_order) for frame in frames
-    )
+    tensors = tuple(preprocess_tensor(frame, channel_order=channel_order) for frame in frames)
     shapes = {tensor.shape[1:] for tensor in tensors}
     if len(shapes) != 1:
         raise ValueError(
-            "mixed-geometry batch requires one tensor shape per batch, "
-            f"received {sorted(shapes)}"
+            f"mixed-geometry batch requires one tensor shape per batch, received {sorted(shapes)}"
         )
     return np.ascontiguousarray(np.concatenate(tensors, axis=0))
 

@@ -94,9 +94,7 @@ class FFmpegSegmentEncoder:
         geometry: EncoderGeometry,
     ) -> FFmpegEncoderSession:
         generation = self._generation_by_camera.get(camera, 0) + 1
-        state = self._spawn_with_encode_fallback(
-            camera, requested_encoder, geometry, generation
-        )
+        state = self._spawn_with_encode_fallback(camera, requested_encoder, geometry, generation)
         session = FFmpegEncoderSession(self, state)
         self._generation_by_camera[camera] = generation
         self._sessions[camera] = session
@@ -194,8 +192,7 @@ class FFmpegSegmentEncoder:
         self._encode_override[camera] = "libx264"
         self.metrics.encode_fallbacks += 1
         LOGGER.warning(
-            "camera %r nvenc session open failed (%s); falling back to libx264 "
-            "for this camera",
+            "camera %r nvenc session open failed (%s); falling back to libx264 for this camera",
             camera,
             reason,
         )
@@ -336,4 +333,6 @@ class FFmpegSegmentEncoder:
                 start_time_sec=start_time_sec,
                 end_time_sec=end_time_sec,
             )
+
+
 __all__ = ["FFmpegSegmentEncoder"]

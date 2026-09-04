@@ -27,6 +27,7 @@ class WarmupModel(Protocol):
 ModelAdapter: TypeAlias = RunnerProtocol
 RunnerFactory: TypeAlias = Callable[..., ModelAdapter]
 
+
 class EmptyModelTaskError(ValueError):
     def __init__(self) -> None:
         super().__init__("task must be non-empty")
@@ -84,7 +85,6 @@ __all__ = [
     "DEFAULT_REGISTRY",
     "EmptyModelTaskError",
     "FallModel",
-
     "ModelAdapter",
     "ModelOption",
     "ModelRegistry",

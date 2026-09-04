@@ -18,15 +18,11 @@ class EventAggregator:
     deciders: tuple[Decider, ...]
     incidents: IncidentManager
     monotonic: Callable[[], float] = time.monotonic
-    _producers: dict[str, tuple[Decider, BusinessEvent]] = field(
-        default_factory=dict, init=False
-    )
+    _producers: dict[str, tuple[Decider, BusinessEvent]] = field(default_factory=dict, init=False)
 
     def update(self, input_value: DecisionInput) -> tuple[BusinessEvent, ...]:
         produced: list[tuple[BusinessEvent, Decider]] = [
-            (event, decider)
-            for decider in self.deciders
-            for event in decider.update(input_value)
+            (event, decider) for decider in self.deciders for event in decider.update(input_value)
         ]
         produced.sort(key=lambda pair: _event_order(pair[0]))
         now_sec = self.monotonic()

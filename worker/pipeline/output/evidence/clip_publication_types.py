@@ -11,6 +11,7 @@ from worker.pipeline.output.evidence.evidence_metadata import (
     validate_runtime_manifest_sha256,
 )
 from worker.pipeline.output.evidence.evidence_outbox_types import ClipId, EdgeEventId
+from worker.pipeline.output.evidence.manifest_models import ClipExtension
 
 JsonValue: TypeAlias = str | int | float | bool | list["JsonValue"] | dict[str, "JsonValue"] | None
 
@@ -61,6 +62,7 @@ class ClipPublicationMetadata:
     source_error_reason: str | None = None
     truncation_reasons: tuple[str, ...] = ()
     domain: str | None = None
+    extension: ClipExtension | None = None
 
     def __post_init__(self) -> None:
         validate_runtime_manifest_sha256(self.runtime_manifest_sha256)

@@ -70,9 +70,7 @@ class PyAvPacketRemuxer:
         except (OSError, ValueError, av.FFmpegError) as error:
             with suppress(OSError):
                 temporary.unlink(missing_ok=True)
-            raise ClipRemuxError(
-                f"source packet remux failed ({type(error).__name__})"
-            ) from error
+            raise ClipRemuxError(f"source packet remux failed ({type(error).__name__})") from error
         au_hash, au_size = _write_au_index(output_path.with_name("au-index.cbor"), expected)
         starts = [packet.presentation_time for packet in expected]
         first = expected[0]
@@ -115,7 +113,9 @@ class PyAvPacketRemuxer:
     ) -> None:
         template = av.open(io.BytesIO(configuration.mux_template), mode="r")
         output = av.open(
-            str(path), mode="w", format="mp4",
+            str(path),
+            mode="w",
+            format="mp4",
             options={"movflags": "+faststart", "avoid_negative_ts": "disabled"},
         )
         try:
@@ -171,9 +171,13 @@ class PyAvPacketRemuxer:
             }
             actual = tuple(
                 _MuxedPacketFact(
-                    output_to_source[packet.stream.index], packet.pts, packet.dts, packet.duration,
+                    output_to_source[packet.stream.index],
+                    packet.pts,
+                    packet.dts,
+                    packet.duration,
                     None if packet.time_base is None else Fraction(packet.time_base),
-                    packet.is_keyframe, bytes(packet),
+                    packet.is_keyframe,
+                    bytes(packet),
                 )
                 for packet in container.demux(actual_streams)
                 if packet.dts is not None and bytes(packet)
@@ -188,9 +192,7 @@ class PyAvPacketRemuxer:
             container.close()
 
 
-def _verify_stream(
-    descriptor: SourceStreamDescriptor, stream: Stream, template: Stream
-) -> None:
+def _verify_stream(descriptor: SourceStreamDescriptor, stream: Stream, template: Stream) -> None:
     codec, template_codec = stream.codec_context, template.codec_context
     if codec.name != descriptor.codec_name or stream.time_base != descriptor.time_base:
         raise ValueError("remuxed stream identity changed")
@@ -214,8 +216,14 @@ def _write_au_index(path: Path, packets: tuple[SourcePacket, ...]) -> tuple[str,
         records = [b"SAUI1" + len(packets).to_bytes(4, "little")]
         records.extend(
             struct.pack(
-                "<QIqqq?Q", packet.arrival_index, packet.stream_index, packet.pts,
-                packet.dts, packet.duration, packet.is_keyframe, packet.epoch.stream_epoch,
+                "<QIqqq?Q",
+                packet.arrival_index,
+                packet.stream_index,
+                packet.pts,
+                packet.dts,
+                packet.duration,
+                packet.is_keyframe,
+                packet.epoch.stream_epoch,
             )
             + bytes.fromhex(packet.configuration.configuration_id)
             + hashlib.sha256(packet.payload).digest()
@@ -231,15 +239,25 @@ def _write_au_index(path: Path, packets: tuple[SourcePacket, ...]) -> tuple[str,
 
 
 def _stream_fact(
-    descriptor: SourceStreamDescriptor, packet_count: int,
+    descriptor: SourceStreamDescriptor,
+    packet_count: int,
     timestamp_translation_ticks: int | None,
 ) -> RemuxStreamFact:
     framing = descriptor.stream_format
     return RemuxStreamFact(
-        descriptor.index, descriptor.media_type, descriptor.codec_name, descriptor.codec_tag,
-        descriptor.time_base, hashlib.sha256(descriptor.extradata).hexdigest(),
-        descriptor.width, descriptor.height, descriptor.sample_rate, descriptor.channels,
-        packet_count, timestamp_translation_ticks, framing,
+        descriptor.index,
+        descriptor.media_type,
+        descriptor.codec_name,
+        descriptor.codec_tag,
+        descriptor.time_base,
+        hashlib.sha256(descriptor.extradata).hexdigest(),
+        descriptor.width,
+        descriptor.height,
+        descriptor.sample_rate,
+        descriptor.channels,
+        packet_count,
+        timestamp_translation_ticks,
+        framing,
         "length-prefixed" if framing == "byte-stream" else framing,
         NORMALIZER_VERSION if framing == "byte-stream" else "none",
         descriptor.parser_caps_sha256,

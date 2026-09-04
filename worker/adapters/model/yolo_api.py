@@ -100,9 +100,7 @@ class YoloTensor(Protocol):
     def numpy(self) -> NDArray[np.float32] | NDArray[np.float64]: ...
 
 
-YoloArray: TypeAlias = (
-    torch.Tensor | NDArray[np.float32] | NDArray[np.float64] | YoloTensor
-)
+YoloArray: TypeAlias = torch.Tensor | NDArray[np.float32] | NDArray[np.float64] | YoloTensor
 
 
 class YoloBoxes(Protocol):

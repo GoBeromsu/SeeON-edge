@@ -94,9 +94,7 @@ class FFmpegDecodeProcess:
         self._child: DecoderChild | None = child
         self._returncode: int | None = None
         self._frame_size = frame_size
-        self._chunks: queue.Queue[bytes | None] = queue.Queue(
-            maxsize=_READ_QUEUE_CAPACITY
-        )
+        self._chunks: queue.Queue[bytes | None] = queue.Queue(maxsize=_READ_QUEUE_CAPACITY)
         self._pending = bytearray()
         self._stop_reader = threading.Event()
         self._reap_lock = threading.Lock()
@@ -166,9 +164,7 @@ class FFmpegDecodeProcess:
             if stream is not None:
                 with suppress(OSError, ValueError):
                     stream.close()
-            self._reader_thread.join(
-                timeout=max(timeout_sec, _MIN_READER_JOIN_TIMEOUT_SEC)
-            )
+            self._reader_thread.join(timeout=max(timeout_sec, _MIN_READER_JOIN_TIMEOUT_SEC))
             self._returncode = returncode
             return returncode
 

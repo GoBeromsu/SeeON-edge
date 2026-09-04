@@ -22,6 +22,7 @@ class BackendStatusResponse(BaseModel):
     reachable: bool | None
     last_ok_at: str | None
 
+
 class ImageDigestsResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

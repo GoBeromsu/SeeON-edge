@@ -112,8 +112,7 @@ def _extract_poses(result: YoloResult) -> PoseDetections:
             raise YoloOutputError(
                 task="pose",
                 detail=(
-                    f"expected {COCO_KEYPOINT_COUNT} COCO keypoints, "
-                    f"received {len(person_points)}"
+                    f"expected {COCO_KEYPOINT_COUNT} COCO keypoints, received {len(person_points)}"
                 ),
             )
         person_confidences = None if confidence_values is None else confidence_values[person_index]

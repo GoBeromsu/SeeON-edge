@@ -88,9 +88,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             audit_healthy = False
 
     if not isinstance(getattr(app.state, "heartbeat_store", None), HeartbeatStore):
-        app.state.heartbeat_store = HeartbeatStore(
-            stale_after_sec=_heartbeat_stale_after_sec()
-        )
+        app.state.heartbeat_store = HeartbeatStore(stale_after_sec=_heartbeat_stale_after_sec())
     if not isinstance(getattr(app.state, "runtime_status_store", None), RuntimeStatusStore):
         app.state.runtime_status_store = RuntimeStatusStore()
 

@@ -44,9 +44,7 @@ def configured_dark_supervisors(env: Mapping[str, str]) -> tuple[ChildConfig, ..
         return ()
     visible = env.get("NVIDIA_VISIBLE_DEVICES", "0").strip()
     visible_devices = (
-        ("0",)
-        if visible in ("", "all")
-        else tuple(part.strip() for part in visible.split(","))
+        ("0",) if visible in ("", "all") else tuple(part.strip() for part in visible.split(","))
     )
     if visible_devices != ("0",):
         raise DarkChildConfigError("unsupported_gpu", visible)

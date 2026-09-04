@@ -142,9 +142,7 @@ class CompactArtifactReceiptStore:
             with write_transaction(connection):
                 incidents = _manifest_incidents(connection, located.manifest.event_refs)
                 for incident_id, _edge_event_id in incidents:
-                    commit_unavailable_primary(
-                        connection, incident_id, reason, timestamp
-                    )
+                    commit_unavailable_primary(connection, incident_id, reason, timestamp)
         finally:
             connection.close()
 
@@ -218,9 +216,7 @@ def _manifest_incidents(
             (event_ref,),
         ).fetchone()
         if incident is None:
-            raise CompactReceiptMissingIncidentError(
-                f"manifest incident is missing: {event_ref}"
-            )
+            raise CompactReceiptMissingIncidentError(f"manifest incident is missing: {event_ref}")
         incidents.append((str(incident[0]), str(incident[1])))
     return incidents
 

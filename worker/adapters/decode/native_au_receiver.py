@@ -115,9 +115,7 @@ class NativeAuReceiver:
         # Components behind each configuration signature, kept so a signature
         # change can name the field that actually moved instead of reporting an
         # opaque digest mismatch.
-        self._configuration_components: dict[
-            tuple[str, int, int], tuple[object, ...]
-        ] = {}
+        self._configuration_components: dict[tuple[str, int, int], tuple[object, ...]] = {}
         self._retired_generations: dict[str, int] = {}
         # Gap markers the child's sender emitted per camera; the holes they
         # announce are marked by the sequence check, so this is a tally only.
@@ -266,17 +264,13 @@ class NativeAuReceiver:
         if identity is None:
             active = self._epochs.get(camera_id)
             identity = (
-                (active.source_generation, active.stream_epoch)
-                if active is not None
-                else (0, 0)
+                (active.source_generation, active.stream_epoch) if active is not None else (0, 0)
             )
         pending = self._gaps_active.get(camera_id)
         if pending is not None and pending >= identity:
             return
         self._gaps_active[camera_id] = identity
-        LOGGER.warning(
-            "native au gap: camera_id=%s reason=%s", camera_id, reason
-        )
+        LOGGER.warning("native au gap: camera_id=%s reason=%s", camera_id, reason)
         self._gap_handler(camera_id, "parser")
 
     def _accept(self, envelope: AuEnvelope) -> None:
@@ -334,8 +328,11 @@ class NativeAuReceiver:
                 LOGGER.warning(
                     "native au sequence gap: camera_id=%s generation=%d epoch=%d "
                     "expected=%d got=%d",
-                    envelope.camera_id, envelope.generation, envelope.epoch,
-                    expected, envelope.sequence,
+                    envelope.camera_id,
+                    envelope.generation,
+                    envelope.epoch,
+                    expected,
+                    envelope.sequence,
                 )
             else:
                 self._tally["adopted"] += 1
@@ -350,7 +347,9 @@ class NativeAuReceiver:
                 LOGGER.warning(
                     "native au epoch adopted mid-stream: camera_id=%s generation=%d "
                     "epoch=%d first_sequence=%d",
-                    envelope.camera_id, envelope.generation, envelope.epoch,
+                    envelope.camera_id,
+                    envelope.generation,
+                    envelope.epoch,
                     envelope.sequence,
                 )
         # A DTS jump on a CONTIGUOUS sequence is the camera's clock moving and
@@ -371,8 +370,13 @@ class NativeAuReceiver:
             self._epochs[envelope.camera_id] = identity
         self._sequences[key] = envelope.sequence
         inputs = (
-            envelope.codec, envelope.framing, envelope.parser_caps, envelope.codec_data,
-            envelope.width, envelope.height, envelope.time_base,
+            envelope.codec,
+            envelope.framing,
+            envelope.parser_caps,
+            envelope.codec_data,
+            envelope.width,
+            envelope.height,
+            envelope.time_base,
         )
         configuration = self._configurations.get(key)
         if configuration is not None and self._signature_inputs.get(key) == inputs:
@@ -393,8 +397,15 @@ class NativeAuReceiver:
             )
             return
         packet = SourcePacket(
-            identity, configuration, 0, envelope.pts, envelope.dts, envelope.duration,
-            envelope.keyframe, envelope.payload, envelope.sequence - 1,
+            identity,
+            configuration,
+            0,
+            envelope.pts,
+            envelope.dts,
+            envelope.duration,
+            envelope.keyframe,
+            envelope.payload,
+            envelope.sequence - 1,
             discontinuity=discontinuity,
         )
         if not self._sink.append(packet):
@@ -418,8 +429,10 @@ class NativeAuReceiver:
         self._tally_logged_at = now
         LOGGER.info(
             "native au receiver tally (60s): holes=%d shed=%d sender_markers=%d adopted=%d",
-            self._tally["holes"], self._tally["shed"],
-            self._tally["sender_markers"], self._tally["adopted"],
+            self._tally["holes"],
+            self._tally["shed"],
+            self._tally["sender_markers"],
+            self._tally["adopted"],
         )
         for name in self._tally:
             self._tally[name] = 0
@@ -435,8 +448,11 @@ class NativeAuReceiver:
 
     def _retire_keys(self, camera_id: str, keep: tuple[str, int, int] | None = None) -> None:
         for mapping in (
-            self._sequences, self._configurations, self._configuration_signatures,
-            self._timeline, self._signature_inputs,
+            self._sequences,
+            self._configurations,
+            self._configuration_signatures,
+            self._timeline,
+            self._signature_inputs,
         ):
             for key in tuple(mapping):
                 if key[0] == camera_id and key != keep:
@@ -444,5 +460,8 @@ class NativeAuReceiver:
 
 
 __all__ = [
-    "NativeAuGapHandler", "NativeAuReceiver", "NativeAuSink", "NativeAuStreamDeathHandler",
+    "NativeAuGapHandler",
+    "NativeAuReceiver",
+    "NativeAuSink",
+    "NativeAuStreamDeathHandler",
 ]

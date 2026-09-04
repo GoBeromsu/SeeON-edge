@@ -242,9 +242,7 @@ class OverlaySceneBuilder:
         person and decision labels only; bed status labels need live debug
         snapshots, which are not part of this hardware-neutral input.
         """
-        transform = fit_scene_transform(
-            source_width, source_height, source_width, source_height
-        )
+        transform = fit_scene_transform(source_width, source_height, source_width, source_height)
         person_decisions = _decisions_by_track(decisions)
         persons = tuple(
             ScenePerson(

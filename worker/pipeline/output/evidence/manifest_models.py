@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from fractions import Fraction
+from math import isfinite
 from typing import ClassVar, Literal, Self, TypeAlias
 from uuid import UUID
 
@@ -44,6 +45,49 @@ class TimeOriginFacts(BaseModel):
         return self
 
 
+class ExtensionContributor(BaseModel):
+    model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True, extra="forbid")
+
+    event_ref: str
+    detected_at: str
+
+    @field_validator("event_ref")
+    @classmethod
+    def _event_ref(cls, value: str) -> str:
+        if not value:
+            raise PydanticCustomError("event_ref", "extension event reference is empty")
+        return value
+
+    @field_validator("detected_at")
+    @classmethod
+    def _detected_at(cls, value: str) -> str:
+        return normalized_timestamp(value)
+
+
+class ClipExtension(BaseModel):
+    model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True, extra="forbid")
+
+    contributors: tuple[ExtensionContributor, ...]
+    duration_s: float
+    boundary: Literal["none", "extension_bounded", "extension_raced"]
+
+    @field_validator("contributors")
+    @classmethod
+    def _contributors(
+        cls, value: tuple[ExtensionContributor, ...]
+    ) -> tuple[ExtensionContributor, ...]:
+        if not value:
+            raise PydanticCustomError("extension_contributors", "extension contributors are empty")
+        return value
+
+    @field_validator("duration_s")
+    @classmethod
+    def _duration_s(cls, value: float) -> float:
+        if not isfinite(value) or value < 0:
+            raise PydanticCustomError("extension_duration", "extension duration is invalid")
+        return value
+
+
 class _ManifestProvenance(BaseModel):
     # Final on-disk manifests may carry forward-compatible keys from older
     # writers; repair and publication both read them with ignore semantics.
@@ -65,6 +109,7 @@ class _ManifestProvenance(BaseModel):
     source_error_reason: str | None = None
     truncation_reasons: tuple[str, ...] = ()
     time_origin: TimeOriginFacts | None = None
+    extension: ClipExtension | None = None
 
     @field_validator("decision_trace_id")
     @classmethod

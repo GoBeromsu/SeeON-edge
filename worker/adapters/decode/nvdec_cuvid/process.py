@@ -26,9 +26,7 @@ _STDERR_RENDER_MAX_CHARS: Final = 512
 _STDERR_TRUNCATION_PREFIX: Final = "[truncated] "
 _USERINFO_RE: Final = re.compile(r"(?i)([a-z][a-z0-9+.-]*://)([^/@\s]+)@")
 _SECRET_QUERY_KEYS: Final = "token|password|passwd|pwd|auth|key|secret|credential"
-_SECRET_ASSIGNMENT_RE: Final = re.compile(
-    rf"(?i)((?:^|[?&/;])(?:{_SECRET_QUERY_KEYS})=)([^&\s#]*)"
-)
+_SECRET_ASSIGNMENT_RE: Final = re.compile(rf"(?i)((?:^|[?&/;])(?:{_SECRET_QUERY_KEYS})=)([^&\s#]*)")
 
 
 class ReadablePipe(Protocol):
@@ -148,9 +146,7 @@ class FFmpegDecodeProcess:
         self._failure_returncode: int | None = None
         self._failure_detail: str | None = None
         self._frame_size = frame_size
-        self._chunks: queue.Queue[bytes | None] = queue.Queue(
-            maxsize=_READ_QUEUE_CAPACITY
-        )
+        self._chunks: queue.Queue[bytes | None] = queue.Queue(maxsize=_READ_QUEUE_CAPACITY)
         self._pending = bytearray()
         self._stop_reader = threading.Event()
         self._reap_lock = threading.Lock()
@@ -293,9 +289,7 @@ class FFmpegDecodeProcess:
             if stream is not None:
                 with suppress(OSError, ValueError):
                     stream.close()
-            self._reader_thread.join(
-                timeout=max(timeout_sec, _MIN_READER_JOIN_TIMEOUT_SEC)
-            )
+            self._reader_thread.join(timeout=max(timeout_sec, _MIN_READER_JOIN_TIMEOUT_SEC))
             stderr = getattr(child, "stderr", None)
             if stderr is not None:
                 with suppress(OSError, ValueError):
@@ -374,8 +368,7 @@ def _render_safe_stderr_line(payload: bytes) -> str | None:
     if not last_line:
         return None
     sanitized = "".join(
-        " " if unicodedata.category(character) == "Cc" else character
-        for character in last_line
+        " " if unicodedata.category(character) == "Cc" else character for character in last_line
     )
     redacted = _USERINFO_RE.sub(r"\1***:***@", sanitized)
     redacted = _SECRET_ASSIGNMENT_RE.sub(r"\1***", redacted)

@@ -52,9 +52,7 @@ class DarkRunRequest:
 def run_dark_child(
     request: DarkRunRequest,
     *,
-    supervisor_factory: Callable[[ChildConfig], DarkSupervisor] = (
-        DeepStreamChildSupervisor
-    ),
+    supervisor_factory: Callable[[ChildConfig], DarkSupervisor] = (DeepStreamChildSupervisor),
 ) -> int:
     """Run one child to terminal exit; any non-graceful loss maps to container exit 4."""
     supervisor = supervisor_factory(request.child)

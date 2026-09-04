@@ -79,9 +79,7 @@ def _parser() -> argparse.ArgumentParser:
     _ = run.add_argument("--mode", choices=tuple(CanaryMode), default=CanaryMode.COMMISSIONING)
     _ = run.add_argument("--authorization", type=Path)
     _ = run.add_argument("--worker-image", default=os.environ.get("CANARY_WORKER_IMAGE"))
-    _ = run.add_argument(
-        "--expected-revision", default=os.environ.get("CANARY_EXPECTED_REVISION")
-    )
+    _ = run.add_argument("--expected-revision", default=os.environ.get("CANARY_EXPECTED_REVISION"))
     _ = run.add_argument("--model-dir", type=Path, default=Path("models"))
     _ = run.add_argument("--engine-cache-source", type=Path)
     _ = run.add_argument("--policy", type=Path, default=POLICY_PATH)
@@ -231,9 +229,7 @@ def _run(arguments: RunArguments) -> int:
                 minimum_gpu_slack_mib=policy.minimum_gpu_slack_mib,
                 maximum_gpu_utilization=policy.gpu_utilization_absolute_max,
                 require_live_status=mode is CanaryMode.SHARED_HOST_SMOKE,
-                gpu_process_loss_grace_seconds=(
-                    policy.protected_gpu_process_loss_grace_seconds
-                ),
+                gpu_process_loss_grace_seconds=(policy.protected_gpu_process_loss_grace_seconds),
             ),
             mode=mode,
             rungs=rungs,

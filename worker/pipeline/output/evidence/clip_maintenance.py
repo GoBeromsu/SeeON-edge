@@ -131,8 +131,7 @@ class ClipMaintenance:
                 )
                 for finalized_at, clip_dir in finalized_clips(self._config.store_dir)
             ),
-            retention_cutoff=datetime.now(UTC)
-            - timedelta(days=self._config.retention_days),
+            retention_cutoff=datetime.now(UTC) - timedelta(days=self._config.retention_days),
             disk_high_watermark=self._config.disk_high_watermark,
         )
         self._stats.held_clips = len(report.held_clip_ids)

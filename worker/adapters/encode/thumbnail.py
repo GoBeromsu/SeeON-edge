@@ -141,10 +141,7 @@ class FFmpegThumbnailGenerator:
             "-frames:v",
             "1",
             "-vf",
-            (
-                "scale=640:360:force_original_aspect_ratio=decrease,"
-                "pad=640:360:(ow-iw)/2:(oh-ih)/2"
-            ),
+            ("scale=640:360:force_original_aspect_ratio=decrease,pad=640:360:(ow-iw)/2:(oh-ih)/2"),
             "-q:v",
             "2",
             "-f",

@@ -220,9 +220,7 @@ def _capture_preview_evidence(
         )
     except subprocess.TimeoutExpired as error:
         raise CanarySafetyError("browser_evidence_timeout", camera_id) from error
-    (raw / "browser-command.log").write_text(
-        browser.stdout + browser.stderr, encoding="utf-8"
-    )
+    (raw / "browser-command.log").write_text(browser.stdout + browser.stderr, encoding="utf-8")
     _require_success(browser, "browser_evidence_failed", camera_id)
 
 
@@ -250,10 +248,7 @@ def execute_canary(request: ExecutionRequest) -> int:
             if telemetry_path.is_file() or not phase_gpu:
                 continue
             camera_ids = (
-                tuple(
-                    f"loop-{index:02d}"
-                    for index in range(1, request.publisher_count + 1)
-                )
+                tuple(f"loop-{index:02d}" for index in range(1, request.publisher_count + 1))
                 if rung != "zero"
                 else ()
             )
@@ -355,10 +350,7 @@ def execute_canary(request: ExecutionRequest) -> int:
                 f"{selected}\n", encoding="utf-8"
             )
             camera_ids = (
-                tuple(
-                    f"loop-{index:02d}"
-                    for index in range(1, request.publisher_count + 1)
-                )
+                tuple(f"loop-{index:02d}" for index in range(1, request.publisher_count + 1))
                 if selected == "workload"
                 else ()
             )
@@ -373,8 +365,7 @@ def execute_canary(request: ExecutionRequest) -> int:
             )
             if selected == "workload":
                 publishers = tuple(
-                    f"publisher-{index:02d}"
-                    for index in range(1, request.publisher_count + 1)
+                    f"publisher-{index:02d}" for index in range(1, request.publisher_count + 1)
                 )
                 publisher_up = _compose(request, "up", "-d", *publishers)
                 phase_logs.append(publisher_up.stdout + publisher_up.stderr)
@@ -416,9 +407,7 @@ def execute_canary(request: ExecutionRequest) -> int:
                     native_windows=(
                         ()
                         if rung == "zero"
-                        else native_windows(
-                            request.evidence_dir / "raw" / "native-telemetry.jsonl"
-                        )
+                        else native_windows(request.evidence_dir / "raw" / "native-telemetry.jsonl")
                     ),
                 )
             )

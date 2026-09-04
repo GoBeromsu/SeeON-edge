@@ -8,6 +8,7 @@ The handler is the composition root's fault boundary.  It:
 todo 26 will add the watchdog on top of this; the watchdog triggers the same
 exit boundary from an independent thread after a deadline.
 """
+
 from __future__ import annotations
 
 import contextlib

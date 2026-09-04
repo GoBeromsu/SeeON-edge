@@ -60,9 +60,10 @@ def admit_worker_image(request: WorkerImageAdmission) -> WorkerImageBinding:
         raise WorkerImageAdmissionError("worker image is required")
     image = request.image.strip()
     digest = _digest(image)
-    if request.expected_revision is not None and _REVISION.fullmatch(
-        request.expected_revision
-    ) is None:
+    if (
+        request.expected_revision is not None
+        and _REVISION.fullmatch(request.expected_revision) is None
+    ):
         raise WorkerImageAdmissionError("expected revision must be 40 lowercase hex characters")
     if request.render_only:
         return WorkerImageBinding(image, digest, request.expected_revision)

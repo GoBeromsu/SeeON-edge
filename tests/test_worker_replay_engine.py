@@ -46,9 +46,7 @@ class _FallModel:
 
 def _fall_rows():
     template = _rows("gap-control-v2")[0]
-    return tuple(
-        replace(template, pts_ns=index * 66_666_667, seq=index) for index in range(45)
-    )
+    return tuple(replace(template, pts_ns=index * 66_666_667, seq=index) for index in range(45))
 
 
 def test_replay_reproduces_identical_events_against_the_same_v2_model() -> None:
@@ -118,17 +116,13 @@ def test_replay_bed_exit_containment_change_produces_structured_mismatch() -> No
     rows = tuple(
         replace(
             row,
-            tracks=(
-                replace(row.tracks[0], bbox=(0.25, 0.0, 0.75, 0.5, 0.9)),
-            )
+            tracks=(replace(row.tracks[0], bbox=(0.25, 0.0, 0.75, 0.5, 0.9)),)
             if row.seq < 2
             else row.tracks,
         )
         for row in source
     )
-    baseline = replay(
-        camera_id="fixture", rows=rows, module_id="bed_exit", policy=_bed_policy(0.9)
-    )
+    baseline = replay(camera_id="fixture", rows=rows, module_id="bed_exit", policy=_bed_policy(0.9))
     candidate = replay(
         camera_id="fixture", rows=rows, module_id="bed_exit", policy=_bed_policy(0.4)
     )
