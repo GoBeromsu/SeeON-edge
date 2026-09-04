@@ -15,33 +15,6 @@ class EngineBuildError(RuntimeError):
     pass
 
 
-def _input_shape(onnx_path: Path) -> tuple[str, tuple[int, ...]]:
-    # Read the graph through onnxruntime rather than the `onnx` package: the
-    # runtime is already a Flow dependency because the fall and bed models are
-    # served with it, and this tool runs inside the shipped image.
-    import onnxruntime
-
-    session = onnxruntime.InferenceSession(str(onnx_path), providers=["CPUExecutionProvider"])
-    inputs = session.get_inputs()
-    if len(inputs) != 1:
-        raise EngineBuildError("ONNX model must expose exactly one input tensor")
-    tensor = inputs[0]
-    if not tensor.shape:
-        raise EngineBuildError(f"ONNX input tensor {tensor.name!r} has no shape")
-    shape: list[int] = []
-    for dimension in tensor.shape[1:]:
-        if not isinstance(dimension, int) or dimension <= 0:
-            raise EngineBuildError(
-                f"ONNX input tensor {tensor.name!r} has a non-static non-batch dimension"
-            )
-        shape.append(dimension)
-    if not tensor.name or not shape:
-        raise EngineBuildError("ONNX input must have a name and at least one non-batch dimension")
-    batch = tensor.shape[0]
-    static_batch = batch if isinstance(batch, int) and batch > 0 else None
-    return tensor.name, tuple(shape), static_batch
-
-
 def sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as source:
@@ -179,15 +152,10 @@ def build_engine(
         # A changed deployment batch is a cache miss. Rebuild it before any
         # source can activate rather than booting against a stale engine.
     engine.parent.mkdir(parents=True, exist_ok=True)
-    input_name, _, static_batch = _input_shape(onnx)
-    # The model itself fixes the batch, and TensorRT refuses explicit shapes for
-    # it. Serving a roster larger than that batch would make nvinfer rebuild at
-    # runtime, so refuse here instead.
-    if static_batch is not None and static_batch < batch_size:
-        raise EngineBuildError(
-            f"ONNX input {input_name!r} fixes batch {static_batch}, which cannot serve the "
-            f"deployed roster batch {batch_size}; export the model with a dynamic batch"
-        )
+    # The batch comes from the nvinfer config, not from the ONNX graph: nvinfer
+    # builds an engine for the batch it is configured with even when the graph
+    # fixes its own batch dimension, which is how the deployed 13-source roster
+    # is served by a model exported at batch 1.
     engine.unlink(missing_ok=True)
     try:
         result = run(

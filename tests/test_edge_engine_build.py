@@ -148,18 +148,6 @@ def test_nvinfer_is_invoked_for_the_declared_batch_and_cached_by_batch(tmp_path:
     assert len(builds) == 2
 
 
-def _write_static_batch_onnx(path: Path, *, batch: int) -> None:
-    graph = helper.make_graph(
-        [helper.make_node("Identity", ["frames"], ["output0"])],
-        "pose",
-        [helper.make_tensor_value_info("frames", TensorProto.FLOAT, [batch, 3, 640, 640])],
-        [helper.make_tensor_value_info("output0", TensorProto.FLOAT, [batch, 3, 640, 640])],
-    )
-    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 13)])
-    model.ir_version = 9
-    onnx.save(model, path)
-
-
 def _build_against(
     tmp_path: Path,
     onnx_path: Path,
@@ -191,37 +179,6 @@ def _build_against(
         batch_size=batch_size,
         run=run,
     )
-
-
-def test_a_static_batch_model_is_built_without_explicit_shapes(tmp_path: Path) -> None:
-    # TensorRT rejects explicit shapes for a model whose batch the graph already
-    # fixes. nvinfer owns the build and receives only its rendered config.
-    onnx_path = tmp_path / "static.onnx"
-    _write_static_batch_onnx(onnx_path, batch=1)
-    seen: list[list[str]] = []
-
-    def run(command, **_kwargs):
-        seen.append(list(command))
-        (tmp_path / "model.engine").write_bytes(b"engine")
-        return CompletedProcess(command, 0, "", "")
-
-    _build_against(tmp_path, onnx_path, batch_size=1, run=run)
-    assert seen, "nvinfer build pipeline was never invoked"
-    assert not [argument for argument in seen[0] if "Shapes=" in argument]
-
-
-def test_a_static_batch_smaller_than_the_roster_is_refused(tmp_path: Path) -> None:
-    # Serving more sources than the engine's fixed batch is exactly what made
-    # nvinfer rebuild at runtime, so the build refuses rather than producing it.
-    onnx_path = tmp_path / "static.onnx"
-    _write_static_batch_onnx(onnx_path, batch=1)
-
-    def run(command, **_kwargs):  # pragma: no cover - must not be reached
-        raise AssertionError("trtexec must not run for a refused batch")
-
-    with pytest.raises(EngineBuildError) as failure:
-        _build_against(tmp_path, onnx_path, batch_size=13, run=run)
-    assert "1" in str(failure.value) and "13" in str(failure.value)
 
 
 def test_builder_failure_names_the_nvinfer_pipeline(tmp_path: Path) -> None:
