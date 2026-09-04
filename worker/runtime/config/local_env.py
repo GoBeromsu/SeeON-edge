@@ -29,7 +29,7 @@ import logging
 import os
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Final
+from typing import Final, Literal
 
 from pydantic import ValidationError
 
@@ -349,10 +349,16 @@ def fall_model_config_from_environment(
         operating_threshold,
         operating_threshold_source,
     )
+    # The packaged bundle carries both members; which one runs is the
+    # profile's decision. The flow image ships no Torch (P1b-AC7), so its
+    # packaged default is the ONNX Runtime member.
+    framework: Literal["pytorch", "onnxruntime"] = (
+        "onnxruntime" if env.get("ML_WORKER_PROFILE", "").strip() == "flow" else "pytorch"
+    )
     try:
         return FallModelConfig(
             type=model_type,
-            framework="pytorch",
+            framework=framework,
             mode="sequence",
             artifact_dir=Path(artifact_dir),
             weights=weights,

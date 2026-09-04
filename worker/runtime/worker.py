@@ -1739,6 +1739,12 @@ class WorkerRuntime:
         configured = self.config.models.fall
         if configured is None:
             raise RuntimeError("fall model must be explicitly configured; refusing to boot")
+        if require_onnxruntime and configured.framework != "onnxruntime":
+            raise RuntimeError(
+                "flow profile requires the ONNX Runtime fall model; the packaged config "
+                f"resolved framework={configured.framework!r} (export model.onnx with "
+                "worker.tools.export_fall_onnx and boot with ML_WORKER_PROFILE=flow)"
+            )
         try:
             return DEFAULT_FALL_MODEL_FAMILY_REGISTRY.create(configured.type, configured, device)
         except UnknownFallModelTypeError as exc:
