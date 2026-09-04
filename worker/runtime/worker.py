@@ -59,6 +59,11 @@ from worker.pipeline.decision.event_identity import event_identity_path
 from worker.pipeline.output.evidence.clip_config import DEFAULT_CLIP_STORE_DIR
 from worker.pipeline.output.evidence.clip_identity import ClipIdAllocator
 from worker.pipeline.output.evidence.clip_publication import ClipPublisher
+from worker.pipeline.output.evidence.clip_store_lock import (
+    ClipStoreLock,
+    ClipStoreLockedError,
+)
+from worker.pipeline.output.evidence.evidence_runtime import EvidenceExportRuntime
 from worker.pipeline.output.evidence.evidence_stager import DurableEvidenceStager
 from worker.pipeline.output.evidence.flow_clip_publication import FlowClipPublisher
 from worker.pipeline.output.evidence.flow_sealed_sidecar import FlowSealedSidecars
@@ -623,6 +628,7 @@ class WorkerRuntime:
         self._warmed_component_ids: frozenset[str] = frozenset()
         self.fault_handler: FaultHandler | None = None
         self.watchdog: InferenceWatchdog | None = None
+        self._evidence_export_runtime: EvidenceExportRuntime | None = None
         self._runtime_status_sender: RuntimeStatusSender | None = None
         # GAP #1/#2 wiring (todo 20): one shared diagnostics sink, overlay
         # renderer, and snapshot store per process -- same "one shared actor"
@@ -739,6 +745,7 @@ class WorkerRuntime:
                     profile_boot_error=None,
                 )
             )
+            self._start_export_sender()
             self._start_runtime_status_sender()
             self._start_live_view_server()
             while not self._max_frames_completion_check() and (
@@ -757,6 +764,8 @@ class WorkerRuntime:
         self._policy_pump_threads = ()
         if self.watchdog is not None:
             self.watchdog.stop()
+        if self._evidence_export_runtime is not None:
+            self._evidence_export_runtime.stop_sender()
         if self._runtime_status_sender is not None:
             self._runtime_status_sender.stop()
         if self._mjpeg_server is not None:
@@ -1114,6 +1123,7 @@ class WorkerRuntime:
         media_plane = self._flow_media_plane
         if media_plane is None:
             raise RuntimeError("flow media plane is not initialized")
+        self._compose_evidence_export()
         plans = {
             camera.camera_id: self._preflight_camera_graph(camera) for camera in self.config.cameras
         }
@@ -1181,6 +1191,45 @@ class WorkerRuntime:
         for thread in self._policy_pump_threads:
             thread.start()
         return outcomes
+
+    def _compose_evidence_export(self) -> None:
+        """Build and initialize the durable evidence exporter before activation."""
+        probe_camera_id = self.config.cameras[0].camera_id if self.config.cameras else "worker"
+        try:
+            runtime = EvidenceExportRuntime.from_config(
+                store_dir=self._resolved_clip_store_dir(),
+                queue_directory=_delivery_queue_dir(self._state_dir),
+                relay_url=self.config.relay.url,
+                relay_token=self.config.relay.token.get_secret_value(),
+                probe_camera_id=probe_camera_id,
+                clip_export_enabled=self._clip_export_policy.enabled,
+                flow_sealed_sidecar_directory=self._state_dir / "flow-sealed",
+            )
+            with ClipStoreLock.acquire(self._resolved_clip_store_dir()):
+                runtime.initialize_under_lock()
+        except ClipStoreLockedError as exc:
+            raise EvidenceDeliveryError(
+                "clip store is locked by another process; refusing evidence delivery"
+            ) from exc
+        except ValueError as exc:
+            raise EvidenceDeliveryError(
+                "evidence delivery is misconfigured: relay URL, relay token, "
+                "and a probe identity are required"
+            ) from exc
+        except Exception as exc:  # noqa: BLE001 - delivery startup is required
+            raise EvidenceDeliveryError(
+                "evidence delivery failed to initialize under the clip-store lock"
+            ) from exc
+        self._evidence_export_runtime = runtime
+
+    def _start_export_sender(self) -> None:
+        """Start the initialized evidence sender after Flow activation succeeds."""
+        if self._evidence_export_runtime is None:
+            raise EvidenceDeliveryError("evidence delivery was not composed")
+        try:
+            self._evidence_export_runtime.start_sender()
+        except Exception as exc:  # noqa: BLE001 - delivery startup is required
+            raise EvidenceDeliveryError("evidence export sender failed to start") from exc
 
     @staticmethod
     def _replay_sealed_clips(bindings: Sequence[FlowEvidenceBinding]) -> int:

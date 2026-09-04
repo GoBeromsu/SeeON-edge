@@ -3,8 +3,13 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from shared.events.delivery_queue import ClipEntry, DeliveryQueue
-from shared.events.evidence_export_contract import ClipReceipt, DeliveryDisposition, DeliveryFailure
+from shared.events.delivery_queue import ClipEntry, DeliveryQueue, EventEntry
+from shared.events.evidence_export_contract import (
+    ClipReceipt,
+    DeliveryDisposition,
+    DeliveryFailure,
+    EventReceipt,
+)
 from worker.pipeline.output.evidence.clip_identity import ClipIdAllocator
 from worker.pipeline.output.evidence.clip_publication import ClipPublicationMetadata, ClipPublisher
 from worker.pipeline.output.evidence.evidence_outbox_types import EdgeEventId, EvidenceReasonCode
@@ -113,6 +118,36 @@ def test_clip_delivery_disabled_retains_entry_without_sending(tmp_path: Path) ->
     assert _sender(tmp_path, transport, enabled=False).run_once() is SenderStep.RETRY_SCHEDULED
     assert len(tuple(queue.entries())) == 1
     assert not transport.claims
+
+
+def test_staged_event_is_handed_to_transport(tmp_path: Path) -> None:
+    class _EventTransport(_Transport):
+        def __init__(self) -> None:
+            super().__init__(ClipReceipt("unused", "READY", 2, None, None))
+            self.events: list[str] = []
+
+        def send_event(self, payload_json: str, edge_event_id: str) -> EventReceipt:
+            assert '"edge_event_id":"event-a"' in payload_json
+            self.events.append(edge_event_id)
+            return EventReceipt("accepted", edge_event_id, "backend-event")
+
+    queue = DeliveryQueue(tmp_path)
+    assert queue.try_admit(
+        EventEntry(
+            edge_event_id="event-a",
+            event_type="fall",
+            detected_at="2026-01-01T00:00:00Z",
+            camera_id="camera-1",
+            facility_id="facility-1",
+            decision_trace=b"{}",
+            values=b'{"edge_event_id":"event-a"}',
+        )
+    ).accepted
+    transport = _EventTransport()
+
+    assert _sender(tmp_path, transport).run_once() is SenderStep.EVENT_ACKED
+    assert transport.events == ["event-a"]
+    assert not tuple(DeliveryQueue(tmp_path).entries())
 
 
 def test_clip_mapping_refusal_retries_but_bad_clip_dead_letters(tmp_path: Path) -> None:

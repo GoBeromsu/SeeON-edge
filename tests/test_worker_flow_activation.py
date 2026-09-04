@@ -150,6 +150,56 @@ def test_flow_status_tick_reads_actor_and_plane_counters() -> None:
     assert lifecycle_ticks == ["tick"]
 
 
+def test_flow_composes_and_starts_the_evidence_sender(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    calls: list[object] = []
+
+    class _ExportRuntime:
+        def initialize_under_lock(self) -> None:
+            calls.append("initialized")
+
+        def start_sender(self) -> None:
+            calls.append("started")
+
+    class _Lock:
+        def __enter__(self) -> None:
+            calls.append("locked")
+
+        def __exit__(self, *_args: object) -> None:
+            calls.append("unlocked")
+
+    runtime = WorkerRuntime.__new__(WorkerRuntime)
+    runtime.config = SimpleNamespace(
+        cameras=(SimpleNamespace(camera_id="camera-a"),),
+        relay=SimpleNamespace(
+            url="http://relay.test",
+            token=SimpleNamespace(get_secret_value=lambda: "relay-token"),
+        ),
+    )
+    runtime._state_dir = tmp_path / "state"  # noqa: SLF001
+    runtime._clip_export_policy = SimpleNamespace(enabled=lambda: True)  # noqa: SLF001
+    runtime._resolved_clip_store_dir = lambda: tmp_path / "clips"  # noqa: SLF001
+    monkeypatch.setattr(
+        "worker.runtime.worker.EvidenceExportRuntime.from_config",
+        lambda **kwargs: calls.append(kwargs) or _ExportRuntime(),
+    )
+    monkeypatch.setattr(
+        "worker.runtime.worker.ClipStoreLock.acquire",
+        lambda _store: _Lock(),
+    )
+
+    runtime._compose_evidence_export()  # noqa: SLF001
+    runtime._start_export_sender()  # noqa: SLF001
+
+    [composition] = [call for call in calls if isinstance(call, dict)]
+    assert composition["queue_directory"] == tmp_path / "state" / "delivery-queue"
+    assert composition["store_dir"] == tmp_path / "clips"
+    assert composition["probe_camera_id"] == "camera-a"
+    assert calls[-1] == "started"
+
+
 def test_shutdown_stops_the_flow_without_removing_its_sources() -> None:
     """Removing sources on the way out core-dumped a 13-camera shutdown.
 

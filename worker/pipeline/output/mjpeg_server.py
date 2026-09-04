@@ -14,7 +14,6 @@ from worker.pipeline.output._mjpeg_http import (
     BED_ZONE_FRAME_TIMEOUT_SECONDS,
     BedZoneNotFoundError,
     BedZoneRecognizer,
-    ClipDeletionControl,
     MjpegProbe,
     MjpegProbeError,
     MjpegProbePayload,
@@ -44,7 +43,6 @@ class MjpegServer:
         config: MjpegServerConfig,
         probe: MjpegProbe | None = None,
         bed_zone_recognizer: BedZoneRecognizer | None = None,
-        clip_deletion_control: ClipDeletionControl | None = None,
         replay_fall_model: FallV2ModelProtocol | None = None,
         *,
         bed_zone_frame_timeout_s: float = BED_ZONE_FRAME_TIMEOUT_SECONDS,
@@ -61,7 +59,6 @@ class MjpegServer:
             probe_token=self.probe_token,
             probe=self.probe,
             bed_zone_recognizer=self.bed_zone_recognizer,
-            clip_deletion_control=clip_deletion_control,
             replay_fall_model=replay_fall_model,
             bed_zone_frame_timeout_s=bed_zone_frame_timeout_s,
         )
@@ -103,7 +100,6 @@ MjpegServerFactory = Callable[
         MjpegServerConfig,
         MjpegProbe | None,
         BedZoneRecognizer | None,
-        ClipDeletionControl | None,
         FallV2ModelProtocol | None,
     ],
     MjpegServer,
@@ -147,7 +143,6 @@ def start_optional_mjpeg_server(
     *,
     probe: MjpegProbe | None = None,
     bed_zone_recognizer: BedZoneRecognizer | None = None,
-    clip_deletion_control: ClipDeletionControl | None = None,
     replay_fall_model: FallV2ModelProtocol | None = None,
     factory: MjpegServerFactory = MjpegServer,
 ) -> MjpegServer | None:
@@ -160,7 +155,6 @@ def start_optional_mjpeg_server(
             resolved,
             probe,
             bed_zone_recognizer,
-            clip_deletion_control,
             replay_fall_model,
         )
     except OSError:
@@ -180,7 +174,6 @@ def _unavailable_probe(_rtsp_url: str) -> MjpegProbePayload:
 __all__ = [
     "BedZoneNotFoundError",
     "BedZoneRecognizer",
-    "ClipDeletionControl",
     "MjpegProbe",
     "MjpegProbeError",
     "MjpegProbePayload",

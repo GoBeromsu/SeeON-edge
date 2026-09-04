@@ -7,7 +7,7 @@ from collections.abc import Callable
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from socketserver import ThreadingMixIn
-from typing import Final, Protocol, TypeAlias
+from typing import Final, TypeAlias
 from urllib.parse import urlsplit
 
 import cv2
@@ -31,8 +31,6 @@ from worker.pipeline.output.live_view_api import (
     ProbeErrorClass,
     ProbeResponse,
     bed_zone_camera_id,
-    clip_deletion_clip_id,
-    clip_deletion_preflight_clip_id,
     normalize_probe_error_class,
     parse_pose_body,
     parse_probe_request,
@@ -86,12 +84,6 @@ class BedZoneNotFoundError(RuntimeError):
 BedZoneRecognizer = Callable[[Image], BedZoneRecognizeResponse]
 
 
-class ClipDeletionControl(Protocol):
-    def preflight(self, clip_id: str) -> dict[str, object]: ...
-
-    def delete(self, clip_id: str) -> dict[str, object]: ...
-
-
 # Raw probe result as the runtime's probe callable returns it (it may carry
 # the masked URL and a message); only ``ProbeResponse.sanitized`` reaches the wire.
 MjpegProbePayload: TypeAlias = dict[str, bool | str | int]
@@ -124,7 +116,6 @@ def build_http_server(
     probe_token: str | None,
     probe: MjpegProbe,
     bed_zone_recognizer: BedZoneRecognizer | None = None,
-    clip_deletion_control: ClipDeletionControl | None = None,
     replay_fall_model: FallV2ModelProtocol | None = None,
     bed_zone_frame_timeout_s: float = BED_ZONE_FRAME_TIMEOUT_SECONDS,
 ) -> HTTPServer:
@@ -142,10 +133,6 @@ def build_http_server(
             pose_id = pose_camera_id(path)
             if pose_id is not None:
                 self._handle_get_pose(pose_id)
-                return
-            clip_preflight_id = clip_deletion_preflight_clip_id(path)
-            if clip_preflight_id is not None:
-                self._handle_clip_delete_preflight(clip_preflight_id)
                 return
             self.send_error(HTTPStatus.NOT_FOUND)
 
@@ -224,42 +211,6 @@ def build_http_server(
                 )
                 return
             self._write_status_json(HTTPStatus.OK, _replay_run_payload(result, trace.truncation))
-
-        def do_DELETE(self) -> None:  # noqa: N802 - stdlib hook name
-            path = urlsplit(self.path).path
-            clip_id = clip_deletion_clip_id(path)
-            if clip_id is not None:
-                self._handle_clip_delete(clip_id)
-                return
-            self.send_error(HTTPStatus.NOT_FOUND)
-
-        def _handle_clip_delete_preflight(self, clip_id: str) -> None:
-            if not _authorized_probe(self.headers.get(RELAY_TOKEN_HEADER), probe_token):
-                self.send_error(HTTPStatus.FORBIDDEN)
-                return
-            if clip_deletion_control is None:
-                self.send_error(HTTPStatus.SERVICE_UNAVAILABLE)
-                return
-            try:
-                payload = clip_deletion_control.preflight(clip_id)
-            except (OSError, RuntimeError, TypeError, ValueError):
-                self.send_error(HTTPStatus.CONFLICT)
-                return
-            self._write_status_json(HTTPStatus.OK, payload)
-
-        def _handle_clip_delete(self, clip_id: str) -> None:
-            if not _authorized_probe(self.headers.get(RELAY_TOKEN_HEADER), probe_token):
-                self.send_error(HTTPStatus.FORBIDDEN)
-                return
-            if clip_deletion_control is None:
-                self.send_error(HTTPStatus.SERVICE_UNAVAILABLE)
-                return
-            try:
-                payload = clip_deletion_control.delete(clip_id)
-            except (OSError, RuntimeError, TypeError, ValueError):
-                self.send_error(HTTPStatus.CONFLICT)
-                return
-            self._write_status_json(HTTPStatus.ACCEPTED, payload)
 
         def _resolve_frame(self, camera_id: str) -> LatestFrame | None:
             if camera_id == "" or not store.is_known(camera_id):
@@ -757,7 +708,6 @@ __all__ = [
     "BED_ZONE_FRAME_TIMEOUT_SECONDS",
     "BedZoneNotFoundError",
     "BedZoneRecognizer",
-    "ClipDeletionControl",
     "MjpegProbe",
     "MjpegProbeError",
     "MjpegProbePayload",
