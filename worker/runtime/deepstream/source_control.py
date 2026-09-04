@@ -9,9 +9,9 @@ from enum import StrEnum
 from typing import Final, Protocol, final, override
 
 from worker.native.deepstream.control import ChildControlError
-from worker.native.deepstream.ipc import MetadataFrame
-from worker.native.deepstream.metadata import AcceptanceToken, SourceBinding
 from worker.types import ChannelState
+from worker.runtime.flow.metadata_slot import AcceptanceToken
+from worker.types.metadata import MetadataFrame, SourceBinding
 
 _SOURCE_READY_TIMEOUT_SEC: Final = 10.0
 

@@ -21,13 +21,14 @@ from worker.interfaces.media_plane import (
     EarlyStopUnsupported,
     MediaPlane,
     MediaPlaneStatus,
+    MetadataSlot,
     RecordingInfo,
     RecordingRefused,
     SnapshotUnavailable,
     SourceRosterFixed,
     SourceStatus,
 )
-from worker.native.deepstream.metadata import LatestMetadataSlot, SourceBinding
+from worker.types.metadata import SourceBinding
 
 _MAX_PREVIEW_JPEG_BYTES = 2 * 1024 * 1024
 #: How often the plane reports what perception is actually producing.
@@ -210,7 +211,7 @@ class DeepStreamMediaPlane(MediaPlane):
         self,
         config: DeepStreamMediaPlaneConfig,
         *,
-        metadata_slot: LatestMetadataSlot,
+        metadata_slot: MetadataSlot,
         flow_factory: FlowFactory = _default_flow_factory,
         snapshot_encoder: Callable[[str], bytes] | None = None,
         jpeg_publisher: Callable[[str, bytes], None] | None = None,

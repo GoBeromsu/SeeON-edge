@@ -19,7 +19,17 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
-from worker.native.deepstream.metadata import SourceBinding
+from worker.types.metadata import MetadataFrame, SourceBinding
+
+
+class MetadataSlot(Protocol):
+    """Runtime-owned mailbox into which a media plane publishes metadata."""
+
+    def register_source(self, binding: SourceBinding) -> object: ...
+
+    def remove_source(self, camera_id: str) -> None: ...
+
+    def publish(self, metadata: MetadataFrame) -> bool: ...
 
 
 @dataclass(frozen=True, slots=True)

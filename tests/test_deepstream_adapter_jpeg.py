@@ -13,7 +13,7 @@ from worker.adapters.deepstream.service_maker import (
     _FlowHandle,
 )
 from worker.adapters.deepstream.tensor_rows import host_array_from_tensor
-from worker.native.deepstream.metadata import LatestMetadataSlot
+from worker.runtime.flow.metadata_slot import LatestMetadataSlot
 
 
 class _Pipeline:

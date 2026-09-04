@@ -27,6 +27,7 @@ from worker.types.frame_memory import (
 )
 from worker.types.frame_packet import FrameKey, FramePacket
 from worker.types.module_result import ModuleResult
+from worker.types.metadata import MetadataCounters, MetadataFrame, SourceBinding
 from worker.types.perception_frame import (
     AssociationResult,
     BedRegion,
@@ -73,6 +74,8 @@ __all__ = [
     "HumanPoseChannel",
     "Keypoint",
     "MemoryKind",
+    "MetadataCounters",
+    "MetadataFrame",
     "ModuleResult",
     "NativeEvidenceTrigger",
     "NumericTraceValue",
@@ -84,6 +87,7 @@ __all__ = [
     "PipelineProfile",
     "PixelFormat",
     "StageCapabilities",
+    "SourceBinding",
     "TemporalProfile",
     "TemporalProfileError",
 ]

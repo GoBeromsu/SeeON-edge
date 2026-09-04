@@ -15,9 +15,10 @@ from worker.adapters.deepstream.service_maker import (
     FlowFactory,
 )
 from worker.interfaces.media_plane import MediaPlane, RecordingInfo, SnapshotUnavailable
-from worker.native.deepstream.metadata import LatestMetadataSlot, SourceBinding
 from worker.pipeline.output.evidence.smart_record_actor import ClipSealed, SmartRecordActor
 from worker.pipeline.output.live_view import LatestFrameStore
+from worker.runtime.flow.metadata_slot import LatestMetadataSlot
+from worker.types.metadata import SourceBinding
 
 LOGGER = logging.getLogger(__name__)
 

@@ -7,14 +7,13 @@ from pathlib import Path
 from contracts.observation import BoundingBox
 from contracts.replay_trace import ReplayRow, ReplayTraceHeader, decode_jsonl, encode_jsonl
 from shared.detection_policies import BedExitPolicyV1, make_effective_policy
-from worker.native.deepstream.ipc import MetadataFrame
-from worker.native.deepstream.metadata import LatestMetadataSlot, SourceBinding
 from worker.pipeline.decision import EventAggregator, IncidentManager
 from worker.pipeline.output.evidence_attacher import AlertEvidenceAttacher
 from worker.pipeline.perception import SceneState
 from worker.pipeline.trace.replay_trace_writer import ReplayTraceWriter
 from worker.replay.engine import replay, replay_trace_frames
 from worker.runtime.deepstream.native_policy_pump import NativePolicyContext, NativePolicyPump
+from worker.runtime.flow.metadata_slot import LatestMetadataSlot
 from worker.runtime.telemetry.runtime_diagnostics import WorkerDiagnostics
 from worker.types import (
     AssociationResult,
@@ -29,6 +28,7 @@ from worker.types import (
     PersonBox,
     PersonBoxChannel,
 )
+from worker.types.metadata import MetadataFrame, SourceBinding
 
 _BOOT = uuid.UUID("12345678-1234-5678-1234-567812345678")
 _CHILD = uuid.UUID("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")

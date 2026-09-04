@@ -9,10 +9,11 @@ from worker.native.deepstream.control import (
     ControlIdentity,
     DeepStreamControlClient,
 )
-from worker.native.deepstream.metadata import LatestMetadataSlot, MetadataReceiver
+from worker.native.deepstream.metadata import MetadataReceiver
 from worker.runtime.deepstream.config import ChildConfig
 from worker.runtime.deepstream.errors import ChildStartupError
 from worker.runtime.deepstream.readiness import wait_for_ready
+from worker.runtime.flow.metadata_slot import LatestMetadataSlot
 from worker.runtime.deepstream.source_control import DarkSourceController
 from worker.runtime.deepstream.transport import ChildTransport
 

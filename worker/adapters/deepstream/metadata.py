@@ -13,8 +13,7 @@ from worker.interfaces.association import (
     AssociationObservation,
     TrackedObject,
 )
-from worker.native.deepstream.ipc_types import MetadataFrame
-from worker.native.deepstream.metadata import SourceBinding
+from worker.types.metadata import MetadataFrame, SourceBinding
 from worker.types.perception_frame import (
     AssociationResult,
     BedRegionChannel,

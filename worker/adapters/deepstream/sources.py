@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from worker.native.deepstream.metadata import SourceBinding
+from worker.types.metadata import SourceBinding
 
 
 @dataclass(slots=True)

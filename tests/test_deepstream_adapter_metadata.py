@@ -7,7 +7,8 @@ from types import SimpleNamespace
 import numpy as np
 
 from worker.adapters.deepstream.metadata import _frame_box, _iou, association_pass, convert_frame
-from worker.native.deepstream.metadata import LatestMetadataSlot, SourceBinding
+from worker.runtime.flow.metadata_slot import LatestMetadataSlot
+from worker.types.metadata import SourceBinding
 from worker.types.perception_frame import PerceptionFrameIdentity
 
 
@@ -112,7 +113,7 @@ def test_a_frame_without_pose_tensors_is_published_with_every_track_unmatched() 
         DeepStreamMediaPlaneConfig,
         _FlowHandle,
     )
-    from worker.native.deepstream.metadata import LatestMetadataSlot
+    from worker.runtime.flow.metadata_slot import LatestMetadataSlot
 
     config = DeepStreamMediaPlaneConfig("infer", "tracker", "lib", Path("/tmp"), 5, 640, 360)
     plane = DeepStreamMediaPlane(

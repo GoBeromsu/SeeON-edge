@@ -13,11 +13,11 @@ from typing import Protocol, final, runtime_checkable
 from contracts.observation import BoundingBox
 from contracts.replay_trace import ReplayRow, ReplaySource, ReplayTrack
 from worker.native.deepstream.control import ChildControlError
-from worker.native.deepstream.ipc import MetadataFrame
-from worker.native.deepstream.metadata import AcceptanceToken, LatestMetadataSlot, SourceBinding
 from worker.pipeline.decision import EventAggregator
 from worker.pipeline.output.evidence_attacher import AlertEvidenceAttacher
 from worker.pipeline.perception import SceneState, build_decision_input, build_frame_observation
+from worker.runtime.flow.metadata_slot import AcceptanceToken, LatestMetadataSlot
+from worker.types.metadata import MetadataFrame, SourceBinding
 from worker.pipeline.trace.replay_trace_writer import ReplayTraceWriter
 from worker.runtime.deepstream.canary_telemetry import NativeCanaryTelemetry
 from worker.types import BusinessEvent, ChannelState, NativeEvidenceTrigger

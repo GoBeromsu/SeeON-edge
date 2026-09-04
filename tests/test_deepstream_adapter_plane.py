@@ -30,7 +30,7 @@ from worker.interfaces.media_plane import (
     SnapshotUnavailable,
     SourceRosterFixed,
 )
-from worker.native.deepstream.metadata import LatestMetadataSlot
+from worker.runtime.flow.metadata_slot import LatestMetadataSlot
 
 
 class _Element:

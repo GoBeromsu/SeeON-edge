@@ -13,11 +13,9 @@ from worker.native.deepstream.control import ControlIdentity, DeepStreamControlC
 from worker.native.deepstream.ipc import (
     ControlMessage,
     MessageKind,
-    MetadataFrame,
     decode_control_message,
     encode_message,
 )
-from worker.native.deepstream.metadata import LatestMetadataSlot, SourceBinding
 from worker.pipeline.decision import EventAggregator, IncidentManager
 from worker.pipeline.output.evidence_attacher import AlertEvidenceAttacher
 from worker.pipeline.perception import SceneState
@@ -25,6 +23,7 @@ from worker.runtime.deepstream.native_policy_pump import (
     NativePolicyContext,
     NativePolicyPump,
 )
+from worker.runtime.flow.metadata_slot import LatestMetadataSlot
 from worker.types import (
     AssociationResult,
     BedRegionChannel,
@@ -39,6 +38,7 @@ from worker.types import (
     PersonBox,
     PersonBoxChannel,
 )
+from worker.types.metadata import MetadataFrame, SourceBinding
 
 _BOOT = uuid.UUID("12345678-1234-5678-1234-567812345678")
 _CHILD = uuid.UUID("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")

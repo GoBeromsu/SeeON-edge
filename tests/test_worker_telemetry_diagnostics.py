@@ -623,7 +623,7 @@ def test_metadata_slot_counters_render_into_the_log_message_not_extra(
     # Given
     import logging
 
-    from worker.native.deepstream.metadata_slot import LatestMetadataSlot
+    from worker.runtime.flow.metadata_slot import LatestMetadataSlot
     from worker.runtime import worker as worker_module
 
     slot = LatestMetadataSlot()

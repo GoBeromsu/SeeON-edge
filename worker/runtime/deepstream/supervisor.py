@@ -12,10 +12,11 @@ from typing import Final, final
 from worker.adapters.decode.native_au_receiver import NativeAuReceiver
 from worker.adapters.decode.native_preview_receiver import NativePreviewReceiver
 from worker.native.deepstream.control import ChildControlError, DeepStreamControlClient
-from worker.native.deepstream.metadata import LatestMetadataSlot, MetadataReceiver
+from worker.native.deepstream.metadata import MetadataReceiver
 from worker.pipeline.output.evidence.packet_repository import PacketRingRepository
 from worker.pipeline.output.evidence.packet_ring import PacketRingLimits
 from worker.pipeline.output.live_view import LatestFrameStore
+from worker.runtime.flow.metadata_slot import LatestMetadataSlot
 from worker.runtime.deepstream.canary_telemetry import NativeCanaryTelemetry
 from worker.runtime.deepstream.child_monitor import ChildExitMonitor, monitor_metadata
 from worker.runtime.deepstream.cleanup import ChildResources, stop_child_resources
