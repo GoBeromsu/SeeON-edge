@@ -25,7 +25,8 @@ Perception math, domain judgment, and vendor kits live elsewhere. `backend` is f
   child owns GPU 0; the parent has no in-process serving. A tracker remains in each preflighted `CameraDetectionPlan` but is not executed on this path.
 - `flow/`: the `flow` profile composes the injected pyservicemaker media plane.
   Its engine is built once by `edge-engine-build`; boot verifies its identity and
-  never performs a lazy build. Source-open faults are camera-local; plane,
+  never performs a lazy build. It warms the CPU temporal runner and waits for
+  an accepted bootstrap metadata frame before cameras activate. Source-open faults are camera-local; plane,
   engine, parser, or identity faults are process-fatal.
 
 ## Failures, allocation, CLI, tests

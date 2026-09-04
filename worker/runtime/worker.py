@@ -134,6 +134,8 @@ from worker.runtime.deepstream.nvidia_media_plane import (
 )
 from worker.runtime.faults.handler import FaultHandler
 from worker.runtime.faults.record import make_fault_record
+from worker.runtime.flow.cold_start import verify_engine_identity
+from worker.runtime.flow.evidence import FlowEvidenceBinding
 from worker.runtime.flow.media_plane import FlowMediaPlane, FlowMediaPlaneConfig
 from worker.runtime.ingest_composition import (
     build_camera_source_registry,
@@ -1090,6 +1092,12 @@ class WorkerRuntime:
             self._nvidia_media_plane.stop()
             self._nvidia_media_plane = None
         if self._flow_media_plane is not None:
+            for camera in self.config.cameras:
+                try:
+                    self._flow_media_plane.remove_source(camera.camera_id)
+                except KeyError:
+                    # Camera-local activation can fail before a source exists.
+                    continue
             self._flow_media_plane.stop()
             self._flow_media_plane = None
         if self.watchdog is not None:
@@ -1574,6 +1582,8 @@ class WorkerRuntime:
     def _initialize_flow_media_plane(self, boot: BootContext) -> SharedComponentGraph:
         """Compose Flow only from explicitly provisioned DeepStream artifacts."""
         required = (
+            "ML_WORKER_FLOW_ENGINE_PATH",
+            "ML_WORKER_FLOW_ENGINE_IDENTITY_PATH",
             "ML_WORKER_FLOW_INFER_CONFIG",
             "ML_WORKER_FLOW_TRACKER_CONFIG",
             "ML_WORKER_FLOW_TRACKER_LIBRARY",
@@ -1585,6 +1595,15 @@ class WorkerRuntime:
         missing = [key for key in required if not self._env.get(key)]
         if missing:
             raise RuntimeError(f"flow profile wiring is missing: {', '.join(missing)}")
+        verify_engine_identity(
+            Path(self._env["ML_WORKER_FLOW_ENGINE_PATH"]),
+            Path(self._env["ML_WORKER_FLOW_ENGINE_IDENTITY_PATH"]),
+            {
+                "infer_config_sha256": Path(self._env["ML_WORKER_FLOW_INFER_CONFIG"]),
+                "tracker_config_sha256": Path(self._env["ML_WORKER_FLOW_TRACKER_CONFIG"]),
+                "tracker_library_sha256": Path(self._env["ML_WORKER_FLOW_TRACKER_LIBRARY"]),
+            },
+        )
         self._flow_media_plane = FlowMediaPlane(
             FlowMediaPlaneConfig(
                 infer_config_path=self._env["ML_WORKER_FLOW_INFER_CONFIG"],
@@ -1728,6 +1747,12 @@ class WorkerRuntime:
             if self.fall_model is None or self._flow_media_plane is None:
                 raise RuntimeError("flow media plane is not initialized")
             self._warm_one(self.fall_model, "cpu")
+            warmup = self._flow_media_plane.add_source("_bootstrap_warmup", "loopback://bootstrap")
+            token = self._flow_media_plane.metadata.subscribe(warmup)
+            try:
+                _ = self._flow_media_plane.metadata.wait_accepted(token, timeout_sec=10.0)
+            finally:
+                self._flow_media_plane.remove_source("_bootstrap_warmup")
             return tuple(sorted(self._warmed_component_ids))
         required_bindings = self._module_registry.shared_bindings(
             self._module_versions,
@@ -1759,6 +1784,8 @@ class WorkerRuntime:
             raise RuntimeError("camera activation requires initialized shared state")
         if boot.profile.name == "nvidia":
             return self._activate_nvidia(boot, handler)
+        if boot.profile.name == "flow":
+            return self._activate_flow(boot, handler)
         # Structural graph failures are global boot failures. Build every complete
         # camera plan before entering the camera-local degradation boundary.
         plans = {
@@ -1871,6 +1898,139 @@ class WorkerRuntime:
         )
         self._supervisor.start()
         return outcomes
+
+    def _activate_flow(
+        self,
+        boot: BootContext,
+        handler: FaultHandler,
+    ) -> tuple[bootstrap.CameraStageOutcome, ...]:
+        """Activate Flow sources and the existing image-free policy pumps."""
+        if self._flow_media_plane is None:
+            raise RuntimeError("flow media plane is not initialized")
+        plans = {
+            camera.camera_id: self._preflight_camera_graph(camera) for camera in self.config.cameras
+        }
+        self._apply_runtime_manifest(boot, plans)
+        self._compose_evidence_export(boot)
+        pumps: list[NativePolicyPump] = []
+        outcomes = tuple(
+            bootstrap.run_camera_stage(
+                camera.camera_id,
+                partial(self._build_flow_camera, camera, pumps),
+            )
+            for camera in self.config.cameras
+        )
+        self._native_policy_pumps = tuple(pumps)
+        for pump in pumps:
+            handler.register_loop(pump)
+        heartbeat = NativeHeartbeatLoop(self.config, self.config.cameras, pumps)
+        handler.register_loop(heartbeat)
+        threading.Thread(target=heartbeat.run, name="flow-heartbeat", daemon=True).start()
+        self._supervisor = ingest.IngestSupervisor(
+            pumps,
+            restart_check=self._restart_check,
+            completion_check=(
+                None if self._max_frames_per_camera is None else self._max_frames_completion_check
+            ),
+        )
+        self._supervisor.start()
+        return outcomes
+
+    def _build_flow_camera(
+        self,
+        camera: CameraRuntimeConfig,
+        pumps: list[NativePolicyPump],
+    ) -> None:
+        from shared.rtsp_url_policy import assert_rtsp_endpoint_allowed
+
+        if camera.decode_backend not in {None, "auto", "nvdec"}:
+            raise RuntimeError("flow cameras cannot override decode to a host backend")
+        media_plane = self._flow_media_plane
+        if media_plane is None:
+            raise RuntimeError("flow media plane is not initialized")
+        endpoint = assert_rtsp_endpoint_allowed(camera.inference_rtsp_url)
+        self.diagnostics.register_decode(camera.camera_id, camera.decode_backend or "auto")
+        self._record_decode_selection(camera, "nvdec")
+        self._live_frames.register_camera(camera.camera_id)
+        binding = media_plane.add_source(camera.camera_id, endpoint.pinned_url)
+        plan = self._preflight_camera_graph(
+            camera,
+            episode_source_identity=(
+                str(self._worker_boot_uuid),
+                str(binding.stream_epoch),
+                binding.source_generation,
+            ),
+        )
+        scene = SceneState(
+            camera.camera_id,
+            persisted_bed_regions=_persisted_bed_regions(camera),
+            bed_zone_image_width=camera.bed_zone_image_width,
+            bed_zone_image_height=camera.bed_zone_image_height,
+        )
+        attacher = AlertEvidenceAttacher(
+            domain_audit=plan.domain_audit,
+            overlay_renderer=None,
+            debug_snapshots_provider=_debug_snapshots_provider(
+                plan.domain_deciders, plan.definitions
+            ),
+            runtime_manifest_sha256=(
+                None if self._runtime_manifest is None else self._runtime_manifest.sha256
+            ),
+        )
+        self._camera_evidence_attachers[camera.camera_id] = attacher
+        stager = DurableEvidenceStager(
+            queue_directory=_delivery_queue_dir(self._state_dir),
+            camera_id=camera.camera_id,
+            facility_id=camera.facility_id,
+            resident_id=camera.resident_id,
+            config_version=self.config.version,
+            clock=time.time,
+            runtime_manifest_sha256=(
+                None if self._runtime_manifest is None else self._runtime_manifest.sha256
+            ),
+        )
+        sealed_binding: list[FlowEvidenceBinding] = []
+        actor = media_plane.smart_recorder(
+            camera.camera_id,
+            sink=lambda sealed: sealed_binding[0].on_sealed(sealed),
+            lookback_sec=10,
+        )
+        sink = FlowEvidenceBinding(actor=actor, stager=stager)
+        sealed_binding.append(sink)
+        pump = NativePolicyPump(
+            binding,
+            NativePolicyContext(
+                media_plane.metadata,
+                media_plane,
+                scene,
+                plan.decision,
+                sink,
+                attacher,
+                self.diagnostics,
+                plan.schedule.get("bed", self.temporal_profile.decision_interval_frames("bed")),
+                replay_trace=(
+                    None
+                    if (trace_directory := replay_trace_directory_from_environment()) is None
+                    else ReplayTraceWriter(trace_directory, camera.camera_id)
+                ),
+                night_window_active=_night_window_active(plan.detection_windows.get("bed_exit")),
+                recreate_decision=lambda rebuilt: (
+                    self._preflight_camera_graph(
+                        camera,
+                        episode_source_identity=(
+                            str(self._worker_boot_uuid),
+                            str(rebuilt.stream_epoch),
+                            rebuilt.source_generation,
+                        ),
+                        incidents=plan.decision.incidents,
+                    ).decision
+                ),
+                track_id_switch_absorbed_total=_absorbed_track_id_switch_total,
+            ),
+        )
+        pumps.append(pump)
+        self.diagnostics.register_native_detection(camera.camera_id)
+        HeartbeatReporter(self.config, camera).mark_ready(camera.camera_id)
 
     def _build_nvidia_camera(
         self,
