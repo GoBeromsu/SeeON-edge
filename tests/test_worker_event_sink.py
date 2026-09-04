@@ -296,6 +296,28 @@ def test_event_sink_completes_without_clip_when_recording_is_unavailable() -> No
     assert stager.completions == [("event-123", None)]
 
 
+def test_event_sink_surfaces_an_explicit_snapshot_capture_failure_to_operators() -> None:
+    stager = _RecordingStager()
+    sink = EvidenceEventSink(stager=stager, recorder=_RecordingRecorder(clip_id=None))
+
+    sink.emit_for_frame(
+        replace(
+            _event(),
+            snapshot_unavailable_reason="deepstream_on_demand_capture_unsupported",
+        ),
+        _trigger_packet(),
+    )
+
+    assert stager.dispositions == [
+        (
+            "event-123",
+            "event-123",
+            "UNAVAILABLE",
+            "deepstream_on_demand_capture_unsupported",
+        )
+    ]
+
+
 def test_worker_relay_surface_delegates_http_to_the_shared_bounded_transport() -> None:
     # Given: the worker surfaces that emit facts and status to the backend.
     repo_root = Path(__file__).resolve().parents[1]

@@ -7,7 +7,7 @@ import threading
 import time
 from collections import deque
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Protocol, final, runtime_checkable
 
 from contracts.observation import BoundingBox
@@ -16,6 +16,7 @@ from worker.pipeline.decision import EventAggregator
 from worker.pipeline.output.evidence_attacher import AlertEvidenceAttacher
 from worker.pipeline.perception import SceneState, build_decision_input, build_frame_observation
 from worker.pipeline.trace.replay_trace_writer import ReplayTraceWriter
+from worker.interfaces.media_plane import OnDemandSnapshotUnsupported
 from worker.runtime.flow.metadata_slot import AcceptanceToken, LatestMetadataSlot
 from worker.types import BusinessEvent, ChannelState, NativeEvidenceTrigger
 from worker.types.metadata import MetadataFrame, SourceBinding
@@ -241,13 +242,26 @@ class NativePolicyPump:
         for position, event in enumerate(events):
             try:
                 snapshot = self._control.snapshot(self.camera_id)
+            except OnDemandSnapshotUnsupported as error:
+                snapshot = None
+                event = replace(
+                    event,
+                    snapshot_unavailable_reason="deepstream_on_demand_capture_unsupported",
+                )
+                LOGGER.warning(
+                    "snapshot unavailable for camera_id=%s; staging the event without it "
+                    "reason=deepstream_on_demand_capture_unsupported: %s",
+                    self.camera_id,
+                    error,
+                )
             except Exception as error:  # noqa: BLE001 - the alert outranks its thumbnail
                 # A snapshot is optional evidence; an admitted safety event is
                 # not. Admission has already consumed the onset, so a failure
                 # here must degrade to "no snapshot", never drop the alert.
                 snapshot = None
                 LOGGER.warning(
-                    "snapshot unavailable for camera_id=%s; staging the event without it: %s",
+                    "snapshot unavailable for camera_id=%s; staging the event without it "
+                    "reason=snapshot_capture_failed: %s",
                     self.camera_id,
                     error,
                 )

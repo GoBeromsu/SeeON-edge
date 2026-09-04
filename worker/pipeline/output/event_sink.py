@@ -175,7 +175,10 @@ class EvidenceEventSink:
                 )
         elif event.snapshot_jpeg is None:
             self._record_snapshot_disposition(
-                edge_event_id, snapshot_id, "UNAVAILABLE", "snapshot_not_provided"
+                edge_event_id,
+                snapshot_id,
+                "UNAVAILABLE",
+                event.snapshot_unavailable_reason or "snapshot_not_provided",
             )
         clip_id = self.recorder.on_event(
             trigger_packet,

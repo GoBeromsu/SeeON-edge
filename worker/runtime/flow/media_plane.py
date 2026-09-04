@@ -54,7 +54,6 @@ class FlowMediaPlane:
         config: FlowMediaPlaneConfig,
         *,
         flow_factory: FlowFactory | None = None,
-        snapshot_encoder: Callable[[str], bytes] | None = None,
         live_frames: LatestFrameStore | None = None,
         worker_boot_id: str | None = None,
     ) -> None:
@@ -62,8 +61,6 @@ class FlowMediaPlane:
         self.metadata = LatestMetadataSlot()
         kwargs: dict[str, object] = {
             "metadata_slot": self.metadata,
-            "snapshot_encoder": snapshot_encoder,
-            "jpeg_publisher": self._publish_jpeg,
             "worker_boot_id": worker_boot_id,
         }
         if flow_factory is not None:
@@ -81,9 +78,7 @@ class FlowMediaPlane:
         self.plane.stop()
 
     def snapshot(self, camera_id: str) -> bytes:
-        jpeg = self.plane.snapshot(camera_id)
-        self._publish_jpeg(camera_id, jpeg)
-        return jpeg
+        return self.plane.snapshot(camera_id)
 
     def bind_live_frames(self, live_frames: LatestFrameStore) -> None:
         if self._live_frames is not None and self._live_frames is not live_frames:
@@ -106,10 +101,6 @@ class FlowMediaPlane:
             # Anything else is a real fault of the preview path and must be
             # visible, but a demand signal must not crash the HTTP server.
             LOGGER.warning("live-frame refresh failed for camera_id=%s: %s", camera_id, error)
-
-    def _publish_jpeg(self, camera_id: str, jpeg: bytes) -> None:
-        if self._live_frames is not None:
-            self._live_frames.publish_jpeg(camera_id, jpeg, frame_index=0)
 
     def add_source(self, camera_id: str, uri: str) -> SourceBinding:
         return self.plane.add_source(camera_id, uri)

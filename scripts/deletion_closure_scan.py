@@ -35,11 +35,13 @@ DELETED_TREES: tuple[str, ...] = (
 )
 
 #: Files that may legitimately name a deleted path: lockfiles nobody edits by
-#: hand, vendored design output, and this scan's own declaration of the trees.
+#: hand, immutable recorded measurements, vendored design output, and this
+#: scan's own declaration of the trees.
 EXCLUDED: tuple[str, ...] = (
     "front/pnpm-lock.yaml",
     "uv.lock",
     "front/design-handoff/",
+    "scripts/qa/pyservicemaker-spike/receipts/",
     "scripts/deletion_closure_scan.py",
     ".gjc/",
 )
@@ -68,11 +70,22 @@ def _is_text(path: Path) -> bool:
 
 
 def _patterns(trees: Sequence[str]) -> list[tuple[str, re.Pattern[str]]]:
+    """Forms a surviving reference can take.
+
+    Three, because a leak hides in whichever one you forgot: the repo-relative
+    path, the dotted module, and the *relative* path a file inside the tree's
+    parent would use - a Dockerfile under `worker/` naming `native/deepstream`,
+    or a CMake file naming `../native`. The relative form is built from the last
+    two segments rather than the bare leaf, because a leaf like `decode` or
+    `bus` appears everywhere in ordinary prose and would drown the report.
+    """
     patterns: list[tuple[str, re.Pattern[str]]] = []
     for tree in trees:
-        path_form = re.escape(tree)
-        module_form = re.escape(tree.removesuffix(".py").replace("/", "."))
-        patterns.append((tree, re.compile(rf"{path_form}|{module_form}")))
+        forms = {re.escape(tree), re.escape(tree.removesuffix(".py").replace("/", "."))}
+        segments = tree.split("/")
+        if len(segments) > 2:
+            forms.add(re.escape("/".join(segments[-2:])))
+        patterns.append((tree, re.compile("|".join(sorted(forms)))))
     return patterns
 
 

@@ -126,3 +126,7 @@ class SourceRosterFixed(RuntimeError):
 
 class SnapshotUnavailable(RuntimeError):
     """No bounded JPEG is currently available for this source."""
+
+
+class OnDemandSnapshotUnsupported(SnapshotUnavailable):
+    """The selected media binding cannot extract an OSD frame on demand."""

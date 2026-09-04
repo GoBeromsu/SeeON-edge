@@ -17,6 +17,7 @@ class BusinessEvent:
     bed_id: int | None = None
     audit: Mapping[str, object] | None = None
     snapshot_jpeg: bytes | None = None
+    snapshot_unavailable_reason: str | None = None
 
 
 __all__ = ["BusinessEvent"]

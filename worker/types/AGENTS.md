@@ -77,7 +77,6 @@ tuples. A detector that needs pixels is a design error. Extract the number in
 - `tests/test_worker_types.py`
 - `tests/test_frame_lease.py`
 - `tests/test_perception_frame_v1.py`
-- `tests/test_nvidia_native_policy_pump.py` (`NativeEvidenceTrigger` handoff)
 - `tests/test_import_dependency_ladder.py`
 - Boundary: `uv run --group lint lint-imports`
 

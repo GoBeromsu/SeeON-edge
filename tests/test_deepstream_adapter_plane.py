@@ -25,6 +25,7 @@ from worker.adapters.deepstream.service_maker import (
 from worker.interfaces.media_plane import (
     EarlyStopUnsupported,
     MediaPlane,
+    OnDemandSnapshotUnsupported,
     RecordingInfo,
     RecordingRefused,
     SnapshotUnavailable,
@@ -69,6 +70,7 @@ class _Flow:
     def __init__(self) -> None:
         self.built = False
         self.ran = False
+        self.render_calls: list[dict[str, object]] = []
 
     def batch_capture(self, uris: list[str], **kwargs: object) -> _Flow:
         del uris, kwargs
@@ -88,7 +90,7 @@ class _Flow:
         return self
 
     def render(self, **kwargs: object) -> _Flow:
-        del kwargs
+        self.render_calls.append(kwargs)
         return self
 
     def __call__(self) -> None:
@@ -246,41 +248,21 @@ def test_smart_record_owns_no_encode_sessions() -> None:
     assert plane.status().nvenc_sessions_active == 0
 
 
-def test_latest_osd_jpeg_slot_serves_snapshot_without_an_encoder() -> None:
+def test_discard_sink_reports_that_the_binding_cannot_capture_an_osd_snapshot_on_demand() -> None:
     plane, _ = _plane()
     plane.add_source("camera", "rtsp://one")
-    plane.publish_jpeg("camera", b"\xff\xd8osd\xff\xd9")
-    assert plane.snapshot("camera") == b"\xff\xd8osd\xff\xd9"
-
-
-def test_snapshot_encodes_once_and_publishes_the_latest_osd_jpeg() -> None:
-    calls: list[str] = []
-    published: list[tuple[str, bytes]] = []
-    config = DeepStreamMediaPlaneConfig("infer", "tracker", "lib", Path("/tmp"), 5, 640, 360)
-    plane = DeepStreamMediaPlane(
-        config,
-        metadata_slot=LatestMetadataSlot(),
-        flow_factory=lambda _: _FlowHandle(
-            flow=_Flow(),
-            pipeline=_Pipeline(),
-            record_config=lambda **kwargs: kwargs,
-            render_mode_discard="discard",
-            make_probe=lambda name, probe: (name, probe),
-        ),
-        snapshot_encoder=lambda camera_id: calls.append(camera_id) or b"\xff\xd8osd\xff\xd9",
-        jpeg_publisher=lambda camera_id, jpeg: published.append((camera_id, jpeg)),
-    )
-    plane.add_source("camera", "rtsp://one")
-    assert plane.snapshot("camera") == b"\xff\xd8osd\xff\xd9"
-    assert calls == ["camera"]
-    assert published == [("camera", b"\xff\xd8osd\xff\xd9")]
-
-
-def test_snapshot_without_a_frame_is_a_typed_unavailable() -> None:
-    plane, _ = _plane()
-    plane.add_source("camera", "rtsp://one")
-    with pytest.raises(SnapshotUnavailable, match="has not produced"):
+    with pytest.raises(OnDemandSnapshotUnsupported, match="terminal BufferRetriever"):
         plane.snapshot("camera")
+
+
+def test_default_steady_state_builds_only_the_discard_sink() -> None:
+    plane, _ = _plane()
+    plane.add_source("camera", "rtsp://one")
+    plane._build_flow()  # noqa: SLF001 - assert the fake Flow's terminal sink
+
+    flow = plane._flow  # noqa: SLF001 - the configured graph is adapter behaviour
+    assert isinstance(flow, _Flow)
+    assert flow.render_calls == [{"mode": "discard", "enable_osd": False, "sync": False}]
 
 
 def test_a_source_failure_rotates_the_stream_identity_and_keeps_the_camera_id() -> None:
