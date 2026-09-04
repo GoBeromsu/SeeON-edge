@@ -57,6 +57,13 @@ class _Flow:
         return self
 
 
+def _armed(plane: DeepStreamMediaPlane) -> DeepStreamMediaPlane:
+    """The retriever is demand-driven, so a preview must be asked for first."""
+    for camera_id in plane.camera_ids_for_preview():
+        plane.request_preview(camera_id)
+    return plane
+
+
 def _plane(*, stride: int = 1) -> tuple[DeepStreamMediaPlane, _Flow]:
     flow = _Flow()
     plane = DeepStreamMediaPlane(
@@ -108,7 +115,7 @@ def _pixels(value: int) -> np.ndarray:
 def test_consumed_batched_buffer_publishes_a_jpeg_for_its_camera() -> None:
     plane, flow = _plane()
     assert flow.retriever is not None
-    assert flow.retriever.consume(_Buffer(_pixels(10), _pixels(20))) == 0
+    assert _armed(plane) and flow.retriever.consume(_Buffer(_pixels(10), _pixels(20))) == 0
     first = plane.snapshot("camera-a")
     second = plane.snapshot("camera-b")
     assert first.startswith(b"\xff\xd8")
@@ -120,30 +127,30 @@ def test_retriever_honours_per_camera_stride() -> None:
     plane, flow = _plane(stride=3)
     assert flow.retriever is not None
     for _ in range(2):
-        flow.retriever.consume(_Buffer(_pixels(1)))
+        _armed(plane) and flow.retriever.consume(_Buffer(_pixels(1)))
     assert "camera-a" not in plane._latest_jpegs  # noqa: SLF001
-    flow.retriever.consume(_Buffer(_pixels(1)))
+    _armed(plane) and flow.retriever.consume(_Buffer(_pixels(1)))
     assert plane.snapshot("camera-a").startswith(b"\xff\xd8")
 
 
 def test_encode_failure_is_logged_and_does_not_escape(monkeypatch, caplog) -> None:
-    _, flow = _plane()
+    plane, flow = _plane()
     assert flow.retriever is not None
     monkeypatch.setattr(
         "worker.adapters.deepstream.service_maker._encode_preview_jpeg",
         lambda pixels: (_ for _ in ()).throw(ValueError("bad pixels")),
     )
     with caplog.at_level(logging.WARNING):
-        assert flow.retriever.consume(_Buffer(_pixels(1))) == 0
+        assert _armed(plane) and flow.retriever.consume(_Buffer(_pixels(1))) == 0
     assert "dropping DeepStream preview frame" in caplog.text
 
 
 def test_latest_slot_replaces_the_previous_frame() -> None:
     plane, flow = _plane()
     assert flow.retriever is not None
-    flow.retriever.consume(_Buffer(_pixels(1)))
+    _armed(plane) and flow.retriever.consume(_Buffer(_pixels(1)))
     first = plane.snapshot("camera-a")
-    flow.retriever.consume(_Buffer(_pixels(200)))
+    _armed(plane) and flow.retriever.consume(_Buffer(_pixels(200)))
     assert plane.snapshot("camera-a") != first
 
 
@@ -154,7 +161,7 @@ def test_host_tensor_is_copied_without_cudart(monkeypatch) -> None:
         "worker.adapters.deepstream.service_maker.host_array_from_tensor",
         lambda tensor: host_array_from_tensor(tensor, cudart=_NoCuda()),
     )
-    flow.retriever.consume(_Buffer(_HostTensor(_pixels(1))))
+    _armed(plane) and flow.retriever.consume(_Buffer(_HostTensor(_pixels(1))))
     assert plane.snapshot("camera-a").startswith(b"\xff\xd8")
 
 

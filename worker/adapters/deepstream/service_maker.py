@@ -129,6 +129,15 @@ class _JpegRetriever:
     """Best-effort preview encoder invoked from Flow's batched-buffer thread."""
 
     def __init__(self, plane: DeepStreamMediaPlane, stride: int) -> None:
+        """Encode only what a viewer asked for.
+
+        ``retrieve`` is the Flow's terminal sink, so this callback runs on the
+        pipeline thread and its cost is the pipeline's cost: copying and
+        encoding every stride-th frame collapsed throughput from 30 fps to
+        roughly 2 fps and starved the decision layer of frames. The live view
+        is demand-driven, so nothing is copied until a snapshot is requested,
+        and then only for the camera that was asked for.
+        """
         if stride < 1:
             raise ValueError("preview_jpeg_stride must be at least one")
         self._plane = plane
@@ -140,6 +149,8 @@ class _JpegRetriever:
             for batch_id in range(int(buffer.batch_size)):
                 camera_id = self._plane.camera_id_for_pad(batch_id)
                 if camera_id is None:
+                    continue
+                if not self._plane.preview_wanted(camera_id):
                     continue
                 count = self._frames.get(camera_id, 0) + 1
                 self._frames[camera_id] = count
@@ -221,6 +232,7 @@ class DeepStreamMediaPlane(MediaPlane):
         self._live: set[str] = set()
         self._publish_sequence: dict[str, int] = {}
         self._unmapped_pads: set[int] = set()
+        self._preview_requested: set[str] = set()
         self._recordings: dict[str, _Recording] = {}
         self._active_encode_sessions: set[int] = set()
         self._started = False
@@ -262,6 +274,20 @@ class DeepStreamMediaPlane(MediaPlane):
             self._started = False
             if self._flow_thread is not None:
                 self._flow_thread.join(timeout=10.0)
+
+    def camera_ids_for_preview(self) -> tuple[str, ...]:
+        """Cameras this plane can encode a preview for."""
+        return self._sources.camera_ids()
+
+    def request_preview(self, camera_id: str) -> None:
+        """Arm one preview encode for this camera on the next batched buffer."""
+        with self._jpeg_lock:
+            self._preview_requested.add(camera_id)
+
+    def preview_wanted(self, camera_id: str) -> bool:
+        """Whether a viewer has asked for this camera since the last encode."""
+        with self._jpeg_lock:
+            return camera_id in self._preview_requested
 
     def camera_id_for_pad(self, pad_index: int) -> str | None:
         """Which camera a batch/pad index belongs to, or None when unmapped."""
@@ -337,6 +363,9 @@ class DeepStreamMediaPlane(MediaPlane):
     def snapshot(self, camera_id: str) -> bytes:
         if camera_id not in self._sources.camera_ids():
             raise SnapshotUnavailable(f"unknown source has no OSD snapshot: {camera_id}")
+        # Arm the next batched buffer to produce a frame for this camera; the
+        # pipeline thread does no preview work until something asks.
+        self.request_preview(camera_id)
         if self._snapshot_encoder is not None:
             # The encoder is a bounded, non-probe seam.  Invoke it once for this
             # request and retain the resulting OSD JPEG for other consumers.
@@ -348,9 +377,11 @@ class DeepStreamMediaPlane(MediaPlane):
         return jpeg
 
     def publish_jpeg(self, camera_id: str, jpeg: bytes) -> None:
-        """Accept one encoded OSD frame from the non-critical-path JPEG branch."""
+        """Accept one encoded OSD frame and satisfy the pending preview request."""
         if camera_id not in self._sources.camera_ids():
             raise SnapshotUnavailable(f"unknown source has no OSD snapshot: {camera_id}")
+        with self._jpeg_lock:
+            self._preview_requested.discard(camera_id)
         if not jpeg:
             raise SnapshotUnavailable(f"source produced an empty OSD snapshot: {camera_id}")
         if len(jpeg) > _MAX_PREVIEW_JPEG_BYTES:
