@@ -35,8 +35,12 @@ def verify_engine_identity(
     engine_path: Path,
     identity_path: Path,
     files: Mapping[str, Path],
-) -> None:
-    """Verify all identity-file digests without ever building at runtime."""
+) -> dict[str, str]:
+    """Verify all identity-file digests without ever building at runtime.
+
+    Returns the verified identity so the composition root can name the
+    engine's digest as the pose component's artifact identity.
+    """
     if not engine_path.is_file():
         raise EngineIdentityError(
             f"Flow engine is absent: {engine_path}; run edge-engine-build before activation"
@@ -62,6 +66,7 @@ def verify_engine_identity(
     image_digest = identity.get("image_digest")
     if not isinstance(image_digest, str) or not image_digest:
         raise EngineIdentityError("Flow engine identity lacks image_digest")
+    return {key: str(value) for key, value in identity.items()}
 
 
 def _sha256(path: Path) -> str:

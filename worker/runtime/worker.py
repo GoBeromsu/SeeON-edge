@@ -1600,7 +1600,7 @@ class WorkerRuntime:
         missing = [key for key in required if not self._env.get(key)]
         if missing:
             raise RuntimeError(f"flow profile wiring is missing: {', '.join(missing)}")
-        verify_engine_identity(
+        self._flow_engine_identity = verify_engine_identity(
             Path(self._env["ML_WORKER_FLOW_ENGINE_PATH"]),
             Path(self._env["ML_WORKER_FLOW_ENGINE_IDENTITY_PATH"]),
             {
@@ -1639,29 +1639,56 @@ class WorkerRuntime:
         fall_model = self._create_fall_model("cpu", require_onnxruntime=require_onnxruntime)
         selected = self.config.models.selected
         selection = None if selected is None else selected.desired.selection
-        graph = SharedComponentGraph(
-            MappingProxyType({"fall-classifier": fall_model}),
-            (),
-            (
+        flags = {"person-box-source": self.config.models.box_source == "person"}
+        bindings = self._module_registry.shared_bindings(self._module_versions, flags=flags)
+        components: dict[str, object] = {}
+        identities: list[SharedComponentIdentity] = []
+        for binding in bindings:
+            if binding.component_id == "fall-classifier":
+                digest = (
+                    "flow-onnxruntime"
+                    if selection is None
+                    else selection.model_publication.bundle_sha256
+                )
+                preprocessing = (
+                    "pose-bbox56.v1" if selection is None else selection.input_observation_schema
+                )
+                components[binding.component_id] = fall_model
+                identities.append(
+                    SharedComponentIdentity(
+                        binding.component_id, digest, "cpu-policy", "cpu", preprocessing
+                    )
+                )
+                continue
+            # The media plane owns every perception component: pose is the
+            # verified TensorRT engine, bed is the ONNX Runtime segmenter.
+            # Their identities are the artifacts the boot verified, so "which
+            # model ran" is answerable from the runtime manifest.
+            digest = self._flow_perception_digest(binding.component_id, binding.artifact_digest)
+            preprocessing = binding.preprocessing_identity
+            if not digest or not preprocessing:
+                raise RuntimeError(f"flow component {binding.component_id!r} has no identity")
+            components[binding.component_id] = _NativeEngineComponent(digest, preprocessing)
+            identities.append(
                 SharedComponentIdentity(
-                    "fall-classifier",
-                    (
-                        "flow-onnxruntime"
-                        if selection is None
-                        else selection.model_publication.bundle_sha256
-                    ),
-                    "cpu-policy",
-                    "cpu",
-                    ("pose-bbox56.v1" if selection is None else selection.input_observation_schema),
-                ),
-            ),
-            None,
-        )
+                    binding.component_id,
+                    digest,
+                    "deepstream-flow" if binding.component_id == "pose" else "onnxruntime-cpu",
+                    boot.device if binding.component_id == "pose" else "cpu",
+                    preprocessing,
+                )
+            )
+        graph = SharedComponentGraph(MappingProxyType(components), (), tuple(identities), None)
         self._shared_graph = graph
         self.fall_model = fall_model
         self.shared_yolo = None
         self._warmed_component_ids = frozenset(graph.components)
         return graph
+
+    def _flow_perception_digest(self, component_id: str, declared: str | None) -> str | None:
+        if component_id == "pose" and self._flow_engine_identity is not None:
+            return self._flow_engine_identity["engine_sha256"]
+        return declared
 
     def _forward_native_preview_demand(
         self,
