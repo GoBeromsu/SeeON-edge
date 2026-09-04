@@ -366,3 +366,28 @@ def test_a_frame_without_pose_tensor_is_counted_and_named_once(
     ]
     assert len(warnings) == 1
     assert "camera" in warnings[0].getMessage()
+
+
+def test_the_probe_stops_converting_once_the_plane_is_stopping(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Teardown empties the source table while the SDK still delivers buffers.
+
+    A 13-camera teardown logged 'dropping frames from unmapped mux pad N; known
+    pads are []' and then core-dumped, so the probe must go quiet the moment
+    stopping begins rather than convert against a table being emptied.
+    """
+    from types import SimpleNamespace
+
+    plane, _ = _plane()
+    plane.add_source("camera", "rtsp://one")
+    plane.start()
+    plane.stop()
+
+    with caplog.at_level(logging.WARNING):
+        plane.publish_frame(
+            SimpleNamespace(pad_index=0, buffer_pts=1, tensor_items=[], object_items=[])
+        )
+
+    assert plane.published_frames("camera") == 0
+    assert not [record for record in caplog.records if "unmapped mux pad" in record.getMessage()]

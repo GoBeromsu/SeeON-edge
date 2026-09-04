@@ -233,6 +233,7 @@ class DeepStreamMediaPlane(MediaPlane):
         self._frames_without_pose_tensor = 0
         self._objects_observed = 0
         self._matched_tracks = 0
+        self._accepting = True
         self._cameras_warned_without_pose_tensor: set[str] = set()
         self._commands: queue.Queue[
             tuple[Callable[[], Any], threading.Event | None, list[Any] | None]
@@ -282,10 +283,20 @@ class DeepStreamMediaPlane(MediaPlane):
 
     def stop(self) -> None:
         if self._started:
+            # Disarm the probe first. Teardown removes sources from the table
+            # while the SDK is still delivering buffers, and a probe that keeps
+            # converting against an emptied table both floods the log with
+            # unmapped-pad warnings and races the SDK's own stream removal.
+            self._accepting = False
             self._pipeline.stop()
             self._started = False
             if self._flow_thread is not None:
                 self._flow_thread.join(timeout=10.0)
+                if self._flow_thread.is_alive():
+                    LOGGER.error(
+                        "the DeepStream Flow did not stop within 10s; "
+                        "the pipeline may still be delivering buffers"
+                    )
 
     def camera_ids_for_preview(self) -> tuple[str, ...]:
         """Cameras this plane can encode a preview for."""
@@ -543,6 +554,10 @@ class DeepStreamMediaPlane(MediaPlane):
 
     def publish_frame(self, frame_meta: Any) -> None:
         """Probe entry: convert one accepted frame and publish it to the slot."""
+        if not self._accepting:
+            # Stopping: the source table is being emptied out from under this
+            # callback, so there is nothing meaningful left to convert.
+            return
         pad_index = int(frame_meta.pad_index)
         camera_id = self._sources.camera_id_for_pad(pad_index)
         if camera_id is None:
