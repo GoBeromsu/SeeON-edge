@@ -10,7 +10,9 @@ import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Final, Protocol
+
+import numpy as np
 
 from worker.adapters.deepstream.metadata import convert_frame
 from worker.adapters.deepstream.sources import SourceTable
@@ -28,6 +30,8 @@ from worker.interfaces.media_plane import (
 from worker.native.deepstream.metadata import LatestMetadataSlot, SourceBinding
 
 _MAX_PREVIEW_JPEG_BYTES = 2 * 1024 * 1024
+#: A frame whose inference produced no tensor metadata still has real tracks.
+_EMPTY_POSE_ROWS: Final = np.zeros((0, 57), dtype=np.float32)
 LOGGER = logging.getLogger(__name__)
 
 
@@ -478,7 +482,13 @@ class DeepStreamMediaPlane(MediaPlane):
             rows = rows_from_tensor(layer)
             break
         if rows is None:
-            return
+            # nvinfer attaches tensor metadata per inferred frame; a frame can
+            # arrive without it (skipped inference interval, exhausted tensor
+            # pool). The tracked objects are still real, so publish the frame
+            # with no pose rows - every track is then explicitly unmatched -
+            # rather than dropping it, which would hide the frame from the
+            # decision layer and make the camera look silent.
+            rows = _EMPTY_POSE_ROWS
         sequence = self._publish_sequence.get(camera_id, 0) + 1
         self._publish_sequence[camera_id] = sequence
         binding = self._sources.binding(camera_id)

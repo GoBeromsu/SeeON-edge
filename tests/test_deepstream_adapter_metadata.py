@@ -91,3 +91,54 @@ def test_slot_rejects_stale_source_generation() -> None:
         boot_id="boot",
     )
     assert not slot.publish(stale_frame)
+
+
+def test_a_frame_without_pose_tensors_is_published_with_every_track_unmatched() -> None:
+    """nvinfer can deliver a frame with no tensor metadata attached.
+
+    The tracked objects are still real, so dropping the frame would hide it
+    from the decision layer and make a streaming camera look silent. It must be
+    published with no pose rows, leaving every track explicitly unmatched.
+    """
+    from pathlib import Path
+    from types import SimpleNamespace
+
+    from worker.adapters.deepstream.service_maker import (
+        DeepStreamMediaPlane,
+        DeepStreamMediaPlaneConfig,
+        _FlowHandle,
+    )
+    from worker.native.deepstream.metadata import LatestMetadataSlot
+
+    config = DeepStreamMediaPlaneConfig("infer", "tracker", "lib", Path("/tmp"), 5, 640, 360)
+    plane = DeepStreamMediaPlane(
+        config,
+        metadata_slot=LatestMetadataSlot(),
+        flow_factory=lambda _: _FlowHandle(
+            flow=object(),
+            pipeline=object(),
+            record_config=lambda **kwargs: kwargs,
+            render_mode_discard="discard",
+            make_probe=lambda name, probe: (name, probe),
+        ),
+        worker_boot_id="boot",
+        child_instance_id="child",
+    )
+    plane.add_source("camera", "rtsp://one")
+    frame = SimpleNamespace(
+        pad_index=0,
+        buffer_pts=1_000,
+        tensor_items=[],
+        object_items=[
+            SimpleNamespace(
+                object_id=7,
+                confidence=0.9,
+                rect_params=SimpleNamespace(left=10.0, top=10.0, width=20.0, height=40.0),
+            )
+        ],
+    )
+
+    plane.publish_frame(frame)
+
+    assert plane.published_frames("camera") == 1, "the frame must count as published"
+    assert "camera" in plane._live  # noqa: SLF001 - the camera is demonstrably alive
