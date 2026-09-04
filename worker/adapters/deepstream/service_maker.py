@@ -49,6 +49,9 @@ class DeepStreamMediaPlaneConfig:
     frame_width: int
     frame_height: int
     preview_jpeg_stride: int = 10
+    #: The preview retriever costs the pipeline its throughput (see _build_flow);
+    #: it stays off until a non-throttling frame path exists.
+    preview_retriever_enabled: bool = False
     transform_id: str = "deepstream-flow.v1"
     pipeline_name: str = "deepstream-media-plane"
 
@@ -472,7 +475,14 @@ class DeepStreamMediaPlane(MediaPlane):
             )
         )
         flow.attach(what=self._handle.make_probe("media-plane-probe", self._probe))
-        if self._handle.make_retriever is None:
+        # `render(DISCARD)` is the terminal sink because it is the only one that
+        # keeps up: measured in this image, a `retrieve()` sink delivers roughly
+        # 2 batched buffers/s where `render` delivers 30, which starves the
+        # decision layer of frames. A preview branch must never be paid for with
+        # the safety pipeline's throughput, so the JPEG retriever is opt-in and
+        # off by default (ML_WORKER_FLOW_PREVIEW_RETRIEVER=1) until a sink that
+        # does not throttle the graph is wired.
+        if self._handle.make_retriever is None or not self._config.preview_retriever_enabled:
             flow.render(mode=self._handle.render_mode_discard)
         else:
             # `retrieve` IS the terminal sink: it pulls each batched buffer into

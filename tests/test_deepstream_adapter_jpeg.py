@@ -65,9 +65,12 @@ def _armed(plane: DeepStreamMediaPlane) -> DeepStreamMediaPlane:
 
 
 def _plane(*, stride: int = 1) -> tuple[DeepStreamMediaPlane, _Flow]:
+    """The preview retriever is opt-in in production; these tests enable it."""
     flow = _Flow()
     plane = DeepStreamMediaPlane(
-        DeepStreamMediaPlaneConfig("infer", "tracker", "lib", Path("/tmp"), 5, 8, 6, stride),
+        DeepStreamMediaPlaneConfig(
+            "infer", "tracker", "lib", Path("/tmp"), 5, 8, 6, stride, preview_retriever_enabled=True
+        ),
         metadata_slot=LatestMetadataSlot(),
         flow_factory=lambda _: _FlowHandle(
             flow=flow,
