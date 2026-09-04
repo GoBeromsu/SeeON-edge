@@ -150,24 +150,6 @@ def _element_strides(dl_tensor: Any, shape: tuple[int, ...]) -> tuple[int, ...]:
     return tuple(int(dl_tensor.strides[index]) for index in range(dl_tensor.ndim))
 
 
-def _padded_shape(shape: tuple[int, ...], strides: tuple[int, ...]) -> tuple[int, ...]:
-    """The contiguous extent that actually holds the tensor, padding included.
-
-    DeepStream frame surfaces pad the row: a ``(360, 640, 3)`` uint8 frame
-    reports strides ``(2048, 3, 1)`` for 1920 used bytes per row. Reading only
-    the logical extent would walk off the rows, so the copy spans the padded
-    width and the caller slices the logical one back out.
-    """
-    if len(shape) < 2:
-        return shape
-    row_elements = shape[-1] * strides[-1]
-    if strides[-2] <= row_elements:
-        return shape
-    padded = list(shape)
-    padded[-1] = strides[-2] // strides[-1]
-    return tuple(padded)
-
-
 def rows_from_tensor(
     tensor: Any,
     *,

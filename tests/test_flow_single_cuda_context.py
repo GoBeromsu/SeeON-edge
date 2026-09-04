@@ -51,14 +51,14 @@ def _current_context(driver: ctypes.CDLL) -> int | None:
     return context.value
 
 
-def test_device_to_host_copy_uses_the_primary_context_and_creates_no_other() -> None:
+def test_the_host_copy_path_makes_no_cuda_context_current() -> None:
     from worker.adapters.deepstream.tensor_rows import host_array_from_tensor
 
     driver = _driver()
     assert _current_context(driver) is None, "Python must hold no CUDA context before the copy"
 
-    # The host seam: a NumPy input never touches CUDA, so the copy path itself
-    # cannot be what introduces a context.
+    # A NumPy input takes the host seam and never touches CUDA; the point here
+    # is that importing and exercising the copy module introduces no context.
     copied = host_array_from_tensor(np.zeros((2, 57), dtype=np.float32))
     assert copied.shape == (2, 57)
 

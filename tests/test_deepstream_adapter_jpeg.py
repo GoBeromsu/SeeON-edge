@@ -156,3 +156,83 @@ def test_host_tensor_is_copied_without_cudart(monkeypatch) -> None:
     )
     flow.retriever.consume(_Buffer(_HostTensor(_pixels(1))))
     assert plane.snapshot("camera-a").startswith(b"\xff\xd8")
+
+
+def _capsule_for(buffer: object, shape: tuple[int, ...], strides: tuple[int, ...]) -> object:
+    """Build a DLPack capsule over an existing host buffer, as a vendor tensor would."""
+    import ctypes
+
+    import numpy as np
+
+    from worker.adapters.deepstream import tensor_rows
+
+    array = buffer
+    assert isinstance(array, np.ndarray)
+    ndim = len(shape)
+    shape_array = (ctypes.c_int64 * ndim)(*shape)
+    stride_array = (ctypes.c_int64 * ndim)(*strides)
+    managed = tensor_rows._DLManagedTensor()  # noqa: SLF001 - building a vendor-shaped capsule
+    managed.dl_tensor.data = ctypes.c_void_p(array.ctypes.data)
+    managed.dl_tensor.device = tensor_rows._DLDevice(2, 0)  # noqa: SLF001
+    managed.dl_tensor.ndim = ndim
+    managed.dl_tensor.dtype = tensor_rows._DLDataType(1, 8, 1)  # noqa: SLF001 - uint8
+    managed.dl_tensor.shape = shape_array
+    managed.dl_tensor.strides = stride_array
+    managed.dl_tensor.byte_offset = 0
+    _CAPSULE_KEEPALIVE.extend([managed, shape_array, stride_array, array])
+    factory = ctypes.pythonapi.PyCapsule_New
+    factory.restype = ctypes.py_object
+    factory.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_void_p]
+    return factory(ctypes.byref(managed), b"dltensor", None)
+
+
+#: DLPack capsules borrow memory; the test keeps every backing object alive.
+_CAPSULE_KEEPALIVE: list[object] = []
+
+
+def test_a_row_padded_device_tensor_is_copied_without_its_padding() -> None:
+    """The defect this guards: a DeepStream frame surface is row-padded.
+
+    A 640x360 RGB frame reports a 2048-element row stride for 1920 used
+    elements, so a copy sized to the logical extent walks off the rows and the
+    image shears. The copy must span the padded extent and slice each logical
+    row back out.
+    """
+    import ctypes
+
+    import numpy as np
+
+    from worker.adapters.deepstream.tensor_rows import host_array_from_tensor
+
+    height, width, channels, row_stride = 4, 5, 3, 20
+    used = width * channels
+    device = np.zeros(height * row_stride, dtype=np.uint8)
+    for row in range(height):
+        device[row * row_stride : row * row_stride + used] = row + 1
+        device[row * row_stride + used :][: row_stride - used] = 0xEE  # padding
+
+    class _PaddedTensor:
+        """A device-resident DLPack tensor whose rows carry trailing padding."""
+
+        def __dlpack_device__(self) -> tuple[int, int]:
+            return (2, 0)  # kDLCUDA
+
+        def __dlpack__(self, stream: object = None) -> object:
+            del stream
+            return _capsule_for(device, (height, width, channels), (row_stride, channels, 1))
+
+    copies: list[int] = []
+
+    class _FakeCudart:
+        def cudaMemcpy(self, dst: int, src: int, count: int, kind: int) -> int:
+            copies.append(count)
+            ctypes.memmove(dst, src, count)
+            return 0
+
+    copied = host_array_from_tensor(_PaddedTensor(), cudart=_FakeCudart())
+
+    assert copied.shape == (height, width, channels)
+    assert copies == [height * row_stride], "the copy must span the padded extent"
+    for row in range(height):
+        assert (copied[row] == row + 1).all(), "each row must be its own logical data"
+    assert 0xEE not in copied, "padding must not survive into the image"

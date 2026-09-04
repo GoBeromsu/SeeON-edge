@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -17,6 +18,8 @@ from worker.interfaces.media_plane import MediaPlane, RecordingInfo, SnapshotUna
 from worker.native.deepstream.metadata import LatestMetadataSlot, SourceBinding
 from worker.pipeline.output.evidence.smart_record_actor import ClipSealed, SmartRecordActor
 from worker.pipeline.output.live_view import LatestFrameStore
+
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,10 +95,14 @@ class FlowMediaPlane:
         # This callback runs on an HTTP thread, never on Flow's probe thread.
         try:
             self.snapshot(camera_id)
-        except (SnapshotUnavailable, RuntimeError, OSError):
-            # The HTTP layer preserves its typed unavailable response when no
-            # frame exists yet; a demand signal must not crash its server.
+        except SnapshotUnavailable:
+            # Expected before the first frame; the HTTP layer answers with its
+            # own typed unavailable response.
             return
+        except (RuntimeError, OSError) as error:
+            # Anything else is a real fault of the preview path and must be
+            # visible, but a demand signal must not crash the HTTP server.
+            LOGGER.warning("live-frame refresh failed for camera_id=%s: %s", camera_id, error)
 
     def _publish_jpeg(self, camera_id: str, jpeg: bytes) -> None:
         if self._live_frames is not None:

@@ -66,11 +66,10 @@ class _FlowHandle:
     render_mode_discard: Any
     make_probe: Callable[[str, _Probe], Any]
     make_retriever: Callable[[_JpegRetriever], Any] | None = None
-    color_format_rgba: Any | None = None
 
 
 def _default_flow_factory(config: DeepStreamMediaPlaneConfig) -> _FlowHandle:
-    from pyservicemaker import ColorFormat, Flow, Pipeline, Probe, RecordConfig, RenderMode
+    from pyservicemaker import Flow, Pipeline, Probe, RecordConfig, RenderMode
 
     pipeline = Pipeline(config.pipeline_name)
     return _FlowHandle(
@@ -80,7 +79,6 @@ def _default_flow_factory(config: DeepStreamMediaPlaneConfig) -> _FlowHandle:
         render_mode_discard=RenderMode.DISCARD,
         make_probe=lambda name, probe: Probe(name, _batch_operator(probe)),
         make_retriever=_buffer_retriever,
-        color_format_rgba=ColorFormat.RGBA,
     )
 
 
@@ -126,12 +124,11 @@ def _buffer_retriever(retriever: _JpegRetriever) -> Any:
 class _JpegRetriever:
     """Best-effort preview encoder invoked from Flow's batched-buffer thread."""
 
-    def __init__(self, plane: DeepStreamMediaPlane, stride: int, color_format_rgba: Any) -> None:
+    def __init__(self, plane: DeepStreamMediaPlane, stride: int) -> None:
         if stride < 1:
             raise ValueError("preview_jpeg_stride must be at least one")
         self._plane = plane
         self._stride = stride
-        self._color_format_rgba = color_format_rgba
         self._frames: dict[str, int] = {}
 
     def consume(self, buffer: Any) -> int:
@@ -224,9 +221,7 @@ class DeepStreamMediaPlane(MediaPlane):
         self._flow_error: Exception | None = None
         self._flow_finished = threading.Event()
         self._probe = _Probe(self)
-        self._jpeg_retriever = _JpegRetriever(
-            self, config.preview_jpeg_stride, handle.color_format_rgba
-        )
+        self._jpeg_retriever = _JpegRetriever(self, config.preview_jpeg_stride)
 
     def start(self) -> None:
         """Build the Flow from the registered roster and run it on its own thread.

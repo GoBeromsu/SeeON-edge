@@ -450,7 +450,7 @@ def test_snapshot_failure_stages_the_alert_without_one_instead_of_dropping_it(
         _binding(generation=3, epoch=4),
         NativePolicyContext(
             LatestMetadataSlot(),
-            _FailingSnapshotControl(),  # pyright: ignore[reportArgumentType]
+            _FailingSnapshotControl(),
             SceneState("camera-a"),
             EventAggregator((decider,), IncidentManager(0.0, tmp_path / "events.jsonl")),
             sink,

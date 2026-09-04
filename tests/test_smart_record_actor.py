@@ -50,20 +50,20 @@ def _actor(plane: FakePlane, now: list[float], sink: list[object]) -> SmartRecor
         media_plane=plane,
         clock=lambda: now[0],
         sink=sink.append,
-        lookback_sec=10,
+        lookback_sec=15,
         clip_id_factory=lambda: f"clip-{len(plane.starts)}",
     )
 
 
-def test_one_alert_starts_one_sixty_second_window() -> None:
-    """AC3/AC6: a clip is the 15 s lookback plus the 45 s forward window."""
+def test_one_alert_starts_one_window_of_the_configured_lookback_and_duration() -> None:
+    """The actor asks the plane for exactly the window it was configured with."""
     plane, now, sink = FakePlane(), [0.0], []
     actor = _actor(plane, now, sink)
 
     actor.admit("event-1", "2026-01-01T00:00:00Z")
     actor.tick()
 
-    assert plane.starts == [(10, 45)]
+    assert plane.starts == [(15, 45)]
     assert plane.stops == []
 
 
@@ -78,7 +78,7 @@ def test_a_second_alert_inside_the_window_is_absorbed_into_the_same_clip() -> No
     actor.admit("late", "2026-01-01T00:00:20Z")
     actor.tick()
 
-    assert plane.starts == [(10, 45)]
+    assert plane.starts == [(15, 45)]
     assert actor.smart_record_extended_total == 1
 
 
@@ -113,7 +113,7 @@ def test_a_refused_start_is_counted_and_retried_rather_than_dropped() -> None:
 
     now[0] = 1.0
     actor.tick()
-    assert plane.starts == [(10, 45)]
+    assert plane.starts == [(15, 45)]
 
 
 def test_a_duplicate_seal_is_surfaced_to_the_sink_not_swallowed() -> None:
@@ -141,6 +141,6 @@ def test_an_alert_after_the_clip_sealed_opens_the_next_one() -> None:
     actor.admit("second", "2026-01-01T00:01:01Z")
     actor.tick()
 
-    assert plane.starts == [(10, 45), (10, 45)]
+    assert plane.starts == [(15, 45), (15, 45)]
     clips = [item for item in sink if isinstance(item, ClipSealed)]
     assert [contributor.event_ref for contributor in clips[0].contributors] == ["first"]
