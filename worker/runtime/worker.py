@@ -995,6 +995,20 @@ class WorkerRuntime:
         self._native_policy_pumps: tuple[NativePolicyPump, ...] = ()
         self._selected_bundle_admission: ModelBundleProof | None = None
 
+    def _stop_flow_media_plane(self) -> None:
+        """Stop the Flow and let it go, without touching its roster.
+
+        Removing its sources on the way out bought nothing - the plane and its
+        slot are discarded here, and a roster change requires a restart anyway -
+        while driving the SDK's per-stream teardown, which core-dumped the
+        process on a 13-camera shutdown after the Flow failed to stop in time.
+        """
+        if self._flow_media_plane is None:
+            return
+        self._live_frames.set_demand_listener(None)
+        self._flow_media_plane.stop()
+        self._flow_media_plane = None
+
     def _resolve_mjpeg_config(self) -> MjpegServerConfig:
         """Settle the live view's two switches into one answer.
 
@@ -1110,18 +1124,7 @@ class WorkerRuntime:
             self._live_frames.set_demand_listener(None)
             self._nvidia_media_plane.stop()
             self._nvidia_media_plane = None
-        if self._flow_media_plane is not None:
-            self._live_frames.set_demand_listener(None)
-            # Stop the Flow before touching its roster: a running Flow's sources
-            # are fixed, so removing them first raises and aborts the shutdown.
-            self._flow_media_plane.stop()
-            for camera in self.config.cameras:
-                try:
-                    self._flow_media_plane.remove_source(camera.camera_id)
-                except KeyError:
-                    # Camera-local activation can fail before a source exists.
-                    continue
-            self._flow_media_plane = None
+        self._stop_flow_media_plane()
         if self.watchdog is not None:
             self.watchdog.stop()
         if self._evidence_export_runtime is not None:
