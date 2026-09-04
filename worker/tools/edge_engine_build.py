@@ -29,6 +29,7 @@ def identity_for(
     parser_lib: Path,
     infer_config: Path,
     tracker_config: Path,
+    tracker_library: Path,
     image_digest: str,
 ) -> dict[str, str]:
     if not image_digest:
@@ -39,6 +40,7 @@ def identity_for(
         "parser_lib_sha256": sha256(parser_lib),
         "infer_config_sha256": sha256(infer_config),
         "tracker_config_sha256": sha256(tracker_config),
+        "tracker_library_sha256": sha256(tracker_library),
         "image_digest": image_digest,
     }
 
@@ -51,6 +53,7 @@ def build_engine(
     parser_lib: Path,
     infer_config: Path,
     tracker_config: Path,
+    tracker_library: Path,
     image_digest: str,
     force: bool = False,
     run: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
@@ -88,6 +91,7 @@ def build_engine(
         parser_lib=parser_lib,
         infer_config=infer_config,
         tracker_config=tracker_config,
+        tracker_library=tracker_library,
         image_digest=image_digest,
     )
     identity_path.write_text(json.dumps(identity, sort_keys=True) + "\n", encoding="utf-8")
@@ -96,7 +100,15 @@ def build_engine(
 
 def main() -> int:
     parser = argparse.ArgumentParser(prog="edge-engine-build")
-    for name in ("onnx", "engine", "identity", "parser-lib", "infer-config", "tracker-config"):
+    for name in (
+        "onnx",
+        "engine",
+        "identity",
+        "parser-lib",
+        "infer-config",
+        "tracker-config",
+        "tracker-library",
+    ):
         parser.add_argument(f"--{name}", required=True)
     parser.add_argument("--image-digest", required=True)
     parser.add_argument("--force", action="store_true")
@@ -108,6 +120,7 @@ def main() -> int:
         parser_lib=Path(args.parser_lib),
         infer_config=Path(args.infer_config),
         tracker_config=Path(args.tracker_config),
+        tracker_library=Path(args.tracker_library),
         image_digest=args.image_digest,
         force=args.force,
     )
