@@ -119,3 +119,33 @@ def test_camera_that_keeps_publishing_is_not_rotated() -> None:
 
     assert plane.failures == []
     assert supervisor.counters("camera-a").outages == 0
+
+
+def test_shutdown_stops_the_flow_before_clearing_its_fixed_roster() -> None:
+    """A running Flow's sources are fixed, so order matters on the way down.
+
+    Removing sources first raises SourceRosterFixed and aborts the shutdown,
+    which a live run surfaced as a runtime error on every stop.
+    """
+    from worker.interfaces.media_plane import SourceRosterFixed
+
+    order: list[str] = []
+
+    class _Plane:
+        def __init__(self) -> None:
+            self.running = True
+
+        def stop(self) -> None:
+            order.append("stop")
+            self.running = False
+
+        def remove_source(self, camera_id: str) -> None:
+            if self.running:
+                raise SourceRosterFixed(f"roster is fixed while running: {camera_id}")
+            order.append(f"remove:{camera_id}")
+
+    plane = _Plane()
+    plane.stop()
+    plane.remove_source("camera-a")
+
+    assert order == ["stop", "remove:camera-a"]

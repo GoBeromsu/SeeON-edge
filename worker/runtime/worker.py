@@ -1111,13 +1111,16 @@ class WorkerRuntime:
             self._nvidia_media_plane.stop()
             self._nvidia_media_plane = None
         if self._flow_media_plane is not None:
+            self._live_frames.set_demand_listener(None)
+            # Stop the Flow before touching its roster: a running Flow's sources
+            # are fixed, so removing them first raises and aborts the shutdown.
+            self._flow_media_plane.stop()
             for camera in self.config.cameras:
                 try:
                     self._flow_media_plane.remove_source(camera.camera_id)
                 except KeyError:
                     # Camera-local activation can fail before a source exists.
                     continue
-            self._flow_media_plane.stop()
             self._flow_media_plane = None
         if self.watchdog is not None:
             self.watchdog.stop()
