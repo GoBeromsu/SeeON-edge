@@ -1622,7 +1622,11 @@ class WorkerRuntime:
                 ),
                 worker_boot_id=str(self._worker_boot_uuid),
             )
-        self._flow_media_plane.start()
+        # The plane is not started here: a pyservicemaker Flow fixes its sources
+        # when it is built, so _activate_flow registers the roster first, then
+        # starts it, then waits for the first accepted frame (the real-batch
+        # warmup). Roster changes go through the worker restart directive - the
+        # same restart-based source lifecycle the nvidia child uses.
         # Flow uses the same temporal policy graph as nvidia, but all image
         # production remains inside the injected DeepStream adapter.
         return self._initialize_nvidia_policy_graph(boot)
@@ -1758,17 +1762,9 @@ class WorkerRuntime:
             if self.fall_model is None or self._flow_media_plane is None:
                 raise RuntimeError("flow media plane is not initialized")
             self._warm_one(self.fall_model, "cpu")
-            warmup = self._flow_media_plane.add_source("_bootstrap_warmup", "loopback://bootstrap")
-            token = self._flow_media_plane.metadata.subscribe(warmup)
-            try:
-                try:
-                    _ = self._flow_media_plane.metadata.wait_accepted(token, timeout_sec=10.0)
-                except TimeoutError as error:
-                    raise FlowWarmupTimeout(
-                        "Flow warmup did not receive an accepted metadata frame"
-                    ) from error
-            finally:
-                self._flow_media_plane.remove_source("_bootstrap_warmup")
+            # The media plane's real-batch warmup happens in _activate_flow,
+            # after the roster is registered and the Flow is started: readiness
+            # flips only once an accepted metadata frame has arrived.
             return tuple(sorted(self._warmed_component_ids))
         required_bindings = self._module_registry.shared_bindings(
             self._module_versions,
@@ -1921,7 +1917,8 @@ class WorkerRuntime:
         handler: FaultHandler,
     ) -> tuple[bootstrap.CameraStageOutcome, ...]:
         """Activate Flow sources and the existing image-free policy pumps."""
-        if self._flow_media_plane is None:
+        media_plane = self._flow_media_plane
+        if media_plane is None:
             raise RuntimeError("flow media plane is not initialized")
         plans = {
             camera.camera_id: self._preflight_camera_graph(camera) for camera in self.config.cameras
@@ -1936,6 +1933,12 @@ class WorkerRuntime:
             )
             for camera in self.config.cameras
         )
+        # Every roster source is registered; build and run the Flow now, then
+        # require one accepted metadata frame before any pump or readiness
+        # exists. This is the real-batch warmup: engines are verified, never
+        # built (ADR-0002), so the first frame proves the whole chain.
+        media_plane.start()
+        self._await_flow_first_frame(pumps)
         self._native_policy_pumps = tuple(pumps)
         for pump in pumps:
             handler.register_loop(pump)
@@ -1951,6 +1954,31 @@ class WorkerRuntime:
         )
         self._supervisor.start()
         return outcomes
+
+    def _await_flow_first_frame(self, pumps: list[NativePolicyPump]) -> None:
+        """Block until one registered source publishes an accepted frame."""
+        media_plane = self._flow_media_plane
+        if media_plane is None:
+            raise RuntimeError("flow media plane is not initialized")
+        bindings = [
+            binding
+            for binding in (media_plane.metadata.expected_binding(pump.camera_id) for pump in pumps)
+            if binding is not None
+        ]
+        if not bindings:
+            raise FlowWarmupTimeout("Flow warmup has no registered source to wait for")
+        deadline = time.monotonic() + 30.0
+        tokens = [media_plane.metadata.subscribe(binding) for binding in bindings]
+        while time.monotonic() < deadline:
+            for token in tokens:
+                try:
+                    _ = media_plane.metadata.wait_accepted(token, timeout_sec=1.0)
+                except TimeoutError:
+                    continue
+                return
+        raise FlowWarmupTimeout(
+            "Flow warmup did not receive an accepted metadata frame from any source"
+        )
 
     def _build_flow_camera(
         self,

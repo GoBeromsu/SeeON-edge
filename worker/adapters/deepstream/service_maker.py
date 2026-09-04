@@ -18,6 +18,7 @@ from worker.interfaces.media_plane import (
     MediaPlaneStatus,
     RecordingInfo,
     RecordingRefused,
+    SourceRosterFixed,
     SourceStatus,
 )
 from worker.native.deepstream.metadata import LatestMetadataSlot, SourceBinding
@@ -105,19 +106,43 @@ class DeepStreamMediaPlane(MediaPlane):
         self._recordings: dict[str, _Recording] = {}
         self._active_encode_sessions: set[int] = set()
         self._started = False
+        self._flow_thread: threading.Thread | None = None
+        self._flow_error: Exception | None = None
+        self._flow_finished = threading.Event()
         self._probe = _Probe(self)
 
     def start(self) -> None:
+        """Build the Flow from the registered roster and run it on its own thread.
+
+        A pyservicemaker Flow fixes its sources when it is built and blocks
+        when called, so the media plane runs it on a dedicated thread and ends
+        it through ``Pipeline.stop()``. Sources registered after this point are
+        refused (``SourceRosterFixed``): the worker restarts to change its
+        roster, exactly as the nvidia child does.
+        """
         if self._started:
             return
         self._build_flow()
         self._started = True
-        self._flow.start()
+        self._flow_thread = threading.Thread(
+            target=self._run_flow, name="deepstream-flow", daemon=True
+        )
+        self._flow_thread.start()
+
+    def _run_flow(self) -> None:
+        try:
+            self._flow()
+        except Exception as error:  # noqa: BLE001 - surfaced through status, never swallowed
+            self._flow_error = error
+        finally:
+            self._flow_finished.set()
 
     def stop(self) -> None:
         if self._started:
-            self._flow.stop()
+            self._pipeline.stop()
             self._started = False
+            if self._flow_thread is not None:
+                self._flow_thread.join(timeout=10.0)
 
     def status(self) -> MediaPlaneStatus:
         return MediaPlaneStatus(
@@ -132,20 +157,25 @@ class DeepStreamMediaPlane(MediaPlane):
         )
 
     def add_source(self, camera_id: str, uri: str) -> SourceBinding:
+        if self._started:
+            raise SourceRosterFixed(
+                f"cannot add {camera_id!r}: the Flow's sources are fixed once it runs; "
+                "restart the worker to change the roster"
+            )
         binding = self._sources.add(camera_id, uri)
         self._slot.register_source(binding)
-        if self._started:
-            self._enqueue(lambda: self._flow.add_source(uri))
         return binding
 
     def remove_source(self, camera_id: str) -> None:
-        source_name = self._sources.source_name(camera_id)
+        if self._started:
+            raise SourceRosterFixed(
+                f"cannot remove {camera_id!r}: the Flow's sources are fixed once it runs; "
+                "restart the worker to change the roster"
+            )
         self._slot.remove_source(camera_id)
         self._live.discard(camera_id)
         self._recordings.pop(camera_id, None)
         self._sources.remove(camera_id)
-        if self._started:
-            self._enqueue(lambda: self._flow.remove_source(source_name))
 
     def source_failure(self, camera_id: str, category: str) -> SourceBinding:
         del category

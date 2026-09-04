@@ -96,3 +96,7 @@ class MediaPlane(Protocol):
 
 class RecordingRefused(RuntimeError):
     """The plane cannot begin a recording for this source right now."""
+
+
+class SourceRosterFixed(RuntimeError):
+    """The plane's sources are fixed once it runs; change the roster by restart."""
