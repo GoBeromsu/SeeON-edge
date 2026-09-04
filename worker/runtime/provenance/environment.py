@@ -103,21 +103,38 @@ def collect_runtime_environment_facts(
     build_revision: str | None,
 ) -> RuntimeEnvironmentFacts:
     """Read an allow-listed software/driver identity; never enumerate environment values."""
-    import torch
-
-    nvidia = boot.runtime_profile.canonical_profile == "nvidia"
+    profile = boot.runtime_profile.canonical_profile
     accelerator_runtime: str | None = None
     driver_version: str | None = None
     device_name: str | None = None
-    if nvidia:
-        cuda_version = torch.version.cuda
-        accelerator_runtime = None if cuda_version is None else f"CUDA {cuda_version}"
+    if profile == "flow":
+        # P1b-AC7: the flow worker never imports Torch. Its model runtime is
+        # ONNX Runtime on CPU and its accelerator facts come from NVML, which
+        # is what DeepStream's own preflight reads.
+        import onnxruntime
+
         status = probe_nvml_gpu_status()
         driver_version = status.driver_version
-        if torch.cuda.is_available() and torch.cuda.device_count() > 0:
-            device_name = str(torch.cuda.get_device_name(0))
-        elif status.device_name:
-            device_name = status.device_name
+        device_name = status.device_name or None
+        # The CUDA runtime the media plane links is the pinned DeepStream
+        # image's; the driver reports the highest CUDA it supports.
+        accelerator_runtime = None if driver_version is None else f"CUDA driver {driver_version}"
+        model_runtime = "onnxruntime"
+        model_runtime_version = str(onnxruntime.__version__)
+    else:
+        import torch
+
+        if profile == "nvidia":
+            cuda_version = torch.version.cuda
+            accelerator_runtime = None if cuda_version is None else f"CUDA {cuda_version}"
+            status = probe_nvml_gpu_status()
+            driver_version = status.driver_version
+            if torch.cuda.is_available() and torch.cuda.device_count() > 0:
+                device_name = str(torch.cuda.get_device_name(0))
+            elif status.device_name:
+                device_name = status.device_name
+        model_runtime = "torch"
+        model_runtime_version = str(torch.__version__)
     return RuntimeEnvironmentFacts(
         # WorkerRuntime's constructor receives an already-resolved identity from
         # the composition root. Keeping that constructor seam explicit lets tests
@@ -130,8 +147,8 @@ def collect_runtime_environment_facts(
         os_name=platform.system(),
         architecture=platform.machine(),
         python_version=platform.python_version(),
-        model_runtime="torch",
-        model_runtime_version=str(torch.__version__),
+        model_runtime=model_runtime,
+        model_runtime_version=model_runtime_version,
         accelerator_runtime=accelerator_runtime,
         driver_version=driver_version,
         device_name=device_name,
