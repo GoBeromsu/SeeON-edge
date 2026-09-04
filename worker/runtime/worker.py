@@ -1646,8 +1646,8 @@ class WorkerRuntime:
         for binding in bindings:
             if binding.component_id == "fall-classifier":
                 # A pulled selection names its publication digest; the packaged
-                # default names the verified weights member of its own bundle
-                # manifest, which is what the runner loaded.
+                # default names the published weights member of its own bundle
+                # manifest (the lineage the ONNX export derives from).
                 digest = (
                     self._packaged_fall_member_digest()
                     if selection is None
@@ -1695,9 +1695,11 @@ class WorkerRuntime:
         configured = self.config.models.fall
         if configured is None:
             raise RuntimeError("fall model must be explicitly configured; refusing to boot")
-        member = "model.onnx" if configured.framework == "onnxruntime" else "model.pt"
+        # The published weights are the bundle's identity on every profile;
+        # under flow the ONNX member is an export of them, pinned to the same
+        # bundle manifest and verified by the ORT runner before it loads.
         manifest = read_json(configured.artifact_dir / "bundle-manifest.json")
-        return member_digest(manifest, member)
+        return member_digest(manifest, "model.pt")
 
     def _forward_native_preview_demand(
         self,
