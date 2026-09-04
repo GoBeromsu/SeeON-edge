@@ -244,3 +244,25 @@ def test_snapshot_without_a_frame_is_a_typed_unavailable() -> None:
     plane.add_source("camera", "rtsp://one")
     with pytest.raises(SnapshotUnavailable, match="has not produced"):
         plane.snapshot("camera")
+
+
+def test_a_source_failure_rotates_the_stream_identity_and_keeps_the_camera_id() -> None:
+    """P1b-AC2: the sensor id is the canonical camera id across a forced rebuild.
+
+    The Flow's sources are fixed once it runs, so a failure rotates the stream
+    identity rather than rebuilding the element: frames after the outage cannot
+    be mistaken for the old stream, and stale preview state is dropped.
+    """
+    plane, _ = _plane()
+    first = plane.add_source("room-208", "rtsp://one")
+    plane._live.add("room-208")  # noqa: SLF001 - a frame has been published
+
+    replacement = plane.source_failure("room-208", "timeout")
+
+    assert replacement.camera_id == first.camera_id == "room-208"
+    assert replacement.stream_epoch > first.stream_epoch or (
+        replacement.source_generation > first.source_generation
+    )
+    assert "room-208" not in plane._live  # noqa: SLF001 - liveness must be re-proven
+    with pytest.raises(SnapshotUnavailable):
+        plane.snapshot("room-208")

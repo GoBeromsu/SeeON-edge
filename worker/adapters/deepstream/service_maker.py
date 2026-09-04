@@ -299,6 +299,17 @@ class DeepStreamMediaPlane(MediaPlane):
         self._sources.remove(camera_id)
 
     def source_failure(self, camera_id: str, category: str) -> SourceBinding:
+        """Rotate this camera's stream identity; the plugin owns media recovery.
+
+        A Flow fixes its sources when it is built, so this does not and cannot
+        rebuild the pipeline element. What it does is the part the decision
+        layer needs: a new ``stream_epoch``/``source_generation`` so frames
+        arriving after the outage are never mistaken for the old stream, and a
+        cleared live/preview state so nothing stale is served. Media recovery
+        is ``nvurisrcbin``'s own RTSP reconnect, configured on every source
+        (measured in the spike: a stalled source recovers within one interval).
+        The canonical camera id never changes across this.
+        """
         del category
         binding = self._sources.rebuild(camera_id)
         self._slot.register_source(binding)
