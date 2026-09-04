@@ -1,12 +1,17 @@
 # pyservicemaker P1b (G8a) spike
 
-**Gate verdict: PASS WITH TWO DOCUMENTED DEVIATIONS.** All six items were
-measured on live facility cameras against the pinned DeepStream 9.1 image on an
-RTX 5070 Ti. Items 1–4 meet their criteria as measured; item 5's build time is
-measured and its bootstrap semantics are P1b-AC4 implementation; item 6's
-named counters are settled by measurement and are P1b implementation. The two
-deviations from the literal G8a wording are named in the table and need an
-owner acknowledgement, not a re-measurement.
+**Gate verdict: items 1–4 PASS on live facility cameras (items 2 and 3
+with the two documented deviations below); items 5 and 6 are NOT yet signed
+off.** Item 5 has its build-time measurement but not the bootstrap behaviour
+(refuse until warmup, activation ordering, timeout, nonzero exit on corrupt
+identity, no post-activation build); item 6's four named counters are
+settled in meaning by the Smart Record measurements but do not yet exist. Both
+are closed by G007 artefacts with their own receipts — the one-shot
+`edge-engine-build` + boot refusal tests, and the recorder actor's exercised
+counters — and this report is re-signed when they land. The owner has
+acknowledged deviations A and B and directed G007 to proceed on that basis
+(ultragoal ledger); the plan's "stop and record an owner decision" rule is
+therefore satisfied by decision, not by silence.
 
 Every number below is reproducible from a committed harness and has a
 committed receipt. Camera URIs (with credentials) are supplied only through the
@@ -87,13 +92,14 @@ rect *is* the parser's box, which is why the gate is safe.
 4. `render()` defaults to an EGL sink that cannot configure caps headless; use
    `RenderMode.DISCARD` in the worker.
 
-## Owner acknowledgements required
+## Owner acknowledgements
 
-- **Deviation A** (item 2): native camera cadence into the media plane, 15 fps
-  owned by `PtsResampler` downstream — accept as the architecture, or require a
-  camera-side 15 fps profile.
-- **Deviation B** (item 3): "195 callbacks/s" realised as ≥ 195 frame items/s
-  through DeepStream's batched callbacks — accept the wording.
+- **Deviation A** (item 2) — acknowledged: native camera cadence into the media
+  plane, 15 fps owned by `PtsResampler` downstream; G007 adds no second
+  throttle.
+- **Deviation B** (item 3) — acknowledged: "195 callbacks/s" is realised as
+  ≥ 195 frame items/s through DeepStream's batched callbacks; P1b-AC6 must
+  still show zero unaccounted drops with real consumers attached.
 - **Deletion freeze**: G008 stays unauthorized and the shipping native profile
   and image digest are retained until G007 passes P1b-AC1–AC7 plus one hour of
   production stability.
