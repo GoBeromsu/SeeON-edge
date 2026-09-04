@@ -98,6 +98,7 @@ class WorkerDiagnostics:
         self._fall_unapplied_policy_threshold_by_camera: dict[str, float] = {}
         self._flow_recording_by_camera: dict[str, tuple[int, int, int]] = {}
         self._flow_nvenc_sessions_by_camera: dict[str, int] = {}
+        self._flow_lifecycle_by_camera: dict[str, tuple[int, int]] = {}
         self._incident_managers: dict[str, object] = {}
         self._encoder = EncoderLifecycleSnapshot()
         self._clip_recorder = ClipRecorderStatus()
@@ -155,6 +156,14 @@ class WorkerDiagnostics:
             raise ValueError("Flow NVENC sessions must be non-negative")
         with self._lock:
             self._flow_nvenc_sessions_by_camera[camera_id] = active
+
+    def record_flow_lifecycle_counters(
+        self, camera_id: str, *, outages: int, recoveries: int
+    ) -> None:
+        if min(outages, recoveries) < 0:
+            raise ValueError("Flow lifecycle counters must be non-negative")
+        with self._lock:
+            self._flow_lifecycle_by_camera[camera_id] = (outages, recoveries)
 
     def register_decode(self, camera_id: str, requested: str) -> None:
         self.update_decode(
@@ -461,6 +470,7 @@ class WorkerDiagnostics:
             fall_unapplied_by_camera = dict(self._fall_unapplied_policy_threshold_by_camera)
             flow_recording_by_camera = dict(self._flow_recording_by_camera)
             flow_nvenc_sessions_by_camera = dict(self._flow_nvenc_sessions_by_camera)
+            flow_lifecycle_by_camera = dict(self._flow_lifecycle_by_camera)
             incident_managers = dict(self._incident_managers)
             measured_fps_by_camera = dict(self._measured_fps_by_camera)
             camera_ids = (
@@ -483,6 +493,7 @@ class WorkerDiagnostics:
                 | set(fall_unapplied_by_camera)
                 | set(flow_recording_by_camera)
                 | set(flow_nvenc_sessions_by_camera)
+                | set(flow_lifecycle_by_camera)
                 | set(incident_managers)
                 | (set() if inference is None else set(inference.cameras))
             )
@@ -536,6 +547,8 @@ class WorkerDiagnostics:
                     2
                 ],
                 nvenc_sessions_active=flow_nvenc_sessions_by_camera.get(camera_id, 0),
+                flow_source_outages_total=flow_lifecycle_by_camera.get(camera_id, (0, 0))[0],
+                flow_source_recoveries_total=flow_lifecycle_by_camera.get(camera_id, (0, 0))[1],
             )
             for camera_id in sorted(camera_ids)
         )

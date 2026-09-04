@@ -144,6 +144,13 @@ class LatestFrameStore:
         with self._condition:
             return self._frames.get(camera_id)
 
+    def clear_camera(self, camera_id: str) -> None:
+        """Discard a preview that belongs to a retired stream identity."""
+        with self._condition:
+            _ = self._frames.pop(camera_id, None)
+            self._snapshot_demand.discard(camera_id)
+            self._condition.notify_all()
+
     def is_known(self, camera_id: str) -> bool:
         with self._condition:
             return camera_id in self._known_camera_ids

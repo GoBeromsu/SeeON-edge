@@ -191,6 +191,8 @@ class CameraDiagnosticsSnapshot:
     smart_record_extension_raced_total: int = 0
     smart_record_start_refused_total: int = 0
     nvenc_sessions_active: int = 0
+    flow_source_outages_total: int = 0
+    flow_source_recoveries_total: int = 0
 
 
 @dataclass(frozen=True, slots=True)

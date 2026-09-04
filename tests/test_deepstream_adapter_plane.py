@@ -181,6 +181,28 @@ def test_sealed_callback_fires_exactly_once_per_session() -> None:
     assert sealed[0].duration_ms == 20
 
 
+def test_sealed_callback_is_retryable_when_the_handoff_raises() -> None:
+    plane, pipeline = _plane()
+    plane.add_source("camera", "rtsp://one")
+    plane._live.add("camera")  # noqa: SLF001
+    sealed: list[RecordingInfo] = []
+    failures = [True]
+
+    def handoff(info: RecordingInfo) -> None:
+        if failures[0]:
+            failures[0] = False
+            raise RuntimeError("publication failed")
+        sealed.append(info)
+
+    session = plane.start_recording("camera", lookback_sec=1, duration_sec=2, on_sealed=handoff)
+    callback = pipeline.callbacks["batch_capture-source-0_0"]
+    with pytest.raises(RuntimeError, match="publication failed"):
+        callback(_info(session))
+
+    callback(_info(session))
+    assert [item.session_id for item in sealed] == [session]
+
+
 def test_sources_are_fixed_once_the_flow_runs() -> None:
     plane, pipeline = _plane()
     plane.add_source("camera", "rtsp://one")

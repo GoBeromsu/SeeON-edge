@@ -124,14 +124,17 @@ def test_warmup_times_out_typed_when_no_source_publishes(monkeypatch: pytest.Mon
 def test_flow_status_tick_reads_actor_and_plane_counters() -> None:
     runtime = WorkerRuntime.__new__(WorkerRuntime)
     runtime.diagnostics = WorkerDiagnostics()
+    lifecycle_ticks: list[str] = []
     runtime._flow_media_plane = SimpleNamespace(
-        media_plane=SimpleNamespace(
-            status=lambda: SimpleNamespace(
-                sources=(SimpleNamespace(camera_id="camera-a"),),
-                nvenc_sessions_active=2,
-            )
+        status=lambda: SimpleNamespace(
+            sources=(SimpleNamespace(camera_id="camera-a"),),
+            nvenc_sessions_active=2,
         ),
         recorder_counters=lambda camera_id: (3, 4, 5),
+    )
+    runtime._flow_lifecycle_supervisor = SimpleNamespace(
+        tick=lambda: lifecycle_ticks.append("tick"),
+        counters=lambda camera_id: SimpleNamespace(outages=6, recoveries=7),
     )
 
     runtime._refresh_flow_recording_telemetry()  # noqa: SLF001
@@ -141,3 +144,6 @@ def test_flow_status_tick_reads_actor_and_plane_counters() -> None:
     assert snapshot.smart_record_extension_raced_total == 4
     assert snapshot.smart_record_start_refused_total == 5
     assert snapshot.nvenc_sessions_active == 2
+    assert snapshot.flow_source_outages_total == 6
+    assert snapshot.flow_source_recoveries_total == 7
+    assert lifecycle_ticks == ["tick"]

@@ -2,14 +2,22 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Protocol
 
 from worker.pipeline.output.evidence.flow_clip_publication import FlowClipPublisher
+from worker.pipeline.output.evidence.flow_sealed_sidecar import (
+    FlowSealedRecovery,
+    FlowSealedSidecars,
+)
 from worker.pipeline.output.evidence.smart_record_actor import ClipSealed, SmartRecordActor
 from worker.types import BusinessEvent, NativeEvidenceTrigger
+
+LOGGER = logging.getLogger(__name__)
 
 
 class FlowEvidenceStager(Protocol):
@@ -33,8 +41,11 @@ class FlowEvidenceBinding:
     actor: SmartRecordActor
     stager: FlowEvidenceStager
     publisher: FlowClipPublisher
+    sidecars: FlowSealedSidecars
+    camera_id: str
     now: Callable[[], datetime] = lambda: datetime.now(UTC)
     _events: dict[str, BusinessEvent] = field(default_factory=dict, init=False)
+    sealed_recovery_missing_media_total: int = field(default=0, init=False)
 
     def emit_for_frame(self, event: BusinessEvent, trigger: NativeEvidenceTrigger) -> None:
         if event.camera_id != trigger.camera_id:
@@ -64,15 +75,33 @@ class FlowEvidenceBinding:
 
     def on_sealed(self, sealed: ClipSealed) -> None:
         """Publish before completing every incident bound to the shared clip."""
+        sidecar_path = self.sidecars.persist(sealed, self._events)
+        recovery = FlowSealedRecovery(sealed, dict(self._events), self.camera_id, sidecar_path)
+        self._publish_recovery(recovery)
         for contributor in sealed.contributors:
-            if contributor.event_ref not in self._events:
+            del self._events[contributor.event_ref]
+
+    def replay_sealed(self) -> None:
+        """Retry sealed clips before Flow activates any camera sources."""
+        for recovery in self.sidecars.pending_for_camera(self.camera_id):
+            media_path = Path(recovery.sealed.path)
+            if not media_path.is_file():
+                error = self.sidecars.discard_missing_media(recovery)
+                self.sealed_recovery_missing_media_total += 1
+                LOGGER.error("%s", error)
+                continue
+            self._publish_recovery(recovery)
+
+    def _publish_recovery(self, recovery: FlowSealedRecovery) -> None:
+        for contributor in recovery.sealed.contributors:
+            if contributor.event_ref not in recovery.events:
                 raise ValueError(
                     f"sealed Flow clip has unknown contributor {contributor.event_ref}"
                 )
-        published = self.publisher.publish(sealed, self._events)
-        for contributor in sealed.contributors:
+        published = self.publisher.publish(recovery.sealed, recovery.events)
+        for contributor in recovery.sealed.contributors:
             self.stager.complete(contributor.event_ref, str(published.clip_id))
-            del self._events[contributor.event_ref]
+        self.sidecars.remove(recovery)
 
 
 __all__ = ["FlowEvidenceBinding", "FlowEvidenceStager"]

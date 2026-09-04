@@ -206,10 +206,10 @@ class SmartRecordActor:
                 ),
                 boundary=recording.boundary,
             )
+            self._sink(sealed)
             self._sealed_sessions.add(info.session_id)
             self._recording = None
             self._state = SmartRecordState.IDLE
-            self._sink(sealed)
             if self._pending:
                 self._start_pending()
 

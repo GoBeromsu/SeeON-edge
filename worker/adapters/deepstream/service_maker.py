@@ -488,7 +488,6 @@ class DeepStreamMediaPlane(MediaPlane):
         recording = self._recordings.get(camera_id)
         if recording is None or recording.sealed:
             return
-        recording.sealed = True
         path = str(Path(str(info.dirpath)) / str(info.filename))
         recording.on_sealed(
             RecordingInfo(
@@ -500,6 +499,7 @@ class DeepStreamMediaPlane(MediaPlane):
                 height=int(info.height),
             )
         )
+        recording.sealed = True
         self._recordings.pop(camera_id, None)
 
 

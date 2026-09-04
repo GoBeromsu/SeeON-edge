@@ -2,11 +2,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import pytest
 
 from worker.interfaces.media_plane import RecordingInfo, RecordingRefused
 from worker.pipeline.output.evidence.flow_clip_publication import FlowClipPublicationError
+from worker.pipeline.output.evidence.flow_sealed_sidecar import FlowSealedSidecars
 from worker.pipeline.output.evidence.smart_record_actor import SmartRecordActor
 from worker.runtime.flow.evidence import FlowEvidenceBinding
 from worker.types import BusinessEvent, NativeEvidenceTrigger
@@ -73,6 +75,7 @@ def _binding(
     plane: _Plane,
     now: list[float],
     dates: list[datetime],
+    sidecar_directory: Path,
     *,
     extension_sec: int = 45,
 ) -> tuple[SmartRecordActor, FlowEvidenceBinding, _Stager, _Publisher]:
@@ -89,15 +92,20 @@ def _binding(
         clip_id_factory=lambda: "primary-clip",
     )
     binding = FlowEvidenceBinding(
-        actor=actor, stager=stager, publisher=publisher, now=lambda: dates.pop(0)
+        actor=actor,
+        stager=stager,
+        publisher=publisher,
+        sidecars=FlowSealedSidecars(sidecar_directory),
+        camera_id="camera-a",
+        now=lambda: dates.pop(0),
     )
     sealed.append(binding)
     return actor, binding, stager, publisher
 
 
-def test_admitted_alert_stages_one_recording_and_sealed_receipt() -> None:
+def test_admitted_alert_stages_one_recording_and_sealed_receipt(tmp_path: Path) -> None:
     plane, now = _Plane(), [0.0]
-    actor, binding, stager, _ = _binding(plane, now, [datetime(2026, 1, 1, tzinfo=UTC)])
+    actor, binding, stager, _ = _binding(plane, now, [datetime(2026, 1, 1, tzinfo=UTC)], tmp_path)
     binding.emit_for_frame(_event("one"), _trigger())
     assert plane.starts == [1]
     now[0] = 30.0
@@ -117,10 +125,13 @@ def test_admitted_alert_stages_one_recording_and_sealed_receipt() -> None:
     assert stager.completed == [("one", "primary-clip")]
 
 
-def test_two_alerts_extend_one_clip_and_complete_distinct_incidents() -> None:
+def test_two_alerts_extend_one_clip_and_complete_distinct_incidents(tmp_path: Path) -> None:
     plane, now = _Plane(), [0.0]
     actor, binding, stager, _ = _binding(
-        plane, now, [datetime(2026, 1, 1, 0, 0, 20, tzinfo=UTC), datetime(2026, 1, 1, tzinfo=UTC)]
+        plane,
+        now,
+        [datetime(2026, 1, 1, 0, 0, 20, tzinfo=UTC), datetime(2026, 1, 1, tzinfo=UTC)],
+        tmp_path,
     )
     binding.emit_for_frame(_event("late"), _trigger())
     now[0] = 20.0
@@ -137,7 +148,7 @@ def test_two_alerts_extend_one_clip_and_complete_distinct_incidents() -> None:
     assert stager.completed == [("early", "primary-clip"), ("late", "primary-clip")]
 
 
-def test_alert_while_stopping_starts_second_clip_without_dropping_it() -> None:
+def test_alert_while_stopping_starts_second_clip_without_dropping_it(tmp_path: Path) -> None:
     """A deployment that cuts clips short can race the stop; nothing is dropped.
 
     With a shorter extension window than the recording window the actor issues a
@@ -152,6 +163,7 @@ def test_alert_while_stopping_starts_second_clip_without_dropping_it() -> None:
             datetime(2026, 1, 1, tzinfo=UTC),
             datetime(2026, 1, 1, tzinfo=UTC) + timedelta(seconds=30),
         ],
+        tmp_path,
         extension_sec=20,
     )
     binding.emit_for_frame(_event("one"), _trigger())
@@ -168,18 +180,20 @@ def test_alert_while_stopping_starts_second_clip_without_dropping_it() -> None:
     assert stager.completed == [("one", "primary-clip"), ("two", "primary-clip")]
 
 
-def test_refused_recording_retries_on_tick() -> None:
+def test_refused_recording_retries_on_tick(tmp_path: Path) -> None:
     plane, now = _Plane(refused=1), [0.0]
-    actor, binding, _, _ = _binding(plane, now, [datetime(2026, 1, 1, tzinfo=UTC)])
+    actor, binding, _, _ = _binding(plane, now, [datetime(2026, 1, 1, tzinfo=UTC)], tmp_path)
     binding.emit_for_frame(_event("one"), _trigger())
     assert actor.smart_record_start_refused_total == 1
     actor.tick()
     assert plane.starts == [1]
 
 
-def test_publication_failure_surfaces_without_completing_the_incident() -> None:
+def test_publication_failure_surfaces_without_completing_the_incident(tmp_path: Path) -> None:
     plane, now = _Plane(), [0.0]
-    _, binding, stager, publisher = _binding(plane, now, [datetime(2026, 1, 1, tzinfo=UTC)])
+    actor, binding, stager, publisher = _binding(
+        plane, now, [datetime(2026, 1, 1, tzinfo=UTC)], tmp_path
+    )
     binding.emit_for_frame(_event("one"), _trigger())
     publisher.fail = True
 
@@ -187,3 +201,5 @@ def test_publication_failure_surfaces_without_completing_the_incident() -> None:
         plane.seal(1)
 
     assert stager.completed == []
+    assert actor.state.name == "FINALIZING"
+    assert len(binding.sidecars.pending_for_camera("camera-a")) == 1

@@ -31,6 +31,7 @@ class FlowMediaPlaneConfig:
     record_cache_seconds: int
     frame_width: int
     frame_height: int
+    source_silence_timeout_sec: float = 30.0
 
     def adapter_config(self) -> DeepStreamMediaPlaneConfig:
         return DeepStreamMediaPlaneConfig(
@@ -56,6 +57,7 @@ class FlowMediaPlane:
         live_frames: LatestFrameStore | None = None,
         worker_boot_id: str | None = None,
     ) -> None:
+        self.config = config
         self.metadata = LatestMetadataSlot()
         kwargs: dict[str, object] = {
             "metadata_slot": self.metadata,
@@ -116,6 +118,13 @@ class FlowMediaPlane:
 
     def source_failure(self, camera_id: str, category: str) -> SourceBinding:
         return self.plane.source_failure(camera_id, category)
+
+    def status(self):
+        return self.plane.status()
+
+    def clear_preview(self, camera_id: str) -> None:
+        if self._live_frames is not None:
+            self._live_frames.clear_camera(camera_id)
 
     #: The clip the acceptance criteria name is 60 s: this cached lookback plus
     #: the plane's forward window. It lives here, with the recorder, so a single

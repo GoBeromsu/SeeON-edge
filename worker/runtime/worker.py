@@ -96,6 +96,7 @@ from worker.pipeline.output.evidence.clip_store_lock import (
 from worker.pipeline.output.evidence.evidence_runtime import EvidenceExportRuntime
 from worker.pipeline.output.evidence.evidence_stager import DurableEvidenceStager
 from worker.pipeline.output.evidence.flow_clip_publication import FlowClipPublisher
+from worker.pipeline.output.evidence.flow_sealed_sidecar import FlowSealedSidecars
 from worker.pipeline.output.evidence.packet_repository import PacketRingRepository
 from worker.pipeline.output.evidence.packet_ring import PacketRingLimits
 from worker.pipeline.output.evidence.snapshot_store import SnapshotStore
@@ -139,6 +140,7 @@ from worker.runtime.faults.handler import FaultHandler
 from worker.runtime.faults.record import make_fault_record
 from worker.runtime.flow.cold_start import FlowWarmupTimeout, verify_flow_boot_inputs
 from worker.runtime.flow.evidence import FlowEvidenceBinding
+from worker.runtime.flow.lifecycle_supervisor import FlowLifecycleSupervisor
 from worker.runtime.flow.media_plane import FlowMediaPlane, FlowMediaPlaneConfig
 from worker.runtime.ingest_composition import (
     build_camera_source_registry,
@@ -828,6 +830,7 @@ class WorkerRuntime:
     #: build a runtime without running __init__.
     _nvidia_media_plane: NvidiaMediaPlane | None = None
     _flow_media_plane: FlowMediaPlane | None = None
+    _flow_lifecycle_supervisor: FlowLifecycleSupervisor | None = None
 
     def __init__(
         self,
@@ -987,6 +990,7 @@ class WorkerRuntime:
         self._camera_inference_results: dict[str, InferenceResultSlot] = {}
         self._nvidia_media_plane: NvidiaMediaPlane | None = None
         self._flow_media_plane: FlowMediaPlane | None = flow_media_plane
+        self._flow_lifecycle_supervisor: FlowLifecycleSupervisor | None = None
         self._nvidia_plans: Mapping[str, CameraDetectionPlan] = MappingProxyType({})
         self._native_policy_pumps: tuple[NativePolicyPump, ...] = ()
         self._selected_bundle_admission: ModelBundleProof | None = None
@@ -1610,6 +1614,12 @@ class WorkerRuntime:
                     record_cache_seconds=int(self._env["ML_WORKER_FLOW_RECORD_CACHE_SECONDS"]),
                     frame_width=int(self._env["ML_WORKER_FLOW_FRAME_WIDTH"]),
                     frame_height=int(self._env["ML_WORKER_FLOW_FRAME_HEIGHT"]),
+                    source_silence_timeout_sec=float(
+                        self._env.get(
+                            "ML_WORKER_FLOW_SOURCE_SILENCE_TIMEOUT_SEC",
+                            str(FlowLifecycleSupervisor.DEFAULT_SILENCE_TIMEOUT_SEC),
+                        )
+                    ),
                 ),
                 worker_boot_id=str(self._worker_boot_uuid),
             )
@@ -1964,13 +1974,16 @@ class WorkerRuntime:
         self._apply_runtime_manifest(boot, plans)
         self._compose_evidence_export(boot)
         pumps: list[NativePolicyPump] = []
+        sealed_bindings: list[FlowEvidenceBinding] = []
         outcomes = tuple(
             bootstrap.run_camera_stage(
                 camera.camera_id,
-                partial(self._build_flow_camera, camera, pumps),
+                partial(self._build_flow_camera, camera, pumps, sealed_bindings),
             )
             for camera in self.config.cameras
         )
+        for binding in sealed_bindings:
+            binding.replay_sealed()
         # Every roster source is registered; build and run the Flow now, then
         # require one accepted metadata frame before any pump or readiness
         # exists. This is the real-batch warmup: engines are verified, never
@@ -1980,6 +1993,36 @@ class WorkerRuntime:
         self._native_policy_pumps = tuple(pumps)
         for pump in pumps:
             handler.register_loop(pump)
+        cameras = {camera.camera_id: camera for camera in self.config.cameras}
+        reporters = {
+            camera_id: HeartbeatReporter(self.config, camera)
+            for camera_id, camera in cameras.items()
+        }
+
+        def on_fatal(error: str) -> None:
+            LOGGER.error("flow media plane fatal: error=%s", error)
+            exc = FatalAcceleratorError(error, task="flow_media_plane")
+            handler.handle(
+                exc,
+                make_fault_record(
+                    exc,
+                    profile="flow",
+                    task="flow_media_plane",
+                    stage="flow_media_plane",
+                ),
+            )
+
+        def on_unready(camera_id: str) -> None:
+            LOGGER.warning("flow source outage: camera_id=%s category=metadata_silence", camera_id)
+
+        self._flow_lifecycle_supervisor = FlowLifecycleSupervisor(
+            media_plane,
+            cameras,
+            on_ready=lambda camera_id: reporters[camera_id].mark_ready(camera_id),
+            on_unready=on_unready,
+            on_fatal=on_fatal,
+            silence_timeout_sec=media_plane.config.source_silence_timeout_sec,
+        )
         heartbeat = NativeHeartbeatLoop(self.config, self.config.cameras, pumps)
         handler.register_loop(heartbeat)
         threading.Thread(target=heartbeat.run, name="flow-heartbeat", daemon=True).start()
@@ -2045,6 +2088,7 @@ class WorkerRuntime:
         self,
         camera: CameraRuntimeConfig,
         pumps: list[NativePolicyPump],
+        sealed_bindings: list[FlowEvidenceBinding],
     ) -> None:
         from shared.rtsp_url_policy import assert_rtsp_endpoint_allowed
 
@@ -2106,8 +2150,11 @@ class WorkerRuntime:
                 ClipIdAllocator(self._resolved_clip_store_dir()),
                 ClipPublisher(self._resolved_clip_store_dir()),
             ),
+            sidecars=FlowSealedSidecars(self._state_dir / "flow-sealed"),
+            camera_id=camera.camera_id,
         )
         sealed_binding.append(sink)
+        sealed_bindings.append(sink)
         pump = NativePolicyPump(
             binding,
             NativePolicyContext(
@@ -2925,7 +2972,11 @@ class WorkerRuntime:
         media_plane = self._flow_media_plane
         if media_plane is None:
             return
-        status = media_plane.media_plane.status()
+        lifecycle = self._flow_lifecycle_supervisor
+        if lifecycle is None:
+            raise RuntimeError("flow lifecycle supervisor is not initialized")
+        lifecycle.tick()
+        status = media_plane.status()
         for source in status.sources:
             extended, extension_raced, start_refused = media_plane.recorder_counters(
                 source.camera_id
@@ -2938,6 +2989,18 @@ class WorkerRuntime:
             )
             self.diagnostics.record_flow_nvenc_sessions(
                 source.camera_id, status.nvenc_sessions_active
+            )
+            counters = lifecycle.counters(source.camera_id)
+            self.diagnostics.record_flow_lifecycle_counters(
+                source.camera_id,
+                outages=counters.outages,
+                recoveries=counters.recoveries,
+            )
+            LOGGER.info(
+                "flow lifecycle: camera_id=%s outages=%d recoveries=%d",
+                source.camera_id,
+                counters.outages,
+                counters.recoveries,
             )
 
     def _default_clip_recorder(self, camera: CameraRuntimeConfig) -> EventClipRecorder:
