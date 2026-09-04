@@ -98,6 +98,24 @@ def _yolo_bed_seg(**kwargs: ModelOption) -> ModelAdapter:
     return YoloBedSegRunner(**kwargs)
 
 
+def flow_registry() -> ModelRegistry:
+    """The P1b flow profile's registry: DeepStream owns pose, ORT owns bed.
+
+    "pose"/"person" are deliberately absent - the media plane performs
+    detection and no host runner may exist for them. "bed" is the ONNX Runtime
+    CPU segmenter so the process never imports torch or ultralytics.
+    """
+    registry = ModelRegistry()
+    registry.register("bed", _ort_bed_seg)
+    return registry
+
+
+def _ort_bed_seg(**kwargs: ModelOption) -> ModelAdapter:
+    from worker.adapters.model.ort_bed_seg import OrtBedSegRunner
+
+    return OrtBedSegRunner(**kwargs)
+
+
 DEFAULT_REGISTRY: Final = default_registry()
 
 __all__ = [
@@ -111,4 +129,5 @@ __all__ = [
     "UnknownModelTaskError",
     "WarmupModel",
     "default_registry",
+    "flow_registry",
 ]

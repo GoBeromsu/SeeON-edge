@@ -1014,15 +1014,19 @@ class WorkerRuntime:
         self._trace_writer = BoundedTraceWriter(
             self._state_dir / "runtime-analysis",
         )
-        nvidia = self._env.get("ML_WORKER_PROFILE", "cpu").strip() == "nvidia"
+        # Under the DeepStream-owned profiles there is no host decoder or
+        # encoder to probe: the media plane (native child for nvidia, the Flow
+        # pipeline for flow) owns NVDEC/NVENC and its own preflight verifies them.
+        profile_name = self._env.get("ML_WORKER_PROFILE", "cpu").strip()
+        media_plane_owned = profile_name in {"nvidia", "flow"}
         decode_probe = (
-            (lambda _decode: VerifyResult(True, "nvidia", "decode", "DeepStream preflight"))
-            if nvidia
+            (lambda _decode: VerifyResult(True, profile_name, "decode", "DeepStream preflight"))
+            if media_plane_owned
             else self._decode_probe
         )
         encode_probe = (
-            (lambda: VerifyResult(True, "nvidia", "encode", "native encoded media plane"))
-            if nvidia
+            (lambda: VerifyResult(True, profile_name, "encode", "DeepStream media plane"))
+            if media_plane_owned
             else self._encode_probe
         )
         stages = bootstrap.named_stages(
@@ -1162,7 +1166,7 @@ class WorkerRuntime:
                 NvidiaBedZoneRecognizer(
                     self._serving, timeout_s=DEFAULT_BED_ZONE_RECOGNITION_TIMEOUT_S
                 )
-                if self._boot is not None and self._boot.profile.name == "nvidia"
+                if self._boot is not None and self._boot.profile.name in {"nvidia", "flow"}
                 else self._bed_zone_recognizer
             ),
             clip_deletion_control=self._clip_deletion_control,

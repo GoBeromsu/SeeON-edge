@@ -28,6 +28,7 @@ from shared.events.relay_failure_log import classify_relay_failure
 from shared.release_identity import ReleaseIdentityMismatchError
 from worker.adapters.encode.thumbnail import FFmpegThumbnailGenerator
 from worker.adapters.model.in_process import InProcessServingClient
+from worker.adapters.model.registry import flow_registry
 from worker.pipeline.output.evidence.clip_config import configured_ffmpeg_bin, configured_store_dir
 from worker.pipeline.output.evidence.clip_store_lock import ClipStoreLockedError
 from worker.pipeline.output.evidence.thumbnail_backfill import backfill_thumbnails
@@ -472,9 +473,14 @@ def main(argv: list[str] | None = None) -> int:
     # fail-fast on unknown) is composition-root territory owned by
     # `WorkerRuntime` itself (`worker/runtime/worker.py`), not the CLI entry.
     # `WorkerRuntime.__init__` supplies the real profile-driven default.
+    # The flow profile's bed recognizer is the ONNX Runtime segmenter; every
+    # other profile keeps the ultralytics runners. Selecting the registry here
+    # keeps that decision in the composition root, not in a registry default.
+    profile_name = os.environ.get("ML_WORKER_PROFILE", "").strip()
+    serving_registry = flow_registry() if profile_name == "flow" else None
     runtime = WorkerRuntime(
         config,
-        serving_client=InProcessServingClient(),
+        serving_client=InProcessServingClient(serving_registry),
         restart_check=restart_check,
         clip_export_policy=clip_export_policy,
         max_frames_per_camera=args.max_frames_per_camera,
