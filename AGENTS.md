@@ -68,7 +68,7 @@ uv run pytest -q
 uvx ruff check .
 uv run --group lint lint-imports
 docker build -f Dockerfile.backend .
-docker build -f Dockerfile.edge --target runtime .
+docker build -f Dockerfile.edge .
 pnpm --dir front install --frozen-lockfile && pnpm --dir front test
 ```
 

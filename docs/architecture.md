@@ -86,16 +86,15 @@ Flow is one-way. A layer may depend on the layer above it and on
 
 ```text
         ┌─────────────────────────────────────────────────────────────┐
-        │ 1. INGEST            Flow media plane/                │
-        │    RTSP/file/webcam source -> decode adapter -> FramePacket │
-        │    per-camera capture loop, reconnect/backoff, probe        │
+        │ 1. FLOW MEDIA PLANE  worker/runtime/flow/media_plane.py     │
+        │    RTSP source -> Flow packet -> policy pump                │
+        │    one process-owned media plane and lifecycle supervisor   │
         └─────────────────────────────────────────────────────────────┘
                                    │  FramePacket  (carries an image)
                                    ▼
         ┌─────────────────────────────────────────────────────────────┐
-        │ 2. FRAME BUS         Flow media plane/                   │
-        │    bounded, drop-oldest fan-out; per-camera scheduler;      │
-        │    depth/drop metrics. Back-pressure is visible, not silent │
+        │ 2. FLOW POLICY        worker/runtime/flow/policy_pump.py    │
+        │    metadata slots, bounded decisions, and observable drops  │
         └─────────────────────────────────────────────────────────────┘
                                    │  FramePacket  (fan-out, see below)
                                    ▼
@@ -202,11 +201,11 @@ guards both halves.
 | Fall latch | per camera | `worker/domains/fall/detector.py` |
 | Bed assignments, grace/hold, night window | per camera | `worker/domains/bed_exit/` |
 | IncidentManager | per camera | `worker/pipeline/decision/incident_manager.py` |
-| Frame-bus subscription and scheduler slot | per camera | `Flow media plane/` |
-| Encoder session and segment ring | per camera | `Flow media plane/session.py` |
-| Ingest loop and reconnect backoff | per camera | `Flow media plane/lifecycle.py` |
+| Flow metadata slot and policy state | per camera | `worker/runtime/flow/metadata_slot.py`, `policy_pump.py` |
+| Flow evidence state | per camera | `worker/runtime/flow/evidence.py` |
+| Flow lifecycle supervision | shared, one per process | `worker/runtime/flow/lifecycle_supervisor.py` |
 | Model objects and extractor instances | shared, one per task per process | `worker/runtime/model_composition.py` |
-| Resolved profile and device selection | shared, one per process | `worker/runtime/profile/` |
+| Flow runtime descriptor | shared, one per process | `worker/runtime/profile/` |
 | GPU lease | shared, one per process | `worker/runtime/lease.py` |
 | Config / LKG store | shared, one per process | `worker/runtime/config/` |
 | Evidence outbox database | shared, one per process | `worker/pipeline/output/evidence/evidence_outbox_database.py` |
@@ -263,9 +262,7 @@ is a loud failure, per ADR-0002.
 
 | Fault | Scope | Behaviour |
 | --- | --- | --- |
-| Profile unresolvable / `auto` requested | global | refuse to start, exit 3 |
-| Requested accelerator unavailable at boot | global | refuse to start, exit 3, reason logged |
-| Decode capability probe fails for the profile | global | refuse to start, exit 3 |
+| Flow runtime configuration invalid | global | refuse to start, exit 3 |
 | Model artifact missing or unloadable | global | refuse to start, exit 3 |
 | Real warmup inference fails | global | refuse to start, exit 3 |
 | GPU lease already held by another process | global | refuse to start, exit 3 |
@@ -347,32 +344,21 @@ tree is deleted.
 | `edge/serving_client/base.py` | `worker/interfaces/serving.py` |
 | `edge/serving_client/in_process.py` | `worker/adapters/model/in_process.py` |
 | `edge/sources/AGENTS.md` | folded into `worker/pipeline/AGENTS.md` |
-| `edge/sources/camera_probe.py` | `Flow media plane/camera_probe.py` |
-| `edge/sources/frame_source.py` | `Flow media plane/frame_source.py` |
-| `edge/sources/probe.py` | `Flow media plane/probe.py` |
-| `edge/sources/registry.py` | `Flow media plane/registry.py` |
-| `edge/sources/rtsp.py` | `Flow media plane/rtsp.py` |
-| `edge/sources/rtsp_backend.py` | `Flow media plane/cpu_av/` and `Flow media plane/nvdec_cuvid/` |
-| `edge/sources/rtsp_url.py` | `Flow media plane/rtsp_url.py` |
-| `edge/sources/video_file.py` | `Flow media plane/video_file.py` |
-| `edge/sources/webcam.py` | `Flow media plane/webcam.py` |
-| `edge/runtime/camera_worker.py` | split, no single owner: orchestration is `Flow media plane/lifecycle.py` (`CameraIngestLoop`), `worker/pipeline/analytics/composite.py` (`CompositeExtractor`), and `worker/runtime/worker.py` (`CameraRuntimeContext`) — see the open gap below |
+| `edge/sources/*` | retired; `worker/runtime/flow/media_plane.py` owns the sole flow media plane |
+| `edge/runtime/camera_worker.py` | `worker/runtime/flow/lifecycle_supervisor.py` and `worker/runtime/worker.py` |
 | `edge/runtime/config_pull.py` | `worker/runtime/config/config_pull.py` plus `http_transport.py`, `pull_models.py` |
 | `edge/runtime/config_resolver.py` | `worker/runtime/config/config_resolver.py` |
 | `edge/runtime/edge_worker.py` | `worker/runtime/worker.py` (`WorkerRuntime`); its CLI half is `worker/__main__.py` |
 | `edge/runtime/edge_worker_config.py` | `worker/runtime/config/worker_models.py` plus `camera_models.py`, `domain_models.py`, `loader.py` |
-| `edge/runtime/edge_worker_supervisor.py` | `Flow media plane/lifecycle.py` (`IngestSupervisor`); restart policy folded into `worker/runtime/worker.py` |
+| `edge/runtime/edge_worker_supervisor.py` | `worker/runtime/flow/lifecycle_supervisor.py`; restart policy is in `worker/runtime/worker.py` |
 | `edge/runtime/incident_manager.py` | `worker/pipeline/decision/incident_manager.py` |
 | `edge/runtime/latest_frame.py` | `worker/pipeline/output/live_view.py` (`LatestFrameStore`) |
 | `edge/runtime/lkg_store.py` | `worker/runtime/config/lkg_store.py` |
 | `edge/runtime/mjpeg_server.py` | `worker/pipeline/output/mjpeg_server.py` plus `_mjpeg_http.py` |
 | `edge/runtime/pipeline_bootstrap.py` | `worker/runtime/bootstrap.py` |
-| `edge/runtime/profile/AGENTS.md` | folded into `worker/runtime/AGENTS.md` |
-| `edge/runtime/profile/boot.py` | `worker/runtime/profile/boot.py` |
-| `edge/runtime/profile/registry.py` | `worker/runtime/profile/registry.py` |
 | `edge/runtime/runtime_diagnostics.py` | `worker/runtime/telemetry/runtime_diagnostics.py` |
 | `edge/runtime/runtime_status_sender.py` | `worker/runtime/telemetry/runtime_status_sender.py` plus `wire.py` |
-| `edge/runtime/scheduler.py` | `Flow media plane/scheduler.py` |
+| `edge/runtime/scheduler.py` | `worker/runtime/flow/policy_pump.py` |
 | `edge/runtime/status_store.py` | `worker/runtime/telemetry/status_store.py` |
 
 Deployment identity is deliberately unchanged by this map: the image and service
@@ -572,8 +558,8 @@ writer. There is no backend analysis-trace HTTP or SQLite warehouse.
 
 ### Replay trace v2
 
-Native policy pumps may emit replay-trace-v2 JSONL under the trace root only
-when its environment gate is enabled. Files are named from a hashed camera id
+Flow policy pumps may emit replay-trace-v2 JSONL under the trace root only when
+its environment gate is enabled. Files are named from a hashed camera id
 and remain contained beneath that root, with bounded rotations. Every row has
 unit coordinates and its frame dimensions; `seq` is ordered within a boot
 segment across rotations. `open` starts a new boot segment and resets replay

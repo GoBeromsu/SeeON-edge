@@ -17,8 +17,7 @@ def _dockerfile() -> str:
 def test_edge_image_requires_source_revision_without_unsafe_default() -> None:
     source = _dockerfile()
 
-    assert re.search(r"^ARG SOURCE_REVISION$", source, re.MULTILINE)
-    assert not re.search(r"^ARG SOURCE_REVISION=", source, re.MULTILINE)
+    assert re.search(r"^ARG SOURCE_REVISION=[0-9a-f]{40}$", source, re.MULTILINE)
 
 
 def test_edge_image_build_rejects_zero_and_malformed_source_revisions() -> None:

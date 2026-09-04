@@ -1247,23 +1247,10 @@ _NOT_A_PULL_REQUEST_IF = "github.event_name != 'pull_request'"
 #: same gate as a push.
 _REGISTRY_WRITE_MARKERS = ("imagetools create", "edge_image_plan.py retag", "docker push")
 
-#: Dockerfile.edge's CI-only stage. The fresh-build boot smoke is a
-#: `docker/build-push-action` step like the two publishing builds, but it is NOT
-#: a token consumer and must never become one: it builds a stage that is never
-#: shipped, so its `push:` is the literal string "false" rather than the
-#: PUSH_IMAGES gate, and it exports nothing at all.
-_BOOT_SMOKE_TARGET = "bootsmoke"
-_NEVER_PUSHES = "false"
-
-#: The stage Dockerfile.edge actually ships. It is NOT that file's last stage --
-#: `bootsmoke` is -- and Docker's default target is the last stage, so a build
-#: of Dockerfile.edge that omits `target:` publishes the CI-only smoke layer as
-#: the production image. Any step here that can push must therefore name it.
-_SHIPPED_TARGET = "runtime"
 _EDGE_DOCKERFILE = "Dockerfile.edge"
 
 #: The two mutually exclusive boot-smoke shapes. A freshly built non-release
-#: image is smoked in the `bootsmoke` build stage; a reused or release digest is
+#: image is loaded from its docker-format carrier; a reused or release digest is
 #: pulled and run. Their `if:` expressions must stay exact complements, or a run
 #: could skip both and the required check would pass having booted nothing.
 _SMOKE_STAGE_IF = "env.BUILD_ML_WORKER == 'true' && env.RELEASE_BUILD != 'true'"
@@ -1382,35 +1369,14 @@ def _assert_token_consumers_are_gated(name: str, job_name: str, job: dict[str, o
         if uses.startswith("actions/upload-artifact@"):
             uploads += 1
             assert step.get("if") == _PUSH_GATE, (name, step.get("name"), step.get("if"))
-        if with_.get("target") == _BOOT_SMOKE_TARGET:
-            # The fresh-build boot smoke. It builds a stage that is never tagged
-            # and never shipped, so it is held to a STRICTER rule than the gate:
-            # it may not push on any event, not even a publishing one.
-            # `push: "false"` as a literal is the assertion; the PUSH_IMAGES
-            # gate would be a regression here, not a fix. It must also stay free
-            # of `cache-to` (the mode=max export the builds above document at
-            # 413.3s) and of `load:` (the docker-format exporter this step
-            # exists to avoid). Retargeting it at `runtime` drops it out of this
-            # branch and into the generic `push:` check below, which its literal
-            # "false" fails.
+        if "docker load --input /tmp/ml-worker-runtime.tar" in str(step.get("run", "")):
             smokes += 1
-            assert with_["push"] == _NEVER_PUSHES, (name, step.get("name"), with_["push"])
-            assert "cache-to" not in with_, (name, step.get("name"))
-            assert "load" not in with_, (name, step.get("name"))
-            continue
+            assert step.get("if") == _SMOKE_STAGE_IF, (name, step.get("name"), step.get("if"))
+            assert "docker run --rm --network none" in str(step["run"])
+            assert "python -m worker --check-config" in str(step["run"])
         if "push" in with_:
             pushes += 1
             assert with_["push"] == _PUSH_GATE_EXPR, (name, step.get("name"), with_["push"])
-            # A build that can reach the registry must name the stage it ships.
-            # Dockerfile.edge ends with the CI-only `bootsmoke` stage and Docker
-            # defaults to the LAST stage, so an unpinned build here would push
-            # the smoke layer as the production ml-worker image.
-            if with_.get("file") == _EDGE_DOCKERFILE:
-                assert with_.get("target") == _SHIPPED_TARGET, (
-                    name,
-                    step.get("name"),
-                    with_.get("target"),
-                )
         if "cache-to" in with_:
             exports += 1
             cache_to = str(with_["cache-to"])
@@ -1436,9 +1402,9 @@ def _assert_token_consumers_are_gated(name: str, job_name: str, job: dict[str, o
 
     # Non-vacuous: these are the shapes this job contains -- one registry login,
     # one artifact upload, two `push:` inputs, two `cache-to` exports, two
-    # digest re-tags, and one boot-smoke build that must never grow into any of
-    # them. Deleting a gate cannot pass by deleting its step, and deleting the
-    # smoke cannot pass by leaving nothing to check.
+    # digest re-tags, and one carrier boot smoke. Deleting a gate cannot pass by
+    # deleting its step, and deleting the smoke cannot pass by leaving nothing
+    # to check.
     assert (logins, uploads, pushes, exports, retags, smokes) == (1, 1, 2, 2, 2, 1), (
         name,
         job_name,
@@ -1477,10 +1443,9 @@ def test_every_pull_request_workflow_pins_actions_to_a_commit() -> None:
         _count_pinned_actions(name, workflow)
         for name, workflow in _pull_request_workflows().items()
     )
-    # ci.yml (5) + edge-images.yml (7, the fresh-build boot smoke now being a
-    # pinned `docker/build-push-action` rather than a `run:`). A floor, not an
+    # ci.yml (5) + edge-images.yml (6). A floor, not an
     # equality: adding a pinned step must not have to touch this number.
-    assert pinned >= 12, pinned
+    assert pinned >= 11, pinned
 
 
 def test_no_pull_request_workflow_reads_a_secret() -> None:
@@ -1506,9 +1471,7 @@ _PUBLISH_STEP_SEQUENCE: tuple[tuple[str, str | None], ...] = (
     ("Decide, per image", None),
     ("Build and push ml-api", "docker/build-push-action@"),
     ("Build and push ml-worker", "docker/build-push-action@"),
-    # The fresh-build boot smoke: a build of Dockerfile.edge's `bootsmoke`
-    # stage, so it is an action step and not a `run:`.
-    ("Boot smoke test", "docker/build-push-action@"),
+    ("Boot smoke test", None),
     ("Re-tag the published ml-api", None),
     ("Re-tag the published ml-worker", None),
     ("Resolve the digests", None),
@@ -1612,10 +1575,6 @@ def test_pull_request_pin_policy_rejects_an_unpinned_action(
         (6, "${{ env.PUSH_IMAGES == 'false' && 'type=gha,mode=max' || '' }}"),
         # Right prefix, but the fallback exports anyway.
         (6, "${{ env.PUSH_IMAGES == 'true' && 'type=gha,mode=max' || 'type=gha' }}"),
-        # The boot smoke exports nothing on any event, so even a correctly
-        # gated `cache-to` is a regression there.
-        (7, "type=gha,scope=edge-ml-worker,mode=max"),
-        (7, "${{ env.PUSH_IMAGES == 'true' && 'type=gha,scope=edge-ml-worker,mode=max' || '' }}"),
     ],
 )
 def test_edge_image_policy_rejects_an_ungated_cache_export(step_index: int, cache_to: str) -> None:
@@ -1676,21 +1635,6 @@ def test_edge_image_policy_rejects_a_write_scope_on_a_second_job() -> None:
         (9, "if", "env.BUILD_ML_WORKER != 'true'"),
         # An artifact upload on a PR run publishes an unpullable digest.
         (13, "if", "always()"),
-        # The boot smoke builds a stage that is never shipped. Pushing it is
-        # wrong on every event, so `push: "false"` is a literal -- gaining
-        # either `true` or the PUSH_IMAGES gate is a regression.
-        (7, "push", "true"),
-        (7, "push", _PUSH_GATE_EXPR),
-        # Retargeting the smoke at the shipped stage turns a throwaway build
-        # back into a build of the published image.
-        (7, "target", _SHIPPED_TARGET),
-        # `load:` is the docker-format exporter this whole step exists to drop.
-        (7, "load", "true"),
-        # And the mirror image on the PUBLISHING build: Dockerfile.edge's last
-        # stage is `bootsmoke`, so a pushing build that names the wrong stage
-        # publishes the CI layer.
-        (6, "target", _BOOT_SMOKE_TARGET),
-        (6, "target", "deepstream-native-build"),
     ],
 )
 def test_edge_image_policy_rejects_an_ungated_token_consumer(
@@ -1727,43 +1671,31 @@ def test_edge_image_policy_rejects_dropping_a_gated_step(step_index: int, why: s
         _assert_write_permissions_stay_off_the_pull_request_path("edge-images.yml", workflow)
 
 
-def test_edge_image_policy_rejects_a_publishing_build_with_no_target() -> None:
-    # Deleting the pin is the dangerous edit, and the one a mutation that only
-    # ever SETS fields cannot reach: with no `target:` at all, Docker falls back
-    # to the last stage in Dockerfile.edge, which is `bootsmoke`.
-    workflow = copy.deepcopy(_workflow("edge-images.yml"))
-    worker = _jobs(workflow)["publish"]["steps"][6]
-    assert worker["with"].pop("target") == _SHIPPED_TARGET
-
-    with pytest.raises(AssertionError):
-        _assert_write_permissions_stay_off_the_pull_request_path("edge-images.yml", workflow)
-
-
 def test_edge_image_boot_smoke_shapes_are_exact_complements() -> None:
     """Every ml-worker build is smoked by exactly one of the two shapes.
 
-    A freshly built non-release image is smoked in the `bootsmoke` build stage;
+    A freshly built non-release image is smoked from the docker-format carrier;
     a reused or release digest is pulled and run. If the two `if:` expressions
     ever stopped being complements, a run could skip BOTH and the required check
     would report green having booted nothing -- the #195 failure mode with an
     extra step of indirection.
     """
     steps = _steps(_jobs(_workflow("edge-images.yml"))["publish"])
-    stage = [s for s in steps if (s.get("with") or {}).get("target") == _BOOT_SMOKE_TARGET]
+    stage = [
+        s
+        for s in steps
+        if "docker load --input /tmp/ml-worker-runtime.tar" in str(s.get("run", ""))
+    ]
     pull = [s for s in steps if "docker pull" in str(s.get("run", ""))]
     assert len(stage) == 1, [s.get("name") for s in stage]
     assert len(pull) == 1, [s.get("name") for s in pull]
     assert stage[0]["if"] == _SMOKE_STAGE_IF, stage[0].get("if")
     assert pull[0]["if"] == _SMOKE_PULL_IF, pull[0].get("if")
     # Both actually boot the worker, rather than merely existing.
+    assert "docker run --rm --network none" in str(stage[0]["run"])
     assert "python -m worker --check-config" in str(pull[0]["run"])
-    # From the index, like every other assertion in this file, so a staged
-    # Dockerfile and a staged workflow are judged against each other.
-    dockerfile = next(
-        blob for relative, blob in _index_blobs() if relative == Path(_EDGE_DOCKERFILE)
-    ).decode("utf-8")
-    assert f"FROM {_SHIPPED_TARGET} AS {_BOOT_SMOKE_TARGET}" in dockerfile
-    assert "python -m worker --check-config" in dockerfile
+    worker = next(s for s in steps if s.get("name") == "Build and push ml-worker image")
+    assert worker["with"]["outputs"] == "type=docker,dest=/tmp/ml-worker-runtime.tar"
 
 
 def test_edge_image_policy_rejects_a_push_images_flag_that_is_true_on_a_pr() -> None:

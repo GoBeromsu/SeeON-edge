@@ -51,7 +51,7 @@ Builds are:
 ```sh
 docker build -f Dockerfile.backend --build-arg "SOURCE_REVISION=$SEALED_ML_SHA" \
   -t "local/ml-api:$SEALED_ML_SHA" .
-docker build --platform linux/amd64 -f Dockerfile.edge --target runtime \
+docker build --platform linux/amd64 -f Dockerfile.edge \
   --build-arg "SOURCE_REVISION=$SEALED_ML_SHA" \
   -t "local/ml-worker:$SEALED_ML_SHA" .
 ```
@@ -91,6 +91,12 @@ updating the deployment receipt.
 exist: `Dockerfile.backend` -> `ml-api` (front + backend; the one-shot
 migrator/consistency services run the same image) and `Dockerfile.edge` ->
 `ml-worker`. Models are never baked into either image.
+
+For a fresh non-release worker build, the workflow exports
+`/tmp/ml-worker-runtime.tar`, loads that carrier, and runs
+`docker run --network none ... python -m worker --check-config`. The Dockerfile
+has no smoke stage; release and reused images are pulled by digest for the same
+check.
 
 | Event                 | Builds both | Boot smoke | Pushes to GHCR | Tags pushed                          | Writes build cache |
 |-----------------------|-------------|------------|----------------|--------------------------------------|--------------------|

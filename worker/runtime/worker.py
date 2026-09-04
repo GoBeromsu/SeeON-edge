@@ -411,9 +411,27 @@ def production_boot_dependencies() -> bootstrap.BootDependencies:
         default_verifiers(
             cuda_source=_production_cuda_source,
             mps_source=_production_mps_source,
-            device_resident_source=None,
+            device_resident_source=_production_device_resident_source,
         )
     )
+
+
+def _production_device_resident_source() -> VerifyResult:
+    """Device residency for `flow`, established from NVML rather than decode.
+
+    The retired `nvidia` profile proved residency by opening an NVDEC device.
+    Under `flow` the SDK owns decode inside its own process graph, so the
+    parent's evidence is NVML naming a driver and a device - the same source
+    the boot telemetry and provenance already use. Failing to see one is a
+    refusal to start, not a warning: ADR-0002 keeps required GPU infrastructure
+    fail-fast.
+    """
+    status = probe_nvml_gpu_status()
+    if not status.nvml_available:
+        return VerifyResult(False, "flow", "device", status.reason)
+    device = status.device_name or "an unnamed device"
+    driver = status.driver_version or "an unreported driver"
+    return VerifyResult(True, "flow", "device", f"NVML reports {device} on driver {driver}")
 
 
 def _production_gpu_status(*, probe_python_cuda: bool = True) -> RelayGpuPayload:
@@ -786,7 +804,6 @@ class WorkerRuntime:
                 },
             )
 
-
     def _bed_zone_recognizer(self, image: Image) -> BedZoneRecognizeResponse:
         """Run one on-demand bed-segmentation pass for the recognition endpoint."""
         if self.shared_yolo is None:
@@ -832,8 +849,10 @@ class WorkerRuntime:
 
     def _max_frames_completion_check(self) -> bool:
         cap = self._max_frames_per_camera
-        return cap is not None and bool(self._native_policy_pumps) and all(
-            pump.processed_count >= cap for pump in self._native_policy_pumps
+        return (
+            cap is not None
+            and bool(self._native_policy_pumps)
+            and all(pump.processed_count >= cap for pump in self._native_policy_pumps)
         )
 
     def _start_runtime_status_sender(self) -> None:
@@ -1247,8 +1266,9 @@ class WorkerRuntime:
         if media_plane is None:
             raise RuntimeError("flow media plane is not initialized")
         endpoint = assert_rtsp_endpoint_allowed(camera.inference_rtsp_url)
+        # Decode is the SDK's now; the host decode-selection record went with the
+        # host pipeline. The diagnostic still names what the roster asked for.
         self.diagnostics.register_decode(camera.camera_id, camera.decode_backend or "auto")
-        self._record_decode_selection(camera, "nvdec")
         self._live_frames.register_camera(camera.camera_id)
         binding = media_plane.add_source(camera.camera_id, endpoint.pinned_url)
         plan = self._preflight_camera_graph(

@@ -16,23 +16,16 @@ name: Edge ML Images
 #
 # The boot smoke has two shapes, and exactly one runs per image build:
 #
-#   freshly built, not a release -> Dockerfile.edge's `bootsmoke` STAGE. No
-#     exporter of any kind. This is every pull_request and every push to main,
-#     i.e. the path all the wall clock was on.
+#   freshly built, not a release -> load the docker-format carrier and run it
+#     with networking disabled. This is every pull_request and every push to
+#     main.
 #   reused, or a release build   -> pull the published digest and `docker run`
 #     it, so the seal never carries a worker digest that was not booted in this
 #     run. Rare, and already logged in to the registry.
 #
-# The stage exists because the `docker run` shape needs the image in the
-# runner's daemon, i.e. `load: true`, i.e. BuildKit's docker-format exporter --
-# which was by far the most expensive thing in this workflow. Measured on PR run
-# 33156001540: `#32 exporting to docker image format` DONE 473.7s (125.9s
-# exporting layers + 347.9s sending tarball) and `#33 importing to docker` DONE
-# 244.0s -- 717.7s, 89% of the 806s ml-worker step and 84% of the whole 14m14s
-# required check, spent so that a 4.4s check could run. Push run 33154567502
-# paid 503.9s + 258.0s for the same thing. The stage runs the identical command
-# inside BuildKit on layers the builder already holds, so `load:` is gone
-# entirely and no exporter runs on the hot path.
+# The fresh-build carrier is written by BuildKit and loaded only for its smoke.
+# It keeps boot verification outside the shipped Dockerfile while ensuring the
+# exact locally built image is what starts.
 #
 # Publish policy:
 #   pull_request     -> build + boot smoke only. Never pushes, never logs in.
@@ -299,26 +292,13 @@ jobs:
         with:
           context: .
           file: Dockerfile.edge
-          # Dockerfile.edge's LAST stage is the CI-only `bootsmoke`, and
-          # Docker's default target is the last stage, so this build must name
-          # the stage it ships. Without it the published ml-worker image would
-          # be the boot-smoke stage (one extra layer -- verified locally: 82
-          # layers against runtime's 81, and a different image ID).
-          # tests/test_public_repository_privacy.py fails any pushing build of
-          # Dockerfile.edge that does not pin this.
-          target: runtime
-          # Deliberately no `load:`. Nothing needs this result in the runner's
-          # daemon any more: a freshly built non-release image is smoked in the
-          # `bootsmoke` stage (next step), and the reuse/release paths pull the
-          # published digest instead. `load` is the docker-format exporter, and
-          # the exporter is what the header measures.
-          #
           # A release still pushes an OCI index rather than a plain manifest: a
           # release's digest is the one a LATER release may reuse, and
           # re-tagging only preserves a digest when the manifest is an index,
           # which means attaching provenance.
           push: ${{ env.PUSH_IMAGES == 'true' }}
           provenance: ${{ env.RELEASE_BUILD == 'true' }}
+          outputs: type=docker,dest=/tmp/ml-worker-runtime.tar
           build-args: |
             SOURCE_REVISION=${{ env.DEPLOY_SHA }}
           tags: ${{ env.ML_WORKER_TAGS }}
@@ -344,37 +324,19 @@ jobs:
           # cache writers.
           cache-to: ${{ env.PUSH_IMAGES == 'true' && 'type=gha,scope=edge-ml-worker,mode=max' || '' }}
 
-      - name: Boot smoke test — worker process actually imports and starts
-        # The fresh-build path, and the one every PR and every push to main
-        # takes. Same build graph as the step above, one stage further:
-        # `bootsmoke` is `FROM runtime` plus a single `RUN --network=none ...
-        # python -m worker --check-config`. Everything under it is already in
-        # this builder, so this resolves to that one RUN and no exporter runs.
-        #
-        # `--network=none` makes "this check has no side effects" an assertion
-        # the build enforces rather than a claim in a comment.
-        #
-        # Complementary to the pull-and-run smoke below: that one covers reused
-        # and release digests, this one covers freshly built non-release images.
-        # Exactly one of the two runs, and the pair is asserted in
-        # tests/test_public_repository_privacy.py so neither can be skipped
-        # into silence.
-        #
-        # Deliberate, and asserted there too: `target: bootsmoke` (never
-        # `runtime` -- that would redo the shipped build for no check),
-        # `push: "false"` as a literal and NOT the PUSH_IMAGES gate (this stage
-        # must never reach a registry on ANY event, so there is nothing to
-        # gate), no `load:`, and no `cache-to`.
+      - name: Boot smoke test — freshly built ml-worker image actually boots
         if: env.BUILD_ML_WORKER == 'true' && env.RELEASE_BUILD != 'true'
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
-        with:
-          context: .
-          file: Dockerfile.edge
-          target: bootsmoke
-          push: "false"
-          build-args: |
-            SOURCE_REVISION=${{ env.DEPLOY_SHA }}
-          cache-from: type=gha,scope=edge-ml-worker
+        run: |
+          set -euo pipefail
+          docker load --input /tmp/ml-worker-runtime.tar
+          set +e
+          docker run --rm --network none \
+            -e RELAY_TOKEN=ci-boot-smoke-test \
+            "$IMAGE_NAMESPACE/ml-worker:$DEPLOY_SHA" \
+            python -m worker --check-config
+          status=$?
+          set -e
+          test "$status" -eq 0
 
       - name: Re-tag the published ml-api digest
         # Token-spending: adds a tag in the registry. Gated on PUSH_IMAGES like
@@ -469,7 +431,7 @@ jobs:
         # URL is fixed in-code now (RELAY_URL is retired); only RELAY_TOKEN is
         # required and it only needs to be well-formed, not reachable.
         #
-        # The complement of the `bootsmoke` stage above: this is the path where
+        # The complement of the carrier smoke above: this is the path where
         # there is no fresh local build graph to smoke, because ml-worker was
         # either REUSED from a previous release or built on a release (which
         # pushes an OCI index and loads nothing). Both cases pull the exact
