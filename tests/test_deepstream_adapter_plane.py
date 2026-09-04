@@ -391,3 +391,35 @@ def test_the_probe_stops_converting_once_the_plane_is_stopping(
 
     assert plane.published_frames("camera") == 0
     assert not [record for record in caplog.records if "unmapped mux pad" in record.getMessage()]
+
+
+def test_a_frame_that_cannot_be_converted_is_dropped_not_fatal(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """An exception escaping a probe callback aborts the process inside the SDK.
+
+    A 13-camera run died during an RTSP reconnect, so a frame whose conversion
+    raises must be counted and dropped instead of taking the worker down.
+    """
+    from types import SimpleNamespace
+
+    plane, _ = _plane()
+    plane.add_source("camera", "rtsp://one")
+
+    class _Exploding:
+        pad_index = 0
+
+        def __getattr__(self, name: str) -> object:
+            raise RuntimeError(f"vendor metadata blew up reading {name}")
+
+    with caplog.at_level(logging.ERROR):
+        plane.publish_frame(_Exploding())
+        plane.publish_frame(_Exploding())
+
+    assert plane.probe_failures() == 2
+    assert plane.published_frames("camera") == 0
+    assert len([r for r in caplog.records if "conversion failed" in r.getMessage()]) == 1
+    plane.publish_frame(
+        SimpleNamespace(pad_index=0, buffer_pts=1, tensor_items=[], object_items=[])
+    )
+    assert plane.published_frames("camera") == 1

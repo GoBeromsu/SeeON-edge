@@ -234,6 +234,7 @@ class DeepStreamMediaPlane(MediaPlane):
         self._objects_observed = 0
         self._matched_tracks = 0
         self._accepting = True
+        self._probe_failures = 0
         self._cameras_warned_without_pose_tensor: set[str] = set()
         self._commands: queue.Queue[
             tuple[Callable[[], Any], threading.Event | None, list[Any] | None]
@@ -334,6 +335,10 @@ class DeepStreamMediaPlane(MediaPlane):
         whole bring-up. These make the difference observable.
         """
         return self._objects_observed, self._frames_without_pose_tensor
+
+    def probe_failures(self) -> int:
+        """Frames dropped because their conversion raised inside the SDK probe."""
+        return self._probe_failures
 
     def status(self) -> MediaPlaneStatus:
         error = self._flow_error
@@ -553,7 +558,20 @@ class DeepStreamMediaPlane(MediaPlane):
         )
 
     def publish_frame(self, frame_meta: Any) -> None:
-        """Probe entry: convert one accepted frame and publish it to the slot."""
+        """Probe entry: convert one accepted frame and publish it to the slot.
+
+        Any exception escaping this callback aborts the process inside the SDK,
+        so a frame that cannot be converted is dropped and reported rather than
+        allowed to take the worker down with it.
+        """
+        try:
+            self._publish_frame(frame_meta)
+        except Exception:  # noqa: BLE001 - an SDK probe must never raise
+            self._probe_failures += 1
+            if self._probe_failures == 1:
+                LOGGER.exception("dropping a frame whose conversion failed inside the SDK probe")
+
+    def _publish_frame(self, frame_meta: Any) -> None:
         if not self._accepting:
             # Stopping: the source table is being emptied out from under this
             # callback, so there is nothing meaningful left to convert.
