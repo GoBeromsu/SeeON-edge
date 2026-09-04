@@ -21,8 +21,18 @@ WORKDIR /app
 # ffmpeg is the clip thumbnail extractor. Smart Record itself never encodes -
 # it stream-copies cached frames - so this adds no NVENC session; without it a
 # sealed clip publishes without its thumbnail.
+# The DeepStream base ships a partial multimedia stack, so ffmpeg's codec
+# libraries must be reinstalled explicitly - the same list Dockerfile.edge
+# pins for the same reason. Without it ffmpeg fails to load libvpx.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ffmpeg \
+    && apt-get install -y --reinstall --no-install-recommends \
+        ffmpeg \
+        libflac12t64 \
+        libmp3lame0 \
+        libmpg123-0t64 \
+        libvpx9 \
+        libx264-164 \
+        libx265-199 \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=uv-bin /usr/local/bin/uv /usr/local/bin/uv
 COPY --from=parser-build /src/libnvdsinfer_custom_yolo26_pose.so /opt/nvidia/deepstream/deepstream/lib/
