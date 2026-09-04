@@ -12,11 +12,11 @@ from typing import Protocol, final, runtime_checkable
 
 from contracts.observation import BoundingBox
 from contracts.replay_trace import ReplayRow, ReplaySource, ReplayTrack
+from worker.interfaces.media_plane import OnDemandSnapshotUnsupported
 from worker.pipeline.decision import EventAggregator
 from worker.pipeline.output.evidence_attacher import AlertEvidenceAttacher
 from worker.pipeline.perception import SceneState, build_decision_input, build_frame_observation
 from worker.pipeline.trace.replay_trace_writer import ReplayTraceWriter
-from worker.interfaces.media_plane import OnDemandSnapshotUnsupported
 from worker.runtime.flow.metadata_slot import AcceptanceToken, LatestMetadataSlot
 from worker.types import BusinessEvent, ChannelState, NativeEvidenceTrigger
 from worker.types.metadata import MetadataFrame, SourceBinding
