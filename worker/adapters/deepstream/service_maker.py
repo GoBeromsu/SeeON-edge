@@ -412,9 +412,15 @@ class DeepStreamMediaPlane(MediaPlane):
             )
         )
         flow.attach(what=self._handle.make_probe("media-plane-probe", self._probe))
-        if self._handle.make_retriever is not None:
-            flow.fork().retrieve(self._handle.make_retriever(self._jpeg_retriever))
-        flow.render(mode=self._handle.render_mode_discard)
+        if self._handle.make_retriever is None:
+            flow.render(mode=self._handle.render_mode_discard)
+        else:
+            # fork() inserts a tee and returns a flow originating at it; every
+            # branch must be built from that fork, because the original flow's
+            # source pad is now the tee's input.
+            forked = flow.fork()
+            forked.retrieve(self._handle.make_retriever(self._jpeg_retriever))
+            forked.render(mode=self._handle.render_mode_discard)
         for camera_id in camera_ids:
             source = self._source_element(camera_id)
             source.set(
