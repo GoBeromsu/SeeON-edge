@@ -1,0 +1,30 @@
+{
+  "chain": [
+    {
+      "hop": "decision -> backend incident",
+      "status": "PROVEN live",
+      "evidence": "fall incidents recorded by the real ml-api on schema 18 (42 in 33 s during one run)"
+    },
+    {
+      "hop": "alerts -> one Smart Record window",
+      "status": "PROVEN live",
+      "evidence": "smart_record_extended_total 0->41, start_refused_total 0, extension_raced_total 0"
+    },
+    {
+      "hop": "sealed media -> published clip",
+      "status": "PROVEN live",
+      "evidence": "clip.mp4 + manifest.json (38 contributors ordered by detected_at, covering 92.9 s) + thumbnail.jpg + terminal-outcome.json naming all 38 event ids"
+    },
+    {
+      "hop": "clip -> backend receipt",
+      "status": "WIRED and exercised live",
+      "evidence": "CLIP delivery entry enqueued and PUT api/v1/relay/clips/{id} attempted; backend answered 409"
+    },
+    {
+      "hop": "backend completes incidents",
+      "status": "BLOCKED BY RIG",
+      "evidence": "409 detail: camera has no backend mapping; clip export cannot address the backend. The rig has no upstream hub (API_BACKEND_BASE_URL=https://hub.invalid), so no backend_camera_id binding exists. Production binds cameras to the hub."
+    }
+  ],
+  "note": "P1b-AC3 first half proven live; the second half needs a hub-bound camera, which is a deployment prerequisite rather than a code gap."
+}
