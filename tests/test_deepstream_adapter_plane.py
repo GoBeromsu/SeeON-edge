@@ -323,3 +323,46 @@ def test_an_unmapped_mux_pad_is_dropped_and_never_raises_into_the_probe() -> Non
     assert plane.published_frames("camera") == 0
     assert plane.camera_id_for_pad(99) is None
     assert plane.camera_id_for_pad(0) == "camera"
+
+
+def test_a_frame_without_pose_tensor_is_counted_and_named_once(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A dead pose path must not look like an empty room.
+
+    A mis-bound output layer produced no pose rows for an entire bring-up while
+    the pipeline ran at full frame rate, so the plane counts such frames and
+    names the camera once instead of staying silent.
+    """
+    from types import SimpleNamespace
+
+    plane, _ = _plane()
+    plane.add_source("camera", "rtsp://one")
+
+    with caplog.at_level(logging.WARNING):
+        for objects in (3, 2):
+            plane.publish_frame(
+                SimpleNamespace(
+                    pad_index=0,
+                    buffer_pts=1,
+                    tensor_items=[],
+                    object_items=[
+                        SimpleNamespace(
+                            object_id=index,
+                            confidence=0.9,
+                            rect_params=SimpleNamespace(left=0.0, top=0.0, width=10.0, height=10.0),
+                        )
+                        for index in range(objects)
+                    ],
+                    num_obj_meta=objects,
+                )
+            )
+
+    observed, without_tensor = plane.perception_counters()
+    assert without_tensor == 2
+    assert observed == 5
+    warnings = [
+        record for record in caplog.records if "no pose tensor metadata" in record.getMessage()
+    ]
+    assert len(warnings) == 1
+    assert "camera" in warnings[0].getMessage()

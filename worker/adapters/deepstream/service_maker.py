@@ -225,6 +225,11 @@ class DeepStreamMediaPlane(MediaPlane):
         self._jpeg_publisher = jpeg_publisher
         self._latest_jpegs: dict[str, bytes] = {}
         self._jpeg_lock = threading.Lock()
+        # A pose path that produces nothing must not be silent: without these a
+        # dead parser looks exactly like an empty room for hours.
+        self._frames_without_pose_tensor = 0
+        self._objects_observed = 0
+        self._cameras_warned_without_pose_tensor: set[str] = set()
         self._commands: queue.Queue[
             tuple[Callable[[], Any], threading.Event | None, list[Any] | None]
         ] = queue.Queue()
@@ -305,6 +310,15 @@ class DeepStreamMediaPlane(MediaPlane):
         survives consumption.
         """
         return self._publish_sequence.get(camera_id, 0)
+
+    def perception_counters(self) -> tuple[int, int]:
+        """Objects the tracker delivered, and frames that carried no pose tensor.
+
+        A pose path that silently produces nothing is indistinguishable from an
+        empty room, which is exactly how a mis-bound output layer hid for a
+        whole bring-up. These make the difference observable.
+        """
+        return self._objects_observed, self._frames_without_pose_tensor
 
     def status(self) -> MediaPlaneStatus:
         error = self._flow_error
@@ -542,7 +556,20 @@ class DeepStreamMediaPlane(MediaPlane):
             layer = tensor_meta.as_tensor_output().get_layers()["output0"]
             rows = rows_from_tensor(layer)
             break
+        objects = int(getattr(frame_meta, "num_obj_meta", 0) or 0)
+        if objects == 0:
+            objects = sum(1 for _ in frame_meta.object_items)
+        self._objects_observed += objects
         if rows is None:
+            self._frames_without_pose_tensor += 1
+            if camera_id not in self._cameras_warned_without_pose_tensor:
+                self._cameras_warned_without_pose_tensor.add(camera_id)
+                LOGGER.warning(
+                    "no pose tensor metadata on the first frame from camera %s "
+                    "(%d tracked objects on it); every track on such a frame is unmatched",
+                    camera_id,
+                    objects,
+                )
             # nvinfer attaches tensor metadata per inferred frame; a frame can
             # arrive without it (skipped inference interval, exhausted tensor
             # pool). The tracked objects are still real, so publish the frame
