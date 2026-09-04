@@ -29,6 +29,15 @@ FIXTURE_PACKAGES: Final = (
     "worker.types",
     "worker.interfaces",
     "worker.adapters",
+    # Contract 13 names the non-DeepStream adapter subpackages and the replay
+    # package explicitly; the fixture must contain every module a contract names.
+    "worker.adapters.decode",
+    "worker.adapters.deepstream",
+    "worker.adapters.device",
+    "worker.adapters.encode",
+    "worker.adapters.frame",
+    "worker.adapters.model",
+    "worker.replay",
     "worker.pipeline",
     "worker.pipeline.bus",
     "worker.pipeline.ingest",

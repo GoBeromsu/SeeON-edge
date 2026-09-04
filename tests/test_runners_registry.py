@@ -10,15 +10,13 @@ classes, and the models-directory resolution default.
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 import pytest
 
 from worker.adapters.model.registry import EmptyModelTaskError, ModelRegistry, default_registry
 from worker.adapters.model.sklearn_fall import MODELS_DIR
-from worker.adapters.model.yolo_bed_seg import YoloBedSegRunner
-from worker.adapters.model.yolo_person import YoloPersonRunner
-from worker.adapters.model.yolo_pose import YoloPoseRunner
 
 
 class FakeRunner:
@@ -38,9 +36,13 @@ def test_default_registry_has_pose_bed_person_factories_without_loading_models()
 
     # "fall" is deliberately absent: it has no registry-backed fallback.
     assert registry.tasks() == ("bed", "person", "pose")
-    assert registry.get_factory("pose") is YoloPoseRunner
-    assert registry.get_factory("bed") is YoloBedSegRunner
-    assert registry.get_factory("person") is YoloPersonRunner
+    # The ultralytics runners resolve lazily so a flow-profile process never
+    # imports torch (P1b-AC7): building the registry must not import them.
+    for task in ("pose", "bed", "person"):
+        assert callable(registry.get_factory(task))
+    assert "worker.adapters.model.yolo_pose" not in sys.modules
+    assert "worker.adapters.model.yolo_bed_seg" not in sys.modules
+    assert "worker.adapters.model.yolo_person" not in sys.modules
 
 
 def test_sklearn_fall_default_models_dir_points_to_ml_models_root() -> None:

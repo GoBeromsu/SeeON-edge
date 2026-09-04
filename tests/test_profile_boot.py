@@ -187,12 +187,18 @@ def test_profile_registry_exact_keys() -> None:
         "intel-vaapi-host",
         "apple-mps-host",
         "nvidia",
+        "flow",
         "mps",
         "cpu",
         "igpu",
     }
     assert PROFILE_REGISTRY["nvidia"].device == "cuda"
     assert PROFILE_REGISTRY["nvidia"].decode == "nvdec"
+    # P1b: the Flow profile is DeepStream-owned end to end (NVDEC, NVENC for the
+    # live view) with the fall/bed models on ONNX Runtime CPU.
+    assert PROFILE_REGISTRY["flow"].device == "cuda"
+    assert PROFILE_REGISTRY["flow"].decode == "nvdec"
+    assert PROFILE_REGISTRY["flow"].inference == "onnxruntime"
     assert PROFILE_REGISTRY["mps"].device == "mps"
     assert PROFILE_REGISTRY["mps"].decode == "opencv"
     assert PROFILE_REGISTRY["cpu"].device == "cpu"

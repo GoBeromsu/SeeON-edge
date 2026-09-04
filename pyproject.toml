@@ -322,12 +322,10 @@ source_modules = [
     "worker.adapters.encode",
     "worker.adapters.frame",
     "worker.adapters.model",
-    "worker.adapters.perception",
     "worker.pipeline",
     "worker.domains",
     "worker.runtime",
     "worker.replay",
-    "worker.tools",
 ]
 forbidden_modules = ["pyservicemaker", "pyds"]
 # The runtime composes the adapter, so a transitive path through

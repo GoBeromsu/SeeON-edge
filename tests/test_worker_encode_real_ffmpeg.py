@@ -98,6 +98,7 @@ def test_every_profile_encode_policy_is_an_accepted_encoder() -> None:
         "cpu-host": "libx264",
         "cpu": "libx264",
         "nvidia": "h264_nvenc",
+        "flow": "h264_nvenc",
         "intel-vaapi-host": "libx264",
         "igpu": "libx264",
         "apple-mps-host": "libx264",

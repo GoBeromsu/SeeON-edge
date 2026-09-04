@@ -618,8 +618,9 @@ def test_tracked_text_contains_no_embedded_secret_or_media_payload() -> None:
             "\n".join(["# " + "A" * 64] * 8),
             "url-safe-or-wrapped-base64",
         ),
-        # Deliberately split so this file never matches its own scanner.
-        ("89504e470d0a1a0a" + "00" * 32, "hex-encoded-media-signature"),  # noqa: ISC001
+        # Deliberately assembled at runtime so this file never matches its own
+        # scanner; ruff's implicit-concat rewrite must not rejoin it.
+        ("8950" + "4e470d0a1a0a" + "00" * 32, "hex-encoded-media-signature"),
         (
             "rtsps://operator:not-a-fixture@camera.example/stream",
             "credentialed-rtsp",
