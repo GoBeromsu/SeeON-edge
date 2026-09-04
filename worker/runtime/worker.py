@@ -1654,7 +1654,9 @@ class WorkerRuntime:
                     else selection.model_publication.bundle_sha256
                 )
                 preprocessing = (
-                    "pose-bbox56.v1" if selection is None else selection.input_observation_schema
+                    binding.preprocessing_identity
+                    if selection is None
+                    else selection.input_observation_schema
                 )
                 components[binding.component_id] = fall_model
                 identities.append(
