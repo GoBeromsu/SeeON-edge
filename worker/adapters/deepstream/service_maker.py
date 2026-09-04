@@ -21,9 +21,9 @@ from worker.interfaces.media_plane import (
     MediaPlaneStatus,
     RecordingInfo,
     RecordingRefused,
+    SnapshotUnavailable,
     SourceRosterFixed,
     SourceStatus,
-    SnapshotUnavailable,
 )
 from worker.native.deepstream.metadata import LatestMetadataSlot, SourceBinding
 

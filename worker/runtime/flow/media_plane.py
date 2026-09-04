@@ -12,7 +12,7 @@ from worker.adapters.deepstream.service_maker import (
     DeepStreamMediaPlaneConfig,
     FlowFactory,
 )
-from worker.interfaces.media_plane import MediaPlane, RecordingInfo
+from worker.interfaces.media_plane import MediaPlane, RecordingInfo, SnapshotUnavailable
 from worker.native.deepstream.metadata import LatestMetadataSlot, SourceBinding
 from worker.pipeline.output.evidence.smart_record_actor import ClipSealed, SmartRecordActor
 from worker.pipeline.output.live_view import LatestFrameStore
@@ -91,7 +91,7 @@ class FlowMediaPlane:
         # This callback runs on an HTTP thread, never on Flow's probe thread.
         try:
             self.snapshot(camera_id)
-        except Exception:
+        except (SnapshotUnavailable, RuntimeError, OSError):
             # The HTTP layer preserves its typed unavailable response when no
             # frame exists yet; a demand signal must not crash its server.
             return
