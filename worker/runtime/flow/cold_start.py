@@ -7,6 +7,7 @@ import json
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Final
 
 
 class EngineIdentityError(RuntimeError):
@@ -78,3 +79,46 @@ def _sha256(path: Path) -> str:
 
 
 __all__ = ["EngineIdentityError", "FlowColdStart", "FlowWarmupTimeout", "verify_engine_identity"]
+
+
+#: Every env key the flow media plane needs before a camera may be admitted.
+FLOW_BOOT_ENV: Final = (
+    "ML_WORKER_FLOW_ENGINE_PATH",
+    "ML_WORKER_FLOW_ENGINE_IDENTITY_PATH",
+    "ML_WORKER_FLOW_INFER_CONFIG",
+    "ML_WORKER_FLOW_TRACKER_CONFIG",
+    "ML_WORKER_FLOW_TRACKER_LIBRARY",
+    "ML_WORKER_FLOW_ONNX_PATH",
+    "ML_WORKER_FLOW_PARSER_LIBRARY",
+    "ML_WORKER_FLOW_RECORD_DIR",
+    "ML_WORKER_FLOW_RECORD_CACHE_SECONDS",
+    "ML_WORKER_FLOW_FRAME_WIDTH",
+    "ML_WORKER_FLOW_FRAME_HEIGHT",
+)
+
+#: Identity keys whose recorded digest must match the file on disk.
+FLOW_IDENTITY_FILES: Final = {
+    "infer_config_sha256": "ML_WORKER_FLOW_INFER_CONFIG",
+    "tracker_config_sha256": "ML_WORKER_FLOW_TRACKER_CONFIG",
+    "tracker_library_sha256": "ML_WORKER_FLOW_TRACKER_LIBRARY",
+    "onnx_sha256": "ML_WORKER_FLOW_ONNX_PATH",
+    "parser_lib_sha256": "ML_WORKER_FLOW_PARSER_LIBRARY",
+}
+
+
+def verify_flow_boot_inputs(env: Mapping[str, str]) -> dict[str, str]:
+    """Fail closed on the flow profile's wiring and its engine identity.
+
+    The flow plane has no native manifest, so this is the boot gate's only
+    proof that what will run is what ``edge-engine-build`` produced. Every
+    recorded digest is checked against the file on disk; nothing is ever built
+    here (ADR-0002).
+    """
+    missing = [key for key in FLOW_BOOT_ENV if not env.get(key)]
+    if missing:
+        raise EngineIdentityError(f"flow profile wiring is missing: {', '.join(missing)}")
+    return verify_engine_identity(
+        Path(env["ML_WORKER_FLOW_ENGINE_PATH"]),
+        Path(env["ML_WORKER_FLOW_ENGINE_IDENTITY_PATH"]),
+        {key: Path(env[name]) for key, name in FLOW_IDENTITY_FILES.items()},
+    )

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
@@ -389,6 +390,21 @@ def default_verifiers(
         return _verify_device_resident(device_resident_source)
 
     def flow() -> VerifyResult:
+        """Fail closed on the flow profile's own boot inputs.
+
+        The flow media plane has no native manifest, so the shared
+        device-resident verifier would pass vacuously when none is configured.
+        Its equivalent proof is the engine identity file written by
+        ``edge-engine-build``: every recorded artifact must exist and match
+        before any camera can be admitted (ADR-0002 - engines are verified,
+        never built at boot).
+        """
+        from worker.runtime.flow.cold_start import verify_flow_boot_inputs
+
+        try:
+            verify_flow_boot_inputs(os.environ)
+        except Exception as error:  # noqa: BLE001 - reported as a boot verdict
+            return VerifyResult(False, "flow", "flow_engine_identity", str(error))
         result = device_resident()
         return VerifyResult(result.ok, "flow", result.stage, result.reason)
 

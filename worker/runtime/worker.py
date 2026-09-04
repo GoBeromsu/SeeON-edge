@@ -134,7 +134,7 @@ from worker.runtime.deepstream.nvidia_media_plane import (
 )
 from worker.runtime.faults.handler import FaultHandler
 from worker.runtime.faults.record import make_fault_record
-from worker.runtime.flow.cold_start import FlowWarmupTimeout, verify_engine_identity
+from worker.runtime.flow.cold_start import FlowWarmupTimeout, verify_flow_boot_inputs
 from worker.runtime.flow.evidence import FlowEvidenceBinding
 from worker.runtime.flow.media_plane import FlowMediaPlane, FlowMediaPlaneConfig
 from worker.runtime.ingest_composition import (
@@ -1586,29 +1586,10 @@ class WorkerRuntime:
 
     def _initialize_flow_media_plane(self, boot: BootContext) -> SharedComponentGraph:
         """Compose Flow only from explicitly provisioned DeepStream artifacts."""
-        required = (
-            "ML_WORKER_FLOW_ENGINE_PATH",
-            "ML_WORKER_FLOW_ENGINE_IDENTITY_PATH",
-            "ML_WORKER_FLOW_INFER_CONFIG",
-            "ML_WORKER_FLOW_TRACKER_CONFIG",
-            "ML_WORKER_FLOW_TRACKER_LIBRARY",
-            "ML_WORKER_FLOW_RECORD_DIR",
-            "ML_WORKER_FLOW_RECORD_CACHE_SECONDS",
-            "ML_WORKER_FLOW_FRAME_WIDTH",
-            "ML_WORKER_FLOW_FRAME_HEIGHT",
-        )
-        missing = [key for key in required if not self._env.get(key)]
-        if missing:
-            raise RuntimeError(f"flow profile wiring is missing: {', '.join(missing)}")
-        self._flow_engine_identity = verify_engine_identity(
-            Path(self._env["ML_WORKER_FLOW_ENGINE_PATH"]),
-            Path(self._env["ML_WORKER_FLOW_ENGINE_IDENTITY_PATH"]),
-            {
-                "infer_config_sha256": Path(self._env["ML_WORKER_FLOW_INFER_CONFIG"]),
-                "tracker_config_sha256": Path(self._env["ML_WORKER_FLOW_TRACKER_CONFIG"]),
-                "tracker_library_sha256": Path(self._env["ML_WORKER_FLOW_TRACKER_LIBRARY"]),
-            },
-        )
+        # The boot gate already ran verify_flow_boot_inputs for this profile;
+        # re-verify here so the plane is never constructed against inputs that
+        # changed since the gate, and keep the returned identity for the manifest.
+        self._flow_engine_identity = verify_flow_boot_inputs(self._env)
         if self._flow_media_plane is None:
             self._flow_media_plane = FlowMediaPlane(
                 FlowMediaPlaneConfig(
