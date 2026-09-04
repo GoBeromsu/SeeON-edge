@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
 
-from worker.adapters.deepstream.metadata import association_pass, convert_frame
+from worker.adapters.deepstream.metadata import _frame_box, _iou, association_pass, convert_frame
 from worker.native.deepstream.metadata import LatestMetadataSlot, SourceBinding
 from worker.types.perception_frame import PerceptionFrameIdentity
 
@@ -144,3 +146,43 @@ def test_a_frame_without_pose_tensors_is_published_with_every_track_unmatched() 
 
     assert plane.published_frames("camera") == 1, "the frame must count as published"
     assert "camera" in plane._live  # noqa: SLF001 - the camera is demonstrably alive
+
+
+def test_the_letterbox_inverse_reproduces_boxes_nvinfer_and_nvtracker_actually_produced() -> None:
+    """Ground truth, not a restatement of the implementation.
+
+    The previous version of this test encoded the same wrong padding convention
+    as the code, so both agreed while the worker matched nothing for an entire
+    bring-up. This one loads raw 57-wide pose rows captured from nvinfer beside
+    the frame-space boxes nvtracker attached to the same frames, and requires the
+    inverse to land on them. Captured by
+    scripts/qa/pyservicemaker-spike/live/capture_letterbox_fixture.py.
+    """
+    capture = json.loads(
+        (Path(__file__).parent / "fixtures" / "nvinfer_letterbox_capture.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    frame_w = int(capture["frame_width"])
+    frame_h = int(capture["frame_height"])
+    assert capture["samples"], "the capture must contain frames"
+
+    for sample in capture["samples"]:
+        tracked = [
+            (
+                float(box["left"]),
+                float(box["top"]),
+                float(box["left"]) + float(box["width"]),
+                float(box["top"]) + float(box["height"]),
+            )
+            for box in sample["boxes"]
+        ]
+        assert tracked, "the capture must contain tracked boxes"
+        for entry in sample["rows"]:
+            row = np.asarray(entry["row"], dtype=np.float32)
+            inverted = _frame_box(row, frame_w, frame_h)
+            best = max(_iou(inverted, box) for box in tracked)
+            assert best > 0.95, (
+                f"the inverse of a real pose row landed at IoU {best:.3f} from every box "
+                "nvtracker produced for that frame"
+            )
