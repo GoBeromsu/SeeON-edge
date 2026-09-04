@@ -10,6 +10,7 @@ classes, and the models-directory resolution default.
 
 from __future__ import annotations
 
+import subprocess
 import sys
 from pathlib import Path
 
@@ -36,13 +37,27 @@ def test_default_registry_has_pose_bed_person_factories_without_loading_models()
 
     # "fall" is deliberately absent: it has no registry-backed fallback.
     assert registry.tasks() == ("bed", "person", "pose")
-    # The ultralytics runners resolve lazily so a flow-profile process never
-    # imports torch (P1b-AC7): building the registry must not import them.
     for task in ("pose", "bed", "person"):
         assert callable(registry.get_factory(task))
-    assert "worker.adapters.model.yolo_pose" not in sys.modules
-    assert "worker.adapters.model.yolo_bed_seg" not in sys.modules
-    assert "worker.adapters.model.yolo_person" not in sys.modules
+    # The ultralytics runners resolve lazily so a flow-profile process never
+    # imports torch (P1b-AC7): building the registry must not import them.
+    # Other tests import those modules, so this is asserted in a fresh process.
+    probe = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import sys; from worker.adapters.model.registry import default_registry; "
+                "default_registry(); "
+                "print(sorted(m for m in sys.modules "
+                "if m.startswith('worker.adapters.model.yolo_')))"
+            ),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert probe.stdout.strip() == "[]"
 
 
 def test_sklearn_fall_default_models_dir_points_to_ml_models_root() -> None:
