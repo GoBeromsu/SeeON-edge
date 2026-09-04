@@ -195,6 +195,7 @@ ban-relative-imports = "all"
 # pre-commit hook and CI step).
 [tool.importlinter]
 root_packages = ["backend", "contracts", "shared", "worker"]
+include_external_packages = true
 
 [[tool.importlinter.contracts]]
 name = "backend and worker are independent (worker→backend relay boundary only)"
@@ -291,3 +292,30 @@ name = "worker tools stay out of the production import graph"
 type = "forbidden"
 source_modules = ["worker.types", "worker.interfaces", "worker.adapters", "worker.pipeline", "worker.domains", "worker.runtime"]
 forbidden_modules = ["worker.tools"]
+
+[[tool.importlinter.contracts]]
+# P1b (G8b): worker/adapters/deepstream is the only package that may touch the
+# DeepStream Python bindings. Everything else sees the vendor-neutral
+# worker.interfaces.media_plane / worker.interfaces.association Protocols, so
+# the media plane can be swapped without a second import of the SDK anywhere.
+name = "only worker.adapters.deepstream imports pyservicemaker or pyds"
+type = "forbidden"
+source_modules = [
+    "backend",
+    "shared",
+    "contracts",
+    "worker.types",
+    "worker.interfaces",
+    "worker.adapters.decode",
+    "worker.adapters.device",
+    "worker.adapters.encode",
+    "worker.adapters.frame",
+    "worker.adapters.model",
+    "worker.adapters.perception",
+    "worker.pipeline",
+    "worker.domains",
+    "worker.runtime",
+    "worker.replay",
+    "worker.tools",
+]
+forbidden_modules = ["pyservicemaker", "pyds"]
