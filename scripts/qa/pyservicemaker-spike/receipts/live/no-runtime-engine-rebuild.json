@@ -1,0 +1,9 @@
+{
+  "criterion": "P1b-AC4 (no nvinfer build after source activation)",
+  "engine_built_by": "nvinfer own builder, adopted into the configured model-engine-file path",
+  "runtime_rebuild_log_lines": 0,
+  "objects_observed": 4236,
+  "matched_tracks": 4236,
+  "frames_without_pose_tensor": 0,
+  "note": "A trtexec-built engine loads as [Implicit Engine Info]: layers num: 0 and serves nothing; nvinfer ignores model-engine-file when it builds and writes <onnx>_b<N>_gpu0_fp16.engine beside the model, so the build adopts that artefact and records its digest. Boot then deserialises and never rebuilds."
+}

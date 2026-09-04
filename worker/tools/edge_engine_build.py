@@ -64,6 +64,16 @@ def _render_infer_config(template: Path, destination: Path, engine: Path, batch_
     destination.write_text(text, encoding="utf-8")
 
 
+def _verify_served_infer_config(infer_config: Path, engine: Path, batch_size: int) -> None:
+    text = infer_config.read_text(encoding="utf-8")
+    engine_values = re.findall(r"(?m)^model-engine-file=(.*)$", text)
+    batch_values = re.findall(r"(?m)^batch-size=(.*)$", text)
+    if engine_values != [str(engine)] or batch_values != [str(batch_size)]:
+        raise EngineBuildError(
+            "served Flow infer config must name the requested engine and deployed batch"
+        )
+
+
 def identity_for(
     *,
     engine: Path,
@@ -91,6 +101,43 @@ def identity_for(
     }
 
 
+def _nvinfer_build_command(*, infer_config: Path, batch_size: int) -> list[str]:
+    command = [
+        "gst-launch-1.0",
+        "-e",
+        "nvstreammux",
+        "name=mux",
+        f"batch-size={batch_size}",
+        "width=640",
+        "height=640",
+        "live-source=0",
+        "batched-push-timeout=40000",
+        "!",
+        "nvinfer",
+        f"config-file-path={infer_config}",
+        "!",
+        "fakesink",
+        "sync=false",
+    ]
+    for source_index in range(batch_size):
+        command.extend(
+            [
+                "videotestsrc",
+                "num-buffers=1",
+                "pattern=black",
+                "!",
+                "video/x-raw,format=I420,width=640,height=640,framerate=30/1",
+                "!",
+                "nvvideoconvert",
+                "!",
+                "video/x-raw(memory:NVMM),format=NV12",
+                "!",
+                f"mux.sink_{source_index}",
+            ]
+        )
+    return command
+
+
 def build_engine(
     *,
     onnx: Path,
@@ -115,6 +162,7 @@ def build_engine(
     active_infer_config = served_infer_config or infer_config
     if served_infer_config is not None:
         _render_infer_config(infer_config, served_infer_config, engine, batch_size)
+    _verify_served_infer_config(active_infer_config, engine, batch_size)
     if engine.exists() and identity_path.exists() and not force:
         existing = json.loads(identity_path.read_text(encoding="utf-8"))
         if isinstance(existing, dict) and existing == identity_for(
@@ -131,41 +179,43 @@ def build_engine(
         # A changed deployment batch is a cache miss. Rebuild it before any
         # source can activate rather than booting against a stale engine.
     engine.parent.mkdir(parents=True, exist_ok=True)
-    input_name, input_dimensions, static_batch = _input_shape(onnx)
-    if static_batch is not None:
-        # The model itself fixes the batch, and TensorRT refuses explicit
-        # shapes for it. Serving a roster larger than that batch would make
-        # nvinfer rebuild at runtime, so refuse here instead.
-        if static_batch < batch_size:
-            raise EngineBuildError(
-                f"ONNX input {input_name!r} fixes batch {static_batch}, which cannot serve the "
-                f"deployed roster batch {batch_size}; export the model with a dynamic batch"
-            )
-        shape_arguments: list[str] = []
-    else:
-        min_shape = "x".join(map(str, (1, *input_dimensions)))
-        deployed_shape = "x".join(map(str, (batch_size, *input_dimensions)))
-        shape_arguments = [
-            f"--minShapes={input_name}:{min_shape}",
-            f"--optShapes={input_name}:{deployed_shape}",
-            f"--maxShapes={input_name}:{deployed_shape}",
-        ]
-    result = run(
-        [
-            "trtexec",
-            f"--onnx={onnx}",
-            f"--saveEngine={engine}",
-            "--fp16",
-            *shape_arguments,
-        ],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
+    input_name, _, static_batch = _input_shape(onnx)
+    # The model itself fixes the batch, and TensorRT refuses explicit shapes for
+    # it. Serving a roster larger than that batch would make nvinfer rebuild at
+    # runtime, so refuse here instead.
+    if static_batch is not None and static_batch < batch_size:
+        raise EngineBuildError(
+            f"ONNX input {input_name!r} fixes batch {static_batch}, which cannot serve the "
+            f"deployed roster batch {batch_size}; export the model with a dynamic batch"
+        )
+    engine.unlink(missing_ok=True)
+    try:
+        result = run(
+            _nvinfer_build_command(infer_config=active_infer_config, batch_size=batch_size),
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except OSError as error:
+        raise EngineBuildError(f"nvinfer build pipeline could not start: {error}") from error
     if result.returncode != 0:
-        raise EngineBuildError(f"trtexec failed: {result.stderr.strip() or result.stdout.strip()}")
+        raise EngineBuildError(
+            "nvinfer build pipeline failed: "
+            f"{result.stderr.strip() or result.stdout.strip() or result.returncode}"
+        )
     if not engine.is_file():
-        raise EngineBuildError("trtexec succeeded without creating the requested engine")
+        # When nvinfer builds rather than deserialises, it writes the engine
+        # beside the ONNX under its own name and ignores `model-engine-file`.
+        # That file is the artefact that serves - verified on hardware - so
+        # adopt it into the configured path instead of failing.
+        produced = onnx.with_name(f"{onnx.name}_b{batch_size}_gpu0_fp16.engine")
+        if not produced.is_file():
+            raise EngineBuildError(
+                "nvinfer build pipeline succeeded without creating an engine at either "
+                f"{engine} or {produced}"
+            )
+        engine.write_bytes(produced.read_bytes())
+        produced.unlink()
     identity = identity_for(
         engine=engine,
         onnx=onnx,
