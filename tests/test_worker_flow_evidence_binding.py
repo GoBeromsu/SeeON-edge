@@ -56,7 +56,11 @@ def _trigger() -> NativeEvidenceTrigger:
 
 
 def _binding(
-    plane: _Plane, now: list[float], dates: list[datetime]
+    plane: _Plane,
+    now: list[float],
+    dates: list[datetime],
+    *,
+    extension_sec: int = 45,
 ) -> tuple[SmartRecordActor, FlowEvidenceBinding, _Stager]:
     stager = _Stager()
     sealed: list[FlowEvidenceBinding] = []
@@ -66,6 +70,7 @@ def _binding(
         clock=lambda: now[0],
         sink=lambda clip: sealed[0].on_sealed(clip),
         lookback_sec=10,
+        extension_sec=extension_sec,
         clip_id_factory=lambda: "primary-clip",
     )
     binding = FlowEvidenceBinding(actor=actor, stager=stager, now=lambda: dates.pop(0))
@@ -116,6 +121,12 @@ def test_two_alerts_extend_one_clip_and_complete_distinct_incidents() -> None:
 
 
 def test_alert_while_stopping_starts_second_clip_without_dropping_it() -> None:
+    """A deployment that cuts clips short can race the stop; nothing is dropped.
+
+    With a shorter extension window than the recording window the actor issues a
+    real early stop, so an alert arriving in that gap cannot join the sealing
+    clip: it must mark the first clip raced and open a second one.
+    """
     plane, now = _Plane(), [0.0]
     actor, binding, stager = _binding(
         plane,
@@ -124,10 +135,12 @@ def test_alert_while_stopping_starts_second_clip_without_dropping_it() -> None:
             datetime(2026, 1, 1, tzinfo=UTC),
             datetime(2026, 1, 1, tzinfo=UTC) + timedelta(seconds=30),
         ],
+        extension_sec=20,
     )
     binding.emit_for_frame(_event("one"), _trigger())
     now[0] = 30.0
     actor.tick()
+    assert plane.stops == [1]
     binding.emit_for_frame(_event("two"), _trigger())
     plane.seal(1)
     assert actor.smart_record_extension_raced_total == 1

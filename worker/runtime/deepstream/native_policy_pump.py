@@ -250,8 +250,16 @@ class NativePolicyPump:
         for position, event in enumerate(events):
             try:
                 snapshot = self._control.snapshot(self.camera_id)
-            except ChildControlError:
+            except Exception as error:  # noqa: BLE001 - the alert outranks its thumbnail
+                # A snapshot is optional evidence; an admitted safety event is
+                # not. Admission has already consumed the onset, so a failure
+                # here must degrade to "no snapshot", never drop the alert.
                 snapshot = None
+                LOGGER.warning(
+                    "snapshot unavailable for camera_id=%s; staging the event without it: %s",
+                    self.camera_id,
+                    error,
+                )
             try:
                 self._sink.emit_for_frame(self._attacher.attach_native(event, snapshot), trigger)
             except Exception:

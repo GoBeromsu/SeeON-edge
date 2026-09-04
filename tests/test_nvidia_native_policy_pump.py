@@ -424,3 +424,46 @@ def test_pump_keeps_its_binding_when_the_source_is_gone(tmp_path: Path) -> None:
     pump._rebind_if_source_was_rebuilt()  # noqa: SLF001
     # Then
     assert pump._binding == original  # noqa: SLF001
+
+
+class _FailingSnapshotControl:
+    """The Flow plane raises a plain RuntimeError when no OSD encoder is wired."""
+
+    def snapshot(self, camera_id: str) -> bytes:
+        raise RuntimeError(f"OSD snapshot encoder is not configured for {camera_id}")
+
+
+def test_snapshot_failure_stages_the_alert_without_one_instead_of_dropping_it(
+    tmp_path: Path,
+) -> None:
+    """An admitted safety event outranks its thumbnail.
+
+    Admission has already consumed the onset and the cooldown, so a snapshot
+    failure must degrade to "no snapshot" and still reach the sink. Propagating
+    it would lose the alert entirely, and the event would not even be released
+    back to the decision for a retry.
+    """
+    decider = _Decider()
+    sink = _Sink()
+    diagnostics = _Diagnostics()
+    pump = NativePolicyPump(
+        _binding(generation=3, epoch=4),
+        NativePolicyContext(
+            LatestMetadataSlot(),
+            _FailingSnapshotControl(),  # pyright: ignore[reportArgumentType]
+            SceneState("camera-a"),
+            EventAggregator((decider,), IncidentManager(0.0, tmp_path / "events.jsonl")),
+            sink,
+            AlertEvidenceAttacher({}),
+            diagnostics,
+            90,
+            track_id_switch_absorbed_total=lambda _: 0,
+        ),
+    )
+
+    pump._process(_metadata())  # noqa: SLF001
+
+    assert sink.emitted is not None
+    event, _trigger = sink.emitted
+    assert event.snapshot_jpeg is None
+    assert diagnostics.completed == 1

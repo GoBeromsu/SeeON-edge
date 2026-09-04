@@ -81,8 +81,8 @@ class SmartRecordActor:
         clock: Callable[[], float],
         sink: SmartRecordSink,
         lookback_sec: int,
-        duration_sec: int = 180,
-        extension_sec: int = 30,
+        duration_sec: int = 45,
+        extension_sec: int = 45,
         clip_id_factory: Callable[[], str] | None = None,
         max_pending_alerts: int = 128,
     ) -> None:
@@ -162,12 +162,19 @@ class SmartRecordActor:
             recording = self._require_recording()
             if self._clock() < recording.stop_due:
                 return
+            if recording.stop_due >= recording.hard_deadline:
+                # The clip already ends at the window the plane was given, so
+                # there is nothing to cut short: let it seal itself and mark the
+                # clip as bounded by that window.
+                recording.boundary = "extension_bounded"
+                return
             self._state = SmartRecordState.STOPPING
             try:
                 self._media_plane.stop_recording(self._camera_id, recording.session_id)
             except EarlyStopUnsupported:
-                # The plane seals at the duration given at start; the clip is
-                # bounded by that window rather than by stop_due.
+                # This plane cannot cut a clip short; it seals at the duration
+                # given at start, which still bounds the clip.
+                self._state = SmartRecordState.RECORDING
                 recording.boundary = "extension_bounded"
 
     def on_sealed(self, info: RecordingInfo) -> None:
@@ -184,8 +191,11 @@ class SmartRecordActor:
             recording = self._require_recording()
             if info.session_id != recording.session_id:
                 raise ValueError(f"unexpected recording session {info.session_id}")
-            if self._state not in (SmartRecordState.STOPPING, SmartRecordState.FINALIZING):
-                raise ValueError("recording sealed before stop was requested")
+            # A clip seals either because the actor asked (STOPPING) or because
+            # it reached the duration given at start. The plane owns that
+            # duration, so natural completion is the normal path, not an error.
+            if self._state is SmartRecordState.RECORDING:
+                recording.boundary = "extension_bounded"
             self._state = SmartRecordState.FINALIZING
             sealed = ClipSealed(
                 clip_id=recording.clip_id,

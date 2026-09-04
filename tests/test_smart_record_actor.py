@@ -12,6 +12,12 @@ from worker.pipeline.output.evidence.smart_record_actor import (
 
 @dataclass
 class FakePlane:
+    """The measured plane: it seals at the duration it was given at start.
+
+    ``stop_recording`` records the request so a test can prove the actor does
+    not ask for an early stop it does not need.
+    """
+
     refusals: int = 0
     starts: list[tuple[int, int]] = field(default_factory=list)
     stops: list[int] = field(default_factory=list)
@@ -49,59 +55,92 @@ def _actor(plane: FakePlane, now: list[float], sink: list[object]) -> SmartRecor
     )
 
 
-def test_extends_one_session_and_orders_contributors() -> None:
+def test_one_alert_starts_one_sixty_second_window() -> None:
+    """AC3/AC6: a clip is the 15 s lookback plus the 45 s forward window."""
     plane, now, sink = FakePlane(), [0.0], []
     actor = _actor(plane, now, sink)
-    actor.admit("first", "2026-01-01T00:00:20Z")
-    now[0] = 20.0
-    actor.admit("second", "2026-01-01T00:00:10Z")
-    now[0] = 49.9
+
+    actor.admit("event-1", "2026-01-01T00:00:00Z")
     actor.tick()
+
+    assert plane.starts == [(10, 45)]
     assert plane.stops == []
-    now[0] = 50.0
-    actor.tick()
-    plane.seal(1)
-    assert plane.starts == [(10, 180)]
-    assert plane.stops == [1]
-    assert actor.smart_record_extended_total == 1
-    [sealed] = sink
-    assert isinstance(sealed, ClipSealed)
-    assert (sealed.clip_id, sealed.path, sealed.duration_ms, sealed.boundary) == (
-        "clip-1",
-        "/clips/1.mp4",
-        12_000,
-        "none",
-    )
-    assert [contributor.event_ref for contributor in sealed.contributors] == ["second", "first"]
 
 
-def test_hard_deadline_race_refusal_and_duplicate_callback() -> None:
+def test_a_second_alert_inside_the_window_is_absorbed_into_the_same_clip() -> None:
+    """DeepStream absorbs an overlapping start, so the actor must never issue one."""
     plane, now, sink = FakePlane(), [0.0], []
     actor = _actor(plane, now, sink)
-    actor.admit("one", "2026-01-01T00:00:00Z")
-    now[0] = 179.0
-    actor.admit("two", "2026-01-01T00:02:59Z")
-    now[0] = 180.0
+    actor.admit("early", "2026-01-01T00:00:00Z")
     actor.tick()
-    assert plane.stops == [1]
-    plane.seal(1)
+
+    now[0] = 20.0
+    actor.admit("late", "2026-01-01T00:00:20Z")
+    actor.tick()
+
+    assert plane.starts == [(10, 45)]
     assert actor.smart_record_extended_total == 1
-    assert sink[0].boundary == "extension_bounded"
-    actor.admit("three", "2026-01-01T00:03:00Z")
-    now[0] = 210.0
+
+
+def test_the_window_seals_itself_and_carries_both_contributors_in_order() -> None:
+    plane, now, sink = FakePlane(), [0.0], []
+    actor = _actor(plane, now, sink)
+    actor.admit("late", "2026-01-01T00:00:20Z")
     actor.tick()
-    actor.admit("four", "2026-01-01T00:03:30Z")
-    assert actor.smart_record_extension_raced_total == 1
-    plane.seal(2)
-    assert len(plane.starts) == 3
-    plane.seal(2)
-    assert isinstance(sink[-1], DuplicateRecordingSealedError)
+    actor.admit("early", "2026-01-01T00:00:00Z")
+
+    now[0] = 45.0
+    actor.tick()
+    plane.seal(1)
+
+    sealed = sink[-1]
+    assert isinstance(sealed, ClipSealed)
+    assert [contributor.event_ref for contributor in sealed.contributors] == ["early", "late"]
+    assert sealed.boundary == "extension_bounded"
+    # Nothing was cut short: the plane's own window bounded the clip.
+    assert plane.stops == []
 
 
-def test_refused_start_retries_on_tick() -> None:
+def test_a_refused_start_is_counted_and_retried_rather_than_dropped() -> None:
     plane, now, sink = FakePlane(refusals=1), [0.0], []
     actor = _actor(plane, now, sink)
-    actor.admit("one", "2026-01-01T00:00:00Z")
+
+    # The actor starts on admission; a refusal must be counted and kept
+    # pending rather than discarding the alert.
+    actor.admit("event-1", "2026-01-01T00:00:00Z")
+    assert plane.starts == []
     assert actor.smart_record_start_refused_total == 1
+
+    now[0] = 1.0
     actor.tick()
-    assert len(plane.starts) == 1
+    assert plane.starts == [(10, 45)]
+
+
+def test_a_duplicate_seal_is_surfaced_to_the_sink_not_swallowed() -> None:
+    plane, now, sink = FakePlane(), [0.0], []
+    actor = _actor(plane, now, sink)
+    actor.admit("event-1", "2026-01-01T00:00:00Z")
+    actor.tick()
+    plane.seal(1)
+    plane.seal(1)
+
+    assert isinstance(sink[-1], DuplicateRecordingSealedError)
+    assert len([item for item in sink if isinstance(item, ClipSealed)]) == 1
+
+
+def test_an_alert_after_the_clip_sealed_opens_the_next_one() -> None:
+    plane, now, sink = FakePlane(), [0.0], []
+    actor = _actor(plane, now, sink)
+    actor.admit("first", "2026-01-01T00:00:00Z")
+    actor.tick()
+    now[0] = 45.0
+    actor.tick()
+    plane.seal(1)
+
+    now[0] = 61.0
+    actor.admit("second", "2026-01-01T00:01:01Z")
+    actor.tick()
+
+    assert plane.starts == [(10, 45), (10, 45)]
+    clips = [item for item in sink if isinstance(item, ClipSealed)]
+    assert [contributor.event_ref for contributor in clips[0].contributors] == ["first"]
