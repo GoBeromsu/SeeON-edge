@@ -4,9 +4,8 @@ from pathlib import Path
 from subprocess import CompletedProcess
 
 import onnx
-from onnx import TensorProto, helper
-
 import pytest
+from onnx import TensorProto, helper
 
 from worker.tools.edge_engine_build import EngineBuildError, build_engine, sha256
 
@@ -117,18 +116,18 @@ def test_batch_shapes_are_derived_from_onnx_and_cached_by_batch(tmp_path: Path) 
         engine.write_bytes(b"engine")
         return CompletedProcess(command, 0, "", "")
 
-    kwargs = dict(
-        onnx=onnx_path,
-        engine=engine,
-        identity_path=identity_path,
-        parser_lib=parser,
-        infer_config=infer,
-        tracker_library=tracker_library,
-        tracker_config=tracker,
-        image_digest="image",
-        served_infer_config=served_infer,
-        run=run,
-    )
+    kwargs = {
+        "onnx": onnx_path,
+        "engine": engine,
+        "identity_path": identity_path,
+        "parser_lib": parser,
+        "infer_config": infer,
+        "tracker_library": tracker_library,
+        "tracker_config": tracker,
+        "image_digest": "image",
+        "served_infer_config": served_infer,
+        "run": run,
+    }
     build_engine(**kwargs, batch_size=14)
     assert "--minShapes=images:1x3x640x640" in builds[0]
     assert "--optShapes=images:14x3x640x640" in builds[0]
