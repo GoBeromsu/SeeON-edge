@@ -1,0 +1,5 @@
+[   0.25] link=0
+[  10.31] start-sr(0,20) session=0
+[  14.31] stop-sr(0)
+[  14.38] sr-done session=0 file=Smart_Record_-1_00000_20260904-032209_1.mp4 dir=/work/records duration_ms=4696 w=640
+[  24.31] sending EOS

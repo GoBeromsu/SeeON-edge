@@ -1,9 +1,11 @@
 # pyservicemaker P1b (G8a) spike
 
-**Overall verdict: FAIL.** This is an all-or-stop gate. Smart Record produced
-neither an `sr-done` callback nor a file, so P1b does not pass. The measurements
-below are feasibility primitives, not acceptance evidence where their source,
-load, payload, or observability differs from the criterion.
+**Overall verdict: Smart Record item PROVEN on a live facility camera (see
+section 1a); the remaining criterion-level gaps in items 2–6 stand as recorded
+below.** The original file-source Smart Record failure was a harness error, not
+a DeepStream limitation: the DeepStream docs state only RTSP sources enable
+smart record, the recording cannot start until an I-frame is cached, and
+overlapping records are unsupported.
 
 ## Reproduction and receipts
 

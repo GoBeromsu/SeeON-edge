@@ -1,0 +1,38 @@
+{
+  "events": [
+    {
+      "t": 1378625.845457225,
+      "event": "start(0,20)",
+      "args": [
+        0
+      ]
+    },
+    {
+      "t": 1378629.845609966,
+      "event": "stop-after-4s",
+      "args": [
+        true
+      ]
+    },
+    {
+      "t": 1378654.84569746,
+      "event": "done-wait",
+      "args": [
+        false
+      ]
+    },
+    {
+      "t": 1378655.845760696,
+      "event": "files",
+      "args": [
+        "Smart_Record_-1_00000_20260904-024222_1.mp4"
+      ]
+    }
+  ],
+  "files": [
+    "/work/records/Smart_Record_-1_00000_20260904-024222_1.mp4"
+  ],
+  "sizes": {
+    "Smart_Record_-1_00000_20260904-024222_1.mp4": 941
+  }
+}

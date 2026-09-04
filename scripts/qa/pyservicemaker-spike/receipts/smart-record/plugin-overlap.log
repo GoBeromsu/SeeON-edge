@@ -1,0 +1,6 @@
+[   0.24] link=0
+[  12.00] start-sr(5,6) session=0
+[  15.00] start-sr(0,6) while inflight session=0
+[  18.07] sr-done session=0 file=Smart_Record_-1_00000_20260904-031234_1.mp4 dir=/work/records duration_ms=10165 w=640
+[  29.00] sending EOS
+file_bytes=511430 duration_s=10.165333
