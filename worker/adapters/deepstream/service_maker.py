@@ -415,12 +415,12 @@ class DeepStreamMediaPlane(MediaPlane):
         if self._handle.make_retriever is None:
             flow.render(mode=self._handle.render_mode_discard)
         else:
-            # fork() inserts a tee and returns a flow originating at it; every
-            # branch must be built from that fork, because the original flow's
-            # source pad is now the tee's input.
-            forked = flow.fork()
-            forked.retrieve(self._handle.make_retriever(self._jpeg_retriever))
-            forked.render(mode=self._handle.render_mode_discard)
+            # `retrieve` IS the terminal sink: it pulls each batched buffer into
+            # Python, which is where the preview JPEG comes from. Measured in
+            # the shipped image: attach(probe) + retrieve() delivers metadata
+            # and buffers one-for-one through the full infer/track chain, while
+            # forking a second branch beside a render sink delivers nothing.
+            flow.retrieve(self._handle.make_retriever(self._jpeg_retriever))
         for camera_id in camera_ids:
             source = self._source_element(camera_id)
             source.set(
