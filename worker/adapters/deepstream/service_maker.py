@@ -567,7 +567,9 @@ class DeepStreamMediaPlane(MediaPlane):
         recording = self._recordings.get(camera_id)
         if recording is None or recording.sealed:
             return
-        path = str(Path(str(info.dirpath)) / str(info.filename))
+        # The SDK's RecordingInfo names these file_directory/file_name; the
+        # older dirpath/filename spelling aborts the process from the callback.
+        path = str(Path(str(info.file_directory)) / str(info.file_name))
         recording.on_sealed(
             RecordingInfo(
                 session_id=int(info.session_id),

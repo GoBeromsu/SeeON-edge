@@ -115,7 +115,15 @@ def _plane(pipeline: _Pipeline | None = None) -> tuple[DeepStreamMediaPlane, _Pi
 
 def _info(session: int) -> SimpleNamespace:
     return SimpleNamespace(
-        session_id=session, dirpath="/tmp", filename="clip.mp4", duration=20, width=640, height=360
+        # Field names as the SDK's RecordingInfo actually spells them; the fake
+        # previously used dirpath/filename, which is why a real seal aborted the
+        # process from inside the completion callback.
+        session_id=session,
+        file_directory="/tmp",
+        file_name="clip.mp4",
+        duration=20,
+        width=640,
+        height=360,
     )
 
 

@@ -24,7 +24,10 @@ CAMERA_ALERTS_PER_HOUR = 2.0
 
 
 def _parse(value: str) -> datetime:
-    return datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC)
+    """Incident timestamps are ISO8601 Z, with or without fractional seconds."""
+    text = value.removesuffix("Z")
+    fmt = "%Y-%m-%dT%H:%M:%S.%f" if "." in text else "%Y-%m-%dT%H:%M:%S"
+    return datetime.strptime(text, fmt).replace(tzinfo=UTC)
 
 
 def alert_rate(database: Path, *, window_start: str | None = None) -> dict[str, object]:
