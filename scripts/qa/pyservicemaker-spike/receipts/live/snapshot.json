@@ -1,0 +1,7 @@
+{
+  "route": "GET /snapshot/{camera}",
+  "http": 200,
+  "bytes": 29887,
+  "format": "JPEG 640x360",
+  "note": "Live facility camera preview published by the Flow retrieve branch; the frame surface is row-padded (2048-element stride for 1920 used) and is copied to host through cudart without Torch."
+}

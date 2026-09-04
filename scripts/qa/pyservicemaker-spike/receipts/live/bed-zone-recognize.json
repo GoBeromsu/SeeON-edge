@@ -1,0 +1,34 @@
+{
+  "route": "POST /overlay/{camera}/bed-zone/recognize",
+  "http": 200,
+  "image_width": 640,
+  "image_height": 360,
+  "polygon_points": 48,
+  "polygon_head": [
+    [
+      474,
+      58
+    ],
+    [
+      474,
+      71
+    ],
+    [
+      466,
+      76
+    ],
+    [
+      461,
+      82
+    ],
+    [
+      459,
+      96
+    ],
+    [
+      454,
+      108
+    ]
+  ],
+  "note": "Live facility camera through the Flow profile with the ORT CPU yolo26m-seg recognizer."
+}
