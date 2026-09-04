@@ -10,6 +10,7 @@ absorbed into the same session; a Flow fixes its sources when built.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
@@ -189,26 +190,32 @@ def test_sealed_callback_fires_exactly_once_per_session() -> None:
     assert sealed[0].duration_ms == 20
 
 
-def test_sealed_callback_is_retryable_when_the_handoff_raises() -> None:
+def test_a_failed_handoff_is_logged_and_never_raises_into_the_sdk_callback(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The completion callback runs on the pipeline thread.
+
+    A live run proved the cost of raising here: a thumbnail failure propagated
+    out of the callback and terminated the worker, taking every camera down.
+    The media and its contributor sidecar are already on disk, so the honest
+    behaviour is to log, keep the media, and let the startup replay finish the
+    publication.
+    """
     plane, pipeline = _plane()
     plane.add_source("camera", "rtsp://one")
     plane._live.add("camera")  # noqa: SLF001
-    sealed: list[RecordingInfo] = []
-    failures = [True]
 
     def handoff(info: RecordingInfo) -> None:
-        if failures[0]:
-            failures[0] = False
-            raise RuntimeError("publication failed")
-        sealed.append(info)
+        raise RuntimeError("publication failed")
 
     session = plane.start_recording("camera", lookback_sec=1, duration_sec=2, on_sealed=handoff)
     callback = pipeline.callbacks["batch_capture-source-0_0"]
-    with pytest.raises(RuntimeError, match="publication failed"):
+
+    with caplog.at_level(logging.ERROR):
         callback(_info(session))
 
-    callback(_info(session))
-    assert [item.session_id for item in sealed] == [session]
+    assert "clip publication failed" in caplog.text
+    assert "/tmp/clip.mp4" in caplog.text, "the operator must be told where the media is"
 
 
 def test_sources_are_fixed_once_the_flow_runs() -> None:

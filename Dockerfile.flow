@@ -18,6 +18,12 @@ FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim@sha256:e5b65587bce7de595f2998
 
 FROM nvcr.io/nvidia/deepstream@sha256:f6fa0247da9290979cbb05749e7da9435d089c93db7c4dcfe85ba2488b5f4994 AS runtime
 WORKDIR /app
+# ffmpeg is the clip thumbnail extractor. Smart Record itself never encodes -
+# it stream-copies cached frames - so this adds no NVENC session; without it a
+# sealed clip publishes without its thumbnail.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
 COPY --from=uv-bin /usr/local/bin/uv /usr/local/bin/uv
 COPY --from=parser-build /src/libnvdsinfer_custom_yolo26_pose.so /opt/nvidia/deepstream/deepstream/lib/
 

@@ -570,16 +570,32 @@ class DeepStreamMediaPlane(MediaPlane):
         # The SDK's RecordingInfo names these file_directory/file_name; the
         # older dirpath/filename spelling aborts the process from the callback.
         path = str(Path(str(info.file_directory)) / str(info.file_name))
-        recording.on_sealed(
-            RecordingInfo(
-                session_id=int(info.session_id),
-                camera_id=camera_id,
-                path=path,
-                duration_ms=int(info.duration),
-                width=int(info.width),
-                height=int(info.height),
+        try:
+            recording.on_sealed(
+                RecordingInfo(
+                    session_id=int(info.session_id),
+                    camera_id=camera_id,
+                    path=path,
+                    duration_ms=int(info.duration),
+                    width=int(info.width),
+                    height=int(info.height),
+                )
             )
-        )
+        except Exception as error:  # noqa: BLE001 - an SDK callback must not abort the process
+            # This runs on the pipeline thread: an exception here terminates the
+            # worker and takes every camera down with it. The sealed media and
+            # its contributor sidecar are already on disk, so the publication is
+            # replayable; the recording is left unsealed for that retry.
+            LOGGER.exception(
+                "clip publication failed for camera_id=%s session=%s; media is retained at %s "
+                "and will be republished (%s)",
+                camera_id,
+                info.session_id,
+                path,
+                type(error).__name__,
+            )
+            self._recordings.pop(camera_id, None)
+            return
         recording.sealed = True
         self._recordings.pop(camera_id, None)
 
