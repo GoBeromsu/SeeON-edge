@@ -6,9 +6,6 @@ from collections.abc import Callable
 from typing import Final, Protocol, TypeAlias
 
 from contracts.runner import RunnerProtocol
-from worker.adapters.model.yolo_bed_seg import YoloBedSegRunner
-from worker.adapters.model.yolo_person import YoloPersonRunner
-from worker.adapters.model.yolo_pose import YoloPoseRunner
 from worker.interfaces.fall_model import FallV2ModelProtocol
 
 ModelOption: TypeAlias = str | int | float | bool | None
@@ -73,10 +70,32 @@ def default_registry() -> ModelRegistry:
     here would just be dead code shadowing the fail-closed boot check.
     """
     registry = ModelRegistry()
-    registry.register("pose", YoloPoseRunner)
-    registry.register("person", YoloPersonRunner)
-    registry.register("bed", YoloBedSegRunner)
+    registry.register("pose", _yolo_pose)
+    registry.register("person", _yolo_person)
+    registry.register("bed", _yolo_bed_seg)
     return registry
+
+
+# The ultralytics runners are the host/nvidia profiles' camera runners. They
+# are resolved when a task is created, not when this module imports: under the
+# flow profile DeepStream owns pose and ORT owns bed, and that process asserts
+# torch/ultralytics are never imported (P1b-AC7).
+def _yolo_pose(**kwargs: ModelOption) -> ModelAdapter:
+    from worker.adapters.model.yolo_pose import YoloPoseRunner
+
+    return YoloPoseRunner(**kwargs)
+
+
+def _yolo_person(**kwargs: ModelOption) -> ModelAdapter:
+    from worker.adapters.model.yolo_person import YoloPersonRunner
+
+    return YoloPersonRunner(**kwargs)
+
+
+def _yolo_bed_seg(**kwargs: ModelOption) -> ModelAdapter:
+    from worker.adapters.model.yolo_bed_seg import YoloBedSegRunner
+
+    return YoloBedSegRunner(**kwargs)
 
 
 DEFAULT_REGISTRY: Final = default_registry()

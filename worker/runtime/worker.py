@@ -134,7 +134,7 @@ from worker.runtime.deepstream.nvidia_media_plane import (
 )
 from worker.runtime.faults.handler import FaultHandler
 from worker.runtime.faults.record import make_fault_record
-from worker.runtime.flow.cold_start import verify_engine_identity
+from worker.runtime.flow.cold_start import FlowWarmupTimeout, verify_engine_identity
 from worker.runtime.flow.evidence import FlowEvidenceBinding
 from worker.runtime.flow.media_plane import FlowMediaPlane, FlowMediaPlaneConfig
 from worker.runtime.ingest_composition import (
@@ -844,6 +844,7 @@ class WorkerRuntime:
         build_revision: str | None = None,
         environment_facts_factory: EnvironmentFactsFactory = collect_runtime_environment_facts,
         temporal_profile: TemporalProfile = CURRENT_TEMPORAL_PROFILE,
+        flow_media_plane: FlowMediaPlane | None = None,
     ) -> None:
         self.config = config
         self.temporal_profile = temporal_profile
@@ -975,7 +976,7 @@ class WorkerRuntime:
         self._camera_debug_snapshots: dict[str, Callable[[int], tuple[Any, ...]]] = {}
         self._camera_inference_results: dict[str, InferenceResultSlot] = {}
         self._nvidia_media_plane: NvidiaMediaPlane | None = None
-        self._flow_media_plane: FlowMediaPlane | None = None
+        self._flow_media_plane: FlowMediaPlane | None = flow_media_plane
         self._nvidia_plans: Mapping[str, CameraDetectionPlan] = MappingProxyType({})
         self._native_policy_pumps: tuple[NativePolicyPump, ...] = ()
         self._selected_bundle_admission: ModelBundleProof | None = None
@@ -1604,18 +1605,19 @@ class WorkerRuntime:
                 "tracker_library_sha256": Path(self._env["ML_WORKER_FLOW_TRACKER_LIBRARY"]),
             },
         )
-        self._flow_media_plane = FlowMediaPlane(
-            FlowMediaPlaneConfig(
-                infer_config_path=self._env["ML_WORKER_FLOW_INFER_CONFIG"],
-                tracker_config_path=self._env["ML_WORKER_FLOW_TRACKER_CONFIG"],
-                tracker_library_path=self._env["ML_WORKER_FLOW_TRACKER_LIBRARY"],
-                record_dir=Path(self._env["ML_WORKER_FLOW_RECORD_DIR"]),
-                record_cache_seconds=int(self._env["ML_WORKER_FLOW_RECORD_CACHE_SECONDS"]),
-                frame_width=int(self._env["ML_WORKER_FLOW_FRAME_WIDTH"]),
-                frame_height=int(self._env["ML_WORKER_FLOW_FRAME_HEIGHT"]),
-            ),
-            worker_boot_id=str(self._worker_boot_uuid),
-        )
+        if self._flow_media_plane is None:
+            self._flow_media_plane = FlowMediaPlane(
+                FlowMediaPlaneConfig(
+                    infer_config_path=self._env["ML_WORKER_FLOW_INFER_CONFIG"],
+                    tracker_config_path=self._env["ML_WORKER_FLOW_TRACKER_CONFIG"],
+                    tracker_library_path=self._env["ML_WORKER_FLOW_TRACKER_LIBRARY"],
+                    record_dir=Path(self._env["ML_WORKER_FLOW_RECORD_DIR"]),
+                    record_cache_seconds=int(self._env["ML_WORKER_FLOW_RECORD_CACHE_SECONDS"]),
+                    frame_width=int(self._env["ML_WORKER_FLOW_FRAME_WIDTH"]),
+                    frame_height=int(self._env["ML_WORKER_FLOW_FRAME_HEIGHT"]),
+                ),
+                worker_boot_id=str(self._worker_boot_uuid),
+            )
         self._flow_media_plane.start()
         # Flow uses the same temporal policy graph as nvidia, but all image
         # production remains inside the injected DeepStream adapter.
@@ -1750,7 +1752,12 @@ class WorkerRuntime:
             warmup = self._flow_media_plane.add_source("_bootstrap_warmup", "loopback://bootstrap")
             token = self._flow_media_plane.metadata.subscribe(warmup)
             try:
-                _ = self._flow_media_plane.metadata.wait_accepted(token, timeout_sec=10.0)
+                try:
+                    _ = self._flow_media_plane.metadata.wait_accepted(token, timeout_sec=10.0)
+                except TimeoutError as error:
+                    raise FlowWarmupTimeout(
+                        "Flow warmup did not receive an accepted metadata frame"
+                    ) from error
             finally:
                 self._flow_media_plane.remove_source("_bootstrap_warmup")
             return tuple(sorted(self._warmed_component_ids))

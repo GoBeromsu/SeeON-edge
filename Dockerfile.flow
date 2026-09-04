@@ -1,13 +1,62 @@
-FROM nvcr.io/nvidia/deepstream@sha256:f6fa0247da9290979cbb05749e7da9435d089c93db7c4dcfe85ba2488b5f4994 AS build
-WORKDIR /app
-COPY worker/adapters/deepstream/native_parser/yolo26_pose_parser.cpp /src/yolo26_pose_parser.cpp
-RUN g++ -shared -fPIC -O2 -o /opt/nvidia/deepstream/deepstream/lib/libnvdsinfer_custom_yolo26_pose.so /src/yolo26_pose_parser.cpp -I/opt/nvidia/deepstream/deepstream/sources/includes
+# ml-worker, P1b `flow` profile: pyservicemaker Flow media plane on the pinned
+# DeepStream 9.1 image with ONNX Runtime CPU models. No Torch, no ultralytics.
+#
+#   docker build -f Dockerfile.flow --build-arg SOURCE_REVISION=$(git rev-parse HEAD) .
+#
+# Engines are never built here or at boot (ADR-0002): run
+# `python -m worker.tools.edge_engine_build` once on the edge after
+# `edge-model-fetch`, and the worker verifies the identity file at boot.
 
-FROM nvcr.io/nvidia/deepstream@sha256:f6fa0247da9290979cbb05749e7da9435d089c93db7c4dcfe85ba2488b5f4994
+FROM nvcr.io/nvidia/deepstream@sha256:f6fa0247da9290979cbb05749e7da9435d089c93db7c4dcfe85ba2488b5f4994 AS parser-build
+COPY worker/adapters/deepstream/native_parser/yolo26_pose_parser.cpp /src/yolo26_pose_parser.cpp
+RUN g++ -std=c++17 -shared -fPIC -O2 \
+      -o /src/libnvdsinfer_custom_yolo26_pose.so /src/yolo26_pose_parser.cpp \
+      -I/opt/nvidia/deepstream/deepstream/sources/includes -I/usr/local/cuda/include \
+    && sha256sum /src/libnvdsinfer_custom_yolo26_pose.so
+
+FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim@sha256:e5b65587bce7de595f299855d7385fe7fca39b8a74baa261ba1b7147afa78e58 AS uv-bin
+
+FROM nvcr.io/nvidia/deepstream@sha256:f6fa0247da9290979cbb05749e7da9435d089c93db7c4dcfe85ba2488b5f4994 AS runtime
 WORKDIR /app
-COPY --from=build /opt/nvidia/deepstream/deepstream/lib/libnvdsinfer_custom_yolo26_pose.so /opt/nvidia/deepstream/deepstream/lib/
+COPY --from=uv-bin /usr/local/bin/uv /usr/local/bin/uv
+COPY --from=parser-build /src/libnvdsinfer_custom_yolo26_pose.so /opt/nvidia/deepstream/deepstream/lib/
+
+# pyservicemaker lives in the image's system dist-packages; the project venv
+# must see it, and the flow group deliberately excludes Torch and ultralytics.
+ENV UV_PROJECT_ENVIRONMENT=/app/.venv PATH=/app/.venv/bin:$PATH
 COPY pyproject.toml uv.lock ./
-RUN python -m pip install --no-cache-dir pyyaml onnxruntime && python -m pip install --no-cache-dir . && ! python -c 'import torch'
-COPY contracts shared worker /app/
-ENV PYTHONPATH=/app
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv venv --system-site-packages /app/.venv \
+    && uv sync --frozen --no-default-groups --group flow --no-install-project \
+    && python -m pip install --no-cache-dir pyyaml \
+    && python -c 'import importlib.util as u; assert u.find_spec("pyservicemaker"), "pyservicemaker not visible from the venv"' \
+    && python -c 'import onnxruntime; assert "CPUExecutionProvider" in onnxruntime.get_available_providers()' \
+    && ! python -c 'import torch' \
+    && ! python -c 'import ultralytics'
+
+COPY contracts ./contracts
+COPY shared ./shared
+COPY worker ./worker
+COPY worker/adapters/deepstream/configs /opt/seeon/deepstream-flow
+RUN test ! -e /app/worker/tools/deepstream_canary \
+    && mkdir -p /app/models/fall/pose-bbox56-gru /app/models/pose /app/models/bed \
+                /var/lib/seeon-state /var/cache/seeon/tensorrt /var/lib/seeon-records
+
+ARG EDGE_DATABASE_SCHEMA_VERSION=18
+ARG SOURCE_REVISION
+RUN if [ "$SOURCE_REVISION" = "0000000000000000000000000000000000000000" ] \
+      || [ "${#SOURCE_REVISION}" -ne 40 ] \
+      || printf '%s' "$SOURCE_REVISION" | grep -Eq '[^0123456789abcdef]'; then \
+      printf '%s\n' 'SOURCE_REVISION must be a non-zero 40-character lowercase hexadecimal revision' >&2; \
+      exit 1; \
+    fi; \
+    install -d -m 0755 /opt/seeon; \
+    printf '%s\n' "$SOURCE_REVISION" > /opt/seeon/ml-worker-image-revision; \
+    printf '%s\n' "$EDGE_DATABASE_SCHEMA_VERSION" > /opt/seeon/edge-database-schema-version; \
+    chmod 0444 /opt/seeon/ml-worker-image-revision /opt/seeon/edge-database-schema-version
+LABEL org.opencontainers.image.revision="${SOURCE_REVISION}" \
+      seeon.edge.database.schema-version="${EDGE_DATABASE_SCHEMA_VERSION}" \
+      com.seniorailab.seeon.deepstream.image="nvcr.io/nvidia/deepstream@sha256:f6fa0247da9290979cbb05749e7da9435d089c93db7c4dcfe85ba2488b5f4994" \
+      com.seniorailab.seeon.worker.profile="flow"
+ENV ML_WORKER_BUILD_REVISION="${SOURCE_REVISION}" ML_WORKER_PROFILE=flow PYTHONPATH=/app
 CMD ["python", "-m", "worker"]

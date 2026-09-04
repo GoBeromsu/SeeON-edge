@@ -30,6 +30,9 @@ class _Pipeline:
     def __getitem__(self, name: str) -> _Element:
         return self.elements.setdefault(name, _Element())
 
+    def stop_recording(self) -> None:
+        raise AssertionError("Smart Record must use the stop-sr action signal")
+
 
 class _Flow:
     def add_source(self, uri: str) -> None:

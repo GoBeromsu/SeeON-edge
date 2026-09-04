@@ -50,11 +50,13 @@ def _frame_box(
     row: NDArray[np.float32], frame_w: int, frame_h: int
 ) -> tuple[float, float, float, float]:
     scale = min(_NET_SIZE / frame_w, _NET_SIZE / frame_h)
+    pad_x = (_NET_SIZE - frame_w * scale) / 2.0
+    pad_y = (_NET_SIZE - frame_h * scale) / 2.0
     return (
-        float(row[0] / scale),
-        float(row[1] / scale),
-        float(row[2] / scale),
-        float(row[3] / scale),
+        float((row[0] - pad_x) / scale),
+        float((row[1] - pad_y) / scale),
+        float((row[2] - pad_x) / scale),
+        float((row[3] - pad_y) / scale),
     )
 
 
@@ -159,11 +161,23 @@ def convert_frame(
         for track in matched
     )
     scale = min(_NET_SIZE / frame_w, _NET_SIZE / frame_h)
+    pad_x = (_NET_SIZE - frame_w * scale) / 2.0
+    pad_y = (_NET_SIZE - frame_h * scale) / 2.0
     poses = tuple(
         tuple(
             Keypoint(
-                int(max(0.0, min(float(frame_w), float(row[6 + point * 3] / scale)))),
-                int(max(0.0, min(float(frame_h), float(row[7 + point * 3] / scale)))),
+                int(
+                    max(
+                        0.0,
+                        min(float(frame_w), float((row[6 + point * 3] - pad_x) / scale)),
+                    )
+                ),
+                int(
+                    max(
+                        0.0,
+                        min(float(frame_h), float((row[7 + point * 3] - pad_y) / scale)),
+                    )
+                ),
                 float(row[8 + point * 3]),
             )
             for point in range(17)

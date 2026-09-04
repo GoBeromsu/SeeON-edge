@@ -42,6 +42,17 @@ worker = [
     "onnxruntime>=1.29.0",
     "onnxslim>=0.1.82",
 ]
+# P1b flow profile: the DeepStream media plane owns decode/inference/tracking
+# and the fall/bed models run on ONNX Runtime CPU. No Torch, no ultralytics,
+# no sklearn - the image asserts `import torch` fails (P1b-AC7).
+flow = [
+    "pillow>=12",
+    "nvidia-ml-py>=12",
+    "onnxruntime>=1.29.0",
+    # The packet-ring recorder stays importable until P2 deletes it; Smart
+    # Record owns clips under flow, so PyAV is import-only here.
+    "av>=15,<17",
+]
 
 [tool.uv]
 package = false

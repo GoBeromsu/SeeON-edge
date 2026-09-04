@@ -42,7 +42,6 @@ from typing import Final, Protocol, TypeAlias
 from typing_extensions import override
 
 from worker.adapters.model.ort_pose_bbox56 import OrtPoseBbox56Runner
-from worker.adapters.model.pose_bbox56_bundle import PoseBbox56BundleRunner
 from worker.adapters.model.registry import FallModel
 
 
@@ -153,6 +152,11 @@ class FallModelFamilyRegistry:
 
 
 def _create_pose_bbox56_bundle_model(artifact_dir: Path, device: str) -> FallModel:
+    # The Torch runner is the nvidia profile's; importing it here at module
+    # scope would drag torch into every worker process, and the flow profile
+    # asserts torch is never imported (P1b-AC7). Resolve it only when selected.
+    from worker.adapters.model.pose_bbox56_bundle import PoseBbox56BundleRunner
+
     return PoseBbox56BundleRunner.from_artifact_dir(artifact_dir, device=device)
 
 

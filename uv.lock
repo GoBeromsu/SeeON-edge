@@ -1226,6 +1226,12 @@ dependencies = [
 ]
 
 [package.dev-dependencies]
+flow = [
+    { name = "av" },
+    { name = "nvidia-ml-py" },
+    { name = "onnxruntime" },
+    { name = "pillow" },
+]
 lint = [
     { name = "import-linter" },
     { name = "mypy" },
@@ -1261,6 +1267,12 @@ requires-dist = [
 ]
 
 [package.metadata.requires-dev]
+flow = [
+    { name = "av", specifier = ">=15,<17" },
+    { name = "nvidia-ml-py", specifier = ">=12" },
+    { name = "onnxruntime", specifier = ">=1.29.0" },
+    { name = "pillow", specifier = ">=12" },
+]
 lint = [
     { name = "import-linter", specifier = ">=2.13" },
     { name = "mypy", specifier = ">=1.11" },

@@ -13,6 +13,10 @@ class EngineIdentityError(RuntimeError):
     """A prebuilt Flow engine is absent or does not match its identity proof."""
 
 
+class FlowWarmupTimeout(RuntimeError):
+    """The Flow bootstrap source did not yield an accepted metadata frame."""
+
+
 @dataclass(frozen=True, slots=True)
 class FlowColdStart:
     """Verify immutable artifacts, then warm the already-built media plane."""
@@ -68,4 +72,4 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-__all__ = ["EngineIdentityError", "FlowColdStart", "verify_engine_identity"]
+__all__ = ["EngineIdentityError", "FlowColdStart", "FlowWarmupTimeout", "verify_engine_identity"]
