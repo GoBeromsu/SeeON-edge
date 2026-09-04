@@ -1663,11 +1663,12 @@ class WorkerRuntime:
                     )
                 )
                 continue
-            # The media plane owns every perception component: pose is the
-            # verified TensorRT engine, bed is the ONNX Runtime segmenter.
-            # Their identities are the artifacts the boot verified, so "which
-            # model ran" is answerable from the runtime manifest.
-            digest = self._flow_perception_digest(binding.component_id, binding.artifact_digest)
+            # The media plane owns every perception component. Their applied
+            # identity is the published weights each derives from (the ONNX
+            # export and the TensorRT engine are build products of that
+            # artifact, verified separately by the engine identity file at
+            # boot), so the runtime manifest names the same lineage nvidia does.
+            digest = binding.artifact_digest
             preprocessing = binding.preprocessing_identity
             if not digest or not preprocessing:
                 raise RuntimeError(f"flow component {binding.component_id!r} has no identity")
@@ -1697,11 +1698,6 @@ class WorkerRuntime:
         member = "model.onnx" if configured.framework == "onnxruntime" else "model.pt"
         manifest = read_json(configured.artifact_dir / "bundle-manifest.json")
         return member_digest(manifest, member)
-
-    def _flow_perception_digest(self, component_id: str, declared: str | None) -> str | None:
-        if component_id == "pose" and self._flow_engine_identity is not None:
-            return self._flow_engine_identity["engine_sha256"]
-        return declared
 
     def _forward_native_preview_demand(
         self,
