@@ -12,6 +12,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Final, final
 
+from shared.events.delivery_queue import ClipEntry, DeliveryQueue
 from worker.adapters.encode.adapter_errors import ThumbnailGenerationError
 from worker.adapters.encode.thumbnail import THUMBNAIL_FILENAME, FFmpegThumbnailGenerator
 from worker.interfaces import ThumbnailGenerator
@@ -29,10 +30,12 @@ from worker.pipeline.output.evidence.clip_publication_types import (
 )
 from worker.pipeline.output.evidence.durability import fsync_directory, fsync_file
 from worker.pipeline.output.evidence.evidence_manifest import (
+    ClipManifest,
     finalize_ready_manifest,
     unavailable_manifest,
 )
 from worker.pipeline.output.evidence.evidence_outbox_types import EvidenceReasonCode
+from worker.pipeline.output.evidence.manifest_models import ReadyClipManifest
 from worker.pipeline.output.evidence.terminal_outcome import (
     TerminalClipOutcome,
     TerminalClipState,
@@ -55,11 +58,13 @@ class ClipPublisher:
         barrier: PublicationBarrier = _no_barrier,
         ffprobe_bin: str = "ffprobe",
         thumbnail_generator: ThumbnailGenerator | None = None,
+        delivery_queue_directory: Path | None = None,
     ) -> None:
         self._store_dir = store_dir
         self._barrier = barrier
         self._ffprobe_bin = ffprobe_bin
         self._thumbnail_generator = thumbnail_generator or FFmpegThumbnailGenerator()
+        self._delivery_queue_directory = delivery_queue_directory
 
     def publish_ready(
         self,
@@ -115,6 +120,7 @@ class ClipPublisher:
                 hashlib.sha256(manifest_path.read_bytes()).hexdigest(),
             ),
         )
+        self._enqueue_clip(manifest, metadata)
         self._cleanup_staging(reservation)
         return PublishedClip(reservation.clip_id, manifest, manifest_path, video_path)
 
@@ -176,6 +182,7 @@ class ClipPublisher:
                 hashlib.sha256(manifest_path.read_bytes()).hexdigest(),
             ),
         )
+        self._enqueue_clip(manifest, metadata)
         self._cleanup_staging(reservation)
         return PublishedClip(reservation.clip_id, manifest, manifest_path, None)
 
@@ -266,6 +273,57 @@ class ClipPublisher:
         if reservation.staging_dir.exists():
             shutil.rmtree(reservation.staging_dir)
             fsync_directory(reservation.staging_dir.parent)
+
+    def _enqueue_clip(self, manifest: ClipManifest, metadata: ClipPublicationMetadata) -> None:
+        if self._delivery_queue_directory is None:
+            return
+        if metadata.facility_id is None:
+            raise ClipPublicationConflictError(
+                manifest.clip_id, "facility id is required for clip relay delivery"
+            )
+        if isinstance(manifest, ReadyClipManifest):
+            entry = ClipEntry(
+                clip_id=manifest.clip_id,
+                event_ids=manifest.event_refs,
+                camera_id=manifest.camera_id,
+                facility_id=metadata.facility_id,
+                local_state="VERIFIED",
+                state_version=manifest.state_version,
+                media_reference=f"clips/{manifest.clip_id}/clip.mp4",
+                sha256=manifest.sha256,
+                size_bytes=manifest.size_bytes,
+                mime_type=manifest.mime_type,
+                codec=manifest.codec,
+                duration_ms=manifest.duration_ms,
+                clip_start_at=manifest.clip_start_at,
+                clip_end_at=manifest.clip_end_at,
+                finalized_at=manifest.finalized_at,
+                unavailable_reason=None,
+            )
+        else:
+            entry = ClipEntry(
+                clip_id=manifest.clip_id,
+                event_ids=manifest.event_refs,
+                camera_id=manifest.camera_id,
+                facility_id=metadata.facility_id,
+                local_state="UNAVAILABLE",
+                state_version=manifest.state_version,
+                media_reference=None,
+                sha256=None,
+                size_bytes=None,
+                mime_type=None,
+                codec=None,
+                duration_ms=None,
+                clip_start_at=manifest.clip_start_at,
+                clip_end_at=manifest.clip_end_at,
+                finalized_at=manifest.finalized_at,
+                unavailable_reason=manifest.reason_code.value,
+            )
+        admitted = DeliveryQueue(self._delivery_queue_directory).try_admit(entry)
+        if not admitted.accepted:
+            raise ClipPublicationConflictError(
+                manifest.clip_id, f"clip relay queue admission failed: {admitted.fault}"
+            )
 
     def _validate_reservation(self, reservation: ClipReservation) -> None:
         clips_dir = self._store_dir / "clips"

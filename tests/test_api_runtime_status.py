@@ -196,6 +196,9 @@ def test_status_round_trips_delivery_queue_capacity_and_kind_mix(tmp_path: Path)
         "max_accepted_entries": MAX_ACCEPTED_ENTRIES,
         "max_accepted_bytes": MAX_ACCEPTED_BYTES,
         "by_kind": {
+            # Clip receipts are their own delivery kind; the backend reports
+            # every kind the worker can queue, including an empty one.
+            "CLIP": 0,
             "EVENT": 1,
             "SNAPSHOT_ATTACHMENT": 1,
             "SNAPSHOT_DISPOSITION": 1,

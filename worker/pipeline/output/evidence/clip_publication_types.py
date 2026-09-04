@@ -63,6 +63,7 @@ class ClipPublicationMetadata:
     truncation_reasons: tuple[str, ...] = ()
     domain: str | None = None
     extension: ClipExtension | None = None
+    facility_id: str | None = None
 
     def __post_init__(self) -> None:
         validate_runtime_manifest_sha256(self.runtime_manifest_sha256)

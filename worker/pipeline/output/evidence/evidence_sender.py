@@ -19,6 +19,12 @@ from shared.events.evidence_export_contract import (
     DeliveryFailure,
     EventReceipt,
 )
+from worker.pipeline.output.evidence.evidence_outbox_types import (
+    ClipId,
+    ClipLocalState,
+    EdgeEventId,
+    EvidenceReasonCode,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -48,12 +54,33 @@ class EvidenceTransport(Protocol):
 
     def send_snapshot_disposition(self, payload: dict[str, object]) -> DeliveryFailure | None: ...
 
+    def send_clip(self, claim: _QueuedClipClaim) -> object: ...
+
 
 @dataclass(frozen=True, slots=True)
 class SenderConfig:
     relay_url: str
     relay_token: str = field(repr=False)
     probe_camera_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class _QueuedClipClaim:
+    clip_id: ClipId
+    local_state: ClipLocalState
+    state_version: int
+    media_relpath: str | None
+    sha256: str | None
+    size_bytes: int | None
+    mime_type: str | None
+    codec: str | None
+    duration_ms: int | None
+    clip_start_at: str | None
+    clip_end_at: str | None
+    finalized_at: str | None
+    unavailable_reason: object | None
+    event_ids: tuple[EdgeEventId, ...]
+    event_payload_json: str
 
 
 class EvidenceSender:
@@ -66,12 +93,12 @@ class EvidenceSender:
         *,
         transport: EvidenceTransport | None = None,
         clip_export_enabled: Callable[[], bool] | None = None,
-        **_ignored: object,
     ) -> None:
-        del clip_export_enabled
         self.queue_directory = queue_directory
         self.config = config
         self._transport = transport or RelayEvidenceClient(config.relay_url, config.relay_token)
+        self._clip_export_enabled = clip_export_enabled or (lambda: True)
+        self._clip_export_disabled_logged = False
         self._last_shed_detail_warning_at = float("-inf")
         self._attempts: dict[str, int] = {}
         self._deferred: set[str] = set()
@@ -141,6 +168,13 @@ class EvidenceSender:
             return SenderStep.IDLE
         entry = self._select(entries)
         entry_id = str(entry["entry_id"])
+        if entry["kind"] == "CLIP" and not self._clip_export_enabled():
+            if not self._clip_export_disabled_logged:
+                _LOGGER.warning("clip relay export is disabled; published clips remain queued")
+                self._clip_export_disabled_logged = True
+            self._deferred.add(entry_id)
+            return SenderStep.RETRY_SCHEDULED
+        self._clip_export_disabled_logged = False
         attempts = self._attempts.get(entry_id, 0)
         if attempts >= _MAX_ENTRY_ATTEMPTS:
             # Exhausted. Retain it for an operator instead of retrying forever
@@ -188,16 +222,22 @@ class EvidenceSender:
             )
             return SenderStep.RETRY_SCHEDULED
         if isinstance(result, DeliveryFailure):
-            if result.status_code == 422:
+            if (
+                result.disposition is DeliveryDisposition.PERMANENT
+                and result.status_code is not None
+                and 400 <= result.status_code < 500
+                and (entry["kind"] == "CLIP" or result.status_code == 422)
+            ):
                 # Refused, not delivered. Retain it for an operator rather than
                 # deleting it and reporting success; that deletion is how 41
                 # real bed-exit events were destroyed here.
                 if self._retain(queue, entry_id, result.status_code):
                     self._deferred.discard(entry_id)
                     _LOGGER.error(
-                        "backend refused evidence entry %s with HTTP 422; retained in "
+                        "backend refused evidence entry %s with HTTP %d; retained in "
                         "%s for operator review, NOT delivered",
                         entry_id,
+                        result.status_code,
                         queue.dead_letter_directory,
                     )
                     return SenderStep.RETRY_SCHEDULED
@@ -206,10 +246,11 @@ class EvidenceSender:
                 # newer alert behind it until admission itself starts failing.
                 self._deferred.add(entry_id)
                 _LOGGER.error(
-                    "backend refused evidence entry %s with HTTP 422 and the retention "
+                    "backend refused evidence entry %s with HTTP %d and the retention "
                     "area at %s is FULL; the entry is still queued and undelivered. Run "
                     "scripts/ops/review-refused-evidence.py to drain retention",
                     entry_id,
+                    result.status_code,
                     queue.dead_letter_directory,
                 )
                 return SenderStep.RETRY_SCHEDULED
@@ -255,6 +296,8 @@ class EvidenceSender:
             case "EVENT":
                 self._warn_shed_detail(entry)
                 return self._transport.send_event(_payload(entry), str(entry["edge_event_id"]))
+            case "CLIP":
+                return self._transport.send_clip(_clip_claim(entry))
             case "SNAPSHOT_ATTACHMENT":
                 return self._transport.send_snapshot_attachment(_media_payload(entry))
             case "SNAPSHOT_DISPOSITION":
@@ -301,6 +344,34 @@ def _payload(entry: dict[str, object]) -> str:
 
 def _media_payload(entry: dict[str, object]) -> dict[str, object]:
     return {key: value for key, value in entry.items() if key not in {"entry_id", "kind"}}
+
+
+def _clip_claim(entry: dict[str, object]) -> _QueuedClipClaim:
+    local_state = ClipLocalState(str(entry["local_state"]))
+    unavailable_reason = entry["unavailable_reason"]
+    return _QueuedClipClaim(
+        clip_id=ClipId(str(entry["clip_id"])),
+        local_state=local_state,
+        state_version=int(entry["state_version"]),
+        media_relpath=None if entry["media_reference"] is None else str(entry["media_reference"]),
+        sha256=None if entry["sha256"] is None else str(entry["sha256"]),
+        size_bytes=None if entry["size_bytes"] is None else int(entry["size_bytes"]),
+        mime_type=None if entry["mime_type"] is None else str(entry["mime_type"]),
+        codec=None if entry["codec"] is None else str(entry["codec"]),
+        duration_ms=None if entry["duration_ms"] is None else int(entry["duration_ms"]),
+        clip_start_at=None if entry["clip_start_at"] is None else str(entry["clip_start_at"]),
+        clip_end_at=None if entry["clip_end_at"] is None else str(entry["clip_end_at"]),
+        finalized_at=None if entry["finalized_at"] is None else str(entry["finalized_at"]),
+        unavailable_reason=(
+            None if unavailable_reason is None else EvidenceReasonCode(str(unavailable_reason))
+        ),
+        event_ids=tuple(EdgeEventId(str(value)) for value in entry["event_ids"]),
+        event_payload_json=json.dumps(
+            {"camera_id": entry["camera_id"], "facility_id": entry["facility_id"]},
+            separators=(",", ":"),
+            sort_keys=True,
+        ),
+    )
 
 
 def _acknowledged_step(entry: dict[str, object]) -> SenderStep:

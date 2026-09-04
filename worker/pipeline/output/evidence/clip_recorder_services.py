@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Protocol
 
 from worker.adapters.encode import FFmpegThumbnailGenerator
@@ -31,6 +32,8 @@ class ClipRecorderServices:
 def default_services(
     config: ClipRecorderConfig,
     repository: PacketRingRepository,
+    *,
+    delivery_queue_directory: Path | None = None,
 ) -> ClipRecorderServices:
     """Build the sole production clean-clip path: source packet stream copy."""
     coordinator = PacketClipRecordingCoordinator(
@@ -52,6 +55,7 @@ def default_services(
             config.store_dir,
             ffprobe_bin=ffprobe_bin,
             thumbnail_generator=FFmpegThumbnailGenerator(ffmpeg_bin=config.ffmpeg_bin),
+            delivery_queue_directory=delivery_queue_directory,
         ),
         "source-packet-remux",
         repository,

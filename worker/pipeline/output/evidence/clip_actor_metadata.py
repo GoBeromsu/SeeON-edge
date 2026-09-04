@@ -70,6 +70,7 @@ def publication_metadata(
             artifact.truncation_reasons if artifact is not None else truncation_reasons
         ),
         domain=active.event.domain,
+        facility_id=active.event.facility_id,
     )
 
 

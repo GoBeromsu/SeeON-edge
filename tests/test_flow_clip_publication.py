@@ -67,6 +67,7 @@ def test_sealed_clip_publishes_ordered_extension_with_covering_duration(tmp_path
     assert str(reservation.clip_id) == "clip-1"
     assert source_path == Path("/plane/clip-1.mp4")
     assert metadata.event_refs == ("early", "late")
+    assert metadata.facility_id == "facility-a"
     assert metadata.detected_at == datetime(2026, 1, 1, tzinfo=UTC)
     assert metadata.duration_s == 60.0
     assert metadata.extension is not None

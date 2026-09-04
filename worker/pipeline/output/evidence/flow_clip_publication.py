@@ -73,6 +73,8 @@ class FlowClipPublisher:
         event = events[primary.event_ref]
         if any(events[item.event_ref].camera_id != event.camera_id for item in contributors):
             raise ValueError("sealed Flow clip spans cameras")
+        if any(events[item.event_ref].facility_id != event.facility_id for item in contributors):
+            raise ValueError("sealed Flow clip spans facilities")
         detected_at = _parse_timestamp(primary.detected_at)
         duration_s = sealed.duration_ms / 1000.0
         if duration_s <= 0:
@@ -107,6 +109,7 @@ class FlowClipPublisher:
                     duration_s=duration_s,
                     boundary=sealed.boundary,
                 ),
+                facility_id=event.facility_id,
             ),
         )
 

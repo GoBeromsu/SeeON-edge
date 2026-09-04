@@ -2172,7 +2172,10 @@ class WorkerRuntime:
             stager=stager,
             publisher=FlowClipPublisher(
                 ClipIdAllocator(self._resolved_clip_store_dir()),
-                ClipPublisher(self._resolved_clip_store_dir()),
+                ClipPublisher(
+                    self._resolved_clip_store_dir(),
+                    delivery_queue_directory=_delivery_queue_dir(self._state_dir),
+                ),
             ),
             sidecars=FlowSealedSidecars(self._state_dir / "flow-sealed"),
             camera_id=camera.camera_id,
@@ -2866,7 +2869,11 @@ class WorkerRuntime:
         self._packet_repository = packet_repository
         recorder = ClipRecorder(
             clip_config,
-            services=default_services(clip_config, packet_repository),
+            services=default_services(
+                clip_config,
+                packet_repository,
+                delivery_queue_directory=_delivery_queue_dir(self._state_dir),
+            ),
             # Holds are backend intent now. The slot keeps no hold index, so it
             # reports nothing as locally held and never initiates a deletion of
             # its own. Deletion arrives as an authorized backend command that
