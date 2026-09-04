@@ -271,6 +271,13 @@ def pct(values: list[float], fraction: float) -> float | None:
     return s[min(len(s) - 1, max(0, round(fraction * (len(s) - 1))))]
 
 
+def _json_safe(value: object) -> object:
+    """numpy scalars are not JSON serialisable; keep the receipt writable."""
+    if isinstance(value, np.generic):
+        return value.item()
+    raise TypeError(f"unserialisable {type(value).__name__}")
+
+
 def write_report(
     probe: ProductionShapedProbe,
     sources: int,
@@ -330,7 +337,12 @@ def write_report(
         **extra,
     }
     with open(out, "w", encoding="utf-8") as fh:
-        json.dump({**report, "lifecycle": lifecycle, "births": probe.births[:200]}, fh, indent=2)
+        json.dump(
+            {**report, "lifecycle": lifecycle, "births": probe.births[:200]},
+            fh,
+            indent=2,
+            default=_json_safe,
+        )
     print(json.dumps(report, indent=2), flush=True)
 
 
