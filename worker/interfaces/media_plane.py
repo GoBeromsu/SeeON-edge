@@ -90,12 +90,20 @@ class MediaPlane(Protocol):
         ...
 
     def stop_recording(self, camera_id: str, session_id: int) -> None:
-        """Seal early; ``on_sealed`` still fires exactly once."""
+        """Seal early; ``on_sealed`` still fires exactly once.
+
+        A plane that cannot stop early raises ``EarlyStopUnsupported``; the
+        recording then runs to the duration given at start and seals itself.
+        """
         ...
 
 
 class RecordingRefused(RuntimeError):
     """The plane cannot begin a recording for this source right now."""
+
+
+class EarlyStopUnsupported(RuntimeError):
+    """This plane seals only at the duration given at start."""
 
 
 class SourceRosterFixed(RuntimeError):

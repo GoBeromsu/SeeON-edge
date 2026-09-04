@@ -10,7 +10,12 @@ from threading import RLock
 from typing import Literal
 from uuid import uuid4
 
-from worker.interfaces.media_plane import MediaPlane, RecordingInfo, RecordingRefused
+from worker.interfaces.media_plane import (
+    EarlyStopUnsupported,
+    MediaPlane,
+    RecordingInfo,
+    RecordingRefused,
+)
 
 ClipBoundary = Literal["none", "extension_bounded", "extension_raced"]
 
@@ -158,7 +163,12 @@ class SmartRecordActor:
             if self._clock() < recording.stop_due:
                 return
             self._state = SmartRecordState.STOPPING
-            self._media_plane.stop_recording(self._camera_id, recording.session_id)
+            try:
+                self._media_plane.stop_recording(self._camera_id, recording.session_id)
+            except EarlyStopUnsupported:
+                # The plane seals at the duration given at start; the clip is
+                # bounded by that window rather than by stop_due.
+                recording.boundary = "extension_bounded"
 
     def on_sealed(self, info: RecordingInfo) -> None:
         """Handle a media-plane completion callback exactly once by session id."""

@@ -1,5 +1,16 @@
+"""DeepStreamMediaPlane against a fake pyservicemaker seam.
+
+The contract is what the G8a spike measured on a live camera
+(docs/research/pyservicemaker-p1b-spike.md): ``Pipeline.start_recording``
+returns a session id and delivers ``RecordingInfo`` to its callback when the
+clip seals; ``Pipeline.stop_recording`` is defective, so the plane refuses
+early stops with a typed error; a second start while one is in flight is
+absorbed into the same session; a Flow fixes its sources when built.
+"""
+
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -10,86 +21,188 @@ from worker.adapters.deepstream.service_maker import (
     DeepStreamMediaPlaneConfig,
     _FlowHandle,
 )
-from worker.interfaces.media_plane import MediaPlane, RecordingRefused
+from worker.interfaces.media_plane import (
+    EarlyStopUnsupported,
+    MediaPlane,
+    RecordingInfo,
+    RecordingRefused,
+    SourceRosterFixed,
+)
 from worker.native.deepstream.metadata import LatestMetadataSlot
 
 
 class _Element:
     def __init__(self) -> None:
-        self.emitted: list[tuple[object, ...]] = []
+        self.properties: dict[str, object] = {}
 
-    def emit(self, *args: object) -> int:
-        self.emitted.append(args)
-        return 4
+    def set(self, properties: dict[str, object]) -> None:
+        self.properties.update(properties)
 
 
 class _Pipeline:
     def __init__(self) -> None:
         self.elements: dict[str, _Element] = {}
+        self.started: list[tuple[str, int, int]] = []
+        self.callbacks: dict[str, Callable[[object], None]] = {}
+        self.stopped = False
 
     def __getitem__(self, name: str) -> _Element:
         return self.elements.setdefault(name, _Element())
 
-    def stop_recording(self) -> None:
-        raise AssertionError("Smart Record must use the stop-sr action signal")
+    def start_recording(
+        self, source: str, lookback: int, duration: int, callback: Callable[[object], None]
+    ) -> int:
+        self.started.append((source, lookback, duration))
+        self.callbacks[source] = callback
+        return 4
+
+    def stop_recording(self, source: str) -> bool:
+        raise AssertionError("the binding's stop_recording is defective and must never be called")
+
+    def stop(self) -> None:
+        self.stopped = True
 
 
 class _Flow:
-    def add_source(self, uri: str) -> None:
-        del uri
+    def __init__(self) -> None:
+        self.built = False
+        self.ran = False
 
-    def remove_source(self, name: str) -> None:
-        del name
+    def batch_capture(self, uris: list[str], **kwargs: object) -> _Flow:
+        del uris, kwargs
+        self.built = True
+        return self
+
+    def infer(self, config: str) -> _Flow:
+        del config
+        return self
+
+    def track(self, **kwargs: object) -> _Flow:
+        del kwargs
+        return self
+
+    def attach(self, what: object) -> _Flow:
+        del what
+        return self
+
+    def render(self, **kwargs: object) -> _Flow:
+        del kwargs
+        return self
+
+    def __call__(self) -> None:
+        self.ran = True
 
 
-def test_plane_binding_and_smart_record_commands() -> None:
-    pipeline = _Pipeline()
+def _plane(pipeline: _Pipeline | None = None) -> tuple[DeepStreamMediaPlane, _Pipeline]:
+    pipeline = pipeline or _Pipeline()
     config = DeepStreamMediaPlaneConfig("infer", "tracker", "lib", Path("/tmp"), 5, 640, 360)
     plane = DeepStreamMediaPlane(
         config,
         metadata_slot=LatestMetadataSlot(),
-        flow_factory=lambda _: _FlowHandle(_Flow(), pipeline),
+        flow_factory=lambda _: _FlowHandle(
+            flow=_Flow(),
+            pipeline=pipeline,
+            record_config=lambda **kwargs: kwargs,
+            render_mode_discard="discard",
+            make_probe=lambda name, probe: (name, probe),
+        ),
         worker_boot_id="boot",
         child_instance_id="child",
     )
+    return plane, pipeline
+
+
+def _info(session: int) -> SimpleNamespace:
+    return SimpleNamespace(
+        session_id=session, dirpath="/tmp", filename="clip.mp4", duration=20, width=640, height=360
+    )
+
+
+def test_plane_satisfies_the_vendor_neutral_protocol() -> None:
+    plane, _ = _plane()
     assert isinstance(plane, MediaPlane)
+
+
+def test_source_failure_rebuilds_the_binding_on_a_new_generation() -> None:
+    plane, _ = _plane()
     first = plane.add_source("camera", "rtsp://one")
     replacement = plane.source_failure("camera", "timeout")
+    assert replacement.camera_id == first.camera_id == "camera"
     assert replacement.source_generation == first.source_generation + 1
-    with pytest.raises(RecordingRefused):
+
+
+def test_recording_is_refused_before_the_source_has_published_a_frame() -> None:
+    plane, _ = _plane()
+    plane.add_source("camera", "rtsp://one")
+    with pytest.raises(RecordingRefused, match="has not published"):
         plane.start_recording("camera", lookback_sec=1, duration_sec=2, on_sealed=lambda _: None)
-    plane._live.add("camera")
+
+
+def test_start_uses_the_sdk_primitive_and_an_inflight_start_is_absorbed() -> None:
+    plane, pipeline = _plane()
+    plane.add_source("camera", "rtsp://one")
+    plane._live.add("camera")  # noqa: SLF001 - a frame has been published
     sealed: list[object] = []
+    session = plane.start_recording(
+        "camera", lookback_sec=15, duration_sec=45, on_sealed=sealed.append
+    )
+    again = plane.start_recording("camera", lookback_sec=1, duration_sec=2, on_sealed=sealed.append)
+    assert again == session
+    assert pipeline.started == [("batch_capture-source-0_0", 15, 45)]
+
+
+def test_early_stop_is_a_typed_refusal_not_a_silent_no_op() -> None:
+    plane, _ = _plane()
+    plane.add_source("camera", "rtsp://one")
+    plane._live.add("camera")  # noqa: SLF001
+    session = plane.start_recording(
+        "camera", lookback_sec=1, duration_sec=2, on_sealed=lambda _: None
+    )
+    with pytest.raises(EarlyStopUnsupported, match="seals at its start duration"):
+        plane.stop_recording("camera", session)
+    with pytest.raises(RecordingRefused, match="unknown recording session"):
+        plane.stop_recording("camera", session + 1)
+
+
+def test_sealed_callback_fires_exactly_once_per_session() -> None:
+    plane, pipeline = _plane()
+    plane.add_source("camera", "rtsp://one")
+    plane._live.add("camera")  # noqa: SLF001
+    sealed: list[RecordingInfo] = []
     session = plane.start_recording(
         "camera", lookback_sec=1, duration_sec=2, on_sealed=sealed.append
     )
-    assert (
-        plane.start_recording("camera", lookback_sec=1, duration_sec=2, on_sealed=sealed.append)
-        == session
-    )
-    plane.stop_recording("camera", session)
-    assert pipeline["batch_capture-source-0_0"].emitted[-1] == ("stop-sr", session)
-    plane._recording_done(
-        "camera",
-        SimpleNamespace(
-            session_id=session,
-            dirpath="/tmp",
-            filename="clip.mp4",
-            duration=20,
-            width=640,
-            height=360,
-        ),
-    )
-    plane._recording_done(
-        "camera",
-        SimpleNamespace(
-            session_id=session,
-            dirpath="/tmp",
-            filename="clip.mp4",
-            duration=20,
-            width=640,
-            height=360,
-        ),
-    )
-    assert len(sealed) == 1
+    callback = pipeline.callbacks["batch_capture-source-0_0"]
+    callback(_info(session))
+    callback(_info(session))
+    assert [item.session_id for item in sealed] == [session]
+    assert sealed[0].path == "/tmp/clip.mp4"
+    assert sealed[0].duration_ms == 20
+
+
+def test_sources_are_fixed_once_the_flow_runs() -> None:
+    plane, pipeline = _plane()
+    plane.add_source("camera", "rtsp://one")
+    plane.start()
+    with pytest.raises(SourceRosterFixed, match="restart the worker"):
+        plane.add_source("late", "rtsp://two")
+    with pytest.raises(SourceRosterFixed):
+        plane.remove_source("camera")
+    plane.stop()
+    assert pipeline.stopped
+
+
+def test_source_properties_follow_the_measured_rtsp_shape() -> None:
+    plane, pipeline = _plane()
+    plane.add_source("camera", "rtsp://one")
+    plane.start()
+    props = pipeline["batch_capture-source-0_0"].properties
+    assert props["select-rtp-protocol"] == 4
+    assert props["init-rtsp-reconnect-interval"] == 5
+    assert props["rtsp-reconnect-interval"] == 5
+    plane.stop()
+
+
+def test_smart_record_owns_no_encode_sessions() -> None:
+    plane, _ = _plane()
     assert plane.status().nvenc_sessions_active == 0

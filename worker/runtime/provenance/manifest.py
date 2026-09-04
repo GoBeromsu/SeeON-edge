@@ -151,10 +151,13 @@ def _verified_component_identities(
             raise AppliedRuntimeManifestError(
                 f"unresolved applied identity for component {identity.component_id!r}"
             )
+        # Under the media-plane-owned profiles the temporal policy and the
+        # bed segmenter run on the CPU beside a CUDA media plane by design;
+        # every other component must match the boot device.
         cpu_policy = (
-            boot.profile.name == "nvidia"
+            boot.profile.name in {"nvidia", "flow"}
             and identity.device == "cpu"
-            and identity.runtime == "cpu-policy"
+            and identity.runtime in {"cpu-policy", "onnxruntime-cpu"}
         )
         if identity.device != boot.device and not cpu_policy:
             raise AppliedRuntimeManifestError(

@@ -14,6 +14,7 @@ from worker.adapters.deepstream.metadata import convert_frame
 from worker.adapters.deepstream.sources import SourceTable
 from worker.adapters.deepstream.tensor_rows import rows_from_tensor
 from worker.interfaces.media_plane import (
+    EarlyStopUnsupported,
     MediaPlane,
     MediaPlaneStatus,
     RecordingInfo,
@@ -50,15 +51,26 @@ class _Recording:
 
 @dataclass(frozen=True, slots=True)
 class _FlowHandle:
+    """Everything the plane needs from the SDK, so tests can supply fakes."""
+
     flow: Any
     pipeline: Any
+    record_config: Callable[..., Any]
+    render_mode_discard: Any
+    make_probe: Callable[[str, _Probe], Any]
 
 
 def _default_flow_factory(config: DeepStreamMediaPlaneConfig) -> _FlowHandle:
-    from pyservicemaker import Flow, Pipeline
+    from pyservicemaker import Flow, Pipeline, Probe, RecordConfig, RenderMode
 
     pipeline = Pipeline(config.pipeline_name)
-    return _FlowHandle(flow=Flow(pipeline), pipeline=pipeline)
+    return _FlowHandle(
+        flow=Flow(pipeline),
+        pipeline=pipeline,
+        record_config=RecordConfig,
+        render_mode_discard=RenderMode.DISCARD,
+        make_probe=lambda name, probe: Probe(name, _batch_operator(probe)),
+    )
 
 
 class _Probe:
@@ -102,6 +114,7 @@ class DeepStreamMediaPlane(MediaPlane):
         self._config = config
         self._slot = metadata_slot
         handle = flow_factory(config)
+        self._handle = handle
         self._flow = handle.flow
         self._pipeline = handle.pipeline
         self._sources = SourceTable(
@@ -226,7 +239,14 @@ class DeepStreamMediaPlane(MediaPlane):
         recording = self._recordings.get(camera_id)
         if recording is None or recording.session_id != session_id:
             raise RecordingRefused(f"unknown recording session {session_id} for {camera_id}")
-        self._call_on_pipeline(lambda: self._source_element(camera_id).emit("stop-sr", session_id))
+        # Measured (docs/research/pyservicemaker-p1b-spike.md): the SDK's
+        # Pipeline.stop_recording returns True but never seals, and the binding
+        # exposes no way to emit the element's stop-sr action signal. The clip
+        # therefore runs to the duration given at start and seals itself.
+        raise EarlyStopUnsupported(
+            f"pyservicemaker cannot stop session {session_id} on {camera_id} early; "
+            "the recording seals at its start duration"
+        )
 
     def _enqueue(self, command: Callable[[], Any]) -> None:
         self._commands.put((command, None, None))
@@ -258,9 +278,7 @@ class DeepStreamMediaPlane(MediaPlane):
         uris = [self._sources.uri(camera_id) for camera_id in camera_ids]
         if not uris:
             return
-        from pyservicemaker import Probe, RecordConfig, RenderMode
-
-        record = RecordConfig(
+        record = self._handle.record_config(
             recording_type="local",
             rec_cache=self._config.record_cache_seconds,
             rec_dir_path=str(self._config.record_dir),
@@ -273,8 +291,8 @@ class DeepStreamMediaPlane(MediaPlane):
         ).infer(self._config.infer_config_path).track(
             ll_config_file=self._config.tracker_config_path,
             ll_lib_file=self._config.tracker_library_path,
-        ).attach(what=Probe("media-plane-probe", _batch_operator(self._probe))).render(
-            mode=RenderMode.DISCARD
+        ).attach(what=self._handle.make_probe("media-plane-probe", self._probe)).render(
+            mode=self._handle.render_mode_discard
         )
         for camera_id in camera_ids:
             source = self._source_element(camera_id)
@@ -286,20 +304,22 @@ class DeepStreamMediaPlane(MediaPlane):
                     "rtsp-reconnect-interval": 5,
                 }
             )
-            source.connect(
-                "sr-done", lambda info, camera_id=camera_id: self._recording_done(camera_id, info)
-            )
 
     def _source_element(self, camera_id: str) -> Any:
         return self._pipeline[self._sources.source_name(camera_id)]
 
     def _start_signal(self, camera_id: str, lookback_sec: int, duration_sec: int) -> int:
-        # Flow commands originate off the probe callback.  Start needs its
-        # returned session immediately, so the source action is the command.
+        # Pipeline.start_recording is the SDK's working primitive: it returns
+        # the session id and delivers RecordingInfo to the callback when the
+        # clip seals (measured live: start(5,6) -> sr-done at +6.06 s).
+        source_name = self._sources.source_name(camera_id)
         return int(
             self._call_on_pipeline(
-                lambda: self._source_element(camera_id).emit(
-                    "start-sr", lookback_sec, duration_sec, None
+                lambda: self._pipeline.start_recording(
+                    source_name,
+                    lookback_sec,
+                    duration_sec,
+                    lambda info, camera_id=camera_id: self._recording_done(camera_id, info),
                 )
             )
         )
