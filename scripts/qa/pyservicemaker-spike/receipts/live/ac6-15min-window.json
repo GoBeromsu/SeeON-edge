@@ -1,0 +1,36 @@
+{
+  "criterion": "P1b-AC6 (production gate), window shortened to 15 minutes by owner direction",
+  "window_utc": [
+    "2026-09-04T16:14:06Z",
+    "2026-09-04T16:30:17Z"
+  ],
+  "window_minutes": 16.2,
+  "cameras": 13,
+  "roster": "the 13 real facility cameras, registered through the dashboard API",
+  "PASS": {
+    "dropped_sources": 0,
+    "outages": 0,
+    "lifecycle_lines_all_zero_outage": 2093,
+    "segfaults": 0,
+    "critical_log_lines": 0,
+    "process_stable_minutes": 16,
+    "cameras_delivering_frames": 13,
+    "frames_per_camera": 28800,
+    "pose_match_rate": 1.0,
+    "frames_without_pose_tensor": 0,
+    "probe_conversion_failures": 0
+  },
+  "FAIL": {
+    "site_alerts_per_hour": 181.5,
+    "budget_site": 26,
+    "worst_camera_per_hour": 148.1,
+    "budget_per_camera": 2,
+    "cameras_firing": 2,
+    "noisy_cameras": [
+      "10 207\ud638 (40 incidents)",
+      "08 205\ud638 (9 incidents)"
+    ],
+    "other_11_cameras": 0
+  },
+  "note": "The pipeline half of AC6 passes outright: 13 real cameras ran 16 minutes with zero dropped sources, zero outages, no crash, every delivered object matched to a pose row. The alert-rate half fails by roughly 7x at the site and 74x on the worst camera, and the noise is concentrated in 2 of 13 rooms while the other 11 produced nothing - so it is a per-room false-positive problem, not uniform sensitivity."
+}
