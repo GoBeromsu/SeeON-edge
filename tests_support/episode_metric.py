@@ -8,7 +8,7 @@ import re
 from collections import defaultdict
 from pathlib import Path
 
-from contracts.replay_trace import ReplayRow, decode_jsonl
+from contracts.replay_trace import ReplayRow, ReplaySource, decode_jsonl
 from shared.detection_policies import (
     BedExitPolicyV1,
     EffectivePolicy,
@@ -125,6 +125,13 @@ def _is_provisional(path: Path) -> bool:
     return bool(payload.get("provisional", False))
 
 
+def _corpus_source(rows: tuple[ReplayRow, ...]) -> ReplaySource:
+    sources = {row.source for row in rows}
+    if len(sources) != 1:
+        raise ValueError("replay trace corpus must have exactly one source")
+    return sources.pop()
+
+
 def _validate_golden_input(
     goldens: tuple[GoldenEpisode, ...], *, provisional: bool, allow_provisional: bool
 ) -> None:
@@ -222,6 +229,7 @@ def evaluate(
             "effective_policy_id": policies[event_type].effective_policy_id,
         }
     return {
+        "trace_source": _corpus_source(rows),
         "recall": sum(item["alerts"] == 1 for item in per_episode) / len(per_episode),
         "precision": 1.0 if not outside else 0.0,
         "alerts_per_episode": len(alerts) / len(episodes),
@@ -369,19 +377,23 @@ def _id_churn_allowance(
 
 
 def _ac1_passed(result: dict[str, object]) -> bool:
-    if result["exact"] is True:
-        return True
     allowance = result["id_churn_allowance"]
     episodes = result["episodes"]
     outside = result["alerts_outside_golden_windows"]
+    trace_source = result.get("trace_source")
     if (
         not isinstance(allowance, list)
         or not isinstance(episodes, list)
         or outside != 0
+        or trace_source not in ("legacy-association", "nvdcf")
         or result.get("id_churn_allowance_limit_exceeded") is not False
         or any(not isinstance(episode, dict) or "alerts" not in episode for episode in episodes)
     ):
         return False
+    if trace_source == "nvdcf":
+        return result["exact"] is True and not allowance
+    if result["exact"] is True:
+        return True
     failed = [episode for episode in episodes if episode["alerts"] != 1]
     failed_ids = {
         (episode.get("camera_id"), episode.get("event_type"), episode.get("start_ns"))
@@ -436,6 +448,7 @@ def main() -> int:
             args.traces, allow_truncated_start=args.allow_truncated_start
         )
         result = evaluate(rows, goldens, policy)
+        result["trace_source"] = _corpus_source(rows)
         result["truncated_start_allowed"] = truncated_start
         if provisional:
             result["owner_decision_required"] = True
@@ -450,6 +463,7 @@ def main() -> int:
         return 2
     args.out.parent.mkdir(parents=True, exist_ok=True)
     result["ac1_passed"] = _ac1_passed(result)
+    result["ac1_id_churn_allowance_limit"] = 0 if result["trace_source"] == "nvdcf" else 10
     args.out.write_text(json.dumps(result, indent=2) + "\n")
     print(json.dumps(result, separators=(",", ":")))
     return 2 if provisional else 0 if result["ac1_passed"] else 1

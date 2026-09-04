@@ -66,6 +66,52 @@ def _cuda_runtime() -> CudaRuntime:
     return _cudart
 
 
+def host_array_from_tensor(
+    tensor: Any,
+    *,
+    cudart: CudaRuntime | None = None,
+) -> NDArray[Any]:
+    """Copy a DLPack tensor to owned host memory without requiring Torch."""
+    if isinstance(tensor, np.ndarray):
+        return tensor.copy()
+
+    capsule = tensor.__dlpack__(None)
+    managed = ctypes.cast(
+        _capsule_pointer(capsule, b"dltensor"), ctypes.POINTER(_DLManagedTensor)
+    ).contents
+    dl_tensor = managed.dl_tensor
+    if dl_tensor.dtype.lanes != 1:
+        raise ValueError("tensor lanes must be one")
+    dtype_spec = {
+        (0, 8): np.int8,
+        (0, 16): np.int16,
+        (0, 32): np.int32,
+        (0, 64): np.int64,
+        (1, 8): np.uint8,
+        (1, 16): np.uint16,
+        (1, 32): np.uint32,
+        (1, 64): np.uint64,
+        (2, 16): np.float16,
+        (2, 32): np.float32,
+        (2, 64): np.float64,
+    }.get((dl_tensor.dtype.code, dl_tensor.dtype.bits))
+    if dtype_spec is None:
+        raise ValueError("unsupported tensor dtype")
+    dtype = np.dtype(dtype_spec)
+    shape = tuple(int(dl_tensor.shape[index]) for index in range(dl_tensor.ndim))
+    host = np.empty(shape, dtype=dtype)
+    source = int(dl_tensor.data) + int(dl_tensor.byte_offset)
+    if dl_tensor.device.device_type == _CPU_DEVICE_TYPE:
+        ctypes.memmove(host.ctypes.data, source, host.nbytes)
+    else:
+        result = (cudart if cudart is not None else _cuda_runtime()).cudaMemcpy(
+            host.ctypes.data, source, host.nbytes, _CUDA_MEMCPY_DEVICE_TO_HOST
+        )
+        if result != 0:
+            raise RuntimeError(f"cudaMemcpy D2H failed: {result}")
+    return host
+
+
 def rows_from_tensor(
     tensor: Any,
     *,
@@ -84,29 +130,12 @@ def rows_from_tensor(
             )
         return rows.copy()
 
-    capsule = tensor.__dlpack__(None)
-    managed = ctypes.cast(
-        _capsule_pointer(capsule, b"dltensor"), ctypes.POINTER(_DLManagedTensor)
-    ).contents
-    dl_tensor = managed.dl_tensor
-    if dl_tensor.dtype.code != 2 or dl_tensor.dtype.bits != 32 or dl_tensor.dtype.lanes != 1:
+    rows = host_array_from_tensor(tensor, cudart=cudart)
+    if rows.dtype != np.float32:
         raise ValueError("pose tensor must be float32")
-    count = 1
-    for index in range(dl_tensor.ndim):
-        count *= int(dl_tensor.shape[index])
-    if count % _ROW_WIDTH != 0:
-        raise ValueError(f"pose tensor element count {count} is not divisible by {_ROW_WIDTH}")
-    host = np.empty(count, dtype=np.float32)
-    source = int(dl_tensor.data) + int(dl_tensor.byte_offset)
-    if dl_tensor.device.device_type == _CPU_DEVICE_TYPE:
-        ctypes.memmove(host.ctypes.data, source, host.nbytes)
-    else:
-        result = (cudart if cudart is not None else _cuda_runtime()).cudaMemcpy(
-            host.ctypes.data, source, host.nbytes, _CUDA_MEMCPY_DEVICE_TO_HOST
-        )
-        if result != 0:
-            raise RuntimeError(f"cudaMemcpy D2H failed: {result}")
-    return host.reshape((-1, _ROW_WIDTH))
+    if rows.size % _ROW_WIDTH != 0:
+        raise ValueError(f"pose tensor element count {rows.size} is not divisible by {_ROW_WIDTH}")
+    return rows.reshape((-1, _ROW_WIDTH))
 
 
-__all__ = ["CudaRuntime", "rows_from_tensor"]
+__all__ = ["CudaRuntime", "host_array_from_tensor", "rows_from_tensor"]

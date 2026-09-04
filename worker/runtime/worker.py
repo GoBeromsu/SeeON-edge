@@ -84,6 +84,8 @@ from worker.pipeline.ingest.registry import SourceRegistry
 from worker.pipeline.output.event_sink import EventClipRecorder, EvidenceEventSink
 from worker.pipeline.output.evidence.clip_config import DEFAULT_CLIP_STORE_DIR
 from worker.pipeline.output.evidence.clip_frame_feeder import ClipFrameFeeder
+from worker.pipeline.output.evidence.clip_identity import ClipIdAllocator
+from worker.pipeline.output.evidence.clip_publication import ClipPublisher
 from worker.pipeline.output.evidence.clip_recorder import ClipRecorder
 from worker.pipeline.output.evidence.clip_recorder_models import ClipRecorderConfig
 from worker.pipeline.output.evidence.clip_recorder_services import default_services
@@ -93,6 +95,7 @@ from worker.pipeline.output.evidence.clip_store_lock import (
 )
 from worker.pipeline.output.evidence.evidence_runtime import EvidenceExportRuntime
 from worker.pipeline.output.evidence.evidence_stager import DurableEvidenceStager
+from worker.pipeline.output.evidence.flow_clip_publication import FlowClipPublisher
 from worker.pipeline.output.evidence.packet_repository import PacketRingRepository
 from worker.pipeline.output.evidence.packet_ring import PacketRingLimits
 from worker.pipeline.output.evidence.snapshot_store import SnapshotStore
@@ -818,6 +821,13 @@ class NativeHeartbeatLoop:
 @final
 class WorkerRuntime:
     """Own process-wide models and camera-local mutable pipeline state."""
+
+    #: The media plane is profile-selected and optional: only `nvidia` and
+    #: `flow` have one. Declaring the absent state here means "no media plane"
+    #: is well defined on every construction path, including the tests that
+    #: build a runtime without running __init__.
+    _nvidia_media_plane: NvidiaMediaPlane | None = None
+    _flow_media_plane: FlowMediaPlane | None = None
 
     def __init__(
         self,
@@ -1603,6 +1613,7 @@ class WorkerRuntime:
                 ),
                 worker_boot_id=str(self._worker_boot_uuid),
             )
+        self._flow_media_plane.bind_live_frames(self._live_frames)
         # The plane is not started here: a pyservicemaker Flow fixes its sources
         # when it is built, so _activate_flow registers the roster first, then
         # starts it, then waits for the first accepted frame (the real-batch
@@ -2066,7 +2077,14 @@ class WorkerRuntime:
             sink=lambda sealed: sealed_binding[0].on_sealed(sealed),
             lookback_sec=10,
         )
-        sink = FlowEvidenceBinding(actor=actor, stager=stager)
+        sink = FlowEvidenceBinding(
+            actor=actor,
+            stager=stager,
+            publisher=FlowClipPublisher(
+                ClipIdAllocator(self._resolved_clip_store_dir()),
+                ClipPublisher(self._resolved_clip_store_dir()),
+            ),
+        )
         sealed_binding.append(sink)
         pump = NativePolicyPump(
             binding,
@@ -2810,6 +2828,7 @@ class WorkerRuntime:
         enabled, version = self._clip_export_policy.snapshot()
         self.diagnostics.set_clip_export_applied(enabled=enabled, version=version)
         self._refresh_clip_recorder_telemetry()
+        self._refresh_flow_recording_telemetry()
         self._log_native_metadata_counters()
 
     def _log_native_metadata_counters(self) -> None:
@@ -2877,6 +2896,26 @@ class WorkerRuntime:
                 encoder=stats.encoder,
             )
         )
+
+    def _refresh_flow_recording_telemetry(self) -> None:
+        """Publish Flow Smart Record and NVENC counters on every status tick."""
+        media_plane = self._flow_media_plane
+        if media_plane is None:
+            return
+        status = media_plane.media_plane.status()
+        for source in status.sources:
+            extended, extension_raced, start_refused = media_plane.recorder_counters(
+                source.camera_id
+            )
+            self.diagnostics.record_flow_recording_counters(
+                source.camera_id,
+                extended=extended,
+                extension_raced=extension_raced,
+                start_refused=start_refused,
+            )
+            self.diagnostics.record_flow_nvenc_sessions(
+                source.camera_id, status.nvenc_sessions_active
+            )
 
     def _default_clip_recorder(self, camera: CameraRuntimeConfig) -> EventClipRecorder:
         if self._clip_recorder is None:

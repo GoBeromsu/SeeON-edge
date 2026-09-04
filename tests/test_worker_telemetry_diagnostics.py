@@ -188,6 +188,31 @@ def test_structured_log_contains_local_metrics(caplog: pytest.LogCaptureFixture)
     }
 
 
+def test_flow_recording_counters_reach_snapshot_and_operator_log(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    diagnostics = WorkerDiagnostics()
+    diagnostics.record_flow_recording_counters(
+        "camera-1", extended=2, extension_raced=1, start_refused=3
+    )
+    diagnostics.record_flow_nvenc_sessions("camera-1", 4)
+
+    snapshot = diagnostics.snapshot().cameras[0]
+
+    with caplog.at_level(logging.INFO):
+        diagnostics.log_snapshot()
+
+    assert snapshot.smart_record_extended_total == 2
+    assert snapshot.smart_record_extension_raced_total == 1
+    assert snapshot.smart_record_start_refused_total == 3
+    assert snapshot.nvenc_sessions_active == 4
+    message = caplog.records[-1].getMessage()
+    assert "smart_record_extended_total=2" in message
+    assert "smart_record_extension_raced_total=1" in message
+    assert "smart_record_start_refused_total=3" in message
+    assert "nvenc_sessions_active=4" in message
+
+
 def test_structured_log_survives_the_entrypoints_basicconfig_format(
     caplog: pytest.LogCaptureFixture,
 ) -> None:

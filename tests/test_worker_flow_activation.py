@@ -13,6 +13,7 @@ from types import SimpleNamespace
 import pytest
 
 from worker.runtime.flow.cold_start import FlowWarmupTimeout
+from worker.runtime.telemetry.runtime_diagnostics import WorkerDiagnostics
 from worker.runtime.worker import WorkerRuntime
 
 
@@ -92,3 +93,25 @@ def test_warmup_times_out_typed_when_no_source_publishes(monkeypatch: pytest.Mon
     with pytest.raises(FlowWarmupTimeout, match="accepted metadata frame from any source"):
         runtime._await_flow_first_frame([_pump("a")])  # noqa: SLF001
     assert plane.calls == ["subscribe:bind-a", "wait:bind-a"]
+
+
+def test_flow_status_tick_reads_actor_and_plane_counters() -> None:
+    runtime = WorkerRuntime.__new__(WorkerRuntime)
+    runtime.diagnostics = WorkerDiagnostics()
+    runtime._flow_media_plane = SimpleNamespace(
+        media_plane=SimpleNamespace(
+            status=lambda: SimpleNamespace(
+                sources=(SimpleNamespace(camera_id="camera-a"),),
+                nvenc_sessions_active=2,
+            )
+        ),
+        recorder_counters=lambda camera_id: (3, 4, 5),
+    )
+
+    runtime._refresh_flow_recording_telemetry()  # noqa: SLF001
+
+    snapshot = runtime.diagnostics.snapshot().cameras[0]
+    assert snapshot.smart_record_extended_total == 3
+    assert snapshot.smart_record_extension_raced_total == 4
+    assert snapshot.smart_record_start_refused_total == 5
+    assert snapshot.nvenc_sessions_active == 2

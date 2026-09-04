@@ -23,6 +23,7 @@ from worker.types import (
     ChannelState,
     HumanPoseChannel,
     Keypoint,
+    NativeEvidenceTrigger,
     PerceptionFrameIdentity,
     PerceptionFrameV1,
     PersonBox,
@@ -34,21 +35,26 @@ _CHILD = uuid.UUID("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
 
 
 class _Control:
-    def snapshot(self, camera_id: str) -> None:
+    def snapshot(self, camera_id: str) -> bytes:
         raise AssertionError(f"unexpected snapshot for {camera_id}")
 
 
 class _Sink:
-    def emit_for_frame(self, event: object, trigger: object) -> None:
+    def emit_for_frame(self, event: BusinessEvent, trigger: NativeEvidenceTrigger) -> None:
         raise AssertionError(f"unexpected event {event!r} {trigger!r}")
 
 
 def _metadata(
-    *, epoch: int, track_id: int, generation: int, live_track_ids: tuple[int, ...] | None = None
+    *,
+    epoch: int,
+    track_id: int,
+    generation: int,
+    strategy: str = "legacy-greedy-bbox-iou.v1",
+    live_track_ids: tuple[int, ...] | None = None,
 ) -> MetadataFrame:
     identity = PerceptionFrameIdentity(str(_BOOT), "camera-a", epoch, 1, 2_000_000_000)
     association = AssociationResult(
-        "legacy-greedy-bbox-iou.v1",
+        strategy,
         (track_id,),
         (0,),
         identity,
@@ -82,10 +88,10 @@ def test_native_pump_captures_epoch_rows_and_writer_rotates(tmp_path: Path) -> N
         binding,
         NativePolicyContext(
             LatestMetadataSlot(),
-            _Control(),  # pyright: ignore[reportArgumentType]
+            _Control(),
             SceneState("camera-a"),
             EventAggregator((), incidents),
-            _Sink(),  # pyright: ignore[reportArgumentType]
+            _Sink(),
             AlertEvidenceAttacher({}),
             diagnostics,
             90,
@@ -100,6 +106,7 @@ def test_native_pump_captures_epoch_rows_and_writer_rotates(tmp_path: Path) -> N
     trace_path = tmp_path / f"{hashlib.sha256(b'camera-a').hexdigest()[:16]}.jsonl"
     _, rows = decode_jsonl(trace_path.read_text())
     assert [row.source_event for row in rows] == ["open", "frame", "reconnect", "frame"]
+    assert {row.source for row in rows} == {"legacy-association"}
     assert [row.seq for row in rows] == [0, 1, 2, 3]
     assert [track.lifecycle for track in rows[1].tracks] == ["new"]
     assert rows[3].tracks[0].lifecycle == "new"
@@ -128,6 +135,32 @@ def test_native_pump_captures_epoch_rows_and_writer_rotates(tmp_path: Path) -> N
     dropping = ReplayTraceWriter(tmp_path / "dropping", "camera-a", max_bytes=1)
     assert not dropping.append(row)
     assert dropping.dropped_rows_total == 1
+
+
+def test_flow_pump_captures_nvdcf_trace_source(tmp_path: Path) -> None:
+    binding = SourceBinding(str(_BOOT), str(_CHILD), "camera-a", 3, 4, "seeon-perception-v1")
+    writer = ReplayTraceWriter(tmp_path, "camera-a")
+    pump = NativePolicyPump(
+        binding,
+        NativePolicyContext(
+            LatestMetadataSlot(),
+            _Control(),
+            SceneState("camera-a"),
+            EventAggregator((), IncidentManager(30.0)),
+            _Sink(),
+            AlertEvidenceAttacher({}),
+            WorkerDiagnostics(),
+            90,
+            replay_trace=writer,
+            track_id_switch_absorbed_total=lambda _decision: 0,
+        ),
+    )
+
+    pump._process(_metadata(epoch=4, track_id=7, generation=3, strategy="nvdcf"))  # noqa: SLF001
+
+    trace_path = tmp_path / f"{hashlib.sha256(b'camera-a').hexdigest()[:16]}.jsonl"
+    _, rows = decode_jsonl(trace_path.read_text())
+    assert {row.source for row in rows} == {"nvdcf"}
 
 
 def test_writer_hashes_untrusted_camera_ids_beneath_root(tmp_path: Path) -> None:

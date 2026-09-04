@@ -51,24 +51,39 @@ class ClipIdAllocator:
         self._staging_root.mkdir(parents=True, exist_ok=True)
         for _ in range(self._max_attempts):
             clip_id = ClipId(self._id_factory(camera_id))
-            final_dir = self._clips_dir / clip_id
-            staging_dir = self._staging_root / clip_id
-            if final_dir.exists():
-                self.collision_count += 1
-                continue
-            try:
-                staging_dir.mkdir(exist_ok=False)
-            except FileExistsError:
-                self.collision_count += 1
-                continue
-            if final_dir.exists():
-                shutil.rmtree(staging_dir)
-                fsync_directory(self._staging_root)
-                self.collision_count += 1
-                continue
-            fsync_directory(self._staging_root)
-            return ClipReservation(clip_id, camera_id, staging_dir, final_dir)
+            reservation = self._reserve(camera_id, clip_id)
+            if reservation is not None:
+                return reservation
         raise ClipIdCollisionError(camera_id, self._max_attempts)
+
+    def reserve_existing(self, camera_id: str, clip_id: str) -> ClipReservation:
+        """Reserve the identity assigned by an external recorder exactly once."""
+        if not clip_id:
+            raise ValueError("clip id must not be empty")
+        self._staging_root.mkdir(parents=True, exist_ok=True)
+        reservation = self._reserve(camera_id, ClipId(clip_id))
+        if reservation is None:
+            raise ClipIdCollisionError(camera_id, 1)
+        return reservation
+
+    def _reserve(self, camera_id: str, clip_id: ClipId) -> ClipReservation | None:
+        final_dir = self._clips_dir / clip_id
+        staging_dir = self._staging_root / clip_id
+        if final_dir.exists():
+            self.collision_count += 1
+            return None
+        try:
+            staging_dir.mkdir(exist_ok=False)
+        except FileExistsError:
+            self.collision_count += 1
+            return None
+        if final_dir.exists():
+            shutil.rmtree(staging_dir)
+            fsync_directory(self._staging_root)
+            self.collision_count += 1
+            return None
+        fsync_directory(self._staging_root)
+        return ClipReservation(clip_id, camera_id, staging_dir, final_dir)
 
 
 def _new_clip_id(camera_id: str) -> str:

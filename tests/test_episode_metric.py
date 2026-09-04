@@ -7,6 +7,7 @@ import pytest
 
 from contracts.replay_trace import (
     ReplayRow,
+    ReplaySource,
     ReplayTraceHeader,
     ReplayTrack,
     decode_document,
@@ -95,14 +96,16 @@ def test_metric_accepts_pinned_fall_policy() -> None:
     assert result["domains"]["fall"]["effective_policy_id"] == policy.effective_policy_id
 
 
-def _row(pts_ns: int, source_event: str) -> ReplayRow:
+def _row(
+    pts_ns: int, source_event: str, *, source: ReplaySource = "legacy-association"
+) -> ReplayRow:
     return ReplayRow(
         camera_id="fixture",
         seq=0 if source_event == "open" else pts_ns,
         pts_ns=pts_ns,
         epoch=0,
         source_event=source_event,  # type: ignore[arg-type]
-        source="legacy-association",
+        source=source,
         tracks=(
             ReplayTrack(
                 1,
@@ -532,6 +535,73 @@ def test_metric_cli_applies_the_bounded_churn_residual_verdict(
     assert status == expected_status
     assert result is not None
     assert result["ac1_passed"] is (affected <= 10)
+
+
+def test_metric_cli_rejects_any_churn_allowance_for_nvdcf(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(episode_metric, "evaluate", lambda *_args: _nonexact_result(affected=1))
+
+    status, result = _run_cli(
+        monkeypatch,
+        tmp_path,
+        (_row(0, "open", source="nvdcf"),),
+        (_cli_golden("fall", 0, 1),),
+    )
+
+    assert status == 1
+    assert result is not None
+    assert result["trace_source"] == "nvdcf"
+    assert result["ac1_id_churn_allowance_limit"] == 0
+    assert result["ac1_passed"] is False
+
+
+def test_metric_cli_rejects_nvdcf_allowance_even_when_alerts_are_exact(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(
+        episode_metric,
+        "evaluate",
+        lambda *_args: {
+            **_nonexact_result(affected=1),
+            "exact": True,
+        },
+    )
+
+    status, result = _run_cli(
+        monkeypatch,
+        tmp_path,
+        (_row(0, "open", source="nvdcf"),),
+        (_cli_golden("fall", 0, 1),),
+    )
+
+    assert status == 1
+    assert result is not None
+    assert result["ac1_passed"] is False
+
+
+def test_metric_cli_accepts_exact_nvdcf_corpus(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(
+        episode_metric,
+        "evaluate",
+        lambda *_args: {
+            **_nonexact_result(affected=0),
+            "exact": True,
+        },
+    )
+
+    status, result = _run_cli(
+        monkeypatch,
+        tmp_path,
+        (_row(0, "open", source="nvdcf"),),
+        (_cli_golden("fall", 0, 1),),
+    )
+
+    assert status == 0
+    assert result is not None
+    assert result["ac1_passed"] is True
 
 
 @pytest.mark.parametrize(

@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from typing import Protocol, final, runtime_checkable
 
 from contracts.observation import BoundingBox
-from contracts.replay_trace import ReplayRow, ReplayTrack
+from contracts.replay_trace import ReplayRow, ReplaySource, ReplayTrack
 from worker.native.deepstream.control import ChildControlError
 from worker.native.deepstream.ipc import MetadataFrame
 from worker.native.deepstream.metadata import AcceptanceToken, LatestMetadataSlot, SourceBinding
@@ -97,6 +97,7 @@ class NativePolicyPump:
         self._trace_tracks: dict[int, ReplayTrack] = {}
         self._live_track_misses: dict[int, int] = {}
         self._trace_source_lost = False
+        self._trace_source: ReplaySource | None = None
         self._trace_dims: tuple[int, int] = (1, 1)
         self._trace_last_pts_ns = 0
         self._trace_seq = 0
@@ -320,6 +321,8 @@ class NativePolicyPump:
         if self._replay_trace is None:
             return
         frame = metadata.frame
+        trace_source = _replay_trace_source(frame.association.strategy)
+        self._trace_source = trace_source
         current_epoch = (frame.identity.stream_epoch, metadata.source_generation)
         source_event = (
             "open"
@@ -338,7 +341,7 @@ class NativePolicyPump:
                     pts_ns=frame.identity.source_pts or 0,
                     epoch=frame.identity.stream_epoch,
                     source_event=source_event,
-                    source="legacy-association",
+                    source=trace_source,
                     tracks=(),
                     bed_polygon_id=None,
                     bed_polygon=None,
@@ -394,7 +397,7 @@ class NativePolicyPump:
                 pts_ns=frame.identity.source_pts or 0,
                 epoch=frame.identity.stream_epoch,
                 source_event="frame",
-                source="legacy-association",
+                source=trace_source,
                 tracks=tuple(current.values()) + tuple(non_observed),
                 bed_polygon_id="persisted" if polygon is not None else None,
                 bed_polygon=polygon,
@@ -421,7 +424,7 @@ class NativePolicyPump:
                     pts_ns=self._trace_last_pts_ns,
                     epoch=self._trace_epoch[0],
                     source_event="lost",
-                    source="legacy-association",
+                    source=_required_trace_source(self._trace_source),
                     tracks=(),
                     bed_polygon_id=None,
                     bed_polygon=None,
@@ -472,6 +475,20 @@ def _persisted_polygon_image_size(
         scene.bed_zone_image_width or fallback_width,
         scene.bed_zone_image_height or fallback_height,
     )
+
+
+def _replay_trace_source(strategy: str) -> ReplaySource:
+    if strategy == "nvdcf":
+        return "nvdcf"
+    if strategy == "legacy-greedy-bbox-iou.v1":
+        return "legacy-association"
+    raise ValueError(f"unsupported association strategy for replay trace: {strategy}")
+
+
+def _required_trace_source(source: ReplaySource | None) -> ReplaySource:
+    if source is None:
+        raise RuntimeError("replay trace source is unavailable before an accepted frame")
+    return source
 
 
 def _unit_bbox(

@@ -15,6 +15,7 @@ from worker.adapters.deepstream.service_maker import (
 from worker.interfaces.media_plane import MediaPlane, RecordingInfo
 from worker.native.deepstream.metadata import LatestMetadataSlot, SourceBinding
 from worker.pipeline.output.evidence.smart_record_actor import ClipSealed, SmartRecordActor
+from worker.pipeline.output.live_view import LatestFrameStore
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,18 +49,23 @@ class FlowMediaPlane:
         *,
         flow_factory: FlowFactory | None = None,
         snapshot_encoder: Callable[[str], bytes] | None = None,
+        live_frames: LatestFrameStore | None = None,
         worker_boot_id: str | None = None,
     ) -> None:
         self.metadata = LatestMetadataSlot()
         kwargs: dict[str, object] = {
             "metadata_slot": self.metadata,
             "snapshot_encoder": snapshot_encoder,
+            "jpeg_publisher": self._publish_jpeg,
             "worker_boot_id": worker_boot_id,
         }
         if flow_factory is not None:
             kwargs["flow_factory"] = flow_factory
         self.plane = DeepStreamMediaPlane(config.adapter_config(), **kwargs)
         self._actors: dict[str, SmartRecordActor] = {}
+        self._live_frames = live_frames
+        if live_frames is not None:
+            live_frames.set_demand_listener(self._refresh_live_frame)
 
     def start(self) -> None:
         self.plane.start()
@@ -68,7 +74,31 @@ class FlowMediaPlane:
         self.plane.stop()
 
     def snapshot(self, camera_id: str) -> bytes:
-        return self.plane.snapshot(camera_id)
+        jpeg = self.plane.snapshot(camera_id)
+        self._publish_jpeg(camera_id, jpeg)
+        return jpeg
+
+    def bind_live_frames(self, live_frames: LatestFrameStore) -> None:
+        if self._live_frames is not None and self._live_frames is not live_frames:
+            raise RuntimeError("Flow live-frame store is already bound")
+        self._live_frames = live_frames
+        live_frames.set_demand_listener(self._refresh_live_frame)
+
+    def _refresh_live_frame(
+        self, camera_id: str, viewers: int, mode: str, snapshot_requested: bool
+    ) -> None:
+        del viewers, mode, snapshot_requested
+        # This callback runs on an HTTP thread, never on Flow's probe thread.
+        try:
+            self.snapshot(camera_id)
+        except Exception:
+            # The HTTP layer preserves its typed unavailable response when no
+            # frame exists yet; a demand signal must not crash its server.
+            return
+
+    def _publish_jpeg(self, camera_id: str, jpeg: bytes) -> None:
+        if self._live_frames is not None:
+            self._live_frames.publish_jpeg(camera_id, jpeg, frame_index=0)
 
     def add_source(self, camera_id: str, uri: str) -> SourceBinding:
         return self.plane.add_source(camera_id, uri)

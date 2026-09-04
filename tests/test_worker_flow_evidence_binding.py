@@ -3,7 +3,10 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 
+import pytest
+
 from worker.interfaces.media_plane import RecordingInfo, RecordingRefused
+from worker.pipeline.output.evidence.flow_clip_publication import FlowClipPublicationError
 from worker.pipeline.output.evidence.smart_record_actor import SmartRecordActor
 from worker.runtime.flow.evidence import FlowEvidenceBinding
 from worker.types import BusinessEvent, NativeEvidenceTrigger
@@ -47,6 +50,17 @@ class _Stager:
         self.completed.append((edge_event_id, clip_id))
 
 
+@dataclass
+class _Publisher:
+    fail: bool = False
+
+    def publish(self, sealed: object, events: object) -> object:
+        del events
+        if self.fail:
+            raise FlowClipPublicationError("publication failed")
+        return type("_Published", (), {"clip_id": sealed.clip_id})()
+
+
 def _event(identity: str) -> BusinessEvent:
     return BusinessEvent("fall", "fall.detected", identity, "camera-a", "facility-a", 12.0, 0.99)
 
@@ -61,8 +75,9 @@ def _binding(
     dates: list[datetime],
     *,
     extension_sec: int = 45,
-) -> tuple[SmartRecordActor, FlowEvidenceBinding, _Stager]:
+) -> tuple[SmartRecordActor, FlowEvidenceBinding, _Stager, _Publisher]:
     stager = _Stager()
+    publisher = _Publisher()
     sealed: list[FlowEvidenceBinding] = []
     actor = SmartRecordActor(
         camera_id="camera-a",
@@ -73,14 +88,16 @@ def _binding(
         extension_sec=extension_sec,
         clip_id_factory=lambda: "primary-clip",
     )
-    binding = FlowEvidenceBinding(actor=actor, stager=stager, now=lambda: dates.pop(0))
+    binding = FlowEvidenceBinding(
+        actor=actor, stager=stager, publisher=publisher, now=lambda: dates.pop(0)
+    )
     sealed.append(binding)
-    return actor, binding, stager
+    return actor, binding, stager, publisher
 
 
 def test_admitted_alert_stages_one_recording_and_sealed_receipt() -> None:
     plane, now = _Plane(), [0.0]
-    actor, binding, stager = _binding(plane, now, [datetime(2026, 1, 1, tzinfo=UTC)])
+    actor, binding, stager, _ = _binding(plane, now, [datetime(2026, 1, 1, tzinfo=UTC)])
     binding.emit_for_frame(_event("one"), _trigger())
     assert plane.starts == [1]
     now[0] = 30.0
@@ -102,7 +119,7 @@ def test_admitted_alert_stages_one_recording_and_sealed_receipt() -> None:
 
 def test_two_alerts_extend_one_clip_and_complete_distinct_incidents() -> None:
     plane, now = _Plane(), [0.0]
-    actor, binding, stager = _binding(
+    actor, binding, stager, _ = _binding(
         plane, now, [datetime(2026, 1, 1, 0, 0, 20, tzinfo=UTC), datetime(2026, 1, 1, tzinfo=UTC)]
     )
     binding.emit_for_frame(_event("late"), _trigger())
@@ -128,7 +145,7 @@ def test_alert_while_stopping_starts_second_clip_without_dropping_it() -> None:
     clip: it must mark the first clip raced and open a second one.
     """
     plane, now = _Plane(), [0.0]
-    actor, binding, stager = _binding(
+    actor, binding, stager, _ = _binding(
         plane,
         now,
         [
@@ -153,8 +170,20 @@ def test_alert_while_stopping_starts_second_clip_without_dropping_it() -> None:
 
 def test_refused_recording_retries_on_tick() -> None:
     plane, now = _Plane(refused=1), [0.0]
-    actor, binding, _ = _binding(plane, now, [datetime(2026, 1, 1, tzinfo=UTC)])
+    actor, binding, _, _ = _binding(plane, now, [datetime(2026, 1, 1, tzinfo=UTC)])
     binding.emit_for_frame(_event("one"), _trigger())
     assert actor.smart_record_start_refused_total == 1
     actor.tick()
     assert plane.starts == [1]
+
+
+def test_publication_failure_surfaces_without_completing_the_incident() -> None:
+    plane, now = _Plane(), [0.0]
+    _, binding, stager, publisher = _binding(plane, now, [datetime(2026, 1, 1, tzinfo=UTC)])
+    binding.emit_for_frame(_event("one"), _trigger())
+    publisher.fail = True
+
+    with pytest.raises(FlowClipPublicationError, match="publication failed"):
+        plane.seal(1)
+
+    assert stager.completed == []

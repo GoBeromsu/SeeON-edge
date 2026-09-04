@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import io
+import logging
 import queue
 import threading
 import uuid
@@ -12,7 +14,7 @@ from typing import Any, Protocol
 
 from worker.adapters.deepstream.metadata import convert_frame
 from worker.adapters.deepstream.sources import SourceTable
-from worker.adapters.deepstream.tensor_rows import rows_from_tensor
+from worker.adapters.deepstream.tensor_rows import host_array_from_tensor, rows_from_tensor
 from worker.interfaces.media_plane import (
     EarlyStopUnsupported,
     MediaPlane,
@@ -21,8 +23,12 @@ from worker.interfaces.media_plane import (
     RecordingRefused,
     SourceRosterFixed,
     SourceStatus,
+    SnapshotUnavailable,
 )
 from worker.native.deepstream.metadata import LatestMetadataSlot, SourceBinding
+
+_MAX_PREVIEW_JPEG_BYTES = 2 * 1024 * 1024
+LOGGER = logging.getLogger(__name__)
 
 
 class FlowFactory(Protocol):
@@ -38,6 +44,7 @@ class DeepStreamMediaPlaneConfig:
     record_cache_seconds: int
     frame_width: int
     frame_height: int
+    preview_jpeg_stride: int = 10
     transform_id: str = "deepstream-flow.v1"
     pipeline_name: str = "deepstream-media-plane"
 
@@ -58,10 +65,12 @@ class _FlowHandle:
     record_config: Callable[..., Any]
     render_mode_discard: Any
     make_probe: Callable[[str, _Probe], Any]
+    make_retriever: Callable[[_JpegRetriever], Any] | None = None
+    color_format_rgba: Any | None = None
 
 
 def _default_flow_factory(config: DeepStreamMediaPlaneConfig) -> _FlowHandle:
-    from pyservicemaker import Flow, Pipeline, Probe, RecordConfig, RenderMode
+    from pyservicemaker import ColorFormat, Flow, Pipeline, Probe, RecordConfig, RenderMode
 
     pipeline = Pipeline(config.pipeline_name)
     return _FlowHandle(
@@ -70,6 +79,8 @@ def _default_flow_factory(config: DeepStreamMediaPlaneConfig) -> _FlowHandle:
         record_config=RecordConfig,
         render_mode_discard=RenderMode.DISCARD,
         make_probe=lambda name, probe: Probe(name, _batch_operator(probe)),
+        make_retriever=_buffer_retriever,
+        color_format_rgba=ColorFormat.RGBA,
     )
 
 
@@ -98,6 +109,74 @@ def _batch_operator(probe: _Probe) -> Any:
     return _Operator()
 
 
+def _buffer_retriever(retriever: _JpegRetriever) -> Any:
+    """Create the SDK subclass lazily so imports work without DeepStream."""
+    from pyservicemaker import BufferRetriever
+
+    class _Retriever(BufferRetriever):
+        def __init__(self) -> None:
+            super().__init__()
+
+        def consume(self, buffer: Any) -> int:
+            return retriever.consume(buffer)
+
+    return _Retriever()
+
+
+class _JpegRetriever:
+    """Best-effort preview encoder invoked from Flow's batched-buffer thread."""
+
+    def __init__(self, plane: DeepStreamMediaPlane, stride: int, color_format_rgba: Any) -> None:
+        if stride < 1:
+            raise ValueError("preview_jpeg_stride must be at least one")
+        self._plane = plane
+        self._stride = stride
+        self._color_format_rgba = color_format_rgba
+        self._frames: dict[str, int] = {}
+
+    def consume(self, buffer: Any) -> int:
+        try:
+            for batch_id in range(int(buffer.batch_size)):
+                camera_id = self._plane._sources.camera_id(batch_id)  # noqa: SLF001
+                count = self._frames.get(camera_id, 0) + 1
+                self._frames[camera_id] = count
+                if count % self._stride:
+                    continue
+                tensor = buffer.extract(batch_id)
+                if self._color_format_rgba is not None:
+                    tensor = tensor.wrap(self._color_format_rgba)
+                jpeg = _encode_preview_jpeg(host_array_from_tensor(tensor))
+                self._plane.publish_jpeg(camera_id, jpeg)
+        except Exception:  # noqa: BLE001 - preview work must not stop inference
+            LOGGER.warning("dropping DeepStream preview frame", exc_info=True)
+        return 0
+
+
+def _encode_preview_jpeg(pixels: Any) -> bytes:
+    """Encode an RGB/RGBA uint8 frame, reducing quality/size to the slot cap."""
+    from PIL import Image
+
+    if pixels.ndim == 4 and pixels.shape[0] == 1:
+        pixels = pixels[0]
+    if pixels.ndim != 3 or pixels.shape[2] not in (3, 4) or pixels.dtype.name != "uint8":
+        raise ValueError(f"preview tensor must be HWC uint8 RGB/RGBA, received {pixels.shape}")
+    image = Image.fromarray(pixels[:, :, :3], "RGB")
+    for quality in (80, 60, 40):
+        output = io.BytesIO()
+        image.save(output, format="JPEG", quality=quality, optimize=True)
+        jpeg = output.getvalue()
+        if len(jpeg) <= _MAX_PREVIEW_JPEG_BYTES:
+            return jpeg
+    while image.width > 1 and image.height > 1:
+        image = image.resize((image.width // 2, image.height // 2))
+        output = io.BytesIO()
+        image.save(output, format="JPEG", quality=40, optimize=True)
+        jpeg = output.getvalue()
+        if len(jpeg) <= _MAX_PREVIEW_JPEG_BYTES:
+            return jpeg
+    raise ValueError("preview JPEG exceeds maximum size")
+
+
 class DeepStreamMediaPlane(MediaPlane):
     """A single Flow worker; vendor calls are contained in this adapter."""
 
@@ -108,9 +187,12 @@ class DeepStreamMediaPlane(MediaPlane):
         metadata_slot: LatestMetadataSlot,
         flow_factory: FlowFactory = _default_flow_factory,
         snapshot_encoder: Callable[[str], bytes] | None = None,
+        jpeg_publisher: Callable[[str, bytes], None] | None = None,
         worker_boot_id: str | None = None,
         child_instance_id: str | None = None,
     ) -> None:
+        if config.preview_jpeg_stride < 1:
+            raise ValueError("preview_jpeg_stride must be at least one")
         self._config = config
         self._slot = metadata_slot
         handle = flow_factory(config)
@@ -123,6 +205,9 @@ class DeepStreamMediaPlane(MediaPlane):
             transform_id=config.transform_id,
         )
         self._snapshot_encoder = snapshot_encoder
+        self._jpeg_publisher = jpeg_publisher
+        self._latest_jpegs: dict[str, bytes] = {}
+        self._jpeg_lock = threading.Lock()
         self._commands: queue.Queue[
             tuple[Callable[[], Any], threading.Event | None, list[Any] | None]
         ] = queue.Queue()
@@ -139,6 +224,9 @@ class DeepStreamMediaPlane(MediaPlane):
         self._flow_error: Exception | None = None
         self._flow_finished = threading.Event()
         self._probe = _Probe(self)
+        self._jpeg_retriever = _JpegRetriever(
+            self, config.preview_jpeg_stride, handle.color_format_rgba
+        )
 
     def start(self) -> None:
         """Build the Flow from the registered roster and run it on its own thread.
@@ -203,6 +291,8 @@ class DeepStreamMediaPlane(MediaPlane):
             )
         self._slot.remove_source(camera_id)
         self._live.discard(camera_id)
+        with self._jpeg_lock:
+            self._latest_jpegs.pop(camera_id, None)
         self._recordings.pop(camera_id, None)
         self._sources.remove(camera_id)
 
@@ -211,12 +301,37 @@ class DeepStreamMediaPlane(MediaPlane):
         binding = self._sources.rebuild(camera_id)
         self._slot.register_source(binding)
         self._live.discard(camera_id)
+        with self._jpeg_lock:
+            self._latest_jpegs.pop(camera_id, None)
         return binding
 
     def snapshot(self, camera_id: str) -> bytes:
-        if self._snapshot_encoder is None:
-            raise RuntimeError("OSD snapshot encoder is not configured")
-        return self._snapshot_encoder(camera_id)
+        if camera_id not in self._sources.camera_ids():
+            raise SnapshotUnavailable(f"unknown source has no OSD snapshot: {camera_id}")
+        if self._snapshot_encoder is not None:
+            # The encoder is a bounded, non-probe seam.  Invoke it once for this
+            # request and retain the resulting OSD JPEG for other consumers.
+            self.publish_jpeg(camera_id, self._snapshot_encoder(camera_id))
+        with self._jpeg_lock:
+            jpeg = self._latest_jpegs.get(camera_id)
+        if jpeg is None:
+            raise SnapshotUnavailable(f"source has not produced an OSD snapshot: {camera_id}")
+        return jpeg
+
+    def publish_jpeg(self, camera_id: str, jpeg: bytes) -> None:
+        """Accept one encoded OSD frame from the non-critical-path JPEG branch."""
+        if camera_id not in self._sources.camera_ids():
+            raise SnapshotUnavailable(f"unknown source has no OSD snapshot: {camera_id}")
+        if not jpeg:
+            raise SnapshotUnavailable(f"source produced an empty OSD snapshot: {camera_id}")
+        if len(jpeg) > _MAX_PREVIEW_JPEG_BYTES:
+            raise SnapshotUnavailable(
+                f"source produced an oversized OSD snapshot: {camera_id} ({len(jpeg)} bytes)"
+            )
+        with self._jpeg_lock:
+            self._latest_jpegs[camera_id] = jpeg
+        if self._jpeg_publisher is not None:
+            self._jpeg_publisher(camera_id, jpeg)
 
     def start_recording(
         self,
@@ -283,17 +398,23 @@ class DeepStreamMediaPlane(MediaPlane):
             rec_cache=self._config.record_cache_seconds,
             rec_dir_path=str(self._config.record_dir),
         )
-        self._flow.batch_capture(
-            uris,
-            record_config=record,
-            width=self._config.frame_width,
-            height=self._config.frame_height,
-        ).infer(self._config.infer_config_path).track(
-            ll_config_file=self._config.tracker_config_path,
-            ll_lib_file=self._config.tracker_library_path,
-        ).attach(what=self._handle.make_probe("media-plane-probe", self._probe)).render(
-            mode=self._handle.render_mode_discard
+        flow = (
+            self._flow.batch_capture(
+                uris,
+                record_config=record,
+                width=self._config.frame_width,
+                height=self._config.frame_height,
+            )
+            .infer(self._config.infer_config_path)
+            .track(
+                ll_config_file=self._config.tracker_config_path,
+                ll_lib_file=self._config.tracker_library_path,
+            )
         )
+        flow.attach(what=self._handle.make_probe("media-plane-probe", self._probe))
+        if self._handle.make_retriever is not None:
+            flow.fork().retrieve(self._handle.make_retriever(self._jpeg_retriever))
+        flow.render(mode=self._handle.render_mode_discard)
         for camera_id in camera_ids:
             source = self._source_element(camera_id)
             source.set(

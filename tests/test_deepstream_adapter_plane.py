@@ -26,6 +26,7 @@ from worker.interfaces.media_plane import (
     MediaPlane,
     RecordingInfo,
     RecordingRefused,
+    SnapshotUnavailable,
     SourceRosterFixed,
 )
 from worker.native.deepstream.metadata import LatestMetadataSlot
@@ -206,3 +207,40 @@ def test_source_properties_follow_the_measured_rtsp_shape() -> None:
 def test_smart_record_owns_no_encode_sessions() -> None:
     plane, _ = _plane()
     assert plane.status().nvenc_sessions_active == 0
+
+
+def test_latest_osd_jpeg_slot_serves_snapshot_without_an_encoder() -> None:
+    plane, _ = _plane()
+    plane.add_source("camera", "rtsp://one")
+    plane.publish_jpeg("camera", b"\xff\xd8osd\xff\xd9")
+    assert plane.snapshot("camera") == b"\xff\xd8osd\xff\xd9"
+
+
+def test_snapshot_encodes_once_and_publishes_the_latest_osd_jpeg() -> None:
+    calls: list[str] = []
+    published: list[tuple[str, bytes]] = []
+    config = DeepStreamMediaPlaneConfig("infer", "tracker", "lib", Path("/tmp"), 5, 640, 360)
+    plane = DeepStreamMediaPlane(
+        config,
+        metadata_slot=LatestMetadataSlot(),
+        flow_factory=lambda _: _FlowHandle(
+            flow=_Flow(),
+            pipeline=_Pipeline(),
+            record_config=lambda **kwargs: kwargs,
+            render_mode_discard="discard",
+            make_probe=lambda name, probe: (name, probe),
+        ),
+        snapshot_encoder=lambda camera_id: calls.append(camera_id) or b"\xff\xd8osd\xff\xd9",
+        jpeg_publisher=lambda camera_id, jpeg: published.append((camera_id, jpeg)),
+    )
+    plane.add_source("camera", "rtsp://one")
+    assert plane.snapshot("camera") == b"\xff\xd8osd\xff\xd9"
+    assert calls == ["camera"]
+    assert published == [("camera", b"\xff\xd8osd\xff\xd9")]
+
+
+def test_snapshot_without_a_frame_is_a_typed_unavailable() -> None:
+    plane, _ = _plane()
+    plane.add_source("camera", "rtsp://one")
+    with pytest.raises(SnapshotUnavailable, match="has not produced"):
+        plane.snapshot("camera")

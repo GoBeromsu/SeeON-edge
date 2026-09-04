@@ -108,3 +108,7 @@ class EarlyStopUnsupported(RuntimeError):
 
 class SourceRosterFixed(RuntimeError):
     """The plane's sources are fixed once it runs; change the roster by restart."""
+
+
+class SnapshotUnavailable(RuntimeError):
+    """No bounded JPEG is currently available for this source."""

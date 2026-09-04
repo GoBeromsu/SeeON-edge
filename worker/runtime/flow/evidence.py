@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Protocol
 
+from worker.pipeline.output.evidence.flow_clip_publication import FlowClipPublisher
 from worker.pipeline.output.evidence.smart_record_actor import ClipSealed, SmartRecordActor
 from worker.types import BusinessEvent, NativeEvidenceTrigger
 
@@ -31,6 +32,7 @@ class FlowEvidenceBinding:
 
     actor: SmartRecordActor
     stager: FlowEvidenceStager
+    publisher: FlowClipPublisher
     now: Callable[[], datetime] = lambda: datetime.now(UTC)
     _events: dict[str, BusinessEvent] = field(default_factory=dict, init=False)
 
@@ -61,14 +63,15 @@ class FlowEvidenceBinding:
         self.actor.admit(event_ref, detected_at)
 
     def on_sealed(self, sealed: ClipSealed) -> None:
-        """Apply the one clip receipt to every ordered contributor."""
+        """Publish before completing every incident bound to the shared clip."""
         for contributor in sealed.contributors:
             if contributor.event_ref not in self._events:
                 raise ValueError(
                     f"sealed Flow clip has unknown contributor {contributor.event_ref}"
                 )
+        published = self.publisher.publish(sealed, self._events)
         for contributor in sealed.contributors:
-            self.stager.complete(contributor.event_ref, sealed.clip_id)
+            self.stager.complete(contributor.event_ref, str(published.clip_id))
             del self._events[contributor.event_ref]
 
 

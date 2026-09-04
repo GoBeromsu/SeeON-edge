@@ -117,6 +117,32 @@ class ClipPublisher:
         self._cleanup_staging(reservation)
         return PublishedClip(reservation.clip_id, manifest, manifest_path, video_path)
 
+    def publish_adopted_ready(
+        self,
+        reservation: ClipReservation,
+        source_path: Path,
+        metadata: ClipPublicationMetadata,
+    ) -> PublishedClip:
+        """Copy externally-recorded media into store staging before publication.
+
+        Smart Record owns its output path, which can be on another filesystem.
+        Copying and fsyncing under the reserved staging directory makes the
+        subsequent publication rename local and atomic without consuming the
+        plane-owned source until a complete manifest exists.
+        """
+        if not source_path.is_file():
+            raise ClipPublicationConflictError(reservation.clip_id, "recorded media is missing")
+        adopted = reservation.staging_dir / "adopted.mp4"
+        temporary = adopted.with_suffix(".mp4.tmp")
+        with source_path.open("rb") as source, temporary.open("xb") as destination:
+            shutil.copyfileobj(source, destination)
+            destination.flush()
+            os.fsync(destination.fileno())
+        os.replace(temporary, adopted)
+        fsync_file(adopted)
+        fsync_directory(reservation.staging_dir)
+        return self.publish_ready(reservation, adopted, metadata)
+
     def publish_unavailable(
         self,
         reservation: ClipReservation,
