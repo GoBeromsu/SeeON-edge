@@ -17,7 +17,7 @@ All traffic goes through `requestJson`. Paths are `/api/v1`-relative. Encode ids
 `cameraBody` and `connectionBody` omit unset keys. Included `null` clears. Omitted means leave it.
 Connection writes send facility code, token, and installation ref. Hub address stays env/image.
 `saveDetectionSettings` is a full replace. Send every domain.
-Clip delete posts `{ confirm_clip_id }`. A mismatch is 422 before the worker runs.
+
 Narrow failures here: `cameraProbeFailureDetail` (422), `cameraDuplicateDetail` (409), `bedZoneRecognitionFailureDetail` (422). Features don't parse `HttpError.body`.
 New 200 envelopes get a normalizer. Don't add another `as Type` on `requestJson`. Policies, incidents, and artifacts still cast. Shrink that set.
 

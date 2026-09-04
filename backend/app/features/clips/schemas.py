@@ -104,28 +104,3 @@ class AuditResponse(BaseModel):
     model_config: ClassVar[ConfigDict] = ConfigDict(extra="forbid")
 
     entries: list[dict[str, object]]
-
-
-class DeleteClipRequest(BaseModel):
-    model_config: ClassVar[ConfigDict] = ConfigDict(extra="forbid")
-
-    # Explicit exact clip-id confirmation -- not a generic query/GET side
-    # effect. The router rejects a mismatch against the path's clip_id.
-    confirm_clip_id: str = Field(min_length=1)
-
-
-ClipDeleteStatus = Literal[
-    "PURGED",
-    "HELD",
-    "MISSING",
-    "UNVERIFIABLE",
-    "DELETE_FAILED",
-    "VERIFICATION_FAILED",
-]
-
-
-class DeleteClipResponse(BaseModel):
-    model_config: ClassVar[ConfigDict] = ConfigDict(extra="forbid")
-
-    clip_id: str = Field(min_length=1)
-    status: ClipDeleteStatus

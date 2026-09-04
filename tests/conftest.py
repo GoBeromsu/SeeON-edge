@@ -40,7 +40,7 @@ def isolate_central_edge_database(
         "backend.app.features.cameras.store",
         "backend.app.features.clips.artifacts",
         "backend.app.features.clips.catalog",
-        "backend.app.features.clips.deletion_lifecycle",
+
         "backend.app.features.clips.router",
         "backend.app.features.clips.storage_location_store",
         "backend.app.features.evidence.router",

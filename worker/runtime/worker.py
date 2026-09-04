@@ -103,6 +103,10 @@ from worker.runtime.model_composition import (
     SharedComponentGraph,
     SharedYoloExtractors,
 )
+from worker.runtime.nvidia_bed_zone_recognizer import (
+    DEFAULT_BED_ZONE_RECOGNITION_TIMEOUT_S,
+    NvidiaBedZoneRecognizer,
+)
 from worker.runtime.profile.boot import BootContext
 from worker.runtime.profile.device import CudaProbe
 from worker.runtime.profile.registry import (
@@ -791,6 +795,15 @@ class WorkerRuntime:
         self._mjpeg_server = start_optional_mjpeg_server(
             self._live_frames,
             self._mjpeg_config,
+            bed_zone_recognizer=(
+                NvidiaBedZoneRecognizer(
+                    self._serving,
+                    timeout_s=DEFAULT_BED_ZONE_RECOGNITION_TIMEOUT_S,
+                )
+                if self._boot is not None and self._boot.profile.name == "flow"
+                else self._bed_zone_recognizer
+            ),
+            replay_fall_model=self.fall_model,
         )
         if self._mjpeg_server is None:
             LOGGER.warning(

@@ -224,8 +224,7 @@ def test_camera_probe_production_wiring_is_covered_and_mutation_sensitive() -> N
         "CLIP_PLAY",
         "CLIP_THUMBNAIL",
         "CLIP_ARTIFACT",
-        "CLIP_DELETE_REQUEST",
-        "CLIP_DELETE_COMPLETE",
+
         "AUDIT_LIST",
         "AUDIT_DETAIL",
         "RELAY_ALERT",

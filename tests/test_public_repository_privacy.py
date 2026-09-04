@@ -848,10 +848,10 @@ _LINT_STEPS = [
         ),
     },
     {
-        "name": "Edge env example renders (GPU + CPU-only overlay)",
+        "name": "Edge env example renders (Flow)",
         "run": (
             "docker compose --env-file .env.edge.prod.example \\\n"
-            "  -f compose.edge.yaml -f compose.edge.cpu.yaml config -q\n"
+            "  -f compose.edge.yaml config -q\n"
         ),
     },
 ]

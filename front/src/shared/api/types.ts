@@ -207,7 +207,7 @@ export type CameraPatchInput = Partial<Omit<CameraInput, 'floor'>> & {
 
 export type CameraTestResult = {
   ok: boolean;
-  error_class?: 'timeout' | 'decode' | 'auth' | string;
+  error_class?: 'timeout' | 'decode' | 'auth' | 'unavailable' | string;
   /** True only when the worker's `/probe` couldn't be reached at all (unconfigured origin, missing
    * relay token, connection refused/timed-out before any response) -- distinct from `error_class`,
    * which classifies a probe the worker actually completed. When true, `error_class` is never set:
@@ -382,9 +382,6 @@ export type DetectionPolicyCatalog = {
 export type CleanArtifactState = 'AVAILABLE' | 'UNAVAILABLE';
 export type SnapshotArtifactState = 'PENDING' | 'AVAILABLE' | 'UNAVAILABLE' | 'CORRUPT' | 'PURGED';
 
-/** GET/PUT status for `DELETE /clips/{clip_id}` -- always the truthful worker-owned retention outcome, never a bare ack. */
-export type ClipDeleteStatus = 'PURGED' | 'HELD' | 'MISSING' | 'UNVERIFIABLE' | 'DELETE_FAILED' | 'VERIFICATION_FAILED';
-export type ClipDeleteResult = { clip_id: string; status: ClipDeleteStatus };
 export type ClipArtifacts = { clip_id: string; clean: CleanArtifactState; snapshot: SnapshotArtifactState | null };
 
 export type ClipStorageInfo = {

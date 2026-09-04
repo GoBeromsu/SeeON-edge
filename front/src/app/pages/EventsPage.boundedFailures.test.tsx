@@ -31,20 +31,6 @@ function expectNoRetiredRequest(fetchMock: ReturnType<typeof vi.fn>): void {
   }
 }
 
-function findButton(root: ParentNode, label: string): HTMLButtonElement {
-  const button = Array.from(root.querySelectorAll('button')).find((candidate) => candidate.textContent === label);
-  if (!button) throw new Error(`missing button ${label}`);
-  return button;
-}
-
-function typeConfirm(input: HTMLInputElement, value: string): void {
-  act(() => {
-    const valueSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
-    valueSetter?.call(input, value);
-    input.dispatchEvent(new Event('input', { bubbles: true }));
-  });
-}
-
 afterEach(() => {
   cleanupPages();
   document.body.innerHTML = '';
@@ -116,44 +102,6 @@ describe('EventsPage bounded failure states', () => {
     await flush();
 
     expect(document.querySelectorAll('[role="dialog"] video')).toHaveLength(1);
-    expectNoRetiredControl();
-    expectNoRetiredRequest(fetchMock);
-  });
-
-
-  it('keeps playback and the delete control when the worker holds the deletion', async () => {
-    resetLocation();
-    const clip = clipManifest({ clip_id: 'clip-held', event_ref: 'event-held' });
-    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
-      const url = String(input);
-      if (url.includes('/cameras')) return Promise.resolve(jsonResponse(cameraRegistry));
-      if (url.endsWith('/artifacts')) {
-        return Promise.resolve(jsonResponse({ clip_id: 'clip-held', clean: 'AVAILABLE', snapshot: null }));
-      }
-      if (url.endsWith('/clips/clip-held') && init?.method === 'DELETE') {
-        return Promise.resolve(jsonResponse({ clip_id: 'clip-held', status: 'HELD' }, 202));
-      }
-      if (url.includes('/clips')) return Promise.resolve(jsonResponse(keysetBody([clip], 48, null)));
-      return Promise.reject(new Error(`unexpected fetch: ${url}`));
-    });
-    vi.stubGlobal('fetch', fetchMock);
-    vi.spyOn(HTMLMediaElement.prototype, 'play').mockResolvedValue();
-
-    const { host } = await renderPage();
-    act(() => (host.querySelector('button.rounded-card') as HTMLButtonElement).click());
-    await flush();
-    act(() => findButton(document.body, '클립 삭제').click());
-    // Located by the confirm input's stable id, never by the dialog's rendered copy.
-    const confirmInput = document.querySelector('#delete-confirm-input') as HTMLInputElement;
-    const confirmDialog = confirmInput.closest('[role="dialog"]') as HTMLElement;
-    typeConfirm(confirmInput, 'clip-held');
-    await act(async () => { findButton(confirmDialog, '삭제').click(); });
-    await flush();
-
-    expect(document.querySelector('[data-testid="clip-delete-status"]')).not.toBeNull();
-    expect(document.querySelectorAll('[role="dialog"] video')).toHaveLength(1);
-    expect(findButton(document.body, '클립 삭제')).toBeDefined();
-    expect(host.querySelectorAll('button.rounded-card')).toHaveLength(1);
     expectNoRetiredControl();
     expectNoRetiredRequest(fetchMock);
   });

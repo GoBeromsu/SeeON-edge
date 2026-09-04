@@ -218,6 +218,27 @@ def test_mjpeg_server_probe_normalizes_auth_failure_without_leaking_url() -> Non
         server.stop()
 
 
+def test_mjpeg_server_default_probe_reports_unavailable_capability() -> None:
+    store = LatestFrameStore()
+    server = MjpegServer(store, MjpegServerConfig(port=0, probe_token="relay-token"))
+    server.start()
+    base = f"http://127.0.0.1:{server.port}"
+    body = json.dumps({"rtsp_url": "rtsp://8.8.8.8/trackID=2"}).encode()
+    try:
+        request = urllib.request.Request(
+            f"{base}/probe",
+            data=body,
+            headers={"X-Edge-Relay-Token": "relay-token"},
+            method="POST",
+        )
+        with urllib.request.urlopen(request, timeout=1) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+
+        assert payload == {"error_class": "unavailable", "ok": False}
+    finally:
+        server.stop()
+
+
 def test_mjpeg_stream_emits_multiple_camera_keyed_non_consuming_parts() -> None:
     store = LatestFrameStore()
     store.publish_jpeg("camera-a", b"\xff\xd8camera-a-1\xff\xd9", frame_index=1)

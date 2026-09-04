@@ -42,16 +42,28 @@ API_RESOLVER_PATH = ROOT / "backend" / "app" / "shared" / "state_dir.py"
 
 def _dockerfile_mkdir_p_args(dockerfile_name: str) -> list[str]:
     """Every whitespace-separated path argument passed to a `RUN mkdir -p ...`
-    line in the given Dockerfile, in file order."""
+    instruction in the given Dockerfile, in file order."""
     text = (ROOT / dockerfile_name).read_text(encoding="utf-8")
     args: list[str] = []
+    instructions: list[str] = []
+    current = ""
     for line in text.splitlines():
         stripped = line.strip()
+        current = f"{current} {stripped}".strip()
+        if stripped.endswith("\\"):
+            current = current[:-1].rstrip()
+            continue
+        instructions.append(current)
+        current = ""
+    if current:
+        instructions.append(current)
+
+    for instruction in instructions:
         marker = "mkdir -p "
-        idx = stripped.find(marker)
+        idx = instruction.find(marker)
         if idx == -1:
             continue
-        args.extend(stripped[idx + len(marker) :].split())
+        args.extend(instruction[idx + len(marker) :].split())
     return args
 
 

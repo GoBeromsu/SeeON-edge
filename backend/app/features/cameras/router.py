@@ -273,7 +273,7 @@ class TestCameraResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     ok: bool
-    error_class: Literal["timeout", "decode", "auth", "unsupported"] | None = None
+    error_class: Literal["timeout", "decode", "auth", "unsupported", "unavailable"] | None = None
     # worker의 /probe에 닿지 못해 검사 자체를 못 했다는 뜻이다 (True일 때만
     # 응답에 실린다 -- response_model_exclude_none이 없애지 못하는 bool
     # 기본값 노출을 피하려고 Optional로 선언했다). error_class는 이 경우
@@ -1489,6 +1489,8 @@ def _probe_result_from_worker(payload: dict[object, object]) -> ProbeResult:
         error_class = "auth"
     elif raw_error_class == "unsupported":
         error_class = "unsupported"
+    elif raw_error_class == "unavailable":
+        error_class = "unavailable"
     else:
         error_class = None
     width = _optional_positive_int(payload.get("width"))

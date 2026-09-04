@@ -25,7 +25,7 @@ from fastapi import HTTPException
 
 from backend.app.features.cameras import bed_zone_router, router, streams_router
 from backend.app.features.cameras.store import ProbeResult
-from backend.app.features.clips import catalog, deletion_control
+from backend.app.features.clips import catalog
 from backend.app.features.clips.manifest import read_manifest_file
 from backend.app.features.clips.store import ClipStore
 from worker.pipeline.output import live_view_api
@@ -159,18 +159,8 @@ def _path(url: str) -> str:
             live_view_api.bed_zone_camera_id,
             "cam/one two",
         ),  # noqa: SLF001
-        (
-            lambda i: deletion_control._clip_path(i, ""),
-            live_view_api.clip_deletion_clip_id,
-            "clip:a/b",
-        ),  # noqa: SLF001
-        (
-            lambda i: deletion_control._clip_path(i, deletion_control._PREFLIGHT_SUFFIX),
-            live_view_api.clip_deletion_preflight_clip_id,
-            "clip:a/b",
-        ),  # noqa: SLF001
     ],
-    ids=["stream", "snapshot", "pose", "bed-zone", "clip-delete", "clip-delete-preflight"],
+    ids=["stream", "snapshot", "pose", "bed-zone"],
 )
 def test_backend_built_paths_are_matched_by_the_worker_route(
     backend_path, worker_match, identity
@@ -182,8 +172,6 @@ def test_backend_built_paths_are_matched_by_the_worker_route(
         live_view_api.snapshot_camera_id,
         live_view_api.pose_camera_id,
         live_view_api.bed_zone_camera_id,
-        live_view_api.clip_deletion_clip_id,
-        live_view_api.clip_deletion_preflight_clip_id,
     } - {worker_match}
     assert all(other(path) is None for other in others)
 
@@ -193,7 +181,6 @@ def test_fixed_routes_headers_and_media_type_agree() -> None:
     assert router.RELAY_TOKEN_HEADER == live_view_api.RELAY_TOKEN_HEADER
     assert streams_router._RELAY_TOKEN_HEADER == live_view_api.RELAY_TOKEN_HEADER  # noqa: SLF001
     assert bed_zone_router._RELAY_TOKEN_HEADER == live_view_api.RELAY_TOKEN_HEADER  # noqa: SLF001
-    assert deletion_control._RELAY_TOKEN_HEADER == live_view_api.RELAY_TOKEN_HEADER  # noqa: SLF001
     assert streams_router._DEFAULT_MEDIA_TYPE == live_view_api.MJPEG_MEDIA_TYPE  # noqa: SLF001
 
 

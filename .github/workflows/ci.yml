@@ -86,10 +86,10 @@ jobs:
       # compose.edge.yaml `${VAR:?...}` needs a value (default or placeholder)
       # in .env.edge.prod.example, or an operator following the docs gets stuck
       # at `docker compose config`.
-      - name: Edge env example renders (GPU + CPU-only overlay)
+      - name: Edge env example renders (Flow)
         run: |
           docker compose --env-file .env.edge.prod.example \
-            -f compose.edge.yaml -f compose.edge.cpu.yaml config -q
+            -f compose.edge.yaml config -q
 
   # The whole cost centre: pytest was 18m27s of a 19m37s job. Sharded across
   # SHARD_TOTAL runners by test file, which needs no new dependency in uv.lock.

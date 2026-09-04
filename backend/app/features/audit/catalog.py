@@ -54,8 +54,6 @@ class AuditAction(StrEnum):
     CLIP_PLAY = "clip.play"
     CLIP_THUMBNAIL = "clip.thumbnail"
     CLIP_ARTIFACT = "clip.artifact"
-    CLIP_DELETE_REQUEST = "clip.delete.request"
-    CLIP_DELETE_COMPLETE = "clip.delete.complete"
     EVIDENCE_RECEIPT = "evidence.receipt"
     AUDIT_LIST = "audit.list"
     AUDIT_DETAIL = "audit.detail"
@@ -129,8 +127,6 @@ ACTION_DETAIL_CATALOG: Final = (
             AuditAction.CLIP_PLAY,
             AuditAction.CLIP_THUMBNAIL,
             AuditAction.CLIP_ARTIFACT,
-            AuditAction.CLIP_DELETE_REQUEST,
-            AuditAction.CLIP_DELETE_COMPLETE,
             AuditAction.EVIDENCE_RECEIPT,
             AuditAction.AUDIT_LIST,
             AuditAction.AUDIT_DETAIL,
@@ -189,7 +185,7 @@ def empty_detail(action: AuditAction) -> AuditDetail:
 
 
 def camera_probe_detail(ok: bool, error_class: str | None) -> AuditDetail:
-    if error_class not in {None, "timeout", "decode", "auth", "unsupported"}:
+    if error_class not in {None, "timeout", "decode", "auth", "unsupported", "unavailable"}:
         raise AuditDetailError("camera probe error class is invalid")
     return _encode(
         AuditAction.CAMERA_PROBE,
@@ -242,6 +238,7 @@ def _encode(
             "decode",
             "auth",
             "unsupported",
+            "unavailable",
         }:
             raise AuditDetailError("camera probe detail values are invalid")
     if declaration.kind is AuditDetailKind.RECOVERY:

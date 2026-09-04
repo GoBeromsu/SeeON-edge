@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import sqlite3
-from dataclasses import dataclass
 from typing import Annotated
 
 from fastapi import APIRouter, HTTPException, Query, Request, status
@@ -18,12 +17,6 @@ from backend.app.features.clips.compact_listing import (
     CompactClipListing,
     CompactClipQuery,
 )
-from backend.app.features.clips.deletion_control import (
-    control_clip_deletion,
-    preflight_clip_deletion,
-)
-from backend.app.features.clips.deletion_lifecycle import ClipDeletionLifecycle
-from backend.app.features.clips.manifest import is_valid_clip_id
 from backend.app.features.clips.media_response import media_response, media_type
 from backend.app.features.clips.responses import clip_response, resolved_video_size
 from backend.app.features.clips.schemas import (
@@ -32,8 +25,6 @@ from backend.app.features.clips.schemas import (
     ClipListQuery,
     ClipManifestResponse,
     ClipsPaginationResponse,
-    DeleteClipRequest,
-    DeleteClipResponse,
     ListClipsResponse,
     SnapshotArtifactState,
 )
@@ -49,38 +40,6 @@ from backend.app.features.evidence.receipt_store import (
 )
 from backend.app.shared.dashboard_auth import authorize_dashboard
 from backend.app.shared.head_response import HEAD_METHODS, drop_body_for_head
-
-
-@dataclass(frozen=True, slots=True)
-class _DeletionCommandResult:
-    clip_id: str
-    status: str
-
-
-def _validate_deletion_payload(
-    payload: dict[str, object], clip_id: str, *, allow_ready: bool
-) -> _DeletionCommandResult:
-    allowed = {
-        "PURGED",
-        "HELD",
-        "MISSING",
-        "UNVERIFIABLE",
-        "DELETE_FAILED",
-        "VERIFICATION_FAILED",
-    }
-    if allow_ready:
-        allowed.add("READY")
-    if (
-        set(payload) != {"clip_id", "status"}
-        or payload.get("clip_id") != clip_id
-        or payload.get("status") not in allowed
-    ):
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail="worker clip deletion response is invalid",
-        )
-    return _DeletionCommandResult(clip_id, str(payload["status"]))
-
 
 router = APIRouter(tags=["clips"])
 
@@ -184,78 +143,6 @@ def clip_artifacts(
         clip_id=manifest.clip_id,
         clean=clean_state,
         snapshot=snapshot,
-    )
-
-
-@router.delete(
-    "/clips/{clip_id}",
-    response_model=DeleteClipResponse,
-    status_code=status.HTTP_202_ACCEPTED,
-)
-def delete_clip(
-    clip_id: str,
-    payload: DeleteClipRequest,
-    request: Request,
-) -> DeleteClipResponse:
-    """Operator-only, explicitly-confirmed primary clip deletion.
-
-    Routes through the worker's control seam (``control_clip_deletion``)
-    rather than deleting anything itself -- the backend never touches
-    worker-owned evidence tables or clip-store files. The response is always
-    ``202`` with a typed, truthful ``status``.
-
-    Deliberately does **not** gate on ``_get_located_clip_or_404`` (the
-    filesystem-backed clip catalog) the way the read routes do: a successful
-    delete removes exactly what that catalog looks up, so gating on it would
-    make the second half of ``duplicate PENDING/PURGED requests are
-    idempotent`` (the contract this route exists to satisfy) impossible -- a
-    duplicate request after a real purge would wrongly 404 instead of
-    reporting the still-true ``PURGED`` tombstone. The worker is the
-    authoritative owner and already reports a clip it has never heard of as
-    the truthful, distinct ``MISSING`` status instead.
-    """
-    actor = _authorize(request)
-    if not is_valid_clip_id(clip_id):
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="clip not found")
-    if payload.confirm_clip_id != clip_id:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="clip id confirmation does not match",
-        )
-    lifecycle = ClipDeletionLifecycle(EDGE_DATABASE_PATH, request.app)
-    retention_state = lifecycle.state(clip_id)
-    if retention_state == "PURGED":
-        return DeleteClipResponse(clip_id=clip_id, status="PURGED")
-
-    preflight = _validate_deletion_payload(
-        preflight_clip_deletion(request, clip_id), clip_id, allow_ready=True
-    )
-    if preflight.status == "HELD":
-        return DeleteClipResponse(clip_id=clip_id, status="HELD")
-    if preflight.status == "MISSING":
-        if retention_state == "PENDING":
-            lifecycle.complete(clip_id, actor_id=actor)
-            return DeleteClipResponse(clip_id=clip_id, status="PURGED")
-        return DeleteClipResponse(clip_id=clip_id, status="MISSING")
-    if preflight.status != "READY":
-        return DeleteClipResponse.model_validate(
-            {"clip_id": preflight.clip_id, "status": preflight.status}
-        )
-
-    pending_state = lifecycle.begin(clip_id, actor)
-    if pending_state is None:
-        return DeleteClipResponse(clip_id=clip_id, status="MISSING")
-    if pending_state == "PURGED":
-        return DeleteClipResponse(clip_id=clip_id, status="PURGED")
-
-    response = _validate_deletion_payload(
-        control_clip_deletion(request, clip_id), clip_id, allow_ready=False
-    )
-    if response.status in {"PURGED", "MISSING"}:
-        lifecycle.complete(clip_id, actor_id=actor)
-        return DeleteClipResponse(clip_id=clip_id, status="PURGED")
-    return DeleteClipResponse.model_validate(
-        {"clip_id": response.clip_id, "status": response.status}
     )
 
 

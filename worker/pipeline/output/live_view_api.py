@@ -115,7 +115,7 @@ def pose_body(mode: OverlayMode) -> dict[str, str]:
 
 # --- POST /probe -----------------------------------------------------------
 
-ProbeErrorClass: TypeAlias = Literal["auth", "timeout", "decode", "unsupported"]
+ProbeErrorClass: TypeAlias = Literal["auth", "timeout", "decode", "unsupported", "unavailable"]
 
 
 def normalize_probe_error_class(value: object) -> ProbeErrorClass:
@@ -126,6 +126,8 @@ def normalize_probe_error_class(value: object) -> ProbeErrorClass:
         return "timeout"
     if value == "unsupported":
         return "unsupported"
+    if value == "unavailable":
+        return "unavailable"
     return "decode"
 
 

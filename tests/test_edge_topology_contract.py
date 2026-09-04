@@ -28,11 +28,13 @@ EDGE_OPS_SERVICES: Final = {"edge-refused-evidence"}
 #: service fills the `worker-models` volume from the committed manifest and
 #: gates ml-worker through depends_on.
 EDGE_MODEL_FETCH_SERVICE: Final = "edge-model-fetch"
+EDGE_ENGINE_BUILD_SERVICE: Final = "edge-engine-build"
 MODELS_VOLUME: Final = "worker-models"
 
 EDGE_SERVICES: Final = {
     "edge-db-migrator",
     EDGE_MODEL_FETCH_SERVICE,
+    EDGE_ENGINE_BUILD_SERVICE,
     *EDGE_OPS_SERVICES,
     *EDGE_RUNTIME_SERVICES,
 }
@@ -107,12 +109,25 @@ def test_edge_worker_runtime_status_environment_contract() -> None:
     services = _compose_services(EDGE_COMPOSE_FILE)
     worker_environment = _mapping_field(services["ml-worker"], "environment")
 
-    # Explicit allowlist only: relay secret, profile, and RTSP destination policy.
+    # Explicit allowlist only: Flow topology, relay secret, and RTSP destination policy.
     # Live clip export is a dashboard runtime setting and must never appear here.
     assert set(worker_environment) == {
         "RELAY_TOKEN",
         "ML_WORKER_PROFILE",
         "ML_WORKER_IMAGE",
+        "ML_WORKER_FLOW_INFER_CONFIG",
+        "ML_WORKER_FLOW_TRACKER_CONFIG",
+        "ML_WORKER_FLOW_TRACKER_LIBRARY",
+        "ML_WORKER_FLOW_RECORD_DIR",
+        "ML_WORKER_FLOW_RECORD_CACHE_SECONDS",
+        "ML_WORKER_FLOW_FRAME_WIDTH",
+        "ML_WORKER_FLOW_FRAME_HEIGHT",
+        "ML_WORKER_FLOW_BATCH_SIZE",
+        "ML_WORKER_FLOW_ENGINE_PATH",
+        "ML_WORKER_FLOW_ENGINE_IDENTITY_PATH",
+        "ML_WORKER_FLOW_ONNX_PATH",
+        "ML_WORKER_FLOW_PARSER_LIBRARY",
+        "NVIDIA_DRIVER_CAPABILITIES",
         "ML_RTSP_ALLOW_PRIVATE_DESTINATIONS",
         "ML_RTSP_ALLOW_LOCAL_DESTINATIONS",
     }
@@ -122,6 +137,7 @@ def test_edge_worker_runtime_status_environment_contract() -> None:
     assert worker_environment["ML_RTSP_ALLOW_LOCAL_DESTINATIONS"] == (
         "${ML_RTSP_ALLOW_LOCAL_DESTINATIONS:-0}"
     )
+    assert worker_environment["ML_WORKER_PROFILE"] == "flow"
     assert not any("EVENT_CLIP_EXPORT" in key for key in worker_environment)
     assert "API_FACILITY_ID" not in worker_environment
 
@@ -155,6 +171,7 @@ def test_edge_db_migrator_owns_schema_lifecycle_before_runtime_start() -> None:
     assert worker_depends_on == {
         "ml-api": {"condition": "service_healthy"},
         EDGE_MODEL_FETCH_SERVICE: {"condition": "service_completed_successfully"},
+        EDGE_ENGINE_BUILD_SERVICE: {"condition": "service_completed_successfully"},
     }
 
 
@@ -186,10 +203,15 @@ def test_edge_model_fetch_owns_the_models_volume_before_worker_start() -> None:
     worker_volumes = _list_field(services["ml-worker"], "volumes")
     assert f"{MODELS_VOLUME}:/models:ro" in worker_volumes
     assert not any(str(volume).startswith("./models") for volume in worker_volumes)
-    # Every service other than the fetcher (writer) and the worker (reader) stays
-    # off the models volume. Derived from compose so retiring a service cannot
-    # silently drop it from this check.
-    for service_name in sorted(set(services) - {"edge-model-fetch", "ml-worker"}):
+    engine_build = services[EDGE_ENGINE_BUILD_SERVICE]
+    assert _list_field(engine_build, "volumes") == [
+        f"{MODELS_VOLUME}:/app/models:ro",
+        "worker-engine-cache:/var/cache/seeon/tensorrt:rw",
+    ]
+    # The engine build reads provisioned models but never writes them. Every
+    # other service stays off the models volume.
+    excluded_services = {"edge-model-fetch", "ml-worker", EDGE_ENGINE_BUILD_SERVICE}
+    for service_name in sorted(set(services) - excluded_services):
         volumes = _list_field(services[service_name], "volumes")
         assert not any("/models" in str(volume) for volume in volumes), (
             f"{service_name} must not mount the models volume"
@@ -569,32 +591,21 @@ def test_internal_origins_and_ports_are_baked_runtime_topology() -> None:
     assert pulled.dev_mjpeg.port == 8090
 
 
-def test_cpu_intel_and_nvidia_overlays_keep_hardware_opt_in() -> None:
+def test_flow_compose_reserves_the_required_nvidia_hardware() -> None:
     services = _compose_services(EDGE_COMPOSE_FILE)
     worker = services["ml-worker"]
-    assert "deploy" not in worker
-    assert "devices" not in worker
-    assert "NVIDIA_DRIVER_CAPABILITIES" not in _mapping_field(worker, "environment")
-
-    cpu_worker = _compose_services("compose.edge.cpu.yaml")["ml-worker"]
-    assert cpu_worker["deploy"] == "null"
-
-    intel_worker = _compose_services("compose.edge.igpu.yaml")["ml-worker"]
-    assert intel_worker["devices"] == ["/dev/dri:/dev/dri"]
-    assert _mapping_field(intel_worker, "environment") == {"LIBVA_DRIVER_NAME": "iHD"}
-
-    nvidia_worker = _compose_services("compose.edge.nvidia.yaml")["ml-worker"]
-    nvidia_deploy = _mapping_field(nvidia_worker, "deploy")
-    assert nvidia_deploy == {
+    assert _mapping_field(worker, "deploy") == {
         "resources": {
             "reservations": {
                 "devices": [{"driver": "nvidia", "count": "all", "capabilities": ["gpu"]}]
             }
         }
     }
-    assert _mapping_field(nvidia_worker, "environment") == {
-        "NVIDIA_DRIVER_CAPABILITIES": "compute,utility,video"
-    }
+    assert "devices" not in worker
+    assert (
+        _mapping_field(worker, "environment")["NVIDIA_DRIVER_CAPABILITIES"]
+        == "compute,utility,video"
+    )
 
 
 def test_edge_compose_exposes_no_static_roster_or_mutable_policy_authority() -> None:

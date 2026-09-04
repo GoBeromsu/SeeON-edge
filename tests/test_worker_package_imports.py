@@ -1,10 +1,8 @@
 """Every worker module must import.
 
 A module that raises on import is invisible to the rest of the suite once
-nothing imports it any more. That is exactly how two landmines survived the P2
-deletion: `worker/runtime/clip_deletion_control.py` imported a deleted retention
-module, and its own test had been deleted alongside the tree it covered, so
-nothing ever loaded it again. This sweep is the check that catches the next one.
+nothing imports it any more. This sweep catches an unreachable module that
+imports a removed dependency before it can survive a production-tree deletion.
 
 `worker.tools` is excluded deliberately: those modules are build-time entry
 points that do real work at import (fetching and verifying model weights), so

@@ -40,7 +40,6 @@ def production_action_owners() -> dict[AuditAction, tuple[Callable[..., Any], ..
         clip_artifacts,
         clip_thumbnail,
         clip_video,
-        delete_clip,
         get_clip_metadata,
         list_clips,
     )
@@ -96,8 +95,6 @@ def production_action_owners() -> dict[AuditAction, tuple[Callable[..., Any], ..
         AuditAction.CLIP_PLAY: (clip_video,),
         AuditAction.CLIP_THUMBNAIL: (clip_thumbnail,),
         AuditAction.CLIP_ARTIFACT: (clip_artifacts,),
-        AuditAction.CLIP_DELETE_REQUEST: (delete_clip,),
-        AuditAction.CLIP_DELETE_COMPLETE: (delete_clip,),
         AuditAction.EVIDENCE_RECEIPT: (export_clip,),
         AuditAction.AUDIT_LIST: (list_audit,),
         AuditAction.AUDIT_DETAIL: (get_audit,),

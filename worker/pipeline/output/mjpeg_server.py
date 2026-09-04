@@ -168,7 +168,7 @@ def start_optional_mjpeg_server(
 
 
 def _unavailable_probe(_rtsp_url: str) -> MjpegProbePayload:
-    raise MjpegProbeError("decode")
+    raise MjpegProbeError("unavailable")
 
 
 __all__ = [

@@ -2,10 +2,8 @@
 # The edge performs ML inference locally. ml-worker relays facts to ml-api over
 # the private Compose network; ml-api is the only public-backend client.
 #
-# Usage (choose exactly one infrastructure overlay):
-#   CPU/Apple MPS: -f compose.edge.yaml
-#   NVIDIA:        -f compose.edge.yaml -f compose.edge.nvidia.yaml
-#   Intel VAAPI:   -f compose.edge.yaml -f compose.edge.igpu.yaml
+# Usage:
+#   NVIDIA DeepStream Flow: -f compose.edge.yaml -f compose.edge.nvidia.yaml
 
 # The project name is REQUIRED, never defaulted. Compose would otherwise derive
 # it from the directory name, and this host already carries three similarly
@@ -150,6 +148,43 @@ services:
       - --dest
       - /models
 
+  # Engines are built after models arrive and before Flow source activation.
+  # The worker verifies this cache at boot and never creates engines itself.
+  edge-engine-build:
+    image: ${ML_WORKER_IMAGE:?ML_WORKER_IMAGE is required in edge prod}
+    build: !reset null
+    pull_policy: always
+    restart: "no"
+    environment:
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility,video
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    volumes:
+      - worker-models:/app/models:ro
+      - worker-engine-cache:/var/cache/seeon/tensorrt:rw
+    depends_on:
+      edge-model-fetch:
+        condition: service_completed_successfully
+    command:
+      - python
+      - -m
+      - worker.tools.edge_engine_build
+      - --onnx=/app/models/pose/yolo26n-pose.onnx
+      - --engine=/var/cache/seeon/tensorrt/yolo26n-pose-fp16.engine
+      - --identity=/var/cache/seeon/tensorrt/engine-identity.json
+      - --parser-lib=/opt/nvidia/deepstream/deepstream/lib/libnvdsinfer_custom_yolo26_pose.so
+      - --infer-config=/opt/seeon/deepstream-flow/nvinfer-yolo26-pose.txt
+      - --served-infer-config=/var/cache/seeon/tensorrt/nvinfer-yolo26-pose.txt
+      - --tracker-config=/opt/seeon/deepstream-flow/config_tracker_NvDCF_perf.yml
+      - --tracker-library=/opt/nvidia/deepstream/deepstream/lib/libnvds_nvmultiobjecttracker.so
+      - --image-digest=${ML_WORKER_IMAGE:?ML_WORKER_IMAGE is required in edge prod}
+      - --batch-size=${ML_WORKER_FLOW_BATCH_SIZE:?ML_WORKER_FLOW_BATCH_SIZE is required}
+
   ml-worker:
     image: ${ML_WORKER_IMAGE:?ML_WORKER_IMAGE is required in edge prod}
     build: !reset null
@@ -160,25 +195,32 @@ services:
       options:
         max-size: "10m"
         max-file: "5"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
     environment:
-      # This explicit allowlist is the complete persistent worker environment
-      # contract. Do not forward the host environment wholesale or persist
-      # one-shot operator/test activation gates in this service.
-      # The relay origin, MJPEG bind/origin/port, model paths, and state paths
-      # are baked runtime topology. Only the paired secret, profile alias, and
-      # RTSP destination policy flags cross the deployment boundary. Live clip
-      # export is a dashboard runtime setting and is never projected here.
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility,video
       RELAY_TOKEN: ${API_EDGE_RELAY_TOKEN:?edge worker requires a deployment-unique relay token}
-      ML_WORKER_PROFILE: ${ML_WORKER_PROFILE:?set cpu-host|nvidia|intel-vaapi-host|apple-mps-host (legacy cpu|igpu|mps accepted)}
-      # The actual digest-pinned image identity is observed only when its
-      # optional image-owned selection document exists.
+      ML_WORKER_PROFILE: flow
       ML_WORKER_IMAGE: ${ML_WORKER_IMAGE:?ML_WORKER_IMAGE is required in edge prod}
-      # Same RTSP destination policy as ml-api (worker probe path).
+      ML_WORKER_FLOW_INFER_CONFIG: /var/cache/seeon/tensorrt/nvinfer-yolo26-pose.txt
+      ML_WORKER_FLOW_TRACKER_CONFIG: /opt/seeon/deepstream-flow/${ML_WORKER_FLOW_TRACKER_PROFILE:-config_tracker_NvDCF_perf}.yml
+      ML_WORKER_FLOW_TRACKER_LIBRARY: /opt/nvidia/deepstream/deepstream/lib/libnvds_nvmultiobjecttracker.so
+      ML_WORKER_FLOW_RECORD_DIR: /var/lib/clip-store
+      ML_WORKER_FLOW_RECORD_CACHE_SECONDS: "30"
+      ML_WORKER_FLOW_FRAME_WIDTH: "640"
+      ML_WORKER_FLOW_FRAME_HEIGHT: "360"
+      ML_WORKER_FLOW_BATCH_SIZE: ${ML_WORKER_FLOW_BATCH_SIZE:?ML_WORKER_FLOW_BATCH_SIZE is required}
+      ML_WORKER_FLOW_ENGINE_PATH: /var/cache/seeon/tensorrt/yolo26n-pose-fp16.engine
+      ML_WORKER_FLOW_ENGINE_IDENTITY_PATH: /var/cache/seeon/tensorrt/engine-identity.json
+      ML_WORKER_FLOW_ONNX_PATH: /app/models/pose/yolo26n-pose.onnx
+      ML_WORKER_FLOW_PARSER_LIBRARY: /opt/nvidia/deepstream/deepstream/lib/libnvdsinfer_custom_yolo26_pose.so
       ML_RTSP_ALLOW_PRIVATE_DESTINATIONS: ${ML_RTSP_ALLOW_PRIVATE_DESTINATIONS:-0}
       ML_RTSP_ALLOW_LOCAL_DESTINATIONS: ${ML_RTSP_ALLOW_LOCAL_DESTINATIONS:-0}
-      # Facility identity/token, camera roster, model/domain/clip policy, and
-      # static YAML config are intentionally absent. The versioned config
-      # endpoint backed by dashboard/DB state owns those values.
     volumes:
       # Fixed image-adjacent model root, populated by edge-model-fetch.
       - worker-models:/models:ro
@@ -196,6 +238,8 @@ services:
       ml-api:
         condition: service_healthy
       edge-model-fetch:
+        condition: service_completed_successfully
+      edge-engine-build:
         condition: service_completed_successfully
     command:
       - python

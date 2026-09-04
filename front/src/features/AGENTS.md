@@ -5,7 +5,7 @@ One folder, one capability. `app/pages/` composes these. Parent already names th
 ## Ownership
 
 - `operations/`: live wall + room detail. Owns the live wall (MJPEG hook lives in `shared/api/useMjpegStream`), snapshot queue, overlay fetch/set, floor/liveness sort (`operationsModel`), room clip history. `ClipPlayerModal` plays that history. No delete, no artifacts.
-- `events/`: clip catalogue + clean source playback. Owns filters, keyset pager, `useEventsPage` / `useClipMetadata`, `eventTypes` facets (`bed-exit` / `fall` / `other`). Incident review surface retired; persisted sidecar analysis retired; burned boxes exist only in the snapshot JPEG. `ClipPlaybackModal` plays only unmodified source clip bytes and owns artifact state and delete.
+- `events/`: clip catalogue + clean source playback. Owns filters, keyset pager, `useEventsPage` / `useClipMetadata`, `eventTypes` facets (`bed-exit` / `fall` / `other`). Incident review surface retired; persisted sidecar analysis retired; burned boxes exist only in the snapshot JPEG. `ClipPlaybackModal` plays only unmodified source clip bytes and owns artifact state.
 - `settings/`: registry writes and site policy. `CameraSection` orchestrates table + register + edit + delete. Its `DetectionSettingsCard` is the global schedule editor (`saveDetectionSettings`). Also clip storage/export, policy evidence, processing status, bed-zone panel (live canvas via `shared/api/useMjpegStream`).
 - `connection/`: 3-step wizard + `ConnectionSettingsPanel`. `wizardSteps.ts` is pure and server-state only (`enrolled`, camera total, `dirty_registry_version`, `readiness_error`, `preview.confirmed`). SettingsPage mounts the wizard. No page of its own.
 - `cameras/`: topology widgets only. Pairing list, structure editor, confirm dialog. No wizard progress, no registry table. Wizard steps 2 and 3 consume them.
@@ -40,7 +40,7 @@ Enforced by `front/eslint.config.js` (`no-restricted-imports`, one override per 
 
 Same-named cards stay separate files. operations card = status + overlay + navigate. settings card = editor. Don't merge by import.
 
-Clip modals stay separate. operations `ClipPlayerModal` = room-history playback. events `ClipPlaybackModal` plays the unmodified source clip with no overlay; snapshot JPEG carries burned boxes. Don't grow delete into operations.
+Clip modals stay separate. operations `ClipPlayerModal` = room-history playback. events `ClipPlaybackModal` plays the unmodified source clip with no overlay; snapshot JPEG carries burned boxes.
 
 Clip paging is keyset only. `GET /clips` takes `limit` plus an opaque `cursor` and answers with `next_cursor`; the order is `(started_at DESC, clip_id DESC)`. `useEventsPage` keeps the walked cursor trail so 이전/다음 stay on exact boundaries. Never reintroduce `offset`, a page-number jump, or a client-side re-sort that ignores the clip-id tiebreak.
 
@@ -50,7 +50,6 @@ Clip paging is keyset only. `GET /clips` takes `limit` plus an opaque `cursor` a
 
 Colocate: `Foo.tsx` next to `Foo.test.tsx` (or `.ts`) in the same slice.
 Pure helpers stay table-driven beside the module: `operationsModel`, `wizardSteps`, `connectionSettingsForm`, `detectionSettingsForm`, `eventTypes`, `formatters`, `SnapshotQueue`, `rtspSubstreamGuidance`.
-Facet splits stay next to the owner (`ClipPlaybackModal.delete.test.tsx`).
 Page suites live under `app/pages/`, not here.
 `cameras` unit-tests the confirm dialog. Pairing and editor coverage rides `connection` step tests.
 `src/test/` is setup only.

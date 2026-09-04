@@ -15,7 +15,7 @@ def test_every_catalog_action_has_a_callable_production_owner() -> None:
     assert all(callable(owner) for action_owners in owners.values() for owner in action_owners)
 
 
-def test_final_seven_owner_bindings_are_mutation_sensitive() -> None:
+def test_governed_owner_bindings_are_mutation_sensitive() -> None:
     owners = production_action_owners()
     governed = (
         AuditAction.CONNECTION_SYNC,

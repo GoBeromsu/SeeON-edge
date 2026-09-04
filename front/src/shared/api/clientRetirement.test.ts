@@ -22,7 +22,7 @@ describe('api client retirement', () => {
     // Positive control first: a bare `not.toContain` would also pass against an empty namespace,
     // so assert the module really is loaded before trusting the absence assertion.
     expect(exported).toContain('fetchClipArtifacts');
-    expect(exported).toContain('deleteClip');
+
     expect(exported).not.toContain(name);
   });
 });

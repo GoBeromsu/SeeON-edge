@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { bedZoneRecognitionFailureDetail, browseClipStorage, cameraDuplicateDetail, cameraProbeFailureDetail, createCamera, deleteClip, fetchCameraOverlay, fetchCameras, fetchClipArtifacts, fetchClips, fetchClipStorage, fetchDetectionSettings, fetchRuntimeSettings, fetchStatus, fetchSystem, getApiBase, getCameraSnapshotUrl, getCameraStreamUrl, loginDashboard, logoutDashboard, recognizeBedZone, saveClipStorageLocation, saveConnection, saveDetectionSettings, saveRuntimeSettings, setCameraOverlay, testCamera, testConnection, updateCamera, updateCameraDecodeBackend } from '@/shared/api/client';
+import { bedZoneRecognitionFailureDetail, browseClipStorage, cameraDuplicateDetail, cameraProbeFailureDetail, createCamera, fetchCameraOverlay, fetchCameras, fetchClipArtifacts, fetchClips, fetchClipStorage, fetchDetectionSettings, fetchRuntimeSettings, fetchStatus, fetchSystem, getApiBase, getCameraSnapshotUrl, getCameraStreamUrl, loginDashboard, logoutDashboard, recognizeBedZone, saveClipStorageLocation, saveConnection, saveDetectionSettings, saveRuntimeSettings, setCameraOverlay, testCamera, testConnection, updateCamera, updateCameraDecodeBackend } from '@/shared/api/client';
 import { HttpError } from '@/shared/api/http';
 import type { DetectionSettings } from '@/shared/api/client';
 
@@ -39,21 +39,6 @@ describe('api client contracts', () => {
     }));
 
     await expect(load()).rejects.toThrow(/Invalid .* response/);
-  });
-
-  it('sends an encoded explicit clip-delete request and rejects invalid worker responses', async () => {
-    const fetchMock = vi.fn().mockResolvedValue({
-      ok: true, status: 202, json: async () => ({ clip_id: 'clip/a', status: 'PURGED' }),
-    });
-    vi.stubGlobal('fetch', fetchMock);
-
-    await expect(deleteClip('clip/a', 'clip/a')).resolves.toEqual({ clip_id: 'clip/a', status: 'PURGED' });
-    expect(fetchMock).toHaveBeenCalledWith('/api/v1/clips/clip%2Fa', expect.objectContaining({
-      method: 'DELETE', body: JSON.stringify({ confirm_clip_id: 'clip/a' }),
-    }));
-
-    fetchMock.mockResolvedValueOnce({ ok: true, status: 202, json: async () => ({ clip_id: 'clip-a', status: 'PENDING' }) });
-    await expect(deleteClip('clip-a', 'clip-a')).rejects.toThrow('Invalid clip deletion response');
   });
 
   it('keeps valid empty list envelopes as successful empty data', async () => {

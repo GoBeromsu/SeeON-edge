@@ -25,7 +25,6 @@ import type {
   CleanArtifactState,
   Clip,
   ClipArtifacts,
-  ClipDeleteResult,
   ClipStorageBrowseResult,
   ClipStorageInfo,
   ConnectionInput,
@@ -57,8 +56,6 @@ export type {
   CameraHeartbeat,
   CameraTestResult,
   Clip,
-  ClipDeleteResult,
-  ClipDeleteStatus,
   ClipStorageBrowseEntry,
   ClipStorageBrowseResult,
   ClipStorageInfo,
@@ -369,26 +366,6 @@ function normalizeClipArtifacts(value: unknown): ClipArtifacts {
 
 export async function fetchClipArtifacts(clipId: string, signal?: AbortSignal): Promise<ClipArtifacts> {
   return normalizeClipArtifacts(await requestJson(`/clips/${encodeURIComponent(clipId)}/artifacts`, { signal }));
-}
-
-const CLIP_DELETE_STATUSES = new Set<ClipDeleteResult['status']>([
-  'PURGED', 'HELD', 'MISSING', 'UNVERIFIABLE', 'DELETE_FAILED', 'VERIFICATION_FAILED',
-]);
-
-function normalizeClipDeleteResult(value: unknown): ClipDeleteResult {
-  if (!isRecord(value) || typeof value.clip_id !== 'string' || value.clip_id.length === 0
-    || typeof value.status !== 'string' || !CLIP_DELETE_STATUSES.has(value.status as ClipDeleteResult['status'])) {
-    throw new Error('Invalid clip deletion response');
-  }
-  return { clip_id: value.clip_id, status: value.status as ClipDeleteResult['status'] };
-}
-
-/** Explicit exact clip-id confirmation is required server-side; a mismatch is rejected as 422 before any worker call. */
-export async function deleteClip(clipId: string, confirmClipId: string): Promise<ClipDeleteResult> {
-  return normalizeClipDeleteResult(await requestJson(`/clips/${encodeURIComponent(clipId)}`, {
-    method: 'DELETE',
-    body: JSON.stringify({ confirm_clip_id: confirmClipId }),
-  }));
 }
 
 export async function fetchClipStorage(signal?: AbortSignal): Promise<ClipStorageInfo> {
