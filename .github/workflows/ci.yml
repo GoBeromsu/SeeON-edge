@@ -163,11 +163,7 @@ jobs:
           mapfile -t shard_files < <(
             git ls-files -- '*.py' |
               grep -E '(^|/)(test_[^/]*|[^/]*_test)\.py$' |
-              # A CTest fixture, not a pytest module: CMakeLists.txt runs it as
-              # `python perception_wire_cross_language_test.py <binary>`. It
-              # matches pytest's default glob but defines no test function, so
-              # pytest collects zero tests from it.
-              grep -vxF 'worker/native/deepstream/src/perception_wire_cross_language_test.py' |
+              while IFS= read -r path; do test -f "$path" && printf '%s\n' "$path"; done |
               LC_ALL=C sort |
               awk -v shard="$SHARD" -v total="$SHARD_TOTAL" \
                 'NR % total == shard % total'

@@ -71,8 +71,8 @@ def probe_mps_capability(*, importer: TorchImporter = _import_torch) -> MpsCapab
     exceptions, backend-visible-but-unusable) without needing real Apple
     Silicon hardware or a broken torch install -- mirrors the
     ``Cv2Importer``/``ProbeRunner`` injection pattern already used elsewhere
-    in this package (``worker/adapters/decode/cpu_av/probe.py``,
-    ``worker/adapters/decode/nvdec_cuvid/probe.py``,
+    in this package (``Flow media plane/cpu_av/probe.py``,
+    ``Flow media plane/nvdec_cuvid/probe.py``,
     ``worker/adapters/device/cuda/probe.py``). Production callers never pass
     ``importer``.
 

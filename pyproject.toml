@@ -278,7 +278,7 @@ forbidden_modules = ["worker.pipeline", "worker.domains", "worker.runtime"]
 name = "worker domains do not depend on ingest, output, or runtime"
 type = "forbidden"
 source_modules = ["worker.domains"]
-forbidden_modules = ["worker.pipeline.ingest", "worker.pipeline.output", "worker.runtime"]
+forbidden_modules = ["worker.pipeline.output", "worker.runtime"]
 
 [[tool.importlinter.contracts]]
 # worker/pipeline/AGENTS.md: perception stays pure numeric math, testable
@@ -286,7 +286,7 @@ forbidden_modules = ["worker.pipeline.ingest", "worker.pipeline.output", "worker
 name = "worker perception features stay pure"
 type = "forbidden"
 source_modules = ["worker.pipeline.perception"]
-forbidden_modules = ["backend", "shared.events", "worker.adapters", "worker.pipeline.bus", "worker.pipeline.ingest", "worker.pipeline.decision", "worker.pipeline.output", "worker.domains", "worker.runtime"]
+forbidden_modules = ["backend", "shared.events", "worker.adapters", "worker.pipeline.decision", "worker.pipeline.output", "worker.domains", "worker.runtime"]
 
 [[tool.importlinter.contracts]]
 # worker/runtime/AGENTS.md: runtime is the only package that may import
@@ -317,9 +317,7 @@ source_modules = [
     "contracts",
     "worker.types",
     "worker.interfaces",
-    "worker.adapters.decode",
     "worker.adapters.device",
-    "worker.adapters.encode",
     "worker.adapters.frame",
     "worker.adapters.model",
     "worker.pipeline",

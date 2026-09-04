@@ -13,6 +13,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+from enum import Enum
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -25,17 +26,40 @@ from backend.app.features.audit.store import AuditEvent, AuditRecord, AuditStore
 from backend.app.features.clips import artifacts as artifact_module
 from backend.app.features.clips.deletion_lifecycle import reconcile_pending_clip_deletions
 from backend.app.main import create_app, no_lifespan
-from worker.pipeline.output.evidence.clip_maintenance import ClipMaintenance
-from worker.pipeline.output.evidence.clip_recorder_models import (
-    ClipRecorderConfig,
-    ClipRecorderStats,
-)
 from worker.pipeline.output.live_view import LatestFrameStore
 from worker.pipeline.output.mjpeg_server import MjpegServer, MjpegServerConfig
-from worker.runtime.clip_deletion_control import ClipDeletionControlService
 
 NOW = "2026-05-01T00:00:00Z"
 LATER = "2026-05-01T00:00:01Z"
+
+
+class _PurgeResult(Enum):
+    MISSING = "MISSING"
+    PURGED = "PURGED"
+
+
+class _ClipDeletionControl:
+    def __init__(self, store_dir: Path) -> None:
+        self._store_dir = store_dir
+
+    def preflight(self, clip_id: str) -> dict[str, object]:
+        status = (
+            "READY"
+            if (self._store_dir / "clips" / clip_id).is_dir()
+            else _PurgeResult.MISSING.value
+        )
+        return {"clip_id": clip_id, "status": status}
+
+    def delete(self, clip_id: str) -> dict[str, object]:
+        clip_dir = self._store_dir / "clips" / clip_id
+        if not clip_dir.is_dir():
+            status = _PurgeResult.MISSING.value
+        else:
+            import shutil
+
+            shutil.rmtree(clip_dir)
+            status = _PurgeResult.PURGED.value
+        return {"clip_id": clip_id, "status": status}
 
 
 def _write_finalized_clip(store_dir: Path, clip_id: str) -> Path:
@@ -74,22 +98,10 @@ def _login(client: TestClient) -> None:
 
 def _worker_server(database: Path, store_dir: Path) -> MjpegServer:
     del database
-    import shutil
-
-    maintenance = ClipMaintenance(
-        ClipRecorderConfig(store_dir=store_dir),
-        ClipRecorderStats(),
-        is_clip_held=lambda _clip_id: False,
-        disk_usage_provider=lambda _path: shutil.disk_usage(store_dir),
-    )
-    control = ClipDeletionControlService(
-        preflight_clip=maintenance.preflight_clip,
-        delete_clip=maintenance.purge_clip,
-    )
     server = MjpegServer(
         LatestFrameStore(),
         MjpegServerConfig(port=0, probe_token="relay-token"),
-        clip_deletion_control=control,
+        clip_deletion_control=_ClipDeletionControl(store_dir),
     )
     server.start()
     return server

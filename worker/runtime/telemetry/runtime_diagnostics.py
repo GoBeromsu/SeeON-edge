@@ -10,7 +10,7 @@ from typing import final
 from contracts.decode_diagnostics import DECODE_FALLBACK_REASONS, DecodeSelection
 from contracts.encode_diagnostics import ENCODE_FALLBACK_REASONS, EncodeSelection
 from contracts.observation import BedRegionCacheState
-from worker.pipeline.inference_coordinator import CameraInferenceTelemetry
+from worker.pipeline.inference_telemetry import CameraInferenceTelemetry
 from worker.pipeline.perception.scene_state import BedRegionCacheCounterSnapshot
 from worker.runtime.telemetry.local_metrics import (
     StageTimingAccumulator,

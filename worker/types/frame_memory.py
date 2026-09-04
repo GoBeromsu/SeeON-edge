@@ -113,7 +113,7 @@ class _DeviceStorage:
     ``handle`` is deliberately typed ``object``: ``worker.types`` may import
     only the standard library and ``contracts`` (see ``worker/types/AGENTS.md``),
     so it can never name a concrete accelerator tensor/array type. The owning
-    adapter (e.g. ``worker.adapters.decode.nvdec_device``) is the only code
+    media-plane adapter is the only code
     that ever casts ``handle`` back to its real type; every other consumer of
     a device-resident ``FrameLease`` treats it as opaque and forwards it
     through named, capability-validated converters only.

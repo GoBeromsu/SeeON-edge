@@ -174,7 +174,7 @@ rtsp://<사용자>:<비밀번호>@<카메라 IP>:554/trackID=1   # 메인 스트
 `restart.py:49`) `GET /api/v1/cameras/worker-config` 를 다시 불러 이 두
 숫자가 올라갔는지만 비교한다(`restart.py:36-41`, `RestartDirectiveTracker
 .observe`). 올라가 있으면 워커가 스스로 멈추고
-(`worker/pipeline/ingest/lifecycle.py:299-306`, `_watch_restart`), compose 의
+(`Flow media plane/lifecycle.py:299-306`, `_watch_restart`), compose 의
 `restart: unless-stopped` 가 다시 띄우면서 새 로스터로 재부팅한다.
 
 문제는 카메라 등록/수정/삭제가 로컬 레지스트리의 `registry_version` 만

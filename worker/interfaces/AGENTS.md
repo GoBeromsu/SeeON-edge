@@ -40,7 +40,7 @@ Always-fail stubs belong in tests only.
 - `DeviceInputEncoder.submit(FrameLease)` is device-resident only. No silent host readback. Host frames go through a named `FrameMaterializer` first.
 - `frame.py`: `FrameMaterializer.materialize(FrameLease) -> FrameLease`. `HostFrameView.view` is host-only and must fail on device input.
 - `output.py`: `EventSink.emit(BusinessEvent)`.
-- `render.py`: `OverlaySceneRenderer.render_scene(packet, OverlayScene)`. Hardware seam. No domain decisions.
+
 - `source_packet.py`: `SourcePacketSink.append(SourcePacket)`. `EpochRollingSourcePacketSink.roll_epoch`.
 - `thumbnail.py`: `ThumbnailGenerator.generate(video, thumb, duration) -> Path`.
 

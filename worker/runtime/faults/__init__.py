@@ -7,7 +7,7 @@ Responsible for:
 - Providing a FaultHandler that stops all camera ingest loops and exits with code 4.
 
 The exception TYPE (FatalAcceleratorError) lives in worker.adapters.model.errors so
-that worker.pipeline.ingest.lifecycle can import it without breaking the import-linter
+that runtime lifecycle code can import it without breaking the import-linter
 contract "worker runtime is the sole composition root".
 """
 

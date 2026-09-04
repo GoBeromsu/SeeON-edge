@@ -31,7 +31,7 @@ from shared.events.delivery_queue import (
     SnapshotDispositionEntry,
 )
 from tests_support.compact_authority_db import prepare_compact_database
-from worker.pipeline.inference_coordinator import (
+from worker.pipeline.inference_telemetry import (
     CameraInferenceTelemetry,
     InferenceTelemetrySnapshot,
 )

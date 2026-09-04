@@ -16,7 +16,6 @@ Shared `ClipRecorder`, one actor thread, camera-local rings. `ClipAdmission` all
 
 The `nvidia` runtime owns the policy/attach handoff; this package receives its
 `NativeEvidenceTrigger` and binds source identity to the packet-ring selection.
-See `worker/runtime/deepstream/AGENTS.md`.
 
 ## Durable staging and delivery queue
 

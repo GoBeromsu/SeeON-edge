@@ -100,7 +100,7 @@ def _identities(
 def _manifest(
     *,
     registry: CompiledDetectionModuleRegistry = DETECTION_MODULE_REGISTRY,
-    profile_name: str = "cpu-host",
+    profile_name: str = "flow",
     threshold: float = 0.5,
     facts: RuntimeEnvironmentFacts | None = None,
     reverse_identities: bool = False,
@@ -142,7 +142,7 @@ def _manifest(
         config_version=9,
         restart_generation=3,
         detector_version="worker-domain-detectors-v1",
-        environment=facts or _facts(nvidia=profile_name == "nvidia"),
+        environment=facts or _facts(nvidia=profile_name == "flow"),
         edge_database_schema_version=5,
     )
 
@@ -152,7 +152,6 @@ def test_runtime_manifest_identity_tracks_effective_module_profile_model_and_pol
     equivalent = _manifest(reverse_identities=True)
     module_changed = _manifest(registry=_compiled_with(module_change=True))
     model_changed = _manifest(registry=_compiled_with(model_change=True))
-    profile_changed = _manifest(profile_name="nvidia")
     policy_changed = _manifest(threshold=0.72)
 
     assert equivalent.sha256 == baseline.sha256
@@ -163,17 +162,15 @@ def test_runtime_manifest_identity_tracks_effective_module_profile_model_and_pol
                 baseline.sha256,
                 module_changed.sha256,
                 model_changed.sha256,
-                profile_changed.sha256,
                 policy_changed.sha256,
             }
         )
-        == 5
+        == 4
     )
 
     baseline_content = json.loads(baseline.canonical_json)
     assert json.loads(module_changed.canonical_json)["modules"] != baseline_content["modules"]
     assert json.loads(model_changed.canonical_json)["components"] != baseline_content["components"]
-    assert json.loads(profile_changed.canonical_json)["profile"] != baseline_content["profile"]
     assert (
         json.loads(policy_changed.canonical_json)["cameras"][0]["policies"]
         != baseline_content["cameras"][0]["policies"]

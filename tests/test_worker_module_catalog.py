@@ -83,7 +83,7 @@ def _boot(profile_name: str) -> BootContext:
 
 
 def _environment(profile_name: str) -> RuntimeEnvironmentFacts:
-    nvidia = profile_name == "nvidia"
+    nvidia = profile_name == "flow"
     return RuntimeEnvironmentFacts(
         worker_build_revision=_BUILD_REVISION,
         os_name="Linux",
@@ -100,7 +100,7 @@ def _environment(profile_name: str) -> RuntimeEnvironmentFacts:
 def _manifest(
     *,
     registry: CompiledDetectionModuleRegistry = DETECTION_MODULE_REGISTRY,
-    profile_name: str = "cpu-host",
+    profile_name: str = "flow",
     fall_threshold: float | None = None,
     reordered: bool = False,
 ) -> AppliedRuntimeManifest:
@@ -340,7 +340,6 @@ def test_manifest_identity_changes_iff_effective_catalog_or_runtime_state_change
         "component": _manifest(registry=_registry_with(component_change=True)),
         "model": _manifest(registry=_registry_with(model_change=True)),
         "policy": _manifest(fall_threshold=0.72),
-        "profile": _manifest(profile_name="nvidia"),
     }
 
     assert equivalent.sha256 == baseline.sha256
@@ -361,7 +360,6 @@ def test_manifest_identity_changes_iff_effective_catalog_or_runtime_state_change
         json.loads(changed["policy"].canonical_json)["cameras"][0]["policies"]
         != baseline_content["cameras"][0]["policies"]
     )
-    assert json.loads(changed["profile"].canonical_json)["profile"] != baseline_content["profile"]
 
 
 def test_module_definitions_are_profile_independent_and_emit_no_secrets_or_local_paths() -> None:
@@ -379,15 +377,12 @@ def test_module_definitions_are_profile_independent_and_emit_no_secrets_or_local
         }
     )
 
-    cpu_content = json.loads(_manifest().canonical_json)
-    nvidia_content = json.loads(_manifest(profile_name="nvidia").canonical_json)
-    assert cpu_content["modules"] == nvidia_content["modules"]
-    assert cpu_content["profile"] != nvidia_content["profile"]
+    flow_content = json.loads(_manifest().canonical_json)
 
     serialized_catalog = canonical_json(
         [module_content(definition) for definition in DETECTION_MODULE_REGISTRY.definitions]
     )
-    serialized_manifest = canonical_json(cpu_content)
+    serialized_manifest = canonical_json(flow_content)
     forbidden_fragments = (
         "://",
         "/Users/",
@@ -406,5 +401,5 @@ def test_module_definitions_are_profile_independent_and_emit_no_secrets_or_local
     )
     assert all(
         not value.startswith(("/", "\\\\")) and re.match(r"[A-Za-z]:[\\/]", value) is None
-        for value in _strings((cpu_content["modules"], cpu_content["components"]))
+        for value in _strings((flow_content["modules"], flow_content["components"]))
     )

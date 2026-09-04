@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -11,7 +12,6 @@ from contracts.observation import (
     BoundingBox,
     FrameObservation,
 )
-from worker.pipeline.analytics.composite import CompositeResult
 from worker.pipeline.trace import (
     BoundedTraceWriter,
     TraceCapture,
@@ -40,7 +40,14 @@ def _packet(seq: int, *, pts: float | None = None) -> FramePacket:
     )
 
 
-def _result(seq: int) -> CompositeResult:
+@dataclass(frozen=True)
+class _TraceResult:
+    module_results: tuple[object, ...]
+    observation: FrameObservation
+    decision_input: DecisionInput
+
+
+def _result(seq: int) -> _TraceResult:
     person = BoundingBox(1, 0, 4, 4, 0.875)
     bed = BoundingBox(0, 0, 5, 4, 0.75, ((0, 1), (5, 0), (5, 4), (0, 4)))
     observation = FrameObservation(
@@ -58,7 +65,7 @@ def _result(seq: int) -> CompositeResult:
         frame_index=seq,
         bed_region=BedRegionDebugSnapshot(source=BedRegionCacheState.FRESH),
     )
-    return CompositeResult((), observation, decision_input)
+    return _TraceResult((), observation, decision_input)
 
 
 def _capture() -> TraceCapture:

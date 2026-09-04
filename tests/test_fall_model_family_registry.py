@@ -41,7 +41,6 @@ from worker.domains import DETECTION_MODULE_REGISTRY, CameraModuleContext
 from worker.interfaces.fall_model import FallV2Probabilities
 from worker.runtime.config import WorkerConfig
 from worker.runtime.lease import GpuLease
-from worker.runtime.profile.registry import VerifyResult
 from worker.runtime.worker import WorkerRuntime
 
 
@@ -118,10 +117,9 @@ def _config(
 def _runtime(config: WorkerConfig, state_dir: Path) -> WorkerRuntime:
     return WorkerRuntime(
         config,
-        env={"ML_WORKER_PROFILE": "cpu"},
+        env={"ML_WORKER_PROFILE": "flow"},
         serving_client=_ForbiddenServingClient(),
         acquire_lease=lambda: GpuLease.acquire(state_dir),
-        decode_probe=lambda _decode: VerifyResult(True, "cpu", "decode", "available"),
     )
 
 

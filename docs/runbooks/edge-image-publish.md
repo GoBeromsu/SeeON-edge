@@ -269,7 +269,6 @@ ships. Bumping it to match a release tag would tell every edge device its
 existing database belongs to a different lineage. The same goes for the
 torch/CUDA/ultralytics versions reported by
 `worker/runtime/provenance/environment.py` and
-`worker/native/deepstream/export.py`: those are other people's versions.
 
 Check the carriers locally before tagging:
 

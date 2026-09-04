@@ -8,7 +8,7 @@ import pytest
 
 from contracts.decode_diagnostics import DecodeSelection
 from contracts.observation import BedRegionCacheState
-from worker.pipeline.inference_coordinator import (
+from worker.pipeline.inference_telemetry import (
     CameraInferenceTelemetry,
     InferenceTelemetrySnapshot,
 )

@@ -54,9 +54,8 @@ COPY contracts ./contracts
 COPY shared ./shared
 COPY worker ./worker
 COPY worker/adapters/deepstream/configs /opt/seeon/deepstream-flow
-RUN test ! -e /app/worker/tools/deepstream_canary \
-    && mkdir -p /app/models/fall/pose-bbox56-gru /app/models/pose /app/models/bed \
-                /var/lib/seeon-state /var/cache/seeon/tensorrt /var/lib/seeon-records
+RUN mkdir -p /app/models/fall/pose-bbox56-gru /app/models/pose /app/models/bed \
+            /var/lib/seeon-state /var/cache/seeon/tensorrt /var/lib/seeon-records
 
 ARG EDGE_DATABASE_SCHEMA_VERSION=18
 ARG SOURCE_REVISION

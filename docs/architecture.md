@@ -86,14 +86,14 @@ Flow is one-way. A layer may depend on the layer above it and on
 
 ```text
         ┌─────────────────────────────────────────────────────────────┐
-        │ 1. INGEST            worker/pipeline/ingest/                │
+        │ 1. INGEST            Flow media plane/                │
         │    RTSP/file/webcam source -> decode adapter -> FramePacket │
         │    per-camera capture loop, reconnect/backoff, probe        │
         └─────────────────────────────────────────────────────────────┘
                                    │  FramePacket  (carries an image)
                                    ▼
         ┌─────────────────────────────────────────────────────────────┐
-        │ 2. FRAME BUS         worker/pipeline/bus/                   │
+        │ 2. FRAME BUS         Flow media plane/                   │
         │    bounded, drop-oldest fan-out; per-camera scheduler;      │
         │    depth/drop metrics. Back-pressure is visible, not silent │
         └─────────────────────────────────────────────────────────────┘
@@ -197,15 +197,14 @@ guards both halves.
 
 | State | Scope | Owner |
 | --- | --- | --- |
-| Tracker | per camera | `worker/pipeline/perception/tracker.py` |
 | SceneState | per camera | `worker/pipeline/perception/scene_state.py` |
 | Window buffer and fall probabilities | per camera | `worker/pipeline/perception/window_buffer.py` |
 | Fall latch | per camera | `worker/domains/fall/detector.py` |
 | Bed assignments, grace/hold, night window | per camera | `worker/domains/bed_exit/` |
 | IncidentManager | per camera | `worker/pipeline/decision/incident_manager.py` |
-| Frame-bus subscription and scheduler slot | per camera | `worker/pipeline/bus/` |
-| Encoder session and segment ring | per camera | `worker/adapters/encode/session.py` |
-| Ingest loop and reconnect backoff | per camera | `worker/pipeline/ingest/lifecycle.py` |
+| Frame-bus subscription and scheduler slot | per camera | `Flow media plane/` |
+| Encoder session and segment ring | per camera | `Flow media plane/session.py` |
+| Ingest loop and reconnect backoff | per camera | `Flow media plane/lifecycle.py` |
 | Model objects and extractor instances | shared, one per task per process | `worker/runtime/model_composition.py` |
 | Resolved profile and device selection | shared, one per process | `worker/runtime/profile/` |
 | GPU lease | shared, one per process | `worker/runtime/lease.py` |
@@ -334,9 +333,7 @@ tree is deleted.
 | `edge/perception/domain_input.py` | `worker/pipeline/perception/decision_input.py` |
 | `edge/perception/fall_window_classifier.py` | `worker/domains/fall/classifier.py` |
 | `edge/perception/observation_builder.py` | `worker/pipeline/perception/observation_builder.py` |
-| `edge/perception/overlay_renderer.py` | `worker/pipeline/output/_overlay_primitives.py` (drawing primitives only) |
 | `edge/perception/scene_state.py` | `worker/pipeline/perception/scene_state.py` |
-| `edge/perception/tracker.py` | `worker/pipeline/perception/tracker.py` |
 | `edge/perception/window_buffer.py` | `worker/pipeline/perception/window_buffer.py` |
 | `edge/runners/AGENTS.md` | folded into `worker/adapters/AGENTS.md` |
 | `edge/runners/device.py` | `worker/runtime/profile/device.py` |
@@ -350,33 +347,32 @@ tree is deleted.
 | `edge/serving_client/base.py` | `worker/interfaces/serving.py` |
 | `edge/serving_client/in_process.py` | `worker/adapters/model/in_process.py` |
 | `edge/sources/AGENTS.md` | folded into `worker/pipeline/AGENTS.md` |
-| `edge/sources/camera_probe.py` | `worker/pipeline/ingest/camera_probe.py` |
-| `edge/sources/frame_source.py` | `worker/pipeline/ingest/frame_source.py` |
-| `edge/sources/probe.py` | `worker/pipeline/ingest/probe.py` |
-| `edge/sources/registry.py` | `worker/pipeline/ingest/registry.py` |
-| `edge/sources/rtsp.py` | `worker/pipeline/ingest/rtsp.py` |
-| `edge/sources/rtsp_backend.py` | `worker/adapters/decode/cpu_av/` and `worker/adapters/decode/nvdec_cuvid/` |
-| `edge/sources/rtsp_url.py` | `worker/pipeline/ingest/rtsp_url.py` |
-| `edge/sources/video_file.py` | `worker/pipeline/ingest/video_file.py` |
-| `edge/sources/webcam.py` | `worker/pipeline/ingest/webcam.py` |
-| `edge/runtime/camera_worker.py` | split, no single owner: orchestration is `worker/pipeline/ingest/lifecycle.py` (`CameraIngestLoop`), `worker/pipeline/analytics/composite.py` (`CompositeExtractor`), and `worker/runtime/worker.py` (`CameraRuntimeContext`) — see the open gap below |
+| `edge/sources/camera_probe.py` | `Flow media plane/camera_probe.py` |
+| `edge/sources/frame_source.py` | `Flow media plane/frame_source.py` |
+| `edge/sources/probe.py` | `Flow media plane/probe.py` |
+| `edge/sources/registry.py` | `Flow media plane/registry.py` |
+| `edge/sources/rtsp.py` | `Flow media plane/rtsp.py` |
+| `edge/sources/rtsp_backend.py` | `Flow media plane/cpu_av/` and `Flow media plane/nvdec_cuvid/` |
+| `edge/sources/rtsp_url.py` | `Flow media plane/rtsp_url.py` |
+| `edge/sources/video_file.py` | `Flow media plane/video_file.py` |
+| `edge/sources/webcam.py` | `Flow media plane/webcam.py` |
+| `edge/runtime/camera_worker.py` | split, no single owner: orchestration is `Flow media plane/lifecycle.py` (`CameraIngestLoop`), `worker/pipeline/analytics/composite.py` (`CompositeExtractor`), and `worker/runtime/worker.py` (`CameraRuntimeContext`) — see the open gap below |
 | `edge/runtime/config_pull.py` | `worker/runtime/config/config_pull.py` plus `http_transport.py`, `pull_models.py` |
 | `edge/runtime/config_resolver.py` | `worker/runtime/config/config_resolver.py` |
 | `edge/runtime/edge_worker.py` | `worker/runtime/worker.py` (`WorkerRuntime`); its CLI half is `worker/__main__.py` |
 | `edge/runtime/edge_worker_config.py` | `worker/runtime/config/worker_models.py` plus `camera_models.py`, `domain_models.py`, `loader.py` |
-| `edge/runtime/edge_worker_supervisor.py` | `worker/pipeline/ingest/lifecycle.py` (`IngestSupervisor`); restart policy folded into `worker/runtime/worker.py` |
+| `edge/runtime/edge_worker_supervisor.py` | `Flow media plane/lifecycle.py` (`IngestSupervisor`); restart policy folded into `worker/runtime/worker.py` |
 | `edge/runtime/incident_manager.py` | `worker/pipeline/decision/incident_manager.py` |
 | `edge/runtime/latest_frame.py` | `worker/pipeline/output/live_view.py` (`LatestFrameStore`) |
 | `edge/runtime/lkg_store.py` | `worker/runtime/config/lkg_store.py` |
 | `edge/runtime/mjpeg_server.py` | `worker/pipeline/output/mjpeg_server.py` plus `_mjpeg_http.py` |
-| `edge/runtime/overlay_renderer.py` | `worker/pipeline/output/overlay.py` (`OverlayRenderer`) |
 | `edge/runtime/pipeline_bootstrap.py` | `worker/runtime/bootstrap.py` |
 | `edge/runtime/profile/AGENTS.md` | folded into `worker/runtime/AGENTS.md` |
 | `edge/runtime/profile/boot.py` | `worker/runtime/profile/boot.py` |
 | `edge/runtime/profile/registry.py` | `worker/runtime/profile/registry.py` |
 | `edge/runtime/runtime_diagnostics.py` | `worker/runtime/telemetry/runtime_diagnostics.py` |
 | `edge/runtime/runtime_status_sender.py` | `worker/runtime/telemetry/runtime_status_sender.py` plus `wire.py` |
-| `edge/runtime/scheduler.py` | `worker/pipeline/bus/scheduler.py` |
+| `edge/runtime/scheduler.py` | `Flow media plane/scheduler.py` |
 | `edge/runtime/status_store.py` | `worker/runtime/telemetry/status_store.py` |
 
 Deployment identity is deliberately unchanged by this map: the image and service
@@ -408,9 +404,9 @@ feature it proves. Developer-convenience harnesses are deferred with the tools.
 
 | Capability | v2 owner | Behaviour test | Disposition |
 | --- | --- | --- | --- |
-| RTSP ingest and reconnect policy | `worker/pipeline/ingest/rtsp.py`, `worker/pipeline/ingest/lifecycle.py` | `tests/test_worker_ingest_rtsp.py`, `tests/test_worker_ingest_lifecycle.py` | ported |
-| CPU decode adapter and capability probe | `worker/adapters/decode/cpu_av/adapter.py`, `worker/adapters/decode/cpu_av/probe.py` | `tests/test_worker_decode_cpu.py`, `tests/test_worker_opencv_decode_probe.py` | ported |
-| NVDEC decode probe | `worker/adapters/decode/nvdec_cuvid/probe.py` | `tests/test_worker_nvdec_probe.py` | ported |
+| RTSP ingest and reconnect policy | `Flow media plane/rtsp.py`, `Flow media plane/lifecycle.py` | `tests/test_worker_ingest_rtsp.py`, `tests/test_worker_ingest_lifecycle.py` | ported |
+| CPU decode adapter and capability probe | `Flow media plane/cpu_av/adapter.py`, `Flow media plane/cpu_av/probe.py` | `tests/test_worker_decode_cpu.py`, `tests/test_worker_opencv_decode_probe.py` | ported |
+| NVDEC decode probe | `Flow media plane/nvdec_cuvid/probe.py` | `tests/test_worker_nvdec_probe.py` | ported |
 | CUDA device selection and verification | `worker/adapters/device/cuda/probe.py` | `tests/test_worker_cuda_device_probe.py` | ported |
 | Model registry, warmup, inference | `worker/adapters/model/registry.py`, `worker/interfaces/serving.py` | `tests/test_worker_production_boot_dependencies.py` | ported |
 | Fall interpretation and episode policy | `worker/domains/fall/` | `tests/test_worker_fall_decider.py`, `tests/test_fall_policy_v2.py` | ported |
@@ -424,7 +420,6 @@ feature it proves. Developer-convenience harnesses are deferred with the tools.
 | Runtime status and diagnostics | `worker/runtime/telemetry/status_store.py`, `worker/runtime/telemetry/runtime_status_sender.py` | `tests/test_worker_runtime_status_sender_composition.py` | ported |
 | CLI entrypoint and bounded-run cap | `worker/__main__.py` | `tests/test_worker_entrypoint.py`, `tests/test_worker_max_frames_per_camera_composition.py` | ported |
 | Per-frame perception: tracking, scene state, window buffering | `worker/pipeline/perception/`, `worker/pipeline/camera_pipeline.py` | `tests/test_perception_observation_builder.py`, `tests/test_demo_tracking.py`, `tests/test_worker_camera_pipeline_pump.py` | ported |
-| Debug overlay rendering | `worker/pipeline/output/overlay.py`, `worker/pipeline/output/_overlay_primitives.py` | `tests/test_worker_overlay_renderer.py`, `tests/test_worker_overlay_primitives.py` | ported |
 | Operator MJPEG live view | `worker/pipeline/output/mjpeg_server.py`, `worker/pipeline/output/live_view.py`, composed in `worker/runtime/worker.py` | `tests/test_worker_live_view_composition.py` | ported |
 | GPU stability preflight installer | — | — | tracked-deferred (`scripts/edge-preflight/gpu-stability-install.sh`, untracked at baseline; [#6](https://github.com/SeniorAILab/eldercare-fall-ml-v2/issues/6)) |
 | GPU telemetry preflight | — | — | tracked-deferred (`scripts/edge-preflight/gpu-telemetry.sh`, untracked at baseline; [#7](https://github.com/SeniorAILab/eldercare-fall-ml-v2/issues/7)) |
@@ -552,15 +547,15 @@ path.
 
 What is still true is the ownership claim. The migration plan names this file as
 the owner of `edge/runtime/camera_worker.py`'s orchestration, and that
-orchestration remains split across `worker/pipeline/ingest/lifecycle.py`
+orchestration remains split across `Flow media plane/lifecycle.py`
 (supervision and reconnect), `worker/pipeline/analytics/composite.py`
 (extraction fan-out), and `worker/runtime/worker.py` (composition and restart
 policy). The ownership row above describes that split because that is what is on
 disk. Either move the orchestration into the pump, or amend the plan's Scope
 table — do not describe the file as owning something it does not.
 
-**No `worker/runtime/supervisor.py` and no `worker/pipeline/bus/latest_frame.py`.**
-The plan named both. Supervision landed in `worker/pipeline/ingest/lifecycle.py`
+**No `worker/runtime/supervisor.py` and no `Flow media plane/latest_frame.py`.**
+The plan named both. Supervision landed in `Flow media plane/lifecycle.py`
 as `IngestSupervisor` with restart policy in `worker/runtime/worker.py`, and the
 latest-frame store landed in `worker/pipeline/output/live_view.py` as
 `LatestFrameStore` (a non-consuming latest-value store, not a queue). The rows
@@ -572,13 +567,8 @@ keyframe-aligned stream epoch/configuration without transcoding. Decoded frames
 remain analysis and optional snapshot taps. Transformed derivative publication
 is not a current production surface.
 
-**Live overlays use one canonical scene; replay is process-local.**
-`worker/types/overlay_scene.py` owns the versioned, hardware-neutral primitives
-and explicit present/stale/missing/not-evaluated semantics.
-`OverlaySceneBuilder` creates those primitives from frozen live observations;
-renderers do not run policy or inference. Decision-trace replay stays in the
-worker process as a bounded in-memory writer. There is no backend analysis-trace
-HTTP or SQLite warehouse.
+Decision-trace replay stays in the worker process as a bounded in-memory
+writer. There is no backend analysis-trace HTTP or SQLite warehouse.
 
 ### Replay trace v2
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -12,25 +13,27 @@ from contracts.observation import (
     BoundingBox,
     FrameObservation,
 )
-from contracts.runner import pose_result
 from shared.detection_policies import FallPolicyV2, make_effective_policy
 from shared.events.delivery_queue import DeliveryQueue, EventEntry
 from worker.domains.bed_exit import BedExitConfig, BedExitMonitor
 from worker.domains.fall import FallPolicyDeciderV2, FallV2DomainDecider, FallV2Probabilities
-from worker.pipeline.analytics.composite import CompositeResult
-from worker.pipeline.camera_pipeline import CameraPipelinePump
-from worker.pipeline.decision import EventAggregator, IncidentManager
-from worker.pipeline.output.evidence.evidence_stager import DurableEvidenceStager
 from worker.pipeline.trace import (
     BoundedTraceWriter,
     TraceCapture,
     TraceIdentity,
     TraceRetentionPolicy,
 )
-from worker.types import DecisionInput, FramePacket, ModuleResult
+from worker.types import DecisionInput, FramePacket
 
 RUNTIME_MANIFEST_SHA256 = "a" * 64
 COMPONENT_SHA256 = "b" * 64
+
+
+@dataclass(frozen=True)
+class _TraceResult:
+    module_results: tuple[object, ...]
+    observation: FrameObservation
+    decision_input: DecisionInput
 
 
 class _ImmediateV2Classifier:
@@ -171,75 +174,6 @@ def _trace_capture(detector: FallV2DomainDecider) -> TraceCapture:
     )
 
 
-def _stager(database: Path) -> DurableEvidenceStager:
-    return DurableEvidenceStager(
-        database_path=database,
-        camera_id="camera-a",
-        facility_id="facility-a",
-        resident_id=None,
-        config_version=1,
-        clock=lambda: 1.0,
-        runtime_manifest_sha256=RUNTIME_MANIFEST_SHA256,
-    )
-
-
-def test_real_camera_pump_captures_before_emitting_the_admitted_event(
-    tmp_path: Path,
-) -> None:
-    detector = _traceable_fall_v2(camera_id="camera-a", facility_id="facility-a")
-
-    class _Analytics:
-        def __init__(self) -> None:
-            self.frame_index = 0
-
-        def process(self, _packet: FramePacket, **_kwargs: object) -> CompositeResult:
-            self.frame_index += 1
-            decision_input = _input(BoundingBox(10, 10, 70, 90, 0.9), frame_index=self.frame_index)
-            return CompositeResult((), decision_input.observation, decision_input)
-
-    class _Sink:
-        def __init__(self) -> None:
-            self.events: list[object] = []
-
-        def emit_for_frame(self, event: object, _packet: FramePacket) -> None:
-            self.events.append(event)
-
-        def emit(self, event: object) -> None:
-            self.events.append(event)
-
-    class _Subscription:
-        def take(self, timeout_sec: float | None = None) -> None:
-            del timeout_sec
-
-    writer = BoundedTraceWriter(tmp_path / "detail-cache", TraceRetentionPolicy.testing())
-    writer.start()
-    sink = _Sink()
-    pump = CameraPipelinePump(
-        "camera-a",
-        _Subscription(),  # type: ignore[arg-type]
-        _Analytics(),  # type: ignore[arg-type]
-        EventAggregator((detector,), IncidentManager(cooldown_sec=0.0), monotonic=lambda: 1.0),
-        sink,  # type: ignore[arg-type]
-        trace_capture=_trace_capture(detector),
-        trace_writer=writer,
-    )
-    try:
-        for _ in range(3):
-            pump._pump_one(  # noqa: SLF001
-                _packet(), ModuleResult("pose", pose_result((), ()), 0.0, "pose")
-            )
-    finally:
-        writer.stop()
-
-    assert len(sink.events) == 1
-    event = sink.events[0]
-    assert hasattr(event, "audit") and event.audit is not None
-    trace_id = event.audit["decision_trace_id"]
-    assert trace_id in {
-        decision.trace_id for decision in writer.recover_camera("camera-a").decisions
-    }
-
-
 def test_admitted_event_decision_basis_is_atomic_in_delivery_queue(
     tmp_path: Path,
 ) -> None:
@@ -247,7 +181,7 @@ def test_admitted_event_decision_basis_is_atomic_in_delivery_queue(
     # transition_votes=1: the very first qualifying frame opens the episode.
     decision_input = _input(BoundingBox(10, 10, 70, 90, 0.9), frame_index=1)
     events = detector.update(decision_input)
-    result = CompositeResult((), decision_input.observation, decision_input)
+    result = _TraceResult((), decision_input.observation, decision_input)
     writer = BoundedTraceWriter(tmp_path / "detail-cache", TraceRetentionPolicy.testing())
     writer.start()
     try:

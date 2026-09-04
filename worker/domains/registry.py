@@ -37,10 +37,10 @@ from worker.domains.module_definition import (
     PolicySchemaIdentity,
     ScheduleRule,
 )
+from worker.domains.tracker import GreedyIouTracker
 from worker.interfaces.decision import Decider
 from worker.interfaces.fall_model import FallV2ModelProtocol
 from worker.pipeline.analytics.merge import result_merger_names
-from worker.pipeline.perception import GreedyIouTracker
 from worker.types import CURRENT_TEMPORAL_PROFILE
 
 AVAILABLE_OBSERVATION_CHANNELS = frozenset({"person_boxes", "poses", "track_ids", "bed_regions"})

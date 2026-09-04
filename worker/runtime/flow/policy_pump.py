@@ -12,15 +12,13 @@ from typing import Protocol, final, runtime_checkable
 
 from contracts.observation import BoundingBox
 from contracts.replay_trace import ReplayRow, ReplaySource, ReplayTrack
-from worker.native.deepstream.control import ChildControlError
 from worker.pipeline.decision import EventAggregator
 from worker.pipeline.output.evidence_attacher import AlertEvidenceAttacher
 from worker.pipeline.perception import SceneState, build_decision_input, build_frame_observation
-from worker.runtime.flow.metadata_slot import AcceptanceToken, LatestMetadataSlot
-from worker.types.metadata import MetadataFrame, SourceBinding
 from worker.pipeline.trace.replay_trace_writer import ReplayTraceWriter
-from worker.runtime.deepstream.canary_telemetry import NativeCanaryTelemetry
+from worker.runtime.flow.metadata_slot import AcceptanceToken, LatestMetadataSlot
 from worker.types import BusinessEvent, ChannelState, NativeEvidenceTrigger
+from worker.types.metadata import MetadataFrame, SourceBinding
 
 LOGGER = logging.getLogger(__name__)
 _FPS_WINDOW_SEC = 10.0
@@ -59,7 +57,6 @@ class NativePolicyContext:
     attacher: AlertEvidenceAttacher
     diagnostics: NativeDiagnostics
     bed_interval: int
-    canary_telemetry: NativeCanaryTelemetry | None = None
     replay_trace: ReplayTraceWriter | None = None
     # G7: composition supplies the evaluated bed-exit detection window.
     night_window_active: Callable[[], bool] | None = None
@@ -81,7 +78,6 @@ class NativePolicyPump:
         self._attacher = context.attacher
         self._diagnostics = context.diagnostics
         self._bed_interval = context.bed_interval
-        self._canary_telemetry = context.canary_telemetry
         self._replay_trace = context.replay_trace
         self._night_window_active = context.night_window_active
         self._recreate_decision = context.recreate_decision
@@ -153,16 +149,10 @@ class NativePolicyPump:
                 token = AcceptanceToken(self._binding, token.native_publish_sequence)
                 continue
             token = AcceptanceToken(self._binding, frame.native_publish_sequence)
-            if self._canary_telemetry is not None:
-                self._canary_telemetry.record(
-                    frame.frame.identity.source_pts or 0,
-                    frame.source_time_ns,
-                    frame.native_publish_sequence,
-                )
             self._diagnostics.record_native_detection_attempt(self.camera_id)
             try:
                 self._process(frame)
-            except (ChildControlError, OSError, ValueError, RuntimeError):
+            except (OSError, ValueError, RuntimeError):
                 self.failure_count += 1
                 LOGGER.warning(
                     "native policy frame failed: camera_id=%s",

@@ -82,7 +82,7 @@ def _boot(profile: str) -> BootContext:
 
 
 def _identities(
-    *, runtime: str = "cpu", device: str = "cpu"
+    *, runtime: str = "onnxruntime", device: str = "cuda"
 ) -> tuple[SharedComponentIdentity, ...]:
     return tuple(
         SharedComponentIdentity(
@@ -148,7 +148,7 @@ def _persisted_bed_camera() -> AppliedCameraState:
 
 def _manifest(
     *,
-    profile: str = "cpu",
+    profile: str = "flow",
     identities: tuple[SharedComponentIdentity, ...] | None = None,
     cameras: tuple[AppliedCameraState, ...] | None = None,
     facts: RuntimeEnvironmentFacts | None = None,
@@ -170,7 +170,7 @@ def _manifest(
         config_version=42,
         restart_generation=7,
         detector_version="worker-domain-detectors-v1",
-        environment=facts or _facts(nvidia=profile == "nvidia"),
+        environment=facts or _facts(nvidia=True),
         edge_database_schema_version=5,
     )
 
@@ -178,15 +178,22 @@ def _manifest(
 def test_manifest_is_canonical_hashable_and_repeatable() -> None:
     first = _manifest()
     second = build_applied_runtime_manifest(
-        boot=_boot("cpu"),
+        boot=_boot("flow"),
         module_registry=DETECTION_MODULE_REGISTRY,
         module_versions={"bed_exit": 1, "fall": 2},
         component_identities=tuple(reversed(_identities())),
-        cameras=tuple(reversed(_cameras())),
+        cameras=tuple(
+            reversed(
+                tuple(
+                    replace(camera, effective_decode_backend=_boot("flow").decode)
+                    for camera in _cameras()
+                )
+            )
+        ),
         config_version=42,
         restart_generation=7,
         detector_version="worker-domain-detectors-v1",
-        environment=_facts(),
+        environment=_facts(nvidia=True),
         edge_database_schema_version=5,
     )
 
@@ -371,43 +378,6 @@ def test_persisted_bed_zone_requires_source_dimensions() -> None:
         )
 
 
-def test_cpu_and_nvidia_preserve_semantics_but_record_execution_difference() -> None:
-    cpu = _manifest()
-    nvidia = _manifest(
-        profile="nvidia",
-        identities=_identities(runtime="cuda", device="cuda"),
-        facts=_facts(nvidia=True),
-    )
-    cpu_content = json.loads(cpu.canonical_json)
-    nvidia_content = json.loads(nvidia.canonical_json)
-
-    assert cpu.sha256 != nvidia.sha256
-    assert cpu_content["modules"] == nvidia_content["modules"]
-    assert [camera["effective_decode_backend"] for camera in cpu_content["cameras"]] == [
-        "opencv",
-        "opencv",
-    ]
-    assert [camera["effective_decode_backend"] for camera in nvidia_content["cameras"]] == [
-        "nvdec",
-        "nvdec",
-    ]
-    for cpu_camera, nvidia_camera in zip(
-        cpu_content["cameras"], nvidia_content["cameras"], strict=True
-    ):
-        assert {
-            key: value for key, value in cpu_camera.items() if key != "effective_decode_backend"
-        } == {
-            key: value for key, value in nvidia_camera.items() if key != "effective_decode_backend"
-        }
-    assert cpu_content["profile"]["canonical"] == "cpu-host"
-    assert nvidia_content["profile"]["canonical"] == "nvidia"
-    # The unified `nvidia` profile keeps frames on the device after nvdec, so the
-    # host-bridge era's two H2D full-frame uploads (inference input + nvenc input)
-    # are gone from the recorded memory path.
-    assert nvidia_content["profile"]["device_resident_after_decode"] is True
-    assert nvidia_content["profile"]["full_frame_copy_counts"] == {"d2h": 0, "h2d": 0}
-
-
 def test_policy_content_change_changes_only_applied_identity() -> None:
     baseline = _manifest()
     changed = _manifest(cameras=_cameras(threshold=0.72))
@@ -427,13 +397,18 @@ def test_unresolved_or_contradictory_component_identity_refuses_manifest() -> No
     with pytest.raises(AppliedRuntimeManifestError, match="unresolved applied identity.*bed"):
         _manifest(
             identities=tuple(
-                identity for identity in _identities() if identity.component_id != "bed"
+                identity
+                for identity in _identities(
+                    runtime="onnxruntime",
+                    device="cuda",
+                )
+                if identity.component_id != "bed"
             )
         )
 
     contradictory = tuple(
         replace(identity, artifact_digest="f" * 64) if identity.component_id == "pose" else identity
-        for identity in _identities()
+        for identity in _identities(runtime="onnxruntime", device="cuda")
     )
     with pytest.raises(AppliedRuntimeManifestError, match="contradictory artifact identity.*pose"):
         _manifest(identities=contradictory)
@@ -450,15 +425,6 @@ def test_secret_url_and_absolute_path_are_never_serialized() -> None:
     assert "/var/lib/" not in manifest.canonical_json
     assert "facility_id" not in manifest.canonical_json
     assert "relay" not in manifest.canonical_json
-
-
-def test_nvidia_manifest_requires_verified_driver_and_runtime_facts() -> None:
-    with pytest.raises(AppliedRuntimeManifestError, match="NVIDIA applied identity"):
-        _manifest(
-            profile="nvidia",
-            identities=_identities(runtime="cuda", device="cuda"),
-            facts=_facts(),
-        )
 
 
 def test_local_manifest_record_preserves_opaque_camera_identity_bytes(

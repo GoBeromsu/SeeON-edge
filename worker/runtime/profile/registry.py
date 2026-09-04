@@ -27,7 +27,7 @@ MpsProbeSource: TypeAlias = Callable[[], bool]
 DeviceResidentProbeSource: TypeAlias = Callable[[], "VerifyResult"]
 
 ML_WORKER_PROFILE_ENV: Final = "ML_WORKER_PROFILE"
-DEFAULT_PROFILE_NAME: Final = "cpu"
+DEFAULT_PROFILE_NAME: Final = "flow"
 
 
 class ProfileError(RuntimeError):
@@ -97,29 +97,6 @@ class ProfileSpec:
         )
 
 
-_CPU_HOST = ProfileSpec(
-    "cpu-host",
-    ("cpu-host", "cpu"),
-    "cpu",
-    "opencv",
-    "numpy-rgb24",
-    "cpu",
-    "numpy-host",
-    "libx264",
-    None,
-)
-_NVIDIA = ProfileSpec(
-    "nvidia",
-    ("nvidia",),
-    "cuda",
-    "nvdec",
-    "cuda-nv12-to-rgb24",
-    "tensorrt",
-    "cuda-device",
-    "h264_nvenc",
-    None,
-    concrete_stages_available=True,
-)
 _FLOW = ProfileSpec(
     "flow",
     ("flow",),
@@ -132,39 +109,10 @@ _FLOW = ProfileSpec(
     None,
     concrete_stages_available=True,
 )
-_INTEL_VAAPI_HOST = ProfileSpec(
-    "intel-vaapi-host",
-    ("intel-vaapi-host", "igpu"),
-    "cpu",
-    "vaapi",
-    "numpy-rgb24",
-    "cpu",
-    "numpy-host",
-    "libx264",
-    None,
-    decode_fallback="opencv",
-)
-_APPLE_MPS_HOST = ProfileSpec(
-    "apple-mps-host",
-    ("apple-mps-host", "mps"),
-    "mps",
-    "opencv",
-    "mps-tensor-upload",
-    "mps",
-    "numpy-host",
-    "libx264",
-    None,
-)
 CANONICAL_PROFILE_REGISTRY: Final[Mapping[str, ProfileSpec]] = MappingProxyType(
     {
         spec.name: spec
-        for spec in (
-            _CPU_HOST,
-            _INTEL_VAAPI_HOST,
-            _APPLE_MPS_HOST,
-            _NVIDIA,
-            _FLOW,
-        )
+        for spec in (_FLOW,)
     }
 )
 PROFILE_ALIASES: Final[Mapping[str, str]] = MappingProxyType(
@@ -213,7 +161,9 @@ def select_profile(
         return ProfileSelection(requested, registry[requested])
     except KeyError as error:
         choices = "|".join(sorted(registry))
-        raise ProfileError(f"unknown ML_WORKER_PROFILE {requested!r}; set {choices}") from error
+        raise ProfileError(
+            f"ADR-0002: unsupported ML_WORKER_PROFILE {requested!r}; set {choices}"
+        ) from error
 
 
 def _edge(
@@ -236,30 +186,7 @@ def _memory_path_for(
     tuple[RuntimeProfileEdge, ...],
 ]:
     del decode, encode  # Device vs host path is selected by spec.name, not these.
-    if spec.name == "apple-mps-host":
-        return (
-            (
-                MemoryPathStep("decode", MemoryKind.HOST, PixelFormat.RGB24),
-                MemoryPathStep("preprocess", MemoryKind.HOST, PixelFormat.RGB24),
-                MemoryPathStep("inference", MemoryKind.MPS_DEVICE, PixelFormat.RGB24),
-                MemoryPathStep("overlay", MemoryKind.HOST, PixelFormat.RGB24),
-                MemoryPathStep("encode", MemoryKind.HOST, PixelFormat.RGB24),
-            ),
-            (ProfileConverter("mps-inference-host-input-upload", _HOST_RGB, _MPS_RGB, "h2d"),),
-            (
-                _edge("decode", "preprocess", _HOST_RGB, _HOST_RGB),
-                _edge(
-                    "preprocess",
-                    "inference",
-                    _HOST_RGB,
-                    _MPS_RGB,
-                    "mps-inference-host-input-upload",
-                ),
-                _edge("decode", "overlay", _HOST_RGB, _HOST_RGB),
-                _edge("overlay", "encode", _HOST_RGB, _HOST_RGB),
-            ),
-        )
-    if spec.name in {"nvidia", "flow"}:
+    if spec.name == "flow":
         device_stages: tuple[tuple[ProfileStage, PixelFormat], ...] = (
             ("decode", PixelFormat.NV12),
             ("preprocess", PixelFormat.NV12),
@@ -286,23 +213,7 @@ def _memory_path_for(
                 _edge("overlay", "encode", _CUDA_RGB, _CUDA_RGB),
             ),
         )
-    host_stages: tuple[ProfileStage, ...] = (
-        "decode",
-        "preprocess",
-        "inference",
-        "overlay",
-        "encode",
-    )
-    return (
-        tuple(MemoryPathStep(stage, MemoryKind.HOST, PixelFormat.RGB24) for stage in host_stages),
-        (),
-        (
-            _edge("decode", "preprocess", _HOST_RGB, _HOST_RGB),
-            _edge("preprocess", "inference", _HOST_RGB, _HOST_RGB),
-            _edge("decode", "overlay", _HOST_RGB, _HOST_RGB),
-            _edge("overlay", "encode", _HOST_RGB, _HOST_RGB),
-        ),
-    )
+    raise ProfileError(f"unsupported production profile {spec.name!r}")
 
 
 def runtime_descriptor_for(
@@ -339,7 +250,7 @@ def runtime_descriptor_for(
         effective_converters=effective_converters,
         effective_edges=effective_edges,
         degraded_reasons=degraded_reasons,
-        device_resident_after_decode=(spec.name in {"nvidia", "flow"} and decode == "nvdec"),
+        device_resident_after_decode=(spec.name == "flow" and decode == "nvdec"),
         concrete_stages_available=spec.concrete_stages_available,
     )
 
@@ -410,14 +321,7 @@ def default_verifiers(
 
     return MappingProxyType(
         {
-            "cpu": _verify_cpu,
-            "cpu-host": _verify_cpu,
-            "nvidia": device_resident,
             "flow": flow,
-            "mps": mps,
-            "apple-mps-host": mps,
-            "igpu": _verify_igpu_device,
-            "intel-vaapi-host": _verify_igpu_device,
         }
     )
 

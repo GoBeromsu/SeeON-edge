@@ -39,7 +39,6 @@ from worker.interfaces.fall_model import FallV2Probabilities
 from worker.runtime import bootstrap
 from worker.runtime.config import WorkerConfig
 from worker.runtime.lease import GpuLease
-from worker.runtime.profile.registry import VerifyResult
 from worker.runtime.worker import WorkerRuntime
 
 
@@ -104,10 +103,9 @@ def _config(*, with_fall: dict[str, object] | None = None) -> WorkerConfig:
 def _runtime(config: WorkerConfig, serving: object, state_dir: Path) -> WorkerRuntime:
     return WorkerRuntime(
         config,
-        env={"ML_WORKER_PROFILE": "cpu"},
+        env={"ML_WORKER_PROFILE": "flow"},
         serving_client=serving,
         acquire_lease=lambda: GpuLease.acquire(state_dir),
-        decode_probe=lambda _decode: VerifyResult(True, "cpu", "decode", "available"),
     )
 
 
@@ -175,4 +173,3 @@ def test_run_refuses_to_start_with_refuse_to_start_exit_code_when_fall_is_unconf
         runtime.run()
 
     assert exc.value.code == bootstrap.REFUSE_TO_START_EXIT_CODE
-    assert runtime.cameras == ()

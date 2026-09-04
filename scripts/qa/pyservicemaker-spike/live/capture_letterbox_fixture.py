@@ -23,8 +23,6 @@ import threading
 from pathlib import Path
 from typing import Any
 
-import numpy as np
-
 sys.path.insert(0, "/app")
 
 from worker.adapters.deepstream.tensor_rows import rows_from_tensor  # noqa: E402

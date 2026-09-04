@@ -40,24 +40,6 @@ from worker.runtime.config import (
 from worker.runtime.worker import WorkerRuntime
 
 
-def _fake_loop_factory(camera: object, bus: object, reporter: object) -> None:
-    raise AssertionError("loop factory must not be invoked by CLI tests")
-
-
-@pytest.fixture(autouse=True)
-def _isolate_from_default_ingest_composition(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Mirrors `tests/test_worker_entrypoint.py`'s fixture of the same name:
-    never let CLI tests construct the real per-camera ingest loop.
-    """
-    real_init = WorkerRuntime.__init__
-
-    def _init_with_fake_loop_factory(self: WorkerRuntime, *args: object, **kwargs: object) -> None:
-        kwargs.setdefault("loop_factory", _fake_loop_factory)
-        real_init(self, *args, **kwargs)
-
-    monkeypatch.setattr(WorkerRuntime, "__init__", _init_with_fake_loop_factory)
-
-
 @pytest.fixture(autouse=True)
 def _no_env_config(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("EDGE_CAMERA_CONFIG", raising=False)

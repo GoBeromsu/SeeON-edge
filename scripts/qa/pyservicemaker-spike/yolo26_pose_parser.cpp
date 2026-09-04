@@ -6,7 +6,6 @@
 // YOLO26 pose head, end-to-end: rows are x1,y1,x2,y2,score,class in tensor
 // space followed by 17x3 keypoints (57 floats). The head already resolved
 // duplicates, so this deliberately performs no second NMS and preserves source
-// order, matching worker/native/deepstream/parity/parse.py.
 namespace {
 
 constexpr int kRows = 300;

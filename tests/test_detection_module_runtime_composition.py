@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import UTC, datetime
-from pathlib import Path
 from types import MappingProxyType
 from typing import final
 
@@ -32,12 +31,8 @@ from worker.domains.registry import (
     DETECTION_MODULE_REGISTRY,
 )
 from worker.pipeline.analytics.merge import merge_module_results, result_merger_names
-from worker.runtime.config import WorkerConfig
 from worker.runtime.config.domain_models import DomainsConfig
 from worker.runtime.model_composition import SharedComponentPool, compose_shared_components
-from worker.runtime.profile.boot import BootContext
-from worker.runtime.profile.registry import PROFILE_REGISTRY
-from worker.runtime.worker import WorkerRuntime
 from worker.types import CURRENT_TEMPORAL_PROFILE, BusinessEvent, DecisionInput, FramePacket
 
 ServingOption = str | int | float | bool | None
@@ -292,52 +287,6 @@ def test_activation_rejects_distinct_active_writers_to_one_output_adapter() -> N
             flags={},
             temporal_profile=CURRENT_TEMPORAL_PROFILE,
         )
-
-
-@pytest.mark.parametrize(
-    ("profile_name", "device"),
-    (("cpu-host", "cpu"),),
-)
-def test_worker_runtime_preflights_third_module_without_name_dispatch(
-    tmp_path: Path,
-    profile_name: str,
-    device: str,
-) -> None:
-    definition = _third_definition()
-    registry = _registry(definition)
-    config = WorkerConfig.model_validate(
-        {
-            "relay": {"url": "http://relay.test", "token": "token"},
-            "domains": {"versions": {"mobility_risk": 3}},
-            "clip": {"enabled": False},
-            "cameras": [
-                {
-                    "camera_id": "camera-1",
-                    "facility_id": "facility-1",
-                    "rtsp_url": "rtsp://example.test/camera-1",
-                    "frame_stride": 7,
-                }
-            ],
-        }
-    )
-    runtime = WorkerRuntime(
-        config,
-        serving_client=_Serving(),
-        module_registry=registry,
-        state_dir=tmp_path,
-        clip_store_dir=tmp_path,
-    )
-    profile = PROFILE_REGISTRY[profile_name]
-    boot = BootContext(profile, profile.device, profile.decode, profile.encode)
-
-    graph = runtime._initialize_models(boot)  # noqa: SLF001
-    runtime._warmed_component_ids = frozenset(graph.components)  # noqa: SLF001
-    plan = runtime._preflight_camera_graph(config.cameras[0])  # noqa: SLF001
-
-    assert plan.schedule == {"mobility-pose": 7, "mobility-bed": 11}
-    assert tuple(plan.definitions) == ("mobility_risk",)
-    assert tuple(plan.domain_deciders) == ("mobility_risk",)
-    assert {identity.device for identity in graph.identities} == {device}
 
 
 def test_production_shared_component_semantics_are_equal_on_cpu_and_nvidia() -> None:

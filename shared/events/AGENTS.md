@@ -44,7 +44,7 @@ Forbidden: `backend`, `worker`, camera I/O, model load, RTSP, decode, serving.
 This package doesn't own cameras, runtimes, detectors, or clip stores.
 Don't open RTSP, construct `WorkerRuntime`, seed a camera registry, or write `runtime_*` / `evidence_*` tables.
 Publishers and outboxes stay network-free except `EdgeIngestClient` and the evidence HTTP clients.
-Camera id is a string field. A live session belongs in `worker/pipeline/ingest`. Durable evidence staging belongs in `worker/pipeline/output/evidence`.
+Camera id is a string field. A live session belongs in `Flow media plane`. Durable evidence staging belongs in `worker/pipeline/output/evidence`.
 
 ## Focused tests
 

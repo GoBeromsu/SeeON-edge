@@ -59,7 +59,6 @@ harness errors, not DeepStream limitations.
 head's `[300,57]` layout with or without the batch dim (nvinfer strips it),
 uses strict `score > 0.05`, preserves source order, copies xyxy boxes, and
 performs no second NMS — the shipped decode in
-`worker/native/deepstream/parity/parse.py`. It adds a positive-area rejection
 the native pose parser does not have; G007 must drop that or prove it is
 equivalent.
 

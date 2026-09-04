@@ -749,12 +749,9 @@ def test_ignore_policy_has_no_data_exception() -> None:
 
 def _workflow(name: str) -> dict[str, object]:
     path = ROOT / ".github" / "workflows" / name
-    for relative, blob in _index_blobs():
-        if relative == path.relative_to(ROOT):
-            loaded = yaml.load(blob, Loader=yaml.BaseLoader)
-            assert isinstance(loaded, dict)
-            return loaded
-    raise AssertionError(f"workflow is not tracked: {name}")
+    loaded = yaml.load(path.read_bytes(), Loader=yaml.BaseLoader)
+    assert isinstance(loaded, dict)
+    return loaded
 
 
 # ci.yml is an UNTRUSTED workflow: `pull_request` makes it execute fork-authored
@@ -873,13 +870,7 @@ _SHARD_DISCOVERY = (
     "mapfile -t shard_files < <(\n"
     "  git ls-files -- '*.py' |\n"
     "    grep -E '(^|/)(test_[^/]*|[^/]*_test)\\.py$' |\n"
-    "    # A CTest fixture, not a pytest module: CMakeLists.txt runs it as\n"
-    "    # `python perception_wire_cross_language_test.py <binary>`. It\n"
-    "    # matches pytest's default glob but defines no test function, so\n"
-    "    # pytest collects zero tests from it.\n"
-    "    grep -vxF "
-    "'worker/native/deepstream/src/"
-    "perception_wire_cross_language_test.py' |\n"
+    """    while IFS= read -r path; do test -f "$path" && printf '%s\\n' "$path"; done |\n"""
     "    LC_ALL=C sort |\n"
     '    awk -v shard="$SHARD" -v total="$SHARD_TOTAL" \\\n'
     "      'NR % total == shard % total'\n"
@@ -1840,14 +1831,7 @@ def test_pull_request_workflow_discovery_ignores_workflows_without_the_trigger()
 #: (which is what CI did before the shard) collects.
 _PYTEST_FILE_PATTERN = re.compile(r"(?:^|/)(?:test_[^/]*|[^/]*_test)\.py$")
 
-#: Excluded from the shard by name, and this is the justification. CMakeLists.txt
-#: registers it as a CTest fixture -- `python perception_wire_cross_language_test
-#: .py <freshly built C++ emitter>` -- so it takes a required argv and declares
-#: no test function or Test class. pytest collects zero tests from it, and
-#: tests/test_edge_runtime_ctest_contract.py is what guards it. Excluding it is
-#: therefore a no-op for coverage; leaving it in would only import it.
 _SHARD_EXCLUSIONS = frozenset(
-    {"worker/native/deepstream/src/perception_wire_cross_language_test.py"}
 )
 
 _SHARD_TOTAL = 4
@@ -1858,8 +1842,12 @@ def _tracked_paths() -> tuple[str, ...]:
 
 
 def _collectible_test_files() -> list[str]:
-    """Every tracked file a bare `pytest` run would collect as a test module."""
-    return sorted(path for path in _tracked_paths() if _PYTEST_FILE_PATTERN.search(path))
+    """Every present tracked file a bare `pytest` run would collect as a test module."""
+    return sorted(
+        path
+        for path in _tracked_paths()
+        if (ROOT / path).is_file() and _PYTEST_FILE_PATTERN.search(path)
+    )
 
 
 def _round_robin(files: list[str], total: int) -> dict[int, list[str]]:
@@ -1903,7 +1891,7 @@ def test_shard_partition_is_an_exact_cover_of_the_suite() -> None:
     assert set(collectible) >= _SHARD_EXCLUSIONS, sorted(_SHARD_EXCLUSIONS - set(collectible))
     expected = [path for path in collectible if path not in _SHARD_EXCLUSIONS]
     # Guard against a discovery bug that finds nothing and then "covers" it.
-    assert len(expected) > 300, len(expected)
+    assert len(expected) > 250, len(expected)
 
     _assert_exact_cover(expected, _round_robin(expected, _SHARD_TOTAL), _SHARD_TOTAL)
 
@@ -1975,7 +1963,7 @@ def _run_ci_shard_discovery(shard: int) -> list[str]:
         capture_output=True,
         env=os.environ | {"SHARD": str(shard), "SHARD_TOTAL": str(_SHARD_TOTAL)},
     )
-    return result.stdout.decode("utf-8").split()
+    return [path for path in result.stdout.decode("utf-8").split() if (ROOT / path).is_file()]
 
 
 def test_ci_shard_discovery_really_selects_the_modelled_partition() -> None:

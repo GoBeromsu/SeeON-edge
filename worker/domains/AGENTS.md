@@ -4,7 +4,7 @@ Own fall and bed-exit judgment. Numeric observations become typed `BusinessEvent
 
 ## Ownership rule
 
-**`worker.domains` must not import `worker.pipeline.ingest`, `worker.pipeline.output`, or `worker.runtime`.**
+**`worker.domains` must not import `worker.pipeline.output` or `worker.runtime`.**
 A domain never opens a stream, never sends a relay request, never writes a clip, and never learns how it was scheduled.
 It receives `DecisionInput` and returns `BusinessEvent` values. The pipeline decides delivery.
 

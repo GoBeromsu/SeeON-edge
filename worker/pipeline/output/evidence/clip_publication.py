@@ -13,8 +13,6 @@ from pathlib import Path
 from typing import Final, final
 
 from shared.events.delivery_queue import ClipEntry, DeliveryQueue
-from worker.adapters.encode.adapter_errors import ThumbnailGenerationError
-from worker.adapters.encode.thumbnail import THUMBNAIL_FILENAME, FFmpegThumbnailGenerator
 from worker.interfaces import ThumbnailGenerator
 from worker.pipeline.output.evidence.clip_corrupt_publication import publish_existing_corrupt
 from worker.pipeline.output.evidence.clip_identity import ClipReservation
@@ -63,7 +61,7 @@ class ClipPublisher:
         self._store_dir = store_dir
         self._barrier = barrier
         self._ffprobe_bin = ffprobe_bin
-        self._thumbnail_generator = thumbnail_generator or FFmpegThumbnailGenerator()
+        self._thumbnail_generator = thumbnail_generator
         self._delivery_queue_directory = delivery_queue_directory
 
     def publish_ready(
@@ -74,24 +72,12 @@ class ClipPublisher:
     ) -> PublishedClip:
         self._validate_reservation(reservation)
         video_path = self._publish_media(reservation, artifact_path)
-        try:
+        if self._thumbnail_generator is not None:
             thumbnail_path = self._thumbnail_generator.generate(
                 video_path,
-                reservation.final_dir / THUMBNAIL_FILENAME,
+                reservation.final_dir / "thumbnail.jpg",
                 metadata.duration_s,
             )
-        except ThumbnailGenerationError as exc:
-            LOGGER.warning(
-                "clip thumbnail generation failed camera_id=%r clip_id=%r error_type=%s",
-                metadata.camera_id,
-                str(reservation.clip_id),
-                type(exc).__name__,
-                extra={
-                    "camera_id": metadata.camera_id,
-                    "clip_id": str(reservation.clip_id),
-                },
-            )
-        else:
             self._barrier(PublicationStage.THUMBNAIL_RENAMED, thumbnail_path)
         manifest = finalize_ready_manifest(
             video_path=video_path,

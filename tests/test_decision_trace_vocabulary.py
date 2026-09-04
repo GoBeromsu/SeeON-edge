@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
 
@@ -17,7 +18,6 @@ from contracts.observation import (
     BoundingBox,
     FrameObservation,
 )
-from worker.pipeline.analytics.composite import CompositeResult
 from worker.pipeline.trace import (
     BoundedTraceWriter,
     TraceCapture,
@@ -34,6 +34,13 @@ from worker.types.trace import (
     DecisionTraceValueName,
     canonical_trace_number,
 )
+
+
+@dataclass(frozen=True)
+class _TraceResult:
+    module_results: tuple[object, ...]
+    observation: FrameObservation
+    decision_input: DecisionInput
 
 _RUNTIME_SHA256 = "a" * 64
 _COMPONENT_SHA256 = "b" * 64
@@ -218,7 +225,7 @@ def _packet() -> FramePacket:
     )
 
 
-def _result() -> CompositeResult:
+def _result() -> _TraceResult:
     person = BoundingBox(0, 0, 2, 3, 0.9)
     bed = BoundingBox(0, 0, 4, 4, 0.8)
     observation = FrameObservation(
@@ -235,7 +242,7 @@ def _result() -> CompositeResult:
         frame_index=7,
         bed_region=BedRegionDebugSnapshot(BedRegionCacheState.FRESH),
     )
-    return CompositeResult((), observation, decision_input)
+    return _TraceResult((), observation, decision_input)
 
 
 def _capture(snapshots: tuple[DecisionTraceSnapshot, ...]) -> TraceCapture:

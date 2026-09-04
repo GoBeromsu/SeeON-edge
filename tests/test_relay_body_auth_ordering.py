@@ -3,14 +3,15 @@
 from __future__ import annotations
 
 import json
+import socket
 import threading
+import time
 from collections.abc import Iterator
 from types import SimpleNamespace
 
 import httpx
 import pytest
 import uvicorn
-from e2e_worker_relay_fixtures import free_tcp_port, wait_until
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
@@ -18,6 +19,20 @@ from backend.app.features.cameras.store import CameraRegistryStore
 from backend.app.features.relay import router as relay_router
 from backend.app.main import create_app, no_lifespan
 from tests_support.compact_authority_db import prepare_compact_database
+
+
+def _free_tcp_port() -> int:
+    with socket.socket() as listener:
+        listener.bind(("127.0.0.1", 0))
+        return int(listener.getsockname()[1])
+
+
+def _wait_until(predicate, *, timeout: float, what: str) -> None:
+    deadline = time.monotonic() + timeout
+    while not predicate():
+        if time.monotonic() >= deadline:
+            pytest.fail(f"timed out waiting for {what}")
+        time.sleep(0.01)
 
 
 def _app(tmp_path):
@@ -179,7 +194,7 @@ class _LiveApp:
     """A relay app served by real uvicorn so bodies traverse a real socket."""
 
     def __init__(self, tmp_path) -> None:
-        self.port = free_tcp_port()
+        self.port = _free_tcp_port()
         config = uvicorn.Config(
             _app_with_camera(tmp_path),
             host="127.0.0.1",
@@ -192,7 +207,7 @@ class _LiveApp:
             target=self._server.run, daemon=True, name="relay-bounded-read"
         )
         self._thread.start()
-        wait_until(lambda: self._server.started, timeout=10.0, what="relay uvicorn startup")
+        _wait_until(lambda: self._server.started, timeout=10.0, what="relay uvicorn startup")
 
     @property
     def base_url(self) -> str:

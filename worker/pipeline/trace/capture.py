@@ -5,7 +5,6 @@ from dataclasses import dataclass, field, replace
 from types import MappingProxyType
 from typing import TYPE_CHECKING
 
-from worker.pipeline.analytics.composite import CompositeResult
 from worker.pipeline.trace.models import (
     AnalysisTrace,
     DecisionTrace,
@@ -74,7 +73,7 @@ class TraceCapture:
     def build(
         self,
         packet: FramePacket,
-        result: CompositeResult,
+        result: object,
         events: Sequence[BusinessEvent],
     ) -> TraceFrame:
         snapshots_by_identity = tuple(snapshots_for(identity) for identity in self.identities)
@@ -120,7 +119,7 @@ class TraceCapture:
         self,
         writer: BoundedTraceWriter,
         packet: FramePacket,
-        result: CompositeResult,
+        result: object,
         events: Sequence[BusinessEvent],
         *,
         require_persisted: bool = False,
@@ -138,7 +137,7 @@ class TraceCapture:
     def _analysis(
         self,
         packet: FramePacket,
-        result: CompositeResult,
+        result: object,
         snapshots_by_identity: tuple[tuple[DecisionTraceSnapshot, ...], ...],
     ) -> AnalysisTrace:
         observation = result.observation

@@ -26,8 +26,8 @@ from worker.types.frame_memory import (
     PixelFormat,
 )
 from worker.types.frame_packet import FrameKey, FramePacket
-from worker.types.module_result import ModuleResult
 from worker.types.metadata import MetadataCounters, MetadataFrame, SourceBinding
+from worker.types.module_result import ModuleResult
 from worker.types.perception_frame import (
     AssociationResult,
     BedRegion,
@@ -86,8 +86,8 @@ __all__ = [
     "PersonBoxChannel",
     "PipelineProfile",
     "PixelFormat",
-    "StageCapabilities",
     "SourceBinding",
+    "StageCapabilities",
     "TemporalProfile",
     "TemporalProfileError",
 ]

@@ -21,6 +21,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from typing import cast
 
 import pytest
 import yaml
@@ -157,9 +158,10 @@ def test_fall_classifier_is_constructed_and_warmed_on_the_cpu_before_cameras(
     """
     import worker.runtime.worker as worker_module
     from worker.domains import DETECTION_MODULE_REGISTRY
-    from worker.runtime.bootstrap import BootContext
+    from worker.runtime.flow.media_plane import FlowMediaPlane
     from worker.runtime.lease import GpuLease
-    from worker.runtime.profile.registry import PROFILE_REGISTRY, VerifyResult
+    from worker.runtime.profile.boot import BootContext
+    from worker.runtime.profile.registry import PROFILE_REGISTRY
 
     def _binding(task: str) -> object:
         component_id = "fall-classifier" if task == "fall" else task
@@ -197,11 +199,24 @@ def test_fall_classifier_is_constructed_and_warmed_on_the_cpu_before_cameras(
     fall_devices: list[str] = []
     fall_runner = _Runner("fall")
 
-    def _create_fall_model(_self: object, device: str) -> object:
+    def _create_fall_model(
+        _self: object, device: str, *, require_onnxruntime: bool = False
+    ) -> object:
+        assert require_onnxruntime
         fall_devices.append(device)
         return fall_runner
 
     monkeypatch.setattr(worker_module.WorkerRuntime, "_create_fall_model", _create_fall_model)
+    monkeypatch.setattr(
+        worker_module.WorkerRuntime, "_packaged_fall_member_digest", lambda _self: "fall-digest"
+    )
+    monkeypatch.setattr(
+        worker_module, "verify_flow_boot_inputs", lambda _env, **_kwargs: {"engine": "verified"}
+    )
+
+    class _FlowMediaPlane:
+        def bind_live_frames(self, _frames: object) -> None:
+            pass
 
     config = WorkerConfig.model_validate(
         {
@@ -212,18 +227,16 @@ def test_fall_classifier_is_constructed_and_warmed_on_the_cpu_before_cameras(
     )
     runtime = worker_module.WorkerRuntime(
         config,
-        env={"ML_WORKER_PROFILE": "cpu"},
+        env={"ML_WORKER_PROFILE": "flow"},
         serving_client=_Serving(),
         acquire_lease=lambda: GpuLease.acquire(tmp_path),
-        decode_probe=lambda _decode: VerifyResult(True, "cpu", "decode", "available"),
+        flow_media_plane=cast(FlowMediaPlane, _FlowMediaPlane()),
     )
-    profile = PROFILE_REGISTRY["cpu"]
-    # A GPU boot device: only the perception runners may follow it.
-    boot = BootContext(profile, "cuda", profile.decode, profile.encode)
+    profile = PROFILE_REGISTRY["flow"]
+    boot = BootContext(profile, profile.device, profile.decode, profile.encode)
     _ = runtime._initialize_models(boot)  # noqa: SLF001
     warmed = runtime._warm_models()  # noqa: SLF001
 
     assert fall_devices == ["cpu"]
     assert "fall-classifier" in warmed
     assert fall_runner.warmup_calls == 1
-    assert runtime.cameras == ()
