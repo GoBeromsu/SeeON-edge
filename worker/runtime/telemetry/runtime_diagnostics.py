@@ -96,6 +96,8 @@ class WorkerDiagnostics:
         self._resample_gap_rows_by_camera: dict[str, int] = {}
         self._fall_inference_device_by_camera: dict[str, str] = {}
         self._fall_unapplied_policy_threshold_by_camera: dict[str, float] = {}
+        self._flow_recording_by_camera: dict[str, tuple[int, int, int]] = {}
+        self._flow_nvenc_sessions_by_camera: dict[str, int] = {}
         self._incident_managers: dict[str, object] = {}
         self._encoder = EncoderLifecycleSnapshot()
         self._clip_recorder = ClipRecorderStatus()
@@ -139,6 +141,20 @@ class WorkerDiagnostics:
             raise ValueError("unapplied policy threshold must be a probability")
         with self._lock:
             self._fall_unapplied_policy_threshold_by_camera[camera_id] = threshold
+
+    def record_flow_recording_counters(
+        self, camera_id: str, *, extended: int, extension_raced: int, start_refused: int
+    ) -> None:
+        if min(extended, extension_raced, start_refused) < 0:
+            raise ValueError("Flow recording counters must be non-negative")
+        with self._lock:
+            self._flow_recording_by_camera[camera_id] = (extended, extension_raced, start_refused)
+
+    def record_flow_nvenc_sessions(self, camera_id: str, active: int) -> None:
+        if active < 0:
+            raise ValueError("Flow NVENC sessions must be non-negative")
+        with self._lock:
+            self._flow_nvenc_sessions_by_camera[camera_id] = active
 
     def register_decode(self, camera_id: str, requested: str) -> None:
         self.update_decode(
@@ -443,6 +459,8 @@ class WorkerDiagnostics:
             resample_gap_rows_by_camera = dict(self._resample_gap_rows_by_camera)
             fall_inference_device_by_camera = dict(self._fall_inference_device_by_camera)
             fall_unapplied_by_camera = dict(self._fall_unapplied_policy_threshold_by_camera)
+            flow_recording_by_camera = dict(self._flow_recording_by_camera)
+            flow_nvenc_sessions_by_camera = dict(self._flow_nvenc_sessions_by_camera)
             incident_managers = dict(self._incident_managers)
             measured_fps_by_camera = dict(self._measured_fps_by_camera)
             camera_ids = (
@@ -463,6 +481,8 @@ class WorkerDiagnostics:
                 | set(resample_gap_rows_by_camera)
                 | set(fall_inference_device_by_camera)
                 | set(fall_unapplied_by_camera)
+                | set(flow_recording_by_camera)
+                | set(flow_nvenc_sessions_by_camera)
                 | set(incident_managers)
                 | (set() if inference is None else set(inference.cameras))
             )
@@ -508,6 +528,14 @@ class WorkerDiagnostics:
                 resample_gap_rows_total=resample_gap_rows_by_camera.get(camera_id, 0),
                 fall_inference_device=fall_inference_device_by_camera.get(camera_id, "unknown"),
                 fall_unapplied_policy_threshold=fall_unapplied_by_camera.get(camera_id),
+                smart_record_extended_total=flow_recording_by_camera.get(camera_id, (0, 0, 0))[0],
+                smart_record_extension_raced_total=flow_recording_by_camera.get(
+                    camera_id, (0, 0, 0)
+                )[1],
+                smart_record_start_refused_total=flow_recording_by_camera.get(camera_id, (0, 0, 0))[
+                    2
+                ],
+                nvenc_sessions_active=flow_nvenc_sessions_by_camera.get(camera_id, 0),
             )
             for camera_id in sorted(camera_ids)
         )

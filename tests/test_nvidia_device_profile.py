@@ -38,12 +38,13 @@ def _resident_ok() -> VerifyResult:
     return VerifyResult(True, "nvidia", "device", "device-resident stages available")
 
 
-def test_canonical_choices_are_cpu_intel_apple_and_nvidia() -> None:
+def test_canonical_choices_include_flow() -> None:
     assert set(CANONICAL_PROFILE_REGISTRY) == {
         "cpu-host",
         "intel-vaapi-host",
         "apple-mps-host",
         "nvidia",
+        "flow",
     }
     assert dict(PROFILE_ALIASES) == {
         "cpu": "cpu-host",
@@ -58,6 +59,7 @@ def test_canonical_choices_are_cpu_intel_apple_and_nvidia() -> None:
         "apple-mps-host",
         "mps",
         "nvidia",
+        "flow",
     }
 
 

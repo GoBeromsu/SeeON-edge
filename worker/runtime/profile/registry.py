@@ -119,6 +119,18 @@ _NVIDIA = ProfileSpec(
     None,
     concrete_stages_available=True,
 )
+_FLOW = ProfileSpec(
+    "flow",
+    ("flow",),
+    "cuda",
+    "nvdec",
+    "deepstream-flow",
+    "onnxruntime",
+    "deepstream-flow",
+    "h264_nvenc",
+    None,
+    concrete_stages_available=True,
+)
 _INTEL_VAAPI_HOST = ProfileSpec(
     "intel-vaapi-host",
     ("intel-vaapi-host", "igpu"),
@@ -150,6 +162,7 @@ CANONICAL_PROFILE_REGISTRY: Final[Mapping[str, ProfileSpec]] = MappingProxyType(
             _INTEL_VAAPI_HOST,
             _APPLE_MPS_HOST,
             _NVIDIA,
+            _FLOW,
         )
     }
 )
@@ -245,7 +258,7 @@ def _memory_path_for(
                 _edge("overlay", "encode", _HOST_RGB, _HOST_RGB),
             ),
         )
-    if spec.name == "nvidia":
+    if spec.name in {"nvidia", "flow"}:
         device_stages: tuple[tuple[ProfileStage, PixelFormat], ...] = (
             ("decode", PixelFormat.NV12),
             ("preprocess", PixelFormat.NV12),
@@ -325,7 +338,7 @@ def runtime_descriptor_for(
         effective_converters=effective_converters,
         effective_edges=effective_edges,
         degraded_reasons=degraded_reasons,
-        device_resident_after_decode=(spec.name == "nvidia" and decode == "nvdec"),
+        device_resident_after_decode=(spec.name in {"nvidia", "flow"} and decode == "nvdec"),
         concrete_stages_available=spec.concrete_stages_available,
     )
 
@@ -375,11 +388,16 @@ def default_verifiers(
     def device_resident() -> VerifyResult:
         return _verify_device_resident(device_resident_source)
 
+    def flow() -> VerifyResult:
+        result = device_resident()
+        return VerifyResult(result.ok, "flow", result.stage, result.reason)
+
     return MappingProxyType(
         {
             "cpu": _verify_cpu,
             "cpu-host": _verify_cpu,
             "nvidia": device_resident,
+            "flow": flow,
             "mps": mps,
             "apple-mps-host": mps,
             "igpu": _verify_igpu_device,

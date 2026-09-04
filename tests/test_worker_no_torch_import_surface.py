@@ -12,6 +12,7 @@ import worker.adapters.model.ort_pose_bbox56
 import worker.interfaces
 import worker.domains
 import worker.pipeline.perception
+from worker.runtime.flow import FlowMediaPlane, FlowMediaPlaneConfig
 assert "torch" not in sys.modules
 """
     completed = subprocess.run(

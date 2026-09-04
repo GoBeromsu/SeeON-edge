@@ -1,0 +1,39 @@
+# Flow DeepStream profile overlay. Invoke with compose.edge.yaml.
+services:
+  ml-worker-flow:
+    image: ${ML_WORKER_FLOW_IMAGE:?ML_WORKER_FLOW_IMAGE is required}
+    build:
+      context: .
+      dockerfile: Dockerfile.flow
+    restart: unless-stopped
+    environment:
+      RELAY_TOKEN: ${API_EDGE_RELAY_TOKEN:?edge worker requires a deployment-unique relay token}
+      ML_WORKER_PROFILE: flow
+      ML_WORKER_IMAGE: ${ML_WORKER_FLOW_IMAGE:?ML_WORKER_FLOW_IMAGE is required}
+      ML_WORKER_FLOW_INFER_CONFIG: /opt/seeon/flow/nvinfer.yml
+      ML_WORKER_FLOW_TRACKER_CONFIG: /opt/seeon/flow/config_tracker_NvDCF_perf.yml
+      ML_WORKER_FLOW_TRACKER_LIBRARY: /opt/nvidia/deepstream/deepstream/lib/libnvds_nvmultiobjecttracker.so
+      ML_WORKER_FLOW_RECORD_DIR: /var/lib/clip-store
+      ML_WORKER_FLOW_RECORD_CACHE_SECONDS: "30"
+      ML_WORKER_FLOW_FRAME_WIDTH: "1920"
+      ML_WORKER_FLOW_FRAME_HEIGHT: "1080"
+      ML_RTSP_ALLOW_PRIVATE_DESTINATIONS: ${ML_RTSP_ALLOW_PRIVATE_DESTINATIONS:-0}
+      ML_RTSP_ALLOW_LOCAL_DESTINATIONS: ${ML_RTSP_ALLOW_LOCAL_DESTINATIONS:-0}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    volumes:
+      - worker-models:/models:ro
+      - worker-models:/app/models:ro
+      - worker-local-state:/var/lib/seeon-state
+      - ${CLIP_STORE_HOST_DIR:?edge requires host clip-store dir}:/var/lib/clip-store:rw
+    depends_on:
+      ml-api:
+        condition: service_healthy
+      edge-model-fetch:
+        condition: service_completed_successfully
+    command: ["python", "-m", "worker", "--heartbeat-on-start", "--state-dir", "/var/lib/seeon-state"]

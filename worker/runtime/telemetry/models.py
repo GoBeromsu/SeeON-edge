@@ -187,6 +187,10 @@ class CameraDiagnosticsSnapshot:
     # but is not authoritative in P1a (P1a-AC7: eligible receipt, else the image
     # default). Reported so the setting is visible instead of silently dropped.
     fall_unapplied_policy_threshold: float | None = None
+    smart_record_extended_total: int = 0
+    smart_record_extension_raced_total: int = 0
+    smart_record_start_refused_total: int = 0
+    nvenc_sessions_active: int = 0
 
 
 @dataclass(frozen=True, slots=True)

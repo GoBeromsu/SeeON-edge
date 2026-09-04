@@ -1,0 +1,13 @@
+FROM nvcr.io/nvidia/deepstream@sha256:f6fa0247da9290979cbb05749e7da9435d089c93db7c4dcfe85ba2488b5f4994 AS build
+WORKDIR /app
+COPY worker/adapters/deepstream/native_parser/yolo26_pose_parser.cpp /src/yolo26_pose_parser.cpp
+RUN g++ -shared -fPIC -O2 -o /opt/nvidia/deepstream/deepstream/lib/libnvdsinfer_custom_yolo26_pose.so /src/yolo26_pose_parser.cpp -I/opt/nvidia/deepstream/deepstream/sources/includes
+
+FROM nvcr.io/nvidia/deepstream@sha256:f6fa0247da9290979cbb05749e7da9435d089c93db7c4dcfe85ba2488b5f4994
+WORKDIR /app
+COPY --from=build /opt/nvidia/deepstream/deepstream/lib/libnvdsinfer_custom_yolo26_pose.so /opt/nvidia/deepstream/deepstream/lib/
+COPY pyproject.toml uv.lock ./
+RUN python -m pip install --no-cache-dir pyyaml onnxruntime && python -m pip install --no-cache-dir . && ! python -c 'import torch'
+COPY contracts shared worker /app/
+ENV PYTHONPATH=/app
+CMD ["python", "-m", "worker"]

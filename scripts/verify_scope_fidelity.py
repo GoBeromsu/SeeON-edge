@@ -36,9 +36,7 @@ ENVIRONMENT_CATEGORIES: Final = frozenset(
 )
 OPS_PATTERNS: Final = (
     (
-        re.compile(
-            r"\b(?:DROP|TRUNCATE)\s+TABLE\b|\bDELETE\s+FROM\b", re.IGNORECASE
-        ),
+        re.compile(r"\b(?:DROP|TRUNCATE)\s+TABLE\b|\bDELETE\s+FROM\b", re.IGNORECASE),
         "destructive SQL",
     ),
     (re.compile(r"\bssh\b[^\n]*\bjnu(?:-oss)?\b", re.IGNORECASE), "JNU target"),
@@ -50,9 +48,7 @@ DEPLOYMENT_PATHS: Final = (
     "compose.edge.cpu.yaml",
     ".env.edge.prod.example",
 )
-OPS_PATHS: Final = (
-    "scripts/ops",
-)
+OPS_PATHS: Final = ("scripts/ops",)
 
 
 @dataclass(frozen=True, slots=True)

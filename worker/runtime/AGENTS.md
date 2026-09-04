@@ -22,7 +22,11 @@ Perception math, domain judgment, and vendor kits live elsewhere. `backend` is f
 - `lease.py`: advisory flock at `~/.local/state/ml-worker/.gpu.lease`. Acquire before CUDA, NVDEC, or model construction. No env override.
 - `watchdog.py`: hung forward drives the same `FaultHandler` path.
 - `deepstream/`: `nvidia`-only native media plane. `worker.py` verifies the content-addressed plan cache, starts one `NvidiaMediaPlane`, and drives the existing policy/evidence plane through image-free `NativePolicyPump`s.
-  The child owns GPU 0; the parent has no in-process serving. A tracker remains in each preflighted `CameraDetectionPlan` but is not executed on this path.
+  child owns GPU 0; the parent has no in-process serving. A tracker remains in each preflighted `CameraDetectionPlan` but is not executed on this path.
+- `flow/`: the `flow` profile composes the injected pyservicemaker media plane.
+  Its engine is built once by `edge-engine-build`; boot verifies its identity and
+  never performs a lazy build. Source-open faults are camera-local; plane,
+  engine, parser, or identity faults are process-fatal.
 
 ## Failures, allocation, CLI, tests
 

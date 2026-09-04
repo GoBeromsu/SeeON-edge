@@ -319,3 +319,6 @@ source_modules = [
     "worker.tools",
 ]
 forbidden_modules = ["pyservicemaker", "pyds"]
+# The runtime composes the adapter, so a transitive path through
+# worker.adapters.deepstream is the design; only a direct import is a leak.
+allow_indirect_imports = true

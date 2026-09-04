@@ -1,0 +1,130 @@
+"""Composition-owned Flow media plane and Smart Record bridge."""
+
+from __future__ import annotations
+
+from collections.abc import Callable
+from dataclasses import dataclass
+from pathlib import Path
+from time import monotonic
+
+from worker.adapters.deepstream.service_maker import (
+    DeepStreamMediaPlane,
+    DeepStreamMediaPlaneConfig,
+    FlowFactory,
+)
+from worker.interfaces.media_plane import MediaPlane, RecordingInfo
+from worker.native.deepstream.metadata import LatestMetadataSlot, SourceBinding
+from worker.pipeline.output.evidence.smart_record_actor import ClipSealed, SmartRecordActor
+
+
+@dataclass(frozen=True, slots=True)
+class FlowMediaPlaneConfig:
+    infer_config_path: str
+    tracker_config_path: str
+    tracker_library_path: str
+    record_dir: Path
+    record_cache_seconds: int
+    frame_width: int
+    frame_height: int
+
+    def adapter_config(self) -> DeepStreamMediaPlaneConfig:
+        return DeepStreamMediaPlaneConfig(
+            infer_config_path=self.infer_config_path,
+            tracker_config_path=self.tracker_config_path,
+            tracker_library_path=self.tracker_library_path,
+            record_dir=self.record_dir,
+            record_cache_seconds=self.record_cache_seconds,
+            frame_width=self.frame_width,
+            frame_height=self.frame_height,
+        )
+
+
+class FlowMediaPlane:
+    """Runtime-owned facade exposing the control subset used by policy pumps."""
+
+    def __init__(
+        self,
+        config: FlowMediaPlaneConfig,
+        *,
+        flow_factory: FlowFactory | None = None,
+        snapshot_encoder: Callable[[str], bytes] | None = None,
+        worker_boot_id: str | None = None,
+    ) -> None:
+        self.metadata = LatestMetadataSlot()
+        kwargs: dict[str, object] = {
+            "metadata_slot": self.metadata,
+            "snapshot_encoder": snapshot_encoder,
+            "worker_boot_id": worker_boot_id,
+        }
+        if flow_factory is not None:
+            kwargs["flow_factory"] = flow_factory
+        self.plane = DeepStreamMediaPlane(config.adapter_config(), **kwargs)
+        self._actors: dict[str, SmartRecordActor] = {}
+
+    def start(self) -> None:
+        self.plane.start()
+
+    def stop(self) -> None:
+        self.plane.stop()
+
+    def snapshot(self, camera_id: str) -> bytes:
+        return self.plane.snapshot(camera_id)
+
+    def add_source(self, camera_id: str, uri: str) -> SourceBinding:
+        return self.plane.add_source(camera_id, uri)
+
+    def remove_source(self, camera_id: str) -> None:
+        self.plane.remove_source(camera_id)
+
+    def source_failure(self, camera_id: str, category: str) -> SourceBinding:
+        return self.plane.source_failure(camera_id, category)
+
+    def smart_recorder(
+        self,
+        camera_id: str,
+        *,
+        sink: Callable[[ClipSealed], None],
+        lookback_sec: int,
+        clock: Callable[[], float] = monotonic,
+    ) -> SmartRecordActor:
+        if camera_id in self._actors:
+            raise ValueError(f"Flow smart recorder already exists for {camera_id}")
+
+        def on_sealed(item: ClipSealed | BaseException) -> None:
+            if isinstance(item, BaseException):
+                raise item
+            sink(item)
+
+        actor = SmartRecordActor(
+            camera_id=camera_id,
+            media_plane=self.plane,
+            clock=clock,
+            sink=on_sealed,
+            lookback_sec=lookback_sec,
+        )
+        self._actors[camera_id] = actor
+        return actor
+
+    def recorder_counters(self, camera_id: str) -> tuple[int, int, int]:
+        actor = self._actors.get(camera_id)
+        if actor is None:
+            return (0, 0, 0)
+        return (
+            actor.smart_record_extended_total,
+            actor.smart_record_extension_raced_total,
+            actor.smart_record_start_refused_total,
+        )
+
+    @property
+    def media_plane(self) -> MediaPlane:
+        return self.plane
+
+    def sealed_recording(self, info: RecordingInfo) -> None:
+        """Test seam for delivering a Flow recording completion to its actor."""
+        actor = self._actors.get(info.camera_id)
+        if actor is None:
+            raise ValueError(f"Flow smart recorder is absent for {info.camera_id}")
+        actor.on_sealed(info)
+
+
+__all__ = ["FlowMediaPlane", "FlowMediaPlaneConfig"]

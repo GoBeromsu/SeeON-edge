@@ -12,7 +12,7 @@ from typing import Protocol, final, runtime_checkable
 
 from contracts.observation import BoundingBox
 from contracts.replay_trace import ReplayRow, ReplayTrack
-from worker.native.deepstream.control import ChildControlError, DeepStreamControlClient
+from worker.native.deepstream.control import ChildControlError
 from worker.native.deepstream.ipc import MetadataFrame
 from worker.native.deepstream.metadata import AcceptanceToken, LatestMetadataSlot, SourceBinding
 from worker.pipeline.decision import EventAggregator
@@ -31,6 +31,12 @@ class NativeEventSink(Protocol):
     def emit_for_frame(self, event: BusinessEvent, trigger: NativeEvidenceTrigger) -> None: ...
 
 
+class NativeSnapshotControl(Protocol):
+    """The only media-plane control operation policy processing needs."""
+
+    def snapshot(self, camera_id: str) -> bytes: ...
+
+
 class NativeDiagnostics(Protocol):
     def update_measured_fps(self, camera_id: str, measured_fps: float | None) -> None: ...
     def record_detection_completed(self, camera_id: str) -> None: ...
@@ -46,7 +52,7 @@ class NativeDiagnostics(Protocol):
 @dataclass(frozen=True, slots=True)
 class NativePolicyContext:
     metadata: LatestMetadataSlot
-    control: DeepStreamControlClient
+    control: NativeSnapshotControl
     scene_state: SceneState
     decision: EventAggregator
     sink: NativeEventSink

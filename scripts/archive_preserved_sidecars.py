@@ -97,9 +97,7 @@ def _reject_aliased_target(
         source_stat.st_dev,
         source_stat.st_ino,
     ):
-        raise ArchivalError(
-            f"archive destination aliases its source inode: {destination}"
-        )
+        raise ArchivalError(f"archive destination aliases its source inode: {destination}")
 
 
 def _publish_no_clobber(temporary: Path, final: Path) -> None:
@@ -112,9 +110,7 @@ def _publish_no_clobber(temporary: Path, final: Path) -> None:
     try:
         os.link(temporary, final)
     except FileExistsError as error:
-        raise ArchivalError(
-            f"refusing to clobber an existing archive entry: {final}"
-        ) from error
+        raise ArchivalError(f"refusing to clobber an existing archive entry: {final}") from error
     os.unlink(temporary)
 
 
@@ -130,9 +126,7 @@ def _copy_exclusive(
 ) -> ArchivedFile:
     """Archive one file as a durable, independent, no-clobber copy."""
     if destination.exists() or destination.is_symlink():
-        raise ArchivalError(
-            f"refusing to clobber an existing archive entry: {destination}"
-        )
+        raise ArchivalError(f"refusing to clobber an existing archive entry: {destination}")
     directory = destination.parent
     temporary = directory / f".{destination.name}.incoming"
     if temporary.exists() or temporary.is_symlink():
@@ -163,13 +157,11 @@ def _copy_exclusive(
     published_sha256, published_size = digest_and_size(destination)
     if published_size != expected_size:
         raise ArchivalError(
-            f"archived size mismatch for {destination}: "
-            f"{published_size} != {expected_size}"
+            f"archived size mismatch for {destination}: {published_size} != {expected_size}"
         )
     if published_sha256 != expected_sha256:
         raise ArchivalError(
-            f"archived digest mismatch for {destination}: "
-            f"{published_sha256} != {expected_sha256}"
+            f"archived digest mismatch for {destination}: {published_sha256} != {expected_sha256}"
         )
     return ArchivedFile(source, destination, published_size, published_sha256)
 

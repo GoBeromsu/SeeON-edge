@@ -46,6 +46,7 @@ from worker.adapters.model.fall_family_registry import (
     DEFAULT_FALL_MODEL_FAMILY_REGISTRY,
     UnknownFallModelTypeError,
 )
+from worker.adapters.model.ort_pose_bbox56 import OrtPoseBbox56Runner
 from worker.domains import (
     AVAILABLE_OBSERVATION_CHANNELS,
     DETECTION_MODULE_REGISTRY,
@@ -133,6 +134,7 @@ from worker.runtime.deepstream.nvidia_media_plane import (
 )
 from worker.runtime.faults.handler import FaultHandler
 from worker.runtime.faults.record import make_fault_record
+from worker.runtime.flow.media_plane import FlowMediaPlane, FlowMediaPlaneConfig
 from worker.runtime.ingest_composition import (
     build_camera_source_registry,
     compose_camera_ingest_loop,
@@ -927,7 +929,8 @@ class WorkerRuntime:
         # mirrors `_boot_dependencies`' own eager probe call two lines above.
         self.diagnostics.set_gpu_status(
             _production_gpu_status(
-                probe_python_cuda=self._env.get("ML_WORKER_PROFILE", "cpu").strip() != "nvidia"
+                probe_python_cuda=self._env.get("ML_WORKER_PROFILE", "cpu").strip()
+                not in {"nvidia", "flow"}
             )
         )
         # Explicit non-default mode: this renderer also feeds
@@ -970,6 +973,7 @@ class WorkerRuntime:
         self._camera_debug_snapshots: dict[str, Callable[[int], tuple[Any, ...]]] = {}
         self._camera_inference_results: dict[str, InferenceResultSlot] = {}
         self._nvidia_media_plane: NvidiaMediaPlane | None = None
+        self._flow_media_plane: FlowMediaPlane | None = None
         self._nvidia_plans: Mapping[str, CameraDetectionPlan] = MappingProxyType({})
         self._native_policy_pumps: tuple[NativePolicyPump, ...] = ()
         self._selected_bundle_admission: ModelBundleProof | None = None
@@ -1085,6 +1089,9 @@ class WorkerRuntime:
             self._live_frames.set_demand_listener(None)
             self._nvidia_media_plane.stop()
             self._nvidia_media_plane = None
+        if self._flow_media_plane is not None:
+            self._flow_media_plane.stop()
+            self._flow_media_plane = None
         if self.watchdog is not None:
             self.watchdog.stop()
         if self._evidence_export_runtime is not None:
@@ -1410,6 +1417,8 @@ class WorkerRuntime:
         self.watchdog = InferenceWatchdog(self.fault_handler, profile=boot.profile.name)
         if boot.profile.name == "nvidia":
             return self._initialize_nvidia_media_plane(boot)
+        if boot.profile.name == "flow":
+            return self._initialize_flow_media_plane(boot)
         flags = {"person-box-source": self.config.models.box_source == "person"}
         selected = self.config.models.selected
         selection = None if selected is None else selected.desired.selection
@@ -1562,6 +1571,66 @@ class WorkerRuntime:
         self._live_frames.set_demand_listener(self._forward_native_preview_demand)
         return graph
 
+    def _initialize_flow_media_plane(self, boot: BootContext) -> SharedComponentGraph:
+        """Compose Flow only from explicitly provisioned DeepStream artifacts."""
+        required = (
+            "ML_WORKER_FLOW_INFER_CONFIG",
+            "ML_WORKER_FLOW_TRACKER_CONFIG",
+            "ML_WORKER_FLOW_TRACKER_LIBRARY",
+            "ML_WORKER_FLOW_RECORD_DIR",
+            "ML_WORKER_FLOW_RECORD_CACHE_SECONDS",
+            "ML_WORKER_FLOW_FRAME_WIDTH",
+            "ML_WORKER_FLOW_FRAME_HEIGHT",
+        )
+        missing = [key for key in required if not self._env.get(key)]
+        if missing:
+            raise RuntimeError(f"flow profile wiring is missing: {', '.join(missing)}")
+        self._flow_media_plane = FlowMediaPlane(
+            FlowMediaPlaneConfig(
+                infer_config_path=self._env["ML_WORKER_FLOW_INFER_CONFIG"],
+                tracker_config_path=self._env["ML_WORKER_FLOW_TRACKER_CONFIG"],
+                tracker_library_path=self._env["ML_WORKER_FLOW_TRACKER_LIBRARY"],
+                record_dir=Path(self._env["ML_WORKER_FLOW_RECORD_DIR"]),
+                record_cache_seconds=int(self._env["ML_WORKER_FLOW_RECORD_CACHE_SECONDS"]),
+                frame_width=int(self._env["ML_WORKER_FLOW_FRAME_WIDTH"]),
+                frame_height=int(self._env["ML_WORKER_FLOW_FRAME_HEIGHT"]),
+            ),
+            worker_boot_id=str(self._worker_boot_uuid),
+        )
+        self._flow_media_plane.start()
+        # Flow uses the same temporal policy graph as nvidia, but all image
+        # production remains inside the injected DeepStream adapter.
+        return self._initialize_nvidia_policy_graph(boot)
+
+    def _initialize_nvidia_policy_graph(self, boot: BootContext) -> SharedComponentGraph:
+        """Build the CPU policy graph shared by the native and Flow media planes."""
+        fall_model = self._create_fall_model("cpu")
+        selected = self.config.models.selected
+        selection = None if selected is None else selected.desired.selection
+        graph = SharedComponentGraph(
+            MappingProxyType({"fall-classifier": fall_model}),
+            (),
+            (
+                SharedComponentIdentity(
+                    "fall-classifier",
+                    (
+                        "flow-onnxruntime"
+                        if selection is None
+                        else selection.model_publication.bundle_sha256
+                    ),
+                    "cpu-policy",
+                    "cpu",
+                    ("pose-bbox56.v1" if selection is None else selection.input_observation_schema),
+                ),
+            ),
+            None,
+        )
+        self._shared_graph = graph
+        self.fall_model = fall_model
+        self.shared_yolo = None
+        self._warmed_component_ids = frozenset(graph.components)
+        return graph
+
     def _forward_native_preview_demand(
         self,
         camera_id: str,
@@ -1611,6 +1680,19 @@ class WorkerRuntime:
             selection = selected.desired.selection
             if selection is None:
                 raise RuntimeError("selected fall bundle has no selection contract")
+            if self._boot is not None and self._boot.profile.name == "flow":
+                artifact_dir = selected.models_root / "bundles" / selected.desired.bundle_sha256
+                model_onnx = artifact_dir / "model.onnx"
+                if not model_onnx.is_file():
+                    raise RuntimeError(
+                        f"flow profile requires ONNX fall bundle model.onnx: {model_onnx}"
+                    )
+                if selection.runtime_format != "onnxruntime":
+                    raise RuntimeError(
+                        "flow profile refuses a Torch fall bundle; the selected runtime_format "
+                        "must be onnxruntime (export model.onnx with worker.tools.export_fall_onnx)"
+                    )
+                return OrtPoseBbox56Runner.from_artifact_dir(artifact_dir, device="cpu")
             try:
                 return DEFAULT_FALL_MODEL_FAMILY_REGISTRY.create_bundle(
                     selection.runtime_format,
@@ -1641,6 +1723,11 @@ class WorkerRuntime:
             if warmup.stream_epoch != 1:
                 raise RuntimeError("native child warmup did not start epoch one")
             _ = self._nvidia_media_plane.child.sources.remove("_bootstrap_warmup")
+            return tuple(sorted(self._warmed_component_ids))
+        if self._boot.profile.name == "flow":
+            if self.fall_model is None or self._flow_media_plane is None:
+                raise RuntimeError("flow media plane is not initialized")
+            self._warm_one(self.fall_model, "cpu")
             return tuple(sorted(self._warmed_component_ids))
         required_bindings = self._module_registry.shared_bindings(
             self._module_versions,

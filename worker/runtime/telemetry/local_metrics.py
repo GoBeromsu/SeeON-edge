@@ -165,6 +165,8 @@ def log_snapshot(snapshot: RuntimeDiagnosticsSnapshot) -> None:
             "worker.runtime.telemetry camera_id=%s failure_category=%s "
             "stage_timings=%s bus=%s encoder=%s encode=%s bed_region=%s "
             "bed_exit_scoring=%s inference=%s"
+            " smart_record_extended_total=%d smart_record_extension_raced_total=%d"
+            " smart_record_start_refused_total=%d nvenc_sessions_active=%d"
             + (" decode_backend=%s" if decode_backend is not None else "")
             # P1a-AC7: an operator threshold the runtime received but does not
             # apply is named in the message itself, because basicConfig renders
@@ -183,6 +185,10 @@ def log_snapshot(snapshot: RuntimeDiagnosticsSnapshot) -> None:
             bed_region,
             bed_exit_scoring,
             inference,
+            camera.smart_record_extended_total,
+            camera.smart_record_extension_raced_total,
+            camera.smart_record_start_refused_total,
+            camera.nvenc_sessions_active,
             *((decode_backend,) if decode_backend is not None else ()),
             *(
                 (camera.fall_unapplied_policy_threshold,)

@@ -47,9 +47,7 @@ def _camera_roster(rows: dict[str, dict[str, str]]) -> list[str]:
     return roster
 
 
-def _overlap_seconds(
-    row: dict[str, str], episode_start_ns: int, episode_end_ns: int
-) -> float:
+def _overlap_seconds(row: dict[str, str], episode_start_ns: int, episode_end_ns: int) -> float:
     try:
         clip_start_ns = _ns(row["clip_started_at"])
         duration_s = float(row["clip_duration_s"])
