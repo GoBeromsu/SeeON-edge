@@ -1985,8 +1985,7 @@ class WorkerRuntime:
             )
             for camera in self.config.cameras
         )
-        for binding in sealed_bindings:
-            binding.replay_sealed()
+        self._replay_sealed_clips(sealed_bindings)
         # Every roster source is registered; build and run the Flow now, then
         # require one accepted metadata frame before any pump or readiness
         # exists. This is the real-batch warmup: engines are verified, never
@@ -2038,6 +2037,28 @@ class WorkerRuntime:
         )
         self._supervisor.start()
         return outcomes
+
+    @staticmethod
+    def _replay_sealed_clips(bindings: Sequence[FlowEvidenceBinding]) -> int:
+        """Republish clips a previous boot sealed but could not publish.
+
+        Returns the number that failed again. A sidecar exists precisely because
+        a publication already failed once; if it fails again the media and the
+        sidecar are still on disk for the next attempt. Refusing to activate
+        cameras over one stale clip would trade every camera for one recording.
+        """
+        failures = 0
+        for binding in bindings:
+            try:
+                binding.replay_sealed()
+            except Exception:  # noqa: BLE001 - a stale clip must never brick the boot
+                failures += 1
+                LOGGER.exception(
+                    "replaying a sealed clip failed for camera_id=%s; the media and its "
+                    "sidecar are retained and cameras continue to activate",
+                    binding.camera_id,
+                )
+        return failures
 
     def _await_flow_first_frame(
         self, pumps: list[NativePolicyPump], *, timeout_sec: float = 30.0

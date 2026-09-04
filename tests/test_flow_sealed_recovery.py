@@ -127,3 +127,33 @@ def test_failed_seal_replays_contributors_and_discards_missing_media(tmp_path: P
 
     restarted.replay_sealed()
     assert stager.completed == [("one", "clip-1"), ("two", "clip-1")]
+
+
+def test_a_failing_replay_is_counted_and_never_blocks_activation(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """One stale clip must not cost every camera.
+
+    A live boot refused to activate any camera because a sidecar from the
+    previous run failed to republish. The evidence is already durable, so a
+    failed replay is counted and logged while activation continues.
+    """
+    import logging
+    from types import SimpleNamespace
+
+    from worker.runtime.worker import WorkerRuntime
+
+    def failing() -> None:
+        raise RuntimeError("publication still failing")
+
+    bindings = [
+        SimpleNamespace(camera_id="camera-a", replay_sealed=failing),
+        SimpleNamespace(camera_id="camera-b", replay_sealed=lambda: None),
+    ]
+
+    with caplog.at_level(logging.ERROR):
+        failures = WorkerRuntime._replay_sealed_clips(bindings)  # noqa: SLF001
+
+    assert failures == 1
+    assert "camera-a" in caplog.text
+    assert "camera-b" not in caplog.text
