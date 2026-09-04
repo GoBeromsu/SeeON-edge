@@ -311,6 +311,10 @@ def _adopt_media(source_path: Path, destination: Path) -> None:
                 "copy",
                 "-movflags",
                 "+faststart",
+                # The staging name ends in .tmp, so ffmpeg cannot infer the
+                # container from the extension and must be told.
+                "-f",
+                "mp4",
                 "-y",
                 str(destination),
             ],
