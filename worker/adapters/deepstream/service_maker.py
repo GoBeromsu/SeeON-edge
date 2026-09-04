@@ -483,7 +483,9 @@ class DeepStreamMediaPlane(MediaPlane):
         # off by default (ML_WORKER_FLOW_PREVIEW_RETRIEVER=1) until a sink that
         # does not throttle the graph is wired.
         if self._handle.make_retriever is None or not self._config.preview_retriever_enabled:
-            flow.render(mode=self._handle.render_mode_discard)
+            # A clock-synced sink paces the whole graph, which on a live RTSP
+            # source backs the reader up until the server drops it as too slow.
+            flow.render(mode=self._handle.render_mode_discard, enable_osd=False, sync=False)
         else:
             # `retrieve` IS the terminal sink: it pulls each batched buffer into
             # Python, which is where the preview JPEG comes from. Measured in
