@@ -70,6 +70,7 @@ def build_engine(
             parser_lib=parser_lib,
             infer_config=infer_config,
             tracker_config=tracker_config,
+            tracker_library=tracker_library,
             image_digest=image_digest,
         ):
             return existing

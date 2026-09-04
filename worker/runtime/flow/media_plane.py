@@ -6,6 +6,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from time import monotonic
+from typing import Final
 
 from worker.adapters.deepstream.service_maker import (
     DeepStreamMediaPlane,
@@ -109,12 +110,17 @@ class FlowMediaPlane:
     def source_failure(self, camera_id: str, category: str) -> SourceBinding:
         return self.plane.source_failure(camera_id, category)
 
+    #: The clip the acceptance criteria name is 60 s: this cached lookback plus
+    #: the plane's forward window. It lives here, with the recorder, so a single
+    #: place owns the contract instead of a literal at the call site.
+    DEFAULT_LOOKBACK_SEC: Final = 15
+
     def smart_recorder(
         self,
         camera_id: str,
         *,
         sink: Callable[[ClipSealed], None],
-        lookback_sec: int,
+        lookback_sec: int = DEFAULT_LOOKBACK_SEC,
         clock: Callable[[], float] = monotonic,
     ) -> SmartRecordActor:
         if camera_id in self._actors:

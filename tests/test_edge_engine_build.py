@@ -34,3 +34,48 @@ def test_build_writes_identity(tmp_path: Path) -> None:
     assert identity["engine_sha256"]
     assert identity["tracker_library_sha256"] == sha256(tracker_library)
     assert (tmp_path / "identity.json").is_file()
+
+
+def test_a_second_run_against_a_populated_cache_verifies_instead_of_building(
+    tmp_path: Path,
+) -> None:
+    """Every ordinary redeploy takes this path.
+
+    Compose runs the builder before each worker start, so with an engine and
+    identity already present it must verify the recorded digests and return,
+    never invoke trtexec and never raise.
+    """
+    onnx = tmp_path / "model.onnx"
+    parser = tmp_path / "parser.so"
+    infer = tmp_path / "infer.yml"
+    tracker = tmp_path / "tracker.yml"
+    tracker_library = tmp_path / "libnvds_nvmultiobjecttracker.so"
+    for path in (onnx, parser, infer, tracker, tracker_library):
+        path.write_bytes(path.name.encode())
+    engine = tmp_path / "model.engine"
+    identity_path = tmp_path / "engine-identity.json"
+    builds: list[list[str]] = []
+
+    def run(command: list[str], **_: object) -> CompletedProcess[str]:
+        builds.append(command)
+        engine.write_bytes(b"engine")
+        return CompletedProcess(command, 0, "", "")
+
+    def build() -> dict[str, str]:
+        return build_engine(
+            onnx=onnx,
+            engine=engine,
+            identity_path=identity_path,
+            parser_lib=parser,
+            infer_config=infer,
+            tracker_library=tracker_library,
+            tracker_config=tracker,
+            image_digest="image",
+            run=run,
+        )
+
+    first = build()
+    second = build()
+
+    assert second == first
+    assert len(builds) == 1, "the populated cache must not rebuild the engine"

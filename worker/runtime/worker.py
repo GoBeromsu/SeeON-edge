@@ -2098,7 +2098,6 @@ class WorkerRuntime:
         actor = media_plane.smart_recorder(
             camera.camera_id,
             sink=lambda sealed: sealed_binding[0].on_sealed(sealed),
-            lookback_sec=10,
         )
         sink = FlowEvidenceBinding(
             actor=actor,

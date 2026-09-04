@@ -98,3 +98,14 @@ def test_snapshot_without_a_frame_is_typed_unavailable() -> None:
 
     with pytest.raises(SnapshotUnavailable):
         plane.snapshot("camera")
+
+
+def test_the_recorder_defaults_to_the_sixty_second_window() -> None:
+    """15 s of cached lookback plus the plane's 45 s forward window.
+
+    Composition takes this default rather than repeating a literal, so the
+    contract has one owner.
+    """
+    from worker.runtime.flow.media_plane import FlowMediaPlane
+
+    assert FlowMediaPlane.DEFAULT_LOOKBACK_SEC == 15
