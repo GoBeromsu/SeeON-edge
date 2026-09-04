@@ -1,0 +1,16 @@
+{
+  "criterion": "P1b-AC3 second half (both incidents COMPLETE in one transaction)",
+  "result": {
+    "clips": 1,
+    "clip_id": "9b461027-ed1d-4160-bfea-09056382d087",
+    "artifacts": 38,
+    "distinct_artifact_ids": 38,
+    "artifacts_all_pointing_at_the_one_clip": 38,
+    "artifact_states": "AVAILABLE x38",
+    "incidents_COMPLETE": 38,
+    "complete_incidents_carrying_an_artifact": 38
+  },
+  "chain": "decision -> incident -> Smart Record window -> sealed clip -> published clip with manifest -> CLIP delivery entry -> PUT api/v1/relay/clips/{id} -> backend export -> upstream accept -> receipt transaction completing every contributor",
+  "rig_caveat": "The facility hub is simulated: a mock answering the three calls the backend makes (capabilities, clip PUT, state PUT), an enrolment row written directly into edge_site, one camera bound to a backend_camera_id, and API_BACKEND_ALLOW_INSECURE_HTTP=1 which the product documents as a local-fixture switch. Everything downstream of that - the worker delivery queue, the export client, the backend export route, the media verification and the receipt transaction - is unmodified product code.",
+  "verdict": "PASS for the code path. One clip completed 38 contributor incidents in a single transaction, each with its own distinct artifact row pointing at that one clip."
+}
