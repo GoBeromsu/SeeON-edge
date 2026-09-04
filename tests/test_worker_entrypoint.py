@@ -324,7 +324,9 @@ def test_real_workerruntime_constructs_with_fake_collaborators_without_typeerror
 
     monkeypatch.setattr(WorkerRuntime, "__init__", _spy_init)
     monkeypatch.setattr(WorkerRuntime, "run", lambda self: None)
-    monkeypatch.setattr(worker_main, "InProcessServingClient", lambda: fake_serving)
+    # The composition root selects the profile's model registry and passes it
+    # to the serving client (flow -> ORT bed, everything else -> the default).
+    monkeypatch.setattr(worker_main, "InProcessServingClient", lambda _registry=None: fake_serving)
 
     exit_code = worker_main.main(["--config", str(config_path)])
 
