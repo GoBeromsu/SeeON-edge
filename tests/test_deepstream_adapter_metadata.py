@@ -69,7 +69,13 @@ def test_slot_rejects_stale_source_generation() -> None:
     rows[0, :4] = (64, 64, 128, 128)
     meta = SimpleNamespace(buffer_pts=10, object_items=[_object(7, 10, 10, 10, 10)])
     converted = convert_frame(
-        meta, rows=rows, binding=binding, frame_w=100, frame_h=100, publish_sequence=1, boot_id="boot"
+        meta,
+        rows=rows,
+        binding=binding,
+        frame_w=100,
+        frame_h=100,
+        publish_sequence=1,
+        boot_id="boot",
     )
     slot = LatestMetadataSlot()
     slot.register_source(binding)
