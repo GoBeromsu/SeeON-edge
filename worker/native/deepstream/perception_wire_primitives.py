@@ -81,7 +81,7 @@ class Reader:
 
     def f64(self) -> float:
         unpacked: tuple[float] = _F64.unpack(self.raw(_F64.size))
-        (value,) = unpacked
+        value, = unpacked
         return value
 
     def text(self) -> str:

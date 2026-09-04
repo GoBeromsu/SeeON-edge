@@ -87,7 +87,8 @@ def _person_boxes(
     rows: tuple[tuple[int, int, int, int, float], ...],
 ) -> tuple[PersonBox, ...]:
     return tuple(
-        PersonBox(x1=row[0], y1=row[1], x2=row[2], y2=row[3], confidence=row[4]) for row in rows
+        PersonBox(x1=row[0], y1=row[1], x2=row[2], y2=row[3], confidence=row[4])
+        for row in rows
     )
 
 
@@ -188,7 +189,9 @@ def parse_bed_rows(
             affine,
             max_points=max_points,
         )
-        regions.append(BedRegion(x1=x1, y1=y1, x2=x2, y2=y2, confidence=score, polygon=polygon))
+        regions.append(
+            BedRegion(x1=x1, y1=y1, x2=x2, y2=y2, confidence=score, polygon=polygon)
+        )
     return ParsedBed(regions=tuple(regions))
 
 
@@ -224,7 +227,9 @@ def _mask_polygon(
     if len(contour) > max_points:
         indices = np.linspace(0, len(contour) - 1, max_points).astype(np.int64)
         contour = tuple(contour[index] for index in indices)
-    return tuple(affine.invert_keypoint((x / width_ratio, y / height_ratio)) for x, y in contour)
+    return tuple(
+        affine.invert_keypoint((x / width_ratio, y / height_ratio)) for x, y in contour
+    )
 
 
 def _trace_contour(

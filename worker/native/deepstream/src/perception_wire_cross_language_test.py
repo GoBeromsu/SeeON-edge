@@ -41,7 +41,9 @@ def identity(reader: Reader) -> tuple[str, str, int, int, int]:
 
 
 def main() -> None:
-    encoded = subprocess.check_output([sys.argv[1], "--emit-nonempty"], text=True).strip()
+    encoded = subprocess.check_output(
+        [sys.argv[1], "--emit-nonempty"], text=True
+    ).strip()
     reader = Reader(bytes.fromhex(encoded))
     assert reader.take(4) == b"PFV2"
     expected_identity = ("12345678-1234-5678-1234-567812345678", "camera-a", 7, 123456, 11)
@@ -50,7 +52,9 @@ def main() -> None:
     assert reader.unpack("<BBBB") == (1, 1, 1, 1)
 
     (box_count,) = reader.unpack("<H")
-    boxes: list[tuple[Scalar, ...]] = [reader.unpack("<iiiid") for _ in range(int(box_count))]
+    boxes: list[tuple[Scalar, ...]] = [
+        reader.unpack("<iiiid") for _ in range(int(box_count))
+    ]
     assert boxes == [(1, 2, 30, 40, 0.75), (5, 6, 50, 60, 0.5)]
 
     (pose_count,) = reader.unpack("<H")

@@ -29,28 +29,29 @@ def encode_message(message: ControlMessage) -> bytes:
     camera = message.camera_id.encode()
     transform = message.transform_id.encode()
     body = camera + transform + message.payload
-    if len(camera) > 65_535 or len(transform) > 65_535 or _HEADER.size + len(body) > _MAX_FRAME:
+    if (
+        len(camera) > 65_535
+        or len(transform) > 65_535
+        or _HEADER.size + len(body) > _MAX_FRAME
+    ):
         raise IpcProtocolError("frame_too_large", str(_HEADER.size + len(body)))
-    return (
-        _HEADER.pack(
-            _MAGIC,
-            PROTOCOL_VERSION,
-            int(message.kind),
-            0,
-            len(body),
-            message.source_generation,
-            message.stream_epoch,
-            message.source_pts,
-            message.source_sequence,
-            message.native_publish_sequence,
-            message.request_id,
-            message.worker_boot_id.bytes,
-            message.child_instance_id.bytes,
-            len(camera),
-            len(transform),
-        )
-        + body
-    )
+    return _HEADER.pack(
+        _MAGIC,
+        PROTOCOL_VERSION,
+        int(message.kind),
+        0,
+        len(body),
+        message.source_generation,
+        message.stream_epoch,
+        message.source_pts,
+        message.source_sequence,
+        message.native_publish_sequence,
+        message.request_id,
+        message.worker_boot_id.bytes,
+        message.child_instance_id.bytes,
+        len(camera),
+        len(transform),
+    ) + body
 
 
 def decode_control_message(data: bytes) -> ControlMessage:
@@ -83,7 +84,7 @@ def decode_control_message(data: bytes) -> ControlMessage:
         raise IpcProtocolError("unknown_kind", str(kind_value)) from error
     if camera_size + transform_size > body_size:
         raise IpcProtocolError("identity_overflow", str(body_size))
-    body = memoryview(data)[_HEADER.size :]
+    body = memoryview(data)[_HEADER.size:]
     try:
         camera = bytes(body[:camera_size]).decode()
         transform = bytes(body[camera_size : camera_size + transform_size]).decode()
