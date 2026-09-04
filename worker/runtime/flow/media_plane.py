@@ -157,6 +157,9 @@ class FlowMediaPlane:
         self._actors[camera_id] = actor
         return actor
 
+    def published_frames(self, camera_id: str) -> int:
+        return self.plane.published_frames(camera_id)
+
     def recorder_counters(self, camera_id: str) -> tuple[int, int, int]:
         actor = self._actors.get(camera_id)
         if actor is None:

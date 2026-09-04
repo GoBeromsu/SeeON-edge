@@ -256,6 +256,16 @@ class DeepStreamMediaPlane(MediaPlane):
             if self._flow_thread is not None:
                 self._flow_thread.join(timeout=10.0)
 
+    def published_frames(self, camera_id: str) -> int:
+        """Frames this plane has published for a camera since it started.
+
+        Monotonic and never consumed. The metadata slot is a capacity-one
+        mailbox that the policy pump drains, so peeking at it reports silence
+        the moment the pump keeps up; this counter is the liveness signal that
+        survives consumption.
+        """
+        return self._publish_sequence.get(camera_id, 0)
+
     def status(self) -> MediaPlaneStatus:
         error = self._flow_error
         return MediaPlaneStatus(

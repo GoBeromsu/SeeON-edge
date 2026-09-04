@@ -13,7 +13,7 @@ class _Frame(Protocol):
 
 
 class _Metadata(Protocol):
-    def peek(self, camera_id: str) -> _Frame | None: ...
+    def published_frames(self, camera_id: str) -> int: ...
 
 
 class _Status(Protocol):
@@ -89,10 +89,14 @@ class FlowLifecycleSupervisor:
 
         now = self._clock()
         for camera_id, state in self._states.items():
-            frame = self._plane.metadata.peek(camera_id)
-            sequence = None if frame is None else frame.native_publish_sequence
-            if sequence is not None and not isinstance(sequence, int):
+            # The plane's published-frame counter, not the metadata slot: the
+            # slot is a capacity-one mailbox the policy pump drains, so peeking
+            # at it reports silence exactly when the pump is keeping up.
+            sequence = self._plane.published_frames(camera_id)
+            if not isinstance(sequence, int):
                 raise TypeError("accepted Flow metadata sequence must be an integer")
+            if sequence == 0:
+                sequence = None
             if sequence is not None and sequence != state.sequence:
                 state.sequence = sequence
                 state.accepted_at = now

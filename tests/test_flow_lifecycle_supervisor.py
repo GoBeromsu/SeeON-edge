@@ -8,20 +8,29 @@ from worker.runtime.flow.lifecycle_supervisor import FlowLifecycleSupervisor
 
 
 class _Metadata:
+    """Only the pump reads the slot; the supervisor must not."""
+
     def __init__(self) -> None:
         self.frames: dict[str, SimpleNamespace] = {}
 
     def peek(self, camera_id: str) -> SimpleNamespace | None:
-        return self.frames.get(camera_id)
+        raise AssertionError(
+            "the supervisor must read the plane's published-frame counter, not the "
+            f"capacity-one slot the pump drains ({camera_id})"
+        )
 
 
 class _Plane:
     def __init__(self) -> None:
         self.metadata = _Metadata()
+        self.published: dict[str, int] = {}
         self.fatal_error: str | None = None
         self.failures: list[str] = []
         self.previews_cleared: list[str] = []
         self.epoch = 1
+
+    def published_frames(self, camera_id: str) -> int:
+        return self.published.get(camera_id, 0)
 
     def status(self) -> SimpleNamespace:
         return SimpleNamespace(fatal_error=self.fatal_error)
@@ -31,6 +40,7 @@ class _Plane:
         self.failures.append(camera_id)
         self.epoch += 1
         self.metadata.frames.pop(camera_id, None)
+        self.published.pop(camera_id, None)
         return SimpleNamespace(stream_epoch=self.epoch)
 
     def clear_preview(self, camera_id: str) -> None:
@@ -69,7 +79,7 @@ def test_silence_rotates_once_then_recovery_marks_ready_and_advances_pump_bindin
         silence_timeout_sec=30.0,
         clock=lambda: now[0],
     )
-    plane.metadata.frames["camera-a"] = SimpleNamespace(native_publish_sequence=1)
+    plane.published["camera-a"] = 1
     supervisor.tick()
 
     now[0] = 30.0
@@ -81,7 +91,7 @@ def test_silence_rotates_once_then_recovery_marks_ready_and_advances_pump_bindin
     assert unready == ["camera-a"]
     assert supervisor.counters("camera-a").outages == 1
 
-    plane.metadata.frames["camera-a"] = SimpleNamespace(native_publish_sequence=2)
+    plane.published["camera-a"] = 2
     now[0] = 31.0
     supervisor.tick()
 
@@ -104,7 +114,7 @@ def test_camera_that_keeps_publishing_is_not_rotated() -> None:
     )
     for sequence, tick in ((1, 0.0), (2, 29.0), (3, 58.0)):
         now[0] = tick
-        plane.metadata.frames["camera-a"] = SimpleNamespace(native_publish_sequence=sequence)
+        plane.published["camera-a"] = sequence
         supervisor.tick()
 
     assert plane.failures == []
