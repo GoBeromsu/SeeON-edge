@@ -81,6 +81,9 @@ _ML_API_INPUTS = (
 #: which is why neither is listed separately.
 _ML_WORKER_INPUTS = (
     "Dockerfile.edge",
+    # P1b: the flow-profile image is a second ml-worker build from the same
+    # sources; its Dockerfile changes that image and nothing else.
+    "Dockerfile.flow",
     "contracts/",
     "pyproject.toml",
     "shared/",
@@ -118,6 +121,7 @@ _NEUTRAL_INPUTS = (
     "artifacts/",
     "compose.edge.cpu.yaml",
     "compose.edge.dev.yaml",
+    "compose.edge.flow.yaml",
     "compose.edge.igpu.yaml",
     "compose.edge.nvidia.yaml",
     "compose.edge.yaml",

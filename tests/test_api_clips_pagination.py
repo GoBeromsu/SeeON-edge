@@ -266,4 +266,5 @@ def test_single_clip_metadata_resolves_every_historical_layout(
         "thumbnail_available": False,
         "detected_at": None,
         "truncation_reasons": [],
+        "extension": None,
     }

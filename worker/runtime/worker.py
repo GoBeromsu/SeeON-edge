@@ -1625,7 +1625,10 @@ class WorkerRuntime:
 
     def _initialize_nvidia_policy_graph(self, boot: BootContext) -> SharedComponentGraph:
         """Build the CPU policy graph shared by the native and Flow media planes."""
-        fall_model = self._create_fall_model("cpu")
+        # The flow profile's worker process never imports Torch (P1b-AC7), so
+        # its fall model must be the ONNX Runtime bundle; nvidia keeps Torch-CPU.
+        require_onnxruntime = boot.profile.name == "flow"
+        fall_model = self._create_fall_model("cpu", require_onnxruntime=require_onnxruntime)
         selected = self.config.models.selected
         selection = None if selected is None else selected.desired.selection
         graph = SharedComponentGraph(
@@ -1678,7 +1681,9 @@ class WorkerRuntime:
                 exc_info=True,
             )
 
-    def _create_fall_model(self, device: str) -> FallV2ModelProtocol:
+    def _create_fall_model(
+        self, device: str, *, require_onnxruntime: bool = False
+    ) -> FallV2ModelProtocol:
         """Construct the selected bundle or the packaged fall model.
 
         Fall model selection has no implicit fallback: an operator who omits
@@ -1701,7 +1706,7 @@ class WorkerRuntime:
             selection = selected.desired.selection
             if selection is None:
                 raise RuntimeError("selected fall bundle has no selection contract")
-            if self._boot is not None and self._boot.profile.name == "flow":
+            if require_onnxruntime:
                 artifact_dir = selected.models_root / "bundles" / selected.desired.bundle_sha256
                 model_onnx = artifact_dir / "model.onnx"
                 if not model_onnx.is_file():
