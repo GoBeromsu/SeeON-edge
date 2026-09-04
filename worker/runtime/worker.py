@@ -1645,8 +1645,11 @@ class WorkerRuntime:
         identities: list[SharedComponentIdentity] = []
         for binding in bindings:
             if binding.component_id == "fall-classifier":
+                # A pulled selection names its publication digest; the packaged
+                # default names the verified weights member of its own bundle
+                # manifest, which is what the runner loaded.
                 digest = (
-                    "flow-onnxruntime"
+                    self._packaged_fall_member_digest()
                     if selection is None
                     else selection.model_publication.bundle_sha256
                 )
@@ -1684,6 +1687,16 @@ class WorkerRuntime:
         self.shared_yolo = None
         self._warmed_component_ids = frozenset(graph.components)
         return graph
+
+    def _packaged_fall_member_digest(self) -> str:
+        from worker.adapters.model.pose_bbox56_bundle_support import member_digest, read_json
+
+        configured = self.config.models.fall
+        if configured is None:
+            raise RuntimeError("fall model must be explicitly configured; refusing to boot")
+        member = "model.onnx" if configured.framework == "onnxruntime" else "model.pt"
+        manifest = read_json(configured.artifact_dir / "bundle-manifest.json")
+        return member_digest(manifest, member)
 
     def _flow_perception_digest(self, component_id: str, declared: str | None) -> str | None:
         if component_id == "pose" and self._flow_engine_identity is not None:

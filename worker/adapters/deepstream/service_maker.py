@@ -62,12 +62,28 @@ def _default_flow_factory(config: DeepStreamMediaPlaneConfig) -> _FlowHandle:
 
 
 class _Probe:
+    """Vendor-neutral half of the probe; wrapped in a BatchMetadataOperator at build time."""
+
     def __init__(self, plane: DeepStreamMediaPlane) -> None:
         self._plane = plane
 
     def handle_metadata(self, batch_meta: Any) -> None:
         for frame_meta in batch_meta.frame_items:
             self._plane.publish_frame(frame_meta)
+
+
+def _batch_operator(probe: _Probe) -> Any:
+    """Subclass the SDK operator lazily so this module imports without pyservicemaker."""
+    from pyservicemaker import BatchMetadataOperator
+
+    class _Operator(BatchMetadataOperator):
+        def __init__(self) -> None:
+            super().__init__()
+
+        def handle_metadata(self, batch_meta: Any) -> None:
+            probe.handle_metadata(batch_meta)
+
+    return _Operator()
 
 
 class DeepStreamMediaPlane(MediaPlane):
@@ -242,7 +258,7 @@ class DeepStreamMediaPlane(MediaPlane):
         uris = [self._sources.uri(camera_id) for camera_id in camera_ids]
         if not uris:
             return
-        from pyservicemaker import RecordConfig, RenderMode
+        from pyservicemaker import Probe, RecordConfig, RenderMode
 
         record = RecordConfig(
             recording_type="local",
@@ -257,7 +273,9 @@ class DeepStreamMediaPlane(MediaPlane):
         ).infer(self._config.infer_config_path).track(
             ll_config_file=self._config.tracker_config_path,
             ll_lib_file=self._config.tracker_library_path,
-        ).attach(self._probe).render(mode=RenderMode.DISCARD)
+        ).attach(what=Probe("media-plane-probe", _batch_operator(self._probe))).render(
+            mode=RenderMode.DISCARD
+        )
         for camera_id in camera_ids:
             source = self._source_element(camera_id)
             source.set(
