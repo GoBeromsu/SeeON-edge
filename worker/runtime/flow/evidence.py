@@ -101,7 +101,6 @@ class FlowEvidenceBinding:
         published = self.publisher.publish(recovery.sealed, recovery.events)
         for contributor in recovery.sealed.contributors:
             self.stager.complete(contributor.event_ref, str(published.clip_id))
-        self.sidecars.remove(recovery)
 
 
 __all__ = ["FlowEvidenceBinding", "FlowEvidenceStager"]

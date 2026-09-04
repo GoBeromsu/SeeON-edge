@@ -32,10 +32,16 @@ from worker.native.deepstream.metadata import LatestMetadataSlot, SourceBinding
 _MAX_PREVIEW_JPEG_BYTES = 2 * 1024 * 1024
 #: How often the plane reports what perception is actually producing.
 _PERCEPTION_HEARTBEAT_FRAMES = 900
+#: Isolated malformed SDK metadata is tolerated; a broken conversion contract is fatal.
+_PROBE_CONSECUTIVE_FAILURE_THRESHOLD = 3
 
 #: A frame whose inference produced no tensor metadata still has real tracks.
 _EMPTY_POSE_ROWS: Final = np.zeros((0, 57), dtype=np.float32)
 LOGGER = logging.getLogger(__name__)
+
+
+class DeepStreamFlowStopTimeout(RuntimeError):
+    """The SDK Flow still owns media resources after requested shutdown."""
 
 
 class FlowFactory(Protocol):
@@ -230,11 +236,12 @@ class DeepStreamMediaPlane(MediaPlane):
         self._jpeg_lock = threading.Lock()
         # A pose path that produces nothing must not be silent: without these a
         # dead parser looks exactly like an empty room for hours.
-        self._frames_without_pose_tensor = 0
-        self._objects_observed = 0
-        self._matched_tracks = 0
+        self._frames_without_pose_tensor: dict[str, int] = {}
+        self._objects_observed: dict[str, int] = {}
+        self._matched_tracks: dict[str, int] = {}
         self._accepting = True
-        self._probe_failures = 0
+        self._probe_failures: dict[str, int] = {}
+        self._probe_fatal_error: str | None = None
         self._cameras_warned_without_pose_tensor: set[str] = set()
         self._commands: queue.Queue[
             tuple[Callable[[], Any], threading.Event | None, list[Any] | None]
@@ -290,14 +297,14 @@ class DeepStreamMediaPlane(MediaPlane):
             # unmapped-pad warnings and races the SDK's own stream removal.
             self._accepting = False
             self._pipeline.stop()
-            self._started = False
             if self._flow_thread is not None:
                 self._flow_thread.join(timeout=10.0)
                 if self._flow_thread.is_alive():
-                    LOGGER.error(
-                        "the DeepStream Flow did not stop within 10s; "
+                    raise DeepStreamFlowStopTimeout(
+                        "DeepStream Flow did not stop within 10 seconds; "
                         "the pipeline may still be delivering buffers"
                     )
+            self._started = False
 
     def camera_ids_for_preview(self) -> tuple[str, ...]:
         """Cameras this plane can encode a preview for."""
@@ -327,23 +334,24 @@ class DeepStreamMediaPlane(MediaPlane):
         """
         return self._publish_sequence.get(camera_id, 0)
 
-    def perception_counters(self) -> tuple[int, int]:
+    def perception_counters(self, camera_id: str) -> tuple[int, int]:
         """Objects the tracker delivered, and frames that carried no pose tensor.
 
         A pose path that silently produces nothing is indistinguishable from an
         empty room, which is exactly how a mis-bound output layer hid for a
         whole bring-up. These make the difference observable.
         """
-        return self._objects_observed, self._frames_without_pose_tensor
-
-    def probe_failures(self) -> int:
-        """Frames dropped because their conversion raised inside the SDK probe."""
-        return self._probe_failures
+        return (
+            self._objects_observed.get(camera_id, 0),
+            self._frames_without_pose_tensor.get(camera_id, 0),
+        )
 
     def status(self) -> MediaPlaneStatus:
         error = self._flow_error
         return MediaPlaneStatus(
-            fatal_error=None if error is None else f"{type(error).__name__}: {error}",
+            fatal_error=(
+                f"{type(error).__name__}: {error}" if error is not None else self._probe_fatal_error
+            ),
             sources=tuple(
                 SourceStatus(
                     camera_id, self._sources.binding(camera_id), camera_id in self._live, 0
@@ -564,14 +572,6 @@ class DeepStreamMediaPlane(MediaPlane):
         so a frame that cannot be converted is dropped and reported rather than
         allowed to take the worker down with it.
         """
-        try:
-            self._publish_frame(frame_meta)
-        except Exception:  # noqa: BLE001 - an SDK probe must never raise
-            self._probe_failures += 1
-            if self._probe_failures == 1:
-                LOGGER.exception("dropping a frame whose conversion failed inside the SDK probe")
-
-    def _publish_frame(self, frame_meta: Any) -> None:
         if not self._accepting:
             # Stopping: the source table is being emptied out from under this
             # callback, so there is nothing meaningful left to convert.
@@ -588,17 +588,40 @@ class DeepStreamMediaPlane(MediaPlane):
                     sorted(self._sources.pad_index(name) for name in self._sources.camera_ids()),
                 )
             return
+        try:
+            self._publish_frame(frame_meta, camera_id)
+        except Exception:  # noqa: BLE001 - an SDK probe must never raise
+            self._record_probe_failure(camera_id)
+
+    def _record_probe_failure(self, camera_id: str) -> None:
+        failures = self._probe_failures.get(camera_id, 0) + 1
+        self._probe_failures[camera_id] = failures
+        if failures == 1:
+            LOGGER.exception(
+                "dropping frame whose conversion failed inside the SDK probe "
+                "camera_id=%s consecutive_failures=%d",
+                camera_id,
+                failures,
+            )
+        if failures == _PROBE_CONSECUTIVE_FAILURE_THRESHOLD:
+            self._probe_fatal_error = (
+                "DeepStream probe conversion failed consecutively "
+                f"camera_id={camera_id} failures={failures}"
+            )
+            LOGGER.error("%s", self._probe_fatal_error)
+
+    def _publish_frame(self, frame_meta: Any, camera_id: str) -> None:
         rows = None
         for tensor_meta in frame_meta.tensor_items:
             layer = tensor_meta.as_tensor_output().get_layers()["output0"]
             rows = rows_from_tensor(layer)
             break
-        objects = int(getattr(frame_meta, "num_obj_meta", 0) or 0)
-        if objects == 0:
-            objects = sum(1 for _ in frame_meta.object_items)
-        self._objects_observed += objects
+        objects = sum(1 for _ in frame_meta.object_items)
+        self._objects_observed[camera_id] = self._objects_observed.get(camera_id, 0) + objects
         if rows is None:
-            self._frames_without_pose_tensor += 1
+            self._frames_without_pose_tensor[camera_id] = (
+                self._frames_without_pose_tensor.get(camera_id, 0) + 1
+            )
             if camera_id not in self._cameras_warned_without_pose_tensor:
                 self._cameras_warned_without_pose_tensor.add(camera_id)
                 LOGGER.warning(
@@ -627,7 +650,10 @@ class DeepStreamMediaPlane(MediaPlane):
             boot_id=binding.worker_boot_id,
         )
         self._live.add(camera_id)
-        self._matched_tracks += len(metadata.frame.association.track_ids)
+        self._matched_tracks[camera_id] = self._matched_tracks.get(camera_id, 0) + len(
+            metadata.frame.association.track_ids
+        )
+        self._probe_failures.pop(camera_id, None)
         if sequence % _PERCEPTION_HEARTBEAT_FRAMES == 0:
             # Operator-visible in the message itself: this is the one line that
             # distinguishes an empty room from a perception path that is dead.
@@ -636,9 +662,9 @@ class DeepStreamMediaPlane(MediaPlane):
                 "frames_without_pose_tensor=%d",
                 camera_id,
                 sequence,
-                self._objects_observed,
-                self._matched_tracks,
-                self._frames_without_pose_tensor,
+                self._objects_observed[camera_id],
+                self._matched_tracks[camera_id],
+                self._frames_without_pose_tensor.get(camera_id, 0),
             )
         self._slot.publish(metadata)
 
@@ -679,4 +705,10 @@ class DeepStreamMediaPlane(MediaPlane):
         self._recordings.pop(camera_id, None)
 
 
-__all__ = ["DeepStreamMediaPlane", "DeepStreamMediaPlaneConfig", "FlowFactory", "_FlowHandle"]
+__all__ = [
+    "DeepStreamFlowStopTimeout",
+    "DeepStreamMediaPlane",
+    "DeepStreamMediaPlaneConfig",
+    "FlowFactory",
+    "_FlowHandle",
+]

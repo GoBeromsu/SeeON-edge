@@ -358,7 +358,7 @@ def test_a_frame_without_pose_tensor_is_counted_and_named_once(
                 )
             )
 
-    observed, without_tensor = plane.perception_counters()
+    observed, without_tensor = plane.perception_counters("camera")
     assert without_tensor == 2
     assert observed == 5
     warnings = [
@@ -393,9 +393,7 @@ def test_the_probe_stops_converting_once_the_plane_is_stopping(
     assert not [record for record in caplog.records if "unmapped mux pad" in record.getMessage()]
 
 
-def test_a_frame_that_cannot_be_converted_is_dropped_not_fatal(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
+def test_an_isolated_conversion_failure_is_dropped_without_tripping_the_plane() -> None:
     """An exception escaping a probe callback aborts the process inside the SDK.
 
     A 13-camera run died during an RTSP reconnect, so a frame whose conversion
@@ -412,14 +410,74 @@ def test_a_frame_that_cannot_be_converted_is_dropped_not_fatal(
         def __getattr__(self, name: str) -> object:
             raise RuntimeError(f"vendor metadata blew up reading {name}")
 
-    with caplog.at_level(logging.ERROR):
-        plane.publish_frame(_Exploding())
-        plane.publish_frame(_Exploding())
+    plane.publish_frame(_Exploding())
 
-    assert plane.probe_failures() == 2
     assert plane.published_frames("camera") == 0
-    assert len([r for r in caplog.records if "conversion failed" in r.getMessage()]) == 1
+    assert plane.status().fatal_error is None
     plane.publish_frame(
         SimpleNamespace(pad_index=0, buffer_pts=1, tensor_items=[], object_items=[])
     )
     assert plane.published_frames("camera") == 1
+    assert plane.status().fatal_error is None
+
+
+def test_sustained_conversion_failure_trips_only_the_affected_camera() -> None:
+    """A broken SDK conversion contract must reach the lifecycle supervisor."""
+    plane, _ = _plane()
+    plane.add_source("broken", "rtsp://one")
+    plane.add_source("healthy", "rtsp://two")
+
+    class _Exploding:
+        pad_index = 0
+
+        def __getattr__(self, name: str) -> object:
+            raise RuntimeError(f"vendor metadata blew up reading {name}")
+
+    for _ in range(3):
+        plane.publish_frame(_Exploding())
+    plane.publish_frame(
+        SimpleNamespace(pad_index=1, buffer_pts=1, tensor_items=[], object_items=[])
+    )
+
+    assert "camera_id=broken" in (plane.status().fatal_error or "")
+    assert plane.published_frames("broken") == 0
+    assert plane.published_frames("healthy") == 1
+
+
+def test_perception_counters_are_camera_local() -> None:
+    plane, _ = _plane()
+    plane.add_source("one", "rtsp://one")
+    plane.add_source("two", "rtsp://two")
+
+    plane.publish_frame(
+        SimpleNamespace(
+            pad_index=0,
+            buffer_pts=1,
+            tensor_items=[],
+            object_items=[
+                SimpleNamespace(
+                    object_id=1,
+                    confidence=0.9,
+                    rect_params=SimpleNamespace(left=0.0, top=0.0, width=10.0, height=10.0),
+                )
+            ],
+        )
+    )
+    plane.publish_frame(
+        SimpleNamespace(
+            pad_index=1,
+            buffer_pts=1,
+            tensor_items=[],
+            object_items=[
+                SimpleNamespace(
+                    object_id=index,
+                    confidence=0.9,
+                    rect_params=SimpleNamespace(left=0.0, top=0.0, width=10.0, height=10.0),
+                )
+                for index in range(2)
+            ],
+        )
+    )
+
+    assert plane.perception_counters("one") == (1, 1)
+    assert plane.perception_counters("two") == (2, 1)

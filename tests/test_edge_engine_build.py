@@ -33,7 +33,9 @@ def test_build_writes_identity(tmp_path: Path) -> None:
     tracker_library = tmp_path / "libnvds_nvmultiobjecttracker.so"
     for path in (parser, tracker, tracker_library):
         path.write_bytes(path.name.encode())
-    infer.write_text("model-engine-file=stale.engine\nbatch-size=1\n", encoding="utf-8")
+    infer.write_text(
+        "onnx-file=stale.onnx\nmodel-engine-file=stale.engine\nbatch-size=1\n", encoding="utf-8"
+    )
     engine = tmp_path / "model.engine"
 
     def run(command: list[str], **_: object) -> CompletedProcess[str]:
@@ -71,7 +73,9 @@ def test_a_second_run_against_a_populated_cache_verifies_instead_of_building(
     for path in (parser, tracker, tracker_library):
         path.write_bytes(path.name.encode())
     engine = tmp_path / "model.engine"
-    infer.write_text(f"model-engine-file={engine}\nbatch-size=14\n", encoding="utf-8")
+    infer.write_text(
+        f"onnx-file=stale.onnx\nmodel-engine-file={engine}\nbatch-size=14\n", encoding="utf-8"
+    )
     identity_path = tmp_path / "engine-identity.json"
     builds: list[list[str]] = []
 
@@ -108,7 +112,9 @@ def test_nvinfer_is_invoked_for_the_declared_batch_and_cached_by_batch(tmp_path:
     tracker_library = tmp_path / "libnvds_nvmultiobjecttracker.so"
     for path in (parser, tracker, tracker_library):
         path.write_bytes(path.name.encode())
-    infer.write_text("model-engine-file=stale.engine\nbatch-size=1\n", encoding="utf-8")
+    infer.write_text(
+        "onnx-file=stale.onnx\nmodel-engine-file=stale.engine\nbatch-size=1\n", encoding="utf-8"
+    )
     engine = tmp_path / "model.engine"
     identity_path = tmp_path / "engine-identity.json"
     served_infer = tmp_path / "cache" / "nvinfer.txt"
@@ -135,11 +141,20 @@ def test_nvinfer_is_invoked_for_the_declared_batch_and_cached_by_batch(tmp_path:
     build_engine(**kwargs, batch_size=14)
     assert builds[0][0] == "gst-launch-1.0"
     assert "nvinfer" in builds[0]
-    assert f"config-file-path={served_infer}" in builds[0]
+    # The builder runs against a staged config in the writable cache, because
+    # nvinfer writes its engine beside the ONNX the config names and the model
+    # directory is mounted read-only in the deployment.
+    build_config = next(
+        str(part).split("=", 1)[1]
+        for part in builds[0]
+        if str(part).startswith("config-file-path=")
+    )
+    assert Path(build_config).parent == engine.parent / "nvinfer-build"
+    assert f"batch-size={14}" in served_infer.read_text(encoding="utf-8")
     assert "batch-size=14" in builds[0]
     assert builds[0].count("videotestsrc") == 14
     assert served_infer.read_text(encoding="utf-8") == (
-        f"model-engine-file={engine}\nbatch-size=14\n"
+        f"onnx-file=stale.onnx\nmodel-engine-file={engine}\nbatch-size=14\n"
     )
 
     build_engine(**kwargs, batch_size=14)
@@ -164,7 +179,7 @@ def _build_against(
         path.write_bytes(path.name.encode())
     engine = engine if engine is not None else tmp_path / "model.engine"
     infer.write_text(
-        f"model-engine-file={engine}\nbatch-size={batch_size}\n",
+        f"onnx-file={onnx_path}\nmodel-engine-file={engine}\nbatch-size={batch_size}\n",
         encoding="utf-8",
     )
     return build_engine(
@@ -214,14 +229,58 @@ def test_the_engine_nvinfer_writes_beside_the_onnx_is_adopted(tmp_path: Path) ->
     onnx_path = tmp_path / "model.onnx"
     _write_onnx(onnx_path)
     engine = tmp_path / "cache" / "model.engine"
-    produced = onnx_path.with_name(f"{onnx_path.name}_b1_gpu0_fp16.engine")
 
     def run(command, **_kwargs):
-        produced.write_bytes(b"nvinfer-built-engine")
+        config = next(
+            str(part).split("=", 1)[1]
+            for part in command
+            if str(part).startswith("config-file-path=")
+        )
+        named = next(
+            line.split("=", 1)[1]
+            for line in Path(config).read_text(encoding="utf-8").splitlines()
+            if line.startswith("onnx-file=")
+        )
+        Path(f"{named}_b1_gpu0_fp16.engine").write_bytes(b"nvinfer-built-engine")
         return CompletedProcess(command, 0, "", "")
 
     identity = _build_against(tmp_path, onnx_path, batch_size=1, run=run, engine=engine)
 
     assert engine.read_bytes() == b"nvinfer-built-engine"
-    assert not produced.exists(), "the adopted engine must not be left beside the model"
+    assert not list(engine.parent.glob("nvinfer-build")), "staging must be cleaned up"
     assert identity["engine_sha256"] == sha256(engine)
+
+
+def test_the_build_never_writes_into_the_model_directory(tmp_path: Path) -> None:
+    """The deployment mounts the model directory read-only.
+
+    nvinfer writes its engine beside the ONNX it is pointed at, so the build
+    must point it at a staged copy in the writable cache; writing beside the
+    provisioned model would fail in production before the worker ever starts.
+    """
+    models = tmp_path / "models"
+    models.mkdir()
+    onnx_path = models / "model.onnx"
+    _write_onnx(onnx_path)
+    engine = tmp_path / "cache" / "model.engine"
+    before = {entry.name for entry in models.iterdir()}
+
+    def run(command, **_kwargs):
+        # Behave like nvinfer: write beside whichever ONNX the config names.
+        config = next(
+            str(part).split("=", 1)[1]
+            for part in command
+            if str(part).startswith("config-file-path=")
+        )
+        text = Path(config).read_text(encoding="utf-8")
+        named = next(
+            line.split("=", 1)[1] for line in text.splitlines() if line.startswith("onnx-file=")
+        )
+        Path(f"{named}_b1_gpu0_fp16.engine").write_bytes(b"engine")
+        return CompletedProcess(command, 0, "", "")
+
+    identity = _build_against(tmp_path, onnx_path, batch_size=1, run=run, engine=engine)
+
+    assert {entry.name for entry in models.iterdir()} == before
+    assert engine.read_bytes() == b"engine"
+    assert identity["onnx_sha256"] == sha256(onnx_path)

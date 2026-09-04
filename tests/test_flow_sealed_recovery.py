@@ -123,10 +123,15 @@ def test_failed_seal_replays_contributors_and_discards_missing_media(tmp_path: P
 
     assert stager.completed == [("one", "clip-1"), ("two", "clip-1")]
     assert restarted.sealed_recovery_missing_media_total == 1
-    assert sidecars.pending_for_camera("camera-a") == ()
+    assert len(sidecars.pending_for_camera("camera-a")) == 1
 
     restarted.replay_sealed()
-    assert stager.completed == [("one", "clip-1"), ("two", "clip-1")]
+    assert stager.completed == [
+        ("one", "clip-1"),
+        ("two", "clip-1"),
+        ("one", "clip-1"),
+        ("two", "clip-1"),
+    ]
 
 
 def test_a_failing_replay_is_counted_and_never_blocks_activation(

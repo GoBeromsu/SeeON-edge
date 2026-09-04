@@ -44,6 +44,7 @@ class EvidenceExportRuntime:
         relay_token: str | None,
         probe_camera_id: str,
         clip_export_enabled: Callable[[], bool],
+        flow_sealed_sidecar_directory: Path | None = None,
     ) -> EvidenceExportRuntime:
         token = "" if relay_token is None else relay_token.strip()
         if not relay_url.strip() or not token or not probe_camera_id.strip():
@@ -58,6 +59,7 @@ class EvidenceExportRuntime:
                 queue_directory,
                 config,
                 clip_export_enabled=clip_export_enabled,
+                flow_sealed_sidecar_directory=flow_sealed_sidecar_directory,
             ),
         )
 

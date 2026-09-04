@@ -22,16 +22,13 @@ bool shape_is_pose(NvDsInferLayerInfo const& layer) {
 // engine built by `trtexec` and one built by nvinfer itself do not agree on it.
 // Selecting index 0 therefore silently parsed the wrong buffer and dropped
 // every detection, so bind the pose tensor by the name the nvinfer config
-// declares in `output-blob-names` and only then fall back to shape.
+// declares in `output-blob-names`.
 NvDsInferLayerInfo const* pose_layer(std::vector<NvDsInferLayerInfo> const& layers) {
   for (auto const& layer : layers) {
     if (layer.buffer != nullptr && layer.layerName != nullptr &&
         std::strcmp(layer.layerName, kPoseLayerName) == 0 && shape_is_pose(layer)) {
       return &layer;
     }
-  }
-  for (auto const& layer : layers) {
-    if (layer.buffer != nullptr && shape_is_pose(layer)) return &layer;
   }
   return nullptr;
 }

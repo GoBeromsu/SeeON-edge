@@ -45,6 +45,7 @@ from shared.events.evidence_export_contract import (
     ClipReceipt,
     DeliveryDisposition,
     DeliveryFailure,
+    DeliveryFailureCode,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -205,7 +206,10 @@ def export_clip(
     if not isinstance(bound_camera_id, str) or not bound_camera_id.strip():
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail="camera has no backend mapping; clip export cannot address the backend",
+            detail={
+                "code": DeliveryFailureCode.CAMERA_MAPPING_MISSING,
+                "message": "camera has no backend mapping; clip export cannot address the backend",
+            },
         )
     client = _backend_client(request, bound_camera_id)
     if isinstance(payload, ReadyClipPayload):

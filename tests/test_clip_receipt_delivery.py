@@ -51,12 +51,19 @@ def _entry() -> ClipEntry:
     )
 
 
-def _sender(directory: Path, transport: _Transport, *, enabled: bool = True) -> EvidenceSender:
+def _sender(
+    directory: Path,
+    transport: _Transport,
+    *,
+    enabled: bool = True,
+    flow_sealed_sidecar_directory: Path | None = None,
+) -> EvidenceSender:
     return EvidenceSender(
         directory,
         SenderConfig("http://relay", "token", "camera-1"),
         transport=transport,
         clip_export_enabled=lambda: enabled,
+        flow_sealed_sidecar_directory=flow_sealed_sidecar_directory,
     )
 
 
@@ -108,9 +115,16 @@ def test_clip_delivery_disabled_retains_entry_without_sending(tmp_path: Path) ->
     assert not transport.claims
 
 
-def test_clip_permanent_failure_dead_letters_and_retryable_failure_retries(tmp_path: Path) -> None:
+def test_clip_mapping_refusal_retries_but_bad_clip_dead_letters(tmp_path: Path) -> None:
     queue = DeliveryQueue(tmp_path)
     assert queue.try_admit(_entry()).accepted
+    mapping_missing = _Transport(
+        DeliveryFailure(DeliveryDisposition.PERMANENT, "CAMERA_MAPPING_MISSING", 409)
+    )
+    assert _sender(tmp_path, mapping_missing).run_once() is SenderStep.RETRY_SCHEDULED
+    assert len(tuple(queue.entries())) == 1
+    assert not queue.dead_letter_directory.exists()
+
     refused = _Transport(DeliveryFailure(DeliveryDisposition.PERMANENT, "INVALID", 400))
     assert _sender(tmp_path, refused).run_once() is SenderStep.RETRY_SCHEDULED
     assert not tuple(queue.entries())
@@ -120,6 +134,25 @@ def test_clip_permanent_failure_dead_letters_and_retryable_failure_retries(tmp_p
     retrying = _Transport(DeliveryFailure(DeliveryDisposition.RETRY, "UNAVAILABLE", 503))
     assert _sender(tmp_path, retrying).run_once() is SenderStep.RETRY_SCHEDULED
     assert len(tuple(queue.entries())) == 1
+
+
+def test_clip_receipt_removes_flow_sealed_state(tmp_path: Path) -> None:
+    queue = DeliveryQueue(tmp_path / "queue")
+    assert queue.try_admit(_entry()).accepted
+    sidecars = tmp_path / "flow-sealed"
+    sidecars.mkdir()
+    (sidecars / "clip-1.json").write_text("{}", encoding="utf-8")
+
+    receipt = _Transport(ClipReceipt("clip-1", "READY", 2, "a" * 64, 10))
+    assert (
+        _sender(
+            tmp_path / "queue",
+            receipt,
+            flow_sealed_sidecar_directory=sidecars,
+        ).run_once()
+        is SenderStep.CLIP_ACKED
+    )
+    assert not (sidecars / "clip-1.json").exists()
 
 
 def test_clip_entry_survives_queue_restart(tmp_path: Path) -> None:

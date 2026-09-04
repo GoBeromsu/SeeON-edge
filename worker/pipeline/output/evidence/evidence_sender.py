@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import os
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -17,6 +18,7 @@ from shared.events.evidence_export_client import RelayEvidenceClient
 from shared.events.evidence_export_contract import (
     DeliveryDisposition,
     DeliveryFailure,
+    DeliveryFailureCode,
     EventReceipt,
 )
 from worker.pipeline.output.evidence.evidence_outbox_types import (
@@ -93,11 +95,13 @@ class EvidenceSender:
         *,
         transport: EvidenceTransport | None = None,
         clip_export_enabled: Callable[[], bool] | None = None,
+        flow_sealed_sidecar_directory: Path | None = None,
     ) -> None:
         self.queue_directory = queue_directory
         self.config = config
         self._transport = transport or RelayEvidenceClient(config.relay_url, config.relay_token)
         self._clip_export_enabled = clip_export_enabled or (lambda: True)
+        self._flow_sealed_sidecar_directory = flow_sealed_sidecar_directory
         self._clip_export_disabled_logged = False
         self._last_shed_detail_warning_at = float("-inf")
         self._attempts: dict[str, int] = {}
@@ -223,6 +227,12 @@ class EvidenceSender:
             return SenderStep.RETRY_SCHEDULED
         if isinstance(result, DeliveryFailure):
             if (
+                entry["kind"] == "CLIP"
+                and result.code == DeliveryFailureCode.CAMERA_MAPPING_MISSING
+            ):
+                self._deferred.add(entry_id)
+                return SenderStep.RETRY_SCHEDULED
+            if (
                 result.disposition is DeliveryDisposition.PERMANENT
                 and result.status_code is not None
                 and 400 <= result.status_code < 500
@@ -289,7 +299,29 @@ class EvidenceSender:
             )
             return SenderStep.RETRY_SCHEDULED
         self._deferred.discard(entry_id)
+        if entry["kind"] == "CLIP":
+            self._remove_flow_sealed_sidecar(entry)
         return _acknowledged_step(entry)
+
+    def _remove_flow_sealed_sidecar(self, entry: dict[str, object]) -> None:
+        """Release Flow recovery state only after the relay receipt is durable."""
+        if self._flow_sealed_sidecar_directory is None:
+            return
+        sidecar = self._flow_sealed_sidecar_directory / f"{entry['clip_id']}.json"
+        if not sidecar.exists():
+            return
+        try:
+            sidecar.unlink(missing_ok=True)
+            descriptor = os.open(self._flow_sealed_sidecar_directory, os.O_DIRECTORY)
+            try:
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+        except OSError:
+            _LOGGER.exception(
+                "clip receipt acknowledged but sealed Flow state could not be removed clip_id=%s",
+                entry["clip_id"],
+            )
 
     def _send(self, entry: dict[str, object]) -> EventReceipt | DeliveryFailure | None:
         match entry["kind"]:

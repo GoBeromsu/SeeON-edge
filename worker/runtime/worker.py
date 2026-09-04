@@ -2782,6 +2782,7 @@ class WorkerRuntime:
                 relay_token=self.config.relay.token.get_secret_value(),
                 probe_camera_id=probe_camera_id,
                 clip_export_enabled=self._clip_export_policy.enabled,
+                flow_sealed_sidecar_directory=self._state_dir / "flow-sealed",
             )
         except ValueError as exc:
             raise EvidenceDeliveryError(

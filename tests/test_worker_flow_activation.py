@@ -12,6 +12,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from worker.adapters.deepstream.service_maker import DeepStreamFlowStopTimeout
 from worker.runtime.flow.cold_start import FlowWarmupTimeout
 from worker.runtime.telemetry.runtime_diagnostics import WorkerDiagnostics
 from worker.runtime.worker import WorkerRuntime
@@ -172,3 +173,19 @@ def test_shutdown_stops_the_flow_without_removing_its_sources() -> None:
 
     assert calls == ["stop"]
     assert runtime._flow_media_plane is None
+
+
+def test_shutdown_keeps_flow_plane_when_stop_is_not_confirmed() -> None:
+    class _StuckPlane:
+        def stop(self) -> None:
+            raise DeepStreamFlowStopTimeout("Flow stop timed out")
+
+    runtime = _runtime(_Plane(bindings={}, accept_after=0))
+    runtime._live_frames = SimpleNamespace(set_demand_listener=lambda _listener: None)
+    plane = _StuckPlane()
+    runtime._flow_media_plane = plane
+
+    with pytest.raises(DeepStreamFlowStopTimeout, match="Flow stop timed out"):
+        runtime._stop_flow_media_plane()
+
+    assert runtime._flow_media_plane is plane

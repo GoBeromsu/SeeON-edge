@@ -524,7 +524,7 @@ def test_export_refused_when_camera_has_no_hub_mapping(tmp_path: Path) -> None:
     )
 
     assert response.status_code == 409
-    assert "backend mapping" in response.json()["detail"]
+    assert response.json()["detail"]["code"] == "CAMERA_MAPPING_MISSING"
     # The decisive property: the backend was never addressed at all.
     assert backend.ready_calls == 0
     assert backend.unavailable_request is None

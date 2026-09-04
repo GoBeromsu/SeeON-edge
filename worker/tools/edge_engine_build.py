@@ -6,6 +6,7 @@ import argparse
 import hashlib
 import json
 import re
+import shutil
 import subprocess
 from collections.abc import Callable
 from pathlib import Path
@@ -23,7 +24,13 @@ def sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _render_infer_config(template: Path, destination: Path, engine: Path, batch_size: int) -> None:
+def _render_infer_config(
+    template: Path,
+    destination: Path,
+    engine: Path,
+    batch_size: int,
+    onnx: Path | None = None,
+) -> None:
     text = template.read_text(encoding="utf-8")
     text, engine_count = re.subn(
         r"(?m)^model-engine-file=.*$",
@@ -33,6 +40,10 @@ def _render_infer_config(template: Path, destination: Path, engine: Path, batch_
     text, batch_count = re.subn(r"(?m)^batch-size=.*$", f"batch-size={batch_size}", text)
     if engine_count != 1 or batch_count != 1:
         raise EngineBuildError("Flow infer config must define one model-engine-file and batch-size")
+    if onnx is not None:
+        text, onnx_count = re.subn(r"(?m)^onnx-file=.*$", f"onnx-file={onnx}", text)
+        if onnx_count != 1:
+            raise EngineBuildError("Flow infer config must define one onnx-file")
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_text(text, encoding="utf-8")
 
@@ -157,9 +168,18 @@ def build_engine(
     # fixes its own batch dimension, which is how the deployed 13-source roster
     # is served by a model exported at batch 1.
     engine.unlink(missing_ok=True)
+    # nvinfer writes its engine beside the ONNX, and the deployment mounts the
+    # model directory read-only, so build against a staged copy in the writable
+    # cache. The identity still hashes the provisioned model, not the copy.
+    build_dir = engine.parent / "nvinfer-build"
+    build_dir.mkdir(parents=True, exist_ok=True)
+    build_onnx = build_dir / onnx.name
+    build_onnx.write_bytes(onnx.read_bytes())
+    build_config = build_dir / "nvinfer-build.txt"
+    _render_infer_config(active_infer_config, build_config, engine, batch_size, build_onnx)
     try:
         result = run(
-            _nvinfer_build_command(infer_config=active_infer_config, batch_size=batch_size),
+            _nvinfer_build_command(infer_config=build_config, batch_size=batch_size),
             check=False,
             capture_output=True,
             text=True,
@@ -176,7 +196,7 @@ def build_engine(
         # beside the ONNX under its own name and ignores `model-engine-file`.
         # That file is the artefact that serves - verified on hardware - so
         # adopt it into the configured path instead of failing.
-        produced = onnx.with_name(f"{onnx.name}_b{batch_size}_gpu0_fp16.engine")
+        produced = build_onnx.with_name(f"{build_onnx.name}_b{batch_size}_gpu0_fp16.engine")
         if not produced.is_file():
             raise EngineBuildError(
                 "nvinfer build pipeline succeeded without creating an engine at either "
@@ -184,6 +204,7 @@ def build_engine(
             )
         engine.write_bytes(produced.read_bytes())
         produced.unlink()
+    shutil.rmtree(build_dir, ignore_errors=True)
     identity = identity_for(
         engine=engine,
         onnx=onnx,
