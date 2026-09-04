@@ -1,0 +1,13 @@
+{
+  "providers": [
+    "CPUExecutionProvider"
+  ],
+  "inferences": 8496,
+  "per_sec": 188.7,
+  "cuda_compute_apps": [
+    "pid, used_gpu_memory [MiB]",
+    "82, 390 MiB"
+  ],
+  "cuda_process_count": 1,
+  "ort_inferences_at_snapshot": 8496
+}

@@ -1,8 +1,9 @@
 # pyservicemaker P1b (G8a) spike
 
-**Overall verdict: Smart Record item PROVEN on a live facility camera (see
-section 1a); the remaining criterion-level gaps in items 2–6 stand as recorded
-below.** The original file-source Smart Record failure was a harness error, not
+**Overall verdict: items 1–4 PROVEN on live facility cameras at their
+criteria (sections 1a and 2a); item 5's build time is proven and its bootstrap
+semantics are G007 code; item 6's named counters are G007 code informed by the
+Smart Record measurements. See "Live-camera acceptance run" below.** The original file-source Smart Record failure was a harness error, not
 a DeepStream limitation: the DeepStream docs state only RTSP sources enable
 smart record, the recording cannot start until an I-frame is cached, and
 overlapping records are unsupported.

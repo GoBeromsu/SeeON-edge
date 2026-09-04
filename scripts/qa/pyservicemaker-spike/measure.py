@@ -44,7 +44,9 @@ class Counter(BatchMetadataOperator):
                     text=True,
                 )
                 rows = [line.strip() for line in result.stdout.splitlines() if line.strip()]
-                header, *data = rows or ["", ]
+                header, *data = rows or [
+                    "",
+                ]
                 # JSON, not CSV: the repository privacy gate refuses tracked
                 # data-asset extensions, and a process count needs its caveat
                 # travelling with it.

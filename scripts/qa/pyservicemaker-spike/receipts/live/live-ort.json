@@ -1,0 +1,45 @@
+{
+  "sources": 2,
+  "error": null,
+  "elapsed_sec": 93.4,
+  "frames": 3532,
+  "objects": 330,
+  "batch_callbacks": 1843,
+  "batch_callbacks_per_sec": 19.73,
+  "frame_callbacks_per_sec": 37.81,
+  "per_source_fps_from_pts": {
+    "0": 30.02,
+    "1": 30.02
+  },
+  "probe_latency_ms": {
+    "p50": 0.577276,
+    "p95": 1.165619,
+    "p99": 2.968332,
+    "max": 6.447626,
+    "mean": 0.6751
+  },
+  "budget_ms_per_batch_at_15fps": 66.67,
+  "queue_drops": 265,
+  "keypoint_rows_matched": 330,
+  "keypoint_rows_unmatched": 0,
+  "distinct_ids_by_source": {
+    "0": 1,
+    "1": 1
+  },
+  "id_births": 2,
+  "id_switch_heuristic_total": 0,
+  "births": [
+    {
+      "t": 1383690.9,
+      "source": 0,
+      "id": 0,
+      "recent_lost": []
+    },
+    {
+      "t": 1383724.74,
+      "source": 1,
+      "id": 1,
+      "recent_lost": []
+    }
+  ]
+}

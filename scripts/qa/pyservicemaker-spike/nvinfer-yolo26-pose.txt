@@ -17,3 +17,5 @@ infer-dims=3;640;640
 output-blob-names=output0
 custom-lib-path=/work/libnvdsinfer_custom_yolo26_pose.so
 parse-bbox-func-name=NvDsInferParseCustomYolo26Pose
+output-tensor-meta=1
+tensor-meta-pool-size=32
