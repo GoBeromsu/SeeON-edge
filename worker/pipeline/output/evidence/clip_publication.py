@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import shutil
+import subprocess
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Final, final
@@ -134,10 +135,7 @@ class ClipPublisher:
             raise ClipPublicationConflictError(reservation.clip_id, "recorded media is missing")
         adopted = reservation.staging_dir / "adopted.mp4"
         temporary = adopted.with_suffix(".mp4.tmp")
-        with source_path.open("rb") as source, temporary.open("xb") as destination:
-            shutil.copyfileobj(source, destination)
-            destination.flush()
-            os.fsync(destination.fileno())
+        _adopt_media(source_path, temporary)
         os.replace(temporary, adopted)
         fsync_file(adopted)
         fsync_directory(reservation.staging_dir)
@@ -288,3 +286,49 @@ __all__ = [
     "PublicationStage",
     "PublishedClip",
 ]
+
+
+def _adopt_media(source_path: Path, destination: Path) -> None:
+    """Copy adopted media into staging as a faststart MP4.
+
+    DeepStream's Smart Record writes the moov atom last, but the evidence
+    contract requires faststart so a player can start without the whole file.
+    Remux (stream copy, no re-encode, so no NVENC session) when a remuxer is
+    available and fall back to a plain copy, which the media inspection then
+    rejects as CORRUPT rather than publishing something unplayable.
+    """
+    remuxer = shutil.which("ffmpeg")
+    if remuxer is not None:
+        result = subprocess.run(  # noqa: S603 - fixed argv, operator-owned binary
+            [
+                remuxer,
+                "-nostdin",
+                "-loglevel",
+                "error",
+                "-i",
+                str(source_path),
+                "-c",
+                "copy",
+                "-movflags",
+                "+faststart",
+                "-y",
+                str(destination),
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode == 0 and destination.exists() and destination.stat().st_size > 0:
+            with destination.open("rb") as handle:
+                os.fsync(handle.fileno())
+            return
+        LOGGER.warning(
+            "faststart remux failed for %s; adopting the original bytes: %s",
+            source_path,
+            (result.stderr or result.stdout).strip()[:200],
+        )
+        destination.unlink(missing_ok=True)
+    with source_path.open("rb") as source, destination.open("xb") as handle:
+        shutil.copyfileobj(source, handle)
+        handle.flush()
+        os.fsync(handle.fileno())
