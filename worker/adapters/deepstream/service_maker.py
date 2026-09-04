@@ -138,7 +138,9 @@ class _JpegRetriever:
     def consume(self, buffer: Any) -> int:
         try:
             for batch_id in range(int(buffer.batch_size)):
-                camera_id = self._plane._sources.camera_id(batch_id)  # noqa: SLF001
+                camera_id = self._plane.camera_id_for_pad(batch_id)
+                if camera_id is None:
+                    continue
                 count = self._frames.get(camera_id, 0) + 1
                 self._frames[camera_id] = count
                 if count % self._stride:
@@ -218,6 +220,7 @@ class DeepStreamMediaPlane(MediaPlane):
         self._command_thread.start()
         self._live: set[str] = set()
         self._publish_sequence: dict[str, int] = {}
+        self._unmapped_pads: set[int] = set()
         self._recordings: dict[str, _Recording] = {}
         self._active_encode_sessions: set[int] = set()
         self._started = False
@@ -259,6 +262,10 @@ class DeepStreamMediaPlane(MediaPlane):
             self._started = False
             if self._flow_thread is not None:
                 self._flow_thread.join(timeout=10.0)
+
+    def camera_id_for_pad(self, pad_index: int) -> str | None:
+        """Which camera a batch/pad index belongs to, or None when unmapped."""
+        return self._sources.camera_id_for_pad(pad_index)
 
     def published_frames(self, camera_id: str) -> int:
         """Frames this plane has published for a camera since it started.
@@ -475,7 +482,18 @@ class DeepStreamMediaPlane(MediaPlane):
 
     def publish_frame(self, frame_meta: Any) -> None:
         """Probe entry: convert one accepted frame and publish it to the slot."""
-        camera_id = self._sources.camera_id(int(frame_meta.pad_index))
+        pad_index = int(frame_meta.pad_index)
+        camera_id = self._sources.camera_id_for_pad(pad_index)
+        if camera_id is None:
+            # Never raise from a probe callback: the SDK aborts the process.
+            if pad_index not in self._unmapped_pads:
+                self._unmapped_pads.add(pad_index)
+                LOGGER.warning(
+                    "dropping frames from unmapped mux pad %d; known pads are %s",
+                    pad_index,
+                    sorted(self._sources.pad_index(name) for name in self._sources.camera_ids()),
+                )
+            return
         rows = None
         for tensor_meta in frame_meta.tensor_items:
             layer = tensor_meta.as_tensor_output().get_layers()["output0"]

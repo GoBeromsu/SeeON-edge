@@ -288,3 +288,23 @@ def test_a_source_failure_rotates_the_stream_identity_and_keeps_the_camera_id() 
     assert "room-208" not in plane._live  # noqa: SLF001 - liveness must be re-proven
     with pytest.raises(SnapshotUnavailable):
         plane.snapshot("room-208")
+
+
+def test_an_unmapped_mux_pad_is_dropped_and_never_raises_into_the_probe() -> None:
+    """An exception in an SDK probe callback aborts the whole process.
+
+    A 13-camera run died exactly this way when a frame arrived on a pad the
+    source table did not know. Such a frame must be counted out and dropped.
+    """
+    from types import SimpleNamespace
+
+    plane, _ = _plane()
+    plane.add_source("camera", "rtsp://one")
+
+    plane.publish_frame(
+        SimpleNamespace(pad_index=99, buffer_pts=1, tensor_items=[], object_items=[])
+    )
+
+    assert plane.published_frames("camera") == 0
+    assert plane.camera_id_for_pad(99) is None
+    assert plane.camera_id_for_pad(0) == "camera"

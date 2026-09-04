@@ -65,11 +65,23 @@ class SourceTable:
             transform_id=self._transform_id,
         )
 
-    def camera_id(self, pad_index: int) -> str:
+    def camera_id_for_pad(self, pad_index: int) -> str | None:
+        """The camera on this mux pad, or ``None`` when the pad is unknown.
+
+        Returning ``None`` rather than raising is deliberate: the only caller is
+        the SDK probe callback, and an exception there aborts the whole
+        pipeline process.
+        """
         for camera_id, source in self._sources.items():
             if source.pad_index == pad_index:
                 return camera_id
-        raise KeyError(f"unknown source pad index: {pad_index}")
+        return None
+
+    def camera_id(self, pad_index: int) -> str:
+        camera_id = self.camera_id_for_pad(pad_index)
+        if camera_id is None:
+            raise KeyError(f"unknown source pad index: {pad_index}")
+        return camera_id
 
     def pad_index(self, camera_id: str) -> int:
         return self._sources[camera_id].pad_index
