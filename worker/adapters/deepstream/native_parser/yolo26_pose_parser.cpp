@@ -1,17 +1,39 @@
 #include "nvdsinfer_custom_impl.h"
 
 #include <cstddef>
+#include <cstring>
+#include <iostream>
 #include <vector>
 
 namespace {
 constexpr int kRows = 300;
 constexpr int kStride = 57;
 constexpr float kScoreThreshold = 0.05F;
+constexpr char kPoseLayerName[] = "output0";
 
 bool shape_is_pose(NvDsInferLayerInfo const& layer) {
   const auto& dims = layer.inferDims;
   return (dims.numDims == 3 && dims.d[1] == kRows && dims.d[2] == kStride) ||
          (dims.numDims == 2 && dims.d[0] == kRows && dims.d[1] == kStride);
+}
+
+// The engine exposes more than one output binding, and their order is a
+// property of how the engine was built rather than of the model: a TensorRT
+// engine built by `trtexec` and one built by nvinfer itself do not agree on it.
+// Selecting index 0 therefore silently parsed the wrong buffer and dropped
+// every detection, so bind the pose tensor by the name the nvinfer config
+// declares in `output-blob-names` and only then fall back to shape.
+NvDsInferLayerInfo const* pose_layer(std::vector<NvDsInferLayerInfo> const& layers) {
+  for (auto const& layer : layers) {
+    if (layer.buffer != nullptr && layer.layerName != nullptr &&
+        std::strcmp(layer.layerName, kPoseLayerName) == 0 && shape_is_pose(layer)) {
+      return &layer;
+    }
+  }
+  for (auto const& layer : layers) {
+    if (layer.buffer != nullptr && shape_is_pose(layer)) return &layer;
+  }
+  return nullptr;
 }
 }  // namespace
 
@@ -20,9 +42,24 @@ extern "C" bool NvDsInferParseCustomYolo26Pose(
     NvDsInferNetworkInfo const& networkInfo,
     NvDsInferParseDetectionParams const&, 
     std::vector<NvDsInferObjectDetectionInfo>& objectList) {
-  if (outputLayersInfo.empty() || outputLayersInfo[0].buffer == nullptr ||
-      !shape_is_pose(outputLayersInfo[0])) return false;
-  const float* rows = static_cast<const float*>(outputLayersInfo[0].buffer);
+  NvDsInferLayerInfo const* const layer = pose_layer(outputLayersInfo);
+  if (layer == nullptr) {
+    // Refusing silently is what hid this failure for a whole bring-up: the
+    // pipeline ran at full frame rate and produced no objects at all. Say so
+    // once, naming what was actually offered.
+    static bool reported = false;
+    if (!reported) {
+      reported = true;
+      std::cerr << "yolo26-pose parser: no output layer named '" << kPoseLayerName
+                << "' with shape [" << kRows << "," << kStride << "]; offered:";
+      for (auto const& candidate : outputLayersInfo) {
+        std::cerr << ' ' << (candidate.layerName != nullptr ? candidate.layerName : "<unnamed>");
+      }
+      std::cerr << std::endl;
+    }
+    return false;
+  }
+  const float* rows = static_cast<const float*>(layer->buffer);
   const float width = static_cast<float>(networkInfo.width);
   const float height = static_cast<float>(networkInfo.height);
   for (int index = 0; index < kRows; ++index) {

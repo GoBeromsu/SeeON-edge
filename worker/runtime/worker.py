@@ -1606,7 +1606,9 @@ class WorkerRuntime:
         # The boot gate already ran verify_flow_boot_inputs for this profile;
         # re-verify here so the plane is never constructed against inputs that
         # changed since the gate, and keep the returned identity for the manifest.
-        self._flow_engine_identity = verify_flow_boot_inputs(self._env)
+        self._flow_engine_identity = verify_flow_boot_inputs(
+            self._env, deployed_batch=len(self.config.cameras)
+        )
         if self._flow_media_plane is None:
             self._flow_media_plane = FlowMediaPlane(
                 FlowMediaPlaneConfig(

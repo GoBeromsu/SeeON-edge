@@ -26,9 +26,12 @@ class FlowColdStart:
     identity_path: Path
     files: Mapping[str, Path]
     warmup: Callable[[], None]
+    deployed_batch: int | None = None
 
     def run(self) -> None:
-        verify_engine_identity(self.engine_path, self.identity_path, self.files)
+        verify_engine_identity(
+            self.engine_path, self.identity_path, self.files, deployed_batch=self.deployed_batch
+        )
         self.warmup()
 
 
@@ -36,6 +39,8 @@ def verify_engine_identity(
     engine_path: Path,
     identity_path: Path,
     files: Mapping[str, Path],
+    *,
+    deployed_batch: int | None = None,
 ) -> dict[str, str]:
     """Verify all identity-file digests without ever building at runtime.
 
@@ -54,6 +59,21 @@ def verify_engine_identity(
         raise EngineIdentityError(f"Flow engine identity is unreadable: {identity_path}") from error
     if not isinstance(identity, dict):
         raise EngineIdentityError("Flow engine identity must be a JSON object")
+    engine_batch = identity.get("batch_size")
+    try:
+        engine_batch_size = int(engine_batch)
+    except (TypeError, ValueError) as error:
+        raise EngineIdentityError("Flow engine identity lacks valid batch_size") from error
+    if engine_batch_size <= 0 or str(engine_batch_size) != engine_batch:
+        raise EngineIdentityError("Flow engine identity lacks valid batch_size")
+    if deployed_batch is not None:
+        if deployed_batch < 0:
+            raise EngineIdentityError("deployed Flow roster batch must not be negative")
+        if engine_batch_size < deployed_batch:
+            raise EngineIdentityError(
+                "Flow engine batch "
+                f"{engine_batch_size} does not cover deployed roster batch {deployed_batch}"
+            )
     expected = {"engine_sha256": engine_path, **dict(files)}
     for key, path in expected.items():
         digest = identity.get(key)
@@ -94,6 +114,7 @@ FLOW_BOOT_ENV: Final = (
     "ML_WORKER_FLOW_RECORD_CACHE_SECONDS",
     "ML_WORKER_FLOW_FRAME_WIDTH",
     "ML_WORKER_FLOW_FRAME_HEIGHT",
+    "ML_WORKER_FLOW_BATCH_SIZE",
 )
 
 #: Identity keys whose recorded digest must match the file on disk.
@@ -106,7 +127,9 @@ FLOW_IDENTITY_FILES: Final = {
 }
 
 
-def verify_flow_boot_inputs(env: Mapping[str, str]) -> dict[str, str]:
+def verify_flow_boot_inputs(
+    env: Mapping[str, str], *, deployed_batch: int | None = None
+) -> dict[str, str]:
     """Fail closed on the flow profile's wiring and its engine identity.
 
     The flow plane has no native manifest, so this is the boot gate's only
@@ -117,8 +140,21 @@ def verify_flow_boot_inputs(env: Mapping[str, str]) -> dict[str, str]:
     missing = [key for key in FLOW_BOOT_ENV if not env.get(key)]
     if missing:
         raise EngineIdentityError(f"flow profile wiring is missing: {', '.join(missing)}")
-    return verify_engine_identity(
+    try:
+        configured_batch = int(env["ML_WORKER_FLOW_BATCH_SIZE"])
+    except ValueError as error:
+        raise EngineIdentityError("flow profile batch size must be a positive integer") from error
+    if configured_batch <= 0:
+        raise EngineIdentityError("flow profile batch size must be a positive integer")
+    identity = verify_engine_identity(
         Path(env["ML_WORKER_FLOW_ENGINE_PATH"]),
         Path(env["ML_WORKER_FLOW_ENGINE_IDENTITY_PATH"]),
         {key: Path(env[name]) for key, name in FLOW_IDENTITY_FILES.items()},
+        deployed_batch=deployed_batch,
     )
+    if identity["batch_size"] != str(configured_batch):
+        raise EngineIdentityError(
+            "Flow engine batch "
+            f"{identity['batch_size']} does not match configured batch {configured_batch}"
+        )
+    return identity
