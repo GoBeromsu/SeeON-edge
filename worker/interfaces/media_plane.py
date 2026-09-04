@@ -47,6 +47,10 @@ class MediaPlaneStatus:
     sources: tuple[SourceStatus, ...]
     engine_identity: str
     nvenc_sessions_active: int
+    #: Set when the plane's own thread died. A plane that has stopped producing
+    #: must say so: reporting healthy zeros forever is how a dead media plane
+    #: goes unnoticed.
+    fatal_error: str | None = None
 
 
 @runtime_checkable

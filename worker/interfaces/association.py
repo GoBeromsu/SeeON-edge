@@ -14,7 +14,6 @@ tracks; ambiguity is a visible ``unmatched`` count, not a borrowed pose.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Protocol, runtime_checkable
 
 from worker.types.perception_frame import PerceptionFrameIdentity
 
@@ -37,10 +36,3 @@ class AssociationObservation:
     live_track_ids: tuple[int, ...]
     unmatched_tracks: int
     rows_available: int
-
-
-@runtime_checkable
-class AssociationSource(Protocol):
-    """Produces one observation per accepted frame from plane metadata."""
-
-    def observe(self, identity: PerceptionFrameIdentity) -> AssociationObservation: ...

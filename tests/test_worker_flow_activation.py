@@ -47,8 +47,22 @@ class _Plane:
         self.metadata = _Metadata(self.calls, bindings=bindings, accept_after=accept_after)
 
 
-def _runtime(plane: _Plane) -> WorkerRuntime:
+class _Reporter:
+    """Records which cameras were announced READY, in order."""
+
+    def __init__(self, announced: list[str]) -> None:
+        self._announced = announced
+
+    def mark_ready(self, camera_id: str) -> None:
+        self._announced.append(camera_id)
+
+
+def _runtime(plane: _Plane, announced: list[str] | None = None) -> WorkerRuntime:
     runtime = WorkerRuntime.__new__(WorkerRuntime)
+    cameras = tuple(
+        SimpleNamespace(camera_id=camera_id) for camera_id in sorted(plane.metadata._bindings)
+    )
+    runtime.config = SimpleNamespace(cameras=cameras)
     runtime._shared_graph = object()  # noqa: SLF001 - isolated warmup branch
     runtime._boot = SimpleNamespace(profile=SimpleNamespace(name="flow"))  # noqa: SLF001
     runtime.fall_model = object()
@@ -71,18 +85,30 @@ def test_flow_warm_models_warms_only_the_cpu_fall_model() -> None:
     assert plane.calls == ["warm:cpu"]
 
 
-def test_first_frame_from_any_roster_source_completes_the_warmup() -> None:
+def test_a_camera_is_announced_ready_only_after_its_own_accepted_frame(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Readiness must follow the frame, not the roster.
+
+    Announcing READY while the plane has not produced anything advertises a
+    camera that cannot alert.
+    """
+    announced: list[str] = []
+    monkeypatch.setattr(
+        "worker.runtime.worker.HeartbeatReporter",
+        lambda _config, _camera: _Reporter(announced),
+    )
     plane = _Plane(bindings={"a": "bind-a", "b": "bind-b"}, accept_after=2)
-    runtime = _runtime(plane)
-    runtime._await_flow_first_frame([_pump("a"), _pump("b")])  # noqa: SLF001
-    assert plane.calls == ["subscribe:bind-a", "subscribe:bind-b", "wait:bind-a", "wait:bind-b"]
+    runtime = _runtime(plane, announced)
+    runtime._await_flow_first_frame([_pump("a"), _pump("b")], timeout_sec=5.0)  # noqa: SLF001
+    assert announced == ["b"]
 
 
 def test_warmup_without_registered_sources_is_a_typed_boot_failure() -> None:
     plane = _Plane(bindings={}, accept_after=5)
     runtime = _runtime(plane)
     with pytest.raises(FlowWarmupTimeout, match="no registered source"):
-        runtime._await_flow_first_frame([_pump("a")])  # noqa: SLF001
+        runtime._await_flow_first_frame([_pump("a")], timeout_sec=0.5)  # noqa: SLF001
 
 
 def test_warmup_times_out_typed_when_no_source_publishes(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -91,7 +117,7 @@ def test_warmup_times_out_typed_when_no_source_publishes(monkeypatch: pytest.Mon
     plane = _Plane(bindings={"a": "bind-a"}, accept_after=0)
     runtime = _runtime(plane)
     with pytest.raises(FlowWarmupTimeout, match="accepted metadata frame from any source"):
-        runtime._await_flow_first_frame([_pump("a")])  # noqa: SLF001
+        runtime._await_flow_first_frame([_pump("a")], timeout_sec=0.5)  # noqa: SLF001
     assert plane.calls == ["subscribe:bind-a", "wait:bind-a"]
 
 

@@ -262,7 +262,9 @@ class DeepStreamMediaPlane(MediaPlane):
                 self._flow_thread.join(timeout=10.0)
 
     def status(self) -> MediaPlaneStatus:
+        error = self._flow_error
         return MediaPlaneStatus(
+            fatal_error=None if error is None else f"{type(error).__name__}: {error}",
             sources=tuple(
                 SourceStatus(
                     camera_id, self._sources.binding(camera_id), camera_id in self._live, 0

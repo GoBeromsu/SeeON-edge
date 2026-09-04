@@ -1993,30 +1993,53 @@ class WorkerRuntime:
         self._supervisor.start()
         return outcomes
 
-    def _await_flow_first_frame(self, pumps: list[NativePolicyPump]) -> None:
+    def _await_flow_first_frame(
+        self, pumps: list[NativePolicyPump], *, timeout_sec: float = 30.0
+    ) -> None:
         """Block until one registered source publishes an accepted frame."""
         media_plane = self._flow_media_plane
         if media_plane is None:
             raise RuntimeError("flow media plane is not initialized")
-        bindings = [
-            binding
-            for binding in (media_plane.metadata.expected_binding(pump.camera_id) for pump in pumps)
+        cameras = {camera.camera_id: camera for camera in self.config.cameras}
+        pending = [
+            (pump.camera_id, binding)
+            for pump, binding in (
+                (pump, media_plane.metadata.expected_binding(pump.camera_id)) for pump in pumps
+            )
             if binding is not None
         ]
-        if not bindings:
+        if not pending:
             raise FlowWarmupTimeout("Flow warmup has no registered source to wait for")
-        deadline = time.monotonic() + 30.0
-        tokens = [media_plane.metadata.subscribe(binding) for binding in bindings]
-        while time.monotonic() < deadline:
-            for token in tokens:
+        deadline = time.monotonic() + timeout_sec
+        tokens = {camera_id: media_plane.metadata.subscribe(b) for camera_id, b in pending}
+        ready: set[str] = set()
+        while time.monotonic() < deadline and len(ready) < len(tokens):
+            for camera_id, token in tokens.items():
+                if camera_id in ready:
+                    continue
                 try:
                     _ = media_plane.metadata.wait_accepted(token, timeout_sec=1.0)
                 except TimeoutError:
                     continue
-                return
-        raise FlowWarmupTimeout(
-            "Flow warmup did not receive an accepted metadata frame from any source"
-        )
+                # A camera is READY only once its own accepted frame proves the
+                # whole chain for it; announcing readiness before the plane
+                # produced anything would advertise a camera that cannot alert.
+                ready.add(camera_id)
+                HeartbeatReporter(self.config, cameras[camera_id]).mark_ready(camera_id)
+        if not ready:
+            raise FlowWarmupTimeout(
+                "Flow warmup did not receive an accepted metadata frame from any source"
+            )
+        unproven = sorted(set(tokens) - ready)
+        if unproven:
+            # The plane's per-source reconnect keeps trying; these cameras are
+            # simply not READY yet, and the operator must be able to see which.
+            LOGGER.warning(
+                "flow warmup: %d of %d cameras published a frame; still waiting on %s",
+                len(ready),
+                len(tokens),
+                ", ".join(unproven),
+            )
 
     def _build_flow_camera(
         self,
@@ -2119,7 +2142,8 @@ class WorkerRuntime:
         )
         pumps.append(pump)
         self.diagnostics.register_native_detection(camera.camera_id)
-        HeartbeatReporter(self.config, camera).mark_ready(camera.camera_id)
+        # Readiness is announced by the warmup once this camera's own accepted
+        # frame arrives, not here: the plane has not even started yet.
 
     def _build_nvidia_camera(
         self,
