@@ -21,9 +21,11 @@ def test_letterbox_inverse_is_exact_for_boxes_and_keypoints() -> None:
     binding = SourceBinding("boot", "child", "camera", 2, 3, "transform")
     rows = np.zeros((1, 57), dtype=np.float32)
     rows[0, 4] = 0.9
-    # 1280x720 is padded by 140 pixels above and below in a 640 square.
-    rows[0, :4] = (50, 190, 150, 290)
-    rows[0, 6:9] = (100, 240, 0.7)
+    # nvinfer letterboxes 1280x720 into the 640 square with the padding at the
+    # right and bottom, so the inverse is the scale alone. Measured on hardware:
+    # removing a centred pad instead shifted every box and matched nothing.
+    rows[0, :4] = (50, 50, 150, 150)
+    rows[0, 6:9] = (100, 100, 0.7)
     meta = SimpleNamespace(
         buffer_pts=10,
         object_items=[_object(7, 100, 100, 200, 200)],

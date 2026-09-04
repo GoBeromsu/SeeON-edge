@@ -30,6 +30,9 @@ from worker.interfaces.media_plane import (
 from worker.native.deepstream.metadata import LatestMetadataSlot, SourceBinding
 
 _MAX_PREVIEW_JPEG_BYTES = 2 * 1024 * 1024
+#: How often the plane reports what perception is actually producing.
+_PERCEPTION_HEARTBEAT_FRAMES = 900
+
 #: A frame whose inference produced no tensor metadata still has real tracks.
 _EMPTY_POSE_ROWS: Final = np.zeros((0, 57), dtype=np.float32)
 LOGGER = logging.getLogger(__name__)
@@ -229,6 +232,7 @@ class DeepStreamMediaPlane(MediaPlane):
         # dead parser looks exactly like an empty room for hours.
         self._frames_without_pose_tensor = 0
         self._objects_observed = 0
+        self._matched_tracks = 0
         self._cameras_warned_without_pose_tensor: set[str] = set()
         self._commands: queue.Queue[
             tuple[Callable[[], Any], threading.Event | None, list[Any] | None]
@@ -590,6 +594,19 @@ class DeepStreamMediaPlane(MediaPlane):
             boot_id=binding.worker_boot_id,
         )
         self._live.add(camera_id)
+        self._matched_tracks += len(metadata.frame.association.track_ids)
+        if sequence % _PERCEPTION_HEARTBEAT_FRAMES == 0:
+            # Operator-visible in the message itself: this is the one line that
+            # distinguishes an empty room from a perception path that is dead.
+            LOGGER.info(
+                "perception heartbeat camera_id=%s frames=%d objects=%d matched_tracks=%d "
+                "frames_without_pose_tensor=%d",
+                camera_id,
+                sequence,
+                self._objects_observed,
+                self._matched_tracks,
+                self._frames_without_pose_tensor,
+            )
         self._slot.publish(metadata)
 
     def _recording_done(self, camera_id: str, info: Any) -> None:
