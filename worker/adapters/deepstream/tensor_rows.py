@@ -99,17 +99,73 @@ def host_array_from_tensor(
         raise ValueError("unsupported tensor dtype")
     dtype = np.dtype(dtype_spec)
     shape = tuple(int(dl_tensor.shape[index]) for index in range(dl_tensor.ndim))
-    host = np.empty(shape, dtype=dtype)
+    strides = _element_strides(dl_tensor, shape)
     source = int(dl_tensor.data) + int(dl_tensor.byte_offset)
+    # A DeepStream frame surface pads each row: a (360, 640, 3) uint8 frame
+    # reports strides (2048, 3, 1) for 1920 used elements per row. Copy the
+    # padded extent flat, then slice the logical row out of each padded row.
+    element_count = _padded_element_count(shape, strides)
+    flat = np.empty(element_count, dtype=dtype)
     if dl_tensor.device.device_type == _CPU_DEVICE_TYPE:
-        ctypes.memmove(host.ctypes.data, source, host.nbytes)
+        ctypes.memmove(flat.ctypes.data, source, flat.nbytes)
     else:
         result = (cudart if cudart is not None else _cuda_runtime()).cudaMemcpy(
-            host.ctypes.data, source, host.nbytes, _CUDA_MEMCPY_DEVICE_TO_HOST
+            flat.ctypes.data, source, flat.nbytes, _CUDA_MEMCPY_DEVICE_TO_HOST
         )
         if result != 0:
             raise RuntimeError(f"cudaMemcpy D2H failed: {result}")
-    return host
+    return _logical_view(flat, shape, strides)
+
+
+def _padded_element_count(shape: tuple[int, ...], strides: tuple[int, ...]) -> int:
+    """Elements spanned by the tensor including any inter-row padding."""
+    if not shape:
+        return 1
+    return int(shape[0]) * int(strides[0])
+
+
+def _logical_view(
+    flat: NDArray[Any], shape: tuple[int, ...], strides: tuple[int, ...]
+) -> NDArray[Any]:
+    """Drop row padding and return an owned array of the logical shape."""
+    row_elements = 1
+    for extent in shape[1:]:
+        row_elements *= int(extent)
+    row_stride = int(strides[0])
+    if row_stride == row_elements:
+        return flat[: int(shape[0]) * row_elements].reshape(shape)
+    rows = flat[: int(shape[0]) * row_stride].reshape(int(shape[0]), row_stride)
+    return np.ascontiguousarray(rows[:, :row_elements].reshape(shape))
+
+
+def _element_strides(dl_tensor: Any, shape: tuple[int, ...]) -> tuple[int, ...]:
+    """Strides in elements; DLPack may report none, meaning tightly packed."""
+    if not dl_tensor.strides:
+        packed: list[int] = []
+        running = 1
+        for extent in reversed(shape):
+            packed.append(running)
+            running *= extent
+        return tuple(reversed(packed))
+    return tuple(int(dl_tensor.strides[index]) for index in range(dl_tensor.ndim))
+
+
+def _padded_shape(shape: tuple[int, ...], strides: tuple[int, ...]) -> tuple[int, ...]:
+    """The contiguous extent that actually holds the tensor, padding included.
+
+    DeepStream frame surfaces pad the row: a ``(360, 640, 3)`` uint8 frame
+    reports strides ``(2048, 3, 1)`` for 1920 used bytes per row. Reading only
+    the logical extent would walk off the rows, so the copy spans the padded
+    width and the caller slices the logical one back out.
+    """
+    if len(shape) < 2:
+        return shape
+    row_elements = shape[-1] * strides[-1]
+    if strides[-2] <= row_elements:
+        return shape
+    padded = list(shape)
+    padded[-1] = strides[-2] // strides[-1]
+    return tuple(padded)
 
 
 def rows_from_tensor(

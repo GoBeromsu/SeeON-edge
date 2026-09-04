@@ -142,10 +142,10 @@ class _JpegRetriever:
                 self._frames[camera_id] = count
                 if count % self._stride:
                     continue
-                tensor = buffer.extract(batch_id)
-                if self._color_format_rgba is not None:
-                    tensor = tensor.wrap(self._color_format_rgba)
-                jpeg = _encode_preview_jpeg(host_array_from_tensor(tensor))
+                # The extracted surface is already an HWC uint8 frame; wrapping
+                # it in a colour format is what the SDK rejects ("Color format
+                # not compatible with tensor layout"), so copy it as-is.
+                jpeg = _encode_preview_jpeg(host_array_from_tensor(buffer.extract(batch_id)))
                 self._plane.publish_jpeg(camera_id, jpeg)
         except Exception:  # noqa: BLE001 - preview work must not stop inference
             LOGGER.warning("dropping DeepStream preview frame", exc_info=True)
