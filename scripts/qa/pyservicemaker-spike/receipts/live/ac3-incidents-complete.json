@@ -12,5 +12,11 @@
   },
   "chain": "decision -> incident -> Smart Record window -> sealed clip -> published clip with manifest -> CLIP delivery entry -> PUT api/v1/relay/clips/{id} -> backend export -> upstream accept -> receipt transaction completing every contributor",
   "rig_caveat": "The facility hub is simulated: a mock answering the three calls the backend makes (capabilities, clip PUT, state PUT), an enrolment row written directly into edge_site, one camera bound to a backend_camera_id, and API_BACKEND_ALLOW_INSECURE_HTTP=1 which the product documents as a local-fixture switch. Everything downstream of that - the worker delivery queue, the export client, the backend export route, the media verification and the receipt transaction - is unmodified product code.",
-  "verdict": "PASS for the code path. One clip completed 38 contributor incidents in a single transaction, each with its own distinct artifact row pointing at that one clip."
+  "verdict": "The chain completes: one clip, 38 contributor incidents COMPLETE, 38 distinct artifact rows on that clip. Read as a code-path proof, not as a production acceptance.",
+  "claim_strength": "SIMULATED INTEGRATION EVIDENCE, not production evidence. It establishes that the code path from a published clip to completed contributor incidents works; it does not establish that it works against the facility hub. A review called the earlier PASS wording overclaimed and it is withdrawn here.",
+  "not_established": [
+    "behaviour against the real facility hub, including its auth and error shapes",
+    "atomicity under a forced mid-transaction failure - no rollback case was exercised",
+    "that the alerts were produced at a meaningful threshold: this run used the 0.0-threshold proof bundle so the episodes themselves carry no clinical meaning"
+  ]
 }

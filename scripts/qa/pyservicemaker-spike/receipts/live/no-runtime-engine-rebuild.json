@@ -5,5 +5,8 @@
   "objects_observed": 4236,
   "matched_tracks": 4236,
   "frames_without_pose_tensor": 0,
-  "note": "A trtexec-built engine loads as [Implicit Engine Info]: layers num: 0 and serves nothing; nvinfer ignores model-engine-file when it builds and writes <onnx>_b<N>_gpu0_fp16.engine beside the model, so the build adopts that artefact and records its digest. Boot then deserialises and never rebuilds."
+  "note": "A trtexec-built engine loads as [Implicit Engine Info]: layers num: 0 and serves nothing; nvinfer ignores model-engine-file when it builds and writes <onnx>_b<N>_gpu0_fp16.engine beside the model, so the build adopts that artefact and records its digest. Boot then deserialises and never rebuilds.",
+  "not_established": [
+    "the claim rests on the absence of nvinfer build lines in the container log rather than on a cache manifest captured before and after source activation"
+  ]
 }

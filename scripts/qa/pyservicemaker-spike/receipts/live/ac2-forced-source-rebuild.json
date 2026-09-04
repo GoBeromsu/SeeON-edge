@@ -22,5 +22,8 @@
     "crashed": false,
     "stable_minutes": 7
   },
-  "verdict": "PASS. The canonical camera id is unchanged across the forced rebuild - one id for the whole run - while the stream epoch rotated from 0 to 2 so post-outage frames cannot join the old stream. Each outage was counted exactly once and matched by a recovery, the other twelve cameras were untouched at zero outages, and the camera resumed detecting after reconnect."
+  "verdict": "PASS. The canonical camera id is unchanged across the forced rebuild - one id for the whole run - while the stream epoch rotated from 0 to 2 so post-outage frames cannot join the old stream. Each outage was counted exactly once and matched by a recovery, the other twelve cameras were untouched at zero outages, and the camera resumed detecting after reconnect.",
+  "not_established": [
+    "the twelve continuing cameras are evidenced by their outage counters staying at zero, which is weaker than showing each kept delivering frames throughout the outage window"
+  ]
 }
