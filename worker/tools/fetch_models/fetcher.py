@@ -285,12 +285,6 @@ def fetch_all(
     sidecar_root: Path = SIDECAR_ROOT,
 ) -> FetchReport:
     """Fetch every artifact and sidecar; raise on the first failure."""
-    artifact_paths = {artifact.path for artifact in manifest.artifacts}
-    if _FALL_PT_PATH in artifact_paths and _FALL_ONNX_PATH not in artifact_paths:
-        raise VerificationError(
-            "published pose+bbox56 fall bundle is incomplete: missing model.onnx; "
-            "publish model.onnx with the bundle"
-        )
     report = FetchReport()
     root.mkdir(parents=True, exist_ok=True)
     for artifact in manifest.artifacts:
@@ -306,4 +300,16 @@ def fetch_all(
         for result in bundle_report.results:
             log(f"{result.outcome:16} {result.sha256}  bundles/{bundle.sha256}/{result.path}")
         report.results.extend(bundle_report.results)
+    # The Flow worker composes the ORT runner and refuses a fall bundle with no
+    # model.onnx. The published manifest may legitimately omit it - the ONNX is
+    # a publication-time export the edge image cannot produce, since Torch is
+    # excluded under P1b-AC7 - so judge the PROVISIONED bundle, not the manifest:
+    # an already-exported bundle on disk is fine, a fresh site without one is
+    # refused here with the reason, instead of at worker boot.
+    artifact_paths = {artifact.path for artifact in manifest.artifacts}
+    if _FALL_PT_PATH in artifact_paths and not (root / _FALL_ONNX_PATH).is_file():
+        raise VerificationError(
+            "provisioned pose+bbox56 fall bundle is incomplete: missing model.onnx at "
+            f"{root / _FALL_ONNX_PATH}; publish model.onnx with the bundle"
+        )
     return report

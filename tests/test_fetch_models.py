@@ -329,9 +329,14 @@ def test_hash_mismatch_fails_and_leaves_nothing_at_the_final_path(tmp_path: Path
     assert not list(tmp_path.rglob(f"*{PART_SUFFIX}"))
 
 
-def test_pose_bbox56_bundle_without_onnx_is_refused_before_fetch(
-    tmp_path: Path,
-) -> None:
+def test_pose_bbox56_bundle_is_judged_on_disk_not_on_the_manifest(tmp_path: Path) -> None:
+    """The manifest may legitimately omit model.onnx; the provisioned bundle may not.
+
+    The ONNX is a publication-time export the edge image cannot produce, so a
+    manifest naming only model.pt is normal. What the Flow worker refuses is a
+    bundle on disk with no model.onnx. Judging the manifest instead broke every
+    compose up, including already-provisioned edges whose bundle was complete.
+    """
     raw = _manifest_dict(
         artifacts=[
             {
@@ -344,9 +349,20 @@ def test_pose_bbox56_bundle_without_onnx_is_refused_before_fetch(
         ]
     )
     manifest = parse_manifest(raw)
+    source = FakeSource({manifest.artifacts[0].url: WEIGHT})
 
-    with pytest.raises(VerificationError, match="published pose\\+bbox56 fall bundle.*model.onnx"):
-        fetch_all(manifest, tmp_path, FakeSource({}), env={}, retry=_no_sleep_policy())
+    # Fresh site: nothing on disk yet -> refused, naming the missing file.
+    with pytest.raises(
+        VerificationError, match="provisioned pose\\+bbox56 fall bundle.*model.onnx"
+    ):
+        fetch_all(manifest, tmp_path, source, env={}, retry=_no_sleep_policy())
+
+    # Already-exported bundle: the ONNX exists on disk -> provisioning proceeds.
+    onnx = tmp_path / "fall" / "pose-bbox56-gru" / "model.onnx"
+    onnx.parent.mkdir(parents=True, exist_ok=True)
+    onnx.write_bytes(b"onnx")
+    report = fetch_all(manifest, tmp_path, source, env={}, retry=_no_sleep_policy())
+    assert report.results, "provisioning must run when the bundle on disk is complete"
 
 
 def test_size_mismatch_fails_before_hash(tmp_path: Path) -> None:
