@@ -36,7 +36,7 @@ Enforced by `front/eslint.config.js` (`no-restricted-imports`, one override per 
 - `RoomDetail` reuses `CameraEditModal` / `DeleteCameraDialog`. Same sibling-dialog rule as `CameraSection`: edit never confirms its own delete. Nested `AccessibleDialog` inerts the first dialog.
 - Room `DetectionSettingsCard` is read-only. It imports `DOMAIN_LABELS`, `DOMAIN_ORDER`, `formatDomainSchedule` from `settings/detectionSettingsForm`. Gear calls `navigateToPage('settings')`. Global `GET /detection-settings` is not per-camera. Don't import the settings editor card.
 
-`settings` no longer imports `operations`. Both settings and operations reuse `shared/ui/BedZoneRecognitionPanel`, which takes `useMjpegStream` from `shared/api` (live canvas, not a still). Recognition is one explicit `POST /cameras/{id}/bed-zone/recognize` per click; no periodic persistence loop that repeatedly restarts Flow. Polygon overlay is a sibling `<svg>`. Drawing on the MJPEG canvas loses the next frame.
+`settings` no longer imports `operations`. Both settings and operations reuse `shared/ui/BedZoneRecognitionPanel`, which shows one still snapshot with a sibling `<svg>` polygon editor. Recognition is one explicit `POST /cameras/{id}/bed-zone/recognize` per click; no periodic persistence loop that repeatedly restarts Flow.
 
 Same-named cards stay separate files. operations card = status + overlay + navigate. settings card = editor. Don't merge by import.
 

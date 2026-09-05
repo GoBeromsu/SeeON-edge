@@ -118,14 +118,29 @@ describe('BedZonePolygonEditor', () => {
     expect(onChange).toHaveBeenCalledWith([{ id: 'manual-bed', polygon: [[20, 20], [40, 20], [40, 40]], origin: 'manual' }]);
   });
 
-  it('offers numeric keyboard editing, clips coordinates, and marks model regions manual', () => {
+  it('offers integer numeric editing on both axes, clips below exclusive bounds, and marks model regions manual', () => {
     const onChange = vi.fn();
     const { host } = render(initial, 1000, 500, onChange);
     const vertex = host.querySelector('circle[aria-label="영역 model-bed 꼭짓점 1"]') as SVGCircleElement;
     act(() => vertex.dispatchEvent(new FocusEvent('focusin', { bubbles: true })));
 
     const x = host.querySelector('input[aria-label="꼭짓점 X"]') as HTMLInputElement;
+    const y = host.querySelector('input[aria-label="꼭짓점 Y"]') as HTMLInputElement;
     expect(x).not.toBeNull();
+    expect(x.max).toBe('999');
+    expect(x.step).toBe('1');
+    expect(y).not.toBeNull();
+    expect(y.max).toBe('499');
+    expect(y.step).toBe('1');
+    act(() => {
+      const valueSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+      valueSetter?.call(x, '10.5');
+      x.dispatchEvent(new Event('input', { bubbles: true }));
+      valueSetter?.call(y, '20.5');
+      y.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    expect(onChange).not.toHaveBeenCalled();
+
     act(() => {
       const valueSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
       valueSetter?.call(x, '1200');
@@ -134,12 +149,24 @@ describe('BedZonePolygonEditor', () => {
 
     expect(onChange).toHaveBeenCalledWith([{
       id: 'model-bed',
-      polygon: [[1000, 100], [400, 100], [400, 300]],
+      polygon: [[999, 100], [400, 100], [400, 300]],
+      origin: 'manual',
+    }]);
+
+    onChange.mockClear();
+    act(() => {
+      const valueSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+      valueSetter?.call(y, '500');
+      y.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    expect(onChange).toHaveBeenCalledWith([{
+      id: 'model-bed',
+      polygon: [[100, 499], [400, 100], [400, 300]],
       origin: 'manual',
     }]);
   });
 
-  it('captures touch-style vertex drags, scales them, and clips them to image bounds', () => {
+  it('captures touch-style vertex drags and clips exact or outside edges to the last pixels', () => {
     const onChange = vi.fn();
     const { host, svg } = render(initial, 1000, 500, onChange);
     const vertex = host.querySelector('circle[aria-label="영역 model-bed 꼭짓점 1"]') as SVGCircleElement;
@@ -147,13 +174,36 @@ describe('BedZonePolygonEditor', () => {
     Object.defineProperty(vertex, 'setPointerCapture', { value: setPointerCapture });
 
     act(() => vertex.dispatchEvent(pointerEvent('pointerdown', 7, 60, 70)));
+    act(() => svg.dispatchEvent(pointerEvent('pointermove', 7, 510, 270)));
     act(() => svg.dispatchEvent(pointerEvent('pointermove', 7, 900, -100)));
     act(() => svg.dispatchEvent(pointerEvent('pointerup', 7, 900, -100)));
 
     expect(setPointerCapture).toHaveBeenCalledWith(7);
+    expect(onChange).toHaveBeenNthCalledWith(1, [{
+      id: 'model-bed',
+      polygon: [[999, 499], [400, 100], [400, 300]],
+      origin: 'manual',
+    }]);
     expect(onChange).toHaveBeenCalledWith([{
       id: 'model-bed',
-      polygon: [[1000, 0], [400, 100], [400, 300]],
+      polygon: [[999, 0], [400, 100], [400, 300]],
+      origin: 'manual',
+    }]);
+  });
+
+  it('floors pointer projections for odd dimensions and keeps new points inside exclusive bounds', () => {
+    const onChange = vi.fn();
+    const { host, svg } = render([], 5, 3, onChange);
+
+    act(() => button(host, '직접 그리기').click());
+    clickCanvas(svg, 133, 103.3);
+    clickCanvas(svg, 510, 20);
+    clickCanvas(svg, -100, 400);
+    act(() => button(host, '영역 완료').click());
+
+    expect(onChange).toHaveBeenCalledWith([{
+      id: '00000000-0000-4000-8000-000000000001',
+      polygon: [[1, 0], [4, 0], [0, 2]],
       origin: 'manual',
     }]);
   });
@@ -210,6 +260,64 @@ describe('BedZonePolygonEditor', () => {
       polygon: [[1, 1], [0, 1], [0, 0]],
       origin: 'manual',
     }]);
+  });
+
+  it('initializes an integer keyboard cursor for odd dimensions and clamps movement to the last pixels', () => {
+    const { host, svg } = render([], 5, 3);
+    act(() => button(host, '직접 그리기').click());
+    const cursor = host.querySelector('[data-keyboard-cursor]') as SVGCircleElement;
+
+    expect(cursor.getAttribute('cx')).toBe('2');
+    expect(cursor.getAttribute('cy')).toBe('1');
+    press(svg, 'ArrowRight', true);
+    press(svg, 'ArrowDown', true);
+    expect(cursor.getAttribute('cx')).toBe('4');
+    expect(cursor.getAttribute('cy')).toBe('2');
+    press(svg, 'ArrowLeft', true);
+    press(svg, 'ArrowUp', true);
+    expect(cursor.getAttribute('cx')).toBe('0');
+    expect(cursor.getAttribute('cy')).toBe('0');
+  });
+
+  it.each([
+    ['fractional x', [[0.5, 0], [4, 0], [4, 2]]],
+    ['fractional y', [[0, 0.5], [4, 0], [4, 2]]],
+    ['negative x', [[-1, 0], [4, 0], [4, 2]]],
+    ['negative y', [[0, -1], [4, 0], [4, 2]]],
+    ['exact upper-bound x', [[5, 0], [4, 0], [4, 2]]],
+    ['exact upper-bound y', [[0, 3], [4, 0], [4, 2]]],
+    ['NaN x', [[Number.NaN, 0], [4, 0], [4, 2]]],
+    ['NaN y', [[0, Number.NaN], [4, 0], [4, 2]]],
+    ['Infinity x', [[Number.POSITIVE_INFINITY, 0], [4, 0], [4, 2]]],
+    ['Infinity y', [[0, Number.POSITIVE_INFINITY], [4, 0], [4, 2]]],
+  ] satisfies [string, BedRegion['polygon']][])('reports backend-invalid existing %s without changing saved geometry', (_label, polygon) => {
+    const invalid: BedRegion[] = [{
+      id: 'invalid-bed',
+      polygon,
+      origin: 'manual',
+    }];
+    const validity = vi.fn();
+    const onChange = vi.fn();
+    const host = document.createElement('div');
+    document.body.append(host);
+    const root = createRoot(host);
+    roots.add(root);
+
+    act(() => root.render(
+      <BedZonePolygonEditor
+        regions={invalid}
+        imageWidth={5}
+        imageHeight={3}
+        onChange={onChange}
+        onDraftValidityChange={validity}
+      />,
+    ));
+
+    expect(validity).toHaveBeenLastCalledWith(false);
+    expect(onChange).not.toHaveBeenCalled();
+    expect((host.querySelector('[data-region-id="invalid-bed"] polygon') as SVGPolygonElement).getAttribute('points')).toBe(
+      polygon.map(([x, y]) => `${x},${y}`).join(' '),
+    );
   });
 
   it('enforces region and vertex limits and disables all edits when requested', () => {

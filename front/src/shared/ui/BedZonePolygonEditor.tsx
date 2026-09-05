@@ -16,7 +16,22 @@ type Drag = { regionId: string; vertexIndex: number; pointerId: number };
 const MAX_REGIONS = 8;
 const MAX_VERTICES = 16;
 
-function validPolygon(points: readonly BedZonePoint[]): boolean {
+function maximumCoordinate(dimension: number): number {
+  if (!Number.isFinite(dimension) || dimension <= 0) return 0;
+  return Math.max(0, Math.ceil(dimension) - 1);
+}
+
+function clampPointerCoordinate(value: number, dimension: number): number {
+  if (!Number.isFinite(value)) return 0;
+  return Math.min(maximumCoordinate(dimension), Math.max(0, Math.floor(value)));
+}
+
+function validCoordinate(value: number, dimension: number): boolean {
+  return Number.isFinite(value) && Number.isInteger(value) && value >= 0 && value < dimension;
+}
+
+function validPolygon(points: readonly BedZonePoint[], imageWidth: number, imageHeight: number): boolean {
+  if (!points.every(([x, y]) => validCoordinate(x, imageWidth) && validCoordinate(y, imageHeight))) return false;
   if (points.length < 3 || new Set(points.map(([x, y]) => `${x},${y}`)).size < 3) return false;
   let twiceArea = 0;
   for (let index = 0; index < points.length; index += 1) {
@@ -67,7 +82,10 @@ function Icon({ kind }: { kind: 'delete' | 'undo' }): JSX.Element {
 
 export function BedZonePolygonEditor({ regions, imageWidth, imageHeight, onChange, onDraftValidityChange, disabled = false }: BedZonePolygonEditorProps): JSX.Element {
   const [draft, setDraft] = useState<{ id: string; points: BedZonePoint[] } | null>(null);
-  const [keyboardCursor, setKeyboardCursor] = useState<BedZonePoint>([imageWidth / 2, imageHeight / 2]);
+  const [keyboardCursor, setKeyboardCursor] = useState<BedZonePoint>([
+    clampPointerCoordinate(imageWidth / 2, imageWidth),
+    clampPointerCoordinate(imageHeight / 2, imageHeight),
+  ]);
   const [selected, setSelected] = useState<{ regionId: string; vertexIndex: number | null } | null>(null);
   const dragRef = useRef<Drag | null>(null);
   const svgRef = useRef<SVGSVGElement>(null);
@@ -76,20 +94,23 @@ export function BedZonePolygonEditor({ regions, imageWidth, imageHeight, onChang
 
   useEffect(() => {
     setDraft(null);
-    setKeyboardCursor([imageWidth / 2, imageHeight / 2]);
+    setKeyboardCursor([
+      clampPointerCoordinate(imageWidth / 2, imageWidth),
+      clampPointerCoordinate(imageHeight / 2, imageHeight),
+    ]);
     setSelected(null);
     dragRef.current = null;
   }, [imageWidth, imageHeight]);
 
   useEffect(() => {
-    onDraftValidityChange?.(draft === null && regions.every((region) => validPolygon(region.polygon)));
-  }, [draft, onDraftValidityChange, regions]);
+    onDraftValidityChange?.(draft === null && regions.every((region) => validPolygon(region.polygon, imageWidth, imageHeight)));
+  }, [draft, imageHeight, imageWidth, onDraftValidityChange, regions]);
 
   function eventPoint(clientX: number, clientY: number): BedZonePoint {
     const rect = svgRef.current?.getBoundingClientRect();
     if (!rect || rect.width <= 0 || rect.height <= 0) return [0, 0];
-    const x = Math.min(imageWidth, Math.max(0, ((clientX - rect.left) / rect.width) * imageWidth));
-    const y = Math.min(imageHeight, Math.max(0, ((clientY - rect.top) / rect.height) * imageHeight));
+    const x = clampPointerCoordinate(((clientX - rect.left) / rect.width) * imageWidth, imageWidth);
+    const y = clampPointerCoordinate(((clientY - rect.top) / rect.height) * imageHeight, imageHeight);
     return [x, y];
   }
 
@@ -100,7 +121,7 @@ export function BedZonePolygonEditor({ regions, imageWidth, imageHeight, onChang
   }
 
   function closeDraft(): void {
-    if (!draft || !validPolygon(draft.points)) return;
+    if (!draft || !validPolygon(draft.points, imageWidth, imageHeight)) return;
     onChange([...regions.map((region) => ({ ...region, polygon: [...region.polygon] })), {
       id: draft.id,
       polygon: draft.points,
@@ -138,8 +159,8 @@ export function BedZonePolygonEditor({ regions, imageWidth, imageHeight, onChang
             event.preventDefault();
             const [x, y] = keyboardCursor;
             setKeyboardCursor([
-              Math.min(imageWidth, Math.max(0, x + (event.key === 'ArrowLeft' ? -step : event.key === 'ArrowRight' ? step : 0))),
-              Math.min(imageHeight, Math.max(0, y + (event.key === 'ArrowUp' ? -step : event.key === 'ArrowDown' ? step : 0))),
+              clampPointerCoordinate(x + (event.key === 'ArrowLeft' ? -step : event.key === 'ArrowRight' ? step : 0), imageWidth),
+              clampPointerCoordinate(y + (event.key === 'ArrowUp' ? -step : event.key === 'ArrowDown' ? step : 0), imageHeight),
             ]);
             return;
           }
@@ -230,11 +251,14 @@ export function BedZonePolygonEditor({ regions, imageWidth, imageHeight, onChang
           disabled={disabled || draft !== null || regions.length >= MAX_REGIONS}
           onClick={() => {
             setDraft({ id: generateUuidV4(), points: [] });
-            setKeyboardCursor([imageWidth / 2, imageHeight / 2]);
+            setKeyboardCursor([
+              clampPointerCoordinate(imageWidth / 2, imageWidth),
+              clampPointerCoordinate(imageHeight / 2, imageHeight),
+            ]);
             svgRef.current?.focus();
           }}
         />
-        <PrimaryToolButton label="영역 완료" disabled={disabled || !draft || !validPolygon(draft.points)} onClick={closeDraft} />
+        <PrimaryToolButton label="영역 완료" disabled={disabled || !draft || !validPolygon(draft.points, imageWidth, imageHeight)} onClick={closeDraft} />
         <ToolButton
           label="선택 영역 삭제"
           disabled={disabled || !selectedRegion}
@@ -253,8 +277,18 @@ export function BedZonePolygonEditor({ regions, imageWidth, imageHeight, onChang
 
       {selectedPoint && selectedRegion && selectedVertexIndex !== null && selectedVertexIndex !== undefined ? (
         <div className="absolute bottom-2 right-2 flex gap-2 rounded-control bg-card/95 p-2 text-xs" role="group" aria-label="꼭짓점 좌표 편집">
-          <label>X <input aria-label="꼭짓점 X" className="w-20 rounded border border-border bg-card px-1" type="number" min={0} max={imageWidth} value={selectedPoint[0]} disabled={disabled} onChange={(event) => replaceVertex(selectedRegion.id, selectedVertexIndex, [Math.min(imageWidth, Math.max(0, Number(event.target.value))), selectedPoint[1]])} /></label>
-          <label>Y <input aria-label="꼭짓점 Y" className="w-20 rounded border border-border bg-card px-1" type="number" min={0} max={imageHeight} value={selectedPoint[1]} disabled={disabled} onChange={(event) => replaceVertex(selectedRegion.id, selectedVertexIndex, [selectedPoint[0], Math.min(imageHeight, Math.max(0, Number(event.target.value)))])} /></label>
+          <label>X <input aria-label="꼭짓점 X" className="w-20 rounded border border-border bg-card px-1" type="number" min={0} max={maximumCoordinate(imageWidth)} step={1} value={selectedPoint[0]} disabled={disabled} onChange={(event) => {
+            if (event.target.value === '') return;
+            const value = Number(event.target.value);
+            if (!Number.isFinite(value) || !Number.isInteger(value)) return;
+            replaceVertex(selectedRegion.id, selectedVertexIndex, [Math.min(maximumCoordinate(imageWidth), Math.max(0, value)), selectedPoint[1]]);
+          }} /></label>
+          <label>Y <input aria-label="꼭짓점 Y" className="w-20 rounded border border-border bg-card px-1" type="number" min={0} max={maximumCoordinate(imageHeight)} step={1} value={selectedPoint[1]} disabled={disabled} onChange={(event) => {
+            if (event.target.value === '') return;
+            const value = Number(event.target.value);
+            if (!Number.isFinite(value) || !Number.isInteger(value)) return;
+            replaceVertex(selectedRegion.id, selectedVertexIndex, [selectedPoint[0], Math.min(maximumCoordinate(imageHeight), Math.max(0, value))]);
+          }} /></label>
         </div>
       ) : null}
     </div>
