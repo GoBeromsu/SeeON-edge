@@ -1613,6 +1613,20 @@ class WorkerRuntime:
                     envelope["threshold_source"] = snapshot.threshold_source
                 if snapshot.receipt_threshold is not None:
                     envelope["receipt_threshold"] = snapshot.receipt_threshold
+                if snapshot.transition_votes is not None:
+                    envelope["transition_votes"] = snapshot.transition_votes
+                if snapshot.transition_window is not None:
+                    envelope["transition_window"] = snapshot.transition_window
+                if snapshot.confirmation_rule_source is not None:
+                    envelope["confirmation_rule_source"] = snapshot.confirmation_rule_source
+                if snapshot.receipt_transition_votes is not None:
+                    envelope["receipt_transition_votes"] = snapshot.receipt_transition_votes
+                if snapshot.receipt_transition_window is not None:
+                    envelope["receipt_transition_window"] = snapshot.receipt_transition_window
+                if snapshot.unapplied_transition_votes is not None:
+                    envelope["unapplied_transition_votes"] = snapshot.unapplied_transition_votes
+                if snapshot.unapplied_transition_window is not None:
+                    envelope["unapplied_transition_window"] = snapshot.unapplied_transition_window
                 if snapshot.unapplied_policy_threshold is not None:
                     # The alert envelope is a frozen wire contract, so an
                     # operator threshold that P1a does not apply is reported on

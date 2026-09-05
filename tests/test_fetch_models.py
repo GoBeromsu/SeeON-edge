@@ -233,7 +233,11 @@ def _selected_bundle_delivery(
         "conformance": "3" * 64,
         "class": "4" * 64,
         "input": "pose-bbox56.v1",
-        "policy": "5" * 64,
+        "policy": (
+            canonical_digest(json.loads(members["calibration.json"])["temporal_rule"])
+            if "calibration.json" in members
+            else "5" * 64
+        ),
         "members": "6" * 64,
     }
     member_records = [

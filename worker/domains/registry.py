@@ -10,7 +10,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime
 from types import MappingProxyType
-from typing import Literal, Protocol, cast, runtime_checkable
+from typing import Literal, NamedTuple, Protocol, cast, runtime_checkable
 
 from shared.detection_policies import (
     FALL_POLICY_V2_DEFAULT,
@@ -106,6 +106,26 @@ class _ArtifactProvenance(Protocol):
 class _ThresholdReceipt(Protocol):
     receipt_threshold: float | None
     promotion_eligible: bool
+
+
+@runtime_checkable
+class _ConfirmationRuleReceipt(Protocol):
+    receipt_transition_votes: int
+    receipt_transition_window: int
+
+
+class _EffectiveFallPolicy(NamedTuple):
+    transition_threshold: float
+    threshold_source: str
+    receipt_threshold: float | None
+    unapplied_policy_threshold: float | None
+    transition_votes: int
+    transition_window: int
+    confirmation_rule_source: str
+    receipt_transition_votes: int | None
+    receipt_transition_window: int | None
+    unapplied_transition_votes: int | None
+    unapplied_transition_window: int | None
 
 
 def _extractor(
@@ -221,9 +241,7 @@ def _fall_v2(context: CameraModuleContext) -> FallV2DomainDecider:
     if not isinstance(resolved, FallPolicyV2):
         raise TypeError("fall.v2 requires a typed fall.policy.v2 effective policy")
     model = _shared_fall_model(context)
-    threshold, _source, _receipt, _unapplied = _effective_transition_threshold(
-        model, context.policy
-    )
+    effective = _effective_transition_threshold(model, context.policy)
     identity = context.camera_components.get("episode-identity")
     if not isinstance(identity, tuple) or len(identity) != 3:
         raise TypeError("fall.v2 requires runtime boot and source identities")
@@ -242,37 +260,67 @@ def _fall_v2(context: CameraModuleContext) -> FallV2DomainDecider:
             boot_id=boot_id,
             stream_epoch=stream_epoch,
             source_generation=source_generation,
-            policy=replace(resolved, transition_threshold=threshold),
+            policy=replace(
+                resolved,
+                transition_threshold=effective.transition_threshold,
+                transition_votes=effective.transition_votes,
+                transition_window=effective.transition_window,
+            ),
         ),
     )
 
 
 def _effective_transition_threshold(
     model: object, effective_policy: EffectivePolicy
-) -> tuple[float, str, float | None, float | None]:
-    """Use an eligible receipt, otherwise the image default (P1a-AC7).
-
-    Returns the effective threshold, its source, the receipt value seen, and any
-    operator override that was received but not applied.
-    """
+) -> _EffectiveFallPolicy:
+    """Resolve receipt operating parameters under one precedence rule."""
     policy = effective_policy.values
     if not isinstance(policy, FallPolicyV2):
         raise TypeError("fall.v2 requires a typed fall.policy.v2 effective policy")
     receipt_threshold = model.receipt_threshold if isinstance(model, _ThresholdReceipt) else None
+    receipt_votes = (
+        model.receipt_transition_votes if isinstance(model, _ConfirmationRuleReceipt) else None
+    )
+    receipt_window = (
+        model.receipt_transition_window if isinstance(model, _ConfirmationRuleReceipt) else None
+    )
     promotion_eligible = model.promotion_eligible if isinstance(model, _ThresholdReceipt) else False
     if promotion_eligible and receipt_threshold is not None:
-        return receipt_threshold, "receipt", receipt_threshold, None
-    # P1a-AC7: receipt when eligible, else the image default. The image's own
-    # fall.policy.v2 default is that default; an operator facility/camera
-    # override is not yet authoritative for this threshold, so it is reported
-    # rather than applied.
-    if effective_policy.source == "image-default":
-        return policy.transition_threshold, "default", receipt_threshold, None
-    return (
-        FALL_POLICY_V2_DEFAULT.transition_threshold,
-        "default",
+        threshold = receipt_threshold
+        threshold_source = "receipt"
+        unapplied_threshold = None
+    elif effective_policy.source == "image-default":
+        threshold = policy.transition_threshold
+        threshold_source = "default"
+        unapplied_threshold = None
+    else:
+        threshold = FALL_POLICY_V2_DEFAULT.transition_threshold
+        threshold_source = "default"
+        unapplied_threshold = policy.transition_threshold
+    if promotion_eligible and receipt_votes is not None and receipt_window is not None:
+        transition_votes = receipt_votes
+        transition_window = receipt_window
+        confirmation_source = "receipt"
+        unapplied_votes = None
+        unapplied_window = None
+    else:
+        transition_votes = FALL_POLICY_V2_DEFAULT.transition_votes
+        transition_window = FALL_POLICY_V2_DEFAULT.transition_window
+        confirmation_source = "default"
+        unapplied_votes = receipt_votes
+        unapplied_window = receipt_window
+    return _EffectiveFallPolicy(
+        threshold,
+        threshold_source,
         receipt_threshold,
-        policy.transition_threshold,
+        unapplied_threshold,
+        transition_votes,
+        transition_window,
+        confirmation_source,
+        receipt_votes,
+        receipt_window,
+        unapplied_votes,
+        unapplied_window,
     )
 
 
@@ -327,15 +375,20 @@ def _audit_snapshot(context: CameraModuleContext) -> DomainAuditSnapshot:
     effective_policy = context.policy
     if effective_policy is None or not isinstance(effective_policy.values, FallPolicyV2):
         raise TypeError("fall.v2 requires a typed fall.policy.v2 effective policy")
-    threshold, source, receipt_threshold, unapplied = _effective_transition_threshold(
-        model, effective_policy
-    )
+    effective = _effective_transition_threshold(model, effective_policy)
     return DomainAuditSnapshot(
         model_version=model_version,
-        operating_threshold=threshold,
-        threshold_source=source,
-        receipt_threshold=receipt_threshold,
-        unapplied_policy_threshold=unapplied,
+        operating_threshold=effective.transition_threshold,
+        threshold_source=effective.threshold_source,
+        receipt_threshold=effective.receipt_threshold,
+        unapplied_policy_threshold=effective.unapplied_policy_threshold,
+        transition_votes=effective.transition_votes,
+        transition_window=effective.transition_window,
+        confirmation_rule_source=effective.confirmation_rule_source,
+        receipt_transition_votes=effective.receipt_transition_votes,
+        receipt_transition_window=effective.receipt_transition_window,
+        unapplied_transition_votes=effective.unapplied_transition_votes,
+        unapplied_transition_window=effective.unapplied_transition_window,
     )
 
 

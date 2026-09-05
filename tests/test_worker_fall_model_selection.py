@@ -48,7 +48,8 @@ from worker.adapters.model import ort_pose_bbox56
 from worker.adapters.model.errors import ModelLoadError
 from worker.adapters.model.ort_pose_bbox56 import OrtPoseBbox56Runner
 from worker.adapters.model.pose_bbox56_bundle import PoseBbox56BundleRunner
-from worker.domains.registry import _effective_transition_threshold
+from worker.domains import DETECTION_MODULE_REGISTRY, CameraModuleContext
+from worker.domains.registry import _audit_snapshot, _effective_transition_threshold
 from worker.interfaces.fall_model import FallV2Probabilities
 from worker.runtime import bootstrap
 from worker.runtime.config import WorkerConfig, local_env
@@ -179,24 +180,32 @@ def _selected_onnx_bundle(
     transition_threshold: float = 0.5,
     threshold_source: str = "default",
     class_order: list[str] | None = None,
+    temporal_rule: object = None,
 ) -> tuple[Path, DesiredModelBundle]:
     source = write_pose_bbox56_bundle(tmp_path / "source")
-    if class_order is not None:
+    if class_order is not None or temporal_rule is not None:
         calibration_path = source / "calibration.json"
         calibration = json.loads(calibration_path.read_text(encoding="utf-8"))
-        calibration["class_order"] = class_order
+        if class_order is not None:
+            calibration["class_order"] = class_order
+        if temporal_rule is not None:
+            if temporal_rule == "missing":
+                del calibration["temporal_rule"]
+            else:
+                calibration["temporal_rule"] = temporal_rule
         calibration_path.write_text(
             json.dumps(calibration, sort_keys=True),
             encoding="utf-8",
         )
     members = {path: (source / path).read_bytes() for path in ("model.onnx", "calibration.json")}
+    calibration_document = json.loads(members["calibration.json"])
     identities = {
         "dataset": "1" * 64,
         "calibration": hashlib.sha256(members["calibration.json"]).hexdigest(),
         "conformance": "3" * 64,
         "class": "4" * 64,
         "input": "pose-bbox56.v1",
-        "policy": "5" * 64,
+        "policy": canonical_digest(calibration_document.get("temporal_rule")),
         "members": "6" * 64,
     }
     member_records = [
@@ -510,7 +519,87 @@ def test_selected_bundle_uses_the_admitted_onnx_member_without_model_pt(tmp_path
     )
     assert (runner.receipt_threshold, runner.promotion_eligible) == (0.31, True)
     policy = default_policy_bundle(("camera-a",)).resolve("camera-a", "fall", 2)
-    assert _effective_transition_threshold(runner, policy)[0] == pytest.approx(0.31)
+    effective = _effective_transition_threshold(runner, policy)
+    assert effective.transition_threshold == pytest.approx(0.31)
+    assert (effective.transition_votes, effective.transition_window) == (5, 5)
+    assert effective.confirmation_rule_source == "receipt"
+
+    definition = DETECTION_MODULE_REGISTRY.get("fall", 2)
+    context = CameraModuleContext(
+        camera_id="camera-a",
+        facility_id="facility-a",
+        shared_components={"fall-classifier": runner},
+        camera_components={"episode-identity": ("boot", "1", 0)},
+        detection_window=None,
+        clock=lambda: pytest.fail("fall clock should not be called"),
+        diagnostics=None,
+        policy=policy,
+    )
+    module = definition.create_camera_module(context)
+    assert (
+        module.decider.policy.policy.transition_votes,
+        module.decider.policy.policy.transition_window,
+    ) == (5, 5)
+    assert definition.audit_adapter is not None
+    audit = definition.audit_adapter(context)
+    assert (audit.transition_votes, audit.transition_window) == (5, 5)
+    assert audit.confirmation_rule_source == "receipt"
+
+
+def test_non_promotable_bundle_keeps_default_confirmation_rule_and_records_declaration(
+    tmp_path: Path,
+) -> None:
+    artifact_dir = write_pose_bbox56_bundle(tmp_path / "bundle")
+    runner = OrtPoseBbox56Runner.from_artifact_dir(
+        artifact_dir,
+        session_factory=lambda _path, _providers: _ZeroLogitSession(),
+    )
+    policy = default_policy_bundle(("camera-a",)).resolve("camera-a", "fall", 2)
+
+    effective = _effective_transition_threshold(runner, policy)
+
+    assert (effective.transition_votes, effective.transition_window) == (3, 5)
+    assert effective.confirmation_rule_source == "default"
+    assert (effective.receipt_transition_votes, effective.receipt_transition_window) == (5, 5)
+    assert (effective.unapplied_transition_votes, effective.unapplied_transition_window) == (5, 5)
+    audit = _audit_snapshot(
+        CameraModuleContext(
+            camera_id="camera-a",
+            facility_id="facility-a",
+            shared_components={"fall-classifier": runner},
+            camera_components={},
+            detection_window=None,
+            clock=lambda: pytest.fail("fall clock should not be called"),
+            diagnostics=None,
+            policy=policy,
+        )
+    )
+    assert (audit.transition_votes, audit.transition_window) == (3, 5)
+    assert audit.confirmation_rule_source == "default"
+    assert (audit.unapplied_transition_votes, audit.unapplied_transition_window) == (5, 5)
+
+
+@pytest.mark.parametrize(
+    "temporal_rule",
+    [
+        pytest.param({"m": 6, "n": 5}, id="m-greater-than-n"),
+        pytest.param({"m": 5.0, "n": 5}, id="non-integer"),
+        pytest.param("missing", id="missing"),
+    ],
+)
+def test_bundle_refuses_malformed_temporal_rule(tmp_path: Path, temporal_rule: object) -> None:
+    models_root, desired = _selected_onnx_bundle(tmp_path, temporal_rule=temporal_rule)
+    selection = desired.selection
+    assert selection is not None
+    proof = admit_model_bundle(models_root, desired)
+
+    with pytest.raises(ModelLoadError, match="temporal_rule"):
+        OrtPoseBbox56Runner.from_admitted_bundle(
+            models_root / "bundles" / desired.bundle_sha256,
+            proof,
+            selection,
+            session_factory=lambda _path, _providers: _ZeroLogitSession(),
+        )
 
 
 def test_selected_receipt_without_threshold_refuses_construction(tmp_path: Path) -> None:

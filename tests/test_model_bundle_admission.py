@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -24,7 +25,7 @@ _IDENTITIES = {
     "conformance": hashlib.sha256(b"{}").hexdigest(),
     "class": "4" * 64,
     "input": "pose-bbox56.v1",
-    "policy": "5" * 64,
+    "policy": canonical_digest(None),
     "members": "6" * 64,
 }
 
@@ -210,6 +211,24 @@ def test_admission_refuses_selection_conformance_digest_not_matching_member_cont
         ModelBundleAdmissionError,
         match=rf"selection declares {_IDENTITIES['conformance']}.*member content has "
         rf"'{hashlib.sha256(b'different conformance').hexdigest()}'",
+    ):
+        admit_model_bundle(models_root, desired)
+
+
+def test_admission_refuses_policy_digest_not_matching_temporal_rule_content(
+    tmp_path: Path,
+) -> None:
+    models_root, desired = _bundle(tmp_path)
+    assert desired.selection is not None
+    desired = replace(
+        desired,
+        selection=replace(desired.selection, policy_digest="5" * 64),
+    )
+
+    with pytest.raises(
+        ModelBundleAdmissionError,
+        match=rf"policy_digest mismatch: selection declares {'5' * 64}, "
+        rf"calibration temporal_rule content has {_IDENTITIES['policy']}",
     ):
         admit_model_bundle(models_root, desired)
 

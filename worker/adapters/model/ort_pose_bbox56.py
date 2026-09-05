@@ -62,6 +62,8 @@ class OrtPoseBbox56Runner:
         session: _OrtSession,
         temperature: float,
         receipt_threshold: float | None,
+        receipt_transition_votes: int,
+        receipt_transition_window: int,
         promotion_eligible: bool,
         artifact_digest: str,
         preprocessing_identity: str,
@@ -69,6 +71,8 @@ class OrtPoseBbox56Runner:
         self._session = session
         self._temperature = temperature
         self.receipt_threshold = receipt_threshold
+        self.receipt_transition_votes = receipt_transition_votes
+        self.receipt_transition_window = receipt_transition_window
         self.promotion_eligible = promotion_eligible
         self.artifact_digest = artifact_digest
         self.preprocessing_identity = preprocessing_identity
@@ -90,7 +94,13 @@ class OrtPoseBbox56Runner:
         manifest = read_json(root / "bundle-manifest.json")
         verify_bundle(root, manifest)
         artifact_digest = member_digest(manifest, "model.onnx")
-        temperature, receipt_threshold, promotion_eligible = _bundle_metadata(root)
+        (
+            temperature,
+            receipt_threshold,
+            receipt_transition_votes,
+            receipt_transition_window,
+            promotion_eligible,
+        ) = _bundle_metadata(root)
         if session_factory is None:
             session_factory = _onnxruntime_session_factory
         try:
@@ -101,6 +111,8 @@ class OrtPoseBbox56Runner:
             session,
             temperature,
             receipt_threshold,
+            receipt_transition_votes,
+            receipt_transition_window,
             promotion_eligible,
             artifact_digest,
             POSE_BBOX56_PREPROCESSING_IDENTITY,
@@ -168,7 +180,11 @@ class OrtPoseBbox56Runner:
         root = Path(artifact_dir).expanduser().resolve()
         _verify_admitted_member(root, "model.onnx", model_digest)
         _verify_admitted_member(root, "calibration.json", calibration_digest)
-        temperature = _calibration_temperature(root)
+        calibration = read_json(root / "calibration.json")
+        temperature = _calibration_temperature(root, calibration)
+        receipt_transition_votes, receipt_transition_window = _calibration_temporal_rule(
+            calibration
+        )
         if session_factory is None:
             session_factory = _onnxruntime_session_factory
         try:
@@ -179,6 +195,8 @@ class OrtPoseBbox56Runner:
             session,
             temperature,
             float(threshold),
+            receipt_transition_votes,
+            receipt_transition_window,
             selection.threshold_source == "receipt",
             model_digest,
             POSE_BBOX56_PREPROCESSING_IDENTITY,
@@ -230,12 +248,13 @@ def _onnxruntime_session_factory(model_path: str, providers: list[str]) -> _OrtS
     return onnxruntime.InferenceSession(model_path, providers=providers)
 
 
-def _bundle_metadata(root: Path) -> tuple[float, float | None, bool]:
+def _bundle_metadata(root: Path) -> tuple[float, float | None, int, int, bool]:
     calibration = read_json(root / "calibration.json")
     receipt = read_json(root / "evaluation-receipt.json")
     if not isinstance(calibration, dict):
         raise ModelLoadError("invalid calibration.json")
     parsed_temperature = _calibration_temperature(root, calibration)
+    transition_votes, transition_window = _calibration_temporal_rule(calibration)
     if not isinstance(receipt, dict):
         raise ModelLoadError("invalid evaluation-receipt.json")
     candidate_threshold = receipt.get("threshold", calibration.get("threshold"))
@@ -249,7 +268,13 @@ def _bundle_metadata(root: Path) -> tuple[float, float | None, bool]:
     promotion_eligible = receipt.get("promotion_eligible", calibration.get("promotion_eligible"))
     if not isinstance(promotion_eligible, bool):
         raise ModelLoadError("receipt promotion_eligible must be boolean")
-    return parsed_temperature, receipt_threshold, promotion_eligible
+    return (
+        parsed_temperature,
+        receipt_threshold,
+        transition_votes,
+        transition_window,
+        promotion_eligible,
+    )
 
 
 def _calibration_temperature(root: Path, calibration: object | None = None) -> float:
@@ -279,6 +304,28 @@ def _validate_calibration_class_order(calibration: Mapping[str, object]) -> None
             f"calibration class_order {class_order!r} contradicts this runner's "
             f"implemented order {list(OUTPUT_CLASS_ORDER)!r}"
         )
+
+
+def _calibration_temporal_rule(calibration: object) -> tuple[int, int]:
+    if not isinstance(calibration, Mapping):
+        raise ModelLoadError("invalid calibration.json")
+    temporal_rule = calibration.get("temporal_rule")
+    if not isinstance(temporal_rule, Mapping):
+        raise ModelLoadError("calibration temporal_rule must declare integer m and n")
+    votes = temporal_rule.get("m")
+    window = temporal_rule.get("n")
+    if (
+        isinstance(votes, bool)
+        or not isinstance(votes, int)
+        or isinstance(window, bool)
+        or not isinstance(window, int)
+        or votes < 1
+        or window < votes
+    ):
+        raise ModelLoadError(
+            "calibration temporal_rule must declare integers satisfying 1 <= m <= n"
+        )
+    return votes, window
 
 
 def _verify_admitted_member(root: Path, relative_path: str, expected_digest: str) -> None:

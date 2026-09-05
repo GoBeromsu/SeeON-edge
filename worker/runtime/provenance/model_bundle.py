@@ -20,6 +20,7 @@ from typing import Final
 from contracts.model_selection import (
     ContractError,
     ModelSelection,
+    canonical_digest,
     canonical_json_bytes,
     parse_model_selection,
     validate_evaluation_receipt_identity,
@@ -154,6 +155,7 @@ def admit_model_bundle(models_root: Path, desired: DesiredModelBundle) -> ModelB
         if isinstance(member, dict)
     }
     _verify_selection_member_digests(member_digests, desired.selection)
+    _verify_selection_policy_digest(root, desired.selection)
     receipt_identities = _verify_required_members(root, members, receipts, desired)
     _verify_exact_tree(root, {"manifest.json", *observed_members, *observed_receipts})
     frozen_static = _freeze({**dict(identities), **receipt_identities})
@@ -197,6 +199,24 @@ def _verify_selection_member_digest(
         raise ModelBundleAdmissionError(
             f"{member_path} digest mismatch: selection declares {selected_digest}, "
             f"member content has {observed_digest!r}"
+        )
+
+
+def _verify_selection_policy_digest(root: Path, selection: ModelSelection | None) -> None:
+    """Bind policy_digest to the canonical calibration temporal_rule object."""
+    if selection is None:
+        return
+    raw = _read_regular(root / "calibration.json", "member calibration.json")
+    try:
+        calibration = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ModelBundleAdmissionError("calibration.json is invalid JSON") from exc
+    temporal_rule = calibration.get("temporal_rule") if isinstance(calibration, dict) else None
+    actual_digest = canonical_digest(temporal_rule)
+    if actual_digest != selection.policy_digest:
+        raise ModelBundleAdmissionError(
+            f"policy_digest mismatch: selection declares {selection.policy_digest}, "
+            f"calibration temporal_rule content has {actual_digest}"
         )
 
 
