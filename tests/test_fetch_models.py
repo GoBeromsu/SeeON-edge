@@ -385,6 +385,16 @@ def test_pose_bbox56_bundle_is_judged_the_way_the_runner_judges_it(tmp_path: Pat
     with pytest.raises(VerificationError, match="not loadable by the Flow runner"):
         fetch_all(manifest, tmp_path, source, env={}, retry=_no_sleep_policy())
 
+    # Manifest lists model.onnx but not model.pt: the runner loads, but boot's
+    # composition also names the bundle by its published weights' digest and
+    # refuses - so fetch must refuse too.
+    onnx.write_bytes(good_onnx)
+    no_pt = json.loads(good_manifest)
+    no_pt["files"] = [f for f in no_pt["files"] if f["relative_path"] != "model.pt"]
+    (bundle / "bundle-manifest.json").write_text(json.dumps(no_pt), encoding="utf-8")
+    with pytest.raises(VerificationError, match="not loadable by the Flow runner"):
+        fetch_all(manifest, tmp_path, source, env={}, retry=_no_sleep_policy())
+
 
 def test_size_mismatch_fails_before_hash(tmp_path: Path) -> None:
     manifest = parse_manifest(_manifest_dict())

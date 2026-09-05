@@ -326,6 +326,7 @@ def _require_loadable_fall_bundle(root: Path) -> None:
     """
     from worker.adapters.model.errors import ModelLoadError
     from worker.adapters.model.ort_pose_bbox56 import OrtPoseBbox56Runner
+    from worker.adapters.model.pose_bbox56_bundle_support import member_digest, read_json
 
     bundle = root / _FALL_BUNDLE_ROOT
     onnx = bundle / "model.onnx"
@@ -335,7 +336,13 @@ def _require_loadable_fall_bundle(root: Path) -> None:
             "publish model.onnx with the bundle"
         )
     try:
+        # Both halves of boot's packaged-fall composition: the ORT runner, and
+        # the published weights' digest that names the bundle's identity
+        # (worker.runtime.worker._packaged_fall_member_digest). A manifest
+        # listing model.onnx but not model.pt passed the runner and refused
+        # at boot.
         _ = OrtPoseBbox56Runner.from_artifact_dir(bundle, "cpu")
+        _ = member_digest(read_json(bundle / "bundle-manifest.json"), "model.pt")
     except ModelLoadError as error:
         raise VerificationError(
             f"provisioned pose+bbox56 fall bundle at {bundle} is not loadable by the Flow "
