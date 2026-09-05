@@ -48,7 +48,7 @@ from worker.tools.fetch_models.manifest import (
     Bundle,
     Manifest,
     ManifestError,
-    PublishedBundle,
+    Source,
     canonical_json,
     load_manifest,
     parse_manifest,
@@ -259,17 +259,14 @@ def _selected_bundle_delivery(
         "evaluation-receipt.json": canonical_json(evaluation).encode() + b"\n",
         "field-evaluation-receipt.json": canonical_json(field).encode() + b"\n",
     }
-    raw = _manifest_dict(
-        published_bundles=[
-            {
-                "source_locator": "owner/models",
-                "revision": "d67887844bfd2e4b1ca3f3275f770b0b05e23aba",
-                "bundle_sha256": bundle_sha256,
-            }
-        ]
-    )
+    raw = _manifest_dict()
     manifest = parse_manifest(raw)
-    source = manifest.sources["hf"]
+    source = Source(
+        name="replacement-publication",
+        kind="huggingface",
+        source_locator="replacement/models",
+        ref="c" * 40,
+    )
     bundle = Bundle(
         bundle_sha256,
         tuple(
@@ -345,13 +342,6 @@ def test_committed_manifest_parses_and_pins_every_family_the_worker_loads() -> N
         "Berom0227/seeon-model-v0.1.0-pose-bbox56-proxy-research",
         "988bacc666a3e5935b70e9f546aea38a6d7e5399",
     )
-    assert manifest.published_bundles == (
-        PublishedBundle(
-            "Berom0227/seeon-model-v0.1.0-pose-bbox56-proxy-research",
-            "988bacc666a3e5935b70e9f546aea38a6d7e5399",
-            "998e060138911f3167c4fba79b96b406ff555893771c33a53bd07eaa4d77cffe",
-        ),
-    )
 
 
 def test_committed_manifest_digests_agree_with_runtime_pins() -> None:
@@ -384,6 +374,7 @@ def test_bundled_sidecars_are_byte_identical_to_tracked_models_dir() -> None:
         (lambda d: d["artifacts"][0].update(path="../escape"), "plain relative path"),
         (lambda d: d["artifacts"][0].update(path="/abs"), "plain relative path"),
         (lambda d: d["artifacts"][1].update(path="fall/lstm/model.pt"), "duplicate"),
+        (lambda d: d.update(published_bundles=[]), "published_bundles is obsolete"),
     ],
 )
 def test_manifest_rejects_malformed_entries(mutation: object, message: str) -> None:
@@ -424,8 +415,16 @@ def test_fetch_all_downloads_verifies_and_is_idempotent(tmp_path: Path) -> None:
     assert len(source.calls) == 2, "second run must not touch the network"
 
 
-def test_fetch_all_delivers_and_rehearses_deployment_selected_bundle(tmp_path: Path) -> None:
+def test_fetch_all_delivers_and_rehearses_selected_bundle_not_listed_in_manifest(
+    tmp_path: Path,
+) -> None:
     manifest, source, selection_path, bundle = _selected_bundle_delivery(tmp_path)
+    publication = json.loads(selection_path.read_text(encoding="utf-8"))["model_publication"]
+    assert not any(
+        (candidate.source_locator, candidate.ref)
+        == (publication["source_locator"], publication["revision"])
+        for candidate in manifest.sources.values()
+    )
 
     report = fetch_all(
         manifest,
@@ -450,17 +449,45 @@ def test_fetch_all_delivers_and_rehearses_deployment_selected_bundle(tmp_path: P
     )
 
 
-def test_fetch_all_refuses_selection_without_published_locator(tmp_path: Path) -> None:
+def test_fetch_all_refuses_selection_when_its_source_is_unreachable(tmp_path: Path) -> None:
     manifest = parse_manifest(_manifest_dict())
     selection_path = tmp_path / "model-selection.json"
     _, _, selected_path, _ = _selected_bundle_delivery(tmp_path / "selection")
     selection_path.write_bytes(selected_path.read_bytes())
 
-    with pytest.raises(VerificationError, match="no published locator"):
+    with pytest.raises(
+        VerificationError,
+        match="published bundle source replacement/models@c{40} is unreachable",
+    ):
         fetch_all(
             manifest,
             tmp_path / "models",
             _fake_for(manifest),
+            env={},
+            retry=_no_sleep_policy(),
+            selection_path=selection_path,
+        )
+
+
+def test_fetch_all_refuses_selected_bundle_claim_with_different_members_identity(
+    tmp_path: Path,
+) -> None:
+    manifest, source, selection_path, bundle = _selected_bundle_delivery(tmp_path)
+    raw_selection = json.loads(selection_path.read_text(encoding="utf-8"))
+    raw_selection["model_publication"]["bundle_sha256"] = "0" * 64
+    selection_path.write_text(json.dumps(raw_selection), encoding="utf-8")
+
+    with pytest.raises(
+        VerificationError,
+        match=(
+            f"published bundle manifest identity {bundle.sha256} does not match selected bundle "
+            f"{'0' * 64}"
+        ),
+    ):
+        fetch_all(
+            manifest,
+            tmp_path / "models",
+            source,
             env={},
             retry=_no_sleep_policy(),
             selection_path=selection_path,

@@ -44,6 +44,7 @@ _FALL_PT_PATH: Final = f"{_FALL_BUNDLE_ROOT}/model.pt"
 _FALL_ONNX_PATH: Final = f"{_FALL_BUNDLE_ROOT}/model.onnx"
 _PUBLISHED_BUNDLE_MANIFEST_PATH: Final = "manifest.json"
 _MAX_PUBLISHED_MANIFEST_SIZE: Final = 1 << 20
+_SELECTED_PUBLICATION_SOURCE_NAME: Final = "selected-model-publication"
 
 Outcome = Literal["present", "fetched", "sidecar-present", "sidecar-written"]
 
@@ -309,12 +310,15 @@ def _read_published_bundle_manifest(
                     f"{_MAX_PUBLISHED_MANIFEST_SIZE} bytes"
                 )
         return bundle_from_published_manifest(bytes(body), source)
+    except SourceError as exc:
+        raise VerificationError(
+            f"published bundle source {source.source_locator}@{source.ref} is unreachable: {exc}"
+        ) from exc
     except ManifestError as exc:
         raise VerificationError(f"published bundle manifest at {url}: {exc}") from exc
 
 
 def _fetch_selected_bundle(
-    manifest: Manifest,
     root: Path,
     source: ByteSource,
     *,
@@ -336,40 +340,13 @@ def _fetch_selected_bundle(
     publication = desired.selection.model_publication if desired.selection is not None else None
     if publication is None:  # pragma: no cover -- selection parsing always supplies it
         raise VerificationError("model selection has no model publication")
-    locator = next(
-        (
-            candidate
-            for candidate in manifest.published_bundles
-            if (
-                candidate.source_locator == publication.source_locator
-                and candidate.revision == publication.revision
-                and candidate.bundle_sha256 == publication.bundle_sha256
-            )
-        ),
-        None,
+    selected_source = Source(
+        name=_SELECTED_PUBLICATION_SOURCE_NAME,
+        kind="huggingface",
+        source_locator=publication.source_locator,
+        ref=publication.revision,
     )
-    if locator is None:
-        raise VerificationError(
-            "model selection names a bundle with no published locator: "
-            f"{publication.source_locator}@{publication.revision} "
-            f"{publication.bundle_sha256}"
-        )
-    pinned_source = next(
-        (
-            candidate
-            for candidate in manifest.sources.values()
-            if (
-                candidate.source_locator == locator.source_locator
-                and candidate.ref == locator.revision
-            )
-        ),
-        None,
-    )
-    if pinned_source is None:  # protected by manifest parsing
-        raise VerificationError(
-            f"published locator has no pinned source for {locator.bundle_sha256}"
-        )
-    bundle = _read_published_bundle_manifest(pinned_source, source, env)
+    bundle = _read_published_bundle_manifest(selected_source, source, env)
     if bundle.sha256 != publication.bundle_sha256:
         raise VerificationError(
             f"published bundle manifest identity {bundle.sha256} does not match selected "
@@ -431,7 +408,6 @@ def fetch_all(
         _require_loadable_fall_bundle(root)
     if selection_path is not None and selection_path.is_file():
         selected_report = _fetch_selected_bundle(
-            manifest,
             root,
             source,
             selection_path=selection_path,

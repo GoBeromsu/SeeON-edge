@@ -67,7 +67,6 @@ class Manifest:
     artifacts: tuple[Artifact, ...]
     sidecars: tuple[str, ...]
     bundles: tuple[Bundle, ...] = ()
-    published_bundles: tuple[PublishedBundle, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -121,15 +120,6 @@ class Bundle:
             )
             + "\n"
         ).encode()
-
-
-@dataclass(frozen=True)
-class PublishedBundle:
-    """Published model lineage, independent of the fetch transport."""
-
-    source_locator: str
-    revision: str
-    bundle_sha256: str
 
 
 def bundle_from_published_manifest(raw: bytes, source: Source) -> Bundle:
@@ -289,6 +279,10 @@ def _parse_bundle(index: int, raw: object, sources: Mapping[str, Source]) -> Bun
 def parse_manifest(raw: object) -> Manifest:
     if not isinstance(raw, Mapping):
         raise ManifestError("manifest must be a JSON object")
+    if "published_bundles" in raw:
+        raise ManifestError(
+            "manifest: published_bundles is obsolete; model selection supplies publication identity"
+        )
     version = _require(raw, "schema_version", "manifest")
     if version != SUPPORTED_SCHEMA_VERSION:
         raise ManifestError(
@@ -319,39 +313,11 @@ def parse_manifest(raw: object) -> Manifest:
     bundle_hashes = [bundle.sha256 for bundle in bundles]
     if len(bundle_hashes) != len(set(bundle_hashes)):
         raise ManifestError("manifest: duplicate bundle identities")
-    raw_published = raw.get("published_bundles", [])
-    if not isinstance(raw_published, list):
-        raise ManifestError("manifest: published_bundles must be a list")
-    published: list[PublishedBundle] = []
-    for index, publication in enumerate(raw_published):
-        where = f"published_bundles[{index}]"
-        if not isinstance(publication, Mapping):
-            raise ManifestError(f"{where}: must be an object")
-        if set(publication) != {"source_locator", "revision", "bundle_sha256"}:
-            raise ManifestError(f"{where}: fields must be source_locator, revision, bundle_sha256")
-        source_locator = publication["source_locator"]
-        revision = publication["revision"]
-        bundle_sha256 = publication["bundle_sha256"]
-        if not isinstance(source_locator, str) or source_locator.count("/") != 1:
-            raise ManifestError(f"{where}: source_locator must be owner/name")
-        if not isinstance(revision, str) or _HEX40_RE.fullmatch(revision) is None:
-            raise ManifestError(f"{where}: revision must be a 40-hex commit")
-        if not isinstance(bundle_sha256, str) or _SHA256_RE.fullmatch(bundle_sha256) is None:
-            raise ManifestError(f"{where}: bundle_sha256 must be 64 lowercase hex characters")
-        if not any(
-            source.source_locator == source_locator and source.ref == revision
-            for source in sources.values()
-        ):
-            raise ManifestError(f"{where}: publication must name a pinned source")
-        published.append(PublishedBundle(source_locator, revision, bundle_sha256))
-    if len({publication.bundle_sha256 for publication in published}) != len(published):
-        raise ManifestError("manifest: duplicate published bundle identities")
     return Manifest(
         sources=sources,
         artifacts=artifacts,
         sidecars=sidecars,
         bundles=bundles,
-        published_bundles=tuple(published),
     )
 
 
