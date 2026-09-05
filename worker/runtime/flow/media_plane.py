@@ -33,6 +33,10 @@ class FlowMediaPlaneConfig:
     frame_width: int
     frame_height: int
     source_silence_timeout_sec: float = 30.0
+    #: The forked OSD/JPEG snapshot branch. Composition decides; the adapter
+    #: default stays off until its throughput cost and overlay burn-in are
+    #: confirmed on hardware.
+    snapshot_branch_enabled: bool = False
 
     def adapter_config(self) -> DeepStreamMediaPlaneConfig:
         return DeepStreamMediaPlaneConfig(
@@ -43,6 +47,7 @@ class FlowMediaPlaneConfig:
             record_cache_seconds=self.record_cache_seconds,
             frame_width=self.frame_width,
             frame_height=self.frame_height,
+            snapshot_branch_enabled=self.snapshot_branch_enabled,
         )
 
 

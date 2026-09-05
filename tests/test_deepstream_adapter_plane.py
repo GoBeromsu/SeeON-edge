@@ -127,7 +127,7 @@ def _plane(
         "infer",
         "tracker",
         "lib",
-        Path("/tmp"),
+        Path("/tmp/seeon-adapter-tests"),
         5,
         640,
         360,
@@ -142,7 +142,6 @@ def _plane(
             record_config=lambda **kwargs: kwargs,
             render_mode_discard="discard",
             make_probe=lambda name, probe: (name, probe),
-            make_jpeg_retriever=lambda camera_id, plane: (camera_id, plane),
         ),
         worker_boot_id="boot",
         child_instance_id="child",
@@ -318,7 +317,9 @@ def test_enabled_snapshot_branch_uses_the_fork_as_the_discard_terminal() -> None
     plane._build_flow()  # noqa: SLF001 - topology is adapter behaviour
 
     assert pipeline.links == [
-        ("fork-tee-0", "snapshot-demux"),
+        # A tee branch gets its own queue first, or the demux never pushes.
+        ("fork-tee-0", "snapshot-tee-queue"),
+        ("snapshot-tee-queue", "snapshot-demux"),
         (("snapshot-demux", "snapshot-queue-0"), ("src_0", "sink")),
         (
             "snapshot-queue-0",
@@ -331,8 +332,8 @@ def test_enabled_snapshot_branch_uses_the_fork_as_the_discard_terminal() -> None
             "snapshot-sink-0",
         ),
     ]
-    assert pipeline["snapshot-valve-0"].properties == {"drop": True}
-    assert pipeline.attached == {"snapshot-sink-0": ("camera", plane)}
+    assert pipeline["snapshot-valve-0"].properties == {"drop": True, "drop-mode": 2}
+    assert pipeline["snapshot-sink-0"].properties["next-file"] == 0
     flow = plane._flow  # noqa: SLF001 - the configured graph is adapter behaviour
     assert isinstance(flow, _Flow)
     assert flow.render_calls == [{"mode": "discard", "enable_osd": False, "sync": False}]
@@ -349,7 +350,7 @@ def test_enabled_snapshot_branch_closes_its_valve_after_one_jpeg() -> None:
         if pipeline["snapshot-valve-0"].properties.get("drop") is False:
             break
         time.sleep(0.01)
-    plane.publish_jpeg("camera", b"\xff\xd8burned\xff\xd9")
+    (plane._snapshot_dir / "0-0000000000.jpg").write_bytes(b"\xff\xd8burned\xff\xd9")  # noqa: SLF001
     request.join(timeout=1)
 
     assert result == [b"\xff\xd8burned\xff\xd9"]
@@ -358,27 +359,6 @@ def test_enabled_snapshot_branch_closes_its_valve_after_one_jpeg() -> None:
             break
         time.sleep(0.01)
     assert pipeline["snapshot-valve-0"].properties["drop"] is True
-    plane.stop()
-
-
-def test_enabled_snapshot_branch_reports_callback_errors_without_raising_in_callback() -> None:
-    plane, _ = _plane(snapshot_branch_enabled=True)
-    plane.add_source("camera", "rtsp://one")
-    plane.start()
-    failure = RuntimeError("encoder failed")
-    result: list[BaseException] = []
-
-    request = threading.Thread(
-        target=lambda: _capture_snapshot_error(plane, "camera", result)
-    )
-    request.start()
-    time.sleep(0.01)
-    plane.snapshot_failed("camera", failure)
-    request.join(timeout=1)
-
-    assert len(result) == 1
-    assert isinstance(result[0], SnapshotUnavailable)
-    assert "encoder failed" in str(result[0])
     plane.stop()
 
 
@@ -392,15 +372,6 @@ def test_enabled_snapshot_branch_times_out_and_recloses_its_valve() -> None:
 
     assert pipeline["snapshot-valve-0"].properties["drop"] is True
     plane.stop()
-
-
-def _capture_snapshot_error(
-    plane: DeepStreamMediaPlane, camera_id: str, errors: list[BaseException]
-) -> None:
-    try:
-        plane.snapshot(camera_id)
-    except SnapshotUnavailable as error:
-        errors.append(error)
 
 
 def test_a_source_failure_rotates_the_stream_identity_and_keeps_the_camera_id() -> None:

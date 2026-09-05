@@ -963,6 +963,11 @@ class WorkerRuntime:
                     record_cache_seconds=int(self._env["ML_WORKER_FLOW_RECORD_CACHE_SECONDS"]),
                     frame_width=int(self._env["ML_WORKER_FLOW_FRAME_WIDTH"]),
                     frame_height=int(self._env["ML_WORKER_FLOW_FRAME_HEIGHT"]),
+                    # Off unless the deployment asks for it: the branch costs
+                    # throughput and its overlay burn-in is unconfirmed.
+                    snapshot_branch_enabled=(
+                        self._env.get("ML_WORKER_FLOW_SNAPSHOT_BRANCH") == "1"
+                    ),
                     source_silence_timeout_sec=float(
                         self._env.get(
                             "ML_WORKER_FLOW_SOURCE_SILENCE_TIMEOUT_SEC",
