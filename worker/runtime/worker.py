@@ -1067,19 +1067,21 @@ class WorkerRuntime:
                 raise RuntimeError("selected fall bundle has no selection contract")
             if require_onnxruntime:
                 artifact_dir = selected.models_root / "bundles" / selected.desired.bundle_sha256
-                model_onnx = artifact_dir / "model.onnx"
-                if not model_onnx.is_file():
-                    raise RuntimeError(
-                        f"flow profile requires ONNX fall bundle model.onnx: {model_onnx}"
-                    )
                 if selection.runtime_format != "onnxruntime":
                     raise RuntimeError(
                         "flow profile refuses a Torch fall bundle; the selected runtime_format "
                         "must be onnxruntime (export model.onnx with worker.tools.export_fall_onnx)"
                     )
-                bundle = ort_pose_bbox56.load_packaged_fall_bundle(artifact_dir)
-                self._loaded_fall_bundle = bundle
-                return bundle.runner
+                proof = self._selected_bundle_admission
+                if proof is None:
+                    raise RuntimeError("selected fall bundle must be admitted before construction")
+                runner = ort_pose_bbox56.OrtPoseBbox56Runner.from_admitted_bundle(
+                    artifact_dir, proof, selection
+                )
+                self._loaded_fall_bundle = ort_pose_bbox56.PackagedFallBundle(
+                    runner, runner.artifact_digest, runner.preprocessing_identity
+                )
+                return runner
             try:
                 return DEFAULT_FALL_MODEL_FAMILY_REGISTRY.create_bundle(
                     selection.runtime_format,

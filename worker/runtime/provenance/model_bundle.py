@@ -148,6 +148,11 @@ def admit_model_bundle(models_root: Path, desired: DesiredModelBundle) -> ModelB
     _validate_bundle_identity(document, desired.bundle_sha256)
     observed_members = _verify_members(root, members)
     observed_receipts = _verify_members(root, receipts)
+    member_digests = {
+        member_path: member["sha256"]
+        for member_path, member in zip(observed_members, members, strict=True)
+        if isinstance(member, dict)
+    }
     receipt_identities = _verify_required_members(root, members, receipts, desired)
     _verify_exact_tree(root, {"manifest.json", *observed_members, *observed_receipts})
     frozen_static = _freeze({**dict(identities), **receipt_identities})
@@ -155,6 +160,7 @@ def admit_model_bundle(models_root: Path, desired: DesiredModelBundle) -> ModelB
         {
             "bundle_sha256": desired.bundle_sha256,
             "members": tuple(observed_members),
+            "member_digests": member_digests,
             "receipts": tuple(observed_receipts),
             "identities": frozen_static,
         }

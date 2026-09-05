@@ -2,15 +2,16 @@
 
 from __future__ import annotations
 
+import hashlib
 import math
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final, Protocol
 
 import numpy as np
 
-from contracts.model_selection import POSE_BBOX56_PREPROCESSING_IDENTITY
+from contracts.model_selection import POSE_BBOX56_PREPROCESSING_IDENTITY, ModelSelection
 from worker.adapters.model.errors import ModelLoadError
 from worker.adapters.model.pose_bbox56_bundle_support import (
     member_digest,
@@ -31,6 +32,10 @@ class _OrtSession(Protocol):
 
 
 SessionFactory = Callable[[str, list[str]], _OrtSession]
+
+
+class _AdmittedBundleProof(Protocol):
+    observed: Mapping[str, object]
 
 
 @dataclass(frozen=True)
@@ -98,6 +103,60 @@ class OrtPoseBbox56Runner:
         runner.warmup()
         return runner
 
+    @classmethod
+    def from_admitted_bundle(
+        cls,
+        artifact_dir: str | Path,
+        proof: _AdmittedBundleProof,
+        selection: ModelSelection,
+        *,
+        session_factory: SessionFactory | None = None,
+    ) -> OrtPoseBbox56Runner:
+        """Construct the selected ONNX runner from the already-admitted bundle."""
+        if selection.preprocessing_identity != POSE_BBOX56_PREPROCESSING_IDENTITY:
+            raise ModelLoadError(
+                "selected bundle preprocessing_identity contradicts runner contract"
+            )
+        member_digests = proof.observed.get("member_digests")
+        if not isinstance(member_digests, Mapping):
+            raise ModelLoadError("admitted bundle proof has no member digests")
+        model_digest = member_digests.get("model.onnx")
+        calibration_digest = member_digests.get("calibration.json")
+        if not isinstance(model_digest, str) or not isinstance(calibration_digest, str):
+            raise ModelLoadError(
+                "admitted bundle must contain model.onnx and calibration.json members"
+            )
+        threshold = selection.transition_threshold
+        if (
+            isinstance(threshold, bool)
+            or not isinstance(threshold, (int, float))
+            or not math.isfinite(float(threshold))
+            or not 0.0 <= float(threshold) <= 1.0
+        ):
+            raise ModelLoadError("selected receipt threshold must be a probability")
+        if selection.threshold_source not in {"default", "receipt"}:
+            raise ModelLoadError("selected threshold_source must be default or receipt")
+        root = Path(artifact_dir).expanduser().resolve()
+        _verify_admitted_member(root, "model.onnx", model_digest)
+        _verify_admitted_member(root, "calibration.json", calibration_digest)
+        temperature = _calibration_temperature(root)
+        if session_factory is None:
+            session_factory = _onnxruntime_session_factory
+        try:
+            session = session_factory(str(root / "model.onnx"), list(_CPU_PROVIDER))
+        except Exception as exc:
+            raise ModelLoadError(f"cannot load pose-bbox56 ONNX model: {exc}") from exc
+        runner = cls(
+            session,
+            temperature,
+            float(threshold),
+            selection.threshold_source == "receipt",
+            model_digest,
+            POSE_BBOX56_PREPROCESSING_IDENTITY,
+        )
+        runner.warmup()
+        return runner
+
     def predict(self, features: FallModelInput) -> FallV2Probabilities:
         values = np.asarray(features, dtype=np.float32)
         if values.shape != _SHAPE or not np.isfinite(values).all():
@@ -147,12 +206,7 @@ def _bundle_metadata(root: Path) -> tuple[float, float | None, bool]:
     receipt = read_json(root / "evaluation-receipt.json")
     if not isinstance(calibration, dict):
         raise ModelLoadError("invalid calibration.json")
-    temperature = calibration.get("temperature")
-    if isinstance(temperature, bool) or not isinstance(temperature, (int, float)):
-        raise ModelLoadError("calibration temperature must be numeric")
-    parsed_temperature = float(temperature)
-    if not math.isfinite(parsed_temperature) or parsed_temperature <= 0:
-        raise ModelLoadError("calibration temperature must be finite and positive")
+    parsed_temperature = _calibration_temperature(root, calibration)
     if not isinstance(receipt, dict):
         raise ModelLoadError("invalid evaluation-receipt.json")
     candidate_threshold = receipt.get("threshold", calibration.get("threshold"))
@@ -167,6 +221,28 @@ def _bundle_metadata(root: Path) -> tuple[float, float | None, bool]:
     if not isinstance(promotion_eligible, bool):
         raise ModelLoadError("receipt promotion_eligible must be boolean")
     return parsed_temperature, receipt_threshold, promotion_eligible
+
+
+def _calibration_temperature(root: Path, calibration: object | None = None) -> float:
+    document = read_json(root / "calibration.json") if calibration is None else calibration
+    if not isinstance(document, dict):
+        raise ModelLoadError("invalid calibration.json")
+    temperature = document.get("temperature")
+    if isinstance(temperature, bool) or not isinstance(temperature, (int, float)):
+        raise ModelLoadError("calibration temperature must be numeric")
+    parsed_temperature = float(temperature)
+    if not math.isfinite(parsed_temperature) or parsed_temperature <= 0:
+        raise ModelLoadError("calibration temperature must be finite and positive")
+    return parsed_temperature
+
+
+def _verify_admitted_member(root: Path, relative_path: str, expected_digest: str) -> None:
+    try:
+        actual_digest = hashlib.sha256((root / relative_path).read_bytes()).hexdigest()
+    except OSError as exc:
+        raise ModelLoadError(f"cannot read admitted bundle member {relative_path}") from exc
+    if actual_digest != expected_digest:
+        raise ModelLoadError(f"admitted bundle member changed: {relative_path}")
 
 
 __all__ = [

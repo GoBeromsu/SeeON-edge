@@ -27,14 +27,20 @@ none-config refusal plus the configured packaged-bundle behavior.
 
 from __future__ import annotations
 
+import hashlib
 import json
-import shutil
+from dataclasses import replace
 from pathlib import Path
 from typing import final
 
 import pytest
 
-from contracts.model_selection import DatasetPublication, ModelPublication, ModelSelection
+from contracts.model_selection import (
+    DatasetPublication,
+    ModelPublication,
+    ModelSelection,
+    canonical_digest,
+)
 from contracts.runner import Image, RunnerResult
 from shared.detection_policies import default_policy_bundle
 from tests_support.pose_bbox56_bundle_artifact import write_pose_bbox56_bundle
@@ -42,6 +48,7 @@ from worker.adapters.model import ort_pose_bbox56
 from worker.adapters.model.errors import ModelLoadError
 from worker.adapters.model.ort_pose_bbox56 import OrtPoseBbox56Runner
 from worker.adapters.model.pose_bbox56_bundle import PoseBbox56BundleRunner
+from worker.domains.registry import _effective_transition_threshold
 from worker.interfaces.fall_model import FallV2Probabilities
 from worker.runtime import bootstrap
 from worker.runtime.config import WorkerConfig
@@ -54,7 +61,7 @@ from worker.runtime.provenance.manifest import (
     build_applied_camera_state,
     build_applied_runtime_manifest,
 )
-from worker.runtime.provenance.model_bundle import DesiredModelBundle
+from worker.runtime.provenance.model_bundle import DesiredModelBundle, admit_model_bundle
 from worker.runtime.worker import WorkerRuntime
 from worker.tools.export_fall_onnx import export_fall_onnx
 from worker.tools.fetch_models.fetcher import VerificationError, _require_loadable_fall_bundle
@@ -86,6 +93,12 @@ class _FakeRunner:
 
     def warmup(self) -> None:
         self.warmup_count += 1
+
+
+@final
+class _ZeroLogitSession:
+    def run(self, _output_names: object, _input_feed: object) -> list[object]:
+        return [[[0.0]]]
 
 
 @final
@@ -157,6 +170,106 @@ def _flow_boot() -> BootContext:
         decode=profile.decode,
         encode=profile.encode,
         requested_profile="flow",
+    )
+
+
+def _selected_onnx_bundle(
+    tmp_path: Path, *, transition_threshold: float = 0.5, threshold_source: str = "default"
+) -> tuple[Path, DesiredModelBundle]:
+    source = write_pose_bbox56_bundle(tmp_path / "source")
+    members = {path: (source / path).read_bytes() for path in ("model.onnx", "calibration.json")}
+    identities = {
+        "dataset": "1" * 64,
+        "calibration": "2" * 64,
+        "conformance": "3" * 64,
+        "class": "4" * 64,
+        "input": "pose-bbox56.v1",
+        "policy": "5" * 64,
+        "members": "6" * 64,
+    }
+    member_records = [
+        {"path": path, "sha256": hashlib.sha256(content).hexdigest(), "size": len(content)}
+        for path, content in members.items()
+    ]
+    payload = {"identities": identities}
+    bundle_sha256 = hashlib.sha256(
+        json.dumps(
+            {"members": member_records, "payload": payload},
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+    ).hexdigest()
+    evaluation = {
+        "bundle_sha256": bundle_sha256,
+        "bundle_members_digest": identities["members"],
+        "dataset_payload_digest": identities["dataset"],
+        "calibration_digest": identities["calibration"],
+        "conformance_digest": identities["conformance"],
+        "input_observation_schema": identities["input"],
+        "output_class_count": 2,
+        "output_class_semantics_digest": identities["class"],
+        "policy_digest": identities["policy"],
+    }
+    field = {
+        **evaluation,
+        "evaluation_receipt_digest": canonical_digest(evaluation),
+        "status": "green",
+    }
+    root = tmp_path / "models" / "bundles" / bundle_sha256
+    root.mkdir(parents=True)
+    for path, content in members.items():
+        (root / path).write_bytes(content)
+    receipts = []
+    for path, document in (
+        ("evaluation-receipt.json", evaluation),
+        ("field-evaluation-receipt.json", field),
+    ):
+        content = json.dumps(document, sort_keys=True, separators=(",", ":")).encode() + b"\n"
+        (root / path).write_bytes(content)
+        receipts.append(
+            {"path": path, "sha256": hashlib.sha256(content).hexdigest(), "size": len(content)}
+        )
+    (root / "manifest.json").write_bytes(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "bundle_sha256": bundle_sha256,
+                "runtime_format": "onnxruntime",
+                "members": member_records,
+                "receipts": receipts,
+                "payload": payload,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+        + b"\n"
+    )
+    selection = ModelSelection(
+        model_publication=ModelPublication("facility/fall", "a" * 40, bundle_sha256),
+        bundle_members_digest=identities["members"],
+        dataset_publication=DatasetPublication("facility/dataset", "b" * 40, identities["dataset"]),
+        evaluation_receipt_digest=canonical_digest(evaluation),
+        field_evaluation_receipt_digest=canonical_digest(field),
+        calibration_digest=identities["calibration"],
+        conformance_digest=identities["conformance"],
+        input_observation_schema=identities["input"],
+        output_class_count=2,
+        output_class_semantics_digest=identities["class"],
+        policy_digest=identities["policy"],
+        runtime_format="onnxruntime",
+        bundle_format="bundle-manifest/proxy-v0",
+        preprocessing_identity="coco17-xyc-plus-pose-head-xyxy-valid-f32-v1",
+        transition_threshold=transition_threshold,
+        threshold_source=threshold_source,
+    )
+    return tmp_path / "models", DesiredModelBundle(
+        bundle_sha256,
+        {
+            **identities,
+            "evaluation": selection.evaluation_receipt_digest,
+            "field": selection.field_evaluation_receipt_digest,
+        },
+        selection,
     )
 
 
@@ -285,45 +398,9 @@ def test_flow_composition_uses_the_loaded_bundle_published_weights_digest(tmp_pa
 def test_selected_bundle_composes_a_runtime_manifest_with_runner_preprocessing_identity(
     tmp_path: Path,
 ) -> None:
-    bundle_sha256 = "a" * 64
-    artifact_dir = write_pose_bbox56_bundle(tmp_path / "source-bundle")
-    models_root = tmp_path / "models"
-    selected_dir = models_root / "bundles" / bundle_sha256
-    selected_dir.parent.mkdir(parents=True)
-    shutil.copytree(artifact_dir, selected_dir)
-    selection = ModelSelection(
-        model_publication=ModelPublication("facility/fall", "1" * 40, bundle_sha256),
-        bundle_members_digest="2" * 64,
-        dataset_publication=DatasetPublication("facility/dataset", "3" * 40, "4" * 64),
-        evaluation_receipt_digest="5" * 64,
-        field_evaluation_receipt_digest="6" * 64,
-        calibration_digest="7" * 64,
-        conformance_digest="8" * 64,
-        input_observation_schema="pose-bbox56.v1",
-        output_class_count=2,
-        output_class_semantics_digest="9" * 64,
-        policy_digest="b" * 64,
-        runtime_format="onnxruntime",
-        bundle_format="bundle-manifest/proxy-v0",
-        preprocessing_identity="coco17-xyc-plus-pose-head-xyxy-valid-f32-v1",
-        transition_threshold=0.5,
-        threshold_source="default",
-    )
-    desired = DesiredModelBundle(
-        bundle_sha256,
-        {
-            "dataset": selection.dataset_publication.payload_digest,
-            "evaluation": selection.evaluation_receipt_digest,
-            "field": selection.field_evaluation_receipt_digest,
-            "calibration": selection.calibration_digest,
-            "conformance": selection.conformance_digest,
-            "class": selection.output_class_semantics_digest,
-            "input": selection.input_observation_schema,
-            "policy": selection.policy_digest,
-            "members": selection.bundle_members_digest,
-        },
-        selection,
-    )
+    models_root, desired = _selected_onnx_bundle(tmp_path)
+    selection = desired.selection
+    assert selection is not None
     config = _config().model_copy(
         update={
             "models": WorkerModelsConfig(
@@ -332,6 +409,7 @@ def test_selected_bundle_composes_a_runtime_manifest_with_runner_preprocessing_i
         }
     )
     runtime = _runtime(config, _ForbiddenServingClient(), tmp_path)
+    runtime._admit_selected_fall_bundle()  # noqa: SLF001
     boot = _flow_boot()
     graph = runtime._initialize_flow_policy_graph(boot)  # noqa: SLF001
     [fall] = [
@@ -385,6 +463,62 @@ def test_selected_bundle_composes_a_runtime_manifest_with_runner_preprocessing_i
         component for component in components if component["component_id"] == "fall-classifier"
     ]
     assert manifest_fall["preprocessing_identity"] == selection.preprocessing_identity
+
+
+def test_selected_bundle_uses_the_admitted_onnx_member_without_model_pt(tmp_path: Path) -> None:
+    models_root, desired = _selected_onnx_bundle(
+        tmp_path, transition_threshold=0.31, threshold_source="receipt"
+    )
+    selection = desired.selection
+    assert selection is not None
+    proof = admit_model_bundle(models_root, desired)
+    artifact_dir = models_root / "bundles" / desired.bundle_sha256
+
+    runner = OrtPoseBbox56Runner.from_admitted_bundle(
+        artifact_dir,
+        proof,
+        selection,
+        session_factory=lambda _path, _providers: _ZeroLogitSession(),
+    )
+
+    assert not (artifact_dir / "model.pt").exists()
+    assert (
+        runner.artifact_digest
+        == hashlib.sha256((artifact_dir / "model.onnx").read_bytes()).hexdigest()
+    )
+    assert (runner.receipt_threshold, runner.promotion_eligible) == (0.31, True)
+    policy = default_policy_bundle(("camera-a",)).resolve("camera-a", "fall", 2)
+    assert _effective_transition_threshold(runner, policy)[0] == pytest.approx(0.31)
+
+
+def test_selected_receipt_without_threshold_refuses_construction(tmp_path: Path) -> None:
+    models_root, desired = _selected_onnx_bundle(tmp_path, threshold_source="receipt")
+    selection = desired.selection
+    assert selection is not None
+    proof = admit_model_bundle(models_root, desired)
+
+    with pytest.raises(ModelLoadError, match="receipt threshold"):
+        OrtPoseBbox56Runner.from_admitted_bundle(
+            models_root / "bundles" / desired.bundle_sha256,
+            proof,
+            replace(selection, transition_threshold=None),  # type: ignore[arg-type]
+            session_factory=lambda _path, _providers: _ZeroLogitSession(),
+        )
+
+
+def test_selected_preprocessing_contradiction_refuses_construction(tmp_path: Path) -> None:
+    models_root, desired = _selected_onnx_bundle(tmp_path)
+    selection = desired.selection
+    assert selection is not None
+    proof = admit_model_bundle(models_root, desired)
+
+    with pytest.raises(ModelLoadError, match="preprocessing_identity contradicts"):
+        OrtPoseBbox56Runner.from_admitted_bundle(
+            models_root / "bundles" / desired.bundle_sha256,
+            proof,
+            replace(selection, preprocessing_identity="contradictory-preprocessing"),
+            session_factory=lambda _path, _providers: _ZeroLogitSession(),
+        )
 
 
 def test_bundle_runner_refuses_a_non_cpu_device(tmp_path: Path) -> None:
