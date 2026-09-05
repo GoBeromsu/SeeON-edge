@@ -329,13 +329,23 @@ def test_hash_mismatch_fails_and_leaves_nothing_at_the_final_path(tmp_path: Path
     assert not list(tmp_path.rglob(f"*{PART_SUFFIX}"))
 
 
+def _runner_manifest(bundle: Path, *members: str) -> None:
+    """Write a bundle manifest the Flow runner's verify_bundle accepts."""
+    files = []
+    for relative in members:
+        data = (bundle / relative).read_bytes()
+        files.append({"relative_path": relative, "sha256": _sha(data), "size": len(data)})
+    (bundle / "bundle-manifest.json").write_text(json.dumps({"files": files}), encoding="utf-8")
+
+
 def test_pose_bbox56_bundle_is_judged_the_way_the_runner_judges_it(tmp_path: Path) -> None:
     """Fetch must refuse exactly the bundles the Flow runner refuses, and no others.
 
-    The runner requires model.onnx on disk AND listed in bundle-manifest.json.
-    A redeploy re-fetches the published manifest over the exported one, leaving
-    the ONNX on disk but unlisted; a file-exists check alone reported success
-    on a bundle the worker then refused at boot.
+    It uses the runner's own helpers - read_json, verify_bundle, member_digest -
+    so the rule cannot drift: the manifest must verify against disk and list
+    model.onnx. A redeploy re-fetches the published manifest over the exported
+    one, leaving the ONNX on disk but unlisted; a file-exists check alone once
+    reported success on a bundle the worker then refused at boot.
     """
     raw = _manifest_dict(
         artifacts=[
@@ -352,26 +362,29 @@ def test_pose_bbox56_bundle_is_judged_the_way_the_runner_judges_it(tmp_path: Pat
     source = FakeSource({manifest.artifacts[0].url: WEIGHT})
     bundle = tmp_path / "fall" / "pose-bbox56-gru"
     bundle.mkdir(parents=True)
-    bundle_manifest = bundle / "bundle-manifest.json"
+    (bundle / "model.pt").write_bytes(WEIGHT)
 
     # Fresh site: no ONNX at all -> refused naming the missing file.
-    bundle_manifest.write_text('{"files": [{"relative_path": "model.pt"}]}', encoding="utf-8")
+    _runner_manifest(bundle, "model.pt")
     with pytest.raises(VerificationError, match="missing model.onnx"):
         fetch_all(manifest, tmp_path, source, env={}, retry=_no_sleep_policy())
 
     # Redeploy: ONNX on disk but the re-fetched manifest no longer lists it ->
-    # refused, because the runner would refuse it too.
+    # refused, because the runner's member_digest would refuse it too.
     (bundle / "model.onnx").write_bytes(b"onnx")
-    with pytest.raises(VerificationError, match="lists no model.onnx"):
+    with pytest.raises(VerificationError, match="not loadable by the Flow runner"):
         fetch_all(manifest, tmp_path, source, env={}, retry=_no_sleep_policy())
 
-    # Exported bundle: on disk and listed -> provisioning proceeds.
-    bundle_manifest.write_text(
-        '{"files": [{"relative_path": "model.pt"}, {"relative_path": "model.onnx"}]}',
-        encoding="utf-8",
-    )
+    # Exported bundle: on disk, listed, digests verify -> provisioning proceeds.
+    _runner_manifest(bundle, "model.pt", "model.onnx")
     report = fetch_all(manifest, tmp_path, source, env={}, retry=_no_sleep_policy())
     assert report.results, "provisioning must run when the bundle is loadable"
+
+    # Tampered member: listed but the digest no longer matches disk -> refused,
+    # exactly as the runner's verify_bundle would refuse it.
+    (bundle / "model.onnx").write_bytes(b"tampered")
+    with pytest.raises(VerificationError, match="not loadable by the Flow runner"):
+        fetch_all(manifest, tmp_path, source, env={}, retry=_no_sleep_policy())
 
 
 def test_size_mismatch_fails_before_hash(tmp_path: Path) -> None:

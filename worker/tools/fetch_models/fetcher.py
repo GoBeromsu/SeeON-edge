@@ -10,7 +10,6 @@ final path, so a later worker boot cannot load a half-written weight.
 from __future__ import annotations
 
 import hashlib
-import json
 import os
 import shutil
 import stat
@@ -319,28 +318,33 @@ def fetch_all(
 
 
 def _require_loadable_fall_bundle(root: Path) -> None:
-    onnx = root / _FALL_ONNX_PATH
+    """Refuse exactly the bundles the Flow runner refuses, using its own checks.
+
+    Equivalence by construction rather than by re-implementation: the runner
+    reads the manifest, verifies every listed member's digest against disk,
+    and requires model.onnx to be among them. Calling the same helpers means
+    the two cannot drift apart.
+    """
+    from worker.adapters.model.errors import ModelLoadError
+    from worker.adapters.model.pose_bbox56_bundle_support import (
+        member_digest,
+        read_json,
+        verify_bundle,
+    )
+
+    bundle = root / _FALL_BUNDLE_ROOT
+    onnx = bundle / "model.onnx"
     if not onnx.is_file():
         raise VerificationError(
             f"provisioned pose+bbox56 fall bundle is incomplete: missing model.onnx at {onnx}; "
             "publish model.onnx with the bundle"
         )
-    manifest_path = root / _FALL_BUNDLE_ROOT / "bundle-manifest.json"
     try:
-        listed = json.loads(manifest_path.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as error:
+        manifest = read_json(bundle / "bundle-manifest.json")
+        verify_bundle(bundle, manifest)
+        _ = member_digest(manifest, "model.onnx")
+    except ModelLoadError as error:
         raise VerificationError(
-            f"provisioned pose+bbox56 fall bundle has an unreadable manifest at {manifest_path}"
+            f"provisioned pose+bbox56 fall bundle at {bundle} is not loadable by the Flow "
+            f"runner: {error}; the published bundle manifest must list the exported model.onnx"
         ) from error
-    files = listed.get("files") if isinstance(listed, dict) else None
-    members = (
-        {item.get("relative_path") for item in files if isinstance(item, dict)}
-        if isinstance(files, list)
-        else set()
-    )
-    if "model.onnx" not in members:
-        raise VerificationError(
-            f"provisioned pose+bbox56 fall bundle lists no model.onnx in {manifest_path}; the "
-            "published bundle manifest must include the exported ONNX, or the worker will "
-            "refuse it at boot"
-        )
