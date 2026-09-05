@@ -220,9 +220,15 @@ def _selected_bundle_delivery(
     tmp_path: Path, *, include_calibration: bool = True
 ) -> tuple[Manifest, FakeSource, Path, Bundle]:
     source_root = write_pose_bbox56_bundle(tmp_path / "source")
+    # A real publication carries its conformance document as a member at the
+    # path the shipped bundle uses; admission binds the selection's digest to
+    # that member's content, whatever it is named.
+    conformance = source_root / "conformance" / "pose-bbox56-v1.json"
+    conformance.parent.mkdir(parents=True, exist_ok=True)
+    conformance.write_text('{"contract": "pose-bbox56-v1"}', encoding="utf-8")
     members = {
         path: (source_root / path).read_bytes()
-        for path in ("model.onnx", "calibration.json")
+        for path in ("model.onnx", "calibration.json", "conformance/pose-bbox56-v1.json")
         if include_calibration or path != "calibration.json"
     }
     identities = {
@@ -230,7 +236,7 @@ def _selected_bundle_delivery(
         "calibration": _sha(members["calibration.json"])
         if "calibration.json" in members
         else "2" * 64,
-        "conformance": "3" * 64,
+        "conformance": _sha(members["conformance/pose-bbox56-v1.json"]),
         "class": "4" * 64,
         "input": "pose-bbox56.v1",
         "policy": (

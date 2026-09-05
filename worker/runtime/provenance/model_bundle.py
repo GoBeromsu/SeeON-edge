@@ -185,9 +185,18 @@ def _verify_selection_member_digests(
     _verify_selection_member_digest(
         member_digests, "calibration.json", selection.calibration_digest
     )
-    if "conformance.json" in member_digests:
-        _verify_selection_member_digest(
-            member_digests, "conformance.json", selection.conformance_digest
+    # The conformance document is bound by its content, not by a file name the
+    # publisher may not use: the shipped bundle keeps it at
+    # conformance/pose-bbox56-v1.json, so a check gated on "conformance.json"
+    # never ran. The digest the selection declares must be the content digest
+    # of exactly one member of the bundle, whatever that member is called.
+    matching = [
+        path for path, digest in member_digests.items() if digest == selection.conformance_digest
+    ]
+    if len(matching) != 1:
+        raise ModelBundleAdmissionError(
+            f"conformance_digest {selection.conformance_digest} matches "
+            f"{len(matching)} bundle member(s) {matching!r}; it must name exactly one"
         )
 
 

@@ -197,12 +197,21 @@ def _selected_onnx_bundle(
             json.dumps(calibration, sort_keys=True),
             encoding="utf-8",
         )
-    members = {path: (source / path).read_bytes() for path in ("model.onnx", "calibration.json")}
+    # A real publication carries its conformance document as a member at the
+    # path the shipped bundle uses; admission binds the selection's
+    # conformance_digest to that member's content, whatever it is named.
+    conformance_path = source / "conformance" / "pose-bbox56-v1.json"
+    conformance_path.parent.mkdir(parents=True, exist_ok=True)
+    conformance_path.write_text('{"contract": "pose-bbox56-v1"}', encoding="utf-8")
+    members = {
+        path: (source / path).read_bytes()
+        for path in ("model.onnx", "calibration.json", "conformance/pose-bbox56-v1.json")
+    }
     calibration_document = json.loads(members["calibration.json"])
     identities = {
         "dataset": "1" * 64,
         "calibration": hashlib.sha256(members["calibration.json"]).hexdigest(),
-        "conformance": "3" * 64,
+        "conformance": hashlib.sha256(members["conformance/pose-bbox56-v1.json"]).hexdigest(),
         "class": "4" * 64,
         "input": "pose-bbox56.v1",
         "policy": canonical_digest(calibration_document.get("temporal_rule")),
@@ -239,6 +248,7 @@ def _selected_onnx_bundle(
     root = tmp_path / "models" / "bundles" / bundle_sha256
     root.mkdir(parents=True)
     for path, content in members.items():
+        (root / path).parent.mkdir(parents=True, exist_ok=True)
         (root / path).write_bytes(content)
     receipts = []
     for path, document in (
