@@ -19,6 +19,7 @@ from pathlib import Path
 
 import pytest
 
+from tests_support.pose_bbox56_bundle_artifact import write_pose_bbox56_bundle
 from worker.tools.fetch_models import cli
 from worker.tools.fetch_models.fetcher import (
     PART_SUFFIX,
@@ -329,60 +330,58 @@ def test_hash_mismatch_fails_and_leaves_nothing_at_the_final_path(tmp_path: Path
     assert not list(tmp_path.rglob(f"*{PART_SUFFIX}"))
 
 
-def _runner_manifest(bundle: Path, *members: str) -> None:
-    """Write a bundle manifest the Flow runner's verify_bundle accepts."""
-    files = []
-    for relative in members:
-        data = (bundle / relative).read_bytes()
-        files.append({"relative_path": relative, "sha256": _sha(data), "size": len(data)})
-    (bundle / "bundle-manifest.json").write_text(json.dumps({"files": files}), encoding="utf-8")
-
-
 def test_pose_bbox56_bundle_is_judged_the_way_the_runner_judges_it(tmp_path: Path) -> None:
-    """Fetch must refuse exactly the bundles the Flow runner refuses, and no others.
+    """Fetch loads the bundle with the runner's own constructor, so it refuses
+    exactly what boot refuses and nothing else.
 
-    It uses the runner's own helpers - read_json, verify_bundle, member_digest -
-    so the rule cannot drift: the manifest must verify against disk and list
-    model.onnx. A redeploy re-fetches the published manifest over the exported
-    one, leaving the ONNX on disk but unlisted; a file-exists check alone once
-    reported success on a bundle the worker then refused at boot.
+    A redeploy re-fetches the published manifest over the exported one, leaving
+    the ONNX on disk but unlisted; a file-exists check alone once reported
+    success on a bundle the worker then refused at boot.
     """
+    bundle = tmp_path / "fall" / "pose-bbox56-gru"
+    bundle.mkdir(parents=True)
+    write_pose_bbox56_bundle(bundle)
+    # The published model.pt is the very one the bundle carries, so fetch's own
+    # download does not disturb the bundle's identity.
+    weights = (bundle / "model.pt").read_bytes()
     raw = _manifest_dict(
         artifacts=[
             {
                 "path": "fall/pose-bbox56-gru/model.pt",
                 "source": "hf",
                 "remote_path": "bundle/model.pt",
-                "size": len(WEIGHT),
-                "sha256": _sha(WEIGHT),
+                "size": len(weights),
+                "sha256": _sha(weights),
             }
         ]
     )
     manifest = parse_manifest(raw)
-    source = FakeSource({manifest.artifacts[0].url: WEIGHT})
-    bundle = tmp_path / "fall" / "pose-bbox56-gru"
-    bundle.mkdir(parents=True)
-    (bundle / "model.pt").write_bytes(WEIGHT)
-
-    # Fresh site: no ONNX at all -> refused naming the missing file.
-    _runner_manifest(bundle, "model.pt")
-    with pytest.raises(VerificationError, match="missing model.onnx"):
-        fetch_all(manifest, tmp_path, source, env={}, retry=_no_sleep_policy())
-
-    # Redeploy: ONNX on disk but the re-fetched manifest no longer lists it ->
-    # refused, because the runner's member_digest would refuse it too.
-    (bundle / "model.onnx").write_bytes(b"onnx")
-    with pytest.raises(VerificationError, match="not loadable by the Flow runner"):
-        fetch_all(manifest, tmp_path, source, env={}, retry=_no_sleep_policy())
+    source = FakeSource({manifest.artifacts[0].url: weights})
+    onnx = bundle / "model.onnx"
+    good_onnx = onnx.read_bytes()
+    good_manifest = (bundle / "bundle-manifest.json").read_text(encoding="utf-8")
 
     # Exported bundle: on disk, listed, digests verify -> provisioning proceeds.
-    _runner_manifest(bundle, "model.pt", "model.onnx")
     report = fetch_all(manifest, tmp_path, source, env={}, retry=_no_sleep_policy())
     assert report.results, "provisioning must run when the bundle is loadable"
 
-    # Tampered member: listed but the digest no longer matches disk -> refused,
-    # exactly as the runner's verify_bundle would refuse it.
-    (bundle / "model.onnx").write_bytes(b"tampered")
+    # Fresh site: no ONNX at all -> refused naming the missing file.
+    onnx.unlink()
+    with pytest.raises(VerificationError, match="missing model.onnx"):
+        fetch_all(manifest, tmp_path, source, env={}, retry=_no_sleep_policy())
+
+    # Redeploy: ONNX back on disk but the re-fetched manifest no longer lists it
+    # -> refused, because the runner's constructor refuses it.
+    onnx.write_bytes(good_onnx)
+    stripped = json.loads(good_manifest)
+    stripped["files"] = [f for f in stripped["files"] if f["relative_path"] != "model.onnx"]
+    (bundle / "bundle-manifest.json").write_text(json.dumps(stripped), encoding="utf-8")
+    with pytest.raises(VerificationError, match="not loadable by the Flow runner"):
+        fetch_all(manifest, tmp_path, source, env={}, retry=_no_sleep_policy())
+
+    # Tampered member: listed but the digest no longer matches disk -> refused.
+    (bundle / "bundle-manifest.json").write_text(good_manifest, encoding="utf-8")
+    onnx.write_bytes(b"tampered")
     with pytest.raises(VerificationError, match="not loadable by the Flow runner"):
         fetch_all(manifest, tmp_path, source, env={}, retry=_no_sleep_policy())
 

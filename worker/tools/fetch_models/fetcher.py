@@ -318,19 +318,14 @@ def fetch_all(
 
 
 def _require_loadable_fall_bundle(root: Path) -> None:
-    """Refuse exactly the bundles the Flow runner refuses, using its own checks.
+    """Load the bundle the way boot loads it, and refuse what boot would refuse.
 
-    Equivalence by construction rather than by re-implementation: the runner
-    reads the manifest, verifies every listed member's digest against disk,
-    and requires model.onnx to be among them. Calling the same helpers means
-    the two cannot drift apart.
+    Not a re-assembly of the runner's checks - the runner's own constructor,
+    so whatever boot requires of the bundle, provisioning requires too. A full
+    load and warm-up costs about 20 ms and pulls in no Torch.
     """
     from worker.adapters.model.errors import ModelLoadError
-    from worker.adapters.model.pose_bbox56_bundle_support import (
-        member_digest,
-        read_json,
-        verify_bundle,
-    )
+    from worker.adapters.model.ort_pose_bbox56 import OrtPoseBbox56Runner
 
     bundle = root / _FALL_BUNDLE_ROOT
     onnx = bundle / "model.onnx"
@@ -340,9 +335,7 @@ def _require_loadable_fall_bundle(root: Path) -> None:
             "publish model.onnx with the bundle"
         )
     try:
-        manifest = read_json(bundle / "bundle-manifest.json")
-        verify_bundle(bundle, manifest)
-        _ = member_digest(manifest, "model.onnx")
+        _ = OrtPoseBbox56Runner.from_artifact_dir(bundle, "cpu")
     except ModelLoadError as error:
         raise VerificationError(
             f"provisioned pose+bbox56 fall bundle at {bundle} is not loadable by the Flow "
