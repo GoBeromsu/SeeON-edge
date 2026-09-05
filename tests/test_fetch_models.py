@@ -329,13 +329,13 @@ def test_hash_mismatch_fails_and_leaves_nothing_at_the_final_path(tmp_path: Path
     assert not list(tmp_path.rglob(f"*{PART_SUFFIX}"))
 
 
-def test_pose_bbox56_bundle_is_judged_on_disk_not_on_the_manifest(tmp_path: Path) -> None:
-    """The manifest may legitimately omit model.onnx; the provisioned bundle may not.
+def test_pose_bbox56_bundle_is_judged_the_way_the_runner_judges_it(tmp_path: Path) -> None:
+    """Fetch must refuse exactly the bundles the Flow runner refuses, and no others.
 
-    The ONNX is a publication-time export the edge image cannot produce, so a
-    manifest naming only model.pt is normal. What the Flow worker refuses is a
-    bundle on disk with no model.onnx. Judging the manifest instead broke every
-    compose up, including already-provisioned edges whose bundle was complete.
+    The runner requires model.onnx on disk AND listed in bundle-manifest.json.
+    A redeploy re-fetches the published manifest over the exported one, leaving
+    the ONNX on disk but unlisted; a file-exists check alone reported success
+    on a bundle the worker then refused at boot.
     """
     raw = _manifest_dict(
         artifacts=[
@@ -350,19 +350,28 @@ def test_pose_bbox56_bundle_is_judged_on_disk_not_on_the_manifest(tmp_path: Path
     )
     manifest = parse_manifest(raw)
     source = FakeSource({manifest.artifacts[0].url: WEIGHT})
+    bundle = tmp_path / "fall" / "pose-bbox56-gru"
+    bundle.mkdir(parents=True)
+    bundle_manifest = bundle / "bundle-manifest.json"
 
-    # Fresh site: nothing on disk yet -> refused, naming the missing file.
-    with pytest.raises(
-        VerificationError, match="provisioned pose\\+bbox56 fall bundle.*model.onnx"
-    ):
+    # Fresh site: no ONNX at all -> refused naming the missing file.
+    bundle_manifest.write_text('{"files": [{"relative_path": "model.pt"}]}', encoding="utf-8")
+    with pytest.raises(VerificationError, match="missing model.onnx"):
         fetch_all(manifest, tmp_path, source, env={}, retry=_no_sleep_policy())
 
-    # Already-exported bundle: the ONNX exists on disk -> provisioning proceeds.
-    onnx = tmp_path / "fall" / "pose-bbox56-gru" / "model.onnx"
-    onnx.parent.mkdir(parents=True, exist_ok=True)
-    onnx.write_bytes(b"onnx")
+    # Redeploy: ONNX on disk but the re-fetched manifest no longer lists it ->
+    # refused, because the runner would refuse it too.
+    (bundle / "model.onnx").write_bytes(b"onnx")
+    with pytest.raises(VerificationError, match="lists no model.onnx"):
+        fetch_all(manifest, tmp_path, source, env={}, retry=_no_sleep_policy())
+
+    # Exported bundle: on disk and listed -> provisioning proceeds.
+    bundle_manifest.write_text(
+        '{"files": [{"relative_path": "model.pt"}, {"relative_path": "model.onnx"}]}',
+        encoding="utf-8",
+    )
     report = fetch_all(manifest, tmp_path, source, env={}, retry=_no_sleep_policy())
-    assert report.results, "provisioning must run when the bundle on disk is complete"
+    assert report.results, "provisioning must run when the bundle is loadable"
 
 
 def test_size_mismatch_fails_before_hash(tmp_path: Path) -> None:

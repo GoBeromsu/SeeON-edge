@@ -10,6 +10,7 @@ final path, so a later worker boot cannot load a half-written weight.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import shutil
 import stat
@@ -306,10 +307,40 @@ def fetch_all(
     # excluded under P1b-AC7 - so judge the PROVISIONED bundle, not the manifest:
     # an already-exported bundle on disk is fine, a fresh site without one is
     # refused here with the reason, instead of at worker boot.
+    # And judge it the way the runner does: the file must exist AND the bundle
+    # manifest must list it. A redeploy re-fetches the published manifest over
+    # the exported one, leaving model.onnx on disk but unlisted - which the
+    # runner refuses - so a file-exists check alone reported success on a
+    # bundle the worker could not load.
     artifact_paths = {artifact.path for artifact in manifest.artifacts}
-    if _FALL_PT_PATH in artifact_paths and not (root / _FALL_ONNX_PATH).is_file():
-        raise VerificationError(
-            "provisioned pose+bbox56 fall bundle is incomplete: missing model.onnx at "
-            f"{root / _FALL_ONNX_PATH}; publish model.onnx with the bundle"
-        )
+    if _FALL_PT_PATH in artifact_paths:
+        _require_loadable_fall_bundle(root)
     return report
+
+
+def _require_loadable_fall_bundle(root: Path) -> None:
+    onnx = root / _FALL_ONNX_PATH
+    if not onnx.is_file():
+        raise VerificationError(
+            f"provisioned pose+bbox56 fall bundle is incomplete: missing model.onnx at {onnx}; "
+            "publish model.onnx with the bundle"
+        )
+    manifest_path = root / _FALL_BUNDLE_ROOT / "bundle-manifest.json"
+    try:
+        listed = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        raise VerificationError(
+            f"provisioned pose+bbox56 fall bundle has an unreadable manifest at {manifest_path}"
+        ) from error
+    files = listed.get("files") if isinstance(listed, dict) else None
+    members = (
+        {item.get("relative_path") for item in files if isinstance(item, dict)}
+        if isinstance(files, list)
+        else set()
+    )
+    if "model.onnx" not in members:
+        raise VerificationError(
+            f"provisioned pose+bbox56 fall bundle lists no model.onnx in {manifest_path}; the "
+            "published bundle manifest must include the exported ONNX, or the worker will "
+            "refuse it at boot"
+        )
