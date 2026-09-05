@@ -329,6 +329,26 @@ def test_hash_mismatch_fails_and_leaves_nothing_at_the_final_path(tmp_path: Path
     assert not list(tmp_path.rglob(f"*{PART_SUFFIX}"))
 
 
+def test_pose_bbox56_bundle_without_onnx_is_refused_before_fetch(
+    tmp_path: Path,
+) -> None:
+    raw = _manifest_dict(
+        artifacts=[
+            {
+                "path": "fall/pose-bbox56-gru/model.pt",
+                "source": "hf",
+                "remote_path": "bundle/model.pt",
+                "size": len(WEIGHT),
+                "sha256": _sha(WEIGHT),
+            }
+        ]
+    )
+    manifest = parse_manifest(raw)
+
+    with pytest.raises(VerificationError, match="published pose\\+bbox56 fall bundle.*model.onnx"):
+        fetch_all(manifest, tmp_path, FakeSource({}), env={}, retry=_no_sleep_policy())
+
+
 def test_size_mismatch_fails_before_hash(tmp_path: Path) -> None:
     manifest = parse_manifest(_manifest_dict())
     source = _fake_for(manifest)

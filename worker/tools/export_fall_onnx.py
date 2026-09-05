@@ -1,4 +1,4 @@
-"""Export a verified pose+bbox56 proxy bundle's Torch weights to ONNX."""
+"""Export a verified pose+bbox56 proxy bundle's Torch weights to ONNX at publish time."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ import torch
 from torch import nn
 
 from worker.adapters.model.errors import ModelLoadError
-from worker.adapters.model.pose_bbox56_bundle_support import read_json, verify_bundle
+from worker.adapters.model.pose_bbox56_bundle_support import member_digest, read_json, verify_bundle
 
 
 class _ProxyGru(nn.Module):
@@ -31,6 +31,11 @@ def export_fall_onnx(bundle_dir: Path, *, force: bool = False) -> str:
     root = bundle_dir.expanduser().resolve()
     manifest = read_json(root / "bundle-manifest.json")
     verify_bundle(root, manifest)
+    if not force:
+        try:
+            return member_digest(manifest, "model.onnx")
+        except ModelLoadError:
+            pass
     arch = read_json(root / "arch.json")
     if not isinstance(arch, dict):
         raise ModelLoadError("unsupported pose-bbox56 architecture")

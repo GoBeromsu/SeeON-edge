@@ -27,6 +27,7 @@ none-config refusal plus the configured packaged-bundle behavior.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import final
 
@@ -34,12 +35,14 @@ import pytest
 
 from contracts.runner import Image, RunnerResult
 from tests_support.pose_bbox56_bundle_artifact import write_pose_bbox56_bundle
+from worker.adapters.model.ort_pose_bbox56 import OrtPoseBbox56Runner
 from worker.adapters.model.pose_bbox56_bundle import PoseBbox56BundleRunner
 from worker.interfaces.fall_model import FallV2Probabilities
 from worker.runtime import bootstrap
 from worker.runtime.config import WorkerConfig
 from worker.runtime.lease import GpuLease
 from worker.runtime.worker import WorkerRuntime
+from worker.tools.export_fall_onnx import export_fall_onnx
 
 
 @final
@@ -80,6 +83,28 @@ class _YoloOnlyServingClient:
         if task == "fall":
             raise AssertionError("fall model refusal must not call serving.create('fall')")
         return _FakeRunner(task)
+
+
+def test_exported_onnx_is_idempotent_and_loadable_by_the_flow_runner(tmp_path: Path) -> None:
+    artifact_dir = write_pose_bbox56_bundle(tmp_path / "pose-bbox56-gru")
+    manifest_path = artifact_dir / "bundle-manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["files"] = [
+        item for item in manifest["files"] if item["relative_path"] != "model.onnx"
+    ]
+    manifest_path.write_text(
+        json.dumps(manifest, indent=1, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    (artifact_dir / "model.onnx").unlink()
+
+    first_digest = export_fall_onnx(artifact_dir)
+    manifest_after_first_export = manifest_path.read_bytes()
+    second_digest = export_fall_onnx(artifact_dir)
+
+    assert second_digest == first_digest
+    assert manifest_path.read_bytes() == manifest_after_first_export
+    assert OrtPoseBbox56Runner.from_artifact_dir(artifact_dir, "cpu").device == "cpu"
 
 
 def _config(*, with_fall: dict[str, object] | None = None) -> WorkerConfig:

@@ -30,6 +30,9 @@ from worker.tools.fetch_models.manifest import SIDECAR_ROOT, Artifact, Bundle, M
 HF_TOKEN_ENV: Final = "HF_TOKEN"
 PART_SUFFIX: Final = ".part"
 _HASH_CHUNK: Final = 1 << 20
+_FALL_BUNDLE_ROOT: Final = "fall/pose-bbox56-gru"
+_FALL_PT_PATH: Final = f"{_FALL_BUNDLE_ROOT}/model.pt"
+_FALL_ONNX_PATH: Final = f"{_FALL_BUNDLE_ROOT}/model.onnx"
 
 Outcome = Literal["present", "fetched", "sidecar-present", "sidecar-written"]
 
@@ -282,6 +285,12 @@ def fetch_all(
     sidecar_root: Path = SIDECAR_ROOT,
 ) -> FetchReport:
     """Fetch every artifact and sidecar; raise on the first failure."""
+    artifact_paths = {artifact.path for artifact in manifest.artifacts}
+    if _FALL_PT_PATH in artifact_paths and _FALL_ONNX_PATH not in artifact_paths:
+        raise VerificationError(
+            "published pose+bbox56 fall bundle is incomplete: missing model.onnx; "
+            "publish model.onnx with the bundle"
+        )
     report = FetchReport()
     root.mkdir(parents=True, exist_ok=True)
     for artifact in manifest.artifacts:

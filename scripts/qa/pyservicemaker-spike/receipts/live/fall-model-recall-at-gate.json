@@ -1,0 +1,81 @@
+{
+  "receipt_version": 1,
+  "measured_at_utc": "2026-09-05T02:36:25.919367Z",
+  "status": "measured",
+  "dataset": {
+    "source": "local Hugging Face cache only; no network or token was used",
+    "hf_repo": "Berom0227/seeon-dataset-v0.1.0-source-proxy",
+    "payload_revision": "765557189d65c76ce41c22b5aa07a2718fa86077",
+    "expected_payload_digest": "ae307c7993b897f06c69af7492bf156f5d321216e600e8a6b781f22a35330718",
+    "verified_payload_digest": "ae307c7993b897f06c69af7492bf156f5d321216e600e8a6b781f22a35330718",
+    "digest_verification": {
+      "method": "SHA-256 of payload-manifest.json parsed then serialized as canonical JSON (sorted keys, compact separators)",
+      "manifest_members_verified": 10,
+      "manifest_member_size_and_sha256_match": true,
+      "checksums_sha256_entries_match_manifest": true
+    },
+    "split": {
+      "role_in_clips_parquet": "selection_validation",
+      "calibration_selection_role": "selection-validation",
+      "clip_count": 448,
+      "positive_clip_count": 288,
+      "negative_clip_count": 160,
+      "positive_window_label": "source_proxy_interval_15fps overlap with [window_start, window_start + 30) is at least 15 frames"
+    }
+  },
+  "runner": {
+    "class": "worker.adapters.model.ort_pose_bbox56.OrtPoseBbox56Runner",
+    "artifact_dir": "models/fall/pose-bbox56-gru",
+    "provider": "CPUExecutionProvider",
+    "device": "cpu",
+    "load_status": "loaded and warmup passed",
+    "model_onnx_sha256": "258ae9d9460534e659bf97af4bc55a083c830fa190ff6c8ed347db6bdbf32163",
+    "bundle_manifest_sha256": "80e87f7ee1d517bec2192b0e5a113cf8f1279ce5026f4cb78978b1a9e472dcec",
+    "calibration_sha256": "0653c44577390488a84ff20388907e34a2c7a6cfe91c4c6f80b6da2ac3de1510",
+    "calibrated_threshold": 0.05,
+    "temperature": 1.0,
+    "readout": "fall_transition = sigmoid(ONNX logits[0,0] / temperature)"
+  },
+  "inference_contract": {
+    "preprocessing": "pose+bbox56 / coco17-xyc-plus-pose-head-xyxy-valid-f32-v1",
+    "implementation": "worker.domains.fall.pose_bbox56.pose_bbox56_row",
+    "window_frames": 30,
+    "stride_frames": 5,
+    "worker_window_positions_per_300_frame_clip": 55,
+    "worker_window_starts": "0 through 270 inclusive, step 5",
+    "feature_rules": "COCO-17 x,y,confidence; confidence below 0.5 zeroes that triple; pose-head bbox is required and its fifth dataset value below 0.5 makes the row zero-filled; finite coordinates are clipped and normalized by the clip width and height; every output value is float32.",
+    "reproduced": true,
+    "difference_from_worker": null
+  },
+  "metrics": {
+    "total_windows_scored": 24640,
+    "positive_window_count": 1880,
+    "threshold_0_5": {
+      "recall": 0.0,
+      "precision": 0.0,
+      "precision_defined": false,
+      "positive_windows_clearing_gate": 0,
+      "false_positive_windows_clearing_gate": 0,
+      "false_negative_positive_windows": 1880
+    },
+    "threshold_0_05": {
+      "recall": 1.0,
+      "precision": 0.0762987012987013,
+      "precision_defined": true,
+      "positive_windows_clearing_gate": 1880,
+      "false_positive_windows_clearing_gate": 22760,
+      "false_negative_positive_windows": 0
+    },
+    "maximum_fall_transition_score_on_positive_window": 0.3710910379886627,
+    "minimum_fall_transition_score_all_windows": 0.06044863536953926,
+    "maximum_fall_transition_score_all_windows": 0.3714597523212433
+  },
+  "calibration_comparison": {
+    "calibration_positive_window_count": 1880,
+    "calibration_threshold_0_05_recall": 1.0,
+    "calibration_threshold_0_05_precision": 0.0822829131652661,
+    "note": "The positive-window count and calibrated-gate recall agree. This worker-equivalent measurement scores all 55 valid stride positions in each 300-frame clip (24,640 windows); calibration.json records 22,848 windows, so its false-positive count and precision are not substituted for this deployed-runner result."
+  },
+  "scope_note": "This measures only the model's own selection-validation source-proxy distribution. It says nothing about facility falls.",
+  "owner_instruction": "replace the model first — the maximum positive-window fall_transition score is 0.3710910379886627, below the deployed 0.5 gate."
+}
