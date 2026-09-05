@@ -28,7 +28,7 @@ const detectionSettings: DetectionSettings = {
   },
 };
 
-let overlayMode = 'none';
+let overlaySelection = { person: true, bed: true };
 
 function installFetchMock(): void {
   vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
@@ -39,9 +39,9 @@ function installFetchMock(): void {
     if (url.includes('/streams/') && url.includes('/pose')) {
       if (init?.method === 'POST') {
         const body = init.body ? JSON.parse(init.body as string) : {};
-        overlayMode = body.mode ?? overlayMode;
+        overlaySelection = body;
       }
-      return Promise.resolve({ ok: true, status: 200, json: async () => ({ mode: overlayMode }) });
+      return Promise.resolve({ ok: true, status: 200, json: async () => overlaySelection });
     }
     return Promise.reject(new Error(`unexpected fetch: ${url}`));
   }));
@@ -67,19 +67,19 @@ async function render(camera: Camera): Promise<{ host: HTMLDivElement; root: Roo
 afterEach(() => {
   document.body.innerHTML = '';
   vi.unstubAllGlobals();
-  overlayMode = 'none';
+  overlaySelection = { person: true, bed: true };
   detectionSettings.domains.bed_exit.on = false;
 });
 
 describe('DetectionSettingsCard (operations)', () => {
-  it('shows "탐지 중" for an on domain on an online camera, and "꺼짐" for an off domain', async () => {
+  it('shows accessible active and off status icons for online camera domains', async () => {
     installFetchMock();
     const { host } = await render(onlineCamera);
 
     expect(host.textContent).toContain('탐지 이벤트');
-    expect(host.textContent).toContain('탐지 중');
-    expect(host.textContent).toContain('꺼짐');
-    expect(host.textContent).not.toContain('중단됨');
+    expect(host.querySelector('svg[aria-label="탐지 중"]')).not.toBeNull();
+    expect(host.querySelector('svg[aria-label="꺼짐"]')).not.toBeNull();
+    expect(host.querySelector('svg[aria-label="중단됨"]')).toBeNull();
   });
 
   it('never marks enabled bed-exit as detecting without persisted geometry, while fall remains detecting', async () => {
@@ -88,9 +88,9 @@ describe('DetectionSettingsCard (operations)', () => {
     const cameraWithoutBedZone: Camera = { ...onlineCamera, bed_zone: null };
     const { host } = await render(cameraWithoutBedZone);
 
-    expect(host.textContent).toContain('침대 영역 미설정');
-    expect(host.textContent).toContain('침대 영역 인식');
-    expect(host.textContent?.match(/탐지 중/g)).toHaveLength(1);
+    expect(host.querySelector('svg[aria-label="침대 영역 미설정"]')).not.toBeNull();
+    expect(host.querySelector('button[aria-label="침대 영역 인식"]')).not.toBeNull();
+    expect(host.querySelectorAll('svg[aria-label="탐지 중"]')).toHaveLength(1);
   });
 
   it('marks enabled bed-exit as detecting when persisted geometry exists', async () => {
@@ -98,8 +98,8 @@ describe('DetectionSettingsCard (operations)', () => {
     detectionSettings.domains.bed_exit.on = true;
     const { host } = await render(onlineCamera);
 
-    expect(host.textContent).not.toContain('침대 영역 미설정');
-    expect(host.textContent?.match(/탐지 중/g)).toHaveLength(2);
+    expect(host.querySelector('svg[aria-label="침대 영역 미설정"]')).toBeNull();
+    expect(host.querySelectorAll('svg[aria-label="탐지 중"]')).toHaveLength(2);
   });
 
   it('keeps the disabled state ahead of missing bed geometry', async () => {
@@ -107,8 +107,8 @@ describe('DetectionSettingsCard (operations)', () => {
     detectionSettings.domains.bed_exit.on = false;
     const { host } = await render({ ...onlineCamera, bed_zone: null });
 
-    expect(host.textContent).toContain('꺼짐');
-    expect(host.textContent).not.toContain('침대 영역 미설정');
+    expect(host.querySelector('svg[aria-label="꺼짐"]')).not.toBeNull();
+    expect(host.querySelector('svg[aria-label="침대 영역 미설정"]')).toBeNull();
   });
 
   it('makes recognition actionable without treating the click itself as successful geometry', async () => {
@@ -126,19 +126,19 @@ describe('DetectionSettingsCard (operations)', () => {
     ));
     await flush();
 
-    const action = Array.from(host.querySelectorAll('button')).find((button) => button.textContent === '침대 영역 인식');
+    const action = host.querySelector<HTMLButtonElement>('button[aria-label="침대 영역 인식"]');
     expect(action).toBeTruthy();
     act(() => action?.click());
     expect(onRecognizeBedZone).toHaveBeenCalledOnce();
-    expect(host.textContent).toContain('침대 영역 미설정');
+    expect(host.querySelector('svg[aria-label="침대 영역 미설정"]')).not.toBeNull();
   });
 
-  it('shows "중단됨" for every domain when the camera is offline, regardless of the domain\'s own on/off flag', async () => {
+  it('shows an accessible paused icon for every domain when the camera is offline', async () => {
     installFetchMock();
     const { host } = await render(offlineCamera);
 
-    expect(host.textContent).toContain('중단됨');
-    expect(host.textContent).not.toContain('탐지 중');
+    expect(host.querySelectorAll('svg[aria-label="중단됨"]')).toHaveLength(2);
+    expect(host.querySelector('svg[aria-label="탐지 중"]')).toBeNull();
   });
 
   it('navigates to the settings page when the header gear icon is clicked', async () => {

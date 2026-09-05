@@ -34,6 +34,13 @@ Frontend-wide rules for `front/`. Slice layout lives in `src/AGENTS.md`.
 - Offline or offscreen tiles pass `baseUrl: null` and fall back to snapshot. Live fetch streams do not need `_r=` cache-busting.
 
 
+## Owner UI preferences (2026-09-05, binding)
+
+- Icons and buttons over text. Status such as detection readiness, missing bed region, or overlay subjects is an icon with `aria-label`/`title`, never a sentence or a text pill. Explanatory paragraphs are removed, not shortened.
+- Overlay controls are per-subject icon toggles (person, bed), default on. Entering a room view with a toggle on shows the overlay immediately and keeps it; no mode picker, no "none" option.
+- Secondary flows (bed recognition, edits) open as popups (`AccessibleDialog`), not inline panels.
+- Live badges show what is drawn, never a detection outcome.
+
 ## Verification
 
 - UI change: focused Vitest beside the module (`*.test.ts` / `*.test.tsx`), then `pnpm --dir front build`.

@@ -1,31 +1,28 @@
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { OverlayModeControl } from '@/features/operations/OverlayModeControl';
+import { OverlaySelectionControl } from '@/features/operations/OverlayModeControl';
 import { toast } from '@/shared/ui/Toast';
+import type { OverlaySelection } from '@/shared/api/client';
 
-function installFetchMock(overlayResponses: Array<{ ok: boolean; status: number; mode?: string }>): { fetchMock: ReturnType<typeof vi.fn>; setPostResult: (result: { ok: boolean; status: number; mode?: string }) => void } {
-  let getIndex = 0;
-  let postResult: { ok: boolean; status: number; mode?: string } = { ok: true, status: 200, mode: 'none' };
+type MockResponse = { ok: boolean; status: number; selection?: OverlaySelection };
+
+function installFetchMock(initial: MockResponse): {
+  fetchMock: ReturnType<typeof vi.fn>;
+  setPostResult: (result: MockResponse) => void;
+} {
+  let postResult: MockResponse = { ok: true, status: 200, selection: { person: true, bed: true } };
   const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
     const url = typeof input === 'string' ? input : input.toString();
-    if (url.includes('/streams/') && url.includes('/pose')) {
-      if (init?.method === 'POST') {
-        return Promise.resolve({
-          ok: postResult.ok,
-          status: postResult.status,
-          json: async () => (postResult.ok ? { mode: postResult.mode } : {}),
-        });
-      }
-      const response = overlayResponses[Math.min(getIndex, overlayResponses.length - 1)];
-      getIndex += 1;
-      return Promise.resolve({
-        ok: response.ok,
-        status: response.status,
-        json: async () => (response.ok ? { mode: response.mode } : {}),
-      });
+    if (!url.includes('/streams/') || !url.includes('/pose')) {
+      return Promise.reject(new Error(`unexpected fetch: ${url}`));
     }
-    return Promise.reject(new Error(`unexpected fetch: ${url}`));
+    const response = init?.method === 'POST' ? postResult : initial;
+    return Promise.resolve({
+      ok: response.ok,
+      status: response.status,
+      json: async () => response.selection ?? {},
+    });
   });
   vi.stubGlobal('fetch', fetchMock);
   return { fetchMock, setPostResult: (result) => { postResult = result; } };
@@ -39,15 +36,16 @@ async function flush(): Promise<void> {
   });
 }
 
-function render(
-  cameraId = 'cam-1',
-  onModeChange?: (mode: string | null) => void,
-): { host: HTMLDivElement; root: Root } {
+function render(onSelectionChange?: (selection: OverlaySelection | null) => void): { host: HTMLDivElement; root: Root } {
   const host = document.createElement('div');
   document.body.append(host);
   const root = createRoot(host);
-  act(() => root.render(<OverlayModeControl cameraId={cameraId} onModeChange={onModeChange} />));
+  act(() => root.render(<OverlaySelectionControl cameraId="cam-1" onSelectionChange={onSelectionChange} />));
   return { host, root };
+}
+
+function toggle(host: HTMLElement, label: '사람' | '침대'): HTMLButtonElement {
+  return Array.from(host.querySelectorAll<HTMLButtonElement>('button')).find((button) => button.textContent === label)!;
 }
 
 afterEach(() => {
@@ -56,80 +54,67 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-describe('OverlayModeControl', () => {
-  it('shows the overlay chips once the initial fetch resolves', async () => {
-    installFetchMock([{ ok: true, status: 200, mode: 'none' }]);
+describe('OverlaySelectionControl', () => {
+  it('shows both server-default subjects as enabled icon toggles on entry', async () => {
+    installFetchMock({ ok: true, status: 200, selection: { person: true, bed: true } });
     const { host } = render();
     await flush();
 
-    expect(host.querySelector('[role="group"]')).not.toBeNull();
-    expect(host.textContent).toContain('오버레이 없음');
+    const person = toggle(host, '사람');
+    const bed = toggle(host, '침대');
+    expect(person.getAttribute('aria-pressed')).toBe('true');
+    expect(bed.getAttribute('aria-pressed')).toBe('true');
+    expect(person.querySelector('[data-overlay-target="person"]')).not.toBeNull();
+    expect(bed.querySelector('[data-overlay-target="bed"]')).not.toBeNull();
   });
 
-  it('shows an error state with a retry button when the initial fetch is rejected, and recovers on retry', async () => {
-    const { fetchMock } = installFetchMock([
-      { ok: false, status: 500 },
-      { ok: true, status: 200, mode: 'bedexit' },
-    ]);
+  it('renders both independently pressed selections from the confirmed GET response', async () => {
+    installFetchMock({ ok: true, status: 200, selection: { person: true, bed: false } });
+    const onSelectionChange = vi.fn();
+    const { host } = render(onSelectionChange);
+    await flush();
+
+    expect(toggle(host, '사람').getAttribute('aria-pressed')).toBe('true');
+    expect(toggle(host, '침대').getAttribute('aria-pressed')).toBe('false');
+    expect(onSelectionChange).toHaveBeenLastCalledWith({ person: true, bed: false });
+  });
+
+  it('toggles one target without changing the other and sends both required fields', async () => {
+    const { fetchMock, setPostResult } = installFetchMock({ ok: true, status: 200, selection: { person: true, bed: true } });
+    setPostResult({ ok: true, status: 200, selection: { person: false, bed: true } });
     const { host } = render();
     await flush();
 
-    expect(host.querySelector('[role="alert"]')?.textContent).toBe('오버레이 모드를 불러오지 못했습니다.');
-    const retryButton = Array.from(host.querySelectorAll('button')).find((button) => button.textContent === '다시 시도');
-    expect(retryButton).not.toBeUndefined();
-
     await act(async () => {
-      retryButton?.click();
+      toggle(host, '사람').click();
       await Promise.resolve();
     });
     await flush();
 
-    expect(fetchMock).toHaveBeenCalledTimes(2);
-    expect(host.querySelector('[role="alert"]')).toBeNull();
-    expect(host.querySelector('[role="group"]')).not.toBeNull();
-    expect(host.textContent).toContain('침대 이탈');
+    expect(fetchMock).toHaveBeenLastCalledWith('/api/v1/streams/cam-1/pose', expect.objectContaining({
+      method: 'POST',
+      body: JSON.stringify({ person: false, bed: true }),
+    }));
+    expect(toggle(host, '사람').getAttribute('aria-pressed')).toBe('false');
+    expect(toggle(host, '침대').getAttribute('aria-pressed')).toBe('true');
   });
 
-  it('shows a toast and resets pending state when setCameraOverlay is rejected', async () => {
-    const toastErrorSpy = vi.spyOn(toast, 'error').mockImplementation(() => undefined);
-    const { setPostResult } = installFetchMock([{ ok: true, status: 200, mode: 'none' }]);
+  it('keeps the confirmed selection and shows an error toast when an update fails', async () => {
+    const toastError = vi.spyOn(toast, 'error').mockImplementation(() => undefined);
+    const { setPostResult } = installFetchMock({ ok: true, status: 200, selection: { person: false, bed: true } });
     setPostResult({ ok: false, status: 500 });
     const { host } = render();
     await flush();
 
-    const fallButton = Array.from(host.querySelectorAll('button')).find((button) => button.textContent === '낙상') as HTMLButtonElement;
-    expect(fallButton).not.toBeUndefined();
-
     await act(async () => {
-      fallButton.click();
+      toggle(host, '사람').click();
       await Promise.resolve();
     });
     await flush();
 
-    expect(toastErrorSpy).toHaveBeenCalledWith('오버레이 모드를 변경하지 못했습니다.');
-    // Reverted: still shows the previously-confirmed mode ('none'), not the rejected selection, and re-enabled.
-    expect(fallButton.getAttribute('aria-pressed')).toBe('false');
-    expect(fallButton.disabled).toBe(false);
-  });
-
-  it('notifies onModeChange with the confirmed mode on load and after a successful selection (issue #102)', async () => {
-    const { setPostResult } = installFetchMock([{ ok: true, status: 200, mode: 'none' }]);
-    const onModeChange = vi.fn();
-    const { host } = render('cam-1', onModeChange);
-    await flush();
-
-    // null while loading, then the resolved initial mode.
-    expect(onModeChange.mock.calls[0]).toEqual([null]);
-    expect(onModeChange).toHaveBeenLastCalledWith('none');
-
-    setPostResult({ ok: true, status: 200, mode: 'fall' });
-    const fallButton = Array.from(host.querySelectorAll('button')).find((button) => button.textContent === '낙상') as HTMLButtonElement;
-    await act(async () => {
-      fallButton.click();
-      await Promise.resolve();
-    });
-    await flush();
-
-    expect(onModeChange).toHaveBeenLastCalledWith('fall');
+    expect(toastError).toHaveBeenCalledTimes(1);
+    expect(toggle(host, '사람').getAttribute('aria-pressed')).toBe('false');
+    expect(toggle(host, '침대').getAttribute('aria-pressed')).toBe('true');
+    expect(toggle(host, '사람').disabled).toBe(false);
   });
 });

@@ -83,6 +83,9 @@ exports: `tests/test_contract_symbol_exports.py`. Docs live in
 - Cameras are registered at runtime through the dashboard registry. Do not seed
   them from env, YAML, or a backend `cameras` pull.
 - Use `uv`. Re-run `lint-imports` after any import-boundary change.
+- Dashboard UI: icons and buttons over text; status is an icon, secondary flows
+  are popups, overlay subjects are per-subject toggles that persist. See
+  `front/AGENTS.md` "Owner UI preferences".
 
 ## Anti-patterns
 

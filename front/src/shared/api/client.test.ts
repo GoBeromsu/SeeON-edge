@@ -223,41 +223,41 @@ describe('api client contracts', () => {
     expect(fetchMock).toHaveBeenCalledWith('/api/v1/cameras/cam-1/test', expect.objectContaining({ method: 'POST' }));
   });
 
-  it('fetches the current per-camera overlay mode', async () => {
+  it('fetches the current per-camera overlay selection', async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
       status: 200,
-      json: async () => ({ mode: 'fall' }),
+      json: async () => ({ person: true, bed: false }),
     });
     vi.stubGlobal('fetch', fetchMock);
 
-    await expect(fetchCameraOverlay('cam/1')).resolves.toBe('fall');
+    await expect(fetchCameraOverlay('cam/1')).resolves.toEqual({ person: true, bed: false });
 
     expect(fetchMock).toHaveBeenCalledWith('/api/v1/streams/cam%2F1/pose', expect.objectContaining({ credentials: 'same-origin' }));
     expect(fetchMock.mock.calls[0]?.[1]?.method).toBeUndefined();
   });
 
-  it('posts the requested overlay mode and returns the confirmed value', async () => {
+  it('posts both overlay selections and returns the confirmed value', async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
       status: 200,
-      json: async () => ({ mode: 'none' }),
+      json: async () => ({ person: false, bed: true }),
     });
     vi.stubGlobal('fetch', fetchMock);
 
-    await expect(setCameraOverlay('cam-1', 'none')).resolves.toBe('none');
+    await expect(setCameraOverlay('cam-1', { person: false, bed: true })).resolves.toEqual({ person: false, bed: true });
 
     expect(fetchMock).toHaveBeenCalledWith('/api/v1/streams/cam-1/pose', expect.objectContaining({
       method: 'POST',
-      body: JSON.stringify({ mode: 'none' }),
+      body: JSON.stringify({ person: false, bed: true }),
     }));
   });
 
-  it('rejects a contract-invalid overlay response', async () => {
+  it('rejects the retired mode-shaped overlay response', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
       ok: true,
       status: 200,
-      json: async () => ({ mode: 'yes' }),
+      json: async () => ({ mode: 'legacy' }),
     }));
 
     await expect(fetchCameraOverlay('cam-1')).rejects.toThrow('Invalid overlay response');

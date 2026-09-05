@@ -65,8 +65,11 @@ export type CameraHeartbeat = {
   config_version: number | null;
 };
 
-/** Per-camera pose/skeleton overlay mode: no overlay, bed-exit skeleton, or fall-detection skeleton. */
-export type OverlayMode = 'none' | 'bedexit' | 'fall';
+/** Independently selected annotations rendered onto a camera's live preview. */
+export type OverlaySelection = {
+  person: boolean;
+  bed: boolean;
+};
 
 /** A single [x, y] vertex of a bed-zone polygon, in the coordinate space of image_width x image_height. */
 export type BedZonePoint = [number, number];

@@ -10,6 +10,7 @@ import {
   normalizeConnectionTestResult,
   normalizeConnectionView,
   normalizeDetectionSettings,
+  normalizeOverlaySelection,
   normalizeRuntimeSettings,
   normalizeStatusSnapshot,
   normalizeSystemSnapshot,
@@ -38,7 +39,7 @@ import type {
   DetectionPolicyComparedPayload,
   DetectionPolicyDiff,
   DetectionPolicyRollbackInput,
-  OverlayMode,
+  OverlaySelection,
   RuntimeSettings,
   RuntimeSettingsInput,
   StatusSnapshot,
@@ -77,7 +78,7 @@ export type {
   DetectionReason,
   DetectionState,
   HeartbeatStatus,
-  OverlayMode,
+  OverlaySelection,
   RuntimeCameraDiagnostics,
   RuntimeDetectionDiagnostics,
   RuntimeClipExportApplied,
@@ -384,25 +385,15 @@ export async function saveClipStorageLocation(path: string): Promise<ClipStorage
   );
 }
 
-const OVERLAY_MODES: readonly OverlayMode[] = ['none', 'bedexit', 'fall'];
-
-function normalizeOverlayResponse(value: unknown): OverlayMode {
-  const mode = isRecord(value) ? value.mode : null;
-  if (typeof mode !== 'string' || !OVERLAY_MODES.includes(mode as OverlayMode)) {
-    throw new Error('Invalid overlay response');
-  }
-  return mode as OverlayMode;
+export async function fetchCameraOverlay(cameraId: string): Promise<OverlaySelection> {
+  return normalizeOverlaySelection(await requestJson(`/streams/${encodeURIComponent(cameraId)}/pose`));
 }
 
-export async function fetchCameraOverlay(cameraId: string): Promise<OverlayMode> {
-  return normalizeOverlayResponse(await requestJson(`/streams/${encodeURIComponent(cameraId)}/pose`));
-}
-
-export async function setCameraOverlay(cameraId: string, mode: OverlayMode): Promise<OverlayMode> {
-  return normalizeOverlayResponse(
+export async function setCameraOverlay(cameraId: string, selection: OverlaySelection): Promise<OverlaySelection> {
+  return normalizeOverlaySelection(
     await requestJson(`/streams/${encodeURIComponent(cameraId)}/pose`, {
       method: 'POST',
-      body: JSON.stringify({ mode }),
+      body: JSON.stringify(selection),
     }),
   );
 }

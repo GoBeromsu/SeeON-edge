@@ -90,7 +90,7 @@ const allClips = [
   clipManifest({ clip_id: 'clip-2', camera_id: 'cam-1', event_type: 'bed-exit', started_at: '2026-08-02T02:00:00Z' }),
 ];
 
-let overlayMode = 'none';
+let overlaySelection = { person: true, bed: true };
 let cameraBedZone: {
   polygon: [number, number][];
   image_width: number;
@@ -122,9 +122,9 @@ function installFetchMock(): ReturnType<typeof vi.fn> {
     if (url.includes('/streams/') && url.includes('/pose')) {
       if (init?.method === 'POST') {
         const body = init.body ? JSON.parse(init.body as string) : {};
-        overlayMode = body.mode ?? overlayMode;
+        overlaySelection = body;
       }
-      return Promise.resolve({ ok: true, status: 200, json: async () => ({ mode: overlayMode }) });
+      return Promise.resolve({ ok: true, status: 200, json: async () => overlaySelection });
     }
     if (url.includes('/clips')) {
       const match = /camera_id=([^&]+)/.exec(url);
@@ -146,20 +146,27 @@ async function flush(): Promise<void> {
   });
 }
 
+const mountedRoots: Root[] = [];
+
 async function renderPage(): Promise<{ host: HTMLDivElement; root: Root }> {
   const host = document.createElement('div');
   document.body.append(host);
   const root = createRoot(host);
+  mountedRoots.push(root);
   act(() => root.render(<OperationsPage />));
   await flush();
   return { host, root };
 }
 
 afterEach(() => {
+  // Unmount before wiping the body: a still-mounted root whose portal DOM was
+  // removed underneath it throws NotFoundError on its next commit, which
+  // surfaces as an uncaught error inside the following test.
+  for (const root of mountedRoots.splice(0)) act(() => root.unmount());
   document.body.innerHTML = '';
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
-  overlayMode = 'none';
+  overlaySelection = { person: true, bed: true };
   cameraBedZone = null;
   detectionSettings.domains.bed_exit.on = false;
 });
@@ -240,29 +247,35 @@ describe('OperationsPage', () => {
     const buttons = Array.from(host.querySelectorAll('button')).map((button) => button.textContent);
     expect(buttons).toContain('재연결 시도');
     expect(buttons).toContain('연결 관리');
-    expect(host.textContent).toContain('중단됨');
+    expect(host.querySelectorAll('svg[aria-label="중단됨"]')).toHaveLength(2);
   });
 
-  it('shows the global detection settings summary and lets the overlay mode be changed', async () => {
+  it('shows the global detection settings summary and lets overlay targets be changed independently', async () => {
     resetLocation('?page=operations&camera=cam-1');
     const fetchMock = installFetchMock();
     const { host } = await renderPage();
 
-    expect(host.textContent).toContain('탐지 중');
-    expect(host.textContent).toContain('꺼짐');
+    expect(host.querySelector('svg[aria-label="탐지 중"]')).not.toBeNull();
+    expect(host.querySelector('svg[aria-label="꺼짐"]')).not.toBeNull();
 
-    const fallChip = Array.from(host.querySelectorAll<HTMLButtonElement>('button[aria-pressed]')).find((button) => button.textContent === '낙상');
-    expect(fallChip?.getAttribute('aria-pressed')).toBe('false');
+    const personToggle = Array.from(host.querySelectorAll<HTMLButtonElement>('button[aria-pressed]')).find((button) => button.textContent === '사람');
+    const bedToggle = Array.from(host.querySelectorAll<HTMLButtonElement>('button[aria-pressed]')).find((button) => button.textContent === '침대');
+    expect(personToggle?.getAttribute('aria-pressed')).toBe('true');
+    expect(bedToggle?.getAttribute('aria-pressed')).toBe('true');
 
-    act(() => fallChip?.click());
+    act(() => personToggle?.click());
     await flush();
 
-    expect(fallChip?.getAttribute('aria-pressed')).toBe('true');
+    expect(personToggle?.getAttribute('aria-pressed')).toBe('false');
+    expect(bedToggle?.getAttribute('aria-pressed')).toBe('true');
     const overlayCalls = fetchMock.mock.calls.filter(([input]) => {
       const url = typeof input === 'string' ? input : (input as URL | Request).toString();
       return url.includes('/pose');
     });
-    expect(overlayCalls.some(([, init]) => (init as RequestInit | undefined)?.method === 'POST')).toBe(true);
+    expect(overlayCalls.some(([, init]) => (
+      (init as RequestInit | undefined)?.method === 'POST'
+      && (init as RequestInit).body === JSON.stringify({ person: false, bed: true })
+    ))).toBe(true);
   });
 
   it('keeps readiness tied to refreshed persisted geometry after recognition failure, success, and server clear', async () => {
@@ -271,16 +284,15 @@ describe('OperationsPage', () => {
     installFetchMock();
     const { host } = await renderPage();
 
-    expect(host.textContent).toContain('침대 영역 미설정');
-    const recognizeAction = Array.from(host.querySelectorAll('button'))
-      .find((button) => button.textContent === '침대 영역 인식');
+    expect(host.querySelector('svg[aria-label="침대 영역 미설정"]')).not.toBeNull();
+    const recognizeAction = host.querySelector<HTMLButtonElement>('button[aria-label="침대 영역 인식"]');
     act(() => recognizeAction?.click());
 
-    const failure = Array.from(host.querySelectorAll('button'))
+    const failure = Array.from(document.querySelectorAll('button'))
       .find((button) => button.textContent === '모의 인식 실패');
     act(() => failure?.click());
     await flush();
-    expect(host.textContent).toContain('침대 영역 미설정');
+    expect(host.querySelector('svg[aria-label="침대 영역 미설정"]')).not.toBeNull();
 
     cameraBedZone = {
       polygon: [[0, 0], [10, 0], [10, 10], [0, 10]],
@@ -288,16 +300,16 @@ describe('OperationsPage', () => {
       image_height: 1080,
       recognized_at: '2026-09-05T00:00:00Z',
     };
-    const success = Array.from(host.querySelectorAll('button'))
+    const success = Array.from(document.querySelectorAll('button'))
       .find((button) => button.textContent === '모의 인식 성공');
     act(() => success?.click());
     await flush();
-    expect(host.textContent).not.toContain('침대 영역 미설정');
+    expect(host.querySelector('svg[aria-label="침대 영역 미설정"]')).toBeNull();
 
     cameraBedZone = null;
     act(() => success?.click());
     await flush();
-    expect(host.textContent).toContain('침대 영역 미설정');
+    expect(host.querySelector('svg[aria-label="침대 영역 미설정"]')).not.toBeNull();
   });
 
   it('lists event history for the selected camera and opens the clip player modal', async () => {

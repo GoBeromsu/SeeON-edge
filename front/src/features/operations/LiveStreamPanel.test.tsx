@@ -2,7 +2,7 @@ import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { LiveStreamPanel } from '@/features/operations/LiveStreamPanel';
-import type { Camera, OverlayMode, RuntimeCameraDiagnostics } from '@/shared/api/client';
+import type { Camera, OverlaySelection, RuntimeCameraDiagnostics } from '@/shared/api/client';
 
 const onlineCamera: Camera = {
   id: 'cam-1',
@@ -73,7 +73,7 @@ function render(
   diagnostics: RuntimeCameraDiagnostics | undefined,
   onRetryConnection = vi.fn(),
   onManageConnection = vi.fn(),
-  overlayMode: OverlayMode | null = null,
+  overlaySelection: OverlaySelection | null = null,
 ): { host: HTMLDivElement; root: Root; onRetryConnection: typeof onRetryConnection; onManageConnection: typeof onManageConnection } {
   const host = document.createElement('div');
   document.body.append(host);
@@ -82,7 +82,7 @@ function render(
     <LiveStreamPanel
       camera={camera}
       diagnostics={diagnostics}
-      overlayMode={overlayMode}
+      overlaySelection={overlaySelection}
       onRetryConnection={onRetryConnection}
       onManageConnection={onManageConnection}
     />,
@@ -182,17 +182,22 @@ describe('LiveStreamPanel', () => {
   });
 
   it.each([
-    { mode: 'fall' as const, label: '라이브 · 사람 표시' },
-    { mode: 'bedexit' as const, label: '라이브 · 침대 영역·사람 표시' },
-    { mode: 'none' as const, label: '라이브 · 원본' },
-    { mode: null, label: '라이브' },
-  ])('shows the truthful display-mode label "$label" for overlay mode "$mode"', ({ mode, label }) => {
+    { selection: { person: true, bed: true }, label: '라이브 · 사람·침대 표시', targets: ['person', 'bed'] },
+    { selection: { person: true, bed: false }, label: '라이브 · 사람 표시', targets: ['person'] },
+    { selection: { person: false, bed: true }, label: '라이브 · 침대 표시', targets: ['bed'] },
+    { selection: { person: false, bed: false }, label: '라이브 · 원본', targets: [] },
+    { selection: null, label: '라이브', targets: [] },
+  ])('shows only the selected subject icons for overlay selection $selection', ({ selection, label, targets }) => {
     stubStreamingFetch();
-    const { host } = render(onlineCamera, undefined, vi.fn(), vi.fn(), mode);
+    const { host } = render(onlineCamera, undefined, vi.fn(), vi.fn(), selection);
 
     const badge = host.querySelector('.bottom-2.left-2');
-    expect(badge?.textContent).toBe(label);
-    expect(host.textContent).not.toContain('낙상 없음');
+    expect(badge?.getAttribute('aria-label')).toBe(label);
+    expect(badge?.getAttribute('title')).toBe(label);
+    expect(Array.from(badge?.querySelectorAll('[data-overlay-target]') ?? []).map((icon) => (
+      icon.getAttribute('data-overlay-target')
+    ))).toEqual(targets);
+    expect(badge?.textContent).toBe('라이브');
   });
 
   it('shows a "연결 끊김" corner badge once the stream has stalled for more than 3s, without dropping the canvas', async () => {
