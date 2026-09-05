@@ -28,11 +28,9 @@ type LiveStreamPanelProps = {
  * (not a full-frame overlay) while `stream.status === 'stalled'`, so the frozen last frame stays
  * visible underneath instead of being hidden.
  *
- * The bottom-left badge label mirrors design-handoff/Eldercare Prototype.dc.html:645's `liveLabel`
- * data model: '라이브 · 낙상 없음' when the camera's overlay mode is 'fall', else '라이브 · 온라인'.
- * `overlayMode` is the OverlayModeControl selection lifted to the shared RoomDetail ancestor
- * (issue #102) rather than fetched again here, so the badge always agrees with what the operator
- * actually selected.
+ * The bottom-left badge reports only the selected display mode. `overlayMode` is the
+ * OverlayModeControl selection lifted to the shared RoomDetail ancestor (issue #102), not
+ * detection state, so the label must not imply that a fall or bed presence was evaluated.
  */
 export function LiveStreamPanel({ camera, diagnostics, overlayMode, onRetryConnection, onManageConnection }: LiveStreamPanelProps): JSX.Element {
   const online = camera.status === 'online';
@@ -44,6 +42,13 @@ export function LiveStreamPanel({ camera, diagnostics, overlayMode, onRetryConne
   // 아직 측정 전인 경우와 값이 있지만 멈춰버린 경우를 구분해서 보여준다.
   const isStale = diagnostics?.stale === true;
   const fpsKnown = fps !== null && fps !== undefined;
+  const liveLabel = overlayMode === 'fall'
+    ? '라이브 · 사람 표시'
+    : overlayMode === 'bedexit'
+      ? '라이브 · 침대 영역·사람 표시'
+      : overlayMode === 'none'
+        ? '라이브 · 원본'
+        : '라이브';
 
   if (!online) {
     return (
@@ -93,7 +98,7 @@ export function LiveStreamPanel({ camera, diagnostics, overlayMode, onRetryConne
       </span>
 
       <span className="media-status-overlay absolute bottom-2 left-2 rounded-control px-2.5 py-1 text-xs font-semibold">
-        {overlayMode === 'fall' ? '라이브 · 낙상 없음' : '라이브 · 온라인'}
+        {liveLabel}
       </span>
 
       {stream.status === 'stalled' ? (

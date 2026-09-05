@@ -6,7 +6,7 @@ One folder, one capability. `app/pages/` composes these. Parent already names th
 
 - `operations/`: live wall + room detail. Owns the live wall (MJPEG hook lives in `shared/api/useMjpegStream`), snapshot queue, overlay fetch/set, floor/liveness sort (`operationsModel`), room clip history. `ClipPlayerModal` plays that history. No delete, no artifacts.
 - `events/`: clip catalogue + clean source playback. Owns filters, keyset pager, `useEventsPage` / `useClipMetadata`, `eventTypes` facets (`bed-exit` / `fall` / `other`). Incident review surface retired; persisted sidecar analysis retired; burned boxes exist only in the snapshot JPEG. `ClipPlaybackModal` plays only unmodified source clip bytes and owns artifact state.
-- `settings/`: registry writes and site policy. `CameraSection` orchestrates table + register + edit + delete. Its `DetectionSettingsCard` is the global schedule editor (`saveDetectionSettings`). Also clip storage/export, policy evidence, processing status, bed-zone panel (live canvas via `shared/api/useMjpegStream`).
+- `settings/`: registry writes and site policy. `CameraSection` orchestrates table + register + edit + delete. Its `DetectionSettingsCard` is the global schedule editor (`saveDetectionSettings`). Also clip storage/export, policy evidence, processing status, and the shared bed-zone panel (`shared/ui/BedZoneRecognitionPanel`).
 - `connection/`: 3-step wizard + `ConnectionSettingsPanel`. `wizardSteps.ts` is pure and server-state only (`enrolled`, camera total, `dirty_registry_version`, `readiness_error`, `preview.confirmed`). SettingsPage mounts the wizard. No page of its own.
 - `cameras/`: topology widgets only. Pairing list, structure editor, confirm dialog. No wizard progress, no registry table. Wizard steps 2 and 3 consume them.
 - `account-settings/`: single-admin username/password rotate. `App` mounts the modal. Already-authed `PUT` credentials. No current-password field.
@@ -36,7 +36,7 @@ Enforced by `front/eslint.config.js` (`no-restricted-imports`, one override per 
 - `RoomDetail` reuses `CameraEditModal` / `DeleteCameraDialog`. Same sibling-dialog rule as `CameraSection`: edit never confirms its own delete. Nested `AccessibleDialog` inerts the first dialog.
 - Room `DetectionSettingsCard` is read-only. It imports `DOMAIN_LABELS`, `DOMAIN_ORDER`, `formatDomainSchedule` from `settings/detectionSettingsForm`. Gear calls `navigateToPage('settings')`. Global `GET /detection-settings` is not per-camera. Don't import the settings editor card.
 
-`settings` no longer imports `operations`. `BedZoneRecognitionPanel` takes `useMjpegStream` from `shared/api` (live canvas, not a still). Recognition is `POST /cameras/{id}/bed-zone/recognize` on a 2s interval while the session is active. Polygon overlay is a sibling `<svg>`. Drawing on the MJPEG canvas loses the next frame.
+`settings` no longer imports `operations`. Both settings and operations reuse `shared/ui/BedZoneRecognitionPanel`, which takes `useMjpegStream` from `shared/api` (live canvas, not a still). Recognition is one explicit `POST /cameras/{id}/bed-zone/recognize` per click; no periodic persistence loop that repeatedly restarts Flow. Polygon overlay is a sibling `<svg>`. Drawing on the MJPEG canvas loses the next frame.
 
 Same-named cards stay separate files. operations card = status + overlay + navigate. settings card = editor. Don't merge by import.
 

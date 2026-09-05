@@ -1,15 +1,4 @@
-"""``WorkerRuntime._bed_zone_recognizer`` -- the on-demand, one-shot bed
-segmentation pass backing the ``POST /overlay/{camera_id}/bed-zone/recognize``
-route (see ``worker/pipeline/output/_mjpeg_http.py``) -- must pick the
-highest-confidence bed, prefer its simplified polygon when the runner
-produced one, fall back to a rectangle when it did not, and raise
-``BedZoneNotFoundError`` when the runner found nothing usable.
-
-These tests exercise the method directly against a minimally constructed
-``WorkerRuntime`` (no ``.run()``, no real model loading) with a fake
-``shared_yolo.bed.runner``, mirroring the ``NamedExtractor._call`` resolution
-idiom (``runner if callable(runner) else runner.run``) it is built to match.
-"""
+"""Strict bed-segmentation conversion for the on-demand overlay route."""
 
 from __future__ import annotations
 
@@ -19,12 +8,16 @@ from typing import Final
 import numpy as np
 import pytest
 
-from contracts.runner import Image, PoseRunnerResult, RunnerResult, bed_result
+from contracts.runner import BedRunnerResult, Image, PoseRunnerResult, RunnerResult, bed_result
 from worker.pipeline.analytics import NamedExtractor
 from worker.pipeline.output.mjpeg_server import BedZoneNotFoundError
 from worker.runtime.config import WorkerConfig
 from worker.runtime.lease import GpuLease
 from worker.runtime.model_composition import SharedYoloExtractors
+from worker.runtime.nvidia_bed_zone_recognizer import (
+    NvidiaBedZoneRecognizer,
+    bed_zone_response,
+)
 from worker.runtime.worker import WorkerRuntime
 
 _IMAGE: Final[Image] = np.zeros((480, 640, 3), dtype=np.uint8)
@@ -33,6 +26,16 @@ _IMAGE: Final[Image] = np.zeros((480, 640, 3), dtype=np.uint8)
 class _FakeServingClient:
     def create(self, task: str, **_options: object) -> object:
         raise AssertionError(f"model composition must not run in this test (task={task!r})")
+
+
+class _RunnerServingClient:
+    def __init__(self, runner: object) -> None:
+        self.runner = runner
+
+    def create(self, task: str, **options: object) -> object:
+        assert task == "bed"
+        assert options == {"device": "cpu"}
+        return self.runner
 
 
 def _config() -> WorkerConfig:
@@ -102,25 +105,82 @@ def test_bed_zone_recognizer_picks_highest_confidence_box_and_its_polygon(
     }
 
 
-def test_bed_zone_recognizer_falls_back_to_rectangle_when_polygon_is_empty(
+def test_bed_zone_recognizer_refuses_box_when_polygon_is_empty(
     tmp_path: Path,
 ) -> None:
     runtime = _runtime(tmp_path)
 
     def runner(_image: Image) -> RunnerResult:
-        # `_simplify_polygon` can legitimately produce an empty polygon for a
-        # degenerate mask even though the box itself is a real detection.
         return bed_result([(10, 20, 110, 220, 0.8, [])])
 
     _with_bed_runner(runtime, runner)
 
-    payload = runtime._bed_zone_recognizer(_IMAGE)  # noqa: SLF001
+    with pytest.raises(BedZoneNotFoundError):
+        runtime._bed_zone_recognizer(_IMAGE)  # noqa: SLF001
 
-    assert payload.as_dict() == {
-        "polygon": [[10, 20], [110, 20], [110, 220], [10, 220]],
-        "image_width": 640,
-        "image_height": 480,
-    }
+
+def test_bed_zone_response_prefers_valid_segment_over_higher_score_box_only() -> None:
+    result = bed_result(
+        [
+            (10, 20, 110, 220, 0.99),
+            (5, 5, 50, 50, 0.7, [[5, 5], [50, 5], [50, 50], [5, 50]]),
+        ]
+    )
+
+    payload = bed_zone_response(_IMAGE, result)
+
+    assert payload.polygon == ((5, 5), (50, 5), (50, 50), (5, 50))
+
+
+@pytest.mark.parametrize(
+    "box",
+    [
+        (10, 20, 110, 220, 0.8),
+        (10, 20, 110, 220, 0.8, []),
+        (10, 20, 110, 220, 0.8, [[1, 1], [1, 1], [2, 2]]),
+        (10, 20, 110, 220, 0.8, [[1, 1], [2, 2], [3, 3]]),
+        (10, 20, 110, 220, 0.8, [[1, 1], [2, 1], [float("nan"), 2]]),
+        (10, 20, 110, 220, 0.8, [[1, 1], [2, 1], [float("inf"), 2]]),
+        (10, 20, 110, 220, 0.8, [[1, 1], [2, 1], ["3", 2]]),
+        (10, 20, 110, 220, 0.8, [[1, 1], [2, 1], [640, 2]]),
+        (10, 20, 110, 220, 0.8, [[1, 1], [2, 1], [3]]),
+    ],
+    ids=[
+        "missing",
+        "empty",
+        "duplicate-degenerate",
+        "zero-area",
+        "nan",
+        "infinity",
+        "nonnumeric",
+        "out-of-bounds",
+        "malformed-point",
+    ],
+)
+def test_bed_zone_response_refuses_absent_degenerate_or_malformed_polygon(
+    box: object,
+) -> None:
+    result = BedRunnerResult(kind="bed", boxes=[box])  # type: ignore[list-item]
+
+    with pytest.raises(BedZoneNotFoundError):
+        bed_zone_response(_IMAGE, result)
+
+
+def test_nvidia_recognizer_uses_strict_shared_response_conversion() -> None:
+    def runner(_image: Image) -> RunnerResult:
+        return bed_result(
+            [
+                (10, 20, 110, 220, 0.99),
+                (2, 2, 40, 40, 0.6, [[2, 2], [40, 2], [40, 40], [2, 40]]),
+            ]
+        )
+
+    recognizer = NvidiaBedZoneRecognizer(
+        _RunnerServingClient(runner),  # type: ignore[arg-type]
+        timeout_s=1.0,
+    )
+
+    assert recognizer(_IMAGE).polygon == ((2, 2), (40, 2), (40, 40), (2, 40))
 
 
 def test_bed_zone_recognizer_accepts_a_run_method_runner_not_just_callable(
@@ -175,4 +235,3 @@ def test_bed_zone_recognizer_raises_when_models_not_initialized(tmp_path: Path) 
 
     with pytest.raises(RuntimeError, match="before models were initialized"):
         runtime._bed_zone_recognizer(_IMAGE)  # noqa: SLF001
-

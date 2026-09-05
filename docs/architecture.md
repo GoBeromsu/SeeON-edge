@@ -169,6 +169,22 @@ the backend builds is matched by the worker's route and by no other, and
 round-trips each worker response body (probe, pose overlay, bed zone) through
 the backend parser. A field either side adds must pass there before it ships.
 
+### Live preview overlays
+
+Preview mode is camera-local: `none` displays the clean image, `fall` displays
+the SDK's detected person boxes and track IDs, and `bedexit` adds the persisted
+bed polygon to those person detections. Bed geometry comes from explicit
+on-demand model recognition and is scaled from its recorded image dimensions;
+the preview does not invent a region or run continuous bed segmentation.
+A camera without a recognized bed region is not ready for bed-exit detection.
+
+Bed recognition consumes a clean snapshot, never the annotated preview cache.
+The shared snapshot tiler/OSD/file bridge serializes requests across cameras.
+Operator preview selections do not disable overlays on alert-evidence JPEGs
+and do not change the original Smart Record video bytes. Host tests cover
+mode routing and polygon pixels; actual SDK rendering still needs runtime
+visual verification.
+
 ## Raw-image vs numeric fan-out
 
 `FramePacket` is the only envelope permitted to carry an image. Four

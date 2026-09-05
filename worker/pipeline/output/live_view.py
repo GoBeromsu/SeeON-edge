@@ -38,11 +38,12 @@ class LatestFrameStore:
         self._viewer_counts: dict[str, int] = {}
         self._snapshot_demand: set[str] = set()
         self._mode: dict[str, OverlayMode] = {}
-        self._demand_listener: Callable[[str, int, str, bool], None] | None = None
+        self._mode_generation: dict[str, int] = {}
+        self._demand_listener: Callable[[str, int, OverlayMode, bool], None] | None = None
 
     def set_demand_listener(
         self,
-        listener: Callable[[str, int, str, bool], None] | None,
+        listener: Callable[[str, int, OverlayMode, bool], None] | None,
     ) -> None:
         with self._condition:
             self._demand_listener = listener
@@ -57,9 +58,13 @@ class LatestFrameStore:
         with self._condition:
             self._viewer_counts[camera_id] = self._viewer_counts.get(camera_id, 0) + 1
             viewers = self._viewer_counts[camera_id]
+            mode = self._mode.get(camera_id, "none")
             listener = self._demand_listener
+            if listener is not None:
+                _ = self._frames.pop(camera_id, None)
+            self._condition.notify_all()
         if listener is not None:
-            listener(camera_id, viewers, "none", False)
+            listener(camera_id, viewers, mode, False)
 
     def mark_viewer_disconnected(self, camera_id: str) -> None:
         """Undo one ``mark_viewer_connected`` (every stream return path calls this)."""
@@ -67,9 +72,13 @@ class LatestFrameStore:
             count = self._viewer_counts.get(camera_id, 0) - 1
             viewers = max(count, 0)
             self._viewer_counts[camera_id] = viewers
+            mode = self._mode.get(camera_id, "none")
             listener = self._demand_listener
+            if viewers > 0 and listener is not None:
+                _ = self._frames.pop(camera_id, None)
+            self._condition.notify_all()
         if listener is not None:
-            listener(camera_id, viewers, "none", False)
+            listener(camera_id, viewers, mode, False)
 
     def has_viewers(self, camera_id: str) -> bool:
         with self._condition:
@@ -86,9 +95,13 @@ class LatestFrameStore:
         with self._condition:
             self._snapshot_demand.add(camera_id)
             viewers = self._viewer_counts.get(camera_id, 0)
+            mode = self._mode.get(camera_id, "none")
             listener = self._demand_listener
+            if listener is not None:
+                _ = self._frames.pop(camera_id, None)
+            self._condition.notify_all()
         if listener is not None:
-            listener(camera_id, viewers, "none", True)
+            listener(camera_id, viewers, mode, True)
 
     def consume_snapshot_demand(self, camera_id: str) -> bool:
         """Atomically check and clear the one-frame snapshot demand flag."""
@@ -100,11 +113,25 @@ class LatestFrameStore:
 
     def set_mode(self, camera_id: str, mode: OverlayMode) -> None:
         with self._condition:
+            if self._mode.get(camera_id, "none") == mode:
+                return
             self._mode[camera_id] = mode
+            generation = self._mode_generation.get(camera_id, 0) + 1
+            self._mode_generation[camera_id] = generation
+            _ = self._frames.pop(camera_id, None)
+            viewers = self._viewer_counts.get(camera_id, 0)
+            listener = self._demand_listener
+            self._condition.notify_all()
+        if listener is not None:
+            listener(camera_id, viewers, mode, True)
 
     def get_mode(self, camera_id: str) -> OverlayMode:
         with self._condition:
             return self._mode.get(camera_id, "none")
+
+    def mode_generation(self, camera_id: str) -> int:
+        with self._condition:
+            return self._mode_generation.get(camera_id, 0)
 
     def publish_jpeg(
         self,
@@ -115,7 +142,9 @@ class LatestFrameStore:
         seq: int | None = None,
         observation_age_sec: float | None = None,
         overlay_stale: bool = False,
-    ) -> None:
+        expected_mode: OverlayMode | None = None,
+        expected_generation: int | None = None,
+    ) -> bool:
         latest = LatestFrame(
             jpeg=bytes(jpeg),
             seq=frame_index if seq is None else seq,
@@ -124,9 +153,17 @@ class LatestFrameStore:
             overlay_stale=overlay_stale,
         )
         with self._condition:
+            if expected_mode is not None and self._mode.get(camera_id, "none") != expected_mode:
+                return False
+            if (
+                expected_generation is not None
+                and self._mode_generation.get(camera_id, 0) != expected_generation
+            ):
+                return False
             self._known_camera_ids.add(camera_id)
             self._frames[camera_id] = latest
             self._condition.notify_all()
+            return True
 
     def get_latest(self, camera_id: str) -> LatestFrame | None:
         with self._condition:

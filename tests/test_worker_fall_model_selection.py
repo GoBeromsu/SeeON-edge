@@ -58,11 +58,7 @@ from worker.runtime.config.worker_models import SelectedFallBundleConfig
 from worker.runtime.lease import GpuLease
 from worker.runtime.profile.boot import BootContext
 from worker.runtime.profile.registry import PROFILE_REGISTRY
-from worker.runtime.provenance.manifest import (
-    RuntimeEnvironmentFacts,
-    build_applied_camera_state,
-    build_applied_runtime_manifest,
-)
+from worker.runtime.provenance.manifest import RuntimeEnvironmentFacts
 from worker.runtime.provenance.model_bundle import DesiredModelBundle, admit_model_bundle
 from worker.runtime.worker import WorkerRuntime, _validate_fall_bundle_conformance
 from worker.tools.export_fall_onnx import export_fall_onnx
@@ -177,6 +173,18 @@ def _runtime(config: WorkerConfig, serving: object, state_dir: Path) -> WorkerRu
         env={"ML_WORKER_PROFILE": "flow"},
         serving_client=serving,
         acquire_lease=lambda: GpuLease.acquire(state_dir),
+        state_dir=state_dir,
+        environment_facts_factory=lambda _boot, _revision: RuntimeEnvironmentFacts(
+            worker_build_revision="c" * 40,
+            os_name="Linux",
+            architecture="x86_64",
+            python_version="3.12.11",
+            model_runtime="onnxruntime",
+            model_runtime_version="1.20.0",
+            accelerator_runtime="CUDA 13.0",
+            driver_version="580.65",
+            device_name="NVIDIA RTX",
+        ),
     )
 
 
@@ -573,6 +581,41 @@ def test_flow_composition_uses_the_loaded_bundle_published_weights_digest(tmp_pa
     assert len(fall.artifact_digest) == 64
 
 
+def test_packaged_bundle_applies_a_runtime_manifest_with_nvdec_camera(
+    tmp_path: Path,
+) -> None:
+    artifact_dir = write_pose_bbox56_bundle(tmp_path / "models" / "fall" / "pose-bbox56-gru")
+    config = _config(
+        with_fall={
+            "type": "pose-bbox56-proxy-v0",
+            "framework": "onnxruntime",
+            "mode": "sequence",
+            "artifact_dir": str(artifact_dir),
+            "weights": "model.pt",
+            "architecture": "arch.json",
+            "metadata": "metadata.yaml",
+            "window": 30,
+            "stride": 5,
+            "input_shape": [30, 56],
+            "operating_threshold": 0.5,
+            "schema_version": 2,
+            "preprocessing_identity": "coco17-xyc-plus-pose-head-xyxy-valid-f32-v1",
+        }
+    )
+    runtime = _runtime(config, _ForbiddenServingClient(), tmp_path)
+    boot = _flow_boot()
+    runtime._boot = boot  # noqa: SLF001 - reproduce the initialized runtime seam
+    runtime._initialize_flow_policy_graph(boot)  # noqa: SLF001
+    plan = runtime._preflight_camera_graph(config.cameras[0])  # noqa: SLF001
+
+    runtime._apply_runtime_manifest(boot, {"camera-a": plan})  # noqa: SLF001
+
+    manifest = runtime._runtime_manifest  # noqa: SLF001
+    assert manifest is not None
+    [camera] = json.loads(manifest.canonical_json)["cameras"]
+    assert camera["effective_decode_backend"] == "nvdec"
+
+
 def test_selected_bundle_composes_a_runtime_manifest_with_runner_preprocessing_identity(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -599,6 +642,7 @@ def test_selected_bundle_composes_a_runtime_manifest_with_runner_preprocessing_i
     runtime = _runtime(config, _ForbiddenServingClient(), tmp_path)
     runtime._admit_selected_fall_bundle()  # noqa: SLF001
     boot = _flow_boot()
+    runtime._boot = boot  # noqa: SLF001 - reproduce the initialized runtime seam
     graph = runtime._initialize_flow_policy_graph(boot)  # noqa: SLF001
     [fall] = [
         identity for identity in graph.identities if identity.component_id == "fall-classifier"
@@ -607,45 +651,13 @@ def test_selected_bundle_composes_a_runtime_manifest_with_runner_preprocessing_i
     assert fall.preprocessing_identity == selection.preprocessing_identity
     assert fall.preprocessing_identity != selection.input_observation_schema
 
-    policy_bundle = default_policy_bundle(("camera-a",))
-    camera = build_applied_camera_state(
-        camera_id="camera-a",
-        effective_decode_backend=boot.decode,
-        ingest_target_fps=5.0,
-        module_qualified_ids=("bed_exit.v1", "fall.v2"),
-        schedule={"pose": 2, "bed": 30},
-        detection_windows={"fall": None, "bed_exit": None},
-        policies={
-            "fall": policy_bundle.resolve("camera-a", "fall", 2),
-            "bed_exit": policy_bundle.resolve("camera-a", "bed_exit", 1),
-        },
-        bed_zone_polygon=None,
-        bed_zone_image_width=None,
-        bed_zone_image_height=None,
-    )
-    manifest = build_applied_runtime_manifest(
-        boot=boot,
-        module_registry=runtime._module_registry,  # noqa: SLF001
-        module_versions=runtime._module_versions,  # noqa: SLF001
-        component_identities=graph.identities,
-        cameras=(camera,),
-        config_version=config.version,
-        restart_generation=0,
-        detector_version="worker-domain-detectors-v1",
-        environment=RuntimeEnvironmentFacts(
-            worker_build_revision="c" * 40,
-            os_name="Linux",
-            architecture="x86_64",
-            python_version="3.12.11",
-            model_runtime="onnxruntime",
-            model_runtime_version="1.20.0",
-            accelerator_runtime="CUDA 13.0",
-            driver_version="580.65",
-            device_name="NVIDIA RTX",
-        ),
-        edge_database_schema_version=5,
-    )
+    plan = runtime._preflight_camera_graph(config.cameras[0])  # noqa: SLF001
+    runtime._apply_runtime_manifest(boot, {"camera-a": plan})  # noqa: SLF001
 
+    manifest = runtime._runtime_manifest  # noqa: SLF001
+    assert manifest is not None
+    [camera] = json.loads(manifest.canonical_json)["cameras"]
+    assert camera["effective_decode_backend"] == "nvdec"
     components = json.loads(manifest.canonical_json)["components"]
     [manifest_fall] = [
         component for component in components if component["component_id"] == "fall-classifier"

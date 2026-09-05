@@ -3,7 +3,7 @@ import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { recognizeBedZone } from '@/shared/api/client';
 import { HttpError } from '@/shared/api/http';
-import { BedZoneRecognitionPanel } from '@/features/settings/BedZoneRecognitionPanel';
+import { BedZoneRecognitionPanel } from '@/shared/ui/BedZoneRecognitionPanel';
 import type { BedZone } from '@/shared/api/client';
 
 vi.mock('@/shared/api/client', async () => {
@@ -49,12 +49,26 @@ function stubStreamingFetch(): ReturnType<typeof createControllableReader>[] {
   return streams;
 }
 
-function render(zone: BedZone | null, onRecognized = vi.fn()): { host: HTMLDivElement; root: Root; onRecognized: typeof onRecognized } {
+function render(zone: BedZone | null, onRecognized = vi.fn()): {
+  host: HTMLDivElement;
+  root: Root;
+  onRecognized: typeof onRecognized;
+  rerender: (cameraId: string, nextZone?: BedZone | null) => void;
+} {
   const host = document.createElement('div');
   document.body.append(host);
   const root = createRoot(host);
   act(() => root.render(<BedZoneRecognitionPanel cameraId="cam-1" bedZone={zone} onRecognized={onRecognized} />));
-  return { host, root, onRecognized };
+  return {
+    host,
+    root,
+    onRecognized,
+    rerender: (cameraId, nextZone = zone) => {
+      act(() => root.render(
+        <BedZoneRecognitionPanel cameraId={cameraId} bedZone={nextZone} onRecognized={onRecognized} />,
+      ));
+    },
+  };
 }
 
 function findButton(host: HTMLElement, label: string): HTMLButtonElement {
@@ -95,7 +109,7 @@ describe('BedZoneRecognitionPanel', () => {
     act(() => root.unmount());
   });
 
-  it('toggles a recognition session: recognizes immediately, keeps re-recognizing every 2s, and stops on "■ 인식 중지"', async () => {
+  it('recognizes exactly once per explicit click and allows another click after completion', async () => {
     stubStreamingFetch();
     vi.mocked(recognizeBedZone).mockResolvedValue(bedZone);
     const { host, root, onRecognized } = render(null);
@@ -104,41 +118,36 @@ describe('BedZoneRecognitionPanel', () => {
     await act(async () => findButton(host, '▶ 인식 시작').click());
     expect(recognizeBedZone).toHaveBeenCalledTimes(1);
     expect(onRecognized).toHaveBeenCalledWith(bedZone);
-    expect(findButton(host, '■ 인식 중지')).toBeTruthy();
 
-    await act(async () => { await vi.advanceTimersByTimeAsync(2_000); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
+    expect(recognizeBedZone).toHaveBeenCalledTimes(1);
+
+    await act(async () => findButton(host, '▶ 인식 시작').click());
     expect(recognizeBedZone).toHaveBeenCalledTimes(2);
-
-    await act(async () => { await vi.advanceTimersByTimeAsync(2_000); });
-    expect(recognizeBedZone).toHaveBeenCalledTimes(3);
-
-    await act(async () => findButton(host, '■ 인식 중지').click());
-    await act(async () => { await vi.advanceTimersByTimeAsync(6_000); });
-    // 세션을 멈춘 뒤에는 시간이 지나도 더 이상 재인식을 호출하지 않는다.
-    expect(recognizeBedZone).toHaveBeenCalledTimes(3);
-    expect(findButton(host, '▶ 인식 시작')).toBeTruthy();
+    expect(onRecognized).toHaveBeenCalledTimes(2);
 
     act(() => root.unmount());
   });
 
-  it('keeps the polygon overlay visible while a session is running instead of clearing it every frame', async () => {
+  it('keeps the persisted polygon overlay visible while recognition is pending', async () => {
     stubStreamingFetch();
-    vi.mocked(recognizeBedZone).mockResolvedValue(bedZone);
+    let resolveRecognition!: (zone: BedZone) => void;
+    vi.mocked(recognizeBedZone).mockReturnValue(new Promise((resolve) => { resolveRecognition = resolve; }));
     const { host, root } = render(bedZone);
     await flushMicrotasks();
 
-    await act(async () => findButton(host, '▶ 인식 시작').click());
+    act(() => findButton(host, '다시 인식').click());
     expect(host.querySelector('polygon')).not.toBeNull();
+    expect(findButton(host, '인식 중...').disabled).toBe(true);
 
-    await act(async () => { await vi.advanceTimersByTimeAsync(2_000); });
-    // 재인식 사이클이 한 번 더 지나도(=캔버스가 새 프레임으로 다시 그려져도) 오버레이 svg는
-    // 캔버스와 별개 엘리먼트이므로 계속 남아 있어야 한다.
+    await act(async () => resolveRecognition(bedZone));
     expect(host.querySelector('polygon')).not.toBeNull();
+    expect(findButton(host, '다시 인식').disabled).toBe(false);
 
     act(() => root.unmount());
   });
 
-  it('shows the "침대를 찾지 못했습니다" failure message on a 422 bed_not_found rejection without ending the session', async () => {
+  it('shows the "침대를 찾지 못했습니다" failure message on a 422 bed_not_found rejection', async () => {
     stubStreamingFetch();
     vi.mocked(recognizeBedZone).mockRejectedValue(
       new HttpError(422, { detail: { error_class: 'bed_not_found' } }),
@@ -149,28 +158,44 @@ describe('BedZoneRecognitionPanel', () => {
     await act(async () => findButton(host, '▶ 인식 시작').click());
 
     expect(host.querySelector('[role="alert"]')?.textContent).toContain('침대를 찾지 못했습니다');
-    expect(findButton(host, '■ 인식 중지')).toBeTruthy();
+    expect(findButton(host, '▶ 인식 시작').disabled).toBe(false);
 
     act(() => root.unmount());
   });
 
-  it('stops both the recognition timer and the MJPEG stream once the panel unmounts', async () => {
-    const streams = stubStreamingFetch();
-    vi.mocked(recognizeBedZone).mockResolvedValue(bedZone);
-    const { host, root } = render(null);
+  it('ignores a stale recognition response after the camera changes', async () => {
+    stubStreamingFetch();
+    let resolveRecognition!: (zone: BedZone) => void;
+    vi.mocked(recognizeBedZone).mockReturnValue(new Promise((resolve) => { resolveRecognition = resolve; }));
+    const { host, root, onRecognized, rerender } = render(null);
     await flushMicrotasks();
 
-    await act(async () => findButton(host, '▶ 인식 시작').click());
+    act(() => findButton(host, '▶ 인식 시작').click());
+    expect(findButton(host, '인식 중...').disabled).toBe(true);
+
+    rerender('cam-2');
+    expect(findButton(host, '▶ 인식 시작').disabled).toBe(false);
+    await act(async () => resolveRecognition(bedZone));
+    expect(onRecognized).not.toHaveBeenCalled();
+    expect(host.querySelector('[role="alert"]')).toBeNull();
+
+    act(() => root.unmount());
+  });
+
+  it('ignores a pending recognition response after unmount and stops the MJPEG stream', async () => {
+    const streams = stubStreamingFetch();
+    let resolveRecognition!: (zone: BedZone) => void;
+    vi.mocked(recognizeBedZone).mockReturnValue(new Promise((resolve) => { resolveRecognition = resolve; }));
+    const { host, root, onRecognized } = render(null);
+    await flushMicrotasks();
+
+    act(() => findButton(host, '▶ 인식 시작').click());
     expect(recognizeBedZone).toHaveBeenCalledTimes(1);
     expect(streams[0]?.reader.cancel).not.toHaveBeenCalled();
 
     act(() => root.unmount());
-
-    // 언마운트 후에는 타이머가 더 이상 돌지 않는다 -- 재인식 호출이 늘지 않아야 한다.
-    await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
-    expect(recognizeBedZone).toHaveBeenCalledTimes(1);
-
-    // useMjpegStream의 언마운트 정리로 스트림 리더도 취소된다.
+    await act(async () => resolveRecognition(bedZone));
+    expect(onRecognized).not.toHaveBeenCalled();
     expect(streams[0]?.reader.cancel).toHaveBeenCalled();
   });
 });

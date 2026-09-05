@@ -10,7 +10,7 @@ HTTP + DTO boundary. Features call this. Screens stay out.
 - `*Normalizer.ts` + `normalizerFields.ts`: parse or throw. Barrel is `normalizers.ts`.
 - `http.ts` + `session.ts`: `requestJson`, `HttpError`, 401/403 bus, `getApiBase()`, media URLs.
 - `usePollingResource.ts`: shared poller plus named resource hooks.
-- `useMjpegStream.ts`: `fetch` + canvas MJPEG hook (Content-Length framed parts, 3s stall reconnect, backoff). Used by operations `LiveStreamPanel` and settings `BedZoneRecognitionPanel`.
+- `useMjpegStream.ts`: `fetch` + canvas MJPEG hook (Content-Length framed parts, 3s stall reconnect, backoff). Used by operations `LiveStreamPanel` and `shared/ui/BedZoneRecognitionPanel`.
 
 ## client.ts
 All traffic goes through `requestJson`. Paths are `/api/v1`-relative. Encode ids.

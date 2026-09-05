@@ -7,6 +7,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from collections.abc import Callable
 
 import cv2
 import numpy as np
@@ -23,11 +24,8 @@ from worker.pipeline.output.mjpeg_server import (
     dev_mjpeg_host,
 )
 
-# A real, cv2-decodable JPEG -- unlike the fake `b"\xff\xd8jpeg\xff\xd9"` bytes
-# used by the /stream and /snapshot tests above (those routes never decode
-# the buffer), the bed-zone recognize handler calls `cv2.imdecode` on
-# whatever is cached before invoking the injected recognizer, so it needs
-# bytes that actually round-trip.
+# A real, cv2-decodable JPEG for the clean snapshot provider used by
+# bed-zone recognition.
 _REAL_JPEG = cv2.imencode(".jpg", np.zeros((16, 16, 3), dtype=np.uint8))[1].tobytes()
 _RELAY_TOKEN = "relay-token"
 _AUTH_HEADERS = {"X-Edge-Relay-Token": _RELAY_TOKEN}
@@ -280,6 +278,49 @@ def test_mjpeg_stream_emits_multiple_camera_keyed_non_consuming_parts() -> None:
     assert latest.jpeg == b"\xff\xd8camera-a-3\xff\xd9"
 
 
+def test_mjpeg_stream_requests_bounded_refreshes_and_emits_new_frames() -> None:
+    store = LatestFrameStore()
+    store.register_camera("camera-a")
+    refresh_times: list[float] = []
+
+    def publish_on_demand(
+        camera_id: str,
+        viewers: int,
+        _mode: str,
+        snapshot_requested: bool,
+    ) -> None:
+        if viewers <= 0 and not snapshot_requested:
+            return
+        refresh_times.append(time.monotonic())
+        frame_index = len(refresh_times)
+        store.publish_jpeg(
+            camera_id,
+            f"\xff\xd8refresh-{frame_index}\xff\xd9".encode(),
+            frame_index=frame_index,
+        )
+
+    store.set_demand_listener(publish_on_demand)
+    server = MjpegServer(store, MjpegServerConfig(port=0, probe_token=_RELAY_TOKEN))
+    server.start()
+    try:
+        with urllib.request.urlopen(
+            _authed_get(f"http://127.0.0.1:{server.port}/stream/camera-a"),
+            timeout=2,
+        ) as response:
+            body = bytearray()
+            deadline = time.monotonic() + 2.0
+            while b"refresh-3" not in body and time.monotonic() < deadline:
+                body.extend(response.read(1))
+
+        assert b"refresh-1" in body
+        assert b"refresh-2" in body
+        assert b"refresh-3" in body
+        assert len(refresh_times) >= 3
+        assert refresh_times[1] - refresh_times[0] >= 0.04
+    finally:
+        server.stop()
+
+
 def test_stream_connect_and_disconnect_track_the_viewer_counter() -> None:
     """Viewer gating (#48): the counter must clear even on a broken pipe.
 
@@ -518,7 +559,11 @@ def test_bed_zone_recognize_unknown_camera_returns_404() -> None:
 def test_bed_zone_recognize_without_recognizer_configured_returns_503() -> None:
     store = LatestFrameStore()
     store.register_camera("camera-a")
-    server = MjpegServer(store, MjpegServerConfig(port=0, probe_token=_RELAY_TOKEN))
+    server = MjpegServer(
+        store,
+        MjpegServerConfig(port=0, probe_token=_RELAY_TOKEN),
+        bed_zone_snapshot=lambda _camera_id: _REAL_JPEG,
+    )
     server.start()
     base = f"http://127.0.0.1:{server.port}"
     try:
@@ -532,7 +577,7 @@ def test_bed_zone_recognize_without_recognizer_configured_returns_503() -> None:
         server.stop()
 
 
-def test_bed_zone_recognize_no_frame_available_returns_503() -> None:
+def test_bed_zone_recognize_without_clean_snapshot_provider_returns_503() -> None:
     store = LatestFrameStore()
     store.register_camera("camera-a")
     recognizer_calls: list[object] = []
@@ -545,7 +590,6 @@ def test_bed_zone_recognize_no_frame_available_returns_503() -> None:
         store,
         MjpegServerConfig(port=0, probe_token=_RELAY_TOKEN),
         bed_zone_recognizer=recognizer,
-        bed_zone_frame_timeout_s=0.05,
     )
     server.start()
     base = f"http://127.0.0.1:{server.port}"
@@ -555,10 +599,53 @@ def test_bed_zone_recognize_no_frame_available_returns_503() -> None:
         except urllib.error.HTTPError as exc:
             assert exc.code == 503
         else:  # pragma: no cover
-            raise AssertionError("no cached frame should 503")
+            raise AssertionError("missing clean snapshot provider should 503")
         assert recognizer_calls == []
     finally:
         server.stop()
+
+
+@pytest.mark.parametrize(
+    "provider",
+    [
+        lambda _camera_id: b"",
+        lambda _camera_id: b"not-a-jpeg",
+        lambda _camera_id: (_ for _ in ()).throw(RuntimeError("snapshot unavailable")),
+    ],
+    ids=("empty", "invalid-jpeg", "unavailable"),
+)
+def test_bed_zone_recognize_snapshot_failure_does_not_call_recognizer(
+    provider: Callable[[str], bytes],
+) -> None:
+    store = LatestFrameStore()
+    store.publish_jpeg("camera-a", _REAL_JPEG, frame_index=1)
+    recognizer_calls: list[object] = []
+
+    def recognizer(image: np.ndarray) -> BedZoneRecognizeResponse:
+        recognizer_calls.append(image)
+        return BedZoneRecognizeResponse(polygon=((0, 0),), image_width=1, image_height=1)
+
+    server = MjpegServer(
+        store,
+        MjpegServerConfig(port=0, probe_token=_RELAY_TOKEN),
+        bed_zone_recognizer=recognizer,
+        bed_zone_snapshot=provider,
+    )
+    server.start()
+    try:
+        with pytest.raises(urllib.error.HTTPError) as raised:
+            urllib.request.urlopen(
+                _post_bed_zone_recognize(
+                    f"http://127.0.0.1:{server.port}",
+                    "camera-a",
+                ),
+                timeout=1,
+            )
+    finally:
+        server.stop()
+
+    assert raised.value.code == 503
+    assert recognizer_calls == []
 
 
 @pytest.mark.parametrize(
@@ -591,7 +678,7 @@ def test_bed_zone_recognize_rejects_images_outside_the_image_contract(
         store,
         MjpegServerConfig(port=0, probe_token=_RELAY_TOKEN),
         bed_zone_recognizer=recognizer,
-        bed_zone_frame_timeout_s=0.05,
+        bed_zone_snapshot=lambda _camera_id: _REAL_JPEG,
     )
     server.start()
     base = f"http://127.0.0.1:{server.port}"
@@ -605,10 +692,17 @@ def test_bed_zone_recognize_rejects_images_outside_the_image_contract(
     assert recognizer_calls == []
 
 
-def test_bed_zone_recognize_success_returns_polygon_and_dimensions() -> None:
+def test_bed_zone_recognize_uses_clean_snapshot_not_annotated_preview() -> None:
     store = LatestFrameStore()
-    store.publish_jpeg("camera-a", _REAL_JPEG, frame_index=1)
+    annotated_jpeg = cv2.imencode(".jpg", np.full((16, 16, 3), 255, dtype=np.uint8))[1].tobytes()
+    clean_jpeg = cv2.imencode(".jpg", np.zeros((16, 16, 3), dtype=np.uint8))[1].tobytes()
+    store.publish_jpeg("camera-a", annotated_jpeg, frame_index=1)
+    snapshot_camera_ids: list[str] = []
     seen_images: list[np.ndarray] = []
+
+    def clean_snapshot(camera_id: str) -> bytes:
+        snapshot_camera_ids.append(camera_id)
+        return clean_jpeg
 
     def recognizer(image: np.ndarray) -> BedZoneRecognizeResponse:
         seen_images.append(image)
@@ -620,7 +714,7 @@ def test_bed_zone_recognize_success_returns_polygon_and_dimensions() -> None:
         store,
         MjpegServerConfig(port=0, probe_token=_RELAY_TOKEN),
         bed_zone_recognizer=recognizer,
-        bed_zone_frame_timeout_s=0.05,
+        bed_zone_snapshot=clean_snapshot,
     )
     server.start()
     base = f"http://127.0.0.1:{server.port}"
@@ -636,8 +730,10 @@ def test_bed_zone_recognize_success_returns_polygon_and_dimensions() -> None:
             "image_height": 16,
         }
         assert len(seen_images) == 1
+        assert snapshot_camera_ids == ["camera-a"]
         assert seen_images[0].dtype == np.dtype(np.uint8)
         assert seen_images[0].shape == (16, 16, 3)
+        assert int(seen_images[0].max()) == 0
     finally:
         server.stop()
 
@@ -654,7 +750,7 @@ def test_bed_zone_recognize_not_found_maps_to_structured_404() -> None:
         store,
         MjpegServerConfig(port=0, probe_token=_RELAY_TOKEN),
         bed_zone_recognizer=recognizer,
-        bed_zone_frame_timeout_s=0.05,
+        bed_zone_snapshot=lambda _camera_id: _REAL_JPEG,
     )
     server.start()
     base = f"http://127.0.0.1:{server.port}"
@@ -683,7 +779,7 @@ def test_bed_zone_recognize_runner_failure_returns_503() -> None:
         store,
         MjpegServerConfig(port=0, probe_token=_RELAY_TOKEN),
         bed_zone_recognizer=recognizer,
-        bed_zone_frame_timeout_s=0.05,
+        bed_zone_snapshot=lambda _camera_id: _REAL_JPEG,
     )
     server.start()
     base = f"http://127.0.0.1:{server.port}"
@@ -726,7 +822,7 @@ def test_media_endpoints_require_relay_token_no_wrong_correct(
         store,
         MjpegServerConfig(port=0, probe_token=_RELAY_TOKEN),
         bed_zone_recognizer=recognizer,
-        bed_zone_frame_timeout_s=0.05,
+        bed_zone_snapshot=lambda _camera_id: _REAL_JPEG,
     )
     server.start()
     base = f"http://127.0.0.1:{server.port}"

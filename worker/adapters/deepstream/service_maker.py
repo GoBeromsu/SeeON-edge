@@ -176,7 +176,6 @@ class DeepStreamMediaPlane(MediaPlane):
         self._probe = _Probe(self)
         self._snapshot_encoder = snapshot_encoder
         self._snapshot_lock = threading.Lock()
-        self._snapshot_pending: set[str] = set()
         self._snapshot_dir = config.record_dir / ".snapshots"
         self._snapshot_dir.mkdir(parents=True, exist_ok=True)
         for path in self._snapshot_dir.glob("*.jpg"):
@@ -306,7 +305,7 @@ class DeepStreamMediaPlane(MediaPlane):
         self._live.discard(camera_id)
         return binding
 
-    def snapshot(self, camera_id: str) -> bytes:
+    def snapshot(self, camera_id: str, *, draw_objects: bool = True) -> bytes:
         if camera_id not in self._sources.camera_ids():
             raise SnapshotUnavailable(f"unknown source has no OSD snapshot: {camera_id}")
         if self._snapshot_encoder is not None:
@@ -315,42 +314,50 @@ class DeepStreamMediaPlane(MediaPlane):
             raise SnapshotUnavailable(
                 f"source has not started its OSD snapshot branch: {camera_id}"
             )
-        with self._snapshot_lock:
-            if camera_id in self._snapshot_pending:
-                raise SnapshotUnavailable(
-                    f"OSD snapshot is already pending for source: {camera_id}"
-                )
-            self._snapshot_pending.add(camera_id)
-        index = self._sources.pad_index(camera_id)
-        for stale_path in self._snapshot_dir.glob("snapshot-*.jpg"):
-            stale_path.unlink()
-        path: Path | None = None
-        try:
-            def select_source_and_open_valve() -> None:
-                self._pipeline["snapshot-tiler"].set({"show-source": index})
-                self._pipeline["snapshot-valve"].set({"drop": False})
-
-            self._call_on_pipeline(select_source_and_open_valve)
-            deadline = time.monotonic() + 2.0
-            while time.monotonic() < deadline:
-                candidates = tuple(self._snapshot_dir.glob("snapshot-*.jpg"))
-                if candidates:
-                    path = max(candidates, key=lambda candidate: candidate.stat().st_mtime_ns)
-                    if path.stat().st_size:
-                        break
-                time.sleep(0.01)
-        finally:
-            self._call_on_pipeline(
-                lambda: self._pipeline["snapshot-valve"].set({"drop": True})
+        if camera_id not in self._live:
+            raise SnapshotUnavailable(
+                f"source has not published a frame for its OSD snapshot branch: {camera_id}"
             )
-            with self._snapshot_lock:
-                self._snapshot_pending.discard(camera_id)
-        if path is None or not path.stat().st_size:
-            raise SnapshotUnavailable(f"OSD snapshot branch timed out for source: {camera_id}")
-        try:
-            return path.read_bytes()
-        finally:
-            path.unlink(missing_ok=True)
+        with self._snapshot_lock:
+            index = self._sources.pad_index(camera_id)
+            try:
+                for stale_path in self._snapshot_dir.glob("snapshot-*.jpg"):
+                    stale_path.unlink()
+
+                def select_source_configure_osd_and_open_valve() -> None:
+                    self._pipeline["snapshot-tiler"].set({"show-source": index})
+                    self._pipeline["snapshot-osd"].set(
+                        {
+                            "display-bbox": int(draw_objects),
+                            "display-text": int(draw_objects),
+                        }
+                    )
+                    self._pipeline["snapshot-valve"].set({"drop": False})
+
+                self._call_on_pipeline(select_source_configure_osd_and_open_valve)
+                deadline = time.monotonic() + 2.0
+                while time.monotonic() < deadline:
+                    candidates = tuple(self._snapshot_dir.glob("snapshot-*.jpg"))
+                    if candidates:
+                        path = max(candidates, key=lambda candidate: candidate.stat().st_mtime_ns)
+                        jpeg = path.read_bytes()
+                        if jpeg.startswith(b"\xff\xd8") and jpeg.endswith(b"\xff\xd9"):
+                            return jpeg
+                    time.sleep(0.01)
+                raise SnapshotUnavailable(f"OSD snapshot branch timed out for source: {camera_id}")
+            finally:
+
+                def close_valve_and_reset_osd() -> None:
+                    try:
+                        self._pipeline["snapshot-valve"].set({"drop": True})
+                    finally:
+                        self._pipeline["snapshot-osd"].set({"display-bbox": 1, "display-text": 1})
+
+                try:
+                    self._call_on_pipeline(close_valve_and_reset_osd)
+                finally:
+                    for snapshot_path in self._snapshot_dir.glob("snapshot-*.jpg"):
+                        snapshot_path.unlink(missing_ok=True)
 
     def start_recording(
         self,
@@ -488,12 +495,8 @@ class DeepStreamMediaPlane(MediaPlane):
             osd,
             {"gpu-id": 0, "display-bbox": 1, "display-text": 1},
         )
-        self._pipeline.add(
-            "nvvideoconvert", post_osd_convert, {"gpu-id": 0, "compute-hw": 1}
-        )
-        self._pipeline.add(
-            "capsfilter", caps, {"caps": "video/x-raw(memory:NVMM), format=I420"}
-        )
+        self._pipeline.add("nvvideoconvert", post_osd_convert, {"gpu-id": 0, "compute-hw": 1})
+        self._pipeline.add("capsfilter", caps, {"caps": "video/x-raw(memory:NVMM), format=I420"})
         self._pipeline.add("nvjpegenc", encoder)
         self._pipeline.add(
             "multifilesink",

@@ -1,16 +1,16 @@
 from __future__ import annotations
 
 import json
-import threading
-import time
 import urllib.request
 from pathlib import Path
 from types import SimpleNamespace
 
 import cv2
 import numpy as np
+import pytest
 
 from contracts.runner import Image, bed_result
+from worker.adapters.deepstream.service_maker import DeepStreamFlowStopTimeout
 from worker.pipeline.output.live_view import LatestFrameStore
 from worker.pipeline.output.mjpeg_server import MjpegServer, MjpegServerConfig
 from worker.runtime.config import WorkerConfig
@@ -18,6 +18,20 @@ from worker.runtime.lease import GpuLease
 from worker.runtime.worker import WorkerRuntime
 
 _JPEG = cv2.imencode(".jpg", np.zeros((16, 16, 3), dtype=np.uint8))[1].tobytes()
+
+
+class _FlowPlane:
+    def __init__(self, stop_error: Exception | None = None) -> None:
+        self.stop_error = stop_error
+        self.snapshot_calls: list[str] = []
+
+    def clean_snapshot(self, camera_id: str) -> bytes:
+        self.snapshot_calls.append(camera_id)
+        return _JPEG
+
+    def stop(self) -> None:
+        if self.stop_error is not None:
+            raise self.stop_error
 
 
 class _BedRunner:
@@ -77,6 +91,8 @@ def test_flow_live_view_injects_bed_recognizer_and_recognize_request_reaches_it(
     runtime.fall_model = fall_model
     runtime._live_frames = LatestFrameStore()  # noqa: SLF001
     runtime._live_frames.publish_jpeg("camera-a", _JPEG, frame_index=1)  # noqa: SLF001
+    plane = _FlowPlane()
+    runtime._flow_media_plane = plane  # noqa: SLF001
     captured: dict[str, object] = {}
 
     def start_server(
@@ -86,6 +102,7 @@ def test_flow_live_view_injects_bed_recognizer_and_recognize_request_reaches_it(
         probe: object = None,
         bed_zone_recognizer: object = None,
         replay_fall_model: object = None,
+        bed_zone_snapshot: object = None,
     ) -> MjpegServer:
         captured["bed_zone_recognizer"] = bed_zone_recognizer
         captured["replay_fall_model"] = replay_fall_model
@@ -95,7 +112,7 @@ def test_flow_live_view_injects_bed_recognizer_and_recognize_request_reaches_it(
             probe=probe,
             bed_zone_recognizer=bed_zone_recognizer,
             replay_fall_model=replay_fall_model,
-            bed_zone_frame_timeout_s=1.0,
+            bed_zone_snapshot=bed_zone_snapshot,
         )
         server.start()
         return server
@@ -114,24 +131,46 @@ def test_flow_live_view_injects_bed_recognizer_and_recognize_request_reaches_it(
             headers={"X-Edge-Relay-Token": "relay-token"},
             method="POST",
         )
-        response_payload: dict[str, object] = {}
-
-        def recognize() -> None:
-            with urllib.request.urlopen(request, timeout=2) as response:
-                response_payload.update(json.loads(response.read().decode("utf-8")))
-
-        thread = threading.Thread(target=recognize)
-        thread.start()
-        time.sleep(0.05)
-        runtime._live_frames.publish_jpeg("camera-a", _JPEG, frame_index=2)  # noqa: SLF001
-        thread.join(timeout=2)
-
-        assert not thread.is_alive()
+        with urllib.request.urlopen(request, timeout=2) as response:
+            response_payload = json.loads(response.read().decode("utf-8"))
         assert response_payload == {
             "polygon": [[1, 2], [12, 2], [12, 14], [1, 14]],
             "image_width": 16,
             "image_height": 16,
         }
         assert serving.create_calls == [("bed", "cpu")]
+        assert plane.snapshot_calls == ["camera-a"]
     finally:
         runtime.stop()
+
+
+@pytest.mark.parametrize(
+    ("stop_error", "exit_codes"),
+    [
+        (None, []),
+        (DeepStreamFlowStopTimeout("deadline exceeded"), [4]),
+        (RuntimeError("unrelated stop error"), []),
+    ],
+)
+def test_only_flow_stop_deadline_uses_terminal_exit(
+    tmp_path: Path, stop_error: Exception | None, exit_codes: list[int]
+) -> None:
+    actual_exits: list[int] = []
+    runtime = WorkerRuntime(
+        _config(),
+        env={"ML_WORKER_PROFILE": "flow"},
+        serving_client=_ServingClient(),
+        state_dir=tmp_path,
+        hard_exit=actual_exits.append,
+    )
+    plane = _FlowPlane(stop_error)
+    runtime._flow_media_plane = plane  # noqa: SLF001
+    if stop_error is None:
+        runtime._stop_flow_media_plane()  # noqa: SLF001
+        assert runtime._flow_media_plane is None  # noqa: SLF001
+    else:
+        with pytest.raises(type(stop_error)) as error:
+            runtime._stop_flow_media_plane()  # noqa: SLF001
+        assert error.value is stop_error
+        assert runtime._flow_media_plane is plane  # noqa: SLF001
+    assert actual_exits == exit_codes

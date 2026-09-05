@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { testCamera, updateCamera, type BedZone, type Camera, type CameraTestResult } from '@/shared/api/client';
 import { AccessibleDialog } from '@/shared/ui/AccessibleDialog';
-import { BedZoneRecognitionPanel } from '@/features/settings/BedZoneRecognitionPanel';
+import { BedZoneRecognitionPanel } from '@/shared/ui/BedZoneRecognitionPanel';
 import { FloorSelect } from '@/features/settings/FloorSelect';
 import { assessRtspSubstreamGuidance } from '@/features/settings/rtspSubstreamGuidance';
 import { getCameraStatusMeta, statusBadgeClassName } from '@/shared/ui/StatusBadge';

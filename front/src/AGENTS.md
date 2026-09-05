@@ -16,7 +16,7 @@ Import that way in app, features, shared, and tests. Never `../../`.
   - `account-settings/`: single-admin username/password modal. Mounted from `App`, not a page.
 - `shared/`: cross-slice building blocks only.
   - `shared/api/`: HTTP (`http.ts`), session/base URL (`session.ts`), `client.ts` + per-resource normalizers, DTO types, polling hooks (`usePollingResource.ts`), MJPEG live-stream hook (`useMjpegStream.ts`, used by operations and settings), topology client.
-  - `shared/ui/`: presentational shell pieces: NavBar, AuthGate, AccessibleDialog, Toast, StatusBadge, ClipThumbnail, AutoplayVideo.
+  - `shared/ui/`: shared interface pieces: NavBar, AuthGate, AccessibleDialog, Toast, StatusBadge, ClipThumbnail, AutoplayVideo, and BedZoneRecognitionPanel.
   - `shared/format/`: tiny formatters (`bytes`, `uuid`).
 - `styles/`: token + shell CSS imported from `styles.css`. Don't dump feature layout here.
 - `test/setup.ts`: jsdom act flag + `HTMLMediaElement.play` stub. Vitest `setupFiles` points here.

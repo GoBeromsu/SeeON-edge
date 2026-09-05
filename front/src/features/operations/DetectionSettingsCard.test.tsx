@@ -11,6 +11,12 @@ const onlineCamera: Camera = {
   floor_name: '1층',
   status: 'online',
   created_at: null,
+  bed_zone: {
+    polygon: [[0, 0], [10, 0], [10, 10], [0, 10]],
+    image_width: 1920,
+    image_height: 1080,
+    recognized_at: '2026-09-05T00:00:00Z',
+  },
 };
 
 const offlineCamera: Camera = { ...onlineCamera, id: 'cam-2', status: 'offline' };
@@ -62,6 +68,7 @@ afterEach(() => {
   document.body.innerHTML = '';
   vi.unstubAllGlobals();
   overlayMode = 'none';
+  detectionSettings.domains.bed_exit.on = false;
 });
 
 describe('DetectionSettingsCard (operations)', () => {
@@ -73,6 +80,57 @@ describe('DetectionSettingsCard (operations)', () => {
     expect(host.textContent).toContain('탐지 중');
     expect(host.textContent).toContain('꺼짐');
     expect(host.textContent).not.toContain('중단됨');
+  });
+
+  it('never marks enabled bed-exit as detecting without persisted geometry, while fall remains detecting', async () => {
+    installFetchMock();
+    detectionSettings.domains.bed_exit.on = true;
+    const cameraWithoutBedZone: Camera = { ...onlineCamera, bed_zone: null };
+    const { host } = await render(cameraWithoutBedZone);
+
+    expect(host.textContent).toContain('침대 영역 미설정');
+    expect(host.textContent).toContain('침대 영역 인식');
+    expect(host.textContent?.match(/탐지 중/g)).toHaveLength(1);
+  });
+
+  it('marks enabled bed-exit as detecting when persisted geometry exists', async () => {
+    installFetchMock();
+    detectionSettings.domains.bed_exit.on = true;
+    const { host } = await render(onlineCamera);
+
+    expect(host.textContent).not.toContain('침대 영역 미설정');
+    expect(host.textContent?.match(/탐지 중/g)).toHaveLength(2);
+  });
+
+  it('keeps the disabled state ahead of missing bed geometry', async () => {
+    installFetchMock();
+    detectionSettings.domains.bed_exit.on = false;
+    const { host } = await render({ ...onlineCamera, bed_zone: null });
+
+    expect(host.textContent).toContain('꺼짐');
+    expect(host.textContent).not.toContain('침대 영역 미설정');
+  });
+
+  it('makes recognition actionable without treating the click itself as successful geometry', async () => {
+    installFetchMock();
+    detectionSettings.domains.bed_exit.on = true;
+    const onRecognizeBedZone = vi.fn();
+    const host = document.createElement('div');
+    document.body.append(host);
+    const root = createRoot(host);
+    act(() => root.render(
+      <DetectionSettingsCard
+        camera={{ ...onlineCamera, bed_zone: null }}
+        onRecognizeBedZone={onRecognizeBedZone}
+      />,
+    ));
+    await flush();
+
+    const action = Array.from(host.querySelectorAll('button')).find((button) => button.textContent === '침대 영역 인식');
+    expect(action).toBeTruthy();
+    act(() => action?.click());
+    expect(onRecognizeBedZone).toHaveBeenCalledOnce();
+    expect(host.textContent).toContain('침대 영역 미설정');
   });
 
   it('shows "중단됨" for every domain when the camera is offline, regardless of the domain\'s own on/off flag', async () => {

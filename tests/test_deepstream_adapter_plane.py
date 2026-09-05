@@ -34,6 +34,8 @@ from worker.interfaces.media_plane import (
 )
 from worker.runtime.flow.metadata_slot import LatestMetadataSlot
 
+_JPEG = b"\xff\xd8complete-jpeg\xff\xd9"
+
 
 class _Element:
     def __init__(self) -> None:
@@ -160,6 +162,17 @@ def _info(session: int) -> SimpleNamespace:
         duration=20,
         width=640,
         height=360,
+    )
+
+
+def _admit_frame(plane: DeepStreamMediaPlane, *, pad_index: int = 0) -> None:
+    plane.publish_frame(
+        SimpleNamespace(
+            pad_index=pad_index,
+            buffer_pts=1,
+            tensor_items=[],
+            object_items=[],
+        )
     )
 
 
@@ -300,15 +313,16 @@ def test_default_steady_state_builds_only_the_discard_sink() -> None:
 
 def test_snapshot_encoder_runs_only_for_the_alert_that_requested_a_snapshot() -> None:
     encoded: list[str] = []
-    plane, _ = _plane()
+    plane, pipeline = _plane()
     plane._snapshot_encoder = lambda camera_id: (  # noqa: SLF001 - adapter seam
-        encoded.append(camera_id) or b"\xff\xd8burned-overlay\xff\xd9"
+        encoded.append(camera_id) or _JPEG
     )
     plane.add_source("camera", "rtsp://one")
 
     assert encoded == []
-    assert plane.snapshot("camera") == b"\xff\xd8burned-overlay\xff\xd9"
+    assert plane.snapshot("camera", draw_objects=False) == _JPEG
     assert encoded == ["camera"]
+    assert "snapshot-osd" not in pipeline.elements
 
 
 def test_enabled_snapshot_branch_uses_the_fork_as_the_discard_terminal() -> None:
@@ -346,9 +360,23 @@ def test_enabled_snapshot_branch_uses_the_fork_as_the_discard_terminal() -> None
     assert flow.render_calls == [{"mode": "discard", "enable_osd": False, "sync": False}]
 
 
+def test_snapshot_refuses_a_source_that_has_not_published_a_frame() -> None:
+    plane, pipeline = _plane(snapshot_branch_enabled=True)
+    plane.add_source("camera", "rtsp://one")
+    plane.start()
+
+    with pytest.raises(SnapshotUnavailable, match="has not published a frame"):
+        plane.snapshot("camera")
+
+    assert pipeline["snapshot-valve"].properties["drop"] is True
+    assert tuple(plane._snapshot_dir.glob("snapshot-*.jpg")) == ()  # noqa: SLF001
+    plane.stop()
+
+
 def test_enabled_snapshot_branch_closes_its_valve_after_one_jpeg() -> None:
     plane, pipeline = _plane(snapshot_branch_enabled=True)
     plane.add_source("camera", "rtsp://one")
+    _admit_frame(plane)
     plane.start()
     result: list[bytes] = []
     request = threading.Thread(target=lambda: result.append(plane.snapshot("camera")))
@@ -371,10 +399,201 @@ def test_enabled_snapshot_branch_closes_its_valve_after_one_jpeg() -> None:
     plane.stop()
 
 
+def test_snapshot_waits_for_a_complete_jpeg(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plane, pipeline = _plane(snapshot_branch_enabled=True)
+    plane.add_source("camera", "rtsp://one")
+    _admit_frame(plane)
+    plane.start()
+    valve_opened = threading.Event()
+    incomplete_observed = threading.Event()
+    valve = pipeline["snapshot-valve"]
+    original_set = valve.set
+
+    def observe_valve(properties: dict[str, object]) -> None:
+        original_set(properties)
+        if properties.get("drop") is False:
+            valve_opened.set()
+
+    monkeypatch.setattr(valve, "set", observe_valve)
+    original_read_bytes = Path.read_bytes
+
+    def observe_read(path: Path) -> bytes:
+        data = original_read_bytes(path)
+        if data == b"\xff\xd8incomplete":
+            incomplete_observed.set()
+        return data
+
+    monkeypatch.setattr(Path, "read_bytes", observe_read)
+    result: list[bytes] = []
+    errors: list[BaseException] = []
+
+    def capture() -> None:
+        try:
+            result.append(plane.snapshot("camera"))
+        except BaseException as error:  # noqa: BLE001 - surfaced to the test thread
+            errors.append(error)
+
+    request = threading.Thread(target=capture)
+    request.start()
+    assert valve_opened.wait(timeout=1)
+    path = plane._snapshot_dir / "snapshot-0000000000.jpg"  # noqa: SLF001
+    path.write_bytes(b"\xff\xd8incomplete")
+    assert incomplete_observed.wait(timeout=1)
+    assert request.is_alive()
+
+    path.write_bytes(_JPEG)
+    request.join(timeout=1)
+
+    assert not request.is_alive()
+    assert errors == []
+    assert result == [_JPEG]
+    assert pipeline["snapshot-valve"].properties["drop"] is True
+    plane.stop()
+
+
+def test_snapshot_configures_requested_osd_mode_and_resets_to_evidence_default() -> None:
+    plane, pipeline = _plane(snapshot_branch_enabled=True)
+    plane.add_source("camera", "rtsp://one")
+    _admit_frame(plane)
+    plane.start()
+
+    def capture(*, draw_objects: bool | None) -> bytes:
+        result: list[bytes] = []
+        request = threading.Thread(
+            target=lambda: result.append(
+                plane.snapshot("camera")
+                if draw_objects is None
+                else plane.snapshot("camera", draw_objects=draw_objects)
+            )
+        )
+        request.start()
+        for _ in range(100):
+            if pipeline["snapshot-valve"].properties.get("drop") is False:
+                break
+            time.sleep(0.01)
+        expected = 1 if draw_objects is None else int(draw_objects)
+        assert pipeline["snapshot-osd"].properties["display-bbox"] == expected
+        assert pipeline["snapshot-osd"].properties["display-text"] == expected
+        (plane._snapshot_dir / "snapshot-0000000000.jpg").write_bytes(  # noqa: SLF001
+            b"\xff\xd8capture\xff\xd9"
+        )
+        request.join(timeout=1)
+        assert not request.is_alive()
+        assert result == [b"\xff\xd8capture\xff\xd9"]
+        return result[0]
+
+    capture(draw_objects=False)
+    assert pipeline["snapshot-valve"].properties["drop"] is True
+    assert pipeline["snapshot-osd"].properties["display-bbox"] == 1
+    assert pipeline["snapshot-osd"].properties["display-text"] == 1
+
+    capture(draw_objects=None)
+    assert pipeline["snapshot-osd"].properties["display-bbox"] == 1
+    assert pipeline["snapshot-osd"].properties["display-text"] == 1
+    plane.stop()
+
+
+def test_snapshots_serialize_the_shared_bridge_across_cameras() -> None:
+    plane, pipeline = _plane(snapshot_branch_enabled=True)
+    plane.add_source("first", "rtsp://one")
+    plane.add_source("second", "rtsp://two")
+    _admit_frame(plane, pad_index=0)
+    _admit_frame(plane, pad_index=1)
+    plane.start()
+    results: dict[str, bytes] = {}
+    errors: list[BaseException] = []
+
+    def capture(camera_id: str) -> None:
+        try:
+            results[camera_id] = plane.snapshot(camera_id)
+        except BaseException as error:  # noqa: BLE001 - surfaced to the test thread
+            errors.append(error)
+
+    first = threading.Thread(target=capture, args=("first",))
+    first.start()
+    for _ in range(100):
+        if pipeline["snapshot-valve"].properties.get("drop") is False:
+            break
+        time.sleep(0.01)
+    assert pipeline["snapshot-tiler"].properties["show-source"] == 0
+
+    second = threading.Thread(target=capture, args=("second",))
+    second.start()
+    second.join(timeout=0.05)
+    assert second.is_alive()
+    assert pipeline["snapshot-tiler"].properties["show-source"] == 0
+
+    (plane._snapshot_dir / "snapshot-0000000000.jpg").write_bytes(  # noqa: SLF001
+        b"\xff\xd8first\xff\xd9"
+    )
+    first.join(timeout=1)
+    for _ in range(100):
+        if (
+            pipeline["snapshot-valve"].properties.get("drop") is False
+            and pipeline["snapshot-tiler"].properties.get("show-source") == 1
+        ):
+            break
+        time.sleep(0.01)
+    (plane._snapshot_dir / "snapshot-0000000000.jpg").write_bytes(  # noqa: SLF001
+        b"\xff\xd8second\xff\xd9"
+    )
+    second.join(timeout=1)
+
+    assert not first.is_alive()
+    assert not second.is_alive()
+    assert errors == []
+    assert results == {
+        "first": b"\xff\xd8first\xff\xd9",
+        "second": b"\xff\xd8second\xff\xd9",
+    }
+    assert pipeline["snapshot-valve"].properties["drop"] is True
+    plane.stop()
+
+
+def test_snapshot_read_error_closes_resets_and_cleans_the_shared_bridge(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plane, pipeline = _plane(snapshot_branch_enabled=True)
+    plane.add_source("camera", "rtsp://one")
+    _admit_frame(plane)
+    plane.start()
+
+    def produce() -> None:
+        for _ in range(100):
+            if pipeline["snapshot-valve"].properties.get("drop") is False:
+                break
+            time.sleep(0.01)
+        (plane._snapshot_dir / "snapshot-0000000000.jpg").write_bytes(  # noqa: SLF001
+            b"\xff\xd8capture\xff\xd9"
+        )
+
+    producer = threading.Thread(target=produce)
+    producer.start()
+
+    def fail_read(_path: Path) -> bytes:
+        raise OSError("read")
+
+    monkeypatch.setattr(Path, "read_bytes", fail_read)
+
+    with pytest.raises(OSError, match="read"):
+        plane.snapshot("camera", draw_objects=False)
+
+    producer.join(timeout=1)
+    assert pipeline["snapshot-valve"].properties["drop"] is True
+    assert pipeline["snapshot-osd"].properties["display-bbox"] == 1
+    assert pipeline["snapshot-osd"].properties["display-text"] == 1
+    assert tuple(plane._snapshot_dir.glob("snapshot-*.jpg")) == ()  # noqa: SLF001
+    plane.stop()
+
+
 def test_snapshot_selects_the_requested_camera_before_opening_the_shared_valve() -> None:
     plane, pipeline = _plane(snapshot_branch_enabled=True)
     plane.add_source("first", "rtsp://one")
     plane.add_source("second", "rtsp://two")
+    _admit_frame(plane, pad_index=0)
+    _admit_frame(plane, pad_index=1)
     plane.start()
     result: list[bytes] = []
     request = threading.Thread(target=lambda: result.append(plane.snapshot("second")))
@@ -396,6 +615,7 @@ def test_snapshot_selects_the_requested_camera_before_opening_the_shared_valve()
 def test_enabled_snapshot_branch_times_out_and_recloses_its_valve() -> None:
     plane, pipeline = _plane(snapshot_branch_enabled=True)
     plane.add_source("camera", "rtsp://one")
+    _admit_frame(plane)
     plane.start()
 
     with pytest.raises(SnapshotUnavailable, match="timed out"):

@@ -28,6 +28,7 @@ from shared.events.evidence_http_transport import (
 from shared.events.relay_failure_log import RelayFailureLog
 from shared.events.schemas import build_audit_envelope
 from shared.release_identity import EDGE_DATABASE_SCHEMA_VERSION
+from worker.adapters.deepstream.service_maker import DeepStreamFlowStopTimeout
 from worker.adapters.device.cuda.probe import probe_cuda_capability
 from worker.adapters.device.mps.probe import probe_mps_capability
 from worker.adapters.device.nvml.probe import probe_nvml_gpu_status
@@ -89,12 +90,16 @@ from worker.runtime.config import (
     WorkerModelsConfig,
     replay_trace_directory_from_environment,
 )
-from worker.runtime.faults.handler import FaultHandler
+from worker.runtime.faults.handler import FATAL_ACCELERATOR_EXIT_CODE, FaultHandler
 from worker.runtime.faults.record import make_fault_record
 from worker.runtime.flow.cold_start import FlowWarmupTimeout, verify_flow_boot_inputs
 from worker.runtime.flow.evidence import FlowEvidenceBinding
 from worker.runtime.flow.lifecycle_supervisor import FlowLifecycleSupervisor
-from worker.runtime.flow.media_plane import FlowMediaPlane, FlowMediaPlaneConfig
+from worker.runtime.flow.media_plane import (
+    BedZoneGeometry,
+    FlowMediaPlane,
+    FlowMediaPlaneConfig,
+)
 from worker.runtime.flow.policy_pump import (
     NativePolicyContext,
     NativePolicyPump,
@@ -107,6 +112,7 @@ from worker.runtime.model_composition import (
 from worker.runtime.nvidia_bed_zone_recognizer import (
     DEFAULT_BED_ZONE_RECOGNITION_TIMEOUT_S,
     NvidiaBedZoneRecognizer,
+    bed_zone_response,
 )
 from worker.runtime.profile.boot import BootContext
 from worker.runtime.profile.device import CudaProbe
@@ -726,7 +732,12 @@ class WorkerRuntime:
         if self._flow_media_plane is None:
             return
         self._live_frames.set_demand_listener(None)
-        self._flow_media_plane.stop()
+        try:
+            self._flow_media_plane.stop()
+        except DeepStreamFlowStopTimeout:
+            LOGGER.critical("Flow shutdown deadline exceeded; terminating worker for restart")
+            self._hard_exit(FATAL_ACCELERATOR_EXIT_CODE)
+            raise
         self._flow_media_plane = None
 
     def _resolved_clip_store_dir(self) -> Path:
@@ -853,6 +864,11 @@ class WorkerRuntime:
                 if self._boot is not None and self._boot.profile.name == "flow"
                 else self._bed_zone_recognizer
             ),
+            bed_zone_snapshot=(
+                self._flow_media_plane.clean_snapshot
+                if self._flow_media_plane is not None
+                else None
+            ),
             replay_fall_model=self.fall_model,
         )
         if self._mjpeg_server is None:
@@ -885,39 +901,7 @@ class WorkerRuntime:
         result = call(image)
         if not isinstance(result, BedRunnerResult):
             raise BedZoneNotFoundError("bed runner returned an unexpected result")
-        height, width = int(image.shape[0]), int(image.shape[1])
-        best_box: Sequence[float | Sequence[Sequence[int]]] | None = None
-        best_score = -1.0
-        for box in result.boxes:
-            if isinstance(box[4], (int, float)) and float(box[4]) > best_score:
-                best_score = float(box[4])
-                best_box = box
-        if best_box is None:
-            raise BedZoneNotFoundError("no bed detected in the current frame")
-        coordinates = best_box[:5]
-        polygon_field = best_box[5] if len(best_box) > 5 else ()
-        polygon = (
-            [
-                [int(point[0]), int(point[1])]
-                for point in polygon_field
-                if isinstance(point, Sequence)
-            ]
-            if isinstance(polygon_field, Sequence)
-            else []
-        )
-        if not polygon:
-            x1, y1, x2, y2 = (
-                int(coordinates[0]),
-                int(coordinates[1]),
-                int(coordinates[2]),
-                int(coordinates[3]),
-            )
-            polygon = [[x1, y1], [x2, y1], [x2, y2], [x1, y2]]
-        return BedZoneRecognizeResponse(
-            polygon=tuple((point[0], point[1]) for point in polygon),
-            image_width=width,
-            image_height=height,
-        )
+        return bed_zone_response(image, result)
 
     def _max_frames_completion_check(self) -> bool:
         cap = self._max_frames_per_camera
@@ -1028,6 +1012,17 @@ class WorkerRuntime:
                         )
                     ),
                 ),
+                bed_zone_geometry={
+                    camera.camera_id: BedZoneGeometry(
+                        polygon=camera.bed_zone_polygon,
+                        image_width=camera.bed_zone_image_width,
+                        image_height=camera.bed_zone_image_height,
+                    )
+                    for camera in self.config.cameras
+                    if camera.bed_zone_polygon is not None
+                    and camera.bed_zone_image_width is not None
+                    and camera.bed_zone_image_height is not None
+                },
                 worker_boot_id=str(self._worker_boot_uuid),
             )
         self._flow_media_plane.bind_live_frames(self._live_frames)
@@ -1491,7 +1486,7 @@ class WorkerRuntime:
                     # manifest records which decoder actually ran, and under flow
                     # that is the SDK's NVDEC. Reporting "flow" here made every
                     # boot fail the manifest's vocabulary check.
-                    effective_decode_backend=self._boot.profile.effective_decode_backend,
+                    effective_decode_backend=self._boot.runtime_profile.effective_decode_backend,
                     ingest_target_fps=self.temporal_profile.target_fps,
                     module_qualified_ids=tuple(
                         definition.qualified_id

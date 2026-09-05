@@ -181,28 +181,18 @@ describe('LiveStreamPanel', () => {
     expect(host.textContent).not.toContain('5.0 FPS');
   });
 
-  it('shows a bottom-left "라이브 · 온라인" badge when the overlay mode is not fall, matching the design handoff', () => {
+  it.each([
+    { mode: 'fall' as const, label: '라이브 · 사람 표시' },
+    { mode: 'bedexit' as const, label: '라이브 · 침대 영역·사람 표시' },
+    { mode: 'none' as const, label: '라이브 · 원본' },
+    { mode: null, label: '라이브' },
+  ])('shows the truthful display-mode label "$label" for overlay mode "$mode"', ({ mode, label }) => {
     stubStreamingFetch();
-    const { host } = render(onlineCamera, undefined);
+    const { host } = render(onlineCamera, undefined, vi.fn(), vi.fn(), mode);
 
-    expect(host.textContent).toContain('라이브 · 온라인');
-    expect(host.textContent).not.toContain('라이브 · 낙상 없음');
-  });
-
-  it('shows "라이브 · 온라인" for the bedexit overlay mode too (only fall gets its own label)', () => {
-    stubStreamingFetch();
-    const { host } = render(onlineCamera, undefined, vi.fn(), vi.fn(), 'bedexit');
-
-    expect(host.textContent).toContain('라이브 · 온라인');
-    expect(host.textContent).not.toContain('라이브 · 낙상 없음');
-  });
-
-  it('shows a bottom-left "라이브 · 낙상 없음" badge when the overlay mode is fall, matching design-handoff/Eldercare Prototype.dc.html:645', () => {
-    stubStreamingFetch();
-    const { host } = render(onlineCamera, undefined, vi.fn(), vi.fn(), 'fall');
-
-    expect(host.textContent).toContain('라이브 · 낙상 없음');
-    expect(host.textContent).not.toContain('라이브 · 온라인');
+    const badge = host.querySelector('.bottom-2.left-2');
+    expect(badge?.textContent).toBe(label);
+    expect(host.textContent).not.toContain('낙상 없음');
   });
 
   it('shows a "연결 끊김" corner badge once the stream has stalled for more than 3s, without dropping the canvas', async () => {

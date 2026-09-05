@@ -3,6 +3,34 @@ import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { OperationsPage } from '@/app/pages/OperationsPage';
 
+vi.mock('@/shared/ui/BedZoneRecognitionPanel', () => ({
+  BedZoneRecognitionPanel: ({
+    onRecognized,
+  }: {
+    onRecognized: (zone: {
+      polygon: [number, number][];
+      image_width: number;
+      image_height: number;
+      recognized_at: string;
+    }) => void;
+  }) => (
+    <div>
+      <button
+        type="button"
+        onClick={() => onRecognized({
+          polygon: [[0, 0], [10, 0], [10, 10], [0, 10]],
+          image_width: 1920,
+          image_height: 1080,
+          recognized_at: '2026-09-05T00:00:00Z',
+        })}
+      >
+        모의 인식 성공
+      </button>
+      <button type="button">모의 인식 실패</button>
+    </div>
+  ),
+}));
+
 function resetLocation(search = '?page=operations'): void {
   window.history.replaceState(null, '', `/${search}`);
 }
@@ -63,12 +91,27 @@ const allClips = [
 ];
 
 let overlayMode = 'none';
+let cameraBedZone: {
+  polygon: [number, number][];
+  image_width: number;
+  image_height: number;
+  recognized_at: string;
+} | null = null;
 
 function installFetchMock(): ReturnType<typeof vi.fn> {
   const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
     const url = typeof input === 'string' ? input : input.toString();
     if (url.includes('/cameras')) {
-      return Promise.resolve({ ok: true, status: 200, json: async () => cameraRegistry });
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          ...cameraRegistry,
+          cameras: cameraRegistry.cameras.map((camera) => (
+            camera.id === 'cam-1' ? { ...camera, bed_zone: cameraBedZone } : camera
+          )),
+        }),
+      });
     }
     if (url.includes('/status')) {
       return Promise.resolve({ ok: true, status: 200, json: async () => statusSnapshot });
@@ -117,6 +160,8 @@ afterEach(() => {
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
   overlayMode = 'none';
+  cameraBedZone = null;
+  detectionSettings.domains.bed_exit.on = false;
 });
 
 describe('OperationsPage', () => {
@@ -218,6 +263,41 @@ describe('OperationsPage', () => {
       return url.includes('/pose');
     });
     expect(overlayCalls.some(([, init]) => (init as RequestInit | undefined)?.method === 'POST')).toBe(true);
+  });
+
+  it('keeps readiness tied to refreshed persisted geometry after recognition failure, success, and server clear', async () => {
+    resetLocation('?page=operations&camera=cam-1');
+    detectionSettings.domains.bed_exit.on = true;
+    installFetchMock();
+    const { host } = await renderPage();
+
+    expect(host.textContent).toContain('침대 영역 미설정');
+    const recognizeAction = Array.from(host.querySelectorAll('button'))
+      .find((button) => button.textContent === '침대 영역 인식');
+    act(() => recognizeAction?.click());
+
+    const failure = Array.from(host.querySelectorAll('button'))
+      .find((button) => button.textContent === '모의 인식 실패');
+    act(() => failure?.click());
+    await flush();
+    expect(host.textContent).toContain('침대 영역 미설정');
+
+    cameraBedZone = {
+      polygon: [[0, 0], [10, 0], [10, 10], [0, 10]],
+      image_width: 1920,
+      image_height: 1080,
+      recognized_at: '2026-09-05T00:00:00Z',
+    };
+    const success = Array.from(host.querySelectorAll('button'))
+      .find((button) => button.textContent === '모의 인식 성공');
+    act(() => success?.click());
+    await flush();
+    expect(host.textContent).not.toContain('침대 영역 미설정');
+
+    cameraBedZone = null;
+    act(() => success?.click());
+    await flush();
+    expect(host.textContent).toContain('침대 영역 미설정');
   });
 
   it('lists event history for the selected camera and opens the clip player modal', async () => {

@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Sequence
 from concurrent.futures import Future, ThreadPoolExecutor, TimeoutError
+from numbers import Real
 from threading import Lock
 from typing import cast
 
@@ -48,7 +50,7 @@ class NvidiaBedZoneRecognizer:
         result = call(image)
         if not isinstance(result, BedRunnerResult):
             raise BedZoneNotFoundError("bed runner returned an unexpected result")
-        return _response_from_result(image, result)
+        return bed_zone_response(image, result)
 
     def _get_runner(self) -> RunnerProtocol:
         with self._runner_lock:
@@ -68,39 +70,77 @@ class NvidiaBedZoneRecognizer:
             return self._runner
 
 
-def _response_from_result(image: Image, result: BedRunnerResult) -> BedZoneRecognizeResponse:
+def bed_zone_response(image: Image, result: BedRunnerResult) -> BedZoneRecognizeResponse:
+    """Build a response from the highest-confidence valid bed segmentation."""
     height, width = int(image.shape[0]), int(image.shape[1])
-    best_box: Sequence[float | Sequence[Sequence[int]]] | None = None
-    best_score = -1.0
+    best_polygon: tuple[tuple[int, int], ...] | None = None
+    best_score = -math.inf
     for box in result.boxes:
-        if not isinstance(box[4], (int, float)):
+        if not isinstance(box, Sequence) or len(box) < 6:
             continue
-        score = float(box[4])
+        score_field = box[4]
+        if (
+            isinstance(score_field, bool)
+            or not isinstance(score_field, Real)
+            or not math.isfinite(float(score_field))
+        ):
+            continue
+        polygon = _valid_polygon(box[5], width=width, height=height)
+        if polygon is None:
+            continue
+        score = float(score_field)
         if score > best_score:
             best_score = score
-            best_box = box
-    if best_box is None:
+            best_polygon = polygon
+    if best_polygon is None:
         raise BedZoneNotFoundError("no bed detected in the current frame")
-    coordinates = cast("Sequence[float]", best_box[:5])
-    polygon_field = best_box[5] if len(best_box) > 5 else ()
-    polygon = (
-        [[int(point[0]), int(point[1])] for point in polygon_field if isinstance(point, Sequence)]
-        if isinstance(polygon_field, Sequence)
-        else []
-    )
-    if not polygon:
-        x1, y1, x2, y2 = (
-            int(coordinates[0]),
-            int(coordinates[1]),
-            int(coordinates[2]),
-            int(coordinates[3]),
-        )
-        polygon = [[x1, y1], [x2, y1], [x2, y2], [x1, y2]]
     return BedZoneRecognizeResponse(
-        polygon=tuple((point[0], point[1]) for point in polygon),
+        polygon=best_polygon,
         image_width=width,
         image_height=height,
     )
+
+
+def _valid_polygon(
+    polygon_field: object,
+    *,
+    width: int,
+    height: int,
+) -> tuple[tuple[int, int], ...] | None:
+    if not isinstance(polygon_field, Sequence):
+        return None
+
+    polygon: list[tuple[int, int]] = []
+    for point in polygon_field:
+        if not isinstance(point, Sequence) or len(point) != 2:
+            return None
+        x, y = point
+        if (
+            isinstance(x, bool)
+            or isinstance(y, bool)
+            or not isinstance(x, Real)
+            or not isinstance(y, Real)
+        ):
+            return None
+        x_float, y_float = float(x), float(y)
+        if (
+            not math.isfinite(x_float)
+            or not math.isfinite(y_float)
+            or not 0 <= x_float < width
+            or not 0 <= y_float < height
+        ):
+            return None
+        polygon.append((int(x_float), int(y_float)))
+
+    if len(set(polygon)) < 3:
+        return None
+    twice_area = sum(
+        x1 * y2 - x2 * y1
+        for (x1, y1), (x2, y2) in zip(polygon, polygon[1:] + polygon[:1], strict=True)
+    )
+    if twice_area == 0:
+        return None
+    return tuple(polygon)
 
 
 __all__ = [
@@ -108,4 +148,5 @@ __all__ = [
     "BedZoneRecognitionTimeoutError",
     "BedZoneRecognizerUnavailableError",
     "NvidiaBedZoneRecognizer",
+    "bed_zone_response",
 ]

@@ -234,8 +234,11 @@ def test_shutdown_keeps_flow_plane_when_stop_is_not_confirmed() -> None:
     runtime._live_frames = SimpleNamespace(set_demand_listener=lambda _listener: None)
     plane = _StuckPlane()
     runtime._flow_media_plane = plane
+    exit_codes: list[int] = []
+    runtime._hard_exit = exit_codes.append
 
     with pytest.raises(DeepStreamFlowStopTimeout, match="Flow stop timed out"):
         runtime._stop_flow_media_plane()
 
     assert runtime._flow_media_plane is plane
+    assert exit_codes == [4]

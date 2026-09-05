@@ -8,6 +8,7 @@ import type { Camera, DetectionDomainKey, DetectionDomainSetting, OverlayMode } 
 type DetectionSettingsCardProps = {
   camera: Camera;
   onOverlayModeChange?: (mode: OverlayMode | null) => void;
+  onRecognizeBedZone?: () => void;
 };
 
 function GearIcon(): JSX.Element {
@@ -24,11 +25,15 @@ function GearIcon(): JSX.Element {
  * detecting anything regardless of what the global schedule says (front/design-handoff/README.md
  * §3 탐지 이벤트: "탐지 중" approved / "꺼짐" closed / camera offline 시 "중단됨" pending).
  */
-function statusPill(setting: DetectionDomainSetting, online: boolean): { label: string; className: string } {
+function statusPill(
+  setting: DetectionDomainSetting,
+  online: boolean,
+  missingBedZone: boolean,
+): { label: string; className: string } {
   if (!online) return { label: '중단됨', className: statusBadgeClassName('pending') };
-  return setting.on
-    ? { label: '탐지 중', className: statusBadgeClassName('approved') }
-    : { label: '꺼짐', className: statusBadgeClassName('closed') };
+  if (!setting.on) return { label: '꺼짐', className: statusBadgeClassName('closed') };
+  if (missingBedZone) return { label: '침대 영역 미설정', className: statusBadgeClassName('rejected') };
+  return { label: '탐지 중', className: statusBadgeClassName('approved') };
 }
 
 /**
@@ -36,7 +41,11 @@ function statusPill(setting: DetectionDomainSetting, online: boolean): { label: 
  * editing the schedule itself stays Settings-page territory — the gear icon here navigates there
  * rather than duplicating that editor.
  */
-export function DetectionSettingsCard({ camera, onOverlayModeChange }: DetectionSettingsCardProps): JSX.Element {
+export function DetectionSettingsCard({
+  camera,
+  onOverlayModeChange,
+  onRecognizeBedZone,
+}: DetectionSettingsCardProps): JSX.Element {
   const { status, data, retry } = useDetectionSettingsResource(true);
   const online = camera.status === 'online';
 
@@ -69,7 +78,8 @@ export function DetectionSettingsCard({ camera, onOverlayModeChange }: Detection
         <div className="grid grid-cols-[1fr_auto_auto] items-center gap-x-3 gap-y-2 text-sm">
           {DOMAIN_ORDER.map((domain: DetectionDomainKey) => {
             const setting = data.domains[domain];
-            const pill = statusPill(setting, online);
+            const missingBedZone = domain === 'bed_exit' && camera.bed_zone == null;
+            const pill = statusPill(setting, online, missingBedZone);
             return (
               <div className="contents" key={domain}>
                 <span className="text-foreground">{DOMAIN_LABELS[domain]}</span>
@@ -81,8 +91,24 @@ export function DetectionSettingsCard({ camera, onOverlayModeChange }: Detection
         </div>
       ) : null}
 
+      {status === 'success' && data?.domains.bed_exit.on && camera.bed_zone == null ? (
+        <div className="mt-3 rounded-control border border-destructive/30 bg-destructive/5 p-3 text-sm">
+          <p className="text-foreground">침대 이탈 탐지를 시작하려면 실제 카메라 영상에서 침대 영역을 인식해야 합니다.</p>
+          <button
+            type="button"
+            className="dialog-secondary-action mt-2"
+            onClick={onRecognizeBedZone ?? (() => navigateToPage('settings'))}
+          >
+            침대 영역 인식
+          </button>
+        </div>
+      ) : null}
+
       <div className="mt-3">
         <OverlayModeControl cameraId={camera.id} onModeChange={onOverlayModeChange} />
+        <p className="mt-2 text-xs text-muted-foreground">
+          침대 이탈은 저장된 인식 영역과 사람을, 낙상은 사람을 표시합니다. 없음은 오버레이 없이 깨끗한 영상을 표시합니다.
+        </p>
       </div>
     </article>
   );

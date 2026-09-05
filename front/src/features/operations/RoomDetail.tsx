@@ -6,6 +6,7 @@ import { EventHistoryList } from '@/features/operations/EventHistoryList';
 import { ClipPlayerModal } from '@/features/operations/ClipPlayerModal';
 import { CameraEditModal } from '@/features/settings/CameraEditModal';
 import { DeleteCameraDialog } from '@/features/settings/DeleteCameraDialog';
+import { BedZoneRecognitionPanel } from '@/shared/ui/BedZoneRecognitionPanel';
 import { useStatusResource } from '@/shared/api/usePollingResource';
 import { getCameraStatusMeta } from '@/shared/ui/StatusBadge';
 import type { Camera, Clip, OverlayMode } from '@/shared/api/client';
@@ -29,6 +30,7 @@ export function RoomDetail({ camera, onBack, onRetryConnection }: RoomDetailProp
   const [selectedClip, setSelectedClip] = useState<Clip | null>(null);
   const [connectionModalOpen, setConnectionModalOpen] = useState(false);
   const [deletingCamera, setDeletingCamera] = useState<Camera | null>(null);
+  const [recognitionCameraId, setRecognitionCameraId] = useState<string | null>(null);
   // Sourced from OverlayModeControl's own fetch/selection state (via its onModeChange callback)
   // rather than re-fetched here, so the live badge below never disagrees with what the operator
   // picked in the detection settings card (issue #102).
@@ -73,7 +75,30 @@ export function RoomDetail({ camera, onBack, onRetryConnection }: RoomDetailProp
             detection={diagnostics?.detection}
             onManageConnection={() => setConnectionModalOpen(true)}
           />
-          <DetectionSettingsCard camera={camera} onOverlayModeChange={setOverlayMode} />
+          <DetectionSettingsCard
+            camera={camera}
+            onOverlayModeChange={setOverlayMode}
+            onRecognizeBedZone={() => setRecognitionCameraId(camera.id)}
+          />
+          {recognitionCameraId === camera.id ? (
+            <article className="rounded-card border border-border bg-card p-4">
+              <div className="mb-3 flex items-center justify-between gap-3">
+                <h2 className="text-base font-semibold text-foreground">침대 영역 인식</h2>
+                <button
+                  type="button"
+                  className="dialog-secondary-action"
+                  onClick={() => setRecognitionCameraId(null)}
+                >
+                  닫기
+                </button>
+              </div>
+              <BedZoneRecognitionPanel
+                cameraId={camera.id}
+                bedZone={camera.bed_zone ?? null}
+                onRecognized={onRetryConnection}
+              />
+            </article>
+          ) : null}
         </div>
       </div>
 
