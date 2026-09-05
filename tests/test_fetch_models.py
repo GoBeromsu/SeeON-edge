@@ -227,7 +227,9 @@ def _selected_bundle_delivery(
     }
     identities = {
         "dataset": "1" * 64,
-        "calibration": "2" * 64,
+        "calibration": _sha(members["calibration.json"])
+        if "calibration.json" in members
+        else "2" * 64,
         "conformance": "3" * 64,
         "class": "4" * 64,
         "input": "pose-bbox56.v1",
@@ -499,9 +501,7 @@ def test_fetch_all_refuses_selected_bundle_boot_would_refuse(tmp_path: Path) -> 
         tmp_path, include_calibration=False
     )
 
-    with pytest.raises(
-        VerificationError, match="admitted bundle must contain model.onnx and calibration.json"
-    ):
+    with pytest.raises(VerificationError, match="calibration.json digest mismatch"):
         fetch_all(
             manifest,
             tmp_path / "models",

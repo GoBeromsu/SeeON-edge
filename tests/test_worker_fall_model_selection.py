@@ -174,13 +174,25 @@ def _flow_boot() -> BootContext:
 
 
 def _selected_onnx_bundle(
-    tmp_path: Path, *, transition_threshold: float = 0.5, threshold_source: str = "default"
+    tmp_path: Path,
+    *,
+    transition_threshold: float = 0.5,
+    threshold_source: str = "default",
+    class_order: list[str] | None = None,
 ) -> tuple[Path, DesiredModelBundle]:
     source = write_pose_bbox56_bundle(tmp_path / "source")
+    if class_order is not None:
+        calibration_path = source / "calibration.json"
+        calibration = json.loads(calibration_path.read_text(encoding="utf-8"))
+        calibration["class_order"] = class_order
+        calibration_path.write_text(
+            json.dumps(calibration, sort_keys=True),
+            encoding="utf-8",
+        )
     members = {path: (source / path).read_bytes() for path in ("model.onnx", "calibration.json")}
     identities = {
         "dataset": "1" * 64,
-        "calibration": "2" * 64,
+        "calibration": hashlib.sha256(members["calibration.json"]).hexdigest(),
         "conformance": "3" * 64,
         "class": "4" * 64,
         "input": "pose-bbox56.v1",
@@ -569,6 +581,57 @@ def test_selected_output_contract_mismatch_refuses_construction(tmp_path: Path) 
             models_root / "bundles" / desired.bundle_sha256,
             proof,
             replace(selection, output_class_count=3),
+            session_factory=lambda _path, _providers: _ZeroLogitSession(),
+        )
+
+
+def test_selected_bundle_refuses_reversed_calibration_class_order(tmp_path: Path) -> None:
+    observed_order = ["fall_transition_proxy", "non_fall"]
+    models_root, desired = _selected_onnx_bundle(tmp_path, class_order=observed_order)
+    selection = desired.selection
+    assert selection is not None
+    proof = admit_model_bundle(models_root, desired)
+
+    with pytest.raises(ModelLoadError, match=r"\['fall_transition_proxy', 'non_fall'\]"):
+        OrtPoseBbox56Runner.from_admitted_bundle(
+            models_root / "bundles" / desired.bundle_sha256,
+            proof,
+            selection,
+            session_factory=lambda _path, _providers: _ZeroLogitSession(),
+        )
+
+
+def test_packaged_bundle_refuses_reversed_calibration_class_order(tmp_path: Path) -> None:
+    observed_order = ["fall_transition_proxy", "non_fall"]
+    artifact_dir = write_pose_bbox56_bundle(tmp_path / "bundle")
+    calibration_path = artifact_dir / "calibration.json"
+    calibration = json.loads(calibration_path.read_text(encoding="utf-8"))
+    calibration["class_order"] = observed_order
+    calibration_path.write_text(json.dumps(calibration, sort_keys=True), encoding="utf-8")
+    manifest_path = artifact_dir / "bundle-manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    calibration_member = next(
+        member for member in manifest["files"] if member["relative_path"] == "calibration.json"
+    )
+    calibration_member["sha256"] = hashlib.sha256(calibration_path.read_bytes()).hexdigest()
+    calibration_member["size"] = calibration_path.stat().st_size
+    manifest_path.write_text(json.dumps(manifest, indent=1, sort_keys=True), encoding="utf-8")
+
+    with pytest.raises(ModelLoadError, match=r"\['fall_transition_proxy', 'non_fall'\]"):
+        ort_pose_bbox56.load_packaged_fall_bundle(artifact_dir)
+
+
+def test_selected_bundle_refuses_calibration_class_order_with_wrong_count(tmp_path: Path) -> None:
+    models_root, desired = _selected_onnx_bundle(tmp_path, class_order=["non_fall"])
+    selection = desired.selection
+    assert selection is not None
+    proof = admit_model_bundle(models_root, desired)
+
+    with pytest.raises(ModelLoadError, match="must contain exactly 2 entries"):
+        OrtPoseBbox56Runner.from_admitted_bundle(
+            models_root / "bundles" / desired.bundle_sha256,
+            proof,
+            selection,
             session_factory=lambda _path, _providers: _ZeroLogitSession(),
         )
 

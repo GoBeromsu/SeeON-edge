@@ -20,8 +20,8 @@ def _canonical(value: object) -> bytes:
 
 _IDENTITIES = {
     "dataset": "1" * 64,
-    "calibration": "2" * 64,
-    "conformance": "3" * 64,
+    "calibration": hashlib.sha256(b"{}").hexdigest(),
+    "conformance": hashlib.sha256(b"{}").hexdigest(),
     "class": "4" * 64,
     "input": "pose-bbox56.v1",
     "policy": "5" * 64,
@@ -162,12 +162,56 @@ def test_admission_rejects_extra_bundle_member(tmp_path: Path) -> None:
 def test_admission_uses_manifest_declared_member_set(tmp_path: Path) -> None:
     models_root, desired = _bundle(
         tmp_path,
-        members={"runtime.bin": b"model", "contract.json": b"{}"},
+        members={
+            "runtime.bin": b"model",
+            "contract.json": b"{}",
+            "calibration.json": b"{}",
+        },
     )
     assert admit_model_bundle(models_root, desired).observed["members"] == (
         "runtime.bin",
         "contract.json",
+        "calibration.json",
     )
+
+
+def test_admission_refuses_selection_calibration_digest_not_matching_member_content(
+    tmp_path: Path,
+) -> None:
+    models_root, desired = _bundle(
+        tmp_path,
+        members={
+            "model.pt": b"model",
+            "calibration.json": b"different calibration",
+        },
+    )
+
+    with pytest.raises(
+        ModelBundleAdmissionError,
+        match=rf"selection declares {_IDENTITIES['calibration']}.*member content has "
+        rf"'{hashlib.sha256(b'different calibration').hexdigest()}'",
+    ):
+        admit_model_bundle(models_root, desired)
+
+
+def test_admission_refuses_selection_conformance_digest_not_matching_member_content(
+    tmp_path: Path,
+) -> None:
+    models_root, desired = _bundle(
+        tmp_path,
+        members={
+            "model.pt": b"model",
+            "calibration.json": b"{}",
+            "conformance.json": b"different conformance",
+        },
+    )
+
+    with pytest.raises(
+        ModelBundleAdmissionError,
+        match=rf"selection declares {_IDENTITIES['conformance']}.*member content has "
+        rf"'{hashlib.sha256(b'different conformance').hexdigest()}'",
+    ):
+        admit_model_bundle(models_root, desired)
 
 
 def test_admission_requires_the_manifest_runtime_format(tmp_path: Path) -> None:

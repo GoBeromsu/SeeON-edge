@@ -26,6 +26,7 @@ _SHAPE: Final = (30, 56)
 #: The output contract this runner implements: one logit, read as a binary
 #: fall-transition score. The bundle calibration's class_order has two entries.
 OUTPUT_CLASS_COUNT: Final = 2
+OUTPUT_CLASS_ORDER: Final = ("non_fall", "fall_transition_proxy")
 _CPU_PROVIDER: Final = ("CPUExecutionProvider",)
 
 
@@ -255,6 +256,7 @@ def _calibration_temperature(root: Path, calibration: object | None = None) -> f
     document = read_json(root / "calibration.json") if calibration is None else calibration
     if not isinstance(document, dict):
         raise ModelLoadError("invalid calibration.json")
+    _validate_calibration_class_order(document)
     temperature = document.get("temperature")
     if isinstance(temperature, bool) or not isinstance(temperature, (int, float)):
         raise ModelLoadError("calibration temperature must be numeric")
@@ -262,6 +264,21 @@ def _calibration_temperature(root: Path, calibration: object | None = None) -> f
     if not math.isfinite(parsed_temperature) or parsed_temperature <= 0:
         raise ModelLoadError("calibration temperature must be finite and positive")
     return parsed_temperature
+
+
+def _validate_calibration_class_order(calibration: Mapping[str, object]) -> None:
+    class_order = calibration.get("class_order")
+    if not isinstance(class_order, list) or len(class_order) != OUTPUT_CLASS_COUNT:
+        raise ModelLoadError(
+            f"calibration class_order must contain exactly {OUTPUT_CLASS_COUNT} entries; "
+            f"observed {class_order!r}"
+        )
+    observed_order = tuple(class_order)
+    if observed_order != OUTPUT_CLASS_ORDER:
+        raise ModelLoadError(
+            f"calibration class_order {class_order!r} contradicts this runner's "
+            f"implemented order {list(OUTPUT_CLASS_ORDER)!r}"
+        )
 
 
 def _verify_admitted_member(root: Path, relative_path: str, expected_digest: str) -> None:

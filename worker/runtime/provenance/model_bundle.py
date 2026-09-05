@@ -153,6 +153,7 @@ def admit_model_bundle(models_root: Path, desired: DesiredModelBundle) -> ModelB
         for member_path, member in zip(observed_members, members, strict=True)
         if isinstance(member, dict)
     }
+    _verify_selection_member_digests(member_digests, desired.selection)
     receipt_identities = _verify_required_members(root, members, receipts, desired)
     _verify_exact_tree(root, {"manifest.json", *observed_members, *observed_receipts})
     frozen_static = _freeze({**dict(identities), **receipt_identities})
@@ -172,6 +173,31 @@ def admit_model_bundle(models_root: Path, desired: DesiredModelBundle) -> ModelB
         }
     )
     return ModelBundleProof(observed=observed, applied=applied)
+
+
+def _verify_selection_member_digests(
+    member_digests: Mapping[str, object], selection: ModelSelection | None
+) -> None:
+    if selection is None:
+        return
+    _verify_selection_member_digest(
+        member_digests, "calibration.json", selection.calibration_digest
+    )
+    if "conformance.json" in member_digests:
+        _verify_selection_member_digest(
+            member_digests, "conformance.json", selection.conformance_digest
+        )
+
+
+def _verify_selection_member_digest(
+    member_digests: Mapping[str, object], member_path: str, selected_digest: str
+) -> None:
+    observed_digest = member_digests.get(member_path)
+    if observed_digest != selected_digest:
+        raise ModelBundleAdmissionError(
+            f"{member_path} digest mismatch: selection declares {selected_digest}, "
+            f"member content has {observed_digest!r}"
+        )
 
 
 def _validate_bundle_identity(document: Mapping[str, object], expected: str) -> None:
