@@ -4,10 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-
 from worker.adapters.deepstream.service_maker import _FlowHandle
-from worker.interfaces.media_plane import OnDemandSnapshotUnsupported
 from worker.runtime.flow.media_plane import FlowMediaPlane, FlowMediaPlaneConfig
 
 
@@ -59,12 +56,17 @@ def _flow_factory(_: object) -> _FlowHandle:
     )
 
 
-def test_snapshot_without_a_frame_is_typed_unavailable() -> None:
-    plane = FlowMediaPlane(_config(), flow_factory=_flow_factory)
+def test_alert_snapshot_uses_the_runtime_snapshot_encoder_seam() -> None:
+    encoded: list[str] = []
+    plane = FlowMediaPlane(
+        _config(),
+        flow_factory=_flow_factory,
+        snapshot_encoder=lambda camera_id: encoded.append(camera_id) or b"burned-jpeg",
+    )
     plane.add_source("camera", "rtsp://one")
 
-    with pytest.raises(OnDemandSnapshotUnsupported):
-        plane.snapshot("camera")
+    assert plane.snapshot("camera") == b"burned-jpeg"
+    assert encoded == ["camera"]
 
 
 def test_the_recorder_defaults_to_the_sixty_second_window() -> None:

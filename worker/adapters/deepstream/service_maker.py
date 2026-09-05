@@ -15,13 +15,12 @@ import numpy as np
 
 from worker.adapters.deepstream.metadata import convert_frame
 from worker.adapters.deepstream.sources import SourceTable
-from worker.adapters.deepstream.tensor_rows import rows_from_tensor
+from worker.adapters.deepstream.tensor_rows import host_array_from_tensor, rows_from_tensor
 from worker.interfaces.media_plane import (
     EarlyStopUnsupported,
     MediaPlane,
     MediaPlaneStatus,
     MetadataSlot,
-    OnDemandSnapshotUnsupported,
     RecordingInfo,
     RecordingRefused,
     SnapshotUnavailable,
@@ -59,6 +58,11 @@ class DeepStreamMediaPlaneConfig:
     frame_height: int
     transform_id: str = "deepstream-flow.v1"
     pipeline_name: str = "deepstream-media-plane"
+    #: The forked OSD/JPEG snapshot branch. Off by default: measured on
+    #: hardware, it builds standalone but its post-OSD convert/caps/nvjpegenc
+    #: chain fails to link inside the production Flow, and an unlinkable
+    #: element aborts camera activation.
+    snapshot_branch_enabled: bool = False
 
 
 @dataclass(slots=True)
@@ -77,10 +81,31 @@ class _FlowHandle:
     record_config: Callable[..., Any]
     render_mode_discard: Any
     make_probe: Callable[[str, _Probe], Any]
+    make_jpeg_retriever: Callable[[str, DeepStreamMediaPlane], Any] | None = None
 
 
 def _default_flow_factory(config: DeepStreamMediaPlaneConfig) -> _FlowHandle:
-    from pyservicemaker import Flow, Pipeline, Probe, RecordConfig, RenderMode
+    from pyservicemaker import (
+        BufferRetriever,
+        Flow,
+        Pipeline,
+        Probe,
+        Receiver,
+        RecordConfig,
+        RenderMode,
+    )
+
+    def make_jpeg_retriever(camera_id: str, plane: DeepStreamMediaPlane) -> Any:
+        class _Retriever(BufferRetriever):
+            def consume(self, buffer: Any) -> int:
+                try:
+                    jpeg = host_array_from_tensor(buffer.extract(0)).tobytes()
+                    plane.publish_jpeg(camera_id, jpeg)
+                except Exception as error:  # noqa: BLE001 - SDK callback containment
+                    plane.snapshot_failed(camera_id, error)
+                return 0
+
+        return Receiver(f"snapshot-receiver-{camera_id}", _Retriever())
 
     pipeline = Pipeline(config.pipeline_name)
     return _FlowHandle(
@@ -89,6 +114,7 @@ def _default_flow_factory(config: DeepStreamMediaPlaneConfig) -> _FlowHandle:
         record_config=RecordConfig,
         render_mode_discard=RenderMode.DISCARD,
         make_probe=lambda name, probe: Probe(name, _batch_operator(probe)),
+        make_jpeg_retriever=make_jpeg_retriever,
     )
 
 
@@ -126,6 +152,7 @@ class DeepStreamMediaPlane(MediaPlane):
         *,
         metadata_slot: MetadataSlot,
         flow_factory: FlowFactory = _default_flow_factory,
+        snapshot_encoder: Callable[[str], bytes] | None = None,
         worker_boot_id: str | None = None,
         child_instance_id: str | None = None,
     ) -> None:
@@ -166,6 +193,9 @@ class DeepStreamMediaPlane(MediaPlane):
         self._flow_error: Exception | None = None
         self._flow_finished = threading.Event()
         self._probe = _Probe(self)
+        self._snapshot_encoder = snapshot_encoder
+        self._snapshot_requests: dict[str, tuple[threading.Event, list[bytes | BaseException]]] = {}
+        self._snapshot_lock = threading.Lock()
 
     def start(self) -> None:
         """Build the Flow from the registered roster and run it on its own thread.
@@ -294,11 +324,69 @@ class DeepStreamMediaPlane(MediaPlane):
     def snapshot(self, camera_id: str) -> bytes:
         if camera_id not in self._sources.camera_ids():
             raise SnapshotUnavailable(f"unknown source has no OSD snapshot: {camera_id}")
-        raise OnDemandSnapshotUnsupported(
-            "pyservicemaker exposes post-OSD pixels only through its terminal "
-            "BufferRetriever; the production DISCARD sink does not provide "
-            "on-demand frame extraction"
+        if self._snapshot_encoder is not None:
+            return self._snapshot_encoder(camera_id)
+        if not self._started:
+            raise SnapshotUnavailable(
+                f"source has not started its OSD snapshot branch: {camera_id}"
+            )
+        done = threading.Event()
+        result: list[bytes | BaseException] = []
+        with self._snapshot_lock:
+            if camera_id in self._snapshot_requests:
+                raise SnapshotUnavailable(
+                    f"OSD snapshot is already pending for source: {camera_id}"
+                )
+            self._snapshot_requests[camera_id] = (done, result)
+        self._call_on_pipeline(
+            lambda: self._pipeline[f"snapshot-valve-{self._sources.pad_index(camera_id)}"].set(
+                {"drop": False}
+            )
         )
+        if not done.wait(timeout=2.0):
+            self._call_on_pipeline(
+                lambda: self._pipeline[
+                    f"snapshot-valve-{self._sources.pad_index(camera_id)}"
+                ].set({"drop": True})
+            )
+            with self._snapshot_lock:
+                self._snapshot_requests.pop(camera_id, None)
+            raise SnapshotUnavailable(f"OSD snapshot branch timed out for source: {camera_id}")
+        value = result[0]
+        if isinstance(value, BaseException):
+            raise SnapshotUnavailable(
+                f"OSD snapshot branch failed for source {camera_id}: {value}"
+            ) from value
+        return value
+
+    def publish_jpeg(self, camera_id: str, jpeg: bytes) -> None:
+        with self._snapshot_lock:
+            request = self._snapshot_requests.pop(camera_id, None)
+        if request is None:
+            return
+        done, result = request
+        result.append(jpeg)
+        self._enqueue(
+            lambda: self._pipeline[f"snapshot-valve-{self._sources.pad_index(camera_id)}"].set(
+                {"drop": True}
+            )
+        )
+        done.set()
+
+    def snapshot_failed(self, camera_id: str, error: BaseException) -> None:
+        LOGGER.exception("OSD snapshot encoding failed for camera_id=%s", camera_id, exc_info=error)
+        with self._snapshot_lock:
+            request = self._snapshot_requests.pop(camera_id, None)
+        if request is None:
+            return
+        done, result = request
+        result.append(error)
+        self._enqueue(
+            lambda: self._pipeline[f"snapshot-valve-{self._sources.pad_index(camera_id)}"].set(
+                {"drop": True}
+            )
+        )
+        done.set()
 
     def start_recording(
         self,
@@ -379,6 +467,7 @@ class DeepStreamMediaPlane(MediaPlane):
             )
         )
         flow.attach(what=self._handle.make_probe("media-plane-probe", self._probe))
+        self._build_snapshot_branch(flow, camera_ids)
         # `render(DISCARD)` is the terminal sink because it is the only one that
         # keeps up: measured in this image, a `retrieve()` sink delivers roughly
         # 2 batched buffers/s where `render` delivers 30, which starves the
@@ -394,6 +483,64 @@ class DeepStreamMediaPlane(MediaPlane):
                     "init-rtsp-reconnect-interval": 5,
                     "rtsp-reconnect-interval": 5,
                 }
+            )
+
+    def _build_snapshot_branch(self, flow: Any, camera_ids: tuple[str, ...]) -> None:
+        """Build one normally-closed OSD/JPEG branch per source.
+
+        The terminal Flow remains the discard sink.  A valve upstream of each
+        encoder is opened only by ``snapshot`` and is immediately closed by
+        the appsink callback, so idle branches do not encode frames.
+        """
+        if not self._config.snapshot_branch_enabled:
+            # Measured on hardware: the branch builds standalone but its
+            # post-OSD convert/caps/nvjpegenc chain fails to link inside the
+            # production Flow, and an unlinkable element aborts camera
+            # activation. Detection and alert delivery outrank a still image,
+            # so the branch stays off until that link is solved.
+            return
+        if self._handle.make_jpeg_retriever is None:
+            return
+        fork = flow.fork()
+        tee = fork._streams[0].originator  # noqa: SLF001 - Flow has no public stream endpoint
+        demux = "snapshot-demux"
+        self._pipeline.add("nvstreamdemux", demux)
+        self._pipeline.link(tee, demux)
+        for index, camera_id in enumerate(camera_ids):
+            queue_name = f"snapshot-queue-{index}"
+            valve_name = f"snapshot-valve-{index}"
+            convert_name = f"snapshot-convert-{index}"
+            osd_name = f"snapshot-osd-{index}"
+            post_osd_convert = f"snapshot-post-osd-convert-{index}"
+            caps_name = f"snapshot-caps-{index}"
+            encoder_name = f"snapshot-encoder-{index}"
+            sink_name = f"snapshot-sink-{index}"
+            self._pipeline.add("queue", queue_name, {"leaky": 2, "max-size-buffers": 1})
+            self._pipeline.add("valve", valve_name, {"drop": True})
+            self._pipeline.add("nvvideoconvert", convert_name, {"gpu-id": 0, "compute-hw": 1})
+            self._pipeline.add("nvdsosd", osd_name, {"gpu-id": 0, "display-mask": True})
+            self._pipeline.add(
+                "nvvideoconvert", post_osd_convert, {"gpu-id": 0, "compute-hw": 1}
+            )
+            self._pipeline.add(
+                "capsfilter", caps_name, {"caps": "video/x-raw(memory:NVMM), format=I420"}
+            )
+            self._pipeline.add("nvjpegenc", encoder_name)
+            self._pipeline.add("appsink", sink_name, {"emit-signals": True, "sync": False}).attach(
+                sink_name,
+                self._handle.make_jpeg_retriever(camera_id, self),
+                tips="new-sample",
+            )
+            self._pipeline.link((demux, queue_name), (f"src_{index}", "sink"))
+            self._pipeline.link(
+                queue_name,
+                valve_name,
+                convert_name,
+                osd_name,
+                post_osd_convert,
+                caps_name,
+                encoder_name,
+                sink_name,
             )
 
     def _source_element(self, camera_id: str) -> Any:

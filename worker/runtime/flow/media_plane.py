@@ -54,6 +54,7 @@ class FlowMediaPlane:
         config: FlowMediaPlaneConfig,
         *,
         flow_factory: FlowFactory | None = None,
+        snapshot_encoder: Callable[[str], bytes] | None = None,
         live_frames: LatestFrameStore | None = None,
         worker_boot_id: str | None = None,
     ) -> None:
@@ -63,6 +64,8 @@ class FlowMediaPlane:
             "metadata_slot": self.metadata,
             "worker_boot_id": worker_boot_id,
         }
+        if snapshot_encoder is not None:
+            kwargs["snapshot_encoder"] = snapshot_encoder
         if flow_factory is not None:
             kwargs["flow_factory"] = flow_factory
         self.plane = DeepStreamMediaPlane(config.adapter_config(), **kwargs)

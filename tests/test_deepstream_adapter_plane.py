@@ -25,7 +25,6 @@ from worker.adapters.deepstream.service_maker import (
 from worker.interfaces.media_plane import (
     EarlyStopUnsupported,
     MediaPlane,
-    OnDemandSnapshotUnsupported,
     RecordingInfo,
     RecordingRefused,
     SnapshotUnavailable,
@@ -248,10 +247,10 @@ def test_smart_record_owns_no_encode_sessions() -> None:
     assert plane.status().nvenc_sessions_active == 0
 
 
-def test_discard_sink_reports_that_the_binding_cannot_capture_an_osd_snapshot_on_demand() -> None:
+def test_snapshot_without_an_active_osd_branch_is_typed_unavailable() -> None:
     plane, _ = _plane()
     plane.add_source("camera", "rtsp://one")
-    with pytest.raises(OnDemandSnapshotUnsupported, match="terminal BufferRetriever"):
+    with pytest.raises(SnapshotUnavailable, match="has not started"):
         plane.snapshot("camera")
 
 
@@ -263,6 +262,19 @@ def test_default_steady_state_builds_only_the_discard_sink() -> None:
     flow = plane._flow  # noqa: SLF001 - the configured graph is adapter behaviour
     assert isinstance(flow, _Flow)
     assert flow.render_calls == [{"mode": "discard", "enable_osd": False, "sync": False}]
+
+
+def test_snapshot_encoder_runs_only_for_the_alert_that_requested_a_snapshot() -> None:
+    encoded: list[str] = []
+    plane, _ = _plane()
+    plane._snapshot_encoder = lambda camera_id: (  # noqa: SLF001 - adapter seam
+        encoded.append(camera_id) or b"\xff\xd8burned-overlay\xff\xd9"
+    )
+    plane.add_source("camera", "rtsp://one")
+
+    assert encoded == []
+    assert plane.snapshot("camera") == b"\xff\xd8burned-overlay\xff\xd9"
+    assert encoded == ["camera"]
 
 
 def test_a_source_failure_rotates_the_stream_identity_and_keeps_the_camera_id() -> None:

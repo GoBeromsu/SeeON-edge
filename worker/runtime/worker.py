@@ -1443,7 +1443,11 @@ class WorkerRuntime:
             cameras = tuple(
                 build_applied_camera_state(
                     camera_id=camera.camera_id,
-                    effective_decode_backend="flow",
+                    # The profile's declared decode, not the profile's name: the
+                    # manifest records which decoder actually ran, and under flow
+                    # that is the SDK's NVDEC. Reporting "flow" here made every
+                    # boot fail the manifest's vocabulary check.
+                    effective_decode_backend=self._boot.profile.effective_decode_backend,
                     ingest_target_fps=self.temporal_profile.target_fps,
                     module_qualified_ids=tuple(
                         definition.qualified_id
