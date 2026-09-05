@@ -17,7 +17,9 @@ import {
 } from '@/shared/api/normalizers';
 import { isRecord } from '@/shared/api/normalizerFields';
 import type {
+  BedRegion,
   BedZone,
+  BedZoneSaveInput,
   Camera,
   CameraInput,
   CameraPatchInput,
@@ -47,8 +49,10 @@ import type {
 } from '@/shared/api/types';
 
 export type {
+  BedRegion,
   BedZone,
   BedZonePoint,
+  BedZoneSaveInput,
   Camera,
   CameraInput,
   CameraPatchInput,
@@ -283,13 +287,32 @@ export function bedZoneRecognitionFailureDetail(error: unknown): BedZoneRecognit
 }
 
 /**
- * Runs one-shot YOLO bed segmentation against the camera's latest frame. 422 (bed_not_found) and 503
- * (worker/frame unavailable) are both surfaced as thrown HttpErrors -- callers keep showing "인식 필요".
+ * Returns one-shot YOLO bed candidates from the camera's latest frame without saving them. 422
+ * (bed_not_found) and 503 (worker/frame unavailable) are surfaced as thrown HttpErrors.
  */
-export async function recognizeBedZone(cameraId: string): Promise<BedZone> {
+export async function recognizeBedZone(cameraId: string, confidence = 0.25): Promise<BedZone> {
   return normalizeBedZoneRecognitionResponse(
-    await requestJson(`/cameras/${encodeURIComponent(cameraId)}/bed-zone/recognize`, { method: 'POST' }),
+    await requestJson(`/cameras/${encodeURIComponent(cameraId)}/bed-zone/recognize`, {
+      method: 'POST',
+      body: JSON.stringify({ confidence }),
+    }),
   );
+}
+
+export async function saveBedZone(cameraId: string, input: BedZoneSaveInput): Promise<BedZone | null> {
+  const validated = normalizeBedZoneRecognitionResponse({
+    bed_zone: { ...input, recognized_at: 'request-validation' },
+  });
+  const value = await requestJson(`/cameras/${encodeURIComponent(cameraId)}/bed-zone`, {
+    method: 'PUT',
+    body: JSON.stringify({
+      regions: validated.regions,
+      image_width: validated.image_width,
+      image_height: validated.image_height,
+    }),
+  });
+  if (isRecord(value) && value.bed_zone === null) return null;
+  return normalizeBedZoneRecognitionResponse(value);
 }
 
 export async function fetchRuntimeSettings(signal?: AbortSignal): Promise<RuntimeSettings> {

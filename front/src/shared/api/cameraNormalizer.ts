@@ -12,6 +12,7 @@ import {
   pickString,
 } from '@/shared/api/normalizerFields';
 import type {
+  BedRegion,
   BedZone,
   BedZonePoint,
   Camera,
@@ -62,27 +63,65 @@ function maskRtsp(value: string | null): string {
 function normalizeBedZonePoint(value: unknown): BedZonePoint | null {
   if (!Array.isArray(value) || value.length !== 2) return null;
   const [x, y] = value;
-  return typeof x === 'number' && typeof y === 'number' ? [x, y] : null;
+  return Number.isInteger(x) && Number.isInteger(y) ? [x as number, y as number] : null;
 }
 
 /**
- * Defensive, never throws: bed-zone recognition (wave 1) may still be rolling out on the backend,
- * so a missing/malformed field normalizes to null ("인식 필요") rather than invalidating the whole
- * camera record.
+ * Defensive, never throws: a missing/malformed field normalizes to null ("인식 필요") rather than
+ * invalidating the whole camera record.
  */
 function normalizeBedZone(value: unknown): BedZone | null {
-  if (!isRecord(value) || !Array.isArray(value.polygon)) return null;
-  const polygon: BedZonePoint[] = [];
-  for (const point of value.polygon) {
-    const normalized = normalizeBedZonePoint(point);
-    if (!normalized) return null;
-    polygon.push(normalized);
+  if (!isRecord(value) || !Array.isArray(value.regions) || value.regions.length > 8) return null;
+  const imageWidth = value.image_width;
+  const imageHeight = value.image_height;
+  const recognizedAt = value.recognized_at;
+  if (
+    !Number.isInteger(imageWidth)
+    || (imageWidth as number) <= 0
+    || !Number.isInteger(imageHeight)
+    || (imageHeight as number) <= 0
+    || typeof recognizedAt !== 'string'
+    || recognizedAt.length === 0
+  ) return null;
+  const width = imageWidth as number;
+  const height = imageHeight as number;
+
+  const ids = new Set<string>();
+  const regions: BedRegion[] = [];
+  for (const region of value.regions) {
+    if (
+      !isRecord(region)
+      || typeof region.id !== 'string'
+      || region.id.length === 0
+      || region.id.length > 64
+      || ids.has(region.id)
+      || (region.origin !== 'manual' && region.origin !== 'model')
+      || !Array.isArray(region.polygon)
+      || region.polygon.length < 3
+      || region.polygon.length > 16
+    ) return null;
+
+    const polygon: BedZonePoint[] = [];
+    for (const point of region.polygon) {
+      const normalized = normalizeBedZonePoint(point);
+      if (
+        !normalized
+        || normalized[0] < 0
+        || normalized[0] >= width
+        || normalized[1] < 0
+        || normalized[1] >= height
+      ) return null;
+      polygon.push(normalized);
+    }
+    ids.add(region.id);
+    regions.push({ id: region.id, polygon, origin: region.origin });
   }
-  const imageWidth = pickNumber(value, ['image_width', 'imageWidth']);
-  const imageHeight = pickNumber(value, ['image_height', 'imageHeight']);
-  const recognizedAt = pickNullableString(value, ['recognized_at', 'recognizedAt']);
-  if (!polygon.length || imageWidth === null || imageHeight === null || !recognizedAt) return null;
-  return { polygon, image_width: imageWidth, image_height: imageHeight, recognized_at: recognizedAt };
+  return {
+    regions,
+    image_width: width,
+    image_height: height,
+    recognized_at: recognizedAt,
+  };
 }
 
 /** Strict counterpart to normalizeBedZone: throws on a malformed 200 response from the recognize endpoint. */

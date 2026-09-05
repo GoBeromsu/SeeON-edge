@@ -819,3 +819,46 @@ describe('decode backend normalization via normalizeCamera', () => {
     expect(camera?.decode_backend).toBe('quicksync');
   });
 });
+
+describe('bed-zone normalization via normalizeCamera', () => {
+  it('preserves canonical multi-region geometry', () => {
+    const bedZone = {
+      regions: [
+        { id: 'bed-1', polygon: [[0, 0], [10, 0], [10, 10]], origin: 'model' },
+        { id: 'bed-2', polygon: [[20, 0], [30, 0], [30, 10]], origin: 'manual' },
+      ],
+      image_width: 1920,
+      image_height: 1080,
+      recognized_at: '2026-08-02T00:00:00Z',
+    };
+
+    expect(normalizeCamera({ id: 'cam-1', bed_zone: bedZone })?.bed_zone).toEqual(bedZone);
+  });
+
+  it.each([
+    ['an old singleton polygon', {
+      polygon: [[0, 0], [10, 0], [10, 10]],
+      image_width: 1920,
+      image_height: 1080,
+      recognized_at: '2026-08-02T00:00:00Z',
+    }],
+    ['a fractional coordinate', {
+      regions: [{ id: 'bed-1', polygon: [[0, 0], [10.5, 0], [10, 10]], origin: 'model' }],
+      image_width: 1920,
+      image_height: 1080,
+      recognized_at: '2026-08-02T00:00:00Z',
+    }],
+    ['too many regions', {
+      regions: Array.from({ length: 9 }, (_, index) => ({
+        id: `bed-${index}`,
+        polygon: [[0, 0], [10, 0], [10, 10]],
+        origin: 'model',
+      })),
+      image_width: 1920,
+      image_height: 1080,
+      recognized_at: '2026-08-02T00:00:00Z',
+    }],
+  ])('defensively maps %s to null', (_case, bedZone) => {
+    expect(normalizeCamera({ id: 'cam-1', bed_zone: bedZone })?.bed_zone).toBeNull();
+  });
+});

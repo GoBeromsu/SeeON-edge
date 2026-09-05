@@ -31,7 +31,7 @@ export function RoomDetail({ camera, onBack, onRetryConnection }: RoomDetailProp
   const [selectedClip, setSelectedClip] = useState<Clip | null>(null);
   const [connectionModalOpen, setConnectionModalOpen] = useState(false);
   const [deletingCamera, setDeletingCamera] = useState<Camera | null>(null);
-  const [recognitionCameraId, setRecognitionCameraId] = useState<string | null>(null);
+  const [bedZoneEditorCameraId, setBedZoneEditorCameraId] = useState<string | null>(null);
   // Sourced from OverlaySelectionControl's own fetch/selection state
   // rather than re-fetched here, so the live badge below never disagrees with what the operator
   // picked in the detection settings card (issue #102).
@@ -79,22 +79,26 @@ export function RoomDetail({ camera, onBack, onRetryConnection }: RoomDetailProp
           <DetectionSettingsCard
             camera={camera}
             onOverlaySelectionChange={setOverlaySelection}
-            onRecognizeBedZone={() => setRecognitionCameraId(camera.id)}
+            onEditBedZones={() => setBedZoneEditorCameraId(camera.id)}
           />
         </div>
       </div>
 
       <AccessibleDialog
-        open={recognitionCameraId === camera.id}
-        title="침대 영역 인식"
-        onClose={() => setRecognitionCameraId(null)}
+        open={bedZoneEditorCameraId === camera.id}
+        title="침대 영역 편집"
+        onClose={() => setBedZoneEditorCameraId(null)}
         size="lg"
         initialFocus="heading"
       >
         <BedZoneRecognitionPanel
           cameraId={camera.id}
           bedZone={camera.bed_zone ?? null}
-          onRecognized={onRetryConnection}
+          onSaved={() => {
+            onRetryConnection();
+            setBedZoneEditorCameraId(null);
+          }}
+          onCancel={() => setBedZoneEditorCameraId(null)}
         />
       </AccessibleDialog>
 

@@ -1,129 +1,121 @@
 import { useEffect, useRef, useState } from 'react';
-import { bedZoneRecognitionFailureDetail, getCameraStreamUrl, recognizeBedZone } from '@/shared/api/client';
-import type { BedZone } from '@/shared/api/client';
-import { useMjpegStream } from '@/shared/api/useMjpegStream';
+import { getCameraSnapshotUrl, recognizeBedZone, saveBedZone, type BedRegion, type BedZone } from '@/shared/api/client';
+import { BedZonePolygonEditor } from '@/shared/ui/BedZonePolygonEditor';
 
 type BedZoneRecognitionPanelProps = {
   cameraId: string;
   bedZone: BedZone | null;
-  onRecognized: (bedZone: BedZone) => void;
+  onSaved: (bedZone: BedZone | null) => void;
+  onCancel: () => void;
 };
 
-function polygonPoints(bedZone: BedZone): string {
-  return bedZone.polygon
-    .map(([x, y]) => `${(x / bedZone.image_width) * 100},${(y / bedZone.image_height) * 100}`)
-    .join(' ');
+function ActionButton({ label, disabled, onClick, primary = false }: { label: string; disabled?: boolean; onClick: () => void; primary?: boolean }): JSX.Element {
+  return <button type="button" className={primary ? 'brand-action rounded-control px-4 py-2 text-sm font-semibold' : 'dialog-secondary-action'} aria-label={label} title={label} disabled={disabled} onClick={onClick}>{label}</button>;
 }
 
-/**
- * Shared 침대 영역 인식 UI, reused by the 카메라 등록 모달's step 2 and the 연결 관리 모달's 다시 인식
- * sub-flow. Recognition is server-side YOLO segmentation (POST /cameras/{id}/bed-zone/recognize) — the
- * technician never draws the polygon themselves, only triggers/reviews it.
- *
- * #157: 화면은 정지 스냅샷이 아니라 운영 화면과 같은 MJPEG 라이브 스트림이다(`useMjpegStream` 재사용
- * -- 직접 `<img>` 를 새로 만들지 않는다). 카메라 각도를 조정하는 작업이라 화면이 실시간으로
- * 따라와야 하기 때문. 인식은 버튼을 누를 때마다 한 번만 실행한다. 자동 반복은 매번 Flow를
- * 재시작하므로 사용하지 않으며, 결과를 확인한 기술자가 필요할 때 명시적으로 다시 실행한다.
- *
- * 폴리곤 오버레이는 캔버스가 아니라 그 위에 겹친 별도의 `<svg>` 로 그린다: `useMjpegStream` 은
- * 프레임마다 캔버스에 `drawImage` 하므로, 오버레이를 같은 캔버스에 그리면 다음 프레임에 지워진다.
- */
-export function BedZoneRecognitionPanel({ cameraId, bedZone, onRecognized }: BedZoneRecognitionPanelProps): JSX.Element {
-  const [recognizing, setRecognizing] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+export function BedZoneRecognitionPanel({ cameraId, bedZone, onSaved, onCancel }: BedZoneRecognitionPanelProps): JSX.Element {
+  const [regions, setRegions] = useState<BedRegion[]>([]);
+  const [dimensions, setDimensions] = useState<{ width: number; height: number } | null>(null);
+  const [confidence, setConfidence] = useState(0.25);
+  const [pending, setPending] = useState<'recognize' | 'save' | null>(null);
+  const [editorValid, setEditorValid] = useState(true);
+  const [status, setStatus] = useState<string | null>(null);
   const generationRef = useRef(0);
-  const requestRef = useRef<object | null>(null);
-  const onRecognizedRef = useRef(onRecognized);
-  onRecognizedRef.current = onRecognized;
-
-  const stream = useMjpegStream(getCameraStreamUrl(cameraId));
+  const initialBedZoneRef = useRef(bedZone);
+  initialBedZoneRef.current = bedZone;
 
   useEffect(() => {
+    const initialBedZone = initialBedZoneRef.current;
     generationRef.current += 1;
-    requestRef.current = null;
-    setRecognizing(false);
-    setError(null);
+    setRegions(initialBedZone?.regions.map((region) => ({ ...region, polygon: [...region.polygon] })) ?? []);
+    setDimensions(initialBedZone ? { width: initialBedZone.image_width, height: initialBedZone.image_height } : null);
+    setConfidence(0.25);
+    setPending(null);
+    setEditorValid(true);
+    setStatus(null);
     return () => {
       generationRef.current += 1;
-      requestRef.current = null;
     };
   }, [cameraId]);
 
-  async function runRecognition(): Promise<void> {
-    if (requestRef.current) return;
+  async function recognize(): Promise<void> {
+    if (pending) return;
     const generation = generationRef.current;
-    const request = {};
-    requestRef.current = request;
-    setRecognizing(true);
-    setError(null);
+    setPending('recognize');
+    setStatus(null);
     try {
-      const result = await recognizeBedZone(cameraId);
-      if (generation === generationRef.current && requestRef.current === request) {
-        onRecognizedRef.current(result);
-      }
-    } catch (caught) {
-      if (generation !== generationRef.current || requestRef.current !== request) return;
-      const detail = bedZoneRecognitionFailureDetail(caught);
-      setError(
-        detail?.error_class === 'bed_not_found'
-          ? '침대를 찾지 못했습니다. 카메라 각도를 확인한 뒤 다시 시도하세요.'
-          : '침대 영역 인식에 실패했습니다. 잠시 후 다시 시도하세요.',
-      );
+      const candidate = await recognizeBedZone(cameraId, confidence);
+      if (generation !== generationRef.current) return;
+      setRegions(candidate.regions.map((region) => ({ ...region, polygon: [...region.polygon] })));
+      setDimensions({ width: candidate.image_width, height: candidate.image_height });
+      setStatus('침대 영역 후보 준비됨');
+    } catch {
+      if (generation === generationRef.current) setStatus('침대 영역 인식 실패');
     } finally {
-      if (generation === generationRef.current && requestRef.current === request) {
-        requestRef.current = null;
-        setRecognizing(false);
-      }
+      if (generation === generationRef.current) setPending(null);
     }
   }
 
-  return (
-    <div>
-      <div className="event-media-frame relative">
-        <canvas ref={stream.canvasRef} role="img" aria-label="카메라 영상" className="h-full w-full object-cover" />
-        {bedZone ? (
-          <svg viewBox="0 0 100 100" preserveAspectRatio="none" className="absolute inset-0 h-full w-full">
-            <polygon points={polygonPoints(bedZone)} fill="rgba(43,182,163,0.25)" stroke="var(--overlay-teal)" strokeWidth={1} />
-          </svg>
-        ) : null}
-        {recognizing && !bedZone ? (
-          <div className="media-status-overlay absolute inset-0 flex items-center justify-center text-sm font-semibold">
-            인식 중...
-          </div>
-        ) : null}
-        {recognizing && bedZone ? (
-          <span
-            role="status"
-            className="media-status-overlay absolute right-2 top-2 rounded-full px-2.5 py-1 text-xs font-semibold"
-          >
-            재인식 중…
-          </span>
-        ) : null}
-        {bedZone ? (
-          <span className="media-status-overlay absolute bottom-2 left-2 rounded-full px-2.5 py-1 text-xs font-semibold">
-            침대 · 자동 인식됨
-          </span>
+  async function save(): Promise<void> {
+    if (pending || !dimensions) return;
+    const generation = generationRef.current;
+    setPending('save');
+    setStatus(null);
+    try {
+      const saved = await saveBedZone(cameraId, {
+        regions,
+        image_width: dimensions.width,
+        image_height: dimensions.height,
+      });
+      if (generation !== generationRef.current) return;
+      onSaved(saved);
+    } catch {
+      if (generation === generationRef.current) setStatus('침대 영역 저장 실패');
+    } finally {
+      if (generation === generationRef.current) setPending(null);
+    }
+  }
+
+  const sensitivity = 1 - confidence;
+  return <div>
+    <div className="relative">
+      <img
+        src={getCameraSnapshotUrl(cameraId, 'bed-zone-editor')}
+        alt="카메라 영상"
+        className="block h-auto w-full"
+        onLoad={(event) => {
+          if (dimensions) return;
+          const { naturalWidth, naturalHeight } = event.currentTarget;
+          if (naturalWidth > 0 && naturalHeight > 0) setDimensions({ width: naturalWidth, height: naturalHeight });
+        }}
+      />
+      {dimensions ? <BedZonePolygonEditor regions={regions} imageWidth={dimensions.width} imageHeight={dimensions.height} onChange={setRegions} onDraftValidityChange={setEditorValid} disabled={pending !== null} /> : null}
+    </div>
+    <p className="mt-2 text-sm text-muted-foreground">
+      {editorValid ? '자동으로 찾거나 침대 모서리를 직접 지정하세요.' : '모서리를 찍은 뒤 영역 완료를 누르세요.'}
+    </p>
+    <p className="mt-1 text-sm font-medium text-foreground">침대 영역 {regions.length}개</p>
+    {status ? (
+      <div role={status.endsWith('실패') ? 'alert' : 'status'} aria-label={status} className={`mt-2 flex items-center gap-2 rounded-control border px-3 py-2 text-sm ${status.endsWith('실패') ? 'border-destructive/30 text-destructive' : 'border-border text-foreground'}`}>
+        <span>{status}</span>
+        {status.endsWith('실패') ? (
+          <>
+            <button type="button" className="font-semibold underline" aria-label="다시 시도" title="다시 시도" onClick={() => void (status === '침대 영역 저장 실패' ? save() : recognize())}>다시 시도</button>
+            <span className="text-muted-foreground">직접 그리기도 사용할 수 있습니다.</span>
+          </>
         ) : null}
       </div>
-
-      <p aria-live="polite" className="mt-2 text-sm text-muted-foreground">
-        {recognizing
-          ? '침대 영역을 인식하는 중입니다...'
-          : bedZone
-            ? '침대 영역이 인식되었습니다.'
-            : '침대 영역 인식이 필요합니다.'}
-      </p>
-
-      {error ? <p role="alert" className="auth-error">{error}</p> : null}
-
-      <button
-        type="button"
-        className="dialog-secondary-action mt-2"
-        onClick={() => void runRecognition()}
-        disabled={recognizing}
-      >
-        {recognizing ? '인식 중...' : bedZone ? '다시 인식' : '▶ 인식 시작'}
-      </button>
+    ) : null}
+    <div className="mt-3 space-y-3">
+      <label className="flex items-center gap-2 text-sm font-medium text-foreground">
+        <span>인식 민감도</span>
+        <input aria-label="인식 민감도" title="인식 민감도" type="range" min={0.05} max={0.95} step={0.05} value={sensitivity} disabled={pending !== null} onChange={(event) => setConfidence(1 - Number(event.target.value))} />
+      </label>
+      <div className="flex flex-wrap justify-end gap-2">
+        <ActionButton label="자동 인식" disabled={pending !== null} onClick={() => void recognize()} />
+        <ActionButton label="저장" primary disabled={pending !== null || dimensions === null || !editorValid} onClick={() => void save()} />
+        <ActionButton label="취소" disabled={pending !== null} onClick={onCancel} />
+      </div>
     </div>
-  );
+  </div>;
 }

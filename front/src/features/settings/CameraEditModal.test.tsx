@@ -1,14 +1,14 @@
 import { act } from 'react';
 import { createRoot } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { recognizeBedZone, testCamera, updateCamera } from '@/shared/api/client';
+import { recognizeBedZone, saveBedZone, testCamera, updateCamera } from '@/shared/api/client';
 import { CameraEditModal } from '@/features/settings/CameraEditModal';
 import { toast } from '@/shared/ui/Toast';
 import type { BedZone, Camera } from '@/shared/api/client';
 
 vi.mock('@/shared/api/client', async () => {
   const actual = await vi.importActual<typeof import('@/shared/api/client')>('@/shared/api/client');
-  return { ...actual, testCamera: vi.fn(), updateCamera: vi.fn(), recognizeBedZone: vi.fn() };
+  return { ...actual, testCamera: vi.fn(), updateCamera: vi.fn(), recognizeBedZone: vi.fn(), saveBedZone: vi.fn() };
 });
 
 const camera: Camera = {
@@ -22,7 +22,7 @@ const camera: Camera = {
 };
 
 const bedZone: BedZone = {
-  polygon: [[0, 0], [100, 0], [100, 100], [0, 100]],
+  regions: [{ id: 'bed-1', polygon: [[0, 0], [100, 0], [100, 100], [0, 100]], origin: 'model' }],
   image_width: 1920,
   image_height: 1080,
   recognized_at: '2026-08-01T00:00:00Z',
@@ -79,6 +79,7 @@ beforeEach(() => {
   vi.mocked(testCamera).mockReset();
   vi.mocked(updateCamera).mockReset();
   vi.mocked(recognizeBedZone).mockReset();
+  vi.mocked(saveBedZone).mockReset();
 });
 
 afterEach(() => {
@@ -221,18 +222,19 @@ describe('CameraEditModal', () => {
     expect(document.querySelectorAll('[role="dialog"]').length).toBe(1);
   });
 
-  it('switches into the re-recognition sub-view and back without opening a second dialog', async () => {
+  it('keeps recognition candidate-only and closes the sub-view after explicit save', async () => {
     vi.mocked(recognizeBedZone).mockResolvedValue(bedZone);
+    vi.mocked(saveBedZone).mockResolvedValue(bedZone);
     const { onUpdated } = render(camera);
 
     act(() => document.querySelector<HTMLButtonElement>('[aria-label="침대 영역 다시 인식"]')?.click());
     expect(document.querySelectorAll('[role="dialog"]').length).toBe(1);
-    expect(document.body.textContent).toContain('침대 영역 인식이 필요합니다.');
 
-    await act(async () => findButton('▶ 인식 시작').click());
-    expect(onUpdated).toHaveBeenCalled();
+    await act(async () => findButton('자동 인식').click());
+    expect(onUpdated).not.toHaveBeenCalled();
 
-    act(() => findButton('완료').click());
+    await act(async () => findButton('저장').click());
+    expect(onUpdated).toHaveBeenCalledOnce();
     expect(document.body.textContent).toContain('인식 완료');
   });
 
@@ -243,7 +245,7 @@ describe('CameraEditModal', () => {
     act(() => document.querySelector<HTMLButtonElement>('[aria-label="침대 영역 다시 인식"]')?.click());
     expect(document.querySelector('[role="dialog"]')?.getAttribute('data-size')).toBe('lg');
 
-    act(() => findButton('취소').click());
+    act(() => document.querySelector<HTMLButtonElement>('[aria-label="취소"]')?.click());
     expect(document.querySelector('[role="dialog"]')?.getAttribute('data-size')).toBe('md');
   });
 
@@ -252,13 +254,13 @@ describe('CameraEditModal', () => {
 
     act(() => document.querySelector<HTMLButtonElement>('[aria-label="침대 영역 다시 인식"]')?.click());
     expect(document.querySelector('[role="dialog"]')?.getAttribute('data-size')).toBe('lg');
-    expect(document.body.textContent).toContain('침대 영역 인식이 필요합니다.');
+    expect(findButton('자동 인식')).not.toBeNull();
 
     // Simulate a 5s poll tick handing down a brand-new object for the same camera id.
     rerender({ ...camera });
 
     expect(document.querySelector('[role="dialog"]')?.getAttribute('data-size')).toBe('lg');
-    expect(document.body.textContent).toContain('침대 영역 인식이 필요합니다.');
+    expect(findButton('자동 인식')).not.toBeNull();
   });
 
   it('resets to the view mode when the modal is retargeted at a different camera id', () => {

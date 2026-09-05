@@ -12,7 +12,10 @@ const onlineCamera: Camera = {
   status: 'online',
   created_at: null,
   bed_zone: {
-    polygon: [[0, 0], [10, 0], [10, 10], [0, 10]],
+    regions: [
+      { id: 'bed-1', polygon: [[0, 0], [10, 0], [10, 10]], origin: 'model' },
+      { id: 'bed-2', polygon: [[20, 0], [30, 0], [30, 10]], origin: 'manual' },
+    ],
     image_width: 1920,
     image_height: 1080,
     recognized_at: '2026-09-05T00:00:00Z',
@@ -29,11 +32,18 @@ const detectionSettings: DetectionSettings = {
 };
 
 let overlaySelection = { person: true, bed: true };
+const mountedRoots = new Set<Root>();
 
-function installFetchMock(): void {
+function installFetchMock(detectionResponse: 'success' | 'error' | 'pending' = 'success'): void {
   vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
     const url = typeof input === 'string' ? input : input.toString();
     if (url.includes('/detection-settings')) {
+      if (detectionResponse === 'error') {
+        return Promise.resolve({ ok: false, status: 500, json: async () => ({}) });
+      }
+      if (detectionResponse === 'pending') {
+        return new Promise(() => undefined);
+      }
       return Promise.resolve({ ok: true, status: 200, json: async () => detectionSettings });
     }
     if (url.includes('/streams/') && url.includes('/pose')) {
@@ -59,12 +69,21 @@ async function render(camera: Camera): Promise<{ host: HTMLDivElement; root: Roo
   const host = document.createElement('div');
   document.body.append(host);
   const root = createRoot(host);
-  act(() => root.render(<DetectionSettingsCard camera={camera} />));
-  await flush();
+  mountedRoots.add(root);
+  await act(async () => {
+    root.render(<DetectionSettingsCard camera={camera} onEditBedZones={vi.fn()} />);
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+  });
   return { host, root };
 }
 
 afterEach(() => {
+  act(() => {
+    for (const root of mountedRoots) root.unmount();
+  });
+  mountedRoots.clear();
   document.body.innerHTML = '';
   vi.unstubAllGlobals();
   overlaySelection = { person: true, bed: true };
@@ -89,7 +108,7 @@ describe('DetectionSettingsCard (operations)', () => {
     const { host } = await render(cameraWithoutBedZone);
 
     expect(host.querySelector('svg[aria-label="침대 영역 미설정"]')).not.toBeNull();
-    expect(host.querySelector('button[aria-label="침대 영역 인식"]')).not.toBeNull();
+    expect(host.querySelector('button[aria-label="침대 영역 편집"]')).not.toBeNull();
     expect(host.querySelectorAll('svg[aria-label="탐지 중"]')).toHaveLength(1);
   });
 
@@ -100,6 +119,7 @@ describe('DetectionSettingsCard (operations)', () => {
 
     expect(host.querySelector('svg[aria-label="침대 영역 미설정"]')).toBeNull();
     expect(host.querySelectorAll('svg[aria-label="탐지 중"]')).toHaveLength(2);
+    expect(host.querySelector('button[aria-label="침대 영역 편집"]')).not.toBeNull();
   });
 
   it('keeps the disabled state ahead of missing bed geometry', async () => {
@@ -109,28 +129,30 @@ describe('DetectionSettingsCard (operations)', () => {
 
     expect(host.querySelector('svg[aria-label="꺼짐"]')).not.toBeNull();
     expect(host.querySelector('svg[aria-label="침대 영역 미설정"]')).toBeNull();
+    expect(host.querySelector('button[aria-label="침대 영역 편집"]')).not.toBeNull();
   });
 
-  it('makes recognition actionable without treating the click itself as successful geometry', async () => {
+  it('keeps bed-zone editing actionable with saved geometry without changing readiness on click', async () => {
     installFetchMock();
     detectionSettings.domains.bed_exit.on = true;
-    const onRecognizeBedZone = vi.fn();
+    const onEditBedZones = vi.fn();
     const host = document.createElement('div');
     document.body.append(host);
     const root = createRoot(host);
+    mountedRoots.add(root);
     act(() => root.render(
       <DetectionSettingsCard
-        camera={{ ...onlineCamera, bed_zone: null }}
-        onRecognizeBedZone={onRecognizeBedZone}
+        camera={onlineCamera}
+        onEditBedZones={onEditBedZones}
       />,
     ));
     await flush();
 
-    const action = host.querySelector<HTMLButtonElement>('button[aria-label="침대 영역 인식"]');
+    const action = host.querySelector<HTMLButtonElement>('button[aria-label="침대 영역 편집"]');
     expect(action).toBeTruthy();
     act(() => action?.click());
-    expect(onRecognizeBedZone).toHaveBeenCalledOnce();
-    expect(host.querySelector('svg[aria-label="침대 영역 미설정"]')).not.toBeNull();
+    expect(onEditBedZones).toHaveBeenCalledOnce();
+    expect(host.querySelector('svg[aria-label="침대 영역 미설정"]')).toBeNull();
   });
 
   it('shows an accessible paused icon for every domain when the camera is offline', async () => {
@@ -139,6 +161,16 @@ describe('DetectionSettingsCard (operations)', () => {
 
     expect(host.querySelectorAll('svg[aria-label="중단됨"]')).toHaveLength(2);
     expect(host.querySelector('svg[aria-label="탐지 중"]')).toBeNull();
+    expect(host.querySelector('button[aria-label="침대 영역 편집"]')).not.toBeNull();
+  });
+
+  it.each(['pending', 'error'] as const)('keeps bed-zone editing available while settings are %s', async (response) => {
+    installFetchMock(response);
+    const { host } = await render(onlineCamera);
+
+    const action = host.querySelector<HTMLButtonElement>('button[aria-label="침대 영역 편집"]');
+    expect(action).not.toBeNull();
+    expect(action?.title).toBe('침대 영역 편집');
   });
 
   it('navigates to the settings page when the header gear icon is clicked', async () => {

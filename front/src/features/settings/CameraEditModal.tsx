@@ -199,23 +199,13 @@ export function CameraEditModal({ camera, onClose, onUpdated, onRequestDelete }:
           <BedZoneRecognitionPanel
             cameraId={camera.id}
             bedZone={bedZone}
-            onRecognized={(zone) => {
+            onSaved={(zone) => {
               setBedZone(zone);
               onUpdated();
+              setMode('view');
             }}
+            onCancel={() => setMode('view')}
           />
-          <div className="dialog-actions mt-4">
-            <button type="button" className="dialog-secondary-action" onClick={() => setMode('view')}>
-              취소
-            </button>
-            <button
-              type="button"
-              className="brand-action inline-flex h-9 items-center justify-center rounded-control px-4 text-sm font-semibold"
-              onClick={() => setMode('view')}
-            >
-              완료
-            </button>
-          </div>
         </div>
       ) : (
         <form onSubmit={(event) => { event.preventDefault(); void handleSave(); }} noValidate>

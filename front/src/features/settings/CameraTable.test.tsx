@@ -12,7 +12,10 @@ const onlineCamera: Camera = {
   status: 'online',
   created_at: null,
   bed_zone: {
-    polygon: [[0, 0], [10, 0], [10, 10], [0, 10]],
+    regions: [
+      { id: 'bed-1', polygon: [[0, 0], [10, 0], [10, 10]], origin: 'model' },
+      { id: 'bed-2', polygon: [[20, 0], [30, 0], [30, 10]], origin: 'manual' },
+    ],
     image_width: 1920,
     image_height: 1080,
     recognized_at: '2026-08-01T00:00:00Z',

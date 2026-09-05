@@ -43,7 +43,7 @@ export type Camera = {
   last_heartbeat_at?: number | null;
   /** Seconds since the last edge heartbeat, or null. Same GET-only availability as last_heartbeat_at. */
   heartbeat_age_sec?: number | null;
-  /** Auto-recognized bed area, or null when recognition has never succeeded ("인식 필요" in the UI). */
+  /** Saved bed regions, or null when none are configured ("인식 필요" in the UI). */
   bed_zone?: BedZone | null;
   edge_ref?: string | null;
   room_edge_ref?: string | null;
@@ -74,13 +74,21 @@ export type OverlaySelection = {
 /** A single [x, y] vertex of a bed-zone polygon, in the coordinate space of image_width x image_height. */
 export type BedZonePoint = [number, number];
 
-/** Auto-recognized (YOLO segmentation) bed area for a camera. Persisted server-side, not user-drawn. */
-export type BedZone = {
+export type BedRegion = {
+  id: string;
   polygon: BedZonePoint[];
+  origin: 'manual' | 'model';
+};
+
+/** Canonical bed-region geometry in the source image coordinate space. */
+export type BedZone = {
+  regions: BedRegion[];
   image_width: number;
   image_height: number;
   recognized_at: string;
 };
+
+export type BedZoneSaveInput = Omit<BedZone, 'recognized_at'>;
 
 export type RuntimeDecodeDiagnostics = {
   requested: string | null;

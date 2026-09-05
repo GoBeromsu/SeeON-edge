@@ -1,201 +1,190 @@
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { recognizeBedZone } from '@/shared/api/client';
-import { HttpError } from '@/shared/api/http';
+import { recognizeBedZone, saveBedZone, type BedZone } from '@/shared/api/client';
 import { BedZoneRecognitionPanel } from '@/shared/ui/BedZoneRecognitionPanel';
-import type { BedZone } from '@/shared/api/client';
 
 vi.mock('@/shared/api/client', async () => {
   const actual = await vi.importActual<typeof import('@/shared/api/client')>('@/shared/api/client');
-  return { ...actual, recognizeBedZone: vi.fn() };
+  return { ...actual, recognizeBedZone: vi.fn(), saveBedZone: vi.fn() };
 });
 
-const bedZone: BedZone = {
-  polygon: [[0, 0], [100, 0], [100, 100], [0, 100]],
+const savedZone: BedZone = {
+  regions: [{ id: 'saved', polygon: [[0, 0], [100, 0], [100, 100]], origin: 'manual' }],
   image_width: 1920,
   image_height: 1080,
   recognized_at: '2026-08-01T00:00:00Z',
 };
+const candidateZone: BedZone = {
+  regions: [{ id: 'candidate', polygon: [[10, 10], [200, 10], [200, 200]], origin: 'model' }],
+  image_width: 1280,
+  image_height: 720,
+  recognized_at: '2026-08-02T00:00:00Z',
+};
+const roots = new Set<Root>();
 
-type ReadResult = { done: boolean; value?: Uint8Array };
-
-/** worker `_mjpeg_http.py:364-371` `_write_part` 의 와이어 포맷은 신경 쓰지 않는다 -- 이 패널
- * 테스트는 프레임 내용이 아니라 스트림의 시작/정지만 검증하면 되므로, `read()` 가 언제까지나
- * 대기하는 컨트롤러블 리더만 있으면 충분하다. */
-function createControllableReader(): {
-  reader: { read: () => Promise<ReadResult>; cancel: ReturnType<typeof vi.fn> };
-} {
-  const pendingResolvers: Array<(result: ReadResult) => void> = [];
-  const reader = {
-    read: (): Promise<ReadResult> => new Promise((resolve) => { pendingResolvers.push(resolve); }),
-    cancel: vi.fn(async () => undefined),
-  };
-  return { reader };
-}
-
-function stubStreamingFetch(): ReturnType<typeof createControllableReader>[] {
-  const streams: ReturnType<typeof createControllableReader>[] = [];
-  vi.stubGlobal('fetch', vi.fn(() => {
-    const controllable = createControllableReader();
-    streams.push(controllable);
-    return Promise.resolve({
-      ok: true,
-      status: 200,
-      headers: { get: () => 'multipart/x-mixed-replace; boundary=frame' },
-      body: { getReader: () => controllable.reader },
-    });
-  }));
-  return streams;
-}
-
-function render(zone: BedZone | null, onRecognized = vi.fn()): {
-  host: HTMLDivElement;
-  root: Root;
-  onRecognized: typeof onRecognized;
-  rerender: (cameraId: string, nextZone?: BedZone | null) => void;
-} {
+function render(zone: BedZone | null = savedZone, onSaved = vi.fn(), onCancel = vi.fn()) {
   const host = document.createElement('div');
   document.body.append(host);
   const root = createRoot(host);
-  act(() => root.render(<BedZoneRecognitionPanel cameraId="cam-1" bedZone={zone} onRecognized={onRecognized} />));
-  return {
-    host,
-    root,
-    onRecognized,
-    rerender: (cameraId, nextZone = zone) => {
-      act(() => root.render(
-        <BedZoneRecognitionPanel cameraId={cameraId} bedZone={nextZone} onRecognized={onRecognized} />,
-      ));
-    },
-  };
+  roots.add(root);
+  act(() => root.render(<BedZoneRecognitionPanel cameraId="cam-1" bedZone={zone} onSaved={onSaved} onCancel={onCancel} />));
+  return { host, root, onSaved, onCancel };
 }
 
-function findButton(host: HTMLElement, label: string): HTMLButtonElement {
-  const button = Array.from(host.querySelectorAll('button')).find((candidate) => candidate.textContent === label);
-  if (!button) throw new Error(`missing button ${label}`);
-  return button;
+function action(host: HTMLElement, label: string): HTMLButtonElement {
+  return host.querySelector(`button[aria-label="${label}"]`) as HTMLButtonElement;
 }
 
-async function flushMicrotasks(times = 3): Promise<void> {
-  for (let i = 0; i < times; i += 1) {
-    await act(async () => { await Promise.resolve(); });
-  }
+async function flush(): Promise<void> {
+  await act(async () => { await Promise.resolve(); await Promise.resolve(); await Promise.resolve(); });
 }
 
 beforeEach(() => {
-  vi.useFakeTimers();
   vi.mocked(recognizeBedZone).mockReset();
-  vi.stubGlobal('createImageBitmap', vi.fn(async () => ({ width: 4, height: 4, close: vi.fn() })));
+  vi.mocked(saveBedZone).mockReset();
 });
 
 afterEach(() => {
-  vi.useRealTimers();
+  act(() => roots.forEach((root) => root.unmount()));
+  roots.clear();
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
   document.body.innerHTML = '';
 });
 
 describe('BedZoneRecognitionPanel', () => {
-  it('renders a live MJPEG canvas (not a static <img> snapshot) with the "▶ 인식 시작" trigger', () => {
-    stubStreamingFetch();
-    const { host, root } = render(null);
-
-    expect(host.querySelector('canvas')).not.toBeNull();
-    expect(host.querySelector('img')).toBeNull();
-    expect(host.textContent).toContain('침대 영역 인식이 필요합니다.');
-    expect(findButton(host, '▶ 인식 시작')).toBeTruthy();
-
-    act(() => root.unmount());
+  it('initializes the editor from saved regions and exposes icon-only explicit actions', () => {
+    const { host } = render();
+    expect(host.querySelector('[data-region-id="saved"]')).not.toBeNull();
+    expect(host.querySelector('svg[viewBox="0 0 1920 1080"]')).not.toBeNull();
+    expect(action(host, '자동 인식').textContent).toBe('자동 인식');
+    expect(action(host, '저장').textContent).toBe('저장');
+    expect(action(host, '취소').textContent).toBe('취소');
+    expect(host.textContent).toContain('자동으로 찾거나 침대 모서리를 직접 지정하세요.');
+    expect(host.textContent).toContain('침대 영역 1개');
   });
 
-  it('recognizes exactly once per explicit click and allows another click after completion', async () => {
-    stubStreamingFetch();
-    vi.mocked(recognizeBedZone).mockResolvedValue(bedZone);
-    const { host, root, onRecognized } = render(null);
-    await flushMicrotasks();
+  it('uses snapshot natural dimensions when no saved geometry exists', () => {
+    const { host } = render(null);
+    const image = host.querySelector('img[alt="카메라 영상"]') as HTMLImageElement;
+    expect(image.className).toContain('h-auto');
+    expect(image.parentElement?.className).not.toContain('event-media-frame');
+    Object.defineProperties(image, {
+      naturalWidth: { value: 1440 },
+      naturalHeight: { value: 810 },
+    });
+    act(() => image.dispatchEvent(new Event('load', { bubbles: true })));
+    expect(host.querySelector('svg[viewBox="0 0 1440 810"]')).not.toBeNull();
+    expect(action(host, '저장').disabled).toBe(false);
+  });
 
-    await act(async () => findButton(host, '▶ 인식 시작').click());
-    expect(recognizeBedZone).toHaveBeenCalledTimes(1);
-    expect(onRecognized).toHaveBeenCalledWith(bedZone);
+  it('uses inverse confidence for sensitivity and treats recognition as an unsaved candidate', async () => {
+    vi.mocked(recognizeBedZone).mockResolvedValue(candidateZone);
+    const { host, onSaved } = render();
+    const sensitivity = host.querySelector('input[aria-label="인식 민감도"]') as HTMLInputElement;
+    act(() => {
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+      setter?.call(sensitivity, '0.9');
+      sensitivity.dispatchEvent(new Event('input', { bubbles: true }));
+    });
 
-    await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
-    expect(recognizeBedZone).toHaveBeenCalledTimes(1);
+    await act(async () => action(host, '자동 인식').click());
 
-    await act(async () => findButton(host, '▶ 인식 시작').click());
+    expect(recognizeBedZone).toHaveBeenCalledWith('cam-1', expect.closeTo(0.1));
+    expect(host.querySelector('[data-region-id="candidate"]')).not.toBeNull();
+    expect(onSaved).not.toHaveBeenCalled();
+    expect(host.querySelector('[aria-label="침대 영역 후보 준비됨"]')).not.toBeNull();
+  });
+
+  it('persists only on explicit save and then reports the actual response', async () => {
+    vi.mocked(saveBedZone).mockResolvedValue(savedZone);
+    const { host, onSaved } = render();
+
+    await act(async () => action(host, '저장').click());
+
+    expect(saveBedZone).toHaveBeenCalledWith('cam-1', {
+      regions: savedZone.regions,
+      image_width: 1920,
+      image_height: 1080,
+    });
+    expect(onSaved).toHaveBeenCalledWith(savedZone);
+  });
+
+  it('can delete the last region and explicitly save an empty clear', async () => {
+    vi.mocked(saveBedZone).mockResolvedValue(null);
+    const { host, onSaved } = render();
+    act(() => (host.querySelector('[data-region-id="saved"] polygon') as SVGPolygonElement).dispatchEvent(new MouseEvent('click', { bubbles: true })));
+    act(() => action(host, '선택 영역 삭제').click());
+
+    await act(async () => action(host, '저장').click());
+
+    expect(saveBedZone).toHaveBeenCalledWith('cam-1', { regions: [], image_width: 1920, image_height: 1080 });
+    expect(onSaved).toHaveBeenCalledWith(null);
+  });
+
+  it('disables save while a polygon draft is incomplete and restores it when cancelled', () => {
+    const { host } = render();
+    expect(action(host, '저장').disabled).toBe(false);
+    act(() => action(host, '직접 그리기').click());
+    expect(action(host, '저장').disabled).toBe(true);
+    expect(host.textContent).toContain('모서리를 찍은 뒤 영역 완료를 누르세요.');
+    const editor = host.querySelector('svg[aria-label="침대 영역 편집 캔버스"]') as SVGSVGElement;
+    act(() => editor.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: 'Escape' })));
+    expect(action(host, '저장').disabled).toBe(false);
+  });
+
+  it('disables save after a vertex edit makes a committed polygon invalid', () => {
+    const { host } = render();
+    const vertex = host.querySelector('circle[aria-label="영역 saved 꼭짓점 1"]') as SVGCircleElement;
+    act(() => vertex.dispatchEvent(new FocusEvent('focusin', { bubbles: true })));
+    const x = host.querySelector('input[aria-label="꼭짓점 X"]') as HTMLInputElement;
+    act(() => {
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+      setter?.call(x, '100');
+      x.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    expect(action(host, '저장').disabled).toBe(true);
+  });
+
+  it('cancels without persistence', () => {
+    const { host, onCancel } = render();
+    act(() => action(host, '취소').click());
+    expect(onCancel).toHaveBeenCalledOnce();
+    expect(saveBedZone).not.toHaveBeenCalled();
+  });
+
+  it('ignores a stale recognition response after camera change', async () => {
+    let resolve!: (zone: BedZone) => void;
+    vi.mocked(recognizeBedZone).mockReturnValue(new Promise((done) => { resolve = done; }));
+    const { host, root } = render();
+    act(() => action(host, '자동 인식').click());
+    act(() => root.render(<BedZoneRecognitionPanel cameraId="cam-2" bedZone={null} onSaved={vi.fn()} onCancel={vi.fn()} />));
+    await act(async () => resolve(candidateZone));
+    expect(host.querySelector('[data-region-id="candidate"]')).toBeNull();
+  });
+
+  it('does not report a pending save after the popup unmounts', async () => {
+    let resolve!: (zone: BedZone | null) => void;
+    vi.mocked(saveBedZone).mockReturnValue(new Promise((done) => { resolve = done; }));
+    const { host, root, onSaved } = render();
+    act(() => action(host, '저장').click());
+    act(() => root.unmount());
+    roots.delete(root);
+    await act(async () => resolve(savedZone));
+    expect(onSaved).not.toHaveBeenCalled();
+  });
+
+  it('shows accessible status icons for request failures without visible helper prose', async () => {
+    vi.mocked(recognizeBedZone).mockRejectedValue(new Error('offline'));
+    const { host } = render();
+    await flush();
+    await act(async () => action(host, '자동 인식').click());
+    expect(host.querySelector('[role="alert"][aria-label="침대 영역 인식 실패"]')).not.toBeNull();
+    expect(host.textContent).toContain('침대 영역 인식 실패');
+    expect(host.textContent).toContain('다시 시도');
+    expect(host.textContent).toContain('직접 그리기도 사용할 수 있습니다.');
+    await act(async () => action(host, '다시 시도').click());
     expect(recognizeBedZone).toHaveBeenCalledTimes(2);
-    expect(onRecognized).toHaveBeenCalledTimes(2);
-
-    act(() => root.unmount());
-  });
-
-  it('keeps the persisted polygon overlay visible while recognition is pending', async () => {
-    stubStreamingFetch();
-    let resolveRecognition!: (zone: BedZone) => void;
-    vi.mocked(recognizeBedZone).mockReturnValue(new Promise((resolve) => { resolveRecognition = resolve; }));
-    const { host, root } = render(bedZone);
-    await flushMicrotasks();
-
-    act(() => findButton(host, '다시 인식').click());
-    expect(host.querySelector('polygon')).not.toBeNull();
-    expect(findButton(host, '인식 중...').disabled).toBe(true);
-
-    await act(async () => resolveRecognition(bedZone));
-    expect(host.querySelector('polygon')).not.toBeNull();
-    expect(findButton(host, '다시 인식').disabled).toBe(false);
-
-    act(() => root.unmount());
-  });
-
-  it('shows the "침대를 찾지 못했습니다" failure message on a 422 bed_not_found rejection', async () => {
-    stubStreamingFetch();
-    vi.mocked(recognizeBedZone).mockRejectedValue(
-      new HttpError(422, { detail: { error_class: 'bed_not_found' } }),
-    );
-    const { host, root } = render(null);
-    await flushMicrotasks();
-
-    await act(async () => findButton(host, '▶ 인식 시작').click());
-
-    expect(host.querySelector('[role="alert"]')?.textContent).toContain('침대를 찾지 못했습니다');
-    expect(findButton(host, '▶ 인식 시작').disabled).toBe(false);
-
-    act(() => root.unmount());
-  });
-
-  it('ignores a stale recognition response after the camera changes', async () => {
-    stubStreamingFetch();
-    let resolveRecognition!: (zone: BedZone) => void;
-    vi.mocked(recognizeBedZone).mockReturnValue(new Promise((resolve) => { resolveRecognition = resolve; }));
-    const { host, root, onRecognized, rerender } = render(null);
-    await flushMicrotasks();
-
-    act(() => findButton(host, '▶ 인식 시작').click());
-    expect(findButton(host, '인식 중...').disabled).toBe(true);
-
-    rerender('cam-2');
-    expect(findButton(host, '▶ 인식 시작').disabled).toBe(false);
-    await act(async () => resolveRecognition(bedZone));
-    expect(onRecognized).not.toHaveBeenCalled();
-    expect(host.querySelector('[role="alert"]')).toBeNull();
-
-    act(() => root.unmount());
-  });
-
-  it('ignores a pending recognition response after unmount and stops the MJPEG stream', async () => {
-    const streams = stubStreamingFetch();
-    let resolveRecognition!: (zone: BedZone) => void;
-    vi.mocked(recognizeBedZone).mockReturnValue(new Promise((resolve) => { resolveRecognition = resolve; }));
-    const { host, root, onRecognized } = render(null);
-    await flushMicrotasks();
-
-    act(() => findButton(host, '▶ 인식 시작').click());
-    expect(recognizeBedZone).toHaveBeenCalledTimes(1);
-    expect(streams[0]?.reader.cancel).not.toHaveBeenCalled();
-
-    act(() => root.unmount());
-    await act(async () => resolveRecognition(bedZone));
-    expect(onRecognized).not.toHaveBeenCalled();
-    expect(streams[0]?.reader.cancel).toHaveBeenCalled();
   });
 });

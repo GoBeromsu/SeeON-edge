@@ -7,7 +7,7 @@ import type { Camera, DetectionDomainKey, DetectionDomainSetting, OverlaySelecti
 type DetectionSettingsCardProps = {
   camera: Camera;
   onOverlaySelectionChange?: (selection: OverlaySelection | null) => void;
-  onRecognizeBedZone?: () => void;
+  onEditBedZones: () => void;
 };
 
 function GearIcon(): JSX.Element {
@@ -79,7 +79,7 @@ function DetectionStatus({ icon, label, className }: ReturnType<typeof detection
   );
 }
 
-function BedRecognitionIcon(): JSX.Element {
+function BedEditIcon(): JSX.Element {
   return (
     <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" className="h-4 w-4">
       <path d="M3 6v12M3 14h18v4M7 10h4a3 3 0 0 1 3 3v1M7 10V7h4a3 3 0 0 1 3 3" />
@@ -96,7 +96,7 @@ function BedRecognitionIcon(): JSX.Element {
 export function DetectionSettingsCard({
   camera,
   onOverlaySelectionChange,
-  onRecognizeBedZone,
+  onEditBedZones,
 }: DetectionSettingsCardProps): JSX.Element {
   const { status, data, retry } = useDetectionSettingsResource(true);
   const online = camera.status === 'online';
@@ -105,14 +105,25 @@ export function DetectionSettingsCard({
     <article className="rounded-card border border-border bg-card p-4">
       <div className="mb-3 flex items-center justify-between gap-3">
         <h2 className="text-base font-semibold text-foreground">탐지 이벤트</h2>
-        <button
-          type="button"
-          className="icon-button"
-          aria-label="탐지 설정으로 이동"
-          onClick={() => navigateToPage('settings')}
-        >
-          <GearIcon />
-        </button>
+        <div className="flex items-center gap-1">
+          <button
+            type="button"
+            className="icon-button"
+            aria-label="침대 영역 편집"
+            title="침대 영역 편집"
+            onClick={onEditBedZones}
+          >
+            <BedEditIcon />
+          </button>
+          <button
+            type="button"
+            className="icon-button"
+            aria-label="탐지 설정으로 이동"
+            onClick={() => navigateToPage('settings')}
+          >
+            <GearIcon />
+          </button>
+        </div>
       </div>
 
       {status === 'loading' ? (
@@ -127,7 +138,7 @@ export function DetectionSettingsCard({
         </div>
       ) : null}
       {status === 'success' && data ? (
-        <div className="grid grid-cols-[1fr_auto_auto_auto] items-center gap-x-3 gap-y-2 text-sm">
+        <div className="grid grid-cols-[1fr_auto_auto] items-center gap-x-3 gap-y-2 text-sm">
           {DOMAIN_ORDER.map((domain: DetectionDomainKey) => {
             const setting = data.domains[domain];
             const missingBedZone = domain === 'bed_exit' && camera.bed_zone == null;
@@ -137,17 +148,6 @@ export function DetectionSettingsCard({
                 <span className="text-foreground">{DOMAIN_LABELS[domain]}</span>
                 <span className="text-right tabular-nums text-muted-foreground">{formatDomainSchedule(setting)}</span>
                 <DetectionStatus {...statusIcon} />
-                {missingBedZone && setting.on && online ? (
-                  <button
-                    type="button"
-                    className="icon-button"
-                    aria-label="침대 영역 인식"
-                    title="침대 영역 인식"
-                    onClick={onRecognizeBedZone ?? (() => navigateToPage('settings'))}
-                  >
-                    <BedRecognitionIcon />
-                  </button>
-                ) : <span aria-hidden="true" />}
               </div>
             );
           })}
