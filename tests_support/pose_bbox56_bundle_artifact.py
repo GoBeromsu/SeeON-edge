@@ -3,9 +3,9 @@
 Mirrors the published ``bundle-manifest/proxy-v0`` layout that
 ``worker.adapters.model.pose_bbox56_bundle`` verifies: every member is listed
 with its sha256 and size, ``arch.json`` describes the binary GRU proxy,
-``calibration.json`` carries the temperature, and ``evaluation-receipt.json``
-carries the receipt threshold and promotion eligibility. Weights are seeded so
-two builds with the same arguments are byte-identical.
+and ``calibration.json`` carries the operational settings. The independent
+``evaluation-receipt.json`` is research metadata. Weights are seeded so two
+builds with the same arguments are byte-identical.
 """
 
 from __future__ import annotations
@@ -43,6 +43,9 @@ def write_pose_bbox56_bundle(
     temperature: float = 1.0,
     receipt_threshold: float | None = 0.05,
     promotion_eligible: bool = False,
+    evaluation_receipt_threshold: float | None = None,
+    evaluation_receipt_promotion_eligible: bool | None = None,
+    manifest_evaluation_receipt: bool = True,
     seed: int = 7,
 ) -> Path:
     """Write a verifiable proxy bundle under ``root`` and return ``root``."""
@@ -85,9 +88,17 @@ def write_pose_bbox56_bundle(
     receipt = {
         "class_order": ["non_fall", "fall_transition_proxy"],
         "preprocessing_identity_digest": PREPROCESSING_IDENTITY_DIGEST,
-        "promotion_eligible": promotion_eligible,
+        "promotion_eligible": (
+            promotion_eligible
+            if evaluation_receipt_promotion_eligible is None
+            else evaluation_receipt_promotion_eligible
+        ),
         "schema_version": "evaluation-receipt/proxy-v0",
-        "threshold": receipt_threshold,
+        "threshold": (
+            receipt_threshold
+            if evaluation_receipt_threshold is None
+            else evaluation_receipt_threshold
+        ),
     }
     (root / "arch.json").write_text(json.dumps(arch, sort_keys=True), encoding="utf-8")
     (root / "calibration.json").write_text(
@@ -106,11 +117,16 @@ def write_pose_bbox56_bundle(
         "arch.json",
         "calibration.json",
         "conformance/pose-bbox56-v1.json",
-        "evaluation-receipt.json",
-        "metadata.yaml",
-        "model.onnx",
-        "model.pt",
     ]
+    if manifest_evaluation_receipt:
+        members.append("evaluation-receipt.json")
+    members.extend(
+        [
+            "metadata.yaml",
+            "model.onnx",
+            "model.pt",
+        ]
+    )
     files = []
     for relative in members:
         payload = (root / relative).read_bytes()

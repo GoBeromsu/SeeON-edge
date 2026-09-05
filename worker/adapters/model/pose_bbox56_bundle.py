@@ -68,9 +68,9 @@ class PoseBbox56BundleRunner:
         root = Path(artifact_dir).expanduser().resolve()
         manifest = read_json(root / "bundle-manifest.json")
         verify_bundle(root, manifest)
+        member_digest(manifest, "calibration.json")
         arch = read_json(root / "arch.json")
         calibration = read_json(root / "calibration.json")
-        receipt = read_json(root / "evaluation-receipt.json")
         if not isinstance(arch, dict) or (arch.get("input_size"), arch.get("fallen_output")) != (
             56,
             False,
@@ -94,9 +94,7 @@ class PoseBbox56BundleRunner:
             module.load_state_dict(state, strict=True)
         except (OSError, RuntimeError, ValueError, EOFError, pickle.UnpicklingError) as exc:
             raise ModelLoadError(f"cannot load pose-bbox56 model: {exc}") from exc
-        if not isinstance(receipt, dict):
-            raise ModelLoadError("invalid evaluation-receipt.json")
-        candidate_threshold = receipt.get("threshold", calibration.get("threshold"))
+        candidate_threshold = calibration.get("threshold")
         receipt_threshold = (
             float(candidate_threshold)
             if isinstance(candidate_threshold, (int, float))
@@ -104,11 +102,9 @@ class PoseBbox56BundleRunner:
             and 0.0 <= float(candidate_threshold) <= 1.0
             else None
         )
-        promotion_eligible = receipt.get(
-            "promotion_eligible", calibration.get("promotion_eligible")
-        )
+        promotion_eligible = calibration.get("promotion_eligible")
         if not isinstance(promotion_eligible, bool):
-            raise ModelLoadError("receipt promotion_eligible must be boolean")
+            raise ModelLoadError("calibration promotion_eligible must be boolean")
         runner = cls(
             module,
             temperature,

@@ -114,6 +114,7 @@ class OrtPoseBbox56Runner:
         manifest = read_json(root / "bundle-manifest.json")
         verify_bundle(root, manifest)
         artifact_digest = member_digest(manifest, "model.onnx")
+        member_digest(manifest, "calibration.json")
         conformance = _packaged_conformance(root, manifest)
         _validate_runner_conformance(conformance)
         (
@@ -286,14 +287,11 @@ def _bundle_metadata(
     root: Path, preprocessing_identity: str
 ) -> tuple[float, float | None, int, int, bool]:
     calibration = read_json(root / "calibration.json")
-    receipt = read_json(root / "evaluation-receipt.json")
     if not isinstance(calibration, dict):
         raise ModelLoadError("invalid calibration.json")
     parsed_temperature = _calibration_temperature(root, calibration, preprocessing_identity)
     transition_votes, transition_window = _calibration_temporal_rule(calibration)
-    if not isinstance(receipt, dict):
-        raise ModelLoadError("invalid evaluation-receipt.json")
-    candidate_threshold = receipt.get("threshold", calibration.get("threshold"))
+    candidate_threshold = calibration.get("threshold")
     receipt_threshold = (
         float(candidate_threshold)
         if isinstance(candidate_threshold, (int, float))
@@ -301,9 +299,9 @@ def _bundle_metadata(
         and 0.0 <= float(candidate_threshold) <= 1.0
         else None
     )
-    promotion_eligible = receipt.get("promotion_eligible", calibration.get("promotion_eligible"))
+    promotion_eligible = calibration.get("promotion_eligible")
     if not isinstance(promotion_eligible, bool):
-        raise ModelLoadError("receipt promotion_eligible must be boolean")
+        raise ModelLoadError("calibration promotion_eligible must be boolean")
     return (
         parsed_temperature,
         receipt_threshold,

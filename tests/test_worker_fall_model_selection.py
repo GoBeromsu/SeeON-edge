@@ -736,6 +736,34 @@ def test_non_promotable_bundle_keeps_default_confirmation_rule_and_records_decla
     assert (audit.unapplied_transition_votes, audit.unapplied_transition_window) == (5, 5)
 
 
+@pytest.mark.parametrize("manifest_evaluation_receipt", [False, True])
+def test_packaged_loaders_ignore_contradictory_evaluation_receipt(
+    tmp_path: Path, manifest_evaluation_receipt: bool
+) -> None:
+    artifact_dir = write_pose_bbox56_bundle(
+        tmp_path / "bundle",
+        receipt_threshold=0.05,
+        promotion_eligible=False,
+        evaluation_receipt_threshold=0.0,
+        evaluation_receipt_promotion_eligible=True,
+        manifest_evaluation_receipt=manifest_evaluation_receipt,
+    )
+    runners = (
+        OrtPoseBbox56Runner.from_artifact_dir(
+            artifact_dir,
+            session_factory=lambda _path, _providers: _ZeroLogitSession(),
+        ),
+        PoseBbox56BundleRunner.from_artifact_dir(artifact_dir),
+    )
+    policy = default_policy_bundle(("camera-a",)).resolve("camera-a", "fall", 2)
+
+    for runner in runners:
+        assert (runner.receipt_threshold, runner.promotion_eligible) == (0.05, False)
+        effective = _effective_transition_threshold(runner, policy)
+        assert effective.transition_threshold == pytest.approx(0.5)
+        assert effective.threshold_source == "default"
+
+
 @pytest.mark.parametrize(
     "temporal_rule",
     [
