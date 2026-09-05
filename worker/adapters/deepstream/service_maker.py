@@ -58,10 +58,8 @@ class DeepStreamMediaPlaneConfig:
     frame_height: int
     transform_id: str = "deepstream-flow.v1"
     pipeline_name: str = "deepstream-media-plane"
-    #: The forked OSD/JPEG snapshot branch. Off by default: measured on
-    #: hardware, it builds standalone but its post-OSD convert/caps/nvjpegenc
-    #: chain fails to link inside the production Flow, and an unlinkable
-    #: element aborts camera activation.
+    #: The forked OSD/JPEG snapshot branch. Off by default until its measured
+    #: throughput cost is accepted for a deployment.
     snapshot_branch_enabled: bool = False
 
 
@@ -467,13 +465,13 @@ class DeepStreamMediaPlane(MediaPlane):
             )
         )
         flow.attach(what=self._handle.make_probe("media-plane-probe", self._probe))
-        self._build_snapshot_branch(flow, camera_ids)
+        terminal_flow = self._build_snapshot_branch(flow, camera_ids)
         # `render(DISCARD)` is the terminal sink because it is the only one that
         # keeps up: measured in this image, a `retrieve()` sink delivers roughly
         # 2 batched buffers/s where `render` delivers 30, which starves the
         # decision layer of frames. The binding exposes pixels only through that
         # terminal retriever, so it cannot provide a non-throttling OSD snapshot.
-        flow.render(mode=self._handle.render_mode_discard, enable_osd=False, sync=False)
+        terminal_flow.render(mode=self._handle.render_mode_discard, enable_osd=False, sync=False)
         for camera_id in camera_ids:
             source = self._source_element(camera_id)
             source.set(
@@ -485,7 +483,7 @@ class DeepStreamMediaPlane(MediaPlane):
                 }
             )
 
-    def _build_snapshot_branch(self, flow: Any, camera_ids: tuple[str, ...]) -> None:
+    def _build_snapshot_branch(self, flow: Any, camera_ids: tuple[str, ...]) -> Any:
         """Build one normally-closed OSD/JPEG branch per source.
 
         The terminal Flow remains the discard sink.  A valve upstream of each
@@ -493,14 +491,9 @@ class DeepStreamMediaPlane(MediaPlane):
         the appsink callback, so idle branches do not encode frames.
         """
         if not self._config.snapshot_branch_enabled:
-            # Measured on hardware: the branch builds standalone but its
-            # post-OSD convert/caps/nvjpegenc chain fails to link inside the
-            # production Flow, and an unlinkable element aborts camera
-            # activation. Detection and alert delivery outrank a still image,
-            # so the branch stays off until that link is solved.
-            return
+            return flow
         if self._handle.make_jpeg_retriever is None:
-            return
+            return flow
         fork = flow.fork()
         tee = fork._streams[0].originator  # noqa: SLF001 - Flow has no public stream endpoint
         demux = "snapshot-demux"
@@ -542,6 +535,7 @@ class DeepStreamMediaPlane(MediaPlane):
                 encoder_name,
                 sink_name,
             )
+        return fork
 
     def _source_element(self, camera_id: str) -> Any:
         return self._pipeline[self._sources.source_name(camera_id)]

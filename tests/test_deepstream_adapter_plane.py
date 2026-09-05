@@ -11,6 +11,8 @@ absorbed into the same session; a Flow fixes its sources when built.
 from __future__ import annotations
 
 import logging
+import threading
+import time
 from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
@@ -44,12 +46,29 @@ class _Element:
 class _Pipeline:
     def __init__(self) -> None:
         self.elements: dict[str, _Element] = {}
+        self.added: list[tuple[str, str, dict[str, object]]] = []
+        self.links: list[tuple[object, ...]] = []
+        self.attached: dict[str, object] = {}
         self.started: list[tuple[str, int, int]] = []
         self.callbacks: dict[str, Callable[[object], None]] = {}
         self.stopped = False
 
     def __getitem__(self, name: str) -> _Element:
         return self.elements.setdefault(name, _Element())
+
+    def add(
+        self, type_name: str, name: str, properties: dict[str, object] | None = None
+    ) -> _Pipeline:
+        self.added.append((type_name, name, properties or {}))
+        self[name].set(properties or {})
+        return self
+
+    def link(self, *elements: object) -> None:
+        self.links.append(elements)
+
+    def attach(self, name: str, receiver: object, *, tips: str) -> None:
+        assert tips == "new-sample"
+        self.attached[name] = receiver
 
     def start_recording(
         self, source: str, lookback: int, duration: int, callback: Callable[[object], None]
@@ -70,6 +89,7 @@ class _Flow:
         self.built = False
         self.ran = False
         self.render_calls: list[dict[str, object]] = []
+        self._streams = [SimpleNamespace(originator="fork-tee-0")]
 
     def batch_capture(self, uris: list[str], **kwargs: object) -> _Flow:
         del uris, kwargs
@@ -88,6 +108,9 @@ class _Flow:
         del what
         return self
 
+    def fork(self) -> _Flow:
+        return self
+
     def render(self, **kwargs: object) -> _Flow:
         self.render_calls.append(kwargs)
         return self
@@ -96,9 +119,20 @@ class _Flow:
         self.ran = True
 
 
-def _plane(pipeline: _Pipeline | None = None) -> tuple[DeepStreamMediaPlane, _Pipeline]:
+def _plane(
+    pipeline: _Pipeline | None = None, *, snapshot_branch_enabled: bool = False
+) -> tuple[DeepStreamMediaPlane, _Pipeline]:
     pipeline = pipeline or _Pipeline()
-    config = DeepStreamMediaPlaneConfig("infer", "tracker", "lib", Path("/tmp"), 5, 640, 360)
+    config = DeepStreamMediaPlaneConfig(
+        "infer",
+        "tracker",
+        "lib",
+        Path("/tmp"),
+        5,
+        640,
+        360,
+        snapshot_branch_enabled=snapshot_branch_enabled,
+    )
     plane = DeepStreamMediaPlane(
         config,
         metadata_slot=LatestMetadataSlot(),
@@ -108,6 +142,7 @@ def _plane(pipeline: _Pipeline | None = None) -> tuple[DeepStreamMediaPlane, _Pi
             record_config=lambda **kwargs: kwargs,
             render_mode_discard="discard",
             make_probe=lambda name, probe: (name, probe),
+            make_jpeg_retriever=lambda camera_id, plane: (camera_id, plane),
         ),
         worker_boot_id="boot",
         child_instance_id="child",
@@ -275,6 +310,97 @@ def test_snapshot_encoder_runs_only_for_the_alert_that_requested_a_snapshot() ->
     assert encoded == []
     assert plane.snapshot("camera") == b"\xff\xd8burned-overlay\xff\xd9"
     assert encoded == ["camera"]
+
+
+def test_enabled_snapshot_branch_uses_the_fork_as_the_discard_terminal() -> None:
+    plane, pipeline = _plane(snapshot_branch_enabled=True)
+    plane.add_source("camera", "rtsp://one")
+    plane._build_flow()  # noqa: SLF001 - topology is adapter behaviour
+
+    assert pipeline.links == [
+        ("fork-tee-0", "snapshot-demux"),
+        (("snapshot-demux", "snapshot-queue-0"), ("src_0", "sink")),
+        (
+            "snapshot-queue-0",
+            "snapshot-valve-0",
+            "snapshot-convert-0",
+            "snapshot-osd-0",
+            "snapshot-post-osd-convert-0",
+            "snapshot-caps-0",
+            "snapshot-encoder-0",
+            "snapshot-sink-0",
+        ),
+    ]
+    assert pipeline["snapshot-valve-0"].properties == {"drop": True}
+    assert pipeline.attached == {"snapshot-sink-0": ("camera", plane)}
+    flow = plane._flow  # noqa: SLF001 - the configured graph is adapter behaviour
+    assert isinstance(flow, _Flow)
+    assert flow.render_calls == [{"mode": "discard", "enable_osd": False, "sync": False}]
+
+
+def test_enabled_snapshot_branch_closes_its_valve_after_one_jpeg() -> None:
+    plane, pipeline = _plane(snapshot_branch_enabled=True)
+    plane.add_source("camera", "rtsp://one")
+    plane.start()
+    result: list[bytes] = []
+    request = threading.Thread(target=lambda: result.append(plane.snapshot("camera")))
+    request.start()
+    for _ in range(100):
+        if pipeline["snapshot-valve-0"].properties.get("drop") is False:
+            break
+        time.sleep(0.01)
+    plane.publish_jpeg("camera", b"\xff\xd8burned\xff\xd9")
+    request.join(timeout=1)
+
+    assert result == [b"\xff\xd8burned\xff\xd9"]
+    for _ in range(100):
+        if pipeline["snapshot-valve-0"].properties.get("drop") is True:
+            break
+        time.sleep(0.01)
+    assert pipeline["snapshot-valve-0"].properties["drop"] is True
+    plane.stop()
+
+
+def test_enabled_snapshot_branch_reports_callback_errors_without_raising_in_callback() -> None:
+    plane, _ = _plane(snapshot_branch_enabled=True)
+    plane.add_source("camera", "rtsp://one")
+    plane.start()
+    failure = RuntimeError("encoder failed")
+    result: list[BaseException] = []
+
+    request = threading.Thread(
+        target=lambda: _capture_snapshot_error(plane, "camera", result)
+    )
+    request.start()
+    time.sleep(0.01)
+    plane.snapshot_failed("camera", failure)
+    request.join(timeout=1)
+
+    assert len(result) == 1
+    assert isinstance(result[0], SnapshotUnavailable)
+    assert "encoder failed" in str(result[0])
+    plane.stop()
+
+
+def test_enabled_snapshot_branch_times_out_and_recloses_its_valve() -> None:
+    plane, pipeline = _plane(snapshot_branch_enabled=True)
+    plane.add_source("camera", "rtsp://one")
+    plane.start()
+
+    with pytest.raises(SnapshotUnavailable, match="timed out"):
+        plane.snapshot("camera")
+
+    assert pipeline["snapshot-valve-0"].properties["drop"] is True
+    plane.stop()
+
+
+def _capture_snapshot_error(
+    plane: DeepStreamMediaPlane, camera_id: str, errors: list[BaseException]
+) -> None:
+    try:
+        plane.snapshot(camera_id)
+    except SnapshotUnavailable as error:
+        errors.append(error)
 
 
 def test_a_source_failure_rotates_the_stream_identity_and_keeps_the_camera_id() -> None:
