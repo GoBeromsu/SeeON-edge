@@ -196,9 +196,23 @@ def _calibration_comparison(bundle_receipt: Mapping[str, Any]) -> dict[str, Any]
     champion_seed = bundle_receipt.get("champion_seed")
     if not isinstance(per_seed, dict) or not isinstance(champion_seed, int):
         raise TypeError("bundle evaluation receipt lacks champion calibration")
-    candidates = per_seed.get("gru")
-    if not isinstance(candidates, list):
-        raise TypeError("bundle evaluation receipt lacks GRU calibrations")
+    # The champion family is whatever the receipt scored and did NOT list as a
+    # comparator - not a name this script knows. A replacement model's receipt
+    # names its own family the same way.
+    comparators = bundle_receipt.get("comparators", [])
+    if not isinstance(comparators, list):
+        raise TypeError("bundle evaluation receipt comparators must be a list")
+    families = [
+        key
+        for key, value in per_seed.items()
+        if isinstance(value, list) and key not in set(comparators)
+    ]
+    if len(families) != 1:
+        raise TypeError(
+            "bundle evaluation receipt must leave exactly one non-comparator family under "
+            f"per_seed, found {families!r} with comparators {comparators!r}"
+        )
+    candidates = per_seed[families[0]]
     champion = next(
         (
             candidate
@@ -360,11 +374,29 @@ def score_bundle(
             "This measures only the model's own selection-validation source-proxy distribution. "
             "It says nothing about facility falls."
         ),
-        "owner_instruction": (
-            "replace the model first — the maximum positive-window fall_transition score is "
-            f"{max(positive_scores)}, below the deployed {gate:g} gate."
+        "owner_instruction": _owner_instruction(
+            gate=gate, max_positive=max(positive_scores), recall=metrics_at_gate["recall"]
         ),
     }
+
+
+def _owner_instruction(*, gate: float, max_positive: float, recall: float) -> str:
+    """Say what the measurement means, in both directions.
+
+    The instruction must follow the number: a replacement whose positive windows
+    clear the gate is ready for a staged fall, and saying 'replace the model' to
+    the model that fixed the problem would send the owner in a circle.
+    """
+    if max_positive < gate:
+        return (
+            "replace the model first — the maximum positive-window fall_transition score is "
+            f"{max_positive}, below the deployed {gate:g} gate; no fall can raise an alert."
+        )
+    return (
+        f"the model clears the deployed {gate:g} gate — recall {recall:.3f} on its own "
+        f"validation split, maximum positive score {max_positive}; proceed to a staged fall on "
+        "a facility camera, which is the only evidence that speaks to the facility distribution."
+    )
 
 
 def write_receipt(out: Path, receipt: Mapping[str, Any]) -> None:

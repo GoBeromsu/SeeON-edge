@@ -139,3 +139,40 @@ def test_scores_selection_validation_and_writes_receipt(
     persisted = json.loads(out.read_text(encoding="utf-8"))
     assert persisted["status"] == "measured"
     assert persisted["metrics"] == receipt["metrics"]
+    # A model whose positive windows clear the gate must be told to proceed,
+    # not to replace itself - the script once said "replace the model first"
+    # unconditionally, which would have sent the owner in a circle.
+    assert "proceed to a staged fall" in receipt["owner_instruction"]
+    assert "replace the model" not in receipt["owner_instruction"]
+
+
+def test_family_comes_from_the_receipt_and_a_failing_model_is_told_to_be_replaced(
+    tmp_path: Path, recall_script: ModuleType
+) -> None:
+    """A replacement model's receipt carries its own family key; the script must
+    not assume 'gru'. And a model whose positive windows never clear the gate is
+    told to be replaced - the instruction follows the number in both directions.
+    """
+    script = recall_script
+    dataset, digest = _snapshot(tmp_path, script)
+    bundle = _bundle(tmp_path, digest)
+    receipt_path = bundle / "evaluation-receipt.json"
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    # A replacement's receipt names its own champion family, alongside the
+    # comparators it was measured against - exactly the shipped receipt's shape.
+    champion = receipt["per_seed"].pop("gru")
+    receipt["per_seed"] = {"transformer": champion, "gru": champion, "rf45": champion}
+    receipt["comparators"] = ["gru", "rf45"]
+    receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+
+    class _WeakRunner:
+        receipt_threshold = 0.1
+
+        def predict(self, features: object) -> SimpleNamespace:
+            return SimpleNamespace(fall_transition=0.2)
+
+    result = script.score_bundle(bundle, dataset, 0.5, runner_factory=lambda _: _WeakRunner())
+
+    assert result["metrics"]["threshold_0_5"]["recall"] == 0.0
+    assert "replace the model first" in result["owner_instruction"]
+    assert "proceed" not in result["owner_instruction"]
