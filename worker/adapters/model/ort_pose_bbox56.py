@@ -12,6 +12,7 @@ from typing import Final, Protocol
 import numpy as np
 
 from contracts.model_selection import POSE_BBOX56_PREPROCESSING_IDENTITY, ModelSelection
+from shared.detection_policies import FALL_POLICY_V2_DEFAULT
 from worker.adapters.model.errors import ModelLoadError
 from worker.adapters.model.pose_bbox56_bundle_support import (
     member_digest,
@@ -150,6 +151,19 @@ class OrtPoseBbox56Runner:
             raise ModelLoadError("selected receipt threshold must be a probability")
         if selection.threshold_source not in {"default", "receipt"}:
             raise ModelLoadError("selected threshold_source must be default or receipt")
+        # A selection that says its threshold is the image default must declare
+        # the image default. Otherwise the document contradicts itself, and the
+        # policy would honour the source word and run at 0.5 while the declared
+        # number - the one the owner read - is silently discarded. Refuse.
+        if selection.threshold_source == "default" and not math.isclose(
+            float(threshold), FALL_POLICY_V2_DEFAULT.transition_threshold
+        ):
+            raise ModelLoadError(
+                f"selected threshold_source is 'default' but transition_threshold is "
+                f"{float(threshold):g}, not the image default "
+                f"{FALL_POLICY_V2_DEFAULT.transition_threshold:g}; declare threshold_source "
+                "'receipt' to run at the declared number"
+            )
         root = Path(artifact_dir).expanduser().resolve()
         _verify_admitted_member(root, "model.onnx", model_digest)
         _verify_admitted_member(root, "calibration.json", calibration_digest)

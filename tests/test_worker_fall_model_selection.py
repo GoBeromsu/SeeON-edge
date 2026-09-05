@@ -531,6 +531,27 @@ def test_selected_preprocessing_contradiction_refuses_construction(tmp_path: Pat
         )
 
 
+def test_selected_default_source_with_a_non_default_threshold_refuses(tmp_path: Path) -> None:
+    """A selection that says 'default' must declare the default.
+
+    Otherwise the policy honours the source word and runs at 0.5 while the
+    declared number the owner read is silently discarded. The contradiction
+    refuses at construction, naming both numbers.
+    """
+    models_root, desired = _selected_onnx_bundle(tmp_path)
+    selection = desired.selection
+    assert selection is not None
+    proof = admit_model_bundle(models_root, desired)
+
+    with pytest.raises(ModelLoadError, match="threshold_source is 'default'"):
+        OrtPoseBbox56Runner.from_admitted_bundle(
+            models_root / "bundles" / desired.bundle_sha256,
+            proof,
+            replace(selection, threshold_source="default", transition_threshold=0.3),
+            session_factory=lambda _path, _providers: _ZeroLogitSession(),
+        )
+
+
 def test_selected_output_contract_mismatch_refuses_construction(tmp_path: Path) -> None:
     """A selection declares its output class count; this runner implements one.
 
