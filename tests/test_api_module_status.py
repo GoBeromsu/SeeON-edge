@@ -10,7 +10,7 @@ from worker.domains.module_compiler import (
     CompiledDetectionModuleRegistry,
     compile_detection_module_registry,
 )
-from worker.domains.module_definition import SharedComponentIdentity
+from worker.domains.module_definition import RuntimeResolvedArtifactDigest, SharedComponentIdentity
 from worker.domains.registry import (
     AVAILABLE_OBSERVATION_CHANNELS,
     DETECTION_MODULE_DEFINITIONS,
@@ -91,10 +91,16 @@ def _identities(
     runtime: str,
     device: str,
 ) -> tuple[SharedComponentIdentity, ...]:
-    return tuple(
-        binding.identity(runtime=runtime, device=device)
-        for binding in registry.shared_bindings({"fall": 2}, flags={})
-    )
+    # The fall classifier's digest is resolved from the loaded bundle at
+    # composition time, never from the registry; stand in for that here the
+    # way the runtime does, with a digest for a bundle that was loaded.
+    resolved = "7bb75a2932e1a1250dc900013b2c80b220de5e23f3ea568e05f1db21d0a757e3"
+    identities = []
+    for binding in registry.shared_bindings({"fall": 2}, flags={}):
+        if isinstance(binding.artifact_digest, RuntimeResolvedArtifactDigest):
+            binding = replace(binding, artifact_digest=resolved)
+        identities.append(binding.identity(runtime=runtime, device=device))
+    return tuple(identities)
 
 
 def _manifest(

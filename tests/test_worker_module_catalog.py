@@ -10,7 +10,11 @@ from worker.domains.module_compiler import (
     CompiledDetectionModuleRegistry,
     compile_detection_module_registry,
 )
-from worker.domains.module_definition import DetectionModuleDefinition
+from worker.domains.module_definition import (
+    DetectionModuleDefinition,
+    RuntimeResolvedArtifactDigest,
+    SharedComponentIdentity,
+)
 from worker.domains.registry import (
     AVAILABLE_OBSERVATION_CHANNELS,
     DETECTION_MODULE_DEFINITIONS,
@@ -108,7 +112,15 @@ def _manifest(
     boot = _boot(profile_name)
     bindings = registry.shared_bindings(selection, flags={"person-box-source": True})
     identities = tuple(
-        binding.identity(
+        SharedComponentIdentity(
+            component_id=binding.component_id,
+            artifact_digest="c" * 64,
+            runtime=boot.runtime_profile.effective_inference_backend,
+            device=boot.device,
+            preprocessing_identity=binding.preprocessing_identity,
+        )
+        if isinstance(binding.artifact_digest, RuntimeResolvedArtifactDigest)
+        else binding.identity(
             runtime=boot.runtime_profile.effective_inference_backend,
             device=boot.device,
         )
@@ -237,8 +249,9 @@ def test_catalog_qualifies_production_modules_components_and_model_bindings() ->
         }
         assert model_bindings == expected_models[definition.qualified_id]
         for binding in definition.shared_bindings:
-            assert binding.artifact_digest is not None
-            assert _SHA256.fullmatch(binding.artifact_digest)
+            assert isinstance(binding.artifact_digest, (str, RuntimeResolvedArtifactDigest))
+            if isinstance(binding.artifact_digest, str):
+                assert _SHA256.fullmatch(binding.artifact_digest)
             assert binding.preprocessing_identity
             assert binding.warmup_required is True
 

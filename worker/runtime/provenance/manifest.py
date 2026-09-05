@@ -9,6 +9,7 @@ from worker.domains.module_compiler import CompiledDetectionModuleRegistry
 from worker.domains.module_definition import (
     ComponentBinding,
     DetectionModuleDefinition,
+    RuntimeResolvedArtifactDigest,
     SharedComponentIdentity,
 )
 from worker.runtime.profile.boot import BootContext
@@ -188,7 +189,10 @@ def _verified_component_identities(
         )
     for component_id, identity in by_id.items():
         binding = bindings[component_id]
-        if binding.artifact_digest != identity.artifact_digest:
+        if (
+            not isinstance(binding.artifact_digest, RuntimeResolvedArtifactDigest)
+            and binding.artifact_digest != identity.artifact_digest
+        ):
             raise AppliedRuntimeManifestError(
                 f"contradictory artifact identity for component {component_id!r}"
             )

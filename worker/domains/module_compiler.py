@@ -16,6 +16,7 @@ from worker.domains.module_definition import (
     DetectionModuleActivationError,
     DetectionModuleCompilationError,
     DetectionModuleDefinition,
+    RuntimeResolvedArtifactDigest,
 )
 from worker.types import TemporalProfile
 
@@ -283,7 +284,15 @@ def _validate_definition(
                 raise DetectionModuleCompilationError(
                     f"component binding {binding.component_id!r} is missing provisioner provenance"
                 )
-            if binding.artifact_digest == "" or binding.preprocessing_identity == "":
+            if (
+                binding.artifact_digest is None
+                or not isinstance(
+                    binding.artifact_digest,
+                    (str, RuntimeResolvedArtifactDigest),
+                )
+                or binding.artifact_digest == ""
+                or binding.preprocessing_identity == ""
+            ):
                 raise DetectionModuleCompilationError(
                     f"component binding {binding.component_id!r} has invalid provenance"
                 )

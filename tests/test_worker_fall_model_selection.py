@@ -43,6 +43,8 @@ from worker.interfaces.fall_model import FallV2Probabilities
 from worker.runtime import bootstrap
 from worker.runtime.config import WorkerConfig
 from worker.runtime.lease import GpuLease
+from worker.runtime.profile.boot import BootContext
+from worker.runtime.profile.registry import PROFILE_REGISTRY
 from worker.runtime.worker import WorkerRuntime
 from worker.tools.export_fall_onnx import export_fall_onnx
 from worker.tools.fetch_models.fetcher import VerificationError, _require_loadable_fall_bundle
@@ -137,6 +139,17 @@ def _runtime(config: WorkerConfig, serving: object, state_dir: Path) -> WorkerRu
     )
 
 
+def _flow_boot() -> BootContext:
+    profile = PROFILE_REGISTRY["flow"]
+    return BootContext(
+        profile=profile,
+        device=profile.device,
+        decode=profile.decode,
+        encode=profile.encode,
+        requested_profile="flow",
+    )
+
+
 def test_create_fall_model_refuses_when_unconfigured_and_never_touches_serving(
     tmp_path: Path,
 ) -> None:
@@ -222,6 +235,41 @@ def test_boot_and_fetch_share_packaged_bundle_load_failure(
     (fetch_bundle / "model.onnx").write_bytes(b"present")
     with pytest.raises(VerificationError, match="shared bundle sentinel"):
         _require_loadable_fall_bundle(tmp_path / "fetch")
+
+
+def test_flow_composition_uses_the_loaded_bundle_published_weights_digest(tmp_path: Path) -> None:
+    artifact_dir = write_pose_bbox56_bundle(tmp_path / "models" / "fall" / "pose-bbox56-gru")
+    config = _config(
+        with_fall={
+            "type": "pose-bbox56-proxy-v0",
+            "framework": "onnxruntime",
+            "mode": "sequence",
+            "artifact_dir": str(artifact_dir),
+            "weights": "model.pt",
+            "architecture": "arch.json",
+            "metadata": "metadata.yaml",
+            "window": 30,
+            "stride": 5,
+            "input_shape": [30, 56],
+            "operating_threshold": 0.5,
+            "schema_version": 2,
+            "preprocessing_identity": "coco17-xyc-plus-pose-head-xyxy-valid-f32-v1",
+        }
+    )
+    runtime = _runtime(config, _ForbiddenServingClient(), tmp_path)
+
+    graph = runtime._initialize_flow_policy_graph(_flow_boot())  # noqa: SLF001
+    fall = next(
+        identity for identity in graph.identities if identity.component_id == "fall-classifier"
+    )
+
+    assert fall.artifact_digest == runtime._packaged_fall_member_digest()  # noqa: SLF001
+    # The swap proof: this synthetic bundle's digest is NOT the shipped model's,
+    # and the manifest names it anyway, with no identity refusal and no code
+    # change. Changing the model alone changes what the receipts name.
+    shipped = "7bb75a2932e1a1250dc900013b2c80b220de5e23f3ea568e05f1db21d0a757e3"
+    assert fall.artifact_digest != shipped
+    assert len(fall.artifact_digest) == 64
 
 
 def test_bundle_runner_refuses_a_non_cpu_device(tmp_path: Path) -> None:

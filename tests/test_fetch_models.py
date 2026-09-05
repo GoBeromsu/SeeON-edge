@@ -246,17 +246,13 @@ def test_committed_manifest_parses_and_pins_every_family_the_worker_loads() -> N
 
 
 def test_committed_manifest_digests_agree_with_runtime_pins() -> None:
-    """The registry and the tracked LSTM sidecar already pin these digests;
-    the manifest must never drift from what the runtime will accept."""
+    """Perception artifacts remain pinned by the compiled Flow registry."""
     from worker.domains.registry import _COMPONENT_ARTIFACT_DIGESTS
 
     by_path = {artifact.path: artifact.sha256 for artifact in load_manifest().artifacts}
     assert by_path["pose/yolo26n-pose.pt"] == _COMPONENT_ARTIFACT_DIGESTS["pose"]
     assert by_path["person/yolo26n.pt"] == _COMPONENT_ARTIFACT_DIGESTS["person"]
     assert by_path["bed/yolo26m-seg.pt"] == _COMPONENT_ARTIFACT_DIGESTS["bed"]
-    assert (
-        by_path["fall/pose-bbox56-gru/model.pt"] == _COMPONENT_ARTIFACT_DIGESTS["fall-classifier"]
-    )
 
 
 def test_bundled_sidecars_are_byte_identical_to_tracked_models_dir() -> None:

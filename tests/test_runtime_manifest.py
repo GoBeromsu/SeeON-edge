@@ -10,8 +10,10 @@ import pytest
 from backend.app.edge_db.bootstrap import bootstrap_database
 from backend.app.edge_db.compatibility import CURRENT_SCHEMA_RANGE
 from shared.detection_policies import default_policy_bundle, make_effective_policy
+from tests_support.pose_bbox56_bundle_artifact import write_pose_bbox56_bundle
+from worker.adapters.model.ort_pose_bbox56 import load_packaged_fall_bundle
 from worker.domains import DETECTION_MODULE_REGISTRY
-from worker.domains.module_definition import SharedComponentIdentity
+from worker.domains.module_definition import RuntimeResolvedArtifactDigest, SharedComponentIdentity
 from worker.pipeline.output.evidence.evidence_stager import DurableEvidenceStager
 from worker.runtime.profile.boot import BootContext
 from worker.runtime.profile.registry import PROFILE_REGISTRY
@@ -25,23 +27,24 @@ from worker.runtime.provenance.manifest import (
 )
 from worker.runtime.provenance.models import AppliedBedZone
 from worker.runtime.provenance.store import AppliedRuntimeManifestStore
+from worker.tools.fetch_models.manifest import load_manifest
 
 _BUILD_REVISION = "1" * 40
 
 
-def _packaged_fall_identity() -> tuple[str, str]:
+def _fall_preprocessing_identity() -> str:
     definition = DETECTION_MODULE_REGISTRY.get("fall", 2)
     [binding] = [
         binding
         for binding in definition.component_bindings
         if binding.component_id == "fall-classifier"
     ]
-    assert binding.artifact_digest is not None
     assert binding.preprocessing_identity is not None
-    return binding.artifact_digest, binding.preprocessing_identity
+    return binding.preprocessing_identity
 
 
-_FALL_ARTIFACT_DIGEST, _FALL_PREPROCESSING_IDENTITY = _packaged_fall_identity()
+_FALL_ARTIFACT_DIGEST = "a" * 64
+_FALL_PREPROCESSING_IDENTITY = _fall_preprocessing_identity()
 _ARTIFACTS = {
     "pose": "eb3bb8268828aeaf515cec23a4bfafd793944a86fe9af94ba7823609c14522a9",
     "person": "9b09cc8bf347f0fc8a5f7657480587f25db09b34bf33b0652110fb03a8ad4fef",
@@ -412,6 +415,39 @@ def test_unresolved_or_contradictory_component_identity_refuses_manifest() -> No
     )
     with pytest.raises(AppliedRuntimeManifestError, match="contradictory artifact identity.*pose"):
         _manifest(identities=contradictory)
+
+
+def test_runtime_resolved_fall_identity_names_loaded_bundle_digest(tmp_path: Path) -> None:
+    definition = DETECTION_MODULE_REGISTRY.get("fall", 2)
+    binding = next(
+        binding
+        for binding in definition.component_bindings
+        if binding.component_id == "fall-classifier"
+    )
+    assert isinstance(binding.artifact_digest, RuntimeResolvedArtifactDigest)
+
+    bundle = load_packaged_fall_bundle(write_pose_bbox56_bundle(tmp_path / "fall-bundle"))
+    loaded_digest = bundle.published_weights_digest
+    shipped_digest = next(
+        artifact.sha256
+        for artifact in load_manifest().artifacts
+        if artifact.path == "fall/pose-bbox56-gru/model.pt"
+    )
+    assert loaded_digest != shipped_digest
+    manifest = _manifest(
+        identities=tuple(
+            replace(identity, artifact_digest=loaded_digest)
+            if identity.component_id == "fall-classifier"
+            else identity
+            for identity in _identities(runtime="onnxruntime", device="cuda")
+        )
+    )
+
+    components = json.loads(manifest.canonical_json)["components"]
+    fall = next(
+        component for component in components if component["component_id"] == "fall-classifier"
+    )
+    assert fall["artifact_sha256"] == loaded_digest
 
 
 def test_secret_url_and_absolute_path_are_never_serialized() -> None:

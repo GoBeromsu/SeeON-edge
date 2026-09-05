@@ -1018,7 +1018,7 @@ class WorkerRuntime:
             # boot), so the runtime manifest names their published lineage.
             digest = binding.artifact_digest
             preprocessing = binding.preprocessing_identity
-            if not digest or not preprocessing:
+            if not isinstance(digest, str) or not digest or not preprocessing:
                 raise RuntimeError(f"flow component {binding.component_id!r} has no identity")
             components[binding.component_id] = _NativeEngineComponent(digest, preprocessing)
             identities.append(

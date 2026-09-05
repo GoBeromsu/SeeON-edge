@@ -23,6 +23,7 @@ from worker.domains.module_definition import (
     DetectionModuleCompilationError,
     DetectionModuleDefinition,
     PolicySchemaIdentity,
+    RuntimeResolvedArtifactDigest,
     ScheduleRule,
 )
 from worker.domains.registry import (
@@ -301,6 +302,8 @@ def test_production_shared_component_semantics_are_equal_on_cpu_and_nvidia() -> 
         def __init__(self, binding: ComponentBinding) -> None:
             artifact_digest = binding.artifact_digest
             preprocessing_identity = binding.preprocessing_identity
+            if isinstance(artifact_digest, RuntimeResolvedArtifactDigest):
+                artifact_digest = "f" * 64
             assert isinstance(artifact_digest, str)
             assert isinstance(preprocessing_identity, str)
             self.artifact_digest: str = artifact_digest
@@ -423,7 +426,7 @@ def test_missing_runner_preprocessing_identity_never_reaches_pool() -> None:
     assert pool.identities == ()
 
 
-def test_unresolved_artifact_identity_never_reaches_applied_graph() -> None:
+def test_missing_artifact_identity_refuses_registry_compilation() -> None:
     definition = _third_definition()
     broken = replace(
         definition,
@@ -434,23 +437,5 @@ def test_unresolved_artifact_identity_never_reaches_applied_graph() -> None:
             for binding in definition.component_bindings
         ),
     )
-    registry = _registry(broken)
-
-    class _UnidentifiedRunner:
-        def __call__(self, _image: Image) -> RunnerResult:
-            return pose_result((), ())
-
-    class _UnidentifiedServing:
-        def create(self, task: str, **_options: ServingOption) -> _UnidentifiedRunner:
-            return _UnidentifiedRunner()
-
-    with pytest.raises(DetectionModuleActivationError, match="artifact identity"):
-        compose_shared_components(
-            registry,
-            module_versions={"mobility_risk": 3},
-            serving_client=_UnidentifiedServing(),
-            runtime="cuda",
-            device="cuda",
-            flags={},
-            pool=SharedComponentPool(),
-        )
+    with pytest.raises(DetectionModuleCompilationError, match="invalid provenance"):
+        _registry(broken)

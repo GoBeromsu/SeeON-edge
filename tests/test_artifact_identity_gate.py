@@ -18,6 +18,7 @@ from contracts.runner import Image, RunnerResult, pose_result
 from worker.domains.module_definition import (
     ComponentBinding,
     DetectionModuleActivationError,
+    RuntimeResolvedArtifactDigest,
 )
 from worker.domains.registry import DETECTION_MODULE_REGISTRY
 from worker.runtime.model_composition import (
@@ -79,6 +80,8 @@ def _compose(serving: object, tamper: dict[str, str] | None = None) -> object:
     def _fall_provisioner(binding: ComponentBinding, _device: object) -> _IdentityRunner:
         digest = binding.artifact_digest
         preprocessing = binding.preprocessing_identity
+        if isinstance(digest, RuntimeResolvedArtifactDigest):
+            digest = "f" * 64
         assert isinstance(digest, str)
         assert isinstance(preprocessing, str)
         component_id = str(binding.component_id)
@@ -104,7 +107,7 @@ def test_compiled_identities_compose_without_error() -> None:
     assert all(isinstance(value, str) and value for value in identities.values())
 
 
-@pytest.mark.parametrize("component_id", ["person", "bed", "pose", "fall-classifier"])
+@pytest.mark.parametrize("component_id", ["person", "bed", "pose"])
 def test_tampered_component_digest_is_refused(component_id: str) -> None:
     """A single wrong digest must block activation for every pinned component."""
 
@@ -143,11 +146,14 @@ def test_missing_or_placeholder_identity_is_refused(bogus: str) -> None:
         _compose(_serving({target: bogus}), {target: bogus})
 
 
-def test_every_selected_component_is_pinned() -> None:
-    """No selected component may activate without a compiled identity."""
+def test_every_selected_component_declares_its_identity_source() -> None:
+    """Every component is pinned or explicitly resolved from its verified bundle."""
 
     for binding in _bindings_by_task().values():
         digest = binding.artifact_digest
-        assert isinstance(digest, str) and len(digest) == 64, (
-            f"component {binding.component_id!r} has no compiled sha256 identity"
+        assert (
+            isinstance(digest, RuntimeResolvedArtifactDigest)
+            or (isinstance(digest, str) and len(digest) == 64)
+        ), (
+            f"component {binding.component_id!r} has no declared artifact identity source"
         )

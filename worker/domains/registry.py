@@ -31,6 +31,7 @@ from worker.domains.fall import FallPolicyDeciderV2, FallV2DomainDecider, FallWi
 from worker.domains.fall.pose_bbox56 import POSE_BBOX56_PREPROCESSING_IDENTITY
 from worker.domains.module_compiler import compile_detection_module_registry
 from worker.domains.module_definition import (
+    RUNTIME_RESOLVED_ARTIFACT_DIGEST,
     CameraModuleContext,
     ComponentBinding,
     DetectionModuleDefinition,
@@ -53,7 +54,6 @@ _COMPONENT_ARTIFACT_DIGESTS = MappingProxyType(
         "pose": "eb3bb8268828aeaf515cec23a4bfafd793944a86fe9af94ba7823609c14522a9",
         "person": "9b09cc8bf347f0fc8a5f7657480587f25db09b34bf33b0652110fb03a8ad4fef",
         "bed": "16b636f04e8fb6a325b3370f22dc5e5535ff473e384f4d041fd28d788f6ee9f5",
-        "fall-classifier": "7bb75a2932e1a1250dc900013b2c80b220de5e23f3ea568e05f1db21d0a757e3",
     }
 )
 _COMPONENT_PREPROCESSING = MappingProxyType(
@@ -143,7 +143,7 @@ def _fall_classifier_binding() -> ComponentBinding:
         component_kind="model",
         model_family="configured-fall-family",
         provisioner="fall-model-family-registry",
-        artifact_digest=_COMPONENT_ARTIFACT_DIGESTS["fall-classifier"],
+        artifact_digest=RUNTIME_RESOLVED_ARTIFACT_DIGEST,
         preprocessing_identity=_COMPONENT_PREPROCESSING["fall-classifier"],
         warmup_required=True,
     )

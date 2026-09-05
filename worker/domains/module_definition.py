@@ -28,6 +28,14 @@ class DetectionModuleActivationError(RuntimeError):
 
 
 @dataclass(frozen=True, slots=True)
+class RuntimeResolvedArtifactDigest:
+    """Marker for a shared model whose verified bundle supplies its digest."""
+
+
+RUNTIME_RESOLVED_ARTIFACT_DIGEST = RuntimeResolvedArtifactDigest()
+
+
+@dataclass(frozen=True, slots=True)
 class PolicySchemaIdentity:
     schema_id: str
     version: int
@@ -70,7 +78,7 @@ class ComponentBinding:
     model_family: str | None = None
     provisioner: str | None = None
     serving_task: str | None = None
-    artifact_digest: str | None = None
+    artifact_digest: str | RuntimeResolvedArtifactDigest | None = None
     preprocessing_identity: str | None = None
     output_adapter: str | None = None
     activation_flag: str | None = None
@@ -86,7 +94,7 @@ class ComponentBinding:
             raise DetectionModuleCompilationError(
                 f"camera-local binding {self.component_id!r} has no shared identity"
             )
-        if self.artifact_digest is None or self.preprocessing_identity is None:
+        if not isinstance(self.artifact_digest, str) or self.preprocessing_identity is None:
             raise DetectionModuleCompilationError(
                 f"component binding {self.component_id!r} is missing provenance"
             )
