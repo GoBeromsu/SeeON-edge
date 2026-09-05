@@ -59,9 +59,7 @@ class DeepStreamMediaPlaneConfig:
     frame_height: int
     transform_id: str = "deepstream-flow.v1"
     pipeline_name: str = "deepstream-media-plane"
-    #: The forked OSD/JPEG snapshot branch. Off by default until its measured
-    #: throughput cost is accepted for a deployment.
-    snapshot_branch_enabled: bool = False
+    snapshot_branch_enabled: bool = True
 
 
 @dataclass(slots=True)
@@ -324,24 +322,29 @@ class DeepStreamMediaPlane(MediaPlane):
                 )
             self._snapshot_pending.add(camera_id)
         index = self._sources.pad_index(camera_id)
-        before = set(self._snapshot_dir.glob(f"{index}-*.jpg"))
-        self._call_on_pipeline(
-            lambda: self._pipeline[f"snapshot-valve-{index}"].set({"drop": False})
-        )
-        deadline = time.monotonic() + 2.0
+        for stale_path in self._snapshot_dir.glob("snapshot-*.jpg"):
+            stale_path.unlink()
         path: Path | None = None
-        while time.monotonic() < deadline:
-            candidates = set(self._snapshot_dir.glob(f"{index}-*.jpg")) - before
-            if candidates:
-                path = max(candidates, key=lambda candidate: candidate.stat().st_mtime_ns)
-                if path.stat().st_size:
-                    break
-            time.sleep(0.01)
-        self._call_on_pipeline(
-            lambda: self._pipeline[f"snapshot-valve-{index}"].set({"drop": True})
-        )
-        with self._snapshot_lock:
-            self._snapshot_pending.discard(camera_id)
+        try:
+            def select_source_and_open_valve() -> None:
+                self._pipeline["snapshot-tiler"].set({"show-source": index})
+                self._pipeline["snapshot-valve"].set({"drop": False})
+
+            self._call_on_pipeline(select_source_and_open_valve)
+            deadline = time.monotonic() + 2.0
+            while time.monotonic() < deadline:
+                candidates = tuple(self._snapshot_dir.glob("snapshot-*.jpg"))
+                if candidates:
+                    path = max(candidates, key=lambda candidate: candidate.stat().st_mtime_ns)
+                    if path.stat().st_size:
+                        break
+                time.sleep(0.01)
+        finally:
+            self._call_on_pipeline(
+                lambda: self._pipeline["snapshot-valve"].set({"drop": True})
+            )
+            with self._snapshot_lock:
+                self._snapshot_pending.discard(camera_id)
         if path is None or not path.stat().st_size:
             raise SnapshotUnavailable(f"OSD snapshot branch timed out for source: {camera_id}")
         try:
@@ -428,7 +431,7 @@ class DeepStreamMediaPlane(MediaPlane):
             )
         )
         flow.attach(what=self._handle.make_probe("media-plane-probe", self._probe))
-        terminal_flow = self._build_snapshot_branch(flow, camera_ids)
+        terminal_flow = self._build_snapshot_branch(flow)
         # `render(DISCARD)` is the terminal sink because it is the only one that
         # keeps up: measured in this image, a `retrieve()` sink delivers roughly
         # 2 batched buffers/s where `render` delivers 30, which starves the
@@ -446,71 +449,75 @@ class DeepStreamMediaPlane(MediaPlane):
                 }
             )
 
-    def _build_snapshot_branch(self, flow: Any, camera_ids: tuple[str, ...]) -> Any:
-        """Build one normally-closed OSD/JPEG branch per source.
+    def _build_snapshot_branch(self, flow: Any) -> Any:
+        """Build one normally-closed OSD/JPEG branch for the batched stream.
 
-        The terminal Flow remains the discard sink.  A valve upstream of each
-        encoder is opened only by ``snapshot`` and is immediately closed by
-        the appsink callback, so idle branches do not encode frames.
+        The terminal Flow remains the discard sink. ``nvmultistreamtiler``
+        selects the requested source from the batch before OSD and JPEG
+        encoding; a single valve is opened only by ``snapshot``.
         """
         if not self._config.snapshot_branch_enabled:
             return flow
         fork = flow.fork()
         tee = fork._streams[0].originator  # noqa: SLF001 - Flow has no public stream endpoint
-        # A tee branch needs its own queue before anything else: without one the
-        # branch runs on the tee's streaming thread, and measured here the demux
-        # negotiated src_0 caps but never pushed a single buffer downstream even
-        # with the valve held open for 65 seconds.
         tee_queue = "snapshot-tee-queue"
+        valve = "snapshot-valve"
+        tiler = "snapshot-tiler"
+        convert = "snapshot-convert"
+        osd = "snapshot-osd"
+        post_osd_convert = "snapshot-post-osd-convert"
+        caps = "snapshot-caps"
+        encoder = "snapshot-encoder"
+        sink = "snapshot-sink"
         self._pipeline.add("queue", tee_queue)
-        demux = "snapshot-demux"
-        self._pipeline.add("nvstreamdemux", demux)
-        self._pipeline.link(tee, tee_queue)
-        self._pipeline.link(tee_queue, demux)
-        for index, _camera_id in enumerate(camera_ids):
-            queue_name = f"snapshot-queue-{index}"
-            valve_name = f"snapshot-valve-{index}"
-            convert_name = f"snapshot-convert-{index}"
-            osd_name = f"snapshot-osd-{index}"
-            post_osd_convert = f"snapshot-post-osd-convert-{index}"
-            caps_name = f"snapshot-caps-{index}"
-            encoder_name = f"snapshot-encoder-{index}"
-            sink_name = f"snapshot-sink-{index}"
-            self._pipeline.add("queue", queue_name, {"leaky": 2, "max-size-buffers": 1})
-            self._pipeline.add("valve", valve_name, {"drop": True, "drop-mode": 2})
-            self._pipeline.add("nvvideoconvert", convert_name, {"gpu-id": 0, "compute-hw": 1})
-            self._pipeline.add(
-                "nvdsosd",
-                osd_name,
-                {"gpu-id": 0, "display-bbox": True, "display-text": True},
-            )
-            self._pipeline.add("nvvideoconvert", post_osd_convert, {"gpu-id": 0, "compute-hw": 1})
-            self._pipeline.add(
-                "capsfilter", caps_name, {"caps": "video/x-raw(memory:NVMM), format=I420"}
-            )
-            self._pipeline.add("nvjpegenc", encoder_name)
-            self._pipeline.add(
-                "multifilesink",
-                sink_name,
-                {
-                    "location": str(self._snapshot_dir / f"{index}-%010d.jpg"),
-                    "next-file": 0,
-                    "max-files": 1,
-                    "async": False,
-                    "sync": False,
-                },
-            )
-            self._pipeline.link((demux, queue_name), (f"src_{index}", "sink"))
-            self._pipeline.link(
-                queue_name,
-                valve_name,
-                convert_name,
-                osd_name,
-                post_osd_convert,
-                caps_name,
-                encoder_name,
-                sink_name,
-            )
+        self._pipeline.add("valve", valve, {"drop": True, "drop-mode": 2})
+        self._pipeline.add(
+            "nvmultistreamtiler",
+            tiler,
+            {
+                "rows": 1,
+                "columns": 1,
+                "width": self._config.frame_width,
+                "height": self._config.frame_height,
+                "show-source": 0,
+            },
+        )
+        self._pipeline.add("nvvideoconvert", convert, {"gpu-id": 0, "compute-hw": 1})
+        self._pipeline.add(
+            "nvdsosd",
+            osd,
+            {"gpu-id": 0, "display-bbox": 1, "display-text": 1},
+        )
+        self._pipeline.add(
+            "nvvideoconvert", post_osd_convert, {"gpu-id": 0, "compute-hw": 1}
+        )
+        self._pipeline.add(
+            "capsfilter", caps, {"caps": "video/x-raw(memory:NVMM), format=I420"}
+        )
+        self._pipeline.add("nvjpegenc", encoder)
+        self._pipeline.add(
+            "multifilesink",
+            sink,
+            {
+                "location": str(self._snapshot_dir / "snapshot-%010d.jpg"),
+                "next-file": 0,
+                "max-files": 1,
+                "async": False,
+                "sync": False,
+            },
+        )
+        self._pipeline.link(
+            tee,
+            tee_queue,
+            valve,
+            tiler,
+            convert,
+            osd,
+            post_osd_convert,
+            caps,
+            encoder,
+            sink,
+        )
         return fork
 
     def _source_element(self, camera_id: str) -> Any:

@@ -33,10 +33,7 @@ class FlowMediaPlaneConfig:
     frame_width: int
     frame_height: int
     source_silence_timeout_sec: float = 30.0
-    #: The forked OSD/JPEG snapshot branch. Composition decides; the adapter
-    #: default stays off until its throughput cost and overlay burn-in are
-    #: confirmed on hardware.
-    snapshot_branch_enabled: bool = False
+    snapshot_branch_enabled: bool = True
 
     def adapter_config(self) -> DeepStreamMediaPlaneConfig:
         return DeepStreamMediaPlaneConfig(
@@ -100,7 +97,13 @@ class FlowMediaPlane:
         del viewers, mode, snapshot_requested
         # This callback runs on an HTTP thread, never on Flow's probe thread.
         try:
-            self.snapshot(camera_id)
+            jpeg = self.snapshot(camera_id)
+            if self._live_frames is not None:
+                self._live_frames.publish_jpeg(
+                    camera_id,
+                    jpeg,
+                    frame_index=self.plane.published_frames(camera_id),
+                )
         except SnapshotUnavailable:
             # Expected before the first frame; the HTTP layer answers with its
             # own typed unavailable response.
