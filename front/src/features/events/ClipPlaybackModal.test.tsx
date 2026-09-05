@@ -34,7 +34,6 @@ function render(clip: Clip | null, open = true, onClose = vi.fn()) {
       onClose={onClose}
       lookupStatus="success"
       onRetry={vi.fn()}
-      onDeleted={vi.fn()}
     />,
   ));
   return { host, root, onClose };
