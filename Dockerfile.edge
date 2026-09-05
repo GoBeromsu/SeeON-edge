@@ -51,7 +51,6 @@ COPY worker ./worker
 COPY worker/adapters/deepstream/configs /opt/seeon/deepstream-flow
 RUN mkdir -p \
         /root/.local/state/ml-worker \
-        /app/models/fall/pose-bbox56-gru \
         /app/models/pose \
         /app/models/bed \
         /var/lib/seeon-state \

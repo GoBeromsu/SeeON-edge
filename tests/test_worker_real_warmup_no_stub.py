@@ -229,6 +229,12 @@ def test_fall_classifier_is_constructed_and_warmed_on_the_cpu_before_cameras(
             "version": 1,
             "relay": {"url": "http://relay.test", "token": "relay-token"},
             "cameras": [],
+            "models": {
+                "fall": {
+                    **_example_fall_config(),
+                    "artifact_dir": str(write_pose_bbox56_bundle(tmp_path / "pose-bbox56-gru")),
+                }
+            },
         }
     )
     runtime = worker_module.WorkerRuntime(

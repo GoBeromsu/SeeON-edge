@@ -51,8 +51,8 @@ from worker.adapters.model.pose_bbox56_bundle import PoseBbox56BundleRunner
 from worker.domains.registry import _effective_transition_threshold
 from worker.interfaces.fall_model import FallV2Probabilities
 from worker.runtime import bootstrap
-from worker.runtime.config import WorkerConfig
-from worker.runtime.config.worker_models import SelectedFallBundleConfig, WorkerModelsConfig
+from worker.runtime.config import WorkerConfig, local_env
+from worker.runtime.config.worker_models import SelectedFallBundleConfig
 from worker.runtime.lease import GpuLease
 from worker.runtime.profile.boot import BootContext
 from worker.runtime.profile.registry import PROFILE_REGISTRY
@@ -396,18 +396,28 @@ def test_flow_composition_uses_the_loaded_bundle_published_weights_digest(tmp_pa
 
 
 def test_selected_bundle_composes_a_runtime_manifest_with_runner_preprocessing_identity(
+    monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     models_root, desired = _selected_onnx_bundle(tmp_path)
     selection = desired.selection
     assert selection is not None
-    config = _config().model_copy(
-        update={
-            "models": WorkerModelsConfig(
-                selected=SelectedFallBundleConfig(models_root=models_root, desired=desired)
-            )
-        }
+    selected_config = SelectedFallBundleConfig(models_root=models_root, desired=desired)
+    selection_path = tmp_path / "model-selection.json"
+    selection_path.write_bytes(
+        json.dumps(
+            selection.as_dict(),
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
     )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(local_env, "FALL_SELECTION_PATH", selection_path)
+    monkeypatch.setattr(local_env, "FALL_MODELS_ROOT", models_root)
+    models = local_env.worker_models_config_from_environment({})
+    assert models.fall is None
+    assert models.selected == selected_config
+    config = _config().model_copy(update={"models": models})
     runtime = _runtime(config, _ForbiddenServingClient(), tmp_path)
     runtime._admit_selected_fall_bundle()  # noqa: SLF001
     boot = _flow_boot()

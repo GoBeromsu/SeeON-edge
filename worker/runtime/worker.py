@@ -85,6 +85,7 @@ from worker.runtime.config import (
     CameraRuntimeConfig,
     LiveClipExportPolicy,
     WorkerConfig,
+    WorkerModelsConfig,
     replay_trace_directory_from_environment,
 )
 from worker.runtime.faults.handler import FaultHandler
@@ -929,12 +930,19 @@ class WorkerRuntime:
         self.watchdog = InferenceWatchdog(self.fault_handler, profile=boot.profile.name)
         return self._initialize_flow_media_plane(boot)
 
+    def _fall_models(self) -> WorkerModelsConfig:
+        models = self.config.models
+        if models is None:
+            raise RuntimeError("fall model must be explicitly configured; refusing to boot")
+        return models
+
     def _admit_selected_fall_bundle(self) -> None:
         """Verify the selected active bundle before any model warmup or camera starts."""
-        selected = self.config.models.selected
+        models = self._fall_models()
+        selected = models.selected
         if selected is None:
             return
-        if self.config.models.box_source != "pose":
+        if models.box_source != "pose":
             raise RuntimeError("selected fall bundle requires box_source=pose")
         if (
             selected.desired.selection is None
@@ -983,7 +991,8 @@ class WorkerRuntime:
     def _initialize_flow_policy_graph(self, boot: BootContext) -> SharedComponentGraph:
         """Build the CPU policy graph for the Flow media plane."""
         fall_model = self._create_fall_model("cpu", require_onnxruntime=True)
-        flags = {"person-box-source": self.config.models.box_source == "person"}
+        models = self._fall_models()
+        flags = {"person-box-source": models.box_source == "person"}
         bindings = self._module_registry.shared_bindings(self._module_versions, flags=flags)
         components: dict[str, object] = {}
         identities: list[SharedComponentIdentity] = []
@@ -1031,7 +1040,8 @@ class WorkerRuntime:
         return graph
 
     def _packaged_fall_member_digest(self) -> str:
-        configured = self.config.models.fall
+        models = self._fall_models()
+        configured = models.fall
         if configured is None:
             raise RuntimeError("fall model must be explicitly configured; refusing to boot")
         bundle = self._loaded_fall_bundle
@@ -1060,7 +1070,8 @@ class WorkerRuntime:
         config: it refuses to boot with a diagnostic error naming every
         registered family, never a silent fallback to "lstm".
         """
-        selected = self.config.models.selected
+        models = self._fall_models()
+        selected = models.selected
         if selected is not None:
             selection = selected.desired.selection
             if selection is None:
@@ -1091,7 +1102,7 @@ class WorkerRuntime:
             except UnknownFallModelTypeError as exc:
                 raise RuntimeError(str(exc)) from exc
 
-        configured = self.config.models.fall
+        configured = models.fall
         if configured is None:
             raise RuntimeError("fall model must be explicitly configured; refusing to boot")
         if require_onnxruntime and configured.framework != "onnxruntime":
@@ -1561,7 +1572,7 @@ class WorkerRuntime:
             raise RuntimeError("detection graph preflight requires initialized components")
         persisted_bed_regions = _persisted_bed_regions(camera)
         flags = {
-            "person-box-source": self.config.models.box_source == "person",
+            "person-box-source": self._fall_models().box_source == "person",
             "persisted-bed-region": bool(persisted_bed_regions),
         }
         activation = self._module_registry.activation(

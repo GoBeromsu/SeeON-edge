@@ -26,7 +26,9 @@ from worker.runtime.config.local_env import (
     ML_WORKER_FALL_MODEL_WINDOW_ENV,
     fall_model_config_from_environment,
     reject_retired_worker_environment,
+    worker_models_config_from_environment,
 )
+from worker.runtime.config.worker_models import WorkerModelsConfig
 
 _PACKAGED_DEFAULT_ARTIFACT_DIR = Path("models/fall/pose-bbox56-gru")
 _PREPROCESSING_IDENTITY = "coco17-xyc-plus-pose-head-xyxy-valid-f32-v1"
@@ -68,8 +70,13 @@ def test_default_env_missing_weights_raises_actionable_error(
     booting without a fall model."""
     monkeypatch.chdir(tmp_path)
 
-    with pytest.raises(WorkerConfigError, match="scripts/fetch-models.sh"):
-        fall_model_config_from_environment({})
+    with pytest.raises(WorkerConfigError, match="missing model.pt"):
+        worker_models_config_from_environment({})
+
+
+def test_models_config_refuses_when_no_fall_model_is_available() -> None:
+    with pytest.raises(ValueError, match="no fall model configured"):
+        WorkerModelsConfig()
 
 
 def _write_fake_packaged_default(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -109,7 +109,13 @@ class WorkerModelsConfig(BaseModel):
     box_source: Literal["pose", "person"] = "pose"
 
     @model_validator(mode="after")
-    def _validate_selected_bundle_box_source(self) -> WorkerModelsConfig:
+    def _validate_fall_model_source(self) -> WorkerModelsConfig:
+        if (self.fall is None) == (self.selected is None):
+            raise ConfigValidationError(
+                "no fall model configured"
+                if self.fall is None
+                else "packaged and selected fall models cannot coexist"
+            )
         if self.selected is not None and self.box_source != "pose":
             raise ConfigValidationError("selected fall bundle requires box_source=pose")
         return self
@@ -176,7 +182,9 @@ class WorkerConfig(BaseModel):
     version: int = 1
     relay: RelayConfig
     runtime: WorkerRuntimeConfig = Field(default_factory=WorkerRuntimeConfig)
-    models: WorkerModelsConfig = Field(default_factory=WorkerModelsConfig)
+    # Config loading settles this local overlay after parsing the optional
+    # YAML hatch. A composed runtime always receives a WorkerModelsConfig.
+    models: WorkerModelsConfig | None = None
     domains: DomainsConfig = Field(default_factory=DomainsConfig)
     detection_policies: PolicyBundle = Field(default_factory=default_policy_bundle)
     dev_mjpeg: DevMjpegConfig = Field(default_factory=DevMjpegConfig)

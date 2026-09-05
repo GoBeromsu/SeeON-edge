@@ -431,7 +431,7 @@ class BackendWorkerConfigPayload(BaseModel):
         return WorkerConfig(
             version=self.directive.version,
             relay=RelayConfig.model_validate({"url": relay_url, "token": token}),
-            models=models if models is not None else WorkerModelsConfig(),
+            models=models,
             domains=domains_config,
             detection_policies=self.resolved_detection_policies,
             clip=resolved_clip,

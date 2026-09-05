@@ -382,10 +382,12 @@ def fall_model_config_from_environment(
 def selected_fall_bundle_config_from_environment(
     environ: Mapping[str, str] | None = None,
     *,
-    selection_path: Path = FALL_SELECTION_PATH,
-    models_root: Path = FALL_MODELS_ROOT,
+    selection_path: Path | None = None,
+    models_root: Path | None = None,
 ) -> SelectedFallBundleConfig | None:
     """Load the selected fall bundle; absence leaves the packaged model active."""
+    selection_path = FALL_SELECTION_PATH if selection_path is None else selection_path
+    models_root = FALL_MODELS_ROOT if models_root is None else models_root
     if not selection_path.exists():
         return None
     try:
@@ -412,9 +414,11 @@ def selected_fall_bundle_config_from_environment(
 def worker_models_config_from_environment(
     environ: Mapping[str, str] | None = None,
 ) -> WorkerModelsConfig:
+    selected = selected_fall_bundle_config_from_environment(environ)
+    if selected is not None:
+        return WorkerModelsConfig(selected=selected)
     return WorkerModelsConfig(
         fall=fall_model_config_from_environment(environ),
-        selected=selected_fall_bundle_config_from_environment(environ),
     )
 
 
@@ -450,19 +454,7 @@ def resolve_local_overrides(
     """
     env = os.environ if environ is None else environ
     environment_models = worker_models_config_from_environment(env)
-    models = WorkerModelsConfig(
-        fall=(
-            yaml_config.models.fall
-            if yaml_config is not None and yaml_config.models.fall is not None
-            else environment_models.fall
-        ),
-        box_source=(
-            yaml_config.models.box_source
-            if yaml_config is not None and yaml_config.models.fall is not None
-            else environment_models.box_source
-        ),
-        selected=environment_models.selected,
-    )
+    yaml_models = yaml_config.models if yaml_config is not None else None
     clip = (
         yaml_config.clip
         if yaml_config is not None and yaml_config.clip.enabled
@@ -470,6 +462,24 @@ def resolve_local_overrides(
     )
     dev_mjpeg = (
         yaml_config.dev_mjpeg if yaml_config is not None and yaml_config.dev_mjpeg.enabled else None
+    )
+    if environment_models.selected is not None:
+        if yaml_models is not None:
+            raise WorkerConfigError(
+                "selected fall bundle cannot coexist with a packaged fall model"
+            )
+        return environment_models, clip, dev_mjpeg
+    models = WorkerModelsConfig(
+        fall=(
+            yaml_models.fall
+            if yaml_models is not None and yaml_models.fall is not None
+            else environment_models.fall
+        ),
+        box_source=(
+            yaml_models.box_source
+            if yaml_models is not None and yaml_models.fall is not None
+            else environment_models.box_source
+        ),
     )
     return models, clip, dev_mjpeg
 
