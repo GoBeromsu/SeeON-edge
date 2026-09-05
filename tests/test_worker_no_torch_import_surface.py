@@ -8,7 +8,7 @@ def test_flow_import_surface_does_not_import_torch() -> None:
     code = """
 import sys
 import worker.adapters.deepstream
-import worker.adapters.model.ort_pose_bbox56
+from worker.adapters.model.ort_pose_bbox56 import load_packaged_fall_bundle
 import worker.interfaces
 import worker.domains
 import worker.pipeline.perception

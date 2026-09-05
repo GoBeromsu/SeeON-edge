@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Final, Protocol
 
@@ -30,6 +31,14 @@ class _OrtSession(Protocol):
 
 
 SessionFactory = Callable[[str, list[str]], _OrtSession]
+
+
+@dataclass(frozen=True)
+class PackagedFallBundle:
+    """The verified CPU runner and published-weights identity of one bundle."""
+
+    runner: OrtPoseBbox56Runner
+    published_weights_digest: str
 
 
 class OrtPoseBbox56Runner:
@@ -112,6 +121,14 @@ class OrtPoseBbox56Runner:
         self.predict(np.zeros(_SHAPE, dtype=np.float32))
 
 
+def load_packaged_fall_bundle(artifact_dir: Path) -> PackagedFallBundle:
+    """Load a packaged fall bundle and its published-weights identity."""
+    root = artifact_dir.expanduser().resolve()
+    runner = OrtPoseBbox56Runner.from_artifact_dir(root, device="cpu")
+    manifest = read_json(root / "bundle-manifest.json")
+    return PackagedFallBundle(runner, member_digest(manifest, "model.pt"))
+
+
 def _onnxruntime_session_factory(model_path: str, providers: list[str]) -> _OrtSession:
     try:
         import onnxruntime
@@ -147,4 +164,9 @@ def _bundle_metadata(root: Path) -> tuple[float, float | None, bool]:
     return parsed_temperature, receipt_threshold, promotion_eligible
 
 
-__all__ = ["OrtPoseBbox56Runner", "SessionFactory"]
+__all__ = [
+    "OrtPoseBbox56Runner",
+    "PackagedFallBundle",
+    "SessionFactory",
+    "load_packaged_fall_bundle",
+]

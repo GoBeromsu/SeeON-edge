@@ -31,13 +31,12 @@ from shared.release_identity import EDGE_DATABASE_SCHEMA_VERSION
 from worker.adapters.device.cuda.probe import probe_cuda_capability
 from worker.adapters.device.mps.probe import probe_mps_capability
 from worker.adapters.device.nvml.probe import probe_nvml_gpu_status
-from worker.adapters.model import warmup_to_ready
+from worker.adapters.model import ort_pose_bbox56, warmup_to_ready
 from worker.adapters.model.errors import FatalAcceleratorError
 from worker.adapters.model.fall_family_registry import (
     DEFAULT_FALL_MODEL_FAMILY_REGISTRY,
     UnknownFallModelTypeError,
 )
-from worker.adapters.model.ort_pose_bbox56 import OrtPoseBbox56Runner
 from worker.domains import (
     AVAILABLE_OBSERVATION_CHANNELS,
     DETECTION_MODULE_REGISTRY,
@@ -628,6 +627,7 @@ class WorkerRuntime:
         self._boot: BootContext | None = None
         self.shared_yolo: SharedYoloExtractors | None = None
         self.fall_model: FallV2ModelProtocol | None = None
+        self._packaged_fall_bundle: ort_pose_bbox56.PackagedFallBundle | None = None
         self._shared_graph: SharedComponentGraph | None = None
         self._warmed_component_ids: frozenset[str] = frozenset()
         self.fault_handler: FaultHandler | None = None
@@ -1037,16 +1037,14 @@ class WorkerRuntime:
         return graph
 
     def _packaged_fall_member_digest(self) -> str:
-        from worker.adapters.model.pose_bbox56_bundle_support import member_digest, read_json
-
         configured = self.config.models.fall
         if configured is None:
             raise RuntimeError("fall model must be explicitly configured; refusing to boot")
-        # The published weights are the bundle's identity on every profile;
-        # under flow the ONNX member is an export of them, pinned to the same
-        # bundle manifest and verified by the ORT runner before it loads.
-        manifest = read_json(configured.artifact_dir / "bundle-manifest.json")
-        return member_digest(manifest, "model.pt")
+        bundle = self._packaged_fall_bundle
+        if bundle is None:
+            bundle = ort_pose_bbox56.load_packaged_fall_bundle(configured.artifact_dir)
+            self._packaged_fall_bundle = bundle
+        return bundle.published_weights_digest
 
     def _create_fall_model(
         self, device: str, *, require_onnxruntime: bool = False
@@ -1085,7 +1083,7 @@ class WorkerRuntime:
                         "flow profile refuses a Torch fall bundle; the selected runtime_format "
                         "must be onnxruntime (export model.onnx with worker.tools.export_fall_onnx)"
                     )
-                return OrtPoseBbox56Runner.from_artifact_dir(artifact_dir, device="cpu")
+                return ort_pose_bbox56.load_packaged_fall_bundle(artifact_dir).runner
             try:
                 return DEFAULT_FALL_MODEL_FAMILY_REGISTRY.create_bundle(
                     selection.runtime_format,
@@ -1104,6 +1102,10 @@ class WorkerRuntime:
                 f"resolved framework={configured.framework!r} (export model.onnx with "
                 "worker.tools.export_fall_onnx and boot with ML_WORKER_PROFILE=flow)"
             )
+        if require_onnxruntime:
+            bundle = ort_pose_bbox56.load_packaged_fall_bundle(configured.artifact_dir)
+            self._packaged_fall_bundle = bundle
+            return bundle.runner
         try:
             return DEFAULT_FALL_MODEL_FAMILY_REGISTRY.create(configured.type, configured, device)
         except UnknownFallModelTypeError as exc:

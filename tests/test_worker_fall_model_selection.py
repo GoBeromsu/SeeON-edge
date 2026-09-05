@@ -35,6 +35,8 @@ import pytest
 
 from contracts.runner import Image, RunnerResult
 from tests_support.pose_bbox56_bundle_artifact import write_pose_bbox56_bundle
+from worker.adapters.model import ort_pose_bbox56
+from worker.adapters.model.errors import ModelLoadError
 from worker.adapters.model.ort_pose_bbox56 import OrtPoseBbox56Runner
 from worker.adapters.model.pose_bbox56_bundle import PoseBbox56BundleRunner
 from worker.interfaces.fall_model import FallV2Probabilities
@@ -43,6 +45,7 @@ from worker.runtime.config import WorkerConfig
 from worker.runtime.lease import GpuLease
 from worker.runtime.worker import WorkerRuntime
 from worker.tools.export_fall_onnx import export_fall_onnx
+from worker.tools.fetch_models.fetcher import VerificationError, _require_loadable_fall_bundle
 
 
 @final
@@ -180,6 +183,45 @@ def test_create_fall_model_uses_the_configured_bundle_artifact_on_the_cpu(
     fall_config = config.models.fall
     assert fall_config is not None
     assert calls == [(fall_config.artifact_dir, "cpu")]
+
+
+def test_boot_and_fetch_share_packaged_bundle_load_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    artifact_dir = tmp_path / "models" / "fall" / "pose-bbox56-gru"
+    write_pose_bbox56_bundle(artifact_dir)
+    config = _config(
+        with_fall={
+            "type": "pose-bbox56-proxy-v0",
+            "framework": "onnxruntime",
+            "mode": "sequence",
+            "artifact_dir": str(artifact_dir),
+            "weights": "model.pt",
+            "architecture": "arch.json",
+            "metadata": "metadata.yaml",
+            "window": 30,
+            "stride": 5,
+            "input_shape": [30, 56],
+            "operating_threshold": 0.5,
+            "schema_version": 2,
+            "preprocessing_identity": "coco17-xyc-plus-pose-head-xyxy-valid-f32-v1",
+        }
+    )
+
+    def raise_sentinel(_artifact_dir: Path) -> object:
+        raise ModelLoadError("shared bundle sentinel")
+
+    monkeypatch.setattr(ort_pose_bbox56, "load_packaged_fall_bundle", raise_sentinel)
+    runtime = _runtime(config, _ForbiddenServingClient(), tmp_path)
+
+    with pytest.raises(ModelLoadError, match="shared bundle sentinel"):
+        runtime._create_fall_model("cpu", require_onnxruntime=True)  # noqa: SLF001
+
+    fetch_bundle = tmp_path / "fetch" / "fall" / "pose-bbox56-gru"
+    fetch_bundle.mkdir(parents=True)
+    (fetch_bundle / "model.onnx").write_bytes(b"present")
+    with pytest.raises(VerificationError, match="shared bundle sentinel"):
+        _require_loadable_fall_bundle(tmp_path / "fetch")
 
 
 def test_bundle_runner_refuses_a_non_cpu_device(tmp_path: Path) -> None:
