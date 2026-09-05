@@ -22,6 +22,9 @@ from worker.interfaces.fall_model import FallV2Probabilities
 from worker.types import FallModelInput
 
 _SHAPE: Final = (30, 56)
+#: The output contract this runner implements: one logit, read as a binary
+#: fall-transition score. The bundle calibration's class_order has two entries.
+OUTPUT_CLASS_COUNT: Final = 2
 _CPU_PROVIDER: Final = ("CPUExecutionProvider",)
 
 
@@ -116,6 +119,17 @@ class OrtPoseBbox56Runner:
         if selection.preprocessing_identity != POSE_BBOX56_PREPROCESSING_IDENTITY:
             raise ModelLoadError(
                 "selected bundle preprocessing_identity contradicts runner contract"
+            )
+        # The selection declares an output contract; this runner implements
+        # exactly one - a single logit read as a binary fall-transition score.
+        # A replacement that emits a different class count is a different
+        # structure, and it must refuse here rather than have its logit read
+        # as if it were this one.
+        if selection.output_class_count != OUTPUT_CLASS_COUNT:
+            raise ModelLoadError(
+                f"selected bundle declares output_class_count={selection.output_class_count}, "
+                f"but this runner implements {OUTPUT_CLASS_COUNT} (a single fall-transition "
+                "logit); a model with another output contract needs its own runner"
             )
         member_digests = proof.observed.get("member_digests")
         if not isinstance(member_digests, Mapping):

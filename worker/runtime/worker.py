@@ -33,10 +33,6 @@ from worker.adapters.device.mps.probe import probe_mps_capability
 from worker.adapters.device.nvml.probe import probe_nvml_gpu_status
 from worker.adapters.model import ort_pose_bbox56, warmup_to_ready
 from worker.adapters.model.errors import FatalAcceleratorError
-from worker.adapters.model.fall_family_registry import (
-    DEFAULT_FALL_MODEL_FAMILY_REGISTRY,
-    UnknownFallModelTypeError,
-)
 from worker.domains import (
     AVAILABLE_OBSERVATION_CHANNELS,
     DETECTION_MODULE_REGISTRY,
@@ -990,7 +986,7 @@ class WorkerRuntime:
 
     def _initialize_flow_policy_graph(self, boot: BootContext) -> SharedComponentGraph:
         """Build the CPU policy graph for the Flow media plane."""
-        fall_model = self._create_fall_model("cpu", require_onnxruntime=True)
+        fall_model = self._create_fall_model()
         models = self._fall_models()
         flags = {"person-box-source": models.box_source == "person"}
         bindings = self._module_registry.shared_bindings(self._module_versions, flags=flags)
@@ -1050,9 +1046,7 @@ class WorkerRuntime:
             self._loaded_fall_bundle = bundle
         return bundle.published_weights_digest
 
-    def _create_fall_model(
-        self, device: str, *, require_onnxruntime: bool = False
-    ) -> FallV2ModelProtocol:
+    def _create_fall_model(self) -> FallV2ModelProtocol:
         """Construct the selected bundle or the packaged fall model.
 
         Fall model selection has no implicit fallback: an operator who omits
@@ -1062,13 +1056,9 @@ class WorkerRuntime:
         default (same fail-closed principle as ``ML_WORKER_PROFILE`` and the
         decode policy's unknown-value ``RuntimeError``).
 
-        Issue #65: which model *family* runs is config/metadata-driven via
-        ``DEFAULT_FALL_MODEL_FAMILY_REGISTRY``, keyed by ``configured.type``.
-        This method never grows a new branch for a new family -- onboarding
-        one means registering a factory, not editing this call site. An
-        unregistered ``type`` value is just as fail-closed as an absent
-        config: it refuses to boot with a diagnostic error naming every
-        registered family, never a silent fallback to "lstm".
+        Flow accepts only the ONNX Runtime runner. Selected bundles are
+        constructed from their admitted proof; packaged bundles are loaded
+        through the same ONNX Runtime adapter.
         """
         models = self._fall_models()
         selected = models.selected
@@ -1076,49 +1066,35 @@ class WorkerRuntime:
             selection = selected.desired.selection
             if selection is None:
                 raise RuntimeError("selected fall bundle has no selection contract")
-            if require_onnxruntime:
-                artifact_dir = selected.models_root / "bundles" / selected.desired.bundle_sha256
-                if selection.runtime_format != "onnxruntime":
-                    raise RuntimeError(
-                        "flow profile refuses a Torch fall bundle; the selected runtime_format "
-                        "must be onnxruntime (export model.onnx with worker.tools.export_fall_onnx)"
-                    )
-                proof = self._selected_bundle_admission
-                if proof is None:
-                    raise RuntimeError("selected fall bundle must be admitted before construction")
-                runner = ort_pose_bbox56.OrtPoseBbox56Runner.from_admitted_bundle(
-                    artifact_dir, proof, selection
+            artifact_dir = selected.models_root / "bundles" / selected.desired.bundle_sha256
+            if selection.runtime_format != "onnxruntime":
+                raise RuntimeError(
+                    "flow profile refuses a Torch fall bundle; the selected runtime_format "
+                    "must be onnxruntime (export model.onnx with worker.tools.export_fall_onnx)"
                 )
-                self._loaded_fall_bundle = ort_pose_bbox56.PackagedFallBundle(
-                    runner, runner.artifact_digest, runner.preprocessing_identity
-                )
-                return runner
-            try:
-                return DEFAULT_FALL_MODEL_FAMILY_REGISTRY.create_bundle(
-                    selection.runtime_format,
-                    selected.models_root / "bundles" / selected.desired.bundle_sha256,
-                    device,
-                )
-            except UnknownFallModelTypeError as exc:
-                raise RuntimeError(str(exc)) from exc
+            proof = self._selected_bundle_admission
+            if proof is None:
+                raise RuntimeError("selected fall bundle must be admitted before construction")
+            runner = ort_pose_bbox56.OrtPoseBbox56Runner.from_admitted_bundle(
+                artifact_dir, proof, selection
+            )
+            self._loaded_fall_bundle = ort_pose_bbox56.PackagedFallBundle(
+                runner, runner.artifact_digest, runner.preprocessing_identity
+            )
+            return runner
 
         configured = models.fall
         if configured is None:
             raise RuntimeError("fall model must be explicitly configured; refusing to boot")
-        if require_onnxruntime and configured.framework != "onnxruntime":
+        if configured.framework != "onnxruntime":
             raise RuntimeError(
                 "flow profile requires the ONNX Runtime fall model; the packaged config "
                 f"resolved framework={configured.framework!r} (export model.onnx with "
                 "worker.tools.export_fall_onnx and boot with ML_WORKER_PROFILE=flow)"
             )
-        if require_onnxruntime:
-            bundle = ort_pose_bbox56.load_packaged_fall_bundle(configured.artifact_dir)
-            self._loaded_fall_bundle = bundle
-            return bundle.runner
-        try:
-            return DEFAULT_FALL_MODEL_FAMILY_REGISTRY.create(configured.type, configured, device)
-        except UnknownFallModelTypeError as exc:
-            raise RuntimeError(str(exc)) from exc
+        bundle = ort_pose_bbox56.load_packaged_fall_bundle(configured.artifact_dir)
+        self._loaded_fall_bundle = bundle
+        return bundle.runner
 
     def _warm_models(self) -> tuple[str, ...]:
         if self._shared_graph is None or self._boot is None:

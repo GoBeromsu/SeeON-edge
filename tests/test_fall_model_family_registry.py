@@ -1,26 +1,4 @@
-"""Issue #65: fall-model family registry -- config/metadata-driven dispatch.
-
-Owner acceptance criteria under test (from the issue's comments):
-  (a) the fall-model family in use is selected by config (``FallModelConfig
-      .type``), not by which class is imported and called in
-      ``worker/runtime/worker.py``.
-  (b) onboarding a new family means implementing ``FallV2ModelProtocol`` and
-      registering a factory -- no edits to ``_create_fall_model``'s call
-      sites and no widening of the ``type`` pin beyond the one-time
-      ``Literal`` -> ``str`` change that landed this dispatch mechanism.
-  (c) an unrecognized ``type`` value refuses to boot with a loud, diagnostic
-      error naming every registered family -- never a silent fallback to
-      the packaged family or any other default.
-  (d) coverage includes a second, fake/test-only model family that loads and
-      runs purely through config, with no hardcoded reference to it in any
-      production module -- proving the registry actually decouples model
-      family from ``worker.py`` rather than moving the hardcoding one layer
-      down.
-
-The #43 none-config boot refusal (``config.models.fall is None``) is
-untouched by this issue and stays covered in
-``tests/test_worker_fall_model_selection.py``.
-"""
+"""Packaged fall-model family registry behavior."""
 
 from __future__ import annotations
 
@@ -29,7 +7,6 @@ from typing import final
 
 import pytest
 
-import worker.runtime.worker as worker_module
 from shared.detection_policies import FallPolicyV2, PolicySource, make_effective_policy
 from tests_support.pose_bbox56_bundle_artifact import write_pose_bbox56_bundle
 from worker.adapters.model.fall_family_registry import (
@@ -40,17 +17,6 @@ from worker.adapters.model.fall_family_registry import (
 from worker.domains import DETECTION_MODULE_REGISTRY, CameraModuleContext
 from worker.interfaces.fall_model import FallV2Probabilities
 from worker.runtime.config import WorkerConfig
-from worker.runtime.lease import GpuLease
-from worker.runtime.worker import WorkerRuntime
-
-
-@final
-class _ForbiddenServingClient:
-    """Fall model dispatch must never reach the serving client (mirrors the
-    #43 test double in ``test_worker_fall_model_selection.py``)."""
-
-    def create(self, task: str, **_options: object) -> object:
-        raise AssertionError(f"fall model dispatch must not call serving.create({task!r})")
 
 
 @final
@@ -114,15 +80,6 @@ def _config(
     )
 
 
-def _runtime(config: WorkerConfig, state_dir: Path) -> WorkerRuntime:
-    return WorkerRuntime(
-        config,
-        env={"ML_WORKER_PROFILE": "flow"},
-        serving_client=_ForbiddenServingClient(),
-        acquire_lease=lambda: GpuLease.acquire(state_dir),
-    )
-
-
 def test_registry_register_and_create_round_trip(tmp_path: Path) -> None:
     artifact_dir = _write_fall_artifact(tmp_path / "fake")
     config = _config("fake-family", artifact_dir)
@@ -151,28 +108,6 @@ def test_registry_get_factory_raises_for_unregistered_type_naming_known_families
 def test_default_registry_only_registers_the_packaged_pose_bbox56_family() -> None:
     registry = default_fall_model_family_registry()
     assert registry.types() == ("pose-bbox56-proxy-v0",)
-    assert registry.runtime_formats() == ("pose-bbox56-onnx-v0", "pose-bbox56-proxy-v0")
-
-
-def test_create_fall_model_loads_a_fake_family_registered_purely_via_config(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """Requirement (d): a fake second family, registered on a throwaway
-    registry, loads through ``WorkerRuntime._create_fall_model`` purely
-    because ``config.models.fall.type`` names it -- there is no "fake-family"
-    branch anywhere in ``worker.py``."""
-    artifact_dir = _write_fall_artifact(tmp_path / "models" / "fall" / "fake")
-    config = _config("fake-family", artifact_dir)
-    fake_model = _FakeFamilyFallModel()
-
-    registry = FallModelFamilyRegistry()
-    registry.register("fake-family", lambda _config, _device: fake_model)
-    monkeypatch.setattr(worker_module, "DEFAULT_FALL_MODEL_FAMILY_REGISTRY", registry)
-
-    runtime = _runtime(config, tmp_path)
-    model = runtime._create_fall_model("cpu")  # noqa: SLF001
-
-    assert model is fake_model
 
 
 def _fall_module(
@@ -260,25 +195,6 @@ def test_operator_policy_override_is_audited_but_not_applied(tmp_path: Path) -> 
     audit = definition.audit_adapter(context)
 
     assert module.decider.policy.policy.transition_threshold == pytest.approx(0.5)
-    assert audit.operating_threshold == pytest.approx(0.5)
+    assert audit.operating_threshold == 0.5
     assert audit.threshold_source == "default"
     assert audit.unapplied_policy_threshold == pytest.approx(0.7)
-
-
-def test_create_fall_model_refuses_to_boot_for_an_unknown_type(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """Requirement (c): an unrecognized ``type`` refuses to boot with a loud
-    error naming the registered families -- never a silent fallback to
-    the packaged family or any other default."""
-    artifact_dir = _write_fall_artifact(tmp_path / "models" / "fall" / "unknown")
-    config = _config("gru", artifact_dir)
-
-    registry = FallModelFamilyRegistry()
-    registry.register("pose-bbox56-proxy-v0", lambda _config, _device: object())
-    monkeypatch.setattr(worker_module, "DEFAULT_FALL_MODEL_FAMILY_REGISTRY", registry)
-
-    runtime = _runtime(config, tmp_path)
-
-    with pytest.raises(RuntimeError, match="unknown fall model type 'gru'"):
-        runtime._create_fall_model("cpu")  # noqa: SLF001

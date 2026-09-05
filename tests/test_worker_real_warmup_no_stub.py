@@ -197,12 +197,9 @@ def test_fall_classifier_is_constructed_and_warmed_on_the_cpu_before_cameras(
         def create(self, task: str, **_options: object) -> object:
             return _Runner(task)
 
-    fall_devices: list[str] = []
     fall_runner = _Runner("fall")
 
-    def _create_fall_model(self: Any, device: str, *, require_onnxruntime: bool = False) -> object:
-        assert require_onnxruntime
-        fall_devices.append(device)
+    def _create_fall_model(self: Any) -> object:
         # The real seam records the loaded bundle so the policy graph can name
         # its identity; the fake must honour that contract too.
         self._loaded_fall_bundle = SimpleNamespace(
@@ -249,6 +246,5 @@ def test_fall_classifier_is_constructed_and_warmed_on_the_cpu_before_cameras(
     _ = runtime._initialize_models(boot)  # noqa: SLF001
     warmed = runtime._warm_models()  # noqa: SLF001
 
-    assert fall_devices == ["cpu"]
     assert "fall-classifier" in warmed
     assert fall_runner.warmup_calls == 1

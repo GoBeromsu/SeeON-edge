@@ -279,7 +279,7 @@ def test_create_fall_model_refuses_when_unconfigured_and_never_touches_serving(
     runtime = _runtime(_config(), _ForbiddenServingClient(), tmp_path)
 
     with pytest.raises(RuntimeError, match="fall model must be explicitly configured"):
-        runtime._create_fall_model("cpu")  # noqa: SLF001
+        runtime._create_fall_model()  # noqa: SLF001
 
 
 def test_create_fall_model_uses_the_configured_bundle_artifact_on_the_cpu(
@@ -289,7 +289,7 @@ def test_create_fall_model_uses_the_configured_bundle_artifact_on_the_cpu(
     config = _config(
         with_fall={
             "type": "pose-bbox56-proxy-v0",
-            "framework": "pytorch",
+            "framework": "onnxruntime",
             "mode": "sequence",
             "artifact_dir": str(artifact_dir),
             "weights": "model.pt",
@@ -306,14 +306,14 @@ def test_create_fall_model_uses_the_configured_bundle_artifact_on_the_cpu(
     calls: list[tuple[Path, str]] = []
     sentinel = _FakeRunner("fall")
 
-    def fake_from_artifact_dir(artifact_dir: Path, device: str = "cpu") -> object:
-        calls.append((Path(artifact_dir), device))
-        return sentinel
+    def fake_load_packaged_bundle(artifact_dir: Path) -> object:
+        calls.append((Path(artifact_dir), "cpu"))
+        return type("_Bundle", (), {"runner": sentinel})()
 
-    monkeypatch.setattr(PoseBbox56BundleRunner, "from_artifact_dir", fake_from_artifact_dir)
+    monkeypatch.setattr(ort_pose_bbox56, "load_packaged_fall_bundle", fake_load_packaged_bundle)
     runtime = _runtime(config, _ForbiddenServingClient(), tmp_path)
 
-    model = runtime._create_fall_model("cpu")  # noqa: SLF001
+    model = runtime._create_fall_model()  # noqa: SLF001
 
     assert model is sentinel
     fall_config = config.models.fall
@@ -351,7 +351,7 @@ def test_boot_and_fetch_share_packaged_bundle_load_failure(
     runtime = _runtime(config, _ForbiddenServingClient(), tmp_path)
 
     with pytest.raises(ModelLoadError, match="shared bundle sentinel"):
-        runtime._create_fall_model("cpu", require_onnxruntime=True)  # noqa: SLF001
+        runtime._create_fall_model()  # noqa: SLF001
 
     fetch_bundle = tmp_path / "fetch" / "fall" / "pose-bbox56-gru"
     fetch_bundle.mkdir(parents=True)
@@ -527,6 +527,27 @@ def test_selected_preprocessing_contradiction_refuses_construction(tmp_path: Pat
             models_root / "bundles" / desired.bundle_sha256,
             proof,
             replace(selection, preprocessing_identity="contradictory-preprocessing"),
+            session_factory=lambda _path, _providers: _ZeroLogitSession(),
+        )
+
+
+def test_selected_output_contract_mismatch_refuses_construction(tmp_path: Path) -> None:
+    """A selection declares its output class count; this runner implements one.
+
+    A replacement that emits a different class count is a different structure,
+    and must refuse here rather than have its logit read as if it were this
+    runner's single fall-transition score - a silent wrong answer.
+    """
+    models_root, desired = _selected_onnx_bundle(tmp_path)
+    selection = desired.selection
+    assert selection is not None
+    proof = admit_model_bundle(models_root, desired)
+
+    with pytest.raises(ModelLoadError, match="output_class_count=3"):
+        OrtPoseBbox56Runner.from_admitted_bundle(
+            models_root / "bundles" / desired.bundle_sha256,
+            proof,
+            replace(selection, output_class_count=3),
             session_factory=lambda _path, _providers: _ZeroLogitSession(),
         )
 
