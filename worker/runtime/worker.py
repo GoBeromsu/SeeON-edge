@@ -16,7 +16,7 @@ from typing import Any, Final, Protocol, final, runtime_checkable
 
 import worker.runtime.telemetry.runtime_status_sender as runtime_status_sender_module
 from contracts.observation import BoundingBox
-from contracts.runner import BedRunnerResult, Image, RunnerProtocol
+from contracts.runner import RunnerProtocol
 from shared.detection_policies import LATEST_POLICY_VERSIONS
 from shared.events.delivery_queue import DeliveryQueue
 from shared.events.evidence_export_contract import DeliveryDisposition, DeliveryFailure
@@ -71,9 +71,7 @@ from worker.pipeline.output.evidence.flow_sealed_sidecar import FlowSealedSideca
 from worker.pipeline.output.evidence.snapshot_store import SnapshotStore
 from worker.pipeline.output.evidence_attacher import AlertEvidenceAttacher
 from worker.pipeline.output.live_view import LatestFrameStore
-from worker.pipeline.output.live_view_api import BedZoneRecognizeResponse
 from worker.pipeline.output.mjpeg_server import (
-    BedZoneNotFoundError,
     MjpegServer,
     MjpegServerConfig,
     dev_mjpeg_config,
@@ -105,14 +103,10 @@ from worker.runtime.flow.policy_pump import (
     NativePolicyPump,
 )
 from worker.runtime.lease import GpuLease
-from worker.runtime.model_composition import (
-    SharedComponentGraph,
-    SharedYoloExtractors,
-)
+from worker.runtime.model_composition import SharedComponentGraph
 from worker.runtime.nvidia_bed_zone_recognizer import (
     DEFAULT_BED_ZONE_RECOGNITION_TIMEOUT_S,
     NvidiaBedZoneRecognizer,
-    bed_zone_response,
 )
 from worker.runtime.profile.boot import BootContext
 from worker.runtime.profile.device import CudaProbe
@@ -681,7 +675,6 @@ class WorkerRuntime:
         self._max_frames_per_camera = max_frames_per_camera
         self._context = bootstrap.BootstrapContext()
         self._boot: BootContext | None = None
-        self.shared_yolo: SharedYoloExtractors | None = None
         self.fall_model: FallV2ModelProtocol | None = None
         self._loaded_fall_bundle: ort_pose_bbox56.PackagedFallBundle | None = None
         self._shared_graph: SharedComponentGraph | None = None
@@ -850,19 +843,17 @@ class WorkerRuntime:
         cosmetic view losing its port must not take fall detection down with
         it, so the failure is logged and the worker keeps running.
         """
+        if self._boot is None:
+            raise RuntimeError("live view server cannot start before flow boot")
         if not self._mjpeg_config.enabled:
             LOGGER.info("dev_mjpeg disabled; live view server not started")
             return
         self._mjpeg_server = start_optional_mjpeg_server(
             self._live_frames,
             self._mjpeg_config,
-            bed_zone_recognizer=(
-                NvidiaBedZoneRecognizer(
-                    self._serving,
-                    timeout_s=DEFAULT_BED_ZONE_RECOGNITION_TIMEOUT_S,
-                )
-                if self._boot is not None and self._boot.profile.name == "flow"
-                else self._bed_zone_recognizer
+            bed_zone_recognizer=NvidiaBedZoneRecognizer(
+                self._serving,
+                timeout_s=DEFAULT_BED_ZONE_RECOGNITION_TIMEOUT_S,
             ),
             bed_zone_snapshot=(
                 self._flow_media_plane.clean_snapshot
@@ -891,17 +882,6 @@ class WorkerRuntime:
                     "port": self._mjpeg_config.port,
                 },
             )
-
-    def _bed_zone_recognizer(self, image: Image) -> BedZoneRecognizeResponse:
-        """Run one on-demand bed-segmentation pass for the recognition endpoint."""
-        if self.shared_yolo is None:
-            raise RuntimeError("bed-zone recognizer called before models were initialized")
-        runner = self.shared_yolo.bed.runner
-        call = runner if callable(runner) else runner.run
-        result = call(image)
-        if not isinstance(result, BedRunnerResult):
-            raise BedZoneNotFoundError("bed runner returned an unexpected result")
-        return bed_zone_response(image, result)
 
     def _max_frames_completion_check(self) -> bool:
         cap = self._max_frames_per_camera
