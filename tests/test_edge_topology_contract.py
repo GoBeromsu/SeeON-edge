@@ -193,7 +193,10 @@ def test_edge_model_fetch_owns_the_models_volume_before_worker_start() -> None:
         "--dest",
         "/models",
     ]
-    assert _list_field(fetch, "volumes") == [f"{MODELS_VOLUME}:/models:rw"]
+    assert _list_field(fetch, "volumes") == [
+        f"{MODELS_VOLUME}:/models:rw",
+        "/deployment/model-selection.json:/app/model-selection.json:ro",
+    ]
     assert set(_mapping_field(fetch, "environment")) == {"HF_TOKEN"}, (
         "only the optional HF token crosses into the fetcher; no relay secret, no profile"
     )
@@ -202,6 +205,7 @@ def test_edge_model_fetch_owns_the_models_volume_before_worker_start() -> None:
 
     worker_volumes = _list_field(services["ml-worker"], "volumes")
     assert f"{MODELS_VOLUME}:/models:ro" in worker_volumes
+    assert "/deployment/model-selection.json:/app/model-selection.json:ro" in worker_volumes
     assert not any(str(volume).startswith("./models") for volume in worker_volumes)
     engine_build = services[EDGE_ENGINE_BUILD_SERVICE]
     assert _list_field(engine_build, "volumes") == [

@@ -10,6 +10,7 @@ final path, so a later worker boot cannot load a half-written weight.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import shutil
 import stat
@@ -25,7 +26,15 @@ from worker.tools.fetch_models.http_source import (
     RetryPolicy,
     SourceError,
 )
-from worker.tools.fetch_models.manifest import SIDECAR_ROOT, Artifact, Bundle, Manifest
+from worker.tools.fetch_models.manifest import (
+    SIDECAR_ROOT,
+    Artifact,
+    Bundle,
+    Manifest,
+    ManifestError,
+    Source,
+    bundle_from_published_manifest,
+)
 
 HF_TOKEN_ENV: Final = "HF_TOKEN"
 PART_SUFFIX: Final = ".part"
@@ -33,6 +42,8 @@ _HASH_CHUNK: Final = 1 << 20
 _FALL_BUNDLE_ROOT: Final = "fall/pose-bbox56-gru"
 _FALL_PT_PATH: Final = f"{_FALL_BUNDLE_ROOT}/model.pt"
 _FALL_ONNX_PATH: Final = f"{_FALL_BUNDLE_ROOT}/model.onnx"
+_PUBLISHED_BUNDLE_MANIFEST_PATH: Final = "manifest.json"
+_MAX_PUBLISHED_MANIFEST_SIZE: Final = 1 << 20
 
 Outcome = Literal["present", "fetched", "sidecar-present", "sidecar-written"]
 
@@ -273,6 +284,109 @@ def fetch_bundle(
     return report
 
 
+def _read_published_bundle_manifest(
+    source: Source, byte_source: ByteSource, env: Mapping[str, str]
+) -> Bundle:
+    """Read the canonical descriptor which names a published bundle's members."""
+    body = bytearray()
+    url = source.url_for(_PUBLISHED_BUNDLE_MANIFEST_PATH)
+    headers = _headers_for(
+        Artifact(
+            path=_PUBLISHED_BUNDLE_MANIFEST_PATH,
+            source=source,
+            remote_path=_PUBLISHED_BUNDLE_MANIFEST_PATH,
+            size=1,
+            sha256="0" * 64,
+        ),
+        env,
+    )
+    try:
+        for chunk in byte_source.stream(url, headers):
+            body.extend(chunk)
+            if len(body) > _MAX_PUBLISHED_MANIFEST_SIZE:
+                raise VerificationError(
+                    f"published bundle manifest at {url} exceeds "
+                    f"{_MAX_PUBLISHED_MANIFEST_SIZE} bytes"
+                )
+        return bundle_from_published_manifest(bytes(body), source)
+    except ManifestError as exc:
+        raise VerificationError(f"published bundle manifest at {url}: {exc}") from exc
+
+
+def _fetch_selected_bundle(
+    manifest: Manifest,
+    root: Path,
+    source: ByteSource,
+    *,
+    selection_path: Path,
+    env: Mapping[str, str],
+    retry: RetryPolicy,
+    log: Callable[[str], None],
+) -> FetchReport:
+    try:
+        selection_raw = json.loads(selection_path.read_text(encoding="utf-8"))
+        from worker.runtime.provenance.model_bundle import (
+            desired_model_bundle_from_selection_document,
+        )
+
+        desired = desired_model_bundle_from_selection_document(selection_raw)
+    except (OSError, ValueError, RuntimeError) as exc:
+        raise VerificationError(f"model selection at {selection_path} is invalid: {exc}") from exc
+
+    publication = desired.selection.model_publication if desired.selection is not None else None
+    if publication is None:  # pragma: no cover -- selection parsing always supplies it
+        raise VerificationError("model selection has no model publication")
+    locator = next(
+        (
+            candidate
+            for candidate in manifest.published_bundles
+            if (
+                candidate.source_locator == publication.source_locator
+                and candidate.revision == publication.revision
+                and candidate.bundle_sha256 == publication.bundle_sha256
+            )
+        ),
+        None,
+    )
+    if locator is None:
+        raise VerificationError(
+            "model selection names a bundle with no published locator: "
+            f"{publication.source_locator}@{publication.revision} "
+            f"{publication.bundle_sha256}"
+        )
+    pinned_source = next(
+        (
+            candidate
+            for candidate in manifest.sources.values()
+            if (
+                candidate.source_locator == locator.source_locator
+                and candidate.ref == locator.revision
+            )
+        ),
+        None,
+    )
+    if pinned_source is None:  # protected by manifest parsing
+        raise VerificationError(
+            f"published locator has no pinned source for {locator.bundle_sha256}"
+        )
+    bundle = _read_published_bundle_manifest(pinned_source, source, env)
+    if bundle.sha256 != publication.bundle_sha256:
+        raise VerificationError(
+            f"published bundle manifest identity {bundle.sha256} does not match selected "
+            f"bundle {publication.bundle_sha256}"
+        )
+    destination = root / "bundles" / bundle.sha256
+    if destination.exists() or destination.is_symlink():
+        # An existing selected tree must fail with the exact boot-path reason,
+        # rather than the generic provisioning-tree error below.
+        _require_loadable_selected_fall_bundle(root, desired)
+    report = fetch_bundle(bundle, root, source, env=env, retry=retry, log=log)
+    for result in report.results:
+        log(f"{result.outcome:16} {result.sha256}  bundles/{bundle.sha256}/{result.path}")
+    _require_loadable_selected_fall_bundle(root, desired)
+    return report
+
+
 def fetch_all(
     manifest: Manifest,
     root: Path,
@@ -283,6 +397,7 @@ def fetch_all(
     force: bool = False,
     log: Callable[[str], None] = lambda _message: None,
     sidecar_root: Path = SIDECAR_ROOT,
+    selection_path: Path | None = None,
 ) -> FetchReport:
     """Fetch every artifact and sidecar; raise on the first failure."""
     report = FetchReport()
@@ -314,6 +429,17 @@ def fetch_all(
     artifact_paths = {artifact.path for artifact in manifest.artifacts}
     if _FALL_PT_PATH in artifact_paths:
         _require_loadable_fall_bundle(root)
+    if selection_path is not None and selection_path.is_file():
+        selected_report = _fetch_selected_bundle(
+            manifest,
+            root,
+            source,
+            selection_path=selection_path,
+            env=env,
+            retry=retry,
+            log=log,
+        )
+        report.results.extend(selected_report.results)
     return report
 
 
@@ -341,3 +467,26 @@ def _require_loadable_fall_bundle(root: Path) -> None:
             f"provisioned pose+bbox56 fall bundle at {bundle} is not loadable by the Flow "
             f"runner: {error}; the published bundle manifest must list the exported model.onnx"
         ) from error
+
+
+def _require_loadable_selected_fall_bundle(root: Path, desired: object) -> None:
+    """Exercise the selection boot path after the immutable tree is published."""
+    from worker.adapters.model.errors import ModelLoadError
+    from worker.adapters.model.ort_pose_bbox56 import OrtPoseBbox56Runner
+    from worker.runtime.provenance.model_bundle import (
+        DesiredModelBundle,
+        ModelBundleAdmissionError,
+        admit_model_bundle,
+    )
+
+    if not isinstance(desired, DesiredModelBundle):  # pragma: no cover -- local invariant
+        raise VerificationError("selected bundle desired state is invalid")
+    try:
+        proof = admit_model_bundle(root, desired)
+        if desired.selection is None:  # pragma: no cover -- local invariant
+            raise VerificationError("selected bundle has no selection")
+        OrtPoseBbox56Runner.from_admitted_bundle(
+            root / "bundles" / desired.bundle_sha256, proof, desired.selection
+        )
+    except (ModelBundleAdmissionError, ModelLoadError) as exc:
+        raise VerificationError(str(exc)) from exc

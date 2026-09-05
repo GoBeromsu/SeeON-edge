@@ -141,6 +141,7 @@ services:
       HF_TOKEN: ${HF_TOKEN:-}
     volumes:
       - worker-models:/models:rw
+      - /deployment/model-selection.json:/app/model-selection.json:ro
     command:
       - python
       - -m
@@ -224,9 +225,8 @@ services:
     volumes:
       # Fixed image-adjacent model root, populated by edge-model-fetch.
       - worker-models:/models:ro
-      # Deployment owns selection, not the image. Enable this read-only bind
-      # when deploying an admitted bundle; omit it for the packaged fallback.
-      # - /deployment/model-selection.json:/app/model-selection.json:ro
+      # Deployment owns selection, not the image.
+      - /deployment/model-selection.json:/app/model-selection.json:ro
       # The deployed pose+bbox56 bundle is mounted read-only.
       - worker-models:/app/models:ro
       # Engines are prepared explicitly from the image-pinned manifest. Runtime
