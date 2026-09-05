@@ -196,13 +196,23 @@ def _selected_onnx_bundle(
     *,
     transition_threshold: float = 0.5,
     threshold_source: str = "default",
+    calibration_grants: tuple[bool, float] | None = None,
     class_order: list[str] | None = None,
     temporal_rule: object = None,
 ) -> tuple[Path, DesiredModelBundle]:
     source = write_pose_bbox56_bundle(tmp_path / "source")
-    if class_order is not None or temporal_rule is not None:
+    # A selection that declares its threshold comes from the receipt must be
+    # backed by the calibration: a real promoted publication states
+    # promotion_eligible and the granted threshold there. Write that in, so
+    # the fixture is what such a publication looks like.
+    grants_receipt = threshold_source == "receipt"
+    if calibration_grants is None and grants_receipt:
+        calibration_grants = (True, transition_threshold)
+    if class_order is not None or temporal_rule is not None or calibration_grants is not None:
         calibration_path = source / "calibration.json"
         calibration = json.loads(calibration_path.read_text(encoding="utf-8"))
+        if calibration_grants is not None:
+            calibration["promotion_eligible"], calibration["threshold"] = calibration_grants
         if class_order is not None:
             calibration["class_order"] = class_order
         if temporal_rule is not None:
@@ -798,6 +808,51 @@ def test_selected_default_source_with_a_non_default_threshold_refuses(tmp_path: 
             models_root / "bundles" / desired.bundle_sha256,
             proof,
             replace(selection, threshold_source="default", transition_threshold=0.3),
+            session_factory=lambda _path, _providers: _ZeroLogitSession(),
+        )
+
+
+def test_selected_receipt_claim_refuses_when_the_calibration_grants_none(tmp_path: Path) -> None:
+    """The word 'receipt' in a deployment document cannot grant what the
+    publisher did not: a non-promotable calibration refuses the claim."""
+    models_root, desired = _selected_onnx_bundle(
+        tmp_path, threshold_source="receipt", calibration_grants=(False, 0.5)
+    )
+    selection = desired.selection
+    assert selection is not None
+    bundle_dir = models_root / "bundles" / desired.bundle_sha256
+    proof = admit_model_bundle(models_root, desired)
+
+    with pytest.raises(ModelLoadError, match="not promotion-eligible"):
+        OrtPoseBbox56Runner.from_admitted_bundle(
+            bundle_dir,
+            proof,
+            selection,
+            session_factory=lambda _path, _providers: _ZeroLogitSession(),
+        )
+
+
+def test_selected_receipt_claim_refuses_when_the_granted_threshold_differs(
+    tmp_path: Path,
+) -> None:
+    """The receipt is the calibration, not the selection: a declared receipt
+    threshold the calibration did not grant refuses naming both."""
+    models_root, desired = _selected_onnx_bundle(
+        tmp_path,
+        threshold_source="receipt",
+        transition_threshold=0.3,
+        calibration_grants=(True, 0.05),
+    )
+    selection = desired.selection
+    assert selection is not None
+    bundle_dir = models_root / "bundles" / desired.bundle_sha256
+    proof = admit_model_bundle(models_root, desired)
+
+    with pytest.raises(ModelLoadError, match=r"declares receipt threshold 0\.3 .*grants 0\.05"):
+        OrtPoseBbox56Runner.from_admitted_bundle(
+            bundle_dir,
+            proof,
+            selection,
             session_factory=lambda _path, _providers: _ZeroLogitSession(),
         )
 

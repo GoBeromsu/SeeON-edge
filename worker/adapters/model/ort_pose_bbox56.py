@@ -212,6 +212,12 @@ class OrtPoseBbox56Runner:
         receipt_transition_votes, receipt_transition_window = _calibration_temporal_rule(
             calibration
         )
+        # A selection that claims its threshold comes from the receipt must be
+        # backed by the receipt. The bundle's own calibration states whether it
+        # is promotion-eligible and at what threshold; the word 'receipt' in a
+        # deployment document cannot grant what the publisher did not.
+        if selection.threshold_source == "receipt":
+            _require_calibration_grants_receipt(calibration, float(threshold))
         if session_factory is None:
             session_factory = _onnxruntime_session_factory
         try:
@@ -305,6 +311,28 @@ def _bundle_metadata(
         transition_window,
         promotion_eligible,
     )
+
+
+def _require_calibration_grants_receipt(
+    calibration: Mapping[str, object], declared_threshold: float
+) -> None:
+    eligible = calibration.get("promotion_eligible")
+    if eligible is not True:
+        raise ModelLoadError(
+            "selection declares threshold_source 'receipt' but the bundle's calibration is "
+            f"not promotion-eligible (promotion_eligible={eligible!r}); a deployment "
+            "document cannot grant a receipt the publisher did not"
+        )
+    granted = calibration.get("threshold")
+    if (
+        isinstance(granted, bool)
+        or not isinstance(granted, (int, float))
+        or not math.isclose(float(granted), declared_threshold)
+    ):
+        raise ModelLoadError(
+            f"selection declares receipt threshold {declared_threshold:g} but the bundle's "
+            f"calibration grants {granted!r}; the receipt is the calibration, not the selection"
+        )
 
 
 def _calibration_temperature(
