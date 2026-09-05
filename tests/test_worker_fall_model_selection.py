@@ -28,12 +28,15 @@ none-config refusal plus the configured packaged-bundle behavior.
 from __future__ import annotations
 
 import json
+import shutil
 from pathlib import Path
 from typing import final
 
 import pytest
 
+from contracts.model_selection import DatasetPublication, ModelPublication, ModelSelection
 from contracts.runner import Image, RunnerResult
+from shared.detection_policies import default_policy_bundle
 from tests_support.pose_bbox56_bundle_artifact import write_pose_bbox56_bundle
 from worker.adapters.model import ort_pose_bbox56
 from worker.adapters.model.errors import ModelLoadError
@@ -42,9 +45,16 @@ from worker.adapters.model.pose_bbox56_bundle import PoseBbox56BundleRunner
 from worker.interfaces.fall_model import FallV2Probabilities
 from worker.runtime import bootstrap
 from worker.runtime.config import WorkerConfig
+from worker.runtime.config.worker_models import SelectedFallBundleConfig, WorkerModelsConfig
 from worker.runtime.lease import GpuLease
 from worker.runtime.profile.boot import BootContext
 from worker.runtime.profile.registry import PROFILE_REGISTRY
+from worker.runtime.provenance.manifest import (
+    RuntimeEnvironmentFacts,
+    build_applied_camera_state,
+    build_applied_runtime_manifest,
+)
+from worker.runtime.provenance.model_bundle import DesiredModelBundle
 from worker.runtime.worker import WorkerRuntime
 from worker.tools.export_fall_onnx import export_fall_onnx
 from worker.tools.fetch_models.fetcher import VerificationError, _require_loadable_fall_bundle
@@ -270,6 +280,111 @@ def test_flow_composition_uses_the_loaded_bundle_published_weights_digest(tmp_pa
     shipped = "7bb75a2932e1a1250dc900013b2c80b220de5e23f3ea568e05f1db21d0a757e3"
     assert fall.artifact_digest != shipped
     assert len(fall.artifact_digest) == 64
+
+
+def test_selected_bundle_composes_a_runtime_manifest_with_runner_preprocessing_identity(
+    tmp_path: Path,
+) -> None:
+    bundle_sha256 = "a" * 64
+    artifact_dir = write_pose_bbox56_bundle(tmp_path / "source-bundle")
+    models_root = tmp_path / "models"
+    selected_dir = models_root / "bundles" / bundle_sha256
+    selected_dir.parent.mkdir(parents=True)
+    shutil.copytree(artifact_dir, selected_dir)
+    selection = ModelSelection(
+        model_publication=ModelPublication("facility/fall", "1" * 40, bundle_sha256),
+        bundle_members_digest="2" * 64,
+        dataset_publication=DatasetPublication("facility/dataset", "3" * 40, "4" * 64),
+        evaluation_receipt_digest="5" * 64,
+        field_evaluation_receipt_digest="6" * 64,
+        calibration_digest="7" * 64,
+        conformance_digest="8" * 64,
+        input_observation_schema="pose-bbox56.v1",
+        output_class_count=2,
+        output_class_semantics_digest="9" * 64,
+        policy_digest="b" * 64,
+        runtime_format="onnxruntime",
+        bundle_format="bundle-manifest/proxy-v0",
+        preprocessing_identity="coco17-xyc-plus-pose-head-xyxy-valid-f32-v1",
+        transition_threshold=0.5,
+        threshold_source="default",
+    )
+    desired = DesiredModelBundle(
+        bundle_sha256,
+        {
+            "dataset": selection.dataset_publication.payload_digest,
+            "evaluation": selection.evaluation_receipt_digest,
+            "field": selection.field_evaluation_receipt_digest,
+            "calibration": selection.calibration_digest,
+            "conformance": selection.conformance_digest,
+            "class": selection.output_class_semantics_digest,
+            "input": selection.input_observation_schema,
+            "policy": selection.policy_digest,
+            "members": selection.bundle_members_digest,
+        },
+        selection,
+    )
+    config = _config().model_copy(
+        update={
+            "models": WorkerModelsConfig(
+                selected=SelectedFallBundleConfig(models_root=models_root, desired=desired)
+            )
+        }
+    )
+    runtime = _runtime(config, _ForbiddenServingClient(), tmp_path)
+    boot = _flow_boot()
+    graph = runtime._initialize_flow_policy_graph(boot)  # noqa: SLF001
+    [fall] = [
+        identity for identity in graph.identities if identity.component_id == "fall-classifier"
+    ]
+
+    assert fall.preprocessing_identity == selection.preprocessing_identity
+    assert fall.preprocessing_identity != selection.input_observation_schema
+
+    policy_bundle = default_policy_bundle(("camera-a",))
+    camera = build_applied_camera_state(
+        camera_id="camera-a",
+        effective_decode_backend=boot.decode,
+        ingest_target_fps=5.0,
+        module_qualified_ids=("bed_exit.v1", "fall.v2"),
+        schedule={"pose": 2, "bed": 30},
+        detection_windows={"fall": None, "bed_exit": None},
+        policies={
+            "fall": policy_bundle.resolve("camera-a", "fall", 2),
+            "bed_exit": policy_bundle.resolve("camera-a", "bed_exit", 1),
+        },
+        bed_zone_polygon=None,
+        bed_zone_image_width=None,
+        bed_zone_image_height=None,
+    )
+    manifest = build_applied_runtime_manifest(
+        boot=boot,
+        module_registry=runtime._module_registry,  # noqa: SLF001
+        module_versions=runtime._module_versions,  # noqa: SLF001
+        component_identities=graph.identities,
+        cameras=(camera,),
+        config_version=config.version,
+        restart_generation=0,
+        detector_version="worker-domain-detectors-v1",
+        environment=RuntimeEnvironmentFacts(
+            worker_build_revision="c" * 40,
+            os_name="Linux",
+            architecture="x86_64",
+            python_version="3.12.11",
+            model_runtime="onnxruntime",
+            model_runtime_version="1.20.0",
+            accelerator_runtime="CUDA 13.0",
+            driver_version="580.65",
+            device_name="NVIDIA RTX",
+        ),
+        edge_database_schema_version=5,
+    )
+
+    components = json.loads(manifest.canonical_json)["components"]
+    [manifest_fall] = [
+        component for component in components if component["component_id"] == "fall-classifier"
+    ]
+    assert manifest_fall["preprocessing_identity"] == selection.preprocessing_identity
 
 
 def test_bundle_runner_refuses_a_non_cpu_device(tmp_path: Path) -> None:

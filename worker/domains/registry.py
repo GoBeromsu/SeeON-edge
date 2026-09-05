@@ -28,10 +28,10 @@ from worker.domains.bed_exit import (
 from worker.domains.bed_exit.geometry import containment_ratio
 from worker.domains.detection_window import DetectionWindow
 from worker.domains.fall import FallPolicyDeciderV2, FallV2DomainDecider, FallWindowClassifierV2
-from worker.domains.fall.pose_bbox56 import POSE_BBOX56_PREPROCESSING_IDENTITY
 from worker.domains.module_compiler import compile_detection_module_registry
 from worker.domains.module_definition import (
     RUNTIME_RESOLVED_ARTIFACT_DIGEST,
+    RUNTIME_RESOLVED_PREPROCESSING_IDENTITY,
     CameraModuleContext,
     ComponentBinding,
     DetectionModuleDefinition,
@@ -61,7 +61,6 @@ _COMPONENT_PREPROCESSING = MappingProxyType(
         "pose": "rgb24-to-coco17.v1",
         "person": "rgb24-to-person-boxes.v1",
         "bed": "rgb24-to-bed-regions.v1",
-        "fall-classifier": POSE_BBOX56_PREPROCESSING_IDENTITY,
     }
 )
 
@@ -144,7 +143,7 @@ def _fall_classifier_binding() -> ComponentBinding:
         model_family="configured-fall-family",
         provisioner="fall-model-family-registry",
         artifact_digest=RUNTIME_RESOLVED_ARTIFACT_DIGEST,
-        preprocessing_identity=_COMPONENT_PREPROCESSING["fall-classifier"],
+        preprocessing_identity=RUNTIME_RESOLVED_PREPROCESSING_IDENTITY,
         warmup_required=True,
     )
 

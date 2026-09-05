@@ -35,10 +35,11 @@ SessionFactory = Callable[[str, list[str]], _OrtSession]
 
 @dataclass(frozen=True)
 class PackagedFallBundle:
-    """The verified CPU runner and published-weights identity of one bundle."""
+    """The verified CPU runner and its published identity fields."""
 
     runner: OrtPoseBbox56Runner
     published_weights_digest: str
+    preprocessing_identity: str
 
 
 class OrtPoseBbox56Runner:
@@ -126,7 +127,11 @@ def load_packaged_fall_bundle(artifact_dir: Path) -> PackagedFallBundle:
     root = artifact_dir.expanduser().resolve()
     runner = OrtPoseBbox56Runner.from_artifact_dir(root, device="cpu")
     manifest = read_json(root / "bundle-manifest.json")
-    return PackagedFallBundle(runner, member_digest(manifest, "model.pt"))
+    return PackagedFallBundle(
+        runner,
+        member_digest(manifest, "model.pt"),
+        runner.preprocessing_identity,
+    )
 
 
 def _onnxruntime_session_factory(model_path: str, providers: list[str]) -> _OrtSession:

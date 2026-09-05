@@ -13,6 +13,7 @@ from worker.domains.module_compiler import (
 from worker.domains.module_definition import (
     DetectionModuleDefinition,
     RuntimeResolvedArtifactDigest,
+    RuntimeResolvedPreprocessingIdentity,
     SharedComponentIdentity,
 )
 from worker.domains.registry import (
@@ -65,7 +66,11 @@ def _registry_with(
                 component_bindings=tuple(
                     replace(binding, preprocessing_identity="rgb24-to-coco17.v2")
                     if component_change and binding.component_id == "pose"
-                    else replace(binding, artifact_digest="d" * 64)
+                    else replace(
+                        binding,
+                        artifact_digest="d" * 64,
+                        preprocessing_identity="coco17-xyc-plus-pose-head-xyxy-valid-f32-v1",
+                    )
                     if model_change and binding.component_id == "fall-classifier"
                     else binding
                     for binding in changed.component_bindings
@@ -117,7 +122,7 @@ def _manifest(
             artifact_digest="c" * 64,
             runtime=boot.runtime_profile.effective_inference_backend,
             device=boot.device,
-            preprocessing_identity=binding.preprocessing_identity,
+            preprocessing_identity="coco17-xyc-plus-pose-head-xyxy-valid-f32-v1",
         )
         if isinstance(binding.artifact_digest, RuntimeResolvedArtifactDigest)
         else binding.identity(
@@ -252,7 +257,10 @@ def test_catalog_qualifies_production_modules_components_and_model_bindings() ->
             assert isinstance(binding.artifact_digest, (str, RuntimeResolvedArtifactDigest))
             if isinstance(binding.artifact_digest, str):
                 assert _SHA256.fullmatch(binding.artifact_digest)
-            assert binding.preprocessing_identity
+            assert isinstance(
+                binding.preprocessing_identity,
+                (str, RuntimeResolvedPreprocessingIdentity),
+            )
             assert binding.warmup_required is True
 
     fall_pose = DETECTION_MODULE_REGISTRY.get("fall", 2).shared_bindings[0]

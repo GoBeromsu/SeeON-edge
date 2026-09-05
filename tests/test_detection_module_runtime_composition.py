@@ -24,6 +24,7 @@ from worker.domains.module_definition import (
     DetectionModuleDefinition,
     PolicySchemaIdentity,
     RuntimeResolvedArtifactDigest,
+    RuntimeResolvedPreprocessingIdentity,
     ScheduleRule,
 )
 from worker.domains.registry import (
@@ -304,6 +305,8 @@ def test_production_shared_component_semantics_are_equal_on_cpu_and_nvidia() -> 
             preprocessing_identity = binding.preprocessing_identity
             if isinstance(artifact_digest, RuntimeResolvedArtifactDigest):
                 artifact_digest = "f" * 64
+            if isinstance(preprocessing_identity, RuntimeResolvedPreprocessingIdentity):
+                preprocessing_identity = "coco17-xyc-plus-pose-head-xyxy-valid-f32-v1"
             assert isinstance(artifact_digest, str)
             assert isinstance(preprocessing_identity, str)
             self.artifact_digest: str = artifact_digest

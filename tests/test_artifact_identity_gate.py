@@ -19,6 +19,7 @@ from worker.domains.module_definition import (
     ComponentBinding,
     DetectionModuleActivationError,
     RuntimeResolvedArtifactDigest,
+    RuntimeResolvedPreprocessingIdentity,
 )
 from worker.domains.registry import DETECTION_MODULE_REGISTRY
 from worker.runtime.model_composition import (
@@ -82,6 +83,8 @@ def _compose(serving: object, tamper: dict[str, str] | None = None) -> object:
         preprocessing = binding.preprocessing_identity
         if isinstance(digest, RuntimeResolvedArtifactDigest):
             digest = "f" * 64
+        if isinstance(preprocessing, RuntimeResolvedPreprocessingIdentity):
+            preprocessing = "coco17-xyc-plus-pose-head-xyxy-valid-f32-v1"
         assert isinstance(digest, str)
         assert isinstance(preprocessing, str)
         component_id = str(binding.component_id)
@@ -151,9 +154,6 @@ def test_every_selected_component_declares_its_identity_source() -> None:
 
     for binding in _bindings_by_task().values():
         digest = binding.artifact_digest
-        assert (
-            isinstance(digest, RuntimeResolvedArtifactDigest)
-            or (isinstance(digest, str) and len(digest) == 64)
-        ), (
-            f"component {binding.component_id!r} has no declared artifact identity source"
-        )
+        assert isinstance(digest, RuntimeResolvedArtifactDigest) or (
+            isinstance(digest, str) and len(digest) == 64
+        ), f"component {binding.component_id!r} has no declared artifact identity source"

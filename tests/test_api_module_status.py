@@ -10,7 +10,10 @@ from worker.domains.module_compiler import (
     CompiledDetectionModuleRegistry,
     compile_detection_module_registry,
 )
-from worker.domains.module_definition import RuntimeResolvedArtifactDigest, SharedComponentIdentity
+from worker.domains.module_definition import (
+    RuntimeResolvedArtifactDigest,
+    SharedComponentIdentity,
+)
 from worker.domains.registry import (
     AVAILABLE_OBSERVATION_CHANNELS,
     DETECTION_MODULE_DEFINITIONS,
@@ -70,7 +73,11 @@ def _compiled_with(*, module_change: bool = False, model_change: bool = False):
             changed = replace(
                 changed,
                 component_bindings=tuple(
-                    replace(binding, artifact_digest="d" * 64)
+                    replace(
+                        binding,
+                        artifact_digest="d" * 64,
+                        preprocessing_identity="coco17-xyc-plus-pose-head-xyxy-valid-f32-v1",
+                    )
                     if binding.component_id == "fall-classifier"
                     else binding
                     for binding in changed.component_bindings
@@ -98,7 +105,11 @@ def _identities(
     identities = []
     for binding in registry.shared_bindings({"fall": 2}, flags={}):
         if isinstance(binding.artifact_digest, RuntimeResolvedArtifactDigest):
-            binding = replace(binding, artifact_digest=resolved)
+            binding = replace(
+                binding,
+                artifact_digest=resolved,
+                preprocessing_identity="coco17-xyc-plus-pose-head-xyxy-valid-f32-v1",
+            )
         identities.append(binding.identity(runtime=runtime, device=device))
     return tuple(identities)
 

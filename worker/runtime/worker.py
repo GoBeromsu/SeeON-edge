@@ -627,7 +627,7 @@ class WorkerRuntime:
         self._boot: BootContext | None = None
         self.shared_yolo: SharedYoloExtractors | None = None
         self.fall_model: FallV2ModelProtocol | None = None
-        self._packaged_fall_bundle: ort_pose_bbox56.PackagedFallBundle | None = None
+        self._loaded_fall_bundle: ort_pose_bbox56.PackagedFallBundle | None = None
         self._shared_graph: SharedComponentGraph | None = None
         self._warmed_component_ids: frozenset[str] = frozenset()
         self.fault_handler: FaultHandler | None = None
@@ -983,27 +983,21 @@ class WorkerRuntime:
     def _initialize_flow_policy_graph(self, boot: BootContext) -> SharedComponentGraph:
         """Build the CPU policy graph for the Flow media plane."""
         fall_model = self._create_fall_model("cpu", require_onnxruntime=True)
-        selected = self.config.models.selected
-        selection = None if selected is None else selected.desired.selection
         flags = {"person-box-source": self.config.models.box_source == "person"}
         bindings = self._module_registry.shared_bindings(self._module_versions, flags=flags)
         components: dict[str, object] = {}
         identities: list[SharedComponentIdentity] = []
         for binding in bindings:
             if binding.component_id == "fall-classifier":
-                # A pulled selection names its publication digest; the packaged
-                # default names the published weights member of its own bundle
-                # manifest (the lineage the ONNX export derives from).
-                digest = (
-                    self._packaged_fall_member_digest()
-                    if selection is None
-                    else selection.model_publication.bundle_sha256
-                )
-                preprocessing = (
-                    binding.preprocessing_identity
-                    if selection is None
-                    else selection.input_observation_schema
-                )
+                # The verified runner's bundle names both identity fields.  Its
+                # preprocessing contract is distinct from the selection
+                # document's input-observation schema, so both routes emit the
+                # runner vocabulary in the applied manifest.
+                bundle = self._loaded_fall_bundle
+                if bundle is None:
+                    raise RuntimeError("flow policy requires a loaded fall bundle")
+                digest = bundle.published_weights_digest
+                preprocessing = bundle.preprocessing_identity
                 components[binding.component_id] = fall_model
                 identities.append(
                     SharedComponentIdentity(
@@ -1040,10 +1034,10 @@ class WorkerRuntime:
         configured = self.config.models.fall
         if configured is None:
             raise RuntimeError("fall model must be explicitly configured; refusing to boot")
-        bundle = self._packaged_fall_bundle
+        bundle = self._loaded_fall_bundle
         if bundle is None:
             bundle = ort_pose_bbox56.load_packaged_fall_bundle(configured.artifact_dir)
-            self._packaged_fall_bundle = bundle
+            self._loaded_fall_bundle = bundle
         return bundle.published_weights_digest
 
     def _create_fall_model(
@@ -1083,7 +1077,9 @@ class WorkerRuntime:
                         "flow profile refuses a Torch fall bundle; the selected runtime_format "
                         "must be onnxruntime (export model.onnx with worker.tools.export_fall_onnx)"
                     )
-                return ort_pose_bbox56.load_packaged_fall_bundle(artifact_dir).runner
+                bundle = ort_pose_bbox56.load_packaged_fall_bundle(artifact_dir)
+                self._loaded_fall_bundle = bundle
+                return bundle.runner
             try:
                 return DEFAULT_FALL_MODEL_FAMILY_REGISTRY.create_bundle(
                     selection.runtime_format,
@@ -1104,7 +1100,7 @@ class WorkerRuntime:
             )
         if require_onnxruntime:
             bundle = ort_pose_bbox56.load_packaged_fall_bundle(configured.artifact_dir)
-            self._packaged_fall_bundle = bundle
+            self._loaded_fall_bundle = bundle
             return bundle.runner
         try:
             return DEFAULT_FALL_MODEL_FAMILY_REGISTRY.create(configured.type, configured, device)

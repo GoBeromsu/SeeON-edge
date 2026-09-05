@@ -13,7 +13,11 @@ from shared.detection_policies import default_policy_bundle, make_effective_poli
 from tests_support.pose_bbox56_bundle_artifact import write_pose_bbox56_bundle
 from worker.adapters.model.ort_pose_bbox56 import load_packaged_fall_bundle
 from worker.domains import DETECTION_MODULE_REGISTRY
-from worker.domains.module_definition import RuntimeResolvedArtifactDigest, SharedComponentIdentity
+from worker.domains.module_definition import (
+    RUNTIME_RESOLVED_PREPROCESSING_IDENTITY,
+    RuntimeResolvedArtifactDigest,
+    SharedComponentIdentity,
+)
 from worker.pipeline.output.evidence.evidence_stager import DurableEvidenceStager
 from worker.runtime.profile.boot import BootContext
 from worker.runtime.profile.registry import PROFILE_REGISTRY
@@ -39,8 +43,8 @@ def _fall_preprocessing_identity() -> str:
         for binding in definition.component_bindings
         if binding.component_id == "fall-classifier"
     ]
-    assert binding.preprocessing_identity is not None
-    return binding.preprocessing_identity
+    assert binding.preprocessing_identity is RUNTIME_RESOLVED_PREPROCESSING_IDENTITY
+    return "coco17-xyc-plus-pose-head-xyxy-valid-f32-v1"
 
 
 _FALL_ARTIFACT_DIGEST = "a" * 64

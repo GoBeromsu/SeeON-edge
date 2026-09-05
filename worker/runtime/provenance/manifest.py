@@ -10,6 +10,7 @@ from worker.domains.module_definition import (
     ComponentBinding,
     DetectionModuleDefinition,
     RuntimeResolvedArtifactDigest,
+    RuntimeResolvedIdentityField,
     SharedComponentIdentity,
 )
 from worker.runtime.profile.boot import BootContext
@@ -196,7 +197,10 @@ def _verified_component_identities(
             raise AppliedRuntimeManifestError(
                 f"contradictory artifact identity for component {component_id!r}"
             )
-        if binding.preprocessing_identity != identity.preprocessing_identity:
+        if (
+            not isinstance(binding.preprocessing_identity, RuntimeResolvedIdentityField)
+            and binding.preprocessing_identity != identity.preprocessing_identity
+        ):
             raise AppliedRuntimeManifestError(
                 f"contradictory preprocessing identity for component {component_id!r}"
             )

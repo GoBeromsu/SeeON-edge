@@ -21,7 +21,8 @@ import os
 import subprocess
 import sys
 from pathlib import Path
-from typing import cast
+from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 import yaml
@@ -199,11 +200,16 @@ def test_fall_classifier_is_constructed_and_warmed_on_the_cpu_before_cameras(
     fall_devices: list[str] = []
     fall_runner = _Runner("fall")
 
-    def _create_fall_model(
-        _self: object, device: str, *, require_onnxruntime: bool = False
-    ) -> object:
+    def _create_fall_model(self: Any, device: str, *, require_onnxruntime: bool = False) -> object:
         assert require_onnxruntime
         fall_devices.append(device)
+        # The real seam records the loaded bundle so the policy graph can name
+        # its identity; the fake must honour that contract too.
+        self._loaded_fall_bundle = SimpleNamespace(
+            runner=fall_runner,
+            published_weights_digest="fall-digest",
+            preprocessing_identity="coco17-xyc-plus-pose-head-xyxy-valid-f32-v1",
+        )
         return fall_runner
 
     monkeypatch.setattr(worker_module.WorkerRuntime, "_create_fall_model", _create_fall_model)
