@@ -7,6 +7,7 @@ import math
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from types import MappingProxyType
 from typing import Final, Protocol
 
 import numpy as np
@@ -52,6 +53,23 @@ class PackagedFallBundle:
     preprocessing_identity: str
 
 
+@dataclass(frozen=True)
+class PoseBbox56Conformance:
+    """Bundle-published input contract, parsed without importing its consumer."""
+
+    relative_path: str
+    preprocessing_identity: str
+    vector_length: int
+    tail_indices: Mapping[str, int]
+    keypoint_order: tuple[str, ...]
+    confidence_gate: float
+    coordinate_system: Mapping[str, object]
+    window_frames: int
+    stride_frames: int
+    fps: float
+    document: Mapping[str, object]
+
+
 class OrtPoseBbox56Runner:
     """Verified ONNX pose+bbox56 binary proxy running exclusively on CPU."""
 
@@ -67,6 +85,7 @@ class OrtPoseBbox56Runner:
         promotion_eligible: bool,
         artifact_digest: str,
         preprocessing_identity: str,
+        conformance: PoseBbox56Conformance,
     ) -> None:
         self._session = session
         self._temperature = temperature
@@ -76,6 +95,7 @@ class OrtPoseBbox56Runner:
         self.promotion_eligible = promotion_eligible
         self.artifact_digest = artifact_digest
         self.preprocessing_identity = preprocessing_identity
+        self.conformance = conformance
 
     @classmethod
     def from_artifact_dir(
@@ -94,13 +114,15 @@ class OrtPoseBbox56Runner:
         manifest = read_json(root / "bundle-manifest.json")
         verify_bundle(root, manifest)
         artifact_digest = member_digest(manifest, "model.onnx")
+        conformance = _packaged_conformance(root, manifest)
+        _validate_runner_conformance(conformance)
         (
             temperature,
             receipt_threshold,
             receipt_transition_votes,
             receipt_transition_window,
             promotion_eligible,
-        ) = _bundle_metadata(root)
+        ) = _bundle_metadata(root, conformance.preprocessing_identity)
         if session_factory is None:
             session_factory = _onnxruntime_session_factory
         try:
@@ -115,7 +137,8 @@ class OrtPoseBbox56Runner:
             receipt_transition_window,
             promotion_eligible,
             artifact_digest,
-            POSE_BBOX56_PREPROCESSING_IDENTITY,
+            conformance.preprocessing_identity,
+            conformance,
         )
         runner.warmup()
         return runner
@@ -130,10 +153,6 @@ class OrtPoseBbox56Runner:
         session_factory: SessionFactory | None = None,
     ) -> OrtPoseBbox56Runner:
         """Construct the selected ONNX runner from the already-admitted bundle."""
-        if selection.preprocessing_identity != POSE_BBOX56_PREPROCESSING_IDENTITY:
-            raise ModelLoadError(
-                "selected bundle preprocessing_identity contradicts runner contract"
-            )
         # The selection declares an output contract; this runner implements
         # exactly one - a single logit read as a binary fall-transition score.
         # A replacement that emits a different class count is a different
@@ -180,8 +199,16 @@ class OrtPoseBbox56Runner:
         root = Path(artifact_dir).expanduser().resolve()
         _verify_admitted_member(root, "model.onnx", model_digest)
         _verify_admitted_member(root, "calibration.json", calibration_digest)
+        conformance = _admitted_conformance(root, member_digests, selection.conformance_digest)
+        if conformance.preprocessing_identity != selection.preprocessing_identity:
+            raise ModelLoadError(
+                "selected preprocessing_identity differs from bundle conformance: "
+                f"selection {selection.preprocessing_identity!r}, "
+                f"conformance {conformance.preprocessing_identity!r}"
+            )
+        _validate_runner_conformance(conformance)
         calibration = read_json(root / "calibration.json")
-        temperature = _calibration_temperature(root, calibration)
+        temperature = _calibration_temperature(root, calibration, selection.preprocessing_identity)
         receipt_transition_votes, receipt_transition_window = _calibration_temporal_rule(
             calibration
         )
@@ -199,7 +226,8 @@ class OrtPoseBbox56Runner:
             receipt_transition_window,
             selection.threshold_source == "receipt",
             model_digest,
-            POSE_BBOX56_PREPROCESSING_IDENTITY,
+            conformance.preprocessing_identity,
+            conformance,
         )
         runner.warmup()
         return runner
@@ -248,12 +276,14 @@ def _onnxruntime_session_factory(model_path: str, providers: list[str]) -> _OrtS
     return onnxruntime.InferenceSession(model_path, providers=providers)
 
 
-def _bundle_metadata(root: Path) -> tuple[float, float | None, int, int, bool]:
+def _bundle_metadata(
+    root: Path, preprocessing_identity: str
+) -> tuple[float, float | None, int, int, bool]:
     calibration = read_json(root / "calibration.json")
     receipt = read_json(root / "evaluation-receipt.json")
     if not isinstance(calibration, dict):
         raise ModelLoadError("invalid calibration.json")
-    parsed_temperature = _calibration_temperature(root, calibration)
+    parsed_temperature = _calibration_temperature(root, calibration, preprocessing_identity)
     transition_votes, transition_window = _calibration_temporal_rule(calibration)
     if not isinstance(receipt, dict):
         raise ModelLoadError("invalid evaluation-receipt.json")
@@ -277,11 +307,23 @@ def _bundle_metadata(root: Path) -> tuple[float, float | None, int, int, bool]:
     )
 
 
-def _calibration_temperature(root: Path, calibration: object | None = None) -> float:
+def _calibration_temperature(
+    root: Path,
+    calibration: object | None = None,
+    preprocessing_identity: str = POSE_BBOX56_PREPROCESSING_IDENTITY,
+) -> float:
     document = read_json(root / "calibration.json") if calibration is None else calibration
     if not isinstance(document, dict):
         raise ModelLoadError("invalid calibration.json")
     _validate_calibration_class_order(document)
+    declared_digest = document.get("preprocessing_identity_digest")
+    expected_digest = hashlib.sha256(preprocessing_identity.encode("utf-8")).hexdigest()
+    if declared_digest != expected_digest:
+        raise ModelLoadError(
+            "calibration preprocessing_identity_digest mismatch: "
+            f"declared {declared_digest!r}, digest of preprocessing identity "
+            f"{preprocessing_identity!r} is {expected_digest}"
+        )
     temperature = document.get("temperature")
     if isinstance(temperature, bool) or not isinstance(temperature, (int, float)):
         raise ModelLoadError("calibration temperature must be numeric")
@@ -337,9 +379,121 @@ def _verify_admitted_member(root: Path, relative_path: str, expected_digest: str
         raise ModelLoadError(f"admitted bundle member changed: {relative_path}")
 
 
+def _packaged_conformance(root: Path, manifest: object) -> PoseBbox56Conformance:
+    if not isinstance(manifest, Mapping) or not isinstance(manifest.get("files"), list):
+        raise ModelLoadError("invalid bundle-manifest.json")
+    candidates = [
+        item.get("relative_path")
+        for item in manifest["files"]
+        if isinstance(item, Mapping)
+        and isinstance(item.get("relative_path"), str)
+        and Path(item["relative_path"]).parent == Path("conformance")
+    ]
+    if len(candidates) != 1:
+        raise ModelLoadError(
+            f"bundle must contain exactly one conformance member; observed {candidates!r}"
+        )
+    return _parse_conformance(root, candidates[0])
+
+
+def _admitted_conformance(
+    root: Path, member_digests: Mapping[str, object], conformance_digest: str
+) -> PoseBbox56Conformance:
+    candidates = [path for path, digest in member_digests.items() if digest == conformance_digest]
+    if len(candidates) != 1:
+        raise ModelLoadError(
+            f"conformance_digest {conformance_digest} names {len(candidates)} members "
+            f"{candidates!r}, not exactly one"
+        )
+    relative_path = candidates[0]
+    _verify_admitted_member(root, relative_path, conformance_digest)
+    return _parse_conformance(root, relative_path)
+
+
+def _parse_conformance(root: Path, relative_path: str) -> PoseBbox56Conformance:
+    document = read_json(root / relative_path)
+    if not isinstance(document, dict):
+        raise ModelLoadError(f"invalid conformance document {relative_path}")
+    vector = document.get("vector")
+    confidence = document.get("confidence")
+    temporal = document.get("temporal")
+    coordinate_system = document.get("coordinate_system")
+    keypoint_order = document.get("keypoint_order")
+    if (
+        not isinstance(vector, dict)
+        or not isinstance(vector.get("tail_indices"), dict)
+        or not isinstance(confidence, dict)
+        or not isinstance(temporal, dict)
+        or not isinstance(coordinate_system, dict)
+        or not isinstance(keypoint_order, list)
+        or any(not isinstance(value, str) for value in keypoint_order)
+    ):
+        raise ModelLoadError(f"invalid conformance document shape: {relative_path}")
+    identity = document.get("preprocessing_identity")
+    vector_length = vector.get("length")
+    tail_indices = vector["tail_indices"]
+    gate = confidence.get("gate")
+    window_frames = temporal.get("window_frames")
+    stride_frames = temporal.get("stride_frames")
+    fps = temporal.get("fps")
+    if not isinstance(identity, str) or not identity:
+        raise ModelLoadError("conformance preprocessing_identity must be a non-empty string")
+    if vector_length != _SHAPE[1]:
+        raise ModelLoadError(
+            f"conformance vector length {vector_length!r} differs from runner {_SHAPE[1]}"
+        )
+    if window_frames != _SHAPE[0]:
+        raise ModelLoadError(
+            f"conformance temporal.window_frames {window_frames!r} differs from runner {_SHAPE[0]}"
+        )
+    if (
+        isinstance(gate, bool)
+        or not isinstance(gate, (int, float))
+        or isinstance(stride_frames, bool)
+        or not isinstance(stride_frames, int)
+        or isinstance(fps, bool)
+        or not isinstance(fps, (int, float))
+    ):
+        raise ModelLoadError("conformance confidence gate, stride_frames, and fps must be numeric")
+    parsed_tail: dict[str, int] = {}
+    for key, value in tail_indices.items():
+        if not isinstance(key, str) or not isinstance(value, int) or isinstance(value, bool):
+            raise ModelLoadError("conformance vector.tail_indices must map strings to integers")
+        parsed_tail[key] = value
+    return PoseBbox56Conformance(
+        relative_path=relative_path,
+        preprocessing_identity=identity,
+        vector_length=vector_length,
+        tail_indices=MappingProxyType(parsed_tail),
+        keypoint_order=tuple(keypoint_order),
+        confidence_gate=float(gate),
+        coordinate_system=MappingProxyType(dict(coordinate_system)),
+        window_frames=window_frames,
+        stride_frames=stride_frames,
+        fps=float(fps),
+        document=MappingProxyType(document),
+    )
+
+
+def _validate_runner_conformance(conformance: PoseBbox56Conformance) -> None:
+    if conformance.preprocessing_identity != POSE_BBOX56_PREPROCESSING_IDENTITY:
+        raise ModelLoadError(
+            "bundle conformance preprocessing_identity differs from runner contract: "
+            f"bundle {conformance.preprocessing_identity!r}, "
+            f"runner {POSE_BBOX56_PREPROCESSING_IDENTITY!r}"
+        )
+    expected_tail = {"x1": 51, "y1": 52, "x2": 53, "y2": 54, "valid": 55}
+    if dict(conformance.tail_indices) != expected_tail:
+        raise ModelLoadError(
+            "bundle conformance vector.tail_indices differs from runner contract: "
+            f"bundle {dict(conformance.tail_indices)!r}, runner {expected_tail!r}"
+        )
+
+
 __all__ = [
     "OrtPoseBbox56Runner",
     "PackagedFallBundle",
+    "PoseBbox56Conformance",
     "SessionFactory",
     "load_packaged_fall_bundle",
 ]

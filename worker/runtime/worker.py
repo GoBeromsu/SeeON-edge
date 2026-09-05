@@ -32,7 +32,7 @@ from worker.adapters.device.cuda.probe import probe_cuda_capability
 from worker.adapters.device.mps.probe import probe_mps_capability
 from worker.adapters.device.nvml.probe import probe_nvml_gpu_status
 from worker.adapters.model import ort_pose_bbox56, warmup_to_ready
-from worker.adapters.model.errors import FatalAcceleratorError
+from worker.adapters.model.errors import FatalAcceleratorError, ModelLoadError
 from worker.domains import (
     AVAILABLE_OBSERVATION_CHANNELS,
     DETECTION_MODULE_REGISTRY,
@@ -44,6 +44,11 @@ from worker.domains import (
 )
 from worker.domains.detection_window import DetectionWindow
 from worker.domains.fall import FallV2DomainDecider
+from worker.domains.fall.classifier_v2 import FALL_STRIDE_FRAMES, FALL_WINDOW_FRAMES
+from worker.domains.fall.pose_bbox56 import (
+    COCO17_KEYPOINT_ORDER,
+    POSE_BBOX56_CONFIDENCE_GATE,
+)
 from worker.domains.tracker import GreedyIouTracker
 from worker.interfaces.decision import Decider
 from worker.interfaces.fall_model import FallV2ModelProtocol
@@ -144,6 +149,54 @@ HEARTBEAT_TIMEOUT_SEC: Final = 0.5
 # Matches edge/runtime/edge_worker.py's DETECTOR_VERSION -- same domain-detector
 # generation, ported wholesale rather than re-derived per worker/AGENTS.md.
 DETECTOR_VERSION: Final = "worker-domain-detectors-v1"
+
+
+def _validate_fall_bundle_conformance(
+    conformance: ort_pose_bbox56.PoseBbox56Conformance,
+) -> None:
+    """Hold the adapter-read publisher contract to the domain implementation."""
+    if conformance.keypoint_order != COCO17_KEYPOINT_ORDER:
+        raise ModelLoadError(
+            "bundle conformance keypoint_order differs from COCO-17 domain order: "
+            f"bundle {list(conformance.keypoint_order)!r}, "
+            f"runner {list(COCO17_KEYPOINT_ORDER)!r}"
+        )
+    if conformance.confidence_gate != POSE_BBOX56_CONFIDENCE_GATE:
+        raise ModelLoadError(
+            "bundle conformance confidence.gate differs from domain contract: "
+            f"bundle {conformance.confidence_gate:g}, "
+            f"runner {POSE_BBOX56_CONFIDENCE_GATE:g}"
+        )
+    coordinate_system = conformance.coordinate_system
+    expected_coordinates = {
+        "origin": "top_left",
+        "xy_normalization_denominators": {
+            "x": "frame_width",
+            "y": "frame_height",
+        },
+        "xy_normalization_rule": (
+            "clip finite raw coordinates to inclusive raw bounds, then divide "
+            "x by frame_width and y by frame_height"
+        ),
+    }
+    observed_coordinates = {key: coordinate_system.get(key) for key in expected_coordinates}
+    if observed_coordinates != expected_coordinates:
+        raise ModelLoadError(
+            "bundle conformance coordinate normalization differs from pose_bbox56 domain "
+            f"contract: bundle {observed_coordinates!r}, runner {expected_coordinates!r}"
+        )
+    if conformance.window_frames != FALL_WINDOW_FRAMES:
+        raise ModelLoadError(
+            "bundle conformance temporal.window_frames differs from domain contract: "
+            f"bundle {conformance.window_frames}, runner {FALL_WINDOW_FRAMES}"
+        )
+    expected_fps = CURRENT_TEMPORAL_PROFILE.pose_fps
+    if conformance.stride_frames != FALL_STRIDE_FRAMES or conformance.fps != expected_fps:
+        raise ModelLoadError(
+            "bundle conformance temporal stride/fps differs from domain temporal profile: "
+            f"bundle stride_frames={conformance.stride_frames}, fps={conformance.fps:g}; "
+            f"runner stride_frames={FALL_STRIDE_FRAMES}, fps={expected_fps:g}"
+        )
 
 
 class EvidenceDeliveryError(RuntimeError):
@@ -1043,6 +1096,7 @@ class WorkerRuntime:
         bundle = self._loaded_fall_bundle
         if bundle is None:
             bundle = ort_pose_bbox56.load_packaged_fall_bundle(configured.artifact_dir)
+            _validate_fall_bundle_conformance(bundle.runner.conformance)
             self._loaded_fall_bundle = bundle
         return bundle.published_weights_digest
 
@@ -1078,6 +1132,7 @@ class WorkerRuntime:
             runner = ort_pose_bbox56.OrtPoseBbox56Runner.from_admitted_bundle(
                 artifact_dir, proof, selection
             )
+            _validate_fall_bundle_conformance(runner.conformance)
             self._loaded_fall_bundle = ort_pose_bbox56.PackagedFallBundle(
                 runner, runner.artifact_digest, runner.preprocessing_identity
             )
@@ -1093,6 +1148,7 @@ class WorkerRuntime:
                 "worker.tools.export_fall_onnx and boot with ML_WORKER_PROFILE=flow)"
             )
         bundle = ort_pose_bbox56.load_packaged_fall_bundle(configured.artifact_dir)
+        _validate_fall_bundle_conformance(bundle.runner.conformance)
         self._loaded_fall_bundle = bundle
         return bundle.runner
 

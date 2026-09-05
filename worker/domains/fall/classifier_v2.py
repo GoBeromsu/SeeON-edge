@@ -13,8 +13,8 @@ from dataclasses import dataclass, field
 
 from worker.interfaces.fall_model import FallV2ModelProtocol, FallV2Probabilities
 
-_WINDOW_FRAMES = 30
-_STRIDE_FRAMES = 5
+FALL_WINDOW_FRAMES = 30
+FALL_STRIDE_FRAMES = 5
 _ROW_WIDTH = 56
 _TRACK_TTL_FRAMES = 45
 _ZERO_ROW = (0.0,) * _ROW_WIDTH
@@ -68,13 +68,13 @@ class FallWindowClassifierV2:
                 continue
             self._buffer_for(track_id).append(self._last_rows.get(track_id, _ZERO_ROW))
 
-        if self._frame_counter % _STRIDE_FRAMES:
+        if self._frame_counter % FALL_STRIDE_FRAMES:
             return {}
 
         due: dict[int, FallV2Probabilities] = {}
         for track_id in sorted(live_ids):
             buffer = self._buffers.get(track_id)
-            if buffer is None or len(buffer) != _WINDOW_FRAMES:
+            if buffer is None or len(buffer) != FALL_WINDOW_FRAMES:
                 continue
             prediction = self.model.predict(tuple(buffer))
             if not isinstance(prediction, FallV2Probabilities):
@@ -97,9 +97,9 @@ class FallWindowClassifierV2:
     def _buffer_for(self, track_id: int) -> deque[tuple[float, ...]]:
         buffer = self._buffers.get(track_id)
         if buffer is None:
-            buffer = deque(maxlen=_WINDOW_FRAMES)
+            buffer = deque(maxlen=FALL_WINDOW_FRAMES)
             if track_id in self._reconnect_ids:
-                buffer.extend((_ZERO_ROW,) * (_WINDOW_FRAMES - 1))
+                buffer.extend((_ZERO_ROW,) * (FALL_WINDOW_FRAMES - 1))
                 self._reconnect_ids.remove(track_id)
             generation = self._next_generations.get(track_id, 0)
             self._next_generations[track_id] = generation + 1
@@ -125,4 +125,9 @@ def _valid_row(value: Sequence[float] | None) -> tuple[float, ...] | None:
     return row
 
 
-__all__ = ["FallV2Probabilities", "FallWindowClassifierV2"]
+__all__ = [
+    "FALL_STRIDE_FRAMES",
+    "FALL_WINDOW_FRAMES",
+    "FallV2Probabilities",
+    "FallWindowClassifierV2",
+]

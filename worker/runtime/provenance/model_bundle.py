@@ -155,6 +155,7 @@ def admit_model_bundle(models_root: Path, desired: DesiredModelBundle) -> ModelB
         if isinstance(member, dict)
     }
     _verify_selection_member_digests(member_digests, desired.selection)
+    _verify_selection_bundle_format(root, member_digests, desired.selection)
     _verify_selection_policy_digest(root, desired.selection)
     receipt_identities = _verify_required_members(root, members, receipts, desired)
     _verify_exact_tree(root, {"manifest.json", *observed_members, *observed_receipts})
@@ -208,6 +209,31 @@ def _verify_selection_member_digest(
         raise ModelBundleAdmissionError(
             f"{member_path} digest mismatch: selection declares {selected_digest}, "
             f"member content has {observed_digest!r}"
+        )
+
+
+def _verify_selection_bundle_format(
+    root: Path,
+    member_digests: Mapping[str, object],
+    selection: ModelSelection | None,
+) -> None:
+    """Bind the declared format to the packaged bundle manifest vocabulary."""
+    if selection is None:
+        return
+    if "bundle-manifest.json" not in member_digests:
+        raise ModelBundleAdmissionError(
+            "selected bundle has no bundle-manifest.json member for bundle_format"
+        )
+    raw = _read_regular(root / "bundle-manifest.json", "member bundle-manifest.json")
+    try:
+        manifest = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ModelBundleAdmissionError("bundle-manifest.json is invalid JSON") from exc
+    observed = manifest.get("schema_version") if isinstance(manifest, dict) else None
+    if observed != selection.bundle_format:
+        raise ModelBundleAdmissionError(
+            f"bundle format mismatch: selection declares {selection.bundle_format!r}, "
+            f"bundle-manifest.json schema_version is {observed!r}"
         )
 
 

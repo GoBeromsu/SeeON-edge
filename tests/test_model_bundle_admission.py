@@ -86,6 +86,7 @@ def _bundle(
             "fall-policy-v2.json": b'{"policy": true}',
             "calibration.json": b'{"calibration": true}',
             "conformance.json": b'{"conformance": true}',
+            "bundle-manifest.json": b'{"schema_version":"bundle-manifest/proxy-v0"}',
         }
         if members is None
         else members
@@ -194,6 +195,7 @@ def test_admission_uses_manifest_declared_member_set(tmp_path: Path) -> None:
             "contract.json": b'{"contract": true}',
             "calibration.json": b'{"calibration": true}',
             "conformance/pose-bbox56-v1.json": b'{"conformance": true}',
+            "bundle-manifest.json": b'{"schema_version":"bundle-manifest/proxy-v0"}',
         },
     )
     assert admit_model_bundle(models_root, desired).observed["members"] == (
@@ -201,6 +203,7 @@ def test_admission_uses_manifest_declared_member_set(tmp_path: Path) -> None:
         "contract.json",
         "calibration.json",
         "conformance/pose-bbox56-v1.json",
+        "bundle-manifest.json",
     )
 
 
@@ -278,4 +281,21 @@ def test_admission_requires_the_manifest_runtime_format(tmp_path: Path) -> None:
     manifest["runtime_format"] = "different-format"
     manifest_path.write_bytes(_canonical(manifest))
     with pytest.raises(ModelBundleAdmissionError, match="runtime format"):
+        admit_model_bundle(models_root, desired)
+
+
+def test_admission_requires_bundle_manifest_schema_version(tmp_path: Path) -> None:
+    models_root, desired = _bundle(tmp_path)
+    desired = replace(
+        desired,
+        selection=replace(desired.selection, bundle_format="bundle-manifest/other"),
+    )
+
+    with pytest.raises(
+        ModelBundleAdmissionError,
+        match=(
+            "selection declares 'bundle-manifest/other'.*"
+            "schema_version is 'bundle-manifest/proxy-v0'"
+        ),
+    ):
         admit_model_bundle(models_root, desired)

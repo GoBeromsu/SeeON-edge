@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 from typing import final
@@ -63,7 +64,7 @@ from worker.runtime.provenance.manifest import (
     build_applied_runtime_manifest,
 )
 from worker.runtime.provenance.model_bundle import DesiredModelBundle, admit_model_bundle
-from worker.runtime.worker import WorkerRuntime
+from worker.runtime.worker import WorkerRuntime, _validate_fall_bundle_conformance
 from worker.tools.export_fall_onnx import export_fall_onnx
 from worker.tools.fetch_models.fetcher import VerificationError, _require_loadable_fall_bundle
 
@@ -100,6 +101,22 @@ class _FakeRunner:
 class _ZeroLogitSession:
     def run(self, _output_names: object, _input_feed: object) -> list[object]:
         return [[[0.0]]]
+
+
+def _rewrite_packaged_json_member(
+    root: Path, relative_path: str, mutation: Callable[[dict[str, object]], None]
+) -> None:
+    path = root / relative_path
+    document = json.loads(path.read_text(encoding="utf-8"))
+    mutation(document)
+    path.write_text(json.dumps(document, sort_keys=True), encoding="utf-8")
+    manifest_path = root / "bundle-manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    entry = next(item for item in manifest["files"] if item["relative_path"] == relative_path)
+    payload = path.read_bytes()
+    entry["sha256"] = hashlib.sha256(payload).hexdigest()
+    entry["size"] = len(payload)
+    manifest_path.write_text(json.dumps(manifest, sort_keys=True), encoding="utf-8")
 
 
 @final
@@ -197,15 +214,14 @@ def _selected_onnx_bundle(
             json.dumps(calibration, sort_keys=True),
             encoding="utf-8",
         )
-    # A real publication carries its conformance document as a member at the
-    # path the shipped bundle uses; admission binds the selection's
-    # conformance_digest to that member's content, whatever it is named.
-    conformance_path = source / "conformance" / "pose-bbox56-v1.json"
-    conformance_path.parent.mkdir(parents=True, exist_ok=True)
-    conformance_path.write_text('{"contract": "pose-bbox56-v1"}', encoding="utf-8")
     members = {
         path: (source / path).read_bytes()
-        for path in ("model.onnx", "calibration.json", "conformance/pose-bbox56-v1.json")
+        for path in (
+            "model.onnx",
+            "calibration.json",
+            "conformance/pose-bbox56-v1.json",
+            "bundle-manifest.json",
+        )
     }
     calibration_document = json.loads(members["calibration.json"])
     identities = {
@@ -304,6 +320,124 @@ def _selected_onnx_bundle(
     )
 
 
+def test_packaged_bundle_refuses_conformance_preprocessing_identity(
+    tmp_path: Path,
+) -> None:
+    root = write_pose_bbox56_bundle(tmp_path)
+    _rewrite_packaged_json_member(
+        root,
+        "conformance/pose-bbox56-v1.json",
+        lambda document: document.update(preprocessing_identity="replacement-preprocessing-v2"),
+    )
+
+    with pytest.raises(
+        ModelLoadError,
+        match=(
+            "bundle 'replacement-preprocessing-v2'.*"
+            "runner 'coco17-xyc-plus-pose-head-xyxy-valid-f32-v1'"
+        ),
+    ):
+        OrtPoseBbox56Runner.from_artifact_dir(
+            root, session_factory=lambda *_args: _ZeroLogitSession()
+        )
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        (lambda document: document["vector"].update(length=57), "vector length 57"),
+        (
+            lambda document: document["temporal"].update(window_frames=31),
+            "temporal.window_frames 31",
+        ),
+    ],
+)
+def test_packaged_bundle_refuses_incompatible_conformance_shape(
+    tmp_path: Path,
+    mutation: Callable[[dict[str, object]], None],
+    message: str,
+) -> None:
+    root = write_pose_bbox56_bundle(tmp_path)
+    _rewrite_packaged_json_member(root, "conformance/pose-bbox56-v1.json", mutation)
+
+    with pytest.raises(ModelLoadError, match=message):
+        OrtPoseBbox56Runner.from_artifact_dir(
+            root, session_factory=lambda *_args: _ZeroLogitSession()
+        )
+
+
+def test_packaged_bundle_refuses_calibration_for_other_preprocessing(
+    tmp_path: Path,
+) -> None:
+    root = write_pose_bbox56_bundle(tmp_path)
+    _rewrite_packaged_json_member(
+        root,
+        "calibration.json",
+        lambda document: document.update(preprocessing_identity_digest="f" * 64),
+    )
+
+    with pytest.raises(
+        ModelLoadError,
+        match=(
+            "declared 'ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff'.*"
+            "coco17-xyc-plus-pose-head-xyxy-valid-f32-v1.*6ab6d816"
+        ),
+    ):
+        OrtPoseBbox56Runner.from_artifact_dir(
+            root, session_factory=lambda *_args: _ZeroLogitSession()
+        )
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        (
+            lambda contract: replace(
+                contract, keypoint_order=tuple(reversed(contract.keypoint_order))
+            ),
+            "keypoint_order",
+        ),
+        (
+            lambda contract: replace(contract, confidence_gate=0.25),
+            "confidence.gate",
+        ),
+        (
+            lambda contract: replace(
+                contract,
+                coordinate_system={
+                    **contract.coordinate_system,
+                    "xy_normalization_denominators": {
+                        "x": "frame_width_minus_one",
+                        "y": "frame_height_minus_one",
+                    },
+                },
+            ),
+            "coordinate normalization",
+        ),
+        (
+            lambda contract: replace(contract, stride_frames=1),
+            "stride/fps",
+        ),
+        (
+            lambda contract: replace(contract, fps=30.0),
+            "stride/fps",
+        ),
+    ],
+)
+def test_runtime_refuses_conformance_that_differs_from_domain_contract(
+    tmp_path: Path,
+    mutation: Callable[[object], object],
+    message: str,
+) -> None:
+    runner = OrtPoseBbox56Runner.from_artifact_dir(
+        write_pose_bbox56_bundle(tmp_path),
+        session_factory=lambda *_args: _ZeroLogitSession(),
+    )
+
+    with pytest.raises(ModelLoadError, match=message):
+        _validate_fall_bundle_conformance(mutation(runner.conformance))  # type: ignore[arg-type]
+
+
 def test_create_fall_model_refuses_when_unconfigured_and_never_touches_serving(
     tmp_path: Path,
 ) -> None:
@@ -336,6 +470,9 @@ def test_create_fall_model_uses_the_configured_bundle_artifact_on_the_cpu(
     )
     calls: list[tuple[Path, str]] = []
     sentinel = _FakeRunner("fall")
+    sentinel.conformance = OrtPoseBbox56Runner.from_artifact_dir(  # type: ignore[attr-defined]
+        artifact_dir, session_factory=lambda *_args: _ZeroLogitSession()
+    ).conformance
 
     def fake_load_packaged_bundle(artifact_dir: Path) -> object:
         calls.append((Path(artifact_dir), "cpu"))
@@ -633,7 +770,9 @@ def test_selected_preprocessing_contradiction_refuses_construction(tmp_path: Pat
     assert selection is not None
     proof = admit_model_bundle(models_root, desired)
 
-    with pytest.raises(ModelLoadError, match="preprocessing_identity contradicts"):
+    with pytest.raises(
+        ModelLoadError, match="selected preprocessing_identity differs from bundle conformance"
+    ):
         OrtPoseBbox56Runner.from_admitted_bundle(
             models_root / "bundles" / desired.bundle_sha256,
             proof,

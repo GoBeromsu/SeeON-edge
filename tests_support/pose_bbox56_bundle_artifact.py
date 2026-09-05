@@ -18,6 +18,10 @@ import torch
 from torch import nn
 
 PREPROCESSING_IDENTITY_DIGEST = "6ab6d8165fe11a374446e36c8448ff1dae32946a23715e0bb0c22d2a234877bb"
+_CONFORMANCE_SOURCE = (
+    Path(__file__).resolve().parents[1]
+    / "models/fall/pose-bbox56-gru/conformance/pose-bbox56-v1.json"
+)
 
 
 class _ProxyGru(nn.Module):
@@ -95,9 +99,13 @@ def write_pose_bbox56_bundle(
     (root / "metadata.yaml").write_text(
         "model_family: gru_source_proxy_v0\nresearch_only: true\n", encoding="utf-8"
     )
+    conformance_path = root / "conformance/pose-bbox56-v1.json"
+    conformance_path.parent.mkdir(parents=True, exist_ok=True)
+    conformance_path.write_bytes(_CONFORMANCE_SOURCE.read_bytes())
     members = [
         "arch.json",
         "calibration.json",
+        "conformance/pose-bbox56-v1.json",
         "evaluation-receipt.json",
         "metadata.yaml",
         "model.onnx",

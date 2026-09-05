@@ -12,6 +12,25 @@ from contracts.model_selection import (
 )
 
 COCO17_KEYPOINTS: Final = 17
+COCO17_KEYPOINT_ORDER: Final = (
+    "nose",
+    "left_eye",
+    "right_eye",
+    "left_ear",
+    "right_ear",
+    "left_shoulder",
+    "right_shoulder",
+    "left_elbow",
+    "right_elbow",
+    "left_wrist",
+    "right_wrist",
+    "left_hip",
+    "right_hip",
+    "left_knee",
+    "right_knee",
+    "left_ankle",
+    "right_ankle",
+)
 POSE_BBOX56_DIM: Final = 56
 POSE_BBOX56_CONFIDENCE_GATE: Final = 0.5
 # Contract vocabulary lives in `contracts`; this re-export keeps the domain's
@@ -124,6 +143,7 @@ def _zero_row() -> PoseBbox56Row:
 
 __all__ = [
     "COCO17_KEYPOINTS",
+    "COCO17_KEYPOINT_ORDER",
     "POSE_BBOX56_CONFIDENCE_GATE",
     "POSE_BBOX56_DIM",
     "POSE_BBOX56_PREPROCESSING_IDENTITY",
