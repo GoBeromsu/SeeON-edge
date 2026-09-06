@@ -10,6 +10,7 @@ import pytest
 from fastapi.testclient import TestClient
 from receipt_helpers import MediaReceiptStore, add_accepted_media_receipts
 
+import backend.app.features.clips.router as clips_router
 from backend.app.features.clips.descriptor_files import OpenedRegularFile
 from backend.app.features.clips.store import ClipStore, LocatedClip
 from backend.app.features.evidence.receipt_store import ArtifactReceipt
@@ -48,6 +49,8 @@ def _write_clip(
     layout: Path,
     clip_id: str,
     manifest_path: str,
+    *,
+    codec: str = "h264",
 ) -> Path:
     recording_root = store_root / layout
     clip_dir = recording_root / "clips" / clip_id
@@ -63,7 +66,7 @@ def _write_clip(
                 "event_type": "fall",
                 "started_at": "2026-08-10T00:00:00Z",
                 "duration_s": 10.0,
-                "codec": "h264",
+                "codec": codec,
                 "path": manifest_path,
                 "video_available": True,
                 "finalized": True,
@@ -72,6 +75,80 @@ def _write_clip(
         encoding="utf-8",
     )
     return video_path
+
+
+def _write_playback(video_path: Path, content: bytes, *, valid_sidecar: bool = True) -> None:
+    playback = video_path.with_name("clip.playback-h264.mp4")
+    playback.write_bytes(content)
+    digest = hashlib.sha256(content).hexdigest()
+    if not valid_sidecar:
+        digest = hashlib.sha256(b"different rendition").hexdigest()
+    playback.with_name(f"{playback.name}.sha256").write_text(f"{digest}\n", encoding="ascii")
+
+
+def test_video_serves_verified_playback_rendition_without_receipt_verification(
+    clip_env: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clip_id = "clip-playback"
+    original = _write_clip(
+        clip_env,
+        Path(),
+        clip_id,
+        f"clips/{clip_id}/clip.mp4",
+        codec="hvc1",
+    )
+    playback = b"browser-safe-playback"
+    _write_playback(original, playback)
+
+    def receipt_must_not_be_checked(*_args: object) -> None:
+        raise AssertionError("a rendition must not be checked against an original receipt")
+
+    monkeypatch.setattr(clips_router, "verify_artifact", receipt_must_not_be_checked)
+    with TestClient(create_app(lifespan=no_lifespan)) as client:
+        _login(client)
+        metadata = client.get(f"/api/v1/clips/{clip_id}/metadata")
+        response = client.get(
+            f"/api/v1/clips/{clip_id}/video",
+            headers={"Range": "bytes=8-15"},
+        )
+
+    assert metadata.status_code == 200
+    assert metadata.json()["playback_codec"] == "h264"
+    assert response.status_code == 206
+    assert response.content == playback[8:16]
+    assert response.headers["x-clip-rendition"] == "playback-h264"
+    assert response.headers["content-range"] == f"bytes 8-15/{len(playback)}"
+
+
+@pytest.mark.parametrize("write_sidecar", (False, True))
+def test_video_falls_back_to_original_when_playback_sidecar_is_missing_or_invalid(
+    clip_env: Path,
+    write_sidecar: bool,
+) -> None:
+    clip_id = f"clip-playback-fallback-{write_sidecar}"
+    original = _write_clip(
+        clip_env,
+        Path(),
+        clip_id,
+        f"clips/{clip_id}/clip.mp4",
+        codec="hvc1",
+    )
+    if write_sidecar:
+        _write_playback(original, b"untrusted playback", valid_sidecar=False)
+    else:
+        original.with_name("clip.playback-h264.mp4").write_bytes(b"untrusted playback")
+
+    with TestClient(create_app(lifespan=no_lifespan)) as client:
+        _login(client)
+        metadata = client.get(f"/api/v1/clips/{clip_id}/metadata")
+        response = client.get(f"/api/v1/clips/{clip_id}/video")
+
+    assert metadata.status_code == 200
+    assert metadata.json()["playback_codec"] == "hvc1"
+    assert response.status_code == 200
+    assert response.content == VIDEO
+    assert response.headers["x-clip-rendition"] == "original"
 
 
 @pytest.mark.parametrize(
@@ -277,10 +354,16 @@ def test_local_evidence_plays_when_no_backend_receipt_exists(clip_env: Path) -> 
     assert response.content == VIDEO
 
 
-def test_a_receipt_that_was_refused_still_blocks_playback(clip_env: Path) -> None:
+@pytest.mark.parametrize("with_playback", (False, True))
+def test_a_receipt_that_was_refused_still_blocks_playback(
+    clip_env: Path,
+    with_playback: bool,
+) -> None:
     """Dropping the existence requirement must not admit a refused artifact."""
-    clip_id = "clip-refused-receipt"
+    clip_id = f"clip-refused-receipt-{with_playback}"
     video = _write_clip(clip_env, Path(), clip_id, f"clips/{clip_id}/clip.mp4")
+    if with_playback:
+        _write_playback(video, b"browser-safe-playback")
     content = video.read_bytes()
 
     with TestClient(create_app(lifespan=no_lifespan)) as client:

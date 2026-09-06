@@ -29,6 +29,7 @@ from backend.app.features.clips.schemas import (
     SnapshotArtifactState,
 )
 from backend.app.features.clips.store import (
+    PLAYBACK_H264_FILENAME,
     ClipStore,
     DuplicateClipIdError,
     LocatedClip,
@@ -106,7 +107,7 @@ def get_clip_metadata(
         manifest,
         resolved_video_size(store, located),
         store.thumbnail_available(located),
-    )
+    ).model_copy(update={"playback_codec": store.playback_codec(located)})
     append_governed(
         request, actor_id=actor, action=AuditAction.CLIP_DETAIL, target_id=manifest.clip_id
     )
@@ -165,15 +166,6 @@ def clip_video(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="clip video not available",
         )
-    try:
-        opened = _clip_store(request).open_located_video(located)
-    except ValueError as exc:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
-    except FileNotFoundError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="clip video not found",
-        ) from exc
     receipt_store = getattr(request.app.state, "artifact_receipt_store", None)
     receipt = (
         receipt_store.get(manifest.clip_id)
@@ -190,13 +182,23 @@ def clip_video(
     # answering "영상을 재생하지 못했습니다" forever. Evidence a carer cannot
     # watch is evidence the system did not capture.
     if receipt is not None and not receipt.accepted:
-        opened.handle.close()
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="clip video receipt not accepted",
         )
     try:
-        if receipt is not None:
+        store = _clip_store(request)
+        opened = store.open_located_playback(located)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="clip video not found",
+        ) from exc
+    rendition = "playback-h264" if opened.path.name == PLAYBACK_H264_FILENAME else "original"
+    try:
+        if receipt is not None and rendition == "original":
             verify_artifact(opened.path, receipt)
     except ArtifactReceiptVerificationError as exc:
         opened.handle.close()
@@ -209,6 +211,7 @@ def clip_video(
         request.headers.get("range"),
         media_type(opened.path.name),
     )
+    response.headers["X-Clip-Rendition"] = rendition
     if response.status_code >= status.HTTP_400_BAD_REQUEST:
         return response
     try:

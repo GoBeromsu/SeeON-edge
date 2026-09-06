@@ -35,6 +35,7 @@ class ClipManifestResponse(BaseModel):
     started_at: str = Field(min_length=1)
     duration_s: float = Field(ge=0)
     codec: str = Field(default="")
+    playback_codec: str = Field(default="")
     path: str | None = Field(default=None)
     video_available: bool
     video_error: str | None = Field(default=None)

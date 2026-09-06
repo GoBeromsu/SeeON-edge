@@ -18,6 +18,7 @@ def clip_response(
             **manifest.as_response(),
             "size_bytes": size_bytes,
             "thumbnail_available": thumbnail_available,
+            "playback_codec": manifest.codec,
         }
     )
 
