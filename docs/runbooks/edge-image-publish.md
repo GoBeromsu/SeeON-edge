@@ -104,9 +104,11 @@ re-export and rebuild, never delete the identity.
 
 `/app/model-selection.json` is a deployment-owned, read-only file; it is never
 copied into `Dockerfile.edge`. To switch the running fall model, publish the
-bundle into `worker-models`, place the matching selection document on the
-deployment host, and enable the read-only selection mount in
-`compose.edge.yaml`. Restart `ml-worker` only after `edge-model-fetch` has
+bundle into `worker-models`, place the matching selection document at
+`/deployment/model-selection.json` on the host, and add the opt-in overlay
+`compose.edge.model-selection.yaml` with a second `-f`. Never bind the file
+unconditionally: on a host without it Docker creates a directory of that name
+and the worker refuses to boot (`IsADirectoryError`, #498). Restart `ml-worker` only after `edge-model-fetch` has
 verified the bundle. Removing that mount is the only normal path back to the
 packaged fallback. Replacing a model requires only the bundle and selection
 file, not an image rebuild.

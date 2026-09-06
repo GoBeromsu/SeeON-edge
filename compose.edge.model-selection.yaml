@@ -1,0 +1,15 @@
+# Opt-in overlay: mount a deployment-owned fall-model selection document.
+#
+#   docker compose --env-file .env.<site> -f compose.edge.yaml \
+#     -f compose.edge.model-selection.yaml up -d
+#
+# Only add this file when /deployment/model-selection.json exists on the host
+# (see docs/runbooks/edge-image-publish.md, "Deploying an admitted model
+# selection"). Without it the worker serves the packaged fall bundle.
+services:
+  edge-model-fetch:
+    volumes:
+      - /deployment/model-selection.json:/app/model-selection.json:ro
+  ml-worker:
+    volumes:
+      - /deployment/model-selection.json:/app/model-selection.json:ro
